@@ -82,7 +82,7 @@ def _compute_column_profiles(bitmap):
         np.int32
     )
     # zero out unoccupied columns
-    col_top[~col_occupied] = 0
+    col_top[~col_occupied]    = 0
     col_bottom[~col_occupied] = 0
     return col_top, col_bottom, col_occupied
 
@@ -316,8 +316,8 @@ def pack_islands(uv_data, resolution=1024, padding=2, rotations=4):
     for i, idata in enumerate(island_data):
         px, py = placements[i]
         # padded bitmap shifts content by `padding` pixels from its origin
-        offset   = np.array([px + padding, py + padding], dtype=np.float64)
-        final_uv = (idata["local_points_px"] + offset) / max_dim
+        offset                            = np.array([px + padding, py + padding], dtype=np.float64)
+        final_uv                          = (idata["local_points_px"] + offset) / max_dim
         new_points[idata["global_verts"]] = final_uv
 
     # normalize to [0,1]^2 with uniform scale

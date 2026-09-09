@@ -127,8 +127,8 @@ class TestNgon(unittest.TestCase):
     # --- UV bitmap rendering ---
 
     def test_uv_bitmap_render(self):
-        uv_data = self.uv_list.copy()
-        uv_data[0].renderer = "skimage"
+        uv_data               = self.uv_list.copy()
+        uv_data[0].renderer   = "skimage"
         uv_data[0].resolution = 512
         uv_data[0].draw_mask()
         self.assertTrue(np.allclose(uv_data[0].buffer, self.expected_buffer))

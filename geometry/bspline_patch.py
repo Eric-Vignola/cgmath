@@ -184,7 +184,7 @@ class BSplinePatchData(Data):
     _cp_params_u        = None
     _cp_params_v        = None
 
-    __repr__            = Data.__repr__
+    __repr__ = Data.__repr__
 
     def __eq__(self, other):
         return np.all(
@@ -280,7 +280,7 @@ class BSplinePatchData(Data):
             eval_u = self._u_table_u % self._max_param_u
         else:
             self._u_table_u = np.linspace(0, self._max_param_u, n, dtype=np.float64)
-            eval_u = self._u_table_u
+            eval_u          = self._u_table_u
 
         eval_v = np.full(n, v_mid, dtype=np.float64)
         pts = _evaluate_bspline_surface(
@@ -293,11 +293,11 @@ class BSplinePatchData(Data):
             self.degree_v,
         )
 
-        diffs   = np.diff(pts, axis=0)
-        seg_len = np.linalg.norm(diffs, axis=1)
-        self._arc_length_table_u = np.zeros(n, dtype=np.float64)
+        diffs                        = np.diff(pts, axis=0)
+        seg_len                      = np.linalg.norm(diffs, axis=1)
+        self._arc_length_table_u     = np.zeros(n, dtype=np.float64)
         self._arc_length_table_u[1:] = np.cumsum(seg_len)
-        self._total_length_u = self._arc_length_table_u[-1]
+        self._total_length_u         = self._arc_length_table_u[-1]
         if self._total_length_u > 0:
             self._arc_length_table_u /= self._total_length_u
 
@@ -314,7 +314,7 @@ class BSplinePatchData(Data):
             eval_v = self._u_table_v % self._max_param_v
         else:
             self._u_table_v = np.linspace(0, self._max_param_v, n, dtype=np.float64)
-            eval_v = self._u_table_v
+            eval_v          = self._u_table_v
 
         eval_u = np.full(n, u_mid, dtype=np.float64)
         pts = _evaluate_bspline_surface(
@@ -327,11 +327,11 @@ class BSplinePatchData(Data):
             self.degree_v,
         )
 
-        diffs   = np.diff(pts, axis=0)
-        seg_len = np.linalg.norm(diffs, axis=1)
-        self._arc_length_table_v = np.zeros(n, dtype=np.float64)
+        diffs                        = np.diff(pts, axis=0)
+        seg_len                      = np.linalg.norm(diffs, axis=1)
+        self._arc_length_table_v     = np.zeros(n, dtype=np.float64)
         self._arc_length_table_v[1:] = np.cumsum(seg_len)
-        self._total_length_v = self._arc_length_table_v[-1]
+        self._total_length_v         = self._arc_length_table_v[-1]
         if self._total_length_v > 0:
             self._arc_length_table_v /= self._total_length_v
 
@@ -597,7 +597,7 @@ class BSplinePatchData(Data):
         # Newton refinement (skip clamped endpoints on open curves)
         mask = np.ones(n, dtype=bool)
         if not periodic:
-            mask[0] = False
+            mask[0]  = False
             mask[-1] = False
         u = self._newton_refine_iso(
             greville.copy(),
@@ -634,7 +634,7 @@ class BSplinePatchData(Data):
         cumsum   = np.concatenate([[0], np.cumsum(kv)])
         greville = (cumsum[d + 1 : d + 1 + n] - cumsum[1 : 1 + n]) / d
         if not periodic:
-            greville[0] = 0.0
+            greville[0]  = 0.0
             greville[-1] = float(max_param)
 
         mids  = (greville[:-1] + greville[1:]) / 2.0
@@ -643,15 +643,15 @@ class BSplinePatchData(Data):
         if periodic:
             half_step_start = (greville[1] - greville[0]) / 2.0
             half_step_end   = (greville[-1] - greville[-2]) / 2.0
-            u_min[0] = greville[0] - half_step_start
-            u_min[1:] = mids
-            u_max[:-1] = mids
-            u_max[-1] = greville[-1] + half_step_end
+            u_min[0]        = greville[0] - half_step_start
+            u_min[1:]       = mids
+            u_max[:-1]      = mids
+            u_max[-1]       = greville[-1] + half_step_end
         else:
-            u_min[0] = 0.0
-            u_min[1:] = mids
+            u_min[0]   = 0.0
+            u_min[1:]  = mids
             u_max[:-1] = mids
-            u_max[-1] = float(max_param)
+            u_max[-1]  = float(max_param)
         return greville, u_min, u_max
 
     def _newton_refine_iso(
@@ -942,7 +942,7 @@ class BSplinePatchData(Data):
         if self._max_param_u is None:
             self._init_bspline()
 
-        scalar        = np.isscalar(u) and np.isscalar(v)
+        scalar = np.isscalar(u) and np.isscalar(v)
 
         extrapolate_u = (not self.periodic_u) and not _native
         extrapolate_v = (not self.periodic_v) and not _native
@@ -1120,8 +1120,8 @@ class BSplinePatchData(Data):
             if self.periodic_v:
                 v = v % self._max_param_v
 
-        u       = np.atleast_1d(u).astype(np.float64)
-        v       = np.atleast_1d(v).astype(np.float64)
+        u = np.atleast_1d(u).astype(np.float64)
+        v = np.atleast_1d(v).astype(np.float64)
 
         cv_grid = self.cv
         cu      = cv_grid.shape[0]
@@ -1558,9 +1558,9 @@ class BSplinePatchData(Data):
         # Distances and params are NaN for misses.
         distances = np.where(hit_out, t_out, np.nan)
 
-        params_u  = self._denormalize_u(safe_u)
-        params_v  = self._denormalize_v(safe_v)
-        params    = np.stack([params_u, params_v], axis=1)
+        params_u         = self._denormalize_u(safe_u)
+        params_v         = self._denormalize_v(safe_v)
+        params           = np.stack([params_u, params_v], axis=1)
         params[~hit_out] = np.nan
 
         tangents = np.stack([tang_u, tang_v], axis=1)
@@ -1898,19 +1898,19 @@ class BSplinePatchData(Data):
         cross = np.cross(su, sv)
         norms = np.linalg.norm(cross, axis=1).reshape(samples, samples)
 
-        du    = self._max_param_u / (samples - (not self.periodic_u))
-        dv    = self._max_param_v / (samples - (not self.periodic_v))
+        du = self._max_param_u / (samples - (not self.periodic_u))
+        dv = self._max_param_v / (samples - (not self.periodic_v))
 
         # Composite Simpson's rule (1D weights then outer product) when
         # samples is odd; else fall back to Riemann sum.
         if samples >= 3 and samples % 2 == 1:
-            w_u = np.ones(samples, dtype=np.float64)
+            w_u         = np.ones(samples, dtype=np.float64)
             w_u[1:-1:2] = 4.0
             w_u[2:-1:2] = 2.0
-            w_v = np.ones(samples, dtype=np.float64)
+            w_v         = np.ones(samples, dtype=np.float64)
             w_v[1:-1:2] = 4.0
             w_v[2:-1:2] = 2.0
-            weights = np.outer(w_u, w_v)
+            weights     = np.outer(w_u, w_v)
             return float(np.sum(weights * norms) * du * dv / 9.0)
 
         return float(np.sum(norms) * du * dv)

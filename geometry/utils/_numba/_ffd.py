@@ -241,14 +241,14 @@ def _bernstein_eval(
     out : (N, 3) float64
         Pre-allocated output, written in-place.
     """
-    N         = uvw.shape[0]
-    lx        = delta.shape[0]
-    ly        = delta.shape[1]
-    lz        = delta.shape[2]
+    N  = uvw.shape[0]
+    lx = delta.shape[0]
+    ly = delta.shape[1]
+    lz = delta.shape[2]
 
-    ns        = min(local_influence_s, divisions_s)
-    nt        = min(local_influence_t, divisions_t)
-    nu        = min(local_influence_u, divisions_u)
+    ns = min(local_influence_s, divisions_s)
+    nt = min(local_influence_t, divisions_t)
+    nu = min(local_influence_u, divisions_u)
 
     num_cps_s = divisions_s + 1
     num_cps_t = divisions_t + 1

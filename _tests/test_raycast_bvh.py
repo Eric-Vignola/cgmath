@@ -62,9 +62,9 @@ class TestBVHRaycast(unittest.TestCase):
         # Pad geometry to width-4 just like the public wrappers do.
         geom = np.asarray(mesh.geometry, dtype=np.int32)
         if geom.shape[1] < 4:
-            pad = np.full((geom.shape[0], 4), -1, dtype=np.int32)
+            pad                     = np.full((geom.shape[0], 4), -1, dtype=np.int32)
             pad[:, : geom.shape[1]] = geom
-            geom = pad
+            geom                    = pad
         pts = np.ascontiguousarray(mesh.points, dtype=np.float64)
 
         aabb_min, aabb_max = _compute_face_aabbs(geom, pts)
@@ -180,7 +180,7 @@ class TestBVHRaycast(unittest.TestCase):
         original_threshold = MeshData._BVH_MIN_FACES
         try:
             MeshData._BVH_MIN_FACES = 100_000  # force fallback
-            rd_bf = mesh.raycast(o, d, method="bilinear")
+            rd_bf                   = mesh.raycast(o, d, method="bilinear")
         finally:
             MeshData._BVH_MIN_FACES = original_threshold
 

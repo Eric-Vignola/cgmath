@@ -77,8 +77,8 @@ def _rebuild_indices(
             e0 += edge_offset
             e1 += edge_offset
 
-            ii = cumsum[index]
-            result[ii] = f
+            ii             = cumsum[index]
+            result[ii]     = f
             result[ii + 1] = e0
             result[ii + 2] = v1
             result[ii + 3] = e1
@@ -161,7 +161,7 @@ def _rebuild_indices_parallel(
             index = base_idx + j
             ii    = cumsum[index]
 
-            result[ii] = f
+            result[ii]     = f
             result[ii + 1] = e0 + edge_offset
             result[ii + 2] = v1
             result[ii + 3] = e1 + edge_offset
@@ -225,13 +225,13 @@ def _rebuild_indices_optimized(
             if v0 == v1:
                 v1 = e2v[e0, 1]
 
-            k     = (j + 1) % count_i
-            e1    = f2e[i, k]
+            k  = (j + 1) % count_i
+            e1 = f2e[i, k]
 
             index = base_idx + j
             ii    = cumsum[index]
 
-            result[ii] = f
+            result[ii]     = f
             result[ii + 1] = e0 + edge_offset
             result[ii + 2] = v1
             result[ii + 3] = e1 + edge_offset
@@ -382,8 +382,8 @@ def _compute_vertex_averages(
         face_start = vertex_face_starts[i]
         edge_start = vertex_edge_starts[i]
 
-        n          = float(n_faces)  # valence
-        inv_n      = 1.0 / n
+        n     = float(n_faces)  # valence
+        inv_n = 1.0 / n
 
         for d in range(n_dims):
             # Average of face centroids (F)
@@ -462,7 +462,7 @@ def _compute_new_edge_points(
             f1 = edge_faces[i, 1]
 
             for d in range(n_dims):
-                avg_centroid = (face_centroids[f0, d] + face_centroids[f1, d]) * 0.5
+                avg_centroid          = (face_centroids[f0, d] + face_centroids[f1, d]) * 0.5
                 new_edge_points[i, d] = (edge_midpoints[i, d] + avg_centroid) * 0.5
 
     return new_edge_points

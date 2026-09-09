@@ -206,8 +206,8 @@ class TestHierarchy(unittest.TestCase):
     def test_channel_write_is_in_place(self):
         # a channel bound to a view must keep writing through it, so external
         # storage sees the write and the binding survives
-        storage = np.zeros((2, 3))
-        node    = TransformData(name='a')
+        storage         = np.zeros((2, 3))
+        node            = TransformData(name='a')
         node._translate = storage[1]
 
         node.translate  = [1.0, 2.0, 3.0]
@@ -219,7 +219,7 @@ class TestHierarchy(unittest.TestCase):
     def test_channel_write_does_not_mutate_the_class_default(self):
         # copy() bypasses __init__, so an untouched channel still points at
         # the class default, which is shared by every instance
-        node = TransformData(name='a').copy()
+        node       = TransformData(name='a').copy()
         node.scale = [3.0, 3.0, 3.0]
 
         self.assertTrue(np.allclose(node.scale, 3.0))
@@ -228,7 +228,7 @@ class TestHierarchy(unittest.TestCase):
 
     def test_channel_defaults_are_float(self):
         # an integer default would silently truncate an in place write
-        node = TransformData(name='a').copy()
+        node        = TransformData(name='a').copy()
         node.rotate = [1.5, 2.5, 3.5]
 
         self.assertTrue(np.allclose(node.rotate, [1.5, 2.5, 3.5]))
@@ -267,7 +267,7 @@ class TestHierarchy(unittest.TestCase):
         skeleton = HierarchyData.load(self.skeleton_file)
         node     = skeleton['elbow_left_joint']
 
-        sub      = skeleton[1:]
+        sub = skeleton[1:]
         self.assertFalse(isinstance(sub, HierarchyData))
         self.assertTrue(node._hierarchy is skeleton)
         for n in sub:
@@ -286,7 +286,7 @@ class TestHierarchy(unittest.TestCase):
         skeleton = HierarchyData.load(self.skeleton_file)
         names    = [n.name for n in skeleton]
 
-        mask     = np.zeros(len(skeleton), dtype=bool)
+        mask         = np.zeros(len(skeleton), dtype=bool)
         mask[[1, 3]] = True
 
         selected = skeleton[mask]
@@ -371,9 +371,9 @@ class TestHierarchy(unittest.TestCase):
 
             # parent first, so each assignment sees a solved parent
             for i, name in enumerate(names):
-                M = np.eye(4)
-                M[:3, :3] = rotation
-                M[3, :3] = positions[i]
+                M                    = np.eye(4)
+                M[:3, :3]            = rotation
+                M[3, :3]             = positions[i]
                 h[name].world_matrix = M
 
             h.segment_scale_compensate = False
@@ -394,8 +394,8 @@ class TestHierarchy(unittest.TestCase):
         # a general 3 axis pose, applied in each joint's own local frame
         posed = b.copy()
         for name, euler in (('shoulder', [20., 30., -15.]), ('elbow', [5., 40., 10.])):
-            P       = euler_to_matrix(np.radians(euler), 0)[0]
-            current = quaternion_to_matrix(posed[name].quaternion)[0]
+            P                      = euler_to_matrix(np.radians(euler), 0)[0]
+            current                = quaternion_to_matrix(posed[name].quaternion)[0]
             posed[name].quaternion = matrix_to_quaternion(np.dot(P, current))[0]
 
         result = delta + posed
@@ -447,8 +447,8 @@ class TestHierarchy(unittest.TestCase):
             ('flipped_shoulder', [20., 30., -15.]),
             ('flipped_elbow', [5., 40., 10.]),
         ):
-            P       = euler_to_matrix(np.radians(euler), 0)[0]
-            current = quaternion_to_matrix(posed[name].quaternion)[0]
+            P                      = euler_to_matrix(np.radians(euler), 0)[0]
+            current                = quaternion_to_matrix(posed[name].quaternion)[0]
             posed[name].quaternion = matrix_to_quaternion(np.dot(P, current))[0]
 
         result = posed.add_delta(a.get_delta(b, by='index'), by='index')
@@ -613,7 +613,7 @@ class TestHierarchy(unittest.TestCase):
 
         # target orientation as a quaternion (from a different rotate)
         node.rotate = np.array([40.0, -20.0, 33.0])
-        target_q = node.quaternion.copy()
+        target_q    = node.quaternion.copy()
 
         # change rotate, then drive it back via the quaternion setter
         node.rotate     = np.array([0.0, 0.0, 0.0])
@@ -737,17 +737,17 @@ class TestHierarchy(unittest.TestCase):
         target[:, 3, 1] += 4.0
 
         for order in ([0, 1, 2], [2, 1, 0]):
-            skeleton = self._chain()
-            view     = skeleton[order]
+            skeleton          = self._chain()
+            view              = skeleton[order]
             view.world_matrix = target[order]
             self.assertTrue(
                 np.allclose(skeleton.world_matrix, target), f'failed for {order}'
             )
 
     def test_view_matrix_setter_is_order_independent(self):
-        source = self._chain()
+        source        = self._chain()
         source.rotate = np.array([[10.0, 20.0, 30.0]] * 3)
-        target = source.matrix.copy()
+        target        = source.matrix.copy()
 
         for order in ([0, 1, 2], [2, 1, 0]):
             skeleton = self._chain()
@@ -804,8 +804,8 @@ class TestHierarchy(unittest.TestCase):
         self.assertEqual(len(view.to_attributes()), 2)
 
     def test_view_match_methods(self):
-        skeleton = self._chain()
-        other    = self._chain(name='k', offset=7.0)
+        skeleton        = self._chain()
+        other           = self._chain(name='k', offset=7.0)
         other.translate = other.translate + np.array([0.0, 3.0, 0.0])
 
         skeleton[1:].match_translate(other[1:])
@@ -822,8 +822,8 @@ class TestHierarchy(unittest.TestCase):
 
     # --- swapaxes --- #
     def _permutation(self, axis0, axis1, negate):
-        P     = np.eye(4)
-        other = 3 - axis0 - axis1
+        P               = np.eye(4)
+        other           = 3 - axis0 - axis1
         P[axis0, axis0] = P[axis1, axis1] = 0.0
         P[axis0, axis1] = -1.0 if negate else 1.0
         P[axis1, axis0] = 1.0
@@ -838,9 +838,9 @@ class TestHierarchy(unittest.TestCase):
                 if axis0 == axis1:
                     continue
                 for negate in (False, True):
-                    skeleton = self._chain()
+                    skeleton        = self._chain()
                     skeleton.rotate = np.array([[15.0, -25.0, 40.0]] * 3)
-                    node = skeleton[1]
+                    node            = skeleton[1]
                     expected = np.dot(
                         self._permutation(axis0, axis1, negate), node.world_matrix
                     )
@@ -893,7 +893,7 @@ class TestHierarchy(unittest.TestCase):
     def test_swapaxes_inverses(self):
         # the plain swap undoes itself; the negated swap is undone by the
         # same call with the axes given the other way round
-        skeleton = self._chain()
+        skeleton        = self._chain()
         skeleton.rotate = np.array([[10.0, 20.0, 30.0]] * 3)
 
         start = skeleton[1].world_matrix.copy()
@@ -906,7 +906,7 @@ class TestHierarchy(unittest.TestCase):
         self.assertTrue(np.allclose(skeleton[1].world_matrix, start, atol=1e-9))
 
     def test_swapaxes_permutes_scale(self):
-        skeleton = self._chain()
+        skeleton          = self._chain()
         skeleton[1].scale = np.array([2.0, 3.0, 5.0])
         for node in skeleton:
             node.segment_scale_compensate = True
@@ -929,7 +929,7 @@ class TestHierarchy(unittest.TestCase):
     def test_swapaxes_vectorized_is_order_independent(self):
         results = []
         for order in ([0, 1, 2], [2, 1, 0]):
-            skeleton = self._chain()
+            skeleton        = self._chain()
             skeleton.rotate = np.array([[10.0, 20.0, 30.0]] * 3)
             skeleton[order].swapaxes(0, 1, negate=True)
             results.append(skeleton.world_matrix.copy())
@@ -937,7 +937,7 @@ class TestHierarchy(unittest.TestCase):
         self.assertTrue(np.allclose(results[0], results[1], atol=1e-9))
 
         # and it matches doing it one node at a time
-        skeleton = self._chain()
+        skeleton        = self._chain()
         skeleton.rotate = np.array([[10.0, 20.0, 30.0]] * 3)
         for node in skeleton[:]:
             node.swapaxes(0, 1, negate=True)
@@ -1017,9 +1017,9 @@ class TestHierarchy(unittest.TestCase):
         self.assertTrue(np.array_equal(parents, [-1, 0, 1, 2]))
 
     def test_index_pairing_over_views_round_trips(self):
-        a = self._chain(count=4)
-        b = self._chain(count=4, name='k', offset=7.0)
-        b.rotate = np.array([[12.0, -8.0, 20.0]] * 4)
+        a         = self._chain(count=4)
+        b         = self._chain(count=4, name='k', offset=7.0)
+        b.rotate  = np.array([[12.0, -8.0, 20.0]] * 4)
 
         delta     = a[1:].get_delta(b[1:], by='index')
         recovered = b[1:].add_delta(delta, by='index')
@@ -1111,9 +1111,9 @@ class TestHierarchy(unittest.TestCase):
 
     def test_orientation_only_delta_does_not_follow_translation(self):
         # documented limit: a joint that moves rather than rotates stays put
-        source = self._chain(count=3)
-        other  = self._chain(count=3, name='k')
-        moved  = self._chain(count=3, name='k')
+        source             = self._chain(count=3)
+        other              = self._chain(count=3, name='k')
+        moved              = self._chain(count=3, name='k')
         moved[0].translate = moved[0].translate + np.array([0.0, 5.0, 0.0])
 
         delta  = source.get_delta(other, by='index', translate=False)
@@ -1201,7 +1201,7 @@ class TestLoadFbx(unittest.TestCase):
         return HierarchyData.load_fbx(self.saved(rig, name))
 
     def test_a_joint_chain_round_trips(self):
-        rig    = self.chain()
+        rig = self.chain()
 
         loaded = self.round_trip(rig)
 
@@ -1324,7 +1324,7 @@ class TestLoadFbxDroppedNodes(unittest.TestCase):
 
     def test_a_locator_round_trips(self):
         """save_fbx writes locators as markers, which the reader used to skip"""
-        rig    = self.locator_rig()
+        rig = self.locator_rig()
 
         loaded = self.load(rig, "loc.fbx")
 
@@ -1429,7 +1429,7 @@ class TestLoadFbxTransformReads(unittest.TestCase):
 
         # the two plausible wrong readings both miss, by a lot
         for wrong in ([0.0, 0.0, 0.0], [-5.0, 12.0, -7.0]):
-            probe = HierarchyData.load_fbx(path)
+            probe                      = HierarchyData.load_fbx(path)
             probe["child"].rotate_axis = wrong
             self.assertGreater(np.abs(probe["child"].matrix - truth).max(), 1e-3)
 
@@ -1530,12 +1530,12 @@ class TestLoadGlbPoseFrame(unittest.TestCase):
 
     def build(self, path, quat):
         """one joint carrying a single translation and rotation key"""
-        times       = np.array([0.0],        dtype=np.float32)
-        translation = np.array([self.POSED], dtype=np.float32)
-        rotation    = np.array([list(quat)], dtype=np.float32)
-        blob        = times.tobytes() + translation.tobytes() + rotation.tobytes()
+        times        = np.array([0.0],        dtype=np.float32)
+        translation  = np.array([self.POSED], dtype=np.float32)
+        rotation     = np.array([list(quat)], dtype=np.float32)
+        blob         = times.tobytes() + translation.tobytes() + rotation.tobytes()
 
-        gltf        = GLTF2()
+        gltf         = GLTF2()
         gltf.scene   = 0
         gltf.scenes  = [Scene(nodes=[0])]
         gltf.nodes   = [Node(name="joint1", translation=self.REST)]
@@ -1582,8 +1582,8 @@ class TestLoadGlbPoseFrame(unittest.TestCase):
             )
 
     def test_the_rest_and_posed_branches_agree_on_scale_factor(self):
-        rest        = TransformList.load_glb(self.path, scale_factor=2.54)
-        posed       = TransformList.load_glb(self.path, scale_factor=2.54, pose_frame=0)
+        rest  = TransformList.load_glb(self.path, scale_factor=2.54)
+        posed = TransformList.load_glb(self.path, scale_factor=2.54, pose_frame=0)
 
         ratio_rest  = np.array(rest["joint1"].translate) / np.array(self.REST)
         ratio_posed = np.array(posed["joint1"].translate) / np.array(self.POSED)
@@ -1614,12 +1614,12 @@ class TestLoadGlbPoseFrame(unittest.TestCase):
         )
 
         for order in range(6):
-            node = TransformData(name="probe", rotate_order=order)
+            node        = TransformData(name="probe", rotate_order=order)
             node.rotate = np.degrees(quaternion_to_euler(delta, order)[0])
-            asked = np.abs(np.dot(node.quaternion.ravel(), delta.ravel()))
+            asked       = np.abs(np.dot(node.quaternion.ravel(), delta.ravel()))
 
             node.rotate = np.degrees(quaternion_to_euler(delta, 0)[0])
-            xyz = np.abs(np.dot(node.quaternion.ravel(), delta.ravel()))
+            xyz         = np.abs(np.dot(node.quaternion.ravel(), delta.ravel()))
 
             self.assertAlmostEqual(asked, 1.0, places=6)
             if order != 0:
@@ -1642,7 +1642,7 @@ class TestLoadGlbNodeOrder(unittest.TestCase):
 
     def chain(self, name="order.glb"):
         """a three joint chain whose node array runs leaf first"""
-        gltf = GLTF2()
+        gltf       = GLTF2()
         gltf.scene = 0
         gltf.nodes = [
             Node(name="leaf", translation=[0.0, 1.0, 0.0]),
@@ -1700,7 +1700,7 @@ class TestLoadGlbDuplicateLeaves(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def write(self, nodes, name="dupes.glb"):
-        gltf = GLTF2()
+        gltf         = GLTF2()
         gltf.scene   = 0
         gltf.nodes   = nodes
         gltf.scenes  = [Scene(nodes=[0])]

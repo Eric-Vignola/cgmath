@@ -48,7 +48,7 @@ class GeomSubsetData(Data):
         else:
             verts = self.indices
 
-        weights = np.zeros((mesh_data.point_count, 1))
+        weights           = np.zeros((mesh_data.point_count, 1))
         weights[verts, 0] = 1.0
 
         return SkinData(weights=weights, influences=[influence])
@@ -68,7 +68,7 @@ class GeomSubsetData(Data):
         if len(skin_data.influences) != 1:
             raise ValueError("SkinData must have only 1 influence.")
 
-        component_type = kwargs.pop("component_type", "v")
+        component_type           = kwargs.pop("component_type", "v")
         kwargs["component_type"] = component_type
 
         weights = skin_data.weights.flatten()
@@ -119,7 +119,7 @@ class GeomSubsetData(Data):
         self, mesh_data: MeshData | None = None
     ) -> list[GeomSubsetData]:
         """Splits this GeomSubsetData object into a list of GeomSubsetData objects based on local vert clusters."""
-        clusters    = mesh_data.get_edge_vertex_clusters(self.indices)
+        clusters = mesh_data.get_edge_vertex_clusters(self.indices)
 
         island_maps = []
         for i, island in enumerate(clusters):
@@ -151,7 +151,7 @@ class MapData(Data):
 
     def to_dense_array(self, component_count: int) -> np.ndarray:
         """Convert this object to a dense value array."""
-        array = np.full((component_count,), self.default_value)
+        array               = np.full((component_count,), self.default_value)
         array[self.indices] = self.values
         return array
 
@@ -166,7 +166,7 @@ class MapData(Data):
             raise NotImplementedError(
                 "Converting non-vertex MapData to SkinData is not supported yet."
             )
-        weights = np.full((mesh_data.point_count, 1), self.default_value)
+        weights                  = np.full((mesh_data.point_count, 1), self.default_value)
         weights[self.indices, 0] = self.values
         return SkinData(weights=weights, influences=[influence])
 
@@ -188,10 +188,10 @@ class MapData(Data):
         if component_type != "v":
             raise ValueError("Can't convert SkinData non-vertex MapData.")
         kwargs["component_type"] = component_type
-        weights = skin_data.weights.flatten()
-        kwargs["indices"] = np.nonzero(weights)[0]
-        kwargs["values"] = weights[kwargs["indices"]]
-        kwargs["default_value"] = 0.0
+        weights                  = skin_data.weights.flatten()
+        kwargs["indices"]        = np.nonzero(weights)[0]
+        kwargs["values"]         = weights[kwargs["indices"]]
+        kwargs["default_value"]  = 0.0
         return MapData(**kwargs)
 
     # --- USD interface
@@ -218,8 +218,8 @@ class MapData(Data):
             prim.SetTypeName(prim_type)
         namespace = prim_type[0].lower() + prim_type[1:]
 
-        Sdf       = pxr().Sdf
-        args      = (False, Sdf.VariabilityVarying)
+        Sdf  = pxr().Sdf
+        args = (False, Sdf.VariabilityVarying)
         attr = prim.CreateAttribute(
             f"{namespace}:indices", Sdf.ValueTypeNames.IntArray, *args
         )

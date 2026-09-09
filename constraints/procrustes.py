@@ -85,10 +85,10 @@ class ProcrustesData(Data):
             if indices.size > self.clusters.shape[1]:
                 max_length = indices.size
 
-            clusters = np.ones((self.clusters.shape[0] + 1, max_length), dtype=int) * -1
+            clusters                                                     = np.ones((self.clusters.shape[0] + 1, max_length), dtype=int) * -1
             clusters[: self.clusters.shape[0], : self.clusters.shape[1]] = self.clusters
-            clusters[-1, : indices.size] = indices
-            self.clusters = clusters
+            clusters[-1, : indices.size]                                 = indices
+            self.clusters                                                = clusters
 
     def update(self, target: np.ndarray) -> None:
         """updates procrustes points and triggers compute"""
@@ -120,13 +120,13 @@ class ProcrustesData(Data):
                 points1 = points0
 
             # pad 0's at end of matrix stack to handle -1 neighbor elements
-            points0_ = np.zeros((points0.shape[0] + 1, points0.shape[1]))
+            points0_      = np.zeros((points0.shape[0] + 1, points0.shape[1]))
             points0_[:-1] = points0
-            points0_ = points0_[clusters]
+            points0_      = points0_[clusters]
 
-            points1_ = np.zeros((points1.shape[0] + 1, points1.shape[1]))
+            points1_      = np.zeros((points1.shape[0] + 1, points1.shape[1]))
             points1_[:-1] = points1
-            points1_ = points1_[clusters]
+            points1_      = points1_[clusters]
 
             # get the actual count of each clusters
             counts = (clusters > -1).sum(axis=1)
@@ -135,9 +135,9 @@ class ProcrustesData(Data):
             centroid0 = np.sum(points0_, axis=1) / counts[:, None]
             centroid1 = np.sum(points1_, axis=1) / counts[:, None]
 
-            vectors0  = points0_ - centroid0[:, None]
+            vectors0                 = points0_ - centroid0[:, None]
             vectors0[clusters == -1] = 0  # so outer product ignores the -1's
-            vectors1 = points1_ - centroid1[:, None]
+            vectors1                 = points1_ - centroid1[:, None]
             vectors1[clusters == -1] = 0  # so outer product ignores the -1's
 
             # sum the vectorized outer products
@@ -164,13 +164,13 @@ class ProcrustesData(Data):
             p = p + T
 
             # Embed the 3x3 rotation into a 4x4 homogeneous matrix
-            R4 = np.zeros((R.shape[0], 4, 4))
+            R4            = np.zeros((R.shape[0], 4, 4))
             R4[:, :3, :3] = R
-            R4[:, 3, 3] = 1.0
+            R4[:, 3, 3]   = 1.0
 
             # compute new transform orientations
-            R4 = matrix_inverse(R4)
-            M  = matrix_multiply(self.transforms, R4)
+            R4          = matrix_inverse(R4)
+            M           = matrix_multiply(self.transforms, R4)
             M[:, 3, :3] = p
 
             # set internals
@@ -205,7 +205,7 @@ class ProcrustesData(Data):
         resulting objective is ``s0 + s1 - s2``.
         """
         U, S, V = np.linalg.svd(H)
-        R    = np.einsum("bji,bkj->bki", V, U)
+        R = np.einsum("bji,bkj->bki", V, U)
 
         refl = np.where(np.linalg.det(R) < 0)[0]
         if refl.size:
@@ -247,7 +247,7 @@ class ProcrustesData(Data):
         if reflected.all():
             return ProcrustesData._svd_rotation(H)
 
-        R = np.empty_like(H)
+        R             = np.empty_like(H)
         R[~reflected] = batch_procrustes_rotations(H[~reflected], max_iter=16)
-        R[reflected] = ProcrustesData._svd_rotation(H[reflected])
+        R[reflected]  = ProcrustesData._svd_rotation(H[reflected])
         return R

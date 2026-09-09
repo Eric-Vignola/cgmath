@@ -333,7 +333,7 @@ class Object(TransformData):
         object_kwargs.setdefault("name", mesh.name or "object")
 
         if load_skin and object_kwargs.get("skin") is None:
-            meshes = [m for m, _ in data]
+            meshes                = [m for m, _ in data]
             object_kwargs["skin"] = _glb_skins(file_path, meshes, scale_factor)[index]
 
         obj = cls(mesh=mesh, uv=uv, **object_kwargs)
@@ -562,7 +562,7 @@ class Object(TransformData):
         second frame onward.
         """
         if self._bind_mesh is None:
-            mesh = self._mesh.copy()
+            mesh        = self._mesh.copy()
             mesh.points = np.asarray(self._skin.rest_points, dtype=float).copy()
             if getattr(mesh, "normals", None) is not None:
                 mesh.normals = None
@@ -596,7 +596,7 @@ class Object(TransformData):
         if self._mesh is None:
             raise ValueError(f"Object {self.name!r} has no mesh to deform")
 
-        target = self._bind_target()
+        target    = self._bind_target()
         self.mesh = self._skin.apply(pose, target)
         # The mesh setter just dropped the bind pose; hand it back rather
         # than rebuild it next frame -- we only replaced the points.
@@ -617,7 +617,7 @@ class Object(TransformData):
         if self._skin is None or self._mesh is None:
             return self
 
-        target = self._bind_target()
+        target          = self._bind_target()
         self.mesh       = target.copy()
         self._bind_mesh = target
         return self
@@ -1462,7 +1462,7 @@ class Object(TransformData):
         tex_arr   = data.pop("_texture", None)
         skin_dict = data.pop("_skin",    None)
 
-        obj       = super().from_dict(data)
+        obj = super().from_dict(data)
 
         if mesh_dict is not None:
             obj._mesh = MeshData.from_dict(mesh_dict)
@@ -3101,11 +3101,11 @@ def _orbit_camera_col(
     rotate -> translate-back composition.  Column-major (OpenGL) in, column
     major out, ready to hand to :func:`render` as ``camera_matrix``.
     """
-    R         = _rotation_matrix_col(rotation_axis, angle)
-    to_origin = np.eye(4, dtype=np.float64)
+    R                = _rotation_matrix_col(rotation_axis, angle)
+    to_origin        = np.eye(4, dtype=np.float64)
     to_origin[:3, 3] = -centroid
-    back = np.eye(4, dtype=np.float64)
-    back[:3, 3] = centroid
+    back             = np.eye(4, dtype=np.float64)
+    back[:3, 3]      = centroid
     return back @ R @ to_origin @ cam_col
 
 
@@ -3184,7 +3184,7 @@ def _fit_camera_over_orbit(
             f"camera pull-back = {required_dist:.3f}"
         )
 
-    chosen = np.array(base_cam_col, dtype=np.float64, copy=True)
+    chosen        = np.array(base_cam_col, dtype=np.float64, copy=True)
     chosen[:3, 3] = cam_world_pos
     return chosen
 
@@ -3663,7 +3663,7 @@ def _extract_fbx_textures(
         _walk_fbx_mesh_nodes(scene.GetRootNode(), mesh_nodes)
         if not mesh_nodes or not -len(mesh_nodes) <= mesh_index < len(mesh_nodes):
             return {}
-        node        = mesh_nodes[mesh_index]
+        node = mesh_nodes[mesh_index]
 
         n_materials = node.GetMaterialCount()
         if n_materials == 0 or not -n_materials <= material_index < n_materials:

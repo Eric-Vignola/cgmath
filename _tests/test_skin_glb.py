@@ -102,7 +102,7 @@ class Builder:
         )
 
     def write(self, path, meshes, nodes, skins, scene_nodes=None):
-        gltf = GLTF2()
+        gltf             = GLTF2()
         gltf.buffers     = [Buffer(byteLength=len(self.blob))]
         gltf.bufferViews = self.views
         gltf.accessors   = self.accessors
@@ -130,9 +130,9 @@ def triangle(offset=0.0):
 
 def one_hot(slots):
     """(N, 4) joints/weights pinning vertex v entirely to slot ``slots[v]``"""
-    joints  = np.zeros((len(slots), 4), dtype=np.uint16)
-    weights = np.zeros((len(slots), 4), dtype=np.float32)
-    joints[:, 0] = slots
+    joints        = np.zeros((len(slots), 4), dtype=np.uint16)
+    weights       = np.zeros((len(slots), 4), dtype=np.float32)
+    joints[:, 0]  = slots
     weights[:, 0] = 1.0
     return joints, weights
 
@@ -187,11 +187,11 @@ class TestIndirection(GlbSkinTest):
         np.testing.assert_allclose(skin.weights, np.eye(3))
 
     def test_fractional_weights_survive(self):
-        builder = Builder()
-        joints  = np.zeros((3, 4), dtype=np.uint16)
-        joints[:, 0] = [0, 1, 2]
-        joints[:, 1] = [1, 2, 0]
-        weights = np.zeros((3, 4), dtype=np.float32)
+        builder       = Builder()
+        joints        = np.zeros((3, 4), dtype=np.uint16)
+        joints[:, 0]  = [0, 1, 2]
+        joints[:, 1]  = [1, 2, 0]
+        weights       = np.zeros((3, 4), dtype=np.float32)
         weights[:, 0] = 0.75
         weights[:, 1] = 0.25
 
@@ -210,17 +210,17 @@ class TestIndirection(GlbSkinTest):
             scene_nodes=[0, 1],
         )
 
-        skin     = load_glb(path)[0]
+        skin = load_glb(path)[0]
 
         expected = np.array([[0.75, 0.25, 0.0], [0.0, 0.75, 0.25], [0.25, 0.0, 0.75]])
         np.testing.assert_allclose(skin.weights, expected, atol=1e-7)
 
     def test_a_joint_repeated_across_slots_accumulates(self):
         """glTF lets two slots name the same joint; the scatter must add, not overwrite"""
-        builder = Builder()
-        joints  = np.zeros((1, 4), dtype=np.uint16)
-        weights = np.zeros((1, 4), dtype=np.float32)
-        joints[0] = [1, 1, 0, 0]
+        builder    = Builder()
+        joints     = np.zeros((1, 4), dtype=np.uint16)
+        weights    = np.zeros((1, 4), dtype=np.float32)
+        joints[0]  = [1, 1, 0, 0]
         weights[0] = [0.5, 0.5, 0.0, 0.0]
 
         primitive = builder.primitive(
@@ -365,8 +365,8 @@ class TestPrimitives(GlbSkinTest):
         and the old `if primitive.attributes.JOINTS_0:` skipped joints AND
         weights without raising
         """
-        builder = Builder()
-        joints  = np.zeros((3, 4), dtype=np.uint16)
+        builder      = Builder()
+        joints       = np.zeros((3, 4), dtype=np.uint16)
         joints[:, 0] = [0, 1, 0]
 
         # burn accessor 0 on JOINTS_0 before anything else is added
@@ -376,8 +376,8 @@ class TestPrimitives(GlbSkinTest):
         }
         self.assertEqual(attributes["JOINTS_0"], 0)
 
-        weights = np.zeros((3, 4), dtype=np.float32)
-        weights[:, 0] = 1.0
+        weights                 = np.zeros((3, 4), dtype=np.float32)
+        weights[:, 0]           = 1.0
         attributes["WEIGHTS_0"] = builder.add(weights, kind="VEC4", ctype=FLOAT)
 
         primitive = Primitive(

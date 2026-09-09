@@ -65,7 +65,7 @@ def _compute_basis(u, kv, c, d):
 
     for i in range(n):
         for j in range(c):
-            b[i, j] = 0.0
+            b[i, j]  = 0.0
             bb[i, j] = 0.0
 
     for i in range(n):
@@ -74,9 +74,9 @@ def _compute_basis(u, kv, c, d):
     for j in range(1, d + 1):
         for i in range(j):
             for k in range(n):
-                li = int(left[k])
+                li            = int(left[k])
                 bb[k, li + i] = b[k, li + i]
-                b[k, li] = 0.0
+                b[k, li]      = 0.0
 
         for i in range(j):
             for k in range(n):
@@ -87,7 +87,7 @@ def _compute_basis(u, kv, c, d):
                     f = bb[k, li + i] / denom
                 else:
                     f = 0.0
-                b[k, li + i] = b[k, li + i] + f * (kv[ri + i] - u[k])
+                b[k, li + i]     = b[k, li + i] + f * (kv[ri + i] - u[k])
                 b[k, li + i + 1] = f * (u[k] - kv[ri + i - j])
 
     return b
@@ -139,7 +139,7 @@ def _compute_basis_parallel(u, kv, c, d):
             left_k = limit
         right_k = left_k + d1
 
-        u_k     = u[k]
+        u_k = u[k]
 
         # Local basis buffer for this sample (size d+2 is enough)
         # We only need to track basis values in the local support
@@ -154,7 +154,7 @@ def _compute_basis_parallel(u, kv, c, d):
             # Copy to buffer and reset
             for i in range(j):
                 local_bb[i] = local_b[i]
-                local_b[i] = 0.0
+                local_b[i]  = 0.0
 
             # Compute new basis values
             for i in range(j):
@@ -223,7 +223,7 @@ def _evaluate_bspline_curve(u, kv, control_points, d):
             left_k = limit
         right_k = left_k + d1
 
-        u_k     = u[k]
+        u_k = u[k]
 
         # Local basis buffer
         local_b  = np.zeros(d1 + 1, dtype=u.dtype)
@@ -236,7 +236,7 @@ def _evaluate_bspline_curve(u, kv, control_points, d):
         for j in range(1, d1):
             for i in range(j):
                 local_bb[i] = local_b[i]
-                local_b[i] = 0.0
+                local_b[i]  = 0.0
 
             for i in range(j):
                 ri    = right_k + i
@@ -289,10 +289,10 @@ def _evaluate_bspline_surface(u, v, kv_u, kv_v, control_points, du, dv):
     np.ndarray
         Evaluated points (n, dims), float64.
     """
-    n       = u.shape[0]
-    cu      = control_points.shape[0]
-    cv      = control_points.shape[1]
-    dims    = control_points.shape[2]
+    n    = u.shape[0]
+    cu   = control_points.shape[0]
+    cv   = control_points.shape[1]
+    dims = control_points.shape[2]
 
     limit_u = cu - du - 1
     limit_v = cv - dv - 1
@@ -313,13 +313,13 @@ def _evaluate_bspline_surface(u, v, kv_u, kv_v, control_points, du, dv):
             left_u = limit_u
         right_u = left_u + du1
 
-        basis_u = np.zeros(du1 + 1, dtype=u.dtype)
-        buf_u   = np.zeros(du1 + 1, dtype=u.dtype)
+        basis_u    = np.zeros(du1 + 1, dtype=u.dtype)
+        buf_u      = np.zeros(du1 + 1, dtype=u.dtype)
         basis_u[0] = 1.0
 
         for j in range(1, du1):
             for i in range(j):
-                buf_u[i] = basis_u[i]
+                buf_u[i]   = basis_u[i]
                 basis_u[i] = 0.0
             for i in range(j):
                 ri    = right_u + i
@@ -339,13 +339,13 @@ def _evaluate_bspline_surface(u, v, kv_u, kv_v, control_points, du, dv):
             left_v = limit_v
         right_v = left_v + dv1
 
-        basis_v = np.zeros(dv1 + 1, dtype=v.dtype)
-        buf_v   = np.zeros(dv1 + 1, dtype=v.dtype)
+        basis_v    = np.zeros(dv1 + 1, dtype=v.dtype)
+        buf_v      = np.zeros(dv1 + 1, dtype=v.dtype)
         basis_v[0] = 1.0
 
         for j in range(1, dv1):
             for i in range(j):
-                buf_v[i] = basis_v[i]
+                buf_v[i]   = basis_v[i]
                 basis_v[i] = 0.0
             for i in range(j):
                 ri    = right_v + i
@@ -410,15 +410,15 @@ def _evaluate_bspline_surface_derivatives(u, v, kv_u, kv_v, control_points, du, 
     tangents_v : np.ndarray
         Partial derivatives dS/dv (n, dims), float64.
     """
-    n          = u.shape[0]
-    cu         = control_points.shape[0]
-    cv         = control_points.shape[1]
-    dims       = control_points.shape[2]
+    n    = u.shape[0]
+    cu   = control_points.shape[0]
+    cv   = control_points.shape[1]
+    dims = control_points.shape[2]
 
-    limit_u    = cu - du - 1
-    limit_v    = cv - dv - 1
-    du1        = du + 1
-    dv1        = dv + 1
+    limit_u = cu - du - 1
+    limit_v = cv - dv - 1
+    du1     = du + 1
+    dv1     = dv + 1
 
     points     = np.zeros((n, dims), dtype=control_points.dtype)
     tangents_u = np.zeros((n, dims), dtype=control_points.dtype)
@@ -436,13 +436,13 @@ def _evaluate_bspline_surface_derivatives(u, v, kv_u, kv_v, control_points, du, 
             left_u = limit_u
         right_u = left_u + du1
 
-        basis_u = np.zeros(du1 + 1, dtype=u.dtype)
-        buf_u   = np.zeros(du1 + 1, dtype=u.dtype)
+        basis_u    = np.zeros(du1 + 1, dtype=u.dtype)
+        buf_u      = np.zeros(du1 + 1, dtype=u.dtype)
         basis_u[0] = 1.0
 
         for j in range(1, du1):
             for i in range(j):
-                buf_u[i] = basis_u[i]
+                buf_u[i]   = basis_u[i]
                 basis_u[i] = 0.0
             for i in range(j):
                 ri    = right_u + i
@@ -461,7 +461,7 @@ def _evaluate_bspline_surface_derivatives(u, v, kv_u, kv_v, control_points, du, 
             basis_u_d1[0] = 1.0
             for j in range(1, du):
                 for i in range(j):
-                    buf_u_d1[i] = basis_u_d1[i]
+                    buf_u_d1[i]   = basis_u_d1[i]
                     basis_u_d1[i] = 0.0
                 for i in range(j):
                     ri    = right_u + i
@@ -481,13 +481,13 @@ def _evaluate_bspline_surface_derivatives(u, v, kv_u, kv_v, control_points, du, 
             left_v = limit_v
         right_v = left_v + dv1
 
-        basis_v = np.zeros(dv1 + 1, dtype=v.dtype)
-        buf_v   = np.zeros(dv1 + 1, dtype=v.dtype)
+        basis_v    = np.zeros(dv1 + 1, dtype=v.dtype)
+        buf_v      = np.zeros(dv1 + 1, dtype=v.dtype)
         basis_v[0] = 1.0
 
         for j in range(1, dv1):
             for i in range(j):
-                buf_v[i] = basis_v[i]
+                buf_v[i]   = basis_v[i]
                 basis_v[i] = 0.0
             for i in range(j):
                 ri    = right_v + i
@@ -506,7 +506,7 @@ def _evaluate_bspline_surface_derivatives(u, v, kv_u, kv_v, control_points, du, 
             basis_v_d1[0] = 1.0
             for j in range(1, dv):
                 for i in range(j):
-                    buf_v_d1[i] = basis_v_d1[i]
+                    buf_v_d1[i]   = basis_v_d1[i]
                     basis_v_d1[i] = 0.0
                 for i in range(j):
                     ri    = right_v + i
@@ -623,23 +623,23 @@ def _compute_basis_derivatives(u, kv, c, d, order=1):
             left_k = limit
         right_k = left_k + d1
 
-        u_k     = u[k]
+        u_k = u[k]
 
         # Compute basis at degree d and d-1
         # We need both for the derivative formula
-        local_b  = np.zeros(d1 + 1, dtype=u.dtype)
-        local_bb = np.zeros(d1 + 1, dtype=u.dtype)
+        local_b    = np.zeros(d1 + 1, dtype=u.dtype)
+        local_bb   = np.zeros(d1 + 1, dtype=u.dtype)
         local_b[0] = 1.0
 
         # Store basis values at each degree level for derivative computation
-        basis_levels = np.zeros((d1, d1 + 1), dtype=u.dtype)
+        basis_levels       = np.zeros((d1, d1 + 1), dtype=u.dtype)
         basis_levels[0, 0] = 1.0
 
         # Cox-de Boor recursion, storing each level
         for j in range(1, d1):
             for i in range(j):
                 local_bb[i] = local_b[i]
-                local_b[i] = 0.0
+                local_b[i]  = 0.0
 
             for i in range(j):
                 ri    = right_k + i
@@ -722,18 +722,18 @@ def _evaluate_bspline_curve_derivative(u, kv, control_points, d):
             left_k = limit
         right_k = left_k + d1
 
-        u_k     = u[k]
+        u_k = u[k]
 
         # Compute basis at degree d-1 for derivative
-        d_minus_1 = d
-        local_b   = np.zeros(d_minus_1 + 1, dtype=u.dtype)
-        local_bb  = np.zeros(d_minus_1 + 1, dtype=u.dtype)
+        d_minus_1  = d
+        local_b    = np.zeros(d_minus_1 + 1, dtype=u.dtype)
+        local_bb   = np.zeros(d_minus_1 + 1, dtype=u.dtype)
         local_b[0] = 1.0
 
         for j in range(1, d_minus_1):
             for i in range(j):
                 local_bb[i] = local_b[i]
-                local_b[i] = 0.0
+                local_b[i]  = 0.0
 
             for i in range(j):
                 ri    = right_k + i
@@ -794,7 +794,7 @@ def _create_uniform_knot_vector(n_control_points, degree):
     n_internal = n_knots - 2 * (degree + 1)
 
     for i in range(degree + 1):
-        kv[i] = 0.0
+        kv[i]               = 0.0
         kv[n_knots - 1 - i] = float(n_internal + 1)
 
     # Internal knots are uniformly spaced
@@ -949,7 +949,7 @@ def _newton_closest_point_parallel(
             for j in range(1, order):
                 for i in range(j):
                     local_bb[i] = local_b[i]
-                    local_b[i] = 0.0
+                    local_b[i]  = 0.0
 
                 for i in range(j):
                     ri    = right_k + i
@@ -969,7 +969,7 @@ def _newton_closest_point_parallel(
             for j in range(1, degree):
                 for i in range(j):
                     local_bb_d1[i] = local_b_d1[i]
-                    local_b_d1[i] = 0.0
+                    local_b_d1[i]  = 0.0
 
                 for i in range(j):
                     ri    = right_k + i
@@ -990,7 +990,7 @@ def _newton_closest_point_parallel(
                 for j in range(1, degree - 1):
                     for i in range(j):
                         local_bb_d2[i] = local_b_d2[i]
-                        local_b_d2[i] = 0.0
+                        local_b_d2[i]  = 0.0
 
                     for i in range(j):
                         ri    = right_k + i
@@ -1118,7 +1118,7 @@ def _newton_closest_point_parallel(
         for j in range(1, order):
             for i in range(j):
                 local_bb[i] = local_b[i]
-                local_b[i] = 0.0
+                local_b[i]  = 0.0
 
             for i in range(j):
                 ri    = right_k + i
@@ -1138,7 +1138,7 @@ def _newton_closest_point_parallel(
         for j in range(1, degree):
             for i in range(j):
                 local_bb_d1[i] = local_b_d1[i]
-                local_b_d1[i] = 0.0
+                local_b_d1[i]  = 0.0
 
             for i in range(j):
                 ri    = right_k + i
@@ -1177,7 +1177,7 @@ def _newton_closest_point_parallel(
         # Store results
         u_out[qi] = ui
         for d in range(dims):
-            points_out[qi, d] = C[d]
+            points_out[qi, d]   = C[d]
             tangents_out[qi, d] = C_prime[d]
 
     return u_out, points_out, tangents_out
@@ -1310,7 +1310,7 @@ def _newton_closest_point_surface_parallel(
             for j in range(1, order_u):
                 for i in range(j):
                     bb_u[i] = b_u[i]
-                    b_u[i] = 0.0
+                    b_u[i]  = 0.0
                 for i in range(j):
                     ri    = right_u + i
                     denom = kv_u[ri] - kv_u[ri - j]
@@ -1328,7 +1328,7 @@ def _newton_closest_point_surface_parallel(
             for j in range(1, du):
                 for i in range(j):
                     bb_u_d1[i] = b_u_d1[i]
-                    b_u_d1[i] = 0.0
+                    b_u_d1[i]  = 0.0
                 for i in range(j):
                     ri    = right_u + i
                     denom = kv_u[ri] - kv_u[ri - j]
@@ -1347,7 +1347,7 @@ def _newton_closest_point_surface_parallel(
                 for j in range(1, du - 1):
                     for i in range(j):
                         bb_u_d2[i] = b_u_d2[i]
-                        b_u_d2[i] = 0.0
+                        b_u_d2[i]  = 0.0
                     for i in range(j):
                         ri    = right_u + i
                         denom = kv_u[ri] - kv_u[ri - j]
@@ -1365,7 +1365,7 @@ def _newton_closest_point_surface_parallel(
             for j in range(1, order_v):
                 for i in range(j):
                     bb_v[i] = b_v[i]
-                    b_v[i] = 0.0
+                    b_v[i]  = 0.0
                 for i in range(j):
                     ri    = right_v + i
                     denom = kv_v[ri] - kv_v[ri - j]
@@ -1383,7 +1383,7 @@ def _newton_closest_point_surface_parallel(
             for j in range(1, dv):
                 for i in range(j):
                     bb_v_d1[i] = b_v_d1[i]
-                    b_v_d1[i] = 0.0
+                    b_v_d1[i]  = 0.0
                 for i in range(j):
                     ri    = right_v + i
                     denom = kv_v[ri] - kv_v[ri - j]
@@ -1402,7 +1402,7 @@ def _newton_closest_point_surface_parallel(
                 for j in range(1, dv - 1):
                     for i in range(j):
                         bb_v_d2[i] = b_v_d2[i]
-                        b_v_d2[i] = 0.0
+                        b_v_d2[i]  = 0.0
                     for i in range(j):
                         ri    = right_v + i
                         denom = kv_v[ri] - kv_v[ri - j]
@@ -1660,7 +1660,7 @@ def _newton_closest_point_surface_parallel(
         for j in range(1, order_u):
             for i in range(j):
                 bb_u[i] = b_u[i]
-                b_u[i] = 0.0
+                b_u[i]  = 0.0
             for i in range(j):
                 ri    = right_u + i
                 denom = kv_u[ri] - kv_u[ri - j]
@@ -1678,7 +1678,7 @@ def _newton_closest_point_surface_parallel(
         for j in range(1, du):
             for i in range(j):
                 bb_u_d1[i] = b_u_d1[i]
-                b_u_d1[i] = 0.0
+                b_u_d1[i]  = 0.0
             for i in range(j):
                 ri    = right_u + i
                 denom = kv_u[ri] - kv_u[ri - j]
@@ -1696,7 +1696,7 @@ def _newton_closest_point_surface_parallel(
         for j in range(1, order_v):
             for i in range(j):
                 bb_v[i] = b_v[i]
-                b_v[i] = 0.0
+                b_v[i]  = 0.0
             for i in range(j):
                 ri    = right_v + i
                 denom = kv_v[ri] - kv_v[ri - j]
@@ -1714,7 +1714,7 @@ def _newton_closest_point_surface_parallel(
         for j in range(1, dv):
             for i in range(j):
                 bb_v_d1[i] = b_v_d1[i]
-                b_v_d1[i] = 0.0
+                b_v_d1[i]  = 0.0
             for i in range(j):
                 ri    = right_v + i
                 denom = kv_v[ri] - kv_v[ri - j]
@@ -1779,7 +1779,7 @@ def _newton_closest_point_surface_parallel(
         u_out[qi] = ui
         v_out[qi] = vi
         for d in range(dims):
-            points_out[qi, d] = S[d]
+            points_out[qi, d]     = S[d]
             tangents_u_out[qi, d] = S_u[d]
             tangents_v_out[qi, d] = S_v[d]
 
@@ -1910,9 +1910,9 @@ def _raycast_bspline_surface_parallel(
         best_v_init  = 0.0
 
         for gi in range(n_grid):
-            ex      = grid_pts[gi, 0] - ox
-            ey      = grid_pts[gi, 1] - oy
-            ez      = grid_pts[gi, 2] - oz
+            ex = grid_pts[gi, 0] - ox
+            ey = grid_pts[gi, 1] - oy
+            ez = grid_pts[gi, 2] - oz
 
             t_along = ex * dx + ey * dy + ez * dz
             if forward_only and t_along < 0.0:
@@ -1948,15 +1948,15 @@ def _raycast_bspline_surface_parallel(
         b_v_d1  = np.zeros(order_v,     dtype=np.float64)
         bb_v_d1 = np.zeros(order_v,     dtype=np.float64)
 
-        Sx      = 0.0
-        Sy      = 0.0
-        Sz      = 0.0
-        Sux     = 0.0
-        Suy     = 0.0
-        Suz     = 0.0
-        Svx     = 0.0
-        Svy     = 0.0
-        Svz     = 0.0
+        Sx  = 0.0
+        Sy  = 0.0
+        Sz  = 0.0
+        Sux = 0.0
+        Suy = 0.0
+        Suz = 0.0
+        Svx = 0.0
+        Svy = 0.0
+        Svz = 0.0
 
         for _ in range(max_iters):
             # --- Find spans ---
@@ -1981,7 +1981,7 @@ def _raycast_bspline_surface_parallel(
             for j in range(1, order_u):
                 for i in range(j):
                     bb_u[i] = b_u[i]
-                    b_u[i] = 0.0
+                    b_u[i]  = 0.0
                 for i in range(j):
                     ri    = right_u + i
                     denom = kv_u[ri] - kv_u[ri - j]
@@ -1999,7 +1999,7 @@ def _raycast_bspline_surface_parallel(
             for j in range(1, du):
                 for i in range(j):
                     bb_u_d1[i] = b_u_d1[i]
-                    b_u_d1[i] = 0.0
+                    b_u_d1[i]  = 0.0
                 for i in range(j):
                     ri    = right_u + i
                     denom = kv_u[ri] - kv_u[ri - j]
@@ -2017,7 +2017,7 @@ def _raycast_bspline_surface_parallel(
             for j in range(1, order_v):
                 for i in range(j):
                     bb_v[i] = b_v[i]
-                    b_v[i] = 0.0
+                    b_v[i]  = 0.0
                 for i in range(j):
                     ri    = right_v + i
                     denom = kv_v[ri] - kv_v[ri - j]
@@ -2035,7 +2035,7 @@ def _raycast_bspline_surface_parallel(
             for j in range(1, dv):
                 for i in range(j):
                     bb_v_d1[i] = b_v_d1[i]
-                    b_v_d1[i] = 0.0
+                    b_v_d1[i]  = 0.0
                 for i in range(j):
                     ri    = right_v + i
                     denom = kv_v[ri] - kv_v[ri - j]
@@ -2099,13 +2099,13 @@ def _raycast_bspline_surface_parallel(
                                 Svz += sc * (cv[cp_u, cp_v + 1, 2] - cv[cp_u, cp_v, 2])
 
             # --- Residual F = (S - O) x d ---
-            ex        = Sx - ox
-            ey        = Sy - oy
-            ez        = Sz - oz
+            ex = Sx - ox
+            ey = Sy - oy
+            ez = Sz - oz
 
-            fx        = ey * dz - ez * dy
-            fy        = ez * dx - ex * dz
-            fz        = ex * dy - ey * dx
+            fx = ey * dz - ez * dy
+            fy = ez * dx - ex * dz
+            fz = ex * dy - ey * dx
 
             f_norm_sq = fx * fx + fy * fy + fz * fz
             if f_norm_sq < tolerance * tolerance:
@@ -2198,7 +2198,7 @@ def _raycast_bspline_surface_parallel(
         for j in range(1, order_u):
             for i in range(j):
                 bb_u[i] = b_u[i]
-                b_u[i] = 0.0
+                b_u[i]  = 0.0
             for i in range(j):
                 ri    = right_u + i
                 denom = kv_u[ri] - kv_u[ri - j]
@@ -2216,7 +2216,7 @@ def _raycast_bspline_surface_parallel(
         for j in range(1, du):
             for i in range(j):
                 bb_u_d1[i] = b_u_d1[i]
-                b_u_d1[i] = 0.0
+                b_u_d1[i]  = 0.0
             for i in range(j):
                 ri    = right_u + i
                 denom = kv_u[ri] - kv_u[ri - j]
@@ -2234,7 +2234,7 @@ def _raycast_bspline_surface_parallel(
         for j in range(1, order_v):
             for i in range(j):
                 bb_v[i] = b_v[i]
-                b_v[i] = 0.0
+                b_v[i]  = 0.0
             for i in range(j):
                 ri    = right_v + i
                 denom = kv_v[ri] - kv_v[ri - j]
@@ -2252,7 +2252,7 @@ def _raycast_bspline_surface_parallel(
         for j in range(1, dv):
             for i in range(j):
                 bb_v_d1[i] = b_v_d1[i]
-                b_v_d1[i] = 0.0
+                b_v_d1[i]  = 0.0
             for i in range(j):
                 ri    = right_v + i
                 denom = kv_v[ri] - kv_v[ri - j]
@@ -2315,9 +2315,9 @@ def _raycast_bspline_surface_parallel(
                             Svz += sc * (cv[cp_u, cp_v + 1, 2] - cv[cp_u, cp_v, 2])
 
         # Compute residual and t at final (u, v)
-        ex          = Sx - ox
-        ey          = Sy - oy
-        ez          = Sz - oz
+        ex = Sx - ox
+        ey = Sy - oy
+        ez = Sz - oz
 
         fx          = ey * dz - ez * dy
         fy          = ez * dx - ex * dz
@@ -2340,9 +2340,9 @@ def _raycast_bspline_surface_parallel(
                 is_hit = False
 
         if is_hit:
-            u_out[k] = ui
-            v_out[k] = vi
-            t_out[k] = t_along
+            u_out[k]   = ui
+            v_out[k]   = vi
+            t_out[k]   = t_along
             hit_out[k] = True
         else:
             t_out[k] = np.nan

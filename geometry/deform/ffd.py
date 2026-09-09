@@ -145,8 +145,8 @@ class FFDData(Data):
         """
         from cgmath.geometry.mesh import MeshData
 
-        lo     = np.full(3, -0.5) if bbox_min is None else np.asarray(bbox_min)
-        hi     = np.full(3, 0.5) if bbox_max is None else np.asarray(bbox_max)
+        lo = np.full(3, -0.5) if bbox_min is None else np.asarray(bbox_min)
+        hi = np.full(3, 0.5) if bbox_max is None else np.asarray(bbox_max)
 
         d      = np.asarray(divisions, dtype=int)
         axes   = [np.linspace(a, b, n) for a, b, n in zip(lo, hi, d)]
@@ -257,12 +257,12 @@ class FFDData(Data):
 
         else:  # falloff
             # Convert falloff_radius from cell-widths to world units
-            size         = hi - lo
-            div          = np.maximum(self.divisions - 1, 1).astype(np.float64)
-            cell_size    = np.mean(size / div)
-            radius_world = self._falloff_radius * max(cell_size, 1e-12)
+            size          = hi - lo
+            div           = np.maximum(self.divisions - 1, 1).astype(np.float64)
+            cell_size     = np.mean(size / div)
+            radius_world  = self._falloff_radius * max(cell_size, 1e-12)
 
-            t            = np.clip(bbox_dist / radius_world, 0.0, 1.0)
+            t             = np.clip(bbox_dist / radius_world, 0.0, 1.0)
             self._weights = 1.0 - t * t * (3.0 - 2.0 * t)  # smoothstep
 
     # ---------------------------- bind / update ------------------------------ #
@@ -282,10 +282,10 @@ class FFDData(Data):
         """
         if not isinstance(target, np.ndarray) and hasattr(target, "points"):
             self._source_mesh = target
-            pts = target.points
+            pts               = target.points
         else:
             self._source_mesh = None
-            pts = target
+            pts               = target
         self._source = np.asarray(pts, dtype=np.float64).copy()
 
         self._cells, self._uvw = assign_cells(self._source, self.lattice)
@@ -313,7 +313,7 @@ class FFDData(Data):
         self.compute(pts)
 
         if self._source_mesh is not None:
-            result = self._source_mesh.copy()
+            result        = self._source_mesh.copy()
             result.points = self._points.copy()
             return result
 

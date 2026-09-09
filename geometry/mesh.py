@@ -90,7 +90,7 @@ from scipy.spatial import cKDTree
 MESH_PRIM_TYPE = "Mesh"
 UV_ATTR_PREFIX = "primvars:st"
 
-EPSILON        = np.finfo(np.float32).eps
+EPSILON = np.finfo(np.float32).eps
 
 
 class AreaMethod(Enum):
@@ -190,7 +190,7 @@ def _newell_normals(
     n_faces = counts.size
 
     # face boundary offsets
-    offsets = np.empty(n_faces + 1, dtype=np.intp)
+    offsets    = np.empty(n_faces + 1, dtype=np.intp)
     offsets[0] = 0
     np.cumsum(counts, out=offsets[1:])
 
@@ -198,7 +198,7 @@ def _newell_normals(
     face_ids = np.repeat(np.arange(n_faces, dtype=np.intp), counts)
 
     # next vertex index in stream, wrapping at face boundaries
-    next_idx = np.arange(indices.size, dtype=np.intp) + 1
+    next_idx                  = np.arange(indices.size, dtype=np.intp) + 1
     next_idx[offsets[1:] - 1] = offsets[:-1]
 
     # gather current and next vertex positions
@@ -214,13 +214,13 @@ def _newell_normals(
     sz = curr[:, 2] + nxt[:, 2]
 
     # accumulate per face via bincount (buffered, fast)
-    normals = np.empty((n_faces, 3), dtype=np.float64)
+    normals       = np.empty((n_faces, 3), dtype=np.float64)
     normals[:, 0] = np.bincount(face_ids, weights=dy * sz, minlength=n_faces)
     normals[:, 1] = np.bincount(face_ids, weights=dz * sx, minlength=n_faces)
     normals[:, 2] = np.bincount(face_ids, weights=dx * sy, minlength=n_faces)
 
     if normalize:
-        magnitudes = np.sqrt(np.einsum("ij,ij->i", normals, normals))
+        magnitudes                                         = np.sqrt(np.einsum("ij,ij->i", normals, normals))
         magnitudes[magnitudes < np.finfo(np.float64).tiny] = 1.0
         normals /= magnitudes[:, None]
 
@@ -247,33 +247,33 @@ class MeshData(Data):
     normal_indices: Optional[np.ndarray] = None
 
     # --- cached attributes --- #
-    _f2v                          = None  # faces to vertices
-    _v2f                          = None  # vertices to faces
-    _f2e                          = None  # faces to edges
-    _v2e                          = None  # vertices to edges
-    _e2f                          = None  # edges to faces
-    _e2v                          = None  # edges to vertices
+    _f2v = None  # faces to vertices
+    _v2f = None  # vertices to faces
+    _f2e = None  # faces to edges
+    _v2e = None  # vertices to edges
+    _e2f = None  # edges to faces
+    _e2v = None  # edges to vertices
 
-    _ue2f                         = None  # unique edges to faces
-    _ue2v                         = None  # unique edges to vertices
-    _f2ue                         = None  # faces to unique edges
-    _v2ue                         = None  # vertices to unique edges
-    _unique_edge_pairs            = None  # unique edge pairs
-    _unique_edges                 = None  # unique edges
+    _ue2f              = None  # unique edges to faces
+    _ue2v              = None  # unique edges to vertices
+    _f2ue              = None  # faces to unique edges
+    _v2ue              = None  # vertices to unique edges
+    _unique_edge_pairs = None  # unique edge pairs
+    _unique_edges      = None  # unique edges
 
-    _non_manifold_vertices        = None  # non-manifold vertices
-    _lamina_faces                 = None  # lamina faces
+    _non_manifold_vertices = None  # non-manifold vertices
+    _lamina_faces          = None  # lamina faces
 
-    _border_vertices              = None  # vertex indices on an opened border
-    _border_edges                 = None  # edge indices on an opened border
-    _border_faces                 = None  # face indices on an opened border
-    _overlap_vertices             = None  # overlapping vertex indices
+    _border_vertices    = None  # vertex indices on an opened border
+    _border_edges       = None  # edge indices on an opened border
+    _border_faces       = None  # face indices on an opened border
+    _overlap_vertices   = None  # overlapping vertex indices
 
-    _face_normals                 = None  # face normals
-    _face_vertex_angles           = None  # face-vertex angles
+    _face_normals       = None  # face normals
+    _face_vertex_angles = None  # face-vertex angles
 
-    _edge_lengths                 = None  # edge lengths
-    _edge_normals                 = None  # edge normals
+    _edge_lengths = None  # edge lengths
+    _edge_normals = None  # edge normals
 
     _v_normal_change              = None  # degree of normal change per vert (0:n)
     _v_normal_change_normalized   = None  # degree of normal change per vert (0:1)
@@ -281,12 +281,12 @@ class MeshData(Data):
     _surface_curvature_normalized = None  # surface curvature per vert (0:1)
     _sec_order_surface_curvature  = None  # second order surface curvature per vert (0:1)
 
-    _triangles                    = None  # faces identified as triangles
-    _quads                        = None  # faces identified as quads
-    _ngons                        = None  # faces identified as ngons (tsk tsk)
-    _degenerate_faces             = None  # faces too short, or repeating a vertex
-    _valence                      = None  # valence per vertex
-    _valid                        = None  # topology validity
+    _triangles        = None  # faces identified as triangles
+    _quads            = None  # faces identified as quads
+    _ngons            = None  # faces identified as ngons (tsk tsk)
+    _degenerate_faces = None  # faces too short, or repeating a vertex
+    _valence          = None  # valence per vertex
+    _valid            = None  # topology validity
 
     # neighbors
     _v2ev = None  # vert to edge vertices
@@ -317,11 +317,11 @@ class MeshData(Data):
         self._unique_edges      = edges
         self._unique_edge_pairs = np.array([e0, e1]).T
 
-        self._ue2f              = matrix_row_combine(self._ue2f, e0, e1)
-        self._ue2f              = matrix_row_combine(self._ue2f, e1, e0)
-        self._e2f               = self._ue2f[edges]
-        self._e2v               = self._ue2v[edges]
-        self._f2e               = indices_replace(self._f2ue, e0, e1, collapse=True)
+        self._ue2f = matrix_row_combine(self._ue2f, e0, e1)
+        self._ue2f = matrix_row_combine(self._ue2f, e1, e0)
+        self._e2f  = self._ue2f[edges]
+        self._e2v  = self._ue2v[edges]
+        self._f2e  = indices_replace(self._f2ue, e0, e1, collapse=True)
 
     @property
     def area(self):
@@ -547,9 +547,9 @@ class MeshData(Data):
     @property
     def points4(self):
         """returns self.points as a 4d sequence for matrix math purposes"""
-        points = np.zeros((self.points.shape[0], 4))
+        points                            = np.zeros((self.points.shape[0], 4))
         points[:, : self.points.shape[1]] = self.points
-        points[:, -1] = 1
+        points[:, -1]                     = 1
         return points
 
     def get_triangles(self):
@@ -626,9 +626,9 @@ class MeshData(Data):
         if points.shape[1] < 3:
             # newell needs three components, and a uv plane's shoelace area
             # is exactly the term the padding leaves behind
-            padded = np.zeros((points.shape[0], 3))
+            padded                       = np.zeros((points.shape[0], 3))
             padded[:, : points.shape[1]] = points
-            points = padded
+            points                       = padded
 
         # _newell_normals miscomputes the face preceding a zero count, and a
         # hole contributes no entries to the stream, so dropping holes from
@@ -1093,7 +1093,7 @@ class MeshData(Data):
     def shell_edges(self):
         """returns the shells as edge indices"""
         if self._shell_edges is None:
-            indices = np.arange(self.edge_count)
+            indices           = np.arange(self.edge_count)
             self._shell_edges = self.get_face_edge_clusters(indices)
 
         return self._shell_edges
@@ -1102,7 +1102,7 @@ class MeshData(Data):
     def shell_points(self):
         """returns the shells as point indices"""
         if self._shell_points is None:
-            indices = np.arange(self.point_count)
+            indices            = np.arange(self.point_count)
             self._shell_points = self.get_face_vertex_clusters(indices)
 
         return self._shell_points
@@ -1111,7 +1111,7 @@ class MeshData(Data):
     def shell_faces(self):
         """returns the shells as face indices"""
         if self._shell_faces is None:
-            indices = np.arange(self.face_count)
+            indices           = np.arange(self.face_count)
             self._shell_faces = self.get_vertex_face_clusters(indices)
 
         return self._shell_faces
@@ -1210,8 +1210,8 @@ class MeshData(Data):
     def get_overlap_vertices(self, tolerance=1e-6):
         """returns overlapping pairs of vertices"""
         if self._overlap_vertices is None:
-            tree       = cKDTree(self.points)
-            duplicates = tree.query_pairs(r=tolerance, output_type="ndarray")
+            tree                   = cKDTree(self.points)
+            duplicates             = tree.query_pairs(r=tolerance, output_type="ndarray")
             self._overlap_vertices = duplicates
 
         return self._overlap_vertices
@@ -1253,8 +1253,8 @@ class MeshData(Data):
                 planar.points[planar.geometry]
                 - planar.points[planar.geometry][:, 0, None]
             )
-            p = p[planar.geometry >= 0]
-            d = np.einsum("...i,...i", p, N)
+            p             = p[planar.geometry >= 0]
+            d             = np.einsum("...i,...i", p, N)
             planar.points = planar.points - N * d[:, None]
 
             return planar.get_face_areas(
@@ -1277,25 +1277,25 @@ class MeshData(Data):
             # map triangulated face areas back to original faces:
             # each tri produced 1 output face, each quad produced 2,
             # each n-gon produced len(ngon_tris[face_id]).
-            tri_ids      = np.where(self.counts == 3)[0]
-            quad_ids     = np.where(self.counts == 4)[0]
-            out_per_face = np.ones(self.counts.size, dtype=np.intp)
+            tri_ids                = np.where(self.counts == 3)[0]
+            quad_ids               = np.where(self.counts == 4)[0]
+            out_per_face           = np.ones(self.counts.size, dtype=np.intp)
             out_per_face[quad_ids] = 2
             for face_id, local_tris in rules.ngon_tris.items():
                 out_per_face[face_id] = len(local_tris)
 
-            out_offsets = np.empty(self.counts.size + 1, dtype=np.intp)
+            out_offsets    = np.empty(self.counts.size + 1, dtype=np.intp)
             out_offsets[0] = 0
             np.cumsum(out_per_face, out=out_offsets[1:])
 
-            triangulated_areas = np.zeros(self.counts.size, dtype=tri_areas.dtype)
+            triangulated_areas          = np.zeros(self.counts.size, dtype=tri_areas.dtype)
             triangulated_areas[tri_ids] = tri_areas[out_offsets[tri_ids]]
             triangulated_areas[quad_ids] = (
                 tri_areas[out_offsets[quad_ids]] + tri_areas[out_offsets[quad_ids] + 1]
             )
             for face_id, local_tris in rules.ngon_tris.items():
-                start  = out_offsets[face_id]
-                n_tris = len(local_tris)
+                start                       = out_offsets[face_id]
+                n_tris                      = len(local_tris)
                 triangulated_areas[face_id] = tri_areas[start : start + n_tris].sum()
 
             return triangulated_areas
@@ -1330,7 +1330,7 @@ class MeshData(Data):
             return self._face_vertex_angles
 
         # ensure 4 max vert count per face (triangles only mesh will have 3 max vert count)
-        indices = np.ones((self.geometry.shape[0], 4), dtype=int) * -1
+        indices                              = np.ones((self.geometry.shape[0], 4), dtype=int) * -1
         indices[:, : self.geometry.shape[1]] = self.geometry
 
         # consider triangles as quads with a duplicated 4th edge to keep the code vectorized
@@ -1561,7 +1561,7 @@ class MeshData(Data):
         tri_uv          = uvdata
         tri_nrm_indices = nrm_indices
 
-        has_quads       = np.any(self.counts == 4)
+        has_quads = np.any(self.counts == 4)
         if has_quads:
             tri_mesh   = self.copy()
             tri_uv     = uvdata.copy()
@@ -1586,8 +1586,8 @@ class MeshData(Data):
         face_vertex_angles = tri_mesh.get_face_vertex_angles()
         num_uv_verts       = tri_uv.point_count
 
-        fv_T               = np.repeat(face_T, tri_mesh.counts, axis=0)
-        fv_B               = np.repeat(face_B, tri_mesh.counts, axis=0)
+        fv_T = np.repeat(face_T, tri_mesh.counts, axis=0)
+        fv_B = np.repeat(face_B, tri_mesh.counts, axis=0)
         fv_T *= face_vertex_angles[:, None]
         fv_B *= face_vertex_angles[:, None]
 
@@ -1631,15 +1631,15 @@ class MeshData(Data):
             fv_sign     = np.repeat(face_sign, tri_mesh.counts)
             uv_sign_sum = np.zeros(num_uv_verts)
             np.add.at(uv_sign_sum, tri_uv.indices, fv_sign)
-            sign = np.sign(uv_sign_sum)
+            sign            = np.sign(uv_sign_sum)
             sign[sign == 0] = -1.0
 
             bitangents = B
 
         # handle degenerates -- preserve UV-determinant sign
-        degenerate_T = ~np.isfinite(T).all(axis=1)
-        degenerate_B = ~np.isfinite(bitangents).all(axis=1)
-        T[degenerate_T] = [1, 0, 0]
+        degenerate_T                            = ~np.isfinite(T).all(axis=1)
+        degenerate_B                            = ~np.isfinite(bitangents).all(axis=1)
+        T[degenerate_T]                         = [1, 0, 0]
         bitangents[degenerate_T | degenerate_B] = [0, 1, 0]
 
         tangents = np.column_stack([T, sign])
@@ -1648,13 +1648,13 @@ class MeshData(Data):
     def get_edge_lengths(self) -> np.ndarray:
         """Returns the edge lengths."""
         if self._edge_lengths is None:
-            points       = self.points
-            edge_pairs   = self.e2v
-            point_a_idxs = edge_pairs[:, 0]
-            point_b_idxs = edge_pairs[:, 1]
-            points_a     = points[point_a_idxs]
-            points_b     = points[point_b_idxs]
-            edges        = points_b - points_a
+            points             = self.points
+            edge_pairs         = self.e2v
+            point_a_idxs       = edge_pairs[:, 0]
+            point_b_idxs       = edge_pairs[:, 1]
+            points_a           = points[point_a_idxs]
+            points_b           = points[point_b_idxs]
+            edges              = points_b - points_a
             self._edge_lengths = np.einsum("...i,...i", edges, edges) ** 0.5
         return self._edge_lengths
 
@@ -1671,16 +1671,16 @@ class MeshData(Data):
             face_a  = edge_face_pairs[:, 0]
             face_b  = edge_face_pairs[:, 1]
 
-            area_a  = areas[face_a]
-            area_b  = areas[face_b]
-            area_a[face_a == -1] = 0  # set to 0 if no face is assigned
-            area_b[face_b == -1] = 0  # set to 0 if no face is assigned
-            area_sum = area_a + area_b
+            area_a                 = areas[face_a]
+            area_b                 = areas[face_b]
+            area_a[face_a == -1]   = 0  # set to 0 if no face is assigned
+            area_b[face_b == -1]   = 0  # set to 0 if no face is assigned
+            area_sum               = area_a + area_b
 
-            weight_a = area_a / area_sum
-            weight_b = area_b / area_sum
-            normal_a = normals[face_a]
-            normal_b = normals[face_b]
+            weight_a               = area_a / area_sum
+            weight_b               = area_b / area_sum
+            normal_a               = normals[face_a]
+            normal_b               = normals[face_b]
             normal_a[face_a == -1] = 0  # set to [0,0,0] if no face is assigned
             normal_b[face_b == -1] = 0  # set to [0,0,0] if no face is assigned
 
@@ -1699,10 +1699,10 @@ class MeshData(Data):
         if len(data) != self.point_count:
             raise ValueError("data must be the same length as the point count")
 
-        v                        = self.points
-        edge_neighbors           = self.v2e
-        v_e_neighbors            = self.e2v
-        edge_lengths             = self.get_edge_lengths()
+        v              = self.points
+        edge_neighbors = self.v2e
+        v_e_neighbors  = self.e2v
+        edge_lengths   = self.get_edge_lengths()
 
         v_data_change            = np.zeros(v.shape[0])
         v_data_change_normalized = np.zeros(v.shape[0])
@@ -1780,10 +1780,10 @@ class MeshData(Data):
                 self.get_point_data_by_surface_change(curvature)
             )
 
-        mean_curv = np.mean(self._surface_curvature)
-        std_curv  = np.std(self._surface_curvature)
-        k_min     = mean_curv - 3 * std_curv
-        k_max     = mean_curv + 3 * std_curv
+        mean_curv               = np.mean(self._surface_curvature)
+        std_curv                = np.std(self._surface_curvature)
+        k_min                   = mean_curv - 3 * std_curv
+        k_max                   = mean_curv + 3 * std_curv
         self._surface_curvature = np.clip(self._surface_curvature, k_min, k_max)
 
         if der == 1:
@@ -1932,7 +1932,7 @@ class MeshData(Data):
                 points4 = np.concatenate([points4, obj.points4])
 
         # bring back points to local space
-        inv_matrix = self.get_inverse_matrix()
+        inv_matrix  = self.get_inverse_matrix()
         self.points = np.dot(points4, inv_matrix.T)[:, : self.points.shape[1]]
 
         # reset components
@@ -2013,11 +2013,11 @@ class MeshData(Data):
             new_geometry = indices_replace(geometry, new_idx, point_offset)
 
             # combined the new points and geometry to self
-            mask = np.zeros(self.face_count, dtype=bool)
+            mask          = np.zeros(self.face_count, dtype=bool)
             mask[indices] = True
 
             self.geometry[~mask] = new_self.geometry
-            self.geometry[mask] = new_geometry
+            self.geometry[mask]  = new_geometry
 
             self.points = np.concatenate([new_self.points, new_points])
             self.indices, self.counts = matrix_to_stream(self.geometry)
@@ -2086,7 +2086,7 @@ class MeshData(Data):
         geometry = self.geometry
         vertices = np.unique(np.atleast_1d(np.asarray(vertices)))
 
-        keep     = np.isin(geometry, vertices)
+        keep = np.isin(geometry, vertices)
         if exclude:
             keep = ~keep
         keep &= geometry >= 0
@@ -2180,7 +2180,7 @@ class MeshData(Data):
         ]
         surviving, indices = np.unique(stream, return_inverse=True)
 
-        new = self.copy()
+        new         = self.copy()
         new.counts  = kept.sum(axis=1)[kept.any(axis=1)].astype(counts.dtype)
         new.points  = self.points[surviving]
         new.indices = indices
@@ -2257,9 +2257,9 @@ class MeshData(Data):
 
         geom = np.asarray(self.geometry, dtype=np.int32)
         if geom.shape[1] < 4:
-            pad = np.full((geom.shape[0], 4), -1, dtype=np.int32)
+            pad                     = np.full((geom.shape[0], 4), -1, dtype=np.int32)
             pad[:, : geom.shape[1]] = geom
-            geom = pad
+            geom                    = pad
         pts = np.ascontiguousarray(self.points, dtype=np.float64)
         aabb_min, aabb_max = _compute_face_aabbs(geom, pts)
         self._bvh_bilinear = build_bvh(aabb_min, aabb_max, leaf_size=8)
@@ -2287,9 +2287,9 @@ class MeshData(Data):
 
         geom = np.asarray(self.geometry, dtype=np.int32)
         if geom.shape[1] < 4:
-            pad = np.full((geom.shape[0], 4), -1, dtype=np.int32)
+            pad                     = np.full((geom.shape[0], 4), -1, dtype=np.int32)
             pad[:, : geom.shape[1]] = geom
-            geom = pad
+            geom                    = pad
         pts = np.ascontiguousarray(self.points, dtype=np.float64)
         normals = np.ascontiguousarray(
             self.get_vertex_normals(angle_weighted=True, area_weighted=False),
@@ -2385,10 +2385,10 @@ class MeshData(Data):
 
     def get_inverse_matrix(self) -> np.ndarray:
         """computes the inverse matrix"""
-        scale_components = np.sum(self.matrix[:3, :3] ** 2, axis=1)
-        inv_matrix       = np.eye(4)
+        scale_components   = np.sum(self.matrix[:3, :3] ** 2, axis=1)
+        inv_matrix         = np.eye(4)
         inv_matrix[:3, :3] = self.matrix[:3, :3] / scale_components[:, None]
-        inv_matrix[3, :3] = -np.dot(inv_matrix[:3, :3], self.matrix[3, :3])
+        inv_matrix[3, :3]  = -np.dot(inv_matrix[:3, :3], self.matrix[3, :3])
         return inv_matrix
 
     def get_extent(self, per_face: bool = False) -> Tuple[np.ndarray]:
@@ -2399,7 +2399,7 @@ class MeshData(Data):
             return self.points.min(axis=0), self.points.max(axis=0)
 
         # return the bbx of each face
-        indexed_points = self.points[self.geometry]
+        indexed_points                       = self.points[self.geometry]
         indexed_points[indexed_points == -1] = np.nan
 
         min_coords = np.nanmin(indexed_points, axis=1)
@@ -2508,7 +2508,7 @@ class MeshData(Data):
             tolerance = self.get_symmetry_deviation()[-1]
 
         # get points
-        duplicate     = self.copy()
+        duplicate = self.copy()
 
         source_points = duplicate.points.copy()
         source_points[:, axis] -= pivot
@@ -2520,7 +2520,7 @@ class MeshData(Data):
         _, indices = tree.query(mirror_points)
 
         # fix centerline
-        center = np.where(np.abs(source_points[:, axis]) <= tolerance)
+        center                      = np.where(np.abs(source_points[:, axis]) <= tolerance)
         source_points[center, axis] = 0.0
 
         # set positive side to match negative
@@ -2589,10 +2589,10 @@ class MeshData(Data):
         U, V = bilinear_vectors(self.points, self.geometry, uv)
 
         # sum all the face normals
-        source_normals = np.cross(U, V)  # compute normal
-        source_normals = source_normals[self.v2f]
+        source_normals                 = np.cross(U, V)  # compute normal
+        source_normals                 = source_normals[self.v2f]
         source_normals[self.v2f == -1] = 0
-        source_normals = np.sum(source_normals, axis=1)
+        source_normals                 = np.sum(source_normals, axis=1)
 
         # gather the mirror normals
         mirror_normals = source_normals[mi]
@@ -2667,7 +2667,7 @@ class MeshData(Data):
         """writes a valid obj file from MeshData"""
         filename = os.path.expanduser(filename)
 
-        name     = self.name
+        name = self.name
         if name is not None:
             if bool(re.search("Shape[0-9]*$", self.name)):
                 name = "".join(name.rpartition("Shape")[::2])
@@ -2708,7 +2708,7 @@ class MeshData(Data):
             indices = np.array(data.faces)
             counts  = np.ones(indices.shape[0], dtype=int) * 3
 
-            new     = cls(points=points, indices=indices.ravel(), counts=counts, name=name)
+            new = cls(points=points, indices=indices.ravel(), counts=counts, name=name)
             mesh_list.append(new)
 
         return mesh_list
@@ -2831,7 +2831,7 @@ class MeshData(Data):
             if self.points.shape[1] == 3:
                 points = self.points
             else:
-                points = np.zeros((self.points.shape[0], 3))
+                points                            = np.zeros((self.points.shape[0], 3))
                 points[:, : self.points.shape[1]] = self.points
 
             if method == TriangulateMethod.FAST:
@@ -2866,13 +2866,13 @@ class MeshData(Data):
                 can_split_13 = agree_13 & balance_13
 
                 # Decision: try preferred diagonal first, fall back to other, else -1
-                rules = np.full(quads.shape[0], -1, dtype=int)
-                rules[prefer_02 & can_split_02] = 0
+                rules                            = np.full(quads.shape[0], -1, dtype=int)
+                rules[prefer_02 & can_split_02]  = 0
                 rules[~prefer_02 & can_split_13] = 1
 
                 # Fallback: if preferred failed, try the other diagonal
-                fallback_02 = prefer_02 & ~can_split_02 & can_split_13
-                fallback_13 = ~prefer_02 & ~can_split_13 & can_split_02
+                fallback_02        = prefer_02 & ~can_split_02 & can_split_13
+                fallback_13        = ~prefer_02 & ~can_split_13 & can_split_02
                 rules[fallback_02] = 1
                 rules[fallback_13] = 0
 
@@ -2962,7 +2962,7 @@ class MeshData(Data):
                 face_verts = self.geometry[face_id]
                 face_verts = face_verts[face_verts >= 0]
 
-                holes      = face_holes.get(int(face_id), None)
+                holes = face_holes.get(int(face_id), None)
                 if holes:
                     hole_set = set()
                     for h in holes:
@@ -3027,15 +3027,15 @@ class MeshData(Data):
             # Maya winding order:
             #   rule=0 (split 0-2): tri1 = (1,2,0), tri2 = (0,2,3)
             #   rule=1 (split 1-3): tri1 = (0,1,3), tri2 = (3,1,2)
-            tri_rules      = np.array([[1, 2, 0], [0, 1, 3]])
-            triangleA      = tri_rules[quad_rules]
-            triangleA      = quads[arange, triangleA]
+            tri_rules = np.array([[1, 2, 0], [0, 1, 3]])
+            triangleA = tri_rules[quad_rules]
+            triangleA = quads[arange, triangleA]
 
-            tri_rules      = np.array([[0, 2, 3], [3, 1, 2]])
-            triangleB      = tri_rules[quad_rules]
-            triangleB      = quads[arange, triangleB]
+            tri_rules = np.array([[0, 2, 3], [3, 1, 2]])
+            triangleB = tri_rules[quad_rules]
+            triangleB = quads[arange, triangleB]
 
-            quad_tri_faces = np.empty((2 * quad_rules.size, 3), dtype=int)
+            quad_tri_faces          = np.empty((2 * quad_rules.size, 3), dtype=int)
             quad_tri_faces[0::2, :] = triangleA
             quad_tri_faces[1::2, :] = triangleB
         else:
@@ -3195,10 +3195,10 @@ class MeshData(Data):
         if chosen.size == 0:
             return np.empty((0, 4), dtype=int)
 
-        fa    = self.ue2f[chosen, 0]
-        fb    = self.ue2f[chosen, 1]
-        va    = self.ue2v[chosen, 0]
-        vb    = self.ue2v[chosen, 1]
+        fa = self.ue2f[chosen, 0]
+        fb = self.ue2f[chosen, 1]
+        va = self.ue2v[chosen, 0]
+        vb = self.ue2v[chosen, 1]
 
         tri_a = self.f2v[fa]
         tri_b = self.f2v[fb]
@@ -3247,10 +3247,10 @@ class MeshData(Data):
         partner       = np.full(n_faces, -1, dtype=int)
         rule_for_face = np.full(n_faces, -1, dtype=int)
         for i in range(rules.shape[0]):
-            fa_i = int(rules[i, 0])
-            fb_i = int(rules[i, 1])
-            partner[fa_i] = fb_i
-            partner[fb_i] = fa_i
+            fa_i                = int(rules[i, 0])
+            fb_i                = int(rules[i, 1])
+            partner[fa_i]       = fb_i
+            partner[fb_i]       = fa_i
             rule_for_face[fa_i] = i
 
         new_indices: List[int] = []
@@ -3291,10 +3291,10 @@ class MeshData(Data):
             tri_b   = self.f2v[fb]
             tri_b   = tri_b[tri_b >= 0]
 
-            oa      = int(tri_a[oa_slot])
-            va      = int(tri_a[(oa_slot + 1) % 3])
-            vb      = int(tri_a[(oa_slot + 2) % 3])
-            ob      = int(tri_b[ob_slot])
+            oa = int(tri_a[oa_slot])
+            va = int(tri_a[(oa_slot + 1) % 3])
+            vb = int(tri_a[(oa_slot + 2) % 3])
+            ob = int(tri_b[ob_slot])
 
             # ``[oa, va, ob, vb]`` is a cyclic rotation of the original
             # quad's winding (inherited from fa), so no normal-based flip
@@ -3348,8 +3348,8 @@ class MeshData(Data):
             else:
                 iterations = np.unique(iterations).astype(int)
 
-            mask = np.ones(neighbors.shape[0], dtype=bool)
-            mask[indices] = False
+            mask             = np.ones(neighbors.shape[0], dtype=bool)
+            mask[indices]    = False
             iterations[mask] = 0
 
         # blur the points
@@ -3689,12 +3689,12 @@ class UVData(MeshData):
         fname = os.path.expanduser(fname)
 
         if self.renderer == RenderMethod.CV2:
-            buffer = cv2.imread(fname)
-            buffer = cv2.flip(buffer, 0)
+            buffer      = cv2.imread(fname)
+            buffer      = cv2.flip(buffer, 0)
             self.buffer = cv2.cvtColor(buffer, cv2.COLOR_RGB2BGR)
 
         elif self.renderer == RenderMethod.SKIMAGE:
-            buffer = skimage.io.imread(fname)
+            buffer      = skimage.io.imread(fname)
             self.buffer = np.flipud(buffer)
         else:
             raise RuntimeError(
@@ -3740,9 +3740,9 @@ class UVData(MeshData):
 
         # if invert is True, invert the face selection
         if invert:
-            negative = np.ones(count, dtype=bool)
+            negative          = np.ones(count, dtype=bool)
             negative[indices] = False
-            indices = np.where(negative)[0]
+            indices           = np.where(negative)[0]
 
         # if no color is specified, use encoded indices
         if color is None:
@@ -3851,8 +3851,8 @@ class UVData(MeshData):
 
             # define the sprite buffer
             bbx_min, bbx_max = p.min(axis=0), p.max(axis=0)
-            bbx    = bbx_max - bbx_min + 1
-            p      = p - bbx_min
+            bbx = bbx_max - bbx_min + 1
+            p   = p - bbx_min
 
             sprite = np.zeros((bbx[1], bbx[0]), dtype=np.uint8)
 
@@ -3937,9 +3937,9 @@ class UVData(MeshData):
             count, overlap, ratio = composite_sprite(
                 sprite, self.buffer, mask, bbx_min, color[i]
             )
-            self._pixel_counts[indices[i]] = count
+            self._pixel_counts[indices[i]]   = count
             self._pixel_overlaps[indices[i]] = overlap
-            self._pixel_ratios[indices[i]] = ratio
+            self._pixel_ratios[indices[i]]   = ratio
 
         # if a mask was given, return the overlap ratios
         if mask is not None:
@@ -3983,8 +3983,8 @@ class UVData(MeshData):
             bbx_min, bbx_max = p.min(axis=0), p.max(axis=0)
             bbx_min -= thickness - 1
             bbx_max += thickness - 1
-            bbx    = bbx_max - bbx_min + 1
-            p      = p - bbx_min
+            bbx = bbx_max - bbx_min + 1
+            p   = p - bbx_min
 
             sprite = np.zeros((bbx[1], bbx[0]), dtype=np.uint8)
 
@@ -4016,9 +4016,9 @@ class UVData(MeshData):
             count, overlap, ratio = composite_sprite(
                 sprite, self.buffer, mask, bbx_min, color[i]
             )
-            self._pixel_counts[indices[i]] = count
+            self._pixel_counts[indices[i]]   = count
             self._pixel_overlaps[indices[i]] = overlap
-            self._pixel_ratios[indices[i]] = ratio
+            self._pixel_ratios[indices[i]]   = ratio
 
         # if a mask was given, return the overlap ratios
         if mask is not None:
@@ -4083,9 +4083,9 @@ class UVData(MeshData):
             count, overlap, ratio = composite_sprite(
                 sprite, self.buffer, mask, p - radius + 1, color[i]
             )
-            self._pixel_counts[indices[i]] = count
+            self._pixel_counts[indices[i]]   = count
             self._pixel_overlaps[indices[i]] = overlap
-            self._pixel_ratios[indices[i]] = ratio
+            self._pixel_ratios[indices[i]]   = ratio
 
         # if a mask was given, return the overlap ratios
         if mask is not None:
@@ -4186,24 +4186,24 @@ class UVData(MeshData):
 
         # generate the kernel if given as an integer (star shaped)
         if isinstance(kernel, int):
-            size         = kernel
-            size         = (size + 1) * 2 - 1
-            kernel       = np.zeros((size, size), dtype=int)
-            center_index = size // 2
+            size   = kernel
+            size   = (size + 1) * 2 - 1
+            kernel = np.zeros((size, size), dtype=int)
+            center_index                       = size // 2
             kernel[center_index, center_index] = 0
-            kernel[center_index, :] = 1
-            kernel[:, center_index] = 1
+            kernel[center_index, :]            = 1
+            kernel[:, center_index]            = 1
 
         # convolve the image with the kernel
         for _ in range(steps):
             # create a convolution mask for non black pixels
-            mask         = np.any(image != [0, 0, 0], axis=-1).astype(int)
-            convolved    = convolve(mask, kernel, mode="constant", cval=0.0)
-            eroded       = convolved == np.sum(kernel)
+            mask      = np.any(image != [0, 0, 0], axis=-1).astype(int)
+            convolved = convolve(mask, kernel, mode="constant", cval=0.0)
+            eroded    = convolved == np.sum(kernel)
 
-            eroded_image = np.zeros_like(image)
+            eroded_image         = np.zeros_like(image)
             eroded_image[eroded] = image[eroded]
-            image = eroded_image
+            image                = eroded_image
 
         if not is_array:
             return Image.fromarray(image)
@@ -4230,10 +4230,10 @@ class UVData(MeshData):
 
         # generate the kernel if given as an integer (doughnut shaped)
         if isinstance(kernel, int):
-            size         = kernel
-            size         = (size + 1) * 2 - 1
-            kernel       = np.ones((size, size), dtype=int)
-            center_index = size // 2
+            size   = kernel
+            size   = (size + 1) * 2 - 1
+            kernel = np.ones((size, size), dtype=int)
+            center_index                       = size // 2
             kernel[center_index, center_index] = 0
 
         # convolve the image with the kernel
@@ -4329,9 +4329,9 @@ class UVData(MeshData):
             if missing.size > 0:
                 # expand geometry buffer if needed
                 if geometry.shape[1] < n:
-                    buffer = np.ones((geometry.shape[0], n), dtype=np.int32) * -1
+                    buffer                         = np.ones((geometry.shape[0], n), dtype=np.int32) * -1
                     buffer[:, : geometry.shape[1]] = geometry
-                    geometry = buffer
+                    geometry                       = buffer
 
                 # generate a nice shape outside of 0-1 range to avoid overlap
                 angles = np.linspace(0, 2 * np.pi, n, endpoint=False)
@@ -4345,8 +4345,8 @@ class UVData(MeshData):
                 shape = np.column_stack((x, y))
 
                 # append indices and new points
-                tiles       = np.tile(shape, (missing.size, 1))
-                new_indices = np.arange(n * missing.size) + self.points.shape[0]
+                tiles                          = np.tile(shape, (missing.size, 1))
+                new_indices                    = np.arange(n * missing.size) + self.points.shape[0]
                 geometry[indices[missing], :n] = new_indices.reshape(missing.size, n)
 
                 self.points = np.concatenate((self.points, tiles))
@@ -4410,10 +4410,10 @@ class UVData(MeshData):
             uv_lists.append(None)
 
             if data.visual.uv is not None:
-                points  = np.array(data.visual.uv)
-                indices = np.array(data.visual.mesh.faces)
-                counts  = np.ones(indices.shape[0], dtype=int) * 3
-                indices = indices.ravel()
+                points       = np.array(data.visual.uv)
+                indices      = np.array(data.visual.mesh.faces)
+                counts       = np.ones(indices.shape[0], dtype=int) * 3
+                indices      = indices.ravel()
                 uv_lists[-1] = cls(points=points, indices=indices, counts=counts)
 
         return uv_lists
@@ -4538,14 +4538,14 @@ class MeshList(DataList):
             face_starts = face_sums[:-1]
             face_ends   = face_sums[1:]
 
-            obj         = self[0].copy()
+            obj = self[0].copy()
             obj.to_identity()
             obj.union(*self[1:])
 
             if obj.fix_symmetry(pivot=pivot, axis=axis, side=side, tolerance=tolerance):
                 for i in range(face_starts.size):
-                    indices = np.arange(face_starts[i], face_ends[i])
-                    mesh    = obj.from_faces(indices)
+                    indices   = np.arange(face_starts[i], face_ends[i])
+                    mesh      = obj.from_faces(indices)
                     mesh.name = self[i].name
 
                     # bring back points to local space
@@ -4725,7 +4725,7 @@ def load_usd(file_path: str) -> list:
     file_path = os.path.expanduser(file_path)
     stage     = open_stage(file_path, no_cache=True)
 
-    data      = []
+    data = []
     for prim in iter_prims(stage, "Mesh"):
         mesh_data    = MeshData.from_prim(prim)
         uv_data_list = UVData.from_prim(prim)
@@ -4743,7 +4743,7 @@ def load_glb(file_path: str, scale_factor: float = 100.0) -> list:
     file_path = os.path.expanduser(file_path)
     scene     = trimesh.load(file_path)
 
-    data      = []
+    data = []
     for name, geometry in scene.geometry.items():
         points  = np.array(geometry.vertices) * scale_factor
         indices = np.array(geometry.faces)
@@ -4842,7 +4842,7 @@ def load_obj(file_path: str) -> list:
     all_uvs     = np.array(all_uvs) if all_uvs else None
     all_normals = np.array(all_normals) if all_normals else None
 
-    data        = []
+    data = []
     for group in groups:
         if not group["vert_ids"]:
             continue
@@ -4934,7 +4934,7 @@ def save_obj(file_path: str, data: list) -> None:
                 f.write(f"f {vals}\n")
 
             mesh_offset += mesh_data.points.shape[0]
-            uv_offset += uv_data_list[0].points.shape[0]
+            uv_offset   += uv_data_list[0].points.shape[0]
 
         f.write("\n")
 
@@ -4952,7 +4952,7 @@ def _fbx_control_points(mesh) -> np.ndarray:
     n      = mesh.GetControlPointsCount()
     points = np.empty((n, 3), dtype=np.float64)
     for i in range(n):
-        cp = mesh.GetControlPointAt(i)
+        cp           = mesh.GetControlPointAt(i)
         points[i, 0] = cp[0]
         points[i, 1] = cp[1]
         points[i, 2] = cp[2]
@@ -4996,11 +4996,11 @@ def _fbx_face_varying_indices(mesh, layer_element, counts: np.ndarray) -> np.nda
     reference   = layer_element.GetReferenceMode()
     index_array = layer_element.GetIndexArray()
 
-    EMap        = fbx.FbxLayerElement.EMappingMode
-    ERef        = fbx.FbxLayerElement.EReferenceMode
+    EMap = fbx.FbxLayerElement.EMappingMode
+    ERef = fbx.FbxLayerElement.EReferenceMode
 
-    total       = int(counts.sum())
-    indices     = np.empty(total, dtype=np.int64)
+    total   = int(counts.sum())
+    indices = np.empty(total, dtype=np.int64)
 
     if mapping == EMap.eByPolygonVertex:
         if reference == ERef.eIndexToDirect:
@@ -5136,15 +5136,15 @@ def _detect_hard_edges(mesh, angle_deg):
     face_normals = mesh.get_face_normals()
     e2f          = mesh.e2f
 
-    valid        = np.all(e2f >= 0, axis=1)
-    valid_idx    = np.where(valid)[0]
+    valid     = np.all(e2f >= 0, axis=1)
+    valid_idx = np.where(valid)[0]
 
-    n0           = face_normals[e2f[valid_idx, 0]]
-    n1           = face_normals[e2f[valid_idx, 1]]
+    n0 = face_normals[e2f[valid_idx, 0]]
+    n1 = face_normals[e2f[valid_idx, 1]]
 
-    dot          = np.einsum("ij,ij->i", n0, n1)
-    dot          = np.clip(dot, -1.0, 1.0)
-    angles       = np.degrees(np.arccos(dot))
+    dot    = np.einsum("ij,ij->i", n0, n1)
+    dot    = np.clip(dot, -1.0, 1.0)
+    angles = np.degrees(np.arccos(dot))
 
     return valid_idx[angles > angle_deg]
 
@@ -5170,7 +5170,7 @@ def _compute_shading_normals(
         mag     = np.einsum("...i,...i", summed, summed) ** 0.5
         normals = summed / mag[:, None]
 
-    degenerate = ~np.isfinite(normals).all(axis=1)
+    degenerate          = ~np.isfinite(normals).all(axis=1)
     normals[degenerate] = [0, 1, 0]
 
     return normals
@@ -5235,7 +5235,7 @@ def _score_quad_candidates(
     fa_all          = ue2f[:, 0]
     fb_all          = ue2f[:, 1]
 
-    both_tri        = np.zeros(ue2f.shape[0], dtype=bool)
+    both_tri = np.zeros(ue2f.shape[0], dtype=bool)
     both_tri[manifold] = (counts[fa_all[manifold]] == 3) & (
         counts[fb_all[manifold]] == 3
     )

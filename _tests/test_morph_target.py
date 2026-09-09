@@ -143,12 +143,12 @@ class TestMorphList(unittest.TestCase):
         self.assertTrue(sum(obj1[[1, 2]]) == (obj2[1]+obj2[2]))
 
         # mutability
-        eyesClosed = self.eyesClosed.copy()
-        jawClosed  = self.jawClosed.copy()
-        jawOpen    = self.jawOpen.copy()
+        eyesClosed   = self.eyesClosed.copy()
+        jawClosed    = self.jawClosed.copy()
+        jawOpen      = self.jawOpen.copy()
 
-        obj1       = MorphList([eyesClosed, jawClosed, jawOpen])
-        obj2       = obj1[[2, 1, 0]]
+        obj1         = MorphList([eyesClosed, jawClosed, jawOpen])
+        obj2         = obj1[[2, 1, 0]]
         jawOpen.name = 'POOF!'
         self.assertTrue(obj1[2].name == 'POOF!')
         self.assertTrue(obj2[0].name == 'POOF!')
@@ -184,7 +184,7 @@ class TestMorphList(unittest.TestCase):
         list1  = self.list.copy()
         shape1 = list1[0].copy()
 
-        list1 += 2
+        list1  += 2
         shape1 += 2
         self.assertTrue(list1[0] == shape1)
 
@@ -192,7 +192,7 @@ class TestMorphList(unittest.TestCase):
         list1  = self.list.copy()
         shape1 = list1[0].copy()
 
-        list1 -= 2
+        list1  -= 2
         shape1 -= 2
         self.assertTrue(list1[0] == shape1)
 
@@ -200,7 +200,7 @@ class TestMorphList(unittest.TestCase):
         list1  = self.list.copy()
         shape1 = list1[0].copy()
 
-        list1 *= 2
+        list1  *= 2
         shape1 *= 2
         self.assertTrue(list1[0] == shape1)
 
@@ -208,7 +208,7 @@ class TestMorphList(unittest.TestCase):
         list1  = self.list.copy()
         shape1 = list1[0].copy()
 
-        list1 /= 2
+        list1  /= 2
         shape1 /= 2
         self.assertTrue(list1[0] == shape1)
 
@@ -237,7 +237,7 @@ class TestMorphList(unittest.TestCase):
             shape.offsets[:] = 2.0
         shape1.offsets[:] = 2.0
         
-        list1 **= 2
+        list1  **= 2
         shape1 **= 2
         
         self.assertTrue(list1[0] == shape1)
@@ -347,7 +347,7 @@ class TestMorphData(unittest.TestCase):
     def test_serialize(self):
 
         # add custom private data
-        obj1 = self.shape.copy()
+        obj1              = self.shape.copy()
         obj1._custom_data = "test"
 
         # write to file
@@ -449,7 +449,7 @@ class TestMorphData(unittest.TestCase):
         self.assertTrue(np.allclose(shape.magnitudes, mag / 2))
 
     def test_pow(self):
-        shape = self.shape.copy()
+        shape            = self.shape.copy()
         shape.offsets[:] = 3
         shape **= 2
         self.assertTrue(np.all(shape.offsets == 9))

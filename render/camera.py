@@ -32,17 +32,17 @@ def look_at(
 
     Column 0 = right, column 1 = up, column 2 = -forward, column 3 = eye.
     """
-    eye_v   = np.asarray(eye,    dtype=np.float64)
-    tgt_v   = np.asarray(target, dtype=np.float64)
-    up_v    = np.asarray(up,     dtype=np.float64)
+    eye_v    = np.asarray(eye,    dtype=np.float64)
+    tgt_v    = np.asarray(target, dtype=np.float64)
+    up_v     = np.asarray(up,     dtype=np.float64)
 
-    forward = tgt_v - eye_v
-    forward = forward / max(np.linalg.norm(forward), 1e-12)
-    right   = np.cross(forward, up_v)
-    right   = right / max(np.linalg.norm(right), 1e-12)
-    new_up  = np.cross(right, forward)
+    forward  = tgt_v - eye_v
+    forward  = forward / max(np.linalg.norm(forward), 1e-12)
+    right    = np.cross(forward, up_v)
+    right    = right / max(np.linalg.norm(right), 1e-12)
+    new_up   = np.cross(right, forward)
 
-    m       = np.eye(4, dtype=np.float64)
+    m        = np.eye(4, dtype=np.float64)
     m[:3, 0] = right
     m[:3, 1] = new_up
     m[:3, 2] = -forward
@@ -173,7 +173,7 @@ def _autofit_camera_for_points(
 
     cam_pos = -R @ move
 
-    new_cam = np.array(camera_matrix, dtype=np.float64, copy=True)
+    new_cam        = np.array(camera_matrix, dtype=np.float64, copy=True)
     new_cam[:3, 3] = cam_pos
     return new_cam
 
@@ -192,7 +192,7 @@ def _af_shift(
         P    = points - proj
         dot  = P @ normal
         dist = np.sqrt(np.einsum("ij,ij->i", P, P))
-    i       = np.argsort(dist)
+    i = np.argsort(dist)
 
     inside  = dot[i] <= 0
     outside = dot[i] > 0
@@ -222,7 +222,7 @@ def _af_slide(
         P     = points - proj
         dot   = P @ normal
         dist  = np.sqrt(np.einsum("ij,ij->i", P, P))
-    i       = np.argsort(dist)
+    i = np.argsort(dist)
 
     inside  = dot[i] <= 0
     outside = dot[i] > 0

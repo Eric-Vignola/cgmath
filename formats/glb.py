@@ -335,7 +335,7 @@ def load_model(fname):
 
     ordered_node_indices = order_nodes_root_first(gltf.nodes)
 
-    name                 = Path(fname).stem
+    name = Path(fname).stem
     return Model(name, gltf.nodes, ordered_node_indices, meshes, animations, skins)
 
 
@@ -351,8 +351,8 @@ def get_binary(gltf, name="runtime_rig_retargeting.zip"):
             buffer      = gltf.buffers[buffer_view.buffer]
             data        = gltf.get_data_from_buffer_uri(buffer.uri)
 
-            start       = buffer_view.byteOffset
-            end         = buffer_view.byteOffset + buffer_view.byteLength
+            start = buffer_view.byteOffset
+            end   = buffer_view.byteOffset + buffer_view.byteLength
             return data[start:end]
 
 
@@ -390,13 +390,13 @@ def set_binary(gltf, binary_data, name="runtime_rig_retargeting.zip"):
     buffer         = gltf.buffers[0]
     current_length = buffer.byteLength
     buffer.byteLength += len(binary_data)
-    new_buffer_view = BufferView()
+    new_buffer_view            = BufferView()
     new_buffer_view.buffer     = 0
     new_buffer_view.byteOffset = current_length
     new_buffer_view.byteLength = len(binary_data)
     gltf.bufferViews.append(new_buffer_view)
 
-    new_accessor = Accessor()
+    new_accessor               = Accessor()
     new_accessor.bufferView    = len(gltf.bufferViews) - 1
     new_accessor.byteOffset    = 0
     new_accessor.componentType = BYTE
@@ -422,7 +422,7 @@ class GlbData:
         self.load(fname)
 
     def load(self, fname: str):
-        fname = os.path.expanduser(fname)
+        fname     = os.path.expanduser(fname)
         self.gltf = GLTF2().load(fname)
 
         if trimesh is not None:

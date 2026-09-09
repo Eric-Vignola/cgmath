@@ -5,9 +5,9 @@ from numba import njit, prange
 @njit(parallel=True, fastmath=True, cache=True)
 def _cdist_euclidean(X, Y):
     """Pairwise Euclidean distance between the rows of X and Y."""
-    m         = X.shape[0]
-    n         = Y.shape[0]
-    k         = X.shape[1]
+    m = X.shape[0]
+    n = Y.shape[0]
+    k = X.shape[1]
 
     distances = np.empty((m, n), dtype=np.float64)
 

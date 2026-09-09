@@ -83,12 +83,12 @@ class TestDataStrictSetattr(unittest.TestCase):
     # -- happy path: declared attrs work ------------------------------
 
     def test_dataclass_field_assignment_succeeds(self):
-        obj = _Leaf()
+        obj      = _Leaf()
         obj.name = "leaf"
         self.assertEqual(obj.name, "leaf")
 
     def test_property_setter_is_invoked(self):
-        obj = _Leaf()
+        obj       = _Leaf()
         obj.value = 5
         self.assertEqual(obj._value, 5)
         self.assertEqual(obj.value, 5)
@@ -96,13 +96,13 @@ class TestDataStrictSetattr(unittest.TestCase):
     def test_property_setter_coercion_runs(self):
         # Confirms we route through the descriptor (which casts to int),
         # not just blindly stuffing the instance dict.
-        obj = _Leaf()
+        obj       = _Leaf()
         obj.value = "7"
         self.assertEqual(obj._value, 7)
         self.assertIsInstance(obj._value, int)
 
     def test_private_attribute_succeeds(self):
-        obj = _Leaf()
+        obj        = _Leaf()
         obj._cache = "anything"
         self.assertEqual(obj._cache, "anything")
 
@@ -110,14 +110,14 @@ class TestDataStrictSetattr(unittest.TestCase):
         # ``_value`` is a private dataclass field on _Leaf -- writable
         # through both the ``_`` prefix bypass AND the class-level
         # default.
-        obj = _Leaf()
+        obj        = _Leaf()
         obj._value = 99
         self.assertEqual(obj._value, 99)
 
     def test_inherited_attribute_succeeds(self):
         # ``name`` and ``value`` are declared on _Leaf; assigning them
         # on the _Child subclass must still succeed via MRO lookup.
-        obj = _Child()
+        obj       = _Child()
         obj.name  = "child"
         obj.value = 10
         obj.extra = 3
@@ -128,7 +128,7 @@ class TestDataStrictSetattr(unittest.TestCase):
     def test_class_constant_assignment_succeeds(self):
         # ``EQUALITY_TEST_IGNORE`` is declared on Data -- shadowing it
         # on an instance must remain allowed.
-        obj = _Leaf()
+        obj                      = _Leaf()
         obj.EQUALITY_TEST_IGNORE = ["name"]
         self.assertEqual(obj.EQUALITY_TEST_IGNORE, ["name"])
 
@@ -248,7 +248,7 @@ class TestDataStrictSetattr(unittest.TestCase):
         # Add a private cache attr -- must NOT appear in to_dict (only
         # dataclass fields are serialized).
         obj._cache = "ignored"
-        data = obj.to_dict()
+        data       = obj.to_dict()
         self.assertIn("name", data)
         self.assertIn("_value", data)
         self.assertNotIn("_cache", data)
@@ -256,7 +256,7 @@ class TestDataStrictSetattr(unittest.TestCase):
     def test_reset_cached_data_does_not_raise(self):
         # Cache slots set on the instance must already be private (start
         # with ``_``); confirms reset_cached_data still works.
-        obj = _Leaf()
+        obj        = _Leaf()
         obj._cache = "anything"
         obj.reset_cached_data()
         self.assertIsNone(obj._cache)

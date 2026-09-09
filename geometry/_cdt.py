@@ -71,8 +71,8 @@ def flatten_3d_to_2d(points_3d):
     Returns:
         Tuple of ``(points_2d, axis_u, axis_v, origin)``.
     """
-    pts      = np.asarray(points_3d, dtype=np.float64)
-    n        = len(pts)
+    pts = np.asarray(points_3d, dtype=np.float64)
+    n   = len(pts)
 
     origin   = pts.mean(axis=0)
     centered = pts - origin
@@ -98,7 +98,7 @@ def flatten_3d_to_2d(points_3d):
             normal_svd = -normal_svd
             axis_v     = -axis_v
 
-    points_2d = np.empty((n, 2), dtype=np.float64)
+    points_2d       = np.empty((n, 2), dtype=np.float64)
     points_2d[:, 0] = centered @ axis_u
     points_2d[:, 1] = centered @ axis_v
 
@@ -208,7 +208,7 @@ def enforce_constraints(mesh, constrained_edges):
     )
 
     mesh.constrained = set(constrained_edges)
-    pts = mesh.pts
+    pts              = mesh.pts
 
     for target in constrained_edges:
         a, b = target
@@ -446,8 +446,8 @@ def remove_exterior_and_holes(mesh, outer_boundary, hole_boundaries, points):
         rid += 1
 
     # Classify regions using point-in-polygon
-    outer_x    = np.array([points[v, 0] for v in outer_boundary], dtype=np.float64)
-    outer_y    = np.array([points[v, 1] for v in outer_boundary], dtype=np.float64)
+    outer_x = np.array([points[v, 0] for v in outer_boundary], dtype=np.float64)
+    outer_y = np.array([points[v, 1] for v in outer_boundary], dtype=np.float64)
 
     hole_polys = []
     if hole_boundaries:

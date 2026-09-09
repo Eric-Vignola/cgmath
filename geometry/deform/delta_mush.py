@@ -177,8 +177,8 @@ class DeltaMushData(Data):
             else:
                 self.border_vertices = None
         else:
-            self._rest_mesh = None
-            pts = rest.points if hasattr(rest, "points") else rest
+            self._rest_mesh  = None
+            pts              = rest.points if hasattr(rest, "points") else rest
             self.rest_points = np.asarray(pts, dtype=np.float64).copy()
             if neighbors is None:
                 raise ValueError(
@@ -366,7 +366,7 @@ class DeltaMushData(Data):
 
         if self._rest_mesh is not None:
             # use the public MeshData.smooth API as requested
-            mesh = self._rest_mesh.copy()
+            mesh        = self._rest_mesh.copy()
             mesh.points = np.asarray(points, dtype=np.float64).copy()
             mesh.smooth(
                 neighbors     = self.neighbors,
@@ -415,7 +415,7 @@ class DeltaMushData(Data):
                 vi = int(face[pos])
                 if seen[vi]:
                     continue
-                seen[vi] = True
+                seen[vi]   = True
                 out[vi, 0] = int(face[(pos + 1) % fs])  # next in winding
                 out[vi, 1] = int(face[(pos - 1) % fs])  # previous in winding
         return out
@@ -581,7 +581,7 @@ class DeltaMushData(Data):
             self._points = self._blend(pts, reconstructed)
 
         if is_mesh:
-            result = target.copy()
+            result        = target.copy()
             result.points = self._points.copy()
             return result
         return self._points

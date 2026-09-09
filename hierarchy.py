@@ -177,11 +177,11 @@ def _rotation(matrix: np.ndarray) -> np.ndarray:
     scale is divided out of the rotation block and the translation row is
     zeroed, so the result composes as a pure orientation.
     """
-    matrix    = np.array(matrix, dtype=float)
-    block     = matrix[..., :3, :3]
-    magnitude = np.einsum("...ij,...ij->...i", block, block) ** 0.5
+    matrix              = np.array(matrix, dtype=float)
+    block               = matrix[..., :3, :3]
+    magnitude           = np.einsum("...ij,...ij->...i", block, block) ** 0.5
     matrix[..., :3, :3] = block / magnitude[..., None]
-    matrix[..., 3, :3] = 0.0
+    matrix[..., 3, :3]  = 0.0
     return matrix
 
 
@@ -199,8 +199,8 @@ def _axis_permutation(axis0: int, axis1: int, negate: bool) -> np.ndarray:
     if axis0 == axis1:
         raise ValueError(f"axes must differ, got {axis0} twice")
 
-    P     = np.eye(4)
-    other = 3 - axis0 - axis1
+    P               = np.eye(4)
+    other           = 3 - axis0 - axis1
     P[axis0, axis0] = P[axis1, axis1] = 0.0
     P[axis0, axis1] = -1.0 if negate else 1.0
     P[axis1, axis0] = 1.0
@@ -401,20 +401,20 @@ class TransformData(Data):
 
     @scale_x.setter
     def scale_x(self, S: float) -> None:
-        s = self.scale
-        s[0] = S
+        s          = self.scale
+        s[0]       = S
         self.scale = s
 
     @scale_y.setter
     def scale_y(self, S: float) -> None:
-        s = self.scale
-        s[1] = S
+        s          = self.scale
+        s[1]       = S
         self.scale = s
 
     @scale_z.setter
     def scale_z(self, S: float) -> None:
-        s = self.scale
-        s[2] = S
+        s          = self.scale
+        s[2]       = S
         self.scale = s
 
     @property
@@ -439,20 +439,20 @@ class TransformData(Data):
 
     @rotate_x.setter
     def rotate_x(self, R: float) -> None:
-        r = self.rotate
-        r[0] = R
+        r           = self.rotate
+        r[0]        = R
         self.rotate = r
 
     @rotate_y.setter
     def rotate_y(self, R: float) -> None:
-        r = self.rotate
-        r[1] = R
+        r           = self.rotate
+        r[1]        = R
         self.rotate = r
 
     @rotate_z.setter
     def rotate_z(self, R: float) -> None:
-        r = self.rotate
-        r[2] = R
+        r           = self.rotate
+        r[2]        = R
         self.rotate = r
 
     @property
@@ -477,20 +477,20 @@ class TransformData(Data):
 
     @translate_x.setter
     def translate_x(self, T: float) -> None:
-        t = self.translate
-        t[0] = T
+        t              = self.translate
+        t[0]           = T
         self.translate = t
 
     @translate_y.setter
     def translate_y(self, T: float) -> None:
-        t = self.translate
-        t[1] = T
+        t              = self.translate
+        t[1]           = T
         self.translate = t
 
     @translate_z.setter
     def translate_z(self, T: float) -> None:
-        t = self.translate
-        t[2] = T
+        t              = self.translate
+        t[2]           = T
         self.translate = t
 
     @property
@@ -526,20 +526,20 @@ class TransformData(Data):
 
     @rotate_axis_x.setter
     def rotate_axis_x(self, R: float) -> None:
-        r = self.rotate_axis
-        r[0] = R
+        r                = self.rotate_axis
+        r[0]             = R
         self.rotate_axis = r
 
     @rotate_axis_y.setter
     def rotate_axis_y(self, R: float) -> None:
-        r = self.rotate_axis
-        r[1] = R
+        r                = self.rotate_axis
+        r[1]             = R
         self.rotate_axis = r
 
     @rotate_axis_z.setter
     def rotate_axis_z(self, R: float) -> None:
-        r = self.rotate_axis
-        r[2] = R
+        r                = self.rotate_axis
+        r[2]             = R
         self.rotate_axis = r
 
     @property
@@ -564,20 +564,20 @@ class TransformData(Data):
 
     @joint_orient_x.setter
     def joint_orient_x(self, JO: float) -> None:
-        jo = self.joint_orient
-        jo[0] = JO
+        jo                = self.joint_orient
+        jo[0]             = JO
         self.joint_orient = jo
 
     @joint_orient_y.setter
     def joint_orient_y(self, JO: float) -> None:
-        jo = self.joint_orient
-        jo[1] = JO
+        jo                = self.joint_orient
+        jo[1]             = JO
         self.joint_orient = jo
 
     @joint_orient_z.setter
     def joint_orient_z(self, JO: float) -> None:
-        jo = self.joint_orient
-        jo[2] = JO
+        jo                = self.joint_orient
+        jo[2]             = JO
         self.joint_orient = jo
 
     @property
@@ -712,7 +712,7 @@ class TransformData(Data):
             self._reject_animated("set_rotate_to_joint_orient()")
             # quaternion captures the full RO * R * JO orientation, so rotate
             # AND rotate_axis must both be zeroed or RO would be double-applied
-            Q = self.quaternion
+            Q                 = self.quaternion
             self.rotate       = np.zeros(3, dtype=float)
             self.rotate_axis  = np.zeros(3, dtype=float)
             self.joint_orient = np.degrees(quaternion_to_euler(Q, 0)[0])
@@ -724,7 +724,7 @@ class TransformData(Data):
             # quaternion captures the full RO * R * JO orientation, so
             # joint_orient AND rotate_axis must both be zeroed or RO would be
             # double-applied
-            Q = self.quaternion
+            Q                 = self.quaternion
             self.joint_orient = np.zeros(3, dtype=float)
             self.rotate_axis  = np.zeros(3, dtype=float)
             self.rotate       = np.degrees(quaternion_to_euler(Q, self.rotate_order)[0])
@@ -741,14 +741,14 @@ class TransformData(Data):
 
         # other is a xyz translation
         if _is_sequence(other, ndim=1):
-            M1 = M0.copy()
+            M1        = M0.copy()
             M1[3, :3] = other
         else:
             M1 = other.world_matrix
 
         # match the translate
-        axes = np.array([x, y, z, False], dtype=bool)
-        M0[3, axes] = M1[3, axes]
+        axes              = np.array([x, y, z, False], dtype=bool)
+        M0[3, axes]       = M1[3, axes]
         self.world_matrix = M0
 
     def match_rotate(self, other: "TransformData" | np.ndarray):
@@ -789,7 +789,7 @@ class TransformData(Data):
 
     def match_matrix(self, other: "TransformData"):
         """matches the world matrix of a TransformData object"""
-        M = other.world_matrix
+        M                 = other.world_matrix
         self.world_matrix = M
 
     def swapaxes(self, axis0: int, axis1: int, negate: bool = False) -> None:
@@ -817,7 +817,7 @@ class TransformData(Data):
 
         # scale permutes exactly, because P is an axis permutation and
         # therefore P * S is S with its components swapped, times P
-        scale = np.array(self.scale, dtype=float)
+        scale                 = np.array(self.scale, dtype=float)
         scale[[axis0, axis1]] = scale[[axis1, axis0]]
 
         # the orientation chain is [RO][R][JO]. conjugating RO and R and
@@ -861,7 +861,7 @@ class TransformData(Data):
     def world_matrix(self):
         """compute a world matrix"""
         if self._world_matrix is None:
-            P = self.get_parent_matrix()
+            P                  = self.get_parent_matrix()
             self._world_matrix = np.dot(self.matrix, P)
         return self._world_matrix.copy()
 
@@ -910,9 +910,9 @@ class TransformData(Data):
 
         # the orientation chain is RO * R * JO, so solve for the pure rotate
         # R = inv(RO) * M * inv(JO); ignoring RO leaves rotate_axis double-applied
-        RO = self.rotate_axis_matrix
-        JO = self.joint_orient_matrix
-        L  = local_matrix(np.dot(np.linalg.inv(RO), M), JO)
+        RO          = self.rotate_axis_matrix
+        JO          = self.joint_orient_matrix
+        L           = local_matrix(np.dot(np.linalg.inv(RO), M), JO)
         self.rotate = np.degrees(matrix_to_euler(L, self.rotate_order))[0]
 
         # reset the branch cached world_matrix
@@ -937,7 +937,7 @@ class TransformData(Data):
 
     @property
     def translate_matrix(self) -> np.ndarray:
-        T = np.eye(4)
+        T        = np.eye(4)
         T[3, :3] = self.translate
         return T
 
@@ -1058,7 +1058,7 @@ class TransformData(Data):
         if parent is None:
             self.parent_node = None
         else:
-            index = self._hierarchy.index(parent)
+            index            = self._hierarchy.index(parent)
             self.parent_node = self._hierarchy[index].uuid
 
         # --- recompute matrices if world_space is True --- #
@@ -1123,7 +1123,7 @@ def _read_fbx(filename: str, scale_factor: float):
         unique_id = generate_uuid()
         kept      = False
 
-        attr      = node.GetNodeAttribute()
+        attr = node.GetNodeAttribute()
         if attr:
             # TODO: for now lets consider meshes as transforms
             # supported node types for now are joints, locators and transforms
@@ -1135,7 +1135,7 @@ def _read_fbx(filename: str, scale_factor: float):
                 _fbx_enum(FBX.FbxNodeAttribute, "EType", "eMesh"),
             ):
                 # basics
-                data = {}
+                data         = {}
                 data["name"] = node.GetName()
                 data["uuid"] = unique_id
                 if parent_uuid is not None:
@@ -1149,7 +1149,7 @@ def _read_fbx(filename: str, scale_factor: float):
                 ]
 
                 # get SRT
-                data["scale"] = np.array(tuple(x for x in node.LclScaling.Get()))
+                data["scale"]  = np.array(tuple(x for x in node.LclScaling.Get()))
                 data["rotate"] = np.array(tuple(x for x in node.LclRotation.Get()))
                 data["translate"] = (
                     np.array(tuple(x for x in node.LclTranslation.Get())) * scale_factor
@@ -1182,8 +1182,8 @@ def _read_fbx(filename: str, scale_factor: float):
                     data["node_type"] = "transform"
 
                 hierarchy_data[unique_id] = data
-                nodes[unique_id] = node
-                kept = True
+                nodes[unique_id]          = node
+                kept                      = True
 
         # a node we skipped has no uuid to hand down, so its children take
         # the nearest ancestor we did keep rather than falling to the world
@@ -1293,11 +1293,11 @@ class TransformList(DataList):
                 if node.extensions and "FB_momentum" in node.extensions:
                     if "limitOrigin" not in node.extensions["FB_momentum"]:
                         if node.extensions["FB_momentum"]["type"] == "skeleton_joint":
-                            new_node = {"name": node.name}
+                            new_node              = {"name": node.name}
                             new_node["node_type"] = "joint"
 
                         elif node.extensions["FB_momentum"]["type"] == "locator":
-                            new_node = {"name": node.name}
+                            new_node              = {"name": node.name}
                             new_node["node_type"] = "locator"
 
                 # style2, everything's a joint
@@ -1311,7 +1311,7 @@ class TransformList(DataList):
                                 found = True
                                 break
                     if not found:
-                        new_node = {"name": node.name}
+                        new_node              = {"name": node.name}
                         new_node["node_type"] = "joint"
 
                 if "name" in new_node:
@@ -1348,7 +1348,7 @@ class TransformList(DataList):
 
                 # convert rotation to joint_orient
                 if "rotate" in node:
-                    Q = node.pop("rotate", None)
+                    Q                    = node.pop("rotate", None)
                     node["joint_orient"] = np.degrees(quaternion_to_euler(Q, 0)[0])
 
                 # convert translation to translate
@@ -1358,7 +1358,7 @@ class TransformList(DataList):
                 hierarchy_data[node["uuid"]] = node
 
         # set the pose_frame if requested
-        hierarchy_data = cls.from_dict(hierarchy_data)
+        hierarchy_data                          = cls.from_dict(hierarchy_data)
         hierarchy_data.segment_scale_compensate = False
 
         if pose_frame is not None and data.animations:
@@ -1955,17 +1955,17 @@ class TransformList(DataList):
         return np.array(values)
 
     # --- per axis channel components --- #
-    scale_x        = _component_property("scale",        "x")
-    scale_y        = _component_property("scale",        "y")
-    scale_z        = _component_property("scale",        "z")
+    scale_x  = _component_property("scale",        "x")
+    scale_y  = _component_property("scale",        "y")
+    scale_z  = _component_property("scale",        "z")
 
-    rotate_x       = _component_property("rotate",       "x")
-    rotate_y       = _component_property("rotate",       "y")
-    rotate_z       = _component_property("rotate",       "z")
+    rotate_x = _component_property("rotate",       "x")
+    rotate_y = _component_property("rotate",       "y")
+    rotate_z = _component_property("rotate",       "z")
 
-    translate_x    = _component_property("translate",    "x")
-    translate_y    = _component_property("translate",    "y")
-    translate_z    = _component_property("translate",    "z")
+    translate_x = _component_property("translate",    "x")
+    translate_y = _component_property("translate",    "y")
+    translate_z = _component_property("translate",    "z")
 
     joint_orient_x = _component_property("joint_orient", "x")
     joint_orient_y = _component_property("joint_orient", "y")
@@ -2147,7 +2147,7 @@ class TransformList(DataList):
         parents       = self._parent_indices(list(self))
         other_parents = self._parent_indices(list(other))
 
-        mismatched    = np.flatnonzero(parents != other_parents)
+        mismatched = np.flatnonzero(parents != other_parents)
         if len(mismatched):
             i = int(mismatched[0])
             raise ValueError(
@@ -2510,7 +2510,7 @@ class HierarchyData(TransformList):
             raise IndexError("pop index out of range")
 
         # extract the node and remove pointer
-        node = self.list.pop(index)
+        node            = self.list.pop(index)
         node._hierarchy = None
 
         # any node in the list which had this node as a parent is now at root
@@ -2523,19 +2523,19 @@ class HierarchyData(TransformList):
 
 def _diagonal(values: np.ndarray) -> np.ndarray:
     """(..., 3) factors as (..., 4, 4) diagonal matrices"""
-    out  = np.zeros(values.shape[:-1] + (4, 4), dtype=float)
-    axes = np.arange(3)
+    out                  = np.zeros(values.shape[:-1] + (4, 4), dtype=float)
+    axes                 = np.arange(3)
     out[..., axes, axes] = values
-    out[..., 3, 3] = 1.0
+    out[..., 3, 3]       = 1.0
     return out
 
 
 def _translation(values: np.ndarray) -> np.ndarray:
     """(..., 3) offsets as (..., 4, 4) row vector translation matrices"""
-    out  = np.zeros(values.shape[:-1] + (4, 4), dtype=float)
-    axes = np.arange(4)
+    out                  = np.zeros(values.shape[:-1] + (4, 4), dtype=float)
+    axes                 = np.arange(4)
     out[..., axes, axes] = 1.0
-    out[..., 3, :3] = values
+    out[..., 3, :3]      = values
     return out
 
 
@@ -2554,7 +2554,7 @@ def _euler_matrices(degrees: np.ndarray, orders: Optional[np.ndarray]) -> np.nda
     out   = np.empty((frames * count, 4, 4), dtype=float)
     tiled = np.tile(np.asarray(orders, dtype=int), frames)
     for order in np.unique(tiled):
-        rows = tiled == order
+        rows      = tiled == order
         out[rows] = euler_to_matrix(flat[rows], int(order))
 
     return out.reshape(frames, count, 4, 4)
@@ -2633,7 +2633,7 @@ def _frame_component(channel: str, axis: int) -> property:
         return np.ascontiguousarray(getattr(self, channel)[..., axis])
 
     def setter(self, value) -> None:
-        current = np.array(getattr(self, channel))
+        current            = np.array(getattr(self, channel))
         current[..., axis] = value
         setattr(self, channel, current)
 
@@ -3046,7 +3046,7 @@ class ClipData(HierarchyData):
 
     def copy(self) -> "ClipData":
         self._realign()
-        new = self.__class__(self.list, start_frame=self._start_frame, fps=self._fps)
+        new         = self.__class__(self.list, start_frame=self._start_frame, fps=self._fps)
         new._blocks = {c: b.copy() for c, b in self._blocks.items()}
         # the blocks are installed behind __init__, so the column list has to
         # come with them: a copy left claiming no columns would have its next
@@ -3078,8 +3078,8 @@ class ClipData(HierarchyData):
         if fps <= 0.0:
             raise ValueError(f"fps must be positive, got {fps}")
 
-        rig        = HierarchyData.load_glb(filename, scale_factor=scale_factor)
-        model      = load_model(os.path.expanduser(filename))
+        rig   = HierarchyData.load_glb(filename, scale_factor=scale_factor)
+        model = load_model(os.path.expanduser(filename))
 
         animations = model.animations or []
         if animation and not -len(animations) <= animation < len(animations):
@@ -3146,7 +3146,7 @@ class ClipData(HierarchyData):
                     quaternion_to_euler(delta, node.rotate_order)
                 )
 
-        orders = np.asarray(clip.rotate_order, dtype=np.intp)
+        orders                = np.asarray(clip.rotate_order, dtype=np.intp)
         clip.frames.scale     = scale
         clip.frames.rotate    = np.degrees(euler_filter(np.radians(rotate), orders))
         clip.frames.translate = translate
@@ -3193,7 +3193,7 @@ class ClipData(HierarchyData):
             filename, scale_factor
         )
 
-        rig      = HierarchyData.from_dict(hierarchy_data)
+        rig = HierarchyData.from_dict(hierarchy_data)
 
         criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimStack.ClassId)
         count    = scene.GetSrcObjectCount(criteria)
@@ -3259,11 +3259,11 @@ class ClipData(HierarchyData):
                     values[2] * scale_factor,
                 )
 
-                values = node.EvaluateLocalRotation(time)
+                values               = node.EvaluateLocalRotation(time)
                 rotate[frame, index] = (values[0], values[1], values[2])
 
-                values = node.EvaluateLocalScaling(time)
-                scale[frame, index] = (values[0], values[1], values[2])
+                values               = node.EvaluateLocalScaling(time)
+                scale[frame, index]  = (values[0], values[1], values[2])
 
         clip.frames.scale     = scale
         clip.frames.rotate    = rotate

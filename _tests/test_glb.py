@@ -38,7 +38,7 @@ class TestLoadAccessorData(unittest.TestCase):
 
     def build(self, blob, views, accessors):
         """write a glb holding raw bytes and read it back through GLTF2"""
-        gltf = GLTF2()
+        gltf             = GLTF2()
         gltf.buffers     = [Buffer(byteLength=len(blob))]
         gltf.bufferViews = [BufferView(buffer=0, **view) for view in views]
         gltf.accessors   = [Accessor(**accessor) for accessor in accessors]
@@ -233,7 +233,7 @@ class TestRepairNullSkinJoints(unittest.TestCase):
     def write(self, name, document, blob=b"\x00" * 16):
         """packs a document into a real glb container"""
         raw = json.dumps(document).encode("utf-8")
-        raw += b" " * (-len(raw) % 4)
+        raw  += b" " * (-len(raw) % 4)
         blob += b"\x00" * (-len(blob) % 4)
 
         chunks = struct.pack("<II", len(raw), 0x4E4F534A) + raw
@@ -311,9 +311,9 @@ class TestRepairNullSkinJoints(unittest.TestCase):
 
     def test_a_null_outside_skins_is_not_repaired(self):
         """dropping one of these changes the hierarchy, so it has to fail"""
-        document = self.document([0, 1])
+        document                         = self.document([0, 1])
         document["nodes"][0]["children"] = [1, None]
-        path = self.write("badchild.glb", document)
+        path                             = self.write("badchild.glb", document)
 
         with open(path, "rb") as handle:
             self.assertIsNone(repair_null_skin_joints(handle.read()))
@@ -323,9 +323,9 @@ class TestRepairNullSkinJoints(unittest.TestCase):
 
     def test_a_null_in_both_places_still_fails(self):
         """repairing the skins does not excuse the one in the hierarchy"""
-        document = self.document([None, None])
+        document                         = self.document([None, None])
         document["nodes"][0]["children"] = [1, None]
-        path = self.write("both.glb", document)
+        path                             = self.write("both.glb", document)
 
         # the skins half IS repairable, so this only fails if the result is
         # looked at again after the repair rather than trusted

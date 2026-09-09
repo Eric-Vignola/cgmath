@@ -62,9 +62,9 @@ def _get_bilinear_derivatives(p0, p1, p2, p3, u, v):
     dpdu = np.empty(3)
     dpdv = np.empty(3)
     for i in range(3):
-        C = p0[i] - p1[i] + p2[i] - p3[i]
-        D = p1[i] - p0[i]
-        E = p3[i] - p0[i]
+        C       = p0[i] - p1[i] + p2[i] - p3[i]
+        D       = p1[i] - p0[i]
+        E       = p3[i] - p0[i]
         dpdu[i] = C * v + D
         dpdv[i] = C * u + E
     return dpdu, dpdv
@@ -200,10 +200,10 @@ def _closest_point_on_face_newton(p0, p1, p2, p3, query, u0, v0, eps, max_its):
     u    = u0
     v    = v0
 
-    C    = np.empty(ndim, dtype=p0.dtype)
-    D    = np.empty(ndim, dtype=p0.dtype)
-    E    = np.empty(ndim, dtype=p0.dtype)
-    F    = np.empty(ndim, dtype=p0.dtype)
+    C = np.empty(ndim, dtype=p0.dtype)
+    D = np.empty(ndim, dtype=p0.dtype)
+    E = np.empty(ndim, dtype=p0.dtype)
+    F = np.empty(ndim, dtype=p0.dtype)
 
     for i in range(ndim):
         C[i] = p0[i] - p1[i] + p2[i] - p3[i]
@@ -228,9 +228,9 @@ def _closest_point_on_face_newton(p0, p1, p2, p3, query, u0, v0, eps, max_its):
 
             grad_u += 2.0 * diff_i * du_i
             grad_v += 2.0 * diff_i * dv_i
-            H00 += 2.0 * du_i * du_i
-            H01 += 2.0 * du_i * dv_i
-            H11 += 2.0 * dv_i * dv_i
+            H00    += 2.0 * du_i * du_i
+            H01    += 2.0 * du_i * dv_i
+            H11    += 2.0 * dv_i * dv_i
 
         if grad_u * grad_u + grad_v * grad_v < eps_sq:
             break
@@ -243,8 +243,8 @@ def _closest_point_on_face_newton(p0, p1, p2, p3, query, u0, v0, eps, max_its):
         delta_u = (H11 * grad_u - H01 * grad_v) * inv_det
         delta_v = (H00 * grad_v - H01 * grad_u) * inv_det
 
-        u       = _clamp(u - delta_u, 0.0, 1.0)
-        v       = _clamp(v - delta_v, 0.0, 1.0)
+        u = _clamp(u - delta_u, 0.0, 1.0)
+        v = _clamp(v - delta_v, 0.0, 1.0)
 
     dist_sq = 0.0
     for i in range(ndim):
@@ -268,7 +268,7 @@ def _closest_point_on_edge_sq(a, b, query):
     for i in range(ndim):
         ei = b[i] - a[i]
         elen_sq += ei * ei
-        dot += (query[i] - a[i]) * ei
+        dot     += (query[i] - a[i]) * ei
 
     if elen_sq < 1e-30:
         dsq = 0.0
@@ -368,8 +368,8 @@ def _bilinear_sample(
     closest_uv    = np.empty((num_queries, 2), dtype=points.dtype)
     closest_index = np.empty(num_queries,      dtype=geometry.dtype)
 
-    eps           = iteration_tolerance
-    max_its       = iteration_count
+    eps     = iteration_tolerance
+    max_its = iteration_count
 
     for k in prange(num_queries):
         best_dist_sq = np.inf
@@ -378,10 +378,10 @@ def _bilinear_sample(
         best_u       = 0.5
         best_v       = 0.5
 
-        p0           = np.empty(ndim, dtype=points.dtype)
-        p1           = np.empty(ndim, dtype=points.dtype)
-        p2           = np.empty(ndim, dtype=points.dtype)
-        p3           = np.empty(ndim, dtype=points.dtype)
+        p0 = np.empty(ndim, dtype=points.dtype)
+        p1 = np.empty(ndim, dtype=points.dtype)
+        p2 = np.empty(ndim, dtype=points.dtype)
+        p3 = np.empty(ndim, dtype=points.dtype)
 
         for j in range(num_faces):
             # Adaptive bounding sphere culling
@@ -432,16 +432,16 @@ def _bilinear_sample(
                     break
 
         # Write results
-        closest_dist[k] = best_dist_sq
+        closest_dist[k]  = best_dist_sq
         closest_index[k] = best_index
         closest_uv[k, 0] = best_u
         closest_uv[k, 1] = best_v
 
-        ou = 1.0 - best_u
-        ov = 1.0 - best_v
-        closest_w[k, 0] = ou * ov
-        closest_w[k, 1] = best_u * ov
-        closest_w[k, 2] = best_u * best_v
+        ou               = 1.0 - best_u
+        ov               = 1.0 - best_v
+        closest_w[k, 0]  = ou * ov
+        closest_w[k, 1]  = best_u * ov
+        closest_w[k, 2]  = best_u * best_v
 
         if best_index >= 0 and geometry[best_index, 3] == -1:
             closest_w[k, 2] += ou * best_v
@@ -751,9 +751,9 @@ def _eval_bezier_surface(cp, u, v):
             cpy = cp[i, j, 1]
             cpz = cp[i, j, 2]
 
-            sx += w * cpx
-            sy += w * cpy
-            sz += w * cpz
+            sx  += w * cpx
+            sy  += w * cpy
+            sz  += w * cpz
             dux += wu * cpx
             duy += wu * cpy
             duz += wu * cpz
@@ -799,8 +799,8 @@ def _closest_point_on_bezier_face_newton(cp, query, u0, v0, eps=1e-6, max_its=20
         delta_u = (H11 * grad_u - H01 * grad_v) * inv_det
         delta_v = (H00 * grad_v - H01 * grad_u) * inv_det
 
-        u       = _clamp(u - delta_u, 0.0, 1.0)
-        v       = _clamp(v - delta_v, 0.0, 1.0)
+        u = _clamp(u - delta_u, 0.0, 1.0)
+        v = _clamp(v - delta_v, 0.0, 1.0)
 
     sx, sy, sz, _, _, _, _, _, _ = _eval_bezier_surface(cp, u, v)
     dist_sq = (sx - query[0]) ** 2 + (sy - query[1]) ** 2 + (sz - query[2]) ** 2
@@ -1161,14 +1161,14 @@ def _bezier_sample(
                     break
 
         # Write results
-        closest_dist[k] = best_dist_sq
+        closest_dist[k]  = best_dist_sq
         closest_index[k] = best_index
         closest_uv[k, 0] = best_u
         closest_uv[k, 1] = best_v
 
         # Bilinear weights from UV (for vertex attribute interpolation)
-        ou = 1.0 - best_u
-        ov = 1.0 - best_v
+        ou              = 1.0 - best_u
+        ov              = 1.0 - best_v
         closest_w[k, 0] = ou * ov
         closest_w[k, 1] = best_u * ov
         closest_w[k, 2] = best_u * best_v
@@ -1201,13 +1201,13 @@ def _bezier_sample(
 @njit(fastmath=True, cache=True)
 def _ray_aabb_intersect(o, inv_d, aabb_min, aabb_max):
     """Test if ray intersects axis-aligned bounding box in forward direction."""
-    t1x    = (aabb_min[0] - o[0]) * inv_d[0]
-    t1y    = (aabb_min[1] - o[1]) * inv_d[1]
-    t1z    = (aabb_min[2] - o[2]) * inv_d[2]
+    t1x = (aabb_min[0] - o[0]) * inv_d[0]
+    t1y = (aabb_min[1] - o[1]) * inv_d[1]
+    t1z = (aabb_min[2] - o[2]) * inv_d[2]
 
-    t2x    = (aabb_max[0] - o[0]) * inv_d[0]
-    t2y    = (aabb_max[1] - o[1]) * inv_d[1]
-    t2z    = (aabb_max[2] - o[2]) * inv_d[2]
+    t2x = (aabb_max[0] - o[0]) * inv_d[0]
+    t2y = (aabb_max[1] - o[1]) * inv_d[1]
+    t2z = (aabb_max[2] - o[2]) * inv_d[2]
 
     tmin_x = min(t1x, t2x)
     tmin_y = min(t1y, t2y)
@@ -1261,50 +1261,50 @@ def _compute_face_aabbs(faces, points):
 @njit(fastmath=True, cache=True)
 def _intersect_bilinear_newton(p0, p1, p2, p3, o, d, u0, v0, eps=1e-6, max_its=20):
     """Newton iteration to find ray-bilinear patch intersection."""
-    u      = u0
-    v      = v0
+    u  = u0
+    v  = v0
 
-    Cx     = p0[0] - p1[0] + p2[0] - p3[0]
-    Cy     = p0[1] - p1[1] + p2[1] - p3[1]
-    Cz     = p0[2] - p1[2] + p2[2] - p3[2]
-    Dx     = p1[0] - p0[0]
-    Dy     = p1[1] - p0[1]
-    Dz     = p1[2] - p0[2]
-    Ex     = p3[0] - p0[0]
-    Ey     = p3[1] - p0[1]
-    Ez     = p3[2] - p0[2]
-    Fx     = p0[0]
-    Fy     = p0[1]
-    Fz     = p0[2]
+    Cx = p0[0] - p1[0] + p2[0] - p3[0]
+    Cy = p0[1] - p1[1] + p2[1] - p3[1]
+    Cz = p0[2] - p1[2] + p2[2] - p3[2]
+    Dx = p1[0] - p0[0]
+    Dy = p1[1] - p0[1]
+    Dz = p1[2] - p0[2]
+    Ex = p3[0] - p0[0]
+    Ey = p3[1] - p0[1]
+    Ez = p3[2] - p0[2]
+    Fx = p0[0]
+    Fy = p0[1]
+    Fz = p0[2]
 
-    dx     = d[0]
-    dy     = d[1]
-    dz     = d[2]
-    ox     = o[0]
-    oy     = o[1]
-    oz     = o[2]
+    dx = d[0]
+    dy = d[1]
+    dz = d[2]
+    ox = o[0]
+    oy = o[1]
+    oz = o[2]
 
     eps_sq = eps * eps
 
     for _ in range(max_its):
-        px        = Cx * u * v + Dx * u + Ex * v + Fx
-        py        = Cy * u * v + Dy * u + Ey * v + Fy
-        pz        = Cz * u * v + Dz * u + Ez * v + Fz
+        px    = Cx * u * v + Dx * u + Ex * v + Fx
+        py    = Cy * u * v + Dy * u + Ey * v + Fy
+        pz    = Cz * u * v + Dz * u + Ez * v + Fz
 
-        dux       = Cx * v + Dx
-        duy       = Cy * v + Dy
-        duz       = Cz * v + Dz
-        dvx       = Cx * u + Ex
-        dvy       = Cy * u + Ey
-        dvz       = Cz * u + Ez
+        dux   = Cx * v + Dx
+        duy   = Cy * v + Dy
+        duz   = Cz * v + Dz
+        dvx   = Cx * u + Ex
+        dvy   = Cy * u + Ey
+        dvz   = Cz * u + Ez
 
-        diffx     = px - ox
-        diffy     = py - oy
-        diffz     = pz - oz
+        diffx = px - ox
+        diffy = py - oy
+        diffz = pz - oz
 
-        fx        = diffy * dz - diffz * dy
-        fy        = diffz * dx - diffx * dz
-        fz        = diffx * dy - diffy * dx
+        fx = diffy * dz - diffz * dy
+        fy = diffz * dx - diffx * dz
+        fz = diffx * dy - diffy * dx
 
         f_norm_sq = fx * fx + fy * fy + fz * fz
         if f_norm_sq < eps_sq:
@@ -1333,8 +1333,8 @@ def _intersect_bilinear_newton(p0, p1, p2, p3, o, d, u0, v0, eps=1e-6, max_its=2
         delta_u = (JTJ11 * JTf0 - JTJ01 * JTf1) * inv_det
         delta_v = (JTJ00 * JTf1 - JTJ01 * JTf0) * inv_det
 
-        u       = u - delta_u
-        v       = v - delta_v
+        u = u - delta_u
+        v = v - delta_v
 
     return 1e308, -1.0, -1.0, False
 
@@ -1377,9 +1377,9 @@ def _intersect_face(p0, p1, p2, p3, o, d, twosided=True, eps=1e-6, max_its=20):
         and -uv_tol <= v <= 1 + uv_tol
         and t >= -t_tol
     ):
-        u      = max(0.0, min(1.0, u))
-        v      = max(0.0, min(1.0, v))
-        t      = max(0.0, t)
+        u = max(0.0, min(1.0, u))
+        v = max(0.0, min(1.0, v))
+        t = max(0.0, t)
 
         accept = True
         if not twosided:
@@ -1413,9 +1413,9 @@ def _intersect_face(p0, p1, p2, p3, o, d, twosided=True, eps=1e-6, max_its=20):
             and -uv_tol <= v <= 1 + uv_tol
             and t >= -t_tol
         ):
-            u      = max(0.0, min(1.0, u))
-            v      = max(0.0, min(1.0, v))
-            t      = max(0.0, t)
+            u = max(0.0, min(1.0, u))
+            v = max(0.0, min(1.0, v))
+            t = max(0.0, t)
 
             accept = True
             if not twosided:
@@ -1447,7 +1447,7 @@ def _intersect_mesh_single(faces, points, aabb_min, aabb_max, o, d, twosided=Tru
     best_v    = np.nan
     best_face = -1
 
-    inv_d     = np.empty(3)
+    inv_d = np.empty(3)
     for k in range(3):
         if abs(d[k]) < 1e-30:
             inv_d[k] = np.inf if d[k] >= 0 else -np.inf
@@ -1504,9 +1504,9 @@ def _intersect_mesh_parallel(
         ti, ui, vi, fi = _intersect_mesh_single(
             faces, points, aabb_min, aabb_max, o, d, twosided
         )
-        t[i] = ti
-        uv[i, 0] = ui
-        uv[i, 1] = vi
+        t[i]            = ti
+        uv[i, 0]        = ui
+        uv[i, 1]        = vi
         face_indices[i] = fi
 
     return t, uv, face_indices
@@ -1549,7 +1549,7 @@ def _intersect_mesh_single_bvh(
     best_v    = np.nan
     best_face = -1
 
-    inv_d     = np.empty(3)
+    inv_d = np.empty(3)
     for k in range(3):
         if abs(d[k]) < 1e-30:
             inv_d[k] = np.inf if d[k] >= 0 else -np.inf
@@ -1557,8 +1557,8 @@ def _intersect_mesh_single_bvh(
             inv_d[k] = 1.0 / d[k]
 
     # Iterative DFS using a fixed-size stack of node ids.
-    stack = np.empty(_BVH_STACK_SIZE, dtype=np.int32)
-    sp    = 0
+    stack     = np.empty(_BVH_STACK_SIZE, dtype=np.int32)
+    sp        = 0
     stack[sp] = 0  # root
     sp += 1
 
@@ -1663,9 +1663,9 @@ def _intersect_mesh_parallel_bvh(
             directions[i],
             twosided,
         )
-        t[i] = ti
-        uv[i, 0] = ui
-        uv[i, 1] = vi
+        t[i]            = ti
+        uv[i, 0]        = ui
+        uv[i, 1]        = vi
         face_indices[i] = fi
 
     return t, uv, face_indices
@@ -1691,15 +1691,15 @@ def _intersect_bezier_mesh_single_bvh(
     best_v    = np.nan
     best_face = -1
 
-    inv_d     = np.empty(3)
+    inv_d = np.empty(3)
     for k in range(3):
         if abs(d[k]) < 1e-30:
             inv_d[k] = np.inf if d[k] >= 0 else -np.inf
         else:
             inv_d[k] = 1.0 / d[k]
 
-    stack = np.empty(_BVH_STACK_SIZE, dtype=np.int32)
-    sp    = 0
+    stack     = np.empty(_BVH_STACK_SIZE, dtype=np.int32)
+    sp        = 0
     stack[sp] = 0
     sp += 1
 
@@ -1785,9 +1785,9 @@ def _intersect_bezier_mesh_parallel_bvh(
             directions[i],
             twosided,
         )
-        t[i] = ti
-        uv[i, 0] = ui
-        uv[i, 1] = vi
+        t[i]            = ti
+        uv[i, 0]        = ui
+        uv[i, 1]        = vi
         face_indices[i] = fi
 
     return t, uv, face_indices
@@ -1832,28 +1832,28 @@ def _intersect_bezier_newton(cp, o, d, u0, v0, eps=1e-6, max_its=20):
     Same formulation as _intersect_bilinear_newton but evaluates the
     surface and derivatives via _eval_bezier_surface.
     """
-    u      = u0
-    v      = v0
+    u  = u0
+    v  = v0
 
-    dx     = d[0]
-    dy     = d[1]
-    dz     = d[2]
-    ox     = o[0]
-    oy     = o[1]
-    oz     = o[2]
+    dx = d[0]
+    dy = d[1]
+    dz = d[2]
+    ox = o[0]
+    oy = o[1]
+    oz = o[2]
 
     eps_sq = eps * eps
 
     for _ in range(max_its):
         sx, sy, sz, dux, duy, duz, dvx, dvy, dvz = _eval_bezier_surface(cp, u, v)
 
-        diffx     = sx - ox
-        diffy     = sy - oy
-        diffz     = sz - oz
+        diffx = sx - ox
+        diffy = sy - oy
+        diffz = sz - oz
 
-        fx        = diffy * dz - diffz * dy
-        fy        = diffz * dx - diffx * dz
-        fz        = diffx * dy - diffy * dx
+        fx = diffy * dz - diffz * dy
+        fy = diffz * dx - diffx * dz
+        fz = diffx * dy - diffy * dx
 
         f_norm_sq = fx * fx + fy * fy + fz * fz
         if f_norm_sq < eps_sq:
@@ -1882,8 +1882,8 @@ def _intersect_bezier_newton(cp, o, d, u0, v0, eps=1e-6, max_its=20):
         delta_u = (JTJ11 * JTf0 - JTJ01 * JTf1) * inv_det
         delta_v = (JTJ00 * JTf1 - JTJ01 * JTf0) * inv_det
 
-        u       = u - delta_u
-        v       = v - delta_v
+        u = u - delta_u
+        v = v - delta_v
 
     return 1e308, -1.0, -1.0, False
 
@@ -1917,9 +1917,9 @@ def _intersect_bezier_face(cp, o, d, twosided=True, eps=1e-6, max_its=20):
                 and -uv_tol <= v <= 1 + uv_tol
                 and t >= -t_tol
             ):
-                u      = max(0.0, min(1.0, u))
-                v      = max(0.0, min(1.0, v))
-                t      = max(0.0, t)
+                u = max(0.0, min(1.0, u))
+                v = max(0.0, min(1.0, v))
+                t = max(0.0, t)
 
                 accept = True
                 if not twosided:
@@ -1950,7 +1950,7 @@ def _intersect_bezier_mesh_single(
     best_v    = np.nan
     best_face = -1
 
-    inv_d     = np.empty(3)
+    inv_d = np.empty(3)
     for k in range(3):
         if abs(d[k]) < 1e-30:
             inv_d[k] = np.inf if d[k] >= 0 else -np.inf
@@ -1993,9 +1993,9 @@ def _intersect_bezier_mesh_parallel(
         ti, ui, vi, fi = _intersect_bezier_mesh_single(
             control_points, aabb_min, aabb_max, o, d, twosided
         )
-        t[i] = ti
-        uv[i, 0] = ui
-        uv[i, 1] = vi
+        t[i]            = ti
+        uv[i, 0]        = ui
+        uv[i, 1]        = vi
         face_indices[i] = fi
 
     return t, uv, face_indices

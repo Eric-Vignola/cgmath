@@ -364,9 +364,9 @@ class TakeData(BaseData):
             return None
 
         # Get the scene's fps
-        scene_data = SceneData()
+        scene_data        = SceneData()
         scene_data._scene = self._scene
-        fps = scene_data.fps
+        fps               = scene_data.fps
 
         if fps is None:
             return None
@@ -394,9 +394,9 @@ class TakeData(BaseData):
             raise RuntimeError("No scene available to convert frames to seconds")
 
         # Get the scene's fps
-        scene_data = SceneData()
+        scene_data        = SceneData()
         scene_data._scene = self._scene
-        fps = scene_data.fps
+        fps               = scene_data.fps
 
         if fps is None:
             raise RuntimeError("Scene fps is not available for frame conversion")
@@ -430,9 +430,9 @@ class TakeData(BaseData):
             return None
 
         # Get the scene's fps
-        scene_data = SceneData()
+        scene_data        = SceneData()
         scene_data._scene = self._scene
-        fps = scene_data.fps
+        fps               = scene_data.fps
 
         if fps is None:
             return None
@@ -460,9 +460,9 @@ class TakeData(BaseData):
             raise RuntimeError("No scene available to convert frames to seconds")
 
         # Get the scene's fps
-        scene_data = SceneData()
+        scene_data        = SceneData()
         scene_data._scene = self._scene
-        fps = scene_data.fps
+        fps               = scene_data.fps
 
         if fps is None:
             raise RuntimeError("Scene fps is not available for frame conversion")
@@ -515,9 +515,9 @@ class TakeData(BaseData):
             return None
 
         # Get the scene's fps
-        scene_data = SceneData()
+        scene_data        = SceneData()
         scene_data._scene = self._scene
-        fps = scene_data.fps
+        fps               = scene_data.fps
 
         if fps is None:
             return None
@@ -1233,9 +1233,9 @@ class CurveData(BaseData):
             return None
 
         # Get the scene's fps
-        scene_data = SceneData()
+        scene_data        = SceneData()
         scene_data._scene = self._scene
-        fps = scene_data.fps
+        fps               = scene_data.fps
 
         if fps is None:
             return None
@@ -1262,9 +1262,9 @@ class CurveData(BaseData):
             raise RuntimeError("No scene available to convert frames to seconds")
 
         # Get the scene's fps
-        scene_data = SceneData()
+        scene_data        = SceneData()
         scene_data._scene = self._scene
-        fps = scene_data.fps
+        fps               = scene_data.fps
 
         if fps is None:
             raise RuntimeError("Scene fps is not available for frame conversion")
@@ -1828,7 +1828,7 @@ class SceneData(BaseData):
         # Create FBX manager if it doesn't exist
         if self._manager is None:
             self._manager = fbx.FbxManager.Create()
-            ios = fbx.FbxIOSettings.Create(self._manager, fbx.IOSROOT)
+            ios           = fbx.FbxIOSettings.Create(self._manager, fbx.IOSROOT)
             self._manager.SetIOSettings(ios)
 
         # Create scene

@@ -56,7 +56,7 @@ def _make_subdivided_box() -> MeshData:
     for z in zs:
         for x in xs:
             points.append([x, 0.0, z])
-    points       = np.array(points, dtype=np.float64)
+    points = np.array(points, dtype=np.float64)
 
     indices_list = []
     counts_list  = []
@@ -182,9 +182,9 @@ class TestBezierResample(unittest.TestCase):
 
     def test_sample_with_face_varying_normals(self):
         """MeshData.sample() must not crash when the mesh carries face-varying normals."""
-        mesh_with_normals = self.original.copy()
-        n                 = np.array([[0, 1, 0]] * 6, dtype=np.float64)
-        ni                = np.array([0, 1, 2, 3, 3, 2, 4, 5], dtype=np.int32)
+        mesh_with_normals                = self.original.copy()
+        n                                = np.array([[0, 1, 0]] * 6, dtype=np.float64)
+        ni                               = np.array([0, 1, 2, 3, 3, 2, 4, 5], dtype=np.int32)
         mesh_with_normals.normals        = n
         mesh_with_normals.normal_indices = ni
 

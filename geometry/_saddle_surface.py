@@ -28,18 +28,18 @@ def integrate(points, geometry, samples=10, method="gauss", tolerance=1e-4):
         raise ValueError("ngons detected")
 
     elif geometry.shape[1] < 4:
-        buffer = np.full((geometry.shape[0], 4), -1, dtype=geometry.dtype)
+        buffer                         = np.full((geometry.shape[0], 4), -1, dtype=geometry.dtype)
         buffer[:, : geometry.shape[1]] = geometry
-        geometry = buffer
+        geometry                       = buffer
 
     # make sure points are 3D
     if points.shape[1] > 3:
         points = points[:, :3]
 
     elif points.shape[1] < 3:
-        buffer = np.zeros((points.shape[0], 3), dtype=points.dtype)
+        buffer                       = np.zeros((points.shape[0], 3), dtype=points.dtype)
         buffer[:, : points.shape[1]] = points
-        points = buffer
+        points                       = buffer
 
     # approximate the saddle surface area
     area = bilinear_integrate(
@@ -82,7 +82,7 @@ class SampleData(Data):
         """
         sample_data = self.copy()
 
-        indices     = remap_indices(dst_mesh.indices, dst_uv.indices, self.distances)
+        indices = remap_indices(dst_mesh.indices, dst_uv.indices, self.distances)
 
         sample_data.projections = sample_data.projections[indices]
         sample_data.distances   = sample_data.distances[indices]
@@ -152,11 +152,11 @@ def raycast(
     if face_geometry.shape[1] > 4:
         raise ValueError("ngons detected")
     elif face_geometry.shape[1] < 4:
-        buffer = np.full((face_geometry.shape[0], 4), -1, dtype=face_geometry.dtype)
+        buffer                              = np.full((face_geometry.shape[0], 4), -1, dtype=face_geometry.dtype)
         buffer[:, : face_geometry.shape[1]] = face_geometry
-        face_geometry = buffer
+        face_geometry                       = buffer
 
-    n     = origins.shape[0]
+    n = origins.shape[0]
 
     _cast = bezier_raycast if surface_normals is not None else bilinear_raycast
 
@@ -187,17 +187,17 @@ def raycast(
     if not forward_only:
         t_bwd, uv_bwd, face_bwd = _do_cast(origins, -directions)
         # keep the closer hit (compare absolute t values)
-        closer = (~np.isnan(t_bwd)) & (np.isnan(t) | (t_bwd < t))
-        t[closer] = t_bwd[closer]
-        uv[closer] = uv_bwd[closer]
+        closer               = (~np.isnan(t_bwd)) & (np.isnan(t) | (t_bwd < t))
+        t[closer]            = t_bwd[closer]
+        uv[closer]           = uv_bwd[closer]
         face_indices[closer] = face_bwd[closer]
 
     # compute bilinear weights from UV
-    u       = uv[:, 0]
-    v       = uv[:, 1]
-    ou      = 1.0 - u
-    ov      = 1.0 - v
-    weights = np.empty((n, 4), dtype=np.float64)
+    u             = uv[:, 0]
+    v             = uv[:, 1]
+    ou            = 1.0 - u
+    ov            = 1.0 - v
+    weights       = np.empty((n, 4), dtype=np.float64)
     weights[:, 0] = ou * ov
     weights[:, 1] = u * ov
     weights[:, 2] = u * v
@@ -214,17 +214,17 @@ def raycast(
     projections = origins + t[:, None] * directions
 
     # gather hit face geometry
-    safe_indices = np.where(hit_mask, face_indices, 0)
-    hit_geometry = face_geometry[safe_indices]
+    safe_indices            = np.where(hit_mask, face_indices, 0)
+    hit_geometry            = face_geometry[safe_indices]
     hit_geometry[~hit_mask] = -1
 
     # compute normals and occluded flag
     if normals is not None:
-        result = normals[hit_geometry] * weights[:, :, None]
+        result                   = normals[hit_geometry] * weights[:, :, None]
         result[hit_geometry < 0] = 0.0
-        interp_normals = np.sum(result, axis=1)
-        mag            = np.einsum("...i,...i", interp_normals, interp_normals) ** 0.5
-        mag[mag == 0] = 1.0
+        interp_normals           = np.sum(result, axis=1)
+        mag                      = np.einsum("...i,...i", interp_normals, interp_normals) ** 0.5
+        mag[mag == 0]            = 1.0
         interp_normals /= mag[:, None]
         occluded = np.einsum("...i,...i", directions, interp_normals) < 0
     else:
@@ -288,12 +288,12 @@ def sample(
     # if any matches, find their indices and set their weights to 1.0
     if np.any(matched):
         f_, i_ = matrix_index_lookup(face_geometry, idx[matched])
-        w = np.zeros((i_.size, 4))
+        w                         = np.zeros((i_.size, 4))
         w[np.arange(i_.size), i_] = 1
-        weights[matched] = w
-        indices[matched] = f_
-        uvs[matched, 0] = w[:, 1] + w[:, 2]
-        uvs[matched, 1] = w[:, 2] + w[:, 3]
+        weights[matched]          = w
+        indices[matched]          = f_
+        uvs[matched, 0]           = w[:, 1] + w[:, 2]
+        uvs[matched, 1]           = w[:, 2] + w[:, 3]
 
     # use saddle surface sampler for non 100% matches
     if not np.all(matched):
@@ -302,9 +302,9 @@ def sample(
             raise ValueError("ngons detected")
 
         elif face_geometry.shape[1] < 4:
-            buffer = np.full((face_geometry.shape[0], 4), -1, dtype=face_geometry.dtype)
+            buffer                              = np.full((face_geometry.shape[0], 4), -1, dtype=face_geometry.dtype)
             buffer[:, : face_geometry.shape[1]] = face_geometry
-            face_geometry = buffer
+            face_geometry                       = buffer
 
         unmatched = ~matched
         centroids, radiuses = compute_centroids(
@@ -328,10 +328,10 @@ def sample(
         )
 
         projections[unmatched, :min_width] = proj
-        distances[unmatched] = d**0.5
-        weights[unmatched] = w
-        indices[unmatched] = i
-        uvs[unmatched] = uv
+        distances[unmatched]               = d**0.5
+        weights[unmatched]                 = w
+        indices[unmatched]                 = i
+        uvs[unmatched]                     = uv
 
     # calculate the contained vertices with the given normals
     if normals is not None:

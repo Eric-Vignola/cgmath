@@ -177,7 +177,7 @@ class TestKnownRotationRoundTrips(unittest.TestCase):
         )
         moved = points @ R_true.T
 
-        H     = (moved.T @ points)[None]
+        H = (moved.T @ points)[None]
         self.assertGreater(np.linalg.det(H[0]), 0.0)
 
         R = ProcrustesData._batch_rotation(H)[0]

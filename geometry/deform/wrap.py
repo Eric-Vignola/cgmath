@@ -51,11 +51,11 @@ class WrapData(Data):
     geodesic_radius: float | None  # max geodesic distance for vertex connectivity
     radius:          float | None  # kernel support radius for compact kernels
 
-    src_points:      np.ndarray    # source control points (Nx3)
-    dst_points:      np.ndarray    # destination control points (Nx3)
+    src_points: np.ndarray  # source control points (Nx3)
+    dst_points: np.ndarray  # destination control points (Nx3)
 
-    conn_matrix:     np.ndarray    # face-vertex neighbor connectivity (from MeshData)
-    conn_distances:  np.ndarray    # edge lengths for conn_matrix neighbors
+    conn_matrix:    np.ndarray  # face-vertex neighbor connectivity (from MeshData)
+    conn_distances: np.ndarray  # edge lengths for conn_matrix neighbors
 
     # --- cached attributes --- #
     _system_matrix:   np.ndarray   # augmented [K, 1, P] interpolation matrix
@@ -87,14 +87,14 @@ class WrapData(Data):
         self.geodesic_radius = None
         self.radius          = None
 
-        self.src_points      = None
-        self.dst_points      = None
-        self._weights        = None
+        self.src_points = None
+        self.dst_points = None
+        self._weights   = None
 
-        self._dirty          = True
-        self._target_dirty   = True
-        self.conn_matrix     = None
-        self.conn_distances  = None
+        self._dirty         = True
+        self._target_dirty  = True
+        self.conn_matrix    = None
+        self.conn_distances = None
 
     def _effective_radius(self) -> float | None:
         """Resolve the kernel support radius.
@@ -123,7 +123,7 @@ class WrapData(Data):
 
     def _build_kernel_matrix(self, cdist):
         """Apply kernel to distance matrix and zero out non-finite entries."""
-        K = self._eval_kernel(cdist)
+        K                  = self._eval_kernel(cdist)
         K[~np.isfinite(K)] = 0.0
         return K
 
@@ -230,11 +230,11 @@ class WrapData(Data):
                 self._distance_matrix = cdist_euclidean(
                     self.src_points, self.src_points
                 )
-                n            = len(self.src_points)
-                valid        = neighborhood >= 0
-                row_idx      = np.where(valid)[0]
+                n       = len(self.src_points)
+                valid   = neighborhood >= 0
+                row_idx = np.where(valid)[0]
                 neighbor_idx = neighborhood[valid]
-                reachable    = np.zeros((n, n), dtype=bool)
+                reachable = np.zeros((n, n), dtype=bool)
                 reachable[row_idx, neighbor_idx] = True
                 np.fill_diagonal(reachable, True)
                 self._distance_matrix[~reachable] = np.inf

@@ -101,9 +101,9 @@ class MorphData(Data):
             mag               = np.zeros((neighbors.shape[0],))
             mag[self.indices] = self.magnitudes
 
-            magnitudes = mag[failing_neighbors] > tolerance
-            magnitudes[failing_neighbors == -1] = False
-            magnitudes = np.any(magnitudes, axis=1)
+            magnitudes                                = mag[failing_neighbors] > tolerance
+            magnitudes[failing_neighbors == -1]       = False
+            magnitudes                                = np.any(magnitudes, axis=1)
             passing[np.where(failing)[0][magnitudes]] = True
 
         # set the offsets
@@ -119,8 +119,8 @@ class MorphData(Data):
     def sort(self):
         """sorts indices."""
         sorted_indices = np.argsort(self.indices)
-        self.indices = self.indices[sorted_indices]
-        self.offsets = self.offsets[sorted_indices]
+        self.indices   = self.indices[sorted_indices]
+        self.offsets   = self.offsets[sorted_indices]
 
     def __iadd__(self, other):
         """inplace add of two morph targets"""
@@ -135,7 +135,7 @@ class MorphData(Data):
                 merged_indices = np.concatenate([self.indices, other.indices])
                 merged_indices = np.unique(merged_indices)
 
-                offsets        = np.zeros((merged_indices.max() + 1, 3))
+                offsets               = np.zeros((merged_indices.max() + 1, 3))
                 offsets[self.indices] = self.offsets
                 offsets[other.indices] += other.offsets
 
@@ -183,7 +183,7 @@ class MorphData(Data):
                 merged_indices = np.concatenate([self.indices, other.indices])
                 merged_indices = np.unique(merged_indices)
 
-                offsets        = np.zeros((merged_indices.max() + 1, 3))
+                offsets               = np.zeros((merged_indices.max() + 1, 3))
                 offsets[self.indices] = self.offsets
                 offsets[other.indices] -= other.offsets
 
@@ -227,7 +227,7 @@ class MorphData(Data):
                 merged_indices = np.concatenate([self.indices, other.indices])
                 merged_indices = np.unique(merged_indices)
 
-                offsets        = np.zeros((merged_indices.max() + 1, 3))
+                offsets               = np.zeros((merged_indices.max() + 1, 3))
                 offsets[self.indices] = self.offsets
                 offsets[other.indices] *= other.offsets
 
@@ -274,7 +274,7 @@ class MorphData(Data):
         """inplace exponent of two morph targets"""
 
         # assume arithmetic exponent
-        abs_power = np.abs(self.offsets) ** other
+        abs_power    = np.abs(self.offsets) ** other
         self.offsets = np.sign(self.offsets) * abs_power
         return self
 

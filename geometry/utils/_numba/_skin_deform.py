@@ -114,7 +114,7 @@ def lbs_compact_fast(
     weights  = np.ascontiguousarray(np.asarray(weights, dtype=np.float64))
     matrices = np.ascontiguousarray(np.asarray(matrices, dtype=np.float64))
 
-    out      = np.empty_like(points)
+    out = np.empty_like(points)
     try:
         _lbs_compact(points, influence_indices, weights, matrices, out)
     except NumbaError:
@@ -382,15 +382,15 @@ def _dqs_compact(
             )
             sw = -w if dot < 0.0 else w
 
-            qx += sw * quats[j, 0]
-            qy += sw * quats[j, 1]
-            qz += sw * quats[j, 2]
-            qw += sw * quats[j, 3]
+            qx  += sw * quats[j, 0]
+            qy  += sw * quats[j, 1]
+            qz  += sw * quats[j, 2]
+            qw  += sw * quats[j, 3]
 
-            dx += sw * duals[j, 0]
-            dy += sw * duals[j, 1]
-            dz += sw * duals[j, 2]
-            dw += sw * duals[j, 3]
+            dx  += sw * duals[j, 0]
+            dy  += sw * duals[j, 1]
+            dz  += sw * duals[j, 2]
+            dw  += sw * duals[j, 3]
 
             s00 += w * stretch[j, 0, 0]
             s01 += w * stretch[j, 0, 1]
@@ -461,16 +461,16 @@ def _dqs_compact_numpy(
     Materializes an ``(N, K, 3, 3)`` gather, so it is far hungrier than the
     kernel and is not a supported standalone path.
     """
-    joints     = quats[influence_indices]
-    pivot      = np.argmax(weights, axis=1)
-    anchor     = quats[influence_indices[np.arange(len(points)), pivot]]
+    joints = quats[influence_indices]
+    pivot  = np.argmax(weights, axis=1)
+    anchor = quats[influence_indices[np.arange(len(points)), pivot]]
 
-    signed     = np.where(np.einsum("nkc,nc->nk", joints, anchor) < 0.0, -1.0, 1.0)
-    signed     = signed * weights
+    signed = np.where(np.einsum("nkc,nc->nk", joints, anchor) < 0.0, -1.0, 1.0)
+    signed = signed * weights
 
-    real       = np.einsum("nk,nkc->nc",   signed,  joints)
-    dual       = np.einsum("nk,nkc->nc",   signed,  duals[influence_indices])
-    scale      = np.einsum("nk,nkij->nij", weights, stretch[influence_indices])
+    real   = np.einsum("nk,nkc->nc",   signed,  joints)
+    dual   = np.einsum("nk,nkc->nc",   signed,  duals[influence_indices])
+    scale  = np.einsum("nk,nkij->nij", weights, stretch[influence_indices])
 
     norm       = np.linalg.norm(real, axis=1, keepdims=True)
     degenerate = (norm < _DEGENERATE).ravel()
@@ -478,18 +478,18 @@ def _dqs_compact_numpy(
     real       = real / safe
     dual       = dual / safe
 
-    scaled     = np.einsum("ni,nij->nj", points, scale)
+    scaled  = np.einsum("ni,nij->nj", points, scale)
 
-    vector     = real[:, :3]
-    scalar     = real[:, 3:4]
-    twice      = 2.0 * np.cross(vector, scaled)
-    rotated    = scaled + scalar * twice + np.cross(vector, twice)
+    vector  = real[:, :3]
+    scalar  = real[:, 3:4]
+    twice   = 2.0 * np.cross(vector, scaled)
+    rotated = scaled + scalar * twice + np.cross(vector, twice)
 
     shift = 2.0 * (
         scalar * dual[:, :3] - dual[:, 3:4] * vector + np.cross(vector, dual[:, :3])
     )
 
-    result = rotated + shift
+    result             = rotated + shift
     result[degenerate] = 0.0
     return result
 
@@ -523,7 +523,7 @@ def dqs_compact_fast(
     duals    = np.empty((count, 4),    dtype=np.float64)
     stretch  = np.empty((count, 3, 3), dtype=np.float64)
 
-    out      = np.empty_like(points)
+    out = np.empty_like(points)
     try:
         _dqs_decompose(matrices, quats, duals, stretch)
         _dqs_compact(points, influence_indices, weights, quats, duals, stretch, out)

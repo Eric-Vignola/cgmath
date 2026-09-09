@@ -23,7 +23,7 @@ EPSILON = 1e-9
 
 def translation(t) -> np.ndarray:
     """Row-vector translation matrix -- translation lives in the LAST ROW."""
-    m = np.eye(4, dtype=np.float64)
+    m        = np.eye(4, dtype=np.float64)
     m[3, :3] = t
     return m
 
@@ -47,10 +47,10 @@ def rotation(axis, degrees, translate=(0.0, 0.0, 0.0)) -> np.ndarray:
     c, s = np.cos(t), np.sin(t)
     cross = np.array([[0.0, -a[2], a[1]], [a[2], 0.0, -a[0]], [-a[1], a[0], 0.0]])
 
-    m     = np.eye(4, dtype=np.float64)
+    m = np.eye(4, dtype=np.float64)
     # row-vector is the transpose of the usual column-vector construction
     m[:3, :3] = (c * np.eye(3) + s * cross + (1.0 - c) * np.outer(a, a)).T
-    m[3, :3] = translate
+    m[3, :3]  = translate
     return m
 
 
@@ -81,7 +81,7 @@ def grid_mesh(n: int = 6) -> MeshData:
 
 def two_joint_skin(n_points: int, split: float = 1.0) -> SkinData:
     """`split` of each vertex on joint ``a``, the remainder on ``b``."""
-    weights = np.zeros((n_points, 2), dtype=np.float64)
+    weights       = np.zeros((n_points, 2), dtype=np.float64)
     weights[:, 0] = split
     weights[:, 1] = 1.0 - split
     return SkinData(weights=weights, influences=["a", "b"])
@@ -98,11 +98,11 @@ class TestConvention(unittest.TestCase):
 
     def test_single_influence_matches_the_package_point_transform(self):
         # ground truth is the library's own transform, not a hand-rolled one
-        points   = np.array([[1.0, 2.0, 3.0], [-4.0, 0.5, 7.0], [0.0, 0.0, 0.0]])
-        m        = translation([5.0, -2.0, 1.0]) @ scale([2.0, 3.0, 4.0])
+        points = np.array([[1.0, 2.0, 3.0], [-4.0, 0.5, 7.0], [0.0, 0.0, 0.0]])
+        m      = translation([5.0, -2.0, 1.0]) @ scale([2.0, 3.0, 4.0])
 
-        d        = deformer(points, two_joint_skin(3, split=1.0))
-        got      = d.deform(points, np.stack([m, np.eye(4)]))
+        d   = deformer(points, two_joint_skin(3, split=1.0))
+        got = d.deform(points, np.stack([m, np.eye(4)]))
 
         expected = matrix_point_multiply(points, np.tile(m[None], (3, 1, 1)))
         self.assertTrue(np.allclose(got, expected, atol=EPSILON))
@@ -174,8 +174,8 @@ class TestBlend(unittest.TestCase):
         weights  = np.array([[1.0, 0.0]])
         matrices = np.stack([translation([1.0, 2.0, 3.0]), np.full((4, 4), np.nan)])
 
-        fast     = lbs_compact_fast(points, indices, weights, matrices)
-        slow     = _lbs_compact_numpy(points, indices, weights, matrices)
+        fast = lbs_compact_fast(points, indices, weights, matrices)
+        slow = _lbs_compact_numpy(points, indices, weights, matrices)
         self.assertTrue(np.allclose(fast, [1.0, 2.0, 3.0], atol=EPSILON))
         self.assertTrue(np.allclose(slow, fast, atol=EPSILON))
 
@@ -199,8 +199,8 @@ class TestKernelParity(unittest.TestCase):
         weights /= weights.sum(axis=1, keepdims=True)
         matrices = rng.normal(size=(3, 4, 4))
 
-        fast     = lbs_compact_fast(points, indices, weights, matrices)
-        slow     = _lbs_compact_numpy(points, indices, weights, matrices)
+        fast = lbs_compact_fast(points, indices, weights, matrices)
+        slow = _lbs_compact_numpy(points, indices, weights, matrices)
         self.assertTrue(np.allclose(fast, slow, atol=1e-10))
 
     def test_compact_and_dense_skin_agree(self):
@@ -209,10 +209,10 @@ class TestKernelParity(unittest.TestCase):
         weights = rng.random((40, 5))
         weights /= weights.sum(axis=1, keepdims=True)
 
-        dense       = SkinData(weights=weights, influences=list("abcde"))
-        compact     = dense.to_compact_skin_data()
+        dense    = SkinData(weights=weights, influences=list("abcde"))
+        compact  = dense.to_compact_skin_data()
 
-        matrices    = np.stack([translation(rng.normal(size=3)) for _ in range(5)])
+        matrices = np.stack([translation(rng.normal(size=3)) for _ in range(5)])
 
         got_dense   = deformer(points, dense).deform(points, matrices)
         got_compact = deformer(points, compact).deform(points, matrices)
@@ -302,8 +302,8 @@ class TestRig(unittest.TestCase):
         points = np.array([[10.0, 0.0, 0.0]])
         skin   = SkinData(weights=np.array([[0.0, 1.0]]), influences=["a", "b"])
 
-        d      = SkinDeformData(mesh=points, skin=skin, bind_rig=rig)
-        got    = d.apply(rig)
+        d   = SkinDeformData(mesh=points, skin=skin, bind_rig=rig)
+        got = d.apply(rig)
         self.assertTrue(np.allclose(got, points, atol=1e-8))
 
     def test_posing_the_root_carries_the_child_bound_vertex(self):
@@ -311,10 +311,10 @@ class TestRig(unittest.TestCase):
         points = np.array([[10.0, 0.0, 0.0]])
         skin   = SkinData(weights=np.array([[0.0, 1.0]]), influences=["a", "b"])
 
-        d      = SkinDeformData(mesh=points, skin=skin, bind_rig=bind)
+        d = SkinDeformData(mesh=points, skin=skin, bind_rig=bind)
 
-        posed  = self._rig(offset=(0.0, 5.0, 0.0))
-        got    = d.apply(posed)
+        posed = self._rig(offset=(0.0, 5.0, 0.0))
+        got   = d.apply(posed)
         self.assertTrue(np.allclose(got, [[10.0, 5.0, 0.0]], atol=1e-8))
 
     def test_a_rotated_pose_pins_the_skin_matrix_order(self):
@@ -376,7 +376,7 @@ class TestApply(unittest.TestCase):
         before = mesh.points.copy()
         d      = deformer(mesh, two_joint_skin(len(mesh.points), split=1.0))
 
-        out    = d.apply(np.stack([translation([0.0, 4.0, 0.0]), np.eye(4)]), mesh)
+        out = d.apply(np.stack([translation([0.0, 4.0, 0.0]), np.eye(4)]), mesh)
 
         self.assertIsNot(out, mesh)
         self.assertTrue(np.array_equal(mesh.points, before))
@@ -405,7 +405,7 @@ class TestApply(unittest.TestCase):
         self.assertTrue(bool(hit.hit[0]))
 
     def test_the_returned_mesh_drops_bind_pose_normals(self):
-        mesh = grid_mesh()
+        mesh         = grid_mesh()
         mesh.normals = np.tile([0.0, 1.0, 0.0], (len(mesh.points), 1))
 
         d   = deformer(mesh, two_joint_skin(len(mesh.points), split=1.0))
@@ -463,7 +463,7 @@ class TestMethodSelector(unittest.TestCase):
     def test_changing_method_keeps_the_bind(self):
         d = deformer(np.zeros((1, 3)), two_joint_skin(1))
         d.bind()
-        indices = d.influence_indices
+        indices       = d.influence_indices
         d.method_enum = DeformMethod.LBS
         self.assertIs(d.influence_indices, indices)
 
@@ -480,7 +480,7 @@ class TestDualQuaternion(unittest.TestCase):
     """
 
     def setUp(self):
-        rng = np.random.default_rng(7)
+        rng         = np.random.default_rng(7)
         self.points = rng.normal(size=(64, 3)) * 3.0
 
     def both(self, points, indices, weights, matrices):
@@ -498,19 +498,19 @@ class TestDualQuaternion(unittest.TestCase):
         matrices = np.stack(
             [rotation([0.4, -0.2, 0.9], 77.0, [3.0, -1.0, 0.5]), np.eye(4)]
         )
-        indices = np.zeros((64, 2), dtype=np.int32)
-        weights = np.zeros((64, 2))
+        indices       = np.zeros((64, 2), dtype=np.int32)
+        weights       = np.zeros((64, 2))
         weights[:, 0] = 1.0
 
         lbs, dqs = self.both(self.points, indices, weights, matrices)
         self.assertTrue(np.allclose(lbs, dqs, atol=1e-10))
 
     def test_influences_sharing_one_rotation_match_lbs(self):
-        shared   = rotation([0.3, 0.9, -0.2], 44.0, [-2.0, 5.0, 1.0])
-        matrices = np.stack([shared, shared.copy()])
-        indices  = np.zeros((64, 2), dtype=np.int32)
+        shared        = rotation([0.3, 0.9, -0.2], 44.0, [-2.0, 5.0, 1.0])
+        matrices      = np.stack([shared, shared.copy()])
+        indices       = np.zeros((64, 2), dtype=np.int32)
         indices[:, 1] = 1
-        weights = np.empty((64, 2))
+        weights       = np.empty((64, 2))
         weights[:, 0] = 0.3
         weights[:, 1] = 0.7
 
@@ -524,9 +524,9 @@ class TestDualQuaternion(unittest.TestCase):
         matrices = np.stack(
             [translation([4.0, -2.0, 1.0]), translation([0.0, 3.0, 0.0])]
         )
-        indices = np.zeros((64, 2), dtype=np.int32)
+        indices       = np.zeros((64, 2), dtype=np.int32)
         indices[:, 1] = 1
-        weights = np.full((64, 2), 0.5)
+        weights       = np.full((64, 2), 0.5)
 
         lbs, dqs = self.both(self.points, indices, weights, matrices)
         self.assertTrue(np.allclose(lbs, dqs, atol=1e-10))
@@ -549,7 +549,7 @@ class TestDualQuaternion(unittest.TestCase):
         indices  = np.zeros((64, 1), dtype=np.int32)
         weights  = np.ones((64, 1))
 
-        got      = dqs_compact_fast(self.points, indices, weights, matrices)
+        got = dqs_compact_fast(self.points, indices, weights, matrices)
         self.assertTrue(np.allclose(got, self.points * [2.0, 3.0, 0.5], atol=1e-9))
 
     def test_rotation_and_scale_together_match_lbs_for_one_influence(self):
@@ -601,18 +601,18 @@ class TestDualQuaternion(unittest.TestCase):
         indices  = np.zeros((64, 1), dtype=np.int32)
         weights  = np.ones((64, 1))
 
-        got      = dqs_compact_fast(self.points, indices, weights, matrices)
+        got = dqs_compact_fast(self.points, indices, weights, matrices)
         self.assertTrue(np.isfinite(got).all())
         self.assertTrue(np.allclose(got, self.points * [-1.0, 1.0, 1.0], atol=1e-9))
 
     # -- where DQS is supposed to beat LBS -------------------------------- #
 
     def test_a_bend_holds_volume_where_lbs_collapses(self):
-        ring     = ring_points()
-        matrices = np.stack([np.eye(4), rotation([0.0, 0.0, 1.0], 120.0)])
-        indices  = np.zeros((len(ring), 2), dtype=np.int32)
+        ring          = ring_points()
+        matrices      = np.stack([np.eye(4), rotation([0.0, 0.0, 1.0], 120.0)])
+        indices       = np.zeros((len(ring), 2), dtype=np.int32)
         indices[:, 1] = 1
-        weights = np.full((len(ring), 2), 0.5)
+        weights       = np.full((len(ring), 2), 0.5)
 
         lbs, dqs = self.both(ring, indices, weights, matrices)
 
@@ -638,9 +638,9 @@ class TestDualQuaternion(unittest.TestCase):
         stretch = np.empty((2, 3, 3))
         _dqs_decompose(matrices, quats, duals, stretch)
 
-        indices = np.zeros((len(self.points), 2), dtype=np.int32)
+        indices       = np.zeros((len(self.points), 2), dtype=np.int32)
         indices[:, 1] = 1
-        weights  = np.full((len(self.points), 2), 0.5)
+        weights       = np.full((len(self.points), 2), 0.5)
 
         straight = np.empty_like(self.points)
         _dqs_compact(self.points, indices, weights, quats, duals, stretch, straight)
@@ -648,7 +648,7 @@ class TestDualQuaternion(unittest.TestCase):
         quats[1] = -quats[1]
         duals[1] = -duals[1]
 
-        flipped = np.empty_like(self.points)
+        flipped  = np.empty_like(self.points)
         _dqs_compact(self.points, indices, weights, quats, duals, stretch, flipped)
 
         self.assertTrue(np.allclose(straight, flipped, atol=1e-12))
@@ -672,11 +672,11 @@ class TestDualQuaternion(unittest.TestCase):
         # the fixture is only meaningful while it stays antipodal
         self.assertLess(float(np.dot(quats[0], quats[1])), 0.0)
 
-        indices = np.zeros((len(self.points), 2), dtype=np.int32)
+        indices       = np.zeros((len(self.points), 2), dtype=np.int32)
         indices[:, 1] = 1
-        weights = np.full((len(self.points), 2), 0.5)
+        weights       = np.full((len(self.points), 2), 0.5)
 
-        got     = dqs_compact_fast(self.points, indices, weights, matrices)
+        got = dqs_compact_fast(self.points, indices, weights, matrices)
 
         self.assertTrue(np.isfinite(got).all())
 
@@ -697,14 +697,14 @@ class TestDualQuaternion(unittest.TestCase):
                 rotation([1.0, 1.0, 0.0], 130.0, [0.0, -3.0, 1.0]),
             ]
         )
-        indices = np.zeros((len(ring), 2), dtype=np.int32)
+        indices       = np.zeros((len(ring), 2), dtype=np.int32)
         indices[:, 1] = 1
-        weights = np.full((len(ring), 2), 0.5)
+        weights       = np.full((len(ring), 2), 0.5)
 
-        got     = dqs_compact_fast(ring, indices, weights, matrices)
+        got = dqs_compact_fast(ring, indices, weights, matrices)
 
-        source  = np.linalg.norm(ring[:, None] - ring[None], axis=-1)
-        result  = np.linalg.norm(got[:, None] - got[None], axis=-1)
+        source = np.linalg.norm(ring[:, None] - ring[None], axis=-1)
+        result = np.linalg.norm(got[:, None] - got[None], axis=-1)
         self.assertTrue(np.allclose(source, result, atol=1e-9))
 
     # -- parity and plumbing ---------------------------------------------- #
@@ -749,9 +749,9 @@ class TestDualQuaternion(unittest.TestCase):
         self.assertTrue(np.isfinite(got).all())
 
     def test_the_bind_pose_is_a_fixed_point(self):
-        mesh     = grid_mesh()
-        skin     = two_joint_skin(len(mesh.points), split=0.5)
-        d        = deformer(mesh, skin, method="dqs")
+        mesh = grid_mesh()
+        skin = two_joint_skin(len(mesh.points), split=0.5)
+        d    = deformer(mesh, skin, method="dqs")
 
         identity = np.stack([np.eye(4), np.eye(4)])
 
@@ -860,10 +860,10 @@ class TestGuards(unittest.TestCase):
     """deform() is public and feeds an unchecked njit kernel."""
 
     def _three_joint(self) -> SkinDeformData:
-        points = np.zeros((4, 3))
-        w      = np.zeros((4, 3))
+        points  = np.zeros((4, 3))
+        w       = np.zeros((4, 3))
         w[:, 2] = 1.0
-        skin = SkinData(weights=w, influences=["a", "b", "c"])
+        skin    = SkinData(weights=w, influences=["a", "b", "c"])
         d = SkinDeformData(
             mesh=points, skin=skin, inverse_bind_matrices=np.stack([np.eye(4)] * 3)
         )
@@ -976,16 +976,16 @@ class TestCompactPadding(unittest.TestCase):
         rng   = np.random.default_rng(11)
         dense = np.zeros((20, 6))
         for i in range(20):
-            cols = rng.choice(6, size=2, replace=False)
-            w    = rng.random(2)
+            cols           = rng.choice(6, size=2, replace=False)
+            w              = rng.random(2)
             dense[i, cols] = w / w.sum()
 
         skin    = SkinData(weights=dense, influences=list("abcdef"))
         compact = skin.to_compact_skin_data()
         self.assertLess(compact.max_influences, 6)
 
-        points      = rng.normal(size=(20, 3))
-        matrices    = np.stack([translation(rng.normal(size=3)) for _ in range(6)])
+        points   = rng.normal(size=(20, 3))
+        matrices = np.stack([translation(rng.normal(size=3)) for _ in range(6)])
 
         got_dense   = deformer(points, skin).deform(points, matrices)
         got_compact = deformer(points, compact).deform(points, matrices)

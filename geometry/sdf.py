@@ -456,9 +456,9 @@ class SDFSphere(TransformData):
         scale     = self.scale
         min_scale = np.min(np.abs(scale))
 
-        R         = self.rotate_matrix
-        T         = np.eye(4)
-        T[3, :3] = self.translate
+        R              = self.rotate_matrix
+        T              = np.eye(4)
+        T[3, :3]       = self.translate
         rigid_matrix   = R @ T
         rigid_inv      = matrix_inverse(rigid_matrix)[0]
 
@@ -536,9 +536,9 @@ class SDFBox(TransformData):
         scale     = self.scale
         min_scale = np.min(np.abs(scale))
 
-        R         = self.rotate_matrix
-        T         = np.eye(4)
-        T[3, :3] = self.translate
+        R              = self.rotate_matrix
+        T              = np.eye(4)
+        T[3, :3]       = self.translate
         rigid_matrix   = R @ T
         rigid_inv      = matrix_inverse(rigid_matrix)[0]
 
@@ -620,11 +620,11 @@ class SDFCylinder(TransformData):
 
     def bounding_box(self) -> Tuple[np.ndarray, np.ndarray]:
         """Cylinder AABB: compute local extent, rotate, take AABB of rotated box."""
-        local_half = np.full(3, self._sdf_radius, dtype=np.float64)
+        local_half             = np.full(3, self._sdf_radius, dtype=np.float64)
         local_half[self._axis] = self._height / 2.0
-        local_half = local_half * self.scale
-        R          = self.rotate_matrix[:3, :3].T
-        world_half = np.abs(R) @ local_half
+        local_half             = local_half * self.scale
+        R                      = self.rotate_matrix[:3, :3].T
+        world_half             = np.abs(R) @ local_half
         return (self.translate - world_half, self.translate + world_half)
 
     def sample(self, X: np.ndarray, Y: np.ndarray, Z: np.ndarray) -> np.ndarray:
@@ -638,9 +638,9 @@ class SDFCylinder(TransformData):
         scale     = self.scale
         min_scale = np.min(np.abs(scale))
 
-        R         = self.rotate_matrix
-        T         = np.eye(4)
-        T[3, :3] = self.translate
+        R              = self.rotate_matrix
+        T              = np.eye(4)
+        T[3, :3]       = self.translate
         rigid_matrix   = R @ T
         rigid_inv      = matrix_inverse(rigid_matrix)[0]
 
@@ -959,9 +959,9 @@ def make_grid(
     min_bound = np.asarray(bounds[0], dtype=np.float64)
     max_bound = np.asarray(bounds[1], dtype=np.float64)
 
-    x         = np.linspace(min_bound[0], max_bound[0], shape[0])
-    y         = np.linspace(min_bound[1], max_bound[1], shape[1])
-    z         = np.linspace(min_bound[2], max_bound[2], shape[2])
+    x = np.linspace(min_bound[0], max_bound[0], shape[0])
+    y = np.linspace(min_bound[1], max_bound[1], shape[1])
+    z = np.linspace(min_bound[2], max_bound[2], shape[2])
 
     X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
 
@@ -1029,9 +1029,9 @@ def transform_points(
     points         = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=-1)
     local_points   = matrix_point(points, M_inv)
 
-    Xo             = local_points[:, 0].reshape(original_shape)
-    Yo             = local_points[:, 1].reshape(original_shape)
-    Zo             = local_points[:, 2].reshape(original_shape)
+    Xo = local_points[:, 0].reshape(original_shape)
+    Yo = local_points[:, 1].reshape(original_shape)
+    Zo = local_points[:, 2].reshape(original_shape)
 
     return Xo, Yo, Zo
 
@@ -1232,7 +1232,7 @@ def box_sdf(
     # Distance inside the box (negative)
     inside = np.minimum(np.maximum(qx, np.maximum(qy, qz)), 0)
 
-    sdf    = outside + inside
+    sdf = outside + inside
 
     # Compute grid parameters
     grid_origin  = min_bound.copy()
@@ -1272,11 +1272,11 @@ def cylinder_sdf(
     half_height = height / 2.0
 
     if bounds is None:
-        extent = np.full(3, radius)
+        extent       = np.full(3, radius)
         extent[axis] = half_height
-        padding   = 0.5 * radius
-        min_bound = center - extent - padding
-        max_bound = center + extent + padding
+        padding      = 0.5 * radius
+        min_bound    = center - extent - padding
+        max_bound    = center + extent + padding
     else:
         min_bound, max_bound = bounds
         min_bound = np.asarray(min_bound, dtype=np.float64)

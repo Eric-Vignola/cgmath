@@ -419,7 +419,7 @@ class TestWrapDataOrderIndependence(unittest.TestCase):
         offset        = np.array([0.1, 0.2, 0.3])
         target_points = mesh.points + offset
 
-        wrap1         = WrapData()
+        wrap1 = WrapData()
         wrap1.set_geodesic_radius(3.0)
         wrap1.set_kernel("wendland_c2")
         wrap1.set_source(mesh)
@@ -441,7 +441,7 @@ class TestWrapDataOrderIndependence(unittest.TestCase):
         offset        = np.array([0.1, 0.2, 0.3])
         target_points = mesh.points + offset
 
-        wrap          = WrapData(kernel="wendland_c2")
+        wrap = WrapData(kernel="wendland_c2")
         wrap.set_radius(1.5)
         wrap.set_source(mesh)
         wrap.set_target(target_points)
@@ -518,7 +518,7 @@ class TestWrapDataSaveLoad(unittest.TestCase):
         offset        = np.array([0.1, 0.2, 0.3])
         target_points = mesh.points + offset
 
-        wrap          = WrapData(kernel="wendland_c2")
+        wrap = WrapData(kernel="wendland_c2")
         wrap.set_geodesic_radius(3.0)
         wrap.set_source(mesh)
         wrap.set_target(target_points)

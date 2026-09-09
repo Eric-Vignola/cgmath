@@ -505,9 +505,9 @@ class TestTurntableGlobalPivot(unittest.TestCase):
         scene = self._scene_with_three()
         a, b, c = scene.objects
         # Pre-set arbitrary rotations.
-        a.rotate_y = 17.0
-        b.rotate_x = 33.0
-        c.rotate   = [11.0, 22.0, 33.0]
+        a.rotate_y  = 17.0
+        b.rotate_x  = 33.0
+        c.rotate    = [11.0, 22.0, 33.0]
 
         wm_a_before = a.world_matrix.copy()
         wm_b_before = b.world_matrix.copy()
@@ -726,17 +726,17 @@ class TestTurntableGlobalPivot(unittest.TestCase):
         radii_to_centroid     = []
         radii_to_world_origin = []
         for fi in range(8):
-            angle       = 360.0 * fi / 8
-            R_full      = _rotation_matrix_col("y", angle)
-            T_to_origin = np.eye(4)
-            T_to_origin[:3, 3] = -centroid
-            T_back = np.eye(4)
-            T_back[:3, 3] = centroid
-            base_with_pos = np.eye(4)
+            angle                 = 360.0 * fi / 8
+            R_full                = _rotation_matrix_col("y", angle)
+            T_to_origin           = np.eye(4)
+            T_to_origin[:3, 3]    = -centroid
+            T_back                = np.eye(4)
+            T_back[:3, 3]         = centroid
+            base_with_pos         = np.eye(4)
             base_with_pos[:3, :3] = R_cam
-            base_with_pos[:3, 3] = cam_world_pos_chosen
-            frame_cam = T_back @ R_full @ T_to_origin @ base_with_pos
-            eye       = frame_cam[:3, 3]
+            base_with_pos[:3, 3]  = cam_world_pos_chosen
+            frame_cam             = T_back @ R_full @ T_to_origin @ base_with_pos
+            eye                   = frame_cam[:3, 3]
             radii_to_centroid.append(float(np.linalg.norm(eye - centroid)))
             radii_to_world_origin.append(float(np.linalg.norm(eye)))
 
@@ -1413,27 +1413,27 @@ class TestObjectWireframe(unittest.TestCase):
 
     def test_wireframe_on_bakes_dark_pixels(self):
         with tempfile.TemporaryDirectory() as tmp:
-            obj = self._make_textured_obj(tmp)
+            obj           = self._make_textured_obj(tmp)
             obj.wireframe = True
-            tex  = obj.get_loaded_texture()
-            dark = (tex.sum(axis=-1) < 0.1).sum()
+            tex           = obj.get_loaded_texture()
+            dark          = (tex.sum(axis=-1) < 0.1).sum()
             self.assertGreater(int(dark), 0, "wireframe bake produced no dark texels")
 
     def test_wireframe_cache_reused_on_repeated_call(self):
         with tempfile.TemporaryDirectory() as tmp:
-            obj = self._make_textured_obj(tmp)
+            obj           = self._make_textured_obj(tmp)
             obj.wireframe = True
-            t1 = obj.get_loaded_texture()
-            t2 = obj.get_loaded_texture()
+            t1            = obj.get_loaded_texture()
+            t2            = obj.get_loaded_texture()
             self.assertIs(t1, t2, "second call should return cached array")
 
     def test_wireframe_color_change_invalidates_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
-            obj = self._make_textured_obj(tmp)
-            obj.wireframe = True
-            t1 = obj.get_loaded_texture()
+            obj                 = self._make_textured_obj(tmp)
+            obj.wireframe       = True
+            t1                  = obj.get_loaded_texture()
             obj.wireframe_color = (255, 0, 0)
-            t2 = obj.get_loaded_texture()
+            t2                  = obj.get_loaded_texture()
             self.assertIsNot(t1, t2)
 
     def test_wireframe_thickness_change_invalidates_cache(self):
@@ -1447,9 +1447,9 @@ class TestObjectWireframe(unittest.TestCase):
 
     def test_texture_change_invalidates_caches(self):
         with tempfile.TemporaryDirectory() as tmp:
-            obj = self._make_textured_obj(tmp)
+            obj           = self._make_textured_obj(tmp)
             obj.wireframe = True
-            _ = obj.get_loaded_texture()
+            _             = obj.get_loaded_texture()
             self.assertIsNotNone(obj._wired_texture_cache)
             # Re-assign texture to the same path: cache should clear.
             obj.texture = obj._texture
@@ -1458,12 +1458,12 @@ class TestObjectWireframe(unittest.TestCase):
 
     def test_wireframe_off_after_bake_returns_plain_diffuse(self):
         with tempfile.TemporaryDirectory() as tmp:
-            obj = self._make_textured_obj(tmp)
+            obj           = self._make_textured_obj(tmp)
             obj.wireframe = True
-            _ = obj.get_loaded_texture()  # populate wired cache
+            _             = obj.get_loaded_texture()  # populate wired cache
             obj.wireframe = False
-            tex  = obj.get_loaded_texture()
-            dark = (tex.sum(axis=-1) < 0.1).sum()
+            tex           = obj.get_loaded_texture()
+            dark          = (tex.sum(axis=-1) < 0.1).sum()
             self.assertEqual(int(dark), 0, "should fall back to plain diffuse")
 
     def test_wireframe_renders_with_dark_pixels_in_image(self):
@@ -1507,13 +1507,13 @@ class TestObjectFrameRenderConfig(unittest.TestCase):
         self.assertEqual(obj.samples_per_pixel, 4)
 
     def test_resolution_setter_coerces_to_int_tuple(self):
-        obj = Object(name="cube", mesh=self.mesh)
+        obj            = Object(name="cube", mesh=self.mesh)
         obj.resolution = [800.0, 600.0]
         self.assertEqual(obj.resolution, (800, 600))
         self.assertIsInstance(obj.resolution[0], int)
 
     def test_samples_per_pixel_setter_accepts_none(self):
-        obj = Object(name="cube", mesh=self.mesh, samples_per_pixel=4)
+        obj                   = Object(name="cube", mesh=self.mesh, samples_per_pixel=4)
         obj.samples_per_pixel = None
         self.assertIsNone(obj.samples_per_pixel)
 
@@ -1527,13 +1527,13 @@ class TestObjectFrameRenderConfig(unittest.TestCase):
         self.assertIsNone(obj.frame)
 
     def test_resolution_no_op_change_does_not_clear_cache(self):
-        obj = Object(name="cube", mesh=self.mesh)
+        obj            = Object(name="cube", mesh=self.mesh)
         obj.frame      = "sentinel"
         obj.resolution = obj.resolution  # set to the same value
         self.assertEqual(obj.frame, "sentinel")
 
     def test_samples_per_pixel_change_clears_cached_frame(self):
-        obj = Object(name="cube", mesh=self.mesh)
+        obj       = Object(name="cube", mesh=self.mesh)
         obj.frame = "sentinel-frame"
         # Use a value different from the new default (4); 9 is the next
         # perfect square up that the renderer accepts.
@@ -1541,7 +1541,7 @@ class TestObjectFrameRenderConfig(unittest.TestCase):
         self.assertIsNone(obj.frame)
 
     def test_samples_per_pixel_no_op_change_does_not_clear_cache(self):
-        obj = Object(name="cube", mesh=self.mesh, samples_per_pixel=4)
+        obj                   = Object(name="cube", mesh=self.mesh, samples_per_pixel=4)
         obj.frame             = "sentinel"
         obj.samples_per_pixel = 4
         self.assertEqual(obj.frame, "sentinel")
@@ -1549,7 +1549,7 @@ class TestObjectFrameRenderConfig(unittest.TestCase):
     # -- render() / turntable() use the per-Object defaults -----------
 
     def test_render_uses_self_resolution_when_kwarg_omitted(self):
-        obj = Object(name="cube", mesh=self.mesh)
+        obj            = Object(name="cube", mesh=self.mesh)
         obj.resolution = (320, 240)
         with patch.object(Scene, "render", return_value="sentinel") as mock_render:
             obj.render()
@@ -1557,7 +1557,7 @@ class TestObjectFrameRenderConfig(unittest.TestCase):
         self.assertEqual(kwargs["resolution"], (320, 240))
 
     def test_render_uses_self_samples_per_pixel_when_kwarg_omitted(self):
-        obj = Object(name="cube", mesh=self.mesh)
+        obj                   = Object(name="cube", mesh=self.mesh)
         obj.samples_per_pixel = 4
         with patch.object(Scene, "render", return_value="sentinel") as mock_render:
             obj.render()
@@ -1578,7 +1578,7 @@ class TestObjectFrameRenderConfig(unittest.TestCase):
         self.assertNotIn("samples_per_pixel", kwargs)
 
     def test_render_explicit_resolution_kwarg_wins(self):
-        obj = Object(name="cube", mesh=self.mesh)
+        obj            = Object(name="cube", mesh=self.mesh)
         obj.resolution = (320, 240)
         with patch.object(Scene, "render", return_value="sentinel") as mock_render:
             obj.render(resolution=(640, 480))
@@ -1586,7 +1586,7 @@ class TestObjectFrameRenderConfig(unittest.TestCase):
         self.assertEqual(kwargs["resolution"], (640, 480))
 
     def test_render_explicit_samples_per_pixel_kwarg_wins(self):
-        obj = Object(name="cube", mesh=self.mesh)
+        obj                   = Object(name="cube", mesh=self.mesh)
         obj.samples_per_pixel = 4
         with patch.object(Scene, "render", return_value="sentinel") as mock_render:
             obj.render(samples_per_pixel=9)
@@ -1594,7 +1594,7 @@ class TestObjectFrameRenderConfig(unittest.TestCase):
         self.assertEqual(kwargs.get("samples_per_pixel"), 9)
 
     def test_turntable_uses_self_resolution_when_kwarg_omitted(self):
-        obj = Object(name="cube", mesh=self.mesh)
+        obj            = Object(name="cube", mesh=self.mesh)
         obj.resolution = (320, 240)
         with patch.object(Scene, "turntable", return_value=[]) as mock_tt:
             obj.turntable(n_frames=1)
@@ -1602,7 +1602,7 @@ class TestObjectFrameRenderConfig(unittest.TestCase):
         self.assertEqual(kwargs["resolution"], (320, 240))
 
     def test_turntable_uses_self_samples_per_pixel_when_kwarg_omitted(self):
-        obj = Object(name="cube", mesh=self.mesh)
+        obj                   = Object(name="cube", mesh=self.mesh)
         obj.samples_per_pixel = 4
         with patch.object(Scene, "turntable", return_value=[]) as mock_tt:
             obj.turntable(n_frames=1)
@@ -1620,7 +1620,7 @@ class TestObjectFrameRenderConfig(unittest.TestCase):
         Scene-level default (``(500, 500)``) so this test isolates the
         Object-leak invariant from the Scene's own resolution default.
         """
-        obj = Object(name="cube", mesh=self.mesh)
+        obj                   = Object(name="cube", mesh=self.mesh)
         obj.resolution        = (640, 480)
         obj.samples_per_pixel = 4
 
@@ -2047,7 +2047,7 @@ class TestFrameCacheInvalidation(unittest.TestCase):
     def _seed_frame(self, obj):
         """Stand-in for a cached render result; any non-None value will
         do since :meth:`imshow` / :meth:`to_image` only check ``is None``."""
-        sentinel = object()
+        sentinel  = object()
         obj.frame = sentinel
         return sentinel
 
@@ -2086,7 +2086,7 @@ class TestFrameCacheInvalidation(unittest.TestCase):
         obj = Object(
             name="cube", mesh=self.mesh, uv=self.uv, base_color=(0.5, 0.5, 0.5)
         )
-        sentinel = self._seed_frame(obj)
+        sentinel       = self._seed_frame(obj)
         obj.base_color = (0.5, 0.5, 0.5)
         self.assertIs(obj.frame, sentinel)
 
@@ -2097,8 +2097,8 @@ class TestFrameCacheInvalidation(unittest.TestCase):
         self.assertIsNone(obj.frame)
 
     def test_wireframe_setter_no_op_preserves_frame(self):
-        obj      = Object(name="cube", mesh=self.mesh, uv=self.uv, wireframe=True)
-        sentinel = self._seed_frame(obj)
+        obj           = Object(name="cube", mesh=self.mesh, uv=self.uv, wireframe=True)
+        sentinel      = self._seed_frame(obj)
         obj.wireframe = True
         self.assertIs(obj.frame, sentinel)
 
@@ -2150,13 +2150,13 @@ class TestFrameCacheInvalidation(unittest.TestCase):
         self.assertIsNone(obj.frame)
 
     def test_sample_method_setter_no_op_preserves_frame(self):
-        obj      = Object(name="cube", mesh=self.mesh, uv=self.uv, sample_method="bilinear")
-        sentinel = self._seed_frame(obj)
+        obj               = Object(name="cube", mesh=self.mesh, uv=self.uv, sample_method="bilinear")
+        sentinel          = self._seed_frame(obj)
         obj.sample_method = "bilinear"
         self.assertIs(obj.frame, sentinel)
 
     def test_sample_method_setter_coerces_to_str(self):
-        obj = Object(name="cube", mesh=self.mesh, uv=self.uv)
+        obj               = Object(name="cube", mesh=self.mesh, uv=self.uv)
         obj.sample_method = 42
         self.assertEqual(obj.sample_method, "42")
         self.assertIsInstance(obj.sample_method, str)
@@ -2174,7 +2174,7 @@ class TestFrameCacheInvalidation(unittest.TestCase):
         self.assertIs(obj.frame, sentinel)
 
     def test_wrap_setter_coerces_to_str(self):
-        obj = Object(name="cube", mesh=self.mesh, uv=self.uv)
+        obj      = Object(name="cube", mesh=self.mesh, uv=self.uv)
         obj.wrap = 0
         self.assertEqual(obj.wrap, "0")
         self.assertIsInstance(obj.wrap, str)
@@ -2186,13 +2186,13 @@ class TestFrameCacheInvalidation(unittest.TestCase):
         self.assertIsNone(obj.frame)
 
     def test_ambient_setter_no_op_preserves_frame(self):
-        obj      = Object(name="cube", mesh=self.mesh, uv=self.uv, ambient=0.25)
-        sentinel = self._seed_frame(obj)
+        obj         = Object(name="cube", mesh=self.mesh, uv=self.uv, ambient=0.25)
+        sentinel    = self._seed_frame(obj)
         obj.ambient = 0.25
         self.assertIs(obj.frame, sentinel)
 
     def test_ambient_setter_coerces_to_float(self):
-        obj = Object(name="cube", mesh=self.mesh, uv=self.uv)
+        obj         = Object(name="cube", mesh=self.mesh, uv=self.uv)
         obj.ambient = 1
         self.assertEqual(obj.ambient, 1.0)
         self.assertIsInstance(obj.ambient, float)
@@ -2204,13 +2204,13 @@ class TestFrameCacheInvalidation(unittest.TestCase):
         self.assertIsNone(obj.frame)
 
     def test_twosided_setter_no_op_preserves_frame(self):
-        obj      = Object(name="cube", mesh=self.mesh, uv=self.uv, twosided=True)
-        sentinel = self._seed_frame(obj)
+        obj          = Object(name="cube", mesh=self.mesh, uv=self.uv, twosided=True)
+        sentinel     = self._seed_frame(obj)
         obj.twosided = True
         self.assertIs(obj.frame, sentinel)
 
     def test_twosided_setter_coerces_to_bool(self):
-        obj = Object(name="cube", mesh=self.mesh, uv=self.uv, twosided=False)
+        obj          = Object(name="cube", mesh=self.mesh, uv=self.uv, twosided=False)
         obj.twosided = 1
         self.assertIs(obj.twosided, True)
 
@@ -2221,13 +2221,13 @@ class TestFrameCacheInvalidation(unittest.TestCase):
         self.assertIsNone(obj.frame)
 
     def test_cast_shadows_setter_no_op_preserves_frame(self):
-        obj      = Object(name="cube", mesh=self.mesh, uv=self.uv, cast_shadows=True)
-        sentinel = self._seed_frame(obj)
+        obj              = Object(name="cube", mesh=self.mesh, uv=self.uv, cast_shadows=True)
+        sentinel         = self._seed_frame(obj)
         obj.cast_shadows = True
         self.assertIs(obj.frame, sentinel)
 
     def test_cast_shadows_setter_coerces_to_bool(self):
-        obj = Object(name="cube", mesh=self.mesh, uv=self.uv, cast_shadows=False)
+        obj              = Object(name="cube", mesh=self.mesh, uv=self.uv, cast_shadows=False)
         obj.cast_shadows = 1
         self.assertIs(obj.cast_shadows, True)
 
@@ -2271,7 +2271,7 @@ class TestObjectTransformCacheInvalidation(unittest.TestCase):
         self.mesh, _ = _make_textured_cube()
 
     def _seed_frame(self, obj):
-        sentinel = object()
+        sentinel  = object()
         obj.frame = sentinel
         return sentinel
 
@@ -2320,9 +2320,9 @@ class TestObjectTransformCacheInvalidation(unittest.TestCase):
     def test_world_matrix_assignment_invalidates_frame(self):
         obj = Object(name="cube", mesh=self.mesh)
         self._seed_frame(obj)
-        new_matrix = np.eye(4)
+        new_matrix        = np.eye(4)
         new_matrix[3, :3] = [5.0, 5.0, 5.0]
-        obj.world_matrix = new_matrix
+        obj.world_matrix  = new_matrix
         self.assertIsNone(obj.frame)
 
     def test_no_transform_change_keeps_cache(self):
@@ -2390,7 +2390,7 @@ class TestSceneCacheInvalidation(unittest.TestCase):
         return scene
 
     def _seed_frame(self, scene):
-        sentinel = object()
+        sentinel    = object()
         scene.frame = sentinel
         return sentinel
 
@@ -2590,8 +2590,8 @@ def _build_glb(json_dict: dict, bin_data: bytes = b"") -> bytes:
     json_pad   = (4 - (len(json_bytes) % 4)) % 4
     json_bytes += b" " * json_pad
 
-    bin_pad      = (4 - (len(bin_data) % 4)) % 4
-    bin_bytes    = bin_data + b"\x00" * bin_pad
+    bin_pad   = (4 - (len(bin_data) % 4)) % 4
+    bin_bytes = bin_data + b"\x00" * bin_pad
 
     total_length = 12 + 8 + len(json_bytes)
     if bin_data:
@@ -2995,7 +2995,7 @@ class TestObjectSerialization(unittest.TestCase):
         obj._loaded_texture         = np.zeros((4, 4, 3), dtype=np.uint8)
         obj._wired_texture_cache    = np.zeros((4, 4, 3), dtype=np.float32)
         obj._render_transform_state = ("dummy",)
-        d = obj.to_dict()
+        d                           = obj.to_dict()
         for k in (
             "_loaded_texture",
             "_wired_texture_cache",
@@ -3402,7 +3402,7 @@ class TestBackgroundProperty(unittest.TestCase):
             Scene("s", background=(0.0, 0.0, 0.0, -0.1))
 
     def test_setter_normalizes_rgb(self):
-        obj = Object(name="x")
+        obj            = Object(name="x")
         obj.background = (0.1, 0.2, 0.3)
         self.assertEqual(obj.background, (0.1, 0.2, 0.3, 1.0))
 
@@ -3457,7 +3457,7 @@ class TestBackgroundProperty(unittest.TestCase):
         from cgmath.render import raytracer as rt
 
         mesh, uv = _make_textured_cube()
-        obj      = Object(name="x", mesh=mesh, uv=uv, background=(1.0, 0.0, 0.0))
+        obj = Object(name="x", mesh=mesh, uv=uv, background=(1.0, 0.0, 0.0))
 
         captured = {}
 
@@ -3743,7 +3743,7 @@ class TestObjectTriangulate(unittest.TestCase):
         np.testing.assert_array_equal(obj.mesh.counts, obj.uv.counts)
 
     def test_triangulate_works_with_no_uv(self):
-        obj = self._quad_obj()
+        obj    = self._quad_obj()
         obj.uv = None
         obj.triangulate()
         self.assertTrue(np.all(obj.mesh.counts == 3))
@@ -3763,7 +3763,7 @@ class TestObjectTriangulate(unittest.TestCase):
 
     @unittest.skipUnless(_HAS_RASTERIZER, "needs cv2 or scikit-image")
     def test_triangulate_invalidates_wireframe_bake(self):
-        obj = self._quad_obj()
+        obj           = self._quad_obj()
         obj.wireframe = True
         # Force a bake.
         _ = obj.get_loaded_texture()

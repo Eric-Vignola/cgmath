@@ -354,9 +354,9 @@ class Frame:
                 in_front = pts_local[:, 2] < -1e-6
                 # Avoid divide-by-zero on culled points -- they get masked
                 # off by `edge_visible` below before any pixel is drawn.
-                z_safe       = np.where(in_front, pts_local[:, 2], -1.0)
-                pix_x        = (pts_local[:, 0] / -z_safe / half_w + 1.0) * 0.5 * W
-                pix_y        = (1.0 - pts_local[:, 1] / -z_safe / half_h) * 0.5 * H
+                z_safe = np.where(in_front, pts_local[:, 2], -1.0)
+                pix_x  = (pts_local[:, 0] / -z_safe / half_w + 1.0) * 0.5 * W
+                pix_y  = (1.0 - pts_local[:, 1] / -z_safe / half_h) * 0.5 * H
 
                 a            = edge_pairs[:, 0]
                 b            = edge_pairs[:, 1]
@@ -540,7 +540,7 @@ class Frame:
             )
         bg_uint8 = (bg_rgb * 255.0).astype(np.float32)  # kept as float for math
 
-        out      = os.path.expandvars(os.path.expanduser(output))
+        out = os.path.expandvars(os.path.expanduser(output))
 
         # Peek at the first frame to learn dimensions and validate the format.
         frames_iter = iter(frames)
@@ -713,7 +713,7 @@ class Frame:
             ValueError: If ``frames`` is empty or contains frames whose
                 channel count is neither 3 nor 4.
         """
-        out         = os.path.expandvars(os.path.expanduser(output))
+        out = os.path.expandvars(os.path.expanduser(output))
 
         frames_iter = iter(frames)
         try:
@@ -1063,13 +1063,13 @@ def _iter_wireframe_primitives(
             try:
                 prim["face_normals"] = _world_face_normals(mesh, world_rotation_3x3)
                 prim["face_centres"] = _face_centres_world(world_pts, mesh)
-                prim["e2f"] = _e2f(mesh)
+                prim["e2f"]          = _e2f(mesh)
             except Exception:
                 # If any of the topology accessors blow up, fall back to
                 # X-ray for this primitive (skip cull rather than crashing).
                 prim["face_normals"] = None
                 prim["face_centres"] = None
-                prim["e2f"] = None
+                prim["e2f"]          = None
         return prim
 
     if isinstance(source, Scene):

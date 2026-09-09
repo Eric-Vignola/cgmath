@@ -60,10 +60,10 @@ def _walk_vertex_ring(pair_prev, pair_next, lo, n_pairs, start, out_row, used_ro
     Returns the number of neighbours written and whether the ring closed
     back onto *start*.
     """
-    capacity = out_row.shape[0]
+    capacity   = out_row.shape[0]
     out_row[0] = start
-    length = 1
-    cur    = start
+    length     = 1
+    cur        = start
 
     for _ in range(n_pairs):
         sel = -1
@@ -75,7 +75,7 @@ def _walk_vertex_ring(pair_prev, pair_next, lo, n_pairs, start, out_row, used_ro
             break
 
         used_row[sel] = True
-        nxt = pair_next[lo + sel]
+        nxt           = pair_next[lo + sel]
         if nxt == start:
             return length, True
         if length >= capacity:
@@ -128,7 +128,7 @@ def _chain_vertex_rings(
         n_pairs = pair_offsets[i + 1] - lo
 
         if n_pairs <= 0:
-            out_valence[i] = 0
+            out_valence[i]  = 0
             out_boundary[i] = True
             continue
 
@@ -140,7 +140,7 @@ def _chain_vertex_rings(
             pair_prev, pair_next, lo, n_pairs, start, out_ring[i], used[i]
         )
 
-        out_valence[i] = length
+        out_valence[i]  = length
         out_boundary[i] = not closed
 
 
@@ -212,7 +212,7 @@ def _compute_decal_maps(
         target = math.pi if is_boundary[i] else _TWO_PI
         scale  = target / total if total > 1e-8 else 1.0
 
-        cum    = 0.0
+        cum = 0.0
         for k in range(val):
             _, _, _, length = _edge_direction(points, i, ring[i, k])
             out_decals[i, k, 0] = length * math.cos(cum)
@@ -305,7 +305,7 @@ def _compute_span_weights(
 
         total = 0.0
         for k in range(val):
-            w = _span_weight(decals[i], val, k)
+            w                 = _span_weight(decals[i], val, k)
             out_weights[i, k] = w
             total += w
 
@@ -337,7 +337,7 @@ def _lift_to_3d(tx, ty, decals, ring, points, i, val, boundary):
     best_z    = points[i, 2]
     best_dist = 1e30
 
-    n_tri     = val - 1 if boundary else val
+    n_tri = val - 1 if boundary else val
 
     for k in range(n_tri):
         kn    = k + 1 if k + 1 < val else 0

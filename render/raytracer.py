@@ -577,7 +577,7 @@ def _render_scene(
         if winner.any():
             z_color[winner] = sample_color[winner]
             z_depth[winner] = sample_distance[winner]
-            z_hit[winner] = True
+            z_hit[winner]   = True
 
     return z_color, z_hit, z_depth
 
@@ -670,7 +670,7 @@ def _shade_mesh_per_sample(
     if is_world:
         sample_distance[sample_hit] = raycast.distances[sample_hit]
     else:
-        diff = hit_proj - origins[sample_hit]
+        diff                        = hit_proj - origins[sample_hit]
         sample_distance[sample_hit] = np.linalg.norm(diff, axis=1)
 
     return sample_color, sample_hit, sample_distance
@@ -702,11 +702,11 @@ def _compose_scene_output(
     :meth:`Frame.wireframe` can project geometry to screen without the
     caller re-passing camera info.
     """
-    n_total    = n_pixels * spp
+    n_total = n_pixels * spp
 
-    per_sample = np.zeros((n_total, 4), dtype=np.float32)
+    per_sample            = np.zeros((n_total, 4), dtype=np.float32)
     per_sample[z_hit, :3] = z_color[z_hit]
-    per_sample[z_hit, 3] = 1.0
+    per_sample[z_hit, 3]  = 1.0
 
     rendered   = _resolve_msaa(per_sample, n_pixels, spp)
     composited = _composite_over(rendered, background)
@@ -749,8 +749,8 @@ def _resolve_msaa(per_sample: np.ndarray, n_pixels: int, spp: int) -> np.ndarray
     safe_n       = np.maximum(n_hits, 1.0)[:, None]
     avg_color    = sum_color / safe_n
     out          = np.zeros((n_pixels, 4), dtype=np.float32)
-    out[:, :3] = avg_color.astype(np.float32)
-    out[:, 3] = coverage.astype(np.float32)
+    out[:, :3]   = avg_color.astype(np.float32)
+    out[:, 3]    = coverage.astype(np.float32)
     return out
 
 
@@ -786,17 +786,17 @@ def _composite_over(
     if np.any(bg < 0.0) or np.any(bg > 1.0):
         raise ValueError(f"background components must be in [0, 1]; got {bg_rgba!r}")
 
-    src_a           = src[:, 3:4]
-    dst_a           = float(bg[3])
-    src_pm          = src[:, :3] * src_a
-    dst_pm          = bg[:3] * dst_a
+    src_a  = src[:, 3:4]
+    dst_a  = float(bg[3])
+    src_pm = src[:, :3] * src_a
+    dst_pm = bg[:3] * dst_a
 
     one_minus_src_a = 1.0 - src_a
     out_pm_rgb      = src_pm + dst_pm * one_minus_src_a
     out_a           = src_a + dst_a * one_minus_src_a
 
-    safe_a          = np.where(out_a > 1e-6, out_a, 1.0)
-    out_rgb         = np.where(out_a > 1e-6, out_pm_rgb / safe_a, 0.0)
+    safe_a  = np.where(out_a > 1e-6, out_a, 1.0)
+    out_rgb = np.where(out_a > 1e-6, out_pm_rgb / safe_a, 0.0)
 
     return np.concatenate([out_rgb, out_a], axis=1).astype(np.float32)
 
@@ -806,7 +806,7 @@ def _resolve_msaa_depth(
 ) -> np.ndarray:
     """Per-pixel depth = closest hit-sample distance, NaN where all miss."""
     if spp == 1:
-        depth = np.full(n_pixels, np.nan, dtype=np.float64)
+        depth      = np.full(n_pixels, np.nan, dtype=np.float64)
         depth[hit] = distances[hit]
         return depth
 
@@ -821,9 +821,9 @@ def _interpolate_uvs(
     """Interpolate UVs at hit points using bilinear weights."""
     uv_geom = uv.geometry
     if uv_geom.shape[1] < 4:
-        padded = np.full((uv_geom.shape[0], 4), -1, dtype=uv_geom.dtype)
+        padded                        = np.full((uv_geom.shape[0], 4), -1, dtype=uv_geom.dtype)
         padded[:, : uv_geom.shape[1]] = uv_geom
-        uv_geom = padded
+        uv_geom                       = padded
     hit_uv_idx     = uv_geom[hit_face_idx]
     safe_uv_idx    = np.where(hit_uv_idx >= 0, hit_uv_idx, 0)
     hit_uv_corners = uv.points[safe_uv_idx]
@@ -850,7 +850,7 @@ def _generate_camera_rays(
     half_h = np.tan(fov_y * 0.5)
     half_w = half_h * aspect
 
-    sub    = (np.arange(n_axis, dtype=np.float64) + 0.5) / n_axis
+    sub = (np.arange(n_axis, dtype=np.float64) + 0.5) / n_axis
     sub_x, sub_y = np.meshgrid(sub, sub, indexing="xy")
     sub_x = sub_x.ravel()
     sub_y = sub_y.ravel()
@@ -871,7 +871,7 @@ def _generate_camera_rays(
     ).reshape(-1, 3)
     cam_dirs = cam_dirs / np.linalg.norm(cam_dirs, axis=1, keepdims=True)
 
-    R        = camera_matrix[:3, :3]
+    R = camera_matrix[:3, :3]
     # Silence spurious BLAS warnings on Apple Accelerate (matmul on arm64).
     with np.errstate(all="ignore"):
         world_dirs = cam_dirs @ R.T
@@ -897,7 +897,7 @@ def _generate_camera_rays_orthographic(
     half_h = 0.5 * ortho_height
     half_w = half_h * aspect
 
-    sub    = (np.arange(n_axis, dtype=np.float64) + 0.5) / n_axis
+    sub = (np.arange(n_axis, dtype=np.float64) + 0.5) / n_axis
     sub_x, sub_y = np.meshgrid(sub, sub, indexing="xy")
     sub_x = sub_x.ravel()
     sub_y = sub_y.ravel()
@@ -990,7 +990,7 @@ def _shade_one_light(
     dist     = np.sqrt(np.maximum(dist2, 1e-20))
     L        = to_light / dist[:, None]
 
-    NdotL    = np.maximum(np.einsum("ij,ij->i", N, L), 0.0)
+    NdotL = np.maximum(np.einsum("ij,ij->i", N, L), 0.0)
     if falloff:
         attenuation = intensity / dist2
     else:

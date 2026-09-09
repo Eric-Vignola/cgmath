@@ -87,7 +87,7 @@ class TestWrapCaching(unittest.TestCase):
         self.cage_points = np.asarray(self.cage.points)
         self.mesh        = np.asarray(_make_grid_mesh(9, height=0.15).points)
 
-        self.wrap        = WrapData()
+        self.wrap = WrapData()
         self.wrap.set_source(self.cage)
         self.wrap.set_target(self.cage_points.copy())
         self.wrap.deform(self.mesh)

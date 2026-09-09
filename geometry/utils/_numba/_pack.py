@@ -64,7 +64,7 @@ def _rasterize_faces(bitmap, points, f2v, counts):
             for i in range(n_x - 1):
                 for j in range(i + 1, n_x):
                     if x_buf[j] < x_buf[i]:
-                        tmp = x_buf[i]
+                        tmp      = x_buf[i]
                         x_buf[i] = x_buf[j]
                         x_buf[j] = tmp
 
@@ -104,7 +104,7 @@ def _skyline_find_best_position(
     best_place_y = 0
     best_total_h = 2147483647  # int32 max
 
-    max_x        = canvas_width - bitmap_w
+    max_x = canvas_width - bitmap_w
     for x in range(max_x + 1):
         # compute placement y: for each occupied column, the island's top-row
         # in that column must sit above the skyline

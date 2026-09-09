@@ -89,7 +89,7 @@ class TestDeltaMushData(unittest.TestCase):
         """When pin_borders=True border vertices stay put after smoothing."""
         rest = _make_grid_mesh(n=8, jitter=0.0, seed=2)
         # add jitter only on borders so smoothing would normally move them
-        border_idx = rest.get_border_vertices(flatten=True)
+        border_idx                 = rest.get_border_vertices(flatten=True)
         rest.points[border_idx, 2] = 0.25
 
         mush = DeltaMushData(rest, smooth_iterations=20, pin_borders=True)
@@ -118,7 +118,7 @@ class TestDeltaMushData(unittest.TestCase):
         )
         rest_var = rest.points[interior, 2].var()
 
-        mush     = DeltaMushData(rest, smooth_iterations=15, pin_borders=True)
+        mush = DeltaMushData(rest, smooth_iterations=15, pin_borders=True)
         mush.bind()
 
         smooth_var = mush.smoothed_points[interior, 2].var()
@@ -133,9 +133,9 @@ class TestDeltaMushData(unittest.TestCase):
                     rest, smooth_iterations=10, pin_borders=True, method=method
                 )
                 mush.bind()
-                deformed = rest.copy()
+                deformed        = rest.copy()
                 deformed.points = deformed.points + np.array([1.5, -2.0, 0.7])
-                out = mush.apply(deformed)
+                out             = mush.apply(deformed)
                 np.testing.assert_allclose(out.points, deformed.points, atol=1e-6)
 
     def test_reconstruct_after_rotation_all_methods(self):
@@ -155,9 +155,9 @@ class TestDeltaMushData(unittest.TestCase):
                     rest, smooth_iterations=10, pin_borders=True, method=method
                 )
                 mush.bind()
-                deformed = rest.copy()
+                deformed        = rest.copy()
                 deformed.points = deformed.points @ R.T
-                out = mush.apply(deformed)
+                out             = mush.apply(deformed)
                 # the reconstruction should match the rotated rest within
                 # smoothing-frame discretisation tolerance
                 np.testing.assert_allclose(out.points, deformed.points, atol=5e-3)
@@ -200,7 +200,7 @@ class TestDeltaMushData(unittest.TestCase):
         mush = DeltaMushData(rest, smooth_iterations=10, pin_borders=True, weight=0.5)
         mush.bind()
 
-        deformed = rest.copy()
+        deformed        = rest.copy()
         deformed.points = deformed.points + np.array([0.0, 0.0, 1.0])
 
         out = mush.apply(deformed)
@@ -212,8 +212,8 @@ class TestDeltaMushData(unittest.TestCase):
         np.testing.assert_allclose(out.points, deformed.points, atol=1e-6)
 
     def test_weight_clamped(self):
-        rest = _make_grid_mesh(n=4, jitter=0.0, seed=10)
-        mush = DeltaMushData(rest, smooth_iterations=2, pin_borders=False)
+        rest        = _make_grid_mesh(n=4, jitter=0.0, seed=10)
+        mush        = DeltaMushData(rest, smooth_iterations=2, pin_borders=False)
         mush.weight = 5.0
         self.assertEqual(mush.weight, 1.0)
         mush.weight = -1.0

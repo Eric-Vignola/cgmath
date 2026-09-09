@@ -105,7 +105,7 @@ class TestHierarchy(unittest.TestCase):
         resampler = MeshDataResampler(self.src_mesh_data, self.dst_mesh_data)
 
         # Create a modified version of src_mesh with offset points
-        modified_mesh = self.src_mesh_data.copy()
+        modified_mesh        = self.src_mesh_data.copy()
         modified_mesh.points = modified_mesh.points + np.array([0.1, 0.1, 0.1])
 
         # Test resampling with explicit mesh_data parameter
@@ -158,10 +158,10 @@ class TestHierarchy(unittest.TestCase):
 
         # Create a MapData object from skin data
         # MapData requires a single weight value
-        skin_data = self.src_skin_data.copy()
+        skin_data            = self.src_skin_data.copy()
         skin_data.influences = [skin_data.influences[0]]
-        rng = np.random.default_rng(seed=42)
-        skin_data.weights = rng.random((skin_data.weights.shape[0],1))
+        rng                  = np.random.default_rng(seed=42)
+        skin_data.weights    = rng.random((skin_data.weights.shape[0],1))
         map_data = MapData.from_skin_data(
             skin_data,
             mesh_data      = self.src_mesh_data,
@@ -195,10 +195,10 @@ class TestHierarchy(unittest.TestCase):
 
         # Create a GeomSubsetData object from skin data
         # GeomSubsetData requires a single weight value
-        skin_data = self.src_skin_data.copy()
+        skin_data            = self.src_skin_data.copy()
         skin_data.influences = [skin_data.influences[0]]
-        rng = np.random.default_rng(seed=42)
-        skin_data.weights = rng.random((skin_data.weights.shape[0],1))
+        rng                  = np.random.default_rng(seed=42)
+        skin_data.weights    = rng.random((skin_data.weights.shape[0],1))
         geom_subset = GeomSubsetData.from_skin_data(
             skin_data,
             mesh_data      = self.src_mesh_data,
@@ -299,8 +299,8 @@ class TestHierarchy(unittest.TestCase):
         resampler = MeshDataResampler(self.src_mesh_data, self.dst_mesh_data)
 
         # Create a distorted version of the source mesh
-        distorted = self.src_mesh_data.copy()
-        rng       = np.random.default_rng(seed=123)
+        distorted        = self.src_mesh_data.copy()
+        rng              = np.random.default_rng(seed=123)
         distorted.points = distorted.points + rng.normal(scale=0.05, size=distorted.points.shape)
 
         resampled_orient = resampler.resample_mesh(

@@ -316,7 +316,7 @@ class TestData(unittest.TestCase):
         self.assertIsNot(obj, obj_copy)
 
         # Modifying copy should not affect original
-        obj_copy.name = "modified"
+        obj_copy.name      = "modified"
         obj_copy.values[0] = 999.0
         self.assertNotEqual(obj.name, obj_copy.name)
         self.assertNotEqual(obj.values[0], obj_copy.values[0])
@@ -439,7 +439,7 @@ class TestData(unittest.TestCase):
 
     def test_to_json(self):
         """Test to_json() method"""
-        obj      = TestDataClass(name="test", values=np.array([1.0, 2.0, 3.0]), count=5)
+        obj = TestDataClass(name="test", values=np.array([1.0, 2.0, 3.0]), count=5)
 
         json_str = obj.to_json()
         self.assertIsInstance(json_str, str)
@@ -453,9 +453,9 @@ class TestDataListClass(unittest.TestCase):
     def setUp(self):
         super().setUp()
 
-        self.obj1      = TestDataClass(name="obj1", values=np.array([1.0, 2.0]), count=1)
-        self.obj2      = TestDataClass(name="obj2", values=np.array([3.0, 4.0]), count=2)
-        self.obj3      = TestDataClass(name="obj3", values=np.array([5.0, 6.0]), count=3)
+        self.obj1 = TestDataClass(name="obj1", values=np.array([1.0, 2.0]), count=1)
+        self.obj2 = TestDataClass(name="obj2", values=np.array([3.0, 4.0]), count=2)
+        self.obj3 = TestDataClass(name="obj3", values=np.array([5.0, 6.0]), count=3)
 
         self.data_list = TestDataList([self.obj1, self.obj2, self.obj3])
 

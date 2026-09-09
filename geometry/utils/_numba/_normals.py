@@ -61,10 +61,10 @@ def _split_at_hard_edges(
             keys[pos] = np.int64(fi) * np.int64(n_verts) + np.int64(indices[pos])
             pos += 1
 
-    order        = np.argsort(keys)
-    sorted_keys  = keys[order]
+    order       = np.argsort(keys)
+    sorted_keys = keys[order]
 
-    parent       = np.arange(n_fv, dtype=np.int64)
+    parent = np.arange(n_fv, dtype=np.int64)
 
     n_edges      = e2f.shape[0]
     n_face_slots = e2f.shape[1]
@@ -109,10 +109,10 @@ def _split_at_hard_edges(
             # union-find with path halving
             while parent[a] != a:
                 parent[a] = parent[parent[a]]
-                a = parent[a]
+                a         = parent[a]
             while parent[b] != b:
                 parent[b] = parent[parent[b]]
-                b = parent[b]
+                b         = parent[b]
             if a != b:
                 if a < b:
                     parent[b] = a
@@ -166,7 +166,7 @@ def _build_tri_expand_map(counts: np.ndarray, rules: np.ndarray) -> np.ndarray:
     for fi in range(n_faces):
         c = counts[fi]
         if c == 3:
-            out[write] = pos
+            out[write]     = pos
             out[write + 1] = pos + 1
             out[write + 2] = pos + 2
             write += 3
@@ -174,7 +174,7 @@ def _build_tri_expand_map(counts: np.ndarray, rules: np.ndarray) -> np.ndarray:
             r = rules[fi]
             if r == 0:
                 # split 0-2: (1,2,0) + (0,2,3)
-                out[write] = pos + 1
+                out[write]     = pos + 1
                 out[write + 1] = pos + 2
                 out[write + 2] = pos
                 out[write + 3] = pos
@@ -182,7 +182,7 @@ def _build_tri_expand_map(counts: np.ndarray, rules: np.ndarray) -> np.ndarray:
                 out[write + 5] = pos + 3
             else:
                 # split 1-3: (0,1,3) + (3,1,2)
-                out[write] = pos
+                out[write]     = pos
                 out[write + 1] = pos + 1
                 out[write + 2] = pos + 3
                 out[write + 3] = pos + 3

@@ -166,8 +166,8 @@ class TestRobustBilinearSkinTransfer(unittest.TestCase):
 
     def test_unmatched_vertex_is_inpainted_from_its_neighbours(self):
         # lift one interior vertex clear of the search radius
-        dst_mesh = quad_grid(5, 5, spacing=1.0)
-        lifted   = 12
+        dst_mesh                   = quad_grid(5, 5, spacing=1.0)
+        lifted                     = 12
         dst_mesh.points[lifted, 2] = 1.0
 
         weights = robust_skinweights_transfer_bilinear(
@@ -185,7 +185,7 @@ class TestRobustBilinearSkinTransfer(unittest.TestCase):
         self.assertAlmostEqual(float(weights[lifted].sum()), 1.0, places=9)
 
     def test_output_is_finite_and_non_negative(self):
-        dst_mesh = quad_grid(5, 5, spacing=1.0)
+        dst_mesh               = quad_grid(5, 5, spacing=1.0)
         dst_mesh.points[12, 2] = 1.0
 
         weights = robust_skinweights_transfer_bilinear(
@@ -196,8 +196,8 @@ class TestRobustBilinearSkinTransfer(unittest.TestCase):
         self.assertTrue(np.all(weights >= 0.0))
 
     def test_smoothing_can_be_disabled(self):
-        options  = RobustBilinearSkinTransferOptions(smooth_iterations=0)
-        dst_mesh = quad_grid(5, 5, spacing=1.0)
+        options                = RobustBilinearSkinTransferOptions(smooth_iterations=0)
+        dst_mesh               = quad_grid(5, 5, spacing=1.0)
         dst_mesh.points[12, 2] = 1.0
 
         weights = robust_skinweights_transfer_bilinear(
@@ -216,7 +216,7 @@ class TestRobustBilinearSkinTransfer(unittest.TestCase):
             )
 
     def test_unreferenced_source_vertices_raise(self):
-        src_mesh = quad_grid(5, 5, spacing=1.0)
+        src_mesh        = quad_grid(5, 5, spacing=1.0)
         src_mesh.points = np.vstack([src_mesh.points, [[9.0, 9.0, 9.0]]])
         src_skin = SkinData(
             weights=np.ones((src_mesh.points.shape[0], 1)), influences=["a"]
@@ -228,7 +228,7 @@ class TestRobustBilinearSkinTransfer(unittest.TestCase):
             )
 
     def test_unreferenced_target_vertices_raise(self):
-        dst_mesh = quad_grid(5, 5, spacing=1.0)
+        dst_mesh        = quad_grid(5, 5, spacing=1.0)
         dst_mesh.points = np.vstack([dst_mesh.points, [[9.0, 9.0, 9.0]]])
 
         with self.assertRaises(ValueError):

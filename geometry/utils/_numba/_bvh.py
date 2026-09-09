@@ -102,8 +102,8 @@ def build_bvh(
         face_ids = face_perm[first : first + count]
 
         # Bounds for this node: union of the contained per-face AABBs.
-        sub_min = aabb_min[face_ids]
-        sub_max = aabb_max[face_ids]
+        sub_min                = aabb_min[face_ids]
+        sub_max                = aabb_max[face_ids]
         node_aabb_min[node_id] = sub_min.min(axis=0)
         node_aabb_max[node_id] = sub_max.max(axis=0)
 
@@ -129,12 +129,12 @@ def build_bvh(
         order      = np.argsort(cents[:, axis], kind="stable")
         sorted_ids = face_ids[order]
         face_perm[first : first + count] = sorted_ids
-        mid      = count // 2
+        mid = count // 2
 
         left_id  = next_node_id
         right_id = next_node_id + 1
         next_node_id += 2
-        node_left[node_id] = left_id
+        node_left[node_id]  = left_id
         node_right[node_id] = right_id
 
         # Push right first so left is processed next - keeps cache locality

@@ -129,13 +129,13 @@ class TestSkinData(unittest.TestCase):
         self.assertTrue(skin.influences != self.skin_cube.influences)
 
     def test_sort(self):
-        skin = self.skin_cube.copy()
-        skin.weights[0] = 0.0
+        skin               = self.skin_cube.copy()
+        skin.weights[0]    = 0.0
         skin.weights[0, 0] = 1.0
         self.assertTrue(skin.weights[0, 0] == 1)
         self.assertTrue(skin.weights[0, -1] == 0)
 
-        last_name = "|zzzzzzzzzzzzzzzzzzzzz"
+        last_name          = "|zzzzzzzzzzzzzzzzzzzzz"
         skin.influences[0] = last_name
 
         skin.sort()
@@ -374,8 +374,8 @@ class TestSkinData(unittest.TestCase):
         plane2    = self.plane2.copy()
         skin_cube = self.skin_cube.copy()
 
-        obj1      = SkinList([plane1, plane2, skin_cube])
-        obj2      = obj1[[2, 1, 0]]
+        obj1           = SkinList([plane1, plane2, skin_cube])
+        obj2           = obj1[[2, 1, 0]]
         skin_cube.name = "POOF!"
         self.assertTrue(obj1[2].name == "POOF!")
         self.assertTrue(obj2[0].name == "POOF!")
@@ -426,7 +426,7 @@ class TestCompactSkinData(unittest.TestCase):
         self.assertTrue(self.compact_skin.valid)
 
         # Make invalid by zeroing weights
-        invalid_compact = self.compact_skin.copy()
+        invalid_compact            = self.compact_skin.copy()
         invalid_compact.weights[:] = 0
         self.assertFalse(invalid_compact.valid)
 
@@ -687,7 +687,7 @@ class TestSkinDataSymmetry(unittest.TestCase):
         )
 
         # Create asymmetric skin weights
-        self.skin_asymmetric = self.skin_symmetric.copy()
+        self.skin_asymmetric            = self.skin_symmetric.copy()
         self.skin_asymmetric.weights[1] = [0.1, 0.1, 0.6, 0.2]  # Break symmetry
 
     def test_get_symmetry_map(self):

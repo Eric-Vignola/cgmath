@@ -208,9 +208,9 @@ class TestSaddleSurfaceSample(unittest.TestCase):
         triangle_points   = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
         triangle_geometry = np.array([[0, 1, 2]])
 
-        query_points      = np.array([[0.25, 0.25, 0.5]])
+        query_points = np.array([[0.25, 0.25, 0.5]])
 
-        sample_data       = sample(query_points, triangle_points, triangle_geometry)
+        sample_data  = sample(query_points, triangle_points, triangle_geometry)
 
         self.assertIsInstance(sample_data, SampleData)
         self.assertEqual(sample_data.projections.shape[0], 1)

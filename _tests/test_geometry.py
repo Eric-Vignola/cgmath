@@ -247,7 +247,7 @@ class TestMesh(unittest.TestCase):
         self.assertTrue(np.all(y==[1]))
 
     def test_clusters(self):
-        mesh     = self.plane_with_hole.copy()
+        mesh = self.plane_with_hole.copy()
 
         clusters = mesh.get_edge_vertex_clusters([0,5])
         self.assertTrue(np.allclose(clusters, [np.array([0]), np.array([5])]))
@@ -305,13 +305,13 @@ class TestMesh(unittest.TestCase):
 
     def test_load_obj_utility_multi_mesh(self):
         # test module-level save_obj / load_obj round-trip with multiple meshes
-        mesh_a = self.box.copy()
+        mesh_a      = self.box.copy()
         mesh_a.name = "boxA"
-        uv_a   = self.box_uv.copy()
+        uv_a        = self.box_uv.copy()
 
-        mesh_b = self.box.copy()
+        mesh_b      = self.box.copy()
         mesh_b.name = "boxB"
-        uv_b = self.box_uv.copy()
+        uv_b        = self.box_uv.copy()
 
         with tempfile.TemporaryDirectory() as temp_dir:
             f = os.path.join(temp_dir, "multi.obj")
@@ -654,7 +654,7 @@ class TestMesh(unittest.TestCase):
             self.box.from_vertices(rules, exclude=True)
 
     def test_subset_rules_clear_normals(self):
-        mesh = self.box.copy()
+        mesh                = self.box.copy()
         mesh.normals        = np.zeros((24, 3))
         mesh.normal_indices = np.arange(24)
 
@@ -1253,7 +1253,7 @@ class TestMesh(unittest.TestCase):
 
     def test_edge_lengths(self):
         """Test get_edge_lengths method"""
-        mesh         = self.plane.copy()
+        mesh = self.plane.copy()
 
         edge_lengths = mesh.get_edge_lengths()
         self.assertEqual(edge_lengths.shape[0], mesh.edge_count)
@@ -1266,7 +1266,7 @@ class TestMesh(unittest.TestCase):
 
     def test_edge_normals(self):
         """Test get_edge_normals method"""
-        mesh         = self.box.copy()
+        mesh = self.box.copy()
 
         edge_normals = mesh.get_edge_normals()
         self.assertEqual(edge_normals.shape[0], mesh.edge_count)
@@ -1520,7 +1520,7 @@ class TestMesh(unittest.TestCase):
         uv_to_nrm = build_uv_to_normal_map(
             uvdata.indices, mesh.indices, uvdata.point_count,
         )
-        N      = mesh.normals[uv_to_nrm]
+        N = mesh.normals[uv_to_nrm]
 
         T      = tangents[:, :3]
         dot_NT = np.abs(np.einsum("ij,ij->i", N, T))
@@ -1625,7 +1625,7 @@ class TestMesh(unittest.TestCase):
         face_det    = ds1 * dt2 - ds2 * dt1
         degen_faces = set(np.where(np.abs(face_det) < 1e-12)[0])
 
-        tested      = 0
+        tested = 0
         for entry in expected:
             fi = entry["face"]
             if fi in degen_faces:
@@ -1670,7 +1670,7 @@ class TestMesh(unittest.TestCase):
         face_det    = ds1 * dt2 - ds2 * dt1
         degen_faces = set(np.where(np.abs(face_det) < 1e-12)[0])
 
-        tested      = 0
+        tested = 0
         for entry in expected:
             fi = entry["face"]
             if fi in degen_faces:
@@ -1750,8 +1750,8 @@ class TestMesh(unittest.TestCase):
         expected_tangents   = np.array([er[0::8], er[1::8], er[2::8]]).T
         expected_bitangents = np.array([er[3::8], er[4::8], er[5::8]]).T
 
-        fv_tangents         = tangents[uvdata.indices, :3]
-        fv_bitangents       = bitangents[uvdata.indices]
+        fv_tangents   = tangents[uvdata.indices, :3]
+        fv_bitangents = bitangents[uvdata.indices]
 
         self.assertTrue(
             np.allclose(fv_tangents, expected_tangents, atol=1e-4),
@@ -2437,7 +2437,7 @@ class TestBSpline(unittest.TestCase):
 
     def test_compute_open_uniform_extrapolation_high(self):
         """For open uniform curves, u > 1 extrapolates linearly along the endpoint tangent."""
-        obj = self.open_curve.copy()
+        obj         = self.open_curve.copy()
         obj.uniform = True
 
         # Reference: position and native tangent at the endpoint (u=1).
@@ -2462,14 +2462,14 @@ class TestBSpline(unittest.TestCase):
 
     def test_compute_open_uniform_extrapolation_low(self):
         """For open uniform curves, u < 0 extrapolates backward from the start."""
-        obj = self.open_curve.copy()
+        obj         = self.open_curve.copy()
         obj.uniform = True
 
         p_start, t_start = obj.compute(0.0)
         total_length = obj.total_length
         t_unit       = t_start / np.linalg.norm(t_start)
 
-        u_extrap     = -0.3
+        u_extrap = -0.3
         p_ex, t_ex = obj.compute(u_extrap)
 
         # u < 0 => motion opposite to the start tangent (extends backward).
@@ -2481,7 +2481,7 @@ class TestBSpline(unittest.TestCase):
 
     def test_compute_open_uniform_extrapolation_mixed_array(self):
         """Array input with a mix of in-range, sub-zero, and beyond-one u values."""
-        obj = self.open_curve.copy()
+        obj         = self.open_curve.copy()
         obj.uniform = True
 
         p_start, t_start = obj.compute(0.0)
@@ -2490,7 +2490,7 @@ class TestBSpline(unittest.TestCase):
         t_unit_start = t_start / np.linalg.norm(t_start)
         t_unit_end   = t_end / np.linalg.norm(t_end)
 
-        u            = np.array([-0.2, 0.0, 0.5, 1.0, 1.4])
+        u = np.array([-0.2, 0.0, 0.5, 1.0, 1.4])
         points, tangents = obj.compute(u)
 
         # In-range entries are unaffected.
@@ -2510,7 +2510,7 @@ class TestBSpline(unittest.TestCase):
 
     def test_compute_fast_open_uniform_extrapolation(self):
         """compute_fast() applies the same extrapolation as compute()."""
-        obj = self.open_curve.copy()
+        obj         = self.open_curve.copy()
         obj.uniform = True
 
         u = np.array([-0.5, 0.5, 1.5])
@@ -2523,11 +2523,11 @@ class TestBSpline(unittest.TestCase):
 
     def test_compute_open_uniform_extrapolation_scipy_matches_numba(self):
         """Numba and scipy code paths produce identical extrapolated values."""
-        obj_numba = self.open_curve.copy()
+        obj_numba           = self.open_curve.copy()
         obj_numba.uniform   = True
         obj_numba.use_numba = True
 
-        obj_scipy = self.open_curve.copy()
+        obj_scipy           = self.open_curve.copy()
         obj_scipy.uniform   = True
         obj_scipy.use_numba = False
 
@@ -2541,7 +2541,7 @@ class TestBSpline(unittest.TestCase):
 
     def test_compute_periodic_uniform_no_extrapolation(self):
         """Periodic uniform curves wrap via modulo -- they do not extrapolate."""
-        obj = self.closed_curve.copy()
+        obj         = self.closed_curve.copy()
         obj.uniform = True
 
         # u=1.5 in periodic uniform space => one full loop + half loop = u=0.5.
@@ -2618,7 +2618,7 @@ class TestBSpline(unittest.TestCase):
         obj       = self.open_curve.copy()
         max_param = obj.max_param
 
-        u         = np.array([-0.5, max_param * 0.5, max_param + 1.0])
+        u = np.array([-0.5, max_param * 0.5, max_param + 1.0])
         p_compute, t_compute = obj.compute(u)
         p_fast, t_fast = obj.compute_fast(u)
 
@@ -2628,10 +2628,10 @@ class TestBSpline(unittest.TestCase):
 
     def test_compute_open_non_uniform_extrapolation_scipy_matches_numba(self):
         """Numba and scipy code paths produce identical extrapolated values for non-uniform open."""
-        obj_numba = self.open_curve.copy()
+        obj_numba           = self.open_curve.copy()
         obj_numba.use_numba = True
 
-        obj_scipy = self.open_curve.copy()
+        obj_scipy           = self.open_curve.copy()
         obj_scipy.use_numba = False
 
         max_param = obj_numba.max_param
@@ -2683,11 +2683,11 @@ class TestBSpline(unittest.TestCase):
         self.assertTrue(allclose(samples.basis, samples_copy.basis))
 
         # Modify the original
-        samples.points[0, 0] += 100.0
+        samples.points[0, 0]   += 100.0
         samples.tangents[0, 0] += 100.0
-        samples.distances[0] += 100.0
-        samples.params[0] += 100.0
-        samples.basis[0, 0] += 100.0
+        samples.distances[0]   += 100.0
+        samples.params[0]      += 100.0
+        samples.basis[0, 0]    += 100.0
 
         # Verify the copy is unaffected (deep copy)
         self.assertFalse(allclose(samples.points, samples_copy.points))
@@ -2961,8 +2961,8 @@ class TestUVList(unittest.TestCase):
         map1 = self.map1.copy()
         map2 = self.map2.copy()
 
-        obj1 = UVList([map0, map1, map2])
-        obj2 = obj1[[2, 1, 0]]
+        obj1      = UVList([map0, map1, map2])
+        obj2      = obj1[[2, 1, 0]]
         map2.name = 'POOF!'
         self.assertTrue(obj1[2].name == 'POOF!')
         self.assertTrue(obj2[0].name == 'POOF!')
@@ -3130,8 +3130,8 @@ class TestMeshList(unittest.TestCase):
         mesh1 = self.mesh1.copy()
         mesh2 = self.mesh2.copy()
 
-        obj1  = MeshList([mesh0, mesh1, mesh2])
-        obj2  = obj1[[2, 1, 0]]
+        obj1       = MeshList([mesh0, mesh1, mesh2])
+        obj2       = obj1[[2, 1, 0]]
         mesh2.name = 'POOF!'
         self.assertTrue(obj1[2].name == 'POOF!')
         self.assertTrue(obj2[0].name == 'POOF!')
@@ -3540,9 +3540,9 @@ class TestTopologicalNeighborhood(unittest.TestCase):
         v0_neighbors = neighbors[0]
         v0_dists     = dists[0]
 
-        idx1         = np.where(v0_neighbors == 1)[0][0]
-        idx2         = np.where(v0_neighbors == 2)[0][0]
-        idx3         = np.where(v0_neighbors == 3)[0][0]
+        idx1 = np.where(v0_neighbors == 1)[0][0]
+        idx2 = np.where(v0_neighbors == 2)[0][0]
+        idx3 = np.where(v0_neighbors == 3)[0][0]
 
         self.assertAlmostEqual(v0_dists[idx1], 1.0, places=5)
         self.assertAlmostEqual(v0_dists[idx2], 1.1, places=5)
@@ -4234,8 +4234,8 @@ class TestBezierSampling(unittest.TestCase):
         result_bi = sphere_cube.sample(queries, method=SampleMethod.BILINEAR)
         result_bz = sphere_cube.sample(queries, method=SampleMethod.BEZIER)
 
-        err_bi    = np.abs(result_bi.distances - true_dist)
-        err_bz    = np.abs(result_bz.distances - true_dist)
+        err_bi = np.abs(result_bi.distances - true_dist)
+        err_bz = np.abs(result_bz.distances - true_dist)
 
         self.assertLess(
             np.mean(err_bz),
@@ -4256,7 +4256,7 @@ class TestBezierSampling(unittest.TestCase):
 
     def test_bezier_default_is_bilinear(self):
         """Default sample method should be bilinear (no normals passed to kernel)."""
-        queries         = np.array([[0.0, 0.0, 2.0]], dtype=np.float64)
+        queries = np.array([[0.0, 0.0, 2.0]], dtype=np.float64)
 
         result_default  = self.cube.sample(queries)
         result_bilinear = self.cube.sample(queries, method=SampleMethod.BILINEAR)
@@ -4268,7 +4268,7 @@ class TestBezierSampling(unittest.TestCase):
 
     def test_bezier_string_method(self):
         """SampleMethod should accept string values."""
-        queries     = np.array([[0.0, 0.0, 2.0]], dtype=np.float64)
+        queries = np.array([[0.0, 0.0, 2.0]], dtype=np.float64)
 
         result_enum = self.cube.sample(queries, method=SampleMethod.BEZIER)
         result_str  = self.cube.sample(queries, method="bezier")
@@ -4339,8 +4339,8 @@ class TestBSplinePatchData(unittest.TestCase):
 
             # private data excluded
             obj1._custom_data = "test"
-            b    = obj1.to_bytes()
-            obj6 = BSplinePatchData.from_bytes(b)
+            b                 = obj1.to_bytes()
+            obj6              = BSplinePatchData.from_bytes(b)
             self.assertFalse(hasattr(obj6, "_custom_data"))
 
     # -------------------------------------------------------------- #
@@ -4416,7 +4416,7 @@ class TestBSplinePatchData(unittest.TestCase):
             u = np.linspace(0.1, patch.max_param_u - 0.1, 8)
             v = np.linspace(0.1, patch.max_param_v - 0.1, 8)
             uu, vv = np.meshgrid(u, v, indexing='ij')
-            pts     = patch.evaluate(uu.ravel(), vv.ravel())
+            pts = patch.evaluate(uu.ravel(), vv.ravel())
 
             samples = patch.sample(pts)
             self.assertTrue(np.allclose(samples.distances, 0, atol=1e-6),
@@ -4629,7 +4629,7 @@ class TestBSplinePatchData(unittest.TestCase):
 
     def test_extrapolation_open_uniform_high(self):
         """U > 1 on open-uniform U extrapolates along total_length_u * unit_S_u."""
-        patch = self.open_open.copy()
+        patch           = self.open_open.copy()
         patch.uniform_u = True
         patch.uniform_v = True
 
@@ -4642,7 +4642,7 @@ class TestBSplinePatchData(unittest.TestCase):
         unit_su = su_end / norm if norm > 1e-14 else np.zeros_like(su_end)
         vel_u   = total_u * unit_su
 
-        u_ex    = 1.4
+        u_ex = 1.4
         p_ex, su_ex, _ = patch.compute(u_ex, v)
 
         expected = p_end + (u_ex - 1.0) * vel_u
@@ -4654,8 +4654,8 @@ class TestBSplinePatchData(unittest.TestCase):
         patch = self.open_open
         max_u = patch.max_param_u
 
-        v     = np.array([1.0, 1.0, 1.0, 1.0, 1.0])
-        u     = np.array([-0.3, 0.0, max_u * 0.5, max_u, max_u + 0.7])
+        v = np.array([1.0, 1.0, 1.0, 1.0, 1.0])
+        u = np.array([-0.3, 0.0, max_u * 0.5, max_u, max_u + 0.7])
         pts, su, sv = patch.compute(u, v)
 
         # In-range entries: should match standalone evaluations.
@@ -4692,8 +4692,8 @@ class TestBSplinePatchData(unittest.TestCase):
         max_u = patch.max_param_u
         max_v = patch.max_param_v
 
-        u     = np.array([-0.5, 0.5, max_u + 0.7])
-        v     = np.array([0.5, max_v + 0.3, 0.5])
+        u = np.array([-0.5, 0.5, max_u + 0.7])
+        v = np.array([0.5, max_v + 0.3, 0.5])
 
         pts_compute, _, _ = patch.compute(u, v)
         pts_evaluate = patch.evaluate(u, v)
@@ -4706,8 +4706,8 @@ class TestBSplinePatchData(unittest.TestCase):
         max_u = patch.max_param_u
         max_v = patch.max_param_v
 
-        u     = np.array([-0.5, 0.5, max_u + 0.7])
-        v     = np.array([0.5, max_v + 0.3, 0.5])
+        u = np.array([-0.5, 0.5, max_u + 0.7])
+        v = np.array([0.5, max_v + 0.3, 0.5])
 
         pts_a, su_a, sv_a = patch.compute(u, v)
         pts_b, su_b, sv_b = patch.compute_fast(u, v)
@@ -4718,10 +4718,10 @@ class TestBSplinePatchData(unittest.TestCase):
 
     def test_extrapolation_scipy_matches_numba(self):
         """Numba and scipy code paths agree on extrapolated values."""
-        patch_n = self.open_open.copy()
+        patch_n           = self.open_open.copy()
         patch_n.use_numba = True
 
-        patch_s = self.open_open.copy()
+        patch_s           = self.open_open.copy()
         patch_s.use_numba = False
 
         max_u = patch_n.max_param_u
@@ -4770,7 +4770,7 @@ class TestBSplinePatchData(unittest.TestCase):
         origin    = anchor + d * normal
         direction = -normal
 
-        result    = patch.raycast(np.array([origin]), np.array([direction]))
+        result = patch.raycast(np.array([origin]), np.array([direction]))
 
         from cgmath.geometry.bspline_patch import PatchRaycastData
         self.assertIsInstance(result, PatchRaycastData)
@@ -4785,7 +4785,7 @@ class TestBSplinePatchData(unittest.TestCase):
         origin    = anchor + 1.5 * normal
         direction = -normal
 
-        result    = patch.raycast(np.array([origin]), np.array([direction]))
+        result = patch.raycast(np.array([origin]), np.array([direction]))
         self.assertTrue(result.hit[0])
 
         # Normals are unit length and point toward the ray (occluded=True
@@ -4800,7 +4800,7 @@ class TestBSplinePatchData(unittest.TestCase):
         origin    = np.array([0.0, 0.0, 100.0])
         direction = np.array([0.0, 0.0, 1.0])
 
-        result    = patch.raycast(np.array([origin]), np.array([direction]))
+        result = patch.raycast(np.array([origin]), np.array([direction]))
         self.assertFalse(result.hit[0])
         self.assertTrue(np.isnan(result.distances[0]))
         self.assertTrue(np.allclose(result.points[0], origin))

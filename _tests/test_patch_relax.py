@@ -70,18 +70,18 @@ def _make_cube_mesh() -> MeshData:
 def _uniform_laplacian(mesh, points, iterations, pinned, step=0.5):
     """Reference umbrella-operator smoother, built independently of the
     implementation under test, to contrast against span-aware weights."""
-    neighbors = mesh.get_edge_vertex_neighbors()
-    valid     = neighbors >= 0
-    counts    = valid.sum(axis=1)
-    out       = np.asarray(points, dtype=np.float64).copy()
-    free      = np.ones(out.shape[0], dtype=bool)
+    neighbors    = mesh.get_edge_vertex_neighbors()
+    valid        = neighbors >= 0
+    counts       = valid.sum(axis=1)
+    out          = np.asarray(points, dtype=np.float64).copy()
+    free         = np.ones(out.shape[0], dtype=bool)
     free[pinned] = False
 
     for _ in range(iterations):
-        gathered = out[np.where(valid, neighbors, 0)]
+        gathered         = out[np.where(valid, neighbors, 0)]
         gathered[~valid] = 0.0
-        centroid = gathered.sum(axis=1) / np.maximum(counts, 1)[:, None]
-        delta    = np.where(counts[:, None] > 0, centroid - out, 0.0)
+        centroid         = gathered.sum(axis=1) / np.maximum(counts, 1)[:, None]
+        delta            = np.where(counts[:, None] > 0, centroid - out, 0.0)
         out[free] += step * delta[free]
 
     return out
@@ -115,7 +115,7 @@ class TestVertexRings(unittest.TestCase):
         self.assertTrue(np.array_equal(valence.reshape(n, n), expected_valence))
 
         # only the interior 3x3 block closes its ring
-        interior = np.zeros((n, n), dtype=bool)
+        interior             = np.zeros((n, n), dtype=bool)
         interior[1:-1, 1:-1] = True
         self.assertTrue(np.array_equal(~is_boundary.reshape(n, n), interior))
 
@@ -335,13 +335,13 @@ class TestPatchRelaxData(unittest.TestCase):
 
     def test_restores_baseline_detail(self):
         """alpha=1 rebuilds detail the pose lost; alpha=0 leaves it flat."""
-        mesh     = _make_grid_mesh(13, height=0.35)
-        flat     = _make_grid_mesh(13, height=0.0).points
+        mesh = _make_grid_mesh(13, height=0.35)
+        flat = _make_grid_mesh(13, height=0.0).points
 
         restored = PatchRelaxData(mesh, iterations=300, alpha=1.0).relax(flat)
         smoothed = PatchRelaxData(mesh, iterations=300, alpha=0.0).relax(flat)
 
-        peak     = mesh.points[:, 2].max()
+        peak = mesh.points[:, 2].max()
         self.assertGreater(restored[:, 2].max(), 0.9 * peak)
         self.assertLess(smoothed[:, 2].max(), 0.01 * peak)
 
@@ -390,7 +390,7 @@ class TestPatchRelaxData(unittest.TestCase):
         flat_rotated = _make_grid_mesh(9, height=0.0).points @ rot.T
         target       = mesh.points @ rot.T
 
-        result       = PatchRelaxData(mesh, iterations=300, alpha=1.0).relax(flat_rotated)
+        result = PatchRelaxData(mesh, iterations=300, alpha=1.0).relax(flat_rotated)
         self.assertLess(np.linalg.norm(result - target, axis=1).mean(), 0.01)
 
     def test_resolves_a_foldover(self):
@@ -405,15 +405,15 @@ class TestPatchRelaxData(unittest.TestCase):
 
     def test_preserves_spans_where_laplacian_equalises_them(self):
         """The paper's central claim, against an independent umbrella smoother."""
-        n               = 9
-        mesh            = _make_grid_mesh(n, power=3.0)
-        pinned          = np.asarray(mesh.get_border_vertices(flatten=True), dtype=np.int64)
+        n      = 9
+        mesh   = _make_grid_mesh(n, power=3.0)
+        pinned = np.asarray(mesh.get_border_vertices(flatten=True), dtype=np.int64)
 
-        baseline_spans  = _row_spans(mesh.points, n, 4)
-        baseline_ratio  = baseline_spans.max() / baseline_spans.min()
+        baseline_spans = _row_spans(mesh.points, n, 4)
+        baseline_ratio = baseline_spans.max() / baseline_spans.min()
 
-        relaxed         = PatchRelaxData(mesh, iterations=200).relax(mesh.points)
-        laplacian       = _uniform_laplacian(mesh, mesh.points, 200, pinned)
+        relaxed   = PatchRelaxData(mesh, iterations=200).relax(mesh.points)
+        laplacian = _uniform_laplacian(mesh, mesh.points, 200, pinned)
 
         relaxed_ratio   = _row_spans(relaxed, n, 4)
         relaxed_ratio   = relaxed_ratio.max() / relaxed_ratio.min()
@@ -455,7 +455,7 @@ class TestPatchRelaxData(unittest.TestCase):
         self.assertTrue(np.array_equal(pinned[borders], noisy[borders]))
 
         relaxer.pin_borders = False
-        free = relaxer.relax(noisy)
+        free                = relaxer.relax(noisy)
         self.assertFalse(np.array_equal(free[borders], noisy[borders]))
 
     def test_mask_scales_the_step(self):

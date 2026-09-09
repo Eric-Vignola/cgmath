@@ -44,7 +44,7 @@ if pygltflib is not None:
 
 HAVE_GLB = pygltflib is not None and trimesh is not None
 
-RES      = {"resolution": (32, 32), "samples_per_pixel": 1}
+RES = {"resolution": (32, 32), "samples_per_pixel": 1}
 
 
 @unittest.skipIf(not HAVE_GLB, "pygltflib / trimesh are not installed")
@@ -70,7 +70,7 @@ class AnimateCase(unittest.TestCase):
         clip  = ClipData(rig, frames=frames, fps=fps)
         spine = list(rig.name).index("spine")
         for index in range(clip.frame_count):
-            clip.frame = index
+            clip.frame         = index
             clip[spine].rotate = np.array([0.0, 0.0, degrees_per_frame * index])
         return clip
 
@@ -195,9 +195,9 @@ class TestAnimate(AnimateCase):
         np.testing.assert_allclose(rest, obj.mesh.points, atol=1e-9)
 
     def test_an_unskinned_object_rides_along_as_a_prop(self):
-        path  = self.skinned_glb()
-        scene = self.scene_with(path)
-        prop  = Object.load_glb(path, load_skin=False)
+        path      = self.skinned_glb()
+        scene     = self.scene_with(path)
+        prop      = Object.load_glb(path, load_skin=False)
         prop.name = "prop"
         scene.append(prop)
         prop_rest = np.array(prop.mesh.points, copy=True)
@@ -379,7 +379,7 @@ class TestEncodeFrameStream(unittest.TestCase):
         return (self.FakeFrame(f"frame{i}") for i in range(count))
 
     def test_a_missing_placeholder_is_invented(self):
-        out     = os.path.join(self.tmp.name, "shot.png")
+        out = os.path.join(self.tmp.name, "shot.png")
 
         written = _encode_frame_stream(self.frames(), out)
 
@@ -389,7 +389,7 @@ class TestEncodeFrameStream(unittest.TestCase):
         )
 
     def test_an_explicit_placeholder_is_honoured(self):
-        out     = os.path.join(self.tmp.name, "shot_{frame:02d}.png")
+        out = os.path.join(self.tmp.name, "shot_{frame:02d}.png")
 
         written = _encode_frame_stream(self.frames(2), out)
 
@@ -398,7 +398,7 @@ class TestEncodeFrameStream(unittest.TestCase):
         )
 
     def test_a_missing_directory_is_created(self):
-        out     = os.path.join(self.tmp.name, "nested", "deeper", "shot.png")
+        out = os.path.join(self.tmp.name, "nested", "deeper", "shot.png")
 
         written = _encode_frame_stream(self.frames(1), out)
 
@@ -437,8 +437,8 @@ class TestEncodeFrameStream(unittest.TestCase):
 @unittest.skipIf(not HAVE_GLB, "pygltflib / trimesh are not installed")
 class TestObjectAnimate(AnimateCase):
     def test_it_renders_without_a_scene(self):
-        path    = self.skinned_glb()
-        obj     = Object.load_glb(path)
+        path = self.skinned_glb()
+        obj  = Object.load_glb(path)
 
         written = obj.animate(self.clip(path), output=self.out(), **RES)
 

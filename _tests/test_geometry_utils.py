@@ -197,9 +197,9 @@ class TestIndicesReplace(unittest.TestCase):
         from_indices = np.array([0, 2, 4])
         to_indices   = np.array([10, 20, 40])
 
-        result       = indices_replace(matrix, from_indices, to_indices)
+        result   = indices_replace(matrix, from_indices, to_indices)
 
-        expected     = np.array([[10, 1, 20], [3, 40, 5], [10, 20, 40]])
+        expected = np.array([[10, 1, 20], [3, 40, 5], [10, 20, 40]])
         self.assertTrue(allclose(result, expected))
 
     def test_replacement_with_collapse(self):
@@ -208,7 +208,7 @@ class TestIndicesReplace(unittest.TestCase):
         from_indices = np.array([0, 2, 4])
         to_indices   = np.array([10, 20, 40])
 
-        result       = indices_replace(matrix, from_indices, to_indices, collapse=True)
+        result = indices_replace(matrix, from_indices, to_indices, collapse=True)
 
         # After collapse, indices should be remapped to 0-based sequential
         self.assertTrue(np.all(result >= 0))
@@ -220,7 +220,7 @@ class TestIndicesReplace(unittest.TestCase):
         from_indices = np.array([0, 1])
         to_indices   = np.array([10, 20])
 
-        result       = indices_replace(matrix, from_indices, to_indices)
+        result = indices_replace(matrix, from_indices, to_indices)
         self.assertTrue(allclose(result, matrix))
 
     def test_none_matrix(self):
@@ -234,7 +234,7 @@ class TestIndicesReplace(unittest.TestCase):
         from_indices = np.array([10, 20])
         to_indices   = np.array([100, 200])
 
-        result       = indices_replace(matrix, from_indices, to_indices)
+        result = indices_replace(matrix, from_indices, to_indices)
 
         # Matrix should remain unchanged
         self.assertTrue(allclose(result, matrix))
@@ -314,7 +314,7 @@ class TestVectorComparison(unittest.TestCase):
         vector_a = np.array([3.0, 4.0, 0.0])  # magnitude = 5.0
         vector_b = np.array([6.0, 8.0, 0.0])  # magnitude = 10.0
 
-        diff     = vector_magnitude_difference(vector_a, vector_b)
+        diff = vector_magnitude_difference(vector_a, vector_b)
 
         # Difference should be 5.0
         self.assertTrue(allclose(diff, 5.0))
@@ -324,7 +324,7 @@ class TestVectorComparison(unittest.TestCase):
         vector_a = np.array([3.0, 4.0, 0.0])  # magnitude = 5.0
         vector_b = np.array([0.0, 5.0, 0.0])  # magnitude = 5.0
 
-        diff     = vector_magnitude_difference(vector_a, vector_b)
+        diff = vector_magnitude_difference(vector_a, vector_b)
 
         # Difference should be 0.0
         self.assertTrue(allclose(diff, 0.0, atol=1e-10))

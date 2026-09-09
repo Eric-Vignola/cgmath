@@ -29,7 +29,7 @@ except ImportError:
 JOINT_NAMES_ATTR = "skel:jointNames"
 SKIN_PRIM_TYPE   = "SkinWeights"
 
-EPSILON          = np.finfo(np.float32).eps
+EPSILON = np.finfo(np.float32).eps
 
 
 # ---------------------- Patterns (unchanged) -------------------------------- #
@@ -42,12 +42,12 @@ class Patterns:
     SHORT_PREFIX = {"positive": ["l_*"], "negative": ["r_*"]}
     SHORT_SUFFIX = {"positive": ["*_l"], "negative": ["*_r"]}
 
-    TRINITY3     = {"positive": ["b_l_*", "p_l_*"], "negative": ["b_r_*", "p_r_*"]}
-    TRINITY4     = SHORT_PREFIX
+    TRINITY3 = {"positive": ["b_l_*", "p_l_*"], "negative": ["b_r_*", "p_r_*"]}
+    TRINITY4 = SHORT_PREFIX
 
-    STYLE2       = {"positive": ["*_left_*"], "negative": ["*_right_*"]}
-    TRINITY      = TRINITY4
-    DEFAULT      = TRINITY
+    STYLE2   = {"positive": ["*_left_*"], "negative": ["*_right_*"]}
+    TRINITY  = TRINITY4
+    DEFAULT  = TRINITY
 
 
 # ---------------------- Optimized _round_normalize -------------------------- #
@@ -80,7 +80,7 @@ class CompactSkinData(Data):
 
     def round(self, n: int):
         """round weights to n digits"""
-        weights = self.weights.reshape(-1, self.max_influences)
+        weights      = self.weights.reshape(-1, self.max_influences)
         self.weights = _round_normalize(weights, n).ravel()
 
     def to_skin_data(self) -> "SkinData":
@@ -126,11 +126,11 @@ class CompactSkinData(Data):
     @classmethod
     def from_prim(cls, prim: Any) -> "CompactSkinData":
         """Constructs a data object from a prim."""
-        binding_api      = pxr().UsdSkel.BindingAPI(prim)
-        infs             = prim.GetAttribute(JOINT_NAMES_ATTR).Get()
-        inf_ids          = binding_api.GetJointIndicesAttr().Get()
-        weights          = binding_api.GetJointWeightsAttr().Get()
-        max_infs         = binding_api.GetJointIndicesPrimvar().GetElementSize()
+        binding_api = pxr().UsdSkel.BindingAPI(prim)
+        infs        = prim.GetAttribute(JOINT_NAMES_ATTR).Get()
+        inf_ids     = binding_api.GetJointIndicesAttr().Get()
+        weights     = binding_api.GetJointWeightsAttr().Get()
+        max_infs    = binding_api.GetJointIndicesPrimvar().GetElementSize()
 
         weights          = np.array(weights, dtype=np.float64).reshape(-1, max_infs)
         total            = weights.sum(axis=1)
@@ -265,7 +265,7 @@ class SkinData(Data):
 
     def remove_unused(self, tolerance: float = 0.0, normalize: bool = True):
         """removes unused influences (max > tolerance)"""
-        kept_indices = np.where(np.max(self.weights, axis=0) > tolerance)[0]
+        kept_indices    = np.where(np.max(self.weights, axis=0) > tolerance)[0]
         self.weights    = self.weights[:, kept_indices]
         self.influences = [self.influences[x] for x in kept_indices]
 
@@ -304,8 +304,8 @@ class SkinData(Data):
     def sort(self):
         """sorts influences alphabetically"""
         sorted_influences = np.argsort(self.influences)
-        self.weights    = self.weights[:, sorted_influences]
-        self.influences = np.array(self.influences)[sorted_influences].tolist()
+        self.weights      = self.weights[:, sorted_influences]
+        self.influences   = np.array(self.influences)[sorted_influences].tolist()
 
     def rank(self, influences: List[str]) -> np.ndarray:
         """takes a list of influences and returns their ranked ids"""
@@ -340,7 +340,7 @@ class SkinData(Data):
 
     def remove(self, influence: str, optimize: bool = False):
         """removes an influence from the skin data"""
-        idx = self.index(influence)
+        idx          = self.index(influence)
         self.weights = np.delete(self.weights, idx, axis=1)
         self.normalize()
         self.influences.pop(idx)
@@ -353,9 +353,9 @@ class SkinData(Data):
             raise ValueError(f"Influence [{influence}] already in the list")
 
         self.influences.append(influence)
-        new = np.ones((self.weights.shape[0], self.weights.shape[1] + 1)) * weight
+        new                             = np.ones((self.weights.shape[0], self.weights.shape[1] + 1)) * weight
         new[:, : self.weights.shape[1]] = self.weights
-        self.weights = new
+        self.weights                    = new
 
         if weight != 0:
             self.normalize(locked_influences=[-1])
@@ -375,10 +375,10 @@ class SkinData(Data):
             raise ValueError("Number of influences must match number of weights")
 
         self.influences.extend(influences)
-        new = np.ones((self.weights.shape[0], self.weights.shape[1] + len(influences)))
-        new[:, -weights.size :] = weights[None, :]
+        new                             = np.ones((self.weights.shape[0], self.weights.shape[1] + len(influences)))
+        new[:, -weights.size :]         = weights[None, :]
         new[:, : self.weights.shape[1]] = self.weights
-        self.weights = new
+        self.weights                    = new
 
         if np.any(weights != 0):
             idx = -1 - np.arange(weights.size)
@@ -388,7 +388,7 @@ class SkinData(Data):
         """inserts an influence at the specified index"""
         if influence not in self.influences:
             self.influences.insert(index, influence)
-            new_column = np.full((1, self.weights.shape[0]), weight)
+            new_column   = np.full((1, self.weights.shape[0]), weight)
             self.weights = np.insert(self.weights, index, new_column, axis=1)
             if weight != 0:
                 self.normalize(locked_influences=[index])
@@ -427,14 +427,14 @@ class SkinData(Data):
         src_influences = sorted(set(src_influences))
         dst_influences = sorted(set(dst_influences))
 
-        src_indices    = np.array([self.index(x) for x in src_influences if x in self])
+        src_indices = np.array([self.index(x) for x in src_influences if x in self])
         if src_indices.size == 0:
             return
 
         [self.append(x) for x in dst_influences if x not in self]
         dst_indices = np.array([self.index(x) for x in dst_influences])
 
-        weights     = np.sum(self.weights[:, src_indices], axis=1)
+        weights = np.sum(self.weights[:, src_indices], axis=1)
 
         if not weighted or dst_indices.size == 1:
             weights /= dst_indices.size
@@ -522,11 +522,11 @@ class SkinData(Data):
             ranked     = np.searchsorted(all_influences[sorted_influences], influences)
             ids        = sorted_influences[ranked]
 
-            weights    = np.zeros((obj.weights.shape[0], all_influences.shape[0]))
+            weights         = np.zeros((obj.weights.shape[0], all_influences.shape[0]))
             weights[:, ids] = obj.weights
 
-            obj.influences = all_influences.tolist()
-            obj.weights    = weights
+            obj.influences  = all_influences.tolist()
+            obj.weights     = weights
 
     # --------------------------------- SYMMETRY --------------------------------- #
 
@@ -578,7 +578,7 @@ class SkinData(Data):
                     if infl_ != infl:
                         for infl in self.influences[i:]:
                             if infl == infl_:
-                                matched[i] = self.influences.index(infl)
+                                matched[i]          = self.influences.index(infl)
                                 matched[matched[i]] = i
                                 match_from.append(i)
                                 match_to.append(matched[i])
@@ -645,8 +645,8 @@ class SkinData(Data):
         negative_test = np.where(compare_symmetric_weights_fast(a, b, 1e-7))[0]
         negative_test = np.setdiff1d(negative_test, center_indices)
 
-        a             = self.weights[center_indices[:, None], negative_influences]
-        b             = self.weights[center_indices[:, None], positive_influences]
+        a = self.weights[center_indices[:, None], negative_influences]
+        b = self.weights[center_indices[:, None], positive_influences]
         center_test = center_indices[
             np.where(compare_symmetric_weights_fast(a, b, 1e-7))
         ]
@@ -691,13 +691,13 @@ class SkinData(Data):
         match_indices = (mesh_data.points[:, axis].ravel() - pivot) < -tolerance
         match_indices = np.where(match_indices)[0]
 
-        a             = self.weights[center_indices, negative_influences[:, None]]
-        b             = self.weights[center_indices, positive_influences[:, None]]
-        test1         = not np.any(compare_symmetric_weights_fast(a, b, 1e-7))
+        a     = self.weights[center_indices, negative_influences[:, None]]
+        b     = self.weights[center_indices, positive_influences[:, None]]
+        test1 = not np.any(compare_symmetric_weights_fast(a, b, 1e-7))
 
-        a             = self.weights[match_indices]
-        b             = mirror_weights[sym_indices[match_indices]]
-        test2         = not np.any(compare_symmetric_weights_fast(a, b, 1e-7))
+        a     = self.weights[match_indices]
+        b     = mirror_weights[sym_indices[match_indices]]
+        test2 = not np.any(compare_symmetric_weights_fast(a, b, 1e-7))
 
         return test1 and test2
 
@@ -830,8 +830,8 @@ class SkinData(Data):
         else:
             iterations = np.array(iterations)
 
-        mask = np.ones(self.weights.shape[0], dtype=bool)
-        mask[indices] = False
+        mask             = np.ones(self.weights.shape[0], dtype=bool)
+        mask[indices]    = False
         iterations[mask] = 0
 
         self.weights = inpaint(
@@ -859,8 +859,8 @@ class SkinData(Data):
             else:
                 iterations = np.array(iterations)
 
-            mask = np.ones(neighbors.shape[0], dtype=bool)
-            mask[indices] = False
+            mask             = np.ones(neighbors.shape[0], dtype=bool)
+            mask[indices]    = False
             iterations[mask] = 0
 
         self.weights = blur(
@@ -882,7 +882,7 @@ class SkinData(Data):
         keep_size:    bool = False,
     ) -> None:
         """uses the Catmull-Clark algorithm to subdivide the skin weights"""
-        proxy = mesh_data.copy()
+        proxy        = mesh_data.copy()
         proxy.points = self.weights
         proxy.subdivide(steps=steps, keep_borders=keep_borders, keep_edges=keep_edges)
 
@@ -1115,7 +1115,7 @@ def load_glb(filename: str, bind_matrices: bool = False) -> list:
                 data.append(None)
                 continue
 
-            skin       = model.skins[skin_index]
+            skin = model.skins[skin_index]
 
             influences = []
             for node_index in skin.joints:

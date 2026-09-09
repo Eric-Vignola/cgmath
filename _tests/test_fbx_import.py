@@ -41,7 +41,7 @@ def _make_fake_fbx_module() -> types.SimpleNamespace:
     fake = types.SimpleNamespace()
 
     # ---- enums --------------------------------------------------------------
-    attr_etype = types.SimpleNamespace(eMesh="eMesh")
+    attr_etype            = types.SimpleNamespace(eMesh="eMesh")
     fake.FbxNodeAttribute = types.SimpleNamespace(EType=attr_etype)
 
     mapping = types.SimpleNamespace(
@@ -96,10 +96,10 @@ def _wire_importer(
     scene.GetRootNode.return_value                              = root_node
     manager.GetIOSettings.return_value                          = ios
 
-    fake_fbx.FbxManager.Create.return_value                     = manager
-    fake_fbx.FbxIOSettings.Create.return_value                  = ios
-    fake_fbx.FbxImporter.Create.return_value                    = importer
-    fake_fbx.FbxScene.Create.return_value                       = scene
+    fake_fbx.FbxManager.Create.return_value    = manager
+    fake_fbx.FbxIOSettings.Create.return_value = ios
+    fake_fbx.FbxImporter.Create.return_value   = importer
+    fake_fbx.FbxScene.Create.return_value      = scene
     return manager
 
 
@@ -108,21 +108,21 @@ def _wire_importer(
 
 def _make_fake_control_point(xyz):
     """An object indexable via ``[0]/[1]/[2]`` like ``FbxVector4``."""
-    cp = MagicMock()
+    cp                         = MagicMock()
     cp.__getitem__.side_effect = lambda i: xyz[i]
     return cp
 
 
 def _make_fake_direct_array(values):
     """A ``GetCount``/``GetAt`` array of fixed-dimension vectors."""
-    arr = MagicMock()
+    arr                       = MagicMock()
     arr.GetCount.return_value = len(values)
     arr.GetAt.side_effect     = lambda i, _vals=values: _make_fake_control_point(_vals[i])
     return arr
 
 
 def _make_fake_index_array(indices):
-    arr = MagicMock()
+    arr                       = MagicMock()
     arr.GetCount.return_value = len(indices)
     arr.GetAt.side_effect     = lambda i, _ix=indices: int(_ix[i])
     return arr
@@ -149,7 +149,7 @@ def _make_fake_uv_element(
 
 
 def _make_fake_normal_element(fake_fbx, *, points, indices):
-    element = MagicMock()
+    element                             = MagicMock()
     element.GetDirectArray.return_value = _make_fake_direct_array(points)
     element.GetIndexArray.return_value  = _make_fake_index_array(indices)
     element.GetMappingMode.return_value = (
@@ -173,7 +173,7 @@ def _make_fake_mesh(
 
     ``polygons`` is a list of vertex-id tuples, one per face.
     """
-    mesh = MagicMock(name="fbx-mesh")
+    mesh                                    = MagicMock(name="fbx-mesh")
     mesh.GetControlPointsCount.return_value = len(control_points)
     mesh.GetControlPointAt.side_effect = lambda i, _cps=control_points: (
         _make_fake_control_point(_cps[i])
@@ -182,7 +182,7 @@ def _make_fake_mesh(
     mesh.GetPolygonSize.side_effect   = lambda i, _p=polygons: len(_p[i])
     mesh.GetPolygonVertex.side_effect = lambda face, v, _p=polygons: int(_p[face][v])
 
-    uv_elements = uv_elements or []
+    uv_elements                         = uv_elements or []
     mesh.GetElementUVCount.return_value = len(uv_elements)
     mesh.GetElementUV.side_effect       = lambda i, _uv=uv_elements: _uv[i]
 
@@ -196,16 +196,16 @@ def _make_fake_mesh(
 
 def _make_fake_mesh_node(fake_fbx, *, name, fbx_mesh, materials=None):
     """Build a fake FbxNode whose attribute is ``fbx_mesh``."""
-    node = MagicMock(name=f"node:{name}")
+    node                      = MagicMock(name=f"node:{name}")
     node.GetName.return_value = name
 
-    attr = MagicMock()
+    attr                               = MagicMock()
     attr.GetAttributeType.return_value = fake_fbx.FbxNodeAttribute.EType.eMesh
     node.GetNodeAttribute.return_value = attr
     # Make _walk_fbx_mesh_nodes treat this node as a leaf.
     node.GetChildCount.return_value = 0
 
-    materials = materials or []
+    materials                          = materials or []
     node.GetMaterialCount.return_value = len(materials)
     node.GetMaterial.side_effect       = lambda i, _m=materials: _m[i]
 
@@ -219,7 +219,7 @@ def _make_fake_mesh_node(fake_fbx, *, name, fbx_mesh, materials=None):
 
 def _make_fake_root(children):
     """Synthetic root node that exposes the given children list."""
-    root = MagicMock(name="root")
+    root                               = MagicMock(name="root")
     root.GetNodeAttribute.return_value = None
     root.GetChildCount.return_value    = len(children)
     root.GetChild.side_effect          = lambda i, _c=children: _c[i]
@@ -682,7 +682,7 @@ def _png_bytes(color=(128, 64, 32), size=(2, 2)) -> bytes:
 
 
 def _make_fake_property(*, src_objects, valid=True):
-    prop = MagicMock()
+    prop                                = MagicMock()
     prop.IsValid.return_value           = valid
     prop.GetSrcObjectCount.return_value = len(src_objects)
     prop.GetSrcObject.side_effect       = lambda i, _o=src_objects: _o[i]
@@ -690,7 +690,7 @@ def _make_fake_property(*, src_objects, valid=True):
 
 
 def _make_fake_file_texture(fake_fbx, *, filename: str, relative: str = ""):
-    tex = MagicMock()
+    tex                                  = MagicMock()
     tex.GetClassId.return_value          = fake_fbx.FbxFileTexture.ClassId
     tex.GetFileName.return_value         = filename
     tex.GetRelativeFileName.return_value = relative
@@ -698,7 +698,7 @@ def _make_fake_file_texture(fake_fbx, *, filename: str, relative: str = ""):
 
 
 def _make_fake_layered_texture(fake_fbx, *, children):
-    layered = MagicMock()
+    layered                                = MagicMock()
     layered.GetClassId.return_value        = fake_fbx.FbxLayeredTexture.ClassId
     layered.GetSrcObjectCount.return_value = len(children)
     layered.GetSrcObject.side_effect       = lambda i, _c=children: _c[i]
@@ -775,7 +775,7 @@ class TestExtractFbxTextures(unittest.TestCase):
         diffuse_prop = _make_fake_property(src_objects=[file_tex])
         invalid_prop = _make_fake_property(src_objects=[], valid=False)
 
-        material     = MagicMock()
+        material = MagicMock()
 
         def _find_property(name):
             if name == "DiffuseColor":
@@ -808,7 +808,7 @@ class TestExtractFbxTextures(unittest.TestCase):
         """NormalMap and Bump both map to ``normal``; the first one
         encountered (NormalMap, by ``_FBX_TEXTURE_SLOTS`` order) wins via
         ``dict.setdefault``."""
-        fake        = _make_fake_fbx_module()
+        fake = _make_fake_fbx_module()
 
         normal_path = _make_real_file(suffix=".png")
         bump_path   = _make_real_file(suffix=".png")
@@ -822,7 +822,7 @@ class TestExtractFbxTextures(unittest.TestCase):
         bump_prop    = _make_fake_property(src_objects=[bump_tex])
         invalid_prop = _make_fake_property(src_objects=[], valid=False)
 
-        material     = MagicMock()
+        material = MagicMock()
         material.FindProperty.side_effect = lambda name: {
             "NormalMap": normal_prop,
             "Bump":      bump_prop,
@@ -857,7 +857,7 @@ class TestExtractFbxTextures(unittest.TestCase):
         diffuse_prop = _make_fake_property(src_objects=[layered])
         invalid_prop = _make_fake_property(src_objects=[], valid=False)
 
-        material     = MagicMock()
+        material = MagicMock()
         material.FindProperty.side_effect = lambda name: (
             diffuse_prop if name == "DiffuseColor" else invalid_prop
         )
@@ -895,7 +895,7 @@ class TestExtractFbxTextures(unittest.TestCase):
             diffuse_prop = _make_fake_property(src_objects=[file_tex])
             invalid_prop = _make_fake_property(src_objects=[], valid=False)
 
-            material     = MagicMock()
+            material = MagicMock()
             material.FindProperty.side_effect = lambda name: (
                 diffuse_prop if name == "DiffuseColor" else invalid_prop
             )

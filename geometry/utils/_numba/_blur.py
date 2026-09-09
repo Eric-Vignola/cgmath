@@ -92,7 +92,7 @@ def _balance_center_weights(weights, positive, negative, center, max_inf):
             for j in range(center.size):
                 if index == center[j]:
                     weights[i, center[j]] = 0.0
-                    found = True
+                    found                 = True
                     count -= 1
                     break
 
@@ -101,7 +101,7 @@ def _balance_center_weights(weights, positive, negative, center, max_inf):
                     if index == positive[j] or index == negative[j]:
                         weights[i, positive[j]] = 0.0
                         weights[i, negative[j]] = 0.0
-                        found = True
+                        found                   = True
                         count -= 2
                         break
 
@@ -162,7 +162,7 @@ def _balance_center_weights_parallel(weights, positive, negative, center, max_in
             found = False
             if _binary_search(center_sorted, index) >= 0:
                 weights[i, index] = 0.0
-                found = True
+                found             = True
                 count -= 1
 
             # If not found, look for positive/negative pair
@@ -172,14 +172,14 @@ def _balance_center_weights_parallel(weights, positive, negative, center, max_in
                     # Found in positive - zero both
                     weights[i, positive[pos_idx]] = 0.0
                     weights[i, negative[pos_idx]] = 0.0
-                    found = True
+                    found                         = True
                     count -= 2
                 else:
                     neg_idx = _binary_search(negative_sorted, index)
                     if neg_idx >= 0:
                         weights[i, positive[neg_idx]] = 0.0
                         weights[i, negative[neg_idx]] = 0.0
-                        found = True
+                        found                         = True
                         count -= 2
 
             if not found:
@@ -342,7 +342,7 @@ def _inpaint(inpaint, values, neighbors, iterations, receptions, contributions):
     while max_iter > 0:
         # Swap buffers (parallel)
         for i in prange(n_verts):
-            progressed[i] = False
+            progressed[i]   = False
             old_inpaints[i] = new_inpaints[i]
             for j in range(n_vals):
                 old_values[i, j] = new_values[i, j]
@@ -381,7 +381,7 @@ def _inpaint(inpaint, values, neighbors, iterations, receptions, contributions):
 
             if sample_count > 0.0:
                 progressed[i] = True
-                inv_count = 1.0 / sample_count
+                inv_count     = 1.0 / sample_count
 
                 if is_initial:
                     for k in range(n_vals):
@@ -389,7 +389,7 @@ def _inpaint(inpaint, values, neighbors, iterations, receptions, contributions):
                     new_inpaints[i] = 1
                 else:
                     iterations[i] = iter_i - 1
-                    reception = receptions[i]
+                    reception     = receptions[i]
                     for k in range(n_vals):
                         new_values[i, k] += deltas[i, k] * inv_count * reception
 

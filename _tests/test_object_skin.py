@@ -100,7 +100,7 @@ def write_glb(path, mesh_names, skinned=True, modes=None, geo_names=None):
 
 
 def _row_translate(x, y, z):
-    matrix = np.eye(4, dtype=np.float64)
+    matrix        = np.eye(4, dtype=np.float64)
     matrix[3, :3] = (x, y, z)
     return matrix
 
@@ -155,8 +155,8 @@ class GlbCase(unittest.TestCase):
 
     def bent_rig(self, path, degrees=90.0):
         """the file's rig with 'spine' rotated, so posing actually moves points"""
-        rig   = HierarchyData.load_glb(path)
-        index = list(rig.name).index("spine")
+        rig               = HierarchyData.load_glb(path)
+        index             = list(rig.name).index("spine")
         rig[index].rotate = np.array([0.0, 0.0, degrees])
         return rig
 
@@ -416,8 +416,8 @@ class TestPose(GlbCase):
             obj.pose(HierarchyData.load_glb(self.skinned()))
 
     def test_pose_without_a_mesh_raises(self):
-        path = self.skinned()
-        obj  = Object.load_glb(path)
+        path     = self.skinned()
+        obj      = Object.load_glb(path)
         obj.mesh = None
 
         with self.assertRaises(ValueError):
@@ -442,8 +442,8 @@ class TestRenderCache(GlbCase):
         obj   = Object.load_glb(path, load_skin=False)
         scene = Scene("s")
         scene.append(obj)
-        before   = scene._compute_render_signature()
-        sentinel = object()
+        before    = scene._compute_render_signature()
+        sentinel  = object()
         obj.frame = sentinel
 
         obj.skin  = Object.load_glb(path).skin
@@ -453,8 +453,8 @@ class TestRenderCache(GlbCase):
 
     def test_posing_does_drop_a_cached_render(self):
         """the counterpart: pose() changes the mesh, so the frame must go"""
-        path = self.skinned()
-        obj  = Object.load_glb(path)
+        path      = self.skinned()
+        obj       = Object.load_glb(path)
         obj.frame = object()
 
         obj.pose(self.bent_rig(path))
@@ -508,9 +508,9 @@ class TestPersistence(GlbCase):
     def test_a_restored_object_poses_from_the_bind_pose(self):
         """the bind mesh is a cache and does not survive the trip; it has to
         be rebuilt from ``rest_points``, which does"""
-        path     = self.skinned()
-        obj      = Object.load_glb(path).pose(self.bent_rig(path))
-        posed    = np.array(obj.mesh.points, copy=True)
+        path  = self.skinned()
+        obj   = Object.load_glb(path).pose(self.bent_rig(path))
+        posed = np.array(obj.mesh.points, copy=True)
 
         restored = Object.from_dict(obj.to_dict())
         self.assertIsNone(restored._bind_mesh)
@@ -667,9 +667,9 @@ class TestFbxBindPose(FbxCase):
         return self.write(name, populate)
 
     def test_the_deformer_holds_the_authored_inverse_binds(self):
-        obj      = Object.load_fbx(self.bent())
+        obj = Object.load_fbx(self.bent())
 
-        expected = np.tile(np.eye(4), (2, 1, 1))
+        expected           = np.tile(np.eye(4), (2, 1, 1))
         expected[1, 3, :3] = (0.0, -5.0, 0.0)
         np.testing.assert_allclose(
             np.asarray(obj.skin.inverse_bind_matrices), expected, atol=1e-6

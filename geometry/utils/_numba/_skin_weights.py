@@ -51,7 +51,7 @@ def _round_normalize_parallel(
         # Single pass: round, find max index, compute sum
         for j in range(n_cols):
             # Round to n decimal places
-            rounded = np.round(weights[i, j] * factor) / factor
+            rounded      = np.round(weights[i, j] * factor) / factor
             result[i, j] = rounded
             row_sum += rounded
 
@@ -209,8 +209,8 @@ def _gather_top_k_weights(
     tuple
         (top_indices, top_weights) both of shape (N, k)
     """
-    n_rows      = weights.shape[0]
-    n_cols      = weights.shape[1]
+    n_rows = weights.shape[0]
+    n_cols = weights.shape[1]
 
     top_indices = np.empty((n_rows, k), dtype=np.int32)
     top_weights = np.empty((n_rows, k), dtype=np.float64)
@@ -368,7 +368,7 @@ def _set_max_influences_parallel(
 
         # Copy top k to result
         for k in range(max_count):
-            j = temp_idxs[k]
+            j            = temp_idxs[k]
             result[i, j] = weights[i, j]
 
     return result
@@ -491,7 +491,7 @@ def _mirror_weights_parallel(
 
         # Copy mirrored weights
         for j in range(n_cols):
-            mirror_j = mirror_indices[j]
+            mirror_j       = mirror_indices[j]
             result[dst, j] = weights[src, mirror_j]
 
     return result

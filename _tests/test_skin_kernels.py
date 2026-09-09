@@ -26,7 +26,7 @@ def row(*values):
 
 def first_column(n_cols, index=0):
     """the degenerate-row answer every operation is expected to give"""
-    expected = np.zeros(n_cols)
+    expected        = np.zeros(n_cols)
     expected[index] = 1.0
     return expected
 
@@ -98,8 +98,8 @@ class TestNormalizeKernel(unittest.TestCase):
         np.testing.assert_allclose(weights[0], first_column(4))
 
     def test_a_locked_column_keeps_its_value(self):
-        weights      = row(0.5, 1.0, 1.0, 0.0)
-        include_mask = np.ones(4, dtype=np.bool_)
+        weights         = row(0.5, 1.0, 1.0, 0.0)
+        include_mask    = np.ones(4, dtype=np.bool_)
         include_mask[0] = False
         _normalize_weights_parallel(
             weights, np.array([0], dtype=np.int32), include_mask
@@ -110,8 +110,8 @@ class TestNormalizeKernel(unittest.TestCase):
 
     def test_the_catch_skips_a_locked_first_column(self):
         """with column 0 locked the unweighted row binds column 1 instead"""
-        weights      = np.zeros((1, 4))
-        include_mask = np.ones(4, dtype=np.bool_)
+        weights         = np.zeros((1, 4))
+        include_mask    = np.ones(4, dtype=np.bool_)
         include_mask[0] = False
         _normalize_weights_parallel(
             weights, np.array([0], dtype=np.int32), include_mask
@@ -193,10 +193,10 @@ class TestRoundKernel(unittest.TestCase):
                 np.testing.assert_allclose(result[0], first_column(n_inf))
 
     def test_the_collapse_skips_a_column_that_rounds_away(self):
-        weights = np.zeros((1, 13))
-        weights[0, 0] = 0.001
+        weights        = np.zeros((1, 13))
+        weights[0, 0]  = 0.001
         weights[0, 1:] = 1.0 / 12.0
-        result = round_normalize_fast(weights, 1)
+        result         = round_normalize_fast(weights, 1)
         np.testing.assert_allclose(result[0], first_column(13, index=1))
 
     def test_a_representable_row_is_not_collapsed(self):
@@ -206,11 +206,11 @@ class TestRoundKernel(unittest.TestCase):
         self.assertGreaterEqual(float(result.min()), 0.0)
 
     def test_only_the_unrepresentable_rows_collapse(self):
-        weights = np.zeros((3, 12))
-        weights[0] = 1.0 / 12.0
+        weights        = np.zeros((3, 12))
+        weights[0]     = 1.0 / 12.0
         weights[1, :3] = [0.5, 0.3, 0.2]
         weights[2, :2] = [0.9, 0.1]
-        result = round_normalize_fast(weights, 1)
+        result         = round_normalize_fast(weights, 1)
 
         self.assertEqual(int((result[0] != 0).sum()), 1)
         self.assertEqual(int((result[1] != 0).sum()), 3)

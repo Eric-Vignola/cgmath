@@ -37,9 +37,9 @@ def surface_points_to_transformation_matrices(
     normals = vector_cross(u_vecs, v_vecs)
     normals = vector_normalize(normals)
     # assumes that world up is Y/V and Aim vector is Z/N
-    matrices        = vector_to_matrix(normals, v_vecs, aim_axis=2, up_axis=1)
+    matrices = vector_to_matrix(normals, v_vecs, aim_axis=2, up_axis=1)
 
-    final_positions = np.copy(positions)
+    final_positions    = np.copy(positions)
     matrices[:, 3, :3] = final_positions
 
     return {
@@ -211,11 +211,11 @@ def transforms_from_surface_coordinates(
     input_points = np.array(points)  # TODO deal with the the Z coordinate as a N offset
     uv_points    = input_points[:, :2]
 
-    off          = 0.01
-    u_off        = np.array([off, 0.0])
-    v_off        = np.array([0.0, off])
-    u_offset     = np.array([np.add(uv, u_off) for uv in uv_points])
-    v_offset     = np.array([np.add(uv, v_off) for uv in uv_points])
+    off      = 0.01
+    u_off    = np.array([off, 0.0])
+    v_off    = np.array([0.0, off])
+    u_offset = np.array([np.add(uv, u_off) for uv in uv_points])
+    v_offset = np.array([np.add(uv, v_off) for uv in uv_points])
 
     final_positions = get_points_from_surface(
         Mesh, UVList, uv_points, uv_map_index=uv_map_index
@@ -300,8 +300,8 @@ def reset_scale(transformation_matrix: np.ndarray) -> np.ndarray:
     # Normalize the column vectors to obtain the rotation matrix
     rotation = rotation_scale / scale_factors
     # Reconstruct the transformation matrix with the scale component reset to identity
-    new_transformation_matrix = np.eye(4)  # Initialize with identity
-    new_transformation_matrix[:3, :3] = rotation  # Set the rotation component
+    new_transformation_matrix         = np.eye(4)  # Initialize with identity
+    new_transformation_matrix[:3, :3] = rotation   # Set the rotation component
     new_transformation_matrix[3, :3] = trans_mat[
         3, :3
     ]  # Copy the translation component
@@ -329,7 +329,7 @@ def extract_scale_matrix(transformation_matrix: np.ndarray) -> np.ndarray:
     scale_z = np.linalg.norm(transformation_matrix[2, :3])
 
     # Create a new transformation matrix with just the scale components
-    scale_matrix = np.eye(4)
+    scale_matrix       = np.eye(4)
     scale_matrix[0, 0] = scale_x
     scale_matrix[1, 1] = scale_y
     scale_matrix[2, 2] = scale_z
@@ -410,7 +410,7 @@ def refactor_control_object_matrices(
     scale_matrices = np.array([extract_scale_matrix(mat) for mat in matrices])
 
     # establish relative offsets from pivot
-    pivot_matrix = np.eye(4)
+    pivot_matrix        = np.eye(4)
     pivot_matrix[3, :3] = origin
 
     # put the matrices relative offsets to the pivot
@@ -468,10 +468,10 @@ def refactor_control_object_matrices_init(
     control_points = control_array_type_conversion(
         matrices, to_transformation_matrix=False
     )
-    control_start  = control_points[0]
-    control_end    = control_points[-1]
-    control_vector = np.subtract(control_end, control_start)
-    control_mag    = vector_magnitude(control_vector)
+    control_start           = control_points[0]
+    control_end             = control_points[-1]
+    control_vector          = np.subtract(control_end, control_start)
+    control_mag             = vector_magnitude(control_vector)
     refactor_data["origin"] = control_start
 
     transform_matrix = np.eye(4)
@@ -493,11 +493,11 @@ def refactor_control_object_matrices_init(
             return
         scale_factor = refactor_mag / control_mag
 
-        scale        = scale_factor * np.array(uvn_scale)
+        scale = scale_factor * np.array(uvn_scale)
 
         refactor_data["translate"] = refactor_start
-        refactor_data["vector"] = refactor_vector
-        refactor_data["scale"] = scale
+        refactor_data["vector"]    = refactor_vector
+        refactor_data["scale"]     = scale
 
         scale_matrix = np.array(
             [
@@ -509,11 +509,11 @@ def refactor_control_object_matrices_init(
         )
 
         if refactor_alignment:
-            vec_uv = np.zeros(3)
-            vec_uv[:2] = refactor_vector[:2]
+            vec_uv           = np.zeros(3)
+            vec_uv[:2]       = refactor_vector[:2]
             transform_matrix = u_vector_to_rotation_matrix(vec_uv)
 
-        transform_matrix = matrix_multiply(scale_matrix, transform_matrix)[0]
+        transform_matrix        = matrix_multiply(scale_matrix, transform_matrix)[0]
         transform_matrix[3, :3] = refactor_start
 
         refactor_data["refactor_matrix"] = transform_matrix
@@ -523,7 +523,7 @@ def refactor_control_object_matrices_init(
         refactor_data["refactored_matrices"] = matrices
     else:
         print("do something")
-        refactor_data["refactor_matrix"] = np.eye(4)
+        refactor_data["refactor_matrix"]     = np.eye(4)
         refactor_data["refactored_matrices"] = matrices
 
     return refactor_data
@@ -610,7 +610,7 @@ def get_bspline_map_init(
         )
 
         rdata["refactor_data"] = refactor_data
-        control_matrices = np.copy(refactor_data["refactored_matrices"])
+        control_matrices       = np.copy(refactor_data["refactored_matrices"])
         # if the input refactored matrices are greater than 2
         # we assume it is full bspline we are refactoring for
         # and we want to use it for mapping the driven objects.
@@ -636,7 +636,7 @@ def get_bspline_map_init(
     # now super sample to plot in surface space
     plotting_points = spline.compute(np.linspace(0, spline.max_param, sample_num))[0]
 
-    param_curve     = spline
+    param_curve = spline
     if Mesh:  # we need to convert surface coords to cartesian positions (bspline approximation of surface)
         surface_data = transforms_from_surface_coordinates(
             Mesh,
@@ -663,13 +663,13 @@ def get_bspline_map_init(
         driven_data = param_curve.sample(driven_points)
 
         # refactor params if super sampling
-        param_factor = spline.max_param / param_curve.max_param
-        params       = driven_data.params * param_factor
+        param_factor    = spline.max_param / param_curve.max_param
+        params          = driven_data.params * param_factor
         rdata["params"] = params
         # we want the Basis from the control spline not the super sampled one if super sampled
         plotting_points = spline.compute(params)[0]
         spline_data     = spline.sample(plotting_points)
-        rdata["basis"] = spline_data.basis
+        rdata["basis"]  = spline_data.basis
 
         if Mesh:  # we need to convert surface coords to cartesian positions (bspline approximation of surface)
             surface_data = transforms_from_surface_coordinates(
@@ -686,7 +686,7 @@ def get_bspline_map_init(
             rdata["offset_points"] = np.subtract(driven_points, surface_data["points"])
         else:  # this method is used if no mesh is involved.
             rdata["offset_points"] = np.subtract(driven_points, driven_data.points)
-            offset_matrices = np.copy(driven_matrices)
+            offset_matrices        = np.copy(driven_matrices)
             for offset, point in zip(offset_matrices, rdata["offset_points"]):
                 offset[3, :3] = point
             rdata["offset_matrices"] = offset_matrices
@@ -714,9 +714,9 @@ def matrix_delta(parent_matrix: np.ndarray, child_matrix: np.ndarray) -> np.ndar
 def build_normal_matrix(
     input_point: np.ndarray, normal_scale: float = 1.0
 ) -> np.ndarray:
-    normal_offset = np.zeros_like(input_point)
-    normal_offset[2] = input_point[2] * normal_scale
-    normal_matrix = np.eye(4)
+    normal_offset        = np.zeros_like(input_point)
+    normal_offset[2]     = input_point[2] * normal_scale
+    normal_matrix        = np.eye(4)
     normal_matrix[3, :3] = normal_offset
     return normal_matrix
 
@@ -752,9 +752,9 @@ def bspline_weigh_transformations(
     # max_param = spline.max_param
 
     # get the points
-    plotting_points = spline.compute(bspline_map["params"])[0]
+    plotting_points   = spline.compute(bspline_map["params"])[0]
     rdata["plotting"] = np.copy(plotting_points)
-    offset_matrices = np.copy(bspline_map["offset_matrices"])
+    offset_matrices   = np.copy(bspline_map["offset_matrices"])
     # get the surface data transformatin matrices
     if Mesh:
         surface_data = transforms_from_surface_coordinates(
@@ -776,7 +776,7 @@ def bspline_weigh_transformations(
         )
 
         # first we need to abstract the rotational and scale contribution
-        bspl_point = np.copy(set_matrix[3, :3])
+        bspl_point        = np.copy(set_matrix[3, :3])
         set_matrix[3, :3] = [0.0, 0.0, 0.0]
         normal_matrix = build_normal_matrix(
             input_point=bspl_point, normal_scale=normal_scale
@@ -1070,7 +1070,7 @@ def convert_dict_vals_arrays(dictionary: dict, to_numpy_array: bool = False) -> 
         dict: A new dictionary with the same structure, but with numpy arrays replaced by lists.
     """
     # Create a new dictionary to store the results
-    result      = {}
+    result = {}
 
     change_type = np.ndarray
     if to_numpy_array:

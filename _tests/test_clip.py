@@ -84,8 +84,8 @@ class TestClipData(unittest.TestCase):
         self.assertIs(clip.frames[1], clip)
 
     def test_node_write_reaches_the_block(self):
-        clip = ClipData(self.rig, frames=3)
-        clip.frame = 1
+        clip                 = ClipData(self.rig, frames=3)
+        clip.frame           = 1
         clip["j2"].translate = [4.0, 5.0, 6.0]
 
         self.assertTrue(np.allclose(clip.frames.translate[1, 2], [4.0, 5.0, 6.0]))
@@ -104,7 +104,7 @@ class TestClipData(unittest.TestCase):
         self.assertTrue(np.allclose(clip.frames.scale, 2.0))
         self.assertTrue(np.allclose(clip.scale, 2.0))
 
-        values = np.arange(3 * 4 * 3, dtype=float).reshape(3, 4, 3)
+        values                = np.arange(3 * 4 * 3, dtype=float).reshape(3, 4, 3)
         clip.frames.translate = values
         self.assertTrue(np.allclose(clip.frames.translate, values))
 
@@ -114,7 +114,7 @@ class TestClipData(unittest.TestCase):
     def test_frames_setitem_stores_a_pose(self):
         clip = ClipData(self.rig, frames=3)
 
-        pose = self.rig.copy()
+        pose           = self.rig.copy()
         pose.translate = np.full((4, 3), 9.0)
         clip.frames[1] = pose
 
@@ -129,7 +129,7 @@ class TestClipData(unittest.TestCase):
     def test_from_poses(self):
         poses = []
         for i in range(4):
-            pose = self.rig.copy()
+            pose           = self.rig.copy()
             pose.translate = np.full((4, 3), float(i))
             poses.append(pose)
 
@@ -165,10 +165,10 @@ class TestClipData(unittest.TestCase):
             clip.frame = -4
 
     def test_negative_frame_indexes_from_the_end(self):
-        clip = ClipData(self.rig, frames=3)
+        clip                  = ClipData(self.rig, frames=3)
         clip.frames.translate = np.arange(3 * 4 * 3, dtype=float).reshape(3, 4, 3)
 
-        clip.frame            = -1
+        clip.frame = -1
         self.assertEqual(clip.frame, 2)
         self.assertTrue(np.allclose(clip.translate, clip.frames.translate[2]))
 
@@ -188,10 +188,10 @@ class TestClipData(unittest.TestCase):
         self.assertEqual(clip.frames.translate.shape, (3, 4, 3))
 
     def test_copy_is_independent(self):
-        clip = ClipData(self.rig, frames=3)
+        clip                  = ClipData(self.rig, frames=3)
         clip.frames.translate = np.full((3, 4, 3), 2.0)
 
-        other = clip.copy()
+        other                  = clip.copy()
         other.frames.translate = np.full((3, 4, 3), 8.0)
 
         self.assertTrue(np.allclose(clip.frames.translate, 2.0))
@@ -201,8 +201,8 @@ class TestClipData(unittest.TestCase):
     def test_copy_keeps_every_frame_distinct(self):
         # a copy that lost its column list would reseed each frame from the
         # loaded pose on the next realign, which a uniform block cannot show
-        clip  = ClipData(self.rig, frames=4)
-        block = np.arange(4 * 4 * 3, dtype=float).reshape(4, 4, 3)
+        clip                  = ClipData(self.rig, frames=4)
+        block                 = np.arange(4 * 4 * 3, dtype=float).reshape(4, 4, 3)
         clip.frames.translate = block
         clip.frame            = 2
 
@@ -220,7 +220,7 @@ class TestClipData(unittest.TestCase):
         self.assertNotEqual(a, b)
 
     def test_round_trip(self):
-        clip = ClipData(self.rig, frames=4, start_frame=1001, fps=30.0)
+        clip                  = ClipData(self.rig, frames=4, start_frame=1001, fps=30.0)
         clip.frames.translate = np.arange(4 * 4 * 3, dtype=float).reshape(4, 4, 3)
         clip.frame            = 2
 
@@ -248,21 +248,21 @@ class TestClipData(unittest.TestCase):
         self.assertTrue(np.allclose(clip.world_matrix, self.rig.world_matrix))
 
     def test_world_matrix_follows_the_scrub(self):
-        clip = ClipData(self.rig, frames=2)
+        clip                     = ClipData(self.rig, frames=2)
         clip.frames[1].translate = np.full((4, 3), 5.0)
 
         clip.frame = 0
-        first = clip.world_matrix.copy()
+        first      = clip.world_matrix.copy()
         clip.frame = 1
-        second = clip.world_matrix.copy()
+        second     = clip.world_matrix.copy()
 
         self.assertFalse(np.allclose(first, second))
         clip.frame = 0
         self.assertTrue(np.allclose(clip.world_matrix, first))
 
     def test_structural_channels_are_shared_by_every_frame(self):
-        clip = ClipData(self.rig, frames=3)
-        clip.frame = 0
+        clip                    = ClipData(self.rig, frames=3)
+        clip.frame              = 0
         clip["j1"].rotate_order = 3
 
         clip.frame = 2
@@ -413,7 +413,7 @@ class TestClipStructuralMutation(unittest.TestCase):
 
         before = {}
         for frame in range(clip.frame_count):
-            clip.frame = frame
+            clip.frame    = frame
             before[frame] = {n.name: n.translate.copy() for n in clip}
 
         clip.set_parent(None, world_space=False)
@@ -432,7 +432,7 @@ class TestClipStructuralMutation(unittest.TestCase):
 
         before = {}
         for frame in range(clip.frame_count):
-            clip.frame = frame
+            clip.frame    = frame
             before[frame] = {n.name: n.rotate.copy() for n in clip}
 
         clip.set_parent("root", world_space=False)
@@ -524,13 +524,13 @@ class TestClipEvaluator(unittest.TestCase):
         on = ClipData(rig, frames=2).frames.world_matrix
 
         rig["b"].segment_scale_compensate = False
-        off = ClipData(rig, frames=2).frames.world_matrix
+        off                               = ClipData(rig, frames=2).frames.world_matrix
 
         self.assertFalse(np.allclose(on[:, 1], off[:, 1]))
 
     def test_batched_follows_a_block_edit(self):
-        clip      = self._animated(frames=4, count=6)
-        before    = clip.frames.world_matrix.copy()
+        clip   = self._animated(frames=4, count=6)
+        before = clip.frames.world_matrix.copy()
 
         translate = clip.frames.translate.copy()
         translate[2] += 5.0
@@ -624,8 +624,8 @@ class TestClipDeltas(unittest.TestCase):
             a.get_delta(b)
 
     def test_operator_matches_the_method(self):
-        rig         = self._rig()
-        clip        = self._animated(rig)
+        rig  = self._rig()
+        clip = self._animated(rig)
 
         by_operator = clip - rig
         by_method   = clip.get_delta(rig)
@@ -642,8 +642,8 @@ class TestClipDeltas(unittest.TestCase):
         self.assertEqual(delta.fps, 30.0)
 
     def test_translate_flag_is_forwarded(self):
-        rig            = self._rig()
-        clip           = self._animated(rig)
+        rig  = self._rig()
+        clip = self._animated(rig)
 
         with_translate = clip.get_delta(rig, translate=True)
         without        = clip.get_delta(rig, translate=False)
@@ -659,8 +659,8 @@ class TestClipScopedFrames(unittest.TestCase):
 
     def setUp(self):
         super().setUp()
-        self.clip = ClipData(chain(4), frames=6)
-        block = np.arange(6 * 4 * 3, dtype=float).reshape(6, 4, 3)
+        self.clip                  = ClipData(chain(4), frames=6)
+        block                      = np.arange(6 * 4 * 3, dtype=float).reshape(6, 4, 3)
         self.clip.frames.translate = block
         self.block                 = block
 
@@ -708,7 +708,7 @@ class TestClipScopedFrames(unittest.TestCase):
 
     def test_a_scoped_write_reaches_the_loaded_pose(self):
         # the nodes are bound into the block, so the current frame has to see it
-        self.clip.frame = 3
+        self.clip.frame                  = 3
         self.clip.frames["j1"].translate = np.zeros((6, 1, 3))
         self.assertTrue(np.array_equal(self.clip[1].translate, np.zeros(3)))
 
@@ -756,20 +756,20 @@ class TestClipScopedFrames(unittest.TestCase):
         self.assertEqual(cut.fps,         30.0)
 
     def test_a_cut_does_not_write_back_to_its_parent(self):
-        cut = self.clip.frames[0:3]
+        cut                  = self.clip.frames[0:3]
         cut.frames.translate = np.zeros((3, 4, 3))
 
         self.assertTrue(np.array_equal(self.clip.frames.translate, self.block))
 
     def test_a_cut_survives_a_realign(self):
         # the columns have to come across, or the first realign flattens it
-        cut = self.clip.frames[1:4]
+        cut       = self.clip.frames[1:4]
         cut.frame = 2
 
         self.assertTrue(np.array_equal(cut.frames.translate, self.block[1:4]))
 
     def test_a_range_can_be_pasted_from_another_clip(self):
-        source = ClipData(chain(4), frames=3)
+        source                  = ClipData(chain(4), frames=3)
         source.frames.translate = np.full((3, 4, 3), -1.0)
 
         self.clip.frames[1:4] = source
@@ -780,7 +780,7 @@ class TestClipScopedFrames(unittest.TestCase):
         self.assertTrue(np.array_equal(got[4:], self.block[4:]))
 
     def test_a_range_can_be_filled_with_one_pose(self):
-        pose = chain(4)
+        pose           = chain(4)
         pose.translate = np.full((4, 3), 7.0)
 
         self.clip.frames[0:2] = pose
@@ -828,9 +828,9 @@ class TestClipSaveFbx(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
-        self.clip = ClipData(uuid_chain(3), frames=10, start_frame=1001, fps=24.0)
-        rotate = np.array(self.clip.frames.rotate)
-        rotate[:, 1, 2] = np.arange(10) * 10.0
+        self.clip               = ClipData(uuid_chain(3), frames=10, start_frame=1001, fps=24.0)
+        rotate                  = np.array(self.clip.frames.rotate)
+        rotate[:, 1, 2]         = np.arange(10) * 10.0
         self.clip.frames.rotate = rotate
         self.clip.frame         = 3
 
@@ -962,7 +962,7 @@ class TestClipLoadGlb(unittest.TestCase):
                     )
                 )
 
-        gltf = GLTF2()
+        gltf       = GLTF2()
         gltf.scene = 0
         gltf.nodes = [
             Node(name=node, translation=[0.0, float(index + 1), 0.0])
@@ -1197,7 +1197,7 @@ class TestClipLoadGlbNodeOrder(unittest.TestCase):
         values = np.array([[0.0, 0.0, 0.0], [7.0, 0.0, 0.0]], dtype=np.float32)
         blob   = times.tobytes() + values.tobytes()
 
-        gltf   = GLTF2()
+        gltf       = GLTF2()
         gltf.scene = 0
         gltf.nodes = [
             Node(name="leaf", translation=[0.0, 1.0, 0.0]),
@@ -1249,7 +1249,7 @@ class TestClipLoadGlbNodeOrder(unittest.TestCase):
         Pairing against the file's array order would walk the two out of step
         and refuse the file outright.
         """
-        clip      = ClipData.load_glb(self.build(target=0), scale_factor=1.0, fps=4.0)
+        clip = ClipData.load_glb(self.build(target=0), scale_factor=1.0, fps=4.0)
 
         names     = [str(node.name) for node in clip]
         moved     = names.index("leaf")
@@ -1264,7 +1264,7 @@ class TestClipLoadGlbNodeOrder(unittest.TestCase):
                 )
 
     def test_a_mid_chain_channel_pairs_too(self):
-        clip      = ClipData.load_glb(self.build(target=1), scale_factor=1.0, fps=4.0)
+        clip = ClipData.load_glb(self.build(target=1), scale_factor=1.0, fps=4.0)
 
         names     = [str(node.name) for node in clip]
         translate = np.array(clip.frames.translate)
@@ -1329,7 +1329,7 @@ class TestClipLoadFbx(unittest.TestCase):
             node.LclTranslation.Set(FBX.FbxDouble3(0.0, 1.0, 0.0))
             parent.AddChild(node)
             nodes[joint] = node
-            parent = node
+            parent       = node
 
         for index in range(stacks):
             stack = FBX.FbxAnimStack.Create(
@@ -1533,7 +1533,7 @@ class TestClipLoadFbx(unittest.TestCase):
             keyed_stack = 2,
         )
 
-        clip      = ClipData.load_fbx(path, fps=4.0)
+        clip = ClipData.load_fbx(path, fps=4.0)
 
         translate = np.array(clip.frames.translate)[:, 0, 0]
         self.assertGreater(float(np.abs(translate - translate[0]).max()), 1.0)

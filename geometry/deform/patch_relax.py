@@ -162,11 +162,11 @@ class PatchRelaxData(Data):
             np.asarray(base.points, dtype=np.float64)
         )
 
-        borders = base.get_border_vertices(flatten=True)
-        borders = np.asarray(borders, dtype=np.int64).ravel()
+        borders              = base.get_border_vertices(flatten=True)
+        borders              = np.asarray(borders, dtype=np.int64).ravel()
         self.border_vertices = borders if borders.size else None
 
-        self.mask            = None
+        self.mask = None
         if mask is not None:
             mask = np.asarray(mask, dtype=np.float64).ravel()
             if mask.size != self.rest_points.shape[0]:
@@ -308,7 +308,7 @@ class PatchRelaxData(Data):
         self._weights      = compute_span_weights(self._rest_decals, self.valence)
         self._rest_vectors = self._compute_rest_vectors()
 
-        self._points       = self.rest_points.copy()
+        self._points = self.rest_points.copy()
 
     def relax(self, points: np.ndarray) -> np.ndarray:
         """Relax a raw point array against the bound baseline.
@@ -371,7 +371,7 @@ class PatchRelaxData(Data):
         self._points = self.relax(pts)
 
         if is_mesh:
-            result = target.copy()
+            result        = target.copy()
             result.points = self._points.copy()
             return result
         return self._points

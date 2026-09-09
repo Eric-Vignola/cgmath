@@ -59,9 +59,9 @@ def _composite_sprite(sprite, buffer, mask, offset, color):
                         c = 0.0
 
                         for i in range(3):
-                            c = float(color[i]) - float(buffer[yy, xx, i])
-                            c = np.round(c * w)
-                            c = c + float(buffer[yy, xx, i])
+                            c                 = float(color[i]) - float(buffer[yy, xx, i])
+                            c                 = np.round(c * w)
+                            c                 = c + float(buffer[yy, xx, i])
                             buffer[yy, xx, i] = c
 
                         if np.sum(mask[yy, xx]) > 0:
@@ -168,14 +168,14 @@ def _composite_sprite_parallel(sprite, buffer, mask, offset, color):
                 if mask[yy, xx, 0] > 0 or mask[yy, xx, 1] > 0 or mask[yy, xx, 2] > 0:
                     local_overlap += 1
 
-        row_counts[y] = local_count
+        row_counts[y]   = local_count
         row_overlaps[y] = local_overlap
 
     # Reduce per-row counts to totals
     count   = 0
     overlap = 0
     for y in range(sprite_h):
-        count += row_counts[y]
+        count   += row_counts[y]
         overlap += row_overlaps[y]
 
     ratio = 0.0
@@ -234,7 +234,7 @@ def _composite_sprite_aa_optimized(sprite, sprite_buffer):
                 buf_val = float(sprite_buffer[y, x])
                 w       = float(sprite_val) * inv_255
                 # Blend toward white: result = buffer + (255 - buffer) * weight
-                new_val = buf_val + (255.0 - buf_val) * w
+                new_val             = buf_val + (255.0 - buf_val) * w
                 sprite_buffer[y, x] = np.uint8(new_val + 0.5)
 
 
@@ -285,15 +285,15 @@ def _composite_sprites_batch(
 
     # Process sprites in parallel
     for s in prange(n_sprites):
-        sprite_w      = sprite_sizes[s, 0]
-        sprite_h      = sprite_sizes[s, 1]
-        sprite_start  = sprite_offsets[s]
-        off_x         = sprite_sizes[s, 0]  # Assuming offset stored elsewhere
-        off_y         = sprite_sizes[s, 1]
+        sprite_w     = sprite_sizes[s, 0]
+        sprite_h     = sprite_sizes[s, 1]
+        sprite_start = sprite_offsets[s]
+        off_x        = sprite_sizes[s, 0]  # Assuming offset stored elsewhere
+        off_y        = sprite_sizes[s, 1]
 
-        color_r       = float(colors[s, 0])
-        color_g       = float(colors[s, 1])
-        color_b       = float(colors[s, 2])
+        color_r = float(colors[s, 0])
+        color_g = float(colors[s, 1])
+        color_b = float(colors[s, 2])
 
         local_count   = 0
         local_overlap = 0
@@ -314,7 +314,7 @@ def _composite_sprites_batch(
 
                 if sprite_val > 0:
                     local_count += 1
-                    w     = float(sprite_val) / 255.0
+                    w = float(sprite_val) / 255.0
 
                     buf_r = float(buffer[yy, xx, 0])
                     buf_g = float(buffer[yy, xx, 1])
@@ -331,7 +331,7 @@ def _composite_sprites_batch(
                     ):
                         local_overlap += 1
 
-        counts[s] = local_count
+        counts[s]   = local_count
         overlaps[s] = local_overlap
         if local_count > 0:
             ratios[s] = float(local_overlap) / float(local_count)
@@ -394,13 +394,13 @@ def _fill_rect_alpha(buffer, x0, y0, x1, y1, color, alpha):
     alpha : float
         Blend factor 0.0-1.0.
     """
-    buf_h     = buffer.shape[0]
-    buf_w     = buffer.shape[1]
+    buf_h = buffer.shape[0]
+    buf_w = buffer.shape[1]
 
-    x0        = max(0, x0)
-    y0        = max(0, y0)
-    x1        = min(buf_w, x1)
-    y1        = min(buf_h, y1)
+    x0 = max(0, x0)
+    y0 = max(0, y0)
+    x1 = min(buf_w, x1)
+    y1 = min(buf_h, y1)
 
     color_r   = float(color[0])
     color_g   = float(color[1])

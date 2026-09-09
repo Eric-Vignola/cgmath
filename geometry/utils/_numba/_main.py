@@ -82,7 +82,7 @@ def _point_row_overlaps_process_pairs(
         if n_neighbors > 1:
             first_neighbor = query_indices[start]
             if first_neighbor < i:
-                write_idx = pair_offsets[i]
+                write_idx            = pair_offsets[i]
                 pairs_src[write_idx] = i
                 pairs_dst[write_idx] = first_neighbor
 
@@ -130,7 +130,7 @@ def point_row_overlaps_fast(matrix: np.ndarray, tolerance: float = 1e-6) -> tupl
     query_indices   = np.empty(total_neighbors, dtype=np.int32)
     query_indptr    = np.zeros(len(query_results) + 1, dtype=np.int32)
 
-    idx             = 0
+    idx = 0
     for i, neighbors in enumerate(query_results):
         for n in neighbors:
             query_indices[idx] = n
@@ -348,7 +348,7 @@ def _vector_angle_difference_parallel(
         for d in range(dim):
             norm_a_sq += vector_a[i, d] * vector_a[i, d]
             norm_b_sq += vector_b[i, d] * vector_b[i, d]
-            dot += vector_a[i, d] * vector_b[i, d]
+            dot       += vector_a[i, d] * vector_b[i, d]
 
         norm_a = np.sqrt(norm_a_sq)
         norm_b = np.sqrt(norm_b_sq)
@@ -434,8 +434,8 @@ def stream_to_matrix_fast(values: np.ndarray, counts: np.ndarray) -> np.ndarray:
     if counts.size == 0:
         return np.empty((0, 0), dtype=np.int32)
 
-    max_chunk_size = int(np.max(counts))
-    chunk_starts   = np.zeros(len(counts), dtype=np.int32)
+    max_chunk_size   = int(np.max(counts))
+    chunk_starts     = np.zeros(len(counts), dtype=np.int32)
     chunk_starts[1:] = np.cumsum(counts[:-1])
 
     return _stream_to_matrix_parallel(values, counts, chunk_starts, max_chunk_size)
@@ -526,14 +526,14 @@ def indices_replace_fast(
     from_indices = np.asarray(from_indices, dtype=np.int32)
     to_indices   = np.asarray(to_indices, dtype=np.int32)
 
-    shape        = matrix.shape
+    shape = matrix.shape
 
-    sort_idx     = np.argsort(from_indices)
-    from_sorted  = from_indices[sort_idx]
-    to_sorted    = to_indices[sort_idx]
+    sort_idx    = np.argsort(from_indices)
+    from_sorted = from_indices[sort_idx]
+    to_sorted   = to_indices[sort_idx]
 
-    result       = _indices_replace_parallel(matrix.ravel(), from_sorted, to_sorted)
-    result       = result.reshape(shape)
+    result = _indices_replace_parallel(matrix.ravel(), from_sorted, to_sorted)
+    result = result.reshape(shape)
 
     if collapse:
         unique = np.unique(result)
@@ -845,7 +845,7 @@ def _find_row_overlaps(
     tuple
         (unique_indices, dup_from, dup_to)
     """
-    n_rows           = matrix.shape[0]
+    n_rows = matrix.shape[0]
 
     is_unique        = np.ones(n_rows, dtype=np.bool_)
     first_occurrence = np.arange(n_rows, dtype=np.int32)
@@ -861,7 +861,7 @@ def _find_row_overlaps(
                 break
 
             if is_unique[j] and _rows_equal(matrix, i, j):
-                is_unique[j] = False
+                is_unique[j]        = False
                 first_occurrence[j] = i
 
     n_unique = 0
@@ -876,15 +876,15 @@ def _find_row_overlaps(
     dup_from       = np.empty(n_dups,   dtype=np.int32)
     dup_to         = np.empty(n_dups,   dtype=np.int32)
 
-    ui             = 0
-    di             = 0
+    ui = 0
+    di = 0
     for i in range(n_rows):
         if is_unique[i]:
             unique_indices[ui] = i
             ui += 1
         else:
             dup_from[di] = i
-            dup_to[di] = first_occurrence[i]
+            dup_to[di]   = first_occurrence[i]
             di += 1
 
     return unique_indices, dup_from, dup_to

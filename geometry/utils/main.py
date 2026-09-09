@@ -351,9 +351,9 @@ def grow_neighbors(
 
     # return full view
     if full_view:
-        expanded = np.full((neighbors.shape[0], matrix.shape[1]), -1, dtype=np.int32)
+        expanded                          = np.full((neighbors.shape[0], matrix.shape[1]), -1, dtype=np.int32)
         expanded[:, : neighbors.shape[1]] = neighbors
-        expanded[idx] = matrix
+        expanded[idx]                     = matrix
         return expanded.astype(dtype)
 
     # return only the indices specified in `indices`
@@ -654,11 +654,11 @@ def bilinear_sample(
     """
     from cgmath.geometry.utils._numba._bilinear import _bilinear_sample
 
-    p                           = np.asarray(p,         dtype=np.float64)
-    points                      = np.asarray(points,    dtype=np.float64)
-    geometry                    = np.asarray(geometry,  dtype=np.int32)
-    centroids                   = np.asarray(centroids, dtype=np.float64)
-    radiuses                    = np.asarray(radiuses,  dtype=np.float64)
+    p         = np.asarray(p,         dtype=np.float64)
+    points    = np.asarray(points,    dtype=np.float64)
+    geometry  = np.asarray(geometry,  dtype=np.int32)
+    centroids = np.asarray(centroids, dtype=np.float64)
+    radiuses  = np.asarray(radiuses,  dtype=np.float64)
     centroid_distance_tolerance = np.float64(centroid_distance_tolerance)
     iteration_count             = np.int32(iteration_count)
     iteration_tolerance         = np.int32(iteration_tolerance)
@@ -795,14 +795,14 @@ def subdivide_catmull_clark(
         _rebuild_subdivision_topology,
     )
 
-    points         = np.asarray(points, dtype=np.float64)
-    counts         = np.asarray(counts, dtype=np.int32)
-    f2v            = np.asarray(f2v,    dtype=np.int32)
-    f2e            = np.asarray(f2e,    dtype=np.int32)
-    e2v            = np.asarray(e2v,    dtype=np.int32)
-    e2f            = np.asarray(e2f,    dtype=np.int32)
-    v2f            = np.asarray(v2f,    dtype=np.int32)
-    v2e            = np.asarray(v2e,    dtype=np.int32)
+    points = np.asarray(points, dtype=np.float64)
+    counts = np.asarray(counts, dtype=np.int32)
+    f2v    = np.asarray(f2v,    dtype=np.int32)
+    f2e    = np.asarray(f2e,    dtype=np.int32)
+    e2v    = np.asarray(e2v,    dtype=np.int32)
+    e2f    = np.asarray(e2f,    dtype=np.int32)
+    v2f    = np.asarray(v2f,    dtype=np.int32)
+    v2e    = np.asarray(v2e,    dtype=np.int32)
 
     face_points    = _compute_face_points(points, f2v)
     edge_midpoints = _compute_edge_midpoints(points, e2v)
@@ -892,10 +892,10 @@ def inpaint(
     if isinstance(contributions, numbers.Real):
         contributions = np.ones(weights.shape[0]) * contributions
 
-    weights         = np.asarray(weights,   dtype=np.float64)
-    indices         = np.asarray(indices,   dtype=np.int32)
-    neighbors       = np.asarray(neighbors, dtype=np.int32)
-    inpaint_indices = np.ones(weights.shape[0], dtype=np.int32)
+    weights                  = np.asarray(weights,   dtype=np.float64)
+    indices                  = np.asarray(indices,   dtype=np.int32)
+    neighbors                = np.asarray(neighbors, dtype=np.int32)
+    inpaint_indices          = np.ones(weights.shape[0], dtype=np.int32)
     inpaint_indices[indices] = 0
 
     return _inpaint(
@@ -968,7 +968,7 @@ def encode_local_deltas(
     smooth_points = np.ascontiguousarray(np.asarray(smooth_points, dtype=np.float64))
     neighbors     = np.ascontiguousarray(np.asarray(neighbors, dtype=np.int32))
 
-    out           = np.empty_like(rest_points)
+    out = np.empty_like(rest_points)
     _encode_local_deltas(rest_points, smooth_points, neighbors, out)
     return out
 
@@ -997,7 +997,7 @@ def decode_local_deltas(
     neighbors     = np.ascontiguousarray(np.asarray(neighbors, dtype=np.int32))
     deltas        = np.ascontiguousarray(np.asarray(deltas, dtype=np.float64))
 
-    out           = np.empty_like(smooth_points)
+    out = np.empty_like(smooth_points)
     _decode_local_deltas(smooth_points, neighbors, deltas, out)
     return out
 
@@ -1063,7 +1063,7 @@ def encode_local_deltas_tbn(
     smooth_points = np.ascontiguousarray(np.asarray(smooth_points, dtype=np.float64))
     first_nbrs    = np.ascontiguousarray(np.asarray(first_nbrs, dtype=np.int32))
 
-    out           = np.empty_like(rest_points)
+    out = np.empty_like(rest_points)
     _encode_local_deltas_tbn(rest_points, smooth_points, first_nbrs, out)
     return out
 
@@ -1093,7 +1093,7 @@ def decode_local_deltas_tbn(
     first_nbrs    = np.ascontiguousarray(np.asarray(first_nbrs, dtype=np.int32))
     deltas        = np.ascontiguousarray(np.asarray(deltas, dtype=np.float64))
 
-    out           = np.empty_like(smooth_points)
+    out = np.empty_like(smooth_points)
     _decode_local_deltas_tbn(smooth_points, first_nbrs, deltas, out)
     return out
 
@@ -1129,7 +1129,7 @@ def decode_world_deltas_procrustes(
     neighbors    = np.ascontiguousarray(np.asarray(neighbors, dtype=np.int32))
     world_deltas = np.ascontiguousarray(np.asarray(world_deltas, dtype=np.float64))
 
-    out          = np.empty_like(smooth_rest)
+    out = np.empty_like(smooth_rest)
     _decode_world_deltas_procrustes(
         smooth_rest, smooth_def, neighbors, world_deltas, out
     )
@@ -1197,7 +1197,7 @@ def decode_world_deltas_ddm(
     rest_weights = np.ascontiguousarray(np.asarray(rest_weights, dtype=np.float64))
     world_deltas = np.ascontiguousarray(np.asarray(world_deltas, dtype=np.float64))
 
-    out          = np.empty_like(smooth_def)
+    out = np.empty_like(smooth_def)
     _decode_world_deltas_ddm(
         smooth_def, neighbors, rest_offsets, rest_weights, world_deltas, out
     )
@@ -1336,9 +1336,9 @@ def bilinear_raycast(points, geometry, origins, directions, twosided=True, bvh=N
     if geometry.shape[1] > 4:
         raise ValueError("ngons detected")
     elif geometry.shape[1] < 4:
-        buffer = np.full((geometry.shape[0], 4), -1, dtype=np.int32)
+        buffer                         = np.full((geometry.shape[0], 4), -1, dtype=np.int32)
         buffer[:, : geometry.shape[1]] = geometry
-        geometry = buffer
+        geometry                       = buffer
 
     # normalize directions
     d_norms    = np.linalg.norm(directions, axis=1, keepdims=True)
@@ -1403,13 +1403,13 @@ def bezier_raycast(
     if geometry.shape[1] > 4:
         raise ValueError("ngons detected")
     elif geometry.shape[1] < 4:
-        buffer = np.full((geometry.shape[0], 4), -1, dtype=np.int32)
+        buffer                         = np.full((geometry.shape[0], 4), -1, dtype=np.int32)
         buffer[:, : geometry.shape[1]] = geometry
-        geometry = buffer
+        geometry                       = buffer
 
     # normalize directions
-    d_norms        = np.linalg.norm(directions, axis=1, keepdims=True)
-    directions     = directions / d_norms
+    d_norms    = np.linalg.norm(directions, axis=1, keepdims=True)
+    directions = directions / d_norms
 
     control_points = _compute_all_pn_quad_cps(geometry, points, normals)
 
@@ -1539,7 +1539,7 @@ def trilinear_jacobian(uvw: np.ndarray, corners: np.ndarray) -> np.ndarray:
         axis=-1,
     )
 
-    J = np.empty((len(u), 3, 3))
+    J          = np.empty((len(u), 3, 3))
     J[:, :, 0] = np.einsum("ni,nij->nj", dN_du, corners)
     J[:, :, 1] = np.einsum("ni,nij->nj", dN_dv, corners)
     J[:, :, 2] = np.einsum("ni,nij->nj", dN_dw, corners)
@@ -1606,17 +1606,17 @@ def assign_cells(
     lx, ly, lz, _ = lattice.shape
     max_cells = np.array([lx - 2, ly - 2, lz - 2])
 
-    flat      = lattice.reshape(-1, 3)
+    flat = lattice.reshape(-1, 3)
     lo, hi = flat.min(axis=0), flat.max(axis=0)
-    size = hi - lo
+    size               = hi - lo
     size[size < 1e-12] = 1.0
 
     global_param = (points - lo) / size * (max_cells + 1)
     cells        = np.clip(np.floor(global_param).astype(np.int64), 0, max_cells)
     uvw          = np.clip(global_param - cells, 0.0, 1.0)
 
-    corners      = get_cell_corners(lattice, cells)
-    uvw          = inverse_trilinear(points, corners, uvw)
+    corners = get_cell_corners(lattice, cells)
+    uvw     = inverse_trilinear(points, corners, uvw)
 
     for _ in range(max_hops):
         escaped = np.any((uvw < -0.01) | (uvw > 1.01), axis=1)
@@ -1629,9 +1629,9 @@ def assign_cells(
 
         for axis in range(3):
             ec[eu[:, axis] < -0.01, axis] -= 1
-            ec[eu[:, axis] > 1.01, axis] += 1
+            ec[eu[:, axis] > 1.01, axis]  += 1
 
-        ec = np.clip(ec, 0, max_cells)
+        ec         = np.clip(ec, 0, max_cells)
         cells[idx] = ec
 
         uvw[idx] = inverse_trilinear(
@@ -1746,7 +1746,7 @@ def _bernstein_eval_numpy(
         (N, 3) displacement vectors.
     """
     lx, ly, lz, _ = delta.shape
-    N            = len(uvw)
+    N = len(uvw)
 
     axis_weights = []
     axis_windows = []
@@ -1864,7 +1864,7 @@ def build_vertex_rings(
     counts      = np.asarray(counts, dtype=np.int64).ravel()
     point_count = int(point_count)
 
-    starts      = np.zeros(counts.size + 1, dtype=np.int64)
+    starts = np.zeros(counts.size + 1, dtype=np.int64)
     np.cumsum(counts, out=starts[1:])
 
     # per-corner (prev, next) pairs -- each face contributes one ring
@@ -1874,7 +1874,7 @@ def build_vertex_rings(
     face_size   = counts[corner_face]
     corner_pos  = np.arange(indices.size, dtype=np.int64) - face_start
 
-    valid       = face_size >= 3
+    valid = face_size >= 3
     if not np.any(valid):
         return (
             np.full((point_count, 1), -1, dtype=np.int32),
@@ -1887,20 +1887,20 @@ def build_vertex_rings(
     corner_pos = corner_pos[valid]
     center     = indices[valid]
 
-    prev_v     = indices[face_start + (corner_pos - 1) % face_size]
-    next_v     = indices[face_start + (corner_pos + 1) % face_size]
+    prev_v = indices[face_start + (corner_pos - 1) % face_size]
+    next_v = indices[face_start + (corner_pos + 1) % face_size]
 
     # group the pairs by their center vertex (CSR)
-    order        = np.argsort(center, kind="stable")
-    pair_prev    = np.ascontiguousarray(prev_v[order], dtype=np.int32)
-    pair_next    = np.ascontiguousarray(next_v[order], dtype=np.int32)
+    order     = np.argsort(center, kind="stable")
+    pair_prev = np.ascontiguousarray(prev_v[order], dtype=np.int32)
+    pair_next = np.ascontiguousarray(next_v[order], dtype=np.int32)
 
     pair_counts  = np.bincount(center, minlength=point_count).astype(np.int64)
     pair_offsets = np.zeros(point_count + 1, dtype=np.int64)
     np.cumsum(pair_counts, out=pair_offsets[1:])
 
     # an open fan holds one more neighbour than it has segments
-    capacity    = max(int(pair_counts.max()) + 1, 1)
+    capacity = max(int(pair_counts.max()) + 1, 1)
 
     ring        = np.full((point_count, capacity), -1, dtype=np.int32)
     valence     = np.zeros(point_count,             dtype=np.int32)
@@ -1974,7 +1974,7 @@ def compute_span_weights(
     decals  = np.ascontiguousarray(np.asarray(decals, dtype=np.float64))
     valence = np.ascontiguousarray(np.asarray(valence, dtype=np.int32))
 
-    out     = np.zeros((decals.shape[0], decals.shape[1]), dtype=np.float64)
+    out = np.zeros((decals.shape[0], decals.shape[1]), dtype=np.float64)
     _compute_span_weights(decals, valence, out)
     return out
 
@@ -2044,8 +2044,8 @@ def patch_relax(
     surface_blend = float(np.clip(surface_blend, 0.0, 1.0))
     use_surface   = surface_blend > 1e-6
 
-    src           = points.copy()
-    dst           = np.empty_like(src)
+    src = points.copy()
+    dst = np.empty_like(src)
 
     # only allocated when the surface-constrained regime is active
     posed_decals = (

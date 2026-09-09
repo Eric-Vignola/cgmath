@@ -196,9 +196,9 @@ class TestFFDDataIdentity(unittest.TestCase):
         lattice_mesh = FFDData.create_lattice(
             (4, 4, 4), bbox_min=[-0.1, -0.1, -0.1], bbox_max=[1.1, 1.1, 1.1]
         )
-        ffd = FFDData.from_mesh(lattice_mesh, divisions=(4, 4, 4))
+        ffd                 = FFDData.from_mesh(lattice_mesh, divisions=(4, 4, 4))
         ffd.local_influence = (4, 4, 4)
-        pts = np.random.default_rng(20).uniform(0, 1, (200, 3))
+        pts                 = np.random.default_rng(20).uniform(0, 1, (200, 3))
         ffd.bind(pts)
         ffd.update(ffd.lattice)
         np.testing.assert_allclose(ffd.points, pts, atol=1e-9)
@@ -335,7 +335,7 @@ class TestFFDDegreeAndOutsideProperties(unittest.TestCase):
             ffd.outside = "invalid"
 
     def test_falloff_radius_setter(self):
-        ffd = FFDData.from_mesh(FFDData.create_lattice((2, 2, 2)), divisions=(2, 2, 2))
+        ffd                = FFDData.from_mesh(FFDData.create_lattice((2, 2, 2)), divisions=(2, 2, 2))
         ffd.falloff_radius = 5.0
         self.assertEqual(ffd.falloff_radius, 5.0)
 
@@ -363,8 +363,8 @@ class TestFFDDegreeAndOutsideProperties(unittest.TestCase):
 
     def test_change_outside_without_rebind(self):
         """Changing outside mode after bind should recompute weights."""
-        ffd = FFDData.from_mesh(FFDData.create_lattice((4, 4, 4)), divisions=(4, 4, 4))
-        pts = np.array([[0.0, 0.0, 0.0], [-1.0, 0.0, 0.0]])
+        ffd         = FFDData.from_mesh(FFDData.create_lattice((4, 4, 4)), divisions=(4, 4, 4))
+        pts         = np.array([[0.0, 0.0, 0.0], [-1.0, 0.0, 0.0]])
         ffd.outside = "extrapolate"
         ffd.bind(pts)
         np.testing.assert_allclose(ffd.weights, [1.0, 1.0])
@@ -405,12 +405,12 @@ class TestFFDNonUniformLattice(unittest.TestCase):
         for i in range(3):
             for j in range(3):
                 for k in range(4):
-                    taper = 1.0 - 0.3 * (k / 3)
+                    taper            = 1.0 - 0.3 * (k / 3)
                     lattice[i, j, k] = [(i - 1) * taper, (j - 1) * taper, k * 0.5]
 
-        ffd = FFDData(lattice)
+        ffd                 = FFDData(lattice)
         ffd.local_influence = (3, 3, 4)
-        pts = np.array([[0.0, 0.0, 0.5]], dtype=np.float64)
+        pts                 = np.array([[0.0, 0.0, 0.5]], dtype=np.float64)
         ffd.bind(pts)
 
         deformed = lattice.copy()

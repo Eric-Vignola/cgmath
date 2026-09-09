@@ -147,18 +147,18 @@ class SkinDeformData(Data):
                 neither *inverse_bind_matrices* nor *bind_rig* is supplied, or
                 if the matrices do not match the joint count.
         """
-        self._rest_mesh  = None
-        self._skin       = skin
-        self._points     = None
+        self._rest_mesh = None
+        self._skin      = skin
+        self._points    = None
 
-        self.name        = name
-        self.method      = DeformMethod(method).value
+        self.name   = name
+        self.method = DeformMethod(method).value
 
         self.rest_points = None
         if mesh is not None:
             if hasattr(mesh, "points") and not isinstance(mesh, np.ndarray):
                 self._rest_mesh = mesh
-                points = mesh.points
+                points          = mesh.points
             else:
                 points = mesh
             self.rest_points = np.ascontiguousarray(
@@ -174,7 +174,7 @@ class SkinDeformData(Data):
 
         self.inverse_bind_matrices = None
         if inverse_bind_matrices is not None:
-            ibm = np.asarray(inverse_bind_matrices, dtype=np.float64)
+            ibm                        = np.asarray(inverse_bind_matrices, dtype=np.float64)
             self.inverse_bind_matrices = np.ascontiguousarray(ibm.reshape(-1, 4, 4))
         elif bind_rig is not None:
             world = np.asarray(bind_rig.world_matrix, dtype=np.float64)
@@ -306,7 +306,7 @@ class SkinDeformData(Data):
         self._lookup(source, "skin influences")
         joint_lookup = self._lookup(self.joints, "joints")
 
-        missing      = [n for n in source if n not in joint_lookup]
+        missing = [n for n in source if n not in joint_lookup]
         if missing:
             raise ValueError(
                 f"{len(missing)} skin influence(s) are absent from joints, "
@@ -489,14 +489,14 @@ class SkinDeformData(Data):
                     "packed into a single MeshData -- pass target=None and "
                     "build the meshes yourself"
                 )
-            stacked = np.stack([self.deform(points, m) for m in matrices])
+            stacked      = np.stack([self.deform(points, m) for m in matrices])
             self._points = stacked[-1] if len(stacked) else None
             return stacked
 
         self._points = self.deform(points, matrices)
 
         if is_mesh:
-            result = target.copy()
+            result        = target.copy()
             result.points = self._points.copy()
             # copy() drops the underscore caches (the BVH included) by
             # rebuilding from to_dict(), but `normals` is a real field and

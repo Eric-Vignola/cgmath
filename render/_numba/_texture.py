@@ -51,12 +51,12 @@ def _sample_texture_bilinear_fast(
         fy = y - np.floor(y)
 
         for c in range(3):
-            t00 = texture[y0, x0, c]
-            t10 = texture[y0, x1, c]
-            t01 = texture[y1, x0, c]
-            t11 = texture[y1, x1, c]
-            top = t00 * (1.0 - fx) + t10 * fx
-            bot = t01 * (1.0 - fx) + t11 * fx
+            t00       = texture[y0, x0, c]
+            t10       = texture[y0, x1, c]
+            t01       = texture[y1, x0, c]
+            t11       = texture[y1, x1, c]
+            top       = t00 * (1.0 - fx) + t10 * fx
+            bot       = t01 * (1.0 - fx) + t11 * fx
             out[i, c] = top * (1.0 - fy) + bot * fy
 
     return out

@@ -261,7 +261,7 @@ def _compute_vertex_points(
             if border_count > 0:
                 inv_border = 1.0 / border_count
                 for d in range(n_dims):
-                    avg_border = border_sum[d] * inv_border
+                    avg_border       = border_sum[d] * inv_border
                     new_points[i, d] = (points[i, d] + avg_border) * 0.5
             else:
                 for d in range(n_dims):
@@ -363,7 +363,7 @@ def _compute_vertex_points_keep_borders(
                 for j in range(max_faces):
                     fi = v2f[i, j]
                     if fi >= 0:
-                        q_sum += face_points[fi, d]
+                        q_sum      += face_points[fi, d]
                         face_count += 1
                 Q = q_sum * inv_n if face_count > 0 else 0.0
 
@@ -457,8 +457,8 @@ def _rebuild_subdivision_topology(counts, f2v, f2e, e2v, edge_offset, face_offse
             e1_idx = e1 + edge_offset
 
             # Write quad: face_point, edge0, vertex, edge1
-            out_idx = (base_face_idx + j) * 4
-            new_indices[out_idx] = f
+            out_idx                  = (base_face_idx + j) * 4
+            new_indices[out_idx]     = f
             new_indices[out_idx + 1] = e0_idx
             new_indices[out_idx + 2] = v1
             new_indices[out_idx + 3] = e1_idx

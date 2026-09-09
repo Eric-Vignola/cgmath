@@ -193,8 +193,8 @@ class TestSceneObjectsUseBezier(unittest.TestCase):
     def test_skips_invisible_object(self):
         # An invisible bezier Object shouldn't trigger inflation; the
         # autofit ignores invisible objects too.
-        scene = Scene("s")
-        obj   = Object(name="o", mesh=self.mesh, uv=self.uv, sample_method="bezier")
+        scene          = Scene("s")
+        obj            = Object(name="o", mesh=self.mesh, uv=self.uv, sample_method="bezier")
         obj.visibility = False
         scene.append(obj)
         self.assertFalse(_scene_objects_use_bezier(scene))

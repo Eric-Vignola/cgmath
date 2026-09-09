@@ -14,7 +14,7 @@ def _gaussian(X, epsilon=1.0):
 
     for i in prange(n):
         for j in range(m):
-            r = X[i, j] * epsilon
+            r            = X[i, j] * epsilon
             result[i, j] = np.exp(-r * r)
 
     return result
@@ -27,7 +27,7 @@ def _multiquadric(X, epsilon=1.0):
 
     for i in prange(n):
         for j in range(m):
-            r = X[i, j] * epsilon
+            r            = X[i, j] * epsilon
             result[i, j] = np.sqrt(1.0 + r * r)
 
     return result
@@ -40,7 +40,7 @@ def _inverse_multiquadric(X, epsilon=1.0):
 
     for i in prange(n):
         for j in range(m):
-            r = X[i, j] * epsilon
+            r            = X[i, j] * epsilon
             result[i, j] = 1.0 / np.sqrt(1.0 + r * r)
 
     return result
@@ -53,7 +53,7 @@ def _inverse_quadratic(X, epsilon=1.0):
 
     for i in prange(n):
         for j in range(m):
-            r = X[i, j] * epsilon
+            r            = X[i, j] * epsilon
             result[i, j] = 1.0 / (1.0 + r * r)
 
     return result
@@ -83,7 +83,7 @@ def _cubic(X, epsilon=1.0):
 
     for i in prange(n):
         for j in range(m):
-            r = X[i, j] / epsilon
+            r            = X[i, j] / epsilon
             result[i, j] = r * r * r
 
     return result
@@ -96,8 +96,8 @@ def _quintic(X, epsilon=1.0):
 
     for i in prange(n):
         for j in range(m):
-            r  = X[i, j] / epsilon
-            r2 = r * r
+            r            = X[i, j] / epsilon
+            r2           = r * r
             result[i, j] = r2 * r2 * r
 
     return result
@@ -174,8 +174,8 @@ def _wendland_c2(X, r=1.0):
             arg  = X[i, j] / r
             diff = 1.0 - arg
             if diff > 0.0:
-                diff2 = diff * diff
-                diff4 = diff2 * diff2
+                diff2        = diff * diff
+                diff4        = diff2 * diff2
                 result[i, j] = diff4 * (4.0 * arg + 1.0)
             else:
                 result[i, j] = 0.0
@@ -193,9 +193,9 @@ def _wendland_c4(X, r=1.0):
             arg  = X[i, j] / r
             diff = 1.0 - arg
             if diff > 0.0:
-                diff2 = diff * diff
-                diff6 = diff2 * diff2 * diff2
-                arg2  = arg * arg
+                diff2        = diff * diff
+                diff6        = diff2 * diff2 * diff2
+                arg2         = arg * arg
                 result[i, j] = diff6 * (35.0 * arg2 + 18.0 * arg + 3.0)
             else:
                 result[i, j] = 0.0
@@ -213,11 +213,11 @@ def _wendland_c6(X, r=1.0):
             arg  = X[i, j] / r
             diff = 1.0 - arg
             if diff > 0.0:
-                diff2 = diff * diff
-                diff4 = diff2 * diff2
-                diff8 = diff4 * diff4
-                arg2  = arg * arg
-                arg3  = arg2 * arg
+                diff2        = diff * diff
+                diff4        = diff2 * diff2
+                diff8        = diff4 * diff4
+                arg2         = arg * arg
+                arg3         = arg2 * arg
                 result[i, j] = diff8 * (32.0 * arg3 + 25.0 * arg2 + 8.0 * arg + 1.0)
             else:
                 result[i, j] = 0.0
@@ -235,9 +235,9 @@ def _wu_c2(X, r=1.0):
             arg  = X[i, j] / r
             diff = 1.0 - arg
             if diff > 0.0:
-                diff2 = diff * diff
-                diff5 = diff2 * diff2 * diff
-                arg2  = arg * arg
+                diff2        = diff * diff
+                diff5        = diff2 * diff2 * diff
+                arg2         = arg * arg
                 result[i, j] = diff5 * (8.0 * arg2 + 5.0 * arg + 1.0)
             else:
                 result[i, j] = 0.0
@@ -255,11 +255,11 @@ def _wu_c4(X, r=1.0):
             arg  = X[i, j] / r
             diff = 1.0 - arg
             if diff > 0.0:
-                diff2 = diff * diff
-                diff4 = diff2 * diff2
-                diff7 = diff4 * diff2 * diff
-                arg2  = arg * arg
-                arg3  = arg2 * arg
+                diff2        = diff * diff
+                diff4        = diff2 * diff2
+                diff7        = diff4 * diff2 * diff
+                arg2         = arg * arg
+                arg3         = arg2 * arg
                 result[i, j] = diff7 * (16.0 * arg3 + 12.0 * arg2 + 5.0 * arg + 1.0)
             else:
                 result[i, j] = 0.0
@@ -292,7 +292,7 @@ def _matern_32(X, epsilon=1.0):
 
     for i in prange(n):
         for j in range(m):
-            z = sqrt3 * X[i, j] / epsilon
+            z            = sqrt3 * X[i, j] / epsilon
             result[i, j] = (1.0 + z) * np.exp(-z)
 
     return result
@@ -323,7 +323,7 @@ def _cauchy(X, epsilon=1.0):
 
     for i in prange(n):
         for j in range(m):
-            r = X[i, j] / epsilon
+            r            = X[i, j] / epsilon
             result[i, j] = 1.0 / (1.0 + r * r)
 
     return result

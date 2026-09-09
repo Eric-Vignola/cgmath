@@ -506,14 +506,14 @@ def _delta_mush_frames_numpy(
     rows ``[T; B; N]`` and ``valid`` is the bool mask of vertices that
     had at least one usable neighbour.
     """
-    diffs = smooth_points[neighbors] - smooth_points[:, None, :]
-    mask  = neighbors >= 0
+    diffs        = smooth_points[neighbors] - smooth_points[:, None, :]
+    mask         = neighbors >= 0
     diffs[~mask] = 0.0
 
-    mags    = np.linalg.norm(diffs, axis=2)
-    safe    = mags > 1e-12
-    inv     = np.where(safe, 1.0 / np.where(safe, mags, 1.0), 0.0)
-    unit    = diffs * inv[..., None]
+    mags = np.linalg.norm(diffs, axis=2)
+    safe = mags > 1e-12
+    inv  = np.where(safe, 1.0 / np.where(safe, mags, 1.0), 0.0)
+    unit = diffs * inv[..., None]
 
     normals = unit.sum(axis=1)
 
@@ -524,26 +524,26 @@ def _delta_mush_frames_numpy(
     tangents      = diffs[rows, first_valid]
 
     # default frame for isolated vertices
-    out_t = np.zeros_like(smooth_points)
-    out_n = np.zeros_like(smooth_points)
+    out_t       = np.zeros_like(smooth_points)
+    out_n       = np.zeros_like(smooth_points)
     out_n[:, 1] = 1.0  # canonical Y-up normal
     out_t[:, 0] = 1.0  # canonical X tangent
 
-    nm     = np.linalg.norm(normals, axis=1)
-    nz     = nm > 1e-12
-    n_unit = np.zeros_like(normals)
-    n_unit[nz] = normals[nz] / nm[nz, None]
+    nm          = np.linalg.norm(normals, axis=1)
+    nz          = nm > 1e-12
+    n_unit      = np.zeros_like(normals)
+    n_unit[nz]  = normals[nz] / nm[nz, None]
 
     # only fill rows that had at least one valid neighbour
     rows_ok = valid_per_row & nz
     n_use   = np.where(rows_ok[:, None], n_unit, out_n)
 
     # project tangent onto plane perpendicular to the normal
-    dot    = np.einsum("ij,ij->i", tangents, n_use)
-    t_proj = tangents - dot[:, None] * n_use
-    tm     = np.linalg.norm(t_proj, axis=1)
-    tz     = tm > 1e-12
-    t_unit = np.zeros_like(t_proj)
+    dot        = np.einsum("ij,ij->i", tangents, n_use)
+    t_proj     = tangents - dot[:, None] * n_use
+    tm         = np.linalg.norm(t_proj, axis=1)
+    tz         = tm > 1e-12
+    t_unit     = np.zeros_like(t_proj)
     t_unit[tz] = t_proj[tz] / tm[tz, None]
 
     # robust fallback tangent for degenerate cases
@@ -552,15 +552,15 @@ def _delta_mush_frames_numpy(
         np.array([1.0, 0.0, 0.0]),
         np.array([0.0, 1.0, 0.0]),
     )
-    fall         = fallback - np.einsum("ij,ij->i", fallback, n_use)[:, None] * n_use
-    fm           = np.linalg.norm(fall, axis=1)
-    fall         = fall / np.where(fm > 1e-12, fm, 1.0)[:, None]
+    fall = fallback - np.einsum("ij,ij->i", fallback, n_use)[:, None] * n_use
+    fm   = np.linalg.norm(fall, axis=1)
+    fall = fall / np.where(fm > 1e-12, fm, 1.0)[:, None]
 
     use_fallback = ~rows_ok | ~tz
     t_use        = np.where(use_fallback[:, None], fall, t_unit)
     b_use        = np.cross(n_use, t_use)
 
-    frames       = np.stack([t_use, b_use, n_use], axis=1)
+    frames = np.stack([t_use, b_use, n_use], axis=1)
     return frames, rows_ok
 
 
@@ -585,8 +585,8 @@ def _delta_mush_decode_numpy(
 ) -> np.ndarray:
     """Pure-numpy fallback for ``_decode_local_deltas``."""
     frames, valid = _delta_mush_frames_numpy(smooth_points, neighbors)
-    world = np.einsum("nji,nj->ni", frames, deltas)
-    out   = smooth_points + world
+    world       = np.einsum("nji,nj->ni", frames, deltas)
+    out         = smooth_points + world
     out[~valid] = smooth_points[~valid] + deltas[~valid]
     return out
 
@@ -678,9 +678,9 @@ def _encode_local_deltas_tbn(
         n_idx = first_nbrs[i, 0]
         p_idx = first_nbrs[i, 1]
 
-        wx    = rest_points[i, 0] - smooth_points[i, 0]
-        wy    = rest_points[i, 1] - smooth_points[i, 1]
-        wz    = rest_points[i, 2] - smooth_points[i, 2]
+        wx = rest_points[i, 0] - smooth_points[i, 0]
+        wy = rest_points[i, 1] - smooth_points[i, 1]
+        wz = rest_points[i, 2] - smooth_points[i, 2]
 
         if n_idx < 0 or p_idx < 0:
             # no face -- store identity delta
@@ -811,12 +811,12 @@ def _decode_world_deltas_procrustes(
         m22         = 0.0
         valid_count = 0
 
-        srx         = smooth_rest[i, 0]
-        sry         = smooth_rest[i, 1]
-        srz         = smooth_rest[i, 2]
-        sdx         = smooth_def[i, 0]
-        sdy         = smooth_def[i, 1]
-        sdz         = smooth_def[i, 2]
+        srx = smooth_rest[i, 0]
+        sry = smooth_rest[i, 1]
+        srz = smooth_rest[i, 2]
+        sdx = smooth_def[i, 0]
+        sdy = smooth_def[i, 1]
+        sdz = smooth_def[i, 2]
 
         for j in range(n_neighbors):
             ni = neighbors[i, j]
@@ -828,15 +828,15 @@ def _decode_world_deltas_procrustes(
             bx = smooth_def[ni, 0] - sdx
             by = smooth_def[ni, 1] - sdy
             bz = smooth_def[ni, 2] - sdz
-            m00 += ax * bx
-            m01 += ax * by
-            m02 += ax * bz
-            m10 += ay * bx
-            m11 += ay * by
-            m12 += ay * bz
-            m20 += az * bx
-            m21 += az * by
-            m22 += az * bz
+            m00         += ax * bx
+            m01         += ax * by
+            m02         += ax * bz
+            m10         += ay * bx
+            m11         += ay * by
+            m12         += ay * bz
+            m20         += az * bx
+            m21         += az * by
+            m22         += az * bz
             valid_count += 1
 
         wx = world_deltas[i, 0]
@@ -911,7 +911,7 @@ def _ddm_precompute(
                 out_offsets[i, j, 0] = 0.0
                 out_offsets[i, j, 1] = 0.0
                 out_offsets[i, j, 2] = 0.0
-                out_weights[i, j] = 0.0
+                out_weights[i, j]    = 0.0
                 continue
             dx  = smooth_points[ni, 0] - sx
             dy  = smooth_points[ni, 1] - sy
@@ -972,9 +972,9 @@ def _decode_world_deltas_ddm(
         m22         = 0.0
         valid_count = 0
 
-        sdx         = smooth_def[i, 0]
-        sdy         = smooth_def[i, 1]
-        sdz         = smooth_def[i, 2]
+        sdx = smooth_def[i, 0]
+        sdy = smooth_def[i, 1]
+        sdz = smooth_def[i, 2]
 
         for j in range(n_neighbors):
             ni = neighbors[i, j]
@@ -992,15 +992,15 @@ def _decode_world_deltas_ddm(
             # weighted outer product (sqrt-weight on each side preserves
             # the geometric meaning of the cross-covariance)
             sw = w
-            m00 += sw * ax * bx
-            m01 += sw * ax * by
-            m02 += sw * ax * bz
-            m10 += sw * ay * bx
-            m11 += sw * ay * by
-            m12 += sw * ay * bz
-            m20 += sw * az * bx
-            m21 += sw * az * by
-            m22 += sw * az * bz
+            m00         += sw * ax * bx
+            m01         += sw * ax * by
+            m02         += sw * ax * bz
+            m10         += sw * ay * bx
+            m11         += sw * ay * by
+            m12         += sw * ay * bz
+            m20         += sw * az * bx
+            m21         += sw * az * by
+            m22         += sw * az * bz
             valid_count += 1
 
         wx = world_deltas[i, 0]
@@ -1042,21 +1042,21 @@ def _delta_mush_encode_tbn_numpy(
     if not valid.any():
         return out
 
-    rows     = np.where(valid)[0]
-    next_off = smooth_points[n_idx[valid]] - smooth_points[rows]
-    prev_off = smooth_points[p_idx[valid]] - smooth_points[rows]
-    normals  = np.cross(next_off, prev_off)
-    nm       = np.linalg.norm(normals, axis=1)
-    safe_n   = nm > 1e-12
-    n_unit   = np.zeros_like(normals)
+    rows           = np.where(valid)[0]
+    next_off       = smooth_points[n_idx[valid]] - smooth_points[rows]
+    prev_off       = smooth_points[p_idx[valid]] - smooth_points[rows]
+    normals        = np.cross(next_off, prev_off)
+    nm             = np.linalg.norm(normals, axis=1)
+    safe_n         = nm > 1e-12
+    n_unit         = np.zeros_like(normals)
     n_unit[safe_n] = normals[safe_n] / nm[safe_n, None]
 
     # tangent: project next_off onto plane perp to n_unit
-    dot    = np.einsum("ij,ij->i", next_off, n_unit)
-    t      = next_off - dot[:, None] * n_unit
-    tm     = np.linalg.norm(t, axis=1)
-    safe_t = tm > 1e-12
-    t_unit = np.zeros_like(t)
+    dot            = np.einsum("ij,ij->i", next_off, n_unit)
+    t              = next_off - dot[:, None] * n_unit
+    tm             = np.linalg.norm(t, axis=1)
+    safe_t         = tm > 1e-12
+    t_unit         = np.zeros_like(t)
     t_unit[safe_t] = t[safe_t] / tm[safe_t, None]
 
     # robust fallback for degenerate t -- perp to n_unit
@@ -1068,9 +1068,9 @@ def _delta_mush_encode_tbn_numpy(
             np.array([1.0, 0.0, 0.0]),
             np.array([0.0, 1.0, 0.0]),
         )
-        proj   = canon - np.einsum("ij,ij->i", canon, n_unit[bad])[:, None] * n_unit[bad]
-        proj_n = np.linalg.norm(proj, axis=1)
-        proj   = proj / np.where(proj_n > 1e-12, proj_n, 1.0)[:, None]
+        proj        = canon - np.einsum("ij,ij->i", canon, n_unit[bad])[:, None] * n_unit[bad]
+        proj_n      = np.linalg.norm(proj, axis=1)
+        proj        = proj / np.where(proj_n > 1e-12, proj_n, 1.0)[:, None]
         t_unit[bad] = proj
 
     b_unit = np.cross(n_unit, t_unit)
@@ -1099,20 +1099,20 @@ def _delta_mush_decode_tbn_numpy(
     if not valid.any():
         return out
 
-    rows     = np.where(valid)[0]
-    next_off = smooth_points[n_idx[valid]] - smooth_points[rows]
-    prev_off = smooth_points[p_idx[valid]] - smooth_points[rows]
-    normals  = np.cross(next_off, prev_off)
-    nm       = np.linalg.norm(normals, axis=1)
-    safe_n   = nm > 1e-12
-    n_unit   = np.zeros_like(normals)
+    rows           = np.where(valid)[0]
+    next_off       = smooth_points[n_idx[valid]] - smooth_points[rows]
+    prev_off       = smooth_points[p_idx[valid]] - smooth_points[rows]
+    normals        = np.cross(next_off, prev_off)
+    nm             = np.linalg.norm(normals, axis=1)
+    safe_n         = nm > 1e-12
+    n_unit         = np.zeros_like(normals)
     n_unit[safe_n] = normals[safe_n] / nm[safe_n, None]
 
-    dot    = np.einsum("ij,ij->i", next_off, n_unit)
-    t      = next_off - dot[:, None] * n_unit
-    tm     = np.linalg.norm(t, axis=1)
-    safe_t = tm > 1e-12
-    t_unit = np.zeros_like(t)
+    dot            = np.einsum("ij,ij->i", next_off, n_unit)
+    t              = next_off - dot[:, None] * n_unit
+    tm             = np.linalg.norm(t, axis=1)
+    safe_t         = tm > 1e-12
+    t_unit         = np.zeros_like(t)
     t_unit[safe_t] = t[safe_t] / tm[safe_t, None]
 
     if (~safe_t).any():
@@ -1122,15 +1122,15 @@ def _delta_mush_decode_tbn_numpy(
             np.array([1.0, 0.0, 0.0]),
             np.array([0.0, 1.0, 0.0]),
         )
-        proj   = canon - np.einsum("ij,ij->i", canon, n_unit[bad])[:, None] * n_unit[bad]
-        proj_n = np.linalg.norm(proj, axis=1)
-        proj   = proj / np.where(proj_n > 1e-12, proj_n, 1.0)[:, None]
+        proj        = canon - np.einsum("ij,ij->i", canon, n_unit[bad])[:, None] * n_unit[bad]
+        proj_n      = np.linalg.norm(proj, axis=1)
+        proj        = proj / np.where(proj_n > 1e-12, proj_n, 1.0)[:, None]
         t_unit[bad] = proj
 
     b_unit = np.cross(n_unit, t_unit)
 
-    d      = deltas[rows]
-    world  = d[:, 0:1] * t_unit + d[:, 1:2] * b_unit + d[:, 2:3] * n_unit
+    d         = deltas[rows]
+    world     = d[:, 0:1] * t_unit + d[:, 1:2] * b_unit + d[:, 2:3] * n_unit
     out[rows] = smooth_points[rows] + world
     return out
 

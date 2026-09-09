@@ -21,7 +21,7 @@ def _matrix_index_lookup(matrix, indices):
 
             if found:
                 faces[i] = j
-                idx[i] = k
+                idx[i]   = k
                 break
 
     return faces, idx
@@ -47,7 +47,7 @@ def _matrix_row_combine(matrix, from_rows, to_rows):
     # create the widest possible merged matrix
     maximum = maximum_.max()
 
-    merged  = np.full((matrix.shape[0], maximum), -1, dtype=matrix.dtype)
+    merged                       = np.full((matrix.shape[0], maximum), -1, dtype=matrix.dtype)
     merged[:, : matrix.shape[1]] = matrix
 
     # insert any new value at the next available index
@@ -97,8 +97,8 @@ def _compute_e2v_e2f(f2v, counts):
     cumsum   = np.cumsum(counts)
     cumsum   = np.append(cumsum[::-1], 0)[::-1][:-1]
 
-    e2v      = np.empty((n_counts, 2), dtype=f2v.dtype)
-    e2f      = np.empty((n_counts, 1), dtype=f2v.dtype)
+    e2v = np.empty((n_counts, 2), dtype=f2v.dtype)
+    e2f = np.empty((n_counts, 1), dtype=f2v.dtype)
 
     for i in prange(len(counts)):
         for j in range(counts[i]):
@@ -167,8 +167,8 @@ def _grow_neighbors(neighbors: np.ndarray, indices: np.ndarray, n: int) -> np.nd
     current_max_width = original_width
     prev_total_count  = 0  # For early termination detection
 
-    converged         = False
-    last_iteration    = 0
+    converged      = False
+    last_iteration = 0
 
     for iteration in range(n):
         # Buffer selection - always do this to keep variables defined
@@ -212,10 +212,10 @@ def _grow_neighbors(neighbors: np.ndarray, indices: np.ndarray, n: int) -> np.nd
             for j in range(next_width):
                 next_buf[i, j] = -1
 
-            v    = indices[i]
-            seen = np.zeros(num_verts, dtype=np.bool_)
+            v       = indices[i]
+            seen    = np.zeros(num_verts, dtype=np.bool_)
             seen[v] = True
-            count = 0
+            count   = 0
 
             # Copy existing neighbors
             for j in range(current_width):

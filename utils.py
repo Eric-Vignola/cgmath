@@ -210,7 +210,7 @@ def run_tests(
     root          = f"{os.path.basename(package_root)}._tests."
     loader        = unittest.TestLoader()
 
-    stream        = _encoding_safe(sys.stderr)   # resolved now, so an installed stderr tee is seen
+    stream = _encoding_safe(sys.stderr)   # resolved now, so an installed stderr tee is seen
 
     if target is None:
         targets: list[str] = []
@@ -425,8 +425,8 @@ def _format_flat_list(
     if start_col + len(single) <= max_line_width:
         return single
 
-    padded         = _pad_column(items, str_items)
-    max_width      = max(len(s) for s in padded)
+    padded    = _pad_column(items, str_items)
+    max_width = max(len(s) for s in padded)
 
     align_col      = start_col + 2  # after "[ "
     available      = max_line_width - align_col
@@ -485,7 +485,7 @@ def _format_nd_array(
         align_col = start_col + 1
         pad       = " " * align_col
 
-        parts     = []
+        parts = []
         for i, row_str in enumerate(row_strs):
             prefix = "[" if i == 0 else pad
             suffix = "," if i < len(row_strs) - 1 else "]"

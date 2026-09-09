@@ -95,7 +95,7 @@ class BSplineData(Data):
     _total_length     = None  # total arc length of curve
     _cp_params        = None  # cached control point parameters
 
-    __repr__          = Data.__repr__
+    __repr__ = Data.__repr__
 
     def __eq__(self, other):
         return np.all(
@@ -189,14 +189,14 @@ class BSplineData(Data):
             eval_u = self._u_table % self._max_param
         else:
             self._u_table = np.linspace(0, self._max_param, n_samples, dtype=np.float64)
-            eval_u = self._u_table
+            eval_u        = self._u_table
 
-        curve_points    = self._spl(eval_u)
+        curve_points = self._spl(eval_u)
 
         diffs           = np.diff(curve_points, axis=0)
         segment_lengths = np.linalg.norm(diffs, axis=1)
 
-        self._arc_length_table = np.zeros(n_samples, dtype=np.float64)
+        self._arc_length_table     = np.zeros(n_samples, dtype=np.float64)
         self._arc_length_table[1:] = np.cumsum(segment_lengths)
 
         self._total_length = self._arc_length_table[-1]
@@ -437,7 +437,7 @@ class BSplineData(Data):
         if self.periodic:
             u = u % self._max_param
 
-        u      = np.atleast_1d(u).astype(np.float64)
+        u = np.atleast_1d(u).astype(np.float64)
 
         points = _evaluate_bspline_curve(u, self._kv, self._cv_f64, self.degree)
         tangents = _evaluate_bspline_curve_derivative(
@@ -541,10 +541,10 @@ class BSplineData(Data):
                 p_end = self._spl(u_end)[0]
                 t_end = self._der(u_end)[0]
 
-            v_end = _velocity(t_end)
-            idx   = np.where(out_high)[0]
-            delta = (u_user[idx] - u_high)[:, None]
-            points[idx] = p_end + delta * v_end
+            v_end         = _velocity(t_end)
+            idx           = np.where(out_high)[0]
+            delta         = (u_user[idx] - u_high)[:, None]
+            points[idx]   = p_end + delta * v_end
             tangents[idx] = t_end
 
         if out_low.any():
@@ -564,8 +564,8 @@ class BSplineData(Data):
             idx     = np.where(out_low)[0]
             # u_user[idx] is negative -> moves opposite to the start tangent,
             # extending the curve backward in space.
-            delta = u_user[idx][:, None]
-            points[idx] = p_start + delta * v_start
+            delta         = u_user[idx][:, None]
+            points[idx]   = p_start + delta * v_start
             tangents[idx] = t_start
 
         if was_1d:
@@ -701,11 +701,11 @@ class BSplineData(Data):
         # open curve
         if not self.periodic:
             if pad_endpoints:
-                points = np.zeros((self.points.shape[0] + 2 * n, self.points.shape[1]))
-                points[:n] = self.points[0]
-                points[-n:] = self.points[-1]
+                points       = np.zeros((self.points.shape[0] + 2 * n, self.points.shape[1]))
+                points[:n]   = self.points[0]
+                points[-n:]  = self.points[-1]
                 points[n:-n] = self.points
-                points = savgol_filter(points, window_length, polyorder, axis=0)[n:-n]
+                points       = savgol_filter(points, window_length, polyorder, axis=0)[n:-n]
             else:
                 points = savgol_filter(self.points, window_length, polyorder, axis=0)
 
@@ -845,7 +845,7 @@ class BSplineData(Data):
 
         # For open curves, clamp endpoints
         if not self.periodic:
-            greville[0] = 0.0
+            greville[0]  = 0.0
             greville[-1] = float(self._max_param)
 
         # Non-overlapping search bounds from midpoints of adjacent Greville points.
@@ -858,46 +858,46 @@ class BSplineData(Data):
         if self.periodic:
             half_step_start = (greville[1] - greville[0]) / 2.0
             half_step_end   = (greville[-1] - greville[-2]) / 2.0
-            u_min[0] = greville[0] - half_step_start
-            u_min[1:] = mids
-            u_max[:-1] = mids
-            u_max[-1] = greville[-1] + half_step_end
+            u_min[0]        = greville[0] - half_step_start
+            u_min[1:]       = mids
+            u_max[:-1]      = mids
+            u_max[-1]       = greville[-1] + half_step_end
         else:
-            u_min[0] = 0.0
-            u_min[1:] = mids
+            u_min[0]   = 0.0
+            u_min[1:]  = mids
             u_max[:-1] = mids
-            u_max[-1] = float(self._max_param)
+            u_max[-1]  = float(self._max_param)
 
         # Vectorized Newton-Raphson refinement
         u       = greville.copy()
         queries = self.points[:n]
 
-        der1    = self._spl.derivative(1)
-        der2    = self._spl.derivative(2)
+        der1 = self._spl.derivative(1)
+        der2 = self._spl.derivative(2)
 
         # Skip refinement for clamped endpoints on open curves
         mask = np.ones(n, dtype=bool)
         if not self.periodic:
-            mask[0] = False
+            mask[0]  = False
             mask[-1] = False
 
         if mask.any():
             for _ in range(10):
                 u_eval = u % self._max_param if self.periodic else u
 
-                C      = self._spl(u_eval)
-                Cp     = der1(u_eval)
-                Cpp    = der2(u_eval)
+                C     = self._spl(u_eval)
+                Cp    = der1(u_eval)
+                Cpp   = der2(u_eval)
 
-                diff   = C - queries
-                f      = np.einsum("ij,ij->i", diff, Cp)
-                fp     = np.einsum("ij,ij->i", Cp, Cp) + np.einsum("ij,ij->i", diff, Cpp)
-                fp     = np.where(np.abs(fp) < 1e-14, 1e-14, fp)
+                diff  = C - queries
+                f     = np.einsum("ij,ij->i", diff, Cp)
+                fp    = np.einsum("ij,ij->i", Cp, Cp) + np.einsum("ij,ij->i", diff, Cpp)
+                fp    = np.where(np.abs(fp) < 1e-14, 1e-14, fp)
 
-                du     = np.where(mask, -f / fp, 0.0)
-                du     = np.clip(du, -0.5, 0.5)
+                du    = np.where(mask, -f / fp, 0.0)
+                du    = np.clip(du, -0.5, 0.5)
 
-                u_new  = np.clip(u + du, u_min, u_max)
+                u_new = np.clip(u + du, u_min, u_max)
 
                 if np.max(np.abs(u_new[mask] - u[mask])) < 1e-10:
                     u = u_new
@@ -905,8 +905,8 @@ class BSplineData(Data):
                 u = u_new
 
         if self.periodic:
-            u      = u % self._max_param
-            u      = self._denormalize_u(u)
+            u = u % self._max_param
+            u = self._denormalize_u(u)
 
             period = 1.0 if self.uniform else float(self._max_param)
 

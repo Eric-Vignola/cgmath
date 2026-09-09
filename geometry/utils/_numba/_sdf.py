@@ -143,9 +143,9 @@ def _compute_dual_vertices(
     points   = np.empty((n_active, 3), dtype=np.float64)
 
     for idx in prange(n_active):
-        i         = active_cubes[idx, 0]
-        j         = active_cubes[idx, 1]
-        k         = active_cubes[idx, 2]
+        i = active_cubes[idx, 0]
+        j = active_cubes[idx, 1]
+        k = active_cubes[idx, 2]
 
         config    = cube_config[i, j, k]
         edge_bits = edge_table[config]
@@ -192,14 +192,14 @@ def _compute_dual_vertices(
                 p1y = grid_origin[1] + (j + o1y) * grid_spacing[1]
                 p1z = grid_origin[2] + (k + o1z) * grid_spacing[2]
 
-                cx += p0x + t * (p1x - p0x)
-                cy += p0y + t * (p1y - p0y)
-                cz += p0z + t * (p1z - p0z)
+                cx    += p0x + t * (p1x - p0x)
+                cy    += p0y + t * (p1y - p0y)
+                cz    += p0z + t * (p1z - p0z)
                 count += 1
 
         # Dual vertex is centroid of crossings
         if count > 0:
-            inv_count = 1.0 / count
+            inv_count      = 1.0 / count
             points[idx, 0] = cx * inv_count
             points[idx, 1] = cy * inv_count
             points[idx, 2] = cz * inv_count
@@ -245,9 +245,9 @@ def _count_faces(
     face_count = 0
 
     for idx in range(active_cubes.shape[0]):
-        i         = active_cubes[idx, 0]
-        j         = active_cubes[idx, 1]
-        k         = active_cubes[idx, 2]
+        i = active_cubes[idx, 0]
+        j = active_cubes[idx, 1]
+        k = active_cubes[idx, 2]
 
         config    = cube_config[i, j, k]
         edge_bits = edge_table[config]
@@ -325,9 +325,9 @@ def _generate_faces(
     face_counts = np.zeros(n_active, dtype=np.int32)
 
     for idx in prange(n_active):
-        i         = active_cubes[idx, 0]
-        j         = active_cubes[idx, 1]
-        k         = active_cubes[idx, 2]
+        i = active_cubes[idx, 0]
+        j = active_cubes[idx, 1]
+        k = active_cubes[idx, 2]
 
         config    = cube_config[i, j, k]
         edge_bits = edge_table[config]
@@ -380,9 +380,9 @@ def _generate_faces(
     faces = np.empty((total_faces, 4), dtype=np.int32)
 
     for idx in prange(n_active):
-        i         = active_cubes[idx, 0]
-        j         = active_cubes[idx, 1]
-        k         = active_cubes[idx, 2]
+        i = active_cubes[idx, 0]
+        j = active_cubes[idx, 1]
+        k = active_cubes[idx, 2]
 
         config    = cube_config[i, j, k]
         edge_bits = edge_table[config]

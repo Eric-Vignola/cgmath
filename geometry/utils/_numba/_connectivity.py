@@ -14,7 +14,7 @@ def _compute_single_vertex_neighborhood(
     v, connectivity, neighbor_counts, num_hops, max_output, num_vertices
 ):
     """Compute neighborhood for a single vertex using BFS."""
-    visited = np.zeros(num_vertices, dtype=np.bool_)
+    visited    = np.zeros(num_vertices, dtype=np.bool_)
     visited[v] = True  # Exclude self
 
     result        = np.full(max_output, np.int32(-1), dtype=np.int32)
@@ -70,7 +70,7 @@ def _compute_single_vertex_neighborhood(
 @njit(cache=True)
 def _count_neighborhood_size(v, connectivity, neighbor_counts, num_hops, num_vertices):
     """Count neighborhood size for a vertex without storing results (for estimation)."""
-    visited = np.zeros(num_vertices, dtype=np.bool_)
+    visited    = np.zeros(num_vertices, dtype=np.bool_)
     visited[v] = True
 
     frontier      = np.empty(num_vertices, dtype=np.int32)
@@ -79,7 +79,7 @@ def _count_neighborhood_size(v, connectivity, neighbor_counts, num_hops, num_ver
     frontier_size = np.int32(0)
     count         = np.int32(0)
 
-    nc            = neighbor_counts[v]
+    nc = neighbor_counts[v]
     for j in range(nc):
         n = connectivity[v, j]
         if not visited[n]:
@@ -121,9 +121,9 @@ def _find_top_connected_vertices(neighbor_counts, num_vertices, top_k):
         for j in range(top_k):
             if nc > top_counts[j]:
                 for k in range(top_k - 1, j, -1):
-                    top_counts[k] = top_counts[k - 1]
+                    top_counts[k]  = top_counts[k - 1]
                     top_indices[k] = top_indices[k - 1]
-                top_counts[j] = nc
+                top_counts[j]  = nc
                 top_indices[j] = i
                 break
     return top_indices
@@ -193,8 +193,8 @@ def _compute_single_vertex_neighborhood_with_distances(
     This allows O(1) lookup for distance updates.
     """
     # visited stores result index (-1 = unvisited, >= 0 = index in result array)
-    visited = np.full(num_vertices, np.int32(-1), dtype=np.int32)
-    visited[v] = -3  # Mark source as visited (special marker, never add to results)
+    visited       = np.full(num_vertices, np.int32(-1), dtype=np.int32)
+    visited[v]    = -3  # Mark source as visited (special marker, never add to results)
 
     result        = np.full(max_output, np.int32(-1), dtype=np.int32)
     result_dists  = np.full(max_output, np.float32(-1.0), dtype=np.float32)
@@ -215,9 +215,9 @@ def _compute_single_vertex_neighborhood_with_distances(
             # First visit - only add if within max_distance
             if d <= max_distance:
                 if output_idx < max_output:
-                    result[output_idx] = n
+                    result[output_idx]       = n
                     result_dists[output_idx] = d
-                    visited[n] = output_idx  # Store result index
+                    visited[n]               = output_idx  # Store result index
                     output_idx += 1
                     if frontier_size < max_output:
                         frontier[frontier_size] = n
@@ -250,9 +250,9 @@ def _compute_single_vertex_neighborhood_with_distances(
                     # First visit OR previously excluded - add if within max_distance
                     if new_dist <= max_distance:
                         if output_idx < max_output:
-                            result[output_idx] = n
+                            result[output_idx]       = n
                             result_dists[output_idx] = new_dist
-                            visited[n] = output_idx  # Store result index
+                            visited[n]               = output_idx  # Store result index
                             output_idx += 1
                             if next_size < max_output:
                                 next_frontier[next_size] = n
@@ -332,7 +332,7 @@ def _compute_topological_neighborhood(connectivity, num_hops, indices):
         result, size = _compute_single_vertex_neighborhood(
             v, connectivity, neighbor_counts, num_hops, max_output, num_vertices
         )
-        neighborhood[i, :] = result
+        neighborhood[i, :]    = result
         neighborhood_sizes[i] = size
 
     max_used = np.int32(0)
@@ -420,9 +420,9 @@ def _compute_topological_neighborhood_with_distances(
             num_vertices,
             max_distance,
         )
-        neighborhood[i, :] = result
+        neighborhood[i, :]       = result
         neighborhood_dists[i, :] = result_dists
-        neighborhood_sizes[i] = size
+        neighborhood_sizes[i]    = size
 
     max_used = np.int32(0)
     for i in range(num_indices):

@@ -255,10 +255,10 @@ class MeshDataResampler:
                         source.points, sample_data.geometry, sample_data.uvs
                     )
 
-                normals = np.cross(U, V)
-                norms   = np.linalg.norm(normals, axis=1, keepdims=True)
+                normals           = np.cross(U, V)
+                norms             = np.linalg.norm(normals, axis=1, keepdims=True)
                 norms[norms == 0] = 1
-                normals = normals / norms
+                normals           = normals / norms
             else:
                 normals = sample_data.normals
 
@@ -299,12 +299,12 @@ class MeshDataResampler:
             target_data = MorphData.from_mesh_data(self.src_mesh, target_data)
 
         # set morph target data in a zero buffer
-        self._buffer[:] = 0
+        self._buffer[:]                   = 0
         self._buffer[target_data.indices] = target_data.offsets
 
         # resample the offsets
-        out_data    = target_data.copy()
-        sample_data = self.get_sample_data(mode, method)
+        out_data         = target_data.copy()
+        sample_data      = self.get_sample_data(mode, method)
         out_data.offsets = sample_data(self._buffer)
         out_data.indices = self._arange
 
@@ -353,7 +353,7 @@ class MeshDataResampler:
                 sample_data=self.get_sample_data(ResampleMode.SPATIAL, method),
             )
         else:
-            sample_data = self.get_sample_data(mode, method)
+            sample_data      = self.get_sample_data(mode, method)
             dst_skin.weights = sample_data(skin_data.weights)
 
         # max infs

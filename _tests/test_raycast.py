@@ -435,7 +435,7 @@ class TestRaycast(unittest.TestCase):
         origins    = np.array([[0.0, 0.0, 2.0]])
         directions = np.array([[0.0, 0.0, -1.0]])
 
-        normals    = np.zeros_like(self.cube_points)
+        normals       = np.zeros_like(self.cube_points)
         normals[:, 2] = 1.0  # all normals pointing +Z
 
         result = raycast(
@@ -454,7 +454,7 @@ class TestRaycast(unittest.TestCase):
         origins    = np.array([[0.0, 0.0, 2.0]])
         directions = np.array([[0.0, 0.0, -1.0]])
 
-        normals    = np.zeros_like(self.cube_points)
+        normals       = np.zeros_like(self.cube_points)
         normals[:, 2] = 1.0
 
         result = raycast(
@@ -603,7 +603,7 @@ class TestMeshDataRaycast(unittest.TestCase):
         origins    = np.array([[0.0, 0.0, 2.0]])
         directions = np.array([[0.0, 0.0, -1.0]])
 
-        result     = self.cube.raycast(origins, directions)
+        result = self.cube.raycast(origins, directions)
         self.assertIsInstance(result, RaycastData)
         self.assertTrue(allclose(result.distances[0], 1.5))
 
@@ -612,7 +612,7 @@ class TestMeshDataRaycast(unittest.TestCase):
         origins    = np.array([[0.0, 0.0, 0.0]])
         directions = np.array([[0.0, 0.0, 1.0]])
 
-        result     = self.cube.raycast(origins, directions, forward_only=False)
+        result = self.cube.raycast(origins, directions, forward_only=False)
         self.assertFalse(np.isnan(result.distances[0]))
 
     def test_twosided_parameter(self):
@@ -621,7 +621,7 @@ class TestMeshDataRaycast(unittest.TestCase):
         origins    = np.array([[0.0, 0.0, 0.0]])
         directions = np.array([[0.0, 0.0, 1.0]])
 
-        result     = self.cube.raycast(origins, directions, twosided=False)
+        result = self.cube.raycast(origins, directions, twosided=False)
         self.assertTrue(np.isnan(result.distances[0]))
         self.assertEqual(result.indices[0], -1)
 
@@ -630,7 +630,7 @@ class TestMeshDataRaycast(unittest.TestCase):
         origins    = np.array([[0.0, 0.0, 2.0]])
         directions = np.array([[0.0, 0.0, -1.0]])
 
-        result     = self.cube.raycast(origins, directions)
+        result = self.cube.raycast(origins, directions)
         # normal at hit point should roughly face +Z
         self.assertGreater(result.normals[0, 2], 0.5)
 
@@ -936,7 +936,7 @@ class TestMeshDataBezierRaycast(unittest.TestCase):
         origins    = np.array([[0.0, 0.0, 1.0]])
         directions = np.array([[0.0, 0.0, -1.0]])
 
-        result     = plane.raycast(origins, directions, method="bezier")
+        result = plane.raycast(origins, directions, method="bezier")
         self.assertIsInstance(result, RaycastData)
         self.assertTrue(result.hit[0])
         self.assertTrue(allclose(result.distances[0], 1.0, atol=0.05))
@@ -956,7 +956,7 @@ class TestMeshDataBezierRaycast(unittest.TestCase):
         origins    = np.array([[0.0, 0.0, 0.0]])
         directions = np.array([[0.0, 0.0, 1.0]])
 
-        result     = self.cube.raycast(origins, directions, method="bezier", twosided=False)
+        result = self.cube.raycast(origins, directions, method="bezier", twosided=False)
         self.assertTrue(np.isnan(result.distances[0]))
         self.assertEqual(result.indices[0], -1)
 
@@ -965,7 +965,7 @@ class TestMeshDataBezierRaycast(unittest.TestCase):
         origins    = np.array([[0.0, 0.0, 2.0]])
         directions = np.array([[0.0, 0.0, -1.0]])
 
-        result     = self.cube.raycast(origins, directions, method="bezier")
+        result = self.cube.raycast(origins, directions, method="bezier")
         self.assertGreater(result.normals[0, 2], 0.5)
 
     def test_method_enum_and_string(self):
