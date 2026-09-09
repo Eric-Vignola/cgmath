@@ -9,10 +9,8 @@ from cgmath.geometry.utils.main import (
     matrix_to_stream,
     point_row_overlaps,
     pxr,
-    remap_array,
     stream_to_matrix,
     vector_angle_difference,
-    vector_magnitude_difference,
 )
 
 EPSILON = np.finfo(np.float32).eps
@@ -309,26 +307,6 @@ class TestVectorComparison(unittest.TestCase):
         # Should be 180 degrees
         self.assertTrue(allclose(angles[0], 180.0, atol=1e-5))
 
-    def test_vector_magnitude_difference(self):
-        """Test vector_magnitude_difference() function"""
-        vector_a = np.array([3.0, 4.0, 0.0])  # magnitude = 5.0
-        vector_b = np.array([6.0, 8.0, 0.0])  # magnitude = 10.0
-
-        diff = vector_magnitude_difference(vector_a, vector_b)
-
-        # Difference should be 5.0
-        self.assertTrue(allclose(diff, 5.0))
-
-    def test_vector_magnitude_same(self):
-        """Test magnitude difference for vectors with same magnitude"""
-        vector_a = np.array([3.0, 4.0, 0.0])  # magnitude = 5.0
-        vector_b = np.array([0.0, 5.0, 0.0])  # magnitude = 5.0
-
-        diff = vector_magnitude_difference(vector_a, vector_b)
-
-        # Difference should be 0.0
-        self.assertTrue(allclose(diff, 0.0, atol=1e-10))
-
     def test_vector_angle_difference(self):
         """Test vector_angle_difference() function"""
         vector_a = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
@@ -351,80 +329,3 @@ class TestVectorComparison(unittest.TestCase):
 
         # Should be 180 degrees
         self.assertTrue(allclose(angles[0], 180.0, atol=1e-5))
-
-
-class TestRemapArray(unittest.TestCase):
-    """Test remap_array() function"""
-
-    def test_basic_remapping(self):
-        """Test basic array remapping"""
-        arr = np.array([[1.0, 2.0, 3.0, 4.0, 5.0]])
-
-        # Remap to [0, 1]
-        result = remap_array(arr, t_min=0, t_max=1)
-
-        # Should be normalized to [0, 1]
-        self.assertTrue(allclose(result[0, 0], 0.0))
-        self.assertTrue(allclose(result[0, -1], 1.0))
-        self.assertTrue(np.all(result >= 0))
-        self.assertTrue(np.all(result <= 1))
-
-    def test_remapping_to_different_range(self):
-        """Test remapping to a different range"""
-        arr = np.array([[0.0, 0.5, 1.0]])
-
-        # Remap from [0, 1] to [10, 20]
-        result = remap_array(arr, t_min=10, t_max=20)
-
-        self.assertTrue(allclose(result[0, 0], 10.0))
-        self.assertTrue(allclose(result[0, -1], 20.0))
-        self.assertTrue(allclose(result[0, 1], 15.0))
-
-    def test_remapping_multiple_rows(self):
-        """Test remapping with multiple rows"""
-        arr = np.array([[0.0, 1.0, 2.0], [5.0, 10.0, 15.0]])
-
-        # Remap each row to [0, 1]
-        result = remap_array(arr, t_min=0, t_max=1)
-
-        # Each row should be independently remapped
-        self.assertTrue(allclose(result[0, 0], 0.0))
-        self.assertTrue(allclose(result[0, -1], 1.0))
-        self.assertTrue(allclose(result[1, 0], 0.0))
-        self.assertTrue(allclose(result[1, -1], 1.0))
-
-    def test_remapping_with_per_row_ranges(self):
-        """Test remapping with different ranges per row"""
-        arr = np.array([[0.0, 1.0, 2.0], [0.0, 1.0, 2.0]])
-
-        # Different ranges for each row
-        t_min  = np.array([0.0, 10.0])
-        t_max  = np.array([1.0, 20.0])
-
-        result = remap_array(arr, t_min=t_min, t_max=t_max)
-
-        # First row: [0, 1]
-        self.assertTrue(allclose(result[0, 0], 0.0))
-        self.assertTrue(allclose(result[0, -1], 1.0))
-
-        # Second row: [10, 20]
-        self.assertTrue(allclose(result[1, 0], 10.0))
-        self.assertTrue(allclose(result[1, -1], 20.0))
-
-    def test_remapping_negative_values(self):
-        """Test remapping with negative values"""
-        arr = np.array([[-5.0, 0.0, 5.0]])
-
-        # Remap to [0, 1]
-        result = remap_array(arr, t_min=0, t_max=1)
-
-        self.assertTrue(allclose(result[0, 0], 0.0))
-        self.assertTrue(allclose(result[0, 1], 0.5))
-        self.assertTrue(allclose(result[0, -1], 1.0))
-
-    def test_remapping_constant_array(self):
-        """Test remapping when all values are the same raises ValueError"""
-        arr = np.array([[5.0, 5.0, 5.0]])
-
-        with self.assertRaises(ValueError):
-            remap_array(arr, t_min=0, t_max=1)

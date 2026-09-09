@@ -13,7 +13,7 @@ wrapped in dataclasses, so the same code runs inside a DCC, in a standalone
 script, or on a farm. Heavy kernels are compiled with Numba.
 
 Topology is derived on first use and cached on the object: adjacency maps, edge
-tables, normals, curvature, borders, shells and symmetry are each computed once
+tables, normals, borders, shells and symmetry are each computed once
 per mesh and reused.
 
 

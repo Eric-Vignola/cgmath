@@ -76,13 +76,10 @@ from cgmath.geometry.utils import (
     pxr,
     quad_match_greedy,
     rebuild_indices,
-    remap_array,
     shared_edges_test,
     split_at_hard_edges,
     stream_to_matrix,
     subdivide_catmull_clark,
-    vector_angle_difference,
-    vector_magnitude_difference,
 )
 from scipy.ndimage import convolve
 from scipy.spatial import cKDTree
@@ -274,12 +271,6 @@ class MeshData(Data):
 
     _edge_lengths = None  # edge lengths
     _edge_normals = None  # edge normals
-
-    _v_normal_change              = None  # degree of normal change per vert (0:n)
-    _v_normal_change_normalized   = None  # degree of normal change per vert (0:1)
-    _surface_curvature            = None  # surface curvature per vert (-1:1)
-    _surface_curvature_normalized = None  # surface curvature per vert (0:1)
-    _sec_order_surface_curvature  = None  # second order surface curvature per vert (0:1)
 
     _triangles        = None  # faces identified as triangles
     _quads            = None  # faces identified as quads
@@ -1692,116 +1683,6 @@ class MeshData(Data):
             )
 
         return self._edge_normals
-
-    def get_point_data_by_surface_change(
-        self, data: np.ndarray, method: string = "default"
-    ) -> np.ndarray:
-        if len(data) != self.point_count:
-            raise ValueError("data must be the same length as the point count")
-
-        v              = self.points
-        edge_neighbors = self.v2e
-        v_e_neighbors  = self.e2v
-        edge_lengths   = self.get_edge_lengths()
-
-        v_data_change            = np.zeros(v.shape[0])
-        v_data_change_normalized = np.zeros(v.shape[0])
-
-        for v_i, edges in enumerate(edge_neighbors):
-            data_diff_sum  = 0.0
-            mask           = edges != -1
-            neighbor_edges = edges[mask]
-            edge_len_sum   = np.sum(edge_lengths[neighbor_edges])
-            num_edges      = len(neighbor_edges)
-            for e_i in neighbor_edges:
-                weight     = edge_lengths[e_i] / edge_len_sum
-                pairs      = v_e_neighbors[e_i]
-                v_pair_idx = np.where(pairs == v_i)[0]
-                other_v_i  = np.delete(pairs, v_pair_idx)[0]
-                if method == "default":
-                    data_diff = np.abs(data[v_i]) - np.abs(data[other_v_i])
-                elif method == "vec_angle":
-                    data_diff = vector_angle_difference(data[v_i], data[other_v_i])
-                elif method == "vec_magnitude":
-                    data_diff = vector_magnitude_difference(data[v_i], data[other_v_i])
-                data_diff_sum += np.abs(data_diff) * (1 - weight)
-            if num_edges != 4:
-                data_diff_sum = (data_diff_sum * 4) / num_edges
-
-            if data_diff_sum < 0.0001 and data_diff_sum > -0.0001:
-                data_diff_sum = round(data_diff_sum, 4)
-            v_data_change[v_i] = data_diff_sum
-
-        if not np.all(v_data_change == v_data_change[0]):
-            v_data_change_normalized = remap_array(v_data_change)
-
-        return v_data_change, v_data_change_normalized
-
-    def get_point_normal_divergence(self) -> np.ndarray:
-        if self._v_normal_change is None:
-            v = self.points
-            n = self.get_vertex_normals()
-
-            self._v_normal_change, self._v_normal_change_normalized = (
-                self.get_point_data_by_surface_change(n, method="vec_angle")
-            )
-
-        return self._v_normal_change_normalized
-
-    def get_surface_curvature(self, der: int = 1) -> np.ndarray:
-        if type(der) is not int:
-            raise ValueError("der must be an integer")
-
-        if der < 1 or der > 2:
-            raise ValueError("der must be either 1 or 2")
-
-        v             = self.points
-        v_e_neighbors = self.e2v
-
-        if der == 1:
-            n  = self.get_vertex_normals()
-            ev = v[v_e_neighbors[:, 1]] - v[v_e_neighbors[:, 0]]
-            en = n[v_e_neighbors[:, 1]] - n[v_e_neighbors[:, 0]]
-
-            self._surface_curvature = np.zeros(v.shape[0])
-
-            e_curv = np.sum(ev * en, axis=1) / np.linalg.norm(ev, axis=1)
-            for idx_e in range(v_e_neighbors.shape[0]):
-                self._surface_curvature[v_e_neighbors[idx_e, 0]] += e_curv[idx_e]
-                self._surface_curvature[v_e_neighbors[idx_e, 1]] += e_curv[idx_e]
-
-            for idx, curvature in enumerate(self._surface_curvature):
-                if curvature < 0.0001 and curvature > -0.0001:
-                    self._surface_curvature[idx] = round(curvature, 4)
-
-        elif der == 2:
-            curvature = self.get_surface_curvature()
-            self._surface_curvature, self._surface_curvature_normalized = (
-                self.get_point_data_by_surface_change(curvature)
-            )
-
-        mean_curv               = np.mean(self._surface_curvature)
-        std_curv                = np.std(self._surface_curvature)
-        k_min                   = mean_curv - 3 * std_curv
-        k_max                   = mean_curv + 3 * std_curv
-        self._surface_curvature = np.clip(self._surface_curvature, k_min, k_max)
-
-        if der == 1:
-            if np.all(self._surface_curvature == self._surface_curvature[0]):
-                if self._surface_curvature[0] == 0:
-                    self._surface_curvature_normalized = np.zeros(
-                        self._surface_curvature.shape
-                    )
-                    self._surface_curvature_normalized[:] = 0.5
-            else:
-                self._surface_curvature = np.asarray(
-                    remap_array(self._surface_curvature, -1, 1)
-                )
-                self._surface_curvature_normalized = remap_array(
-                    self._surface_curvature
-                )
-
-        return self._surface_curvature_normalized
 
     # --- edit mesh
 

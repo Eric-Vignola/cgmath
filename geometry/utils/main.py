@@ -1272,37 +1272,11 @@ def compare_normals(normal_a, normal_b):
     return compare_normals_fast(normal_a, normal_b)
 
 
-def vector_magnitude_difference(vector_a, vector_b):
-    """returns the difference in magnitude between two vectors"""
-    return np.abs(np.linalg.norm(vector_a) - np.linalg.norm(vector_b))
-
-
 def vector_angle_difference(vector_a, vector_b):
     """Optimized: uses parallel Numba kernel for angle computation."""
     from cgmath.geometry.utils._numba._main import vector_angle_difference_fast
 
     return vector_angle_difference_fast(vector_a, vector_b)
-
-
-def remap_array(
-    arr: np.ndarray, t_min: int | np.ndarray = 0, t_max: int | np.ndarray = 1
-) -> np.ndarray:
-    """Optimized: uses parallel Numba kernel for remapping.
-
-    Raises ValueError if any axis to remap has zero range (all identical values).
-    """
-    from cgmath.geometry.utils._numba._main import remap_array_fast
-
-    arr = np.asarray(arr)
-    if arr.size > 0:
-        arr_min = arr.min(axis=-1)
-        arr_max = arr.max(axis=-1)
-        if np.any(arr_min == arr_max):
-            raise ValueError(
-                "Cannot remap array with identical values along an axis (zero range)"
-            )
-
-    return remap_array_fast(arr, t_min, t_max)
 
 
 # ---------------------------------- Raycast --------------------------------- #

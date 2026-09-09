@@ -50,7 +50,6 @@ from cgmath.geometry.utils.main import (
     pxr,
     quad_match_greedy,
     rebuild_indices,
-    remap_array,
     remap_indices,
     shared_edges_test,
     split_at_hard_edges,
@@ -59,5 +58,4 @@ from cgmath.geometry.utils.main import (
     trilinear,
     trilinear_jacobian,
     vector_angle_difference,
-    vector_magnitude_difference,
 )
