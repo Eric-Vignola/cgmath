@@ -1,0 +1,1836 @@
+{
+  "description": "MikkTSpace test data: cube with 6 faces (4 triangles each = 24 triangles total), 30 vertices",
+  "source": "gltf-rs/mikktspace regression test (https://github.com/gltf-rs/mikktspace/blob/master/tests/regression_test.rs)",
+  "mesh": {
+    "vertices": [
+      {
+        "position": [
+          0.5,
+          -0.5,
+          0.5
+        ],
+        "normal": [
+          0.5773502691896258,
+          -0.5773502691896258,
+          0.5773502691896258
+        ],
+        "tex_coord": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "position": [
+          0.5,
+          -0.5,
+          -0.5
+        ],
+        "normal": [
+          0.5773502691896258,
+          -0.5773502691896258,
+          -0.5773502691896258
+        ],
+        "tex_coord": [
+          0.0,
+          1.0
+        ]
+      },
+      {
+        "position": [
+          0.5,
+          0.5,
+          -0.5
+        ],
+        "normal": [
+          0.5773502691896258,
+          0.5773502691896258,
+          -0.5773502691896258
+        ],
+        "tex_coord": [
+          1.0,
+          1.0
+        ]
+      },
+      {
+        "position": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "normal": [
+          0.5773502691896258,
+          0.5773502691896258,
+          0.5773502691896258
+        ],
+        "tex_coord": [
+          1.0,
+          0.0
+        ]
+      },
+      {
+        "position": [
+          0.5,
+          0.0,
+          0.0
+        ],
+        "normal": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "tex_coord": [
+          0.5,
+          0.5
+        ]
+      },
+      {
+        "position": [
+          -0.5,
+          0.5,
+          0.5
+        ],
+        "normal": [
+          -0.5773502691896258,
+          0.5773502691896258,
+          0.5773502691896258
+        ],
+        "tex_coord": [
+          1.0,
+          0.0
+        ]
+      },
+      {
+        "position": [
+          -0.5,
+          0.5,
+          -0.5
+        ],
+        "normal": [
+          -0.5773502691896258,
+          0.5773502691896258,
+          -0.5773502691896258
+        ],
+        "tex_coord": [
+          1.0,
+          1.0
+        ]
+      },
+      {
+        "position": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "normal": [
+          -0.5773502691896258,
+          -0.5773502691896258,
+          -0.5773502691896258
+        ],
+        "tex_coord": [
+          0.0,
+          1.0
+        ]
+      },
+      {
+        "position": [
+          -0.5,
+          -0.5,
+          0.5
+        ],
+        "normal": [
+          -0.5773502691896258,
+          -0.5773502691896258,
+          0.5773502691896258
+        ],
+        "tex_coord": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "position": [
+          -0.5,
+          0.0,
+          0.0
+        ],
+        "normal": [
+          -1.0,
+          0.0,
+          0.0
+        ],
+        "tex_coord": [
+          0.5,
+          0.5
+        ]
+      },
+      {
+        "position": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "normal": [
+          0.5773502691896258,
+          0.5773502691896258,
+          0.5773502691896258
+        ],
+        "tex_coord": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "position": [
+          0.5,
+          0.5,
+          -0.5
+        ],
+        "normal": [
+          0.5773502691896258,
+          0.5773502691896258,
+          -0.5773502691896258
+        ],
+        "tex_coord": [
+          0.0,
+          1.0
+        ]
+      },
+      {
+        "position": [
+          -0.5,
+          0.5,
+          -0.5
+        ],
+        "normal": [
+          -0.5773502691896258,
+          0.5773502691896258,
+          -0.5773502691896258
+        ],
+        "tex_coord": [
+          0.0,
+          1.0
+        ]
+      },
+      {
+        "position": [
+          -0.5,
+          0.5,
+          0.5
+        ],
+        "normal": [
+          -0.5773502691896258,
+          0.5773502691896258,
+          0.5773502691896258
+        ],
+        "tex_coord": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "position": [
+          0.0,
+          0.5,
+          0.0
+        ],
+        "normal": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "tex_coord": [
+          0.0,
+          0.5
+        ]
+      },
+      {
+        "position": [
+          -0.5,
+          -0.5,
+          0.5
+        ],
+        "normal": [
+          -0.5773502691896258,
+          -0.5773502691896258,
+          0.5773502691896258
+        ],
+        "tex_coord": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "position": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "normal": [
+          -0.5773502691896258,
+          -0.5773502691896258,
+          -0.5773502691896258
+        ],
+        "tex_coord": [
+          0.0,
+          1.0
+        ]
+      },
+      {
+        "position": [
+          0.5,
+          -0.5,
+          -0.5
+        ],
+        "normal": [
+          0.5773502691896258,
+          -0.5773502691896258,
+          -0.5773502691896258
+        ],
+        "tex_coord": [
+          0.0,
+          1.0
+        ]
+      },
+      {
+        "position": [
+          0.5,
+          -0.5,
+          0.5
+        ],
+        "normal": [
+          0.5773502691896258,
+          -0.5773502691896258,
+          0.5773502691896258
+        ],
+        "tex_coord": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "position": [
+          0.0,
+          -0.5,
+          0.0
+        ],
+        "normal": [
+          0.0,
+          -1.0,
+          0.0
+        ],
+        "tex_coord": [
+          0.0,
+          0.5
+        ]
+      },
+      {
+        "position": [
+          -0.5,
+          0.5,
+          0.5
+        ],
+        "normal": [
+          -0.5773502691896258,
+          0.5773502691896258,
+          0.5773502691896258
+        ],
+        "tex_coord": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "position": [
+          -0.5,
+          -0.5,
+          0.5
+        ],
+        "normal": [
+          -0.5773502691896258,
+          -0.5773502691896258,
+          0.5773502691896258
+        ],
+        "tex_coord": [
+          0.0,
+          1.0
+        ]
+      },
+      {
+        "position": [
+          0.5,
+          -0.5,
+          0.5
+        ],
+        "normal": [
+          0.5773502691896258,
+          -0.5773502691896258,
+          0.5773502691896258
+        ],
+        "tex_coord": [
+          1.0,
+          1.0
+        ]
+      },
+      {
+        "position": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "normal": [
+          0.5773502691896258,
+          0.5773502691896258,
+          0.5773502691896258
+        ],
+        "tex_coord": [
+          1.0,
+          0.0
+        ]
+      },
+      {
+        "position": [
+          0.0,
+          0.0,
+          0.5
+        ],
+        "normal": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "tex_coord": [
+          0.5,
+          0.5
+        ]
+      },
+      {
+        "position": [
+          0.5,
+          0.5,
+          -0.5
+        ],
+        "normal": [
+          0.5773502691896258,
+          0.5773502691896258,
+          -0.5773502691896258
+        ],
+        "tex_coord": [
+          1.0,
+          0.0
+        ]
+      },
+      {
+        "position": [
+          0.5,
+          -0.5,
+          -0.5
+        ],
+        "normal": [
+          0.5773502691896258,
+          -0.5773502691896258,
+          -0.5773502691896258
+        ],
+        "tex_coord": [
+          1.0,
+          1.0
+        ]
+      },
+      {
+        "position": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "normal": [
+          -0.5773502691896258,
+          -0.5773502691896258,
+          -0.5773502691896258
+        ],
+        "tex_coord": [
+          0.0,
+          1.0
+        ]
+      },
+      {
+        "position": [
+          -0.5,
+          0.5,
+          -0.5
+        ],
+        "normal": [
+          -0.5773502691896258,
+          0.5773502691896258,
+          -0.5773502691896258
+        ],
+        "tex_coord": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "position": [
+          0.0,
+          0.0,
+          -0.5
+        ],
+        "normal": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "tex_coord": [
+          0.5,
+          0.5
+        ]
+      }
+    ],
+    "faces": [
+      [
+        0,
+        1,
+        4
+      ],
+      [
+        1,
+        2,
+        4
+      ],
+      [
+        2,
+        3,
+        4
+      ],
+      [
+        3,
+        0,
+        4
+      ],
+      [
+        5,
+        6,
+        9
+      ],
+      [
+        6,
+        7,
+        9
+      ],
+      [
+        7,
+        8,
+        9
+      ],
+      [
+        8,
+        5,
+        9
+      ],
+      [
+        10,
+        11,
+        14
+      ],
+      [
+        11,
+        12,
+        14
+      ],
+      [
+        12,
+        13,
+        14
+      ],
+      [
+        13,
+        10,
+        14
+      ],
+      [
+        15,
+        16,
+        19
+      ],
+      [
+        16,
+        17,
+        19
+      ],
+      [
+        17,
+        18,
+        19
+      ],
+      [
+        18,
+        15,
+        19
+      ],
+      [
+        20,
+        21,
+        24
+      ],
+      [
+        21,
+        22,
+        24
+      ],
+      [
+        22,
+        23,
+        24
+      ],
+      [
+        23,
+        20,
+        24
+      ],
+      [
+        25,
+        26,
+        29
+      ],
+      [
+        26,
+        27,
+        29
+      ],
+      [
+        27,
+        28,
+        29
+      ],
+      [
+        28,
+        25,
+        29
+      ]
+    ]
+  },
+  "expected_results": [
+    {
+      "face": 0,
+      "vert": 0,
+      "tangent": [
+        0.40824825,
+        0.81649655,
+        0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        -0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 0,
+      "vert": 1,
+      "tangent": [
+        0.40824825,
+        0.81649655,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 0,
+      "vert": 2,
+      "tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 1,
+      "vert": 0,
+      "tangent": [
+        0.40824825,
+        0.81649655,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 1,
+      "vert": 1,
+      "tangent": [
+        -0.40824825,
+        0.81649655,
+        0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        -0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 1,
+      "vert": 2,
+      "tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 2,
+      "vert": 0,
+      "tangent": [
+        -0.40824825,
+        0.81649655,
+        0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        -0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 2,
+      "vert": 1,
+      "tangent": [
+        -0.40824825,
+        0.81649655,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 2,
+      "vert": 2,
+      "tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 3,
+      "vert": 0,
+      "tangent": [
+        -0.40824825,
+        0.81649655,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 3,
+      "vert": 1,
+      "tangent": [
+        0.40824825,
+        0.81649655,
+        0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        -0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 3,
+      "vert": 2,
+      "tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 4,
+      "vert": 0,
+      "tangent": [
+        0.40824825,
+        0.81649655,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 4,
+      "vert": 1,
+      "tangent": [
+        0.40824825,
+        0.81649655,
+        0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        -0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 4,
+      "vert": 2,
+      "tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 5,
+      "vert": 0,
+      "tangent": [
+        0.40824825,
+        0.81649655,
+        0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        -0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 5,
+      "vert": 1,
+      "tangent": [
+        -0.40824825,
+        0.81649655,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 5,
+      "vert": 2,
+      "tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 6,
+      "vert": 0,
+      "tangent": [
+        -0.40824825,
+        0.81649655,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 6,
+      "vert": 1,
+      "tangent": [
+        -0.40824825,
+        0.81649655,
+        0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        -0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 6,
+      "vert": 2,
+      "tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 7,
+      "vert": 0,
+      "tangent": [
+        -0.40824825,
+        0.81649655,
+        0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        -0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 7,
+      "vert": 1,
+      "tangent": [
+        0.40824825,
+        0.81649655,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 7,
+      "vert": 2,
+      "tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 8,
+      "vert": 0,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 8,
+      "vert": 1,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 8,
+      "vert": 2,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 9,
+      "vert": 0,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 9,
+      "vert": 1,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 9,
+      "vert": 2,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 10,
+      "vert": 0,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 10,
+      "vert": 1,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 10,
+      "vert": 2,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 11,
+      "vert": 0,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 11,
+      "vert": 1,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 11,
+      "vert": 2,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 12,
+      "vert": 0,
+      "tangent": [
+        -0.40824825,
+        0.81649655,
+        0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        -0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 12,
+      "vert": 1,
+      "tangent": [
+        -0.40824825,
+        0.81649655,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 12,
+      "vert": 2,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 13,
+      "vert": 0,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 13,
+      "vert": 1,
+      "tangent": [
+        0.40824825,
+        0.81649655,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 13,
+      "vert": 2,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 14,
+      "vert": 0,
+      "tangent": [
+        0.40824825,
+        0.81649655,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 14,
+      "vert": 1,
+      "tangent": [
+        0.40824825,
+        0.81649655,
+        0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        -0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 14,
+      "vert": 2,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 15,
+      "vert": 0,
+      "tangent": [
+        0.40824825,
+        0.81649655,
+        0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        -0.40824825,
+        -0.81649655
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 15,
+      "vert": 1,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 15,
+      "vert": 2,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 16,
+      "vert": 0,
+      "tangent": [
+        0.81649655,
+        0.40824825,
+        0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        -0.81649655,
+        0.40824825
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 16,
+      "vert": 1,
+      "tangent": [
+        0.81649655,
+        -0.40824825,
+        0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        -0.81649655,
+        -0.40824825
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 16,
+      "vert": 2,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 17,
+      "vert": 0,
+      "tangent": [
+        0.81649655,
+        -0.40824825,
+        0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        -0.81649655,
+        -0.40824825
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 17,
+      "vert": 1,
+      "tangent": [
+        0.81649655,
+        0.40824825,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        -0.81649655,
+        -0.40824825
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 17,
+      "vert": 2,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 18,
+      "vert": 0,
+      "tangent": [
+        0.81649655,
+        0.40824825,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        -0.81649655,
+        -0.40824825
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 18,
+      "vert": 1,
+      "tangent": [
+        0.81649655,
+        -0.40824825,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        -0.81649655,
+        0.40824825
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 18,
+      "vert": 2,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 19,
+      "vert": 0,
+      "tangent": [
+        0.81649655,
+        -0.40824825,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        -0.81649655,
+        0.40824825
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 19,
+      "vert": 1,
+      "tangent": [
+        0.81649655,
+        0.40824825,
+        0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        -0.81649655,
+        0.40824825
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 19,
+      "vert": 2,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": false
+    },
+    {
+      "face": 20,
+      "vert": 0,
+      "tangent": [
+        0.81649655,
+        -0.40824825,
+        0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        -0.81649655,
+        -0.40824825
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 20,
+      "vert": 1,
+      "tangent": [
+        0.81649655,
+        0.40824825,
+        0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        -0.81649655,
+        0.40824825
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 20,
+      "vert": 2,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 21,
+      "vert": 0,
+      "tangent": [
+        0.81649655,
+        0.40824825,
+        0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        -0.81649655,
+        0.40824825
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 21,
+      "vert": 1,
+      "tangent": [
+        0.81649655,
+        -0.40824825,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        -0.81649655,
+        0.40824825
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 21,
+      "vert": 2,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 22,
+      "vert": 0,
+      "tangent": [
+        0.81649655,
+        -0.40824825,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        -0.81649655,
+        0.40824825
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 22,
+      "vert": 1,
+      "tangent": [
+        0.81649655,
+        0.40824825,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        -0.81649655,
+        -0.40824825
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 22,
+      "vert": 2,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 23,
+      "vert": 0,
+      "tangent": [
+        0.81649655,
+        0.40824825,
+        -0.40824825
+      ],
+      "bi_tangent": [
+        -0.40824825,
+        -0.81649655,
+        -0.40824825
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 23,
+      "vert": 1,
+      "tangent": [
+        0.81649655,
+        -0.40824825,
+        0.40824825
+      ],
+      "bi_tangent": [
+        0.40824825,
+        -0.81649655,
+        -0.40824825
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    },
+    {
+      "face": 23,
+      "vert": 2,
+      "tangent": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "bi_tangent": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "mag_s": 1.0,
+      "mag_t": 1.0,
+      "bi_tangent_preserves_orientation": true
+    }
+  ]
+}

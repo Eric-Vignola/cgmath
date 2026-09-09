@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+
+# numba writes its on-disk kernel cache next to the sources
+*.nbi
+*.nbc
+
+.claude/

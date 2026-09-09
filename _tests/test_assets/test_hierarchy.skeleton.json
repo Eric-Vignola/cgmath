@@ -1,0 +1,952 @@
+{
+    "A9F9DCBC-417E-8A8B-97A0-B493F0C916B6": {
+        "name": "root_joint",
+        "node_type": "joint",
+        "uuid": "A9F9DCBC-417E-8A8B-97A0-B493F0C916B6",
+        "_segment_scale_compensate": true
+    },
+    "6A3E7E38-4E1A-69F1-3BF3-B49D12A49685": {
+        "name": "pelvis_joint",
+        "node_type": "joint",
+        "uuid": "6A3E7E38-4E1A-69F1-3BF3-B49D12A49685",
+        "parent_node": "A9F9DCBC-417E-8A8B-97A0-B493F0C916B6",
+        "_translate": [  0.0              , 104.13423739808233 ,   1.211013913154602],
+        "_joint_orient": [90.00000000000006,  0.0             , 90.0             ],
+        "_segment_scale_compensate": true
+    },
+    "EF4E1A72-4176-5457-55F4-EDBAB331C40E": {
+        "name": "spineLower_joint",
+        "node_type": "joint",
+        "uuid": "EF4E1A72-4176-5457-55F4-EDBAB331C40E",
+        "parent_node": "6A3E7E38-4E1A-69F1-3BF3-B49D12A49685",
+        "_translate": [ 1.123706804814233,  0.0              , -0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "E5E6E5F2-4566-964A-D0DD-E8B48A8CC1F6": {
+        "name": "spineMiddle_joint",
+        "node_type": "joint",
+        "uuid": "E5E6E5F2-4566-964A-D0DD-E8B48A8CC1F6",
+        "parent_node": "EF4E1A72-4176-5457-55F4-EDBAB331C40E",
+        "_translate": [10.175166630271463,  0.0              ,  0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "836E4593-47BC-085D-D536-219EB862AF51": {
+        "name": "spineUpper_joint",
+        "node_type": "joint",
+        "uuid": "836E4593-47BC-085D-D536-219EB862AF51",
+        "parent_node": "E5E6E5F2-4566-964A-D0DD-E8B48A8CC1F6",
+        "_translate": [8.895000457763672, 0.0              , 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "EAD8D769-4AB8-A351-C76A-BE8A5EA58B90": {
+        "name": "chest_joint",
+        "node_type": "joint",
+        "uuid": "EAD8D769-4AB8-A351-C76A-BE8A5EA58B90",
+        "parent_node": "836E4593-47BC-085D-D536-219EB862AF51",
+        "_translate": [8.895000457763672, 0.0              , 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "C1DDEC63-48DF-D543-F8E6-2AA2654F7C80": {
+        "name": "clavicle_left_joint",
+        "node_type": "joint",
+        "uuid": "C1DDEC63-48DF-D543-F8E6-2AA2654F7C80",
+        "parent_node": "EAD8D769-4AB8-A351-C76A-BE8A5EA58B90",
+        "_translate": [8.929119110107422, 0.556666612625121, 2.570925907022538],
+        "_joint_orient": [ 124.63140803410964,  -71.89855757550421, -123.28412952772283],
+        "_segment_scale_compensate": true
+    },
+    "C99C7C10-40BC-1E1D-B77D-3BB069E6FA7B": {
+        "name": "shoulder_left_joint",
+        "node_type": "joint",
+        "uuid": "C99C7C10-40BC-1E1D-B77D-3BB069E6FA7B",
+        "parent_node": "C1DDEC63-48DF-D543-F8E6-2AA2654F7C80",
+        "_translate": [11.999999999999977, -0.000000000000002, -0.000000000000256],
+        "_joint_orient": [  2.092394002016104, -37.105255416568525,  13.555736955163812],
+        "_segment_scale_compensate": true
+    },
+    "C9E157A9-4657-AA63-49C4-5791447CAF15": {
+        "name": "elbow_left_joint",
+        "node_type": "joint",
+        "uuid": "C9E157A9-4657-AA63-49C4-5791447CAF15",
+        "parent_node": "C99C7C10-40BC-1E1D-B77D-3BB069E6FA7B",
+        "_translate": [27.000000000000057, -0.00000000000006 ,  0.000000000000185],
+        "_joint_orient": [0.0              , 0.0              , 5.294394543148034],
+        "_segment_scale_compensate": true
+    },
+    "8750383C-4874-9CCE-A94A-DBBC7BAB75F0": {
+        "name": "elbow_partial_left_joint",
+        "node_type": "joint",
+        "uuid": "8750383C-4874-9CCE-A94A-DBBC7BAB75F0",
+        "parent_node": "C9E157A9-4657-AA63-49C4-5791447CAF15",
+        "_segment_scale_compensate": true
+    },
+    "422AA308-4039-E584-16F5-9D8895148D15": {
+        "name": "armLower_twist_01_left_joint",
+        "node_type": "joint",
+        "uuid": "422AA308-4039-E584-16F5-9D8895148D15",
+        "parent_node": "C9E157A9-4657-AA63-49C4-5791447CAF15",
+        "_translate": [8.14484150528044 , 0.000000000000039, 0.000000000000583],
+        "_segment_scale_compensate": true
+    },
+    "F6E83AB3-47FE-9D4C-7249-06A52609670E": {
+        "name": "armLower_twist_02_left_joint",
+        "node_type": "joint",
+        "uuid": "F6E83AB3-47FE-9D4C-7249-06A52609670E",
+        "parent_node": "C9E157A9-4657-AA63-49C4-5791447CAF15",
+        "_translate": [16.289683010560616,  0.000000000000044,  0.000000000000483],
+        "_segment_scale_compensate": true
+    },
+    "8D92D89E-4D4D-B406-20AD-AB81A8250BE1": {
+        "name": "armLower_twist_03_left_joint",
+        "node_type": "joint",
+        "uuid": "8D92D89E-4D4D-B406-20AD-AB81A8250BE1",
+        "parent_node": "C9E157A9-4657-AA63-49C4-5791447CAF15",
+        "_translate": [25.051987011230857,  0.000000000000012,  0.000000000000639],
+        "_segment_scale_compensate": true
+    },
+    "9489D795-42AE-4046-5D66-1E805696940A": {
+        "name": "handWrist_left_joint",
+        "node_type": "joint",
+        "uuid": "9489D795-42AE-4046-5D66-1E805696940A",
+        "parent_node": "C9E157A9-4657-AA63-49C4-5791447CAF15",
+        "_translate": [25.051987011230942, -0.000000000000007,  0.000000000000782],
+        "_joint_orient": [90.0              ,  2.004165991757366, -1.356994204621368],
+        "_segment_scale_compensate": true
+    },
+    "FB4B91A5-4979-0E75-92DF-9F89D83F63D4": {
+        "name": "handIndexMeta_left_joint",
+        "node_type": "joint",
+        "uuid": "FB4B91A5-4979-0E75-92DF-9F89D83F63D4",
+        "parent_node": "9489D795-42AE-4046-5D66-1E805696940A",
+        "_translate": [ 2.058972035691909,  0.479045382035494, -1.608435112096039],
+        "_joint_orient": [-0.409545919436547,  9.580941854421898,  6.780263387596662],
+        "_segment_scale_compensate": true
+    },
+    "39317C90-49CC-9642-90B5-21BA1414541E": {
+        "name": "handIndex_00_left_joint",
+        "node_type": "joint",
+        "uuid": "39317C90-49CC-9642-90B5-21BA1414541E",
+        "parent_node": "FB4B91A5-4979-0E75-92DF-9F89D83F63D4",
+        "_translate": [ 6.920924154751994,  0.000360854611969, -0.050482969521426],
+        "_joint_orient": [  2.652597907504885, -14.252554682103087,  -3.027042136368363],
+        "_segment_scale_compensate": true
+    },
+    "4A2348B3-4236-A188-61E2-DCA045AAD22F": {
+        "name": "handIndex_01_left_joint",
+        "node_type": "joint",
+        "uuid": "4A2348B3-4236-A188-61E2-DCA045AAD22F",
+        "parent_node": "39317C90-49CC-9642-90B5-21BA1414541E",
+        "_translate": [3.44927996285292 , 0.000800814994406, 0.038714799593844],
+        "_joint_orient": [ 0.097409838044398, -0.646174382168079,  1.68288872023414 ],
+        "_segment_scale_compensate": true
+    },
+    "867C7F8E-4B9C-AF90-F882-99AF4F9FAE61": {
+        "name": "handIndex_02_left_joint",
+        "node_type": "joint",
+        "uuid": "867C7F8E-4B9C-AF90-F882-99AF4F9FAE61",
+        "parent_node": "4A2348B3-4236-A188-61E2-DCA045AAD22F",
+        "_translate": [ 2.687840782659116, -0.000025524306878,  0.000000000000037],
+        "_joint_orient": [ 0.0             ,  0.0             , -0.00054409287767],
+        "_segment_scale_compensate": true
+    },
+    "BF56DFD5-4C2C-44D7-BD90-9CB548498E0A": {
+        "name": "handMiddleMeta_left_joint",
+        "node_type": "joint",
+        "uuid": "BF56DFD5-4C2C-44D7-BD90-9CB548498E0A",
+        "parent_node": "9489D795-42AE-4046-5D66-1E805696940A",
+        "_translate": [ 2.230610875457806,  0.239194724209554, -0.422731159004731],
+        "_joint_orient": [0.0              , 0.847873870293248, 5.539999999999955],
+        "_segment_scale_compensate": true
+    },
+    "170CCF02-457D-85C6-5259-9BBE28DC7740": {
+        "name": "handMiddle_00_left_joint",
+        "node_type": "joint",
+        "uuid": "170CCF02-457D-85C6-5259-9BBE28DC7740",
+        "parent_node": "BF56DFD5-4C2C-44D7-BD90-9CB548498E0A",
+        "_translate": [ 6.749889582248997, -0.000433737424032, -0.005001234896421],
+        "_joint_orient": [ 2.433204064628783, -3.520742121174252,  0.278658052427165],
+        "_segment_scale_compensate": true
+    },
+    "BB887C5D-469C-58ED-C47D-6C9CF2609C63": {
+        "name": "handMiddle_01_left_joint",
+        "node_type": "joint",
+        "uuid": "BB887C5D-469C-58ED-C47D-6C9CF2609C63",
+        "parent_node": "170CCF02-457D-85C6-5259-9BBE28DC7740",
+        "_translate": [4.148467173479084, 0.001023220041006, 0.01196463464978 ],
+        "_joint_orient": [ 0.111018419345417, -0.155813364758442, -1.144895377268975],
+        "_segment_scale_compensate": true
+    },
+    "F949AB67-4E91-3F81-D36C-4E89B449ADA2": {
+        "name": "handMiddle_02_left_joint",
+        "node_type": "joint",
+        "uuid": "F949AB67-4E91-3F81-D36C-4E89B449ADA2",
+        "parent_node": "BB887C5D-469C-58ED-C47D-6C9CF2609C63",
+        "_translate": [ 2.870603398041986,  0.000000923159263, -0.000000000000015],
+        "_joint_orient": [0.0              , 0.0              , 0.000018425798038],
+        "_segment_scale_compensate": true
+    },
+    "C59F70A1-4BD6-A5CB-295A-ED9886B1511D": {
+        "name": "handWrist_partial_left_joint",
+        "node_type": "joint",
+        "uuid": "C59F70A1-4BD6-A5CB-295A-ED9886B1511D",
+        "parent_node": "9489D795-42AE-4046-5D66-1E805696940A",
+        "_joint_orient": [-0.00593397427663 ,  0.678497098672131,  1.002012727347937],
+        "_segment_scale_compensate": true
+    },
+    "003203A9-4590-23BD-D495-D194836DA9CD": {
+        "name": "handPinkyMeta_left_joint",
+        "node_type": "joint",
+        "uuid": "003203A9-4590-23BD-D495-D194836DA9CD",
+        "parent_node": "9489D795-42AE-4046-5D66-1E805696940A",
+        "_translate": [1.956809445532812, 0.865316655327319, 1.87271749423051 ],
+        "_joint_orient": [  0.614644609451851, -14.455482050790371,   8.228564124686674],
+        "_segment_scale_compensate": true
+    },
+    "7F8C93C5-4F9E-65DD-D64E-EBB412D03F6B": {
+        "name": "handPinky_00_left_joint",
+        "node_type": "joint",
+        "uuid": "7F8C93C5-4F9E-65DD-D64E-EBB412D03F6B",
+        "parent_node": "003203A9-4590-23BD-D495-D194836DA9CD",
+        "_translate": [6.470780955714659, 0.000969531323548, 0.068797354401738],
+        "_joint_orient": [-0.393785667007281, 14.278078624444465, -4.301991261401511],
+        "_segment_scale_compensate": true
+    },
+    "8B9C772C-42A4-18AE-25A5-2BA0382178FA": {
+        "name": "handPinky_01_left_joint",
+        "node_type": "joint",
+        "uuid": "8B9C772C-42A4-18AE-25A5-2BA0382178FA",
+        "parent_node": "7F8C93C5-4F9E-65DD-D64E-EBB412D03F6B",
+        "_translate": [ 3.02910497668654 , -0.001352375469821, -0.03300437697668 ],
+        "_joint_orient": [-0.022668017385065,  0.63374196446351 , -0.785991290729419],
+        "_segment_scale_compensate": true
+    },
+    "A4AD6934-458B-8CA1-D25C-67A06CFE7ED3": {
+        "name": "handPinky_02_left_joint",
+        "node_type": "joint",
+        "uuid": "A4AD6934-458B-8CA1-D25C-67A06CFE7ED3",
+        "parent_node": "8B9C772C-42A4-18AE-25A5-2BA0382178FA",
+        "_translate": [ 2.339344084560057, -0.000000506254182,  0.000000000000003],
+        "_joint_orient": [ 0.0              ,  0.0              , -0.000012399288886],
+        "_segment_scale_compensate": true
+    },
+    "23A1D9B5-406F-3FC9-C957-AC8D57AAC963": {
+        "name": "handRingMeta_left_joint",
+        "node_type": "joint",
+        "uuid": "23A1D9B5-406F-3FC9-C957-AC8D57AAC963",
+        "parent_node": "9489D795-42AE-4046-5D66-1E805696940A",
+        "_translate": [2.18995693317212 , 0.407901978886102, 0.785947928275976],
+        "_joint_orient": [ 0.347426585925746, -6.895749790898638,  7.393291139268407],
+        "_segment_scale_compensate": true
+    },
+    "5418E807-4821-ED46-315D-57A375763C58": {
+        "name": "handRing_00_left_joint",
+        "node_type": "joint",
+        "uuid": "5418E807-4821-ED46-315D-57A375763C58",
+        "parent_node": "23A1D9B5-406F-3FC9-C957-AC8D57AAC963",
+        "_translate": [6.551937674894468, 0.000279286110228, 0.035157567207355],
+        "_joint_orient": [ 0.027519215549662,  5.477146432179022, -2.295418947965808],
+        "_segment_scale_compensate": true
+    },
+    "2A2D6ABF-49F9-2735-5C31-E1BD5971BC78": {
+        "name": "handRing_01_left_joint",
+        "node_type": "joint",
+        "uuid": "2A2D6ABF-49F9-2735-5C31-E1BD5971BC78",
+        "parent_node": "5418E807-4821-ED46-315D-57A375763C58",
+        "_translate": [ 3.595216462020232, -0.000310852481604, -0.016319106078849],
+        "_joint_orient": [-0.006785969127002,  0.253979064070563, -1.655232259752947],
+        "_segment_scale_compensate": true
+    },
+    "B8E431E5-48EA-4960-49D2-58A3E08A322D": {
+        "name": "handRing_02_left_joint",
+        "node_type": "joint",
+        "uuid": "B8E431E5-48EA-4960-49D2-58A3E08A322D",
+        "parent_node": "2A2D6ABF-49F9-2735-5C31-E1BD5971BC78",
+        "_translate": [ 2.749653478139106,  0.000000864518825, -0.000000000000002],
+        "_joint_orient": [0.0              , 0.0              , 0.000017785541236],
+        "_segment_scale_compensate": true
+    },
+    "E8AD121C-41A1-1A3D-1B8A-6AAFF6730A8E": {
+        "name": "handThumbMeta_left_joint",
+        "node_type": "joint",
+        "uuid": "E8AD121C-41A1-1A3D-1B8A-6AAFF6730A8E",
+        "parent_node": "9489D795-42AE-4046-5D66-1E805696940A",
+        "_translate": [ 0.21890367007974 ,  1.494103250370173, -1.728025442927854],
+        "_joint_orient": [90.17792708943371 , 45.01946687010302 , 41.165725985221876],
+        "_segment_scale_compensate": true
+    },
+    "73867C7E-4565-58C0-82AB-AE807B5D9352": {
+        "name": "handThumb_00_left_joint",
+        "node_type": "joint",
+        "uuid": "73867C7E-4565-58C0-82AB-AE807B5D9352",
+        "parent_node": "E8AD121C-41A1-1A3D-1B8A-6AAFF6730A8E",
+        "_translate": [ 2.0601567575129  , -0.044840664296402,  0.000139249253799],
+        "_joint_orient": [-0.973830402825739, -9.803955638050473,  5.904917715551043],
+        "_segment_scale_compensate": true
+    },
+    "20B7AAA0-447A-CA49-973B-7795753BF756": {
+        "name": "handThumb_01_left_joint",
+        "node_type": "joint",
+        "uuid": "20B7AAA0-447A-CA49-973B-7795753BF756",
+        "parent_node": "73867C7E-4565-58C0-82AB-AE807B5D9352",
+        "_translate": [ 3.875261674161706,  0.002214112256219, -0.010845985503892],
+        "_joint_orient": [0.450800930094694, 0.109950365103798, 6.543391608475726],
+        "_segment_scale_compensate": true
+    },
+    "25BC9325-4559-E722-E818-A882B5098C15": {
+        "name": "handThumb_02_left_joint",
+        "node_type": "joint",
+        "uuid": "25BC9325-4559-E722-E818-A882B5098C15",
+        "parent_node": "20B7AAA0-447A-CA49-973B-7795753BF756",
+        "_translate": [2.650366378679244, 0.004510211978491, 0.000000000000185],
+        "_joint_orient": [0.0              , 0.0              , 0.097501939244748],
+        "_segment_scale_compensate": true
+    },
+    "5FCD3CD8-45F3-E782-58D6-CEBFF5CAF867": {
+        "name": "armUpper_twist_01_left_joint",
+        "node_type": "joint",
+        "uuid": "5FCD3CD8-45F3-E782-58D6-CEBFF5CAF867",
+        "parent_node": "C99C7C10-40BC-1E1D-B77D-3BB069E6FA7B",
+        "_translate": [ 8.8330157637579  , -0.000000000000027,  0.000000000000242],
+        "_segment_scale_compensate": true
+    },
+    "5DC54341-453D-542E-3284-C680B745C6C3": {
+        "name": "armUpper_twist_02_left_joint",
+        "node_type": "joint",
+        "uuid": "5DC54341-453D-542E-3284-C680B745C6C3",
+        "parent_node": "C99C7C10-40BC-1E1D-B77D-3BB069E6FA7B",
+        "_translate": [17.66603152751584 , -0.000000000000042,  0.000000000000398],
+        "_segment_scale_compensate": true
+    },
+    "EA9539A6-4D33-1827-A11E-59A361094249": {
+        "name": "armUpper_twist_03_left_joint",
+        "node_type": "joint",
+        "uuid": "EA9539A6-4D33-1827-A11E-59A361094249",
+        "parent_node": "C99C7C10-40BC-1E1D-B77D-3BB069E6FA7B",
+        "_translate": [27.00000000000007 , -0.00000000000006 ,  0.000000000000185],
+        "_segment_scale_compensate": true
+    },
+    "10B94151-41B1-90E6-0E84-A9B0D729ED65": {
+        "name": "neck_joint",
+        "node_type": "joint",
+        "uuid": "10B94151-41B1-90E6-0E84-A9B0D729ED65",
+        "parent_node": "EAD8D769-4AB8-A351-C76A-BE8A5EA58B90",
+        "_translate": [11.316816329956055, -1.881569743156433,  0.000000036529226],
+        "_joint_orient": [ 0.000003107649756,  0.0              , 14.157999999999976],
+        "_segment_scale_compensate": true
+    },
+    "D37945CC-4C18-8CD4-C595-449F3C50CADF": {
+        "name": "head_joint",
+        "node_type": "joint",
+        "uuid": "D37945CC-4C18-8CD4-C595-449F3C50CADF",
+        "parent_node": "10B94151-41B1-90E6-0E84-A9B0D729ED65",
+        "_translate": [13.543713292079048,  0.046765767773337, -0.002212194856172],
+        "_joint_orient": [  0.0             ,   0.0             , -15.52777977207542],
+        "_segment_scale_compensate": true
+    },
+    "971F2D8C-4FB3-393E-F2BC-1AABA12422A3": {
+        "name": "eye_offset_right_joint",
+        "node_type": "joint",
+        "uuid": "971F2D8C-4FB3-393E-F2BC-1AABA12422A3",
+        "parent_node": "D37945CC-4C18-8CD4-C595-449F3C50CADF",
+        "_translate": [ 6.845097351520224,  7.204620317506459, -3.838787963015387],
+        "_joint_orient": [89.99999703107454 ,  4.000001983667824, 89.9996936979816  ],
+        "_segment_scale_compensate": true
+    },
+    "5076EA02-4FC2-C144-31B4-92B2B0EDFC93": {
+        "name": "eye_right_joint",
+        "node_type": "joint",
+        "uuid": "5076EA02-4FC2-C144-31B4-92B2B0EDFC93",
+        "parent_node": "971F2D8C-4FB3-393E-F2BC-1AABA12422A3",
+        "_joint_orient": [ 0.000306725041848, -0.000006415434033, -0.080537800670101],
+        "_segment_scale_compensate": true
+    },
+    "402C543F-4F8A-7268-9C7C-FA951E074942": {
+        "name": "eye_offset_left_joint",
+        "node_type": "joint",
+        "uuid": "402C543F-4F8A-7268-9C7C-FA951E074942",
+        "parent_node": "D37945CC-4C18-8CD4-C595-449F3C50CADF",
+        "_translate": [6.845097239979111, 7.204620718954896, 3.843105147259874],
+        "_joint_orient": [89.99999703550567 , -3.999998016332182, 89.99969369204196 ],
+        "_segment_scale_compensate": true
+    },
+    "2D694E50-4D7A-BEB3-1A59-4C8EA8CBF4D3": {
+        "name": "eye_left_joint",
+        "node_type": "joint",
+        "uuid": "2D694E50-4D7A-BEB3-1A59-4C8EA8CBF4D3",
+        "parent_node": "402C543F-4F8A-7268-9C7C-FA951E074942",
+        "_joint_orient": [ 0.000306725040219, -0.000005865781058,  0.080552076214284],
+        "_segment_scale_compensate": true
+    },
+    "3CE2F875-469E-DA45-CDD9-DB9D97D2CA35": {
+        "name": "muzzle_joint",
+        "node_type": "joint",
+        "uuid": "3CE2F875-469E-DA45-CDD9-DB9D97D2CA35",
+        "parent_node": "D37945CC-4C18-8CD4-C595-449F3C50CADF",
+        "_translate": [ 3.521889379058422, 10.687717145727133,  0.000000226766393],
+        "_joint_orient": [89.99999918605089 ,  0.000001983688842, 90.0000000000001  ],
+        "_segment_scale_compensate": true
+    },
+    "2263F5BD-4918-3BA6-492A-D1BCC3D994EE": {
+        "name": "dentureTp_joint",
+        "node_type": "joint",
+        "uuid": "2263F5BD-4918-3BA6-492A-D1BCC3D994EE",
+        "parent_node": "3CE2F875-469E-DA45-CDD9-DB9D97D2CA35",
+        "_translate": [-0.87988667319431 , -0.000000151739094, -4.282577957171611],
+        "_joint_orient": [0.0              , 5.000000000000012, 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "E2DC5027-4FAC-5465-18B2-57BAA3DE0B04": {
+        "name": "dentureBt_joint",
+        "node_type": "joint",
+        "uuid": "E2DC5027-4FAC-5465-18B2-57BAA3DE0B04",
+        "parent_node": "3CE2F875-469E-DA45-CDD9-DB9D97D2CA35",
+        "_translate": [-1.41062936028127 , -0.000000151739122, -6.074189877417126],
+        "_joint_orient": [0.0              , 5.000000000000012, 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "613F4A2E-4014-ECA8-79FB-69A59298D00F": {
+        "name": "tongueBase_joint",
+        "node_type": "joint",
+        "uuid": "613F4A2E-4014-ECA8-79FB-69A59298D00F",
+        "parent_node": "E2DC5027-4FAC-5465-18B2-57BAA3DE0B04",
+        "_translate": [-5.596307017770907,  0.000000000000004,  0.205771157296311],
+        "_joint_orient": [0.0              , 0.100482566558798, 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "68C357DD-4EC7-110A-3981-C59291FF6BB8": {
+        "name": "tongueTip_joint",
+        "node_type": "joint",
+        "uuid": "68C357DD-4EC7-110A-3981-C59291FF6BB8",
+        "parent_node": "613F4A2E-4014-ECA8-79FB-69A59298D00F",
+        "_translate": [ 3.465537058020258, -0.000000000000001,  0.000000000000199],
+        "_segment_scale_compensate": true
+    },
+    "BB23C899-451F-D403-80C1-F889DE9B0EB4": {
+        "name": "neck_twist_01_joint",
+        "node_type": "joint",
+        "uuid": "BB23C899-451F-D403-80C1-F889DE9B0EB4",
+        "parent_node": "10B94151-41B1-90E6-0E84-A9B0D729ED65",
+        "_translate": [ 6.874999999999631,  0.00000000000005 , -0.0              ],
+        "_joint_orient": [0.000015060480787, 0.000003107649721, 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "7B30C6C2-4ABD-D527-1C51-D6B6740AE3C1": {
+        "name": "neck_twist_02_joint",
+        "node_type": "joint",
+        "uuid": "7B30C6C2-4ABD-D527-1C51-D6B6740AE3C1",
+        "parent_node": "10B94151-41B1-90E6-0E84-A9B0D729ED65",
+        "_translate": [13.75             ,  0.000000000000128,  0.0              ],
+        "_joint_orient": [0.000104300538679, 0.000003107649778, 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "EF8E7FBA-4101-B57F-64FD-58AD31CD5149": {
+        "name": "clavicle_right_joint",
+        "node_type": "joint",
+        "uuid": "EF8E7FBA-4101-B57F-64FD-58AD31CD5149",
+        "parent_node": "EAD8D769-4AB8-A351-C76A-BE8A5EA58B90",
+        "_translate": [ 8.928888251304613,  0.556666086845395, -2.570930000000002],
+        "_joint_orient": [124.63140803410916, -71.8985575755041 ,  56.71587047227735],
+        "_segment_scale_compensate": true
+    },
+    "D541FDE5-49E0-47A4-F945-D0A7CC025B0B": {
+        "name": "shoulder_right_joint",
+        "node_type": "joint",
+        "uuid": "D541FDE5-49E0-47A4-F945-D0A7CC025B0B",
+        "parent_node": "EF8E7FBA-4101-B57F-64FD-58AD31CD5149",
+        "_translate": [-11.999955363956241,   0.000007198259173,   0.000109570521687],
+        "_joint_orient": [  2.092394002016384, -37.1052554165685  ,  13.555736955163662],
+        "_segment_scale_compensate": true
+    },
+    "D90470FF-4084-2F46-51A1-008EEC123736": {
+        "name": "elbow_right_joint",
+        "node_type": "joint",
+        "uuid": "D90470FF-4084-2F46-51A1-008EEC123736",
+        "parent_node": "D541FDE5-49E0-47A4-F945-D0A7CC025B0B",
+        "_translate": [-26.999691454113574,   0.000021444203344,   0.000379878886562],
+        "_joint_orient": [0.0              , 0.0              , 5.294394543147891],
+        "_segment_scale_compensate": true
+    },
+    "542183C2-4F88-5501-B514-9AB6A01B64FC": {
+        "name": "elbow_partial_right_joint",
+        "node_type": "joint",
+        "uuid": "542183C2-4F88-5501-B514-9AB6A01B64FC",
+        "parent_node": "D90470FF-4084-2F46-51A1-008EEC123736",
+        "_segment_scale_compensate": true
+    },
+    "125639F5-42B9-0055-73C9-28A58224D46F": {
+        "name": "armLower_twist_01_right_joint",
+        "node_type": "joint",
+        "uuid": "125639F5-42B9-0055-73C9-28A58224D46F",
+        "parent_node": "D90470FF-4084-2F46-51A1-008EEC123736",
+        "_translate": [-8.145165984621698,  0.000010573803143, -0.000317729856675],
+        "_segment_scale_compensate": true
+    },
+    "9B400A7A-4FF5-F02B-D186-4E8D88C7CE76": {
+        "name": "armLower_twist_02_right_joint",
+        "node_type": "joint",
+        "uuid": "9B400A7A-4FF5-F02B-D186-4E8D88C7CE76",
+        "parent_node": "D90470FF-4084-2F46-51A1-008EEC123736",
+        "_translate": [-16.2895971747429  ,  -0.000008396637828,   0.000042246107441],
+        "_segment_scale_compensate": true
+    },
+    "58DFB743-4A1E-7924-A867-FEB57550456F": {
+        "name": "armLower_twist_03_right_joint",
+        "node_type": "joint",
+        "uuid": "58DFB743-4A1E-7924-A867-FEB57550456F",
+        "parent_node": "D90470FF-4084-2F46-51A1-008EEC123736",
+        "_translate": [-25.05198380249353 ,  -0.000005126977546,  -0.000079203451094],
+        "_segment_scale_compensate": true
+    },
+    "D61D4E01-4E75-2A4E-F975-C099DFF2A72F": {
+        "name": "handWrist_right_joint",
+        "node_type": "joint",
+        "uuid": "D61D4E01-4E75-2A4E-F975-C099DFF2A72F",
+        "parent_node": "D90470FF-4084-2F46-51A1-008EEC123736",
+        "_translate": [-25.051983802493574,  -0.000005126977553,  -0.000079203451065],
+        "_joint_orient": [90.00000000000007 ,  2.004165991757277, -1.356994204621364],
+        "_segment_scale_compensate": true
+    },
+    "57DA0956-484A-83AC-15F3-779D3E4A0632": {
+        "name": "handIndexMeta_right_joint",
+        "node_type": "joint",
+        "uuid": "57DA0956-484A-83AC-15F3-779D3E4A0632",
+        "parent_node": "D61D4E01-4E75-2A4E-F975-C099DFF2A72F",
+        "_translate": [-2.059558544455356, -0.479600189332842,  1.608416690326471],
+        "_joint_orient": [-0.409545919436215,  9.580941854421994,  6.780263387596583],
+        "_segment_scale_compensate": true
+    },
+    "ED292DC6-4216-06BC-B97E-90BF77D6A207": {
+        "name": "handIndex_00_right_joint",
+        "node_type": "joint",
+        "uuid": "ED292DC6-4216-06BC-B97E-90BF77D6A207",
+        "parent_node": "57DA0956-484A-83AC-15F3-779D3E4A0632",
+        "_translate": [-6.920521229727093, -0.000047854864846,  0.050561536845553],
+        "_joint_orient": [  2.652597907504114, -14.252554682103087,  -3.027042136368267],
+        "_segment_scale_compensate": true
+    },
+    "AD9D5132-4055-FD00-7D8F-A6BA323B5B22": {
+        "name": "handIndex_01_right_joint",
+        "node_type": "joint",
+        "uuid": "AD9D5132-4055-FD00-7D8F-A6BA323B5B22",
+        "parent_node": "ED292DC6-4216-06BC-B97E-90BF77D6A207",
+        "_translate": [-3.449363629163564, -0.000817421803575, -0.038707101729185],
+        "_joint_orient": [ 0.097409838033604, -0.64617438216802 ,  1.682888720234129],
+        "_segment_scale_compensate": true
+    },
+    "5BF42898-4443-960F-EB91-7482030C8504": {
+        "name": "handIndex_02_right_joint",
+        "node_type": "joint",
+        "uuid": "5BF42898-4443-960F-EB91-7482030C8504",
+        "parent_node": "AD9D5132-4055-FD00-7D8F-A6BA323B5B22",
+        "_translate": [-2.687762638594968,  0.000032709620541, -0.000001473757673],
+        "_joint_orient": [0.000544089655005, 0.0              , 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "60710504-4BF0-BD25-3C3B-0A88B73BDEA7": {
+        "name": "handMiddleMeta_right_joint",
+        "node_type": "joint",
+        "uuid": "60710504-4BF0-BD25-3C3B-0A88B73BDEA7",
+        "parent_node": "D61D4E01-4E75-2A4E-F975-C099DFF2A72F",
+        "_translate": [-2.230901386646828, -0.239520974396086,  0.422722907505191],
+        "_joint_orient": [0.0             , 0.84787387029339, 5.53999999999994],
+        "_segment_scale_compensate": true
+    },
+    "A94E7CEC-46F2-F52B-27F3-79BAE6EB7C42": {
+        "name": "handMiddle_00_right_joint",
+        "node_type": "joint",
+        "uuid": "A94E7CEC-46F2-F52B-27F3-79BAE6EB7C42",
+        "parent_node": "60710504-4BF0-BD25-3C3B-0A88B73BDEA7",
+        "_translate": [-6.749817547493478,  0.000570404411391,  0.00500293036725 ],
+        "_joint_orient": [ 2.433204064628278, -3.520742121174317,  0.278658052427187],
+        "_segment_scale_compensate": true
+    },
+    "456A44CD-4DD9-5026-AD95-2FAB2A8254D6": {
+        "name": "handMiddle_01_right_joint",
+        "node_type": "joint",
+        "uuid": "456A44CD-4DD9-5026-AD95-2FAB2A8254D6",
+        "parent_node": "A94E7CEC-46F2-F52B-27F3-79BAE6EB7C42",
+        "_translate": [-4.148508079776164, -0.001022514961406, -0.01196506147991 ],
+        "_joint_orient": [ 0.111018419344005, -0.155813364758352, -1.144895377268812],
+        "_segment_scale_compensate": true
+    },
+    "3087EDD3-4A0C-A3C6-123D-4F8897639B57": {
+        "name": "handMiddle_02_right_joint",
+        "node_type": "joint",
+        "uuid": "3087EDD3-4A0C-A3C6-123D-4F8897639B57",
+        "parent_node": "456A44CD-4DD9-5026-AD95-2FAB2A8254D6",
+        "_translate": [-2.870536561600204,  0.000006658948919, -0.000000241064233],
+        "_joint_orient": [0.000018390847174, 0.0              , 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "AF149F47-40A6-1E6E-E62A-D8AB5FEC2CDE": {
+        "name": "handWrist_partial_right_joint",
+        "node_type": "joint",
+        "uuid": "AF149F47-40A6-1E6E-E62A-D8AB5FEC2CDE",
+        "parent_node": "D61D4E01-4E75-2A4E-F975-C099DFF2A72F",
+        "_joint_orient": [-0.005933974252842,  0.678497098672208,  1.002012727347806],
+        "_segment_scale_compensate": true
+    },
+    "4108FA63-4964-7ED1-6751-418BBAFE1D43": {
+        "name": "handPinkyMeta_right_joint",
+        "node_type": "joint",
+        "uuid": "4108FA63-4964-7ED1-6751-418BBAFE1D43",
+        "parent_node": "D61D4E01-4E75-2A4E-F975-C099DFF2A72F",
+        "_translate": [-1.957107427951954, -0.865536736376825, -1.87272396516032 ],
+        "_joint_orient": [  0.614644609451443, -14.455482050790245,   8.228564124686638],
+        "_segment_scale_compensate": true
+    },
+    "A37D1810-4696-56D3-DCEB-FC99DE8ED318": {
+        "name": "handPinky_00_right_joint",
+        "node_type": "joint",
+        "uuid": "A37D1810-4696-56D3-DCEB-FC99DE8ED318",
+        "parent_node": "4108FA63-4964-7ED1-6751-418BBAFE1D43",
+        "_translate": [-6.470735484617542, -0.001009167329499, -0.068806273651353],
+        "_joint_orient": [-0.393785667005629, 14.27807862444454 , -4.301991261401371],
+        "_segment_scale_compensate": true
+    },
+    "80F0E671-4871-25C9-CFCF-C59925411150": {
+        "name": "handPinky_01_right_joint",
+        "node_type": "joint",
+        "uuid": "80F0E671-4871-25C9-CFCF-C59925411150",
+        "parent_node": "A37D1810-4696-56D3-DCEB-FC99DE8ED318",
+        "_translate": [-3.029068971046726,  0.001399795902373,  0.033001413814323],
+        "_joint_orient": [-0.022668017395018,  0.633741964463288, -0.785991290729266],
+        "_segment_scale_compensate": true
+    },
+    "B63A11FF-4C41-061F-C389-C6876480FBD7": {
+        "name": "handPinky_02_right_joint",
+        "node_type": "joint",
+        "uuid": "B63A11FF-4C41-061F-C389-C6876480FBD7",
+        "parent_node": "80F0E671-4871-25C9-CFCF-C59925411150",
+        "_translate": [-2.339317548521294,  0.000008813540589, -0.000001279236917],
+        "_joint_orient": [0.000012431131932, 0.0              , 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "B0B9B921-4998-A07C-DB79-85869C3DC0EE": {
+        "name": "handRingMeta_right_joint",
+        "node_type": "joint",
+        "uuid": "B0B9B921-4998-A07C-DB79-85869C3DC0EE",
+        "parent_node": "D61D4E01-4E75-2A4E-F975-C099DFF2A72F",
+        "_translate": [-2.190082279233174, -0.408013288359669, -0.785952383004677],
+        "_joint_orient": [ 0.347426585924766, -6.895749790898483,  7.393291139268383],
+        "_segment_scale_compensate": true
+    },
+    "B0BC580D-4E96-A1F0-0F2E-83AADBDC0DF4": {
+        "name": "handRing_00_right_joint",
+        "node_type": "joint",
+        "uuid": "B0BC580D-4E96-A1F0-0F2E-83AADBDC0DF4",
+        "parent_node": "B0B9B921-4998-A07C-DB79-85869C3DC0EE",
+        "_translate": [-6.552057659223628, -0.00037376035948 , -0.035145147983459],
+        "_joint_orient": [ 0.027519215546036,  5.477146432179039, -2.295418947965689],
+        "_segment_scale_compensate": true
+    },
+    "10BBD5FE-4F53-451F-A820-509E478A8C01": {
+        "name": "handRing_01_right_joint",
+        "node_type": "joint",
+        "uuid": "10BBD5FE-4F53-451F-A820-509E478A8C01",
+        "parent_node": "B0BC580D-4E96-A1F0-0F2E-83AADBDC0DF4",
+        "_translate": [-3.595199835807335,  0.00026598196051 ,  0.016315938979856],
+        "_joint_orient": [-0.006785968723919,  0.253979064070667, -1.655232259752807],
+        "_segment_scale_compensate": true
+    },
+    "E780BA94-4DBA-AF5E-0FFE-79B0553C1F10": {
+        "name": "handRing_02_right_joint",
+        "node_type": "joint",
+        "uuid": "E780BA94-4DBA-AF5E-0FFE-79B0553C1F10",
+        "parent_node": "10BBD5FE-4F53-451F-A820-509E478A8C01",
+        "_translate": [-2.749620879118364,  0.000033908117544,  0.000008209571789],
+        "_joint_orient": [0.000017683628849, 0.0              , 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "6139F31B-4D7C-C417-DA9A-9A80E6796B96": {
+        "name": "handThumbMeta_right_joint",
+        "node_type": "joint",
+        "uuid": "6139F31B-4D7C-C417-DA9A-9A80E6796B96",
+        "parent_node": "D61D4E01-4E75-2A4E-F975-C099DFF2A72F",
+        "_translate": [-0.219102783178961, -1.494336469582777,  1.728017996042594],
+        "_joint_orient": [90.1779270894338  , 45.019466870103166, 41.16572598522191 ],
+        "_segment_scale_compensate": true
+    },
+    "EE4D0FC0-494D-66AD-30D6-CAB8D9151E95": {
+        "name": "handThumb_00_right_joint",
+        "node_type": "joint",
+        "uuid": "EE4D0FC0-494D-66AD-30D6-CAB8D9151E95",
+        "parent_node": "6139F31B-4D7C-C417-DA9A-9A80E6796B96",
+        "_translate": [-2.060180907510599,  0.044820418162402, -0.000135810062524],
+        "_joint_orient": [-0.973830402825233, -9.803955638050489,  5.904917715550856],
+        "_segment_scale_compensate": true
+    },
+    "E9D0CF1A-426D-D0A1-8F8D-43B89AE8805C": {
+        "name": "handThumb_01_right_joint",
+        "node_type": "joint",
+        "uuid": "E9D0CF1A-426D-D0A1-8F8D-43B89AE8805C",
+        "parent_node": "EE4D0FC0-494D-66AD-30D6-CAB8D9151E95",
+        "_translate": [-3.875246473965298, -0.002205053705168,  0.010803992647197],
+        "_joint_orient": [0.450800930092822, 0.109950365103864, 6.543391608475923],
+        "_segment_scale_compensate": true
+    },
+    "1F96A2FA-4A03-715F-2BB4-EE94D6BB3E39": {
+        "name": "handThumb_02_right_joint",
+        "node_type": "joint",
+        "uuid": "1F96A2FA-4A03-715F-2BB4-EE94D6BB3E39",
+        "parent_node": "E9D0CF1A-426D-D0A1-8F8D-43B89AE8805C",
+        "_translate": [-2.650375044766605, -0.004517088408832,  0.00001976109894 ],
+        "_joint_orient": [0.0              , 0.0              , 0.097501939242843],
+        "_segment_scale_compensate": true
+    },
+    "1582D054-43F7-9FA9-B511-5DB4CF85F34E": {
+        "name": "armUpper_twist_01_right_joint",
+        "node_type": "joint",
+        "uuid": "1582D054-43F7-9FA9-B511-5DB4CF85F34E",
+        "parent_node": "D541FDE5-49E0-47A4-F945-D0A7CC025B0B",
+        "_translate": [-8.832630936837646,  0.000016254608396,  0.000318990005837],
+        "_segment_scale_compensate": true
+    },
+    "8F688B1A-40F8-1A8F-37BC-BA8486BBC9BC": {
+        "name": "armUpper_twist_02_right_joint",
+        "node_type": "joint",
+        "uuid": "8F688B1A-40F8-1A8F-37BC-BA8486BBC9BC",
+        "parent_node": "D541FDE5-49E0-47A4-F945-D0A7CC025B0B",
+        "_translate": [-17.666064268038483,   0.000003230911791,   0.000033574463288],
+        "_segment_scale_compensate": true
+    },
+    "BB2F08CD-4299-D329-DFA2-32AA14E58E0C": {
+        "name": "armUpper_twist_03_right_joint",
+        "node_type": "joint",
+        "uuid": "BB2F08CD-4299-D329-DFA2-32AA14E58E0C",
+        "parent_node": "D541FDE5-49E0-47A4-F945-D0A7CC025B0B",
+        "_translate": [-26.999691454113545,   0.00002144420334 ,   0.000379878886619],
+        "_segment_scale_compensate": true
+    },
+    "98C81E3A-456C-3F6A-E171-46998695D1E8": {
+        "name": "hip_left_joint",
+        "node_type": "joint",
+        "uuid": "98C81E3A-456C-3F6A-E171-46998695D1E8",
+        "parent_node": "6A3E7E38-4E1A-69F1-3BF3-B49D12A49685",
+        "_translate": [-7.679323202888526, -1.051607608795166,  9.320962443517281],
+        "_joint_orient": [ -0.0             ,  -0.20000000000002, 180.0             ],
+        "_segment_scale_compensate": true
+    },
+    "018A2AA8-480A-550F-19FC-4E82A65440AF": {
+        "name": "knee_left_joint",
+        "node_type": "joint",
+        "uuid": "018A2AA8-480A-550F-19FC-4E82A65440AF",
+        "parent_node": "98C81E3A-456C-3F6A-E171-46998695D1E8",
+        "_translate": [47.527686406335455, -0.0              , -0.00000000000002 ],
+        "_joint_orient": [0.0              , 0.0              , 0.982518867249454],
+        "_segment_scale_compensate": true
+    },
+    "7D9DCFF9-4A04-1791-4472-9191F7198962": {
+        "name": "footAnkle_left_joint",
+        "node_type": "joint",
+        "uuid": "7D9DCFF9-4A04-1791-4472-9191F7198962",
+        "parent_node": "018A2AA8-480A-550F-19FC-4E82A65440AF",
+        "_translate": [42.83090679340938 , -0.000000000049038, -0.000000000000014],
+        "_joint_orient": [-179.99999999999991 ,    0.786672749008154,   -0.632531129863002],
+        "_segment_scale_compensate": true
+    },
+    "0B874B54-4186-E92A-170C-199604038291": {
+        "name": "footBall_left_joint",
+        "node_type": "joint",
+        "uuid": "0B874B54-4186-E92A-170C-199604038291",
+        "parent_node": "7D9DCFF9-4A04-1791-4472-9191F7198962",
+        "_translate": [ 4.645499229432354, 10.45170021057089 , -0.000000000000005],
+        "_joint_orient": [179.99999993121156 ,   0.000059326800438,  89.9999999999761  ],
+        "_segment_scale_compensate": true
+    },
+    "8FF0980A-406C-CFED-67F3-F3A5CC736CAA": {
+        "name": "footToe_left_joint",
+        "node_type": "joint",
+        "uuid": "8FF0980A-406C-CFED-67F3-F3A5CC736CAA",
+        "parent_node": "0B874B54-4186-E92A-170C-199604038291",
+        "_translate": [3.2999999523163  , 0.000000120136167, 0.000000515526301],
+        "_joint_orient": [-0.000017968223041, -0.000060083453165,  0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "5F849B6F-4447-A002-DB61-A0BAF4B8F4F7": {
+        "name": "footAnkle_partial_left_joint",
+        "node_type": "joint",
+        "uuid": "5F849B6F-4447-A002-DB61-A0BAF4B8F4F7",
+        "parent_node": "7D9DCFF9-4A04-1791-4472-9191F7198962",
+        "_joint_orient": [ 0.000024507653382, -0.000137174900891, -0.134305617886662],
+        "_segment_scale_compensate": true
+    },
+    "E43519B5-4701-C71F-D285-EB819E8EB3A8": {
+        "name": "knee_partial_left_joint",
+        "node_type": "joint",
+        "uuid": "E43519B5-4701-C71F-D285-EB819E8EB3A8",
+        "parent_node": "018A2AA8-480A-550F-19FC-4E82A65440AF",
+        "_translate": [-0.000502015197767,  0.000005542347859,  0.000006893379856],
+        "_joint_orient": [ 0.000036554044185,  0.0000722152829  , -0.167520482379472],
+        "_segment_scale_compensate": true
+    },
+    "1DCBF36B-4BFA-4A15-55FA-6794F2574C80": {
+        "name": "legLower_twist_01_left_joint",
+        "node_type": "joint",
+        "uuid": "1DCBF36B-4BFA-4A15-55FA-6794F2574C80",
+        "parent_node": "018A2AA8-480A-550F-19FC-4E82A65440AF",
+        "_translate": [12.830906793409547,  0.023947221404319,  0.029784730749299],
+        "_joint_orient": [0.000016359658583, 0.000088136710578, 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "289B4221-4B32-605D-B3D8-209B0736566E": {
+        "name": "legLower_twist_02_left_joint",
+        "node_type": "joint",
+        "uuid": "289B4221-4B32-605D-B3D8-209B0736566E",
+        "parent_node": "018A2AA8-480A-550F-19FC-4E82A65440AF",
+        "_translate": [27.830906793409614,  0.023947221398526,  0.029784727351709],
+        "_joint_orient": [ 0.000032599215942,  0.000231185282008, -0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "A10DDD74-41CD-FEBC-F0B2-5092A4FD015F": {
+        "name": "legLower_twist_03_left_joint",
+        "node_type": "joint",
+        "uuid": "A10DDD74-41CD-FEBC-F0B2-5092A4FD015F",
+        "parent_node": "018A2AA8-480A-550F-19FC-4E82A65440AF",
+        "_translate": [42.83090679340968 ,  0.023948877602863,  0.029784723340065],
+        "_joint_orient": [0.000049409939139, 0.000276267727752, 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "6EFA49D5-4B2A-D750-C9F4-2A94668BB041": {
+        "name": "legUpper_twist_01_left_joint",
+        "node_type": "joint",
+        "uuid": "6EFA49D5-4B2A-D750-C9F4-2A94668BB041",
+        "parent_node": "98C81E3A-456C-3F6A-E171-46998695D1E8",
+        "_translate": [11.722148371763836, -0.026497825571162,  0.059576771719504],
+        "_joint_orient": [0.000024438438992, 0.00006580521038 , 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "CEDBC47A-4601-70CE-8DEF-E88CF5109FA2": {
+        "name": "legUpper_twist_02_left_joint",
+        "node_type": "joint",
+        "uuid": "CEDBC47A-4601-70CE-8DEF-E88CF5109FA2",
+        "parent_node": "98C81E3A-456C-3F6A-E171-46998695D1E8",
+        "_translate": [27.782147837705935, -0.026497825519144,  0.059581162852718],
+        "_joint_orient": [0.0              , 0.000172149223855, 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "82D23B6E-4153-4D41-38BE-358A3F5C8486": {
+        "name": "legUpper_twist_03_left_joint",
+        "node_type": "joint",
+        "uuid": "82D23B6E-4153-4D41-38BE-358A3F5C8486",
+        "parent_node": "98C81E3A-456C-3F6A-E171-46998695D1E8",
+        "_translate": [46.01068080149984 , -0.01325131928536 ,  0.029786570646507],
+        "_joint_orient": [0.000072897678769, 0.00015435547197 , 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "F6331D7F-4CAB-1C90-230D-C1B7D71743C0": {
+        "name": "hip_right_joint",
+        "node_type": "joint",
+        "uuid": "F6331D7F-4CAB-1C90-230D-C1B7D71743C0",
+        "parent_node": "6A3E7E38-4E1A-69F1-3BF3-B49D12A49685",
+        "_translate": [-7.679337398082339, -1.051607913154612, -9.320959999999998],
+        "_joint_orient": [ 0.0              , -0.199999999999805,  0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "548D3FD0-41F7-B39F-BDCF-76A938291718": {
+        "name": "knee_right_joint",
+        "node_type": "joint",
+        "uuid": "548D3FD0-41F7-B39F-BDCF-76A938291718",
+        "parent_node": "F6331D7F-4CAB-1C90-230D-C1B7D71743C0",
+        "_translate": [-47.52768958079117 ,   0.0              ,  -0.000007403147762],
+        "_joint_orient": [0.0              , 0.0              , 0.982518867168876],
+        "_segment_scale_compensate": true
+    },
+    "73E8BCA1-4630-3D5D-1F92-CF89ED5EA36F": {
+        "name": "footAnkle_right_joint",
+        "node_type": "joint",
+        "uuid": "73E8BCA1-4630-3D5D-1F92-CF89ED5EA36F",
+        "parent_node": "548D3FD0-41F7-B39F-BDCF-76A938291718",
+        "_translate": [-42.83088815863322 ,   0.000000177562842,   0.000005718803664],
+        "_joint_orient": [-179.99999999993148 ,    0.786672749008049,   -0.632531129776568],
+        "_segment_scale_compensate": true
+    },
+    "2DACFC3C-4E21-E187-265F-11933768A221": {
+        "name": "footBall_right_joint",
+        "node_type": "joint",
+        "uuid": "2DACFC3C-4E21-E187-265F-11933768A221",
+        "parent_node": "73E8BCA1-4630-3D5D-1F92-CF89ED5EA36F",
+        "_translate": [ -4.645497376522749, -10.451698875173799,   0.000003588884919],
+        "_joint_orient": [180.0              ,   0.000059326868924,  89.99999999998386 ],
+        "_segment_scale_compensate": true
+    },
+    "B180155F-48D2-C197-24DD-269F077385CF": {
+        "name": "footToe_right_joint",
+        "node_type": "joint",
+        "uuid": "B180155F-48D2-C197-24DD-269F077385CF",
+        "parent_node": "2DACFC3C-4E21-E187-265F-11933768A221",
+        "_translate": [-3.299961581667105, -0.000002639878323,  0.000003752684799],
+        "_joint_orient": [0.000017905736003, 0.0              , 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "59EBA2CE-4AAE-4FF3-30D3-378FCB658BBA": {
+        "name": "footAnkle_partial_right_joint",
+        "node_type": "joint",
+        "uuid": "59EBA2CE-4AAE-4FF3-30D3-378FCB658BBA",
+        "parent_node": "73E8BCA1-4630-3D5D-1F92-CF89ED5EA36F",
+        "_joint_orient": [ 0.000024504554467, -0.000137174900941, -0.134305617878392],
+        "_segment_scale_compensate": true
+    },
+    "CDFA817F-4FBB-ED24-F0B5-84A1F01882DA": {
+        "name": "knee_partial_right_joint",
+        "node_type": "joint",
+        "uuid": "CDFA817F-4FBB-ED24-F0B5-84A1F01882DA",
+        "parent_node": "548D3FD0-41F7-B39F-BDCF-76A938291718",
+        "_translate": [ 0.000499974883084, -0.000005574063232, -0.000001745325706],
+        "_joint_orient": [ 0.000036576900866,  0.000072215282661, -0.167520482292492],
+        "_segment_scale_compensate": true
+    },
+    "46B6EB64-4773-B13F-3CBB-378ADDD7C7D9": {
+        "name": "legLower_twist_01_right_joint",
+        "node_type": "joint",
+        "uuid": "46B6EB64-4773-B13F-3CBB-378ADDD7C7D9",
+        "parent_node": "548D3FD0-41F7-B39F-BDCF-76A938291718",
+        "_translate": [-12.830879222159673,  -0.023947359805142,  -0.029780073139966],
+        "_joint_orient": [0.000016400456191, 0.0              , 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "3B2FAC62-4406-03A6-5DDE-CAA0B3116953": {
+        "name": "legLower_twist_02_right_joint",
+        "node_type": "joint",
+        "uuid": "3B2FAC62-4406-03A6-5DDE-CAA0B3116953",
+        "parent_node": "548D3FD0-41F7-B39F-BDCF-76A938291718",
+        "_translate": [-27.83087599233421 ,  -0.023947783647244,  -0.0297780114758  ],
+        "_joint_orient": [0.000032611471217, 0.0              , 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "91B9928D-4CA1-5B56-B3D3-9F8FA1E26D28": {
+        "name": "legLower_twist_03_right_joint",
+        "node_type": "joint",
+        "uuid": "91B9928D-4CA1-5B56-B3D3-9F8FA1E26D28",
+        "parent_node": "548D3FD0-41F7-B39F-BDCF-76A938291718",
+        "_translate": [-42.830892783452725,  -0.023949264338624,  -0.029775879998606],
+        "_joint_orient": [0.000049437843904, 0.0              , 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "3DA86DF7-4BB7-48DC-6BBA-C28715DD1E1E": {
+        "name": "legUpper_twist_01_right_joint",
+        "node_type": "joint",
+        "uuid": "3DA86DF7-4BB7-48DC-6BBA-C28715DD1E1E",
+        "parent_node": "F6331D7F-4CAB-1C90-230D-C1B7D71743C0",
+        "_translate": [-11.722179396641081,   0.026498         ,  -0.059582320895538],
+        "_joint_orient": [0.000024448356594, 0.0              , 0.0              ],
+        "_segment_scale_compensate": true
+    },
+    "67406866-4A32-2EEA-59D2-47A08EF8D8E5": {
+        "name": "legUpper_twist_02_right_joint",
+        "node_type": "joint",
+        "uuid": "67406866-4A32-2EEA-59D2-47A08EF8D8E5",
+        "parent_node": "F6331D7F-4CAB-1C90-230D-C1B7D71743C0",
+        "_translate": [-27.782177240152762,   0.026498         ,  -0.059582466695536],
+        "_segment_scale_compensate": true
+    },
+    "C9CD3AC1-4951-1891-3BED-B2B6684AD1B2": {
+        "name": "legUpper_twist_03_right_joint",
+        "node_type": "joint",
+        "uuid": "C9CD3AC1-4951-1891-3BED-B2B6684AD1B2",
+        "parent_node": "F6331D7F-4CAB-1C90-230D-C1B7D71743C0",
+        "_translate": [-46.010684309536686,   0.013252         ,  -0.029792921208333],
+        "_joint_orient": [0.000072901471412, 0.0              , 0.0              ],
+        "_segment_scale_compensate": true
+    }
+}
