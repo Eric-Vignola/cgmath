@@ -1309,10 +1309,13 @@ class TestLoadFbxDroppedNodes(unittest.TestCase):
         if middle is not None:
             nodes[1].SetNodeAttribute(middle(scene, "b"))
 
-        path     = os.path.join(self.tmp.name, f"mid_{middle}.fbx")
+        # the attribute class names the file; str(middle) would put "<" and
+        # ">" in it, which Windows rejects
+        label    = getattr(getattr(middle, "__self__", None), "__name__", "none")
+        path     = os.path.join(self.tmp.name, f"mid_{label}.fbx")
         exporter = FBX.FbxExporter.Create(manager, "")
-        exporter.Initialize(path, -1, manager.GetIOSettings())
-        exporter.Export(scene)
+        self.assertTrue(exporter.Initialize(path, -1, manager.GetIOSettings()))
+        self.assertTrue(exporter.Export(scene))
         exporter.Destroy()
         manager.Destroy()
         return path
