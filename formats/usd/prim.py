@@ -389,7 +389,7 @@ def add_inherits(
         inherit_obj.ClearInherits()
     for each in inherits:
         if isinstance(each, Usd.Prim):
-            each = each.GetPath()
+            each = each.GetPath().pathString
         inherit_obj.AddInherit(Path(each).as_posix())
 
 

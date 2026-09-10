@@ -546,7 +546,7 @@ zip_to_dict(filename)
 Constants:
 
 ```text
-MISSING = <dataclasses._MISSING_TYPE object at 0x00000222FCF9E650>
+MISSING = <dataclasses._MISSING_TYPE object at 0x0000017BF3FFE5D0>
 ```
 
 ## `cgmath.geometry.mesh`
@@ -3006,7 +3006,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x00000222F8DD3920>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000017BEFE43920>, '...
 ```
 
 ## `cgmath.constraints`

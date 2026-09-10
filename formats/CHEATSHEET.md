@@ -770,7 +770,6 @@ print(take.start_frame)
 
 Layers, and the single-layer `curves` shortcut:
 
-<!-- notest: cgmath.formats.fbx walks curves with FbxAnimCurveNode.GetChannelsCount(), which FBX Python SDK 2020.3.10 does not expose; this block fails until the code is updated -->
 ```python
 print(take.layers)  # LayerList(['BaseLayer'])
 print(take.curves)  # CurveList(['pCube1.translateX'])
@@ -808,7 +807,6 @@ A layer is an FBX animation layer inside a take.
 | `.curves` | `CurveList` | rebuilt by walking the layer's curve nodes |
 | `.create_curve(node, property)` | `CurveData` | Maya or FBX property names |
 
-<!-- notest: cgmath.formats.fbx walks curves with FbxAnimCurveNode.GetChannelsCount(), which FBX Python SDK 2020.3.10 does not expose; this block fails until the code is updated -->
 ```python
 base = take.layers[0]
 print(base.name, base.curves)
@@ -821,7 +819,6 @@ base.rename("BaseLayer")
 `create_curve` accepts either naming convention and returns a curve with no
 keys yet:
 
-<!-- notest: cgmath.formats.fbx walks curves with FbxAnimCurveNode.GetChannelsCount(), which FBX Python SDK 2020.3.10 does not expose; this block fails until the code is updated -->
 ```python
 spin = base.create_curve("pCube2", "rotateZ")     # -> 'Lcl RotationZ'
 print(spin.name, spin.key_count)                  # pCube2.rotateZ 0
@@ -836,7 +833,6 @@ print(spin.name, spin.key_count)                  # pCube2.rotateZ 0
 
 An unknown node raises `ValueError`:
 
-<!-- notest: cgmath.formats.fbx walks curves with FbxAnimCurveNode.GetChannelsCount(), which FBX Python SDK 2020.3.10 does not expose; this block fails until the code is updated -->
 ```python
 try:
     base.create_curve("ghost", "translateX")
@@ -859,7 +855,6 @@ One animation curve. Times are seconds, frames are `times * fps`.
 | `.values` | `np.ndarray` | get/set — the setter needs a matching key count |
 | `.clear()` | — | removes keys one by one, keeping the attribute connection |
 
-<!-- notest: cgmath.formats.fbx walks curves with FbxAnimCurveNode.GetChannelsCount(), which FBX Python SDK 2020.3.10 does not expose; this block fails until the code is updated -->
 ```python
 curve_data = take.curves["pCube1.translateX"]
 print(curve_data.name, curve_data.key_count)
@@ -871,7 +866,6 @@ print(curve_data.frames)  # times * fps
 Retiming and re-valuing. Order matters — set times first, values second,
 because assigning `times` (or `frames`) wipes the values to `0.0`.
 
-<!-- notest: cgmath.formats.fbx walks curves with FbxAnimCurveNode.GetChannelsCount(), which FBX Python SDK 2020.3.10 does not expose; this block fails until the code is updated -->
 ```python
 curve_data.times = [0.0, 1.0, 2.0]
 print(curve_data.values)             # [0. 0. 0.] — reset by the times setter
@@ -881,7 +875,6 @@ print(curve_data.times, curve_data.values)
 
 Frames are the same door:
 
-<!-- notest: cgmath.formats.fbx walks curves with FbxAnimCurveNode.GetChannelsCount(), which FBX Python SDK 2020.3.10 does not expose; this block fails until the code is updated -->
 ```python
 curve_data.frames = [0.0, 15.0, 30.0]
 print(curve_data.times)              # /fps
@@ -890,7 +883,6 @@ curve_data.values = [0.0, 5.0, 10.0]
 
 Guard rails:
 
-<!-- notest: cgmath.formats.fbx walks curves with FbxAnimCurveNode.GetChannelsCount(), which FBX Python SDK 2020.3.10 does not expose; this block fails until the code is updated -->
 ```python
 empty = base.create_curve("pCube2", "scaleY")
 try:
@@ -906,7 +898,6 @@ except ValueError as error:
 
 Clearing keeps the curve connected to its attribute, unlike `KeyClear()`:
 
-<!-- notest: cgmath.formats.fbx walks curves with FbxAnimCurveNode.GetChannelsCount(), which FBX Python SDK 2020.3.10 does not expose; this block fails until the code is updated -->
 ```python
 curve_data.clear()
 print(curve_data.key_count, take.curves)    # 0, curve still listed
@@ -995,7 +986,6 @@ their behaviour.
 `BaseData(scene, data_object)` gives you `.name` (Maya-translated),
 `in` (substring against the name), `str()` and `repr()`:
 
-<!-- notest: cgmath.formats.fbx walks curves with FbxAnimCurveNode.GetChannelsCount(), which FBX Python SDK 2020.3.10 does not expose; this block fails until the code is updated -->
 ```python
 from cgmath.formats.fbx import BaseData
 
@@ -1293,17 +1283,13 @@ usd_prim.clear_references(ref_holder)
 print(usd_prim.get_references(ref_holder))
 
 usd_prim.add_inherits(body, "/World/Chars/Hero/Rig")
-usd_prim.add_inherits(body, "/World/Chars/Hero/Rig")           # duplicates are ignored
+usd_prim.add_inherits(body, rig)                                # a prim works too; duplicates are ignored
 print(usd_prim.get_inherits(body))
 usd_prim.set_inherits(body, "/World")
 print(usd_prim.get_inherits(body))
 usd_prim.clear_inherits(body)
 print(usd_prim.get_inherits(body))
 ```
-
-One rough edge, verified: `add_inherits` documents that it accepts a
-`Usd.Prim`, but passing one raises `TypeError` — the code hands the prim's
-`Sdf.Path` to `pathlib.Path`, which rejects it. Pass the path string.
 
 `add_api_schema` / `get_api_schemas` operate on the `apiSchemas` metadata
 directly, so they behave the same across USD versions.
