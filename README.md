@@ -154,6 +154,8 @@ deformers. `FFDData`, `SkinDeformData` and `WrapData` come from
   `subdivide`, `merge`, `smooth`, `pack` edit in place and drop the
   caches; `copy`, `from_faces`, `sample`, every `resample_*` hand back
   something new.
+The first three are `transforms` conventions that cgmath inherits — full
+detail in its [README](https://github.com/Eric-Vignola/transforms/blob/main/README.md).
 
 ### Optional dependencies
 

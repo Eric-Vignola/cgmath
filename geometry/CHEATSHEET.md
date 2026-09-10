@@ -1427,10 +1427,6 @@ assert np.allclose(as_pts, pts)
 ```
 
 ```python
-parent = np.eye(4); parent[3, :3] = [1.0, 0.0, 0.0]
-child = np.eye(4); child[3, :3] = [1.0, 2.0, 0.0]
-print(sp.matrix_delta(parent, child)[0, 3, :3])   # [0, 2, 0] -- child in parent space
-
 scaled = np.eye(4) * 2.0; scaled[3, 3] = 1.0
 print(np.diag(sp.extract_scale_matrix(scaled)))                         # [2, 2, 2, 1]
 print(np.diag(sp.reset_scale(scaled)))                                  # [1, 1, 1, 1]
@@ -1440,8 +1436,7 @@ print(sp.u_vector_to_rotation_matrix(np.array([1.0, 0.0, 0.0])).shape)  # (16,) 
 ```
 
 > `u_vector_to_rotation_matrix` returns a **flat 16-element** array, not a
-> `(4, 4)`; and `matrix_delta` returns a *stack*, so index `[0]` for a single
-> pair.
+> `(4, 4)`.
 
 ### The B-spline control map
 

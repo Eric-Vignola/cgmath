@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 from cgmath.geometry.bspline import BSplineData
 from transforms import (
-    matrix_inverse,
+    matrix_delta,
     matrix_multiply,
     matrix_weighted_transformation,
     vector_cross,
@@ -692,23 +692,6 @@ def get_bspline_map_init(
             rdata["offset_matrices"] = offset_matrices
 
     return rdata
-
-
-def matrix_delta(parent_matrix: np.ndarray, child_matrix: np.ndarray) -> np.ndarray:
-    """
-    Compute the local offset of a transformation matrix as a child of another transformation matrix.
-    Args:
-        parent_matrix (np.ndarray): The 4x4 transformation matrix of the parent.
-        child_matrix (np.ndarray): The 4x4 transformation matrix of the child.
-    Returns:
-        np.ndarray: The 4x4 transformation matrix representing the offset of the child with respect to the parent's coordinate system.
-    """
-    # Invert the parent matrix to transform from world space to parent space
-    parent_inverse = matrix_inverse(parent_matrix)
-    # Compute the offset transformation matrix by multiplying the parent's inverse with the child's matrix
-    offset_matrix = matrix_multiply(child_matrix, parent_inverse)
-    # offset_matrix = matrix_multiply( parent_inverse, child_matrix)
-    return offset_matrix
 
 
 def build_normal_matrix(

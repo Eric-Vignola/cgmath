@@ -413,7 +413,7 @@ Real behaviour, verified — not bugs to work around blindly.
   `MeshDataResampler.resample_skin_weights`, never by the transfer function
   itself.
 - In `surface_plotting`, `u_vector_to_rotation_matrix` returns a **flat `(16,)`**
-  array, and `matrix_delta` returns a *stack* — index `[0]` for a single pair.
+  array, not a `(4, 4)`.
 - `MeshData.ngons` is a count, not an index list. `get_ngons()` is the list. The
   same holds for `triangles` / `get_triangles()` and `quads` / `get_quads()`.
 - `get_border_vertices()`, `get_non_manifold_vertices()`, `get_lamina_faces()`

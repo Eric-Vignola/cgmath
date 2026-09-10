@@ -21,30 +21,28 @@ share a namespace, notebook style.
 | — | [Setup](#setup) | |
 | 1 | [Where each name lives](#1-where-each-name-lives) | |
 | 2 | [The conventions, in code](#2-the-conventions-in-code) | |
-| 3 | [Build a matrix, move a point](#3-build-a-matrix-move-a-point) | [`transforms/`](https://github.com/Eric-Vignola/transforms/blob/main/CHEATSHEET.md) |
-| 4 | [Blend two rotations](#4-blend-two-rotations) | [`transforms/`](https://github.com/Eric-Vignola/transforms/blob/main/CHEATSHEET.md) |
-| 5 | [Build a rig, read world space](#5-build-a-rig-read-world-space) | [`hierarchy/`](hierarchy/CHEATSHEET.md) |
-| 6 | [Animate it as a clip](#6-animate-it-as-a-clip) | [`hierarchy/`](hierarchy/CHEATSHEET.md) |
-| 7 | [Retarget a pose](#7-retarget-a-pose) | [`hierarchy/`](hierarchy/CHEATSHEET.md) |
-| 8 | [Build a mesh, count it](#8-build-a-mesh-count-it) | [`geometry/`](geometry/CHEATSHEET.md) |
-| 9 | [Topology maps and diagnostics](#9-topology-maps-and-diagnostics) | [`geometry/`](geometry/CHEATSHEET.md) |
-| 10 | [Normals and areas](#10-normals-and-areas) | [`geometry/`](geometry/CHEATSHEET.md) |
-| 11 | [Edit a mesh, keep its UVs in step](#11-edit-a-mesh-keep-its-uvs-in-step) | [`geometry/`](geometry/CHEATSHEET.md) |
-| 12 | [Closest point and raycast](#12-closest-point-and-raycast) | [`geometry/`](geometry/CHEATSHEET.md) |
-| 13 | [Skin weights](#13-skin-weights) | [`geometry/`](geometry/CHEATSHEET.md) |
-| 14 | [Pose a skinned mesh](#14-pose-a-skinned-mesh) | [`deform/`](geometry/deform/CHEATSHEET.md) |
-| 15 | [Delta Mush a wobbly pose](#15-delta-mush-a-wobbly-pose) | [`deform/`](geometry/deform/CHEATSHEET.md) |
-| 16 | [Sculpt with an FFD lattice](#16-sculpt-with-an-ffd-lattice) | [`deform/`](geometry/deform/CHEATSHEET.md) |
-| 17 | [Wrap dense geometry to a cage](#17-wrap-dense-geometry-to-a-cage) | [`deform/`](geometry/deform/CHEATSHEET.md), [`rbf/`](rbf/CHEATSHEET.md) |
-| 18 | [Transfer data onto a new topology](#18-transfer-data-onto-a-new-topology) | [`geometry/`](geometry/CHEATSHEET.md) |
-| 19 | [Rivet a transform to a deforming patch](#19-rivet-a-transform-to-a-deforming-patch) | [`constraints/`](constraints/CHEATSHEET.md) |
-| 20 | [CSG with signed distance fields](#20-csg-with-signed-distance-fields) | [`geometry/`](geometry/CHEATSHEET.md) |
-| 21 | [Sample a B-spline](#21-sample-a-b-spline) | [`geometry/`](geometry/CHEATSHEET.md) |
-| 22 | [Render a still](#22-render-a-still) | [`render/`](render/CHEATSHEET.md) |
-| 23 | [Turntable and video](#23-turntable-and-video) | [`render/`](render/CHEATSHEET.md) |
-| 24 | [Save and load anything](#24-save-and-load-anything) | [`geometry/`](geometry/CHEATSHEET.md) |
-| 25 | [FBX and GLB](#25-fbx-and-glb) | [`formats/`](formats/CHEATSHEET.md) |
-| 26 | [Pretty printing and docstrings](#26-pretty-printing-and-docstrings) | |
+| 3 | [Build a rig, read world space](#3-build-a-rig-read-world-space) | [`hierarchy/`](hierarchy/CHEATSHEET.md) |
+| 4 | [Animate it as a clip](#4-animate-it-as-a-clip) | [`hierarchy/`](hierarchy/CHEATSHEET.md) |
+| 5 | [Retarget a pose](#5-retarget-a-pose) | [`hierarchy/`](hierarchy/CHEATSHEET.md) |
+| 6 | [Build a mesh, count it](#6-build-a-mesh-count-it) | [`geometry/`](geometry/CHEATSHEET.md) |
+| 7 | [Topology maps and diagnostics](#7-topology-maps-and-diagnostics) | [`geometry/`](geometry/CHEATSHEET.md) |
+| 8 | [Normals and areas](#8-normals-and-areas) | [`geometry/`](geometry/CHEATSHEET.md) |
+| 9 | [Edit a mesh, keep its UVs in step](#9-edit-a-mesh-keep-its-uvs-in-step) | [`geometry/`](geometry/CHEATSHEET.md) |
+| 10 | [Closest point and raycast](#10-closest-point-and-raycast) | [`geometry/`](geometry/CHEATSHEET.md) |
+| 11 | [Skin weights](#11-skin-weights) | [`geometry/`](geometry/CHEATSHEET.md) |
+| 12 | [Pose a skinned mesh](#12-pose-a-skinned-mesh) | [`deform/`](geometry/deform/CHEATSHEET.md) |
+| 13 | [Delta Mush a wobbly pose](#13-delta-mush-a-wobbly-pose) | [`deform/`](geometry/deform/CHEATSHEET.md) |
+| 14 | [Sculpt with an FFD lattice](#14-sculpt-with-an-ffd-lattice) | [`deform/`](geometry/deform/CHEATSHEET.md) |
+| 15 | [Wrap dense geometry to a cage](#15-wrap-dense-geometry-to-a-cage) | [`deform/`](geometry/deform/CHEATSHEET.md), [`rbf/`](rbf/CHEATSHEET.md) |
+| 16 | [Transfer data onto a new topology](#16-transfer-data-onto-a-new-topology) | [`geometry/`](geometry/CHEATSHEET.md) |
+| 17 | [Rivet a transform to a deforming patch](#17-rivet-a-transform-to-a-deforming-patch) | [`constraints/`](constraints/CHEATSHEET.md) |
+| 18 | [CSG with signed distance fields](#18-csg-with-signed-distance-fields) | [`geometry/`](geometry/CHEATSHEET.md) |
+| 19 | [Sample a B-spline](#19-sample-a-b-spline) | [`geometry/`](geometry/CHEATSHEET.md) |
+| 20 | [Render a still](#20-render-a-still) | [`render/`](render/CHEATSHEET.md) |
+| 21 | [Turntable and video](#21-turntable-and-video) | [`render/`](render/CHEATSHEET.md) |
+| 22 | [Save and load anything](#22-save-and-load-anything) | [`geometry/`](geometry/CHEATSHEET.md) |
+| 23 | [FBX and GLB](#23-fbx-and-glb) | [`formats/`](formats/CHEATSHEET.md) |
+| 24 | [Pretty printing and docstrings](#24-pretty-printing-and-docstrings) | |
 
 ---
 
@@ -111,7 +109,9 @@ print(cube.point_count, cube.face_count, grid.face_count)
 
 `cgmath/__init__.py` is a docstring and re-exports nothing, so there is
 nothing to import from `cgmath` itself. Always import from a subpackage. The
-batched transform functions come from the separate `transforms` package.
+batched transform functions come from the separate `transforms` package;
+building matrices, moving points and blending rotations are its territory —
+see the [`transforms` CHEATSHEET](https://github.com/Eric-Vignola/transforms/blob/main/CHEATSHEET.md).
 
 ```python
 from cgmath.hierarchy import HierarchyData, TransformData, TransformList, ClipData
@@ -146,19 +146,6 @@ Three easy-to-miss facts:
 Row-major Maya matrices everywhere. Translation is a **row**, points are
 **row vectors**, and `matrix_multiply(A, B)` applies `A` first.
 
-```python
-from transforms import matrix_identity, matrix_multiply
-
-M        = matrix_identity(1)[0]
-M[3, :3] = (1.0, 2.0, 3.0)                       # <-- translation lives on row 3
-print(matrix_point_multiply([0.0, 0.0, 0.0], M)) # [[1. 2. 3.]]  p' = p @ M
-
-A, B = matrix_identity(1), matrix_identity(1)
-A[0, 3, :3] = (1.0, 0.0, 0.0)
-B[0, 3, :3] = (0.0, 1.0, 0.0)
-assert np.allclose(matrix_multiply(A, B), A @ B)
-```
-
 Units split at the node boundary: the free functions are **radians**,
 `TransformData.rotate` is **degrees**.
 
@@ -179,6 +166,10 @@ print(np.degrees(matrix_to_euler(node.matrix, 0)).round(4))   # [[0. 45. 0.]]
 | UV | `v` increases up; `v = 0` is the bottom of the texture |
 | Padding | `-1` marks "no entry" in every adjacency matrix and raycast miss |
 
+The matrix, quaternion, rotate-order and angle rows are `transforms`
+conventions that cgmath inherits — full detail in its
+[README](https://github.com/Eric-Vignola/transforms/blob/main/README.md).
+
 `look_at()` and node matrices disagree on layout, on purpose — one is
 OpenGL, the other is Maya:
 
@@ -192,61 +183,7 @@ print(TransformData("cam", translate=(0, 0, 5)).matrix[3, :3])  # [0 0 5] -- row
 
 ---
 
-## 3. Build a matrix, move a point
-
-```python
-M = euler_to_matrix([0.0, 0.0, np.radians(90.0)], 0)      # +90 deg about Z
-print(matrix_point_multiply([1.0, 0.0, 0.0], M).round(6)) # [[0. 1. 0.]]
-```
-
-Everything is batched with NumPy's rules: a bare `(3,)` or `(4, 4)` is
-promoted to a stack of one, and every input must be as long as the longest
-one or exactly one.
-
-```python
-from transforms import matrix_inverse, matrix_local, matrix_random
-
-stack = matrix_random(4, seed=0)
-print(stack.shape, matrix_inverse(stack).shape)
-print(matrix_local(stack, matrix_identity(1)).shape)   # 1 parent, 4 children
-```
-
-Full surface: [`transforms/CHEATSHEET.md`](https://github.com/Eric-Vignola/transforms/blob/main/CHEATSHEET.md).
-
----
-
-## 4. Blend two rotations
-
-Slerp the quaternions; never lerp euler angles.
-
-```python
-from transforms import euler_to_quaternion, quaternion_to_euler
-
-q0 = euler_to_quaternion(np.radians([[0.0, 0.0, 0.0]]), 0)
-q1 = euler_to_quaternion(np.radians([[0.0, 170.0, 0.0]]), 0)
-print(np.degrees(quaternion_to_euler(quaternion_slerp(q0, q1, 0.5), 0)).round(4))
-```
-
-For whole transforms, pick the right blend — `matrix_slerp` is rotation
-only and **zeroes the translation**; `matrix_interpolate` blends S, R and T.
-
-```python
-from transforms import matrix_interpolate, matrix_slerp
-
-m0           = euler_to_matrix([0.0, 0.0, 0.0], 0)
-m1           = euler_to_matrix([0.0, np.radians(90.0), 0.0], 0)
-m1[:, 3, :3] = (0.0, 4.0, 0.0)
-
-print(matrix_slerp(m0.copy(), m1.copy(), 0.5)[0, 3, :3])        # [0. 0. 0.]
-print(matrix_interpolate(m0.copy(), m1.copy(), 0.5)[0, 3, :3])  # [0. 2. 0.]
-```
-
-`matrix_interpolate` divides the scale out of **both argument arrays in
-place**. Pass copies unless your scale is 1.
-
----
-
-## 5. Build a rig, read world space
+## 3. Build a rig, read world space
 
 `world_matrix` is a **property**, on every type — never a call, never
 parameterised by name.
@@ -281,7 +218,7 @@ Full surface: [`transforms/hierarchy/CHEATSHEET.md`](hierarchy/CHEATSHEET.md).
 
 ---
 
-## 6. Animate it as a clip
+## 4. Animate it as a clip
 
 A `ClipData` is a `HierarchyData` holding `F` poses. `clip.frames` writes
 whole channels at once; `clip.frame = n` scrubs the nodes to one pose.
@@ -302,7 +239,7 @@ that rides alongside it.
 
 ---
 
-## 7. Retarget a pose
+## 5. Retarget a pose
 
 `a - b` (`get_delta`) is a retargeting operator, not a subtraction: the
 delta is fixed to the bone, so it re-poses `b` at any pose.
@@ -321,7 +258,7 @@ print(result.name)
 
 ---
 
-## 8. Build a mesh, count it
+## 6. Build a mesh, count it
 
 A `MeshData` is a face-vertex stream — `indices` + `counts` + `points` —
 not a triangle array. Mixed tris, quads and n-gons are normal.
@@ -339,7 +276,7 @@ Full surface: [`geometry/CHEATSHEET.md`](geometry/CHEATSHEET.md).
 
 ---
 
-## 9. Topology maps and diagnostics
+## 7. Topology maps and diagnostics
 
 Every adjacency map is lazy, cached and `-1` padded.
 
@@ -365,7 +302,7 @@ print(cube.shell_count,        len(cube.shell_faces))     # 1 1
 
 ---
 
-## 10. Normals and areas
+## 8. Normals and areas
 
 Geometric normals are derived from `points` on demand. There is no
 `get_normals()`.
@@ -386,7 +323,7 @@ print(hard.normals.shape, hard.normal_indices is not None)
 
 ---
 
-## 11. Edit a mesh, keep its UVs in step
+## 9. Edit a mesh, keep its UVs in step
 
 A mesh and its UV set share face topology but not vertex ids, so every
 paired edit goes through a face-local **rules** object handed to both.
@@ -416,7 +353,7 @@ print(front.face_count, front.point_count)
 
 ---
 
-## 12. Closest point and raycast
+## 10. Closest point and raycast
 
 Quads are integrated as genuine bilinear patches, not two triangles.
 Misses are `NaN`, never exceptions — always filter by `hit`.
@@ -433,7 +370,7 @@ print(hit.hit, hit.distances.round(3), hit.indices)
 
 ---
 
-## 13. Skin weights
+## 11. Skin weights
 
 `SkinData.weights` is **dense** `(V, I)` paired with an `influences` list
 of joint names. `valid` checks that rows sum to 1 and the widths agree.
@@ -463,7 +400,7 @@ print(morph.offsets.shape, density.values, head.component_type)
 
 ---
 
-## 14. Pose a skinned mesh
+## 12. Pose a skinned mesh
 
 Skin *deformation* lives in `deform`, not with `SkinData`.
 
@@ -492,7 +429,7 @@ Full surface: [`geometry/deform/CHEATSHEET.md`](geometry/deform/CHEATSHEET.md).
 
 ---
 
-## 15. Delta Mush a wobbly pose
+## 13. Delta Mush a wobbly pose
 
 Constructor takes the **rest** geometry; `apply()` takes the deformed one
 and auto-binds on the first call.
@@ -509,7 +446,7 @@ There is no `iterations=` or `step=` argument, and `bind()` takes none.
 
 ---
 
-## 16. Sculpt with an FFD lattice
+## 14. Sculpt with an FFD lattice
 
 `from_mesh` takes the **lattice**, not the mesh being deformed. Build the
 lattice around the mesh's bounding box first.
@@ -533,7 +470,7 @@ print(np.abs(sheared.points - cube.points).max().round(4))
 
 ---
 
-## 17. Wrap dense geometry to a cage
+## 15. Wrap dense geometry to a cage
 
 Source, target and radius are set through **methods**; the constructor
 takes only `kernel` and `name`. The kernel is `"thin_plate_spline"` —
@@ -565,7 +502,7 @@ Watch the shape parameter: `epsilon` **multiplies** the distance in
 
 ---
 
-## 18. Transfer data onto a new topology
+## 16. Transfer data onto a new topology
 
 `MeshDataResampler` never changes the destination topology — it re-indexes
 a source-shaped array onto the destination's vertices. Build one resampler,
@@ -590,7 +527,7 @@ print(dst_skin.weights.shape, dst_skin.influences, dst_skin.valid)
 
 ---
 
-## 19. Rivet a transform to a deforming patch
+## 17. Rivet a transform to a deforming patch
 
 `ProcrustesData(target)` takes one positional argument. Attach transforms
 to clusters of point indices, then feed it the deformed cloud.
@@ -615,7 +552,7 @@ Procrustes" means. `compute()` raises until something is attached.
 
 ---
 
-## 20. CSG with signed distance fields
+## 18. CSG with signed distance fields
 
 The OOP layer: primitives subclass `TransformData`, so they carry the full
 Maya SRT surface. `resolution` is *subdivisions per world unit*.
@@ -650,7 +587,7 @@ re-exported at `cgmath.geometry` level.
 
 ---
 
-## 21. Sample a B-spline
+## 19. Sample a B-spline
 
 `u` runs `[0, max_param]` in knot space unless you pass `uniform=True`,
 which switches to arc length on `[0, 1]`.
@@ -671,7 +608,7 @@ print(curve.sample(np.array([[2.0, 2.0, 0.0]])).distances.round(3))   # closest 
 
 ---
 
-## 22. Render a still
+## 20. Render a still
 
 Build a `Scene`, append nodes, render. `append()` returns `None`, so it
 does **not** chain — only `configure()` does.
@@ -714,7 +651,7 @@ Full surface: [`render/CHEATSHEET.md`](render/CHEATSHEET.md).
 
 ---
 
-## 23. Turntable and video
+## 21. Turntable and video
 
 One call orbits the camera and encodes. The extension picks the writer;
 an `{frame}` token writes an image sequence instead.
@@ -736,7 +673,7 @@ frames directly when you want to build the motion yourself. `mp4` and
 
 ---
 
-## 24. Save and load anything
+## 22. Save and load anything
 
 Every `Data` subclass — meshes, UVs, skins, morphs, maps, rigs, clips —
 shares one persistence surface. The extension picks the writer; the file's
@@ -772,7 +709,7 @@ print(reloaded.name, len(reloaded.frames))
 
 ---
 
-## 25. FBX and GLB
+## 23. FBX and GLB
 
 `cgmath.formats` is curve / take / layer focused. **Mesh** loading lives
 in `geometry`.
@@ -814,7 +751,7 @@ Full surface: [`formats/CHEATSHEET.md`](formats/CHEATSHEET.md).
 
 ---
 
-## 26. Pretty printing and docstrings
+## 24. Pretty printing and docstrings
 
 ```python
 from cgmath.utils import docstring, info, pretty_json

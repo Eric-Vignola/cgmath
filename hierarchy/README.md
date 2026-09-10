@@ -96,10 +96,10 @@ hierarchy/
                     batched clip evaluator
 ```
 
-`hierarchy.py` also exposes `generate_uuid()` / `validate_uuid()`, the
-`MAYA_ATTRIBUTE_MAP` used by `to_attributes()`, and re-exports the
-transform math it is built on (`euler_to_matrix`, `matrix_multiply`,
-`matrix_to_quaternion`, `q_slerp`, …) from `transforms`.
+`hierarchy.py` also exposes `generate_uuid()` / `validate_uuid()` and the
+`MAYA_ATTRIBUTE_MAP` used by `to_attributes()`. The matrix and quaternion
+math it is built on comes from `transforms` and is not re-exported: import
+`euler_to_matrix`, `quaternion_slerp` and friends from there.
 
 Optional dependencies are lazy: `pygltflib` for glb, the Autodesk `fbx`
 sdk for fbx. Without them only those loaders raise `ImportError`; the

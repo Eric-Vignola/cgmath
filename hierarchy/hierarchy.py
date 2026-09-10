@@ -39,6 +39,17 @@ except ImportError:
     FbxExporter = None
 
 
+__all__ = [
+    "ClipData",
+    "HierarchyData",
+    "TransformData",
+    "TransformList",
+    "MAYA_ATTRIBUTE_MAP",
+    "generate_uuid",
+    "validate_uuid",
+]
+
+
 # attribute names mapped against Autodesk Maya
 MAYA_ATTRIBUTE_MAP = {
     "_scale": "scale",
