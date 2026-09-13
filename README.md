@@ -1,8 +1,8 @@
-# `cgmath` — Maya's math, without Maya
+# `cgmath` — a DCC-agnostic CG math library
 
 A Python toolkit for what tech artists, riggers and pipeline engineers
-actually need: SRT transforms with Maya's parenting rules, mesh topology
-you can introspect, five deformers, a software raytracer, signed distance
+actually need: SRT transforms and a scene graph, mesh topology you can
+introspect, five deformers, a software raytracer, signed distance
 fields, skin-weight transfer, and importers for OBJ / GLB / FBX / USD.
 
 Everything is numpy-native. No DCC required. Numba-accelerated where it
@@ -123,6 +123,10 @@ deformers. `FFDData`, `SkinDeformData` and `WrapData` come from
 
 ## Conventions, all in one place
 
+`cgmath` depends on no DCC, but its conventions are modelled on Maya's:
+row-major matrices, Maya's rotate orders and its SRT parenting rules.
+If you know Maya, nothing below will surprise you.
+
 - **Transforms are Maya row-major.** Translation lives at `M[3, :3]`,
   points are row vectors (`p' = p @ M`), and `matrix_multiply(A, B)`
   applies `A` first. Maya rotate orders:
@@ -183,7 +187,7 @@ Importing any subpackage is cheap; the first `sample()`, `subdivide()` or
 
 ## Quick taste
 
-### Move a point through a Maya world matrix
+### Move a point through a world matrix
 
 ```python
 from cgmath.hierarchy import TransformData
@@ -268,9 +272,9 @@ print(dst.weights.shape, dst.influences, dst.valid)
 
 ## Audience
 
-Written for tech artists, riggers and tools engineers who think in Maya
-nodes but want clean Python they can ship to CI, a notebook or a headless
-cluster — without launching a DCC.
+Written for tech artists, riggers and tools engineers who want clean
+Python they can ship to CI, a notebook or a headless cluster — whichever
+DCC, if any, sits at the other end of the pipeline.
 
 If you have ever wanted to score a turntable for a Slack post, or to bind
 skin weights to a USD prim from Python, you are in the right module.
