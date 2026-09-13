@@ -1,8 +1,8 @@
 # `cgmath.hierarchy` — the scene graph
 
-Maya-shaped transform nodes, the containers that hold them, and the
-animation clip that plays them back. Four public types, no DCC, numpy
-all the way down.
+Transform nodes that follow Maya's SRT conventions, the containers that
+hold them, and the animation clip that plays them back. Four public
+types, no DCC, numpy all the way down.
 
 ```python
 from cgmath.hierarchy import (
@@ -50,10 +50,9 @@ world  = matrix · parent_world             # accumulated down the chain
 inverse scale (identity unless `segment_scale_compensate` is on).
 `rotate_order` picks which of the six euler orders builds `R`.
 
-**`world_matrix` is a property, on every type** — `node.world_matrix`,
-`rig.world_matrix`, never a call, never parameterised by name. It is
-cached per node, and any channel write clears the cache of that node and
-its whole branch.
+**`world_matrix` is a property on every type** — `node.world_matrix`,
+`rig.world_matrix`. It is cached per node, and any channel write clears
+the cache of that node and its whole branch.
 
 **A clip's nodes are its playback head.** Each framed channel is bound
 to one row of a dense `(F, N, 3)` block. Scrubbing rebinds; reading a
@@ -71,7 +70,7 @@ rigs whose joint axes or proportions differ. `(a - b) + b == a`.
 
 ## When to reach for it
 
-- You have joints, parents and world matrices, and you do not want Maya
+- You have joints, parents and world matrices, and you do not want a DCC
   running to evaluate them.
 - You need to read a rig out of an fbx or glb, retime or retarget it,
   and write it back.
@@ -164,5 +163,5 @@ result.name                                 # ['root', 'hip', 'knee']
 | You want to... | Read |
 |---|---|
 | Every class, property and method, with runnable examples | [`CHEATSHEET.md`](CHEATSHEET.md) |
-| The rest of the library | [`../../README.md`](../README.md) |
-| The free transform functions these types are built on | [`../../CHEATSHEET.md`](../CHEATSHEET.md) |
+| The rest of the library | [`../README.md`](../README.md) |
+| The free transform functions these types are built on | [`transforms`](https://github.com/Eric-Vignola/transforms/blob/main/CHEATSHEET.md) |

@@ -44,7 +44,7 @@ for it) and a **CHEATSHEET** (every public name, with a runnable example).
 
 | Module | What it holds | |
 |---|---|---|
-| **this page** | conventions, the map, the quick taste | [CHEATSHEET](CHEATSHEET.md) — the 25 most common things, cross-cutting |
+| **this page** | conventions, the map, the quick taste | [CHEATSHEET](CHEATSHEET.md) — the 24 most common things, cross-cutting |
 | **learning by doing** | ten walkthroughs that each build something complete | [TUTORIAL](TUTORIAL.md) |
 | `transforms` (separate package) | matrices, quaternions, euler, axis-angle, vectors — as batched functions | [README](https://github.com/Eric-Vignola/transforms/blob/main/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/transforms/blob/main/CHEATSHEET.md) |
 | `cgmath.hierarchy` | `TransformData` / `TransformList` / `HierarchyData` / `ClipData` — the scene graph | [README](hierarchy/README.md) · [CHEATSHEET](hierarchy/CHEATSHEET.md) |
@@ -158,6 +158,7 @@ If you know Maya, nothing below will surprise you.
   `subdivide`, `merge`, `smooth`, `pack` edit in place and drop the
   caches; `copy`, `from_faces`, `sample`, every `resample_*` hand back
   something new.
+
 The first three are `transforms` conventions that cgmath inherits — full
 detail in its [README](https://github.com/Eric-Vignola/transforms/blob/main/README.md).
 
@@ -170,12 +171,11 @@ without them and only the paths that need them complain.
 |---|---|---|
 | `pygltflib` | GLB / glTF read | `RuntimeError("pygltflib is not installed")` at call time |
 | Autodesk FBX SDK | FBX read / write | `import cgmath.formats.fbx` itself raises `ImportError` |
-| `pxr` | `cgmath.formats.usd` stage / prim helpers | `import cgmath.formats.usd.prim` itself raises `ImportError` |
+| `pxr` (USD) | `cgmath.formats.usd` stage / prim helpers; `from_prim` / `to_prim` / `load_usd` in `geometry` | `import cgmath.formats.usd.prim` itself raises `ImportError`; the `geometry` paths raise `ImportError` at call time (`geometry.utils.pxr()` is the accessor) |
 | `trimesh` | `GlbData.mesh_list` | that attribute is `None` |
 | `PIL` (Pillow) | `Frame.image` / `.save` / `.wireframe` / `.encode_gif`, `to_image`, texture I/O | `RuntimeError("... install Pillow.")` at call time |
 | `cv2` | `imshow()` windows; UV rasterization in `geometry.mesh` | `imshow` raises `RuntimeError`; rasterization falls back to `skimage` |
 | `skimage` | the `cv2` fallback for UV rasterization and image loading | `RuntimeError` only when neither it nor `cv2` is present |
-| `pxr` | USD `from_prim` / `to_prim` / `load_usd` | `ImportError` at call time (`geometry.utils.pxr()` is the accessor) |
 | `ffmpeg` / `gifski` on `PATH` | `encode_mp4` / `encode_gif` | `encode_gif` falls back to ffmpeg when gifski is absent; no ffmpeg is an error |
 
 `numba` compiles on first call and caches to disk next to the sources
@@ -187,52 +187,83 @@ Importing any subpackage is cheap; the first `sample()`, `subdivide()` or
 
 ## Quick taste
 
-### Move a point through a world matrix
-
-```python
-from cgmath.hierarchy import TransformData
-from transforms import matrix_point_multiply
-
-node = TransformData("hero", translate=(0, 1, 0), rotate=(0, 90, 0))
-print(node.world_matrix.round(6)[3, :3])                     # [0. 1. 0.]
-print(matrix_point_multiply([1.0, 0.0, 0.0], node.world_matrix).round(6))
-```
-
-`world_matrix` is a **property** on every node type — never a call, never
-parameterised by name. The local SRT matrix is `node.matrix`.
+Each block below builds on the `cube` from the top of this page.
 
 ### Read mesh topology
 
 ```python
 print(cube.point_count, cube.face_count, cube.edge_count)  # 8 6 12
+print(cube.closed, cube.quads, round(cube.area, 4))        # True 6 6.0
 print(cube.get_border_vertices(flatten=True))              # [] -- closed
-print(cube.shell_faces)                                    # connected components
-print(cube.e2v.shape, cube.ue2v.shape)                     # deduped vs raw edges
+print(cube.e2v.shape, cube.ue2v.shape)                     # (12, 2) deduped vs (24, 2) raw
 ```
 
-Counts are `point_count` / `face_count` / `edge_count`; the diagnostics
-(`get_border_vertices`, `get_non_manifold_vertices`, `get_lamina_faces`,
-`get_overlap_vertices`) are **methods**.
+Every adjacency matrix (`f2v`, `v2f`, `e2v`, `e2f`, ...) is built lazily,
+cached, and `-1` padded.
 
-### Build a rig and pose it
+### Texture a mesh through its UVs and render it
+
+A `UVData` is a mesh in UV space: the same face stream, with `(V, 2)`
+points. Here every face maps to the whole texture square.
 
 ```python
-from cgmath.hierarchy import HierarchyData
+from cgmath.geometry import UVData
+from cgmath.render import Object, Scene
 
-rig = HierarchyData()
-for name in ("root", "hip", "knee"):
-    rig.append(TransformData(name, node_type="joint"))
-rig["hip"].set_parent("root", world_space=False)
-rig["knee"].set_parent("hip", world_space=False)
-rig["hip"].translate  = (0.0, 10.0, 0.0)
-rig["knee"].translate = (0.0, 10.0, 0.0)
-rig["hip"].rotate_z   = 90.0
+cube_uv = UVData(
+    points  = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
+    indices = np.tile([0, 1, 2, 3], 6),
+    counts  = cube.counts,
+)
 
-print(rig.world_matrix[:, 3, :3].round(6))
+i, j    = np.indices((64, 64)) // 8                        # an 8 x 8 checkerboard
+checker = np.where(((i + j) % 2)[..., None] == 1, 230, 40).astype(np.uint8).repeat(3, axis=2)
+
+scene = Scene("hero")
+scene.append(Object(name="cube", mesh=cube, uv=cube_uv, texture=checker))
+scene.configure(resolution=(320, 240), samples_per_pixel=4)
+scene.render().save("hero.png")
 ```
 
-Parent with `set_parent(name)`. `parent_node` holds the parent's **uuid**,
-so assigning a name to it directly leaves `get_children()` empty.
+`texture` takes a file path or an `(H, W, 3)` array. Without a `uv`, an
+`Object` renders in its flat `base_color`.
+
+### Carry a sculpt from a dense mesh back to a coarse one
+
+`MeshDataResampler(src, dst)` projects every destination vertex onto the
+source surface once, then pushes any source-shaped data through that
+correspondence: points, skin weights, morph targets, painted maps.
+
+```python
+from cgmath.geometry import SkinData
+from cgmath.geometry.resample import MeshDataResampler
+
+def sphere(level):
+    """Subdivide the cube, then push every point onto the unit sphere."""
+    mesh = cube.copy()
+    mesh.subdivide(level)
+    mesh.points = mesh.points / np.linalg.norm(mesh.points, axis=1, keepdims=True)
+    return mesh
+
+coarse, dense = sphere(1), sphere(3)                       # 26 and 386 points, same shape
+
+sculpt        = dense.copy()                               # a bump at the north pole
+bump          = np.exp(-8.0 * np.sum((dense.points - [0.0, 1.0, 0.0]) ** 2, axis=1))
+sculpt.points = dense.points * (1.0 + 0.3 * bump)[:, None]
+
+resampler = MeshDataResampler(dense, coarse)
+back      = resampler.resample_mesh(sculpt)                # coarse topology, sculpted shape
+print(back.point_count, np.abs(back.points - coarse.points).max().round(3))   # 26 0.3
+
+y    = (dense.points[:, 1] + 1.0) / 2.0                    # weights authored on the dense mesh
+skin = SkinData(weights=np.column_stack([1.0 - y, y]), influences=["root", "tip"])
+print(resampler.resample_skin_weights(skin).weights.shape)                    # (26, 2)
+```
+
+The default mode is `SPATIAL` (closest point on the source surface). `UV`
+matches through a shared UV layout, and `ROBUST_BILINEAR` rejects bad
+matches and inpaints them — see
+[`geometry/README.md`](geometry/README.md#resampling-is-topology-transfer-not-remeshing).
 
 ### Sweep an FFD lattice
 
@@ -248,36 +279,22 @@ ffd = FFDData.from_mesh(lattice, divisions=(3, 3, 3))   # the LATTICE, not the m
 ffd.bind(cube)
 
 posed = ffd.lattice.copy()
-posed[:, -1, :, 0] += 0.5
+posed[:, -1, :, 0] += 0.5                                  # push the top control plane in +X
 print(np.abs(ffd.update(posed).points - cube.points).max().round(4))
 ```
 
-### Transfer skin weights onto a denser mesh
-
-```python
-from cgmath.geometry import SkinData
-from cgmath.geometry.resample import MeshDataResampler, ResampleMode
-
-dense = cube.copy()
-dense.subdivide(1)
-
-y    = cube.points[:, 1] + 0.5
-skin = SkinData(weights=np.column_stack([1.0 - y, y]), influences=["root", "tip"])
-
-dst  = MeshDataResampler(cube, dense).resample_skin_weights(skin, mode=ResampleMode.SPATIAL)
-print(dst.weights.shape, dst.influences, dst.valid)
-```
+FFD is one of five deformers; Delta Mush, patch relax, skinning and RBF
+wrap sit next to it in [`geometry/deform`](geometry/deform/README.md).
 
 ---
 
 ## Audience
 
-Written for tech artists, riggers and tools engineers who want clean
-Python they can ship to CI, a notebook or a headless cluster — whichever
-DCC, if any, sits at the other end of the pipeline.
+Tech artists, riggers and tools engineers who want the geometry, rigging
+and rendering maths of a DCC as plain Python — in CI, a notebook or a
+headless job — with results that line up when the data goes back into
+the DCC.
 
-If you have ever wanted to score a turntable for a Slack post, or to bind
-skin weights to a USD prim from Python, you are in the right module.
 Start with [`CHEATSHEET.md`](CHEATSHEET.md).
 
 

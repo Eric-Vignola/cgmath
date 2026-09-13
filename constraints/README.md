@@ -165,4 +165,4 @@ print(c.translate[0])                     # [0, 2, 0]
 |---|---|
 | Every method, property and gotcha, with runnable blocks | [`CHEATSHEET.md`](CHEATSHEET.md) |
 | The rest of the library | [`../README.md`](../README.md) |
-| Row-major matrix helpers used above | [`../transforms`](https://github.com/Eric-Vignola/transforms) |
+| Row-major matrix helpers used above | [`transforms`](https://github.com/Eric-Vignola/transforms) |

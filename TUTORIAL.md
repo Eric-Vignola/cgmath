@@ -14,7 +14,7 @@ workflow, a short `load from file` variant sits next to the runnable one.
 1. [Hello render](#1-hello-render-90-seconds) — your first render, no rig
 2. [Hero shot, frame to disk](#2-hero-shot-frame-to-disk) — a polished still
 3. [Slack-ready turntable](#3-slack-ready-turntable) — orbit + encode in one call
-4. [Build a Maya-style hierarchy from scratch](#4-build-a-maya-style-hierarchy-from-scratch)
+4. [Build a joint hierarchy from scratch](#4-build-a-joint-hierarchy-from-scratch)
 5. [Inspect mesh topology](#5-inspect-mesh-topology)
 6. [Sculpt a shape with FFD](#6-sculpt-a-shape-with-ffd)
 7. [Procedural geometry with SDFs](#7-procedural-geometry-with-sdfs)
@@ -34,7 +34,7 @@ import tempfile
 
 import numpy as np
 
-WORK = tempfile.mkdtemp(prefix="rlmath_tutorial_")
+WORK = tempfile.mkdtemp(prefix="cgmath_tutorial_")
 print(WORK)
 ```
 
@@ -257,11 +257,11 @@ DCC like Maya that usually means setting `PATH` in a startup script — see
 
 ---
 
-## 4. Build a Maya-style hierarchy from scratch
+## 4. Build a joint hierarchy from scratch
 
-A `TransformData` is one Maya-shaped node: name, uuid, parent, SRT,
-`rotate_order`, `joint_orient`, `segment_scale_compensate`. A
-`HierarchyData` owns a set of them.
+A `TransformData` is one transform node with Maya's channel set: name,
+uuid, parent, SRT, `rotate_order`, `joint_orient`,
+`segment_scale_compensate`. A `HierarchyData` owns a set of them.
 
 Parenting is by **uuid**, and `parent_node` holds that uuid. Do not hand
 it a name — use `set_parent()`, which resolves the name for you.
@@ -284,8 +284,8 @@ rig["foot"].translate = (0.0, 1.0, 0.0)
 print(rig["foot"].world_matrix[3, :3])       # [0. 3. 0.] — the chain composed
 ```
 
-`world_matrix` is a **property**, on nodes and on containers alike. It is
-never called with a node name. On a container it is a stacked `(N, 4, 4)`.
+`world_matrix` is a property on nodes and containers alike; on a
+container it is a stacked `(N, 4, 4)`.
 
 ```python
 print(rig.world_matrix.shape)      # (4, 4, 4)
@@ -344,7 +344,7 @@ rig  = HierarchyData.load("hero.fbx")      # header sniffing
 clip = ClipData.load_fbx("walk.fbx")
 ```
 
-Full treatment in [`transforms/hierarchy/README.md`](hierarchy/README.md).
+Full treatment in [`hierarchy/README.md`](hierarchy/README.md).
 
 ---
 
@@ -934,7 +934,7 @@ hero_uv   = UVData.load_fbx("hero.fbx", name="hero_geo", channel=0)
 | A recipe per subpackage | [`CHEATSHEET.md`](CHEATSHEET.md) |
 | The exact API surface | [`REFERENCE.md`](REFERENCE.md) |
 | Transform math on raw arrays | [`transforms/README.md`](https://github.com/Eric-Vignola/transforms/blob/main/README.md) |
-| Rigs, clips and retargeting | [`transforms/hierarchy/README.md`](hierarchy/README.md) |
+| Rigs, clips and retargeting | [`hierarchy/README.md`](hierarchy/README.md) |
 | Meshes, curves, SDFs, transfer | [`geometry/README.md`](geometry/README.md) |
 | The five deformers | [`geometry/deform/README.md`](geometry/deform/README.md) |
 | Raw numba geometry kernels | [`geometry/utils/README.md`](geometry/utils/README.md) |

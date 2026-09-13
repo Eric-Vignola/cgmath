@@ -1,6 +1,6 @@
 # `cgmath` Cheatsheet — the cross-cutting quick start
 
-The 25 things people actually reach for, one small runnable block each.
+The 24 things people actually reach for, one small runnable block each.
 Every subpackage now has its own exhaustive cheatsheet; this page is the
 map, not the territory. Each section ends with a pointer to the module
 cheatsheet that covers the full surface.
@@ -143,7 +143,7 @@ Three easy-to-miss facts:
 
 ## 2. The conventions, in code
 
-Row-major Maya matrices everywhere. Translation is a **row**, points are
+Row-major matrices everywhere (Maya's convention). Translation is a **row**, points are
 **row vectors**, and `matrix_multiply(A, B)` applies `A` first.
 
 Units split at the node boundary: the free functions are **radians**,
@@ -185,8 +185,7 @@ print(TransformData("cam", translate=(0, 0, 5)).matrix[3, :3])  # [0 0 5] -- row
 
 ## 3. Build a rig, read world space
 
-`world_matrix` is a **property**, on every type — never a call, never
-parameterised by name.
+`world_matrix` is a property on nodes and containers alike.
 
 ```python
 rig = HierarchyData()
@@ -214,7 +213,7 @@ print([n.name for n in rig["hip"].get_children()])  # ['knee']
 print(rig.match("*e*").name)                        # fnmatch selection
 ```
 
-Full surface: [`transforms/hierarchy/CHEATSHEET.md`](hierarchy/CHEATSHEET.md).
+Full surface: [`hierarchy/CHEATSHEET.md`](hierarchy/CHEATSHEET.md).
 
 ---
 
@@ -555,7 +554,7 @@ Procrustes" means. `compute()` raises until something is attached.
 ## 18. CSG with signed distance fields
 
 The OOP layer: primitives subclass `TransformData`, so they carry the full
-Maya SRT surface. `resolution` is *subdivisions per world unit*.
+SRT surface. `resolution` is *subdivisions per world unit*.
 
 ```python
 from cgmath.geometry.sdf import DMCField, SDFBox, SDFSphere

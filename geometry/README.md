@@ -234,7 +234,7 @@ Dual Marching Cubes places one vertex per active cube, so its output is
 quad-only.
 
 The OOP layer wraps the same thing: `SDFSphere`, `SDFBox` and `SDFCylinder`
-(there is no plane) subclass `TransformData`, so they carry the whole Maya SRT
+(there is no plane) subclass `TransformData`, so they carry the whole SRT
 surface. A `DMCField` stacks them with `add` / `subtract` / `intersect` /
 `remove` and exposes a lazy `mesh_data`; its `resolution` is *subdivisions per
 world unit*, not a total grid size.

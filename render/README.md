@@ -1,10 +1,11 @@
-# `cgmath.render` — for Tech Artists
+# `cgmath.render` — the software raytracer
 
-A Python software raytracer that thinks like Maya.
+A numpy software raytracer with a small scene graph.
 
 You build a **Scene** out of **Objects**, **Cameras**, and **Lights**, hit
-"render," and get a `Frame` (image + optional depth) back. Same SRT
-transforms you already know, same Maya-ish parenting, no DCC required.
+"render," and get a `Frame` (image + optional depth) back. The nodes are
+the same `TransformData` as the rest of the library, so SRT and parenting
+work as they do everywhere else. No DCC required.
 
 - [`CHEATSHEET.md`](CHEATSHEET.md) — every public class, function, property
   and method in this module, each with a small copy-paste example.
@@ -67,7 +68,7 @@ When you don't supply a Camera or Light, the renderer fills them in for you:
   - **Fill** — front-upper-left, 40% of key
   - **Rim** — back-upper, 30% of key
   All three sit at `1.5 × the AABB diagonal` from the centroid with
-  intensity `distance²`, so it Just Looks Right at any scale.
+  intensity `distance²`, so it looks right at any scale.
 - **Default resolution**: `(500, 500)` for a `Scene` or an `Object`
   preview. (The bare `render()` function defaults to `(512, 384)`.)
   Bump it via `scene.configure(resolution=(W, H))`.
@@ -85,11 +86,11 @@ quickly without rigging anything.
 
 ---
 
-## The mental model — Maya, one Python module deep
+## The mental model — a scene graph
 
-Three node types, all inheriting Maya-style `TransformData`
+Three node types, all inheriting `TransformData`
 (`translate / rotate / scale / parent_node`, row-major matrices, Maya
-rotate order). Parent a Light to a Camera and you get a real headlight.
+rotate orders). Parent a Light to a Camera and you get a real headlight.
 Parent an Object to another Object for free instancing-with-offsets.
 
 | Node | What it is | Lives in |
@@ -135,7 +136,7 @@ obj = Object(
     wireframe_color     = (0, 0, 0),        # 0-255 ints
     wireframe_thickness = 1,
 
-    # standard Maya SRT (inherited from TransformData)
+    # SRT (inherited from TransformData)
     translate  = (0, 0, 0),
     rotate     = (0, 0, 0),
     scale      = (1, 1, 1),
@@ -219,8 +220,8 @@ framed = Camera.default_view(scene.union_points())  # fresh 3/4 elevated framed 
 
 Convention: looks down its own `-Z`, `+Y` is up, `+X` is right (OpenGL).
 
-**Two matrix layouts, don't mix them up.** `cam.world_matrix` is Maya
-row-major — the eye sits at `cam.world_matrix[3, :3]`. The free function
+**Two matrix layouts, don't mix them up.** `cam.world_matrix` is
+row-major like every node — the eye sits at `cam.world_matrix[3, :3]`. The free function
 `look_at()` and `Frame.camera_matrix` are column-major OpenGL — the eye
 sits at `[:3, 3]`. Transpose when you cross between them.
 
@@ -739,8 +740,8 @@ ortho.render().save("ortho.png")
 - **Image** pixel `(0, 0)` is top-left, `+x` right, `+y` down.
 - **UV** has `u` increasing right, `v` increasing up — `v=0` is the
   **bottom** of the texture (Maya/OpenGL convention).
-- **Node transforms** are Maya row-major: translation lives at
-  `M[3, :3]`, Maya rotate-orders, Maya parenting.
+- **Node transforms** are row-major, following Maya: translation lives
+  at `M[3, :3]`, Maya rotate orders and parenting.
 - **Camera-to-world matrices** handed to / returned by the renderer
   (`look_at()`, `Frame.camera_matrix`, `render(camera_matrix=...)`) are
   column-major OpenGL: eye at `M[:3, 3]`.
