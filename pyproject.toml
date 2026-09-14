@@ -39,7 +39,12 @@ dependencies = [
     # Not on PyPI, so it is declared as a direct reference. `pip install` of
     # this wheel fetches and builds it from GitHub; that repository carries
     # its own pyproject.toml for exactly this reason.
-    "transforms @ git+https://github.com/Eric-Vignola/transforms",
+    #
+    # PINNED to the 1.0.0 tag rather than tracking the default branch, so this
+    # release resolves to one fixed commit and cannot be changed under it by
+    # later work upstream. Bumping cgmath against a newer transforms means
+    # moving this ref deliberately.
+    "transforms @ git+https://github.com/Eric-Vignola/transforms@1.0.0",
     # The video encoders shell out to the ffmpeg BINARY rather than to this
     # binding, so `ffmpeg` must also be on PATH for mp4 / avi output.
     "ffmpeg-python",
