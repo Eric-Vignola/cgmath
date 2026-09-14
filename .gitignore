@@ -6,3 +6,10 @@ __pycache__/
 *.nbc
 
 .claude/
+
+# Packaging artifacts. `python -m build` writes the wheel and sdist into
+# dist/, and setuptools drops an egg-info beside the sources; the release
+# assets live on GitHub, not in the repository.
+build/
+dist/
+*.egg-info/
