@@ -1,11 +1,59 @@
 import logging
 import os
 import pathlib
+import warnings
 
-import fbx
 import numpy as np
 
 LOGGER = logging.getLogger(__name__)
+
+# The Autodesk FBX SDK ships as a separate download and is NOT on PyPI, so it
+# cannot be a wheel dependency: naming it would make `pip install cgmath` fail
+# on every machine that does not already have it, taking OBJ, GLB and USD down
+# with it. Importing this module therefore has to survive its absence -- warn,
+# and let the failure land only if FBX is actually used.
+#
+# The stand-in resolves attribute CHAINS and raises only when something is
+# CALLED. That split is what the module needs: class bodies below name FBX
+# constants at import time (`FbxExporter` maps rotation orders to
+# `fbx.EFbxRotationOrder.*`), so a stand-in that raised on attribute access
+# would fail at import -- the very thing this is here to prevent. Every real
+# FBX operation goes through a call, so those still fail, with one actionable
+# message instead of `NameError: fbx` or `AttributeError: 'NoneType' object
+# has no attribute 'FbxManager'`.
+FBX_SDK_REQUIRED = (
+    "The Autodesk FBX SDK (the `fbx` module) is not installed, so cgmath's FBX "
+    "support is unavailable. Autodesk distributes it separately from PyPI: "
+    "install the FBX Python SDK matching your Python version from "
+    "https://aps.autodesk.com/developer/overview/fbx-sdk . Every other format "
+    "cgmath reads and writes -- OBJ, GLB, USD -- works without it."
+)
+
+try:
+    import fbx
+except ImportError:
+
+    class _FbxSdkMissing:
+        """Stands in for the absent ``fbx`` module and explains itself."""
+
+        def __getattr__(self, name):
+            return self  # so `fbx.EFbxRotationOrder.eEulerXYZ` still imports
+
+        def __call__(self, *args, **kwargs):
+            raise RuntimeError(FBX_SDK_REQUIRED)
+
+        def __bool__(self):
+            return False
+
+        def __repr__(self):
+            return "<Autodesk FBX SDK not installed>"
+
+    fbx = _FbxSdkMissing()
+    # `warnings` rather than LOGGER: it is the channel a library is supposed to
+    # use for a degraded-capability notice, it prints once per location by
+    # default, and it stays silenceable per-caller. Emitting on both channels
+    # only doubles the noise on a plain import.
+    warnings.warn(FBX_SDK_REQUIRED, UserWarning, stacklevel=2)
 
 
 """
