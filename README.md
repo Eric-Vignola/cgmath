@@ -1,9 +1,14 @@
 # `cgmath` — a DCC-agnostic CG math library
 
-A Python toolkit for what tech artists, riggers and pipeline engineers
-actually need: SRT transforms and a scene graph, mesh topology you can
-introspect, five deformers, a software raytracer, signed distance
-fields, skin-weight transfer, and importers for OBJ / GLB / FBX / USD.
+A Python toolkit for what tech artists, and pipeline engineers actually 
+need: 
+- topology and you can introspect and manipulate
+- data resampling methods (topology, skin weights, etc)
+- deformers (RBF Wraps, LBS, DQS, etc) 
+- skeletal hierarchy manipulation 
+- import support for OBJ / GLB / FBX / USD
+- a software raytracer, 
+- and more!
 
 Everything is numpy-native. No DCC required. Numba-accelerated where it
 matters.
