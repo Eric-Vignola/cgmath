@@ -1,6 +1,6 @@
 # `cgmath` Reference
 
-Generated from the live code by `gen_reference.py` (kept in the `tools/` folder beside the packages, not in this repository) on 2026-09-10. Do not edit by hand; re-run the script after any API change.
+Generated from the live code by `gen_reference.py` (kept in the `tools/` folder beside the packages, not in this repository) on 2026-09-15. Do not edit by hand; re-run the script after any API change.
 
 Every public class, property, method, function and constant of the modules below, with the real signature (`inspect.signature`) and the first line of its docstring. To *learn* a subpackage read its `README.md` and `CHEATSHEET.md`; this page is for looking things up.
 
@@ -217,7 +217,7 @@ pretty_json(data: 'dict | list | tuple', indent: 'int' = 4, max_line_width: 'int
 profile(cmd: 'str', n: 'int' = 1) -> 'float'
     simple speed profiler
 run_tests(target: 'str | Sequence[str] | None' = None, verbosity: 'int' = 2, failfast: 'bool' = False) -> 'unittest.TestResult'
-    runs the package's unit test suite
+    runs the package's unit tests: every ``_tests`` suite in the library
 ```
 
 ## `cgmath.hierarchy`
@@ -679,7 +679,7 @@ zip_to_dict(filename)
 Constants:
 
 ```text
-MISSING = <dataclasses._MISSING_TYPE object at 0x000001C2B3719B10>
+MISSING = <dataclasses._MISSING_TYPE object at 0x0000023330903E50>
 ```
 
 ## `cgmath.geometry.mesh`
@@ -1161,7 +1161,7 @@ save_obj(file_path: 'str', data: 'list') -> 'None'
 Constants:
 
 ```text
-EPSILON = 1.1920929e-07
+EPSILON = np.float32(1.1920929e-07)
 MESH_PRIM_TYPE = 'Mesh'
 UV_ATTR_PREFIX = 'primvars:st'
 ```
@@ -1489,7 +1489,7 @@ load_glb(filename: 'str', bind_matrices: 'bool' = False) -> 'list'
 Constants:
 
 ```text
-EPSILON = 1.1920929e-07
+EPSILON = np.float32(1.1920929e-07)
 JOINT_NAMES_ATTR = 'skel:jointNames'
 SKIN_PRIM_TYPE = 'SkinWeights'
 ```
@@ -2024,7 +2024,7 @@ CORNER_OFFSETS = array([[0, 0, 0],
        [1, 0, 0],
        [1, 1, 0],
    ...
-EDGE_AXIS = array([0, 1, 0, 1, 0, 1, 0, 1, 2, 2, 2, 2])
+EDGE_AXIS = array([0, 1, 0, 1, 0, 1, 0, 1, 2, 2, 2, 2], dtype=int32)
 EDGE_TABLE = array([   0,  265,  515,  778, 1030, 1295, 1541, 1804, 20...
 EDGE_VERTICES = array([[0, 1],
        [1, 2],
@@ -2988,6 +2988,7 @@ TakeList(take_data_objects=None)
 Constants:
 
 ```text
+FBX_SDK_REQUIRED = "The Autodesk FBX SDK (the `fbx` module) is not installed...
 LOGGER = <Logger cgmath.formats.fbx (WARNING)>
 ```
 
@@ -3137,7 +3138,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001C2AF668180>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000002337EA4B560>, '...
 ```
 
 ## `cgmath.constraints`
