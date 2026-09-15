@@ -32,7 +32,20 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
 
+# FOUR of these are the real dependencies -- numpy, scipy, numba and
+# transforms. Without them cgmath does not import. Everything after them is
+# OPTIONAL to the library: each is imported under a guard that degrades to
+# None, so cgmath runs without it and only the feature named beside it goes
+# quiet.
+#
+# They are declared as requirements anyway, deliberately. A plain
+# `pip install` should hand somebody a complete tool rather than a core that
+# silently lacks half its file formats, and every one of them is a wheel on
+# PyPI that costs nothing but disk. Anyone who wants the four alone can
+# install them and drop the package on sys.path, which is how this library
+# was used before it was packaged.
 dependencies = [
+    # --- core ---------------------------------------------------------
     "numpy",
     "scipy",
     "numba",
@@ -45,17 +58,19 @@ dependencies = [
     # later work upstream. Bumping cgmath against a newer transforms means
     # moving this ref deliberately.
     "transforms @ git+https://github.com/Eric-Vignola/transforms@1.0.0",
-    # The video encoders shell out to the ffmpeg BINARY rather than to this
-    # binding, so `ffmpeg` must also be on PATH for mp4 / avi output.
+
+    # --- optional: installed for convenience, guarded in the source -----
+    "pillow",         # image read/write behind textures, frames and scenes
+    "opencv-python",  # image ops in geometry.mesh and render.scene
+    "scikit-image",   # image measurement helpers in geometry.mesh
+    "pygltflib",      # GLB/glTF read and write, and the hierarchy importer
+    "trimesh",        # mesh interchange behind the GLB path
+    "usd-core",       # USD stage and prim reading
+    # Declared for completeness, but the video and gif encoders shell out to
+    # the ffmpeg BINARY rather than to this binding: `ffmpeg` has to be on
+    # PATH for mp4 / avi output, and installing this package does not put it
+    # there.
     "ffmpeg-python",
-    "opencv-python",
-    "scikit-image",
-    "pygltflib",
-    "trimesh",
-    "usd-core",
-    # Imported unguarded by geometry/mesh.py and the three render modules, so
-    # it is a hard requirement rather than an extra.
-    "pillow",
 ]
 
 [project.urls]
@@ -72,6 +87,7 @@ packages    = [
     "cgmath",
     "cgmath.constraints",
     "cgmath.formats",
+    "cgmath.formats.usd",
     "cgmath.geometry",
     "cgmath.geometry.deform",
     "cgmath.geometry.utils",
