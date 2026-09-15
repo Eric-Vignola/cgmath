@@ -57,11 +57,6 @@ dependencies = [
     "pygltflib",      # GLB/glTF read and write, and the hierarchy importer
     "trimesh",        # mesh interchange behind the GLB path
     "usd-core",       # USD stage and prim reading
-    # Declared for completeness, but the video and gif encoders shell out to
-    # the ffmpeg BINARY rather than to this binding: `ffmpeg` has to be on
-    # PATH for mp4 / avi output, and installing this package does not put it
-    # there.
-    "ffmpeg-python",
 ]
 
 [project.urls]

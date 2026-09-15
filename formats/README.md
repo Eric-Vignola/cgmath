@@ -22,9 +22,9 @@ from cgmath.formats.fbx import SceneData, FbxExporter
 from cgmath.formats.usd import prim as usd_prim, stage as usd_stage
 ```
 
-`usd/` has no `__init__.py` of its own (an implicit namespace subpackage), so
-`from cgmath.formats.usd import prim` works and `from cgmath.formats import *`
-gives you nothing.
+`usd/` is a regular subpackage whose `__init__.py` is likewise only a
+docstring, so import `prim` and `stage` from it directly.
+`from cgmath.formats import *` gives you nothing.
 
 ---
 
@@ -45,11 +45,12 @@ gives you nothing.
 |---|---|---|
 | `glb` | `pygltflib` | Imports fine. Every entry point raises `RuntimeError("pygltflib is not installed")` |
 | `glb` | `trimesh` (optional) | Imports fine. `GlbData.mesh_list` is `None` |
-| `fbx` | Autodesk FBX Python SDK | **`import cgmath.formats.fbx` raises `ImportError`** — `import fbx` is unguarded |
-| `usd.prim`, `usd.stage` | `pxr` (USD) | **`import cgmath.formats.usd.prim` raises `ImportError`** — `from pxr import Usd` is unguarded |
+| `fbx` | Autodesk FBX Python SDK — not on PyPI, a manual install | Imports fine, with one `UserWarning` naming the SDK and where to get it. Every FBX call raises `RuntimeError` with that same message |
+| `usd.prim`, `usd.stage` | `pxr`, from `usd-core` — installed with the wheel | Always present after `pip install`. Run straight off `sys.path` without it, **`import cgmath.formats.usd.prim` raises `ImportError`** — `from pxr import Usd` is unguarded |
 
-So `glb` degrades at call time while `fbx` and `usd` degrade at import time.
-Guard those imports if your caller must survive without the SDKs.
+So `glb` and `fbx` degrade at call time, while `usd` needs `pxr` at import
+time — which the wheel always installs. Guard that import only if your caller
+runs cgmath off `sys.path` without `usd-core`.
 
 ---
 
