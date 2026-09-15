@@ -177,8 +177,8 @@ without them and only the paths that need them complain.
 | Dependency | Used for | Missing behaviour |
 |---|---|---|
 | `pygltflib` | GLB / glTF read | `RuntimeError("pygltflib is not installed")` at call time |
-| Autodesk FBX SDK | FBX read / write | `import cgmath.formats.fbx` itself raises `ImportError` |
-| `pxr` (USD) | `cgmath.formats.usd` stage / prim helpers; `from_prim` / `to_prim` / `load_usd` in `geometry` | `import cgmath.formats.usd.prim` itself raises `ImportError`; the `geometry` paths raise `ImportError` at call time (`geometry.utils.pxr()` is the accessor) |
+| Autodesk FBX SDK — not on PyPI, a manual install | FBX read / write | imports fine, with one `UserWarning` naming the SDK and where to get it; every FBX call raises `RuntimeError` with that same message |
+| `pxr`, from `usd-core` — installed with the wheel | `cgmath.formats.usd` stage / prim helpers; `from_prim` / `to_prim` / `load_usd` in `geometry` | always present after `pip install`. Run off `sys.path` without it, `import cgmath.formats.usd.prim` itself raises `ImportError` and the `geometry` paths raise `ImportError` at call time (`geometry.utils.pxr()` is the accessor) |
 | `trimesh` | `GlbData.mesh_list` | that attribute is `None` |
 | `PIL` (Pillow) | `Frame.image` / `.save` / `.wireframe` / `.encode_gif`, `to_image`, texture I/O | `RuntimeError("... install Pillow.")` at call time |
 | `cv2` | `imshow()` windows; UV rasterization in `geometry.mesh` | `imshow` raises `RuntimeError`; rasterization falls back to `skimage` |
@@ -226,7 +226,7 @@ cube_uv = UVData(
 i, j    = np.indices((64, 64)) // 8                        # an 8 x 8 checkerboard
 checker = np.where(((i + j) % 2)[..., None] == 1, 230, 40).astype(np.uint8).repeat(3, axis=2)
 
-scene = Scene("hero")
+scene   = Scene("hero")
 scene.append(Object(name="cube", mesh=cube, uv=cube_uv, texture=checker))
 scene.configure(resolution=(320, 240), samples_per_pixel=4)
 scene.render().save("hero.png")

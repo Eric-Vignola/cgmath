@@ -234,7 +234,7 @@ def run_tests(
         ".".join([package] + os.path.relpath(d, package_root).split(os.sep)) + "."
         for d in test_dirs
     ]
-    loader        = unittest.TestLoader()
+    loader = unittest.TestLoader()
 
     stream = _encoding_safe(sys.stderr)   # resolved now, so an installed stderr tee is seen
 

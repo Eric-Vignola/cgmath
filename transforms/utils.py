@@ -200,8 +200,8 @@ def run_tests(
     top_level_dir = package_root
     for _ in package.split("."):
         top_level_dir = os.path.dirname(top_level_dir)
-    root          = f"{package}._tests."
-    loader        = unittest.TestLoader()
+    root   = f"{package}._tests."
+    loader = unittest.TestLoader()
 
     stream = _encoding_safe(sys.stderr)   # resolved now, so an installed stderr tee is seen
 
