@@ -48,19 +48,19 @@ for it) and a **CHEATSHEET** (every public name, with a runnable example).
 
 | Module | What it holds | |
 |---|---|---|
-| **this page** | conventions, the map, the quick taste | [CHEATSHEET](CHEATSHEET.md) — the 24 most common things, cross-cutting |
-| **learning by doing** | ten walkthroughs that each build something complete | [TUTORIAL](TUTORIAL.md) |
-| `cgmath.transforms` | matrices, quaternions, euler, axis-angle, vectors — as batched functions | [README](transforms/README.md) · [CHEATSHEET](transforms/CHEATSHEET.md) |
-| `cgmath.hierarchy` | `TransformData` / `TransformList` / `HierarchyData` / `ClipData` — the scene graph | [README](hierarchy/README.md) · [CHEATSHEET](hierarchy/CHEATSHEET.md) |
-| `cgmath.geometry` | `MeshData`, UVs, B-splines, SDFs, skin weights, morphs, maps, resampling | [README](geometry/README.md) · [CHEATSHEET](geometry/CHEATSHEET.md) |
-| `cgmath.geometry.deform` | FFD, Delta Mush, patch relax, skinning, RBF wrap | [README](geometry/deform/README.md) · [CHEATSHEET](geometry/deform/CHEATSHEET.md) |
-| `cgmath.geometry.utils` | the 59 numba kernels everything above stands on | [README](geometry/utils/README.md) · [CHEATSHEET](geometry/utils/CHEATSHEET.md) |
-| `cgmath.render` | software raytracer, `Scene` / `Object` / `Camera` / `Light` / `Frame` | [README](render/README.md) · [CHEATSHEET](render/CHEATSHEET.md) |
-| `cgmath.formats` | FBX + GLB curve / take / accessor I/O, USD stage and prim helpers | [README](formats/README.md) · [CHEATSHEET](formats/CHEATSHEET.md) |
-| `cgmath.rbf` | 21 radial basis function kernels + a JIT LU solver | [README](rbf/README.md) · [CHEATSHEET](rbf/CHEATSHEET.md) |
-| `cgmath.constraints` | `ProcrustesData` — rivet a transform to a deforming patch | [README](constraints/README.md) · [CHEATSHEET](constraints/CHEATSHEET.md) |
+| **this page** | conventions, the map, the quick taste | [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/CHEATSHEET.md) — the 24 most common things, cross-cutting |
+| **learning by doing** | ten walkthroughs that each build something complete | [TUTORIAL](https://github.com/Eric-Vignola/cgmath/blob/main/TUTORIAL.md) |
+| `cgmath.transforms` | matrices, quaternions, euler, axis-angle, vectors — as batched functions | [README](https://github.com/Eric-Vignola/cgmath/blob/main/transforms/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/transforms/CHEATSHEET.md) |
+| `cgmath.hierarchy` | `TransformData` / `TransformList` / `HierarchyData` / `ClipData` — the scene graph | [README](https://github.com/Eric-Vignola/cgmath/blob/main/hierarchy/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/hierarchy/CHEATSHEET.md) |
+| `cgmath.geometry` | `MeshData`, UVs, B-splines, SDFs, skin weights, morphs, maps, resampling | [README](https://github.com/Eric-Vignola/cgmath/blob/main/geometry/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/geometry/CHEATSHEET.md) |
+| `cgmath.geometry.deform` | FFD, Delta Mush, patch relax, skinning, RBF wrap | [README](https://github.com/Eric-Vignola/cgmath/blob/main/geometry/deform/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/geometry/deform/CHEATSHEET.md) |
+| `cgmath.geometry.utils` | the 59 numba kernels everything above stands on | [README](https://github.com/Eric-Vignola/cgmath/blob/main/geometry/utils/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/geometry/utils/CHEATSHEET.md) |
+| `cgmath.render` | software raytracer, `Scene` / `Object` / `Camera` / `Light` / `Frame` | [README](https://github.com/Eric-Vignola/cgmath/blob/main/render/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/render/CHEATSHEET.md) |
+| `cgmath.formats` | FBX + GLB curve / take / accessor I/O, USD stage and prim helpers | [README](https://github.com/Eric-Vignola/cgmath/blob/main/formats/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/formats/CHEATSHEET.md) |
+| `cgmath.rbf` | 21 radial basis function kernels + a JIT LU solver | [README](https://github.com/Eric-Vignola/cgmath/blob/main/rbf/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/rbf/CHEATSHEET.md) |
+| `cgmath.constraints` | `ProcrustesData` — rivet a transform to a deforming patch | [README](https://github.com/Eric-Vignola/cgmath/blob/main/constraints/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/constraints/CHEATSHEET.md) |
 
-[`REFERENCE.md`](REFERENCE.md), a flat API listing, also sits in this
+[`REFERENCE.md`](https://github.com/Eric-Vignola/cgmath/blob/main/REFERENCE.md), a flat API listing, also sits in this
 directory. It is generated from the live code by `gen_reference.py` (kept in
 the `tools/` folder beside the packages, not in this repository): every public
 name with its real signature and first docstring line.
@@ -102,7 +102,7 @@ cgmath/
 ```
 
 The batched matrix / quaternion / euler / axis / vector functions that all
-of this stands on live in [`cgmath.transforms`](transforms/README.md); its own
+of this stands on live in [`cgmath.transforms`](https://github.com/Eric-Vignola/cgmath/blob/main/transforms/README.md); its own
 README and CHEATSHEET cover them. The same code is published on its own as
 [`transforms`](https://github.com/Eric-Vignola/transforms) for anyone who wants the math without the
 rest of cgmath.
@@ -167,7 +167,7 @@ If you know Maya, nothing below will surprise you.
   something new.
 
 The first three are `cgmath.transforms` conventions that the rest of cgmath
-follows — full detail in its [README](transforms/README.md).
+follows — full detail in its [README](https://github.com/Eric-Vignola/cgmath/blob/main/transforms/README.md).
 
 ### Optional dependencies
 
@@ -270,7 +270,7 @@ print(resampler.resample_skin_weights(skin).weights.shape)                    # 
 The default mode is `SPATIAL` (closest point on the source surface). `UV`
 matches through a shared UV layout, and `ROBUST_BILINEAR` rejects bad
 matches and inpaints them — see
-[`geometry/README.md`](geometry/README.md#resampling-is-topology-transfer-not-remeshing).
+[`geometry/README.md`](https://github.com/Eric-Vignola/cgmath/blob/main/geometry/README.md#resampling-is-topology-transfer-not-remeshing).
 
 ### Sweep an FFD lattice
 
@@ -291,7 +291,7 @@ print(np.abs(ffd.update(posed).points - cube.points).max().round(4))
 ```
 
 FFD is one of five deformers; Delta Mush, patch relax, skinning and RBF
-wrap sit next to it in [`geometry/deform`](geometry/deform/README.md).
+wrap sit next to it in [`geometry/deform`](https://github.com/Eric-Vignola/cgmath/blob/main/geometry/deform/README.md).
 
 ---
 
@@ -302,7 +302,7 @@ and rendering maths of a DCC as plain Python — in CI, a notebook or a
 headless job — with results that line up when the data goes back into
 the DCC.
 
-Start with [`CHEATSHEET.md`](CHEATSHEET.md).
+Start with [`CHEATSHEET.md`](https://github.com/Eric-Vignola/cgmath/blob/main/CHEATSHEET.md).
 
 
 ## Requirements
