@@ -1,7 +1,7 @@
 """Geometry, deformation, RBF and rendering tools.
 
-Requires the external ``transforms`` package for the underlying matrix,
-quaternion, euler and vector math.
+The underlying matrix, quaternion, euler and vector math lives in
+:mod:`cgmath.transforms`.
 """
 
 __version__ = "1.0.0"

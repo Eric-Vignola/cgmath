@@ -15,7 +15,7 @@ from cgmath.geometry.utils._numba._skin_deform import (
     lbs_compact_fast,
 )
 from cgmath.hierarchy import HierarchyData, TransformData
-from transforms import matrix_point_multiply
+from cgmath.transforms import matrix_point_multiply
 
 
 EPSILON = 1e-9
@@ -579,7 +579,7 @@ class TestDualQuaternion(unittest.TestCase):
         # rebuild R through the package's own converter rather than a
         # hand-written formula, so the test cannot agree with a wrong
         # convention just because both sides share my arithmetic
-        from transforms._numba._quaternion import _quaternion_to_matrix
+        from cgmath.transforms._numba._quaternion import _quaternion_to_matrix
 
         rebuilt = _quaternion_to_matrix(quats)
 

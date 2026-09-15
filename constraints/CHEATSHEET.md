@@ -37,7 +37,7 @@ import numpy as np
 
 from cgmath.constraints import ProcrustesData
 from cgmath.geometry import MeshData
-from transforms import euler_to_matrix, matrix_identity, matrix_multiply, matrix_normalize, matrix_point_multiply, matrix_to_euler
+from cgmath.transforms import euler_to_matrix, matrix_identity, matrix_multiply, matrix_normalize, matrix_point_multiply, matrix_to_euler
 
 CUBE_POINTS = np.array(
     [

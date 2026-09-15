@@ -358,3 +358,37 @@ class TestPrettyJsonEdgeCases(unittest.TestCase):
         result = pretty_json(data)
         parsed = stdlib_json.loads(result)
         self.assertEqual(parsed, data)
+
+
+class TestRunTestsFindsEverySuite(unittest.TestCase):
+    """``run_tests`` must reach every ``_tests`` package, not only
+    ``cgmath._tests``.  Each case runs one small transforms module and never the
+    whole suite: a no-argument call from inside the suite would run itself."""
+
+    @staticmethod
+    def _run(target):
+        import contextlib
+        import io
+
+        from cgmath.utils import run_tests
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            return run_tests(target, verbosity=0)
+
+    def test_a_short_name_reaches_the_transforms_suite(self):
+        result = self._run("test_exports")
+        self.assertTrue(result.wasSuccessful())
+        self.assertEqual(result.testsRun, 4)
+
+    def test_the_package_relative_name_works(self):
+        result = self._run("transforms._tests.test_exports.TestRootExports")
+        self.assertTrue(result.wasSuccessful())
+        self.assertEqual(result.testsRun, 4)
+
+    def test_a_glob_matches_in_every_suite(self):
+        result = self._run("test_exports.py")
+        self.assertEqual(result.testsRun, 4)
+
+    def test_an_unknown_name_raises(self):
+        with self.assertRaises(ValueError):
+            self._run("test_no_such_module_anywhere")

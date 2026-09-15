@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from cgmath.geometry.bspline import BSplineData
-from transforms import (
+from cgmath.transforms import (
     matrix_delta,
     matrix_multiply,
     matrix_weighted_transformation,

@@ -4,12 +4,13 @@ Generated from the live code by `gen_reference.py` (kept in the `tools/` folder 
 
 Every public class, property, method, function and constant of the modules below, with the real signature (`inspect.signature`) and the first line of its docstring. To *learn* a subpackage read its `README.md` and `CHEATSHEET.md`; this page is for looking things up.
 
-Conventions: matrices are row-major with translation at `M[3, :3]`; quaternions are `(i, j, k, w)`; the free functions of the separate `transforms` package take radians while node channels are degrees; rotate orders `XYZ=0 YZX=1 ZXY=2 XZY=3 YXZ=4 ZYX=5`.
+Conventions: matrices are row-major with translation at `M[3, :3]`; quaternions are `(i, j, k, w)`; the free functions of `cgmath.transforms` take radians while node channels are degrees; rotate orders `XYZ=0 YZX=1 ZXY=2 XZY=3 YXZ=4 ZYX=5`.
 
 ---
 
 ## Index
 
+- [`cgmath.transforms`](#cgmathtransforms)
 - [`cgmath.utils`](#cgmathutils)
 - [`cgmath.hierarchy`](#cgmathhierarchy)
 - [`cgmath.geometry`](#cgmathgeometry)
@@ -43,6 +44,145 @@ Conventions: matrices are row-major with translation at `M[3, :3]`; quaternions 
 - [`cgmath.constraints`](#cgmathconstraints)
 
 ---
+
+## `cgmath.transforms`
+
+batched matrix, quaternion, euler, axis-angle and vector math (implemented in `transforms/main.py`, re-exported at the package root).
+
+> Unified transforms math module.
+
+Functions:
+
+```text
+axis_angle_to_euler(axis, angle=0.0, axes=0)
+    Convert axis-angle pairs to euler angles.
+axis_angle_to_matrix(axis, angle=0.0)
+    Convert axis-angle pairs to 4x4 rotation matrices.
+axis_angle_to_quaternion(axis, angle=0.0)
+    Convert axis-angle pairs to quaternions.  Backed by ``_axis_angle_to_quaternion``.
+euler_filter(euler, axes)
+    Remove branch jumps from euler angles sampled over time.
+euler_random(n, seed=None)
+    Generate ``n`` random euler angles in radians.
+euler_reorder(euler, from_axes, to_axes)
+    Convert euler angles from one rotate order to another.
+euler_slerp(euler0, euler1, weight=0.5, axes0=0, axes1=0, axes=0)
+    Spherical interpolation between two lists of euler angles.
+euler_to_matrix(euler, axes=0)
+    Convert euler angles to 4x4 transform matrices.
+euler_to_quaternion(euler, axes=0)
+    Convert euler angles to quaternions.
+matrix_decompose(matrix: 'np.ndarray') -> 'typing.Tuple[np.ndarray, np.ndarray, np.ndarray]'
+    Decompose a 4x4 matrix into ``(translation, rotation, scale)`` 4x4s.
+matrix_delta(parent_matrix: 'typing.List[float]', child_matrix: 'typing.List[float]') -> 'typing.List[float]'
+    Offset transform between a parent and child matrix.
+matrix_flatten(matrix: 'typing.List[typing.List[float]]') -> 'typing.List[float]'
+    Flatten a 4x4 matrix to a Maya-style flat 16-element list.
+matrix_identity(count)
+    Build a stack of identity 4x4 matrices.  Backed by ``_matrix_identity``.
+matrix_interpolate(matrix0, matrix1, weight=0.5, shortest=True)
+    Decomposed SRT interpolation between two lists of transform matrices.
+matrix_inverse(matrix)
+    Invert a list of 4x4 transform matrices.  Backed by ``_matrix_inverse``.
+matrix_local(matrix, parent_matrix)
+    Return matrix expressed in the local space of ``parent_matrix``.
+matrix_multiply(matrix0, matrix1)
+    Multiply pairs of 4x4 transform matrices.
+matrix_normalize(matrix)
+    Re-orthonormalise the rotation block of transform matrices.
+matrix_point_multiply(point, matrix)
+    Transform points by 4x4 matrices.  ``P * M`` row-vector convention.
+matrix_random(n, seed=None, random_position=False)
+    Generate ``n`` random 4x4 rotation matrices.
+matrix_slerp(matrix0, matrix1, weight=0.5, shortest=True)
+    Spherical interpolation of rotation between two lists of matrices.
+matrix_to_euler(matrix, axes=0)
+    Convert 4x4 transform matrices to euler angles.
+matrix_to_quaternion(matrix)
+    Convert 4x4 transform matrices to quaternions.
+matrix_transpose(matrix)
+    Transpose a list of 4x4 transform matrices.  Backed by ``_matrix_transpose``.
+matrix_weighted_rotational(matrices: 'typing.List[np.ndarray]', weights: 'typing.List[float]') -> 'np.ndarray'
+    Weighted average of 3x3 rotation matrices via scipy ``Rotation``.
+matrix_weighted_transformation(transformation_matrices: 'typing.List[np.ndarray]', weights: 'typing.List[float]', flatten: 'bool' = False) -> 'np.ndarray'
+    Compute a weighted average of 4x4 transformation matrices.
+quaternion_add(quat0, quat1)
+    Component-wise quaternion addition.  Backed by ``_quaternion_add``.
+quaternion_conjugate(quat)
+    Per-quaternion conjugate.  Backed by ``_quaternion_conjugate``.
+quaternion_dot(quat0, quat1)
+    Dot product between two lists of quaternions.
+quaternion_exp(rotation_vector)
+    Exponential of ``(N, 3)`` rotation vectors -> ``(N, 4)`` unit quaternions.
+quaternion_intermediate(quat_prev, quat_cur, quat_next)
+    Squad inner-quadrangle control quaternions ``s_i`` from three keys.
+quaternion_inverse(quat)
+    Per-quaternion inverse.  Backed by ``_quaternion_inverse``.
+quaternion_log(quat)
+    Logarithm of unit quaternions -> ``(N, 3)`` rotation vectors.
+quaternion_multiply(quat0, quat1)
+    Hamilton product of two lists of quaternions.
+quaternion_negate(quat)
+    Per-quaternion negation.  Backed by ``_quaternion_negate``.
+quaternion_nlerp(quat0, quat1, weight=0.5, shortest=True)
+    Normalised linear interpolation between two lists of quaternions.
+quaternion_normalize(quat)
+    Normalise quaternions to unit length.
+quaternion_random(n, seed=None)
+    Generate ``n`` random unit quaternions.
+quaternion_slerp(quat0, quat1, weight=0.5, shortest=True)
+    Spherical linear interpolation between two lists of quaternions.
+quaternion_squad(quat0, control0, control1, quat1, weight=0.5)
+    Cubic (C1-continuous) quaternion spline segment (spherical-and-quadrangle).
+quaternion_sub(quat0, quat1)
+    Component-wise quaternion subtraction.  Backed by ``_quaternion_sub``.
+quaternion_to_euler(quat, axes=0)
+    Convert quaternions to euler angles for a given rotate order.
+quaternion_to_matrix(quat)
+    Convert quaternions to 4x4 rotation matrices.
+vector_angle(vector0, vector1)
+    Arc angle (radians) between two lists of vectors.
+vector_arc_to_euler(vector0, vector1, axes=0)
+    Shortest-arc rotation between two lists of vectors as euler angles.
+vector_arc_to_matrix(vector0, vector1)
+    Shortest-arc rotation between two lists of vectors as 4x4 matrices.
+vector_arc_to_quaternion(vector0, vector1)
+    Shortest-arc rotation between two lists of vectors as quaternions.
+vector_cross(vector0, vector1)
+    Cross product of two lists of vectors.  Backed by ``_vector_cross``.
+vector_dot(vector0, vector1)
+    Dot product of two lists of vectors.  Backed by ``_vector_dot``.
+vector_lerp(vector0, vector1, weight=0.5)
+    Linear interpolation between two lists of vectors.
+vector_magnitude(vector)
+    Magnitude (L2 norm) of vectors.  Backed by ``_vector_magnitude``.
+vector_normalize(vector)
+    Normalise vectors to unit length.  Backed by ``_vector_normalize``.
+vector_random(n, seed=None, normalize=False)
+    Generate ``n`` random vectors in ``[-1, 1]^3``.
+vector_slerp(vector0, vector1, weight=0.5)
+    Spherical interpolation between two lists of vectors.
+vector_to_euler(vector0, vector1, aim_axis=0, up_axis=1, axes=0)
+    Build euler angles from aim + up vector pairs.
+vector_to_matrix(vector0, vector1, aim_axis=0, up_axis=1)
+    Build 4x4 rotation matrices from aim + up vector pairs.
+vector_to_quaternion(vector0, vector1, aim_axis=0, up_axis=1)
+    Build quaternions from aim + up vector pairs.
+```
+
+Constants:
+
+```text
+X = 0
+XYZ = 0
+XZY = 3
+Y = 1
+YXZ = 4
+YZX = 1
+Z = 2
+ZXY = 2
+ZYX = 5
+```
 
 ## `cgmath.utils`
 

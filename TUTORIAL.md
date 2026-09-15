@@ -933,7 +933,7 @@ hero_uv   = UVData.load_fbx("hero.fbx", name="hero_geo", channel=0)
 |---|---|
 | A recipe per subpackage | [`CHEATSHEET.md`](CHEATSHEET.md) |
 | The exact API surface | [`REFERENCE.md`](REFERENCE.md) |
-| Transform math on raw arrays | [`transforms/README.md`](https://github.com/Eric-Vignola/transforms/blob/main/README.md) |
+| Transform math on raw arrays | [`transforms/README.md`](transforms/README.md) |
 | Rigs, clips and retargeting | [`hierarchy/README.md`](hierarchy/README.md) |
 | Meshes, curves, SDFs, transfer | [`geometry/README.md`](geometry/README.md) |
 | The five deformers | [`geometry/deform/README.md`](geometry/deform/README.md) |

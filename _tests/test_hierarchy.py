@@ -6,7 +6,7 @@ import numpy as np
 from cgmath.formats.glb import pygltflib
 from cgmath.hierarchy import HierarchyData, TransformData, TransformList
 from cgmath.hierarchy import _fbx_enum, _rotation, FBX
-from transforms import (
+from cgmath.transforms import (
     euler_to_matrix,
     euler_to_quaternion,
     matrix_multiply,

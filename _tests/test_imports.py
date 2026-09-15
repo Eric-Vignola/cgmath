@@ -14,6 +14,7 @@ test.
 import importlib
 import os
 import pkgutil
+import re
 import unittest
 
 import cgmath
@@ -57,19 +58,38 @@ class TestEveryModuleImports(unittest.TestCase):
         )
 
     def test_test_modules_import(self):
-        """The test package itself must be importable by dotted name.
+        """Every test package must be importable by dotted name.
 
-        ``cgmath/_tests/__init__.py`` makes this a real package, which means
-        sibling test helpers have to be imported as ``cgmath._tests.<name>``
-        rather than bare ``<name>``. A bare sibling import passes when the
-        tests are run from inside the directory and fails everywhere else.
+        ``cgmath/_tests/__init__.py`` makes that suite a real package, and
+        ``cgmath/transforms/_tests/__init__.py`` does the same for the transforms
+        suite, which means sibling test helpers have to be imported as
+        ``cgmath._tests.<name>`` / ``cgmath.transforms._tests.<name>`` rather than
+        bare ``<name>``. A bare sibling import passes when the tests are run from
+        inside the directory and fails everywhere else.
+
+        The test packages are found by walking the library, the same way
+        :func:`cgmath.utils.run_tests` finds them.
         """
-        names = [
-            f"cgmath._tests.{f[:-3]}"
-            for f in sorted(os.listdir(os.path.join(PACKAGE_ROOT, "_tests")))
-            if f.startswith("test_") and f.endswith(".py")
-        ]
+        names = []
+        for dirpath, dirnames, filenames in os.walk(PACKAGE_ROOT):
+            dirnames[:] = sorted(
+                d for d in dirnames if d != "__pycache__" and not d.startswith(".")
+            )
+            if os.path.basename(dirpath) == "_tests" and "__init__.py" in filenames:
+                dotted = ".".join(
+                    ["cgmath"] + os.path.relpath(dirpath, PACKAGE_ROOT).split(os.sep)
+                )
+                names += [
+                    f"{dotted}.{f[:-3]}"
+                    for f in sorted(filenames)
+                    if f.startswith("test_") and f.endswith(".py")
+                ]
+                dirnames[:] = []
         self.assertGreater(len(names), 10)
+        self.assertTrue(
+            any(n.startswith("cgmath.transforms._tests.") for n in names),
+            "the walk found no cgmath.transforms._tests modules",
+        )
 
         broken = []
         for name in names:
@@ -84,22 +104,48 @@ class TestEveryModuleImports(unittest.TestCase):
 
 
 class TestTransformsBoundary(unittest.TestCase):
-    """``transforms`` is an external package, and the hierarchy types are
-    not part of it.  Both halves of that split are easy to undo by accident.
+    """``transforms`` ships inside cgmath as :mod:`cgmath.transforms`, and the
+    hierarchy types are not part of it.  Both halves of that split are easy to
+    undo by accident.
     """
 
-    def test_transforms_is_an_external_dependency(self):
-        """``transforms`` must resolve outside the package, not inside it."""
-        import transforms
+    # A statement that imports the TOP-LEVEL package: ``import transforms``,
+    # ``import transforms as tr``, ``from transforms import x``,
+    # ``from transforms.main import x``.  ``from cgmath.transforms ...`` does not
+    # match, and neither does prose that merely mentions the name.
+    _TOP_LEVEL = re.compile(r"^[ \t]*(?:import[ \t]+transforms\b|from[ \t]+transforms[ \t.])", re.M)
 
-        self.assertFalse(
+    def test_transforms_is_a_cgmath_subpackage(self):
+        """``cgmath.transforms`` must resolve from inside the package."""
+        from cgmath import transforms
+
+        self.assertTrue(
             os.path.abspath(transforms.__file__).startswith(PACKAGE_ROOT),
-            "transforms resolved from inside cgmath; it is meant to be external",
+            "cgmath.transforms resolved from outside cgmath",
         )
 
+    def test_nothing_imports_the_standalone_transforms(self):
+        """No module may import the top-level ``transforms`` package.
+
+        The standalone repository installs under that name too, so a stray
+        top-level import passes wherever that copy happens to be installed and
+        fails everywhere else.
+        """
+        offenders = []
+        for dirpath, dirnames, filenames in os.walk(PACKAGE_ROOT):
+            dirnames[:] = [d for d in dirnames if d not in ("__pycache__", ".git")]
+            for name in filenames:
+                if not name.endswith(".py"):
+                    continue
+                path = os.path.join(dirpath, name)
+                with open(path, encoding="utf-8") as fh:
+                    if self._TOP_LEVEL.search(fh.read()):
+                        offenders.append(os.path.relpath(path, PACKAGE_ROOT))
+        self.assertEqual([], offenders)
+
     def test_hierarchy_types_come_from_facet(self):
-        """The hierarchy types moved out of ``transforms`` and into ``cgmath``."""
-        import transforms
+        """The hierarchy types live in ``cgmath.hierarchy``, not ``cgmath.transforms``."""
+        from cgmath import transforms
 
         from cgmath.hierarchy import (
             ClipData,
@@ -112,7 +158,7 @@ class TestTransformsBoundary(unittest.TestCase):
             self.assertTrue(cls.__module__.startswith("cgmath."), cls.__module__)
             self.assertFalse(
                 hasattr(transforms, cls.__name__),
-                f"transforms still exports {cls.__name__}",
+                f"cgmath.transforms exports {cls.__name__}",
             )
 
 

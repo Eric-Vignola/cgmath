@@ -109,13 +109,13 @@ print(cube.point_count, cube.face_count, grid.face_count)
 
 `cgmath/__init__.py` is a docstring and re-exports nothing, so there is
 nothing to import from `cgmath` itself. Always import from a subpackage. The
-batched transform functions come from the separate `transforms` package;
+batched transform functions live in `cgmath.transforms`;
 building matrices, moving points and blending rotations are its territory —
-see the [`transforms` CHEATSHEET](https://github.com/Eric-Vignola/transforms/blob/main/CHEATSHEET.md).
+see the [`cgmath.transforms` CHEATSHEET](transforms/CHEATSHEET.md).
 
 ```python
 from cgmath.hierarchy import HierarchyData, TransformData, TransformList, ClipData
-from transforms import euler_to_matrix, matrix_point_multiply, quaternion_slerp
+from cgmath.transforms import euler_to_matrix, matrix_point_multiply, quaternion_slerp
 from cgmath.geometry import MeshData, MeshList, UVData, UVList
 from cgmath.geometry import BSplineData, BSplinePatchData
 from cgmath.geometry import MapData, GeomSubsetData, MorphData, MorphList
@@ -151,7 +151,7 @@ Units split at the node boundary: the free functions are **radians**,
 
 ```python
 node = TransformData("hero", rotate=(0.0, 45.0, 0.0))     # degrees
-from transforms import matrix_to_euler
+from cgmath.transforms import matrix_to_euler
 print(np.degrees(matrix_to_euler(node.matrix, 0)).round(4))   # [[0. 45. 0.]]
 ```
 
@@ -166,9 +166,9 @@ print(np.degrees(matrix_to_euler(node.matrix, 0)).round(4))   # [[0. 45. 0.]]
 | UV | `v` increases up; `v = 0` is the bottom of the texture |
 | Padding | `-1` marks "no entry" in every adjacency matrix and raycast miss |
 
-The matrix, quaternion, rotate-order and angle rows are `transforms`
-conventions that cgmath inherits — full detail in its
-[README](https://github.com/Eric-Vignola/transforms/blob/main/README.md).
+The matrix, quaternion, rotate-order and angle rows are `cgmath.transforms`
+conventions that the rest of cgmath follows — full detail in its
+[README](transforms/README.md).
 
 `look_at()` and node matrices disagree on layout, on purpose — one is
 OpenGL, the other is Maya:
@@ -533,7 +533,7 @@ to clusters of point indices, then feed it the deformed cloud.
 
 ```python
 from cgmath.constraints import ProcrustesData
-from transforms import matrix_identity as ident
+from cgmath.transforms import matrix_identity as ident
 
 proc = ProcrustesData(cube)                    # any (N, 3) or anything with .points
 proc.attach(ident(1)[0], [0, 1, 2, 3])  # front face
@@ -771,7 +771,7 @@ print(pretty_json({"m": np.eye(2)}))   # decimal-aligned, numpy-aware
 |---|---|
 | `cgmath` overview and conventions | [`README.md`](README.md) |
 | Ten walkthroughs that build something complete | [`TUTORIAL.md`](TUTORIAL.md) |
-| `transforms` | [README](https://github.com/Eric-Vignola/transforms/blob/main/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/transforms/blob/main/CHEATSHEET.md) |
+| `cgmath.transforms` | [README](transforms/README.md) · [CHEATSHEET](transforms/CHEATSHEET.md) |
 | `cgmath.hierarchy` | [README](hierarchy/README.md) · [CHEATSHEET](hierarchy/CHEATSHEET.md) |
 | `cgmath.geometry` | [README](geometry/README.md) · [CHEATSHEET](geometry/CHEATSHEET.md) |
 | `cgmath.geometry.deform` | [README](geometry/deform/README.md) · [CHEATSHEET](geometry/deform/CHEATSHEET.md) |

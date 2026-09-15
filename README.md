@@ -2,16 +2,15 @@
 
 A Python toolkit for what tech artists, and pipeline engineers actually 
 need: 
-- topology and you can introspect and manipulate
-- data resampling methods (topology, skin weights, etc)
-- deformers (RBF Wraps, LBS, DQS, etc) 
+- common CG dataclasses you can define, introspect, query, and manipulate.
+- solid bilinear data resampling methods for topology, skin weights, etc.
+- various deformer detaclasses (RBF Wrap kernels, LBS, DQS, etc) 
 - skeletal hierarchy manipulation 
 - import support for OBJ / GLB / FBX / USD
-- a software raytracer, 
+- a software raytracer 
 - and more!
 
-Everything is numpy-native. No DCC required. Numba-accelerated where it
-matters.
+Everything is numpy-native, Numba-accelerated where it matters.
 
 ```python
 import numpy as np
@@ -51,7 +50,7 @@ for it) and a **CHEATSHEET** (every public name, with a runnable example).
 |---|---|---|
 | **this page** | conventions, the map, the quick taste | [CHEATSHEET](CHEATSHEET.md) — the 24 most common things, cross-cutting |
 | **learning by doing** | ten walkthroughs that each build something complete | [TUTORIAL](TUTORIAL.md) |
-| `transforms` (separate package) | matrices, quaternions, euler, axis-angle, vectors — as batched functions | [README](https://github.com/Eric-Vignola/transforms/blob/main/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/transforms/blob/main/CHEATSHEET.md) |
+| `cgmath.transforms` | matrices, quaternions, euler, axis-angle, vectors — as batched functions | [README](transforms/README.md) · [CHEATSHEET](transforms/CHEATSHEET.md) |
 | `cgmath.hierarchy` | `TransformData` / `TransformList` / `HierarchyData` / `ClipData` — the scene graph | [README](hierarchy/README.md) · [CHEATSHEET](hierarchy/CHEATSHEET.md) |
 | `cgmath.geometry` | `MeshData`, UVs, B-splines, SDFs, skin weights, morphs, maps, resampling | [README](geometry/README.md) · [CHEATSHEET](geometry/CHEATSHEET.md) |
 | `cgmath.geometry.deform` | FFD, Delta Mush, patch relax, skinning, RBF wrap | [README](geometry/deform/README.md) · [CHEATSHEET](geometry/deform/CHEATSHEET.md) |
@@ -95,6 +94,7 @@ cgmath/
 │   │                      SkinDeformData, WrapData
 │   └── utils/             main.py + _numba/ -- the kernel floor
 │
+├── transforms/            main.py + _numba/ -- batched matrix, quaternion, euler, axis, vector math
 ├── render/                scene.py raytracer.py camera.py frame.py texture.py
 ├── formats/               fbx.py, glb.py, usd/prim.py, usd/stage.py
 ├── rbf/                   _kernels.py + _numba/   (__init__.py is a docstring, on purpose)
@@ -102,8 +102,10 @@ cgmath/
 ```
 
 The batched matrix / quaternion / euler / axis / vector functions that all
-of this stands on live in the separate [`transforms`](https://github.com/Eric-Vignola/transforms)
-package, which `cgmath` imports. Its own README and CHEATSHEET cover them.
+of this stands on live in [`cgmath.transforms`](transforms/README.md); its own
+README and CHEATSHEET cover them. The same code is published on its own as
+[`transforms`](https://github.com/Eric-Vignola/transforms) for anyone who wants the math without the
+rest of cgmath.
 
 The public surface of each subpackage is what its `__init__.py`
 re-exports:
@@ -164,8 +166,8 @@ If you know Maya, nothing below will surprise you.
   caches; `copy`, `from_faces`, `sample`, every `resample_*` hand back
   something new.
 
-The first three are `transforms` conventions that cgmath inherits — full
-detail in its [README](https://github.com/Eric-Vignola/transforms/blob/main/README.md).
+The first three are `cgmath.transforms` conventions that the rest of cgmath
+follows — full detail in its [README](transforms/README.md).
 
 ### Optional dependencies
 
@@ -305,7 +307,7 @@ Start with [`CHEATSHEET.md`](CHEATSHEET.md).
 
 ## Requirements
 
-Numpy, Scipy, Numba, and the [transforms](https://github.com/Eric-Vignola/transforms) python modules.
+Numpy, Scipy and Numba python modules.
 
 Optional, per feature (see the table above for how each degrades):
 

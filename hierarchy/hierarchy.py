@@ -10,7 +10,7 @@ import numpy as np
 from cgmath.formats.glb import load_gltf, load_model
 from cgmath.geometry import Data, DataList, ImmutableArray as numpy_array
 from cgmath.geometry._base import _mask_to_indices
-from transforms import (
+from cgmath.transforms import (
     euler_filter,
     euler_to_matrix,
     matrix_local as local_matrix,

@@ -164,4 +164,4 @@ result.name                                 # ['root', 'hip', 'knee']
 |---|---|
 | Every class, property and method, with runnable examples | [`CHEATSHEET.md`](CHEATSHEET.md) |
 | The rest of the library | [`../README.md`](../README.md) |
-| The free transform functions these types are built on | [`transforms`](https://github.com/Eric-Vignola/transforms/blob/main/CHEATSHEET.md) |
+| The free transform functions these types are built on | [`cgmath.transforms`](../transforms/CHEATSHEET.md) |

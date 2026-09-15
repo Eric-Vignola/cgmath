@@ -10,7 +10,7 @@ No DCC, no constraint node, no per-frame graph evaluation — just numpy.
 ```python
 import numpy as np
 from cgmath.constraints import ProcrustesData
-from transforms import euler_to_matrix, matrix_identity, matrix_point_multiply
+from cgmath.transforms import euler_to_matrix, matrix_identity, matrix_point_multiply
 
 rest = np.array([[-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [-0.5, 0.5, 0.5], [0.5, 0.5, 0.5],
                  [-0.5, 0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, -0.5, -0.5], [0.5, -0.5, -0.5]])
@@ -77,7 +77,7 @@ kernel first and falls back to the vectorized SVD path above.
 
 - **Row-major, Maya style.** Translation lives at `M[3, :3]`. Points
   transform as `p @ M`. Matches everything in
-  [`transforms`](https://github.com/Eric-Vignola/transforms).
+  [`cgmath.transforms`](../transforms/README.md).
 - **`rotate` is radians**, XYZ order — it is `matrix_to_euler(matrix)`.
 - **`scale` is uniform**, reported as `(M, 3)` with all three components
   equal.
@@ -120,7 +120,7 @@ see `DeltaMushData(method="PROCRUSTES")` in
 
 ```python
 from cgmath.constraints import ProcrustesData
-from transforms import matrix_identity
+from cgmath.transforms import matrix_identity
 import numpy as np
 
 rest = np.array([[-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [-0.5, 0.5, 0.5], [0.5, 0.5, 0.5],
@@ -165,4 +165,4 @@ print(c.translate[0])                     # [0, 2, 0]
 |---|---|
 | Every method, property and gotcha, with runnable blocks | [`CHEATSHEET.md`](CHEATSHEET.md) |
 | The rest of the library | [`../README.md`](../README.md) |
-| Row-major matrix helpers used above | [`transforms`](https://github.com/Eric-Vignola/transforms) |
+| Row-major matrix helpers used above | [`cgmath.transforms`](../transforms/README.md) |

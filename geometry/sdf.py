@@ -75,9 +75,9 @@ from cgmath.geometry.utils._numba._sdf import (
     _extract_active_cubes,
     _generate_faces,
 )
-from transforms import euler_to_matrix
+from cgmath.transforms import euler_to_matrix
 from cgmath.hierarchy import TransformData
-from transforms import matrix_inverse, matrix_point_multiply as matrix_point
+from cgmath.transforms import matrix_inverse, matrix_point_multiply as matrix_point
 
 
 # =============================================================================

@@ -153,23 +153,29 @@ def run_tests(
     failfast:  bool                       = False,
 ) -> unittest.TestResult:
     """
-    runs the package's unit test suite
+    runs the package's unit tests: every ``_tests`` suite in the library
+
+    The suites are found by walking the package for ``_tests`` packages --
+    ``cgmath._tests`` and ``cgmath.transforms._tests`` today -- so a subpackage
+    that adds its own ``_tests`` is picked up with no change here.
 
     Args:
         target: what to run, coarsest to finest::
 
-            None                    the whole suite
+            None                    every suite
             "test_skin*.py"                                        a filename glob
             "test_geometry"                                        one module
             "test_geometry.TestMesh"                               one class
             "test_geometry.TestMesh.test_bitangent_unit_length"    one test method
 
-            A list or tuple runs several in one pass, which is the quick way
-            to re-run a handful of failures.
+            A glob matches in every suite.  A list or tuple runs several in one
+            pass, which is the quick way to re-run a handful of failures.
 
-            Short dotted names are resolved inside the package, so you never
-            write the fully qualified ``cgmath._tests....`` path.
-            Pasting the long form copied out of a failure line works too.
+            Short dotted names are looked up in every suite, so you never write
+            the fully qualified ``cgmath._tests....`` or
+            ``cgmath.transforms._tests....`` path.  The package-relative form
+            (``transforms._tests.test_matrix``) and the long form copied out of
+            a failure line work too.
         verbosity: 0 for silent, 1 for a dot per test, 2 for a line each.
         failfast: stop on the first failure or error.
 
@@ -182,6 +188,8 @@ def run_tests(
         ValueError: a dotted target naming no such module, class or method.
             Unittest would otherwise fold that into the run as an ordinary
             test error, which reads like a real failure rather than a typo.
+            Also raised for a short name that more than one suite carries,
+            rather than silently running only one of them.
 
     Note:
         Discovery imports every matching module, so a missing optional
@@ -189,25 +197,43 @@ def run_tests(
         aborting the run.
 
         >>> from cgmath.utils import run_tests
-        >>> run_tests()                        # everything
+        >>> run_tests()                        # everything, both suites
         >>> run_tests("test_skin*.py")                                       # a glob
         >>> run_tests("test_geometry.TestMesh")                              # one class
         >>> run_tests("test_geometry.TestMesh.test_bitangent_unit_length")   # one test
         >>> run_tests(["test_rbf", "test_pack"])                             # two modules
+        >>> run_tests("test_matrix")                                         # a transforms module
         >>> run_tests(verbosity=1, failfast=True)
     """
     package_root = os.path.dirname(os.path.abspath(__file__))
-    start_dir    = os.path.join(package_root, "_tests")
+    package      = os.path.basename(package_root)
 
-    if not os.path.isdir(start_dir):
-        raise FileNotFoundError(f"no test directory at {start_dir!r}")
+    # Every test package in the library: ``_tests`` itself plus the suite a
+    # subpackage carries (``transforms/_tests``).  Found by walking the package,
+    # so a subpackage that grows its own ``_tests`` joins the run with no list to
+    # update.  The walk does not descend into a test package: its own
+    # subpackages are searched through it, below.
+    test_dirs: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(package_root):
+        dirnames[:] = sorted(
+            d for d in dirnames if d != "__pycache__" and not d.startswith(".")
+        )
+        if os.path.basename(dirpath) == "_tests" and "__init__.py" in filenames:
+            test_dirs.append(dirpath)
+            dirnames[:] = []
+
+    if not test_dirs:
+        raise FileNotFoundError(f"no _tests package under {package_root!r}")
 
     # top_level_dir is the package's PARENT, so modules import as
-    # ``cgmath._tests.<name>`` rather than as a bare ``<name>``.  The suite
-    # imports its own siblings by that dotted path, so pointing this at
-    # ``_tests`` would break them.
+    # ``cgmath._tests.<name>`` / ``cgmath.transforms._tests.<name>`` rather than
+    # as a bare ``<name>``.  The suites import their own siblings by that dotted
+    # path, so pointing this at a ``_tests`` folder would break them.
     top_level_dir = os.path.dirname(package_root)
-    root          = f"{os.path.basename(package_root)}._tests."
+    roots         = [
+        ".".join([package] + os.path.relpath(d, package_root).split(os.sep)) + "."
+        for d in test_dirs
+    ]
     loader        = unittest.TestLoader()
 
     stream = _encoding_safe(sys.stderr)   # resolved now, so an installed stderr tee is seen
@@ -220,52 +246,73 @@ def run_tests(
         targets = list(target)
 
     if not targets:
-        suite = loader.discover(
-            start_dir, pattern="test_*.py", top_level_dir=top_level_dir
-        )
+        suite = unittest.TestSuite()
+        for start_dir in test_dirs:
+            suite.addTests(
+                loader.discover(start_dir, pattern="test_*.py", top_level_dir=top_level_dir)
+            )
         return _run(suite, stream, verbosity, failfast)
 
-    # Namespaces a short name may live in: ``_tests`` itself, plus any test
-    # subpackage inside it.  Callers should not have to know whether a module
-    # sits at the top level or one directory down.
-    namespaces = [root] + [
-        root + entry + "."
-        for entry in sorted(os.listdir(start_dir))
-        if os.path.isfile(os.path.join(start_dir, entry, "__init__.py"))
-    ]
+    # Namespaces a short name may live in: every test package, plus any test
+    # subpackage inside one.  Callers should not have to know which suite a
+    # module belongs to, or whether it sits one directory down.
+    namespaces: list[str] = []
+    for start_dir, root in zip(test_dirs, roots):
+        namespaces.append(root)
+        namespaces += [
+            root + entry + "."
+            for entry in sorted(os.listdir(start_dir))
+            if os.path.isfile(os.path.join(start_dir, entry, "__init__.py"))
+        ]
+    # The same roots relative to the package: "_tests.", "transforms._tests."
+    relative_roots = [root[len(package) + 1 :] for root in roots]
 
     suite = unittest.TestSuite()
     for item in targets:
         if "*" in item or "?" in item or item.endswith(".py"):
-            suite.addTests(
-                loader.discover(start_dir, pattern=item, top_level_dir=top_level_dir)
-            )
+            for start_dir in test_dirs:
+                suite.addTests(
+                    loader.discover(start_dir, pattern=item, top_level_dir=top_level_dir)
+                )
             continue
 
-        # accept the short "test_x...", "_tests.test_x..." and the fully
-        # qualified "cgmath._tests.test_x..." that a failure line prints
-        name = item[len("_tests.") :] if item.startswith("_tests.") else item
-        candidates = (
-            [name] if name.startswith(root) else [ns + name for ns in namespaces]
-        )
+        # accept the short "test_x...", the package-relative "_tests.test_x..."
+        # or "transforms._tests.test_x...", and the fully qualified
+        # "cgmath._tests.test_x..." that a failure line prints
+        if item.startswith(package + "."):
+            candidates = [item]
+        elif any(item.startswith(rel) for rel in relative_roots):
+            candidates = [package + "." + item]
+        else:
+            candidates = [ns + item for ns in namespaces]
 
-        resolved = None
+        # Try EVERY namespace rather than stopping at the first hit: a short name
+        # that two suites both carry must not silently run only one of them.
+        resolved = []
         for candidate in candidates:
             mark  = len(loader.errors)
             found = loader.loadTestsFromName(candidate)
             if len(loader.errors) == mark:
-                resolved = found
-                break
-            del loader.errors[mark:]  # discard the miss, try the next namespace
+                resolved.append((candidate, found))
+            else:
+                del loader.errors[mark:]  # discard the miss, try the next namespace
 
-        if resolved is None:
+        if not resolved:
             raise ValueError(
                 "could not resolve test target "
                 + repr(item)
                 + "; tried "
                 + ", ".join(candidates)
             )
-        suite.addTests(resolved)
+        if len(resolved) > 1:
+            raise ValueError(
+                "test target "
+                + repr(item)
+                + " is ambiguous; it names "
+                + " and ".join(candidate for candidate, _ in resolved)
+                + ". Pass the full name of the one you mean."
+            )
+        suite.addTests(resolved[0][1])
 
     return _run(suite, stream, verbosity, failfast)
 

@@ -3,7 +3,7 @@ Numba-optimized kernels for skin deformation.
 
 Row-vector convention throughout, matching the rest of the package: a point
 transforms as ``p' = p @ M`` with the translation in ``M[3, :3]`` -- see
-:func:`transforms._numba._matrix._matrix_point_multiply`.  A skin
+:func:`cgmath.transforms._numba._matrix._matrix_point_multiply`.  A skin
 matrix is therefore ``inverse_bind @ world_posed``, in that order.
 
 Weights arrive compact -- ``(N, K)`` columns into the joint list plus the
@@ -135,7 +135,7 @@ def lbs_compact_fast(
 # scaled matrix straight in silently drops the scale instead of failing.
 #
 # Quaternions are ``(x, y, z, w)`` with the scalar last, matching
-# :mod:`transforms._numba._quaternion`, and a point rotates as
+# :mod:`cgmath.transforms._numba._quaternion`, and a point rotates as
 # ``q p conj(q)`` -- verified against ``_matrix_point_multiply``, which is the
 # oracle for the row-vector convention.
 
@@ -222,7 +222,7 @@ def _rotation_quaternion(rot):
     """Unit ``(x, y, z, w)`` for an orthonormal row-vector 3x3.
 
     Same trace branches as
-    :func:`transforms._numba._matrix._matrix_to_quaternion`.
+    :func:`cgmath.transforms._numba._matrix._matrix_to_quaternion`.
     """
     trace = rot[0, 0] + rot[1, 1] + rot[2, 2]
     if trace > 0.0:

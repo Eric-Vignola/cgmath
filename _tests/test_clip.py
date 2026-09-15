@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 from cgmath.formats.glb import pygltflib
-from transforms import euler_to_quaternion, quaternion_slerp
+from cgmath.transforms import euler_to_quaternion, quaternion_slerp
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData
 from cgmath.hierarchy import _fbx_frame_rate, FBX
 
