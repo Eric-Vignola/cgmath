@@ -1326,7 +1326,8 @@ class TestLoadFbxDroppedNodes(unittest.TestCase):
         return HierarchyData.load_fbx(path)
 
     def test_a_locator_round_trips(self):
-        """save_fbx writes locators as markers, which the reader used to skip"""
+        """save_fbx writes a locator as a null drawn as a cross, and the reader
+        brings it back as a locator, not a transform"""
         rig = self.locator_rig()
 
         loaded = self.load(rig, "loc.fbx")
@@ -1340,6 +1341,25 @@ class TestLoadFbxDroppedNodes(unittest.TestCase):
                 atol=1e-9,
             )
         )
+
+    def test_a_marker_or_a_crossed_null_reads_as_a_locator(self):
+        """a bare null is a group, one drawn as a cross is a locator, a marker too"""
+
+        def null(look):
+            def create(scene, name):
+                attr = FBX.FbxNull.Create(scene, name)
+                attr.Look.Set(look.value)
+                return attr
+            return create
+
+        cases = (
+            (FBX.FbxMarker.Create, "locator"),
+            (null(FBX.FbxNull.ELook.eCross), "locator"),
+            (null(FBX.FbxNull.ELook.eNone), "transform"),
+        )
+        for middle, node_type in cases:
+            loaded = HierarchyData.load_fbx(self.three_deep(middle))
+            self.assertEqual(loaded["B"].node_type, node_type)
 
     def test_a_locator_keeps_its_children(self):
         loaded = self.load(self.locator_rig(), "loc_children.fbx")

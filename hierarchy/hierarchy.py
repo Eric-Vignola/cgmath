@@ -45,6 +45,7 @@ __all__ = [
     "TransformData",
     "TransformList",
     "MAYA_ATTRIBUTE_MAP",
+    "SUPPORTED_NODE_TYPES",
     "generate_uuid",
     "validate_uuid",
 ]
@@ -63,6 +64,11 @@ MAYA_ATTRIBUTE_MAP = {
     "_visibility": "visibility",
     "_draw_style": "drawStyle",
 }
+
+# the node types a TransformData can describe.
+# anything else (constraints, ikHandles, etc.) is only a transform by inheritance,
+# it can't be rebuilt nor exported from this data and is skipped along with its children.
+SUPPORTED_NODE_TYPES = ("transform", "joint", "locator", "space_transform")
 
 # ---------------------------------------------------------------------------- #
 
@@ -1123,6 +1129,8 @@ def _read_fbx(filename: str, scale_factor: float):
 
     skeleton       = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eSkeleton")
     marker         = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eMarker")
+    null           = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eNull")
+    cross          = _fbx_enum(FBX.FbxNull,          "ELook",        "eCross")
     source_pivot   = _fbx_enum(FBX.FbxNode,          "EPivotSet",    "eSourcePivot")
     inherit_rrs    = _fbx_enum(FBX.FbxTransform,     "EInheritType", "eInheritRrs")
 
@@ -1142,7 +1150,7 @@ def _read_fbx(filename: str, scale_factor: float):
             if attr_type in (
                 skeleton,
                 marker,
-                _fbx_enum(FBX.FbxNodeAttribute, "EType", "eNull"),
+                null,
                 _fbx_enum(FBX.FbxNodeAttribute, "EType", "eMesh"),
             ):
                 # basics
@@ -1188,6 +1196,10 @@ def _read_fbx(filename: str, scale_factor: float):
                         node.GetTransformationInheritType() == inherit_rrs
                     )
                 elif attr_type == marker:
+                    data["node_type"] = "locator"
+                # a null drawn as a cross is a locator, a bare one is a group,
+                # which is how Maya's own FBX plugin tells them apart
+                elif attr_type == null and attr.Look.Get() == cross:
                     data["node_type"] = "locator"
                 else:
                     data["node_type"] = "transform"
@@ -1409,14 +1421,13 @@ class TransformList(DataList):
         # build the TransformList
         return cls.from_dict(hierarchy_data)
 
-    def save_fbx(self, filename, zero_root=False):
-        """saves the data to a .fbx file"""
+    def save_fbx(self, filename, zero_root=False, as_ascii=False):
+        """saves the data to a .fbx file, binary unless as_ascii is set"""
 
         if FbxExporter is None:
             raise ImportError("fbx module not found")
 
-        # expand ~ so the post-export read-back (below) matches what the
-        # exporter wrote, consistent with the other IO paths
+        # expand ~, consistent with the other IO paths
         filename = os.path.expanduser(filename)
 
         exporter = FbxExporter()
@@ -1424,40 +1435,9 @@ class TransformList(DataList):
 
         exporter.export(
             path      = filename,
-            as_ascii  = True,
+            as_ascii  = as_ascii,
             zero_root = zero_root,
         )
-
-        # SUPER HACK
-        with open(filename, "r") as io:
-            data = io.readlines()
-
-        for node in self:
-            if node.user_defined_attributes:
-                found = False
-
-                for i, line in enumerate(data):
-                    if f"Model::{node}" in line:
-                        found = True
-
-                    if found and "}" in line:
-                        break
-
-                    elif found and line.strip().startswith("P:"):
-                        split = line.split(",")
-                        name  = split[0].split("P: ")[1][1:-1]
-                        if name in node.user_defined_attributes:
-                            split = line.split(",")
-
-                            if node.user_defined_attributes[name]["keyable"]:
-                                split[3] = '"A+U"'
-                            else:
-                                split[3] = '"U"'
-
-                            data[i] = ",".join(split)
-
-        with open(filename, "w") as io:
-            io.writelines(data)
 
     # --------- gltf and fbx methods --------- #
     @classmethod
@@ -3282,8 +3262,8 @@ class ClipData(HierarchyData):
         clip.frame            = 0
         return clip
 
-    def save_fbx(self, filename, zero_root=False):
-        """saves the bound frame to a .fbx file
+    def save_fbx(self, filename, zero_root=False, as_ascii=False):
+        """saves the bound frame to a .fbx file, binary unless as_ascii is set
 
         The exporter writes one pose per node and never opens an animation
         stack, so a clip holding more than one frame has to say which frame
@@ -3297,7 +3277,7 @@ class ClipData(HierarchyData):
                 "or use save() to keep the whole clip"
             )
 
-        super().save_fbx(filename, zero_root=zero_root)
+        super().save_fbx(filename, zero_root=zero_root, as_ascii=as_ascii)
 
     def to_dict(self) -> dict:
         self._realign()

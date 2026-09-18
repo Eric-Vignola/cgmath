@@ -2363,6 +2363,21 @@ class SceneData(BaseData):
             self._filename = None
 
 
+def _enum_fields(enum_name: str) -> list:
+    """Splits a Maya enumName ("a=1:b=5:c") into (field, index) pairs.
+
+    A field without an explicit index follows the previous one, the way
+    Maya numbers them.
+    """
+    fields = []
+    index  = -1
+    for token in enum_name.split(":"):
+        name, _, given = token.partition("=")
+        index = int(given) if given else index + 1
+        fields.append((name, index))
+    return fields
+
+
 class FbxExporter:
     """Export fbx files from pipeline components"""
 
@@ -2375,6 +2390,24 @@ class FbxExporter:
         5: fbx.EFbxRotationOrder.eEulerZYX,
     }
     """dict: mapping HierarchyData rotation order to fbx rotation order"""
+
+    _USER_ATTR_TYPE_MAP = {
+        "string":       fbx.FbxStringDT,
+        "bool":         fbx.FbxBoolDT,
+        "short":        fbx.FbxShortDT,
+        "int":          fbx.FbxIntDT,
+        "long":         fbx.FbxIntDT,
+        "byte":         fbx.FbxUCharDT,
+        "char":         fbx.FbxCharDT,
+        "enum":         fbx.FbxEnumDT,
+        "float":        fbx.FbxDoubleDT,
+        "double":       fbx.FbxDoubleDT,
+        "doubleAngle":  fbx.FbxDoubleDT,
+        "doubleLinear": fbx.FbxDoubleDT,
+    }
+    """dict: mapping Maya user defined attr types to fbx data types, the same types
+    Maya's own FBX plugin writes. Types it does not write (stringArray, doubleArray,
+    time, etc.) are left out on purpose, those attrs are skipped on export."""
 
     def __init__(self):
         self._skeleton = None
@@ -2416,8 +2449,32 @@ class FbxExporter:
             raise ValueError(f"Skeleton already set: {self._skeleton}!")
         self._skeleton = skeleton_component
 
+        # the fbx node of every item, keyed by item identity.
+        # parents can't be found by name, names may be duplicated across branches.
+        fbx_nodes = {}
+
+        # user defined attrs with no fbx data type, skipped and reported once
+        skipped = {}
+
+        # nodes that can't be exported (constraints, ikHandles, etc.), skipped
+        # along with what is under them, the same way Maya's own FBX plugin
+        # never writes them as scene nodes. parents come first.
+        # imported here, cgmath.hierarchy imports this module.
+        from cgmath.hierarchy import SUPPORTED_NODE_TYPES
+
+        skipped_nodes = {}
+        dropped       = set()
+
         for item in self._skeleton:
+            supported = item.node_type in SUPPORTED_NODE_TYPES
+            if not supported or id(item.get_parent()) in dropped:
+                dropped.add(id(item))
+                skipped_nodes[item.node_type] = skipped_nodes.get(item.node_type, 0) + 1
+                continue
+
             node = fbx.FbxNode.Create(self.manager, item.name)
+
+            fbx_nodes[id(item)] = node
 
             node.LclTranslation.Set(fbx.FbxDouble3(*item.translate))
             node.LclRotation.Set(fbx.FbxDouble3(*item.rotate))
@@ -2428,10 +2485,13 @@ class FbxExporter:
                 self._ROTATE_ORDER_MAP[item.rotate_order],
             )
 
+            parent = item.get_parent()
             if item.parent_node is None:
                 parent_node = self.scene.GetRootNode()
+            elif id(parent) in fbx_nodes:
+                parent_node = fbx_nodes[id(parent)]
             else:
-                parent_node = self.scene.FindNodeByName(item.get_parent().name)
+                parent_node = self.scene.FindNodeByName(parent.name)
 
             parent_node.AddChild(node)
 
@@ -2461,35 +2521,63 @@ class FbxExporter:
                     fbx.FbxNode.EPivotSet.eSourcePivot,
                     post.Inverse().GetR(),
                 )
+            # a null's look is what tells a locator from a group, the same way
+            # Maya's own FBX plugin writes them. the binding's Look.Set() only
+            # takes the enum's integer value.
             elif item.node_type == "transform" or item.node_type == "space_transform":
                 node_attr = fbx.FbxNull.Create(self.manager, "")
+                node_attr.Look.Set(fbx.FbxNull.ELook.eNone.value)
             elif item.node_type == "locator":
-                node_attr = fbx.FbxMarker.Create(self.manager, "")
-            else:
-                raise RuntimeError(
-                    f"Not sure how to process nodes of type: {item.node_type}!"
-                )
+                node_attr = fbx.FbxNull.Create(self.manager, "")
+                node_attr.Look.Set(fbx.FbxNull.ELook.eCross.value)
 
             # set user defined attrs
             ud_attrs = item.user_defined_attributes
             if ud_attrs:
-                attr_types = {
-                    "string": fbx.FbxStringDT,
-                    "double": fbx.FbxDoubleDT,
-                    "int":    fbx.FbxIntDT,
-                    "bool":   fbx.FbxBoolDT,
-                    "short":  fbx.FbxShortDT,
-                }
                 for name, deets in ud_attrs.items():
                     if "attributeType" in deets:
-                        fbx_att = attr_types[deets["attributeType"]]
+                        attr_type = deets["attributeType"]
                     else:
-                        fbx_att = attr_types[deets["dataType"]]
+                        attr_type = deets["dataType"]
+
+                    # skip what Maya's own FBX plugin does not write either:
+                    # unmapped types, multi attrs and compound parents (no value)
+                    fbx_att = self._USER_ATTR_TYPE_MAP.get(attr_type)
+                    value   = deets.get("value")
+                    if deets.get("multi"):
+                        attr_type = f"{attr_type}[]"
+                    if fbx_att is None or value is None or deets.get("multi"):
+                        skipped[attr_type] = skipped.get(attr_type, 0) + 1
+                        continue
 
                     prop = fbx.FbxProperty.Create(node, fbx_att, name, name)
-                    prop.Set(deets["value"])
+
+                    # fbx enum values are positions in the field list,
+                    # Maya's can be explicit ("a=1:b=5:c")
+                    if attr_type == "enum":
+                        fields = _enum_fields(deets.get("enumName", ""))
+                        for field, _ in fields:
+                            prop.AddEnumValue(field)
+                        positions = {index: i for i, (_, index) in enumerate(fields)}
+                        value     = positions.get(value, value)
+
+                    prop.Set(value)
+
+                    # flagged the way Maya's importer expects a custom attr
+                    prop.ModifyFlag(fbx.FbxPropertyFlags.EFlags.eUserDefined, True)
+                    prop.ModifyFlag(
+                        fbx.FbxPropertyFlags.EFlags.eAnimatable, bool(deets.get("keyable"))
+                    )
 
             node.SetNodeAttribute(node_attr)
+
+        if skipped_nodes:
+            counts = ", ".join(f"{v} {k}" for k, v in sorted(skipped_nodes.items()))
+            LOGGER.warning(f"skipped nodes that can't be exported: {counts}")
+
+        if skipped:
+            counts = ", ".join(f"{v} {k}" for k, v in sorted(skipped.items()))
+            LOGGER.warning(f"skipped user defined attrs with no fbx type: {counts}")
         LOGGER.info(f"added skeleton: {skeleton_component}")
 
     def export(self, path: pathlib.Path, as_ascii=False, zero_root=False) -> None:
