@@ -1,6 +1,6 @@
 # `cgmath` Reference
 
-Generated from the live code by `gen_reference.py` (kept in the `tools/` folder beside the packages, not in this repository) on 2026-09-15. Do not edit by hand; re-run the script after any API change.
+Generated from the live code by `gen_reference.py` (kept in the `tools/` folder beside the packages, not in this repository) on 2026-09-17. Do not edit by hand; re-run the script after any API change.
 
 Every public class, property, method, function and constant of the modules below, with the real signature (`inspect.signature`) and the first line of its docstring. To *learn* a subpackage read its `README.md` and `CHEATSHEET.md`; this page is for looking things up.
 
@@ -270,8 +270,8 @@ classmethod load_fbx(cls, filename: 'str', scale_factor: 'float' = 1.0, take: 'O
     builds a clip from an fbx's animation take
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, animation: 'int' = 0, fps: 'float' = 24.0, start_frame: 'int' = 0) -> "'ClipData'"
     builds a clip from a glb's animation
-save_fbx(self, filename, zero_root=False)
-    saves the bound frame to a .fbx file
+save_fbx(self, filename, zero_root=False, as_ascii=False)
+    saves the bound frame to a .fbx file, binary unless as_ascii is set
 to_dict(self) -> 'dict'
     set keys as uuid in the case of duplicate names
 ```
@@ -488,8 +488,8 @@ match_rotate(self, other) -> 'None'
     matches the world rotation of a node, a list of nodes or a rotation
 match_translate(self, other, x: 'bool' = True, y: 'bool' = True, z: 'bool' = True) -> 'None'
     matches the world position of a node, a list of nodes or a translation
-save_fbx(self, filename, zero_root=False)
-    saves the data to a .fbx file
+save_fbx(self, filename, zero_root=False, as_ascii=False)
+    saves the data to a .fbx file, binary unless as_ascii is set
 set_joint_orient_to_rotate(self) -> 'None'
     sets joint_orient to 0 and applies all rotation to rotate
 set_parent(self, parent: 'Union[str, None]', world_space: 'bool' = True) -> 'None'
@@ -517,6 +517,7 @@ Constants:
 
 ```text
 MAYA_ATTRIBUTE_MAP = {'_scale': 'scale', '_rotate': 'rotate', '_translate': 't...
+SUPPORTED_NODE_TYPES = ('transform', 'joint', 'locator', 'space_transform')
 ```
 
 ## `cgmath.geometry`
@@ -679,7 +680,7 @@ zip_to_dict(filename)
 Constants:
 
 ```text
-MISSING = <dataclasses._MISSING_TYPE object at 0x0000023330903E50>
+MISSING = <dataclasses._MISSING_TYPE object at 0x0000025E7F22C390>
 ```
 
 ## `cgmath.geometry.mesh`
@@ -3138,7 +3139,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000002337EA4B560>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000025E810ED1C0>, '...
 ```
 
 ## `cgmath.constraints`
