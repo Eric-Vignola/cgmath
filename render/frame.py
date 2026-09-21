@@ -424,9 +424,9 @@ class Frame:
     @classmethod
     def encode(
         cls,
-        frames: Iterable["Frame.FrameLike"],
-        output: str,
-        fps:    int                         = 30,
+        frames:   Iterable["Frame.FrameLike"],
+        output:   str,
+        fps:      int                         = 30,
         **kwargs: Any,
     ) -> str:
         """Dispatch to :meth:`encode_mp4` / :meth:`encode_avi` /

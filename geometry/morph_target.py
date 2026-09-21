@@ -294,8 +294,8 @@ class MorphData(Data):
         cls,
         base_mesh_data,
         target_mesh_data,
-        target_name:     str          = "",
-        tolerance:       float | None = None,
+        target_name: str          = "",
+        tolerance:   float | None = None,
     ) -> MorphData:
         """Creates a MorphData object from two mesh data objects.
 
