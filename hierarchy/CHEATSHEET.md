@@ -21,7 +21,7 @@ overview see [`README.md`](README.md); for the rest of the library see
 | [Matrices](#matrices) | `matrix`, `world_matrix`, the six factor matrices, `quaternion` |
 | [Cache invalidation](#cache-invalidation) | when `world_matrix` is recomputed |
 | [Node queries](#node-queries) | parent / children / branch / root / index |
-| [Node edits](#node-edits) | `set_parent`, `match_*`, `swapaxes`, orient helpers, prefix / suffix |
+| [Node edits](#node-edits) | `set_parent`, `match_*`, `swapaxes`, orient helpers, prefix / suffix, namespaces |
 | [`TransformList` — views](#transformlist--views) | slicing, fancy indexing, `match` |
 | [Vectorized channels](#vectorized-channels) | read / write a whole selection |
 | [Vectorized queries and edits](#vectorized-queries-and-edits) | the list forms of every node method |
@@ -389,6 +389,27 @@ j.add_prefix("L_")
 j.add_suffix("_JNT")
 assert j.name == ["L_j0_JNT", "L_j1_JNT"]
 ```
+
+### Namespaces
+
+A skeleton serialized out of Maya keeps its namespaces in every name.
+`strip_namespace()` removes them all. Given a namespace path it removes just
+that one, and what was inside it moves up one level, as when Maya deletes a
+namespace.
+
+```python
+ns = make_chain(("VLR_RIG:SK:root", "VLR_RIG:SK:spine"))
+ns.append(TransformData("VLR_RIG:ctrl"))
+assert ns.namespace == ["VLR_RIG:SK", "VLR_RIG:SK", "VLR_RIG"]
+
+ns.strip_namespace("VLR_RIG:SK")
+assert ns.name == ["VLR_RIG:root", "VLR_RIG:spine", "VLR_RIG:ctrl"]
+ns.strip_namespace()
+assert ns.name == ["root", "spine", "ctrl"]
+```
+
+A rename that would give two nodes the same name raises `ValueError` and
+renames nothing.
 
 ---
 

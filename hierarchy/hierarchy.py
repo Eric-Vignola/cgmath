@@ -264,6 +264,30 @@ def validate_uuid(uuid_string: str) -> bool:
         return False
 
 
+def _strip_namespace(name: str, namespace: Optional[str] = None) -> str:
+    """``name`` without its namespaces, or without the one namespace path given
+
+    With no path ``A:B:node`` becomes ``node``. Without ``"A:B"`` it becomes
+    ``A:node``, without ``"A"`` it becomes ``B:node``: the namespace's content
+    moves up one level, as Maya merges a deleted namespace into its parent. A
+    name outside the namespace comes back unchanged. A leading ``:``, Maya's
+    absolute form, is accepted on either.
+    """
+    head, _, short = name.rpartition(":")
+    if namespace is None:
+        return short
+
+    target = [x for x in namespace.split(":") if x]
+    if not target:
+        raise ValueError("strip_namespace needs a namespace path, not an empty one")
+
+    spaces = [x for x in head.split(":") if x]
+    depth  = len(target)
+    if spaces[:depth] != target:
+        return name
+    return ":".join(target[:-1] + spaces[depth:] + [short])
+
+
 @dataclass(repr=False, eq=False)
 class TransformData(Data):
     # name, node_type, uuid, and parent_node
@@ -1100,6 +1124,35 @@ class TransformData(Data):
         """adds a suffix to the node's name"""
         self.name = self.name + suffix
 
+    @property
+    def namespace(self) -> str:
+        """the node's namespace path: ``"A:B"`` for ``A:B:node``, ``""`` for none"""
+        return self.name.rpartition(":")[0].lstrip(":")
+
+    def strip_namespace(self, namespace: Optional[str] = None) -> None:
+        """removes every namespace from the node's name, or the one path given
+
+        ``strip_namespace()`` turns ``A:B:node`` into ``node``. Given a path,
+        only that namespace goes and what was inside it moves up one level:
+        ``"A:B"`` gives ``A:node``, ``"A"`` gives ``B:node``. A name outside
+        the namespace is left as it is.
+
+        Raises ValueError, renaming nothing, when another node of the
+        hierarchy already has the new name.
+        """
+        new = _strip_namespace(self.name, namespace)
+        if new == self.name:
+            return
+
+        if self._hierarchy is not None:
+            for other in self._hierarchy:
+                if other is not self and other.name == new:
+                    raise ValueError(
+                        f"strip_namespace: {self.name} would become {new}, "
+                        f"a name another node already has; nothing renamed"
+                    )
+        self.name = new
+
 
 def _read_fbx(filename: str, scale_factor: float):
     """opens an fbx and walks its joints into TransformData dicts
@@ -1527,6 +1580,46 @@ class TransformList(DataList):
         for node in self:
             node.add_suffix(suffix)
 
+    def strip_namespace(self, namespace: Optional[str] = None) -> None:
+        """strip_namespace() on every node of the view, all or nothing
+
+        Every new name is worked out first. If one would be shared with another
+        node -- in the view, or elsewhere in the hierarchies the view's nodes
+        belong to -- ValueError lists them and no node is renamed. Names that
+        were already shared before are left alone.
+        """
+        renamed = {id(node): _strip_namespace(node.name, namespace) for node in self}
+        changed = {id(node) for node in self if renamed[id(node)] != node.name}
+
+        # the nodes a new name can collide with: the view, plus the rest of
+        # every hierarchy the view's nodes belong to
+        nodes = {id(node): node for node in self}
+        hierarchies = {
+            id(n._hierarchy): n._hierarchy for n in self if n._hierarchy is not None
+        }
+        for hierarchy in hierarchies.values():
+            for node in hierarchy:
+                nodes.setdefault(id(node), node)
+
+        owners = {}
+        for key, node in nodes.items():
+            owners.setdefault(renamed.get(key, node.name), []).append(node)
+
+        clashes = [
+            f"{name} <- {', '.join(sorted(n.name for n in group))}"
+            for name, group in sorted(owners.items())
+            if len(group) > 1 and any(id(n) in changed for n in group)
+        ]
+        if clashes:
+            more = " ..." if len(clashes) > 10 else ""
+            raise ValueError(
+                f"strip_namespace would give {len(clashes)} name(s) to more than "
+                f"one node, nothing renamed: {'; '.join(clashes[:10])}{more}"
+            )
+
+        for node in self:
+            node.name = renamed[id(node)]
+
     def _parent_first(self) -> List[int]:
         """view indices ordered so an ancestor is always written before a child
 
@@ -1646,6 +1739,11 @@ class TransformList(DataList):
     def name(self) -> List[str]:
         """returns a list of all names"""
         return [x.name for x in self]
+
+    @property
+    def namespace(self) -> List[str]:
+        """returns a list of all namespace paths, ``""`` where a node has none"""
+        return [x.namespace for x in self]
 
     @property
     def unique_name(self) -> np.ndarray:

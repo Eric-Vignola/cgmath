@@ -1882,3 +1882,109 @@ class TestTransformListCopy(unittest.TestCase):
         copied["j2"].translate = [5.0, 5.0, 5.0]
 
         self.assertFalse(np.allclose(rig["j2"].translate, [5.0, 5.0, 5.0]))
+
+
+class TestNamespaces(unittest.TestCase):
+    """strip_namespace and namespace on nodes, views and hierarchies"""
+
+    def rig(self):
+        """VLR_RIG:SK:root -> VLR_RIG:SK:spine -> VLR_RIG:ctrl"""
+        rig = HierarchyData(
+            [
+                TransformData(name="VLR_RIG:SK:root", node_type="joint"),
+                TransformData(name="VLR_RIG:SK:spine", node_type="joint"),
+                TransformData(name="VLR_RIG:ctrl"),
+            ]
+        )
+        rig["VLR_RIG:SK:spine"].set_parent("VLR_RIG:SK:root", world_space=False)
+        rig["VLR_RIG:ctrl"].set_parent("VLR_RIG:SK:spine", world_space=False)
+        rig["VLR_RIG:SK:spine"].translate = [0.0, 10.0, 0.0]
+        rig["VLR_RIG:ctrl"].translate     = [0.0, 5.0, 0.0]
+        return rig
+
+    @staticmethod
+    def parents(rig):
+        return [n.get_parent().name if n.get_parent() else None for n in rig]
+
+    def test_namespace(self):
+        rig = self.rig()
+        self.assertEqual(rig["VLR_RIG:SK:root"].namespace, "VLR_RIG:SK")
+        self.assertEqual(rig.namespace, ["VLR_RIG:SK", "VLR_RIG:SK", "VLR_RIG"])
+        self.assertEqual(TransformData(name="root").namespace, "")
+        self.assertEqual(TransformData(name=":A:root").namespace, "A")
+
+    def test_strip_every_namespace(self):
+        rig   = self.rig()
+        world = [n.world_matrix for n in rig]
+        rig.strip_namespace()
+        self.assertEqual(rig.name, ["root", "spine", "ctrl"])
+        self.assertEqual(self.parents(rig), [None, "root", "spine"])
+        self.assertTrue(np.allclose([n.world_matrix for n in rig], world))
+
+    def test_strip_one_namespace_moves_its_content_up(self):
+        rig = self.rig()
+        rig.strip_namespace("VLR_RIG:SK")
+        self.assertEqual(rig.name, ["VLR_RIG:root", "VLR_RIG:spine", "VLR_RIG:ctrl"])
+
+        rig = self.rig()
+        rig.strip_namespace("VLR_RIG")
+        self.assertEqual(rig.name, ["SK:root", "SK:spine", "ctrl"])
+        self.assertEqual(self.parents(rig), [None, "SK:root", "SK:spine"])
+
+    def test_a_path_matches_from_the_top(self):
+        # SK sits inside VLR_RIG, and a node name is not a namespace
+        rig = self.rig()
+        for path in ("SK", "OTHER", "VLR_RIG:SK:root"):
+            rig.strip_namespace(path)
+        self.assertEqual(rig.name, self.rig().name)
+
+    def test_leading_colon_and_empty_path(self):
+        rig = self.rig()
+        rig.strip_namespace(":VLR_RIG:SK")
+        self.assertEqual(rig.name, ["VLR_RIG:root", "VLR_RIG:spine", "VLR_RIG:ctrl"])
+        for path in ("", ":"):
+            with self.assertRaises(ValueError):
+                rig.strip_namespace(path)
+
+    def test_a_clash_renames_nothing(self):
+        rig = HierarchyData(
+            [TransformData(name="hero:root"), TransformData(name="villain:root")]
+        )
+        with self.assertRaisesRegex(ValueError, "root <- hero:root, villain:root"):
+            rig.strip_namespace()
+        self.assertEqual(rig.name, ["hero:root", "villain:root"])
+
+    def test_names_already_shared_do_not_block(self):
+        rig = HierarchyData(
+            [
+                TransformData(name="dup"),
+                TransformData(name="dup"),
+                TransformData(name="A:x"),
+            ]
+        )
+        rig.strip_namespace()
+        self.assertEqual(rig.name, ["dup", "dup", "x"])
+
+    def test_a_view_is_checked_against_its_whole_hierarchy(self):
+        rig = HierarchyData([TransformData(name="root"), TransformData(name="A:root")])
+        with self.assertRaises(ValueError):
+            rig.match("A:*").strip_namespace()
+        self.assertEqual(rig.name, ["root", "A:root"])
+
+        rig = HierarchyData([TransformData(name="A:x"), TransformData(name="B:y")])
+        rig.match("A:*").strip_namespace()
+        self.assertEqual(rig.name, ["x", "B:y"])
+
+    def test_a_single_node(self):
+        rig = HierarchyData(
+            [TransformData(name="hero:root"), TransformData(name="villain:root")]
+        )
+        rig["hero:root"].strip_namespace()
+        self.assertEqual(rig.name, ["root", "villain:root"])
+        with self.assertRaises(ValueError):
+            rig["villain:root"].strip_namespace()
+        self.assertEqual(rig.name, ["root", "villain:root"])
+
+        node = TransformData(name="A:B:node")
+        node.strip_namespace("A")
+        self.assertEqual(node.name, "B:node")
