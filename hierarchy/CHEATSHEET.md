@@ -390,6 +390,9 @@ j.add_suffix("_JNT")
 assert j.name == ["L_j0_JNT", "L_j1_JNT"]
 ```
 
+Both leave a namespace in front: `add_prefix("L_")` turns `VLR_RIG:SK:root`
+into `VLR_RIG:SK:L_root`.
+
 ### Namespaces
 
 A skeleton serialized out of Maya keeps its namespaces in every name.
@@ -1111,19 +1114,9 @@ except ValueError as error:
 animated.frames[3:4].save_fbx(os.path.join(WORKDIR, "frame3.fbx"))
 ```
 
-glb needs an asset, and there is none in this package. `scale_factor`
-converts units (glTF is metres, so `100.0` gives centimetres);
-`pose_frame` reads one frame of the file's animation onto the rest pose.
-
-<!-- notest -->
-```python
-rig  = HierarchyData.load_glb("hero.glb")                    # metres -> cm
-rig  = HierarchyData.load_glb("hero.glb", scale_factor=1.0)  # keep metres
-rig  = HierarchyData.load_glb("hero.glb", pose_frame=0)      # posed rest
-
-clip = ClipData.load_glb("hero.glb", fps=30.0, start_frame=1001)
-clip = ClipData.load_glb("hero.glb", animation=1)            # pick a take
-```
+For `load_glb`, `scale_factor` converts units (glTF is metres, so `100.0`
+gives centimetres); `pose_frame` reads one frame of the file's animation
+onto the rest pose.
 
 glTF keys every property on its own timeline, so `load_glb` resamples
 the samplers onto a uniform grid at `fps` and runs the result through
@@ -1133,13 +1126,6 @@ with no animation gives a one-frame clip rather than an error.
 
 `ClipData.load_fbx` defaults to the first take that was actually keyed,
 not to index 0, because a file can hold takes with no curves at all.
-
-<!-- notest -->
-```python
-clip = ClipData.load_fbx("walk.fbx", take=2)    # pick a take
-clip = ClipData.load_fbx("walk.fbx", fps=30.0)  # override the rate
-clip = ClipData.load_fbx("walk.fbx", start_frame=1001, end_frame=1100)
-```
 
 ---
 
