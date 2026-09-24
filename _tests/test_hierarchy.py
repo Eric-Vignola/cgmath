@@ -1988,3 +1988,16 @@ class TestNamespaces(unittest.TestCase):
         node = TransformData(name="A:B:node")
         node.strip_namespace("A")
         self.assertEqual(node.name, "B:node")
+
+    def test_prefix_and_suffix_leave_the_namespace_in_front(self):
+        rig = self.rig()
+        rig.add_prefix("L_")
+        rig.add_suffix("_JNT")
+        self.assertEqual(
+            rig.name,
+            ["VLR_RIG:SK:L_root_JNT", "VLR_RIG:SK:L_spine_JNT", "VLR_RIG:L_ctrl_JNT"],
+        )
+
+        node = TransformData(name="root")
+        node.add_prefix("L_")
+        self.assertEqual(node.name, "L_root")

@@ -1117,8 +1117,13 @@ class TransformData(Data):
         self._hierarchy.extend(affected)
 
     def add_prefix(self, prefix: str) -> None:
-        """adds a prefix to the node's name"""
-        self.name = prefix + self.name
+        """adds a prefix to the node's name
+
+        The prefix goes on the node's own name, after its namespace: ``"L_"``
+        turns ``A:B:root`` into ``A:B:L_root``.
+        """
+        head, colon, short = self.name.rpartition(":")
+        self.name = head + colon + prefix + short
 
     def add_suffix(self, suffix: str) -> None:
         """adds a suffix to the node's name"""
