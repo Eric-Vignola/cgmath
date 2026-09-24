@@ -1,6 +1,6 @@
 # `cgmath` Reference
 
-Generated from the live code by `gen_reference.py` (kept in the `tools/` folder beside the packages, not in this repository) on 2026-09-17. Do not edit by hand; re-run the script after any API change.
+Generated from the live code by `gen_reference.py` (kept in the `tools/` folder beside the packages, not in this repository) on 2026-09-24. Do not edit by hand; re-run the script after any API change.
 
 Every public class, property, method, function and constant of the modules below, with the real signature (`inspect.signature`) and the first line of its docstring. To *learn* a subpackage read its `README.md` and `CHEATSHEET.md`; this page is for looking things up.
 
@@ -324,6 +324,7 @@ joint_orient_x
 joint_orient_y                     
 joint_orient_z                     
 matrix                             computes the local transform matrix
+namespace                          the node's namespace path: ``"A:B"`` for ``A:B:node``, ``""`` for none
 parent_scale_inverse               
 parent_scale_inverse_matrix        
 quaternion                         rotation as a quaterion
@@ -385,6 +386,8 @@ set_parent(self, parent: 'Union[str, None]', world_space: 'bool' = True) -> 'Non
     reparents node to a given parent and resets internal SRTs
 set_rotate_to_joint_orient(self) -> 'None'
     sets rotate and rotate_axis to 0 and applies all rotation to joint_orient
+strip_namespace(self, namespace: 'Optional[str]' = None) -> 'None'
+    removes every namespace from the node's name, or the one path given
 swapaxes(self, axis0: 'int', axis1: 'int', negate: 'bool' = False) -> 'None'
     swaps two of this node's local axes without moving its children
 to_attributes(self, mapping: 'dict' = {'_scale': 'scale', '_rotate': 'rotate', '_translate': 'translate', '_rotate_order': 'rotateOrder', '_rotate_axis': 'rotateAxis', '_joint_orient': 'jointOrient', '_segment_scale_compensate': 'segmentScaleCompensate', '_radius': 'radius', '_visibility': 'visibility', '_draw_style': 'drawStyle'}) -> 'dict'
@@ -411,6 +414,7 @@ joint_orient_y
 joint_orient_z                     
 matrix                             
 name                               returns a list of all names
+namespace                          returns a list of all namespace paths, ``""`` where a node has none
 node_type                          
 parent_scale_inverse               
 parent_scale_inverse_matrix        
@@ -496,6 +500,8 @@ set_parent(self, parent: 'Union[str, None]', world_space: 'bool' = True) -> 'Non
     sets all the nodes under a given parent
 set_rotate_to_joint_orient(self) -> 'None'
     sets rotate to 0 and applies all rotation to joint_orient
+strip_namespace(self, namespace: 'Optional[str]' = None) -> 'None'
+    strip_namespace() on every node of the view, all or nothing
 swapaxes(self, axis0: 'int', axis1: 'int', negate: 'bool' = False) -> 'None'
     swaps two local axes on every node in the view
 to_attributes(self, mapping: 'dict' = {'_scale': 'scale', '_rotate': 'rotate', '_translate': 'translate', '_rotate_order': 'rotateOrder', '_rotate_axis': 'rotateAxis', '_joint_orient': 'jointOrient', '_segment_scale_compensate': 'segmentScaleCompensate', '_radius': 'radius', '_visibility': 'visibility', '_draw_style': 'drawStyle'}) -> 'List[dict]'
@@ -680,7 +686,7 @@ zip_to_dict(filename)
 Constants:
 
 ```text
-MISSING = <dataclasses._MISSING_TYPE object at 0x0000025E7F22C390>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000002B77F3C0C10>
 ```
 
 ## `cgmath.geometry.mesh`
@@ -3139,7 +3145,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000025E810ED1C0>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000002B7800E0D60>, '...
 ```
 
 ## `cgmath.constraints`
