@@ -14,7 +14,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "cgmath"
-version         = "1.0.2"
+version         = "1.0.3"
 description     = "A DCC-agnostic CG math library: batched matrix, quaternion and euler math, mesh topology, deformers, resampling, skeletal hierarchies, SDFs, a software raytracer and asset IO, all numpy-native."
 readme          = "README.md"
 requires-python = ">=3.9"
