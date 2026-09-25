@@ -364,6 +364,8 @@ add_prefix(self, prefix: 'str') -> 'None'
     adds a prefix to the node's name
 add_suffix(self, suffix: 'str') -> 'None'
     adds a suffix to the node's name
+add_user_attribute(self, name: 'str', value: 'Any', attribute_type: 'Optional[str]' = None, keyable: 'bool' = True, enum_names: 'Optional[str]' = None) -> 'None'
+    creates a user defined attribute, then read and set as ``node.name``
 get_branch(self) -> "'TransformList'"
     returns a recursive NodeList from of all decendents
 get_children(self) -> "'TransformList'"
@@ -458,6 +460,8 @@ add_prefix(self, prefix: 'str') -> 'None'
     adds a prefix to the node's name
 add_suffix(self, suffix: 'str') -> 'None'
     adds a suffix to the node's name
+add_user_attribute(self, name: 'str', value: 'Any', attribute_type: 'Optional[str]' = None, keyable: 'bool' = True, enum_names: 'Optional[str]' = None) -> 'None'
+    add_user_attribute() on every node of the view, all or nothing
 append(self, node: "'TransformData'") -> 'None'
     S.append(value) -- append value to the end of the sequence
 copy(self) -> "'TransformList'"
@@ -686,7 +690,7 @@ zip_to_dict(filename)
 Constants:
 
 ```text
-MISSING = <dataclasses._MISSING_TYPE object at 0x000002B77F3C0C10>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000001DC7F460F50>
 ```
 
 ## `cgmath.geometry.mesh`
@@ -3145,7 +3149,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000002B7800E0D60>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001DC800E11C0>, '...
 ```
 
 ## `cgmath.constraints`
