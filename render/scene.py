@@ -1714,6 +1714,18 @@ class Scene(HierarchyData):
       signature spec.
     """
 
+    # render settings __init__ and configure() set on the instance, declared so
+    # the hierarchy lists' strict setter accepts them
+    aspect_ratio:        Optional[float]
+    default_camera_name: Optional[str]
+    resolution:          Optional[Tuple[int, int]]
+    samples_per_pixel:   Optional[int]
+    autofit:             Optional[bool]
+    default_light:       Optional[bool]
+    return_depth:        Optional[bool]
+    angle_of_view:       Optional[float]
+    fit_padding:         Optional[float]
+
     def __init__(
         self,
         name:                str                                             = "scene",

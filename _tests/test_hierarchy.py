@@ -1,4 +1,5 @@
 import os
+import pickle
 import tempfile
 import unittest
 
@@ -2001,3 +2002,244 @@ class TestNamespaces(unittest.TestCase):
         node = TransformData(name="root")
         node.add_prefix("L_")
         self.assertEqual(node.name, "L_root")
+
+
+class TestUserAttributes(unittest.TestCase):
+    """user defined attributes read and set as properties"""
+
+    @staticmethod
+    def node():
+        return TransformData(
+            name="root",
+            user_defined_attributes={
+                "heroHeight": {"attributeType": "double", "value": 1.8, "keyable": True},
+                "count":      {"attributeType": "long", "value": 3, "keyable": True},
+                "flag":       {"attributeType": "bool", "value": False, "keyable": True},
+                "mode": {
+                    "attributeType": "enum",
+                    "enumName":      "a=1:b=5:c",
+                    "value":         5,
+                    "keyable":       True,
+                },
+                "label": {"dataType": "string", "value": "hero", "keyable": False},
+                "uuids": {"dataType": "stringArray", "value": ["a"], "keyable": False},
+                "vec":   {"attributeType": "double3", "numberOfChildren": 3},
+                "vecX":  {"attributeType": "double", "value": 1.0, "parent": "vec"},
+                "vecY":  {"attributeType": "double", "value": 2.0, "parent": "vec"},
+                "vecZ":  {"attributeType": "double", "value": 3.0, "parent": "vec"},
+                "grp":   {"attributeType": "compound", "numberOfChildren": 2},
+                "grpA":  {"attributeType": "double", "value": 4.5, "parent": "grp"},
+                "grpB":  {"attributeType": "bool", "value": True, "parent": "grp"},
+                "weights": {
+                    "attributeType": "double",
+                    "multi":         True,
+                    "value":         [[0, 1.5], [2, 3.5]],
+                },
+                "radius": {"attributeType": "double", "value": 9.0},
+            },
+        )
+
+    def test_read(self):
+        node = self.node()
+        self.assertEqual(node.heroHeight, 1.8)
+        self.assertEqual(node.label,      "hero")
+        self.assertEqual(node.uuids,      ["a"])
+        self.assertEqual(node.mode,       5)
+        self.assertEqual(node.weights,    [[0, 1.5], [2, 3.5]])
+
+    def test_write_converts_to_the_type(self):
+        node            = self.node()
+        node.heroHeight = 3
+        node.count      = 4.0
+        node.flag       = 1
+        node.uuids      = ("b", "c")
+        self.assertEqual((node.heroHeight, node.count, node.flag), (3.0, 4, True))
+        self.assertIsInstance(node.heroHeight, float)
+        self.assertIsInstance(node.count, int)
+        self.assertEqual(node.uuids, ["b", "c"])
+        self.assertEqual(node.user_defined_attributes["heroHeight"]["value"], 3.0)
+
+    def test_write_raises_and_keeps_the_value(self):
+        node = self.node()
+        for name, value, error in (
+            ("heroHeight", "tall", TypeError),
+            ("count", 3.5, ValueError),
+            ("flag", 2, ValueError),
+            ("label", 5, TypeError),
+            ("uuids", ["a", 1], TypeError),
+            ("mode", "z", ValueError),
+            ("mode", 3, ValueError),
+        ):
+            before = node.user_defined_attributes[name]["value"]
+            with self.assertRaises(error):
+                setattr(node, name, value)
+            self.assertEqual(node.user_defined_attributes[name]["value"], before)
+
+    def test_enum_by_name_or_number(self):
+        node      = self.node()
+        node.mode = "c"
+        self.assertEqual(node.mode, 6)
+        node.mode = 1
+        self.assertEqual(node.mode, 1)
+
+    def test_compound(self):
+        node = self.node()
+        self.assertIsInstance(node.vec, np.ndarray)
+        self.assertTrue(np.array_equal(node.vec, [1.0, 2.0, 3.0]))
+        self.assertEqual(node.grp, (4.5, True))
+
+        node.vec = np.array([4, 5, 6])
+        self.assertEqual([node.vecX, node.vecY, node.vecZ], [4.0, 5.0, 6.0])
+        node.grp = [0.5, 0]
+        self.assertEqual(node.grp, (0.5, False))
+        with self.assertRaises(ValueError):
+            node.vec = (1, 2)
+        with self.assertRaises(TypeError):
+            node.vec = 1.0
+
+    def test_multi(self):
+        node         = self.node()
+        node.weights = [[1, 2]]
+        self.assertEqual(node.weights, [[1, 2.0]])
+        with self.assertRaises(TypeError):
+            node.weights = [1, 2]
+
+    def test_missing_names_still_raise(self):
+        node = self.node()
+        with self.assertRaises(AttributeError):
+            node.heroHieght
+        with self.assertRaisesRegex(AttributeError, "add_user_attribute"):
+            node.heroHieght = 3
+        self.assertNotIn("heroHieght", node.user_defined_attributes)
+
+    def test_built_in_names_win(self):
+        node = self.node()
+        self.assertEqual(node.radius, 1.0)
+        node.radius = 2.0
+        self.assertEqual(node.radius, 2.0)
+        self.assertEqual(node.user_defined_attributes["radius"]["value"], 9.0)
+
+    def test_add_user_attribute(self):
+        node = TransformData(name="root")
+        node.add_user_attribute("heroHeight", 3.1416)
+        node.add_user_attribute("count",      3)
+        node.add_user_attribute("flag",       True)
+        node.add_user_attribute("label",      "hero")
+        node.add_user_attribute("uuids",      ["a", "b"])
+        node.add_user_attribute("weights",    [1, 2.5])
+        node.add_user_attribute(
+            "mode", "b", attribute_type="enum", enum_names="a=1:b=5:c"
+        )
+        node.add_user_attribute("size", 2, attribute_type="short", keyable=False)
+
+        attrs = node.user_defined_attributes
+        kinds = {k: v.get("attributeType", v.get("dataType")) for k, v in attrs.items()}
+        self.assertEqual(
+            kinds,
+            {
+                "heroHeight": "double",
+                "count":      "long",
+                "flag":       "bool",
+                "label":      "string",
+                "uuids":      "stringArray",
+                "weights":    "doubleArray",
+                "mode":       "enum",
+                "size":       "short",
+            },
+        )
+        self.assertEqual(node.heroHeight, 3.1416)
+        self.assertEqual(node.mode,       5)
+        self.assertEqual(node.weights,    [1.0, 2.5])
+
+        # Maya can not key strings or arrays
+        self.assertTrue(attrs["heroHeight"]["keyable"])
+        self.assertFalse(attrs["label"]["keyable"])
+        self.assertFalse(attrs["uuids"]["keyable"])
+        self.assertFalse(attrs["size"]["keyable"])
+
+    def test_add_user_attribute_refuses(self):
+        node = TransformData(name="root")
+        node.add_user_attribute("heroHeight", 1.8)
+        for args, kwargs, error in (
+            (("heroHeight", 2.0), {}, ValueError),
+            (("translate", 2.0), {}, ValueError),
+            (("1abc", 2.0), {}, ValueError),
+            (("_x", 2.0), {}, ValueError),
+            (("empty", []), {}, TypeError),
+            (("vec", 1.0), {"attribute_type": "double3"}, ValueError),
+            (("mode", 1), {"attribute_type": "enum"}, ValueError),
+            (("tall", "x"), {"attribute_type": "double"}, TypeError),
+        ):
+            with self.assertRaises(error):
+                node.add_user_attribute(*args, **kwargs)
+        self.assertEqual(list(node.user_defined_attributes), ["heroHeight"])
+
+    def test_tab_completion(self):
+        node = self.node()
+        self.assertIn("heroHeight", dir(node))
+        self.assertIn("heroHeight", dir(HierarchyData([node])))
+
+    def test_lists(self):
+        rig = HierarchyData([self.node(), TransformData(name="hip")])
+        self.assertEqual(rig.heroHeight, [1.8, None])
+        rig.heroHeight = 2
+        self.assertEqual(rig.heroHeight, [2.0, None])
+        self.assertTrue(np.array_equal(rig.vec[0], [1.0, 2.0, 3.0]))
+
+        with self.assertRaises(AttributeError):
+            rig.nope
+        with self.assertRaisesRegex(AttributeError, "add_user_attribute"):
+            rig.nope = 1
+        self.assertNotIn("nope", rig.__dict__)
+
+    def test_a_subclass_sets_what_it_declares(self):
+        class Settings(HierarchyData):
+            quality: float
+
+        rig         = Settings([TransformData(name="root")])
+        rig.quality = 1.5
+        self.assertEqual(rig.quality, 1.5)
+        with self.assertRaises(AttributeError):
+            rig.qualty = 1.5
+
+    def test_list_writes_are_all_or_nothing(self):
+        # a double takes 2.5, a bool does not
+        a = TransformData(
+            name="a", user_defined_attributes={"v": {"attributeType": "double", "value": 1.0}}
+        )
+        b = TransformData(
+            name="b", user_defined_attributes={"v": {"attributeType": "bool", "value": False}}
+        )
+        rig = HierarchyData([a, b])
+        with self.assertRaises(ValueError):
+            rig.v = 2.5
+        self.assertEqual(rig.v, [1.0, False])
+
+    def test_a_view_writes_only_its_nodes(self):
+        rig = HierarchyData([self.node(), TransformData(name="hip")])
+        rig["hip"].add_user_attribute("heroHeight", 1.0)
+        rig.match("hip").heroHeight = 5
+        self.assertEqual(rig.heroHeight, [1.8, 5.0])
+
+    def test_list_add_user_attribute(self):
+        rig = HierarchyData([TransformData(name="a"), TransformData(name="b")])
+        rig.add_user_attribute("uuids", ["x"])
+        self.assertEqual(rig.uuids, [["x"], ["x"]])
+
+        # each node owns its value
+        rig["a"].uuids = ["y"]
+        self.assertEqual(rig.uuids, [["y"], ["x"]])
+
+        rig["b"].add_user_attribute("tag", "t")
+        with self.assertRaises(ValueError):
+            rig.add_user_attribute("tag", "t")
+        self.assertNotIn("tag", rig["a"].user_defined_attributes)
+
+    def test_values_survive_copy_pickle_and_json(self):
+        node            = self.node()
+        node.heroHeight = 2.5
+        self.assertEqual(node.copy().heroHeight, 2.5)
+        self.assertEqual(pickle.loads(pickle.dumps(node)).heroHeight, 2.5)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = HierarchyData([node]).save(os.path.join(tmp, "rig.json"))
+            self.assertEqual(HierarchyData.load(path)["root"].heroHeight, 2.5)

@@ -4,7 +4,7 @@ import os
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
 import numpy as np
 from cgmath.formats.glb import load_gltf, load_model
@@ -286,6 +286,262 @@ def _strip_namespace(name: str, namespace: Optional[str] = None) -> str:
     if spaces[:depth] != target:
         return name
     return ":".join(target[:-1] + spaces[depth:] + [short])
+
+
+# user defined attribute types, by the cmds.addAttr() name, grouped by how a
+# value converts to them
+_FLOAT_TYPES  = ("double", "float", "doubleAngle", "doubleLinear")
+_INT_TYPES    = ("long", "short", "byte", "char")
+_NUMBER_TYPES = _FLOAT_TYPES + _INT_TYPES
+
+# the types add_user_attribute() creates, as attributeType then as dataType
+_NEW_ATTRIBUTE_TYPES = _NUMBER_TYPES + ("bool", "enum")
+_NEW_DATA_TYPES = (
+    "string",
+    "stringArray",
+    "doubleArray",
+    "floatArray",
+    "Int32Array",
+    "vectorArray",
+    "pointArray",
+)
+
+
+def _enum_fields(enum_name: str) -> list:
+    """Splits a Maya enumName ("a=1:b=5:c") into (field, index) pairs.
+
+    A field without an explicit index follows the previous one, the way
+    Maya numbers them.
+    """
+    fields = []
+    index  = -1
+    for token in enum_name.split(":"):
+        name, _, given = token.partition("=")
+        index = int(given) if given else index + 1
+        fields.append((name, index))
+    return fields
+
+
+def _user_attr_type(spec: dict) -> str:
+    """the cmds.addAttr() type name of a user defined attribute spec"""
+    return spec.get("attributeType", spec.get("dataType"))
+
+
+def _to_float(value, label: str) -> float:
+    if isinstance(value, (bool, int, float, np.bool_, np.integer, np.floating)):
+        return float(value)
+    raise TypeError(f"{label} takes a number, got {value!r}")
+
+
+def _to_int(value, label: str) -> int:
+    if isinstance(value, (bool, int, np.bool_, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        if float(value).is_integer():
+            return int(value)
+        raise ValueError(f"{label} takes a whole number, got {value!r}")
+    raise TypeError(f"{label} takes a whole number, got {value!r}")
+
+
+def _to_bool(value, label: str) -> bool:
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        if value in (0, 1):
+            return bool(value)
+        raise ValueError(f"{label} takes True, False, 0 or 1, got {value!r}")
+    raise TypeError(f"{label} takes True, False, 0 or 1, got {value!r}")
+
+
+def _to_enum(value, enum_name: Optional[str], label: str) -> int:
+    fields = _enum_fields(enum_name) if enum_name else []
+    if isinstance(value, str):
+        for field, index in fields:
+            if field == value:
+                return index
+        raise ValueError(
+            f"{label} has no field {value!r}, its fields are {enum_name!r}"
+        )
+    index = _to_int(value, label)
+    if fields and index not in {i for _, i in fields}:
+        raise ValueError(f"{label} has no field {index}, its fields are {enum_name!r}")
+    return index
+
+
+def _to_list(value, label: str) -> list:
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return list(value)
+    raise TypeError(f"{label} takes a list, got {value!r}")
+
+
+def _to_rows(value, size: int, label: str) -> list:
+    rows = []
+    for item in _to_list(value, label):
+        row = [_to_float(x, label) for x in _to_list(item, label)]
+        if len(row) != size:
+            raise ValueError(f"{label} takes rows of {size} numbers, got {item!r}")
+        rows.append(row)
+    return rows
+
+
+def _convert_one(kind: str, spec: dict, value, label: str):
+    """``value`` converted to one value of a user defined attribute of ``kind``;
+    a kind without a rule is stored as given"""
+    if kind in _FLOAT_TYPES:
+        return _to_float(value, label)
+    if kind in _INT_TYPES:
+        return _to_int(value, label)
+    if kind == "bool":
+        return _to_bool(value, label)
+    if kind == "enum":
+        return _to_enum(value, spec.get("enumName"), label)
+    if kind == "string":
+        if isinstance(value, str):
+            return str(value)
+        raise TypeError(f"{label} takes a string, got {value!r}")
+    if kind == "stringArray":
+        items = _to_list(value, label)
+        if all(isinstance(x, str) for x in items):
+            return [str(x) for x in items]
+        raise TypeError(f"{label} takes a list of strings, got {value!r}")
+    if kind in ("doubleArray", "floatArray"):
+        return [_to_float(x, label) for x in _to_list(value, label)]
+    if kind == "Int32Array":
+        return [_to_int(x, label) for x in _to_list(value, label)]
+    if kind == "vectorArray":
+        return _to_rows(value, 3, label)
+    if kind == "pointArray":
+        return _to_rows(value, 4, label)
+    if kind == "matrix":
+        rows = _to_list(value, label)
+        if len(rows) == 4:
+            rows = [x for row in _to_rows(rows, 4, label) for x in row]
+        if len(rows) != 16:
+            raise ValueError(f"{label} takes 16 numbers or 4 rows of 4, got {value!r}")
+        return [_to_float(x, label) for x in rows]
+    return value
+
+
+def _convert_user_value(spec: dict, value, label: str):
+    """``value`` converted to what the user defined attribute ``spec`` stores; a
+    multi attribute stores ``[[index, value], ...]``"""
+    kind = _user_attr_type(spec)
+    if not spec.get("multi"):
+        return _convert_one(kind, spec, value, label)
+
+    pairs = []
+    for pair in _to_list(value, label):
+        if not isinstance(pair, (list, tuple, np.ndarray)) or len(pair) != 2:
+            raise TypeError(f"{label} takes [[index, value], ...], got {value!r}")
+        index = _to_int(pair[0], label)
+        if index < 0:
+            raise ValueError(f"{label} takes indices from 0, got {index}")
+        pairs.append([index, _convert_one(kind, spec, pair[1], label)])
+    return pairs
+
+
+def _compound_children(attrs: dict, name: str) -> list:
+    """the names of a compound user attribute's children, in order"""
+    return [child for child, spec in attrs.items() if spec.get("parent") == name]
+
+
+def _user_value(attrs: dict, name: str):
+    """a user defined attribute's value; a compound parent's comes from its
+    children, as an array when they are all numbers, else as a tuple"""
+    spec = attrs[name]
+    if "numberOfChildren" not in spec:
+        return spec.get("value")
+
+    children = _compound_children(attrs, name)
+    values   = [_user_value(attrs, child) for child in children]
+    numeric = all(
+        _user_attr_type(attrs[child]) in _NUMBER_TYPES
+        and "numberOfChildren" not in attrs[child]
+        and not attrs[child].get("multi")
+        for child in children
+    )
+    return np.array(values) if children and numeric else tuple(values)
+
+
+def _user_writes(attrs: dict, name: str, value, owner: str) -> list:
+    """the (spec, converted value) pairs that setting ``name`` to ``value``
+    stores, all converted before anything is written; a compound parent takes
+    one value per child"""
+    spec  = attrs[name]
+    label = f"{owner}.{name}"
+    if "numberOfChildren" not in spec:
+        return [(spec, _convert_user_value(spec, value, label))]
+
+    children = _compound_children(attrs, name)
+    items    = _to_list(value, label)
+    if len(items) != len(children):
+        raise ValueError(
+            f"{label} takes {len(children)} values, one per child, got {len(items)}"
+        )
+    writes = []
+    for child, item in zip(children, items):
+        writes.extend(_user_writes(attrs, child, item, owner))
+    return writes
+
+
+def _declares(cls: type, name: str) -> bool:
+    """whether ``cls`` or one of its parents annotates ``name`` at class level"""
+    return any(name in vars(c).get("__annotations__", {}) for c in cls.__mro__)
+
+
+def _has_user_attr(node: "TransformData", name: str) -> bool:
+    """whether ``node`` has a user attribute ``name`` a built-in does not hide"""
+    attrs = node.user_defined_attributes or {}
+    return name in attrs and not node._is_builtin_attr(name)
+
+
+def _infer_user_attr_type(value) -> str:
+    """the type a new user attribute takes from its first value"""
+    if isinstance(value, (bool, np.bool_)):
+        return "bool"
+    if isinstance(value, (int, np.integer)):
+        return "long"
+    if isinstance(value, (float, np.floating)):
+        return "double"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (list, tuple, np.ndarray)) and len(value):
+        items   = list(value)
+        numbers = (int, float, np.integer, np.floating)
+        flags   = (bool, np.bool_)
+        if all(isinstance(x, str) for x in items):
+            return "stringArray"
+        if all(isinstance(x, numbers) and not isinstance(x, flags) for x in items):
+            return "doubleArray"
+    raise TypeError(
+        f"cannot tell a user attribute type from {value!r}, pass attribute_type"
+    )
+
+
+def _new_user_attr(
+    value, attribute_type: Optional[str], keyable: bool, enum_names, label: str
+) -> dict:
+    """the spec of a new user defined attribute, in the form rig serializes"""
+    kind = attribute_type or _infer_user_attr_type(value)
+    if kind in _NEW_ATTRIBUTE_TYPES:
+        spec = {"attributeType": kind}
+    elif kind in _NEW_DATA_TYPES:
+        spec = {"dataType": kind}
+    else:
+        raise ValueError(f"add_user_attribute cannot create a {kind!r} attribute")
+
+    if kind == "enum":
+        if not enum_names:
+            raise ValueError(
+                "an enum user attribute needs enum_names, e.g. 'a=1:b=5:c'"
+            )
+        spec["enumName"] = enum_names
+
+    # Maya can not key strings or arrays
+    spec["value"]       = _convert_user_value(spec, value, label)
+    spec["keyable"]     = bool(keyable) and "attributeType" in spec
+    spec["channel_box"] = False
+    return spec
 
 
 @dataclass(repr=False, eq=False)
@@ -1158,6 +1414,88 @@ class TransformData(Data):
                     )
         self.name = new
 
+    # --- user defined attributes, as properties --- #
+
+    def _is_builtin_attr(self, name: str) -> bool:
+        """whether ``name`` is a field, property or method of the class"""
+        return hasattr(type(self), name) or name in self._dataclass_field_names()
+
+    def __getattr__(self, name: str):
+        """a user defined attribute's value, read as ``node.heroHeight``
+
+        Only reached when normal lookup fails, so built-in names always win.
+        """
+        attrs = self.__dict__.get("user_defined_attributes")
+        if attrs and not name.startswith("_") and name in attrs:
+            return _user_value(attrs, name)
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
+        )
+
+    def __setattr__(self, name: str, value) -> None:
+        """sets a user defined attribute the node has, as ``node.heroHeight =
+        3.1416``, converted to its type; anything else goes to Data, which
+        raises on names the class does not declare"""
+        if not name.startswith("_"):
+            attrs = self.__dict__.get("user_defined_attributes")
+            if attrs and name in attrs and not self._is_builtin_attr(name):
+                for spec, converted in _user_writes(attrs, name, value, self.name):
+                    spec["value"] = converted
+                return
+
+        try:
+            super().__setattr__(name, value)
+        except AttributeError as error:
+            if self._is_builtin_attr(name):
+                raise
+            raise AttributeError(
+                f"{error}; add_user_attribute() creates a user attribute"
+            ) from None
+
+    def __dir__(self):
+        attrs = self.__dict__.get("user_defined_attributes") or {}
+        return sorted(set(super().__dir__()) | set(attrs))
+
+    def _check_new_user_attr(self, name: str) -> None:
+        """raises ValueError when ``name`` can not be a new user attribute"""
+        if not isinstance(name, str) or not name.isidentifier() or name.startswith("_"):
+            raise ValueError(f"{name!r} is not a valid user attribute name")
+        if self._is_builtin_attr(name):
+            raise ValueError(
+                f"{name!r} is a built-in attribute of {type(self).__name__}"
+            )
+        if name in (self.user_defined_attributes or {}):
+            raise ValueError(f"{self.name} already has a user attribute {name!r}")
+
+    def add_user_attribute(
+        self,
+        name:           str,
+        value:          Any,
+        attribute_type: Optional[str] = None,
+        keyable:        bool          = True,
+        enum_names:     Optional[str] = None,
+    ) -> None:
+        """creates a user defined attribute, then read and set as ``node.name``
+
+        ``attribute_type`` is a cmds.addAttr() type: double, float, doubleAngle,
+        doubleLinear, long, short, byte, char, bool, enum, string, stringArray,
+        doubleArray, floatArray, Int32Array, vectorArray or pointArray. Without
+        one it comes from ``value``: bool, long, double, string, stringArray or
+        doubleArray. An enum needs ``enum_names``, e.g. ``"a=1:b=5:c"``. String
+        and array attributes are never keyable, as in Maya.
+
+        Raises ValueError when the name exists, is built in or is not a valid
+        attribute name, and TypeError or ValueError when the value does not
+        fit the type.
+        """
+        self._check_new_user_attr(name)
+        spec = _new_user_attr(
+            value, attribute_type, keyable, enum_names, f"{self.name}.{name}"
+        )
+        if self.user_defined_attributes is None:
+            self.user_defined_attributes = {}
+        self.user_defined_attributes[name] = spec
+
 
 def _read_fbx(filename: str, scale_factor: float):
     """opens an fbx and walks its joints into TransformData dicts
@@ -1624,6 +1962,72 @@ class TransformList(DataList):
 
         for node in self:
             node.name = renamed[id(node)]
+
+    # --- user defined attributes, as properties --- #
+
+    def __getattr__(self, name: str):
+        """a user defined attribute read on every node of the view, as
+        ``h.heroHeight``: one value per node, None where a node has none"""
+        nodes = None if name.startswith("_") else self.__dict__.get("list")
+        if nodes and any(_has_user_attr(node, name) for node in nodes):
+            return [
+                _user_value(node.user_defined_attributes, name)
+                if _has_user_attr(node, name)
+                else None
+                for node in nodes
+            ]
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
+        )
+
+    def __setattr__(self, name: str, value) -> None:
+        """sets a user defined attribute on every node of the view that has it,
+        as ``h.heroHeight = 1.8``: every value is converted before any is
+        written. A name no node has raises instead of landing on the list,
+        unless the class declares it."""
+        own = name.startswith("_") or name == "list" or name in self.__dict__
+        if own or hasattr(type(self), name) or _declares(type(self), name):
+            super().__setattr__(name, value)
+            return
+
+        nodes = [n for n in self.__dict__.get("list", []) if _has_user_attr(n, name)]
+        if not nodes:
+            raise AttributeError(
+                f"{type(self).__name__!r} has no attribute {name!r} and no node has "
+                f"a user attribute of that name; add_user_attribute() creates one"
+            )
+        writes = []
+        for node in nodes:
+            attrs = node.user_defined_attributes
+            writes.extend(_user_writes(attrs, name, value, node.name))
+        for spec, converted in writes:
+            spec["value"] = converted
+
+    def __dir__(self):
+        names = set(super().__dir__())
+        for node in self.__dict__.get("list", []):
+            names.update(node.user_defined_attributes or {})
+        return sorted(names)
+
+    def add_user_attribute(
+        self,
+        name:           str,
+        value:          Any,
+        attribute_type: Optional[str] = None,
+        keyable:        bool          = True,
+        enum_names:     Optional[str] = None,
+    ) -> None:
+        """add_user_attribute() on every node of the view, all or nothing"""
+        specs = []
+        for node in self:
+            node._check_new_user_attr(name)
+            label = f"{node.name}.{name}"
+            spec  = _new_user_attr(value, attribute_type, keyable, enum_names, label)
+            specs.append((node, spec))
+        for node, spec in specs:
+            if node.user_defined_attributes is None:
+                node.user_defined_attributes = {}
+            node.user_defined_attributes[name] = spec
 
     def _parent_first(self) -> List[int]:
         """view indices ordered so an ancestor is always written before a child

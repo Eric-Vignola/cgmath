@@ -21,7 +21,7 @@ overview see [`README.md`](README.md); for the rest of the library see
 | [Matrices](#matrices) | `matrix`, `world_matrix`, the six factor matrices, `quaternion` |
 | [Cache invalidation](#cache-invalidation) | when `world_matrix` is recomputed |
 | [Node queries](#node-queries) | parent / children / branch / root / index |
-| [Node edits](#node-edits) | `set_parent`, `match_*`, `swapaxes`, orient helpers, prefix / suffix, namespaces |
+| [Node edits](#node-edits) | `set_parent`, `match_*`, `swapaxes`, orient helpers, prefix / suffix, namespaces, user attributes |
 | [`TransformList` — views](#transformlist--views) | slicing, fancy indexing, `match` |
 | [Vectorized channels](#vectorized-channels) | read / write a whole selection |
 | [Vectorized queries and edits](#vectorized-queries-and-edits) | the list forms of every node method |
@@ -413,6 +413,28 @@ assert ns.name == ["root", "spine", "ctrl"]
 
 A rename that would give two nodes the same name raises `ValueError` and
 renames nothing.
+
+### User attributes
+
+User defined attributes read and set like the built-in ones. A value is
+converted to the attribute's type, and one that does not fit raises.
+
+```python
+hero = make_chain(("root", "hip"))
+hero["root"].add_user_attribute("heroHeight", 1.8)
+hero["root"].heroHeight = 3.1416
+assert hero["root"].user_defined_attributes["heroHeight"]["value"] == 3.1416
+
+assert hero.heroHeight == [3.1416, None]
+hero.heroHeight = 2
+assert hero.heroHeight == [2.0, None]
+```
+
+A list gives one value per node, `None` where a node has none, and a write
+goes to every node that has the attribute. A compound attribute reads as an
+array when its children are all numbers, and an enum takes a field name or
+its number. Assigning to a name no node has raises; `add_user_attribute`
+creates one.
 
 ---
 

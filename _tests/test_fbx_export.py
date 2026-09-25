@@ -283,6 +283,18 @@ class TestFbxExportSkeleton(unittest.TestCase):
         self.assertEqual(result["|root"], {"a_double": "Number"})
         self.assertEqual(result["|root|child"], {})
 
+    def test_a_user_attr_set_as_a_property_is_exported(self):
+        attrs = {"heroHeight": {"attributeType": "double", "value": 1.8, "keyable": True}}
+        root  = _joint("root", user_defined_attributes=attrs)
+
+        root.heroHeight = 3.1416
+        self._export(HierarchyData([root]))
+
+        def _value(node):
+            return fbx.FbxPropertyDouble1(node.FindProperty("heroHeight")).Get()
+
+        self.assertAlmostEqual(self._walk(_value)["|root"], 3.1416)
+
 
 if __name__ == "__main__":
     unittest.main()

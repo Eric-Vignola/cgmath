@@ -2363,21 +2363,6 @@ class SceneData(BaseData):
             self._filename = None
 
 
-def _enum_fields(enum_name: str) -> list:
-    """Splits a Maya enumName ("a=1:b=5:c") into (field, index) pairs.
-
-    A field without an explicit index follows the previous one, the way
-    Maya numbers them.
-    """
-    fields = []
-    index  = -1
-    for token in enum_name.split(":"):
-        name, _, given = token.partition("=")
-        index = int(given) if given else index + 1
-        fields.append((name, index))
-    return fields
-
-
 class FbxExporter:
     """Export fbx files from pipeline components"""
 
@@ -2461,6 +2446,7 @@ class FbxExporter:
         # never writes them as scene nodes. parents come first.
         # imported here, cgmath.hierarchy imports this module.
         from cgmath.hierarchy import SUPPORTED_NODE_TYPES
+        from cgmath.hierarchy.hierarchy import _enum_fields
 
         skipped_nodes = {}
         dropped       = set()
