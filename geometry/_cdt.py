@@ -317,7 +317,7 @@ def maya_tiebreak(mesh):
     Only swaps when ALL conditions are met:
 
     1. The quad is convex (required for a valid flip).
-    2. The alternative diagonal is strictly longer.
+    2. The alternative diagonal is longer, by more than rounding noise.
     3. Min angles of both triangulations are nearly equal (< 0.005 rad).
     4. Circumcircle violation is small relative to quad geometry.
     """
@@ -353,9 +353,11 @@ def maya_tiebreak(mesh):
             if not check_convex(pts, c, d, a, b):
                 continue
 
+            # An exact tie (cocircular points, equal diagonals) must not flip:
+            # its last bits come from the SVD flattening and vary by numpy build.
             len_ab_sq = (pax - pbx) ** 2 + (pay - pby) ** 2
             len_cd_sq = (pcx - pdx) ** 2 + (pcy - pdy) ** 2
-            if len_cd_sq <= len_ab_sq:
+            if len_cd_sq <= len_ab_sq * (1.0 + 1e-9):
                 continue
 
             curr_min = min(
