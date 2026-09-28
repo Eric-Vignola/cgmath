@@ -46,11 +46,13 @@ docstring, so import `prim` and `stage` from it directly.
 | `glb` | `pygltflib` | Imports fine. Every entry point raises `RuntimeError("pygltflib is not installed")` |
 | `glb` | `trimesh` (optional) | Imports fine. `GlbData.mesh_list` is `None` |
 | `fbx` | Autodesk FBX Python SDK — not on PyPI, a manual install | Imports fine, with one `UserWarning` naming the SDK and where to get it. Every FBX call raises `RuntimeError` with that same message |
-| `usd.prim`, `usd.stage` | `pxr`, from `usd-core` — installed with the wheel | Always present after `pip install`. Run straight off `sys.path` without it, **`import cgmath.formats.usd.prim` raises `ImportError`** — `from pxr import Usd` is unguarded |
+| `usd.prim`, `usd.stage` | `pxr`, from `usd-core` (the `usd` extra) or the host DCC's own USD | **`import cgmath.formats.usd.prim` raises `ImportError`** — `from pxr import Usd` is unguarded |
 
 So `glb` and `fbx` degrade at call time, while `usd` needs `pxr` at import
-time — which the wheel always installs. Guard that import only if your caller
-runs cgmath off `sys.path` without `usd-core`.
+time. Get it with `pip install "cgmath[usd]"`, except inside a DCC that
+already ships USD (Maya, Houdini): use the host's `pxr` there, since a second
+copy from `usd-core` conflicts with it. Guard the import if your caller may
+run without either.
 
 ---
 

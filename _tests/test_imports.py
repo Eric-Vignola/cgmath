@@ -12,6 +12,7 @@ test.
 """
 
 import importlib
+import importlib.util
 import os
 import pkgutil
 import re
@@ -26,6 +27,10 @@ OPTIONAL = {
     "cgmath.usd",  # external studio package, not yet vendored
     "cgmath.formats.fbx",  # hard-requires the Autodesk FBX SDK, which is not on PyPI
 }
+# `cgmath.formats.usd` imports pxr unguarded. pxr comes with the `usd` extra
+# or from the host DCC, so the check still runs wherever pxr is available.
+if importlib.util.find_spec("pxr") is None:
+    OPTIONAL.add("cgmath.formats.usd")
 
 PACKAGE_ROOT = os.path.dirname(os.path.abspath(cgmath.__file__))
 

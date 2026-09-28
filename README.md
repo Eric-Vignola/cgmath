@@ -172,13 +172,15 @@ follows — full detail in its [README](https://github.com/Eric-Vignola/cgmath/b
 ### Optional dependencies
 
 Imported lazily behind `try / except ImportError`, so the package loads
-without them and only the paths that need them complain.
+without them and only the paths that need them complain. A plain
+`pip install cgmath` brings in none of them; the PyPI ones come as extras,
+see [Requirements](#requirements).
 
 | Dependency | Used for | Missing behaviour |
 |---|---|---|
 | `pygltflib` | GLB / glTF read | `RuntimeError("pygltflib is not installed")` at call time |
 | Autodesk FBX SDK — not on PyPI, a manual install | FBX read / write | imports fine, with one `UserWarning` naming the SDK and where to get it; every FBX call raises `RuntimeError` with that same message |
-| `pxr`, from `usd-core` — installed with the wheel | `cgmath.formats.usd` stage / prim helpers; `from_prim` / `to_prim` / `load_usd` in `geometry` | always present after `pip install`. Run off `sys.path` without it, `import cgmath.formats.usd.prim` itself raises `ImportError` and the `geometry` paths raise `ImportError` at call time (`geometry.utils.pxr()` is the accessor) |
+| `pxr`, from `usd-core` or the host DCC's own USD | `cgmath.formats.usd` stage / prim helpers; `from_prim` / `to_prim` / `load_usd` in `geometry` | `import cgmath.formats.usd.prim` itself raises `ImportError`, and the `geometry` paths raise `ImportError` at call time (`geometry.utils.pxr()` is the accessor) |
 | `trimesh` | `GlbData.mesh_list` | that attribute is `None` |
 | `PIL` (Pillow) | `Frame.image` / `.save` / `.wireframe` / `.encode_gif`, `to_image`, texture I/O | `RuntimeError("... install Pillow.")` at call time |
 | `cv2` | `imshow()` windows; UV rasterization in `geometry.mesh` | `imshow` raises `RuntimeError`; rasterization falls back to `skimage` |
@@ -307,15 +309,22 @@ Start with [`CHEATSHEET.md`](https://github.com/Eric-Vignola/cgmath/blob/main/CH
 
 ## Requirements
 
-Numpy, Scipy and Numba python modules.
+Numpy, Scipy and Numba python modules, the only packages a plain
+`pip install cgmath` brings in.
 
-Optional, per feature (see the table above for how each degrades):
+Everything else is optional, per feature (see the table above for how each
+degrades), and comes as a pip extra:
 
-    Pillow                  texture I/O and rendered frames
-    pygltflib, trimesh      glTF / GLB read and write
-    Autodesk FBX SDK        FBX read and write
-    pxr (USD)               USD stage read and write
-    scikit-image or OpenCV  UV rasterization
+    pip install "cgmath[image]"   Pillow, OpenCV, scikit-image: texture I/O,
+                                  rendered frames, UV rasterization
+    pip install "cgmath[gltf]"    pygltflib, trimesh: glTF / GLB read and write
+    pip install "cgmath[usd]"     usd-core (pxr): USD stage read and write
+    pip install "cgmath[all]"     all of the above
+
+Inside a DCC that ships its own USD (Maya, Houdini), leave `usd` out: a
+second `pxr` on `sys.path` conflicts with the one the host has loaded.
+
+The Autodesk FBX SDK (FBX read and write) is not on PyPI; install it by hand.
 
 
 ## Author

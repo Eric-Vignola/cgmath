@@ -32,31 +32,46 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
 
-# THREE of these are the real dependencies -- numpy, scipy and numba.
-# Without them cgmath does not import. Everything after them is
-# OPTIONAL to the library: each is imported under a guard that degrades to
-# None, so cgmath runs without it and only the feature named beside it goes
-# quiet.
+# Only numpy, scipy and numba are required: without them cgmath does not
+# import. Everything else is OPTIONAL to the library -- each is imported under
+# a guard, so cgmath runs without it and only the feature named beside it
+# complains -- and comes as an extra:
 #
-# They are declared as requirements anyway, deliberately. A plain
-# `pip install` should hand somebody a complete tool rather than a core that
-# silently lacks half its file formats, and every one of them is a wheel on
-# PyPI that costs nothing but disk. Anyone who wants the three alone can
-# install them and drop the package on sys.path, which is how this library
-# was used before it was packaged.
+#   pip install cgmath                numpy, scipy and numba only
+#   pip install "cgmath[gltf,usd]"    plus the chosen features
+#   pip install "cgmath[all]"         everything on PyPI
+#
+# Up to 1.0.3 the extras were plain requirements, so that a bare
+# `pip install` handed over the complete tool. That broke DCC hosts: usd-core
+# brings its own `pxr`, and a second USD build on sys.path collides with the
+# one Maya or Houdini has already loaded. So inside a DCC, leave `usd` out.
+# The Autodesk FBX SDK is not on PyPI and is installed by hand.
 dependencies = [
-    # --- core ---------------------------------------------------------
     "numpy",
     "scipy",
     "numba",
+]
 
-    # --- optional: installed for convenience, guarded in the source -----
+[project.optional-dependencies]
+image = [
     "pillow",         # image read/write behind textures, frames and scenes
     "opencv-python",  # image ops in geometry.mesh and render.scene
     "scikit-image",   # image measurement helpers in geometry.mesh
+]
+gltf = [
     "pygltflib",      # GLB/glTF read and write, and the hierarchy importer
     "trimesh",        # mesh interchange behind the GLB path
+]
+usd = [
     "usd-core",       # USD stage and prim reading
+]
+all = [
+    "pillow",
+    "opencv-python",
+    "scikit-image",
+    "pygltflib",
+    "trimesh",
+    "usd-core",
 ]
 
 [project.urls]
