@@ -387,6 +387,7 @@ class TestOrthographic(unittest.TestCase):
             self.assertLess(hit_depth.std(), 0.6)
 
 
+@unittest.skipIf(Image is None, "PIL is not installed")
 class TestTurntable(unittest.TestCase):
     """Scene.turntable() short loop."""
 
@@ -499,6 +500,7 @@ class TestTurntableGlobalPivot(unittest.TestCase):
                     default_light  = False,
                 )
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_object_transforms_are_not_mutated(self):
         """The new turntable rotates the camera, not the Objects.  All
         Object transforms must be byte-identical before vs after."""
@@ -525,6 +527,7 @@ class TestTurntableGlobalPivot(unittest.TestCase):
         np.testing.assert_array_equal(b.world_matrix, wm_b_before)
         np.testing.assert_array_equal(c.world_matrix, wm_c_before)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_camera_orbits_world_axis(self):
         """Frames at 0\u00b0 vs 90\u00b0 must look distinct (camera has moved
         around the world Y axis)."""
@@ -545,6 +548,7 @@ class TestTurntableGlobalPivot(unittest.TestCase):
                 "0\u00b0 and 90\u00b0 frames should differ -- camera should orbit",
             )
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_translated_objects_stay_in_frame(self):
         """All visible Objects must remain in frame across the rotation."""
         scene = self._scene_with_three()  # A/B/C at -3 / 0 / +3 along X
@@ -573,6 +577,7 @@ class TestTurntableGlobalPivot(unittest.TestCase):
                 f"translated objects aren't framed correctly (span={span} of 120)",
             )
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_fit_static_uses_existing_camera_unchanged(self):
         """fit='static' must NOT autofit -- the scene's existing Camera
         is used as-is for the orbit base, only its position rotates per
@@ -614,6 +619,7 @@ class TestTurntableGlobalPivot(unittest.TestCase):
                     default_light  = False,
                 )
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_no_off_center_clipping_on_translated_scene(self):
         """Regression for the off-center clipping bug.  With three cubes
         spread along X (asymmetric silhouette per angle), the BBX-based
@@ -756,6 +762,7 @@ class TestTurntableGlobalPivot(unittest.TestCase):
             f"(centroid is at (10, 0, 0); should NOT orbit world 0): r = {rs_origin}",
         )
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_silhouette_centered_in_frame(self):
         """At every sampled angle, the silhouette's centroid in pixel space
         must be near the image centre.  This is the property the BBX-based
@@ -890,6 +897,7 @@ class TestObjectRenderShim(unittest.TestCase):
         self.assertEqual(frame.shape, (500, 500, 4))
         self.assertEqual(frame.dtype, np.uint8)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_object_render_save_to_disk(self):
         """When output= is given, the frame should be saved to disk."""
         obj = Object(name="cube", mesh=self.mesh, uv=self.uv)
@@ -938,6 +946,7 @@ class TestObjectRenderShim(unittest.TestCase):
         _         = obj.render(resolution=(32, 32))
         np.testing.assert_array_equal(obj.world_matrix, wm_before)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_object_turntable_writes_frames(self):
         """Object.turntable() should produce an image sequence."""
         obj = Object(name="cube", mesh=self.mesh, uv=self.uv)
@@ -951,6 +960,7 @@ class TestObjectRenderShim(unittest.TestCase):
             for f in files:
                 self.assertTrue(os.path.exists(f))
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_object_turntable_default_resolution_is_500(self):
         """The default resolution for turntable should be 500x500
         (the per-Object default resolution)."""
@@ -985,6 +995,7 @@ class TestFrameWireframe(unittest.TestCase):
         self.assertIsNotNone(self.frame.angle_of_view)
         self.assertGreater(float(self.frame.angle_of_view), 0.0)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_wireframe_modifies_pixels(self):
         """A wireframe overlay must change at least some pixels (it'd be
         meaningless if no edges got drawn)."""
@@ -993,6 +1004,7 @@ class TestFrameWireframe(unittest.TestCase):
         diff = int(np.any(self.frame.array != wired.array, axis=-1).sum())
         self.assertGreater(diff, 0, "wireframe drew zero pixels")
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_wireframe_color_kwarg(self):
         """Passing a bright red color must produce visible red pixels."""
         red = self.frame.wireframe(self.scene, color=(255, 0, 0, 255), width=2)
@@ -1004,6 +1016,7 @@ class TestFrameWireframe(unittest.TestCase):
         # Wider line -> noticeable count of red pixels.
         self.assertGreater(int(red_mask.sum()), 20)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_wireframe_width_increases_pixel_count(self):
         """Width=3 should color more pixels than width=1 for the same scene."""
         thin  = self.frame.wireframe(self.scene, color=(255, 0, 0, 255), width=1)
@@ -1024,14 +1037,17 @@ class TestFrameWireframe(unittest.TestCase):
         )
         self.assertGreater(thick_count, thin_count)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_wireframe_accepts_scene(self):
         wired = self.frame.wireframe(self.scene)
         self.assertEqual(wired.shape, self.frame.shape)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_wireframe_accepts_object(self):
         wired = self.frame.wireframe(self.scene.objects[0])
         self.assertEqual(wired.shape, self.frame.shape)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_wireframe_accepts_meshdata(self):
         wired = self.frame.wireframe(self.mesh)
         self.assertEqual(wired.shape, self.frame.shape)
@@ -1044,12 +1060,14 @@ class TestFrameWireframe(unittest.TestCase):
         with self.assertRaises(ValueError):
             bare.wireframe(self.scene)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_wireframe_bad_source_raises(self):
         with self.assertRaises(TypeError):
             self.frame.wireframe(42)
         with self.assertRaises(TypeError):
             self.frame.wireframe("not a scene")
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_wireframe_preserves_camera_metadata(self):
         """The returned Frame should carry the same camera_matrix /
         angle_of_view -- useful for chained overlays."""
@@ -1057,6 +1075,7 @@ class TestFrameWireframe(unittest.TestCase):
         np.testing.assert_array_equal(wired.camera_matrix, self.frame.camera_matrix)
         self.assertEqual(wired.angle_of_view, self.frame.angle_of_view)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_wireframe_chainable(self):
         """Two wireframe calls should chain (e.g., black mesh edges +
         red object outlines)."""
@@ -1085,6 +1104,7 @@ class TestFrameWireframe(unittest.TestCase):
         # but only 18 unique edges (12 cube edges + 6 face diagonals).
         self.assertLess(unique_pairs.shape[0], per_face_pairs.shape[0])
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_wireframe_cull_backfaces_default_on(self):
         """Default behaviour culls back-facing edges -- so the culled
         result should differ from an explicit X-ray pass."""
@@ -1099,6 +1119,7 @@ class TestFrameWireframe(unittest.TestCase):
             "default cull_backfaces=True should produce different pixels than X-ray",
         )
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_wireframe_cull_reduces_drawn_pixels(self):
         """Culled pass should draw strictly fewer red pixels than X-ray
         for a cube viewed at 3/4 angle (some faces are back-facing)."""
@@ -1116,6 +1137,7 @@ class TestFrameWireframe(unittest.TestCase):
         self.assertGreater(x, 0)
         self.assertLess(c, x, f"cull should remove pixels (culled={c}, xray={x})")
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_wireframe_cull_works_for_translated_object(self):
         """Cull must use world-space face normals, so a translated /
         rotated object's wireframe still culls correctly."""
@@ -1178,6 +1200,7 @@ class TestFrameWireframe(unittest.TestCase):
             "face_normals should be None / absent when with_cull_data=False",
         )
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_wireframe_cull_faceless_orphan_edges_keep_drawn(self):
         """Edges with no adjacent face (orphans) should survive cull."""
         # Build a tiny mesh where one edge is an orphan (no face uses it).
@@ -1205,6 +1228,7 @@ class TestToImageCache(unittest.TestCase):
         self.assertIs(obj.frame, f)
         self.assertEqual(obj.buffer.shape, (48, 48, 4))
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_object_to_image_lazy_renders_when_no_cache(self):
         obj = Object(name="cube", mesh=self.mesh)
         img = obj.to_image()
@@ -1215,6 +1239,7 @@ class TestToImageCache(unittest.TestCase):
         # PIL Image .size is (width, height).
         self.assertEqual(img.size, (500, 500))
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_object_to_image_uses_cached_frame_no_rerender(self):
         obj       = Object(name="cube", mesh=self.mesh)
         f         = obj.render(resolution=(32, 32))
@@ -1226,6 +1251,7 @@ class TestToImageCache(unittest.TestCase):
         self.assertEqual(obj.buffer.shape, (32, 32, 4))
         self.assertEqual(img.size,         (32, 32))
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_object_to_image_returns_pil_image(self):
         """to_image() should return a PIL Image instance."""
         from PIL.Image import Image as _PILImage
@@ -1235,6 +1261,7 @@ class TestToImageCache(unittest.TestCase):
         img = obj.to_image()
         self.assertIsInstance(img, _PILImage)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_object_to_image_pixels_match_buffer(self):
         """The PIL Image returned by to_image must contain the same pixels
         as the cached frame buffer (no flip; Frame.array is top-down)."""
@@ -1250,6 +1277,7 @@ class TestToImageCache(unittest.TestCase):
         self.assertIs(scene.frame, f)
         self.assertEqual(scene.buffer.shape, (48, 48, 4))
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_scene_to_image_lazy_renders_at_resolution(self):
         scene = Scene("s")
         scene.append(Object(name="cube", mesh=self.mesh))
@@ -1258,6 +1286,7 @@ class TestToImageCache(unittest.TestCase):
         self.assertEqual(scene.buffer.shape, (40, 40, 4))
         self.assertEqual(img.size, (40, 40))
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_scene_to_image_default_resolution_is_500(self):
         """When no resolution is passed, lazy-render uses the 500x500 default."""
         scene = Scene("s")
@@ -1266,6 +1295,7 @@ class TestToImageCache(unittest.TestCase):
         self.assertEqual(scene.buffer.shape, (500, 500, 4))
         self.assertEqual(img.size, (500, 500))
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_scene_to_image_returns_pil_image(self):
         """Scene.to_image() should return a PIL Image instance."""
         from PIL.Image import Image as _PILImage
@@ -1276,6 +1306,7 @@ class TestToImageCache(unittest.TestCase):
         img = scene.to_image()
         self.assertIsInstance(img, _PILImage)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_scene_to_image_uses_cached_frame_no_rerender(self):
         """to_image must NOT re-render when a frame is already cached."""
         scene = Scene("s")
@@ -1362,6 +1393,7 @@ class TestSceneRenderConfig(unittest.TestCase):
         f = scene.render(resolution=(40, 30), default_light=True)
         self.assertEqual(f.shape, (30, 40, 4))
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_turntable_uses_scene_attrs(self):
         """Scene.resolution should propagate to turntable() too."""
         scene = Scene("s", resolution=(48, 48))
@@ -2637,6 +2669,7 @@ def _minimal_glb_with_color(png: bytes) -> bytes:
 class TestGlbTextureExtraction(unittest.TestCase):
     """Tests for ``_extract_glb_textures`` and the ``Object`` wrappers."""
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_extract_glb_textures_finds_base_color(self):
         from cgmath.render.scene import _extract_glb_textures
 
@@ -2695,6 +2728,7 @@ class TestGlbTextureExtraction(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_extract_glb_textures_pil_unavailable(self):
         from cgmath.render import scene as scene_mod
         from cgmath.render.scene import _extract_glb_textures
@@ -2723,6 +2757,7 @@ class TestGlbTextureExtraction(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_extract_glb_textures_data_uri(self):
         from cgmath.render.scene import _extract_glb_textures
 
@@ -2744,6 +2779,7 @@ class TestGlbTextureExtraction(unittest.TestCase):
             textures["base_color"][:, :, 1], np.full((2, 2), 255, dtype=np.uint8)
         )
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_extract_glb_textures_extracts_all_pbr_slots(self):
         """Multi-texture support: helper still extracts non-base_color slots."""
         from cgmath.render.scene import _extract_glb_textures
@@ -2809,6 +2845,7 @@ class TestGlbTextureExtraction(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_object_extract_texture_from_glb_assigns_texture(self):
         mesh, uv = _make_textured_cube()
         obj = Object(name="cube", mesh=mesh, uv=uv)
@@ -2871,6 +2908,7 @@ class TestGlbTextureExtraction(unittest.TestCase):
         self.assertIsNone(obj._wired_texture_cache)
         self.assertIsNone(obj._loaded_texture)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_object_load_glb_auto_extracts_texture(self):
         """Object.load_glb auto-fills texture from the GLB when no override."""
         from cgmath.render import scene as scene_mod
@@ -2886,6 +2924,7 @@ class TestGlbTextureExtraction(unittest.TestCase):
         self.assertIsNotNone(obj.texture)
         self.assertIsInstance(obj.texture, np.ndarray)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_object_load_glb_extract_texture_false(self):
         from cgmath.render import scene as scene_mod
 
@@ -2899,6 +2938,7 @@ class TestGlbTextureExtraction(unittest.TestCase):
 
         self.assertIsNone(obj.texture)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_object_load_glb_explicit_texture_wins(self):
         """An explicit ``texture=`` kwarg suppresses auto-extraction."""
         from cgmath.render import scene as scene_mod

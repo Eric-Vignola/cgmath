@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 from cgmath.geometry import MeshData, MorphList, SkinData, UVList
 from cgmath.geometry.map import GeomSubsetData, MapData
-from cgmath.geometry.mesh import SampleMethod
+from cgmath.geometry.mesh import cv2, SampleMethod, skimage
 from cgmath.geometry.resample import MeshDataResampler, ResampleMode
 
 EPSILON = np.finfo(np.float32).eps
@@ -68,6 +68,7 @@ class TestHierarchy(unittest.TestCase):
 
 
 
+    @unittest.skipIf(cv2 is None and skimage is None, "needs cv2 or scikit-image")
     def test_overlap(self):
         indices, result1, result2 = self.overlap_data
 

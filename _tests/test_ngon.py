@@ -2,7 +2,7 @@ import os
 import unittest
 
 import numpy as np
-from cgmath.geometry.mesh import MeshData, UVList
+from cgmath.geometry.mesh import MeshData, UVList, skimage
 
 
 class TestNgon(unittest.TestCase):
@@ -126,6 +126,7 @@ class TestNgon(unittest.TestCase):
 
     # --- UV bitmap rendering ---
 
+    @unittest.skipIf(skimage is None, "scikit-image is not installed")
     def test_uv_bitmap_render(self):
         uv_data               = self.uv_list.copy()
         uv_data[0].renderer   = "skimage"

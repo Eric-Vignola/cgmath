@@ -38,6 +38,13 @@ try:
 except ImportError:
     trimesh = None
 
+# rendered frames go through PIL (Frame.image); it is a separate extra from
+# pygltflib / trimesh, so HAVE_GLB alone does not cover these tests
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
 if pygltflib is not None:
     from cgmath._tests.test_object_skin import write_glb
 
@@ -81,6 +88,7 @@ class AnimateCase(unittest.TestCase):
 
 
 class TestAnimate(AnimateCase):
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_writes_one_frame_per_clip_frame(self):
         path    = self.skinned_glb()
         scene   = self.scene_with(path)
@@ -90,6 +98,7 @@ class TestAnimate(AnimateCase):
         self.assertEqual(len(written), 5)
         self.assertTrue(all(os.path.exists(p) for p in written))
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_the_frames_are_not_all_the_same_picture(self):
         """the whole point -- turntable renders the bind pose N times"""
         path    = self.skinned_glb()
@@ -100,6 +109,7 @@ class TestAnimate(AnimateCase):
         blobs   = {open(p, "rb").read() for p in written}
         self.assertGreater(len(blobs), 1)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_the_scene_is_handed_back_undeformed(self):
         path  = self.skinned_glb()
         scene = self.scene_with(path)
@@ -110,6 +120,7 @@ class TestAnimate(AnimateCase):
 
         np.testing.assert_allclose(rest, obj.mesh.points, atol=1e-9)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_animating_twice_renders_the_same_thing(self):
         """follows from the restore, and is what would break silently"""
         path   = self.skinned_glb()
@@ -144,6 +155,7 @@ class TestAnimate(AnimateCase):
 
         np.testing.assert_allclose(rest, obj.mesh.points, atol=1e-9)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_frame_n_shows_pose_n(self):
         """'the frames differ' is also satisfied by a clip played backwards
 
@@ -194,6 +206,7 @@ class TestAnimate(AnimateCase):
 
         np.testing.assert_allclose(rest, obj.mesh.points, atol=1e-9)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_an_unskinned_object_rides_along_as_a_prop(self):
         path      = self.skinned_glb()
         scene     = self.scene_with(path)
@@ -293,6 +306,7 @@ class TestAnimateGuards(AnimateCase):
         self.assertIn("no visible skinned Objects", str(caught.exception))
 
 
+@unittest.skipIf(Image is None, "PIL is not installed")
 class TestFraming(AnimateCase):
     def test_static_and_auto_choose_different_cameras(self):
         path = self.skinned_glb()
@@ -436,6 +450,7 @@ class TestEncodeFrameStream(unittest.TestCase):
 
 @unittest.skipIf(not HAVE_GLB, "pygltflib / trimesh are not installed")
 class TestObjectAnimate(AnimateCase):
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_it_renders_without_a_scene(self):
         path = self.skinned_glb()
         obj  = Object.load_glb(path)
@@ -444,6 +459,7 @@ class TestObjectAnimate(AnimateCase):
 
         self.assertEqual(len(written), 5)
 
+    @unittest.skipIf(Image is None, "PIL is not installed")
     def test_it_leaves_the_object_undeformed(self):
         path = self.skinned_glb()
         obj  = Object.load_glb(path)

@@ -8,11 +8,13 @@ from cgmath.geometry.bspline import BSplineData
 from cgmath.geometry.bspline_patch import BSplinePatchData
 from cgmath.geometry.mesh import (
     Axis,
+    cv2,
     load_obj,
     MeshData,
     MeshList,
     SampleMethod,
     save_obj,
+    skimage,
     UVData,
     UVList,
 )
@@ -1083,6 +1085,7 @@ class TestMesh(unittest.TestCase):
         self.assertTrue(allclose(faces, [1]))
 
 
+    @unittest.skipIf(cv2 is None and skimage is None, "needs cv2 or scikit-image")
     def test_rasterization(self):
 
         # test rasterization
