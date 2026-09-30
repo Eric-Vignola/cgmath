@@ -27,7 +27,6 @@ Conventions: matrices are row-major with translation at `M[3, :3]`; quaternions 
 - [`cgmath.geometry.pack`](#cgmathgeometrypack)
 - [`cgmath.geometry.resample`](#cgmathgeometryresample)
 - [`cgmath.geometry.robust_skinweights_transfer_bilinear`](#cgmathgeometryrobust_skinweights_transfer_bilinear)
-- [`cgmath.geometry.surface_plotting`](#cgmathgeometrysurface_plotting)
 - [`cgmath.geometry.deform`](#cgmathgeometrydeform)
 - [`cgmath.geometry.utils`](#cgmathgeometryutils)
 - [`cgmath.render`](#cgmathrender)
@@ -2173,59 +2172,6 @@ find_matches_closest_surface(sample_data: 'SampleData', dst_mesh: 'MeshData', sr
     For each vertex on the target mesh find a match on the source mesh.
 robust_skinweights_transfer_bilinear(src_mesh: 'MeshData', src_skin_data: 'SkinData', dst_mesh: 'MeshData', transfer_options: 'RobustBilinearSkinTransferOptions | None' = None, sample_data: 'SampleData | None' = None) -> 'np.ndarray'
     Transfers skin weights from a source mesh onto a target mesh.
-```
-
-## `cgmath.geometry.surface_plotting`
-
-surface-space control retargeting.
-
-Functions:
-
-```text
-batch_retarget_init(function_data: dict, rig_args: dict, mesh_data: dict, uvn_scale: Optional[List[float]] = None, refactor_alignment: bool = False) -> dict
-    Initializes the retargeting process for a set of rigs, adjusting their function data to a new space.
-bspline_weigh_transformations(control_data: dict, bspline_map: dict, Mesh: Optional[object] = None, UVList: Optional[list] = None, uv_map_index: int = 0, normal_scale: float = 1.0, return_matrices: bool = False) -> dict
-    Computes the weighted transformation for objects based on B-spline mapping and optional surface constraints.
-build_normal_matrix(input_point: numpy.ndarray, normal_scale: float = 1.0) -> numpy.ndarray
-control_array_type_conversion(array: list, to_transformation_matrix: bool = False) -> numpy.ndarray
-    Converts an array of points or matrices into a different format based on the specified flag.
-control_sort(lst: List[str]) -> List[str]
-    Sorts a list of control names by separating and ordering them based on specific suffixes.
-convert_dict_vals_arrays(dictionary: dict, to_numpy_array: bool = False) -> dict
-    Recursively iterate over a dictionary and convert any numpy arrays to lists.
-convert_points_to_surfacespace_matrices(input_points: list, Mesh: object, UVList: list, uv_map_index: int = 0) -> numpy.ndarray
-    Converts input points to transformation matrices in surface space.
-extract_scale_matrix(transformation_matrix: numpy.ndarray) -> numpy.ndarray
-    Extracts the scale components from a 4x4 transformation matrix.
-find_key(dictionary: dict, key: str) -> list
-    Find all instances of a specific key in a dictionary.
-get_bspline_map_init(control_data: Tuple[List[str], numpy.ndarray], driven_data: Optional[Tuple[List[str], numpy.ndarray]] = None, Mesh: Optional[object] = None, UVList: Optional[List[object]] = None, uv_map_index: int = 0, uvn_scale: Optional[List[float]] = None, refactor_inputs: Optional[Tuple[List[str], numpy.ndarray]] = None, refactor_alignment: bool = False) -> Dict[str, Union[List, Dict]]
-    Initializes a B-spline mapping for control and driven data, potentially refactoring the control matrices.
-get_control_arrays(controls_list: List[str]) -> Dict[str, List[str]]
-    Organizes a list of control names into a dictionary based on their root names.
-get_function_pose(rig_function_data: dict, mesh_data: dict, pose: str, relative: bool = False) -> dict
-    Retrieves the pose data for a given rig and pose name, transforming it into the appropriate space.
-get_points_from_surface(Mesh: object, UVList: list, input_points: list, uv_map_index: int = 0, as_3d: bool = False) -> numpy.ndarray
-    Retrieves points from a surface based on input points and UV mapping.
-get_roots(controls_list: List[str]) -> List[str]
-    Extracts and returns the unique root names from a list of control names.
-refactor_control_object_matrices(control_matrices: numpy.ndarray, refactor_data: dict, refactor_alignment: bool = False) -> dict
-    Refactors control object matrices based on provided refactor data.
-refactor_control_object_matrices_init(control_matrices: numpy.ndarray, uvn_scale: list = None, refactor_inputs: list = None, refactor_alignment: bool = False) -> dict
-    Initializes the refactoring of control object matrices based on provided inputs.
-reset_scale(transformation_matrix: numpy.ndarray) -> numpy.ndarray
-    Resets the scale component of a transformation matrix to identity.
-retarget_function_data(function_data, bslpine_map_data, refactor_alignment=False)
-set_value_by_path(dictionary: dict, path: list, value) -> None
-    Set a value in a dictionary by a given path.
-surface_points_to_transformation_matrices(positions: numpy.ndarray, u_vecs: numpy.ndarray, v_vecs: numpy.ndarray) -> dict
-    Converts surface points and their corresponding U and V vectors into transformation matrices.
-transforms_from_surface_coordinates(Mesh: object, UVList: list, points: list, uv_map_index: int = 0, z_scale: float = 1.0) -> dict
-    Transforms points from surface coordinates to 3D space using the given mesh and UV list.
-transforms_to_surface_space(Mesh: object, UVList: list, matrices: numpy.ndarray, uv_map_index: int = 0, as_matrices: bool = False) -> numpy.ndarray
-    Converts transformation matrices to surface space coordinates.
-u_vector_to_rotation_matrix(input_vector: numpy.ndarray) -> numpy.ndarray
-    Converts a given U vector into a rotation matrix.
 ```
 
 ## `cgmath.geometry.deform`

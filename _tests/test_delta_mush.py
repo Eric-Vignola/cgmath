@@ -1,7 +1,7 @@
 import unittest
 
 import numpy as np
-from cgmath.geometry.delta_mush import DeltaMushData
+from cgmath.geometry.deform.delta_mush import DeltaMushData
 from cgmath.geometry.mesh import MeshData
 from cgmath.geometry.utils._numba._delta_mush import (
     _delta_mush_decode_ddm_numpy,

@@ -1,7 +1,7 @@
 import unittest
 
 import numpy as np
-from cgmath.geometry.ffd import FFDData
+from cgmath.geometry.deform.ffd import FFDData
 from cgmath.geometry.utils.main import (
     assign_cells,
     get_cell_corners,

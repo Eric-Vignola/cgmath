@@ -53,13 +53,8 @@ A CSG stack in, a quad `MeshData` out.
 | `pack.py` | `pack_islands` — the UV shell packer behind `UVData.pack` |
 | `resample.py` | `MeshDataResampler`, `ResampleMode`, `SpatialSkinTransferOptions`, `UVSkinTransferOptions` |
 | `robust_skinweights_transfer_bilinear.py` | robust weight inpainting, quad-native, no dependency |
-| `surface_plotting.py` | rig retargeting through UV surface frames |
 | [`deform/`](deform/README.md) | `FFDData`, `DeltaMushData`, `PatchRelaxData`, `SkinDeformData`, `WrapData` |
 | [`utils/`](utils/README.md) | the 59 numba kernels every one of the above stands on |
-
-`camera.py`, `delta_mush.py`, `ffd.py`, `patch_relax.py`, `raytracer.py` and
-`texture.py` are one-release deprecation shims. They warn on import and
-re-export from `cgmath.geometry.deform.*` or `cgmath.render.*`.
 
 ---
 
@@ -264,16 +259,6 @@ for robust when the two meshes genuinely differ.
 Each `ResampleMode` *value* is literally that mode's options dataclass
 (`ResampleMode.SPATIAL.value is SpatialSkinTransferOptions`).
 
-### `surface_plotting` speaks (u, v, n), not world
-
-Two heads that share a UV layout share surface coordinates even when their
-geometry does not, which is how a control rig authored on one is retargeted onto
-another. `transforms_to_surface_space` goes world → `(u, v, 0)`;
-`transforms_from_surface_coordinates` builds world frames back out. Those frames
-are Maya row-major with **X = U tangent, Y = V tangent, Z = surface normal**.
-Every entry point takes a `Mesh` (a `MeshData`) plus a `UVList` selected by
-`uv_map_index`.
-
 ---
 
 ## Conventions
@@ -412,8 +397,6 @@ Real behaviour, verified — not bugs to work around blindly.
 - `max_influences` on `RobustBilinearSkinTransferOptions` is applied only by
   `MeshDataResampler.resample_skin_weights`, never by the transfer function
   itself.
-- In `surface_plotting`, `u_vector_to_rotation_matrix` returns a **flat `(16,)`**
-  array, not a `(4, 4)`.
 - `MeshData.ngons` is a count, not an index list. `get_ngons()` is the list. The
   same holds for `triangles` / `get_triangles()` and `quads` / `get_quads()`.
 - `get_border_vertices()`, `get_non_manifold_vertices()`, `get_lamina_faces()`

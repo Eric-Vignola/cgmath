@@ -89,10 +89,6 @@ The numba kernels live one level up in `cgmath.geometry.utils._numba`
 wrappers in `cgmath.geometry.utils.main`. The RBF kernels come from
 `cgmath.rbf`.
 
-`cgmath.geometry.ffd`, `cgmath.geometry.delta_mush` and
-`cgmath.geometry.patch_relax` are deprecation shims for the old import paths —
-they warn and re-export. Import from `cgmath.geometry.deform`.
-
 ---
 
 ## Quick taste

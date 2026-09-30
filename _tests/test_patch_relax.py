@@ -1,8 +1,8 @@
 import unittest
 
 import numpy as np
+from cgmath.geometry.deform.patch_relax import PatchRelaxData
 from cgmath.geometry.mesh import MeshData
-from cgmath.geometry.patch_relax import PatchRelaxData
 from cgmath.geometry.utils import (
     build_vertex_rings,
     compute_decal_maps,

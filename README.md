@@ -86,10 +86,8 @@ cgmath/
 │   ├── map.py morph_target.py skin_weights.py    MapData, MorphData, SkinData
 │   ├── bspline.py bspline_patch.py _saddle_surface.py _cdt.py
 │   ├── sdf.py             SDF primitives + dual marching cubes
-│   ├── pack.py resample.py surface_plotting.py
+│   ├── pack.py resample.py
 │   ├── robust_skinweights_transfer_bilinear.py
-│   ├── camera.py delta_mush.py ffd.py patch_relax.py raytracer.py texture.py
-│   │                      one-release deprecation shims -- they warn and re-export
 │   ├── deform/            FFDData, DeltaMushData, PatchRelaxData,
 │   │                      SkinDeformData, WrapData
 │   └── utils/             main.py + _numba/ -- the kernel floor
