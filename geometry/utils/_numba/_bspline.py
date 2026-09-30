@@ -1491,7 +1491,8 @@ def _newton_closest_point_surface_parallel(
                         ki2 = cp_u + 2
                         d2  = kv_u[ki2 + du] - kv_u[ki2]
                         if d1 != 0.0 and d2 != 0.0:
-                            kid = cp_u + 1
+                            # divided by kv_u[i+du+1] - kv_u[i+2]
+                            kid = cp_u + 2
                             dd  = kv_u[kid + du - 1] - kv_u[kid]
                             if dd != 0.0:
                                 for iv in range(order_v):
@@ -1529,7 +1530,8 @@ def _newton_closest_point_surface_parallel(
                                 ki2 = cp_v + 2
                                 d2  = kv_v[ki2 + dv] - kv_v[ki2]
                                 if d1 != 0.0 and d2 != 0.0:
-                                    kid = cp_v + 1
+                                    # divided by kv_v[i+dv+1] - kv_v[i+2]
+                                    kid = cp_v + 2
                                     dd  = kv_v[kid + dv - 1] - kv_v[kid]
                                     if dd != 0.0:
                                         sc = (

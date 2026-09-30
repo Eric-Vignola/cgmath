@@ -1,14 +1,19 @@
-"""Direct tests for the numba B-spline basis derivative kernel.
+"""Direct tests for numba B-spline kernels, against scipy.
 
-``_compute_basis_derivatives`` has no public wrapper, so it is checked here
+``_compute_basis_derivatives`` has no public wrapper, so it is checked
 against scipy's derivatives of every basis function, on each kind of knot
-vector a curve can carry.
+vector a curve can carry. The surface closest-point Newton kernel is checked
+step by step against the same steps taken with scipy's exact second
+derivatives.
 """
 
 import unittest
 
 import numpy as np
-from cgmath.geometry.utils._numba._bspline import _compute_basis_derivatives
+from cgmath.geometry.utils._numba._bspline import (
+    _compute_basis_derivatives,
+    _newton_closest_point_surface_parallel,
+)
 from scipy.interpolate import BSpline
 
 # Clamped cubic knot vectors
@@ -117,6 +122,114 @@ class TestBasisDerivativeKernel(unittest.TestCase):
         kv = uniform_clamped(3, 4)
         with self.assertRaises(ValueError):
             _compute_basis_derivatives(inside_domain(kv, 3), kv, 7, 3, -1)
+
+
+def patch(d, spans_u, spans_v, periodic_u, seed=8):
+    """
+    A bumpy cubic patch: a tube around y when periodic in u, a grid
+    otherwise. Returns the knot vectors, the control points (wrapped along
+    u when periodic, as BSplinePatchData stores them) and the parameter
+    ranges.
+    """
+    rng  = np.random.default_rng(seed)
+    n_u  = spans_u if periodic_u else spans_u + d
+    n_v  = spans_v + d
+    rows = np.arange(n_v, dtype=float)[None, :] * np.ones((n_u, 1))
+    if periodic_u:
+        angle  = 2 * np.pi * np.arange(n_u) / n_u
+        radius = 3 + rng.uniform(-0.5, 0.5, (n_u, n_v))
+        x      = radius * np.cos(angle)[:, None]
+        z      = radius * np.sin(angle)[:, None]
+        cvs    = np.stack([x, rows, z], axis=-1)
+        cvs    = cvs[np.r_[np.arange(n_u), np.arange(d) % n_u]]
+        kv_u   = periodic_style(d, n_u)
+        max_u  = float(n_u)
+    else:
+        cols  = np.arange(n_u, dtype=float)[:, None] * np.ones((1, n_v))
+        cvs   = np.stack([cols, rows, rng.uniform(-0.6, 0.6, (n_u, n_v))], axis=-1)
+        kv_u  = uniform_clamped(d, spans_u)
+        max_u = float(spans_u)
+    return kv_u, uniform_clamped(d, spans_v), cvs, max_u, float(spans_v)
+
+
+def exact_newton_steps(queries, u, v, kv_u, kv_v, cvs, d, max_u, max_v, periodic_u, steps):
+    """
+    The kernel's closest-point Newton steps, with exact second derivatives
+    from scipy: same trust region, clamping and wrapping.
+    """
+    bu = BSpline(kv_u, np.eye(cvs.shape[0]), d)
+    bv = BSpline(kv_v, np.eye(cvs.shape[1]), d)
+    for _ in range(steps):
+        eu = [bu(u), bu.derivative(1)(u), bu.derivative(2)(u)]
+        ev = [bv(v), bv.derivative(1)(v), bv.derivative(2)(v)]
+
+        def surface(i, j):
+            return np.einsum("ni,nj,ijd->nd", eu[i], ev[j], cvs)
+
+        def dot(a, b):
+            return np.einsum("nd,nd->n", a, b)
+
+        su, sv = surface(1, 0), surface(0, 1)
+        r      = surface(0, 0) - queries
+        f1     = dot(r, su)
+        f2     = dot(r, sv)
+        j11    = dot(su, su) + dot(r, surface(2, 0))
+        j12    = dot(su, sv) + dot(r, surface(1, 1))
+        j22    = dot(sv, sv) + dot(r, surface(0, 2))
+        det    = j11 * j22 - j12 * j12
+        det    = np.where(np.abs(det) < 1e-14, np.where(det >= 0, 1e-14, -1e-14), det)
+        step_u = np.clip((-f1 * j22 + f2 * j12) / det, -0.5, 0.5)
+        step_v = np.clip((f1 * j12 - f2 * j11) / det, -0.5, 0.5)
+
+        u = (u + step_u) % max_u if periodic_u else np.clip(u + step_u, 0.0, max_u)
+        v = np.clip(v + step_v, 0.0, max_v)
+    return u, v
+
+
+class TestSurfaceNewtonKernel(unittest.TestCase):
+    """
+    Each Newton step uses exact second derivatives; S_uu and S_vv once
+    divided by a knot difference one index off (0.14 off after one step).
+    """
+
+    def assert_steps_exact(self, periodic_u):
+        d = 3
+        kv_u, kv_v, cvs, max_u, max_v = patch(d, 4, 3, periodic_u)
+
+        rng = np.random.default_rng(9)
+        u   = rng.uniform(0.05, max_u - 0.05, 40)
+        v   = rng.uniform(0.05, max_v - 0.05, 40)
+        on = np.einsum(
+            "ni,nj,ijd->nd",
+            BSpline(kv_u, np.eye(cvs.shape[0]), d)(u),
+            BSpline(kv_v, np.eye(cvs.shape[1]), d)(v),
+            cvs,
+        )
+        queries = on + rng.normal(scale=0.15, size=on.shape)
+        u0      = u + rng.uniform(-0.25, 0.25, u.shape)
+        u0      = u0 % max_u if periodic_u else np.clip(u0, 0.0, max_u)
+        v0      = np.clip(v + rng.uniform(-0.25, 0.25, v.shape), 0.0, max_v)
+
+        for steps in (1, 2):
+            with self.subTest(steps=steps):
+                found_u, found_v = _newton_closest_point_surface_parallel(
+                    queries, u0, v0, kv_u, kv_v, cvs, d, d, max_u, max_v,
+                    periodic_u, False, steps, 0.0,
+                )[:2]
+                exact_u, exact_v = exact_newton_steps(
+                    queries, u0, v0, kv_u, kv_v, cvs, d, max_u, max_v, periodic_u, steps
+                )
+                gap_u = found_u - exact_u
+                if periodic_u:
+                    gap_u = (gap_u + max_u / 2) % max_u - max_u / 2
+                np.testing.assert_allclose(gap_u, 0.0, atol=1e-12)
+                np.testing.assert_allclose(found_v, exact_v, atol=1e-12)
+
+    def test_open_patch(self):
+        self.assert_steps_exact(periodic_u=False)
+
+    def test_periodic_patch(self):
+        self.assert_steps_exact(periodic_u=True)
 
 
 if __name__ == "__main__":
