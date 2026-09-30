@@ -2804,6 +2804,388 @@ class TestBSpline(unittest.TestCase):
         self.assertEqual(obj.points.shape[0], 6)
 
 
+class TestBSplineFit(unittest.TestCase):
+    """BSplineData.fit(), stored knots, and the kernels that read them."""
+
+    # a joint chain and the curve Maya 2025 builds for it:
+    # ikHandle(solver="ikSplineSolver", simplifyCurve=False)
+    CHAIN = np.array([[0.0, 0.0, 0.0], [1.0, 2.0, 0.0], [1.5, 5.0, 0.5], [3.0, 7.0, 1.0],
+                      [5.0, 8.0, 1.0], [6.0, 11.0, 0.0], [6.5, 12.0, -1.0], [8.0, 15.0, -1.0],
+                      [10.0, 16.0, 0.0], [11.0, 19.0, 1.0]])
+
+    MAYA_CVS = np.array([[0.0, 0.0, 0.0],
+                         [0.39721523705829037, 0.6502481418433167, -0.023758289026230263],
+                         [1.341953893385036, 2.1968014924990698, -0.08026511947284129],
+                         [1.135779666275262, 4.896952415856927, 0.4326108941173349],
+                         [2.6934802467065047, 7.225050345772469, 1.097836903415178],
+                         [5.755860186165289, 7.726784917799885, 1.0411800087259482],
+                         [5.7002816478912015, 10.827518393737984, 0.6101469568262011],
+                         [6.759430514559802, 12.17940014802975, -1.6749528973756593],
+                         [7.405407000624257, 15.394714197779033, -1.2529262622562023],
+                         [10.6331152401805, 15.678992732866327, 0.21812929996582908],
+                         [10.866029504284741, 17.78731133429811, 0.7144945314154065],
+                         [11.0, 19.0, 1.0]])
+
+    MAYA_KNOTS = np.array([0.0, 0.0, 0.0, 2.23606797749979, 5.318274978984277,
+                           7.86778473578067, 10.10385271328046, 13.420477503635857,
+                           14.920477503635857, 18.27457946988554, 20.72406921266872,
+                           24.04069400302412, 24.04069400302412, 24.04069400302412])
+
+    @staticmethod
+    def ring(n, seed=0):
+        """n points around a bumpy loop"""
+        rng    = np.random.default_rng(seed)
+        angles = 2 * np.pi * np.arange(n) / n + rng.uniform(-0.2, 0.2, n)
+        radii  = 3 + rng.uniform(-0.5, 0.5, n)
+        height = rng.uniform(-0.5, 0.5, n)
+        return np.column_stack([radii * np.cos(angles), height, radii * np.sin(angles)])
+
+    @staticmethod
+    def derivative(curve, u, order):
+        """curve derivative of the given order at native parameter u"""
+        curve.rebuild()
+        spline = curve._spl.derivative(order) if order else curve._spl
+        return spline(u)
+
+    def test_blank_curve(self):
+        curve = BSplineData()
+        self.assertEqual(curve.points.shape, (0, 3))
+        self.assertEqual(curve.degree, 3)
+        self.assertFalse(curve.periodic)
+        self.assertIsNone(curve.knots)
+
+        curve.fit(self.CHAIN)
+        self.assertEqual(curve.count, len(self.CHAIN) + 2)
+
+        # the default points are not shared with the fitted curve
+        self.assertEqual(BSplineData().points.shape, (0, 3))
+
+    def test_matches_maya_spline_ik(self):
+        curve = BSplineData()
+        curve.fit(self.CHAIN)
+        self.assertTrue(np.allclose(curve.points, self.MAYA_CVS, atol=1e-9))
+
+        # Maya's knot spacing, scaled to [0, max_param]
+        knots = self.MAYA_KNOTS / self.MAYA_KNOTS[-1] * curve.max_param
+        self.assertTrue(np.allclose(curve.kv, knots, atol=1e-12))
+
+        # the joints sit on the knots
+        points, _ = curve.compute(knots[2:-2])
+        self.assertTrue(np.allclose(points, self.CHAIN, atol=1e-12))
+
+    def test_open_degrees(self):
+        points = self.CHAIN[:8]
+        for degree in range(1, 8):
+            curve = BSplineData(degree=degree)
+            curve.fit(points)
+            self.assertEqual(curve.count, len(points) + degree - 1)
+
+            # passes through every point, on the knots
+            found, _ = curve.compute(np.unique(curve.kv))
+            self.assertTrue(np.allclose(found, points, atol=1e-9), degree)
+
+            # Maya's end conditions
+            for order in range(2, 2 + degree // 2):
+                start = self.derivative(curve, 0.0, order)
+                self.assertTrue(np.allclose(start, 0.0, atol=1e-6), (degree, order))
+            for order in range(2, 2 + (degree - 1) // 2):
+                end = self.derivative(curve, float(curve.max_param), order)
+                self.assertTrue(np.allclose(end, 0.0, atol=1e-6), (degree, order))
+
+    def test_periodic_degrees(self):
+        for n in (7, 8):
+            points = self.ring(n)
+            for degree in range(1, 8):
+                curve = BSplineData(degree=degree, periodic=True)
+                curve.fit(points)
+                self.assertEqual(curve.count, n)
+
+                # passes through every point: on the knots for odd degrees,
+                # mid-span for even ones
+                distances = curve.sample(points).distances
+                self.assertTrue(np.allclose(distances, 0.0, atol=1e-9), (n, degree))
+
+                # smooth across the seam
+                for order in range(degree):
+                    start = self.derivative(curve, 0.0, order)
+                    end   = self.derivative(curve, float(curve.max_param), order)
+                    self.assertTrue(np.allclose(start, end, atol=1e-7), (n, degree, order))
+
+    def test_periodic_drops_repeated_closing_point(self):
+        points = self.ring(6)
+        curve  = BSplineData(periodic=True)
+        curve.fit(points)
+        closed = BSplineData(periodic=True)
+        closed.fit(np.vstack([points, points[:1]]))
+
+        self.assertEqual(closed.count, 6)
+        self.assertTrue(np.allclose(closed.points, curve.points))
+
+    def test_keep_count_more(self):
+        for periodic, points in ((False, self.CHAIN), (True, self.ring(8))):
+            maya = BSplineData(periodic=periodic)
+            maya.fit(points)
+            for count in (maya.count + 1, maya.count + 7):
+                curve = BSplineData(points=np.zeros((count, 3)), periodic=periodic)
+                curve.fit(points, resize=False)
+                self.assertEqual(curve.count, count)
+
+                # Maya's curve with knots inserted: the same shape
+                u = np.linspace(0, curve.max_param, 101)
+                found, _ = curve.compute(u)
+                same, _ = maya.compute(u * maya.max_param / curve.max_param)
+                self.assertTrue(np.allclose(found, same, atol=1e-9), (periodic, count))
+
+    def test_keep_count_between(self):
+        # fewer control points than Maya's, at least one per point
+        for count in (len(self.CHAIN), len(self.CHAIN) + 1):
+            curve = BSplineData(points=np.zeros((count, 3)))
+            curve.fit(self.CHAIN, resize=False)
+            self.assertEqual(curve.count, count)
+            self.assertTrue(np.allclose(curve.sample(self.CHAIN).distances, 0.0, atol=1e-9), count)
+
+            ends, _ = curve.compute([0.0, curve.max_param])
+            self.assertTrue(np.allclose(ends, self.CHAIN[[0, -1]], atol=1e-12), count)
+
+    def test_keep_count_fewer(self):
+        curve = BSplineData(points=np.zeros((6, 3)))
+        curve.fit(self.CHAIN, resize=False)
+        self.assertEqual(curve.count, 6)
+
+        # the ends stay on the first and last point, the rest is a best fit
+        ends, _ = curve.compute([0.0, curve.max_param])
+        self.assertTrue(np.allclose(ends, self.CHAIN[[0, -1]], atol=1e-12))
+
+        miss = curve.sample(self.CHAIN).distances.max()
+        self.assertTrue(1e-3 < miss < 1.5, miss)
+
+    def test_keep_count_blank_resizes(self):
+        curve = BSplineData()
+        curve.fit(self.CHAIN, resize=False)
+        self.assertEqual(curve.count, len(self.CHAIN) + 2)
+
+    def test_fit_returns_sample_params(self):
+        # every flag combination and count: fit's u is what sample() finds
+        cases = ((False, self.CHAIN, (0, 15, 11, 6)), (True, self.ring(8), (0, 12, 5)))
+        for periodic, points, counts in cases:
+            for uniform in (False, True):
+                for registered in (False, True):
+                    for count in counts:
+                        curve = BSplineData(
+                            points     = np.zeros((count, 3)),
+                            periodic   = periodic,
+                            uniform    = uniform,
+                            registered = registered,
+                        )
+                        u        = curve.fit(points, resize=count == 0)
+                        expected = curve.sample(points).params
+                        period   = 1.0 if uniform else float(curve.max_param)
+                        diff     = u - expected
+                        if periodic:
+                            diff = (diff + period / 2) % period - period / 2
+                        tag = (periodic, uniform, registered, count)
+
+                        self.assertEqual(u.shape, (len(points),), tag)
+                        self.assertTrue(np.allclose(diff, 0.0, atol=1e-9), tag)
+                        self.assertTrue(np.all((u >= 0.0) & (u <= period)), tag)
+
+    def test_fit_params_land_on_the_points(self):
+        for periodic, points in ((False, self.CHAIN), (True, self.ring(7))):
+            for uniform in (False, True):
+                for registered in (False, True):
+                    curve = BSplineData(periodic=periodic, uniform=uniform, registered=registered)
+                    found, _ = curve.compute(curve.fit(points))
+                    tag = (periodic, uniform, registered)
+                    self.assertTrue(np.allclose(found, points, atol=1e-9), tag)
+
+    def test_fit_params_repeated_closing_point(self):
+        # one u per input point; the closing point gets the first one's
+        points = self.ring(6)
+        u      = BSplineData(periodic=True).fit(np.vstack([points, points[:1]]))
+        self.assertEqual(u.shape, (7,))
+        self.assertEqual(u[-1], u[0])
+
+    def test_sample_params_in_range(self):
+        # registered periodic curves used to return negative values
+        rng = np.random.default_rng(4)
+        for periodic, points in ((False, self.MAYA_CVS), (True, self.ring(8))):
+            queries = points + rng.normal(scale=0.3, size=points.shape)
+            for uniform in (False, True):
+                for registered in (False, True):
+                    curve = BSplineData(
+                        points     = points,
+                        periodic   = periodic,
+                        uniform    = uniform,
+                        registered = registered,
+                    )
+                    found = curve.sample(queries)
+                    top   = 1.0 if uniform else float(curve.max_param)
+                    back, _ = curve.compute(found.params)
+                    tag = (periodic, uniform, registered)
+
+                    self.assertTrue(np.all((found.params >= 0.0) & (found.params <= top)), tag)
+                    self.assertTrue(np.allclose(back, found.points, atol=1e-9), tag)
+
+        # u=0 on a registered periodic curve is still CV 0's Greville point
+        plain      = BSplineData(points=self.ring(8), periodic=True)
+        registered = BSplineData(points=self.ring(8), periodic=True, registered=True)
+        greville   = np.mean(plain.kv[: plain.degree]) % plain.max_param
+        self.assertTrue(np.allclose(registered.compute(0.0)[0], plain.compute(greville)[0]))
+
+    def test_fit_keeps_callers_array(self):
+        points = self.MAYA_CVS.copy()
+        curve  = BSplineData(points=points)
+        curve.fit(self.CHAIN[::-1], resize=False)
+        self.assertTrue(np.array_equal(points, self.MAYA_CVS))
+
+    def test_fit_errors(self):
+        # one point
+        with self.assertRaises(ValueError):
+            BSplineData().fit(self.CHAIN[:1])
+
+        # a closed curve through two points
+        with self.assertRaises(ValueError):
+            BSplineData(periodic=True).fit(self.CHAIN[:2])
+
+        # a closed curve with fewer points than its degree
+        with self.assertRaises(ValueError):
+            BSplineData(degree=5, periodic=True).fit(self.CHAIN[:4])
+
+        # two consecutive points at the same position
+        with self.assertRaises(ValueError):
+            BSplineData().fit(np.vstack([self.CHAIN[:3], self.CHAIN[2:]]))
+
+        # a kept count too small for a cubic
+        with self.assertRaises(ValueError):
+            BSplineData(points=np.zeros((3, 3))).fit(self.CHAIN, resize=False)
+
+        # degree 0
+        with self.assertRaises(ValueError):
+            BSplineData(degree=0).fit(self.CHAIN)
+
+        # not an (N, dims) array
+        with self.assertRaises(ValueError):
+            BSplineData().fit(np.zeros(3))
+
+    def test_knots_field(self):
+        # Maya's own knots give Maya's curve
+        fitted = BSplineData()
+        fitted.fit(self.CHAIN)
+        curve = BSplineData(points=self.MAYA_CVS, knots=self.MAYA_KNOTS)
+        self.assertTrue(np.allclose(curve.kv, fitted.kv, atol=1e-12))
+
+        u = np.linspace(0, curve.max_param, 50)
+        self.assertTrue(np.allclose(curve.compute(u)[0], fitted.compute(u)[0], atol=1e-9))
+
+        # wrong count, decreasing
+        with self.assertRaises(ValueError):
+            BSplineData(points=self.MAYA_CVS, knots=self.MAYA_KNOTS[:-1]).kv
+        with self.assertRaises(ValueError):
+            BSplineData(points=self.MAYA_CVS, knots=self.MAYA_KNOTS[::-1]).kv
+
+    def test_explicit_uniform_knots_change_nothing(self):
+        for periodic in (False, True):
+            for degree in (1, 2, 3):
+                settings = dict(
+                    points     = self.MAYA_CVS,
+                    degree     = degree,
+                    periodic   = periodic,
+                    registered = True,
+                )
+                plain = BSplineData(**settings)
+                knots = BSplineData(**settings, knots=plain.kv)
+                u     = np.linspace(0, 1, 37) * plain.max_param
+                tag   = (periodic, degree)
+
+                for a, b in (
+                    (plain.compute(u)[0], knots.compute(u)[0]),
+                    (plain.basis(u), knots.basis(u)),
+                    (plain.control_point_params, knots.control_point_params),
+                ):
+                    self.assertTrue(np.allclose(a, b, atol=1e-12), tag)
+
+                # the registration offset only applies to periodic curves
+                if periodic:
+                    self.assertTrue(np.isclose(plain._offset, knots._offset), tag)
+
+    def test_numba_matches_scipy(self):
+        rng = np.random.default_rng(3)
+        for periodic, degree, points in ((False, 3, self.CHAIN), (False, 5, self.CHAIN),
+                                         (True, 3, self.ring(8)), (True, 2, self.ring(8))):
+            fast = BSplineData(degree=degree, periodic=periodic)
+            fast.fit(points)
+            slow = BSplineData(
+                points    = fast.points,
+                degree    = degree,
+                periodic  = periodic,
+                knots     = fast.knots,
+                use_numba = False,
+            )
+            u   = np.linspace(0, fast.max_param, 101)
+            tag = (periodic, degree)
+
+            fast_points, fast_tangents = fast.compute(u)
+            slow_points, slow_tangents = slow.compute(u)
+            for a, b in (
+                (fast_points, slow_points),
+                (fast_tangents, slow_tangents),
+                (fast.basis(u, collapse=True), slow.basis(u, collapse=True)),
+            ):
+                self.assertTrue(np.allclose(a, b, atol=1e-12), tag)
+
+            queries = points + rng.normal(scale=0.2, size=points.shape)
+            a, b = fast.sample(queries), slow.sample(queries)
+            self.assertTrue(np.allclose(a.points, b.points, atol=1e-9), tag)
+            self.assertTrue(np.allclose(a.params, b.params, atol=1e-9), tag)
+
+    def test_sample_newton_matches_scipy(self):
+        # numba's closest-point Newton step uses the exact second
+        # derivative, so it takes the same steps as scipy's; a knot index
+        # one off made them drift apart (3e-4 after one step)
+        queries = self.CHAIN + np.random.default_rng(3).normal(scale=0.2, size=self.CHAIN.shape)
+        for knots in (None, self.MAYA_KNOTS):
+            fast = BSplineData(points=self.MAYA_CVS, knots=knots)
+            slow = BSplineData(points=self.MAYA_CVS, knots=knots, use_numba=False)
+            for iterations in (1, 2):
+                a = fast.sample(queries, max_newton_iters=iterations).params
+                b = slow.sample(queries, max_newton_iters=iterations).params
+                self.assertTrue(np.allclose(a, b, atol=1e-12), (knots is None, iterations))
+
+    def test_knots_serialize(self):
+        curve = BSplineData()
+        curve.fit(self.CHAIN)
+        self.assertIn("knots", curve.to_dict())
+        self.assertNotIn("knots", BSplineData(points=self.MAYA_CVS).to_dict())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            f = os.path.join(temp_dir, "curve")
+            for mode in ("pkl", "json", "npz"):
+                curve.save(f, mode=mode)
+                loaded = BSplineData.load(f)
+                self.assertTrue(curve == loaded, mode)
+                self.assertTrue(np.allclose(loaded.kv, curve.kv), mode)
+
+        self.assertTrue(curve == BSplineData.from_bytes(curve.to_bytes()))
+        self.assertTrue(curve == curve.copy())
+
+    def test_eq_compares_knots(self):
+        curve = BSplineData()
+        curve.fit(self.CHAIN)
+        self.assertFalse(curve == BSplineData(points=curve.points.copy()))
+
+    def test_open_close_drop_knots(self):
+        curve = BSplineData()
+        curve.fit(self.CHAIN)
+        curve.close()
+        self.assertIsNone(curve.knots)
+        self.assertTrue(np.allclose(curve.kv, BSplineData(points=curve.points, periodic=True).kv))
+
+        curve.fit(self.ring(6))
+        curve.open()
+        self.assertIsNone(curve.knots)
+        self.assertTrue(np.allclose(curve.kv, BSplineData(points=curve.points).kv))
+
+
 class TestUVList(unittest.TestCase):
     def setUp(self):
         super().setUp()

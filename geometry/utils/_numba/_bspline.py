@@ -17,6 +17,58 @@ from numba import njit, prange
 
 
 # --------------------------------------------------------------------------- #
+#                     Knot span lookup                                        #
+# --------------------------------------------------------------------------- #
+
+
+@njit(fastmath=True, cache=True)
+def _find_span(u, kv, d, limit):
+    """
+    Finds the knot span holding a parameter value.
+
+    Spans are counted from the start of the curve's domain: span ``s``
+    covers ``kv[d + s] <= u < kv[d + s + 1]``. Values before the domain
+    get span 0, values at or past the start of the last span get
+    ``limit``.
+
+    Uniform integer knots take a shortcut (the span is ``floor(u)``);
+    any other non-decreasing knot vector falls back to a binary search.
+
+    Parameters
+    ----------
+    u : float
+        Parameter value.
+    kv : np.ndarray
+        Knot vector (c + d + 1,).
+    d : int
+        Degree of the B-spline.
+    limit : int
+        Index of the last span, c - d - 1.
+
+    Returns
+    -------
+    int
+        Span index in [0, limit].
+    """
+    if u >= kv[d + limit]:
+        return limit
+
+    s = int(np.floor(u))
+    if 0 <= s < limit and kv[d + s] <= u < kv[d + s + 1]:
+        return s
+
+    lo = 0
+    hi = limit
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if kv[d + mid] <= u:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+# --------------------------------------------------------------------------- #
 #                     Original implementation                                 #
 # --------------------------------------------------------------------------- #
 
@@ -49,15 +101,11 @@ def _compute_basis(u, kv, c, d):
     """
     n     = u.shape[0]
     limit = c - d - 1
-    left  = np.empty(n, dtype=kv.dtype)
-    right = np.empty(n, dtype=kv.dtype)
+    left  = np.empty(n, dtype=np.int64)
+    right = np.empty(n, dtype=np.int64)
 
     for i in range(n):
-        left[i] = np.floor(u[i])
-        if left[i] < 0:
-            left[i] = 0
-        elif left[i] > limit:
-            left[i] = limit
+        left[i]  = _find_span(u[i], kv, d, limit)
         right[i] = left[i] + d + 1
 
     b  = np.empty((n, c), dtype=u.dtype)
@@ -132,11 +180,7 @@ def _compute_basis_parallel(u, kv, c, d):
     # Process each sample point in parallel
     for k in prange(n):
         # Compute left/right indices for this sample
-        left_k = int(np.floor(u[k]))
-        if left_k < 0:
-            left_k = 0
-        elif left_k > limit:
-            left_k = limit
+        left_k  = _find_span(u[k], kv, d, limit)
         right_k = left_k + d1
 
         u_k = u[k]
@@ -216,11 +260,7 @@ def _evaluate_bspline_curve(u, kv, control_points, d):
     # Process each sample point in parallel
     for k in prange(n):
         # Compute left/right indices
-        left_k = int(np.floor(u[k]))
-        if left_k < 0:
-            left_k = 0
-        elif left_k > limit:
-            left_k = limit
+        left_k  = _find_span(u[k], kv, d, limit)
         right_k = left_k + d1
 
         u_k = u[k]
@@ -715,11 +755,7 @@ def _evaluate_bspline_curve_derivative(u, kv, control_points, d):
         return result
 
     for k in prange(n):
-        left_k = int(np.floor(u[k]))
-        if left_k < 0:
-            left_k = 0
-        elif left_k > limit:
-            left_k = limit
+        left_k  = _find_span(u[k], kv, d, limit)
         right_k = left_k + d1
 
         u_k = u[k]
@@ -934,11 +970,7 @@ def _newton_closest_point_parallel(
         # Newton-Raphson iterations
         for _ in range(max_iters):
             # Find knot span for current u
-            left_k = int(np.floor(ui))
-            if left_k < 0:
-                left_k = 0
-            elif left_k > limit:
-                left_k = limit
+            left_k  = _find_span(ui, kv, degree, limit)
             right_k = left_k + order
 
             # === Compute basis functions at degree d ===
@@ -1040,8 +1072,9 @@ def _newton_closest_point_parallel(
                         denom2  = kv[kv_idx2 + degree] - kv[kv_idx2]
 
                         if denom1 != 0.0 and denom2 != 0.0:
-                            # Second derivative uses difference of Q vectors
-                            kv_idx_dd = cp_idx + 1
+                            # Second derivative uses difference of Q vectors,
+                            # divided by kv[i+degree+1] - kv[i+2]
+                            kv_idx_dd = cp_idx + 2
                             denom_dd  = kv[kv_idx_dd + degree - 1] - kv[kv_idx_dd]
                             if denom_dd != 0.0:
                                 scale = (
@@ -1103,11 +1136,7 @@ def _newton_closest_point_parallel(
             ui = ui_new
 
         # === Final evaluation at converged parameter ===
-        left_k = int(np.floor(ui))
-        if left_k < 0:
-            left_k = 0
-        elif left_k > limit:
-            left_k = limit
+        left_k  = _find_span(ui, kv, degree, limit)
         right_k = left_k + order
 
         # Recompute basis at final u

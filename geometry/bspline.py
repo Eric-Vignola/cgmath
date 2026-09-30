@@ -1,8 +1,9 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 import numpy as np
 import scipy.integrate as si
-from cgmath.geometry._base import Data
+from cgmath.geometry._base import Data, ImmutableArray as numpy_array
 from cgmath.geometry.utils import compute_basis
 from cgmath.geometry.utils._numba._bspline import (
     _compute_basis_parallel,
@@ -52,11 +53,12 @@ class BSplineData(Data):
     Parameters
     ----------
     points : np.ndarray
-        Control point positions (N, dims).
+        Control point positions (N, dims). Empty by default, so
+        ``BSplineData()`` is an empty cubic for ``fit()`` to fill.
     degree : int
-        Degree of the B-spline curve.
+        Degree of the B-spline curve. Default is 3.
     periodic : bool
-        Whether the curve is closed/periodic.
+        Whether the curve is closed/periodic. Default is False.
     uniform : bool
         If True, uses arc-length parameterization where equal spacing in
         parameter space [0, 1] gives equal spacing along the curve.
@@ -66,21 +68,33 @@ class BSplineData(Data):
         If False, uses scipy.interpolate.BSpline.
     registered : bool
         If True, u=0 on periodic curves aligns with the curve point nearest
-        to points[0]. Uses the formula: offset = max_param - (degree - 1) / 2.
+        to points[0]. The offset is CV 0's Greville abscissa (the average
+        of the knots under its basis function), which on uniform knots is
+        offset = max_param - (degree - 1) / 2.
         Has no effect on non-periodic curves.
     arc_length_samples : int
         Number of samples used to build the arc-length lookup table.
         Higher values give more accurate arc-length parameterization.
         Default is 1000.
+    knots : np.ndarray, optional
+        Knot vector in Maya's layout, the one ``kv`` returns:
+        count + degree - 1 values on open curves, count + 2 * degree - 1
+        on periodic ones. None (default) gives uniform knots. The values
+        are rescaled so the parameter range stays [0, max_param]; only
+        their spacing shapes the curve. Periodic curves rebuild the knots
+        outside that range from the ones inside it, so the seam stays
+        smooth. Set by ``fit()``, cleared by ``open()`` and ``close()``;
+        call ``invalidate()`` after changing it by hand.
     """
 
-    points:             np.ndarray
-    degree:             int
-    periodic:           bool
+    points:             np.ndarray = numpy_array(np.zeros((0, 3)))
+    degree:             int = field(default=3)
+    periodic:           bool = field(default=False)
     uniform:            bool = field(default=False)
     use_numba:          bool = field(default=True)
     registered:         bool = field(default=False)
     arc_length_samples: int = field(default=1000)
+    knots:              Optional[np.ndarray] = None
 
     # --- cached attributes --- #
     _kv               = None  # curve knot vector
@@ -94,6 +108,7 @@ class BSplineData(Data):
     _u_table          = None  # corresponding native parameter values
     _total_length     = None  # total arc length of curve
     _cp_params        = None  # cached control point parameters
+    _offset           = None  # registration offset of periodic curves
 
     __repr__ = Data.__repr__
 
@@ -105,6 +120,7 @@ class BSplineData(Data):
                 self.periodic == other.periodic,
                 self.uniform == other.uniform,
                 self.registered == other.registered,
+                self.kv.shape == other.kv.shape and np.allclose(self.kv, other.kv),
             ]
         )
 
@@ -122,6 +138,9 @@ class BSplineData(Data):
         - All n control points are used
         - Parameter range is [0, n-degree]
         - Knot vector is clamped (repeated values at ends)
+
+        With ``knots`` set, the knot vector comes from them instead,
+        rescaled to the same parameter range.
         """
         self._count = self.points.shape[0]
 
@@ -159,6 +178,17 @@ class BSplineData(Data):
             # Geometry indices: direct mapping
             self._geometry = np.arange(self._count)
 
+        # Custom knots replace the uniform ones
+        if self.knots is not None:
+            self._kv = _knot_vector(self.knots, self._count, self.degree, self.periodic)
+
+        # Registration offset (periodic): CV 0's Greville abscissa, the
+        # average of the knots under its basis function
+        if self.knots is None:
+            self._offset = self._max_param - (self.degree - 1) / 2.0
+        else:
+            self._offset = self._max_param + np.mean(self._kv[1 : self.degree + 1])
+
         # Create scipy BSpline with control vertices (may be wrapped for periodic)
         self._cv_f64 = self.cv.astype(np.float64)
         self._spl    = BSpline(self._kv, self._cv_f64, self.degree)
@@ -182,7 +212,7 @@ class BSplineData(Data):
         n_samples = self.arc_length_samples
 
         if self.registered and self.periodic:
-            offset = self._max_param - (self.degree - 1) / 2.0
+            offset = self._offset
             self._u_table = np.linspace(
                 offset, offset + self._max_param, n_samples, dtype=np.float64
             )
@@ -266,8 +296,7 @@ class BSplineData(Data):
         u = np.asarray(u, dtype=np.float64)
 
         if self.registered and self.periodic and not self.uniform:
-            offset = self._max_param - (self.degree - 1) / 2.0
-            u      = u + offset
+            u = u + self._offset
 
         if self.uniform:
             u = self._arc_length_to_param(u % 1.0 if self.periodic else u)
@@ -283,7 +312,8 @@ class BSplineData(Data):
         domain [offset, offset+max_param] before lookup.
 
         If registered and periodic (non-uniform), removes the offset
-        so that the returned values are relative to points[0].
+        so that the returned values are relative to points[0], wrapped
+        into [0, max_param).
 
         Parameters
         ----------
@@ -299,12 +329,12 @@ class BSplineData(Data):
 
         if self.uniform:
             if self.registered and self.periodic:
-                offset = self._max_param - (self.degree - 1) / 2.0
-                u      = np.where(u < offset, u + self._max_param, u)
+                u = np.where(u < self._offset, u + self._max_param, u)
             u = self._param_to_arc_length(u)
         elif self.registered and self.periodic:
-            offset = self._max_param - (self.degree - 1) / 2.0
-            u      = u - offset
+            # A value a hair below 0 wraps to max_param itself; that is 0
+            u = (u - self._offset) % self._max_param
+            u = np.where(u >= self._max_param, 0.0, u)
 
         return u
 
@@ -596,6 +626,7 @@ class BSplineData(Data):
         self._u_table          = None
         self._total_length     = None
         self._cp_params        = None
+        self._offset           = None
 
     def rebuild(self) -> None:
         """
@@ -643,6 +674,7 @@ class BSplineData(Data):
 
         Converts the curve from periodic to non-periodic by keeping
         all control points and reinitializing with clamped knot vector.
+        Custom ``knots`` are dropped: the curve goes back to uniform knots.
         Topology change invalidates all caches (control_point_params,
         arc-length tables, etc).
         """
@@ -651,6 +683,7 @@ class BSplineData(Data):
 
         if self.periodic:
             self.periodic = False
+            self.knots    = None
             # Topology changed: invalidate everything (cp_params,
             # arc-length table, total_length) and rebuild.
             self.rebuild()
@@ -661,6 +694,7 @@ class BSplineData(Data):
 
         Converts the curve from non-periodic to periodic by
         reinitializing with periodic knot vector and wrapped geometry.
+        Custom ``knots`` are dropped: the curve goes back to uniform knots.
         Topology change invalidates all caches (control_point_params,
         arc-length tables, etc).
         """
@@ -669,6 +703,7 @@ class BSplineData(Data):
 
         if not self.periodic:
             self.periodic = True
+            self.knots    = None
             # Topology changed: invalidate everything (cp_params,
             # arc-length table, total_length) and rebuild.
             self.rebuild()
@@ -736,6 +771,175 @@ class BSplineData(Data):
         # stale. Invalidate so the next access rebuilds from fresh CPs.
         self.invalidate()
 
+    def fit(self, points, resize: bool = True) -> np.ndarray:
+        """
+        Moves the control points so the curve passes through the points,
+        and returns the curve parameter of each point.
+
+        Builds the curve Maya's EP Curve Tool builds, which is also the
+        spline IK curve when ``ikHandle`` doesn't simplify it
+        (``simplifyCurve=False``): each point becomes an edit point, where
+        two spans join, and the spans are spaced by the distance between
+        the points. Sets ``points`` (to a new array) and ``knots``; keeps
+        ``degree`` and ``periodic``.
+
+        Parameters
+        ----------
+        points : array-like
+            Points to pass through, in order (N, dims). A periodic curve
+            closes the loop itself, so a last point repeating the first
+            is dropped.
+        resize : bool
+            If True (default), the curve takes the control point count
+            Maya uses, N + degree - 1 when open and N when periodic, and
+            passes exactly through every point. If False, it keeps its
+            count. With more control points it is still Maya's curve,
+            with knots inserted: the same shape. With fewer it passes
+            exactly through the points while it has at least one control
+            point per point, as smoothly as it can, and as close as it
+            can below that; open curves keep their ends on the first and
+            last point. An empty curve is always resized.
+
+        Returns
+        -------
+        np.ndarray
+            The curve parameter of each point (N,), what ``sample(points)``
+            returns: [0, max_param], or [0, 1] with ``uniform``; periodic
+            curves wrap into the range, with u=0 at the registration
+            point when ``registered``. The point sits exactly there when
+            the curve passes through it; on a best fit it is the closest
+            point, searched only half way to the neighbouring points so it
+            can't latch onto another part of the curve.
+
+        Raises
+        ------
+        ValueError
+            A degree below 1; too few points (2 on an open curve, 3 and
+            at least ``degree`` on a periodic one); two consecutive points
+            at the same position; or, with resize=False, a count too
+            small for the degree.
+
+        Notes
+        -----
+        Open curves need degree - 1 extra conditions. As in Maya,
+        derivatives 2 to 1 + ceil((degree - 1) / 2) are zero at the start
+        and 2 to 1 + floor((degree - 1) / 2) at the end: a cubic's second
+        derivative is zero at both ends, a quadratic's only at the start.
+        Periodic curves need none. On even degrees each point sits
+        mid-span, since points on the span joins have no solution when
+        their count is even. Maya's own periodic EP curve spaced by
+        distance has clamped knots and a kink at the seam; this one
+        closes smoothly.
+
+        With resize=False, a high degree with barely one control point
+        per point can overshoot between the points: exact interpolation
+        leaves it no freedom to stay smooth.
+
+        Example
+        -------
+        >>> curve = BSplineData()
+        >>> u = curve.fit(joint_positions)
+        >>> curve.count == len(joint_positions) + 2
+        True
+        >>> np.allclose(curve.compute(u)[0], joint_positions)
+        True
+        """
+        points = np.asarray(points, dtype=np.float64)
+        if points.ndim != 2:
+            raise ValueError(
+                f"fit points must be an (N, dims) array, got shape {points.shape}"
+            )
+
+        degree = int(self.degree)
+        if degree < 1:
+            raise ValueError(f"fit needs a degree of 1 or more, got {degree}")
+
+        # Positions closer than this count as the same point
+        tolerance = 1e-12 * max(1.0, float(np.abs(points).max(initial=0.0)))
+
+        # A periodic curve closes the loop itself
+        closing = (
+            self.periodic
+            and points.shape[0] > 1
+            and np.linalg.norm(points[-1] - points[0]) <= tolerance
+        )
+        if closing:
+            points = points[:-1]
+
+        n       = points.shape[0]
+        minimum = max(3, degree) if self.periodic else 2
+        if n < minimum:
+            kind = "a periodic" if self.periodic else "an open"
+            raise ValueError(
+                f"{kind} curve of degree {degree} needs at least {minimum} "
+                f"fit points, got {n}"
+            )
+
+        # Maya's control point count
+        maya = n if self.periodic else n + degree - 1
+
+        if resize or len(self.points) == 0:
+            count = maya
+        else:
+            count    = len(self.points)
+            smallest = max(3, degree) if self.periodic else degree + 1
+            if count < smallest:
+                raise ValueError(
+                    f"{count} control points are too few for this degree "
+                    f"{degree} curve, it needs {smallest}; fit with resize=True"
+                )
+
+        # Maya's curve, or the best one with fewer control points
+        fitted = min(count, maya)
+        full, params = _fit_knots(points, fitted, degree, self.periodic, tolerance)
+        cv = _fit_points(
+            points, full, params, fitted, degree, self.periodic, end_rule=count >= maya
+        )
+
+        # More control points: Maya's curve with knots inserted, same shape
+        if count > maya:
+            cv, full, params = _insert_knots(
+                cv, full, params, degree, self.periodic, count - maya
+            )
+
+        self.points = cv
+        self.knots  = full[1:-1].copy()
+        self.rebuild()
+
+        # Each point's parameter, refined to its closest point on the curve
+        # without leaving its own partition (half way to its neighbours).
+        # It only moves on a best fit; elsewhere the curve passes through.
+        spans = self._max_param
+        u     = params.copy()
+        if self.periodic:
+            wraps = np.flatnonzero(np.diff(u) < 0)
+            if wraps.size:
+                u[wraps[0] + 1 :] += spans
+
+        mids  = (u[:-1] + u[1:]) / 2.0
+        u_min = np.concatenate([u[:1], mids])
+        u_max = np.concatenate([mids, u[-1:]])
+        mask  = np.ones(n, dtype=bool)
+        if self.periodic:
+            gap       = u[0] + spans - u[-1]
+            u_min[0]  = u[0] - gap / 2.0
+            u_max[-1] = u[-1] + gap / 2.0
+        else:
+            # the ends sit exactly on the first and last point
+            mask[0]  = False
+            mask[-1] = False
+
+        u = self._partitioned_newton(points, u, u_min, u_max, mask)
+
+        # Same space as sample(): wrapped on periodic curves, then uniform
+        # and registered applied
+        if self.periodic:
+            u = u % spans
+            u = np.where(u >= spans, 0.0, u)
+        u = self._denormalize_u(u)
+
+        return np.append(u, u[:1]) if closing else u
+
     @property
     def count(self) -> int:
         if self._max_param is None:
@@ -749,6 +953,7 @@ class BSplineData(Data):
         scipy.interpolate.BSpline of degree n with m control points has
         m + n + 1 knots, as defined in the NURBS book by Piegl and Tiller.
         Maya and other DCCs have curves defined as m + n - 1 knots.
+        This is the layout the ``knots`` field takes.
         """
         if self._max_param is None:
             self._init_bspline()
@@ -827,9 +1032,12 @@ class BSplineData(Data):
         d  = self.degree
         kv = self._kv
 
-        # Degree 1: parameters map directly to integer indices
+        # Degree 1: each control point sits on a knot (an integer index on
+        # uniform knots)
         if d <= 1:
-            if self.periodic:
+            if self.knots is not None:
+                self._cp_params = kv[1 : n + 1 + int(self.periodic)].copy()
+            elif self.periodic:
                 self._cp_params = np.arange(n + 1, dtype=np.float64)
             else:
                 self._cp_params = np.linspace(
@@ -868,41 +1076,13 @@ class BSplineData(Data):
             u_max[:-1] = mids
             u_max[-1]  = float(self._max_param)
 
-        # Vectorized Newton-Raphson refinement
-        u       = greville.copy()
-        queries = self.points[:n]
-
-        der1 = self._spl.derivative(1)
-        der2 = self._spl.derivative(2)
-
         # Skip refinement for clamped endpoints on open curves
         mask = np.ones(n, dtype=bool)
         if not self.periodic:
             mask[0]  = False
             mask[-1] = False
 
-        if mask.any():
-            for _ in range(10):
-                u_eval = u % self._max_param if self.periodic else u
-
-                C     = self._spl(u_eval)
-                Cp    = der1(u_eval)
-                Cpp   = der2(u_eval)
-
-                diff  = C - queries
-                f     = np.einsum("ij,ij->i", diff, Cp)
-                fp    = np.einsum("ij,ij->i", Cp, Cp) + np.einsum("ij,ij->i", diff, Cpp)
-                fp    = np.where(np.abs(fp) < 1e-14, 1e-14, fp)
-
-                du    = np.where(mask, -f / fp, 0.0)
-                du    = np.clip(du, -0.5, 0.5)
-
-                u_new = np.clip(u + du, u_min, u_max)
-
-                if np.max(np.abs(u_new[mask] - u[mask])) < 1e-10:
-                    u = u_new
-                    break
-                u = u_new
+        u = self._partitioned_newton(self.points[:n], greville.copy(), u_min, u_max, mask)
 
         if self.periodic:
             u = u % self._max_param
@@ -928,6 +1108,60 @@ class BSplineData(Data):
 
         self._cp_params = u
         return self._cp_params
+
+    def _partitioned_newton(self, queries, u, u_min, u_max, mask):
+        """
+        Closest-point parameters by Newton-Raphson, each confined to its
+        own partition.
+
+        Every query only searches [u_min, u_max], so it cannot latch onto
+        another part of the curve that happens to pass closer. Used by
+        ``control_point_params`` and ``fit()``.
+
+        Parameters
+        ----------
+        queries : np.ndarray
+            Points to project (n, dims).
+        u : np.ndarray
+            Starting native parameters (n,); on periodic curves they may
+            run past [0, max_param], the curve is evaluated modulo it.
+        u_min, u_max : np.ndarray
+            Partition bounds (n,), native space.
+        mask : np.ndarray
+            Which queries to refine (n,), bool; the others keep their u.
+
+        Returns
+        -------
+        np.ndarray
+            Refined native parameters (n,), unwrapped like ``u``.
+        """
+        der1 = self._spl.derivative(1)
+        der2 = self._spl.derivative(2) if self.degree >= 2 else None
+
+        if mask.any():
+            for _ in range(10):
+                u_eval = u % self._max_param if self.periodic else u
+
+                C     = self._spl(u_eval)
+                Cp    = der1(u_eval)
+                Cpp   = der2(u_eval) if der2 is not None else np.zeros_like(Cp)
+
+                diff  = C - queries
+                f     = np.einsum("ij,ij->i", diff, Cp)
+                fp    = np.einsum("ij,ij->i", Cp, Cp) + np.einsum("ij,ij->i", diff, Cpp)
+                fp    = np.where(np.abs(fp) < 1e-14, 1e-14, fp)
+
+                du    = np.where(mask, -f / fp, 0.0)
+                du    = np.clip(du, -0.5, 0.5)
+
+                u_new = np.clip(u + du, u_min, u_max)
+
+                if np.max(np.abs(u_new[mask] - u[mask])) < 1e-10:
+                    u = u_new
+                    break
+                u = u_new
+
+        return u
 
     def get_length(self, fast: bool = True, samples: int = 100) -> float:
         """
@@ -1223,3 +1457,393 @@ class BSplineData(Data):
         tangents = der1(u)
 
         return u, points, tangents
+
+
+# ------------------------------- Knots and fit ------------------------------- #
+
+
+def _knot_vector(knots, count, degree, periodic):
+    """
+    Knot vector in scipy's layout from knots in Maya's layout.
+
+    Rescales them so the parameter range is [0, max_param], as with
+    uniform knots. Periodic curves rebuild the knots outside that range
+    from the ones inside it, so the seam stays smooth.
+
+    Parameters
+    ----------
+    knots : array-like
+        Knots in Maya's layout: count + degree - 1 values (open) or
+        count + 2 * degree - 1 (periodic).
+    count : int
+        Number of control points, without the periodic wrap.
+    degree : int
+        Degree of the curve.
+    periodic : bool
+        Whether the curve is closed.
+
+    Returns
+    -------
+    np.ndarray
+        Knot vector (count + degree + 1,) for open curves,
+        (count + 2 * degree + 1,) for periodic ones.
+    """
+    knots = np.asarray(knots, dtype=np.float64).ravel()
+    if degree < 1:
+        raise ValueError(f"knots need a degree of 1 or more, got {degree}")
+
+    spans = count if periodic else count - degree
+    if spans < (degree if periodic else 1):
+        kind = "periodic" if periodic else "open"
+        raise ValueError(
+            f"{count} control points are too few for a {kind} curve of "
+            f"degree {degree}"
+        )
+
+    size = spans + 2 * degree - 1
+    if knots.shape[0] != size:
+        raise ValueError(
+            f"{count} control points of degree {degree} take {size} knots, "
+            f"got {knots.shape[0]}"
+        )
+    if np.any(np.diff(knots) < 0.0):
+        raise ValueError("knots must never decrease")
+
+    lo, hi = knots[degree - 1], knots[degree - 1 + spans]
+    if not hi > lo:
+        raise ValueError("knots must cover a parameter range longer than zero")
+    if lo != 0.0 or hi != spans:
+        knots = (knots - lo) / (hi - lo) * spans
+
+    if periodic:
+        return _knots_from_edges(knots[degree - 1 : degree + spans], degree, True)
+    return np.concatenate([knots[:1], knots, knots[-1:]])
+
+
+def _fit_knots(points, count, degree, periodic, tolerance):
+    """
+    Knot vector (scipy's layout) and fit point parameters for ``fit()``,
+    both in the curve's parameter range [0, max_param], for at most the
+    control point count Maya uses (points + degree - 1 open, points
+    periodic).
+
+    The points are spaced by the distance between them, like Maya's EP
+    curves. At Maya's count the knots land on the points; periodic curves
+    of even degree shift them half a span, so each point sits mid-span.
+    Open curves with fewer control points, but at least one per point,
+    average each run of consecutive point parameters into a knot (the
+    NURBS Book's averaging), which keeps exact interpolation well
+    conditioned. Fewer control points than points resample the spacing
+    at evenly spaced fractional point indices.
+
+    Parameters
+    ----------
+    points : np.ndarray
+        Fit points (N, dims).
+    count : int
+        Number of control points, without the periodic wrap.
+    degree : int
+        Degree of the curve.
+    periodic : bool
+        Whether the curve is closed.
+    tolerance : float
+        Distance under which two consecutive points count as one.
+
+    Returns
+    -------
+    tuple
+        (knot vector, fit point parameters (N,)).
+    """
+    loop   = np.vstack([points, points[:1]]) if periodic else points
+    chords = np.linalg.norm(np.diff(loop, axis=0), axis=1)
+    if np.any(chords <= tolerance):
+        raise ValueError(
+            "fit points must not repeat: two consecutive points share a position"
+        )
+    along = np.concatenate([[0.0], np.cumsum(chords)])
+
+    n     = points.shape[0]
+    steps = chords.shape[0]
+    spans = count if periodic else count - degree
+
+    if not periodic and count >= n:
+        # Each interior knot averages `width` consecutive interior
+        # parameters; a width of 1 puts the knots on the points
+        width = n + degree - count
+        inner = along[1:-1]
+        if width > 1:
+            inner = np.array(
+                [inner[i : i + width].mean() for i in range(inner.shape[0] - width + 1)]
+            )
+        edges = np.concatenate([along[:1], inner, along[-1:]])
+    else:
+        shift = 0.5 if periodic and degree % 2 == 0 else 0.0
+        where = (np.arange(spans + 1) + shift) * steps / spans
+
+        if periodic:
+            # A second lap, for the half-span shift
+            laps  = np.concatenate([along, along[1:] + along[-1]])
+            edges = np.interp(where, np.arange(2 * steps + 1), laps)
+        else:
+            edges = np.interp(where, np.arange(steps + 1), along)
+
+    start  = edges[0]
+    length = edges[-1] - start
+    edges  = (edges - start) / length * spans
+    params = (along[: points.shape[0]] - start) / length * spans
+
+    if periodic:
+        params = params % spans
+
+    return _knots_from_edges(edges, degree, periodic), params
+
+
+def _knots_from_edges(edges, degree, periodic):
+    """
+    Knot vector (scipy's layout) from the knots inside the parameter
+    range: clamped on open curves, wrapped around on periodic ones.
+
+    Parameters
+    ----------
+    edges : np.ndarray
+        Knots from 0 to the span count, one per span join (spans + 1,).
+    degree : int
+        Degree of the curve.
+    periodic : bool
+        Whether the curve is closed.
+
+    Returns
+    -------
+    np.ndarray
+        Knot vector (spans + 2 * degree + 1,).
+    """
+    spans = edges.shape[0] - 1
+    if periodic:
+        return np.concatenate(
+            [edges[spans - degree : spans] - spans, edges, edges[1 : degree + 1] + spans]
+        )
+    return np.concatenate([np.zeros(degree), edges, np.full(degree, float(spans))])
+
+
+def _fit_points(points, full, params, count, degree, periodic, end_rule):
+    """
+    Control points for ``fit()``, solved in priority order: each level
+    only uses the freedom the levels before it leave.
+
+    1. Open curves start and end on the first and last point.
+    2. Pass through the points, as close as possible with too few
+       control points.
+    3. With ``end_rule``, Maya's end conditions on open curves:
+       derivatives 2 to 1 + ceil((degree - 1) / 2) are zero at the start,
+       2 to 1 + floor((degree - 1) / 2) at the end.
+    4. Smoothest curve for whatever freedom is left: least squared second
+       derivative (first on linear curves), integrated by Gauss-Legendre
+       quadrature over every span.
+
+    Parameters
+    ----------
+    points : np.ndarray
+        Fit points (N, dims).
+    full : np.ndarray
+        Knot vector in scipy's layout.
+    params : np.ndarray
+        Parameter of each fit point (N,).
+    count : int
+        Number of control points, without the periodic wrap.
+    degree : int
+        Degree of the curve.
+    periodic : bool
+        Whether the curve is closed.
+    end_rule : bool
+        Whether to apply Maya's end conditions (level 3).
+
+    Returns
+    -------
+    np.ndarray
+        Control points (count, dims).
+    """
+    dims   = points.shape[1]
+    spans  = count if periodic else count - degree
+    levels = []
+
+    if not periodic:
+        pins        = np.zeros((2, count))
+        pins[0, 0]  = 1.0
+        pins[1, -1] = 1.0
+        levels.append((pins, points[[0, -1]]))
+
+    levels.append((_fit_basis(full, degree, count, periodic, params), points))
+
+    if end_rule and not periodic:
+        rows = [
+            _fit_basis(full, degree, count, False, [0.0], order)
+            for order in range(2, 2 + degree // 2)
+        ]
+        rows += [
+            _fit_basis(full, degree, count, False, [float(spans)], order)
+            for order in range(2, 2 + (degree - 1) // 2)
+        ]
+        if rows:
+            levels.append((np.vstack(rows), np.zeros((len(rows), dims))))
+
+    at, weight = _span_quadrature(full[degree : degree + spans + 1], degree)
+    bending = _fit_basis(full, degree, count, periodic, at, min(2, degree))
+    levels.append((bending * weight[:, None], np.zeros((at.shape[0], dims))))
+
+    return _layered_lstsq(levels, count, dims)
+
+
+def _insert_knots(cv, full, params, degree, periodic, extra):
+    """
+    The same curve with more control points: splits the longest span in
+    two, ``extra`` times, then solves for the control points that
+    reproduce the curve exactly (a refined knot vector holds it).
+
+    Parameters
+    ----------
+    cv : np.ndarray
+        Control points (count, dims), without the periodic wrap.
+    full : np.ndarray
+        Knot vector in scipy's layout.
+    params : np.ndarray
+        Curve parameters to carry over to the new parameter range.
+    degree : int
+        Degree of the curve.
+    periodic : bool
+        Whether the curve is closed.
+    extra : int
+        Number of knots to insert.
+
+    Returns
+    -------
+    tuple
+        (control points (count + extra, dims), knot vector, params in the
+        new parameter range).
+    """
+    count = cv.shape[0]
+    spans = count if periodic else count - degree
+    edges = list(full[degree : degree + spans + 1])
+    for _ in range(extra):
+        i = int(np.argmax(np.diff(edges)))
+        edges.insert(i + 1, (edges[i] + edges[i + 1]) / 2.0)
+
+    # Rescale to the new parameter range [0, spans + extra]
+    scale = (spans + extra) / spans
+    fine  = _knots_from_edges(np.array(edges) * scale, degree, periodic)
+
+    # Periodic curves repeat their first control points at the end
+    wrap = np.arange(count)
+    if periodic:
+        wrap = np.concatenate([wrap, np.arange(degree) % count])
+
+    at, _ = _span_quadrature(fine[degree : degree + spans + extra + 1], degree)
+    target  = BSpline(full, cv[wrap], degree)(at / scale)
+    basis   = _fit_basis(fine, degree, count + extra, periodic, at)
+
+    fine_cv = _layered_lstsq([(basis, target)], count + extra, cv.shape[1])
+    return fine_cv, fine, params * scale
+
+
+def _span_quadrature(edges, degree):
+    """
+    Gauss-Legendre nodes over every span longer than zero, exact for the
+    polynomials a degree ``degree`` curve's squared derivatives make.
+
+    Parameters
+    ----------
+    edges : np.ndarray
+        Knots inside the parameter range (spans + 1,).
+    degree : int
+        Degree of the curve.
+
+    Returns
+    -------
+    tuple
+        (nodes, square roots of their weights), both (n,).
+    """
+    keep = edges[1:] > edges[:-1]
+    lo, hi = edges[:-1][keep], edges[1:][keep]
+    nodes, weights = np.polynomial.legendre.leggauss(degree + 1)
+    half = (hi - lo)[:, None] / 2.0
+    at   = (lo[:, None] + half * (nodes + 1.0)).ravel()
+    return at, np.sqrt((half * weights).ravel())
+
+
+def _fit_basis(full, degree, count, periodic, at, order=0):
+    """
+    Basis functions, or their derivatives, at parameter values.
+
+    Periodic curves fold the wrapped control points back onto the ones
+    they repeat, so there is one column per control point.
+
+    Parameters
+    ----------
+    full : np.ndarray
+        Knot vector in scipy's layout.
+    degree : int
+        Degree of the curve.
+    count : int
+        Number of control points, without the periodic wrap.
+    periodic : bool
+        Whether the curve is closed.
+    at : array-like
+        Parameter values (n,).
+    order : int
+        Derivative order, 0 for the basis functions themselves.
+
+    Returns
+    -------
+    np.ndarray
+        Values (n, count).
+    """
+    n_basis = full.shape[0] - degree - 1
+    spline  = BSpline(full, np.eye(n_basis), degree)
+    if order:
+        spline = spline.derivative(order)
+
+    values = spline(np.asarray(at, dtype=np.float64))
+    if periodic:
+        values[:, :degree] += values[:, count:]
+        values = values[:, :count]
+    return values
+
+
+def _layered_lstsq(levels, size, dims):
+    """
+    Least squares in priority order.
+
+    Each level ``(a, b)`` minimises ``|a x - b|`` only over the solutions
+    the levels before it left free, so a later level never spoils an
+    earlier one. Whatever freedom is left after the last level takes the
+    smallest solution.
+
+    Parameters
+    ----------
+    levels : list of tuple
+        ``(a, b)`` pairs: ``a`` (rows, size), ``b`` (rows, dims).
+    size : int
+        Number of unknowns.
+    dims : int
+        Number of right-hand sides, solved together.
+
+    Returns
+    -------
+    np.ndarray
+        Solution (size, dims).
+    """
+    x    = np.zeros((size, dims))
+    free = np.eye(size)
+    for a, b in levels:
+        if free.shape[1] == 0:
+            break
+
+        a_free = a @ free
+        u, s, vt = np.linalg.svd(a_free, full_matrices=a_free.shape[0] < a_free.shape[1])
+        if s.size == 0 or s[0] == 0.0:
+            continue
+
+        rank = int(np.sum(s > s[0] * max(a_free.shape) * np.finfo(np.float64).eps * 1e3))
+        x    = x + free @ (vt[:rank].T @ ((u[:, :rank].T @ (b - a @ x)) / s[:rank, None]))
+        free = free @ vt[rank:].T
+
+    return x

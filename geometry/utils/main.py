@@ -709,7 +709,7 @@ def compute_basis(u, kv, c, d):
     from cgmath.geometry.utils._numba._bspline import _compute_basis
 
     u  = np.asarray(u, dtype=np.float64)
-    kv = np.asarray(kv, dtype=np.int32)
+    kv = np.asarray(kv, dtype=np.float64)
     c  = np.int32(c)
     d  = np.int32(d)
 

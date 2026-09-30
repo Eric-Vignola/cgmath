@@ -1656,6 +1656,50 @@ ring.close()
 print(ring.periodic, ring.max_param)  # True 5    (count)
 ```
 
+### `fit()` — a curve through points
+
+`fit()` moves the control points so the curve passes through the points,
+the way Maya's EP Curve Tool does, and the way `ikHandle` builds its spline
+IK curve with `simplifyCurve=False`. Each point becomes an edit point, the
+spans are spaced by the distance between the points (kept in `knots`), and
+an open curve gets `points + degree - 1` control points. `BSplineData()` is
+an empty cubic, ready to fit.
+
+```python
+joints = np.array([
+    [0.0, 0.0, 0.0],
+    [1.0, 2.0, 0.0],
+    [1.5, 5.0, 0.5],
+    [3.0, 7.0, 1.0],
+    [5.0, 8.0, 1.0],
+])
+
+curve = BSplineData()
+u     = curve.fit(joints)     # each joint's u, as sample() would return it
+print(curve.count)            # 7 == len(joints) + degree - 1
+print(np.round(curve.kv, 3))  # knots on the joints, scaled to [0, max_param]
+print(np.round(u, 3))         # the joints' u: the knots
+
+# the curve passes through the joints at u
+p, _ = curve.compute(u)
+assert np.allclose(p, joints)
+assert np.allclose(u, curve.sample(joints).params)
+
+# keep the count: more CVs give the same curve, fewer a best fit
+dense = BSplineData(points=np.zeros((12, 3)))
+dense.fit(joints, resize=False)
+print(dense.count)  # 12
+
+# closed curves get one control point per point
+loop = BSplineData(periodic=True)
+loop.fit(joints)
+print(loop.count)  # 5
+
+# knots in Maya's layout (MFnNurbsCurve.knots()) load as they are
+same = BSplineData(points=curve.points, knots=curve.kv)
+assert same == curve
+```
+
 ### Arc length
 
 ```python
