@@ -625,6 +625,15 @@ def _compute_basis_derivatives(u, kv, c, d, order=1):
     """
     Compute B-spline basis function derivatives in parallel.
 
+    The Cox-de Boor recursion runs up to degree d - order; each of the
+    last ``order`` degrees then applies the derivative recursion
+
+        N^(k)_{m,p} = p * (N^(k-1)_{m,p-1} / (t_{m+p} - t_m)
+            - N^(k-1)_{m+1,p-1} / (t_{m+p+1} - t_{m+1}))
+
+    with 0/0 taken as 0. This holds for any non-decreasing knot vector:
+    clamped, uniform, non-uniform or with repeated knots.
+
     Parameters
     ----------
     u : np.ndarray
@@ -636,13 +645,22 @@ def _compute_basis_derivatives(u, kv, c, d, order=1):
     d : int
         Degree of the B-spline.
     order : int
-        Derivative order (default 1 for first derivative).
+        Derivative order (default 1 for first derivative). Order 0 gives
+        the basis itself, orders above d give zeros.
 
     Returns
     -------
     np.ndarray
         Basis derivative values (n, c), float64.
+
+    Raises
+    ------
+    ValueError
+        If order is negative.
     """
+    if order < 0:
+        raise ValueError("order must be non-negative")
+
     n     = u.shape[0]
     limit = c - d - 1
     d1    = d + 1
@@ -656,68 +674,41 @@ def _compute_basis_derivatives(u, kv, c, d, order=1):
 
     # Process each sample point in parallel
     for k in prange(n):
-        left_k = int(np.floor(u[k]))
-        if left_k < 0:
-            left_k = 0
-        elif left_k > limit:
-            left_k = limit
-        right_k = left_k + d1
+        s    = _find_span(u[k], kv, d, limit)
+        span = s + d
+        u_k  = u[k]
 
-        u_k = u[k]
-
-        # Compute basis at degree d and d-1
-        # We need both for the derivative formula
-        local_b    = np.zeros(d1 + 1, dtype=u.dtype)
-        local_bb   = np.zeros(d1 + 1, dtype=u.dtype)
+        # After degree j, local_b[i] belongs to basis function s + d - j + i
+        local_b    = np.zeros(d1, dtype=u.dtype)
+        local_bb   = np.zeros(d1, dtype=u.dtype)
         local_b[0] = 1.0
 
-        # Store basis values at each degree level for derivative computation
-        basis_levels       = np.zeros((d1, d1 + 1), dtype=u.dtype)
-        basis_levels[0, 0] = 1.0
-
-        # Cox-de Boor recursion, storing each level
         for j in range(1, d1):
             for i in range(j):
                 local_bb[i] = local_b[i]
-                local_b[i]  = 0.0
+            local_b[0] = 0.0
 
-            for i in range(j):
-                ri    = right_k + i
-                denom = kv[ri] - kv[ri - j]
-                if denom != 0.0:
-                    f = local_bb[i] / denom
+            for i in range(1, j + 1):
+                left  = kv[span + i - j]
+                right = kv[span + i]
+                denom = right - left
+                if denom == 0.0:
+                    # Zero-length support, the 0/0 term is taken as 0
+                    local_b[i] = 0.0
+                elif j <= d - order:
+                    # Cox-de Boor step
+                    f = local_bb[i - 1] / denom
+                    local_b[i - 1] += f * (right - u_k)
+                    local_b[i] = f * (u_k - left)
                 else:
-                    f = 0.0
-                local_b[i] += f * (kv[ri] - u_k)
-                local_b[i + 1] = f * (u_k - kv[ri - j])
+                    # Derivative step
+                    f = j * local_bb[i - 1] / denom
+                    local_b[i - 1] -= f
+                    local_b[i] = f
 
-            # Store this level
-            for i in range(j + 1):
-                basis_levels[j, i] = local_b[i]
-
-        # Compute first derivative using:
-        # B'_{i,d}(u) = d * (B_{i,d-1}(u) / (kv[i+d] - kv[i]) - B_{i+1,d-1}(u) / (kv[i+d+1] - kv[i+1]))
-        if order >= 1 and d >= 1:
-            for i in range(d1):
-                cp_idx = left_k + i
-                if cp_idx < c:
-                    deriv = 0.0
-
-                    # Left term
-                    if i < d:
-                        kv_idx = left_k + i
-                        denom  = kv[kv_idx + d] - kv[kv_idx]
-                        if denom != 0.0:
-                            deriv += d * basis_levels[d - 1, i] / denom
-
-                    # Right term
-                    if i > 0:
-                        kv_idx = left_k + i
-                        denom  = kv[kv_idx + d] - kv[kv_idx]
-                        if denom != 0.0:
-                            deriv -= d * basis_levels[d - 1, i - 1] / denom
-
-                    db[k, cp_idx] = deriv
+        # Write local results to output matrix
+        for i in range(d1):
+            db[k, s + i] = local_b[i]
 
     return db
 

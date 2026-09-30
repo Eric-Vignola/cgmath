@@ -705,7 +705,26 @@ def bilinear_sample(
 
 
 def compute_basis(u, kv, c, d):
-    """returns bilinear quad surface areas"""
+    """
+    Computes the B-spline basis matrix.
+
+    Parameters
+    ----------
+    u : array_like
+        Parameter values (n,).
+    kv : array_like
+        Knot vector (c + d + 1,).
+    c : int
+        Number of control points.
+    d : int
+        Degree of the B-spline.
+
+    Returns
+    -------
+    np.ndarray
+        Basis matrix (n, c), float64. Row k holds every basis function
+        evaluated at u[k].
+    """
     from cgmath.geometry.utils._numba._bspline import _compute_basis
 
     u  = np.asarray(u, dtype=np.float64)
