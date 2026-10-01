@@ -1420,8 +1420,9 @@ print(ring.periodic, ring.max_param)  # True 5    (count)
 the way Maya's EP Curve Tool does, and the way `ikHandle` builds its spline
 IK curve with `simplifyCurve=False`. Each point becomes an edit point, the
 spans are spaced by the distance between the points (kept in `knots`), and
-an open curve gets `points + degree - 1` control points. `BSplineData()` is
-an empty cubic, ready to fit.
+an open curve gets `points + degree - 1` control points. Those distances are
+the curve's parameters, as in Maya: `kv` is Maya's knots and `domain` its
+`knotDomain`. `BSplineData()` is an empty cubic, ready to fit.
 
 ```python
 joints = np.array([
@@ -1435,8 +1436,9 @@ joints = np.array([
 curve = BSplineData()
 u     = curve.fit(joints)     # each joint's u, as sample() would return it
 print(curve.count)            # 7 == len(joints) + degree - 1
-print(np.round(curve.kv, 3))  # knots on the joints, scaled to [0, max_param]
-print(np.round(u, 3))         # the joints' u: the knots
+print(np.round(curve.kv, 3))  # Maya's knots: the distance along the joints
+print(np.round(u, 3))         # each joint's u: its distance along the chain
+print(curve.domain)           # (0.0, 10.10...): the parameter range
 
 # the curve passes through the joints at u
 p, _ = curve.compute(u)

@@ -1,3 +1,4 @@
+import json
 import os
 import pickle
 import tempfile
@@ -2862,15 +2863,16 @@ class TestBSplineFit(unittest.TestCase):
 
     def test_matches_maya_spline_ik(self):
         curve = BSplineData()
-        curve.fit(self.CHAIN)
+        u     = curve.fit(self.CHAIN)
         self.assertTrue(np.allclose(curve.points, self.MAYA_CVS, atol=1e-9))
 
-        # Maya's knot spacing, scaled to [0, max_param]
-        knots = self.MAYA_KNOTS / self.MAYA_KNOTS[-1] * curve.max_param
-        self.assertTrue(np.allclose(curve.kv, knots, atol=1e-12))
+        # Maya's knots and parameter range: the distance along the joints
+        self.assertTrue(np.allclose(curve.kv, self.MAYA_KNOTS, atol=1e-12))
+        self.assertTrue(np.allclose(curve.domain, (0.0, self.MAYA_KNOTS[-1]), atol=1e-12))
 
-        # the joints sit on the knots
-        points, _ = curve.compute(knots[2:-2])
+        # each joint's u is its distance along the chain, where it sits
+        self.assertTrue(np.allclose(u, self.MAYA_KNOTS[2:-2], atol=1e-12))
+        points, _ = curve.compute(u)
         self.assertTrue(np.allclose(points, self.CHAIN, atol=1e-12))
 
     def test_open_degrees(self):
@@ -2889,7 +2891,7 @@ class TestBSplineFit(unittest.TestCase):
                 start = self.derivative(curve, 0.0, order)
                 self.assertTrue(np.allclose(start, 0.0, atol=1e-6), (degree, order))
             for order in range(2, 2 + (degree - 1) // 2):
-                end = self.derivative(curve, float(curve.max_param), order)
+                end = self.derivative(curve, float(curve._max_param), order)
                 self.assertTrue(np.allclose(end, 0.0, atol=1e-6), (degree, order))
 
     def test_periodic_degrees(self):
@@ -2908,7 +2910,7 @@ class TestBSplineFit(unittest.TestCase):
                 # smooth across the seam
                 for order in range(degree):
                     start = self.derivative(curve, 0.0, order)
-                    end   = self.derivative(curve, float(curve.max_param), order)
+                    end   = self.derivative(curve, float(curve._max_param), order)
                     self.assertTrue(np.allclose(start, end, atol=1e-7), (n, degree, order))
 
     def test_periodic_drops_repeated_closing_point(self):
@@ -3072,6 +3074,7 @@ class TestBSplineFit(unittest.TestCase):
         fitted = BSplineData()
         fitted.fit(self.CHAIN)
         curve = BSplineData(points=self.MAYA_CVS, knots=self.MAYA_KNOTS)
+        self.assertTrue(np.allclose(curve.kv, self.MAYA_KNOTS, atol=1e-12))
         self.assertTrue(np.allclose(curve.kv, fitted.kv, atol=1e-12))
 
         u = np.linspace(0, curve.max_param, 50)
@@ -3184,6 +3187,89 @@ class TestBSplineFit(unittest.TestCase):
         curve.open()
         self.assertIsNone(curve.knots)
         self.assertTrue(np.allclose(curve.kv, BSplineData(points=curve.points).kv))
+
+
+class TestBSplineKnotRange(unittest.TestCase):
+    """
+    A curve with knots uses the knots' range as its parameter range, as in
+    Maya. Checked against six Maya 2025 curves built from six points with
+
+        cmds.curve(editPoint=POINTS, degree=3)
+        cmds.curve(point=POINTS, degree=3, knot=[5, 5, 5, 5.5, 7, 8, 8, 8])
+        cmds.curve(point=POINTS, degree=3, knot=[0, 0, 0, 1/3, 2/3, 1, 1, 1])
+        cmds.curve(point=POINTS, degree=2, knot=[0, 0, 0.5, 2, 2.25, 4, 4])
+        cmds.closeCurve(<the EP curve>, preserveShape=0, replaceOriginal=True)
+        cmds.circle(sections=8, degree=3)
+
+    and read with MFnNurbsCurve: knots(), knotDomain, and
+    getDerivativesAtParam() at nine parameters across the range.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        path = os.path.join(
+            os.path.dirname(__file__), "test_assets", "test_geometry.bspline_maya_curves.json"
+        )
+        with open(path) as f:
+            cls.MAYA = json.load(f)["curves"]
+
+    def curves(self, **kwargs):
+        for name, maya in self.MAYA.items():
+            curve = BSplineData(
+                points   = np.array(maya["points"]),
+                degree   = maya["degree"],
+                periodic = maya["periodic"],
+                knots    = maya["maya_knots"],
+                **kwargs,
+            )
+            yield name, maya, curve
+
+    def test_kv_and_domain_are_mayas(self):
+        for name, maya, curve in self.curves():
+            self.assertTrue(np.allclose(curve.kv, maya["maya_knots"], atol=1e-12), name)
+            self.assertTrue(np.allclose(curve.domain, maya["maya_domain"], atol=1e-12), name)
+
+            # and they travel: the same knots build the same curve
+            again = BSplineData(curve.points, curve.degree, curve.periodic, knots=curve.kv)
+            self.assertTrue(again == curve, name)
+
+    def test_points_and_derivatives_at_mayas_parameters(self):
+        for use_numba in (True, False):
+            for name, maya, curve in self.curves(use_numba=use_numba):
+                points, tangents = curve.compute(np.array(maya["params"]))
+                tag = (name, use_numba)
+                self.assertTrue(np.allclose(points, maya["maya_points"], atol=1e-9), tag)
+                self.assertTrue(np.allclose(tangents, maya["maya_derivatives"], atol=1e-9), tag)
+
+    def test_sample_returns_mayas_parameters(self):
+        for name, maya, curve in self.curves():
+            found = curve.sample(np.array(maya["maya_points"])).params
+            gap   = found - np.array(maya["params"])
+            if maya["periodic"]:
+                period = curve.max_param - curve.min_param
+                gap    = (gap + period / 2) % period - period / 2
+            self.assertTrue(np.allclose(gap, 0.0, atol=1e-9), name)
+
+    def test_open_curves_extrapolate_from_the_range(self):
+        curve = next(c for name, _, c in self.curves() if name == "open_own_knots_5_to_8")
+        start, tangent = curve.compute(5.0)
+        before, _ = curve.compute(4.0)
+        self.assertTrue(np.allclose(before, start - tangent, atol=1e-12))
+
+    def test_registered_periodic_curves_stay_in_the_range(self):
+        for name, maya, curve in self.curves(registered=True):
+            if not maya["periodic"]:
+                continue
+            found = curve.sample(np.array(maya["maya_points"]))
+            self.assertTrue(np.all(found.params >= curve.min_param), name)
+            self.assertTrue(np.all(found.params < curve.max_param), name)
+            back, _ = curve.compute(found.params)
+            self.assertTrue(np.allclose(back, found.points, atol=1e-9), name)
+
+    def test_curves_without_knots_keep_spans(self):
+        curve = BSplineData(points=np.array(self.MAYA["open_own_knots_5_to_8"]["points"]))
+        self.assertEqual(curve.domain, (0.0, 3))
+        self.assertEqual(curve.max_param, 3)
 
 
 class TestUVList(unittest.TestCase):

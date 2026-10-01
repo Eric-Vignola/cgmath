@@ -62,14 +62,16 @@ class BSplineData(Data):
     uniform : bool
         If True, uses arc-length parameterization where equal spacing in
         parameter space [0, 1] gives equal spacing along the curve.
-        If False (default), uses native parameter space [0, max_param].
+        If False (default), uses the curve's parameter range
+        [min_param, max_param]: the knots' own range, or [0, spans].
     use_numba : bool
         If True (default), uses optimized Numba kernels for evaluation.
         If False, uses scipy.interpolate.BSpline.
     registered : bool
-        If True, u=0 on periodic curves aligns with the curve point nearest
-        to points[0]. The offset is CV 0's Greville abscissa (the average
-        of the knots under its basis function), which on uniform knots is
+        If True, the start of the parameter range on periodic curves aligns
+        with the curve point nearest to points[0]. The offset is CV 0's
+        Greville abscissa (the average of the knots under its basis
+        function), which on uniform knots is
         offset = max_param - (degree - 1) / 2.
         Has no effect on non-periodic curves.
     arc_length_samples : int
@@ -79,12 +81,14 @@ class BSplineData(Data):
     knots : np.ndarray, optional
         Knot vector in Maya's layout, the one ``kv`` returns:
         count + degree - 1 values on open curves, count + 2 * degree - 1
-        on periodic ones. None (default) gives uniform knots. The values
-        are rescaled so the parameter range stays [0, max_param]; only
-        their spacing shapes the curve. Periodic curves rebuild the knots
-        outside that range from the ones inside it, so the seam stays
-        smooth. Set by ``fit()``, cleared by ``open()`` and ``close()``;
-        call ``invalidate()`` after changing it by hand.
+        on periodic ones. None (default) gives uniform knots on
+        [0, spans]. Their range is the curve's parameter range, as in Maya:
+        ``min_param`` to ``max_param``, so a parameter names the same point
+        here and on a Maya curve built from ``points`` and ``kv``, and
+        tangents are derivatives with respect to it. Periodic curves
+        rebuild the knots outside that range from the ones inside it, so
+        the seam stays smooth. Set by ``fit()``, cleared by ``open()`` and
+        ``close()``; call ``invalidate()`` after changing it by hand.
     """
 
     points:             np.ndarray = numpy_array(np.zeros((0, 3)))
@@ -109,6 +113,9 @@ class BSplineData(Data):
     _total_length     = None  # total arc length of curve
     _cp_params        = None  # cached control point parameters
     _offset           = None  # registration offset of periodic curves
+    _lo               = None  # start of the parameter range (the knots')
+    _hi               = None  # end of the parameter range
+    _scale            = None  # parameter units per native unit
 
     __repr__ = Data.__repr__
 
@@ -178,9 +185,15 @@ class BSplineData(Data):
             # Geometry indices: direct mapping
             self._geometry = np.arange(self._count)
 
-        # Custom knots replace the uniform ones
+        # Custom knots replace the uniform ones. Internally the curve still
+        # runs on [0, spans]; the knots' own range is the parameter range
+        # users see, mapped in _normalize_u / _denormalize_u
+        self._lo, self._hi, self._scale = 0.0, float(self._max_param), 1.0
         if self.knots is not None:
-            self._kv = _knot_vector(self.knots, self._count, self.degree, self.periodic)
+            self._kv, self._lo, self._hi = _knot_vector(
+                self.knots, self._count, self.degree, self.periodic
+            )
+            self._scale = (self._hi - self._lo) / self._max_param
 
         # Registration offset (periodic): CV 0's Greville abscissa, the
         # average of the knots under its basis function
@@ -247,7 +260,7 @@ class BSplineData(Data):
         Returns
         -------
         np.ndarray
-            Native parameter value(s) in [0, max_param].
+            Native parameter value(s) in [0, spans].
         """
         s = np.asarray(s, dtype=np.float64)
         return np.interp(s, self._arc_length_table, self._u_table)
@@ -261,7 +274,7 @@ class BSplineData(Data):
         Parameters
         ----------
         u : float or np.ndarray
-            Native parameter value(s) in [0, max_param].
+            Native parameter value(s) in [0, spans].
 
         Returns
         -------
@@ -275,8 +288,12 @@ class BSplineData(Data):
         """
         Convert user parameter space to native parameter space.
 
+        With ``knots`` (non-uniform), maps the knots' range onto the
+        native [0, spans].
+
         If registered and periodic (non-uniform), offsets u so that
-        u=0 aligns with the curve point nearest points[0].
+        the start of the range aligns with the curve point nearest
+        points[0].
 
         If uniform, converts arc-length [0, 1] to native parameter
         space. When also registered, the arc-length table already
@@ -295,6 +312,10 @@ class BSplineData(Data):
         """
         u = np.asarray(u, dtype=np.float64)
 
+        # the knots' range -> the native [0, spans]
+        if self.knots is not None and not self.uniform:
+            u = (u - self._lo) / self._scale
+
         if self.registered and self.periodic and not self.uniform:
             u = u + self._offset
 
@@ -307,13 +328,16 @@ class BSplineData(Data):
         """
         Convert native parameter space to user parameter space.
 
-        If uniform, converts native [0, max_param] to arc-length [0, 1].
+        If uniform, converts native [0, spans] to arc-length [0, 1].
         When also registered, native params are unwrapped to the table's
-        domain [offset, offset+max_param] before lookup.
+        domain [offset, offset + spans] before lookup.
 
         If registered and periodic (non-uniform), removes the offset
         so that the returned values are relative to points[0], wrapped
-        into [0, max_param).
+        into the range.
+
+        With ``knots`` (non-uniform), maps the native [0, spans] onto the
+        knots' range.
 
         Parameters
         ----------
@@ -331,10 +355,15 @@ class BSplineData(Data):
             if self.registered and self.periodic:
                 u = np.where(u < self._offset, u + self._max_param, u)
             u = self._param_to_arc_length(u)
-        elif self.registered and self.periodic:
-            # A value a hair below 0 wraps to max_param itself; that is 0
-            u = (u - self._offset) % self._max_param
-            u = np.where(u >= self._max_param, 0.0, u)
+        else:
+            if self.registered and self.periodic:
+                # A value a hair below 0 wraps to max_param itself; that is 0
+                u = (u - self._offset) % self._max_param
+                u = np.where(u >= self._max_param, 0.0, u)
+
+            # the native [0, spans] -> the knots' range
+            if self.knots is not None:
+                u = self._lo + u * self._scale
 
         return u
 
@@ -346,17 +375,20 @@ class BSplineData(Data):
         ----------
         u : float or np.ndarray
             Parameter value(s). If uniform=True, expected in [0, 1] range.
-            If uniform=False, expected in [0, max_param] range.
-            If registered=True on periodic curves, u=0 aligns with points[0].
+            If uniform=False, expected in [min_param, max_param] range.
+            If registered=True on periodic curves, the start of the range
+            aligns with points[0].
 
             For open (non-periodic) curves, values outside the natural domain
             are linearly extrapolated along the endpoint tangent direction:
               - uniform=True: outside [0, 1]; one unit of u corresponds to one
                 full curve length (`total_length`) of physical motion.
-              - uniform=False: outside [0, max_param]; one unit of u corresponds
-                to one unit of native-tangent magnitude.
+              - uniform=False: outside [min_param, max_param]; one unit of u
+                moves one tangent length.
             The returned tangent in the extrapolated region equals the endpoint
-            native tangent (held constant during extrapolation).
+            tangent (held constant during extrapolation). Tangents are
+            derivatives with respect to the curve parameter: the knots' one
+            on curves with ``knots``, which matches Maya's tangent.
 
         Returns
         -------
@@ -377,7 +409,7 @@ class BSplineData(Data):
         # This handles uniform scaling and registration offset
         u = self._normalize_u(u)
 
-        # For non-uniform open curves, clip native u to [0, max_param] so the
+        # For non-uniform open curves, clip native u to [0, spans] so the
         # evaluator never sees out-of-knot values (scipy would extrapolate
         # polynomially, numba behaviour is undefined). Out-of-range entries
         # are overwritten with linear extrapolation below.
@@ -396,6 +428,10 @@ class BSplineData(Data):
             points, tangents = self._apply_open_extrapolation(
                 u_user_arr, points, tangents
             )
+
+        # derivatives with respect to the knots' parameter, as in Maya
+        if self.knots is not None:
+            tangents = tangents / self._scale
 
         return points, tangents
 
@@ -483,6 +519,10 @@ class BSplineData(Data):
                 u_user_arr, points, tangents
             )
 
+        # derivatives with respect to the knots' parameter, as in Maya
+        if self.knots is not None:
+            tangents = tangents / self._scale
+
         return points, tangents
 
     def _apply_open_extrapolation(self, u_user, points, tangents):
@@ -492,7 +532,7 @@ class BSplineData(Data):
 
         Natural domain depends on parameterization:
           - uniform=True:  [0, 1]
-          - uniform=False: [0, max_param]
+          - uniform=False: [min_param, max_param]
 
         Position formulas (let `lo` and `hi` denote the domain bounds):
           - For u_user > hi:
@@ -524,11 +564,11 @@ class BSplineData(Data):
             Output shape matches input shape (1D vs 2D).
         """
         if self.uniform:
-            u_high = 1.0
+            u_low, u_high = 0.0, 1.0
         else:
-            u_high = float(self._max_param)
+            u_low, u_high = self._lo, self._hi
 
-        out_low  = u_user < 0.0
+        out_low  = u_user < u_low
         out_high = u_user > u_high
         if not (out_low.any() or out_high.any()):
             return points, tangents
@@ -543,8 +583,9 @@ class BSplineData(Data):
 
         # Helper: per-unit-u position velocity in the extrapolation region.
         # In uniform mode this is total_length * unit_tangent (so du=1 covers
-        # the full curve length). In non-uniform mode, native u == user u, so
-        # the velocity is just the native tangent itself.
+        # the full curve length). In non-uniform mode it is the tangent with
+        # respect to the user parameter: the native one over the knots' scale
+        # (1 without knots).
         if self.uniform:
             scale = self.total_length
 
@@ -556,7 +597,7 @@ class BSplineData(Data):
         else:
 
             def _velocity(t_native):
-                return t_native
+                return t_native / self._scale
 
         if out_high.any():
             u_end = np.array([self._max_param], dtype=np.float64)
@@ -592,9 +633,9 @@ class BSplineData(Data):
 
             v_start = _velocity(t_start)
             idx     = np.where(out_low)[0]
-            # u_user[idx] is negative -> moves opposite to the start tangent,
-            # extending the curve backward in space.
-            delta         = u_user[idx][:, None]
+            # u_user[idx] is below the range -> moves opposite to the start
+            # tangent, extending the curve backward in space.
+            delta         = (u_user[idx] - u_low)[:, None]
             points[idx]   = p_start + delta * v_start
             tangents[idx] = t_start
 
@@ -627,6 +668,9 @@ class BSplineData(Data):
         self._total_length     = None
         self._cp_params        = None
         self._offset           = None
+        self._lo               = None
+        self._hi               = None
+        self._scale            = None
 
     def rebuild(self) -> None:
         """
@@ -780,8 +824,10 @@ class BSplineData(Data):
         spline IK curve when ``ikHandle`` doesn't simplify it
         (``simplifyCurve=False``): each point becomes an edit point, where
         two spans join, and the spans are spaced by the distance between
-        the points. Sets ``points`` (to a new array) and ``knots``; keeps
-        ``degree`` and ``periodic``.
+        the points. The knots are Maya's too: the distance along the
+        points, so ``kv`` and every parameter match Maya's curve. Sets
+        ``points`` (to a new array) and ``knots``; keeps ``degree`` and
+        ``periodic``.
 
         Parameters
         ----------
@@ -804,9 +850,10 @@ class BSplineData(Data):
         -------
         np.ndarray
             The curve parameter of each point (N,), what ``sample(points)``
-            returns: [0, max_param], or [0, 1] with ``uniform``; periodic
-            curves wrap into the range, with u=0 at the registration
-            point when ``registered``. The point sits exactly there when
+            returns: the distance along the points, from 0 to max_param
+            (Maya's EP / spline IK parameter), or [0, 1] with ``uniform``;
+            periodic curves wrap into the range, starting at the
+            registration point when ``registered``. The point sits exactly there when
             the curve passes through it; on a best fit it is the closest
             point, searched only half way to the neighbouring points so it
             can't latch onto another part of the curve.
@@ -891,7 +938,7 @@ class BSplineData(Data):
 
         # Maya's curve, or the best one with fewer control points
         fitted = min(count, maya)
-        full, params = _fit_knots(points, fitted, degree, self.periodic, tolerance)
+        full, params, length = _fit_knots(points, fitted, degree, self.periodic, tolerance)
         cv = _fit_points(
             points, full, params, fitted, degree, self.periodic, end_rule=count >= maya
         )
@@ -902,15 +949,17 @@ class BSplineData(Data):
                 cv, full, params, degree, self.periodic, count - maya
             )
 
+        # Maya's knots: the distance along the points, so kv and every
+        # parameter match Maya's EP and spline IK curves
+        spans       = count if self.periodic else count - degree
         self.points = cv
-        self.knots  = full[1:-1].copy()
+        self.knots  = full[1:-1] * (length / spans)
         self.rebuild()
 
         # Each point's parameter, refined to its closest point on the curve
         # without leaving its own partition (half way to its neighbours).
         # It only moves on a best fit; elsewhere the curve passes through.
-        spans = self._max_param
-        u     = params.copy()
+        u = params.copy()
         if self.periodic:
             wraps = np.flatnonzero(np.diff(u) < 0)
             if wraps.size:
@@ -953,10 +1002,13 @@ class BSplineData(Data):
         scipy.interpolate.BSpline of degree n with m control points has
         m + n + 1 knots, as defined in the NURBS book by Piegl and Tiller.
         Maya and other DCCs have curves defined as m + n - 1 knots.
-        This is the layout the ``knots`` field takes.
+        This is the layout the ``knots`` field takes, and with ``knots`` set
+        it gives them back in their own range.
         """
         if self._max_param is None:
             self._init_bspline()
+        if self.knots is not None:
+            return self._lo + self._kv[1:-1] * self._scale
         return self._kv[1:-1]
 
     @property
@@ -966,10 +1018,33 @@ class BSplineData(Data):
         return self._geometry
 
     @property
-    def max_param(self) -> int:
+    def max_param(self) -> float:
+        """
+        End of the curve's parameter range: the end of the knots' range, or
+        the span count without ``knots``. Ignores ``uniform`` and
+        ``registered``.
+        """
         if self._max_param is None:
             self._init_bspline()
+        if self.knots is not None:
+            return self._hi
         return self._max_param
+
+    @property
+    def min_param(self) -> float:
+        """
+        Start of the curve's parameter range: the start of the knots'
+        range, or 0 without ``knots``. Ignores ``uniform`` and
+        ``registered``.
+        """
+        if self._max_param is None:
+            self._init_bspline()
+        return self._lo
+
+    @property
+    def domain(self) -> tuple:
+        """The curve's parameter range, (min_param, max_param), like Maya's knotDomain."""
+        return (self.min_param, self.max_param)
 
     @property
     def cv(self) -> np.ndarray:
@@ -1003,24 +1078,25 @@ class BSplineData(Data):
     @property
     def control_point_params(self) -> np.ndarray:
         """
-        Monotonically increasing native parameter values for each control
-        point, representing the closest point on the curve to each CP.
+        Monotonically increasing parameter values for each control point,
+        representing the closest point on the curve to each CP.
 
         Uses Greville abscissae (knot averages) as initial guesses and
         Newton-Raphson refinement constrained to non-overlapping partitions
         derived from midpoints between adjacent Greville points.
 
         For periodic curves, returns count + 1 values where the last
-        value is the first + max_param (closing the loop).
+        value is the first plus the period (closing the loop).
 
-        For open curves, the first and last values are clamped at 0
-        and max_param respectively.
+        For open curves, the first and last values are clamped at
+        min_param and max_param respectively.
 
         Returns
         -------
         np.ndarray
-            Parameter values in native space. Length is count for open
-            curves, count + 1 for periodic.
+            Parameter values in the curve's parameter range ([0, 1] when
+            uniform). Length is count for open curves, count + 1 for
+            periodic.
         """
         if self._cp_params is not None:
             return self._cp_params
@@ -1036,7 +1112,7 @@ class BSplineData(Data):
         # uniform knots)
         if d <= 1:
             if self.knots is not None:
-                self._cp_params = kv[1 : n + 1 + int(self.periodic)].copy()
+                self._cp_params = self._lo + kv[1 : n + 1 + int(self.periodic)] * self._scale
             elif self.periodic:
                 self._cp_params = np.arange(n + 1, dtype=np.float64)
             else:
@@ -1088,12 +1164,15 @@ class BSplineData(Data):
             u = u % self._max_param
             u = self._denormalize_u(u)
 
-            period = 1.0 if self.uniform else float(self._max_param)
+            if self.uniform:
+                start, period = 0.0, 1.0
+            else:
+                start, period = self._lo, self._hi - self._lo
 
             # For registered curves, CP 0 sits at the registration boundary.
             # If Newton landed slightly on the wrong side, it wraps to near
-            # the end of the period instead of near 0. Correct this.
-            if self.registered and u[0] > period / 2:
+            # the end of the period instead of near its start. Correct this.
+            if self.registered and u[0] - start > period / 2:
                 u[0] -= period
 
             # Restore monotonicity in user space
@@ -1124,7 +1203,7 @@ class BSplineData(Data):
             Points to project (n, dims).
         u : np.ndarray
             Starting native parameters (n,); on periodic curves they may
-            run past [0, max_param], the curve is evaluated modulo it.
+            run past [0, spans], the curve is evaluated modulo it.
         u_min, u_max : np.ndarray
             Partition bounds (n,), native space.
         mask : np.ndarray
@@ -1214,7 +1293,7 @@ class BSplineData(Data):
         u : float or np.ndarray
             Parameter value(s). By default, expected in user space:
             - If uniform=True: [0, 1] range
-            - If uniform=False: [0, max_param] range
+            - If uniform=False: [min_param, max_param] range
             - If registered=True: offset is applied internally
         collapse : bool
             If True and periodic, collapse the basis for skin weights.
@@ -1302,7 +1381,7 @@ class BSplineData(Data):
         -------
         SampleData
             Contains projected points, tangents, distances, params, and basis.
-            params are in [0, 1] if uniform=True, else [0, max_param].
+            params are in [0, 1] if uniform=True, else [min_param, max_param].
         """
         if self._max_param is None:
             self._init_bspline()
@@ -1356,6 +1435,10 @@ class BSplineData(Data):
         # Convert to user parameter space
         # This handles uniform (returns [0,1]) and registered offset
         params = self._denormalize_u(u)
+
+        # derivatives with respect to the knots' parameter, as in Maya
+        if self.knots is not None:
+            tangents = tangents / self._scale
 
         # Compute basis at native parameters (skip normalization to avoid
         # double-applying registration offset)
@@ -1464,11 +1547,13 @@ class BSplineData(Data):
 
 def _knot_vector(knots, count, degree, periodic):
     """
-    Knot vector in scipy's layout from knots in Maya's layout.
+    Knot vector in scipy's layout from knots in Maya's layout, and the
+    knots' own parameter range.
 
-    Rescales them so the parameter range is [0, max_param], as with
-    uniform knots. Periodic curves rebuild the knots outside that range
-    from the ones inside it, so the seam stays smooth.
+    The knot vector is rescaled to the curve's native range [0, spans], the
+    one uniform knots have; the range returned is what users see. Periodic
+    curves rebuild the knots outside that range from the ones inside it,
+    so the seam stays smooth.
 
     Parameters
     ----------
@@ -1484,9 +1569,9 @@ def _knot_vector(knots, count, degree, periodic):
 
     Returns
     -------
-    np.ndarray
-        Knot vector (count + degree + 1,) for open curves,
-        (count + 2 * degree + 1,) for periodic ones.
+    tuple
+        (knot vector (count + degree + 1,) for open curves or
+        (count + 2 * degree + 1,) for periodic ones, range start, range end).
     """
     knots = np.asarray(knots, dtype=np.float64).ravel()
     if degree < 1:
@@ -1516,14 +1601,16 @@ def _knot_vector(knots, count, degree, periodic):
         knots = (knots - lo) / (hi - lo) * spans
 
     if periodic:
-        return _knots_from_edges(knots[degree - 1 : degree + spans], degree, True)
-    return np.concatenate([knots[:1], knots, knots[-1:]])
+        full = _knots_from_edges(knots[degree - 1 : degree + spans], degree, True)
+    else:
+        full = np.concatenate([knots[:1], knots, knots[-1:]])
+    return full, float(lo), float(hi)
 
 
 def _fit_knots(points, count, degree, periodic, tolerance):
     """
     Knot vector (scipy's layout) and fit point parameters for ``fit()``,
-    both in the curve's parameter range [0, max_param], for at most the
+    both in the curve's native range [0, spans], for at most the
     control point count Maya uses (points + degree - 1 open, points
     periodic).
 
@@ -1552,7 +1639,8 @@ def _fit_knots(points, count, degree, periodic, tolerance):
     Returns
     -------
     tuple
-        (knot vector, fit point parameters (N,)).
+        (knot vector, fit point parameters (N,), total distance along the
+        points, which a periodic curve measures around its loop).
     """
     loop   = np.vstack([points, points[:1]]) if periodic else points
     chords = np.linalg.norm(np.diff(loop, axis=0), axis=1)
@@ -1595,7 +1683,7 @@ def _fit_knots(points, count, degree, periodic, tolerance):
     if periodic:
         params = params % spans
 
-    return _knots_from_edges(edges, degree, periodic), params
+    return _knots_from_edges(edges, degree, periodic), params, length
 
 
 def _knots_from_edges(edges, degree, periodic):

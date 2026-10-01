@@ -1515,31 +1515,34 @@ B-spline curves.
 BSpline data class.
 
 ```text
-BSplineData(points: numpy.ndarray, degree: int, periodic: bool, uniform: bool = False, use_numba: bool = True, registered: bool = False, arc_length_samples: int = 1000) -> None
+BSplineData(points: numpy.ndarray = ImmutableArray([], shape=(0, 3), dtype=float64), degree: int = 3, periodic: bool = False, uniform: bool = False, use_numba: bool = True, registered: bool = False, arc_length_samples: int = 1000, knots: Optional[numpy.ndarray] = None) -> None
 ```
 
 Fields:
 
 ```text
-points: ndarray
-degree: int
-periodic: bool
+points: ndarray = ImmutableArray([], shape=(0, 3), dtype=f
+degree: int = 3
+periodic: bool = False
 uniform: bool = False
 use_numba: bool = True
 registered: bool = False
 arc_length_samples: int = 1000
+knots: Optional = None
 ```
 
 Properties:
 
 ```text
-control_point_params               Monotonically increasing native parameter values for each control
+control_point_params               Monotonically increasing parameter values for each control point,
 count                              
 cv                                 control vertices
+domain                             The curve's parameter range, (min_param, max_param), like Maya's knotDomain.
 geometry                           
 kv                                 Unpadded knot vector.
 length                             Returns the total arc length of the curve.
-max_param                          
+max_param                          End of the curve's parameter range: the end of the knots' range, or
+min_param                          Start of the curve's parameter range: the start of the knots'
 total_length                       Returns the total arc length of the curve.
 ```
 
@@ -1554,6 +1557,8 @@ compute(self, u)
     Computes points and tangents on curve at given u coordinate.
 compute_fast(self, u)
     Compute points and tangents using the fastest available method (Numba).
+fit(self, points, resize: bool = True) -> numpy.ndarray
+    Moves the control points so the curve passes through the points,
 get_length(self, fast: bool = True, samples: int = 100) -> float
     Approximates the length of the curve.
 invalidate(self) -> None
