@@ -1557,16 +1557,20 @@ compute(self, u)
     Computes points and tangents on curve at given u coordinate.
 compute_fast(self, u)
     Compute points and tangents using the fastest available method (Numba).
-fit(self, points, resize: bool = True) -> numpy.ndarray
+fit(self, points, count: Optional[int] = None, degree: Optional[int] = None, collapse: Optional[tuple] = None) -> numpy.ndarray
     Moves the control points so the curve passes through the points,
+classmethod from_edit_points(cls, points, degree: int = 3, periodic: bool = False, collapse: Optional[tuple] = None, **fields) -> 'BSplineData'
+    A new curve through the points, each one an edit point (where two
+get_collapsed_points(self, tol: float = 1e-06) -> list
+    Groups of control points stacked on each other: every run of
 get_length(self, fast: bool = True, samples: int = 100) -> float
     Approximates the length of the curve.
 invalidate(self) -> None
     Invalidate all cached data.
 open(self)
     Opens a periodic (closed) curve.
-rebuild(self) -> None
-    Rebuild all cached data from current control points.
+rebuild(self, count: Optional[int] = None, degree: Optional[int] = None, collapse: Optional[tuple] = None, knots: str = 'best') -> float
+    Rebuilds the curve with a new control point count, degree or
 rebuild_arc_length_table(self) -> None
     Rebuild cached spline and arc-length lookup table.
 sample(self, obj, initial_samples=20, max_newton_iters=10, tolerance=1e-10)

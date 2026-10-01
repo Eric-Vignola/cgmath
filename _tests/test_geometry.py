@@ -2929,7 +2929,7 @@ class TestBSplineFit(unittest.TestCase):
             maya.fit(points)
             for count in (maya.count + 1, maya.count + 7):
                 curve = BSplineData(points=np.zeros((count, 3)), periodic=periodic)
-                curve.fit(points, resize=False)
+                curve.fit(points)
                 self.assertEqual(curve.count, count)
 
                 # Maya's curve with knots inserted: the same shape
@@ -2942,7 +2942,7 @@ class TestBSplineFit(unittest.TestCase):
         # fewer control points than Maya's, at least one per point
         for count in (len(self.CHAIN), len(self.CHAIN) + 1):
             curve = BSplineData(points=np.zeros((count, 3)))
-            curve.fit(self.CHAIN, resize=False)
+            curve.fit(self.CHAIN)
             self.assertEqual(curve.count, count)
             self.assertTrue(np.allclose(curve.sample(self.CHAIN).distances, 0.0, atol=1e-9), count)
 
@@ -2951,7 +2951,7 @@ class TestBSplineFit(unittest.TestCase):
 
     def test_keep_count_fewer(self):
         curve = BSplineData(points=np.zeros((6, 3)))
-        curve.fit(self.CHAIN, resize=False)
+        curve.fit(self.CHAIN)
         self.assertEqual(curve.count, 6)
 
         # the ends stay on the first and last point, the rest is a best fit
@@ -2961,13 +2961,89 @@ class TestBSplineFit(unittest.TestCase):
         miss = curve.sample(self.CHAIN).distances.max()
         self.assertTrue(1e-3 < miss < 1.5, miss)
 
-    def test_keep_count_blank_resizes(self):
-        curve = BSplineData()
-        curve.fit(self.CHAIN, resize=False)
+    def test_count_argument(self):
+        # -1 picks Maya's count, an int sets it, None keeps the curve's
+        curve = BSplineData(points=np.zeros((6, 3)))
+        curve.fit(self.CHAIN, count=-1)
         self.assertEqual(curve.count, len(self.CHAIN) + 2)
+        self.assertTrue(np.allclose(curve.points, self.MAYA_CVS, atol=1e-9))
+
+        curve.fit(self.CHAIN, count=8)
+        self.assertEqual(curve.count, 8)
+        curve.fit(self.CHAIN[::-1])
+        self.assertEqual(curve.count, 8)
+
+    def test_degree_argument(self):
+        curve = BSplineData()
+        curve.fit(self.CHAIN, degree=5)
+        self.assertEqual((curve.degree, curve.count), (5, len(self.CHAIN) + 4))
+
+        # the count is kept: Maya's cubic with knots inserted
+        curve.fit(self.CHAIN, degree=3)
+        self.assertEqual((curve.degree, curve.count), (3, len(self.CHAIN) + 4))
+        self.assertTrue(np.allclose(curve.sample(self.CHAIN).distances, 0.0, atol=1e-9))
+
+    def test_from_edit_points(self):
+        # the same curve as an empty one fitted with the count fit() picks
+        for settings in (
+            dict(),
+            dict(collapse=(2, 2)),
+            dict(degree=5, collapse=(3, 0)),
+            dict(periodic=True, uniform=True, registered=True),
+        ):
+            points = self.ring(8) if settings.get("periodic") else self.CHAIN
+            curve  = BSplineData.from_edit_points(points, **settings)
+            fitted = BSplineData(**{k: v for k, v in settings.items() if k != "collapse"})
+            fitted.fit(points, count=-1, collapse=settings.get("collapse"))
+            tag = str(settings)
+
+            self.assertIsInstance(curve, BSplineData, tag)
+            self.assertTrue(np.array_equal(curve.points, fitted.points), tag)
+            self.assertTrue(np.array_equal(curve.knots, fitted.knots), tag)
+            self.assertTrue(curve == fitted, tag)
+
+        spine = BSplineData.from_edit_points(self.CHAIN)
+        self.assertTrue(np.allclose(spine.points, self.MAYA_CVS, atol=1e-9))
+
+        # the fit sets the knots and the points
+        with self.assertRaises(TypeError):
+            BSplineData.from_edit_points(self.CHAIN, knots=self.MAYA_KNOTS)
+        with self.assertRaises(TypeError):
+            BSplineData.from_edit_points(self.CHAIN, points=self.CHAIN)
+
+    def test_exact_fit_params_are_the_knots(self):
+        # through the points, each point on a knot gets the knot's own value
+        cases = (
+            dict(), dict(degree=1), dict(degree=2), dict(degree=4), dict(degree=5),
+            dict(collapse=(2, 2)), dict(collapse=(3, 3)), dict(collapse=(3, 0)),
+            dict(count=14), dict(count=20), dict(collapse=(2, 2), count=17),
+        )
+        for kwargs in cases:
+            curve = BSplineData()
+            u     = curve.fit(self.CHAIN, **kwargs)
+            self.assertTrue(np.all(np.isin(u, curve.kv)), kwargs)
+            self.assertTrue(np.allclose(curve.compute(u)[0], self.CHAIN, atol=1e-12), kwargs)
+
+        # odd degree periodic: also on the knots
+        loop = BSplineData(periodic=True)
+        u    = loop.fit(self.ring(8))
+        self.assertTrue(np.all(np.isin(u, loop.kv)))
+
+    def test_repeated_point_errors(self):
+        start = np.vstack([self.CHAIN[:1], self.CHAIN])
+        end   = np.vstack([self.CHAIN, self.CHAIN[-1:]])
+        mid   = np.vstack([self.CHAIN[:3], self.CHAIN[2:]])
+        for points, message in (
+            (start, r"points 0 and 1 .*collapse=\(2, 0\)"),
+            (end, r"points 9 and 10 .*collapse=\(0, 2\)"),
+            (mid, r"points 2 and 3 share a position$"),
+        ):
+            with self.assertRaisesRegex(ValueError, message):
+                BSplineData.from_edit_points(points)
 
     def test_fit_returns_sample_params(self):
-        # every flag combination and count: fit's u is what sample() finds
+        # every flag combination and count, on smooth input: fit's u is what
+        # sample() finds (on a tight fold sample() can pick another stretch)
         cases = ((False, self.CHAIN, (0, 15, 11, 6)), (True, self.ring(8), (0, 12, 5)))
         for periodic, points, counts in cases:
             for uniform in (False, True):
@@ -2979,7 +3055,7 @@ class TestBSplineFit(unittest.TestCase):
                             uniform    = uniform,
                             registered = registered,
                         )
-                        u        = curve.fit(points, resize=count == 0)
+                        u        = curve.fit(points)
                         expected = curve.sample(points).params
                         period   = 1.0 if uniform else float(curve.max_param)
                         diff     = u - expected
@@ -3037,7 +3113,7 @@ class TestBSplineFit(unittest.TestCase):
     def test_fit_keeps_callers_array(self):
         points = self.MAYA_CVS.copy()
         curve  = BSplineData(points=points)
-        curve.fit(self.CHAIN[::-1], resize=False)
+        curve.fit(self.CHAIN[::-1])
         self.assertTrue(np.array_equal(points, self.MAYA_CVS))
 
     def test_fit_errors(self):
@@ -3057,9 +3133,16 @@ class TestBSplineFit(unittest.TestCase):
         with self.assertRaises(ValueError):
             BSplineData().fit(np.vstack([self.CHAIN[:3], self.CHAIN[2:]]))
 
-        # a kept count too small for a cubic
+        # a kept count too small for a cubic, or one set too small
         with self.assertRaises(ValueError):
-            BSplineData(points=np.zeros((3, 3))).fit(self.CHAIN, resize=False)
+            BSplineData(points=np.zeros((3, 3))).fit(self.CHAIN)
+        with self.assertRaises(ValueError):
+            BSplineData().fit(self.CHAIN, count=3)
+
+        # a count that isn't a whole number
+        for count in (2.5, "12", True):
+            with self.assertRaises(ValueError):
+                BSplineData().fit(self.CHAIN, count=count)
 
         # degree 0
         with self.assertRaises(ValueError):
@@ -3270,6 +3353,309 @@ class TestBSplineKnotRange(unittest.TestCase):
         curve = BSplineData(points=np.array(self.MAYA["open_own_knots_5_to_8"]["points"]))
         self.assertEqual(curve.domain, (0.0, 3))
         self.assertEqual(curve.max_param, 3)
+
+
+class TestBSplineStackedEnds(unittest.TestCase):
+    """fit(collapse=...) and get_collapsed_points(): stacked end control points."""
+
+    CHAIN      = TestBSplineFit.CHAIN
+    MAYA_KNOTS = TestBSplineFit.MAYA_KNOTS
+    derivative = staticmethod(TestBSplineFit.derivative)
+    ring       = staticmethod(TestBSplineFit.ring)
+
+    def test_spine_pairs(self):
+        curve = BSplineData()
+        u     = curve.fit(self.CHAIN, collapse=(2, 2))
+
+        # Maya's count and knots, through every joint
+        self.assertEqual(curve.count, len(self.CHAIN) + 2)
+        self.assertTrue(np.allclose(curve.kv, self.MAYA_KNOTS, atol=1e-12))
+        self.assertTrue(np.allclose(curve.compute(u)[0], self.CHAIN, atol=1e-12))
+
+        # the pairs are exactly equal, and leave the curve no end tangent
+        self.assertTrue(np.array_equal(curve.points[0], curve.points[1]))
+        self.assertTrue(np.array_equal(curve.points[-1], curve.points[-2]))
+        self.assertTrue(np.allclose(self.derivative(curve, 0.0, 1), 0.0, atol=1e-12))
+        end = float(curve._max_param)
+        self.assertTrue(np.allclose(self.derivative(curve, end, 1), 0.0, atol=1e-12))
+        self.assertEqual(curve.get_collapsed_points(), [[0, 1], [10, 11]])
+
+    def test_refit_keeps_the_stacks(self):
+        curve = BSplineData()
+        curve.fit(self.CHAIN, collapse=(2, 2))
+        u = curve.fit(self.CHAIN + [0.0, 1.0, 0.5])
+        self.assertEqual(curve.count, len(self.CHAIN) + 2)
+        self.assertEqual(curve.get_collapsed_points(), [[0, 1], [10, 11]])
+        self.assertTrue(np.allclose(curve.compute(u)[0], self.CHAIN + [0.0, 1.0, 0.5], atol=1e-12))
+
+    def test_variants(self):
+        n = len(self.CHAIN)
+        cases = (
+            (dict(count=8), 8, 3, [[0, 1], [6, 7]]),
+            (dict(count=20), 20, 3, [[0, 1], [18, 19]]),
+            (dict(degree=5), n + 2, 5, [[0, 1], [10, 11]]),
+            (dict(degree=5, count=-1), n + 4, 5, [[0, 1], [12, 13]]),
+            (dict(collapse=(2, 0)), n + 2, 3, [[0, 1]]),
+            (dict(collapse=(0, 0)), n + 2, 3, []),
+            (dict(collapse=(3, 0), count=-1), n + 3, 3, [[0, 1, 2]]),
+            (dict(collapse=(3, 3), count=-1), n + 4, 3, [[0, 1, 2], [11, 12, 13]]),
+            (dict(degree=2, count=-1), n + 2, 2, [[0, 1], [10, 11]]),
+        )
+        for kwargs, count, degree, groups in cases:
+            curve = BSplineData()
+            curve.fit(self.CHAIN, collapse=(2, 2))
+            u   = curve.fit(self.CHAIN, **kwargs)
+            tag = str(kwargs)
+            self.assertEqual((curve.count, curve.degree), (count, degree), tag)
+            self.assertEqual(curve.get_collapsed_points(), groups, tag)
+            for group in groups:
+                self.assertTrue(np.all(curve.points[group] == curve.points[group[0]]), tag)
+
+            # through every joint with enough control points, the ends always
+            miss = np.linalg.norm(curve.compute(u)[0] - self.CHAIN, axis=1)
+            self.assertTrue(np.all(miss[[0, -1]] < 1e-12), tag)
+            if count >= n + sum(len(g) - 1 for g in groups):
+                self.assertTrue(np.all(miss < 1e-9), tag)
+
+    def test_stacked_end_replaces_mayas_end_rule(self):
+        # a start pair zeroes the tangent there; the free end keeps C'' = 0
+        curve = BSplineData()
+        curve.fit(self.CHAIN, collapse=(2, 0))
+        end = float(curve._max_param)
+        self.assertTrue(np.allclose(self.derivative(curve, 0.0, 1), 0.0, atol=1e-12))
+        self.assertTrue(np.allclose(self.derivative(curve, end, 2), 0.0, atol=1e-9))
+
+        # triples zero the first and second derivatives
+        curve.fit(self.CHAIN, collapse=(3, 3), count=-1)
+        end = float(curve._max_param)
+        for order in (1, 2):
+            self.assertTrue(np.allclose(self.derivative(curve, 0.0, order), 0.0, atol=1e-9))
+            self.assertTrue(np.allclose(self.derivative(curve, end, order), 0.0, atol=1e-9))
+
+    def test_two_points(self):
+        curve = BSplineData()
+        u     = curve.fit(self.CHAIN[:2], collapse=(3, 3))
+        self.assertEqual(curve.count, 6)
+        self.assertEqual(curve.get_collapsed_points(), [[0, 1, 2], [3, 4, 5]])
+        self.assertTrue(np.allclose(curve.compute(u)[0], self.CHAIN[:2], atol=1e-12))
+
+    def test_degree_drop_caps_the_stacks(self):
+        curve = BSplineData()
+        curve.fit(self.CHAIN, collapse=(3, 3), count=-1)
+        curve.fit(self.CHAIN, degree=2)
+        self.assertEqual(curve.get_collapsed_points(), [[0, 1], [12, 13]])
+        curve.fit(self.CHAIN, degree=1)
+        self.assertEqual(curve.get_collapsed_points(), [])
+
+    def test_get_collapsed_points(self):
+        cv = np.array([[0, 0, 0], [0, 0, 0], [1, 0, 0], [2, 0, 0], [2, 0, 1e-7], [2, 0, 2e-7],
+                       [3, 0, 0], [4, 0, 0]], dtype=float)
+        curve = BSplineData(points=cv)
+        self.assertEqual(curve.get_collapsed_points(),         [[0, 1], [3, 4, 5]])
+        self.assertEqual(curve.get_collapsed_points(tol=0.0),  [[0, 1]])
+        self.assertEqual(BSplineData().get_collapsed_points(), [])
+
+        # a periodic curve's run can cross the seam
+        loop = BSplineData(points=np.vstack([cv[1:], cv[:1]]), periodic=True)
+        self.assertEqual(loop.get_collapsed_points(), [[2, 3, 4], [7, 0]])
+
+        # every control point in one run
+        self.assertEqual(BSplineData(points=np.zeros((5, 3))).get_collapsed_points(),
+                         [[0, 1, 2, 3, 4]])
+
+    def test_found_stacks(self):
+        # a run longer than the degree, or covering every control point, isn't a stack
+        self.assertEqual(BSplineData(points=np.zeros((6, 3)))._end_stacks(None, 3), (0, 0))
+        self.assertEqual(BSplineData(points=np.zeros((3, 3)))._end_stacks(None, 3), (0, 0))
+        cv = np.vstack([np.zeros((4, 3)), self.CHAIN[1:5]])
+        self.assertEqual(BSplineData(points=cv)._end_stacks(None, 3),     (0, 0))
+        self.assertEqual(BSplineData(points=cv[1:])._end_stacks(None, 3), (3, 0))
+        self.assertEqual(BSplineData(points=cv[1:])._end_stacks(None, 2), (2, 0))
+
+    def test_errors(self):
+        curve = BSplineData()
+        for collapse in ((1, 0), (4, 0), (2,), "22", (2.5, 0), (True, 0), 2):
+            with self.assertRaises(ValueError, msg=repr(collapse)):
+                curve.fit(self.CHAIN, collapse=collapse)
+
+        # periodic curves have no ends
+        with self.assertRaises(ValueError):
+            BSplineData(periodic=True).fit(self.ring(8), collapse=(2, 0))
+        BSplineData(periodic=True).fit(self.ring(8), collapse=(0, 0))
+
+        # degree 1 can't stack
+        with self.assertRaises(ValueError):
+            BSplineData(degree=1).fit(self.CHAIN, collapse=(2, 2))
+
+        # too few control points for the stacks
+        with self.assertRaises(ValueError):
+            BSplineData().fit(self.CHAIN[:2], collapse=(3, 3), count=5)
+
+
+class TestBSplineRebuild(unittest.TestCase):
+    """BSplineData.rebuild(): a new count, degree or stacks, closest to the old shape."""
+
+    CHAIN = TestBSplineFit.CHAIN
+    ring  = staticmethod(TestBSplineFit.ring)
+
+    # calm, then a tight wiggle
+    t = np.linspace(0, 1, 14)
+    HOOK = np.column_stack(
+        [10 * t, np.where(t < 0.7, 0.3 * np.sin(6 * t), 3 * np.sin(14 * (t - 0.7))), 0 * t]
+    )
+    del t
+
+    @staticmethod
+    def copy(curve):
+        return BSplineData(
+            points   = curve.points.copy(),
+            degree   = curve.degree,
+            periodic = curve.periodic,
+            knots    = None if curve.knots is None else np.array(curve.knots, copy=True),
+        )
+
+    @staticmethod
+    def distance(a, b, samples=4001):
+        """largest distance between two curves, both ways: dense samples of
+        each, to their closest point on the other"""
+        pa = a.compute(np.linspace(a.min_param, a.max_param, samples))[0]
+        pb = b.compute(np.linspace(b.min_param, b.max_param, samples))[0]
+        return max(b.sample(pa).distances.max(), a.sample(pb).distances.max())
+
+    def test_bare_rebuild_refreshes_only(self):
+        # after a hand edit, the curve reads the new control points
+        for periodic in (False, True):
+            curve = BSplineData(points=self.CHAIN.copy(), periodic=periodic)
+            curve.compute(0.5)
+            curve.points[0] = [1.0, 2.0, 3.0]
+            self.assertEqual(curve.rebuild(), 0.0)
+            self.assertIsNone(curve.knots)
+
+            fresh = BSplineData(points=curve.points.copy(), periodic=periodic)
+            u     = np.linspace(0, curve.max_param, 50)
+            self.assertTrue(np.array_equal(curve.compute(u)[0], fresh.compute(u)[0]), periodic)
+
+    def test_same_settings_change_nothing(self):
+        curve = BSplineData()
+        curve.fit(self.CHAIN, collapse=(2, 2))
+        points, knots = curve.points.copy(), np.array(curve.knots)
+        for kwargs in (dict(count=12), dict(degree=3), dict(collapse=(2, 2)), dict(count=12, degree=3)):
+            self.assertEqual(curve.rebuild(**kwargs), 0.0, kwargs)
+            self.assertTrue(np.array_equal(curve.points, points), kwargs)
+            self.assertTrue(np.array_equal(curve.knots, knots), kwargs)
+
+        # even knots on a curve that already has them
+        plain = BSplineData(points=self.CHAIN.copy())
+        self.assertEqual(plain.rebuild(knots="even"), 0.0)
+        self.assertIsNone(plain.knots)
+
+    def test_more_control_points_are_exact(self):
+        for periodic, points, collapse in (
+            (False, self.CHAIN, (2, 2)),
+            (False, self.HOOK, (0, 0)),
+            (True, self.ring(8), (0, 0)),
+        ):
+            old = BSplineData(periodic=periodic)
+            old.fit(points, collapse=collapse)
+            for count in (old.count + 1, old.count + 6):
+                curve = self.copy(old)
+                moved = curve.rebuild(count=count)
+                tag   = (periodic, count)
+                self.assertEqual(curve.count, count, tag)
+                self.assertLess(moved, 1e-12, tag)
+                self.assertEqual(curve.domain, old.domain, tag)
+
+                # the same curve at the same parameters
+                u = np.linspace(old.min_param, old.max_param, 101)
+                self.assertTrue(np.allclose(curve.compute(u)[0], old.compute(u)[0], atol=1e-12), tag)
+                if any(collapse):
+                    self.assertEqual(curve.get_collapsed_points(), [[0, 1], [count - 2, count - 1]])
+
+    def test_fewer_control_points(self):
+        for points in (self.CHAIN, self.HOOK):
+            for collapse in ((0, 0), (2, 2)):
+                old = BSplineData()
+                old.fit(points, collapse=collapse)
+                for count in (5, 6, 8, 10):
+                    best  = self.copy(old)
+                    even  = self.copy(old)
+                    moved = best.rebuild(count=count)
+                    flat  = even.rebuild(count=count, knots="even")
+                    tag   = (len(points), collapse, count)
+
+                    # the closest of three placements, so never worse than even
+                    self.assertLessEqual(moved, flat, tag)
+                    self.assertGreater(moved, 0.0, tag)
+
+                    # the returned distance is the one measured
+                    self.assertTrue(np.isclose(moved, self.distance(best, old), rtol=1e-3), tag)
+
+                    # range, end points and stacks kept
+                    self.assertEqual(best.count, count, tag)
+                    self.assertEqual(best.domain, old.domain, tag)
+                    ends = [old.min_param, old.max_param]
+                    self.assertTrue(np.allclose(best.compute(ends)[0], old.compute(ends)[0], atol=1e-12), tag)
+                    if any(collapse):
+                        self.assertEqual(best.get_collapsed_points(), [[0, 1], [count - 2, count - 1]], tag)
+
+    def test_even_knots(self):
+        old = BSplineData()
+        old.fit(self.CHAIN)
+        curve = self.copy(old)
+        curve.rebuild(count=8, knots="even")
+        self.assertTrue(np.allclose(np.diff(np.unique(curve.kv)), old.max_param / 5, atol=1e-12))
+        self.assertEqual(curve.domain, old.domain)
+
+    def test_degree(self):
+        old = BSplineData()
+        old.fit(self.CHAIN, collapse=(2, 2))
+        for degree in (2, 5):
+            curve = self.copy(old)
+            moved = curve.rebuild(degree=degree)
+            self.assertEqual((curve.degree, curve.count), (degree, old.count))
+            self.assertEqual(curve.get_collapsed_points(), [[0, 1], [10, 11]])
+            self.assertTrue(0.0 < moved < 1.0, (degree, moved))
+
+    def test_add_stacks(self):
+        # stacking an EP curve's ends moves it; fit() through the points instead
+        old = BSplineData()
+        old.fit(self.CHAIN)
+        curve = self.copy(old)
+        moved = curve.rebuild(collapse=(2, 2))
+        self.assertEqual(curve.get_collapsed_points(), [[0, 1], [10, 11]])
+        self.assertTrue(0.0 < moved < 1.0, moved)
+
+    def test_periodic(self):
+        old = BSplineData(periodic=True)
+        old.fit(self.ring(8))
+        for kwargs in (dict(count=6), dict(degree=2), dict(count=6, knots="even")):
+            curve = self.copy(old)
+            moved = curve.rebuild(**kwargs)
+            self.assertTrue(0.0 < moved < 1.0, kwargs)
+            self.assertTrue(np.isclose(moved, self.distance(curve, old), rtol=1e-3), kwargs)
+            self.assertEqual(curve.domain, old.domain, kwargs)
+
+    def test_knot_range_kept(self):
+        # a Maya curve with its own range keeps it
+        cv    = np.array([[0, 0, 0], [1, 0, 0.5], [2, 1, 0], [3, 1, 1], [4, 0, 0], [5, 0.5, 1]], float)
+        curve = BSplineData(points=cv, knots=[5, 5, 5, 5.5, 7, 8, 8, 8])
+        curve.rebuild(count=9)
+        self.assertEqual(curve.domain, (5.0, 8.0))
+        self.assertEqual(curve.kv[0],  5.0)
+        self.assertEqual(curve.kv[-1], 8.0)
+
+    def test_errors(self):
+        curve = BSplineData()
+        curve.fit(self.CHAIN)
+        for kwargs in (dict(count=-1), dict(count=3), dict(count=2.5), dict(degree=0),
+                       dict(knots="maya"), dict(collapse=(4, 0)), dict(degree=5, count=5)):
+            with self.assertRaises(ValueError, msg=str(kwargs)):
+                self.copy(curve).rebuild(**kwargs)
+
+        with self.assertRaises(ValueError):
+            BSplineData().rebuild(count=5)
+        with self.assertRaises(ValueError):
+            BSplineData(points=self.ring(8), periodic=True).rebuild(collapse=(2, 2))
 
 
 class TestUVList(unittest.TestCase):

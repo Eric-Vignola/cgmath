@@ -672,21 +672,252 @@ class BSplineData(Data):
         self._hi               = None
         self._scale            = None
 
-    def rebuild(self) -> None:
-        """
-        Rebuild all cached data from current control points.
+    def _refresh(self) -> None:
+        """Rebuilds every cache from the current fields."""
+        self.invalidate()
+        self._init_bspline()
 
-        Call this after modifying control points to update all
-        internal caches immediately. This is equivalent to calling
-        invalidate() followed by accessing any property.
+    def rebuild(
+        self,
+        count:    Optional[int]   = None,
+        degree:   Optional[int]   = None,
+        collapse: Optional[tuple] = None,
+        knots:    str             = "best",
+    ) -> float:
+        """
+        Rebuilds the curve with a new control point count, degree or
+        stacked ends, as close as it can to its current shape, and returns
+        how far it moved.
+
+        Called bare, nothing changes: it refreshes every cache from the
+        current control points, as after editing ``points`` by hand.
+
+        The parameter range (``domain``) is kept, and so are the end
+        points of an open curve. More control points at the same degree
+        keep the exact shape: knots are inserted. Otherwise the curve is
+        the closest one its new knots allow, measured the same way at
+        every parameter, so points keep roughly the same parameter. Sets
+        ``points``, ``knots`` and ``degree``. This isn't Maya's
+        ``rebuildCurve``, which spaces its knots evenly over a new range.
+
+        Parameters
+        ----------
+        count : int, optional
+            Number of control points. None keeps the current count.
+        degree : int, optional
+            Degree of the new curve. None keeps the current degree.
+        collapse : tuple of int, optional
+            ``(start, end)``: how many control points sit stacked on each
+            end of an open curve, 0 or 2 to degree each. Stacked control
+            points are exactly equal, which leaves the curve no tangent at
+            that end. None keeps the stacks the curve has, as
+            ``get_collapsed_points()`` finds them at its ends, capped at
+            the new degree. ``(0, 0)`` stops keeping them stacked; the
+            closest shape may still leave them where they are.
+        knots : str
+            ``"best"`` (default): the closest shape. Exact when it can be;
+            otherwise the closest of three knot placements: evenly
+            spaced, following the current spacing, and denser where the
+            curve bends. ``"even"``: evenly spaced knots over the current
+            range, and the closest shape for them.
+
+        Returns
+        -------
+        float
+            The largest distance between the new curve and the old one,
+            measured both ways on dense samples; 0.0 when nothing
+            changes.
+
+        Raises
+        ------
+        ValueError
+            An empty curve given any argument; a count of -1 (only fit()
+            picks a count) or too small for the degree and stacks; a
+            degree below 1; a bad ``collapse`` or ``knots``; any stack on
+            a periodic curve.
 
         Example
         -------
-        >>> curve.points[0] = [1.0, 2.0, 3.0]
-        >>> curve.rebuild()  # Immediately rebuilds all caches
+        >>> curve = BSplineData.from_edit_points(joint_positions, collapse=(2, 2))
+        >>> moved = curve.rebuild(count=8)       # 8 CVs, still stacked
+        >>> curve.rebuild(count=16) < 1e-12      # exact: knots inserted
+        True
         """
-        self.invalidate()
-        self._init_bspline()
+        if knots not in ("best", "even"):
+            raise ValueError(f'knots must be "best" or "even", got {knots!r}')
+
+        # Nothing asked: refresh the caches only
+        if count is None and degree is None and collapse is None and knots == "best":
+            self._refresh()
+            return 0.0
+
+        if len(self.points) == 0:
+            raise ValueError("an empty curve has nothing to rebuild; fit() it first")
+        if count is not None and _as_int(count, "count") == -1:
+            raise ValueError(
+                "count=-1 (the count that passes through every point) only "
+                "applies to fit()"
+            )
+
+        if self._max_param is None:
+            self._init_bspline()
+
+        old_degree = int(self.degree)
+        new_degree = old_degree if degree is None else _check_degree(degree)
+        stack      = self._end_stacks(collapse, new_degree)
+        old_count  = self._count
+        new_count  = old_count if count is None else _as_int(count, "count")
+        _check_count(new_count, new_degree, self.periodic, stack, "pass a larger count")
+
+        span  = int(self._max_param)
+        spans = new_count if self.periodic else new_count - new_degree
+        edges = self._kv[old_degree : old_degree + span + 1]
+        same  = new_degree == old_degree and stack == self._end_stacks(None, old_degree)
+
+        # Nothing changes: same curve, same knots
+        even = np.linspace(0.0, span, spans + 1)
+        if same and new_count == old_count:
+            if knots == "best" or np.array_equal(even, edges):
+                self._refresh()
+                return 0.0
+
+        # Candidate knots in the current curve's range [0, span]
+        if knots == "even":
+            candidates = [even]
+        elif same and new_count > old_count:
+            candidates = [_split_longest(edges, new_count - old_count)]
+        else:
+            follow     = np.interp(np.arange(spans + 1) * span / spans, np.arange(span + 1), edges)
+            candidates = [even, follow, _bend_edges(self._spl, span, spans)]
+
+        best = None
+        for candidate in candidates:
+            full   = _knots_from_edges(candidate / span * spans, new_degree, self.periodic)
+            cv     = _project(self._spl, span, full, new_count, new_degree, self.periodic, stack)
+            spline = BSpline(full, _wrap(cv, new_degree, self.periodic), new_degree)
+            moved  = _curve_distance(self._spl, span, spline, spans)
+            if best is None or moved < best[0]:
+                best = (moved, cv, full)
+
+        # Keep the parameter range, end knots exactly
+        moved, cv, full = best
+        lo, hi = self._lo, self._hi
+        stored                         = lo + full[1:-1] / spans * (hi - lo)
+        stored[new_degree - 1]         = lo
+        stored[new_degree - 1 + spans] = hi
+        if not self.periodic:
+            stored[: new_degree - 1]     = lo
+            stored[new_degree + spans :] = hi
+
+        self.degree = new_degree
+        self.points = cv
+        self.knots  = stored
+        self._refresh()
+        return moved
+
+    def get_collapsed_points(self, tol: float = 1e-6) -> list:
+        """
+        Groups of control points stacked on each other: every run of
+        neighbouring control points within ``tol`` of the next one.
+
+        Only reports; ``fit()`` and ``rebuild()`` keep the runs that start
+        or finish an open curve. A periodic curve's run can cross the
+        seam, from its last control points to its first.
+
+        Parameters
+        ----------
+        tol : float
+            Largest distance between two neighbouring control points that
+            still counts as stacked.
+
+        Returns
+        -------
+        list of list of int
+            Control point indices of each run, in curve order, e.g.
+            ``[[0, 1], [10, 11]]``. Empty when nothing is stacked.
+
+        Example
+        -------
+        >>> curve = BSplineData.from_edit_points(joint_positions, collapse=(2, 2))
+        >>> curve.get_collapsed_points()
+        [[0, 1], [10, 11]]
+        """
+        cv    = np.asarray(self.points, dtype=np.float64)
+        count = cv.shape[0]
+        if count < 2:
+            return []
+
+        close = np.linalg.norm(np.diff(cv, axis=0), axis=1) <= tol
+        if self.periodic and np.all(close) and np.linalg.norm(cv[-1] - cv[0]) <= tol:
+            return [list(range(count))]
+
+        groups = []
+        run    = [0]
+        for i, stacked in enumerate(close):
+            if stacked:
+                run.append(i + 1)
+                continue
+            if len(run) > 1:
+                groups.append(run)
+            run = [i + 1]
+        if len(run) > 1:
+            groups.append(run)
+
+        # A periodic curve joins its last run to its first across the seam
+        if self.periodic and np.linalg.norm(cv[-1] - cv[0]) <= tol:
+            head = groups.pop(0) if groups and groups[0][0] == 0 else [0]
+            tail = groups.pop() if groups and groups[-1][-1] == count - 1 else [count - 1]
+            groups.append(tail + head)
+
+        return groups
+
+    def _end_stacks(self, collapse, degree):
+        """
+        Stacked control point counts ``(start, end)`` for ``fit()`` and
+        ``rebuild()``: checked from ``collapse``, or found at the ends of
+        the curve when it is None. A found run longer than the curve's
+        degree, or covering every control point, isn't a stack (a curve
+        with every control point at the origin has none); one longer than
+        ``degree`` is capped to it.
+        """
+        if collapse is None:
+            if self.periodic or len(self.points) == 0:
+                return (0, 0)
+
+            last  = len(self.points) - 1
+            start = end = 0
+            for group in self.get_collapsed_points():
+                if len(group) > self.degree or len(group) > last:
+                    continue
+                if group[0] == 0:
+                    start = len(group)
+                if group[-1] == last:
+                    end = len(group)
+
+            start, end = min(start, degree), min(end, degree)
+            return (start if start > 1 else 0, end if end > 1 else 0)
+
+        try:
+            start, end = collapse
+            valid = all(int(n) == n and not isinstance(n, bool) for n in (start, end))
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise ValueError(
+                f"collapse must be (start, end), how many control points are "
+                f"stacked on each end, got {collapse!r}"
+            )
+
+        start, end = int(start), int(end)
+        for n in (start, end):
+            if n != 0 and not 2 <= n <= degree:
+                raise ValueError(
+                    f"collapse counts are 0 or 2 to the degree ({degree}), "
+                    f"got {collapse!r}"
+                )
+        if self.periodic and (start or end):
+            raise ValueError("a periodic curve has no ends to collapse; use (0, 0) or None")
+        return (start, end)
 
     def rebuild_arc_length_table(self) -> None:
         """
@@ -730,7 +961,7 @@ class BSplineData(Data):
             self.knots    = None
             # Topology changed: invalidate everything (cp_params,
             # arc-length table, total_length) and rebuild.
-            self.rebuild()
+            self._refresh()
 
     def close(self):
         """
@@ -750,7 +981,7 @@ class BSplineData(Data):
             self.knots    = None
             # Topology changed: invalidate everything (cp_params,
             # arc-length table, total_length) and rebuild.
-            self.rebuild()
+            self._refresh()
 
     def smooth(
         self,
@@ -815,18 +1046,87 @@ class BSplineData(Data):
         # stale. Invalidate so the next access rebuilds from fresh CPs.
         self.invalidate()
 
-    def fit(self, points, resize: bool = True) -> np.ndarray:
+    @classmethod
+    def from_edit_points(
+        cls,
+        points,
+        degree:   int             = 3,
+        periodic: bool            = False,
+        collapse: Optional[tuple] = None,
+        **fields,
+    ) -> "BSplineData":
+        """
+        A new curve through the points, each one an edit point (where two
+        spans join): the curve Maya's EP Curve Tool builds, and the spline
+        IK curve ``ikHandle`` builds with ``simplifyCurve=False``.
+
+        ``fit()`` with the count it picks (``count=-1``). For each point's
+        parameter as well, or another control point count, fit an empty
+        curve instead: ``curve = BSplineData(); u = curve.fit(points)``.
+
+        Parameters
+        ----------
+        points : array-like
+            Edit points, in order (N, dims). The curve passes through each,
+            on a knot. On a periodic curve of even degree each sits mid-span
+            instead (see ``fit()``).
+        degree : int
+            Degree of the curve.
+        periodic : bool
+            Whether the curve is closed.
+        collapse : tuple of int, optional
+            ``(start, end)``: how many control points sit stacked on each
+            end of an open curve, 0 or 2 to degree each.
+        **fields
+            Any other field: ``uniform``, ``registered``, ``use_numba``,
+            ``arc_length_samples``.
+
+        Returns
+        -------
+        BSplineData
+            The new curve.
+
+        Raises
+        ------
+        TypeError
+            ``knots`` given: the fit sets them.
+        ValueError
+            As ``fit()``: too few points, a point repeating the one before
+            it, a bad degree or ``collapse``.
+
+        Example
+        -------
+        >>> spine = BSplineData.from_edit_points(joint_positions, collapse=(2, 2))
+        >>> spine.count == len(joint_positions) + 2
+        True
+        """
+        if "knots" in fields:
+            raise TypeError("from_edit_points() sets knots itself, from the points")
+
+        curve = cls(degree=degree, periodic=periodic, **fields)
+        curve.fit(points, count=-1, collapse=collapse)
+        return curve
+
+    def fit(
+        self,
+        points,
+        count:    Optional[int]   = None,
+        degree:   Optional[int]   = None,
+        collapse: Optional[tuple] = None,
+    ) -> np.ndarray:
         """
         Moves the control points so the curve passes through the points,
-        and returns the curve parameter of each point.
+        and returns the curve parameter of each point. For a new curve in
+        one line, use ``BSplineData.from_edit_points()``.
 
-        Builds the curve Maya's EP Curve Tool builds, which is also the
-        spline IK curve when ``ikHandle`` doesn't simplify it
+        With the count it picks (``count=-1``, or any count on an empty
+        curve) it builds the curve Maya's EP Curve Tool builds, which is
+        also the spline IK curve when ``ikHandle`` doesn't simplify it
         (``simplifyCurve=False``): each point becomes an edit point, where
         two spans join, and the spans are spaced by the distance between
         the points. The knots are Maya's too: the distance along the
         points, so ``kv`` and every parameter match Maya's curve. Sets
-        ``points`` (to a new array) and ``knots``; keeps ``degree`` and
+        ``points`` (to a new array), ``knots`` and ``degree``; keeps
         ``periodic``.
 
         Parameters
@@ -835,36 +1135,53 @@ class BSplineData(Data):
             Points to pass through, in order (N, dims). A periodic curve
             closes the loop itself, so a last point repeating the first
             is dropped.
-        resize : bool
-            If True (default), the curve takes the control point count
-            Maya uses, N + degree - 1 when open and N when periodic, and
-            passes exactly through every point. If False, it keeps its
-            count. With more control points it is still Maya's curve,
-            with knots inserted: the same shape. With fewer it passes
-            exactly through the points while it has at least one control
-            point per point, as smoothly as it can, and as close as it
-            can below that; open curves keep their ends on the first and
-            last point. An empty curve is always resized.
+        count : int, optional
+            Number of control points. None (default) keeps the current
+            count; an empty curve takes the count -1 picks. -1 picks the
+            count that passes exactly through every point: Maya's,
+            N + degree - 1 when open and N when periodic, plus one per
+            stacked control point beyond what Maya's end rule needs (see
+            Notes). More control points than that give the same curve,
+            with knots inserted. Fewer still pass exactly through the
+            points while there is one free control point per point, as
+            smoothly as they can, and as close as they can below that;
+            open curves keep their ends on the first and last point.
+        degree : int, optional
+            Degree of the curve. None keeps the current degree.
+        collapse : tuple of int, optional
+            ``(start, end)``: how many control points sit stacked on each
+            end of an open curve, 0 or 2 to degree each, e.g. ``(2, 2)``
+            for a spine whose ends don't bend. Stacked control points are
+            exactly equal, which leaves the curve no tangent at that end.
+            None keeps the stacks the curve has, as
+            ``get_collapsed_points()`` finds them at its ends, capped at
+            the degree; ``(0, 0)`` removes them.
 
         Returns
         -------
         np.ndarray
-            The curve parameter of each point (N,), what ``sample(points)``
-            returns: the distance along the points, from 0 to max_param
-            (Maya's EP / spline IK parameter), or [0, 1] with ``uniform``;
-            periodic curves wrap into the range, starting at the
-            registration point when ``registered``. The point sits exactly there when
-            the curve passes through it; on a best fit it is the closest
-            point, searched only half way to the neighbouring points so it
-            can't latch onto another part of the curve.
+            The curve parameter of each point (N,), in the space
+            ``compute()`` and ``sample()`` use: the distance along the
+            points, from 0 to max_param (Maya's EP / spline IK parameter),
+            or [0, 1] with ``uniform``; periodic curves wrap into the range,
+            starting at the registration point when ``registered``. When the
+            curve passes through the points, each sits exactly at its u,
+            and a point on a knot gets that knot's value from ``kv``. On a
+            best fit, u is the closest point on the point's own stretch of
+            the curve, searched only half way to its neighbours. Either way
+            the points keep their order. ``sample(points)`` gives the same
+            values on smooth chains, but it searches the whole curve: on a
+            tight fold, or a point the chain passes twice, it can pick
+            another stretch.
 
         Raises
         ------
         ValueError
             A degree below 1; too few points (2 on an open curve, 3 and
-            at least ``degree`` on a periodic one); two consecutive points
-            at the same position; or, with resize=False, a count too
-            small for the degree.
+            at least ``degree`` on a periodic one); a point at the same
+            position as the one before it (stack end control points with
+            ``collapse`` instead); a count too small for the degree and
+            stacks; a bad ``collapse``; any stack on a periodic curve.
 
         Notes
         -----
@@ -872,24 +1189,31 @@ class BSplineData(Data):
         derivatives 2 to 1 + ceil((degree - 1) / 2) are zero at the start
         and 2 to 1 + floor((degree - 1) / 2) at the end: a cubic's second
         derivative is zero at both ends, a quadratic's only at the start.
-        Periodic curves need none. On even degrees each point sits
-        mid-span, since points on the span joins have no solution when
-        their count is even. Maya's own periodic EP curve spaced by
-        distance has clamped knots and a kink at the seam; this one
-        closes smoothly.
+        A stacked end replaces that rule at its end: k stacked control
+        points zero derivatives 1 to k - 1 there, so a cubic's pairs need
+        no more control points than Maya's curve, and a triple one more.
+        That end then differs from Maya's curve. Periodic curves need no
+        extra conditions. On even degrees each point sits mid-span, since
+        points on the span joins have no solution when their count is
+        even. Maya's own periodic EP curve spaced by distance has clamped
+        knots and a kink at the seam; this one closes smoothly.
 
-        With resize=False, a high degree with barely one control point
-        per point can overshoot between the points: exact interpolation
-        leaves it no freedom to stay smooth.
+        A high degree with barely one control point per point can
+        overshoot between the points: exact interpolation leaves it no
+        freedom to stay smooth.
 
         Example
         -------
-        >>> curve = BSplineData()
+        >>> curve = BSplineData()             # a new curve, and each point's u
         >>> u = curve.fit(joint_positions)
         >>> curve.count == len(joint_positions) + 2
         True
         >>> np.allclose(curve.compute(u)[0], joint_positions)
         True
+        >>> spine = BSplineData.from_edit_points(joint_positions, collapse=(2, 2))
+        >>> u = spine.fit(moved_joints)       # refit: same count and stacks
+        >>> spine.get_collapsed_points()
+        [[0, 1], [10, 11]]
         """
         points = np.asarray(points, dtype=np.float64)
         if points.ndim != 2:
@@ -897,9 +1221,7 @@ class BSplineData(Data):
                 f"fit points must be an (N, dims) array, got shape {points.shape}"
             )
 
-        degree = int(self.degree)
-        if degree < 1:
-            raise ValueError(f"fit needs a degree of 1 or more, got {degree}")
+        degree = _check_degree(self.degree if degree is None else degree)
 
         # Positions closer than this count as the same point
         tolerance = 1e-12 * max(1.0, float(np.abs(points).max(initial=0.0)))
@@ -922,63 +1244,53 @@ class BSplineData(Data):
                 f"fit points, got {n}"
             )
 
-        # Maya's control point count
-        maya = n if self.periodic else n + degree - 1
-
-        if resize or len(self.points) == 0:
-            count = maya
+        # Stacked ends first: they set the count the points need
+        stack = self._end_stacks(collapse, degree)
+        exact = _exact_count(n, degree, self.periodic, stack)
+        if count is None:
+            count = len(self.points) or exact
         else:
-            count    = len(self.points)
-            smallest = max(3, degree) if self.periodic else degree + 1
-            if count < smallest:
-                raise ValueError(
-                    f"{count} control points are too few for this degree "
-                    f"{degree} curve, it needs {smallest}; fit with resize=True"
-                )
+            count = _as_int(count, "count")
+            if count == -1:
+                count = exact
+        _check_count(count, degree, self.periodic, stack, "fit with count=-1")
 
-        # Maya's curve, or the best one with fewer control points
-        fitted = min(count, maya)
-        full, params, length = _fit_knots(points, fitted, degree, self.periodic, tolerance)
+        # The exact curve, or the best one with fewer control points
+        fitted = min(count, exact)
+        full, params, length = _fit_knots(
+            points, fitted, degree, self.periodic, tolerance, stack
+        )
         cv = _fit_points(
-            points, full, params, fitted, degree, self.periodic, end_rule=count >= maya
+            points, full, params, fitted, degree, self.periodic, fitted == exact, stack
         )
 
-        # More control points: Maya's curve with knots inserted, same shape
-        if count > maya:
+        # More control points: the same curve with knots inserted
+        if count > exact:
             cv, full, params = _insert_knots(
-                cv, full, params, degree, self.periodic, count - maya
+                cv, full, params, degree, self.periodic, count - exact, stack
             )
 
         # Maya's knots: the distance along the points, so kv and every
         # parameter match Maya's EP and spline IK curves
         spans       = count if self.periodic else count - degree
+        self.degree = degree
         self.points = cv
         self.knots  = full[1:-1] * (length / spans)
-        self.rebuild()
+        self._refresh()
 
-        # Each point's parameter, refined to its closest point on the curve
-        # without leaving its own partition (half way to its neighbours).
-        # It only moves on a best fit; elsewhere the curve passes through.
-        u = params.copy()
-        if self.periodic:
-            wraps = np.flatnonzero(np.diff(u) < 0)
-            if wraps.size:
-                u[wraps[0] + 1 :] += spans
-
-        mids  = (u[:-1] + u[1:]) / 2.0
-        u_min = np.concatenate([u[:1], mids])
-        u_max = np.concatenate([mids, u[-1:]])
-        mask  = np.ones(n, dtype=bool)
-        if self.periodic:
-            gap       = u[0] + spans - u[-1]
-            u_min[0]  = u[0] - gap / 2.0
-            u_max[-1] = u[-1] + gap / 2.0
+        # Each point's parameter. Through the points, it is where the point
+        # was fitted; one on a knot takes the knot's own value, so u matches
+        # kv exactly.
+        u       = params.copy()
+        through = n if self.periodic else n + max(0, stack[0] - 1) + max(0, stack[1] - 1)
+        if count >= through:
+            edges = self._kv[degree : degree + spans + 1]
+            near  = np.clip(np.searchsorted(edges, u), 1, spans)
+            for side in (near - 1, near):
+                on_knot = np.abs(edges[side] - u) <= 1e-12 * spans
+                u       = np.where(on_knot, edges[side], u)
         else:
-            # the ends sit exactly on the first and last point
-            mask[0]  = False
-            mask[-1] = False
-
-        u = self._partitioned_newton(points, u, u_min, u_max, mask)
+            u = self._best_fit_params(points, u, spans)
 
         # Same space as sample(): wrapped on periodic curves, then uniform
         # and registered applied
@@ -988,6 +1300,49 @@ class BSplineData(Data):
         u = self._denormalize_u(u)
 
         return np.append(u, u[:1]) if closing else u
+
+    def _best_fit_params(self, points, u, spans):
+        """
+        Best fit point parameters for ``fit()``: each refined to its closest
+        point on the curve without leaving its own partition (half way to
+        its neighbours), so the points keep their order. Open curves keep
+        their ends on the first and last point.
+
+        Parameters
+        ----------
+        points : np.ndarray
+            Fit points (N, dims).
+        u : np.ndarray
+            Native parameters the points were fitted at (N,), wrapped into
+            [0, spans) on periodic curves.
+        spans : int
+            The curve's span count.
+
+        Returns
+        -------
+        np.ndarray
+            Refined native parameters (N,), not wrapped.
+        """
+        u = u.copy()
+        if self.periodic:
+            wraps = np.flatnonzero(np.diff(u) < 0)
+            if wraps.size:
+                u[wraps[0] + 1 :] += spans
+
+        mids  = (u[:-1] + u[1:]) / 2.0
+        u_min = np.concatenate([u[:1], mids])
+        u_max = np.concatenate([mids, u[-1:]])
+        mask  = np.ones(u.shape[0], dtype=bool)
+        if self.periodic:
+            gap       = u[0] + spans - u[-1]
+            u_min[0]  = u[0] - gap / 2.0
+            u_max[-1] = u[-1] + gap / 2.0
+        else:
+            # the ends sit exactly on the first and last point
+            mask[0]  = False
+            mask[-1] = False
+
+        return self._partitioned_newton(points, u, u_min, u_max, mask)
 
     @property
     def count(self) -> int:
@@ -1607,21 +1962,23 @@ def _knot_vector(knots, count, degree, periodic):
     return full, float(lo), float(hi)
 
 
-def _fit_knots(points, count, degree, periodic, tolerance):
+def _fit_knots(points, count, degree, periodic, tolerance, stack=(0, 0)):
     """
     Knot vector (scipy's layout) and fit point parameters for ``fit()``,
-    both in the curve's native range [0, spans], for at most the
-    control point count Maya uses (points + degree - 1 open, points
-    periodic).
+    both in the curve's native range [0, spans], for at most the exact
+    control point count (``_exact_count``).
 
     The points are spaced by the distance between them, like Maya's EP
-    curves. At Maya's count the knots land on the points; periodic curves
-    of even degree shift them half a span, so each point sits mid-span.
-    Open curves with fewer control points, but at least one per point,
-    average each run of consecutive point parameters into a knot (the
-    NURBS Book's averaging), which keeps exact interpolation well
-    conditioned. Fewer control points than points resample the spacing
-    at evenly spaced fractional point indices.
+    curves. At the exact count the knots land on the points; a stacked
+    end that needs more control points than Maya's end rule splits its
+    end span evenly, once per extra one. Periodic curves of even degree
+    shift the knots half a span, so each point sits mid-span. Open
+    curves with fewer control points, but at least one free control
+    point per point, average each run of consecutive point parameters
+    into a knot (the NURBS Book's averaging), each stacked end counting
+    once per stacked control point; this keeps exact interpolation well
+    conditioned. Fewer resample the spacing at evenly spaced fractional
+    point indices.
 
     Parameters
     ----------
@@ -1635,6 +1992,8 @@ def _fit_knots(points, count, degree, periodic, tolerance):
         Whether the curve is closed.
     tolerance : float
         Distance under which two consecutive points count as one.
+    stack : tuple of int
+        Stacked control points at the start and end, 0 for none.
 
     Returns
     -------
@@ -1644,26 +2003,44 @@ def _fit_knots(points, count, degree, periodic, tolerance):
     """
     loop   = np.vstack([points, points[:1]]) if periodic else points
     chords = np.linalg.norm(np.diff(loop, axis=0), axis=1)
-    if np.any(chords <= tolerance):
+    repeat = np.flatnonzero(chords <= tolerance)
+    if repeat.size:
+        first = int(repeat[0])
+        last  = points.shape[0] - 2
+        hint  = ""
+        if not periodic and first in (0, last):
+            stack = "(2, 0)" if first == 0 else "(0, 2)"
+            hint  = f"; to stack the end control points, pass collapse={stack} instead"
         raise ValueError(
-            "fit points must not repeat: two consecutive points share a position"
+            f"fit points must not repeat: points {first} and "
+            f"{(first + 1) % points.shape[0]} share a position{hint}"
         )
     along = np.concatenate([[0.0], np.cumsum(chords)])
 
     n     = points.shape[0]
     steps = chords.shape[0]
     spans = count if periodic else count - degree
+    head, tail = stack
 
-    if not periodic and count >= n:
-        # Each interior knot averages `width` consecutive interior
-        # parameters; a width of 1 puts the knots on the points
-        width = n + degree - count
-        inner = along[1:-1]
+    if not periodic and count >= _exact_count(n, degree, False, stack):
+        # On the points; a stack's extra conditions split its end span
+        edges = _split_span(along, 0, 1 + max(0, head - 1 - degree // 2))
+        edges = _split_span(
+            edges, edges.shape[0] - 2, 1 + max(0, tail - 1 - (degree - 1) // 2)
+        )
+    elif not periodic and count >= n + max(0, head - 1) + max(0, tail - 1):
+        # Each interior knot averages `width` consecutive interior sites;
+        # a stacked end is a site once per stacked control point
+        sites = np.concatenate(
+            [np.repeat(along[:1], max(1, head)), along[1:-1], np.repeat(along[-1:], max(1, tail))]
+        )
+        width = sites.shape[0] + degree - count
+        inner = sites[1:-1]
         if width > 1:
             inner = np.array(
                 [inner[i : i + width].mean() for i in range(inner.shape[0] - width + 1)]
             )
-        edges = np.concatenate([along[:1], inner, along[-1:]])
+        edges = np.concatenate([sites[:1], inner, sites[-1:]])
     else:
         shift = 0.5 if periodic and degree % 2 == 0 else 0.0
         where = (np.arange(spans + 1) + shift) * steps / spans
@@ -1713,17 +2090,19 @@ def _knots_from_edges(edges, degree, periodic):
     return np.concatenate([np.zeros(degree), edges, np.full(degree, float(spans))])
 
 
-def _fit_points(points, full, params, count, degree, periodic, end_rule):
+def _fit_points(points, full, params, count, degree, periodic, end_rule, stack=(0, 0)):
     """
     Control points for ``fit()``, solved in priority order: each level
     only uses the freedom the levels before it leave.
 
+    0. Stacked control points are one unknown each stack, so they come
+       out exactly equal.
     1. Open curves start and end on the first and last point.
     2. Pass through the points, as close as possible with too few
        control points.
-    3. With ``end_rule``, Maya's end conditions on open curves:
-       derivatives 2 to 1 + ceil((degree - 1) / 2) are zero at the start,
-       2 to 1 + floor((degree - 1) / 2) at the end.
+    3. With ``end_rule``, Maya's end conditions on open curves, at each
+       end that isn't stacked: derivatives 2 to 1 + ceil((degree - 1) / 2)
+       are zero at the start, 2 to 1 + floor((degree - 1) / 2) at the end.
     4. Smoothest curve for whatever freedom is left: least squared second
        derivative (first on linear curves), integrated by Gauss-Legendre
        quadrature over every span.
@@ -1744,6 +2123,8 @@ def _fit_points(points, full, params, count, degree, periodic, end_rule):
         Whether the curve is closed.
     end_rule : bool
         Whether to apply Maya's end conditions (level 3).
+    stack : tuple of int
+        Stacked control points at the start and end, 0 for none.
 
     Returns
     -------
@@ -1755,33 +2136,30 @@ def _fit_points(points, full, params, count, degree, periodic, end_rule):
     levels = []
 
     if not periodic:
-        pins        = np.zeros((2, count))
-        pins[0, 0]  = 1.0
-        pins[1, -1] = 1.0
-        levels.append((pins, points[[0, -1]]))
+        levels.append(_end_pins(count, points[[0, -1]]))
 
     levels.append((_fit_basis(full, degree, count, periodic, params), points))
 
     if end_rule and not periodic:
-        rows = [
-            _fit_basis(full, degree, count, False, [0.0], order)
-            for order in range(2, 2 + degree // 2)
-        ]
-        rows += [
-            _fit_basis(full, degree, count, False, [float(spans)], order)
-            for order in range(2, 2 + (degree - 1) // 2)
-        ]
+        rows = []
+        if not stack[0]:
+            rows += [
+                _fit_basis(full, degree, count, False, [0.0], order)
+                for order in range(2, 2 + degree // 2)
+            ]
+        if not stack[1]:
+            rows += [
+                _fit_basis(full, degree, count, False, [float(spans)], order)
+                for order in range(2, 2 + (degree - 1) // 2)
+            ]
         if rows:
             levels.append((np.vstack(rows), np.zeros((len(rows), dims))))
 
-    at, weight = _span_quadrature(full[degree : degree + spans + 1], degree)
-    bending = _fit_basis(full, degree, count, periodic, at, min(2, degree))
-    levels.append((bending * weight[:, None], np.zeros((at.shape[0], dims))))
-
-    return _layered_lstsq(levels, count, dims)
+    levels.append(_bending(full, degree, count, periodic, dims))
+    return _layered_lstsq(levels, count, dims, _ties(count, stack))
 
 
-def _insert_knots(cv, full, params, degree, periodic, extra):
+def _insert_knots(cv, full, params, degree, periodic, extra, stack=(0, 0)):
     """
     The same curve with more control points: splits the longest span in
     two, ``extra`` times, then solves for the control points that
@@ -1801,6 +2179,8 @@ def _insert_knots(cv, full, params, degree, periodic, extra):
         Whether the curve is closed.
     extra : int
         Number of knots to insert.
+    stack : tuple of int
+        Stacked control points at the start and end, kept exactly equal.
 
     Returns
     -------
@@ -1810,26 +2190,66 @@ def _insert_knots(cv, full, params, degree, periodic, extra):
     """
     count = cv.shape[0]
     spans = count if periodic else count - degree
-    edges = list(full[degree : degree + spans + 1])
-    for _ in range(extra):
-        i = int(np.argmax(np.diff(edges)))
-        edges.insert(i + 1, (edges[i] + edges[i + 1]) / 2.0)
+    edges = _split_longest(full[degree : degree + spans + 1], extra)
 
     # Rescale to the new parameter range [0, spans + extra]
-    scale = (spans + extra) / spans
-    fine  = _knots_from_edges(np.array(edges) * scale, degree, periodic)
+    fine    = _knots_from_edges(edges / spans * (spans + extra), degree, periodic)
+    spline  = BSpline(full, _wrap(cv, degree, periodic), degree)
+    fine_cv = _project(spline, spans, fine, count + extra, degree, periodic, stack)
+    return fine_cv, fine, params * ((spans + extra) / spans)
 
-    # Periodic curves repeat their first control points at the end
-    wrap = np.arange(count)
-    if periodic:
-        wrap = np.concatenate([wrap, np.arange(degree) % count])
 
-    at, _ = _span_quadrature(fine[degree : degree + spans + extra + 1], degree)
-    target  = BSpline(full, cv[wrap], degree)(at / scale)
-    basis   = _fit_basis(fine, degree, count + extra, periodic, at)
+def _project(spline, span, full, count, degree, periodic, stack=(0, 0)):
+    """
+    Control points of the curve on knot vector ``full`` closest to
+    ``spline``: the least squared distance between the two at the same
+    relative parameter, integrated over the whole range. Open curves keep
+    the spline's end points, and stacked control points come out exactly
+    equal. Exact when the knots can hold the spline.
 
-    fine_cv = _layered_lstsq([(basis, target)], count + extra, cv.shape[1])
-    return fine_cv, fine, params * scale
+    Parameters
+    ----------
+    spline : scipy.interpolate.BSpline
+        Curve to follow, on its native range [0, span].
+    span : int
+        Its span count.
+    full : np.ndarray
+        New knot vector in scipy's layout, on [0, spans].
+    count : int
+        Number of control points, without the periodic wrap.
+    degree : int
+        Degree of the new curve.
+    periodic : bool
+        Whether the curve is closed.
+    stack : tuple of int
+        Stacked control points at the start and end, 0 for none.
+
+    Returns
+    -------
+    np.ndarray
+        Control points (count, dims).
+    """
+    spans = count if periodic else count - degree
+    scale = spans / span
+
+    # Gauss nodes on every piece both curves are polynomial over, exact for
+    # the squared distance
+    breaks = np.unique(
+        np.concatenate(
+            [spline.t[spline.k : spline.k + span + 1] * scale, full[degree : degree + spans + 1]]
+        )
+    )
+    at, weight = _span_quadrature(breaks, max(degree, spline.k))
+    target = spline(at / scale)
+    dims   = target.shape[1]
+
+    levels = []
+    if not periodic:
+        levels.append(_end_pins(count, spline([0.0, float(span)])))
+    basis = _fit_basis(full, degree, count, periodic, at)
+    levels.append((basis * weight[:, None], target * weight[:, None]))
+    levels.append(_bending(full, degree, count, periodic, dims))
+    return _layered_lstsq(levels, count, dims, _ties(count, stack))
 
 
 def _span_quadrature(edges, degree):
@@ -1896,7 +2316,7 @@ def _fit_basis(full, degree, count, periodic, at, order=0):
     return values
 
 
-def _layered_lstsq(levels, size, dims):
+def _layered_lstsq(levels, size, dims, ties=None):
     """
     Least squares in priority order.
 
@@ -1913,12 +2333,20 @@ def _layered_lstsq(levels, size, dims):
         Number of unknowns.
     dims : int
         Number of right-hand sides, solved together.
+    ties : np.ndarray, optional
+        Which shared unknown each unknown is (size,), from ``_ties``:
+        unknowns sharing one come out exactly equal.
 
     Returns
     -------
     np.ndarray
         Solution (size, dims).
     """
+    if ties is not None:
+        shared = np.eye(int(ties.max()) + 1)[ties]
+        x      = _layered_lstsq([(a @ shared, b) for a, b in levels], shared.shape[1], dims)
+        return x[ties]
+
     x    = np.zeros((size, dims))
     free = np.eye(size)
     for a, b in levels:
@@ -1935,3 +2363,173 @@ def _layered_lstsq(levels, size, dims):
         free = free @ vt[rank:].T
 
     return x
+
+
+def _as_int(value, name):
+    """``value`` as an int, or ValueError when it isn't a whole number."""
+    try:
+        valid = int(value) == value and not isinstance(value, bool)
+    except (TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise ValueError(f"{name} must be a whole number, got {value!r}")
+    return int(value)
+
+
+def _check_degree(degree):
+    """``degree`` as an int of 1 or more, or ValueError."""
+    degree = _as_int(degree, "degree")
+    if degree < 1:
+        raise ValueError(f"the degree must be 1 or more, got {degree}")
+    return degree
+
+
+def _check_count(count, degree, periodic, stack, hint):
+    """ValueError when ``count`` control points are too few for the curve."""
+    smallest = max(3, degree) if periodic else max(degree + 1, stack[0] + stack[1])
+    if count < smallest:
+        stacked = f" with {stack[0]} and {stack[1]} stacked" if any(stack) else ""
+        raise ValueError(
+            f"{count} control points are too few for this degree {degree} "
+            f"curve{stacked}, it needs {smallest}; {hint}"
+        )
+
+
+def _exact_count(n, degree, periodic, stack):
+    """
+    Control points a curve needs to pass exactly through ``n`` points:
+    Maya's EP count, n + degree - 1 open and n periodic, plus one per
+    condition a stacked end adds beyond Maya's end rule. k stacked
+    control points zero derivatives 1 to k - 1; the rule they replace
+    zeroes ceil((degree - 1) / 2) derivatives at the start and
+    floor((degree - 1) / 2) at the end.
+    """
+    if periodic:
+        return n
+    head, tail = stack
+    extra = max(0, head - 1 - degree // 2) + max(0, tail - 1 - (degree - 1) // 2)
+    return n + degree - 1 + extra
+
+
+def _ties(count, stack):
+    """
+    Which shared unknown each control point is (count,): one per stacked
+    end, one per other control point. None without stacks.
+    """
+    head, tail = stack
+    if not head and not tail:
+        return None
+    ties = np.arange(count)
+    if head:
+        ties = np.maximum(ties - (head - 1), 0)
+    if tail:
+        ties[count - tail :] = ties[count - tail]
+    return ties
+
+
+def _end_pins(count, ends):
+    """Least squares level holding the first and last control points on ``ends``."""
+    pins        = np.zeros((2, count))
+    pins[0, 0]  = 1.0
+    pins[1, -1] = 1.0
+    return pins, ends
+
+
+def _bending(full, degree, count, periodic, dims):
+    """
+    Least squares level for the smoothest curve: squared second derivative
+    (first on linear curves) integrated over every span.
+    """
+    spans = count if periodic else count - degree
+    at, weight = _span_quadrature(full[degree : degree + spans + 1], degree)
+    bending = _fit_basis(full, degree, count, periodic, at, min(2, degree))
+    return bending * weight[:, None], np.zeros((at.shape[0], dims))
+
+
+def _wrap(cv, degree, periodic):
+    """Control points with a periodic curve's first ``degree`` repeated at the end."""
+    if not periodic:
+        return cv
+    return cv[np.concatenate([np.arange(cv.shape[0]), np.arange(degree) % cv.shape[0]])]
+
+
+def _split_span(edges, span, pieces):
+    """Knots with span ``span`` split evenly into ``pieces``."""
+    if pieces <= 1:
+        return edges
+    lo, hi = edges[span], edges[span + 1]
+    inside = lo + (hi - lo) * np.arange(1, pieces) / pieces
+    return np.concatenate([edges[: span + 1], inside, edges[span + 1 :]])
+
+
+def _split_longest(edges, extra):
+    """Knots with the longest span split in two, ``extra`` times."""
+    edges = list(edges)
+    for _ in range(extra):
+        i = int(np.argmax(np.diff(edges)))
+        edges.insert(i + 1, (edges[i] + edges[i + 1]) / 2.0)
+    return np.array(edges)
+
+
+def _bend_edges(spline, span, spans):
+    """
+    ``spans + 1`` knots on [0, span], denser where the curve bends: equal
+    shares of sqrt(|C''| |C'|), the classic optimal knot density, plus a
+    15% floor so straight stretches still get knots. A curve that never
+    bends gets knots spaced by length.
+    """
+    u       = np.linspace(0.0, span, 64 * max(span, spans, 64) + 1)
+    speed   = np.linalg.norm(spline.derivative(1)(u), axis=1)
+
+    density = np.zeros_like(speed)
+    if spline.k >= 2:
+        density = np.sqrt(np.linalg.norm(spline.derivative(2)(u), axis=1) * speed)
+    density = density + 0.15 * density.mean()
+    if not density.mean() > 0.0:
+        density = speed
+    if not density.mean() > 0.0:
+        return np.linspace(0.0, span, spans + 1)
+
+    total     = np.concatenate([[0.0], np.cumsum((density[1:] + density[:-1]) / 2.0 * np.diff(u))])
+    edges     = np.interp(np.linspace(0.0, total[-1], spans + 1), total, u)
+    edges[0]  = 0.0
+    edges[-1] = float(span)
+    return edges
+
+
+def _curve_distance(a, a_span, b, b_span):
+    """
+    Largest distance between two curves, both ways (Hausdorff): dense
+    samples of each, measured to the other's sampled polyline.
+
+    Parameters
+    ----------
+    a, b : scipy.interpolate.BSpline
+        The curves, on their native ranges.
+    a_span, b_span : int
+        Their span counts.
+
+    Returns
+    -------
+    float
+        The distance.
+    """
+    samples = 64 * max(a_span, b_span, 64) + 1
+    pa      = a(np.linspace(0.0, a_span, samples))
+    pb      = b(np.linspace(0.0, b_span, samples))
+    return max(_polyline_distance(pa, pb), _polyline_distance(pb, pa))
+
+
+def _polyline_distance(points, line):
+    """Largest distance from ``points`` to the polyline through ``line``."""
+    nearest = cKDTree(line).query(points)[1]
+    best    = np.full(points.shape[0], np.inf)
+    for segment in (nearest - 1, nearest):
+        segment = np.clip(segment, 0, line.shape[0] - 2)
+        start   = line[segment]
+        along   = line[segment + 1] - start
+        length  = np.einsum("ij,ij->i", along, along)
+        t       = np.einsum("ij,ij->i", points - start, along) / np.where(length > 0.0, length, 1.0)
+        t       = np.clip(t, 0.0, 1.0)
+        best    = np.minimum(best, np.linalg.norm(points - (start + t[:, None] * along), axis=1))
+    return float(best.max())

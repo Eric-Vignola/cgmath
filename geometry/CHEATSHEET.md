@@ -26,7 +26,7 @@ Concepts, conventions and the file map live in [`README.md`](README.md).
 | [`morph_target` — `MorphData` and `MorphList`](#morph_target--morphdata-and-morphlist) | sparse offsets, arithmetic, pruning |
 | [`skin_weights` — `SkinData`, `SkinList`, `CompactSkinData`](#skin_weights--skindata-skinlist-compactskindata) | dense weights, cleanup, influence editing, smoothing, top-k |
 | [`pack` — UV island packing](#pack--uv-island-packing) | `UVData.pack`, `pack_islands`, resolution / padding / rotations |
-| [`bspline` — curves](#bspline--curves) | knot space, periodic, arc length, basis, `sample()` |
+| [`bspline` — curves](#bspline--curves) | knot space, periodic, `from_edit_points`/`fit`, stacked ends, `rebuild`, arc length, basis, `sample()` |
 | [`bspline_patch` — surfaces](#bspline_patch--surfaces) | tensor products, `compute`/`evaluate`, `sample`, `raycast`, area |
 | [`_saddle_surface` — quad-aware surface queries](#_saddle_surface--quad-aware-surface-queries) | `integrate`, `sample`, `remap`, `raycast`, the `MeshData` wrappers |
 | [`sdf` — signed distance fields, functional API](#sdf--signed-distance-fields-functional-api) | `make_grid`, `eval_*`, CSG, `dual_marching_cubes` |
@@ -1414,15 +1414,27 @@ ring.close()
 print(ring.periodic, ring.max_param)  # True 5    (count)
 ```
 
-### `fit()` — a curve through points
+### `from_edit_points()` / `fit()` — a curve through points
 
-`fit()` moves the control points so the curve passes through the points,
-the way Maya's EP Curve Tool does, and the way `ikHandle` builds its spline
-IK curve with `simplifyCurve=False`. Each point becomes an edit point, the
-spans are spaced by the distance between the points (kept in `knots`), and
-an open curve gets `points + degree - 1` control points. Those distances are
-the curve's parameters, as in Maya: `kv` is Maya's knots and `domain` its
-`knotDomain`. `BSplineData()` is an empty cubic, ready to fit.
+`BSplineData.from_edit_points(points)` builds the curve Maya's EP Curve
+Tool builds, which is also the spline IK curve `ikHandle` builds with
+`simplifyCurve=False`. Each point becomes an edit point, the spans are
+spaced by the distance between the points (kept in `knots`), and an open
+curve gets `points + degree - 1` control points. Those distances are the
+curve's parameters, as in Maya: `kv` is Maya's knots and `domain` its
+`knotDomain`.
+
+`fit()` does the same to an existing curve, in place, and returns each
+point's `u`: in order, each on its own stretch of the curve. On a smooth
+chain `sample()` finds the same values, but it searches the whole curve, so
+on a tight fold or a point the chain passes twice it can pick another
+stretch. `BSplineData()` is an empty cubic, ready to fit.
+
+`count` picks the control point count: `None` (default) keeps the curve's
+own (an empty curve takes Maya's), `-1` takes Maya's, an int sets it. More
+than Maya's give the same curve with knots inserted; fewer still pass
+through every point while there is one control point per point, and are a
+best fit below that, the ends always on the first and last point.
 
 ```python
 joints = np.array([
@@ -1433,31 +1445,101 @@ joints = np.array([
     [5.0, 8.0, 1.0],
 ])
 
-curve = BSplineData()
-u     = curve.fit(joints)     # each joint's u, as sample() would return it
-print(curve.count)            # 7 == len(joints) + degree - 1
-print(np.round(curve.kv, 3))  # Maya's knots: the distance along the joints
-print(np.round(u, 3))         # each joint's u: its distance along the chain
-print(curve.domain)           # (0.0, 10.10...): the parameter range
+chain = BSplineData.from_edit_points(joints)
+print(chain.count)            # 7 == len(joints) + degree - 1
+print(np.round(chain.kv, 3))  # Maya's knots: the distance along the joints
+print(chain.domain)           # (0.0, 10.10...): the parameter range
 
-# the curve passes through the joints at u
-p, _ = curve.compute(u)
+# fit() refits in place and returns each joint's u: its distance along the chain
+u = chain.fit(joints)
+print(np.round(u, 3))  # [ 0.  2.236  5.318  7.868 10.104]
+
+# the curve passes through the joints at u, each joint on its knot
+p, _ = chain.compute(u)
 assert np.allclose(p, joints)
-assert np.allclose(u, curve.sample(joints).params)
+assert np.all(np.isin(u, chain.kv))
 
-# keep the count: more CVs give the same curve, fewer a best fit
+# a curve keeps its count: more CVs give the same curve, fewer a best fit
 dense = BSplineData(points=np.zeros((12, 3)))
-dense.fit(joints, resize=False)
-print(dense.count)  # 12
+dense.fit(joints)
+print(dense.count)                    # 12
+dense.fit(joints, count=-1)           # Maya's count
+print(dense.count)                    # 7
+dense.fit(joints, count=4, degree=2)  # any count and degree
+print(dense.count, dense.degree)      # 4 2
 
 # closed curves get one control point per point
-loop = BSplineData(periodic=True)
-loop.fit(joints)
+loop = BSplineData.from_edit_points(joints, periodic=True)
 print(loop.count)  # 5
 
 # knots in Maya's layout (MFnNurbsCurve.knots()) load as they are
-same = BSplineData(points=curve.points, knots=curve.kv)
-assert same == curve
+same = BSplineData(points=chain.points, knots=chain.kv)
+assert same == chain
+```
+
+### Stacked end control points — `collapse`
+
+Two or more control points at the same position on an end of an open
+curve leave it no tangent there: `k` stacked CVs zero derivatives `1` to
+`k - 1`. A stacked end replaces Maya's "no bend at the end" rule there, so
+that end differs from Maya's curve. Cubic pairs need no extra control
+point, a triple one more. `fit()` and `rebuild()` take
+`collapse=(start, end)`, each `0` or `2` to `degree`; `None` (default)
+keeps the stacks `get_collapsed_points()` finds at the ends, and `(0, 0)`
+removes them. Stacked CVs come out exactly equal. Closed curves have no
+ends to stack.
+
+```python
+spine = BSplineData.from_edit_points(joints, collapse=(2, 2))
+print(spine.count)                   # 7: pairs cost nothing on a cubic
+print(spine.get_collapsed_points())  # [[0, 1], [5, 6]]
+assert np.allclose(spine.compute(0.0)[1], 0.0)  # no tangent at the start
+
+raised = joints + [0.0, 1.0, 0.0]
+u      = spine.fit(raised)           # a refit keeps the count and the pairs
+print(spine.get_collapsed_points())  # [[0, 1], [5, 6]]
+assert np.allclose(spine.compute(u)[0], raised)
+
+spine.fit(joints, collapse=(3, 0), count=-1)
+print(spine.count)                   # 8: a triple needs one more
+
+# stacking applies to control points: a repeated edit point raises
+try:
+    BSplineData.from_edit_points(np.vstack([joints[:1], joints]))
+except ValueError as error:
+    print(error)  # ...points 0 and 1 share a position; ...pass collapse=(2, 0) instead
+
+# every run of neighbouring CVs within tol, anywhere on the curve
+print(BSplineData(points=[[0, 0, 0], [0, 0, 0], [1, 0, 0], [2, 0, 0]]).get_collapsed_points())
+# [[0, 1]]
+```
+
+### `rebuild()` — a new count, degree or stacks, same shape
+
+`rebuild(count=None, degree=None, collapse=None, knots="best")` refits the
+curve to itself and returns the largest distance it moved. It keeps the
+parameter range (`domain`) and the end points. More control points at the
+same degree are exact (knots inserted). Otherwise `knots="best"` keeps the
+closest of three knot placements (evenly spaced, following the current
+spacing, denser where the curve bends) and `knots="even"` spaces them
+evenly. Called bare it changes nothing and refreshes the caches. It isn't
+Maya's `rebuildCurve`.
+
+```python
+spine = BSplineData.from_edit_points(joints, collapse=(2, 2))
+print(spine.rebuild(count=12) < 1e-12)  # True: more CVs, the same shape
+print(spine.get_collapsed_points())     # [[0, 1], [10, 11]]: stacks kept
+
+moved = spine.rebuild(count=5)          # fewer CVs: closest shape
+print(round(moved, 3))  # how far it moved
+print(spine.domain)     # (0.0, 10.10...): same range
+
+flat = BSplineData.from_edit_points(joints)
+flat.rebuild(count=6, knots="even")  # evenly spaced knots, same range
+print(np.round(np.diff(np.unique(flat.kv)), 3))
+
+flat.rebuild(degree=5, count=8)      # a new degree
+print(flat.degree, flat.count)       # 5 8
 ```
 
 ### Arc length
@@ -1579,7 +1661,7 @@ curve.invalidate()               # lazy: rebuilds on next access
 print(np.round(curve.compute(0.0)[0], 3))
 
 curve.points[0] = [0.0, 0.0, 0.0]
-curve.rebuild()                  # eager: rebuilds everything now
+curve.rebuild()                  # eager: bare, it rebuilds everything now
 print(np.round(curve.compute(0.0)[0], 3))
 
 arc.points[-1] = [7.0, 1.0, 0.0]
