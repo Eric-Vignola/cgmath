@@ -383,6 +383,8 @@ match_translate(self, other: "'TransformData' | np.ndarray", x: 'bool' = True, y
     matches the world position of a TransformData object
 set_joint_orient_to_rotate(self) -> 'None'
     sets joint_orient and rotate_axis to 0 and applies all rotation to rotate
+set_node_type(self, node_type: 'str') -> 'None'
+    Sets the node type.
 set_parent(self, parent: 'Union[str, None]', world_space: 'bool' = True) -> 'None'
     reparents node to a given parent and resets internal SRTs
 set_rotate_to_joint_orient(self) -> 'None'

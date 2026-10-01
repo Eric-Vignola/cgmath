@@ -2243,3 +2243,112 @@ class TestUserAttributes(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = HierarchyData([node]).save(os.path.join(tmp, "rig.json"))
             self.assertEqual(HierarchyData.load(path)["root"].heroHeight, 2.5)
+
+
+class TestNodeType(unittest.TestCase):
+    """setting node_type on every node at once, and on one node"""
+
+    @staticmethod
+    def rig():
+        """a joint chain with joint orients, rotate axes and mixed rotate orders"""
+        hierarchy = HierarchyData()
+        for i in range(4):
+            node = TransformData(
+                name=f"j{i}",
+                node_type="joint",
+                translate=[2.0 if i else 0.0, 0.5 * i, 0.0],
+                rotate=[10.0 * i, -7.0 * i, 3.0 + i],
+                rotate_order=i % 6,
+                rotate_axis=[5.0, 0.0, -3.0 * i],
+                joint_orient=[0.0, 15.0 * i, 4.0 * i - 20.0],
+                radius=2.5,
+                draw_style=2,
+                segment_scale_compensate=True,
+            )
+            if i:
+                node.parent_node = hierarchy[i - 1].uuid
+            hierarchy.append(node)
+        return hierarchy
+
+    def test_joint_to_transform_keeps_the_pose(self):
+        hierarchy = self.rig()
+        local     = np.array([node.matrix for node in hierarchy])
+        world     = np.array([node.world_matrix for node in hierarchy])
+        axes      = np.array([node.rotate_axis for node in hierarchy])
+
+        hierarchy.node_type = "transform"
+
+        self.assertEqual(hierarchy.node_type, ["transform"] * 4)
+        self.assertTrue(np.allclose([node.matrix for node in hierarchy], local, atol=1e-9))
+        self.assertTrue(np.allclose([node.world_matrix for node in hierarchy], world, atol=1e-9))
+        self.assertTrue(np.allclose([node.joint_orient for node in hierarchy], 0.0))
+        self.assertTrue(np.allclose([node.rotate_axis for node in hierarchy], axes))
+        self.assertFalse(np.any(hierarchy.segment_scale_compensate))
+        self.assertTrue(np.all(hierarchy.radius == 1.0))
+        self.assertTrue(np.all(hierarchy.draw_style == 0))
+
+    def test_one_type_per_node(self):
+        hierarchy           = self.rig()
+        hierarchy.node_type = ["joint", "locator", "transform", "joint"]
+        self.assertEqual(hierarchy.node_type, ["joint", "locator", "transform", "joint"])
+
+        # joints keep their joint-only attributes
+        self.assertEqual(hierarchy[0].radius, 2.5)
+        self.assertEqual(hierarchy[3].radius, 2.5)
+        self.assertEqual(hierarchy[1].radius, 1.0)
+
+        with self.assertRaises(ValueError):
+            hierarchy.node_type = ["joint", "locator"]
+
+    def test_a_slice_sets_a_subset(self):
+        hierarchy                = self.rig()
+        hierarchy[1:3].node_type = "locator"
+        self.assertEqual(hierarchy.node_type, ["joint", "locator", "locator", "joint"])
+
+    def test_other_changes_only_set_the_type(self):
+        node = TransformData(
+            name="t",
+            node_type="transform",
+            joint_orient=[0.0, 10.0, 0.0],
+            radius=3.0,
+            draw_style=1,
+            segment_scale_compensate=True,
+        )
+        for node_type in ("locator", "joint"):
+            node.set_node_type(node_type)
+            self.assertEqual(node.node_type, node_type)
+            self.assertTrue(np.allclose(node.joint_orient, [0.0, 10.0, 0.0]))
+            self.assertEqual(node.radius, 3.0)
+            self.assertEqual(node.draw_style, 1)
+            self.assertTrue(node.segment_scale_compensate)
+
+    def test_set_node_type_on_one_node(self):
+        whole, each = self.rig(), self.rig()
+        whole.node_type = "locator"
+        for node in each:
+            node.set_node_type("locator")
+
+        for a, b in zip(whole, each):
+            self.assertEqual(a.node_type, b.node_type)
+            self.assertTrue(np.allclose(a.rotate, b.rotate))
+            self.assertTrue(np.allclose(a.joint_orient, b.joint_orient))
+            self.assertEqual(a.segment_scale_compensate, b.segment_scale_compensate)
+            self.assertEqual((a.radius, a.draw_style), (b.radius, b.draw_style))
+
+        # a plain assignment sets the type and nothing else
+        raw                 = self.rig()
+        raw["j2"].node_type = "transform"
+        self.assertEqual(raw["j2"].radius, 2.5)
+        self.assertTrue(np.allclose(raw["j2"].joint_orient, [0.0, 30.0, -12.0]))
+
+    def test_segment_scale_compensate_turns_off_under_a_scaled_parent(self):
+        hierarchy           = self.rig()
+        hierarchy[0].scale  = [2.0, 2.0, 2.0]
+        before              = hierarchy[1].matrix
+
+        hierarchy.node_type = "transform"
+        after               = hierarchy[1].matrix
+
+        # the child no longer cancels its parent's 2x scale; translate stays
+        self.assertTrue(np.allclose(after[:3, :3], 2.0 * before[:3, :3], atol=1e-9))
+        self.assertTrue(np.allclose(after[3], before[3], atol=1e-9))

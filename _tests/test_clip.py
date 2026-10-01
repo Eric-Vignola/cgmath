@@ -339,6 +339,14 @@ class TestClipStructuralMutation(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             clip.set_joint_orient_to_rotate()
 
+    def test_node_type_refuses_an_animated_clip(self):
+        # joints with a joint orient would need rotate rebuilt per frame;
+        # nothing changes, not even the joint without one
+        clip = self._varied_clip(uuid_chain(4))
+        with self.assertRaises(RuntimeError):
+            clip.node_type = "transform"
+        self.assertEqual(clip.node_type, ["joint"] * 4)
+
     def test_set_parent_in_world_space_refuses_an_animated_clip(self):
         clip = self._varied_clip(uuid_chain(4, root=True))
         with self.assertRaises(RuntimeError):

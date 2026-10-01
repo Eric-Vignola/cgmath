@@ -21,7 +21,7 @@ overview see [`README.md`](README.md); for the rest of the library see
 | [Matrices](#matrices) | `matrix`, `world_matrix`, the six factor matrices, `quaternion` |
 | [Cache invalidation](#cache-invalidation) | when `world_matrix` is recomputed |
 | [Node queries](#node-queries) | parent / children / branch / root / index |
-| [Node edits](#node-edits) | `set_parent`, `match_*`, `swapaxes`, orient helpers, prefix / suffix, namespaces, user attributes |
+| [Node edits](#node-edits) | `set_parent`, `match_*`, `swapaxes`, orient helpers, node type, prefix / suffix, namespaces, user attributes |
 | [`TransformList` — views](#transformlist--views) | slicing, fancy indexing, `match` |
 | [Vectorized channels](#vectorized-channels) | read / write a whole selection |
 | [Vectorized queries and edits](#vectorized-queries-and-edits) | the list forms of every node method |
@@ -361,6 +361,28 @@ assert np.allclose(j.joint_orient, 0.0, atol=1e-9)
 Both zero `rotate_axis` too, because the orientation chain is
 `RO · R · JO` and leaving `RO` in would double-count it.
 
+### Change node type
+
+```python
+typed              = make_chain()
+typed.joint_orient = [[0.0, 30.0, 0.0]] * 3
+world              = typed.world_matrix.copy()
+
+typed.node_type = "transform"  # every node; a list sets one per node
+assert np.allclose(typed.world_matrix, world, atol=1e-9)
+assert np.allclose(typed.joint_orient, 0.0)
+
+typed[1:].node_type = "joint"           # a view sets a subset
+typed["root"].set_node_type("locator")  # one node
+print(typed.node_type)                  # ['locator', 'joint', 'joint']
+```
+
+A joint that becomes another type folds `joint_orient` into `rotate` (the
+pose holds and `rotate_axis` stays), turns `segment_scale_compensate` off
+and resets `radius` / `draw_style` to 1.0 / 0. Under a scaled parent it
+moves, since it no longer cancels that scale. Assigning `node.node_type`
+directly only sets the type.
+
 ### Swap local axes
 
 `swapaxes(a, b)` puts axis `a` where axis `b` was and vice versa, without
@@ -537,7 +559,7 @@ shuffled.world_matrix = target[[2, 0, 1]]
 assert np.allclose(rig.world_matrix, target)
 ```
 
-Read-only list properties: `name`, `uuid`, `node_type`, `indices`,
+Read-only list properties: `name`, `uuid`, `indices`,
 `rotate_axes`, `unique_name`, `parent_scale_inverse`, and the six factor
 matrices (`scale_matrix`, `rotate_axis_matrix`, `rotate_matrix`,
 `joint_orient_matrix`, `parent_scale_inverse_matrix`,
@@ -1039,7 +1061,9 @@ Rig-level edits rebuild `rotate` out of a matrix. Doing that per frame
 lets each frame pick its own euler branch, which leaves the poses exact
 and the curves full of 180° and 360° steps. So on a clip holding more
 than one frame they refuse: `swapaxes`, `set_rotate_to_joint_orient`,
-`set_joint_orient_to_rotate`, and `set_parent(world_space=True)`.
+`set_joint_orient_to_rotate`, `set_parent(world_space=True)`, and
+turning a joint with a `joint_orient` into another type (`node_type`,
+`set_node_type`).
 
 ```python
 animated               = ClipData(make_chain(), frames=3)

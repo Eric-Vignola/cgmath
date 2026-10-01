@@ -1026,6 +1026,41 @@ class TransformData(Data):
             self.rotate_axis  = np.zeros(3, dtype=float)
             self.rotate       = np.degrees(quaternion_to_euler(Q, self.rotate_order)[0])
 
+    def set_node_type(self, node_type: str) -> None:
+        """
+        Sets the node type.
+
+        A joint that becomes another type sheds its joint-only attributes
+        and keeps its pose: joint_orient is folded into rotate (rotate_axis
+        is kept), segment_scale_compensate is turned off, radius and
+        draw_style go back to 1.0 and 0. Turning segment_scale_compensate
+        off moves the node when its parent is scaled, since it no longer
+        cancels that scale. Any other change only sets the type.
+
+        Assigning ``node_type`` directly sets the type and nothing else.
+
+        Raises
+        ------
+        RuntimeError
+            A joint with a joint_orient in an animated clip: its rotate
+            would have to be rebuilt one frame at a time.
+        """
+        node_type = str(node_type)
+        if self.node_type == "joint" and node_type != "joint":
+            if np.any(self.joint_orient != 0.0):
+                self._reject_animated("set_node_type()")
+                # the orientation chain is RO * R * JO, so R * JO as the new
+                # rotate leaves the local matrix as it was once JO is zero
+                RJ                = np.dot(self.rotate_matrix, self.joint_orient_matrix)
+                self.rotate       = np.degrees(matrix_to_euler(RJ, self.rotate_order))[0]
+                self.joint_orient = np.zeros(3, dtype=float)
+
+            self.segment_scale_compensate = False
+            self.radius                   = 1.0
+            self.draw_style               = 0
+
+        self.node_type = node_type
+
     def match_translate(
         self,
         other: "TransformData" | np.ndarray,
@@ -2391,6 +2426,34 @@ class TransformList(DataList):
         for node in self:
             values.append(node.node_type)
         return values
+
+    @node_type.setter
+    def node_type(self, value) -> None:
+        """
+        Sets the type of every node, one value for all or one per node.
+        Joints that become another type shed their joint-only attributes,
+        see ``TransformData.set_node_type``. Every node is checked before
+        any changes, so a refused change leaves them all as they were.
+        """
+        if _is_sequence(value):
+            values = [str(v) for v in value]
+            if len(values) != len(self):
+                raise ValueError(
+                    f"got {len(values)} node types for {len(self)} nodes"
+                )
+        else:
+            values = [str(value)] * len(self)
+
+        for node, node_type in zip(self, values):
+            if (
+                node.node_type == "joint"
+                and node_type != "joint"
+                and np.any(node.joint_orient != 0.0)
+            ):
+                node._reject_animated("node_type")
+
+        for node, node_type in zip(self, values):
+            node.set_node_type(node_type)
 
     @property
     def scale_matrix(self) -> np.ndarray:
