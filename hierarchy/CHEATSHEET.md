@@ -110,7 +110,7 @@ str(node)           # 'hero'
 | `rotate_axis` | `(0, 0, 0)` | degrees; Maya `rotateAxis` |
 | `joint_orient` | `(0, 0, 0)` | degrees; Maya `jointOrient` |
 | `visibility` | `True` | |
-| `segment_scale_compensate` | `True` | divide out the parent's scale |
+| `segment_scale_compensate` | `False` | divide out the parent's scale |
 | `radius` | `1.0` | joint display radius |
 | `draw_style` | `0` | Maya `drawStyle` |
 | `user_defined_attributes` | `{}` | extra attributes carried through `save_fbx` |

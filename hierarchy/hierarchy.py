@@ -562,7 +562,7 @@ class TransformData(Data):
     # attributes specific to joints as defined by Maya
     _joint_orient:             Optional[np.ndarray] = numpy_array([0.0, 0.0, 0.0])
     _visibility:               Optional[bool] = True
-    _segment_scale_compensate: Optional[bool] = True  # Maya default for joints :(
+    _segment_scale_compensate: Optional[bool] = False
     _radius:                   Optional[float] = 1.0
     _draw_style:               Optional[int] = 0
 
@@ -641,7 +641,7 @@ class TransformData(Data):
         if segment_scale_compensate is not None:
             self._segment_scale_compensate = bool(segment_scale_compensate)
         else:
-            self._segment_scale_compensate = True
+            self._segment_scale_compensate = False
 
         if radius is not None:
             self._radius = float(radius)
