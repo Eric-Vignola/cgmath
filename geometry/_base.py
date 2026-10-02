@@ -174,21 +174,207 @@ def bytes_to_dict(data):
 
 
 def get_file_type(filename: str) -> str:
-    """identifies the supported file type by reading the header"""
+    """
+    The file's type: ``"npz"``, ``"json"`` or ``"pkl"`` for cgmath's own
+    files, ``"glb"``, ``"fbx"``, ``"obj"`` or ``"usd"`` for assets.
+
+    ``.gltf``, ``.usd``, ``.usda``, ``.usdc`` and ``.usdz`` go by their
+    extension; then the header decides (a binary glTF, an FBX, a numpy zip,
+    json), then ``.obj``; anything else is taken as a pickle.
+    """
+    # by extension first: a .gltf is json, a .usdz is a zip like an npz
+    ext = os.path.splitext(filename)[1].lower()
+    if ext == ".gltf":
+        return "glb"
+    if ext in (".usd", ".usda", ".usdc", ".usdz"):
+        return "usd"
 
     with open(filename, "rb") as file:
-        header = file.read(4)
+        header = file.read(18)
 
-        # assume its a numpy zip file
-        if header == b"PK\x03\x04":
-            return "npz"
+    if header[:4] == b"PK\x03\x04":
+        return "npz"
+    if header[:4] == b"glTF":
+        return "glb"
+    if b" FBX " in header:
+        return "fbx"
+    if header[:4].strip() in [b"{", b"["]:
+        return "json"
+    if ext == ".obj":
+        return "obj"
+    return "pkl"
 
-        # assume its a json file
-        elif header.strip() in [b"{", b"["]:
-            return "json"
 
-        # assume its a pickle file
-        return "pkl"
+def _load_as(cls, filename: str, mode: Optional[str] = None) -> Any:
+    """
+    ``cls.load()``: the reader for ``mode``, or for the file's type
+    (:func:`get_file_type`). Assets go to the class's own ``load_glb`` /
+    ``load_fbx`` / ``load_obj`` / ``load_usd``.
+
+    Raises
+    ------
+    ValueError
+        The class has no reader for that type.
+    """
+    filename = os.path.expanduser(filename)
+    mode     = get_file_type(filename) if mode is None else mode.lower()
+    mode     = {"gltf": "glb", "pkl": "pickle"}.get(mode, mode)
+
+    reader   = getattr(cls, f"load_{mode}", None)
+    if reader is None:
+        raise ValueError(f"{cls.__name__} has no reader for {mode} files")
+    return reader(filename)
+
+
+# -------------------------------- NAMESPACES -------------------------------- #
+
+
+def _strip_namespace(name: Optional[str], namespace: Optional[str] = None) -> Optional[str]:
+    """
+    ``name`` without its namespaces, or without the one namespace path given.
+
+    With no path ``A:B:node`` becomes ``node``. Without ``"A:B"`` it becomes
+    ``A:node``, without ``"A"`` it becomes ``B:node``: the namespace's content
+    moves up one level, as Maya merges a deleted namespace into its parent. A
+    name outside the namespace comes back unchanged, and so does ``None``. A
+    leading ``:``, Maya's absolute form, is accepted on either. Each part of a
+    ``|`` path is stripped on its own: ``|A:grp|A:node`` becomes ``|grp|node``.
+
+    Raises
+    ------
+    ValueError
+        An empty path (``""`` or ``":"``).
+    """
+    target = None
+    if namespace is not None:
+        target = [x for x in namespace.split(":") if x]
+        if not target:
+            raise ValueError("strip_namespace needs a namespace path, not an empty one")
+
+    if name is None:
+        return None
+
+    def strip(part):
+        head, _, short = part.rpartition(":")
+        if target is None:
+            return short
+
+        spaces = [x for x in head.split(":") if x]
+        depth  = len(target)
+        if spaces[:depth] != target:
+            return part
+        return ":".join(target[:-1] + spaces[depth:] + [short])
+
+    return "|".join(strip(part) if part else part for part in name.split("|"))
+
+
+def _namespace_of(name: Optional[str]) -> str:
+    """the namespace path of ``name``'s last ``|`` part: ``"A:B"`` for ``A:B:node``"""
+    if name is None:
+        return ""
+    return name.rpartition("|")[2].rpartition(":")[0].lstrip(":")
+
+
+def _strip_namespaces(items: list, namespace: Optional[str] = None) -> None:
+    """
+    ``strip_namespace()`` on every item, all or nothing.
+
+    Each item's ``NAMESPACED_FIELDS`` are stripped (``name``, and lists of
+    node names such as a skin's influences), and so are those of the parts it
+    owns (``_namespace_parts``: an Object's mesh and skin). Every new value is
+    worked out first. Nothing is renamed when a new name would be shared with
+    another item, among the items and their ``_namespace_peers`` (a node's
+    hierarchy), or when a list would hold one name twice. Names that were
+    already shared are left alone.
+
+    Raises
+    ------
+    AttributeError
+        An item has none of its ``NAMESPACED_FIELDS``: it has no name.
+    ValueError
+        A clash, or an empty namespace path.
+    """
+    _strip_namespace(None, namespace)  # an empty path raises, whatever the items
+
+    changes = []
+    planned = set()
+
+    def plan(obj, owned):
+        if id(obj) in planned:
+            return
+        planned.add(id(obj))
+
+        present = [f for f in type(obj).NAMESPACED_FIELDS if hasattr(obj, f)]
+        if not present and not owned:
+            raise AttributeError(
+                f"{type(obj).__name__} has no name to strip a namespace from"
+            )
+
+        for field in present:
+            old = getattr(obj, field)
+            if old is None:
+                continue
+
+            if isinstance(old, str):
+                new = _strip_namespace(old, namespace)
+                if new != old:
+                    changes.append((obj, field, new))
+                continue
+
+            new = [_strip_namespace(x, namespace) for x in old]
+            if len(set(new)) < len(set(old)):
+                twice = sorted({x for x in new if new.count(x) > 1}, key=str)
+                raise ValueError(
+                    f"strip_namespace would give one name to two of "
+                    f"{type(obj).__name__}({getattr(obj, 'name', None)}).{field}, "
+                    f"nothing renamed: {twice[:10]}"
+                )
+            if new != list(old):
+                new = np.asarray(new) if isinstance(old, np.ndarray) else type(old)(new)
+                changes.append((obj, field, new))
+
+        for part in obj._namespace_parts():
+            if part is not None:
+                plan(part, True)
+
+    for item in items:
+        plan(item, False)
+
+    # the names a new name must not take: the items and their peers, each
+    # container of peers (a hierarchy) walked once
+    pool       = {id(item): item for item in items}
+    containers = set()
+    for item in items:
+        peers = item._namespace_peers()
+        if id(peers) in containers:
+            continue
+        containers.add(id(peers))
+        for peer in peers:
+            pool.setdefault(id(peer), peer)
+
+    renamed = {
+        id(obj): new for obj, field, new in changes if field == "name" and id(obj) in pool
+    }
+    owners = {}
+    for key, obj in pool.items():
+        name = renamed.get(key, getattr(obj, "name", None))
+        if name is not None:
+            owners.setdefault(name, []).append(obj)
+
+    clashes = [
+        f"{name} <- {', '.join(sorted(o.name for o in group))}"
+        for name, group in sorted(owners.items())
+        if len(group) > 1 and any(id(o) in renamed for o in group)
+    ]
+    if clashes:
+        more = " ..." if len(clashes) > 10 else ""
+        raise ValueError(
+            f"strip_namespace would give {len(clashes)} name(s) to more than "
+            f"one item, nothing renamed: {'; '.join(clashes[:10])}{more}"
+        )
+
+    for obj, field, new in changes:
+        setattr(obj, field, new)
 
 
 # ------------------------------ BASE DATACLASS ------------------------------ #
@@ -258,6 +444,10 @@ class Data:
     """Base class with managed serialization."""
 
     EQUALITY_TEST_IGNORE = []
+
+    # fields holding node names, a str or a list of str: strip_namespace()
+    # rewrites them
+    NAMESPACED_FIELDS = ("name",)
 
     def __setattr__(self, name: str, value) -> None:
         """Strict attribute setter -- rejects writes to undeclared
@@ -455,6 +645,43 @@ class Data:
             if key not in get_type_hints(type(self)):
                 setattr(self, key, None)
 
+    @property
+    def namespace(self) -> str:
+        """the namespace path of the name: ``"A:B"`` for ``A:B:node``, ``""`` for none"""
+        return _namespace_of(self.name)
+
+    def strip_namespace(self, namespace: Optional[str] = None) -> None:
+        """
+        Removes every namespace from the name, or the one path given.
+
+        ``strip_namespace()`` turns ``A:B:node`` into ``node``. Given a path,
+        only that namespace goes and what was inside it moves up one level:
+        ``"A:B"`` gives ``A:node``, ``"A"`` gives ``B:node``. A name outside
+        the namespace is left as it is. Every field in ``NAMESPACED_FIELDS``
+        is stripped (a skin's influences with its name), and so are the parts
+        the item owns (an Object's mesh and skin).
+
+        Raises
+        ------
+        AttributeError
+            This type has no name.
+        ValueError
+            Renaming nothing: another item would share the new name (a node
+            in the same hierarchy), or two influences would.
+        """
+        _strip_namespaces([self], namespace)
+
+    def _namespace_peers(self):
+        """
+        The container of the items whose names a new name must not take, a
+        node's hierarchy; one shared container is walked once.
+        """
+        return ()
+
+    def _namespace_parts(self) -> list:
+        """data the item owns whose names are stripped with its own"""
+        return []
+
     def match(self, *args, exact: bool = True) -> bool:
         """returns True if name matches any arguments"""
         if not hasattr(self, "name"):
@@ -560,21 +787,13 @@ class Data:
 
     @classmethod
     def load(cls, filename: str, mode: Optional[str] = None) -> Any:
-        """loads the data from a file"""
-
-        filename = os.path.expanduser(filename)
-
-        # identify the filetype of None given
-        if mode is None:
-            mode = get_file_type(filename)
-
-        reader = {
-            "pkl":  cls.load_pickle,
-            "json": cls.load_json,
-            "npz":  cls.load_npz,
-        }
-
-        return reader[mode](filename)
+        """
+        Loads the data from a file: ``mode``, or the type the file reads as
+        (:func:`get_file_type`). ``"pkl"`` / ``"json"`` / ``"npz"`` are
+        cgmath's own; ``"glb"`` / ``"fbx"`` / ``"obj"`` / ``"usd"`` go to the
+        class's ``load_<mode>``.
+        """
+        return _load_as(cls, filename, mode)
 
     def to_dict(self) -> dict:
         """returns the annotated data as a dict"""
@@ -730,6 +949,34 @@ class DataList(MutableSequence):
                     return i + start
         raise ValueError(f"{value} is not in list")
 
+    def get(self, name: str, default: Any = None) -> Any:
+        """the first item named ``name``, or ``default``"""
+        for item in self.list:
+            if getattr(item, "name", None) == name:
+                return item
+        return default
+
+    @property
+    def name(self) -> List[Optional[str]]:
+        """every item's name, in order"""
+        return [item.name for item in self.list]
+
+    @property
+    def namespace(self) -> List[str]:
+        """every item's namespace path, ``""`` where it has none"""
+        return [item.namespace for item in self.list]
+
+    def strip_namespace(self, namespace: Optional[str] = None) -> None:
+        """
+        ``strip_namespace()`` on every item, all or nothing.
+
+        Every new name is worked out first. If one would be shared with
+        another item -- in the list, or among the items' peers (the rest of
+        the hierarchies a node view belongs to) -- ValueError lists them and
+        nothing is renamed. Names that were already shared are left alone.
+        """
+        _strip_namespaces(list(self.list), namespace)
+
     def sort(self, key=None, reverse=False):
         if key is None:
             self.list.sort(key=lambda shape: shape.name, reverse=reverse)
@@ -873,18 +1120,10 @@ class DataList(MutableSequence):
 
     @classmethod
     def load(cls, filename: str, mode: Optional[str] = None) -> Any:
-        """loads the data from a file"""
-
-        filename = os.path.expanduser(filename)
-
-        reader = {
-            "pkl":  cls.load_pickle,
-            "json": cls.load_json,
-            "npz":  cls.load_npz,
-        }
-
-        # identify the filetype of None given
-        if mode is None:
-            mode = get_file_type(filename)
-
-        return reader[mode](filename)
+        """
+        Loads the data from a file: ``mode``, or the type the file reads as
+        (:func:`get_file_type`). ``"pkl"`` / ``"json"`` / ``"npz"`` are
+        cgmath's own; ``"glb"`` / ``"fbx"`` / ``"obj"`` / ``"usd"`` go to the
+        class's ``load_<mode>``.
+        """
+        return _load_as(cls, filename, mode)

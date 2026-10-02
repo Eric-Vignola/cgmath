@@ -52,6 +52,7 @@ except ImportError:
 
 
 from cgmath.geometry import Data, DataList, ImmutableArray as numpy_array
+from cgmath.geometry._base import get_file_type
 from cgmath.geometry._saddle_surface import integrate, sample
 from cgmath.geometry.utils import (
     average_points,
@@ -2574,25 +2575,22 @@ class MeshData(Data):
 
     # TODO scale_factor is prolly not the best name, think of a better way to handle unit conversions
     @classmethod
-    def load_glb(cls, filename: str, scale_factor: float = 100.0) -> "MeshData":
-        """a basic glb file reader to MeshData"""
-
-        if trimesh is None:
-            raise ImportError("trimesh is not installed")
-
-        filename  = os.path.expanduser(filename)
-        scene     = trimesh.load(filename)
-
-        mesh_list = []
-        for name, data in scene.geometry.items():
-            points  = np.array(data.vertices) * scale_factor
-            indices = np.array(data.faces)
-            counts  = np.ones(indices.shape[0], dtype=int) * 3
-
-            new = cls(points=points, indices=indices.ravel(), counts=counts, name=name)
-            mesh_list.append(new)
-
-        return mesh_list
+    def load_glb(
+        cls,
+        filename:     str,
+        scale_factor: float      = 100.0,
+        name:         str | None = None,
+    ) -> "MeshData":
+        """returns a single MeshData from a glb (first mesh if name is None)"""
+        meshes = MeshList.load_glb(filename, scale_factor)
+        if not meshes:
+            raise RuntimeError("No meshes found in glb file")
+        if name is None:
+            return meshes[0]
+        mesh = meshes.get(name)
+        if mesh is None:
+            raise ValueError(f"Mesh '{name}' not found; available: {meshes.name}")
+        return mesh
 
     # ----------------------------------- FBX ------------------------------------ #
 
@@ -4277,27 +4275,18 @@ class UVData(MeshData):
     # ----------------------------------- GLB ------------------------------------ #
 
     @classmethod
-    def load_glb(cls, filename: str) -> List["UVData"]:
-        """a basic glb file reader to UVData"""
+    def load_glb(
+        cls, filename: str, name: str | None = None, channel: int = 0
+    ) -> "UVData":
+        """returns a single UV channel from a glb (first mesh / channel 0 by default)"""
+        return _one_uv_channel(UVList.load_glb(filename, name=name), channel)
 
-        if trimesh is None:
-            raise ImportError("trimesh is not installed")
-
-        filename = os.path.expanduser(filename)
-        scene    = trimesh.load(filename)
-
-        uv_lists = []
-        for name, data in scene.geometry.items():
-            uv_lists.append(None)
-
-            if data.visual.uv is not None:
-                points       = np.array(data.visual.uv)
-                indices      = np.array(data.visual.mesh.faces)
-                counts       = np.ones(indices.shape[0], dtype=int) * 3
-                indices      = indices.ravel()
-                uv_lists[-1] = cls(points=points, indices=indices, counts=counts)
-
-        return uv_lists
+    @classmethod
+    def load_obj(
+        cls, filename: str, name: str | None = None, channel: int = 0
+    ) -> "UVData":
+        """returns a single UV channel from an obj (first mesh / channel 0 by default)"""
+        return _one_uv_channel(UVList.load_obj(filename, name=name), channel)
 
     # ----------------------------------- FBX ------------------------------------ #
 
@@ -4388,6 +4377,21 @@ class MeshList(DataList):
         """loads all meshes from an fbx file into a MeshList"""
         return cls([mesh_data for mesh_data, _ in load_fbx(filename)])
 
+    @classmethod
+    def load_glb(cls, filename: str, scale_factor: float = 100.0) -> "MeshList":
+        """loads all meshes from a glb file into a MeshList"""
+        return cls([mesh_data for mesh_data, _ in load_glb(filename, scale_factor)])
+
+    @classmethod
+    def load_obj(cls, filename: str) -> "MeshList":
+        """loads all meshes (groups) from an obj file into a MeshList"""
+        return cls([mesh_data for mesh_data, _ in load_obj(filename)])
+
+    @classmethod
+    def load_usd(cls, filename: str) -> "MeshList":
+        """loads all mesh prims from a usd file into a MeshList"""
+        return cls([mesh_data for mesh_data, _ in load_usd(filename)])
+
     # --------- vectorized properties and methods --------- #
     def merge(self):
         """applies merge to all elements"""
@@ -4456,16 +4460,22 @@ class UVList(MeshList):
     @classmethod
     def load_fbx(cls, filename: str, name: str | None = None) -> "UVList":
         """loads all UV channels for one mesh from an fbx file (first mesh if name is None)"""
-        data = load_fbx(filename)
-        if not data:
-            raise RuntimeError("No meshes found in FBX file")
-        if name is None:
-            return data[0][1]
-        for mesh_data, uv_list in data:
-            if mesh_data.name == name:
-                return uv_list
-        available = [m.name for m, _ in data]
-        raise ValueError(f"Mesh '{name}' not found; available: {available}")
+        return _one_uv_list(load_fbx(filename), name, "FBX")
+
+    @classmethod
+    def load_glb(cls, filename: str, name: str | None = None) -> "UVList":
+        """loads all UV channels for one mesh from a glb file (first mesh if name is None)"""
+        return _one_uv_list(load_glb(filename), name, "glb")
+
+    @classmethod
+    def load_obj(cls, filename: str, name: str | None = None) -> "UVList":
+        """loads all UV channels for one mesh from an obj file (first mesh if name is None)"""
+        return _one_uv_list(load_obj(filename), name, "obj")
+
+    @classmethod
+    def load_usd(cls, filename: str, name: str | None = None) -> "UVList":
+        """loads all UV channels for one mesh prim from a usd file (first if name is None)"""
+        return _one_uv_list(load_usd(filename), name, "usd")
 
     # --------- vectorized properties and methods --------- #
 
@@ -4597,13 +4607,51 @@ class UVList(MeshList):
 
 
 # ------------------------------------ UTILS ------------------------------------- #
-def load_usd(file_path: str) -> list:
+def _one_uv_list(data: list, name: str | None, kind: str) -> "UVList":
+    """the UV channels of the first ``(MeshData, UVList)`` pair, or of the mesh named ``name``"""
+    if not data:
+        raise RuntimeError(f"No meshes found in {kind} file")
+    if name is None:
+        return data[0][1]
+    for mesh_data, uv_list in data:
+        if mesh_data.name == name:
+            return uv_list
+    available = [m.name for m, _ in data]
+    raise ValueError(f"Mesh '{name}' not found; available: {available}")
+
+
+def _one_uv_channel(uv_list: "UVList", channel: int) -> "UVData":
+    """UV channel ``channel`` of one mesh's ``UVList``"""
+    if channel >= len(uv_list):
+        raise IndexError(
+            f"UV channel {channel} not found; mesh has {len(uv_list)} channel(s)"
+        )
+    return uv_list[channel]
+
+
+def load(filename: str, mode: str | None = None) -> list:
+    """
+    The file's meshes with their UVs, as ``(MeshData, UVList)`` pairs:
+    ``load_fbx`` / ``load_glb`` / ``load_obj`` / ``load_usd``, picked by
+    ``mode`` or by the file.
+    """
+    filename = os.path.expanduser(filename)
+    mode     = get_file_type(filename) if mode is None else mode.lower()
+    mode     = "glb" if mode == "gltf" else mode
+
+    readers  = {"fbx": load_fbx, "glb": load_glb, "obj": load_obj, "usd": load_usd}
+    if mode not in readers:
+        raise ValueError(f"mesh.load reads fbx, glb, obj and usd files, not {mode}")
+    return readers[mode](filename)
+
+
+def load_usd(filename: str) -> list:
     """loads usd file and returns list of (MeshData, UVList) tuples"""
 
     if iter_prims is None:
         raise ImportError("pxr is not installed")
 
-    file_path = os.path.expanduser(file_path)
+    file_path = os.path.expanduser(filename)
     stage     = open_stage(file_path, no_cache=True)
 
     data = []
@@ -4615,13 +4663,13 @@ def load_usd(file_path: str) -> list:
     return data
 
 
-def load_glb(file_path: str, scale_factor: float = 100.0) -> list:
+def load_glb(filename: str, scale_factor: float = 100.0) -> list:
     """loads glb file and returns list of (MeshData, UVList) tuples"""
 
     if trimesh is None:
         raise ImportError("trimesh is not installed")
 
-    file_path = os.path.expanduser(file_path)
+    file_path = os.path.expanduser(filename)
     scene     = trimesh.load(file_path)
 
     data = []
@@ -4656,10 +4704,10 @@ def load_glb(file_path: str, scale_factor: float = 100.0) -> list:
     return data
 
 
-def load_obj(file_path: str) -> list:
+def load_obj(filename: str) -> list:
     """loads obj file and returns list of (MeshData, UVList) tuples"""
 
-    file_path = os.path.expanduser(file_path)
+    file_path = os.path.expanduser(filename)
 
     # global accumulators (obj indices are global across the whole file)
     all_points  = []
@@ -4954,13 +5002,13 @@ def _extract_fbx_normals(
     return normals, normal_indices
 
 
-def load_fbx(file_path: str) -> list:
+def load_fbx(filename: str) -> list:
     """loads fbx file and returns list of (MeshData, UVList) tuples"""
 
     if fbx is None:
         raise ImportError("Autodesk FBX Python SDK is not installed")
 
-    file_path = os.path.expanduser(file_path)
+    file_path = os.path.expanduser(filename)
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"FBX file not found: {file_path}")
 

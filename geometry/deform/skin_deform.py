@@ -107,10 +107,17 @@ class SkinDeformData(Data):
     method:                str = DeformMethod.LBS.value
     name:                  str | None = None
 
+    # joints are node names: strip_namespace() strips them with the name
+    NAMESPACED_FIELDS = ("name", "joints")
+
     # --- cached --- #
     _rest_mesh = None
     _skin      = None
     _points    = None
+
+    def _namespace_parts(self) -> list:
+        """the SkinData the deformer was built from: its influences name the same joints"""
+        return [self._skin]
 
     # --------------------------- construction -------------------------------- #
 

@@ -18,7 +18,7 @@ import unittest
 
 import numpy as np
 from cgmath.geometry import SkinData
-from cgmath.geometry.skin_weights import load_glb
+from cgmath.geometry.skin_weights import _read_skins_glb, load_glb
 
 try:
     import pygltflib
@@ -171,6 +171,28 @@ class GlbSkinTest(unittest.TestCase):
             scene_nodes=[0, 1, 2],
         )
 
+    def multi(self, name, modes):
+        builder    = Builder()
+        primitives = []
+        for index, mode in enumerate(modes):
+            joints, weights = one_hot([0, 1, 0])
+            primitives.append(
+                builder.primitive(triangle(index * 10.0), joints, weights, mode=mode)
+            )
+
+        binds = builder.identity_binds(2)
+        return builder.write(
+            self.path(name),
+            [Mesh(primitives=primitives, name="body")],
+            [
+                Node(name="root", children=[2]),
+                Node(name="geo", mesh=0, skin=0),
+                Node(name="spine"),
+            ],
+            [Skin(joints=[0, 2], inverseBindMatrices=binds)],
+            scene_nodes=[0, 1],
+        )
+
 
 class TestIndirection(GlbSkinTest):
     def test_joints_0_is_read_through_the_skins_joint_list(self):
@@ -283,28 +305,6 @@ class TestNaming(GlbSkinTest):
 
 
 class TestPrimitives(GlbSkinTest):
-    def multi(self, name, modes):
-        builder    = Builder()
-        primitives = []
-        for index, mode in enumerate(modes):
-            joints, weights = one_hot([0, 1, 0])
-            primitives.append(
-                builder.primitive(triangle(index * 10.0), joints, weights, mode=mode)
-            )
-
-        binds = builder.identity_binds(2)
-        return builder.write(
-            self.path(name),
-            [Mesh(primitives=primitives, name="body")],
-            [
-                Node(name="root", children=[2]),
-                Node(name="geo", mesh=0, skin=0),
-                Node(name="spine"),
-            ],
-            [Skin(joints=[0, 2], inverseBindMatrices=binds)],
-            scene_nodes=[0, 1],
-        )
-
     def test_one_entry_per_primitive(self):
         data = load_glb(self.multi("two.glb", [TRIANGLES, TRIANGLES]))
 
@@ -313,25 +313,26 @@ class TestPrimitives(GlbSkinTest):
             self.assertEqual(skin.influences, ["root", "spine"])
 
     def test_a_non_triangle_primitive_still_yields_weights(self):
-        """trimesh drops these, so MeshData.load_glb would return fewer entries.
+        """trimesh drops these, so MeshList.load_glb returns fewer meshes.
         This reader is parallel to load_model, which keeps them.
         """
         data = load_glb(self.multi("fan.glb", [TRIANGLES, TRIANGLE_FAN, TRIANGLES]))
 
         self.assertEqual(len(data), 3)
-        self.assertTrue(all(x is not None for x in data))
+        for skin in data:
+            self.assertEqual(skin.influences, ["root", "spine"])
 
     @unittest.skipIf(trimesh is None, "trimesh is not installed")
     def test_the_reader_diverges_from_meshdata_on_a_non_triangle_file(self):
         """pins the documented caveat rather than pretending the two always pair"""
-        from cgmath.geometry import MeshData
+        from cgmath.geometry import MeshList
 
         path = self.multi("fan_pairing.glb", [TRIANGLES, TRIANGLE_FAN, TRIANGLES])
 
         self.assertEqual(len(load_glb(path)), 3)
-        self.assertEqual(len(MeshData.load_glb(path)), 2)
+        self.assertEqual(len(MeshList.load_glb(path)), 2)
 
-    def test_an_unskinned_primitive_becomes_a_hole(self):
+    def test_an_unskinned_primitive_is_left_out(self):
         builder = Builder()
         joints, weights = one_hot([0, 1, 0])
         skinned = builder.primitive(triangle(), joints, weights)
@@ -356,9 +357,13 @@ class TestPrimitives(GlbSkinTest):
 
         data = load_glb(path)
 
-        self.assertEqual(len(data), 2)
-        self.assertIsNotNone(data[0])
-        self.assertIsNone(data[1])
+        self.assertEqual(data.name, ["body"])
+
+        # render pairs skins with meshes by position: its reader keeps the hole
+        entries = _read_skins_glb(path)
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0][0].name, "body")
+        self.assertIsNone(entries[1])
 
     def test_joints_0_at_accessor_index_zero_is_not_dropped(self):
         """regression for the truthiness guard in glb.py: accessor 0 is falsy,
@@ -404,6 +409,45 @@ class TestPrimitives(GlbSkinTest):
 
         self.assertIsNotNone(data[0])
         self.assertEqual(data[0].influences, ["root", "spine"])
+
+
+class TestOneConvention(GlbSkinTest):
+    """every module reads a glb the same way, one item from the XData loaders"""
+
+    def test_skins_and_rig(self):
+        from cgmath import hierarchy
+        from cgmath.geometry.skin_weights import SkinList
+
+        path = self.decoy_file()
+        self.assertIsInstance(load_glb(path), SkinList)
+        self.assertEqual(SkinList.load(path).name, ["body"])
+        self.assertIsInstance(hierarchy.load_glb(path), hierarchy.HierarchyData)
+        self.assertEqual(hierarchy.load(path).name, hierarchy.load_glb(path).name)
+
+    @unittest.skipIf(trimesh is None, "trimesh is not installed")
+    def test_meshes(self):
+        from cgmath.geometry import MeshData, MeshList, UVData, UVList, mesh
+
+        path  = self.multi("two.glb", [TRIANGLES, TRIANGLES])
+        pairs = mesh.load(path)
+        names = [m.name for m, _ in pairs]
+        self.assertEqual(len(names), 2)
+
+        # the list: every mesh; one mesh: the first, or the named one
+        self.assertEqual(MeshList.load_glb(path).name, names)
+        first = MeshData.load_glb(path)
+        self.assertIsInstance(first, MeshData)
+        self.assertEqual(first.name, names[0])
+        np.testing.assert_allclose(first.points, pairs[0][0].points)
+        last = MeshData.load_glb(path, name=names[-1])
+        np.testing.assert_allclose(last.points, pairs[-1][0].points)
+        with self.assertRaises(ValueError):
+            MeshData.load_glb(path, name="nope")
+
+        # one mesh's UV channels; this fixture has none, so channel 0 is missing
+        self.assertIsInstance(UVList.load_glb(path, name=names[-1]), UVList)
+        with self.assertRaises(IndexError):
+            UVData.load_glb(path, channel=0)
 
 
 class TestClassMethod(GlbSkinTest):

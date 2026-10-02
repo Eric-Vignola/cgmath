@@ -891,17 +891,18 @@ GLB / FBX / USD need their optional SDKs and a real asset on disk.
 
 <!-- notest -->
 ```python
-from cgmath.geometry.mesh import load_fbx, load_glb, load_usd
+from cgmath.geometry.mesh import load, load_fbx, load_glb, load_usd
 
-load_glb("hero.glb", scale_factor=100.0)    # list[(MeshData, UVList)]
+load("hero.fbx")                            # list[(MeshData, UVList)], reader by file
+load_glb("hero.glb", scale_factor=100.0)
 load_fbx("hero.fbx")
 load_usd("hero.usd")
 
-MeshData.load_glb("hero.glb")
-MeshData.load_fbx("hero.fbx", name="body")  # name=None -> first mesh
-MeshList.load_fbx("hero.fbx")
+MeshData.load_glb("hero.glb", name="body")  # one mesh; name=None -> first
+MeshData.load_fbx("hero.fbx", name="body")
+MeshList.load_glb("hero.glb")               # every mesh
 UVData.load_fbx("hero.fbx", channel=0)
-UVList.load_fbx("hero.fbx", name="body")
+UVList.load_glb("hero.glb", name="body")    # one mesh's UV channels
 ```
 
 USD prims round-trip through `from_prim` / `to_prim` on `MeshData`, `UVData`,
@@ -1245,12 +1246,19 @@ FBX and GLB skin readers need their SDKs and an asset.
 
 <!-- notest -->
 ```python
-from cgmath.geometry.skin_weights import load_fbx, load_glb
+from cgmath.geometry.skin_weights import load, load_fbx, load_glb
+from cgmath.hierarchy import load_fbx as load_rig
 
-load_fbx("hero.fbx", bind_matrices=False)     # [(mesh name, SkinData), ...]
-load_glb("hero.glb")
+skins = load_fbx("hero.fbx")  # SkinList, each skin named after its mesh
+skins = load("hero.glb")      # reader by file
+body  = skins["body"]         # or skins.get("body", None)
 SkinData.load_fbx("hero.fbx", name="body")
 SkinData.load_glb("hero.glb")
+
+# namespaces: strip the rig first, then its skins (influences go with the name)
+rig = load_rig("hero.fbx")
+rig.strip_namespace()
+skins.strip_namespace()
 ```
 
 ---

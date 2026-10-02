@@ -238,8 +238,10 @@ in `geometry`:
 |---|---|
 | Meshes + UVs from FBX | `cgmath.geometry.mesh.load_fbx(path)` → `[(MeshData, UVList), ...]` |
 | Meshes + UVs from GLB | `cgmath.geometry.mesh.load_glb(path, scale_factor=100.0)` |
-| One named mesh | `MeshData.load_fbx(path, name=...)` / `MeshData.load_glb(path)` |
-| Skin weights | `cgmath.geometry.skin_weights.load_fbx / load_glb` |
+| Meshes, any format | `cgmath.geometry.mesh.load(path)` / `MeshList.load(path)` |
+| One named mesh | `MeshData.load_fbx(path, name=...)` / `MeshData.load_glb(path, name=...)` |
+| Skin weights | `cgmath.geometry.skin_weights.load / load_fbx / load_glb` → `SkinList` |
+| Hierarchy | `cgmath.hierarchy.load / load_fbx / load_glb` → `HierarchyData` |
 
 The one exception is `GlbData.mesh_list`, which is a `trimesh`-powered
 convenience on the GLB wrapper (points scaled ×100 — metres to centimetres).

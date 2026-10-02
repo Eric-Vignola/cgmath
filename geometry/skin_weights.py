@@ -67,6 +67,8 @@ def _round_normalize(weights: np.ndarray, n: int) -> np.ndarray:
 class CompactSkinData(Data):
     """Compact skin data class with optimized to_skin_data."""
 
+    NAMESPACED_FIELDS = ("influences",)
+
     max_influences:    int
     influence_indices: np.ndarray
     weights:           np.ndarray
@@ -175,6 +177,7 @@ class SkinData(Data):
     """Skin data class with optimized operations."""
 
     EQUALITY_TEST_IGNORE = ["name"]
+    NAMESPACED_FIELDS    = ("name", "influences")
 
     weights:    np.ndarray
     influences: List[str]
@@ -478,32 +481,20 @@ class SkinData(Data):
     @classmethod
     def load_glb(cls, filename: str, name: str | None = None) -> "SkinData":
         """returns a single SkinData from a glb (first skinned primitive if name is None)"""
-        data = [x for x in load_glb(filename) if x is not None]
-        if not data:
+        skins = SkinList.load_glb(filename)
+        if not skins:
             raise RuntimeError("No skinned primitives found in glb file")
-        if name is None:
-            return data[0]
-        for skin_data in data:
-            if skin_data.name == name:
-                return skin_data
-        available = [x.name for x in data]
-        raise ValueError(f"Skin '{name}' not found; available: {available}")
+        return _one_skin(skins, name)
 
     # ----------------------------------- FBX ------------------------------------ #
 
     @classmethod
     def load_fbx(cls, filename: str, name: str | None = None) -> "SkinData":
         """returns a single SkinData from an fbx file (first skinned mesh if name is None)"""
-        data = load_fbx(filename)
-        if not data:
+        skins = SkinList.load_fbx(filename)
+        if not skins:
             raise RuntimeError("No skinned meshes found in FBX file")
-        if name is None:
-            return data[0][1]
-        for mesh_name, skin_data in data:
-            if mesh_name == name:
-                return skin_data
-        available = [x for x, _ in data]
-        raise ValueError(f"Skin '{name}' not found; available: {available}")
+        return _one_skin(skins, name)
 
     @staticmethod
     def conform(*objects: "SkinData") -> "SkinData":
@@ -920,12 +911,39 @@ class SkinData(Data):
 class SkinList(DataList):
     DATA_LIST_CLASS = SkinData
 
+    @classmethod
+    def load_fbx(cls, filename: str) -> "SkinList":
+        """
+        Every skinned mesh of an fbx, in file order, named after its mesh.
+        Names and influences are as in the file; ``strip_namespace()``
+        removes namespaces afterwards.
+        """
+        return cls(skin for skin, _ in _read_skins_fbx(filename))
+
+    @classmethod
+    def load_glb(cls, filename: str) -> "SkinList":
+        """
+        Every skinned primitive of a glb, in file order, named after its
+        primitive. Unskinned primitives are left out.
+        """
+        return cls(entry[0] for entry in _read_skins_glb(filename) if entry is not None)
+
     def transfer_influences(
         self, src_influences: list, dst_influences: list, weighted: bool = True
     ) -> None:
         """transfers weights from one influence to another"""
         for obj in self:
             obj.transfer_influences(src_influences, dst_influences, weighted=weighted)
+
+
+def _one_skin(skins: SkinList, name: str | None) -> SkinData:
+    """the first skin, or the one named ``name``"""
+    if name is None:
+        return skins[0]
+    skin = skins.get(name)
+    if skin is None:
+        raise ValueError(f"Skin '{name}' not found; available: {skins.name}")
+    return skin
 
 
 # ---------------------- file readers ---------------------------------------- #
@@ -965,10 +983,11 @@ def _fbx_matrix(matrix) -> np.ndarray:
     )
 
 
-def load_fbx(filename: str, bind_matrices: bool = False) -> list:
-    """loads an fbx file and returns a list of ``(mesh name, SkinData)`` tuples
+def _read_skins_fbx(filename: str, bind_matrices: bool = False) -> list:
+    """an fbx's skins as ``(SkinData, inverse bind matrices or None)`` pairs
 
-    Influences carry the names ``HierarchyData.load_fbx`` gives the same file.
+    Each ``SkinData`` is named after its mesh. Influences carry the names
+    ``HierarchyData.load_fbx`` gives the same file.
     They are resolved through the ``FbxNode`` behind each cluster rather than
     by name, because fbx lets two nodes share a name and a name lookup could
     not then say which one a cluster meant.
@@ -976,11 +995,12 @@ def load_fbx(filename: str, bind_matrices: bool = False) -> list:
     Meshes carrying no skin deformer are left out, so the result is not
     positionally parallel to ``cgmath.geometry.mesh.load_fbx``.
 
-    With *bind_matrices*, every tuple gains a third item: the ``(J, 4, 4)``
-    inverse bind matrices the file authored for that mesh, ordered to the
-    ``SkinData``'s influences.  A rig read back out of an animated file
-    carries the take's pose rather than the pose the mesh was bound in, so
-    these are the only trustworthy source for it.
+    With *bind_matrices*, the second item is the ``(J, 4, 4)`` inverse bind
+    matrices the file authored for that mesh, ordered to the ``SkinData``'s
+    influences; without, it is ``None``. A rig read back out of an animated
+    file carries the take's pose rather than the pose the mesh was bound in,
+    so these are the only trustworthy source for it. ``render`` reads them;
+    the public loaders return a ``SkinList``.
     """
     if fbx is None:
         raise ImportError("Autodesk FBX Python SDK is not installed")
@@ -1056,22 +1076,18 @@ def load_fbx(filename: str, bind_matrices: bool = False) -> list:
             continue
 
         weights, influences = _dense_weights(mesh.GetControlPointsCount(), columns)
-        entry = (
-            node.GetName(),
-            SkinData(weights=weights, influences=influences, name=node.GetName()),
-        )
-        if bind_matrices:
-            entry += (np.asarray([binds[x] for x in influences]),)
-        data.append(entry)
+        skin  = SkinData(weights=weights, influences=influences, name=node.GetName())
+        bound = np.asarray([binds[x] for x in influences]) if bind_matrices else None
+        data.append((skin, bound))
 
     return data
 
 
-def load_glb(filename: str, bind_matrices: bool = False) -> list:
-    """loads a glb and returns one entry per primitive, ``None`` where unskinned
+def _read_skins_glb(filename: str, bind_matrices: bool = False) -> list:
+    """a glb's skins: one entry per primitive, ``None`` where unskinned
 
     The list runs parallel to ``cgmath.formats.glb.load_model``'s primitives,
-    not to ``MeshData.load_glb``: trimesh drops any primitive that is not built
+    not to ``mesh.load_glb``: trimesh drops any primitive that is not built
     from triangles, so those two only line up on an all triangle file.
 
     Influences carry the names ``HierarchyData.load_glb`` gives the same file.
@@ -1079,10 +1095,11 @@ def load_glb(filename: str, bind_matrices: bool = False) -> list:
     the file's nodes, so it is read through ``skin.joints`` -- taking it for a
     node index binds vertices to whatever happens to sit there, silently.
 
-    With *bind_matrices*, a skinned entry becomes a ``(SkinData, (J, 4, 4))``
-    pair carrying the file's own inverse bind matrices, ordered to the
-    influences.  They are in the file's units, which is not necessarily the
-    unit the points get read in -- see ``scale_factor``.
+    A skinned entry is a ``(SkinData, inverse bind matrices or None)`` pair:
+    with *bind_matrices*, the file's own ``(J, 4, 4)`` matrices ordered to the
+    influences. They are in the file's units, which is not necessarily the
+    unit the points get read in -- see ``scale_factor``. ``render`` pairs the
+    entries with meshes by position; the public loaders return a ``SkinList``.
     """
     from cgmath.formats.glb import load_model
     from cgmath.hierarchy import HierarchyData
@@ -1140,16 +1157,35 @@ def load_glb(filename: str, bind_matrices: bool = False) -> list:
                 influences = dense.influences,
                 name       = primitive.name,
             )
+            bound = None
             if bind_matrices:
                 # glTF stores each matrix column-major, so reading the 16
                 # floats back in C order already gives the row-vector form
                 # cgmath wants -- there is no transpose here
-                entry = (
-                    entry,
-                    np.asarray(skin.inverse_bind_matrices, dtype=np.float64).reshape(
-                        -1, 4, 4
-                    ),
+                bound = np.asarray(skin.inverse_bind_matrices, dtype=np.float64).reshape(
+                    -1, 4, 4
                 )
-            data.append(entry)
+            data.append((entry, bound))
 
     return data
+
+
+# ---------------------- file loaders ---------------------------------------- #
+
+
+def load(filename: str, mode: Optional[str] = None) -> SkinList:
+    """
+    The file's skins: ``SkinList.load()``, which picks the reader from
+    ``mode`` or from the file (fbx, glb, or cgmath's own npz / json / pickle).
+    """
+    return SkinList.load(filename, mode)
+
+
+def load_fbx(filename: str) -> SkinList:
+    """Every skinned mesh of an fbx, names as in the file: ``SkinList.load_fbx()``."""
+    return SkinList.load_fbx(filename)
+
+
+def load_glb(filename: str) -> SkinList:
+    """Every skinned primitive of a glb, names as in the file: ``SkinList.load_glb()``."""
+    return SkinList.load_glb(filename)

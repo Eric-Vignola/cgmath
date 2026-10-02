@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import numpy as np
 from cgmath.geometry import SkinData
-from cgmath.geometry.skin_weights import load_fbx
+from cgmath.geometry.skin_weights import SkinList, load_fbx
 
 try:
     import fbx
@@ -115,10 +115,11 @@ class TestReading(FbxSkinTest):
     def test_influences_and_weights(self):
         data = load_fbx(self.simple())
 
+        self.assertIsInstance(data, SkinList)
         self.assertEqual(len(data), 1)
-        name, skin = data[0]
+        skin = data[0]
 
-        self.assertEqual(name, "body_geo")
+        self.assertEqual(skin.name, "body_geo")
         self.assertEqual(skin.influences, ["root", "tip"])
         np.testing.assert_allclose(skin.weights, [[1, 0], [1, 0], [0, 1], [0, 1]])
 
@@ -133,7 +134,7 @@ class TestReading(FbxSkinTest):
                 [(root, {0: 0.75, 1: 0.25}), (tip, {0: 0.25, 1: 0.75})],
             )
 
-        skin = load_fbx(self.write("fractional.fbx", populate))[0][1]
+        skin = load_fbx(self.write("fractional.fbx", populate))[0]
 
         np.testing.assert_allclose(skin.weights, [[0.75, 0.25], [0.25, 0.75]])
 
@@ -154,7 +155,7 @@ class TestReading(FbxSkinTest):
                 skin.AddCluster(cluster)
             mesh.AddDeformer(skin)
 
-        skin = load_fbx(self.write("twice.fbx", populate))[0][1]
+        skin = load_fbx(self.write("twice.fbx", populate))[0]
 
         self.assertEqual(skin.influences, ["root"])
         np.testing.assert_allclose(skin.weights, [[1.0], [1.0]])
@@ -168,7 +169,7 @@ class TestReading(FbxSkinTest):
 
         data = load_fbx(self.write("partial.fbx", populate))
 
-        self.assertEqual([name for name, _ in data], ["body_geo"])
+        self.assertEqual(data.name, ["body_geo"])
 
     def test_two_skinned_meshes_both_come_back(self):
         def populate(scene):
@@ -180,10 +181,10 @@ class TestReading(FbxSkinTest):
 
         data = load_fbx(self.write("two.fbx", populate))
 
-        self.assertEqual(sorted(name for name, _ in data), ["a_geo", "b_geo"])
+        self.assertEqual(sorted(data.name), ["a_geo", "b_geo"])
 
     def test_rows_match_the_meshs_control_point_count(self):
-        skin = load_fbx(self.simple())[0][1]
+        skin = load_fbx(self.simple())[0]
 
         self.assertEqual(skin.weights.shape[0], 4)
 
@@ -191,7 +192,7 @@ class TestReading(FbxSkinTest):
         from cgmath.hierarchy import HierarchyData
 
         path = self.simple()
-        skin = load_fbx(path)[0][1]
+        skin = load_fbx(path)[0]
         rig  = [str(x) for x in HierarchyData.load_fbx(path).name]
 
         for influence in skin.influences:
@@ -239,7 +240,7 @@ class TestDeformRoundTrip(FbxSkinTest):
         from cgmath.hierarchy import HierarchyData
 
         path = self.simple()
-        skin = load_fbx(path)[0][1]
+        skin = load_fbx(path)[0]
         rig  = HierarchyData.load_fbx(path)
         points = np.array(
             [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]], dtype=np.float64
@@ -249,6 +250,57 @@ class TestDeformRoundTrip(FbxSkinTest):
         deformer.bind()
 
         self.assertTrue(deformer.valid)
+        np.testing.assert_allclose(deformer.apply(rig), points, atol=1e-9)
+
+
+@unittest.skipIf(fbx is None, "Autodesk FBX Python SDK is not installed")
+class TestOneConvention(FbxSkinTest):
+    """every module reads an fbx the same way, names exactly as in the file"""
+
+    def namespaced(self):
+        """simple(), with every node in the namespace ns"""
+
+        def populate(scene):
+            _, mesh = add_mesh(scene, "ns:body_geo", 4)
+            root = add_joint(scene, "ns:root")
+            tip  = add_joint(scene, "ns:tip", parent=root)
+            bind(scene, mesh, [(root, {0: 1.0, 1: 1.0}), (tip, {2: 1.0, 3: 1.0})])
+
+        return self.write("namespaced.fbx", populate)
+
+    def test_every_module_reads_it(self):
+        from cgmath import hierarchy
+        from cgmath.geometry import MeshList, mesh, skin_weights
+
+        path = self.namespaced()
+        rig  = hierarchy.load_fbx(path)
+
+        self.assertIsInstance(rig, hierarchy.HierarchyData)
+        self.assertEqual(hierarchy.load(path).name, rig.name)
+        self.assertEqual(rig.namespace[-1], "ns")
+        self.assertEqual(skin_weights.load(path).name, ["ns:body_geo"])
+        self.assertEqual(SkinList.load(path).name, ["ns:body_geo"])
+        self.assertEqual([m.name for m, _ in mesh.load(path)], ["ns:body_geo"])
+        self.assertEqual(MeshList.load(path).name, ["ns:body_geo"])
+
+    def test_strip_the_rig_then_its_skins(self):
+        from cgmath.geometry.deform import SkinDeformData
+        from cgmath.hierarchy import load_fbx as load_rig
+
+        path  = self.namespaced()
+        rig   = load_rig(path)
+        skins = load_fbx(path)
+        rig.strip_namespace()
+        skins.strip_namespace()
+
+        self.assertEqual(skins.name, ["body_geo"])
+        self.assertEqual(skins[0].influences, ["root", "tip"])
+
+        points = np.array(
+            [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]], dtype=np.float64
+        )
+        deformer = SkinDeformData(mesh=points, skin=skins[0], bind_rig=rig)
+        deformer.bind()
         np.testing.assert_allclose(deformer.apply(rig), points, atol=1e-9)
 
 

@@ -323,7 +323,6 @@ joint_orient_x
 joint_orient_y                     
 joint_orient_z                     
 matrix                             computes the local transform matrix
-namespace                          the node's namespace path: ``"A:B"`` for ``A:B:node``, ``""`` for none
 parent_scale_inverse               
 parent_scale_inverse_matrix        
 quaternion                         rotation as a quaterion
@@ -389,8 +388,6 @@ set_parent(self, parent: 'Union[str, None]', world_space: 'bool' = True) -> 'Non
     reparents node to a given parent and resets internal SRTs
 set_rotate_to_joint_orient(self) -> 'None'
     sets rotate and rotate_axis to 0 and applies all rotation to joint_orient
-strip_namespace(self, namespace: 'Optional[str]' = None) -> 'None'
-    removes every namespace from the node's name, or the one path given
 swapaxes(self, axis0: 'int', axis1: 'int', negate: 'bool' = False) -> 'None'
     swaps two of this node's local axes without moving its children
 to_attributes(self, mapping: 'dict' = {'_scale': 'scale', '_rotate': 'rotate', '_translate': 'translate', '_rotate_order': 'rotateOrder', '_rotate_axis': 'rotateAxis', '_joint_orient': 'jointOrient', '_segment_scale_compensate': 'segmentScaleCompensate', '_radius': 'radius', '_visibility': 'visibility', '_draw_style': 'drawStyle'}) -> 'dict'
@@ -416,8 +413,6 @@ joint_orient_x
 joint_orient_y                     
 joint_orient_z                     
 matrix                             
-name                               returns a list of all names
-namespace                          returns a list of all namespace paths, ``""`` where a node has none
 node_type                          
 parent_scale_inverse               
 parent_scale_inverse_matrix        
@@ -483,8 +478,6 @@ index(self, obj, start=0, stop=None) -> 'int'
     S.index(value, [start, [stop]]) -> integer -- return first index of value.
 insert(self, index: 'int', node: "'TransformData'") -> 'None'
     S.insert(index, value) -- insert value before index
-classmethod load(cls, filename: 'str', mode: 'Optional[str]' = None)
-    loads the data from a file
 classmethod load_fbx(cls, filename: 'str', scale_factor: 'float' = 1.0)
     primitive fbx joint loader
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, pose_frame: 'None | int' = None)
@@ -505,8 +498,6 @@ set_parent(self, parent: 'Union[str, None]', world_space: 'bool' = True) -> 'Non
     sets all the nodes under a given parent
 set_rotate_to_joint_orient(self) -> 'None'
     sets rotate to 0 and applies all rotation to joint_orient
-strip_namespace(self, namespace: 'Optional[str]' = None) -> 'None'
-    strip_namespace() on every node of the view, all or nothing
 swapaxes(self, axis0: 'int', axis1: 'int', negate: 'bool' = False) -> 'None'
     swaps two local axes on every node in the view
 to_attributes(self, mapping: 'dict' = {'_scale': 'scale', '_rotate': 'rotate', '_translate': 'translate', '_rotate_order': 'rotateOrder', '_rotate_axis': 'rotateAxis', '_joint_orient': 'jointOrient', '_segment_scale_compensate': 'segmentScaleCompensate', '_radius': 'radius', '_visibility': 'visibility', '_draw_style': 'drawStyle'}) -> 'List[dict]'
@@ -520,6 +511,12 @@ Functions:
 ```text
 generate_uuid() -> 'str'
     generates a new unique uuid
+load(filename: 'str', mode: 'Optional[str]' = None) -> "'HierarchyData'"
+    The file's hierarchy: ``HierarchyData.load()``, which picks the reader
+load_fbx(filename: 'str', scale_factor: 'float' = 1.0) -> "'HierarchyData'"
+    The fbx's node hierarchy, names as in the file: ``HierarchyData.load_fbx()``.
+load_glb(filename: 'str', scale_factor: 'float' = 100.0, pose_frame: 'Optional[int]' = None) -> "'HierarchyData'"
+    The glb's joint hierarchy, names as in the file: ``HierarchyData.load_glb()``.
 validate_uuid(uuid_string: 'str') -> 'bool'
     validates a uuid string
 ```
@@ -576,6 +573,12 @@ Base class with managed serialization.
 Data() -> None
 ```
 
+Properties:
+
+```text
+namespace                          the namespace path of the name: ``"A:B"`` for ``A:B:node``, ``""`` for none
+```
+
 Methods:
 
 ```text
@@ -586,7 +589,7 @@ classmethod from_dict(cls, data: dict) -> Any
 classmethod info(cls) -> str
     Returns this class's docstring as a string.
 classmethod load(cls, filename: str, mode: Optional[str] = None) -> Any
-    loads the data from a file
+    Loads the data from a file: ``mode``, or the type the file reads as
 classmethod load_json(cls, filename: str) -> Any
 classmethod load_npz(cls, filename: str) -> Any
 classmethod load_pickle(cls, filename: str) -> Any
@@ -599,6 +602,8 @@ save(self, filename: str, mode: Optional[str] = None) -> str
 save_json(self, filename: str) -> str
 save_npz(self, filename: str, compression=8) -> str
 save_pickle(self, filename: str) -> str
+strip_namespace(self, namespace: Optional[str] = None) -> None
+    Removes every namespace from the name, or the one path given.
 to_bytes(self) -> bytes
     returns a bytes object from the zipped data
 to_dict(self) -> dict
@@ -615,6 +620,13 @@ All the operations on a read-write sequence.
 DataList(iterable=None)
 ```
 
+Properties:
+
+```text
+name                               every item's name, in order
+namespace                          every item's namespace path, ``""`` where it has none
+```
+
 Methods:
 
 ```text
@@ -626,12 +638,14 @@ extend(self, iterable)
     S.extend(iterable) -- extend sequence by appending elements from the iterable
 classmethod from_bytes(cls, data: bytes) -> Any
 classmethod from_dict(cls, data: dict) -> Any
+get(self, name: str, default: Any = None) -> Any
+    the first item named ``name``, or ``default``
 index(self, value, start=0, stop=None)
     S.index(value, [start, [stop]]) -> integer -- return first index of value.
 insert(self, index, value)
     S.insert(index, value) -- insert value before index
 classmethod load(cls, filename: str, mode: Optional[str] = None) -> Any
-    loads the data from a file
+    Loads the data from a file: ``mode``, or the type the file reads as
 classmethod load_json(cls, filename: str) -> Any
 classmethod load_npz(cls, filename: str) -> Any
 classmethod load_pickle(cls, filename: str) -> Any
@@ -649,6 +663,8 @@ save_npz(self, filename: str) -> str
     saves the morph target list to a npz file
 save_pickle(self, filename: str) -> str
 sort(self, key=None, reverse=False)
+strip_namespace(self, namespace: Optional[str] = None) -> None
+    ``strip_namespace()`` on every item, all or nothing.
 to_bytes(self) -> bytes
     returns a bytes object from the zipped data
 to_dict(self) -> dict
@@ -677,7 +693,7 @@ flatten_nested_lists(xs)
 get_annotations(cls)
     returns a dict of all annotations including inherited ones
 get_file_type(filename: str) -> str
-    identifies the supported file type by reading the header
+    The file's type: ``"npz"``, ``"json"`` or ``"pkl"`` for cgmath's own
 is_ndarray_annotation(dtype) -> bool
     returns True if an annotation is np.ndarray, or a union holding it
 nan_to_none(obj)
@@ -916,8 +932,8 @@ grow_vertex_face_indices(self, indices: 'np.ndarray', n: 'int' = 1) -> 'np.ndarr
     grows vertex face indices by n steps
 classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None) -> "'MeshData'"
     returns a single MeshData from an fbx file (first mesh if name is None)
-classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0) -> "'MeshData'"
-    a basic glb file reader to MeshData
+classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, name: 'str | None' = None) -> "'MeshData'"
+    returns a single MeshData from a glb (first mesh if name is None)
 classmethod load_obj(cls, filename: 'str') -> "'MeshData'"
     a basic obj file reader to MeshData
 merge(self)
@@ -986,6 +1002,12 @@ fix_symmetry(self, pivot: 'float' = 0.0, axis: 'int' = 0, side: 'float' = 1.0, c
     attempts a symmetry fix on each element or combined.
 classmethod load_fbx(cls, filename: 'str') -> "'MeshList'"
     loads all meshes from an fbx file into a MeshList
+classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0) -> "'MeshList'"
+    loads all meshes from a glb file into a MeshList
+classmethod load_obj(cls, filename: 'str') -> "'MeshList'"
+    loads all meshes (groups) from an obj file into a MeshList
+classmethod load_usd(cls, filename: 'str') -> "'MeshList'"
+    loads all mesh prims from a usd file into a MeshList
 merge(self)
     applies merge to all elements
 to_identity(self)
@@ -1099,8 +1121,10 @@ imwrite(self, fname: 'str') -> 'str'
     writes a png file
 classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None, channel: 'int' = 0) -> "'UVData'"
     returns a single UV channel from an fbx file (first mesh / channel 0 by default)
-classmethod load_glb(cls, filename: 'str') -> "List['UVData']"
-    a basic glb file reader to UVData
+classmethod load_glb(cls, filename: 'str', name: 'str | None' = None, channel: 'int' = 0) -> "'UVData'"
+    returns a single UV channel from a glb (first mesh / channel 0 by default)
+classmethod load_obj(cls, filename: 'str', name: 'str | None' = None, channel: 'int' = 0) -> "'UVData'"
+    returns a single UV channel from an obj (first mesh / channel 0 by default)
 normalize(self, bbx_min=(0.0, 0.0), bbx_max=(1.0, 1.0), tolerance=1e-06)
     brings UV maps within frame range (default 0-1)
 pack(self, resolution=1024, padding=2, rotations=4)
@@ -1148,6 +1172,12 @@ get_minimum_resolution(self)
     computes the minimum resolution for the entire list
 classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None) -> "'UVList'"
     loads all UV channels for one mesh from an fbx file (first mesh if name is None)
+classmethod load_glb(cls, filename: 'str', name: 'str | None' = None) -> "'UVList'"
+    loads all UV channels for one mesh from a glb file (first mesh if name is None)
+classmethod load_obj(cls, filename: 'str', name: 'str | None' = None) -> "'UVList'"
+    loads all UV channels for one mesh from an obj file (first mesh if name is None)
+classmethod load_usd(cls, filename: 'str', name: 'str | None' = None) -> "'UVList'"
+    loads all UV channels for one mesh prim from a usd file (first if name is None)
 merge_seams(self)
     merges the UV seams
 pack(self, resolution=1024, padding=2, rotations=4)
@@ -1158,13 +1188,15 @@ triangulate(self, rules: 'Union[np.ndarray, TriangulateRules]') -> 'None'
 Functions:
 
 ```text
-load_fbx(file_path: 'str') -> 'list'
+load(filename: 'str', mode: 'str | None' = None) -> 'list'
+    The file's meshes with their UVs, as ``(MeshData, UVList)`` pairs:
+load_fbx(filename: 'str') -> 'list'
     loads fbx file and returns list of (MeshData, UVList) tuples
-load_glb(file_path: 'str', scale_factor: 'float' = 100.0) -> 'list'
+load_glb(filename: 'str', scale_factor: 'float' = 100.0) -> 'list'
     loads glb file and returns list of (MeshData, UVList) tuples
-load_obj(file_path: 'str') -> 'list'
+load_obj(filename: 'str') -> 'list'
     loads obj file and returns list of (MeshData, UVList) tuples
-load_usd(file_path: 'str') -> 'list'
+load_usd(filename: 'str') -> 'list'
     loads usd file and returns list of (MeshData, UVList) tuples
 save_obj(file_path: 'str', data: 'list') -> 'None'
     writes a valid obj file from a list of (MeshData, UVList) tuples
@@ -1485,6 +1517,10 @@ SkinList(iterable=None)
 Methods:
 
 ```text
+classmethod load_fbx(cls, filename: 'str') -> "'SkinList'"
+    Every skinned mesh of an fbx, in file order, named after its mesh.
+classmethod load_glb(cls, filename: 'str') -> "'SkinList'"
+    Every skinned primitive of a glb, in file order, named after its
 transfer_influences(self, src_influences: 'list', dst_influences: 'list', weighted: 'bool' = True) -> 'None'
     transfers weights from one influence to another
 ```
@@ -1492,10 +1528,12 @@ transfer_influences(self, src_influences: 'list', dst_influences: 'list', weight
 Functions:
 
 ```text
-load_fbx(filename: 'str', bind_matrices: 'bool' = False) -> 'list'
-    loads an fbx file and returns a list of ``(mesh name, SkinData)`` tuples
-load_glb(filename: 'str', bind_matrices: 'bool' = False) -> 'list'
-    loads a glb and returns one entry per primitive, ``None`` where unskinned
+load(filename: 'str', mode: 'Optional[str]' = None) -> 'SkinList'
+    The file's skins: ``SkinList.load()``, which picks the reader from
+load_fbx(filename: 'str') -> 'SkinList'
+    Every skinned mesh of an fbx, names as in the file: ``SkinList.load_fbx()``.
+load_glb(filename: 'str') -> 'SkinList'
+    Every skinned primitive of a glb, names as in the file: ``SkinList.load_glb()``.
 ```
 
 Constants:
@@ -2470,11 +2508,11 @@ get_loaded_texture(self) -> 'Optional[np.ndarray]'
     Returns the texture as a contiguous ``(H, W, 3) float32`` array,
 imshow(self) -> 'None'
     Show the rendered frame in a window via OpenCV.
-classmethod load_fbx(cls, file_path: 'str', index: 'int' = 0, extract_texture: 'bool' = True, load_skin: 'bool' = True, **object_kwargs) -> "'Object'"
+classmethod load_fbx(cls, filename: 'str', index: 'int' = 0, extract_texture: 'bool' = True, load_skin: 'bool' = True, **object_kwargs) -> "'Object'"
     Load a mesh from an FBX file as an :class:`Object`.
-classmethod load_glb(cls, file_path: 'str', index: 'int' = 0, scale_factor: 'float' = 100.0, extract_texture: 'bool' = True, load_skin: 'bool' = True, **object_kwargs) -> "'Object'"
+classmethod load_glb(cls, filename: 'str', index: 'int' = 0, scale_factor: 'float' = 100.0, extract_texture: 'bool' = True, load_skin: 'bool' = True, **object_kwargs) -> "'Object'"
     Load a mesh from a GLB file as an :class:`Object`.
-classmethod load_obj(cls, file_path: 'str', index: 'int' = 0, **object_kwargs) -> "'Object'"
+classmethod load_obj(cls, filename: 'str', index: 'int' = 0, **object_kwargs) -> "'Object'"
     Load a mesh from an OBJ file as an :class:`Object`.
 merge(self) -> 'None'
     Merges overlapping points (and resulting overlapping faces),
@@ -2531,9 +2569,9 @@ imshow(self, resolution: 'Tuple[int, int]' = (500, 500)) -> 'None'
     Show the rendered frame in a window via OpenCV.
 insert(self, index: 'int', node: 'TransformData') -> 'None'
     S.insert(index, value) -- insert value before index
-classmethod load_glb(cls, file_path: 'str', name: 'Optional[str]' = None, scale_factor: 'float' = 100.0, load_skin: 'bool' = True, extract_texture: 'bool' = True) -> "'Scene'"
+classmethod load_glb(cls, filename: 'str', name: 'Optional[str]' = None, scale_factor: 'float' = 100.0, load_skin: 'bool' = True, extract_texture: 'bool' = True) -> "'Scene'"
     Load every mesh in a GLB file into a new :class:`Scene` as
-classmethod load_obj(cls, file_path: 'str', name: 'Optional[str]' = None) -> "'Scene'"
+classmethod load_obj(cls, filename: 'str', name: 'Optional[str]' = None) -> "'Scene'"
     Load every mesh in an OBJ file into a new :class:`Scene` as
 render(self, **kwargs)
     Convenience wrapper around the module-level ``render(scene=self, ...)``.

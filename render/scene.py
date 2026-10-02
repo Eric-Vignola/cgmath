@@ -48,10 +48,7 @@ from cgmath.geometry.mesh import (
     MeshData,
     UVData,
 )
-from cgmath.geometry.skin_weights import (
-    load_fbx as _load_skin_fbx,
-    load_glb as _load_skin_glb,
-)
+from cgmath.geometry.skin_weights import _read_skins_fbx, _read_skins_glb
 from cgmath.render.camera import (
     _autofit_camera_for_points,
     _default_camera_for_points,
@@ -246,7 +243,7 @@ class Object(TransformData):
     # -- file IO: load an Object from disk -----------------------------
 
     @classmethod
-    def load_obj(cls, file_path: str, index: int = 0, **object_kwargs) -> "Object":
+    def load_obj(cls, filename: str, index: int = 0, **object_kwargs) -> "Object":
         """Load a mesh from an OBJ file as an :class:`Object`.
 
         Convenience wrapper around :func:`cgmath.geometry.mesh.load_obj`.
@@ -256,7 +253,7 @@ class Object(TransformData):
         ``texture``, ``base_color``, transforms, etc.
 
         Args:
-            file_path: Path to the ``.obj`` file (``~`` and env vars OK).
+            filename: Path to the ``.obj`` file (``~`` and env vars OK).
             index: Which mesh to load when the file contains multiple
                 ``g`` groups.  Negative indices count from the end.
             **object_kwargs: Forwarded to :class:`Object` (``name``,
@@ -265,12 +262,12 @@ class Object(TransformData):
         Returns:
             A new Object with ``mesh`` and ``uv`` populated.
         """
-        data = _load_obj(file_path)
+        data = _load_obj(filename)
         if not data:
-            raise ValueError(f"{file_path}: contains no meshes")
+            raise ValueError(f"{filename}: contains no meshes")
         if not -len(data) <= index < len(data):
             raise IndexError(
-                f"{file_path}: index {index} out of range (file has {len(data)} meshes)"
+                f"{filename}: index {index} out of range (file has {len(data)} meshes)"
             )
         mesh, uv_list = data[index]
         uv = uv_list[0] if len(uv_list) > 0 else None
@@ -280,7 +277,7 @@ class Object(TransformData):
     @classmethod
     def load_glb(
         cls,
-        file_path:       str,
+        filename:        str,
         index:           int   = 0,
         scale_factor:    float = 100.0,
         extract_texture: bool  = True,
@@ -293,7 +290,7 @@ class Object(TransformData):
         See :meth:`load_obj` for parameter semantics.
 
         Args:
-            file_path: Path to the ``.glb`` file (``~`` and env vars OK).
+            filename: Path to the ``.glb`` file (``~`` and env vars OK).
             index: Which mesh to load when the file contains multiple
                 geometries.  Negative indices count from the end.
             scale_factor: Multiplier applied to vertex positions (GLB
@@ -321,12 +318,12 @@ class Object(TransformData):
         Raises:
             ImportError: If ``trimesh`` is not installed.
         """
-        data = _load_glb(file_path, scale_factor=scale_factor)
+        data = _load_glb(filename, scale_factor=scale_factor)
         if not data:
-            raise ValueError(f"{file_path}: contains no meshes")
+            raise ValueError(f"{filename}: contains no meshes")
         if not -len(data) <= index < len(data):
             raise IndexError(
-                f"{file_path}: index {index} out of range (file has {len(data)} meshes)"
+                f"{filename}: index {index} out of range (file has {len(data)} meshes)"
             )
         mesh, uv_list = data[index]
         uv = uv_list[0] if len(uv_list) > 0 else None
@@ -334,20 +331,20 @@ class Object(TransformData):
 
         if load_skin and object_kwargs.get("skin") is None:
             meshes                = [m for m, _ in data]
-            object_kwargs["skin"] = _glb_skins(file_path, meshes, scale_factor)[index]
+            object_kwargs["skin"] = _glb_skins(filename, meshes, scale_factor)[index]
 
         obj = cls(mesh=mesh, uv=uv, **object_kwargs)
         # Only auto-extract when the caller didn't supply an explicit
         # texture; explicit always wins.  No-op when the GLB has no
         # base color map (returns False) or PIL is unavailable.
         if extract_texture and obj.texture is None:
-            obj.extract_texture_from_glb(file_path)
+            obj.extract_texture_from_glb(filename)
         return obj
 
     @classmethod
     def load_fbx(
         cls,
-        file_path:       str,
+        filename:        str,
         index:           int  = 0,
         extract_texture: bool = True,
         load_skin:       bool = True,
@@ -359,7 +356,7 @@ class Object(TransformData):
         See :meth:`load_obj` for parameter semantics.
 
         Args:
-            file_path: Path to the ``.fbx`` file (``~`` and env vars OK).
+            filename: Path to the ``.fbx`` file (``~`` and env vars OK).
             index: Which mesh to load when the file contains multiple
                 geometries.  Negative indices count from the end.
             extract_texture: When True (default), also extract the
@@ -382,23 +379,23 @@ class Object(TransformData):
         Raises:
             ImportError: If the Autodesk FBX Python SDK is not installed.
         """
-        data = _load_fbx(file_path)
+        data = _load_fbx(filename)
         if not data:
-            raise ValueError(f"{file_path}: contains no meshes")
+            raise ValueError(f"{filename}: contains no meshes")
         if not -len(data) <= index < len(data):
             raise IndexError(
-                f"{file_path}: index {index} out of range (file has {len(data)} meshes)"
+                f"{filename}: index {index} out of range (file has {len(data)} meshes)"
             )
         mesh, uv_list = data[index]
         uv = uv_list[0] if len(uv_list) > 0 else None
         object_kwargs.setdefault("name", mesh.name or "object")
 
         if load_skin and object_kwargs.get("skin") is None:
-            object_kwargs["skin"] = _fbx_skin(file_path, mesh)
+            object_kwargs["skin"] = _fbx_skin(filename, mesh)
 
         obj = cls(mesh=mesh, uv=uv, **object_kwargs)
         if extract_texture and obj.texture is None:
-            obj.extract_texture_from_fbx(file_path, mesh_index=index)
+            obj.extract_texture_from_fbx(filename, mesh_index=index)
         return obj
 
     def extract_texture_from_glb(
@@ -498,6 +495,10 @@ class Object(TransformData):
         """
         self._frame                  = None
         self._render_transform_state = None
+
+    def _namespace_parts(self) -> list:
+        """the mesh, the cached bind-pose mesh posing copies, and the skin"""
+        return [self._mesh, self._bind_mesh, self._skin]
 
     @property
     def mesh(self) -> Optional[MeshData]:
@@ -1776,7 +1777,7 @@ class Scene(HierarchyData):
     # -- file IO: build a Scene from disk -----------------------------
 
     @classmethod
-    def load_obj(cls, file_path: str, name: Optional[str] = None) -> "Scene":
+    def load_obj(cls, filename: str, name: Optional[str] = None) -> "Scene":
         """Load every mesh in an OBJ file into a new :class:`Scene` as
         :class:`Object` nodes.
 
@@ -1787,14 +1788,14 @@ class Scene(HierarchyData):
         present.
 
         Args:
-            file_path: Path to the ``.obj`` file (``~`` and env vars OK).
+            filename: Path to the ``.obj`` file (``~`` and env vars OK).
             name: Optional name for the Scene (defaults to ``"scene"``).
 
         Returns:
             A Scene populated with one Object per ``g`` group in the file.
         """
         scene = cls(name=name or "scene")
-        for mesh, uv_list in _load_obj(file_path):
+        for mesh, uv_list in _load_obj(filename):
             uv = uv_list[0] if len(uv_list) > 0 else None
             scene.append(Object(name=mesh.name or "object", mesh=mesh, uv=uv))
         return scene
@@ -1802,7 +1803,7 @@ class Scene(HierarchyData):
     @classmethod
     def load_glb(
         cls,
-        file_path:       str,
+        filename:        str,
         name:            Optional[str] = None,
         scale_factor:    float         = 100.0,
         load_skin:       bool          = True,
@@ -1812,7 +1813,7 @@ class Scene(HierarchyData):
         :class:`Object` nodes.  See :meth:`load_obj`.
 
         Args:
-            file_path: Path to the ``.glb`` file (``~`` and env vars OK).
+            filename: Path to the ``.glb`` file (``~`` and env vars OK).
             name: Optional name for the Scene (defaults to ``"scene"``).
             scale_factor: Multiplier applied to vertex positions (matches
                 :meth:`MeshData.load_glb`'s default of 100).
@@ -1834,10 +1835,10 @@ class Scene(HierarchyData):
             ImportError: If ``trimesh`` is not installed.
         """
         scene  = cls(name=name or "scene")
-        data   = _load_glb(file_path, scale_factor=scale_factor)
+        data   = _load_glb(filename, scale_factor=scale_factor)
         meshes = [m for m, _ in data]
         skins = (
-            _glb_skins(file_path, meshes, scale_factor)
+            _glb_skins(filename, meshes, scale_factor)
             if load_skin
             else [None] * len(meshes)
         )
@@ -1845,7 +1846,7 @@ class Scene(HierarchyData):
             uv  = uv_list[0] if len(uv_list) > 0 else None
             obj = Object(name=mesh.name or "object", mesh=mesh, uv=uv, skin=skin)
             if extract_texture:
-                obj.extract_texture_from_glb(file_path)
+                obj.extract_texture_from_glb(filename)
             scene.append(obj)
         return scene
 
@@ -2888,7 +2889,7 @@ def _glb_skins(
 
     The two lists are paired POSITIONALLY, not by name.  Both readers walk
     the same file, but they get their names from different libraries:
-    ``MeshData.load_glb`` uses trimesh's ``scene.geometry`` keys while the
+    ``mesh.load_glb`` uses trimesh's ``scene.geometry`` keys while the
     skin reader uses the glb's own mesh names.  Trimesh has to keep its keys
     unique, so a file holding two meshes both called ``part`` reads back as
     ``part`` and ``part_1`` on one side and ``part`` twice on the other --
@@ -2901,7 +2902,7 @@ def _glb_skins(
     loaded fine before skinning existed, it warns and skins nothing.
     """
     try:
-        skins = _load_skin_glb(file_path, bind_matrices=True)
+        skins = _read_skins_glb(file_path, bind_matrices=True)
     except Exception as exc:
         warnings.warn(f"{file_path}: could not read skin weights ({exc})", stacklevel=2)
         return [None] * len(meshes)
@@ -2997,12 +2998,12 @@ def _fbx_skin(file_path: str, mesh: MeshData) -> Optional[SkinDeformData]:
     would quietly bind a mesh to some other mesh's weights.
     """
     try:
-        entries = _load_skin_fbx(file_path, bind_matrices=True)
+        entries = _read_skins_fbx(file_path, bind_matrices=True)
     except Exception as exc:
         warnings.warn(f"{file_path}: could not read skin weights ({exc})", stacklevel=2)
         return None
 
-    matches = [entry[1:] for entry in entries if entry[0] == mesh.name]
+    matches = [entry for entry in entries if entry[0].name == mesh.name]
     if not matches:
         return None
     if len(matches) > 1:

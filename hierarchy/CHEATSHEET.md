@@ -434,7 +434,12 @@ assert ns.name == ["root", "spine", "ctrl"]
 ```
 
 A rename that would give two nodes the same name raises `ValueError` and
-renames nothing.
+renames nothing. Every named data type and list has the same method: a skin
+strips its influences with its name, so strip the rig first, then the skins
+and meshes read from the same file.
+
+`cgmath.hierarchy.load` / `load_fbx` / `load_glb` read a file's hierarchy
+(names as in the file), like the other modules' loaders.
 
 ### User attributes
 

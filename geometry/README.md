@@ -284,19 +284,36 @@ Each `ResampleMode` *value* is literally that mode's options dataclass
 
 ### Which loaders exist
 
+Every module with a file interface has `load` (picks the reader from the file),
+`load_fbx` and `load_glb`. No loader strips namespaces: fbx and glb node and skin
+names come back as written (obj meshes are named after their group plus `Shape`,
+and trimesh renames duplicate glb meshes `part`, `part_1`). A list type's
+`load_<format>` gives every item in the file; a data type's gives one, the first
+or `name=`, except `MeshData.load_obj`, which merges every group into one mesh.
+
 | Entry point | Returns |
 |---|---|
-| `mesh.load_obj` / `load_glb` / `load_fbx` / `load_usd` | `list[(MeshData, UVList)]` |
+| `mesh.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | `list[(MeshData, UVList)]` |
 | `mesh.save_obj(path, data)` | writes that same list shape |
+| `MeshList.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | every mesh, a `MeshList` |
 | `MeshData.load_obj` / `load_glb` / `load_fbx`, `MeshData.save_obj` | one `MeshData` |
-| `MeshList.load_fbx`, `UVList.load_fbx` | a list |
-| `UVData.load_fbx`, `UVData.load_glb` | one / a list of `UVData` |
-| `skin_weights.load_fbx` / `load_glb` | `list[(mesh name, SkinData)]` |
+| `UVList.load_glb` / `load_fbx` | one mesh's UV channels |
+| `UVData.load_glb` / `load_fbx` | one `UVData` |
+| `skin_weights.load` / `load_fbx` / `load_glb`, `SkinList.load_*` | a `SkinList`, each skin named after its mesh |
 | `SkinData.load_fbx` / `load_glb` | one `SkinData` |
+| `cgmath.hierarchy.load` / `load_fbx` / `load_glb` | a `HierarchyData` |
 | `from_prim` / `to_prim` on `MeshData`, `UVData`, `MapData`, `GeomSubsetData`, `MorphData`, `CompactSkinData` | USD |
 
-OBJ is pure python and always available. There is **no** `MeshList.load_obj` and
-**no** `MeshData.load_usd`.
+OBJ is pure python and always available. There is **no** `MeshData.load_usd`.
+
+### Namespaces
+
+`strip_namespace()` and `namespace` work on every named data type and list.
+A skin strips its influences and a skin deformer its joints along with the
+name, so strip the rig first, then its skins and meshes: names that still
+match bind. Anything that would give two items (or two influences) one name
+raises `ValueError` and renames nothing; a type with no name raises
+`AttributeError`.
 
 ---
 

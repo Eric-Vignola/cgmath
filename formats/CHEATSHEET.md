@@ -1105,10 +1105,12 @@ raises `AttributeError`.
 from cgmath.geometry.mesh import load_fbx, load_glb          # [(MeshData, UVList), ...]
 from cgmath.geometry.skin_weights import load_fbx as skin_fbx
 from cgmath.geometry.skin_weights import load_glb as skin_glb
+from cgmath.hierarchy import load_fbx as rig_fbx
 
 load_fbx("hero.fbx")
 load_glb("hero.glb", scale_factor=100.0)
-skin_glb("hero.glb", bind_matrices=False)                     # -> list[SkinData]
+skin_glb("hero.glb")  # -> SkinList
+rig_fbx("hero.fbx")   # -> HierarchyData
 ```
 
 ---
