@@ -1434,7 +1434,9 @@ stretch. `BSplineData()` is an empty cubic, ready to fit.
 own (an empty curve takes Maya's), `-1` takes Maya's, an int sets it. More
 than Maya's give the same curve with knots inserted; fewer still pass
 through every point while there is one control point per point, and are a
-best fit below that, the ends always on the first and last point.
+best fit below that, the ends always on the first and last point. On a best
+fit each point's `u` is its closest spot on the curve between its
+neighbours' `u`.
 
 ```python
 joints = np.array([

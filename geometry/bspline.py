@@ -4,7 +4,7 @@ from typing import Optional
 import numpy as np
 import scipy.integrate as si
 from cgmath.geometry._base import Data, ImmutableArray as numpy_array
-from cgmath.geometry.utils import compute_basis
+from cgmath.geometry.utils import compute_basis, ordered_closest_params
 from cgmath.geometry.utils._numba._bspline import (
     _compute_basis_parallel,
     _evaluate_bspline_curve,
@@ -1167,8 +1167,8 @@ class BSplineData(Data):
             starting at the registration point when ``registered``. When the
             curve passes through the points, each sits exactly at its u,
             and a point on a knot gets that knot's value from ``kv``. On a
-            best fit, u is the closest point on the point's own stretch of
-            the curve, searched only half way to its neighbours. Either way
+            best fit, u is the closest point on the curve between its
+            neighbours' u, so no point jumps to another stretch. Either way
             the points keep their order. ``sample(points)`` gives the same
             values on smooth chains, but it searches the whole curve: on a
             tight fold, or a point the chain passes twice, it can pick
@@ -1303,10 +1303,12 @@ class BSplineData(Data):
 
     def _best_fit_params(self, points, u, spans):
         """
-        Best fit point parameters for ``fit()``: each refined to its closest
-        point on the curve without leaving its own partition (half way to
-        its neighbours), so the points keep their order. Open curves keep
-        their ends on the first and last point.
+        Best fit point parameters for ``fit()``: each point's closest spot
+        on the curve between its neighbours' u, so the points keep their
+        order. ``_partition_params`` gives the start;
+        ``ordered_closest_params`` then moves a point to any strictly closer
+        spot between its neighbours, so none ends farther than the start.
+        Open curves keep their ends on the first and last point.
 
         Parameters
         ----------
@@ -1321,7 +1323,34 @@ class BSplineData(Data):
         Returns
         -------
         np.ndarray
-            Refined native parameters (N,), not wrapped.
+            Native parameters (N,), not wrapped.
+        """
+        u = self._partition_params(points, u, spans)
+        return ordered_closest_params(
+            points, u, self._kv, self._cv_f64, self.degree, self.periodic
+        )
+
+    def _partition_params(self, points, u, spans):
+        """
+        Each point's closest spot on the curve without leaving its own
+        partition (half way to its neighbours): the start of
+        ``_best_fit_params``. Open curves keep their ends on the first and
+        last point.
+
+        Parameters
+        ----------
+        points : np.ndarray
+            Fit points (N, dims).
+        u : np.ndarray
+            Native parameters the points were fitted at (N,), wrapped into
+            [0, spans) on periodic curves.
+        spans : int
+            The curve's span count.
+
+        Returns
+        -------
+        np.ndarray
+            Native parameters (N,), not wrapped.
         """
         u = u.copy()
         if self.periodic:

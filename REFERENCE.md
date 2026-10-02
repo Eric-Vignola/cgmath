@@ -2250,7 +2250,7 @@ composite_sprite(sprite: 'np.ndarray', buffer: 'np.ndarray', mask: 'np.ndarray |
 composite_sprite_aa(sprite: 'np.ndarray', buffer: 'np.ndarray')
     composites an antialiased sprite to anothert sprite buffer
 compute_basis(u, kv, c, d)
-    returns bilinear quad surface areas
+    Computes the B-spline basis matrix.
 compute_centroids(points, geometry, return_radiuses=False)
     Optimized: uses parallel Numba kernel for centroid computation.
 compute_decal_maps(points: 'np.ndarray', ring: 'np.ndarray', valence: 'np.ndarray', is_boundary: 'np.ndarray', out: 'np.ndarray | None' = None) -> 'np.ndarray'
@@ -2299,6 +2299,8 @@ matrix_to_stream(matrix)
     converts matrix to index stream, skips over -1 pads
 minimize_neighbor_distances(neighborhood: 'np.ndarray', neighborhood_dists: 'np.ndarray', num_vertices: 'int') -> 'np.ndarray'
     Find the shortest distance to each unique vertex index across all rows.
+ordered_closest_params(points, u, kv, cv, degree, periodic)
+    Repairs best-fit parameters: each point's closest spot between its neighbours.
 patch_relax(points: 'np.ndarray', rest_points: 'np.ndarray', ring: 'np.ndarray', valence: 'np.ndarray', is_boundary: 'np.ndarray', weights: 'np.ndarray', rest_vectors: 'np.ndarray', rest_decals: 'np.ndarray', iterations: 'int' = 30, alpha: 'float' = 1.0, step_size: 'float' = 0.5, surface_blend: 'float' = 0.0, step_scale: 'np.ndarray | None' = None, polar_iters: 'int' = 12) -> 'np.ndarray'
     Run patch-based surface relaxation on a deformed pose.
 point_row_overlaps(matrix, tolerance=1e-06)

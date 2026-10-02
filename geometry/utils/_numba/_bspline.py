@@ -1204,6 +1204,875 @@ def _newton_closest_point_parallel(
 
 
 # --------------------------------------------------------------------------- #
+#                     Ordered closest points                                  #
+# --------------------------------------------------------------------------- #
+#
+# fit()'s best fit gives each fit point a curve parameter u. The kernels
+# below repair those u: a point only ever moves to a strictly closer spot on
+# the curve between its neighbours' current u, so the points keep their
+# order and none gets farther from the curve.
+#
+# Parameters are native: the curve runs on [0, spans]. On periodic curves
+# they may be unwrapped (any lap); the curve is evaluated modulo spans.
+#
+# The curve and its derivatives are evaluated with scipy's own de Boor
+# recursion, so every position, slope and Newton step is bit-identical to
+# scipy's BSpline.
+#
+# fastmath stays off: the "strictly closer" tests compare distances at
+# float-noise level.
+
+
+@njit(cache=True)
+def _curve_derivatives(x, kv, cv, degree, order, work, out):
+    """
+    The curve's derivatives up to ``order`` at one native parameter, as scipy's.
+
+    Parameters
+    ----------
+    x : float
+        Native parameter, inside the domain [kv[degree], kv[c]].
+    kv, cv : np.ndarray
+        Knot vector (c + degree + 1,) in scipy's layout and control points
+        (c, dims), wrapped on periodic curves; float64.
+    degree, order : int
+        Degree of the B-spline; highest derivative wanted (past degree: zero).
+    work, out : np.ndarray
+        Scratch (degree + 2, degree + 1); output (order + 1 or more, dims),
+        row m the m-th derivative.
+
+    Returns
+    -------
+    None
+    """
+    # Right-sided at the knots, like scipy. A repeated knot at either end of
+    # the domain leaves an empty span there (scipy returns zeros): the nearest
+    # non-empty span takes it
+    limit = cv.shape[0] - degree - 1
+    span  = _find_span(x, kv, degree, limit)
+    while span > 0 and not kv[degree + span] < kv[degree + span + 1]:
+        span -= 1
+    while span < limit and not kv[degree + span] < kv[degree + span + 1]:
+        span += 1
+
+    # scipy's de Boor recursion, so every value is bit-identical to
+    # BSpline(x, m): degree - m Cox-de Boor steps (shared, highest m first)
+    # raise the basis functions to degree - m, in place, then m steps
+    # differentiate them back up. A zero knot difference adds nothing
+    knot     = span + degree
+    basis    = work[degree + 1]
+    basis[0] = 1.0
+    level    = 0
+    top      = min(order, degree)
+    for m in range(top, -1, -1):
+        while level < degree - m:
+            level += 1
+            carry = 0.0
+            for n in range(1, level + 1):
+                upper = kv[knot + n]
+                lower = kv[knot + n - level]
+                if upper == lower:
+                    basis[n - 1] = carry
+                    carry        = 0.0
+                    continue
+                w            = basis[n - 1] / (upper - lower)
+                basis[n - 1] = carry + w * (upper - x)
+                carry        = w * (x - lower)
+            basis[level] = carry
+
+        row              = work[m]
+        row[: level + 1] = basis[: level + 1]
+        for j in range(level + 1, degree + 1):
+            carry = 0.0
+            for n in range(1, j + 1):
+                upper = kv[knot + n]
+                lower = kv[knot + n - j]
+                if upper == lower:
+                    row[n - 1] = carry
+                    carry      = 0.0
+                    continue
+                w          = j * row[n - 1] / (upper - lower)
+                row[n - 1] = carry - w
+                carry      = w
+            row[j] = carry
+
+        for dim in range(cv.shape[1]):
+            total = 0.0
+            for j in range(degree + 1):
+                total += cv[span + j, dim] * row[j]
+            out[m, dim] = total
+    out[top + 1 : order + 1] = 0.0
+
+
+@njit(cache=True, inline="always")
+def _knot_on_lap(m, knots, spans):
+    """
+    Knot m counted over every lap: knot m % spans, moved m // spans laps.
+
+    Parameters
+    ----------
+    m : int
+        Knot index, any integer (negative = earlier laps).
+    knots, spans
+        The domain's knots (spans + 1,), from 0 to spans; the span count.
+
+    Returns
+    -------
+    float
+        The knot's unwrapped native parameter.
+    """
+    return knots[m % spans] + (m // spans) * float(spans)
+
+
+@njit(cache=True)
+def _distance(point, x, kv, cv, degree, periodic, work, derivs, slope):
+    """
+    |C(x) - point|, or with ``slope`` (C(x) - point) . C'(x).
+
+    Parameters
+    ----------
+    point : np.ndarray
+        The point (dims,), float64.
+    x : float
+        Native parameter, unwrapped on periodic curves.
+    kv, cv, degree, periodic
+        The curve, as in ``_curve_derivatives``.
+    work, derivs : np.ndarray
+        Scratch for ``_curve_derivatives``; derivs (3, dims) or more.
+    slope : bool
+        Return half the squared distance's derivative instead (negative while
+        the curve still comes closer).
+
+    Returns
+    -------
+    float
+        The distance or the slope.
+    """
+    if periodic:
+        x = x % float(cv.shape[0] - degree)
+    _curve_derivatives(x, kv, cv, degree, int(slope), work, derivs)
+    total = 0.0
+    for dim in range(point.shape[0]):
+        offset = derivs[0, dim] - point[dim]
+        total += offset * (derivs[1, dim] if slope else offset)
+    return total if slope else np.sqrt(total)
+
+
+@njit(cache=True)
+def _keep_closer(point, x, rank, best, kv, cv, degree, periodic, work, derivs):
+    """
+    The closer of candidate x and the best so far; the smaller rank on a tie.
+
+    Parameters
+    ----------
+    point, x, kv, cv, degree, periodic, work, derivs
+        As in ``_distance``.
+    rank : int
+        The candidate's rank (see ``_window_closest``).
+    best : tuple
+        (x, distance, rank) of the best so far.
+
+    Returns
+    -------
+    tuple
+        (x, distance, rank) of the closer one.
+    """
+    dist = _distance(point, x, kv, cv, degree, periodic, work, derivs, False)
+    if dist < best[1] or (dist == best[1] and rank < best[2]):
+        return x, dist, rank
+    return best
+
+
+@njit(cache=True)
+def _score_newton(point, y, lower, upper, stay, rank, group, best, kv, cv, degree,
+                  periodic, work, derivs):
+    """
+    Newton's method on the distance slope inside a bracket, then scored.
+
+    Parameters
+    ----------
+    point, kv, cv, degree, periodic, work, derivs
+        As in ``_distance``.
+    y : float
+        Start; clipped into the bracket first.
+    lower, upper : float
+        The bracket, native parameters.
+    stay : bool
+        Where Newton fails, stop (a root of the piece's polynomial, already
+        close) instead of bisecting (a lone minimum known to be inside).
+    rank, group : int
+        The result's rank; the floats before and after it rank group and
+        2 x group later.
+    best : tuple
+        (x, distance, rank) of the best so far.
+
+    Returns
+    -------
+    tuple
+        The new best (x, distance, rank).
+    """
+    # Each step shrinks the bracket to the side the slope points at. A step
+    # that leaves it, or a non-convex spot, stops or bisects. Done once a step
+    # moves less than 1e-12 x max(spans, 1), or after 60 steps
+    period   = float(cv.shape[0] - degree)
+    step_tol = 1e-12 * max(period, 1.0)
+    y        = min(max(y, lower), upper)
+    low      = lower
+    high     = upper
+    for _ in range(60):
+        x = y % period if periodic else y
+        _curve_derivatives(x, kv, cv, degree, 2, work, derivs)
+
+        # slope = (C - p).C', bend = its derivative |C'|^2 + (C - p).C''
+        slope = 0.0
+        speed = 0.0
+        pull  = 0.0
+        for dim in range(point.shape[0]):
+            offset = derivs[0, dim] - point[dim]
+            slope += offset * derivs[1, dim]
+            speed += derivs[1, dim] * derivs[1, dim]
+            pull  += offset * derivs[2, dim]
+        bend = speed + pull
+
+        if slope < 0.0:
+            low = y
+        if slope > 0.0:
+            high = y
+        inside = False
+        if bend > 0.0:
+            y_new  = y - slope / bend
+            inside = low <= y_new <= high
+        if not inside:
+            y_new = y if stay else (low + high) / 2.0
+        moved = abs(y_new - y)
+        y     = y_new
+        if not moved > step_tol:
+            break
+
+    # The distance is flat at a minimum: the floats either side may be a hair
+    # closer than the one Newton stopped on
+    best = _keep_closer(point, y, rank, best, kv, cv, degree, periodic, work, derivs)
+    best = _keep_closer(point, np.nextafter(y, lower), rank + group, best, kv, cv,
+                        degree, periodic, work, derivs)
+    best = _keep_closer(point, np.nextafter(y, upper), rank + 2 * group, best, kv, cv,
+                        degree, periodic, work, derivs)
+    return best
+
+
+@njit(cache=True)
+def _polynomial_roots(poly, matrix, real, imag):
+    """
+    The real roots in [0, 1] of a polynomial, ascending: companion eigenvalues.
+
+    Parameters
+    ----------
+    poly : np.ndarray
+        Power coefficients (size + 1,), lowest first, float64.
+    matrix : np.ndarray
+        Scratch (size, size), complex128.
+    real, imag : np.ndarray
+        Scratch (size,), float64; real[:found] receives the roots.
+
+    Returns
+    -------
+    int
+        found: eigenvalues within 1e-2 of real and 1e-3 of [0, 1]; none when
+        the matrix is not finite or the eigenvalues do not converge.
+    """
+    # The coefficients go in the first row (numpy.roots' layout: its roots
+    # come out slightly more accurate than the last column's). A vanishing leading
+    # coefficient is held at 1e-13 (a huge, harmless root). Complex: below
+    # numpy 2.5, numba's eigvals will not turn a real matrix's eigenvalues
+    # complex
+    size      = matrix.shape[0]
+    matrix[:] = 0.0
+    for i in range(1, size):
+        matrix[i, i - 1] = 1.0
+    lead = poly[size]
+    if abs(lead) < 1e-13:
+        lead = 1e-13
+    for i in range(size):
+        matrix[0, i] = -poly[size - 1 - i] / lead
+
+    # eigvals raises on a matrix that is not finite (checked first, which
+    # avoids the raise) and when it does not converge
+    if not np.isfinite(matrix[0]).all():
+        return 0
+    try:
+        roots = np.linalg.eigvals(matrix)
+    except Exception:
+        return 0
+    real[:] = roots.real
+    imag[:] = roots.imag
+
+    # The real ones in [0, 1], in ascending order (insertion sort): on an
+    # exact tie the earlier root wins
+    found = 0
+    for i in range(size):
+        if abs(imag[i]) < 1e-2 and -1e-3 < real[i] < 1.0 + 1e-3:
+            root = real[i]
+            at   = found
+            while at > 0 and real[at - 1] > root:
+                real[at] = real[at - 1]
+                at -= 1
+            real[at] = root
+            found += 1
+    return found
+
+
+@njit(cache=True)
+def _window_closest(point, lo, hi, kv, cv, degree, periodic, wild, scratch):
+    """
+    One point's exact closest spot on the curve inside a parameter window.
+
+    Parameters
+    ----------
+    point : np.ndarray
+        The point (dims,), float64.
+    lo, hi : float
+        The window, native, finite and within 2 ** 31 laps of 0; unwrapped on
+        periodic curves, where it may cross the seam or reach into other laps
+        (cut to three laps from lo: it holds every spot of the curve anyway).
+    kv, cv, degree, periodic
+        The curve, as in ``_curve_derivatives``.
+    wild : bool
+        Whether the control points are beyond 1e5 x the points.
+    scratch : tuple
+        (work, derivs, coef, poly, bern, companion, real, imag, to_bern, fact)
+        from ``_ordered_closest_params``.
+
+    Returns
+    -------
+    tuple
+        (u, distance) of the closest spot in [lo, hi]; on an exact tie the
+        smallest rank.
+    """
+    work, derivs, coef, poly, bern, companion, real, imag, to_bern, fact = scratch
+    dims   = point.shape[0]
+    spans  = cv.shape[0] - degree
+    period = float(spans)
+    knots  = kv[degree : degree + spans + 1]
+    size   = 2 * degree - 1  # the slope's degree
+
+    if periodic and hi - lo > 3.0 * period:
+        hi = lo + 3.0 * period
+
+    # The window is cut into pieces at the knots: the knot spans it crosses,
+    # counted over every lap
+    lap_lo = int(np.floor(lo / period))
+    lap_hi = int(np.floor(hi / period))
+    first  = lap_lo * spans + np.searchsorted(knots, lo % period, side="right") - 1
+    last   = lap_hi * spans + np.searchsorted(knots, hi % period) - 1
+    if not periodic:
+        first = min(max(first, 0), spans - 1)
+        last  = min(max(last, 0), spans - 1)
+    pieces = max(last - first + 1, 1)
+
+    # Of two candidates exactly as close the smaller rank wins: group x (0 piece
+    # start, 1 piece end, 2 Newton result, 3 the float before it, 4 the float
+    # after it) + kinds x (0 polynomial root, 1 lone minimum, 2 sampled
+    # bracket) + 64 x piece + root or bracket number
+    kinds = pieces * 64
+    group = 3 * kinds
+    best  = (lo, np.inf, 5 * group)
+    for piece in range(pieces):
+        span  = first + piece
+        knot0 = _knot_on_lap(span, knots, spans)
+        start = max(lo, knot0)
+        end   = max(min(hi, _knot_on_lap(span + 1, knots, spans)), lo)
+        width = end - start
+        at    = piece * 64
+
+        # The piece ends always compete; an empty piece has nothing else
+        best = _keep_closer(point, start, at, best, kv, cv, degree, periodic, work,
+                            derivs)
+        best = _keep_closer(point, end, group + at, best, kv, cv, degree, periodic,
+                            work, derivs)
+        if not width > 0.0:
+            continue
+
+        # (C - p).C' on the piece, as a polynomial in t in [0, 1]: on one knot
+        # span the Taylor expansion C(base + t w) = sum_m C^(m)(base) (t w)^m / m!
+        # is exact, so (C - p).dC/dt has degree 2 x degree - 1. base is on the
+        # domain's lap, measured from the span's own knot
+        base = knots[span % spans] + (start - knot0)
+        _curve_derivatives(base, kv, cv, degree, degree, work, derivs)
+        for m in range(degree + 1):
+            scale = width**m / fact[m]
+            for dim in range(dims):
+                coef[m, dim] = derivs[m, dim] * scale
+        for dim in range(dims):
+            coef[0, dim] -= point[dim]
+
+        # (sum_a c_a t^a) . (sum_b b c_b t^(b - 1)): c_a . c_b lands on t^(a + b - 1)
+        poly[:] = 0.0
+        for a in range(degree + 1):
+            for b in range(1, degree + 1):
+                dot = 0.0
+                for dim in range(dims):
+                    dot += coef[a, dim] * coef[b, dim]
+                poly[a + b - 1] += b * dot
+
+        # Scaled so the largest is 1, then in Bernstein form, whose sign changes
+        # bound the roots in [0, 1]: 0 means none inside, 1 exactly one; 2 more
+        # when a coefficient is within 1e-12 of the largest from zero (a root
+        # may hide there)
+        largest = 0.0
+        for c in range(size + 1):
+            largest = max(largest, abs(poly[c]))
+        largest = max(largest, 1e-300)
+        poly /= largest
+        for c in range(size + 1):
+            total = 0.0
+            for r in range(size + 1):
+                total += poly[r] * to_bern[r, c]
+            bern[c] = total
+        signs   = 0
+        largest = 0.0
+        for c in range(size + 1):
+            largest = max(largest, abs(bern[c]))
+            if c > 0 and (bern[c] >= 0.0) != (bern[c - 1] >= 0.0):
+                signs += 1
+        for c in range(size + 1):
+            if abs(bern[c]) < 1e-12 * largest:
+                signs += 2
+                break
+
+        # Several possible minima: every real root of the polynomial in the
+        # piece, polished by Newton
+        if signs > 1:
+            found = _polynomial_roots(poly, companion, real, imag)
+            for index in range(found):
+                best = _score_newton(point, start + width * real[index], start, end,
+                                     True, 2 * group + at + index, group, best, kv, cv,
+                                     degree, periodic, work, derivs)
+
+        # A lone minimum: the slope starts negative and either crosses zero
+        # once, or the curve says it ends positive. Newton from where the
+        # Bernstein control polygon crosses zero, or mid-piece
+        slope_end = _distance(point, end, kv, cv, degree, periodic, work, derivs, True)
+        if bern[0] < 0.0 and (signs == 1 or slope_end > 0.0):
+            cross = 0
+            for c in range(1, size + 1):
+                if bern[c] >= 0.0:
+                    cross = c - 1
+                    break
+            den = 1.0
+            if bern[cross] != bern[cross + 1]:
+                den = bern[cross] - bern[cross + 1]
+            t = (cross + bern[cross] / den) / size if signs == 1 else 0.5
+            best = _score_newton(point, start + width * t, start, end, False,
+                                 2 * group + kinds + at, group, best, kv, cv, degree,
+                                 periodic, work, derivs)
+
+        # The expansion lost the far end (its last sign disagrees with the
+        # curve's, or is near zero: a long piece of a fast curve): the curve's
+        # own slope signs at 17 evenly spaced points bracket the minima
+        disagree = np.sign(bern[size]) != np.sign(slope_end)
+        if disagree or abs(bern[size]) < 1e-8 * largest:
+            prev_t = start
+            prev_slope = _distance(point, start, kv, cv, degree, periodic, work, derivs,
+                                   True)
+            for k in range(1, 17):
+                t = start + width * (k / 16.0)
+                slope = _distance(point, t, kv, cv, degree, periodic, work, derivs,
+                                  True)
+                if not prev_slope >= 0.0 and slope >= 0.0:
+                    best = _score_newton(point, (prev_t + t) / 2.0, prev_t, t, False,
+                                         2 * group + 2 * kinds + at + k - 1, group,
+                                         best, kv, cv, degree, periodic, work, derivs)
+                prev_t     = t
+                prev_slope = slope
+
+    # Wild control points: at the float level the curve is noise, so try the
+    # 16 floats either side of the best (np.spacing: the gap to the next float
+    # away from zero), again around a closer one found there, at most 8 times:
+    # which float Newton stopped on no longer decides which noise dip is in reach
+    best_x    = best[0]
+    best_dist = best[1]
+    if wild:
+        for _ in range(8):
+            away        = np.inf if best_x >= 0.0 else -np.inf
+            gap         = np.nextafter(best_x, away) - best_x
+            center      = best_x
+            center_dist = best_dist
+            best_dist   = np.inf
+            for step in range(-16, 17):
+                x = min(max(center + gap * step, lo), hi)
+                dist = _distance(point, x, kv, cv, degree, periodic, work, derivs,
+                                 False)
+                if dist < best_dist:
+                    best_x    = x
+                    best_dist = dist
+            if not best_dist < center_dist:
+                break
+
+    return best_x, best_dist
+
+
+@njit(cache=True)
+def _unjam(u, dist, dirty, stopped, free, wide, points, grid, kv, cv, degree, periodic,
+           tol, work, derivs, min_run, chunk):
+    """
+    Re-assigns runs of stuck points at once, by an ordered DP.
+
+    Parameters
+    ----------
+    u, dist : np.ndarray
+        Current native parameters and distances (n,), float64.
+    dirty, stopped, free : np.ndarray
+        (n,) bool: points to revisit; points that moved this round and were
+        stopped; points allowed to move (not the ends of open curves).
+    wide : int
+        How far to widen each run, in its own lengths.
+    points, grid : np.ndarray
+        Fit points (n, dims); the spots to try, the lap grid; float64.
+    kv, cv, degree, periodic, work, derivs
+        As in ``_distance``.
+    tol : float
+        Float noise of a distance.
+    min_run, chunk : int
+        Shortest run worth re-assigning; most points re-assigned at once.
+
+    Returns
+    -------
+    None
+        u and dist change where points moved; around each chunk (and one
+        neighbour either side) the free points are marked dirty.
+    """
+    # A leg that has to slide along the curve moves one point per round, each
+    # stopped by its neighbour. Here every run of stopped points (and the
+    # points tied with them) is widened by its own length x wide either side,
+    # overlapping runs merge, and each run of at least min_run points is
+    # re-assigned in one go, in chunks of at most chunk points
+    n      = u.shape[0]
+    dims   = points.shape[1]
+    period = float(cv.shape[0] - degree)
+    shift  = 1 if periodic else 0
+
+    # Mark the stopped points and those tied with them (same u). Index p + 1
+    # is point p: index 0 and n + 1 are the anchors either side
+    marked = np.zeros(n + 2, dtype=np.bool_)
+    first  = 0
+    while first < n:
+        last = first + 1
+        while last < n and u[last] == u[last - 1]:
+            last += 1
+        if stopped[first:last].any():
+            marked[first + 1 : last + 1] = free[first:last]
+        first = last
+
+    # Widen each run by its length x wide, never past an open curve's ends
+    # (first free point at index 2, last at n - 1), and merge
+    cover = np.zeros(n + 2, dtype=np.int64)
+    p     = 1
+    while p <= n:
+        if marked[p] and not marked[p - 1]:
+            q = p
+            while marked[q]:
+                q += 1
+            reach = wide * (q - p)
+            cover[max(p - reach, 2 - shift)] += 1
+            cover[min(q + reach, n + shift)] -= 1
+            p = q
+        p += 1
+    for p in range(1, n + 2):
+        cover[p] += cover[p - 1]
+
+    # Each chunk: the cheapest non-decreasing assignment of its points to the
+    # spots between its two neighbours (grid samples, the neighbours and the
+    # points' own u), by sum of squared distances. A point may only take a
+    # spot strictly closer than its current one (by 1e-10 relative, tol, and
+    # 1e-14 of the squared sizes for the expansion's rounding), or keep its
+    # own. A chunk touching a u or a distance that is not finite is left alone
+    p = 1
+    while p <= n:
+        if cover[p] > 0 and cover[p - 1] <= 0:
+            run_end = p
+            while cover[run_end] > 0:
+                run_end += 1
+            if run_end - p >= min_run:
+                # The chunk: indices a .. b - 1, neighbours a - 1 and b
+                for a in range(p, run_end, chunk):
+                    b = min(a + chunk, run_end)
+                    m = b - a
+
+                    # The neighbours' u; past the ends of the point list, the
+                    # other end's u a lap away (periodic) or the end itself
+                    before = u[n - 1] - period if periodic else u[0]
+                    after  = u[0] + period if periodic else u[n - 1]
+                    left   = before if a - 1 == 0 else u[a - 2]
+                    right  = after if b == n + 1 else u[b - 1]
+                    usable = np.isfinite(left) and np.isfinite(right)
+                    for j in range(a - 1, b - 1):
+                        usable = usable and np.isfinite(u[j]) and np.isfinite(dist[j])
+                    if not usable:
+                        continue
+
+                    # Spots: grid samples strictly between the neighbours, the
+                    # neighbours and the chunk's own u
+                    values = np.empty(grid.shape[0] + m + 2)
+                    k      = 0
+                    for g in range(grid.shape[0]):
+                        if left < grid[g] < right:
+                            values[k] = grid[g]
+                            k += 1
+                    values[k]                 = left
+                    values[k + 1 : k + 1 + m] = u[a - 1 : b - 1]
+                    values[k + 1 + m]         = right
+                    spots                     = np.unique(values[: k + m + 2])
+                    count                     = spots.shape[0]
+
+                    # Squared distances by expansion around the chunk's mean
+                    # point: |P - Q|^2 = |P|^2 + |Q|^2 - 2 P.Q
+                    center = np.zeros(dims)
+                    for j in range(m):
+                        for dim in range(dims):
+                            center[dim] += points[a - 1 + j, dim]
+                    center /= m
+
+                    curve = np.empty((count, dims))
+                    size2 = np.empty(count)
+                    for x in range(count):
+                        at = spots[x] % period if periodic else spots[x]
+                        _curve_derivatives(at, kv, cv, degree, 0, work, derivs)
+                        total = 0.0
+                        for dim in range(dims):
+                            curve[x, dim] = derivs[0, dim] - center[dim]
+                            total += curve[x, dim] * curve[x, dim]
+                        size2[x] = total
+
+                    # cost[x] = cheapest assignment of the points so far with the
+                    # last one at spot x; back[j, x] = where point j - 1 sits on
+                    # the cheapest way for point j to reach spot x (the first
+                    # cheapest spot at or before x)
+                    cost     = np.empty(count)
+                    cost_new = np.empty(count)
+                    back     = np.empty((m, count), dtype=np.int32)
+                    offset   = np.empty(dims)
+                    for x in range(count):
+                        cost[x] = np.inf if spots[x] > left else 0.0
+
+                    for j in range(m):
+                        point = a - 1 + j
+                        own   = np.searchsorted(spots, u[point])
+                        total = 0.0
+                        for dim in range(dims):
+                            offset[dim] = points[point, dim] - center[dim]
+                            total += offset[dim] * offset[dim]
+                        limit  = max(dist[point] * (1.0 - 1e-10) - tol, 0.0) ** 2
+
+                        low    = cost[0]
+                        low_at = 0
+                        for x in range(count):
+                            if cost[x] < low:
+                                low    = cost[x]
+                                low_at = x
+                            back[j, x] = low_at
+
+                            both = total + size2[x]
+                            dot  = 0.0
+                            for dim in range(dims):
+                                dot += offset[dim] * curve[x, dim]
+                            here = both - 2.0 * dot
+                            if here >= limit - 1e-14 * both:  # only strictly closer
+                                here = np.inf
+                            if x == own:  # or where it is now
+                                here = dist[point] ** 2
+                            cost_new[x] = here + low
+                        cost, cost_new = cost_new, cost
+
+                    # Way back from the first cheapest end
+                    end = 0
+                    for x in range(1, count):
+                        if cost[x] < cost[end]:
+                            end = x
+                    seat        = np.empty(m, dtype=np.int64)
+                    seat[m - 1] = end
+                    for j in range(m - 1, 0, -1):
+                        seat[j - 1] = back[j, seat[j]]
+
+                    for j in range(m):
+                        point = a - 1 + j
+                        moved = spots[seat[j]]
+                        if moved != u[point]:
+                            u[point] = moved
+                            dist[point] = _distance(points[point], moved, kv, cv,
+                                                    degree, periodic, work, derivs,
+                                                    False)
+
+                    for q in range(a - 2, b):
+                        if free[q % n]:
+                            dirty[q % n] = True
+            p = run_end
+        p += 1
+
+
+@njit(cache=True)
+def _ordered_closest_params(points, u, kv, cv, degree, periodic, rounds=200, samples=32,
+                            min_run=4, chunk=1024, jam_every=4):
+    """
+    Repairs best-fit u: each point moves only to a strictly closer spot, in order.
+
+    Parameters
+    ----------
+    points : np.ndarray
+        Fit points (n, dims), float64.
+    u : np.ndarray
+        Starting native parameters (n,), float64, ordered; unwrapped on
+        periodic curves (within one lap of each other).
+    kv, cv, degree, periodic
+        The curve, as in ``_curve_derivatives``; degree 1 or more.
+    rounds, samples, min_run, chunk, jam_every : int
+        Most rounds; grid samples per knot span, shortest run and most points
+        at once for ``_unjam``; rounds between ``_unjam`` passes.
+
+    Returns
+    -------
+    np.ndarray
+        Repaired native parameters (n,), float64. Periodic ones stay unwrapped
+        (points that never moved keep their float); a point tied with point 0
+        across the seam takes point 0's wrapped value.
+    """
+    # Starts from u (fit()'s partitioned Newton). Red-black rounds over the
+    # dirty points (all free points first, then the neighbours of every point
+    # that moved): each searches the whole window between its neighbours with
+    # _window_closest and moves when strictly closer (by 1e-10 relative and
+    # the float noise of a distance). Every jam_every rounds, runs of points
+    # stopped by a neighbour (later: of points that moved) are re-assigned at
+    # once by _unjam. Stops when nothing is dirty, or after rounds rounds.
+    #
+    # A start u that is not finite (or beyond 2 ** 31 laps) never moves, and
+    # neither do its neighbours, whose window it bounds; points or control
+    # points that are not all finite leave every u as it is
+    n      = points.shape[0]
+    dims   = points.shape[1]
+    spans  = cv.shape[0] - degree
+    period = float(spans)
+    u      = u.copy()
+    if n == 0:
+        return u
+
+    size = np.abs(points).max()
+    if not (np.isfinite(size) and np.isfinite(np.abs(cv).max())):
+        return u
+    tol   = 1e-15 * size                # float noise of a distance
+    wild  = np.abs(cv).max() > 1e5 * size
+    reach = 2.0**31 * max(period, 1.0)  # farthest u the lap arithmetic takes
+
+    # The slope polynomial (C - p).C' has terms = 2 x degree coefficients. Its
+    # power coefficients to Bernstein ones on [0, 1]: b = a @ to_bern, row r,
+    # column c holding C(c, r) / C(terms - 1, r), from Pascal's triangle (exact)
+    terms = 2 * degree
+    binom = np.zeros((terms, terms))
+    for r in range(terms):
+        binom[r, 0] = 1.0
+        for c in range(1, r + 1):
+            binom[r, c] = binom[r - 1, c - 1] + binom[r - 1, c]
+    to_bern = np.zeros((terms, terms))
+    for r in range(terms):
+        for c in range(r, terms):
+            to_bern[r, c] = binom[c, r] / binom[terms - 1, r]
+    fact = np.ones(degree + 1)  # 0! .. degree!
+    for m in range(2, degree + 1):
+        fact[m] = fact[m - 1] * m
+
+    # Scratch, allocated once per fit (eigvals still allocates its own): work
+    # for _curve_derivatives, derivs up to C'' for Newton, then
+    # _window_closest's coef (a piece's power coefficients), poly and bern (its
+    # slope polynomial in power and Bernstein form), companion (complex), real
+    # and imag (its eigenvalues)
+    work      = np.zeros((degree + 2, degree + 1))
+    derivs    = np.zeros((max(degree, 2) + 1, dims))
+    companion = np.zeros((terms - 1, terms - 1), dtype=np.complex128)
+    scratch = (work, derivs, np.zeros((degree + 1, dims)), np.zeros(terms),
+               np.zeros(terms), companion, np.zeros(terms - 1), np.zeros(terms - 1),
+               to_bern, fact)
+
+    # _unjam's spots: samples evenly spaced in every knot span (each span's
+    # knot and samples - 1 inside it, then the last knot) of the laps -2 .. 3
+    # on periodic curves (native [-2 spans, 4 spans]), of the domain on open
+    knots = kv[degree : degree + spans + 1]
+    first = -2 * spans if periodic else 0
+    last  = 4 * spans if periodic else spans
+    grid  = np.empty((last - first) * samples + 1)
+    for q in range(last - first):
+        knot0 = _knot_on_lap(first + q, knots, spans)
+        step  = _knot_on_lap(first + q + 1, knots, spans) - knot0
+        for t in range(samples):
+            grid[q * samples + t] = knot0 + step * t / samples
+    grid[-1] = _knot_on_lap(last, knots, spans)
+
+    dist = np.full(n, np.nan)
+    for i in range(n):
+        if abs(u[i]) <= reach:
+            dist[i] = _distance(points[i], u[i], kv, cv, degree, periodic, work, derivs,
+                                False)
+
+    # Open curves keep their ends. Red-black: a point's neighbours have the
+    # other colour (an odd ring gives its last point a third one)
+    free   = np.ones(n, dtype=np.bool_)
+    colour = np.arange(n) % 2
+    if periodic and n % 2 == 1:
+        colour[n - 1] = 2
+    if not periodic:
+        free[0]     = False
+        free[n - 1] = False
+    dirty   = free.copy()
+    stopped = np.zeros(n, dtype=np.bool_)
+
+    for it in range(rounds):
+        stopped[:] = False
+        for c in range(3):
+            for i in range(n):
+                if not dirty[i] or colour[i] != c:
+                    continue
+                dirty[i] = False
+
+                # The window: between the neighbours' current u (a lap away
+                # across a periodic seam), never excluding its own
+                before = u[i - 1] if i > 0 else u[n - 1] - period
+                after  = u[i + 1] if i < n - 1 else u[0] + period
+                if not (
+                    abs(before) <= reach and abs(after) <= reach and abs(u[i]) <= reach
+                ):
+                    continue
+                lo = min(before, u[i])
+                hi = max(after, u[i])
+
+                x, d = _window_closest(points[i], lo, hi, kv, cv, degree, periodic,
+                                       wild, scratch)
+                if d < dist[i] * (1.0 - 1e-10) - tol:
+                    stopped[i] = it > jam_every or x == lo or x == hi
+                    u[i]       = x
+                    dist[i]    = d
+                    dirty[(i - 1) % n] |= free[(i - 1) % n]
+                    dirty[(i + 1) % n] |= free[(i + 1) % n]
+
+        if not dirty.any():
+            break
+        if it % jam_every == 1:
+            # 2 ** (it // jam_every), capped at n: any wider reaches both
+            # ends anyway, and the product with a run's length stays small
+            wide = min(2 ** (it // jam_every), n)
+            _unjam(u, dist, dirty, stopped, free, wide, points, grid, kv, cv, degree,
+                   periodic, tol, work, derivs, min_run, chunk)
+
+    # A tie across the seam: point 0's value, or the float just before it,
+    # so the cyclic steps add up to one lap (u that never moved for being
+    # out of reach stay as they are)
+    if periodic and abs(u[0]) <= reach:
+        wrapped = u[0] % period
+        seam    = min(wrapped, (wrapped + period) - period)
+        lap_end = u[0] + period * (1 - 1e-12)
+        for i in range(1, n):
+            if lap_end <= u[i] <= reach:
+                u[i] = seam
+
+    return u
+
+
+# --------------------------------------------------------------------------- #
 #            2D Newton-Raphson closest point (surface)                         #
 # --------------------------------------------------------------------------- #
 

@@ -735,6 +735,102 @@ def compute_basis(u, kv, c, d):
     return _compute_basis(u, kv, c, d)
 
 
+def ordered_closest_params(points, u, kv, cv, degree, periodic):
+    """
+    Repairs best-fit parameters: each point's closest spot between its neighbours.
+
+    Parameters
+    ----------
+    points : array_like
+        Fit points (n, dims).
+    u : array_like
+        Starting native parameters (n,), in order; unwrapped on periodic
+        curves (BSplineData._best_fit_params' output). A point only moves to
+        a strictly closer spot; one that is not finite stays, as do its
+        neighbours.
+    kv : array_like
+        Knot vector in scipy's layout (c + degree + 1,), never decreasing,
+        native range [0, spans]: kv[degree] = 0 and kv[c] = spans
+        (BSplineData._kv); else ValueError, as for shapes that do not fit.
+    cv : array_like
+        Control points the curve evaluates with (c, dims), wrapped on
+        periodic curves (BSplineData._cv_f64).
+    degree : int
+        Degree of the curve, a whole number of 1 or more.
+    periodic : bool
+        Whether the curve is periodic.
+
+    Returns
+    -------
+    np.ndarray
+        Repaired native parameters (n,), float64. Periodic ones stay
+        unwrapped; a point tied with point 0 across the seam takes point 0's
+        wrapped value, so the cyclic steps add up to one lap.
+    """
+    from cgmath.geometry.utils._numba._bspline import _ordered_closest_params
+
+    points = _plain_float64(points)
+    u      = _plain_float64(u)
+    kv     = _plain_float64(kv)
+    cv     = _plain_float64(cv)
+
+    if isinstance(degree, (bool, np.bool_)) or int(degree) != degree:
+        raise ValueError(f"degree must be a whole number, got {degree!r}")
+    degree   = np.int64(degree)
+    periodic = bool(periodic)
+
+    if points.ndim != 2 or points.shape[1] < 1:
+        raise ValueError(f"points must be (n, dims), got shape {points.shape}")
+    count, dims = points.shape
+    if u.shape != (count,):
+        raise ValueError(f"u must be ({count},) for {count} points, got {u.shape}")
+    if cv.ndim != 2 or cv.shape[1] != dims:
+        raise ValueError(f"cv must be (c, {dims}) for {dims}-D points, got {cv.shape}")
+    if degree < 1:
+        raise ValueError(f"degree must be 1 or more, got {degree}")
+    spans = cv.shape[0] - degree
+    if spans < 1:
+        raise ValueError(
+            f"{cv.shape[0]} control points are too few for degree {degree}"
+        )
+    if kv.shape != (cv.shape[0] + degree + 1,):
+        raise ValueError(
+            f"kv must be ({cv.shape[0] + degree + 1},) for {cv.shape[0]} control "
+            f"points of degree {degree}, got {kv.shape}"
+        )
+    # Never decreasing (NaN fails it) between finite ends: all finite
+    if not (np.all(kv[1:] >= kv[:-1]) and -np.inf < kv[0] and kv[-1] < np.inf):
+        raise ValueError("kv must be finite and never decrease")
+    if kv[degree] != 0.0 or kv[degree + spans] != spans:
+        raise ValueError(
+            f"kv must run the native range [0, {spans}] from kv[{degree}] to "
+            f"kv[{degree + spans}], got [{kv[degree]}, {kv[degree + spans]}]"
+        )
+
+    return _ordered_closest_params(points, u, kv, cv, degree, periodic)
+
+
+def _plain_float64(array):
+    """
+    The array as C-ordered, aligned, writable float64, copied only if needed.
+
+    Parameters
+    ----------
+    array : array_like
+        Any array or nested sequence.
+
+    Returns
+    -------
+    np.ndarray
+        The array itself or a copy, float64: the kernel then compiles one
+        signature, not one per read-only or unaligned combination.
+    """
+    array = np.ascontiguousarray(array, dtype=np.float64)
+    if not (array.flags.writeable and array.flags.aligned):
+        array = array.copy()
+    return array
+
+
 # --------------------------- Subdivision Surface ---------------------------- #
 def rebuild_indices(
     new_indices, counts, cumsum, f2v, f2e, e2v, face_offset, edge_offset

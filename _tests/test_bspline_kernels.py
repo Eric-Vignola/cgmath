@@ -4,7 +4,8 @@
 against scipy's derivatives of every basis function, on each kind of knot
 vector a curve can carry. The surface closest-point Newton kernel is checked
 step by step against the same steps taken with scipy's exact second
-derivatives.
+derivatives. ``_curve_derivatives``, which the best-fit parameter repair
+evaluates the curve with, is checked against scipy's curve derivatives.
 """
 
 import unittest
@@ -12,6 +13,7 @@ import unittest
 import numpy as np
 from cgmath.geometry.utils._numba._bspline import (
     _compute_basis_derivatives,
+    _curve_derivatives,
     _newton_closest_point_surface_parallel,
 )
 from scipy.interpolate import BSpline
@@ -230,6 +232,40 @@ class TestSurfaceNewtonKernel(unittest.TestCase):
 
     def test_periodic_patch(self):
         self.assert_steps_exact(periodic_u=True)
+
+
+class TestCurveDerivativesKernel(unittest.TestCase):
+    """
+    _curve_derivatives runs scipy's own de Boor recursion: every derivative
+    matches BSpline(x, nu), at knots and both domain ends included.
+    """
+
+    def assert_matches_scipy(self, kv, d, cv):
+        curve = BSpline(kv, cv, d)
+        work  = np.zeros((d + 2, d + 1))
+        out   = np.zeros((d + 2, cv.shape[1]))
+        for x in np.r_[inside_domain(kv, d), domain_knots(kv, d)]:
+            _curve_derivatives(x, kv, cv, d, d + 1, work, out)
+            for order in range(d + 1):
+                np.testing.assert_allclose(out[order], curve(x, order), rtol=1e-12, atol=1e-12)
+            np.testing.assert_array_equal(out[d + 1], 0.0)
+
+    def test_clamped_knots(self):
+        rng = np.random.default_rng(0)
+        for d in range(1, 6):
+            kv = uniform_clamped(d, 4)
+            with self.subTest(d=d):
+                self.assert_matches_scipy(kv, d, rng.normal(size=(len(kv) - d - 1, 3)))
+        for kv in (NON_UNIFORM, DOUBLE_KNOT, TRIPLE_KNOT):
+            self.assert_matches_scipy(kv, 3, rng.normal(size=(len(kv) - 4, 2)))
+
+    def test_periodic_knots(self):
+        rng = np.random.default_rng(1)
+        for d in (1, 2, 3, 5):
+            kv = periodic_style(d, 6)
+            cv = rng.normal(size=(6, 3))
+            with self.subTest(d=d):
+                self.assert_matches_scipy(kv, d, np.vstack([cv, cv[:d]]))
 
 
 if __name__ == "__main__":

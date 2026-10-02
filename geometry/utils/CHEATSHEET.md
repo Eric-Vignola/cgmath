@@ -22,7 +22,7 @@ the file top to bottom and it executes.
 | [Quad matching](#quad-matching) | `quad_match_greedy` |
 | [Bilinear and Bézier surfaces](#bilinear-and-bézier-surfaces) | `compute_centroids` `bilinear_vectors` `bilinear_integrate` `bilinear_sample` `compute_samples` `bezier_evaluate` `bezier_vectors` |
 | [Raycast](#raycast) | `bilinear_raycast` `bezier_raycast` |
-| [B-spline basis](#b-spline-basis) | `compute_basis` |
+| [B-splines](#b-splines) | `compute_basis` `ordered_closest_params` |
 | [FFD, trilinear, Bernstein](#ffd-trilinear-bernstein) | `build_lattice_topology` `get_cell_corners` `trilinear` `trilinear_jacobian` `inverse_trilinear` `assign_cells` `bernstein_basis_1d` `bernstein_eval` |
 | [Blur, inpaint, weights](#blur-inpaint-weights) | `blur` `inpaint` `balance_center_weights` |
 | [Delta mush](#delta-mush) | `encode_local_deltas` `decode_local_deltas` `*_tbn` `decode_world_deltas_procrustes` `ddm_precompute` `decode_world_deltas_ddm` `blend_deltas` `batch_procrustes_rotations` |
@@ -492,7 +492,7 @@ print(t, faces)
 
 ---
 
-## B-spline basis
+## B-splines
 
 `compute_basis(u, kv, c, d)` returns the
 `(len(u), num_control_points)` basis matrix. `BSplineData` and
@@ -509,6 +509,21 @@ print(basis)
 # [[1.   0.   0.  ]
 #  [0.25 0.5  0.25]
 #  [0.   0.   1.  ]]
+```
+
+`ordered_closest_params(points, u, kv, cv, degree, periodic)` moves each
+point's curve parameter to its closest spot on the curve between its
+neighbours' parameters, never farther than where it started, so the points
+keep their order. `u` is native (the curve runs on `[0, spans]`, `kv` in
+scipy's layout, `cv` wrapped on periodic curves); open curves keep the first
+and last `u`. `BSplineData.fit()` calls it on best fits.
+
+```python
+kv     = np.array([0, 0, 0, 0, 1, 2, 2, 2, 2], float)  # clamped cubic on [0, 2]
+cv     = np.array([[0, 0, 0], [1, 3, 0], [2, -3, 0], [3, 3, 0], [4, 0, 0]], float)
+points = np.array([[0, 0, 0], [0.5, 2.0, 0], [1.9, 0.1, 0], [3.5, 1.5, 0], [4, 0, 0]])
+u      = gu.ordered_closest_params(points, np.linspace(0, 2, 5), kv, cv, 3, False)
+print(np.round(u, 3))  # [0.    0.29  0.912 1.749 2.   ]: distances 1.113 / 0.141 / 0.783 -> 0.731 / 0.049 / 0.286
 ```
 
 ---
@@ -941,6 +956,7 @@ normally calls it.
 | Kernel | Does | Called by |
 |---|---|---|
 | `compute_basis(u, kv, c, d)` | B-spline basis matrix | `geometry/bspline.py`, `bspline_patch.py` |
+| `ordered_closest_params(points, u, kv, cv, degree, periodic)` | each point's closest curve parameter between its neighbours' | `geometry/bspline.py` (`fit()` best fits) |
 | `build_lattice_topology(lx, ly, lz)` | `(indices, counts)` for every hex-cell face | `geometry/deform/ffd.py` |
 | `get_cell_corners(lattice, cells)` | gather the 8 corners of each `(i, j, k)` cell | `geometry/deform/ffd.py` |
 | `trilinear(uvw, corners)` | forward trilinear interpolation | `assign_cells` |

@@ -115,7 +115,7 @@ level — import them from `cgmath.geometry.utils.main`:
 | Quadrangulate | `quad_match_greedy` | `MeshData` quadrangulation |
 | Surface sampling | `compute_centroids` `bilinear_vectors` `bilinear_integrate` `bilinear_sample` `compute_samples` `bezier_evaluate` `bezier_vectors` | `MeshData.sample`, `.get_face_areas`, `resample` |
 | Raycast | `bilinear_raycast` `bezier_raycast` | `MeshData.raycast`, the raytracer |
-| Splines / FFD | `compute_basis` `build_lattice_topology` `get_cell_corners` `trilinear` `trilinear_jacobian` `inverse_trilinear` `assign_cells` `bernstein_basis_1d` `bernstein_eval` | `BSplineData`, `BSplinePatchData`, `FFDData` |
+| Splines / FFD | `compute_basis` `ordered_closest_params` `build_lattice_topology` `get_cell_corners` `trilinear` `trilinear_jacobian` `inverse_trilinear` `assign_cells` `bernstein_basis_1d` `bernstein_eval` | `BSplineData`, `BSplinePatchData`, `FFDData` |
 | Blur / weights | `blur` `inpaint` `balance_center_weights` | `MeshData.smooth`, `SkinData` |
 | Delta mush | `encode_local_deltas` `decode_local_deltas` `encode_local_deltas_tbn` `decode_local_deltas_tbn` `decode_world_deltas_procrustes` `ddm_precompute` `decode_world_deltas_ddm` `blend_deltas` `batch_procrustes_rotations` | `DeltaMushData` |
 | Patch relax | `compute_decal_maps` `compute_span_weights` `patch_relax` | `PatchRelaxData` |

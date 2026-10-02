@@ -45,6 +45,7 @@ from cgmath.geometry.utils.main import (
     matrix_row_overlaps,
     matrix_to_stream,
     minimize_neighbor_distances,
+    ordered_closest_params,
     patch_relax,
     point_row_overlaps,
     pxr,

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 import numpy as np
-from cgmath.geometry.bspline import BSplineData
+from cgmath.geometry.bspline import BSplineData, _fit_knots
 from cgmath.geometry.bspline_patch import BSplinePatchData
 from cgmath.geometry.mesh import (
     Axis,
@@ -19,7 +19,7 @@ from cgmath.geometry.mesh import (
     UVData,
     UVList,
 )
-from cgmath.geometry.utils import compute_topological_neighborhood
+from cgmath.geometry.utils import compute_topological_neighborhood, ordered_closest_params
 
 EPSILON = np.finfo(np.float32).eps
 
@@ -3656,6 +3656,146 @@ class TestBSplineRebuild(unittest.TestCase):
             BSplineData().rebuild(count=5)
         with self.assertRaises(ValueError):
             BSplineData(points=self.ring(8), periodic=True).rebuild(collapse=(2, 2))
+
+
+def closest_between(curve, point, lo, hi, per_span=64):
+    """smallest distance from point to the curve over native [lo, hi]"""
+    d, s = curve.degree, curve._max_param
+
+    def distance(x):
+        x = np.asarray(x, dtype=float)
+        return np.linalg.norm(curve._spl(x % s if curve.periodic else x) - point, axis=-1)
+
+    if not hi > lo:
+        return float(distance(lo))
+
+    # per_span samples in every knot span the window crosses, on any lap
+    knots = curve._kv[d : d + int(s) + 1]
+    laps  = np.arange(np.floor(lo / s), np.floor(hi / s) + 1) * s if curve.periodic else [0.0]
+    edges = np.concatenate([knots + lap for lap in laps])
+    edges = np.unique(np.r_[lo, edges[(edges > lo) & (edges < hi)], hi])
+    grid  = np.unique(np.concatenate([np.linspace(a, b, per_span + 1) for a, b in zip(edges[:-1], edges[1:])]))
+
+    near  = distance(grid)
+    best  = int(np.argmin(near))
+    a, b = grid[max(best - 1, 0)], grid[min(best + 1, len(grid) - 1)]
+    for _ in range(80):  # golden section around the best sample
+        m1, m2 = a + (b - a) * 0.381966, a + (b - a) * 0.618034
+        if distance(m1) < distance(m2):
+            b = m2
+        else:
+            a = m1
+    return float(min(near[best], distance((a + b) / 2)))
+
+
+class TestBSplineBestFitParams(unittest.TestCase):
+    """
+    fit()'s u when the curve can't pass through every point: each point's
+    closest spot on the curve between its neighbours' u, in order. It starts
+    from a search confined to fixed partitions, which used to stop at their
+    edges, and only ever moves a point closer.
+    """
+
+    CHAIN = TestBSplineFit.CHAIN
+
+    @classmethod
+    def setUpClass(cls):
+        path = os.path.join(
+            os.path.dirname(__file__), "test_assets", "test_geometry.bspline_best_fit_params.npz"
+        )
+        with np.load(path) as data:
+            cls.CASES = [
+                dict(
+                    name     = str(data["names"][i]),
+                    points   = data["points"][a:b],
+                    periodic = bool(data["periodic"][i]),
+                    degree   = int(data["degree"][i]),
+                    count    = int(data["count"][i]),
+                    collapse = tuple(int(c) for c in data["collapse"][i]),
+                )
+                for i, (a, b) in enumerate(zip(data["offsets"][:-1], data["offsets"][1:]))
+            ]
+
+    @staticmethod
+    def best_fit(points, periodic, degree, count, collapse):
+        """
+        The fitted curve, fit()'s u, the native u fit() made it from, and
+        the native u of the partition search it started from
+        """
+        curve = BSplineData(degree=degree, periodic=periodic)
+        u     = curve.fit(points, count=count, collapse=collapse)
+        tol   = 1e-12 * max(1.0, float(np.abs(points).max()))
+        seed  = _fit_knots(points, count, degree, periodic, tol, collapse)[1]
+        spans = int(curve._max_param)
+        start = curve._partition_params(points, seed.copy(), spans)
+        return curve, u, curve._best_fit_params(points, seed, spans), start
+
+    def check(self, curve, points, u, native, start, name=""):
+        """in order, ends kept, never farther than the start, nothing closer between neighbours"""
+        s      = curve._max_param
+        wrap   = native % s if curve.periodic else native
+        dist   = np.linalg.norm(curve._spl(wrap) - points, axis=1)
+        before = np.linalg.norm(curve._spl(start % s if curve.periodic else start) - points, axis=1)
+        size   = float(np.ptp(points, axis=0).max())
+        scale  = float(np.abs(points).max())
+
+        # fit() returns the same u, in its own parameter range
+        public = curve._denormalize_u(np.where(wrap >= s, 0.0, wrap) if curve.periodic else wrap)
+        np.testing.assert_array_equal(u, public, err_msg=name)
+
+        if curve.periodic:
+            # one lap around the loop; a tie across the seam is a zero step
+            steps = np.diff(np.r_[wrap, wrap[:1]]) % s
+            self.assertAlmostEqual(steps.sum(), s, delta=1e-9 * s, msg=name)
+        else:
+            self.assertTrue(np.all(np.diff(native) >= 0.0), name)
+            self.assertEqual((native[0], native[-1]), (0.0, s), name)
+
+        # float noise only: the seam wrap and the norm round differently
+        self.assertTrue(np.all(dist <= before * (1 + 1e-13) + 1e-15 * scale), name)
+
+        noise = 1e-8 * size + 1e-13 * scale
+        n     = len(points)
+        for i in range(n) if curve.periodic else range(1, n - 1):
+            if curve.periodic:
+                lo = wrap[i] - ((wrap[i] - wrap[i - 1]) % s)
+                hi = wrap[i] + ((wrap[(i + 1) % n] - wrap[i]) % s)
+            else:
+                lo, hi = native[i - 1], native[i + 1]
+            gap = dist[i] - closest_between(curve, points[i], lo, hi)
+            self.assertLessEqual(gap, noise, f"{name}: point {i} could be {gap:.3g} closer")
+
+    def test_stacked_chain(self):
+        # a triple-stacked start squeezes the curve's parameter near it; the
+        # partition search left a joint 4.85 away from the curve
+        curve, u, native, start = self.best_fit(self.CHAIN, False, 3, 6, (3, 0))
+        self.check(curve, self.CHAIN, u, native, start)
+        far = np.linalg.norm(curve.compute(u)[0] - self.CHAIN, axis=1).max()
+        self.assertLess(far, 1.2)
+
+    def test_saved_cases(self):
+        # 50 inputs where the partition search clipped: folds, curls, clusters,
+        # stacked ends, degrees 1-7, closed curves, huge and tiny scales
+        for case in self.CASES:
+            with self.subTest(case=case["name"]):
+                curve, u, native, start = self.best_fit(
+                    case["points"], case["periodic"], case["degree"], case["count"], case["collapse"]
+                )
+                self.check(curve, case["points"], u, native, start, case["name"])
+
+    def test_wrapper_checks_its_inputs(self):
+        curve = BSplineData.from_edit_points(self.CHAIN)
+        args  = (self.CHAIN, np.linspace(0, curve._max_param, 10), curve._kv, curve._cv_f64, 3, False)
+        self.assertEqual(ordered_closest_params(*args).shape, (10,))
+        for bad in (
+            (self.CHAIN, args[1][:-1]) + args[2:],  # u too short
+            (self.CHAIN[:, :2],) + args[1:],  # dims differ
+            args[:2] + (args[2][:-1],) + args[3:],  # kv too short
+            args[:2] + (args[2] * 2.0,) + args[3:],  # kv off the native range
+            args[:4] + (0, False),  # degree 0
+        ):
+            with self.assertRaises(ValueError):
+                ordered_closest_params(*bad)
 
 
 class TestUVList(unittest.TestCase):
