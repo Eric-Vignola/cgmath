@@ -30,12 +30,18 @@ is not disabled, a "headlight" is added parented to the camera.
 
 from __future__ import annotations
 
+import atexit
 import base64
+import hashlib
 import io
 import json
 import os
+import pickle
+import shutil
 import struct
+import tempfile
 import warnings
+import weakref
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
@@ -1319,6 +1325,8 @@ class Object(TransformData):
         # to the scene's union AABB) -- same rig as Object.render().
         if samples_per_pixel is not None:
             render_kwargs.setdefault("samples_per_pixel", samples_per_pixel)
+        # the preview scene is new every call; the frames belong to this Object
+        scene._render_cache_owner = self
         return scene.turntable(
             output_pattern = output,
             n_frames       = n_frames,
@@ -1379,6 +1387,7 @@ class Object(TransformData):
         if samples_per_pixel is not None:
             animate_kwargs.setdefault("samples_per_pixel", samples_per_pixel)
 
+        scene._render_cache_owner = self
         return scene.animate(
             clip,
             output_pattern = output,
@@ -1386,6 +1395,15 @@ class Object(TransformData):
             fps            = fps,
             **animate_kwargs,
         )
+
+    def clear_render_cache(self) -> None:
+        """
+        Deletes the frames kept from this Object's last :meth:`turntable` or
+        :meth:`animate`, so the next one renders again. Needed only after an
+        in-place edit of mesh points or texture pixels, which the cache does
+        not notice.
+        """
+        _clear_render_cache(self)
 
     # -- serialization: round-trip mesh / uv / texture -------------
 
@@ -1953,7 +1971,7 @@ class Scene(HierarchyData):
 
     # -- frame cache: lazy invalidation via render-signature snapshot ---
 
-    def _compute_render_signature(self) -> tuple:
+    def _compute_render_signature(self, mesh_token=None) -> tuple:
         """Build a hashable snapshot of every render-affecting attribute
         on this Scene and its child Object/Camera/Light nodes.  Used by
         the :attr:`frame` getter to lazy-invalidate the cache when any
@@ -2019,7 +2037,7 @@ class Scene(HierarchyData):
                         node.uuid,
                         node.visibility,
                         transform_state,
-                        id(node._mesh),
+                        id(node._mesh) if mesh_token is None else mesh_token(node),
                         id(node._uv),
                         id(node._texture),
                         node._base_color,
@@ -2474,6 +2492,48 @@ class Scene(HierarchyData):
         if fps is None:
             fps = int(round(float(getattr(clip, "fps", 30.0)) or 30.0))
 
+        # ---- an identical earlier animation's frames come off disk ----
+        owner = getattr(self, "_render_cache_owner", None) or self
+        key = _sequence_key(
+            self,
+            (
+                "animate", world, [np.asarray(c) for c in columns],
+                [obj.uuid for obj in skinned], fit, rotation_axis, start_angle,
+                end_angle, camera_name, n_pose_samples, n_fit_samples, render_kwargs,
+            ),
+        )
+        frames = _cached_sequence(owner, key)
+        if frames is None:
+            frames = _record_sequence(
+                owner,
+                key,
+                self._animate_frames(
+                    skinned, columns, world, frame_count, fit, rotation_axis,
+                    start_angle, end_angle, camera_name, n_pose_samples,
+                    n_fit_samples, render_kwargs, verbose,
+                ),
+            )
+
+        return _encode_frame_stream(
+            frames,
+            output_pattern,
+            fps            = int(fps),
+            mp4_background = self._resolve_mp4_background(background),
+            verbose        = verbose,
+        )
+
+    def _animate_frames(
+        self, skinned, columns, world, frame_count, fit, rotation_axis,
+        start_angle, end_angle, camera_name, n_pose_samples, n_fit_samples,
+        render_kwargs, verbose,
+    ):
+        """
+        The animation's frames, posed and rendered one by one as they are
+        taken: the camera framing is worked out now. The scene goes back to
+        its bind pose when the frames run out or are abandoned.
+        """
+        render_kwargs = dict(render_kwargs)
+
         try:
             chosen_cam_col, centroid = self._fit_animated_camera(
                 skinned,
@@ -2515,13 +2575,7 @@ class Scene(HierarchyData):
                 for obj in skinned:
                     obj.restore_bind_pose()
 
-        return _encode_frame_stream(
-            _frame_stream(),
-            output_pattern,
-            fps            = int(fps),
-            mp4_background = self._resolve_mp4_background(background),
-            verbose        = verbose,
-        )
+        return _frame_stream()
 
     def _fit_animated_camera(
         self,
@@ -2683,6 +2737,44 @@ class Scene(HierarchyData):
         # frame without being repeated.
         render_kwargs = self._merge_render_config(render_kwargs)
 
+        # ---- an identical earlier turntable's frames come off disk ----
+        owner = getattr(self, "_render_cache_owner", None) or self
+        key = _sequence_key(
+            self,
+            (
+                "turntable", int(n_frames), rotation_axis, start_angle, end_angle,
+                fit, camera_name, n_fit_samples, render_kwargs,
+            ),
+        )
+        frames = _cached_sequence(owner, key)
+        if frames is None:
+            frames = _record_sequence(
+                owner,
+                key,
+                self._turntable_frames(
+                    render_kwargs, n_frames, rotation_axis, start_angle, end_angle,
+                    fit, camera_name, n_fit_samples, verbose,
+                ),
+            )
+
+        return _encode_frame_stream(
+            frames,
+            output_pattern,
+            fps            = int(fps),
+            mp4_background = self._resolve_mp4_background(background),
+            verbose        = verbose,
+        )
+
+    def _turntable_frames(
+        self, render_kwargs, n_frames, rotation_axis, start_angle, end_angle,
+        fit, camera_name, n_fit_samples, verbose,
+    ):
+        """
+        The turntable's frames, rendered one by one as they are taken: the
+        camera framing is worked out now, each frame when it is asked for.
+        """
+        render_kwargs = dict(render_kwargs)
+
         # ---- gather all visible world-space points (one cloud) ----
         all_pts = self._visible_world_points("turntable")
 
@@ -2749,13 +2841,16 @@ class Scene(HierarchyData):
                 )
                 yield self.render(**render_kwargs)
 
-        return _encode_frame_stream(
-            _frame_stream(),
-            output_pattern,
-            fps            = int(fps),
-            mp4_background = self._resolve_mp4_background(background),
-            verbose        = verbose,
-        )
+        return _frame_stream()
+
+    def clear_render_cache(self) -> None:
+        """
+        Deletes the frames kept from this Scene's last :meth:`turntable` or
+        :meth:`animate`, so the next one renders again. Needed only after an
+        in-place edit of mesh points or texture pixels, which the cache does
+        not notice.
+        """
+        _clear_render_cache(self)
 
 
 # -- helpers ---------------------------------------------------------------------------
@@ -3016,6 +3111,157 @@ def _fbx_skin(file_path: str, mesh: MeshData) -> Optional[SkinDeformData]:
         return None
 
     return _bound_deformer(file_path, mesh, *matches[0])
+
+
+# -- render cache ----------------------------------------------------------------------
+#
+# Each Scene / Object keeps the frames of its last turntable / animate in its
+# own folder, under one scratch folder per process, so a second encode of the
+# same frames (a .gif, then an .mp4) reads them back instead of rendering. The
+# key is everything the frames depend on: the scene's render signature and the
+# sequence's own settings. A different key wipes the folder first.
+
+_CACHE_ROOT: Optional[str] = None
+_CACHE_DIRS: dict = {}
+
+
+def _render_cache_root() -> str:
+    """this process's scratch folder for rendered sequences, removed at exit"""
+    global _CACHE_ROOT
+    if _CACHE_ROOT is None or not os.path.isdir(_CACHE_ROOT):
+        _CACHE_ROOT = tempfile.mkdtemp(prefix="cgmath_render_")
+        atexit.register(shutil.rmtree, _CACHE_ROOT, True)
+    return _CACHE_ROOT
+
+
+def _render_cache_dir(owner) -> str:
+    """*owner*'s own folder: made on first use, removed when *owner* goes"""
+    key    = id(owner)
+    folder = _CACHE_DIRS.get(key)
+    if folder is None or not os.path.isdir(folder):
+        folder           = tempfile.mkdtemp(dir=_render_cache_root())
+        _CACHE_DIRS[key] = folder
+        weakref.finalize(owner, _drop_render_cache_dir, key, folder)
+    return folder
+
+
+def _drop_render_cache_dir(key: int, folder: str) -> None:
+    if _CACHE_DIRS.get(key) == folder:
+        del _CACHE_DIRS[key]
+    shutil.rmtree(folder, ignore_errors=True)
+
+
+def _clear_render_cache(owner) -> None:
+    """empties *owner*'s folder, if it has one"""
+    folder = _CACHE_DIRS.get(id(owner))
+    if folder is not None and os.path.isdir(folder):
+        _wipe_folder(folder)
+
+
+def _wipe_folder(folder: str) -> None:
+    for name in os.listdir(folder):
+        path = os.path.join(folder, name)
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            os.remove(path)
+
+
+def _canonical(value):
+    """*value* as plain, comparable data for a cache key"""
+    if isinstance(value, dict):
+        return tuple(sorted((str(k), _canonical(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_canonical(v) for v in value)
+    if isinstance(value, np.ndarray):
+        array = np.ascontiguousarray(value)
+        return ("ndarray", array.dtype.str, array.shape, hashlib.sha1(array.tobytes()).hexdigest())
+    if isinstance(value, np.generic):
+        return value.item()
+    if value is None or isinstance(value, (bool, int, float, str, bytes)):
+        return value
+    # anything else by identity, like the render signature's meshes
+    return (type(value).__name__, id(value))
+
+
+def _sequence_mesh_token(node):
+    """
+    An Object's mesh in a sequence key. Posing swaps a skinned Object's mesh
+    for a new one every frame and puts a copy back after, so it goes by its
+    points; any other mesh goes by identity.
+    """
+    mesh = node._mesh
+    if node._skin is None or mesh is None:
+        return id(mesh)
+    points = np.ascontiguousarray(mesh.points, dtype=np.float64)
+    return (id(node._skin), points.shape, hashlib.sha1(points.tobytes()).hexdigest())
+
+
+def _sequence_key(scene: "Scene", settings) -> str:
+    """the cache key of a turntable / animate on *scene* with *settings*"""
+    signature = scene._compute_render_signature(mesh_token=_sequence_mesh_token)
+    payload   = pickle.dumps(_canonical((signature, settings)), protocol=4)
+    return hashlib.sha1(payload).hexdigest()
+
+
+def _cached_sequence(owner, key: str):
+    """*owner*'s kept frames for *key*, read back one by one, or None"""
+    folder   = _render_cache_dir(owner)
+    manifest = os.path.join(folder, "sequence.json")
+    try:
+        with open(manifest) as f:
+            kept = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if kept.get("key") != key:
+        return None
+    return _replay_sequence(folder, kept["frames"])
+
+
+def _replay_sequence(folder: str, frames: list):
+    from cgmath.render.frame import Frame
+
+    for index, meta in enumerate(frames):
+        stem = os.path.join(folder, f"{index:05d}")
+        yield Frame(
+            array         = np.load(stem + ".npy"),
+            depth         = np.load(stem + ".depth.npy") if meta["depth"] else None,
+            camera_matrix = np.load(stem + ".camera.npy") if meta["camera"] else None,
+            angle_of_view = meta["angle_of_view"],
+        )
+
+
+def _record_sequence(owner, key: str, frames):
+    """
+    *frames*, passed on as they render, each saved to *owner*'s wiped folder.
+    The sequence is kept only once the last frame is through: an encode that
+    stops part way leaves nothing to reuse.
+    """
+    folder = _render_cache_dir(owner)
+    _wipe_folder(folder)
+    kept = []
+    try:
+        for index, frame in enumerate(frames):
+            stem = os.path.join(folder, f"{index:05d}")
+            np.save(stem + ".npy", np.asarray(frame.array))
+            if frame.depth is not None:
+                np.save(stem + ".depth.npy", np.asarray(frame.depth))
+            if frame.camera_matrix is not None:
+                np.save(stem + ".camera.npy", np.asarray(frame.camera_matrix))
+            kept.append(
+                {
+                    "depth":         frame.depth is not None,
+                    "camera":        frame.camera_matrix is not None,
+                    "angle_of_view": None if frame.angle_of_view is None else float(frame.angle_of_view),
+                }
+            )
+            yield frame
+    finally:
+        # hands an abandoned animation back to its bind pose straight away
+        frames.close()
+
+    with open(os.path.join(folder, "sequence.json"), "w") as f:
+        json.dump({"key": key, "frames": kept}, f)
 
 
 def _encode_frame_stream(

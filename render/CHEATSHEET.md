@@ -26,7 +26,7 @@ see [Production settings](#production-settings) for real numbers.
 - [`Light`](#light) — [point vs infinite](#point-vs-infinite) · [rig](#the-default-3-point-rig)
 - [`Scene`](#scene) — [building](#building-a-scene) · [queries](#inspecting-a-scene) · [`configure`](#configure) · [background](#background--coverage-alpha) · [render](#rendering-a-scene) · [frame cache](#the-frame-cache) · [file loaders](#scene-file-loaders)
 - [`Frame`](#frame) — [fields](#frame-fields) · [interop](#numpy--pil-interop) · [wireframe overlay](#screen-space-wireframe-overlay) · [encoders](#encoders)
-- [Turntables](#turntables)
+- [Turntables](#turntables) — [re-encoding is free](#re-encoding-is-free)
 - [Functional `render()`](#functional-render)
 - [`load_texture`](#load_texture)
 - [Auto-framing and defaults](#auto-framing-and-defaults)
@@ -1010,6 +1010,30 @@ print(len(solo.turntable(os.path.join(tmp, "tt4", "o.{frame:04d}.png"), n_frames
 
 Give a path with no `{frame}` placeholder and one is injected as
 `<stem>.{frame:04d}<ext>`.
+
+### Re-encoding is free
+
+`turntable()` and `animate()`, on a Scene or an Object, keep their raw
+frames in a scratch folder. The same frames asked for again are read
+back, not rendered: only `fps`, `background` and the output path may
+differ. Anything else, or anything that clears the frame cache, renders
+again. The folder goes with its owner, and all of it at exit.
+
+```python
+spin  = os.path.join(tmp, "tt5", "a.{frame:04d}.png")
+again = os.path.join(tmp, "tt5", "b.{frame:04d}.png")
+first = scene.turntable(spin, n_frames=3, resolution=(32, 32), samples_per_pixel=1)
+reuse = scene.turntable(again, n_frames=3, resolution=(32, 32), samples_per_pixel=1)  # read back
+print(open(first[0], "rb").read() == open(reuse[0], "rb").read())                    # True
+```
+
+Like the frame cache it cannot see in-place edits; drop the kept frames
+by hand after one:
+
+```python
+scene.clear_render_cache()  # the next turntable renders
+solo.clear_render_cache()   # an Object keeps its own
+```
 
 ---
 

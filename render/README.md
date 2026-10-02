@@ -634,6 +634,37 @@ puts it back.
 
 ---
 
+## Sequences render once
+
+`turntable()` and `animate()` keep their frames, raw, in a scratch
+folder: one per Scene or Object, under one per Python process. The same
+frames asked for again are read back, not rendered, so the `.gif` after
+the `.mp4` costs only the encode:
+
+```python
+scene.turntable("spin.mp4", n_frames=24, fps=24)  # renders 24 frames
+scene.turntable("spin.gif", n_frames=24, fps=12)  # renders none
+scene.turntable("spin.mp4", n_frames=12)          # renders 12: another turntable
+```
+
+| Reads back | Renders again |
+|---|---|
+| a new output path or extension, `fps`, `background` | any other argument |
+| | any render setting, and anything that clears the frame cache |
+| the same clip values | a different clip |
+
+- **One sequence per folder.** A different one replaces it.
+- **Nothing to clean up.** The folder goes with its Scene or Object, the
+  scratch folder at exit.
+- **Blind to in-place edits**, like the frame cache: mesh points, UVs,
+  texture pixels. `clear_render_cache()` drops the kept frames.
+
+```python
+scene.clear_render_cache()  # the next turntable renders
+```
+
+---
+
 ## Recipes — what to type for what shot
 
 ### Quick lookdev preview
