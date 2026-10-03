@@ -5,8 +5,9 @@ from typing import Any, List, Optional
 
 import numpy as np
 from cgmath.geometry._base import Array, Data
-from cgmath.geometry.mesh import _pxr_module, MeshData
+from cgmath.geometry.mesh import MeshData
 from cgmath.geometry.skin_weights import SkinData
+from cgmath.geometry.utils import pxr
 
 GEOM_SUBSET_PRIM_TYPE = "GeomSubset"
 VERT_MAP_PRIM_TYPE    = "VertFloatMap"
@@ -88,7 +89,7 @@ class GeomSubsetData(Data):
     @classmethod
     def from_prim(cls, prim: Any) -> "GeomSubsetData":
         """Constructs a data object from a prim."""
-        set_api = _pxr_module("UsdGeom").Subset(prim)
+        set_api = pxr().UsdGeom.Subset(prim)
         return cls(
             component_type = set_api.GetElementTypeAttr().Get()[0].lower(),
             indices        = np.array(set_api.GetIndicesAttr().Get()),
@@ -107,7 +108,7 @@ class GeomSubsetData(Data):
         else:
             element_type = "edge"
 
-        set_api = _pxr_module("UsdGeom").Subset(prim)
+        set_api = pxr().UsdGeom.Subset(prim)
         set_api.CreateElementTypeAttr().Set(element_type)
         if self.category:
             set_api.CreateFamilyNameAttr().Set(self.category)
@@ -219,7 +220,7 @@ class MapData(Data):
             prim.SetTypeName(prim_type)
         namespace = prim_type[0].lower() + prim_type[1:]
 
-        Sdf  = _pxr_module("Sdf")
+        Sdf  = pxr().Sdf
         args = (False, Sdf.VariabilityVarying)
         attr = prim.CreateAttribute(
             f"{namespace}:indices", Sdf.ValueTypeNames.IntArray, *args

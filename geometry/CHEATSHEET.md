@@ -530,8 +530,9 @@ print(cube.get_valence())                                        # per-vertex de
 ## Diagnostics
 
 ```python
-print(cube.get_border_vertices())      # [] -- a closed cube has no border
+print(cube.get_border_vertices())                    # [] -- a closed cube has no border
 print(cube.get_border_edges(), cube.get_border_faces())
+print(cube.get_border_vertices(flatten=True).dtype)  # int32 -- flattened, an empty array
 
 lid_off = cube.copy()
 lid_off.delete_faces([4])
@@ -652,6 +653,61 @@ print(cube.get_face_areas())
 print(cube.get_face_areas(method=AreaMethod.PLANAR))
 print(cube.get_face_areas(method="gauss", samples=10, tolerance=1e-4))
 print([m.value for m in AreaMethod])
+```
+
+N-gons take every normal and area call but `get_tangent_space()`, which
+still raises on them: triangulate first. An n-gon's area is the sum of the
+triangles it triangulates into, whatever the `AreaMethod`, and 0 when its
+points lie on one line. A repeated corner is dropped first, and a face that
+comes back through one vertex measures the region the loops it makes there
+enclose: a loop beside another adds to it (a bowtie, whichever way each lobe
+turns), one inside another wound against it is a hole and is taken off (a
+keyhole), and one inside wound with it adds nothing. `AreaMethod.TRIANGULATE`
+measures only what `triangulate()` makes, so it raises on most of these odd
+faces and on points on one line. A `UVData`'s n-gons measure the same way.
+Its corner angles lie between each corner's previous and next edge in its
+own loop: on a face with holes, the outer loop and each hole wrap on
+themselves. `from_faces()` and `delete_faces()` renumber the holes of the
+faces they keep and drop the others' holes; hole metadata naming a
+triangle, a quad or no face at all is ignored. Triangles and quads are
+measured as before.
+
+```python
+hexagon = MeshData(
+    points  = [[np.cos(a), np.sin(a), 0.0] for a in np.arange(6) * np.pi / 3],
+    indices = np.arange(6),
+    counts  = [6],
+)
+print(hexagon.get_face_areas().round(4))             # [2.5981], 1.5 * sqrt(3)
+print(np.degrees(hexagon.get_face_vertex_angles()))  # 120 at every corner
+hexagon.set_normals()
+print(hexagon.normals.round(4)[0])                   # [0. 0. 1.]
+
+bowtie = MeshData(
+    points  = [[0, 0, 0], [1, 1, 0], [2, 0, 0], [2, 2, 0], [0, 2, 0]],
+    indices = [0, 1, 2, 3, 1, 4],
+    counts  = [6],
+)
+print(bowtie.get_face_areas())                       # [2.] -- two triangles through (1, 1)
+
+figure8 = MeshData(points=bowtie.points, indices=[0, 1, 3, 2, 1, 4], counts=[6])
+print(figure8.get_face_areas())                      # [2.] -- the right lobe turns the other way, still beside
+
+keyhole = MeshData(
+    points  = [[0, 0, 0], [4, 0, 0], [4, 4, 0], [0, 4, 0], [1, 1, 0], [1, 3, 0], [3, 3, 0], [3, 1, 0]],
+    indices = [0, 1, 2, 3, 0, 4, 5, 6, 7, 4],
+    counts  = [10],
+)
+print(keyhole.get_face_areas())                      # [12.] -- 16 less the hole walked the other way
+uv_keyhole = UVData(points=keyhole.points[:, :2], indices=keyhole.indices, counts=keyhole.counts)
+print(uv_keyhole.get_face_areas())                   # [12.]
+
+twice = MeshData(points=hexagon.points, indices=list(range(6)) * 2, counts=[12])
+print(twice.get_face_areas().round(4))               # [2.5981] -- walked twice, enclosed once
+try:
+    twice.get_face_areas(method=AreaMethod.TRIANGULATE)
+except NotImplementedError as exc:
+    print(exc)                                       # triangulate() makes no triangle of it
 ```
 
 Tangent space needs a UV set; returns `(UV, 4)` tangents (`w` is the
@@ -813,7 +869,7 @@ print(cube_uv.f2v[0], cube_uv.get_border_vertices(flatten=True))
 ```python
 from cgmath.geometry.mesh import Axis
 
-projected = cube.to_uvdata(name="proj", axis=Axis.Y)
+projected = cube.to_uvdata(name="proj", axis=Axis.Y)  # own copy of indices / counts
 print(projected.points.shape, projected.name)
 print(cube.to_uvdata(axis="x", maintain_ratio=True, swap_uvs=True).points.shape)
 
@@ -839,7 +895,7 @@ uv.pack(resolution=128, padding=1, rotations=1)    # skyline island packer
 print(uv.get_extent())
 print(cube_uv.get_minimum_resolution(pixels=3))
 
-uv = cube_uv.copy()                                # get_overlap_faces sets both UVs' resolution
+uv = cube_uv.copy()                                # deprecated; changes neither UV's resolution
 print(uv.get_overlap_faces(uv, resolution=64))
 ```
 
@@ -848,6 +904,7 @@ print(uv.get_overlap_faces(uv, resolution=64))
 `UVData` owns a render buffer keyed by `resolution`. Faces can be drawn with
 an id colour (`color=None`) that decodes back to face indices. `resolution`
 (`int32`, `(2,)`) and `antialias` are saved with the UVs; the buffer is not.
+`==` ignores both: two UV maps that only render differently are equal.
 
 ```python
 uv            = cube_uv.copy()
@@ -2449,7 +2506,9 @@ outside concave faces and ignores holes. `_cdt` runs a **constrained
 Delaunay triangulation** instead — scipy Delaunay, then Sloan constraint
 insertion so every boundary edge survives, then edge flips to restore the
 Delaunay property, a Maya-compatible cocircular tiebreak, and a flood fill
-that deletes triangles outside the outline or inside a hole.
+that deletes triangles outside the outline or inside a hole. A flip needs a
+point inside the circle by more than a relative `1e-9`, so cocircular points
+(a regular polygon's) never flip on rounding noise.
 
 You rarely call it directly: `MeshData.get_triangulate_rules()` routes every
 n-gon face through it and stashes the result in `TriangulateRules.ngon_tris`.

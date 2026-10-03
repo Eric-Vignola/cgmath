@@ -99,8 +99,8 @@ def mesh_data() -> MeshData:
     )
 
     # the quad's fold (26.6 degrees) is hard, the triangle's (14) smooth:
-    # face-varying normals, split along edge 1-2. Corner angle and face area
-    # weighting refuse n-gons, so the face normals are averaged as they are.
+    # face-varying normals, split along edge 1-2. The face normals are
+    # averaged as they are, with no corner angle or face area weighting.
     mesh.set_normals(hard_edge_angle=20.0, angle_weighted=False, area_weighted=False)
     return mesh
 

@@ -2,12 +2,16 @@ import json
 import os
 import pickle
 import tempfile
+import time
 import unittest
+import warnings
 
 import numpy as np
+from cgmath._tests._examples_geometry import mesh_data, uv_data
 from cgmath.geometry.bspline import BSplineData, _fit_knots
 from cgmath.geometry.bspline_patch import BSplinePatchData
 from cgmath.geometry.mesh import (
+    AreaMethod,
     Axis,
     cv2,
     load_obj,
@@ -27,6 +31,23 @@ EPSILON = np.finfo(np.float32).eps
 
 def allclose(x, y, atol=EPSILON):
     return np.allclose(x, y, atol=EPSILON)
+
+
+def _ngon_prism(sides=6, twist=0.0):
+    """
+    a closed prism of radius 1 and height 2: two n-gon caps and a quad per
+    side, the top cap turned by ``twist`` radians (its sides then saddles)
+    """
+    angles = np.arange(sides) * 2 * np.pi / sides
+    bottom = np.stack([np.cos(angles), np.sin(angles), np.zeros(sides)], axis=1)
+    top    = np.stack([np.cos(angles + twist), np.sin(angles + twist), np.full(sides, 2.0)], axis=1)
+    faces  = [list(range(sides))[::-1], list(range(sides, 2 * sides))]
+    faces += [[i, (i + 1) % sides, sides + (i + 1) % sides, sides + i] for i in range(sides)]
+    return MeshData(
+        points  = np.concatenate([bottom, top]),
+        indices = np.concatenate(faces),
+        counts  = [len(face) for face in faces],
+    )
 
 
 class TestMesh(unittest.TestCase):
@@ -287,6 +308,24 @@ class TestMesh(unittest.TestCase):
 
             obj2 = MeshData.load_obj(f)
             self.assertTrue(obj1 == obj2)
+
+    def test_load_obj_group_name(self):
+        """MeshData.load_obj names a mesh as load_obj does: no newline, "default" is no name"""
+        triangle = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"
+        groups = {
+            "g pCube1\n":  "pCubeShape1",
+            "g  mesh\t\n": "meshShape",
+            "g default\n": None,
+            "g \n":        None,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            f = os.path.join(temp_dir, "test.obj")
+            for group, expected in groups.items():
+                with self.subTest(group=group):
+                    with open(f, "w") as handle:
+                        handle.write(group + triangle)
+                    self.assertEqual(MeshData.load_obj(f).name, expected)
+                    self.assertEqual(load_obj(f)[0][0].name, expected)
 
     def test_load_obj_utility_round_trip(self):
         # test module-level save_obj / load_obj round-trip with UVs
@@ -888,6 +927,28 @@ class TestMesh(unittest.TestCase):
         borders = mesh.get_border_vertices()
         self.assertTrue(allclose(borders, [[1, 3, 5, 7]]))
 
+    def test_border_flatten_closed(self):
+        """a closed mesh's flattened borders are an empty int32 array, not a list"""
+        for getter in ("get_border_vertices", "get_border_edges", "get_border_faces"):
+            with self.subTest(getter=getter):
+                borders = getattr(self.box.copy(), getter)(flatten=True)
+                self.assertIsInstance(borders, np.ndarray)
+                self.assertEqual(borders.dtype, np.int32)
+                self.assertEqual(borders.shape, (0,))
+                self.assertEqual(getattr(self.box.copy(), getter)(), [])
+
+    def test_border_indices_int32(self):
+        """an open mesh's borders are int32 too, per loop and flattened, as a closed mesh's"""
+        lid_off = self.box.copy()
+        lid_off.delete_faces([4])
+        for getter in ("get_border_vertices", "get_border_edges", "get_border_faces"):
+            with self.subTest(getter=getter):
+                mesh  = self.plane_with_hole.copy()
+                loops = getattr(mesh, getter)()
+                self.assertEqual([loop.dtype for loop in loops], [np.int32, np.int32])
+                self.assertEqual(getattr(mesh, getter)(flatten=True).dtype, np.int32)
+                self.assertEqual(getattr(lid_off.copy(), getter)(flatten=True).dtype, np.int32)
+
     def test_union_difference(self):
         mesh = self.box.copy()
         self.assertFalse(mesh.open)
@@ -1292,6 +1353,383 @@ class TestMesh(unittest.TestCase):
         expected_angle = np.pi / 2
         self.assertTrue(allclose(angles, expected_angle, atol=0.01))
 
+    def test_ngon_face_areas(self):
+        """every method measures an n-gon as its triangles, and the quads beside it as alone"""
+        prism = _ngon_prism(twist=0.4)
+        quads = MeshData(points=prism.points, indices=prism.indices[12:], counts=prism.counts[2:])
+        cap   = 1.5 * np.sqrt(3.0)  # a regular hexagon of radius 1
+        for method in AreaMethod:
+            with self.subTest(method=method):
+                areas = prism.get_face_areas(method=method)
+                self.assertTrue(np.allclose(areas[:2], cap, rtol=1e-12, atol=0))
+                if method != AreaMethod.TRIANGULATE:
+                    self.assertTrue(np.array_equal(areas[2:], quads.get_face_areas(method=method)))
+        self.assertTrue(np.isclose(prism.area, prism.get_face_areas().sum()))
+
+    def test_ngon_face_vertex_angles(self):
+        """an n-gon corner lies between its previous and next edges; the quads' are as alone"""
+        prism  = _ngon_prism(twist=0.4)
+        quads  = MeshData(points=prism.points, indices=prism.indices[12:], counts=prism.counts[2:])
+        angles = prism.get_face_vertex_angles()
+        self.assertEqual(angles.shape, (prism.indices.size,))
+        self.assertTrue(np.allclose(angles[:12], 2 * np.pi / 3, rtol=1e-12, atol=0))
+        self.assertTrue(np.array_equal(angles[12:], quads.get_face_vertex_angles()))
+
+    def test_set_normals_ngons(self):
+        """set_normals and recompute_normals take n-gons, smooth or split"""
+        prism  = _ngon_prism()
+
+        smooth = prism.copy()
+        smooth.set_normals()
+        self.assertEqual(smooth.normals.shape, (12, 3))
+        self.assertTrue(allclose(np.linalg.norm(smooth.normals, axis=1), 1.0))
+        self.assertTrue(np.all(smooth.normals[:6, 2] < 0) and np.all(smooth.normals[6:, 2] > 0))
+
+        # every cap edge is 90 degrees: the caps keep their flat normals
+        hard = prism.copy()
+        hard.set_normals(hard_edge_angle=45.0)
+        caps = hard.normals[hard.normal_indices[:12]]
+        self.assertTrue(allclose(caps[:6], [0, 0, -1]) and allclose(caps[6:], [0, 0, 1]))
+
+        hard.points = hard.points * [2.0, 2.0, 3.0]
+        hard.recompute_normals()
+        caps = hard.normals[hard.normal_indices[:12]]
+        self.assertTrue(allclose(caps[:6], [0, 0, -1]) and allclose(caps[6:], [0, 0, 1]))
+        self.assertTrue(allclose(np.linalg.norm(hard.normals, axis=1), 1.0))
+
+    def test_ngon_hole_face_vertex_angles(self):
+        """an n-gon's outer loop and each hole loop wrap on themselves, not over the bridge to the next"""
+        square = [[0, 0, 0], [4, 0, 0], [4, 2, 0], [0, 2, 0]]
+        hole_a = [[0.5, 0.5, 0], [0.5, 1.5, 0], [1.5, 1.5, 0], [1.5, 0.5, 0]]
+        hole_b = [[2.5, 0.5, 0], [2.5, 1.5, 0], [3.0, 1.5, 0], [3.5, 0.5, 0]]  # a trapezoid
+        panel = MeshData(
+            points       = np.array(square + hole_a + hole_b, dtype=float),
+            indices      = np.arange(12),
+            counts       = [12],
+            hole_faces   = [0, 0],
+            hole_counts  = [4, 4],
+            hole_indices = np.arange(4, 12),
+        )
+
+        # every corner square but the trapezoid's slanted side's two
+        slant    = np.arccos(1 / np.sqrt(5))
+        expected = [np.pi / 2] * 10 + [np.pi - slant, slant]
+        self.assertTrue(np.allclose(panel.get_face_vertex_angles(), expected, rtol=1e-12, atol=0))
+        self.assertTrue(np.isclose(panel.area, 8.0 - 1.0 - 0.75, rtol=1e-12, atol=0))
+
+        panel.set_normals()
+        self.assertTrue(allclose(panel.normals, [0, 0, 1]))
+
+        # the examples' panel and lightmap: a square hole in a square face
+        for example in (mesh_data(), uv_data()):
+            with self.subTest(example=type(example).__name__):
+                angles = example.get_face_vertex_angles()
+                self.assertTrue(np.allclose(angles[:8], np.pi / 2, rtol=1e-12, atol=0))
+
+    def test_ngon_flat_area(self):
+        """an n-gon with its points on one line measures 0, as a flat quad does: set_normals still runs"""
+        square = [[5, 5, 0], [6, 5, 0], [6, 6, 0], [5, 6, 0]]
+        flats = {
+            "one line": [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0], [4, 0, 0]],
+            "one spot": [[1, 1, 1]] * 5,
+        }
+        for label, flat in flats.items():
+            with self.subTest(label):
+                mesh = MeshData(
+                    points  = np.array(flat + square, dtype=float),
+                    indices = np.arange(9),
+                    counts  = [5, 4],
+                )
+                self.assertTrue(np.allclose(mesh.get_face_areas(), [0.0, 1.0], rtol=1e-12, atol=0))
+                self.assertTrue(np.isclose(mesh.area, 1.0, rtol=1e-12, atol=0))
+
+                mesh.set_normals()
+                self.assertTrue(allclose(mesh.normals[5:], [0, 0, 1]))
+
+    def test_ngon_repeated_corner_area(self):
+        """an n-gon that repeats a corner, or comes back through one, measures as the loops it draws"""
+        square = [[5, 5, 0], [6, 5, 0], [6, 6, 0], [5, 6, 0]]
+        house  = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0.5, 1.5, 0], [0, 1, 0]]
+        bowtie = [[0, 0, 0], [1, 1, 0], [2, 0, 0], [2, 2, 0], [0, 2, 0]]
+        cases = {
+            "repeated corner":       (house, [0, 1, 1, 2, 3, 4], 1.25),
+            "back through a corner": (bowtie, [0, 1, 2, 3, 1, 4], 2.0),  # two triangles meeting at (1, 1)
+        }
+        for label, (points, face, area) in cases.items():
+            with self.subTest(label):
+                mesh = MeshData(
+                    points  = np.array(points + square, dtype=float),
+                    indices = np.array(face + [5, 6, 7, 8]),
+                    counts  = [len(face), 4],
+                )
+                self.assertTrue(np.allclose(mesh.get_face_areas(), [area, 1.0], rtol=1e-12, atol=0))
+                self.assertTrue(np.isclose(mesh.area, area + 1.0, rtol=1e-12, atol=0))
+
+                mesh.set_normals()
+                self.assertTrue(allclose(mesh.normals[5:], [0, 0, 1]))
+
+    def test_ngon_inner_loop_area(self):
+        """a loop an n-gon walks through one vertex against its outer loop is a hole: taken off, not added"""
+        square = [[0, 0, 0], [4, 0, 0], [4, 4, 0], [0, 4, 0]]
+        unit   = [[10, 0, 0], [11, 0, 0], [11, 1, 0], [10, 1, 0]]
+        cases = {
+            # a 2 x 2 hole walked clockwise, joined to corner 0 by an edge there and back
+            "keyhole": ([[1, 1, 0], [1, 3, 0], [3, 3, 0], [3, 1, 0]], [0, 1, 2, 3, 0, 4, 5, 6, 7, 4], 16 - 4),
+            # a triangle of area 1.5 walked clockwise from corner 0
+            "hole touching a corner": ([[1, 2, 0], [2, 1, 0]], [0, 1, 2, 3, 0, 4, 5], 16 - 1.5),
+        }
+        for label, (inner, face, area) in cases.items():
+            for winding in (1, -1):
+                with self.subTest(label, winding=winding):
+                    quad = list(range(4 + len(inner), 8 + len(inner)))
+                    mesh = MeshData(
+                        points  = np.array(square + inner + unit, dtype=float),
+                        indices = np.array(face[::winding] + quad),
+                        counts  = [len(face), 4],
+                    )
+                    self.assertTrue(np.allclose(mesh.get_face_areas(), [area, 1.0], rtol=1e-12, atol=0))
+                    self.assertTrue(np.isclose(mesh.area, area + 1.0, rtol=1e-12, atol=0))
+
+    def test_ngon_loops_enclose_a_region(self):
+        """an n-gon's loops through one vertex measure the region they enclose, whichever way each turns"""
+        unit   = [[10, 0, 0], [11, 0, 0], [11, 1, 0], [10, 1, 0]]
+        square = [[0, 0, 0], [4, 0, 0], [4, 4, 0], [0, 4, 0]]
+        inner  = [[1, 1, 0], [1, 3, 0], [3, 3, 0], [3, 1, 0]]
+        house  = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0.5, 1.5, 0], [0, 1, 0]]
+        lobes  = [[0, 0, 0], [1, 1, 0], [2, 2, 0], [2, 0, 0], [0, 2, 0]]
+
+        # a 3 x 3 lobe at the square's corner (4, 4), walked against it, and a
+        # triangle of area 1.5 inside the lobe from its corner (7, 7)
+        lobe = [[4, 7, 0], [7, 7, 0], [5, 6, 0], [6, 5, 0], [7, 4, 0]]
+        cases = {
+            # two unit triangles through (1, 1), the right one walked clockwise
+            "figure 8": (lobes, [0, 1, 2, 3, 1, 4], 2.0),
+            # a 2 x 2 loop inside, walked the square's way: enclosed once
+            "loop inside the same way": (square + inner, [0, 1, 2, 3, 0, 4, 7, 6, 5, 4], 16.0),
+            "twice round": (house, [0, 1, 2, 3, 4] * 2, 1.25),
+            "hole in the second lobe": (square + lobe, [0, 1, 2, 4, 5, 6, 7, 5, 8, 2, 3], 16 + 9 - 1.5),
+        }
+        for label, (points, face, area) in cases.items():
+            for winding in (1, -1):
+                with self.subTest(label, winding=winding):
+                    quad = list(range(len(points), len(points) + 4))
+                    mesh = MeshData(
+                        points  = np.array(points + unit, dtype=float),
+                        indices = np.array(face[::winding] + quad),
+                        counts  = [len(face), 4],
+                    )
+                    self.assertTrue(np.allclose(mesh.get_face_areas(), [area, 1.0], rtol=1e-12, atol=0))
+                    self.assertTrue(np.isclose(mesh.area, area + 1.0, rtol=1e-12, atol=0))
+
+    def test_uv_ngon_loop_areas(self):
+        """a UV map's n-gon that comes back through one vertex measures as a mesh's does"""
+        unit = [[10, 0], [11, 0], [11, 1], [10, 1]]
+        cases = {
+            "bowtie": ([[0, 0], [1, 1], [2, 0], [2, 2], [0, 2]], [0, 1, 2, 3, 1, 4], 2.0),
+            "keyhole": (
+                [[0, 0], [4, 0], [4, 4], [0, 4], [1, 1], [1, 3], [3, 3], [3, 1]],
+                [0, 1, 2, 3, 0, 4, 5, 6, 7, 4],
+                12.0,
+            ),
+        }
+        for label, (points, face, area) in cases.items():
+            with self.subTest(label):
+                quad = list(range(len(points), len(points) + 4))
+                uv = UVData(
+                    points  = np.array(points + unit, dtype=float),
+                    indices = np.array(face + quad),
+                    counts  = [len(face), 4],
+                )
+                self.assertTrue(np.allclose(uv.get_face_areas(), [area, 1.0], rtol=1e-12, atol=0))
+                self.assertTrue(np.isclose(uv.area, area + 1.0, rtol=1e-12, atol=0))
+
+    def test_ngon_many_returns_to_one_vertex(self):
+        """an n-gon that comes back through one vertex 3000 times measures and takes normals"""
+        # a unit square with 3000 spikes walked out from corner 0 and back
+        spikes = 3000
+        angles = np.linspace(1.1, 1.4, spikes) * np.pi
+        tips   = np.stack([np.cos(angles), np.sin(angles), np.zeros(spikes)], axis=1)
+        square = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], dtype=float)
+        face   = [0] + [v for tip in range(4, 4 + spikes) for v in (tip, 0)] + [1, 2, 3]
+        mesh = MeshData(
+            points  = np.concatenate([square, tips]),
+            indices = np.array(face),
+            counts  = [len(face)],
+        )
+        self.assertTrue(np.allclose(mesh.get_face_areas(), [1.0], rtol=1e-12, atol=0))
+
+        mesh.set_normals()
+        self.assertTrue(allclose(mesh.normals[:4], [0, 0, 1]))
+
+    def test_triangulate_area_ngon_left_whole(self):
+        """AreaMethod.TRIANGULATE raises on an n-gon triangulate() makes no triangle of, not mis-measure the next face"""
+        unit  = [[10, 0, 0], [11, 0, 0], [11, 1, 0], [10, 1, 0]]
+        house = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0.5, 1.5, 0], [0, 1, 0]]
+        lobes = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [-1, 0, 0], [-1, -1, 0], [0, -1, 0], [1, -1, 0]]
+        cases = {
+            "twice round": (house, [0, 1, 2, 3, 4] * 2, 1.25),
+            # three unit triangles through (0, 0)
+            "three lobes": (lobes, [0, 1, 2, 0, 3, 4, 0, 5, 6], 1.5),
+        }
+        for label, (points, face, area) in cases.items():
+            for cls, dim in ((MeshData, 3), (UVData, 2)):
+                for quad_first in (False, True):
+                    with self.subTest(label, cls=cls.__name__, quad_first=quad_first):
+                        quad = list(range(len(points), len(points) + 4))
+                        mesh = cls(
+                            points  = np.array(points + unit, dtype=float)[:, :dim],
+                            indices = np.array(quad + face if quad_first else face + quad),
+                            counts  = [4, len(face)] if quad_first else [len(face), 4],
+                        )
+                        areas = [1.0, area] if quad_first else [area, 1.0]
+                        self.assertTrue(np.allclose(mesh.get_face_areas(), areas, rtol=1e-12, atol=0))
+
+                        # triangulate() leaves the n-gon whole, with a warning
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore", UserWarning)
+                            with self.assertRaises(NotImplementedError):
+                                mesh.get_face_areas(method=AreaMethod.TRIANGULATE)
+
+    def test_ngon_hole_stream_order_area(self):
+        """a hole measures the same whichever of its corners the face's index stream starts it at"""
+        def panel(x):
+            outer = [[x, 0, 0], [x + 4, 0, 0], [x + 4, 4, 0], [x, 4, 0]]
+            hole  = [[x + 1, 1, 0], [x + 1, 3, 0], [x + 3, 3, 0], [x + 3, 1, 0]]
+            return outer + hole
+
+        # face 0 lists its hole from its third corner, face 1 from its first
+        mesh = MeshData(
+            points       = np.array(panel(0) + panel(10) + [[20, 0, 0], [21, 0, 0], [21, 1, 0], [20, 1, 0]], dtype=float),
+            indices      = np.array([0, 1, 2, 3, 6, 7, 4, 5] + list(range(8, 20))),
+            counts       = [8, 8, 4],
+            hole_faces   = [1, 0],
+            hole_counts  = [4, 4],
+            hole_indices = np.array([12, 13, 14, 15, 4, 5, 6, 7]),
+        )
+        self.assertTrue(np.allclose(mesh.get_face_areas(), [12.0, 12.0, 1.0], rtol=1e-12, atol=0))
+        self.assertTrue(np.isclose(mesh.area, 25.0, rtol=1e-12, atol=0))
+        self.assertTrue(np.allclose(mesh.get_face_vertex_angles(), np.pi / 2, rtol=1e-12, atol=0))
+
+    def test_ngon_stale_hole_metadata(self):
+        """hole metadata naming a triangle, a quad, no face, or an n-gon without the hole's vertices is ignored"""
+        # subset rules keep the metadata as it was: the holed 8-gon, face 0, is now a triangle
+        panel = mesh_data()
+        part  = panel.from_vertices(panel.get_subset_rules([1, 2, 3, 8, 9, 10]))
+
+        # two quads, the metadata naming the first and a face 7 that is not there
+        quads = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [2, 0, 0], [2, 1, 0]]
+        pair = MeshData(
+            points       = np.array(quads, dtype=float),
+            indices      = np.array([0, 1, 2, 3, 1, 4, 5, 2]),
+            counts       = [4, 4],
+            hole_faces   = [0, 7],
+            hole_counts  = [3, 2],
+            hole_indices = np.array([0, 1, 2, 4, 5]),
+        )
+
+        # a regular octagon, its metadata naming the quad's corners beside it
+        angles  = np.arange(8) * np.pi / 4
+        octagon = np.stack([np.cos(angles), np.sin(angles), np.zeros(8)], axis=1)
+        other = MeshData(
+            points       = np.concatenate([octagon, np.array(quads[:4]) + [5, 0, 0]]),
+            indices      = np.arange(12),
+            counts       = [8, 4],
+            hole_faces   = [0],
+            hole_counts  = [4],
+            hole_indices = np.arange(8, 12),
+        )
+
+        for label, mesh in (("subset rules", part), ("quad, no face", pair), ("n-gon without them", other)):
+            with self.subTest(label):
+                self.assertIsNotNone(mesh.hole_faces)
+                bare              = mesh.copy()
+                bare.hole_faces   = None
+                bare.hole_counts  = None
+                bare.hole_indices = None
+
+                self.assertTrue(np.array_equal(mesh.get_face_areas(), bare.get_face_areas()))
+                angles = mesh.get_face_vertex_angles()
+                self.assertTrue(np.array_equal(angles, bare.get_face_vertex_angles()))
+
+                mesh.set_normals()
+                bare.set_normals()
+                self.assertTrue(np.array_equal(mesh.normals, bare.normals))
+                self.assertFalse(np.isnan(mesh.normals).any())
+
+    def test_delete_faces_renumbers_holes(self):
+        """from_faces and delete_faces keep a kept face's holes, renumbered with it, and drop a deleted face's"""
+        def panel(x):
+            outer = [[x, 0, 0], [x + 4, 0, 0], [x + 4, 4, 0], [x, 4, 0]]
+            hole  = [[x + 1, 1, 0], [x + 1, 3, 0], [x + 3, 3, 0], [x + 3, 1, 0]]
+            return outer, hole
+
+        # faces 0 and 1 are holed panels, face 1 storing its hole's points
+        # before its outer loop's; face 2 is a plain regular octagon
+        outer_0, hole_0 = panel(0)
+        outer_1, hole_1 = panel(10)
+        angles  = np.arange(8) * np.pi / 4
+        octagon = np.stack([20 + np.cos(angles), np.sin(angles), np.zeros(8)], axis=1)
+        mesh = MeshData(
+            points       = np.concatenate([np.array(outer_0 + hole_0 + hole_1 + outer_1, dtype=float), octagon]),
+            indices      = np.array([0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 8, 9, 10, 11] + list(range(16, 24))),
+            counts       = [8, 8, 8],
+            hole_faces   = [0, 1],
+            hole_counts  = [4, 4],
+            hole_indices = np.arange(4, 12),
+        )
+        corner = np.full(8, np.pi / 2)
+        eighth = np.full(8, 3 * np.pi / 4)
+
+        cut = mesh.copy()
+        cut.delete_faces([0])
+        cases = {
+            # (mesh, hole_faces, hole_indices, areas, corner angles)
+            "delete_faces([0])":  (cut, [0], [0, 1, 2, 3], [12, 2 * np.sqrt(2)], [corner, eighth]),
+            "from_faces([2])":    (mesh.from_faces([2]), [], [], [2 * np.sqrt(2)], [eighth]),
+            "from_faces([0, 2])": (mesh.from_faces([0, 2]), [0], [4, 5, 6, 7], [12, 2 * np.sqrt(2)], [corner, eighth]),
+        }
+        for label, (part, hole_faces, hole_indices, areas, corners) in cases.items():
+            with self.subTest(label):
+                self.assertEqual(part.hole_faces.tolist(),   hole_faces)
+                self.assertEqual(part.hole_counts.tolist(),  [4] * len(hole_faces))
+                self.assertEqual(part.hole_indices.tolist(), hole_indices)
+                self.assertTrue(np.allclose(part.get_face_areas(), areas, rtol=1e-12, atol=0))
+                self.assertTrue(np.allclose(part.get_face_vertex_angles(), np.concatenate(corners), rtol=1e-12, atol=0))
+
+                part.set_normals()
+                self.assertTrue(allclose(part.normals, [0, 0, 1]))
+
+        # a UV map's holes follow its faces the same way
+        self.assertEqual(uv_data().from_faces([0, 2]).hole_indices.tolist(), [4, 5, 6, 7])
+        self.assertEqual(uv_data().from_faces([1, 2]).hole_faces.tolist(), [])
+
+    def test_delete_faces_many_holes_quickly(self):
+        """delete_faces renumbers 20000 holes in one pass, not hole by hole"""
+        panels = 20000
+        panel  = [[0, 0, 0], [4, 0, 0], [4, 4, 0], [0, 4, 0], [1, 1, 0], [1, 3, 0], [3, 3, 0], [3, 1, 0]]
+        offset = np.repeat(np.arange(panels) * 5.0, 8)[:, None] * [1, 0, 0]
+        holes  = np.arange(panels)[:, None] * 8 + np.arange(4, 8)
+        mesh = MeshData(
+            points       = np.tile(np.array(panel, dtype=float), (panels, 1)) + offset,
+            indices      = np.arange(8 * panels),
+            counts       = np.full(panels, 8),
+            hole_faces   = np.arange(panels),
+            hole_counts  = np.full(panels, 4),
+            hole_indices = holes.ravel(),
+        )
+
+        # f2v built first (its numba kernel loads on a first call), so the
+        # time is delete_faces' own: a scan of every face and point per hole
+        # took 2.7 s, one pass takes 20 ms
+        mesh.f2v
+        start = time.perf_counter()
+        mesh.delete_faces(np.arange(0, panels, 2))
+        self.assertLess(time.perf_counter() - start, 0.5)
+
+        self.assertEqual(mesh.hole_faces.tolist(),   list(range(panels // 2)))
+        self.assertEqual(mesh.hole_counts.tolist(),  [4] * (panels // 2))
+        self.assertEqual(mesh.hole_indices.tolist(), holes[: panels // 2].ravel().tolist())
+
     # --- shading normals (set_normals / recompute_normals) ---
 
     def test_set_normals_smooth(self):
@@ -1610,6 +2048,46 @@ class TestMesh(unittest.TestCase):
                 self.assertEqual(loaded.resolution.dtype, np.int32)
                 self.assertEqual(loaded.resolution.tolist(), [64, 32])
                 self.assertIs(loaded.antialias, True)
+
+    def test_uv_render_settings_ignored_by_equality(self):
+        """two uv maps that only render differently are equal; the uvs themselves still count"""
+        uv               = self.box_uv.copy()
+        other            = uv.copy()
+        other.resolution = (64, 32)
+        other.antialias  = True
+        self.assertTrue(uv == other)
+        self.assertFalse(uv != other)
+
+        other.points[0] += 0.1
+        self.assertFalse(uv == other)
+
+    @unittest.skipIf(cv2 is None and skimage is None, "needs cv2 or scikit-image")
+    def test_get_overlap_faces_leaves_its_uvs_unchanged(self):
+        """get_overlap_faces renders at its own resolution: neither UVData's resolution or buffer changes"""
+        target            = self.box_uv.copy()
+        mask              = self.box_uv.copy()
+        target.resolution = (32, 16)
+        mask.resolution   = (48, 24)
+        target.buffer[:]  = 7
+        mask.buffer[:]    = 9
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            overlap = target.get_overlap_faces(mask, indices=[0, 1], resolution=64)
+
+        self.assertEqual(target.resolution.tolist(), [32, 16])
+        self.assertEqual(mask.resolution.tolist(), [48, 24])
+        self.assertTrue(np.all(target.buffer == 7))
+        self.assertTrue(np.all(mask.buffer == 9))
+
+        # the overlap the deprecation note's recipe gives at that resolution
+        uv_mask            = self.box_uv.copy()
+        uv_mask.resolution = 64
+        uv_mask.draw_mask(indices=[0, 1])
+        uv_target            = self.box_uv.copy()
+        uv_target.resolution = 64
+        self.assertEqual(overlap.tolist(), uv_target.draw_faces(mask=uv_mask).tolist())
+        self.assertEqual(overlap.tolist(), [0, 1])
 
     # --- tangent space (get_tangent_space) ---
 
@@ -2354,6 +2832,18 @@ class TestMesh(unittest.TestCase):
         self.assertTrue(allclose(uvdata_mixed.indices, mixed_mesh.indices))
         self.assertTrue(allclose(uvdata_mixed.counts, mixed_mesh.counts))
         self.assertEqual(uvdata_mixed.face_count, mixed_mesh.face_count)
+
+    def test_to_uvdata_owns_its_topology(self):
+        """the UVData's indices and counts are copies: editing them leaves the mesh"""
+        mesh   = self.box.copy()
+        uvdata = mesh.to_uvdata()
+        self.assertFalse(np.shares_memory(uvdata.indices, mesh.indices))
+        self.assertFalse(np.shares_memory(uvdata.counts, mesh.counts))
+
+        uvdata.indices[0] = 7
+        uvdata.counts[0]  = 3
+        self.assertEqual(mesh.indices[0], 0)
+        self.assertEqual(mesh.counts[0], 4)
 
 
 class TestBSpline(unittest.TestCase):

@@ -830,7 +830,7 @@ apply_morph_target(self, target_data) -> 'None'
 contains_vertices(self, vertices, contained=True, exclude=False)
     returns the mesh's faces which contains the given vertex indices
 delete_faces(self, faces, exclude=False)
-    deletes faces at given face indices
+    deletes faces at given face indices. The hole metadata (hole_faces)
 detach_faces(self, indices=None)
     detaches faces
 difference(self, *args, tolerance=1e-06, world_space=False)
@@ -852,11 +852,11 @@ from_vertices(self, vertices, contained=True, exclude=False)
 get_asymmetric_points(self, pivot: 'float' = 0.0, axis: 'int' = 0, tolerance: 'Union[None, float]' = None)
     returns the vertex indices that fail the symmetry test
 get_border_edges(self, flatten=False)
-    returns all border edges
+    returns all border edges as int32 arrays, one per border loop, or one
 get_border_faces(self, flatten=False)
-    returns all border faces
+    returns all border faces as int32 arrays, one per border loop, or one
 get_border_vertices(self, flatten=False)
-    returns all border vertices
+    returns all border vertices as int32 arrays, one per border loop, or
 get_center_points(self, pivot: 'float' = 0.0, axis: 'int' = 0, tolerance: 'Union[None, float]' = None) -> 'np.ndarray'
     returns the indices of the center points
 get_closest_points(self, points: 'np.ndarray', k: 'int' = 1) -> 'Tuple[np.ndarray, np.ndarray]'
@@ -883,7 +883,7 @@ get_edge_vertex_neighbors(self, n: 'int' = 0) -> 'np.ndarray'
 get_extent(self, per_face: 'bool' = False) -> 'Tuple[np.ndarray]'
     Returns 2 tuples that represents the extent of this mesh.
 get_face_areas(self, method: 'AreaMethod | str' = <AreaMethod.GAUSS: 'gauss'>, samples: 'int' = 10, tolerance: 'float' = 0.0001)
-    returns a face area approximation
+    returns a face area approximation. Triangles and quads are measured
 get_face_edge_clusters(self, indices: 'np.ndarray') -> 'List[np.ndarray]'
     convert face edge indices to clusters
 get_face_edge_geodesic_neighborhood(self, n: 'int | None' = None, max_distance: 'float | None' = None, indices: 'np.ndarray | None' = None, distance_format='sparse')
@@ -943,7 +943,7 @@ get_vertex_face_geodesic_neighborhood(self, n: 'int | None' = None, max_distance
 get_vertex_face_neighbors(self, n: 'int' = 0) -> 'np.ndarray'
     return a matrix of faces neighboring connected vertices to faces
 get_vertex_normals(self, angle_weighted: 'bool' = True, area_weighted: 'bool' = True, force: 'bool' = False, _areas: 'np.ndarray | None' = None) -> 'np.ndarray'
-    Computes vertex normals from face normals.
+    Computes vertex normals from face normals, on triangles, quads and
 get_zero_area_faces(self, tolerance=1e-12)
     returns the face indices enclosing no area
 grow_edge_face_indices(self, indices: 'np.ndarray', n: 'int' = 1) -> 'np.ndarray'
@@ -979,7 +979,7 @@ sample(self, obj: "Union['MeshData', np.ndarray]", method: 'SampleMethod | str' 
 save_obj(self, filename: 'str') -> 'None'
     writes a valid obj file from MeshData
 set_normals(self, hard_edge_angle: 'float | None' = None, hard_edges: 'np.ndarray | None' = None, angle_weighted: 'bool' = True, area_weighted: 'bool' = True) -> 'None'
-    Compute and store face-varying shading normals.
+    Compute and store face-varying shading normals, on triangles, quads
 shrink_edge_face_indices(self, indices: 'np.ndarray', n: 'int' = 1) -> 'np.ndarray'
     shrinks vertex face indices by n steps
 shrink_edge_vertex_indices(self, indices: 'np.ndarray', n: 'int' = 1) -> 'np.ndarray'
@@ -1002,7 +1002,7 @@ to_identity(self) -> 'None'
 to_prim(self, prim: 'Any') -> 'None'
     Streams data into a prim.
 to_uvdata(self, name: 'str | None' = None, axis: 'str | Axis' = <Axis.Y: 'y'>, maintain_ratio=False, swap_uvs=False) -> 'UVData'
-    creates an orthogonal projection of the mesh as a UVData object
+    creates an orthogonal projection of the mesh as a UVData object, with
 triangulate(self, rules: 'Union[np.ndarray, TriangulateRules]', preserve_order: 'bool' = True) -> 'None'
     triangulates the mesh according to the given method.
 union(self, *args, world_space=False)
@@ -1143,7 +1143,7 @@ get_holes(self) -> 'np.ndarray'
 get_minimum_resolution(self, pixels: 'int' = 3) -> 'np.ndarray'
     returns the minumum resolution to fit n pixels in a given bounding box
 get_overlap_faces(self, uvdata: "'UVData'", indices: 'Union[None, np.ndarray]' = None, resolution: 'int' = 2048, tolerance: 'float' = 0.0)
-    returns the self overlapping face indices over the given given UVData object
+    returns the self overlapping face indices over the given UVData object,
 imshow(self) -> 'None'
     shows the image in a window
 imwrite(self, fname: 'str') -> 'str'
@@ -2374,7 +2374,7 @@ patch_relax(points: 'np.ndarray', rest_points: 'np.ndarray', ring: 'np.ndarray',
 point_row_overlaps(matrix, tolerance=1e-06)
     Optimized: uses Numba for parallel pair processing.
 pxr()
-    Returns the pxr module (USD) or raises an ImportError
+    Returns the pxr module (USD), its Sdf, Usd, UsdGeom and UsdSkel modules
 quad_match_greedy(score, fa, fb, n_faces)
     Greedy maximum-weight matching on the triangle dual graph.
 rebuild_indices(new_indices, counts, cumsum, f2v, f2e, e2v, face_offset, edge_offset)

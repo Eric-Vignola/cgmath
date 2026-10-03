@@ -5,7 +5,7 @@ from typing import Optional
 
 import numpy as np
 from cgmath.geometry._base import _is_sequence, Array, Data, DataList
-from cgmath.geometry.mesh import _pxr_module
+from cgmath.geometry.utils import pxr
 
 BLS_PRIM_TYPE = "MorphTarget"
 
@@ -317,7 +317,7 @@ class MorphData(Data):
     @classmethod
     def from_prim(cls, prim) -> MorphData:
         """Constructs a data object from a prim."""
-        bls_api = _pxr_module("UsdSkel").BlendShape(prim)
+        bls_api = pxr().UsdSkel.BlendShape(prim)
         offsets = bls_api.GetOffsetsAttr().Get()
 
         # ensure the correct data type
@@ -331,7 +331,7 @@ class MorphData(Data):
         """Streams data into a prim."""
         if not prim.GetTypeName():
             prim.SetTypeName(BLS_PRIM_TYPE)
-        bls_api = _pxr_module("UsdSkel").BlendShape(prim)
+        bls_api = pxr().UsdSkel.BlendShape(prim)
         bls_api.CreateOffsetsAttr().Set(self.offsets)
         bls_api.CreatePointIndicesAttr().Set(self.indices)
 

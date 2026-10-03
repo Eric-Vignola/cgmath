@@ -280,7 +280,7 @@ Two independent things.
   `normal_indices` stays `None`; with `hard_edge_angle` or explicit
   `hard_edges` they become face-varying. `recompute_normals()` refreshes the
   vectors after a deformation while keeping the splits. Topology edits clear
-  both.
+  both. Both families take triangles, quads and n-gons.
 
 ### Skin weights, morph targets, maps
 
@@ -302,7 +302,9 @@ Two independent things.
 `_saddle_surface` is the engine behind `MeshData.sample()`, `MeshData.raycast()`,
 `MeshData.area` and `MeshData.get_face_areas()`. A quad whose corners are not
 coplanar is integrated and intersected as a genuine saddle. Triangles are padded
-to quads with a `-1` fourth index; **n-gons raise** — triangulate first.
+to quads with a `-1` fourth index. An n-gon's area is the sum of the triangles
+it triangulates into; `sample()` and `raycast()` **raise on n-gons** —
+triangulate first.
 
 Passing `surface_normals=` swaps flat bilinear patches for PN-Quad bicubic
 Bézier patches: slower, but each patch curves to match the vertex normals.

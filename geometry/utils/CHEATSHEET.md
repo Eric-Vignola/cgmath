@@ -871,14 +871,14 @@ print(aa_buffer)   # [[  0 128] [255  64]]
 
 ## USD accessor
 
-`pxr()` returns the USD module, or raises a friendly `ImportError` when
-USD is not installed. Every USD path in `cgmath.geometry` funnels
-through it.
+`pxr()` returns the USD module with its `Sdf`, `Usd`, `UsdGeom` and
+`UsdSkel` modules imported, or raises a friendly `ImportError` when USD is
+not installed. Every USD path in `cgmath.geometry` funnels through it.
 
 ```python
 try:
     usd = gu.pxr()
-    print("USD available:", usd.__name__)
+    print("USD available:", usd.__name__, usd.UsdGeom.__name__)
 except ImportError as exc:
     print("no USD ->", exc)   # "USD not found."
 ```
@@ -1006,4 +1006,4 @@ normally calls it.
 | `rebuild_indices(new_indices, counts, cumsum, f2v, f2e, e2v, face_offset, edge_offset)` | the index-rebuild half of a subdivision step | `geometry/mesh.py` |
 | `composite_sprite(sprite, buffer, mask=None, offset=(0, 0), color=(255, 255, 255))` | blit a gray sprite into an RGB buffer → `(count, overlap, ratio)` | `geometry/mesh.py` |
 | `composite_sprite_aa(sprite, buffer)` | in-place antialiased gray-on-gray blend | `geometry/mesh.py` |
-| `pxr()` | the USD module, or a friendly `ImportError` | `mesh.py`, `map.py`, `morph_target.py`, `skin_weights.py` |
+| `pxr()` | the USD module, `Sdf` / `Usd` / `UsdGeom` / `UsdSkel` imported, or a friendly `ImportError` | `mesh.py`, `map.py`, `morph_target.py`, `skin_weights.py` |

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import importlib
+import copy
 import os
 import re
 import warnings
@@ -85,21 +85,12 @@ from cgmath.geometry.utils import (
     subdivide_catmull_clark,
 )
 from scipy.ndimage import convolve
-from scipy.spatial import cKDTree
+from scipy.spatial import QhullError, cKDTree
 
 MESH_PRIM_TYPE = "Mesh"
 UV_ATTR_PREFIX = "primvars:st"
 
 EPSILON = np.finfo(np.float32).eps
-
-
-def _pxr_module(name: str):
-    """
-    The USD module ``pxr.<name>``. ``pxr()`` only carries the submodules
-    something has already imported, so each one is imported here.
-    """
-    pxr()  # ImportError when USD is not installed
-    return importlib.import_module(f"pxr.{name}")
 
 
 def _usd_value(attr: Any, empty: Any = None) -> Any:
@@ -111,7 +102,7 @@ def _usd_value(attr: Any, empty: Any = None) -> Any:
         return empty
     value = attr.Get()
     if value is None and attr.GetNumTimeSamples():
-        value = attr.Get(_pxr_module("Usd").TimeCode.EarliestTime())
+        value = attr.Get(pxr().Usd.TimeCode.EarliestTime())
     return empty if value is None else value
 
 
@@ -247,6 +238,101 @@ def _newell_normals(
         normals /= magnitudes[:, None]
 
     return normals
+
+
+def _simple_loops(loop) -> list:
+    """
+    a polygon loop of vertex ids as the simple loops it is made of: a corner
+    that repeats the one before it (an edge of length 0) is dropped, and a
+    loop that comes back through one vertex is split there into two loops
+    """
+    loop = [v for i, v in enumerate(loop) if v != loop[i - 1]]
+
+    # walk the loop: coming back to a vertex of the path closes the corners
+    # walked since as a loop, and the path goes on from that vertex
+    loops, path, seen = [], [], {}
+    for v in loop:
+        j = seen.get(v)
+        if j is None:
+            seen[v] = len(path)
+            path.append(v)
+            continue
+
+        loops.append(path[j:])
+        for u in path[j + 1 :]:
+            del seen[u]
+        del path[j + 1 :]
+
+    return loops + [path]
+
+
+def _loop_senses(points, loops, loop_tris) -> list:
+    """
+    the sign each simple loop of one face counts its area with, so that the
+    face measures the region its loops enclose (the nonzero winding rule):
+    a loop inside no other adds (+1: a bowtie, a figure 8, whichever way its
+    lobes turn), a loop inside another wound against it is a hole in it (-1:
+    a keyhole, a hole touching a corner), and one inside another wound with
+    it encloses nothing more (0). The loops are taken to meet at vertices,
+    not to cross. loop_tris holds each loop's triangles (vertex ids), empty
+    when its points lie on one line.
+    """
+    if points.shape[1] < 3:
+        # newell needs three components: a uv map's points are 2d
+        padded                       = np.zeros((points.shape[0], 3))
+        padded[:, : points.shape[1]] = points
+        points                       = padded
+
+    # each loop turns as the largest one does (+1) or against it (-1)
+    windings = _newell_normals(
+        points,
+        np.concatenate(loops),
+        np.array([len(loop) for loop in loops]),
+        normalize = False,
+    )
+    largest = windings[np.argmax(np.einsum("ij,ij->i", windings, windings))]
+    turns   = np.where(windings @ largest < 0, -1, 1)
+
+    # the loops seen down the largest one's normal: each loop's area, and a
+    # point inside it, the centre of its largest triangle
+    flat   = points[:, np.argsort(np.abs(largest))[:2]]
+    areas  = np.zeros(len(loops))
+    middle = np.zeros((len(loops), 2))
+    for k, tris in enumerate(loop_tris):
+        if len(tris):
+            a, b, c = flat[tris[:, 0]], flat[tris[:, 1]], flat[tris[:, 2]]
+            doubled   = np.abs((b - a)[:, 0] * (c - a)[:, 1] - (b - a)[:, 1] * (c - a)[:, 0])
+            areas[k]  = doubled.sum()
+            middle[k] = (a + b + c)[np.argmax(doubled)] / 3
+
+    # largest first: a loop's parent is the last loop before it to hold its
+    # point, and the winding number inside it is its parent's plus its turn
+    order       = np.argsort(-areas, kind="stable")
+    rank        = np.empty(len(loops), dtype=np.intp)
+    rank[order] = np.arange(len(loops))
+    edge_loop   = np.repeat(np.arange(len(loops)), [len(loop) for loop in loops])
+    tails       = flat[np.concatenate(loops)]
+    heads       = flat[np.concatenate([np.roll(loop, -1) for loop in loops])]
+
+    inside = np.zeros(len(loops), dtype=np.intp)
+    senses = np.zeros(len(loops))
+    for k in order:
+        outside = 0
+        if areas[k] > 0:
+            # the edges of the loops before it that a ray from its point to +x
+            # crosses: a loop crossed an odd number of times holds the point
+            x, y = middle[k]
+            crossed = np.flatnonzero((rank[edge_loop] < rank[k]) & ((tails[:, 1] > y) != (heads[:, 1] > y)))
+            t       = (y - tails[crossed, 1]) / (heads[crossed, 1] - tails[crossed, 1])
+            crossed = crossed[x < tails[crossed, 0] + t * (heads[crossed, 0] - tails[crossed, 0])]
+            holders = np.flatnonzero(np.bincount(edge_loop[crossed], minlength=len(loops)) % 2)
+            if holders.size:
+                outside = inside[holders[np.argmax(rank[holders])]]
+
+        inside[k] = outside + turns[k]
+        senses[k] = float(inside[k] != 0) - float(outside != 0)
+
+    return senses.tolist()
 
 
 @dataclass(repr=False, eq=False)
@@ -1173,53 +1259,65 @@ class MeshData(Data):
                 edge_borders = edge_borders[~mask_rows]
                 edge_indices = edge_indices[~mask_rows]
 
-            # append to loops
-            self._border_vertices.append(vertices)
-            self._border_edges.append(edges)
+            # append to loops, int32 as the mesh's own indices
+            self._border_vertices.append(np.asarray(vertices, dtype=np.int32))
+            self._border_edges.append(np.asarray(edges, dtype=np.int32))
 
             # sort by size
             self._border_edges    = sorted(self._border_edges, key=len)
             self._border_vertices = sorted(self._border_vertices, key=len)
 
+    @staticmethod
+    def _flatten_borders(loops):
+        """every index in the border loops, as one array: empty with no border"""
+        if len(loops) == 0:
+            return np.empty(0, dtype=np.int32)
+        if len(loops) == 1:
+            return loops[0]
+        return np.unique(np.concatenate(loops))
+
     def get_border_vertices(self, flatten=False):
-        """returns all border vertices"""
+        """
+        returns all border vertices as int32 arrays, one per border loop, or
+        one array of them all when flatten is True (empty on a closed mesh)
+        """
 
         if self._border_vertices is None:
             self._compute_borders()
 
-        if flatten and len(self._border_vertices) > 0:
-            if len(self._border_vertices) == 1:
-                return self._border_vertices[0]
-            return np.unique(np.concatenate(self._border_vertices))
+        if flatten:
+            return self._flatten_borders(self._border_vertices)
 
         return self._border_vertices
 
     def get_border_edges(self, flatten=False):
-        """returns all border edges"""
+        """
+        returns all border edges as int32 arrays, one per border loop, or one
+        array of them all when flatten is True (empty on a closed mesh)
+        """
 
         if self._border_edges is None:
             self._compute_borders()
 
-        if flatten and len(self._border_edges) > 0:
-            if len(self._border_edges) == 1:
-                return self._border_edges[0]
-            return np.unique(np.concatenate(self._border_edges))
+        if flatten:
+            return self._flatten_borders(self._border_edges)
 
         return self._border_edges
 
     def get_border_faces(self, flatten=False):
-        """returns all border faces"""
+        """
+        returns all border faces as int32 arrays, one per border loop, or one
+        array of them all when flatten is True (empty on a closed mesh)
+        """
         if self._border_faces is None:
             self._compute_borders()
             self._border_faces = []
             for vertices in self.get_border_vertices():
                 faces = np.any(np.isin(self.f2v, vertices), axis=1)
-                self._border_faces.append(np.where(faces)[0])
+                self._border_faces.append(np.where(faces)[0].astype(np.int32))
 
-        if flatten and len(self._border_faces) > 0:
-            if len(self._border_faces) == 1:
-                return self._border_faces[0]
-            return np.unique(np.concatenate(self._border_faces))
+        if flatten:
+            return self._flatten_borders(self._border_faces)
 
         return self._border_faces
 
@@ -1238,10 +1336,44 @@ class MeshData(Data):
         samples:   int              = 10,
         tolerance: float            = 1e-4,
     ):
-        """returns a face area approximation"""
+        """
+        returns a face area approximation. Triangles and quads are measured
+        by the given method; an n-gon, which has no patch to integrate, is
+        measured as the triangles it triangulates into, whatever the method.
+        A repeated corner (an edge of length 0) is dropped first, and an n-gon
+        that comes back through one vertex is measured as the region the
+        loops it makes there enclose: a loop beside another adds to it (a
+        bowtie, a figure 8, whichever way each lobe turns), a loop inside
+        another wound against it is a hole and is taken off (a keyhole, a
+        hole touching a corner), and one wound with it adds nothing, its
+        region enclosed already. An n-gon whose points lie on one line cannot
+        be triangulated: its area is 0, as a flat triangle's or quad's is.
+        AreaMethod.TRIANGULATE measures the triangles triangulate() makes of
+        the whole mesh, so it raises on most of these: where triangulate()
+        raises (points on one line, a repeated corner, many faces that come
+        back through a vertex) and on an n-gon it makes no triangle of (a
+        loop walked twice). The triangles it does make of such a face need
+        not cover the region above; they are what it measures.
+        """
         method = AreaMethod(method)
-        if method != AreaMethod.TRIANGULATE:
-            _require_no_ngons("get_face_areas", self.counts)
+
+        # n-gons measured apart, every other face as asked
+        ngons = self.counts > 4
+        if np.any(ngons) and method != AreaMethod.TRIANGULATE:
+            areas  = self._get_ngon_areas()
+            others = ~ngons
+            if np.any(others):
+                faces = type(self)(
+                    indices = self.indices[np.repeat(others, self.counts)],
+                    counts  = self.counts[others],
+                    points  = self.points,
+                )
+                areas[others] = faces.get_face_areas(
+                    method    = method,
+                    samples   = samples,
+                    tolerance = tolerance,
+                )
+            return areas
 
         if method in (AreaMethod.ADAPTIVE, AreaMethod.QUADRATURE, AreaMethod.GAUSS):
             return integrate(
@@ -1283,6 +1415,16 @@ class MeshData(Data):
             # return areas as triangulated faces
             copy  = self.copy()
             rules = self.get_triangulate_rules(method="fast")
+
+            # an n-gon the triangulator makes no triangle of stays whole in
+            # the copy: it has no triangles to measure
+            whole = [face_id for face_id, local_tris in rules.ngon_tris.items() if len(local_tris) == 0]
+            if whole:
+                raise NotImplementedError(
+                    f"AreaMethod.TRIANGULATE: triangulate() makes no triangle of n-gon faces {whole}. "
+                    "Measure them with another AreaMethod."
+                )
+
             copy.triangulate(rules=rules)  # preserve_order=True keeps face order
             tri_areas = copy.get_face_areas(
                 samples   = samples,
@@ -1319,6 +1461,99 @@ class MeshData(Data):
         else:
             raise ValueError(f"Unknown area method: {method}")
 
+    def _get_ngon_areas(self) -> np.ndarray:
+        """
+        per face, an n-gon's area as the sum of the triangles it triangulates
+        into (2x2 Gauss, as AreaMethod.TRIANGULATE measures them), 0 elsewhere
+        and on an n-gon whose points lie on one line (no triangle to measure).
+        Its outer loop and holes are made simple loops first (_simple_loops):
+        when that leaves one outer loop and no vertex twice, the face is one
+        triangulation with its holes cut out, else each loop is measured
+        alone, the holes' areas taken off and the outer loops' counted as the
+        region they enclose (_loop_senses): a loop inside another wound
+        against it is a hole in it too (a keyhole, a hole touching a corner).
+        """
+        from cgmath.geometry._cdt import triangulate_ngon
+
+        face_holes = self._get_face_holes()
+        starts     = np.cumsum(self.counts) - self.counts
+        tris       = [np.empty((0, 3), dtype=np.int32)]
+        owner      = [np.empty(0, dtype=np.intp)]
+        signs      = [np.empty(0)]
+        for face_id in np.flatnonzero(self.counts > 4):
+            face_verts = self.indices[starts[face_id] : starts[face_id] + self.counts[face_id]]
+            holes      = face_holes.get(int(face_id), [])
+
+            # the outer loop is every corner that is on no hole
+            outer = face_verts
+            if holes:
+                outer = face_verts[~np.isin(face_verts, np.concatenate(holes))]
+
+            outers = [loop for loop in _simple_loops(list(outer)) if len(loop) > 2]
+            if not outers:
+                continue
+
+            inners = [loop for hole in holes for loop in _simple_loops(list(hole)) if len(loop) > 2]
+            ids    = [v for loop in outers + inners for v in loop]
+            if len(outers) == 1 and len(set(ids)) == len(ids):
+                pieces = [(outers[0], inners)]
+            else:
+                pieces = [(loop, []) for loop in outers + inners]
+
+            face_tris = []
+            for loop, cut in pieces:
+                try:
+                    local_tris = triangulate_ngon(self.points, loop, cut or None)
+                except QhullError:
+                    local_tris = np.empty((0, 3), dtype=np.intp)  # its points on one line, or all on one spot
+
+                # local ids count the loop's corners, then each hole's
+                loop_verts = np.array(loop + [v for hole in cut for v in hole])
+                face_tris.append(loop_verts[local_tris])
+
+            # measured loop by loop, the holes are taken off and the outer
+            # loops count as the region they enclose
+            senses = [1.0]
+            if len(pieces) > 1:
+                senses = _loop_senses(self.points, outers, face_tris[: len(outers)]) + [-1.0] * len(inners)
+
+            for face_tri, sense in zip(face_tris, senses):
+                if sense:
+                    tris.append(face_tri)
+                    owner.append(np.full(len(face_tri), face_id, dtype=np.intp))
+                    signs.append(np.full(len(face_tri), sense))
+
+        tris = np.concatenate(tris)
+        if tris.size == 0:
+            return np.zeros(self.counts.size)
+
+        tri_areas = integrate(self.points, tris, method="gauss") * np.concatenate(signs)
+        return np.bincount(np.concatenate(owner), weights=tri_areas, minlength=self.counts.size)
+
+    def _get_face_holes(self) -> dict:
+        """
+        each n-gon's hole loops from the hole metadata, {face id: [vertex ids
+        of a hole, ...]}. A hole counts only on an n-gon that lists all its
+        vertices, so metadata naming a face that is gone or is a triangle or
+        quad is ignored. Metadata that names another n-gon holding all of the
+        hole's vertices cannot be told from a real hole.
+        """
+        face_holes = {}
+        if self.hole_faces is None or self.hole_counts is None or self.hole_indices is None:
+            return face_holes
+
+        starts     = np.cumsum(self.counts) - self.counts
+        hole_loops = np.split(self.hole_indices, np.cumsum(self.hole_counts)[:-1])
+        for face_id, hole in zip(self.hole_faces, hole_loops):
+            face_id = int(face_id)
+            if not 0 <= face_id < self.counts.size or self.counts[face_id] <= 4:
+                continue
+            face_verts = self.indices[starts[face_id] : starts[face_id] + self.counts[face_id]]
+            if np.all(np.isin(hole, face_verts)):
+                face_holes.setdefault(face_id, []).append(hole)
+
+        return face_holes
+
     # --- normals
 
     def get_face_normals(self, force: bool = False) -> np.ndarray:
@@ -1336,62 +1571,64 @@ class MeshData(Data):
 
     def get_face_vertex_angles(self, force: bool = False) -> np.ndarray:
         """Compute vertex angles in radians as a per face per vertex array
-        matching `self.indices`.
+        matching `self.indices`. Each corner's angle lies between the edges
+        to its previous and next corner, on triangles, quads and n-gons alike.
+        On an n-gon with holes (``hole_faces``) the outer loop and each hole
+        loop wrap on themselves: a square hole's corners are 90 degrees.
 
         Args:
             force: If True, force recomputes the face vertex angles.
         """
-        _require_no_ngons("get_face_vertex_angles", self.counts)
         if self._face_vertex_angles is not None and not force:
             return self._face_vertex_angles
 
-        # ensure 4 max vert count per face (triangles only mesh will have 3 max vert count)
-        indices                              = np.ones((self.geometry.shape[0], 4), dtype=int) * -1
-        indices[:, : self.geometry.shape[1]] = self.geometry
+        # each corner's next and previous corner in the index stream, wrapping
+        # around its face (a hole, a count of 0, has no corner)
+        starts = np.cumsum(self.counts) - self.counts
+        faces  = np.flatnonzero(self.counts)
+        first  = starts[faces]
+        last   = first + self.counts[faces] - 1
+        corner = np.arange(self.indices.size)
 
-        # consider triangles as quads with a duplicated 4th edge to keep the code vectorized
-        i1 = np.where(
-            self.counts[:, None] > 3, indices[:, [1, 2, 3, 0]], indices[:, [1, 2, 0, 0]]
-        )
-        i0 = np.where(
-            self.counts[:, None] > 3, indices[:, [0, 1, 2, 3]], indices[:, [0, 1, 2, 2]]
-        )
-        vtx0 = self.points[i0]
-        vtx1 = self.points[i1]
+        next_corner        = corner + 1
+        next_corner[last]  = first
+        prev_corner        = corner - 1
+        prev_corner[first] = last
 
-        # compute each edge
-        e0, e1, e2, e3 = (vtx1 - vtx0).swapaxes(0, 1)
+        # a face with holes lists its outer loop, then each hole loop: each
+        # loop wraps on itself, not over the bridge to the next loop
+        for face_id, holes in self._get_face_holes().items():
+            face_corners = corner[starts[face_id] : starts[face_id] + self.counts[face_id]]
+            face_verts   = self.indices[face_corners]
+            outer        = np.ones(face_corners.size, dtype=bool)
+            loops        = []
+            for hole in holes:
+                in_hole = np.isin(face_verts, hole)
+                outer &= ~in_hole
+                loops.append(face_corners[in_hole])
+            loops.append(face_corners[outer])
+
+            for loop in loops:
+                next_corner[loop] = np.roll(loop, -1)
+                prev_corner[loop] = np.roll(loop, 1)
+
+        # the edge leaving each corner
+        edges = self.points[self.indices[next_corner]] - self.points[self.indices]
 
         # compute each edge length (einsum is ~10x faster than np.linalg.norm)
         with np.errstate(divide="ignore", invalid="ignore"):
-            l0 = np.einsum("...i,...i", e0, e0) ** 0.5
-            l1 = np.einsum("...i,...i", e1, e1) ** 0.5
-            l2 = np.einsum("...i,...i", e2, e2) ** 0.5
-            l3 = np.einsum("...i,...i", e3, e3) ** 0.5
+            lengths = np.einsum("...i,...i", edges, edges) ** 0.5
 
             # normalize each edge
-            e0 /= l0[:, None]
-            e1 /= l1[:, None]
-            e2 /= l2[:, None]
-            e3 /= l3[:, None]
+            edges /= lengths[:, None]
 
-            # compute dot products (einsum is ~10x faster than np.dot)
-            d0 = np.einsum("ij,ij->i", e0, 0 - e3)
-            d1 = np.einsum("ij,ij->i", e1, 0 - e0)
-            d2 = np.einsum("ij,ij->i", e2, 0 - e1)
-            d3 = np.einsum("ij,ij->i", e3, 0 - e2)
+            # dot the edge leaving each corner with the reversed edge arriving
+            # at it (einsum is ~10x faster than np.dot)
+            dots = np.einsum("ij,ij->i", edges, 0 - edges[prev_corner])
 
-            # compute angles and recompose geomety/angle matrix
-            angles = np.array([d0, d1, d2, d3]).T
-            angles = np.arccos(angles)
+            self._face_vertex_angles = np.arccos(dots)
 
-            # flatten to per face per vertex array, handle mix of quads/tris or just tris
-            if self.counts.max() > 3:
-                self._face_vertex_angles = angles[self.geometry >= 0]
-            else:
-                self._face_vertex_angles = angles[:, :3].ravel()
-
-            return self._face_vertex_angles
+        return self._face_vertex_angles
 
     def get_closest_points(
         self, points: np.ndarray, k: int = 1
@@ -1415,7 +1652,8 @@ class MeshData(Data):
         force:          bool              = False,
         _areas:         np.ndarray | None = None,
     ) -> np.ndarray:
-        """Computes vertex normals from face normals.
+        """Computes vertex normals from face normals, on triangles, quads and
+        n-gons alike.
 
         For reference, how maya calculates vertex normals:
         https://www.autodesk.com/support/technical/article/caas/sfdcarticles/sfdcarticles/How-Maya-computes-face-normals.html
@@ -1468,7 +1706,8 @@ class MeshData(Data):
         angle_weighted:  bool              = True,
         area_weighted:   bool              = True,
     ) -> None:
-        """Compute and store face-varying shading normals.
+        """Compute and store face-varying shading normals, on triangles, quads
+        and n-gons alike.
 
         These are independent from the geometric normals returned by
         ``get_vertex_normals()`` and ``get_face_normals()``.
@@ -1712,7 +1951,10 @@ class MeshData(Data):
     # --- edit mesh
 
     def delete_faces(self, faces, exclude=False):
-        """deletes faces at given face indices"""
+        """
+        deletes faces at given face indices. The hole metadata (hole_faces)
+        of the faces kept is renumbered with them; a deleted face's holes go.
+        """
         # find the reverse mapping and delete everyghing not in faces
         if not exclude:
             arange = np.arange(self.counts.size)
@@ -1721,12 +1963,37 @@ class MeshData(Data):
             faces = np.unique(faces)
             faces = faces[(faces >= 0) & (faces < self.face_count)]
 
-        f2v = self.f2v[faces]
-        idx = np.unique(f2v)
+        f2v  = self.f2v[faces]
+        idx  = np.unique(f2v)
+        kept = idx[idx >= 0]
+
+        # a kept face's holes, renumbered as the faces and points kept are
+        if self.hole_faces is not None and self.hole_counts is not None and self.hole_indices is not None:
+            # each hole's slice of hole_indices, cut as np.split cuts them and
+            # paired with hole_faces as zip pairs them
+            size   = self.hole_indices.size
+            cuts   = np.clip(np.cumsum(self.hole_counts, dtype=np.intp)[:-1], 0, size)
+            firsts = np.concatenate([[0], cuts]).astype(np.intp)
+            lasts  = np.maximum(np.concatenate([cuts, [size]]), firsts).astype(np.intp)
+            pairs  = min(self.hole_faces.size, firsts.size)
+
+            # a hole stays when its face and all its corners do
+            lost = np.concatenate([[0], np.cumsum(~np.isin(self.hole_indices, kept))])
+            keep = np.isin(self.hole_faces[:pairs], faces)
+            keep &= lost[lasts[:pairs]] == lost[firsts[:pairs]]
+
+            # the corners of the holes kept, slice after slice
+            firsts  = firsts[:pairs][keep]
+            counts  = lasts[:pairs][keep] - firsts
+            corners = np.arange(counts.sum()) + np.repeat(firsts - (np.cumsum(counts) - counts), counts)
+
+            self.hole_faces   = np.searchsorted(faces, self.hole_faces[:pairs][keep])
+            self.hole_counts  = counts
+            self.hole_indices = np.searchsorted(kept, self.hole_indices[corners])
 
         self.reset_cached_data()
         self.counts = self.counts[faces]
-        self.points = self.points[idx[idx >= 0]]
+        self.points = self.points[kept]
         _, self.indices = np.unique(f2v[f2v >= 0], return_inverse=True)
 
         # reset components
@@ -2527,7 +2794,8 @@ class MeshData(Data):
         with open(filename, "r") as f:
             for line in f.readlines():
                 if line.startswith("g "):
-                    name = line.split(" ")[1]
+                    tokens = line.split()
+                    name   = tokens[1] if len(tokens) > 1 else None
                     if name == "default":
                         name = None
 
@@ -2648,7 +2916,7 @@ class MeshData(Data):
         Returns:
             A MeshData object.
         """
-        mesh_api    = _pxr_module("UsdGeom").Mesh(prim)
+        mesh_api    = pxr().UsdGeom.Mesh(prim)
         vert_counts = np.array(_usd_value(mesh_api.GetFaceVertexCountsAttr(), []))
         vert_ids    = np.array(_usd_value(mesh_api.GetFaceVertexIndicesAttr(), []))
         points      = np.array(_usd_value(mesh_api.GetPointsAttr(), []))
@@ -2679,7 +2947,7 @@ class MeshData(Data):
             prim.SetTypeName(MESH_PRIM_TYPE)
 
         min_bbx, max_bbx = self.get_extent()
-        mesh_api = _pxr_module("UsdGeom").Mesh(prim)
+        mesh_api = pxr().UsdGeom.Mesh(prim)
         mesh_api.CreateFaceVertexCountsAttr().Set(self.counts)
         mesh_api.CreateFaceVertexIndicesAttr().Set(self.indices)
         mesh_api.CreatePointsAttr().Set(self.points)
@@ -2687,7 +2955,7 @@ class MeshData(Data):
 
         # write shading normals
         if self.normals is not None:
-            Sdf = _pxr_module("Sdf")
+            Sdf = pxr().Sdf
             attr = prim.CreateAttribute(
                 "primvars:normals",
                 Sdf.ValueTypeNames.Normal3fArray,
@@ -3361,7 +3629,10 @@ class MeshData(Data):
         maintain_ratio            = False,
         swap_uvs                  = False,
     ) -> UVData:
-        """creates an orthogonal projection of the mesh as a UVData object"""
+        """
+        creates an orthogonal projection of the mesh as a UVData object, with
+        its own copy of the mesh's indices and counts
+        """
 
         # if swap_uvs is True, swap the desired uv axes
         uv_axes = [0, 1]
@@ -3384,7 +3655,7 @@ class MeshData(Data):
             raise ValueError("Invalid projection axis.")
 
         # create the UVData object
-        uvdata = UVData(points=points, indices=self.indices, counts=self.counts)
+        uvdata = UVData(points=points, indices=self.indices.copy(), counts=self.counts.copy())
 
         # normalize the UVData object, if requested conserve spatial ratio
         bbx_min, bbx_max = uvdata.get_extent()
@@ -3419,9 +3690,12 @@ class UVData(MeshData):
     points: Array(np.float64, "N", 2)
     name:   str = "map1"
 
-    # render settings, under the resolution and antialias properties
+    # render settings, under the resolution and antialias properties: saved
+    # with the uvs, but two uv maps that only render differently are equal
     _resolution: Array(np.int32, 2) = numpy_array(np.array([2048, 2048], dtype=np.int32))
     _antialias:  bool = False
+
+    EQUALITY_TEST_IGNORE = ["name", "_resolution", "_antialias"]
 
     # --- cached attributes --- #
     _buffer   = None  # render buffer
@@ -4046,7 +4320,11 @@ class UVData(MeshData):
         resolution: int                     = 2048,
         tolerance:  float                   = 0.0,
     ):
-        """returns the self overlapping face indices over the given given UVData object"""
+        """
+        returns the self overlapping face indices over the given UVData object,
+        both rasterized at the given resolution. Neither UVData is changed:
+        each is drawn on a shallow copy with its own resolution and buffer.
+        """
 
         # issue a deprecation warning
         text = """
@@ -4060,12 +4338,16 @@ class UVData(MeshData):
         warnings.warn(text, DeprecationWarning)
 
         # rasterize the mask
-        uvdata.resolution = resolution
-        uvdata.draw_mask(indices=indices)
+        mask            = copy.copy(uvdata)
+        mask._renderer  = uvdata._renderer
+        mask.resolution = resolution
+        mask.draw_mask(indices=indices)
 
         # rasterize the faces
-        self.resolution = resolution
-        return self.draw_faces(mask=uvdata, tolerance=tolerance)
+        target            = copy.copy(self)
+        target._renderer  = self._renderer
+        target.resolution = resolution
+        return target.draw_faces(mask=mask, tolerance=tolerance)
 
     # -------------------------------- IMAGE I/O --------------------------------- #
 
@@ -4351,7 +4633,7 @@ class UVData(MeshData):
                         id_attr_name = f"{attr_name}:indices"
                         yield attr, prim.GetAttribute(id_attr_name)
 
-        mesh_api    = _pxr_module("UsdGeom").Mesh(prim)
+        mesh_api    = pxr().UsdGeom.Mesh(prim)
         vert_counts = _usd_value(mesh_api.GetFaceVertexCountsAttr(), [])
 
         data_list   = []
@@ -4385,7 +4667,7 @@ class UVData(MeshData):
             uv_set_id: An uv set index to write the UV data under.
             prim: A mesh prim to write the UV data to.
         """
-        Sdf      = _pxr_module("Sdf")
+        Sdf      = pxr().Sdf
         var_name = UV_ATTR_PREFIX if uv_set_id == 0 else f"{UV_ATTR_PREFIX}{uv_set_id}"
         attr = prim.CreateAttribute(
             var_name,

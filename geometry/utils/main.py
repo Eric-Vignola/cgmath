@@ -7,6 +7,7 @@ for improved performance on large datasets.
 
 from __future__ import annotations
 
+import importlib
 import numbers
 
 import numpy as np
@@ -21,11 +22,20 @@ try:
 except ImportError:
     _pxr = None
 
+# the USD modules pxr() hands out: a bare "import pxr" carries none of them,
+# so pxr() imports them when first called, not when this module loads
+_PXR_MODULES = ("Sdf", "Usd", "UsdGeom", "UsdSkel")
+
 
 def pxr():
-    """Returns the pxr module (USD) or raises an ImportError"""
+    """
+    Returns the pxr module (USD), its Sdf, Usd, UsdGeom and UsdSkel modules
+    imported, or raises an ImportError
+    """
     if _pxr is None:
         raise ImportError("USD not found.")
+    for name in _PXR_MODULES:
+        importlib.import_module(f"pxr.{name}")
     return _pxr
 
 

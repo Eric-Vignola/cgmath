@@ -1,3 +1,8 @@
+import importlib.util
+import os
+import subprocess
+import sys
+import textwrap
 import unittest
 
 import numpy as np
@@ -16,6 +21,10 @@ from cgmath.geometry.utils.main import (
 EPSILON = np.finfo(np.float32).eps
 
 
+# the folder holding the cgmath package, for a fresh interpreter to import it
+PROJECTS = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 def allclose(x, y, atol=EPSILON):
     return np.allclose(x, y, atol=atol)
 
@@ -32,6 +41,26 @@ class TestPxrFunction(unittest.TestCase):
         except ImportError as e:
             # If USD is not available, should raise ImportError with specific message
             self.assertIn("USD not found", str(e))
+
+    @unittest.skipIf(importlib.util.find_spec("pxr") is None, "USD is not installed")
+    def test_pxr_imports_its_modules(self):
+        """pxr() hands out Sdf, Usd, UsdGeom and UsdSkel without anything importing them first"""
+        script = textwrap.dedent(
+            """
+            import sys
+            from cgmath.geometry.utils import pxr
+
+            assert "pxr.UsdGeom" not in sys.modules
+            assert "pxr.UsdSkel" not in sys.modules
+            usd = pxr()
+            for name in ("Sdf", "Usd", "UsdGeom", "UsdSkel"):
+                assert getattr(usd, name).__name__ == "pxr." + name, name
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script], cwd=PROJECTS, capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class TestMatrixRowOverlaps(unittest.TestCase):

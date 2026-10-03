@@ -208,7 +208,7 @@ Each block below builds on the `cube` from the top of this page.
 ```python
 print(cube.point_count, cube.face_count, cube.edge_count)  # 8 6 12
 print(cube.closed, cube.quads, round(cube.area, 4))        # True 6 6.0
-print(cube.get_border_vertices(flatten=True))              # [] -- closed
+print(cube.get_border_vertices(flatten=True))              # [] -- closed, an empty int32 array
 print(cube.e2v.shape, cube.ue2v.shape)                     # (12, 2) deduped vs (24, 2) raw
 ```
 

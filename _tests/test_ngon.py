@@ -3,6 +3,7 @@ import unittest
 
 import numpy as np
 from cgmath.geometry.mesh import MeshData, UVList, skimage
+from cgmath.geometry.utils._numba._cdt import check_delaunay_violation
 
 
 class TestNgon(unittest.TestCase):
@@ -133,3 +134,30 @@ class TestNgon(unittest.TestCase):
         uv_data[0].resolution = 512
         uv_data[0].draw_mask()
         self.assertTrue(np.allclose(uv_data[0].buffer, self.expected_buffer))
+
+
+class TestDelaunayViolation(unittest.TestCase):
+    """The edge flip test of the n-gon triangulation."""
+
+    # four points on a circle of radius 1.5 (a 3-4-5 triangle's, scaled):
+    # edge (0, 2) with (1, 3) across it. 0.9 and 1.2 are not exact in binary,
+    # so the circle test of these cocircular points is rounding noise
+    COCIRCULAR = np.array([[1.5, 0.0], [0.9, 1.2], [-0.9, 1.2], [-1.5, 0.0]])
+
+    def test_cocircular_points_do_not_flip(self):
+        """a tie is not a violation, whatever its rounding noise, at any scale or offset"""
+        for scale in (1.0, 1e-3, 1e3):
+            for offset in (0.0, 0.1, 10.7):
+                with self.subTest(scale=scale, offset=offset):
+                    points = self.COCIRCULAR * scale + offset
+                    self.assertFalse(check_delaunay_violation(points, 0, 2, 1, 3))
+                    self.assertFalse(check_delaunay_violation(points, 1, 3, 0, 2))
+
+    def test_violations_still_flip(self):
+        """a point inside the circle by more than the tolerance is a violation"""
+        for inside in (0.5, 1e-6):
+            for scale in (1.0, 1e-3, 1e3):
+                with self.subTest(inside=inside, scale=scale):
+                    points = self.COCIRCULAR * scale
+                    points[3, 0] *= 1.0 - inside  # pulled in towards the centre
+                    self.assertTrue(check_delaunay_violation(points, 0, 2, 1, 3))

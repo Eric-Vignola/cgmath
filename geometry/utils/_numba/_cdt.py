@@ -56,14 +56,29 @@ def point_in_polygon_ray(px, py, poly_x, poly_y):
 
 @njit(cache=True)
 def check_delaunay_violation(pts, a, b, c, d):
-    """True if edge (a,b) violates Delaunay w.r.t. opposite vertices c, d."""
+    """True if edge (a,b) violates Delaunay w.r.t. opposite vertices c, d.
+
+    D must lie inside the circumcircle by more than a relative 1e-9 of the
+    determinant's own terms. Cocircular points (a tie) do not flip: their
+    rounding noise comes from the SVD flattening and varies by numpy build.
+    """
     pax, pay = pts[a, 0], pts[a, 1]
     pbx, pby = pts[b, 0], pts[b, 1]
     pcx, pcy = pts[c, 0], pts[c, 1]
     pdx, pdy = pts[d, 0], pts[d, 1]
     if orient2d(pax, pay, pbx, pby, pcx, pcy) < 0:
         pax, pay, pbx, pby = pbx, pby, pax, pay
-    return in_circumcircle(pax, pay, pbx, pby, pcx, pcy, pdx, pdy) > 0
+
+    # the size of the determinant's terms, which its rounding error scales with
+    adx, ady = pax - pdx, pay - pdy
+    bdx, bdy = pbx - pdx, pby - pdy
+    cdx, cdy = pcx - pdx, pcy - pdy
+    permanent = (
+        (adx * adx + ady * ady) * (abs(bdx * cdy) + abs(cdx * bdy))
+        + (bdx * bdx + bdy * bdy) * (abs(adx * cdy) + abs(cdx * ady))
+        + (cdx * cdx + cdy * cdy) * (abs(adx * bdy) + abs(bdx * ady))
+    )
+    return in_circumcircle(pax, pay, pbx, pby, pcx, pcy, pdx, pdy) > 1e-9 * permanent
 
 
 @njit(cache=True)

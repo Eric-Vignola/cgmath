@@ -19,11 +19,11 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 import numpy as np
 from cgmath.formats._fbx_io import open_fbx
 from cgmath.geometry._base import Array, Data, DataList
-from cgmath.geometry.mesh import _pxr_module
 from cgmath.geometry.utils import (
     balance_center_weights,
     blur,
     inpaint,
+    pxr,
     subdivide_catmull_clark,
 )
 from scipy.sparse import coo_matrix
@@ -119,7 +119,7 @@ class CompactSkinData(Data):
     @classmethod
     def from_prim(cls, prim: Any) -> "CompactSkinData":
         """Constructs a data object from a prim."""
-        binding_api = _pxr_module("UsdSkel").BindingAPI(prim)
+        binding_api = pxr().UsdSkel.BindingAPI(prim)
         infs        = prim.GetAttribute(JOINT_NAMES_ATTR).Get()
         inf_ids     = binding_api.GetJointIndicesAttr().Get()
         weights     = binding_api.GetJointWeightsAttr().Get()
@@ -143,7 +143,7 @@ class CompactSkinData(Data):
         """Streams data into a prim."""
         if not prim.GetTypeName():
             prim.SetTypeName(SKIN_PRIM_TYPE)
-        binding_api = _pxr_module("UsdSkel").BindingAPI(prim)
+        binding_api = pxr().UsdSkel.BindingAPI(prim)
         binding_api.CreateJointIndicesAttr(self.influence_indices)
         binding_api.GetJointIndicesPrimvar().SetElementSize(self.max_influences)
         binding_api.GetJointIndicesPrimvar().SetInterpolation("vertex")
@@ -151,7 +151,7 @@ class CompactSkinData(Data):
         binding_api.GetJointWeightsPrimvar().SetElementSize(self.max_influences)
         binding_api.GetJointWeightsPrimvar().SetInterpolation("vertex")
 
-        Sdf = _pxr_module("Sdf")
+        Sdf = pxr().Sdf
         prim.CreateAttribute(
             JOINT_NAMES_ATTR,
             Sdf.ValueTypeNames.TokenArray,
