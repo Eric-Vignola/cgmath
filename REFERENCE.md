@@ -474,7 +474,7 @@ get_parents(self) -> 'np.ndarray'
 get_roots(self) -> "'TransformList'"
     returns all contained nodes parented to the world
 index(self, obj, start=0, stop=None) -> 'int'
-    S.index(value, [start, [stop]]) -> integer -- return first index of value.
+    The position of a node, given as the node, its uuid or its name,
 insert(self, index: 'int', node: "'TransformData'") -> 'None'
     S.insert(index, value) -- insert value before index
 classmethod load_fbx(cls, filename: 'str', scale_factor: 'float' = 1.0)
@@ -660,7 +660,7 @@ classmethod from_dict(cls, data: dict) -> Any
 get(self, name: str, default: Any = None) -> Any
     the first item named ``name``, or ``default``
 index(self, value, start=0, stop=None)
-    S.index(value, [start, [stop]]) -> integer -- return first index of value.
+    The position of the first item named ``value``, searched from
 insert(self, index, value)
     S.insert(index, value) -- insert value before index
 classmethod load(cls, filename: str, mode: Optional[str] = None) -> Any

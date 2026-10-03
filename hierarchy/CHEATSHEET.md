@@ -120,8 +120,10 @@ str(node)           # 'hero'
 ## SRT channels
 
 Every vector channel is a read/write property returning a fresh float64
-`(3,)` array, plus three scalar per-axis accessors. A value that is not
-three long raises `ValueError`.
+`(3,)` array, plus three scalar per-axis accessors. One number sets all
+three, and a `(1, 3)` row, what a transforms function returns for one
+matrix, writes its row; any other value that is not three long raises
+`ValueError` naming the channel.
 
 ```python
 node.translate                    # array([0., 1., 0.])
@@ -132,6 +134,13 @@ node.translate                    # array([1., 5., 3.])
 node.rotate  = (0.0, 90.0, 0.0)    # degrees
 node.scale_z = 2.0
 node.scale                        # array([1., 1., 2.])
+node.scale   = [[1.0, 1.0, 2.0]]  # one (1, 3) row writes its row
+node.scale                        # array([1., 1., 2.])
+
+try:
+    node.translate = (1.0, 2.0)
+except ValueError as error:
+    print(error)                  # TransformData.translate must have shape (3,), got (2,)
 ```
 
 | Channel | Vector | Per-axis |
@@ -246,10 +255,32 @@ assert np.allclose(rig["knee"].world_matrix[3, :3], [5.0, 5.0, 5.0])
 ```
 
 Writing `matrix` / `world_matrix` decomposes into scale, rotate and
-translate, and resets `rotate_axis` to zero. Writing `quaternion` solves
-only `rotate`, keeping `rotate_axis` and `joint_orient`.
+translate, solving `rotate` around the `rotate_axis`, `joint_orient` and
+`segment_scale_compensate` the node already has, so the matrix reads back
+as written. A mirror goes on `scale_z`, the way Maya splits a matrix, and
+what a zero scale leaves of the rotation is kept from the current one.
+Writing `quaternion` solves only `rotate`, keeping `rotate_axis` and
+`joint_orient`. `set_parent()` and `match_matrix()` write through them
+too, so a reparented transform or locator keeps its `rotate_axis`, which
+`save_fbx` writes for joints only (see
+[Importers and exporters](#importers-and-exporters)).
 
 ```python
+knee              = rig["knee"]
+knee.rotate_axis  = (0.0, 0.0, 10.0)
+knee.joint_orient = (0.0, 30.0, 0.0)
+target            = TransformData("pose", rotate=(20.0, 0.0, 45.0), translate=(1.0, 2.0, 3.0)).matrix
+
+knee.world_matrix = target
+assert np.allclose(knee.world_matrix, target)
+assert np.allclose(knee.rotate_axis, [0.0, 0.0, 10.0])   # kept; rotate is solved
+assert np.allclose(knee.joint_orient, [0.0, 30.0, 0.0])
+
+mirror            = TransformData("mirror", rotate=(-45.0, -90.0, 0.0), scale=(-1.0, 1.0, 1.0)).matrix
+knee.world_matrix = mirror
+assert np.allclose(knee.world_matrix, mirror)
+assert np.allclose(knee.scale, [1.0, 1.0, -1.0])         # the mirror lands on z
+
 rig["hip"].quaternion = [0.0, 0.0, 0.0, 1.0]       # identity orientation
 assert np.allclose(rig["hip"].rotate, 0.0, atol=1e-9)
 ```
@@ -943,11 +974,16 @@ assert np.allclose(clip.frames.translate[..., 1], 0.0)
 
 ### Scoping to nodes
 
-A scoped axis addresses channels across **every** frame at once.
+A scoped axis addresses channels across **every** frame at once. One
+node's component reads back `(F, 1)`, and takes a flat list of `F` values
+as well.
 
 ```python
 clip.frames["knee"].translate.shape             # (6, 1, 3)
 clip.frames["knee"].translate = np.zeros((6, 1, 3))
+clip.frames["knee"].translate_y.shape           # (6, 1)
+clip.frames["knee"].translate_y = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+assert np.allclose(clip.frames.translate[:, 2, 1], np.arange(6.0))
 clip.frames[["root", "knee"]].rotate.shape      # (6, 2, 3)
 clip.frames[[0, 2]].rotate.shape                # (6, 2, 3) -- indices too
 
@@ -1142,7 +1178,7 @@ assert isinstance(clip, ClipData) and clip.frame_count == 1
 | `TransformList.load_glb` | `(filename, scale_factor=100.0, pose_frame=None)` |
 | `ClipData.load_fbx` | `(filename, scale_factor=1.0, take=None, fps=None, start_frame=None, end_frame=None)` |
 | `ClipData.load_glb` | `(filename, scale_factor=100.0, animation=0, fps=24.0, start_frame=0)` |
-| `TransformList.save_fbx` | `(filename, zero_root=False)` |
+| `TransformList.save_fbx` | `(filename, zero_root=False, as_ascii=False)` — binary unless `as_ascii` |
 
 `zero_root=True` writes the root joint with an identity transform, so the
 file carries the skeleton at the origin. Meshes and locators at the world
@@ -1150,6 +1186,30 @@ are left as they are; a skeleton with no root joint raises `ValueError`.
 
 ```python
 make_chain().save_fbx(os.path.join(WORKDIR, "flat.fbx"), zero_root=True)
+```
+
+`save_fbx` writes `rotate_axis` (and `joint_orient`) for joints only. A
+transform or locator holding a `rotate_axis` loses it in the file, so it
+reloads off by that rotation. A matrix write, `set_parent()`,
+`match_translate()` and `match_matrix()` all keep a node's `rotate_axis`.
+Fold it into `rotate` before saving: read `matrix`, zero `rotate_axis`,
+write `matrix` back.
+
+```python
+held = HierarchyData([
+    TransformData("arm", node_type="joint", rotate=(30.0, 0.0, 0.0)),
+    TransformData("prop", rotate_axis=(0.0, 0.0, 20.0), rotate=(10.0, 20.0, 30.0)),
+])
+held["prop"].set_parent("arm")                  # keeps rotate_axis
+world = held["prop"].world_matrix
+
+local                    = held["prop"].matrix
+held["prop"].rotate_axis = (0.0, 0.0, 0.0)      # fold it into rotate
+held["prop"].matrix      = local
+held.save_fbx(os.path.join(WORKDIR, "prop.fbx"))
+
+back = HierarchyData.load_fbx(os.path.join(WORKDIR, "prop.fbx"))
+assert np.allclose(back["prop"].world_matrix, world)
 ```
 
 `ClipData.save_fbx` writes one pose and no animation stack, so a
@@ -1169,7 +1229,11 @@ animated.frames[3:4].save_fbx(os.path.join(WORKDIR, "frame3.fbx"))
 
 For `load_glb`, `scale_factor` converts units (glTF is metres, so `100.0`
 gives centimetres); `pose_frame` reads one frame of the file's animation
-onto the rest pose.
+onto the rest pose. A node holding a mesh is not read as a joint, whatever
+its name, so a namespaced `ns:body` mesh neither loads as a joint nor
+hides a joint named `ns`. Nor does a mesh named like a joint lend that
+joint its animation: `pose_frame` and `ClipData.load_glb` read the joint's
+own channels, and a skin bound to the joint loads.
 
 glTF keys every property on its own timeline, so `load_glb` resamples
 the samplers onto a uniform grid at `fps` and runs the result through

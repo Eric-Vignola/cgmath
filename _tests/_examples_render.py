@@ -117,10 +117,10 @@ def _user_attributes(node: TransformData) -> None:
 
 
 def _every_channel(node: TransformData, rotate_order: int) -> None:
-    """the channels a set_parent() or look_at() rewrites (it re-solves the
-    local matrix, rotate_axis back to zero), set once the node sits in place,
-    and hidden; joint_orient to draw_style included: TransformData saves them
-    for every node type"""
+    """the channels set_parent() and look_at() leave alone (they re-solve
+    rotate around them), set once the node sits in place, and hidden;
+    joint_orient to draw_style included: TransformData saves them for every
+    node type"""
     node.rotate_order             = rotate_order
     node.rotate_axis              = [0.0, 5.0, 0.0]
     node.joint_orient             = [0.0, 0.0, 15.0]

@@ -122,6 +122,22 @@ def typed(**kwargs):
     return TypedDataClass(**values)
 
 
+@dataclass(repr=False, eq=False)
+class ShadedDataClass(Data):
+    """private array fields, one behind a public property of its own name"""
+
+    _color:  Array(np.float64, 3) = ImmutableArray([0.5, 0.5, 0.5])
+    _hidden: Array(np.float64, 3) = ImmutableArray([0.0, 0.0, 0.0])
+
+    @property
+    def color(self) -> np.ndarray:
+        return self._color
+
+    @color.setter
+    def color(self, value) -> None:
+        self._color = value
+
+
 class TestDataHelperFunctions(unittest.TestCase):
     """Test helper functions used by Data class"""
 
@@ -503,6 +519,21 @@ class TestArrayFields(unittest.TestCase):
             typed(points=np.zeros((3, 2)))
         with self.assertRaises(ValueError):
             typed().matrix = np.eye(3)
+
+    def test_a_private_field_is_named_by_its_public_property(self):
+        """the error names what the caller set, not the storage behind it"""
+        with self.assertRaisesRegex(
+            ValueError, r"^ShadedDataClass\.color must have shape \(3,\), got \(2,\)$"
+        ):
+            ShadedDataClass().color = (1.0, 2.0)
+
+        # no property of that name: the field keeps its own
+        with self.assertRaisesRegex(ValueError, r"^ShadedDataClass\._hidden must have shape"):
+            ShadedDataClass()._hidden = (1.0, 2.0)
+
+        # a public field is named as it is
+        with self.assertRaisesRegex(ValueError, r"^TypedDataClass\.points must have shape"):
+            typed(points=np.zeros((3, 2)))
 
     def test_an_empty_value_takes_the_declared_size(self):
         obj = typed(indices=[], points=[])
@@ -1145,6 +1176,35 @@ class TestDataListClass(unittest.TestCase):
         # Not found raises ValueError
         with self.assertRaises(ValueError):
             self.data_list.index("nonexistent")
+
+    def test_index_between_start_and_stop(self):
+        """a stop bounds the search the way list.index's does"""
+        self.assertEqual(self.data_list.index("obj2", 0, 3),   1)
+        self.assertEqual(self.data_list.index("obj3", 1, 3),   2)
+        self.assertEqual(self.data_list.index("obj3", stop=3), 2)
+
+        with self.assertRaises(ValueError):
+            self.data_list.index("obj3", 0, 2)  # past the stop
+        with self.assertRaises(ValueError):
+            self.data_list.index("obj1", 1)  # before the start
+
+    def test_index_counts_a_negative_bound_from_the_end(self):
+        """every start and stop finds what list.index finds, negative ones too"""
+        names = [x.name for x in self.data_list]
+        for name in names + ["obj9"]:
+            for start in range(-5, 6):
+                for stop in list(range(-5, 6)) + [None]:
+                    bounds = (start,) if stop is None else (start, stop)
+                    try:
+                        expected = names.index(name, *bounds)
+                    except ValueError:
+                        expected = ValueError
+                    with self.subTest(name=name, start=start, stop=stop):
+                        if expected is ValueError:
+                            with self.assertRaises(ValueError):
+                                self.data_list.index(name, start, stop)
+                        else:
+                            self.assertEqual(self.data_list.index(name, start, stop), expected)
 
     def test_sort(self):
         """Test sort() method"""

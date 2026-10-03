@@ -1279,7 +1279,7 @@ class Data:
         spec = specs.get(name)
         if spec is not None:
             if value is not None:
-                value = spec.coerce(value, f"{cls.__name__}.{name}")
+                value = spec.coerce(value, cls._field_label(name))
             super().__setattr__(name, value)
             return
 
@@ -1356,6 +1356,27 @@ class Data:
 
         cls._ARRAY_SPECS_CACHE = specs
         return specs
+
+    @classmethod
+    def _field_label(cls, name: str) -> str:
+        """
+        How an error names a field: ``Class.field``. A private field behind a
+        public property of its own name is named by the property, the one a
+        caller sets, so ``_base_color`` reads ``Object.base_color``. Cached
+        per class.
+        """
+        labels = cls.__dict__.get("_FIELD_LABELS_CACHE")
+        if labels is None:
+            labels                  = {}
+            cls._FIELD_LABELS_CACHE = labels
+
+        label = labels.get(name)
+        if label is None:
+            public = name[1:] if name.startswith("_") else name
+            if not isinstance(getattr(cls, public, None), property):
+                public = name
+            label = labels[name] = f"{cls.__name__}.{public}"
+        return label
 
     @classmethod
     def _allowed_public_attrs(cls) -> list:
@@ -1839,11 +1860,15 @@ class DataList(MutableSequence):
         return False
 
     def index(self, value, start=0, stop=None):
-        if stop is None:
-            stop = len(self)
-            for i, shape in enumerate(self.list[start:stop]):
-                if shape.name == value:
-                    return i + start
+        """
+        The position of the first item named ``value``, searched from
+        ``start`` up to ``stop`` the way ``list.index`` searches: a negative
+        bound counts from the end. ValueError when no item is.
+        """
+        start, stop, _ = slice(start, stop).indices(len(self))
+        for i in range(start, stop):
+            if self.list[i].name == value:
+                return i
         raise ValueError(f"{value} is not in list")
 
     def get(self, name: str, default: Any = None) -> Any:

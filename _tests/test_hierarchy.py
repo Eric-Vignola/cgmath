@@ -1,8 +1,10 @@
 import copy
+import itertools
 import os
 import pickle
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 from cgmath.formats.glb import pygltflib
@@ -12,6 +14,7 @@ from cgmath.transforms import (
     euler_to_matrix,
     euler_to_quaternion,
     matrix_multiply,
+    matrix_to_euler,
     matrix_to_quaternion,
     quaternion_conjugate,
     quaternion_multiply,
@@ -30,6 +33,7 @@ if pygltflib is not None:
         BufferView,
         FLOAT,
         GLTF2,
+        Mesh,
         Node,
         Scene,
     )
@@ -61,11 +65,13 @@ class TestHierarchy(unittest.TestCase):
     def test_serialize(self):
 
         skeleton = HierarchyData.load(self.skeleton_file)
- 
-        # save the data to disk
-        pkl_file  = skeleton.save("~/skeleton.pkl",  mode="pkl")
-        npz_file  = skeleton.save("~/skeleton.npz",  mode="npz")
-        json_file = skeleton.save("~/skeleton.json", mode="json")
+
+        # save the data to a scratch folder, never the user's home
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        pkl_file  = skeleton.save(os.path.join(tmp.name, "skeleton.pkl"),  mode="pkl")
+        npz_file  = skeleton.save(os.path.join(tmp.name, "skeleton.npz"),  mode="npz")
+        json_file = skeleton.save(os.path.join(tmp.name, "skeleton.json"), mode="json")
 
         # reload from their respective formats
         pkl  = HierarchyData.load(pkl_file,  mode="pkl")
@@ -240,6 +246,46 @@ class TestHierarchy(unittest.TestCase):
             default = np.asarray(getattr(TransformData, channel))
             self.assertEqual(default.dtype, np.float64)
 
+    def test_channel_write_with_the_wrong_length_names_the_channel(self):
+        # the constructor names the channel and the shape it needs; a write
+        # through the property has to say the same, not numpy's broadcast error
+        node = TransformData(name='a', translate=[1.0, 2.0, 3.0])
+
+        for channel in ('scale', 'rotate', 'translate', 'rotate_axis', 'joint_orient'):
+            message = rf'^TransformData\.{channel} must have shape \(3,\), got \(2,\)$'
+            with self.subTest(channel=channel):
+                with self.assertRaisesRegex(ValueError, message):
+                    setattr(node, channel, (1, 2))
+                with self.assertRaisesRegex(ValueError, message):
+                    TransformData(name='b', **{channel: (1, 2)})
+
+        # the refused write changed nothing, and one number still fills all three
+        self.assertTrue(np.allclose(node.translate, [1.0, 2.0, 3.0]))
+        node.scale = 2.0
+        self.assertTrue(np.allclose(node.scale, [2.0, 2.0, 2.0]))
+
+    def test_channel_write_takes_a_one_row_value(self):
+        # a transforms function returns a (1, 3) row for one matrix, and a
+        # channel write has always taken it, as numpy writes it into the (3,)
+        # channel; checking the length must not refuse it, nor one number
+        # held in a list or a (1,) array
+        matrix = euler_to_matrix(np.radians([10.0, 20.0, 30.0]), 0)[0]
+        node   = TransformData(name='a')
+
+        node.rotate = np.degrees(matrix_to_euler(matrix, 0))
+        self.assertTrue(np.allclose(node.rotate, [10.0, 20.0, 30.0]))
+
+        for value in ([5.0], np.array([5.0]), np.array([[5.0]]), np.array([[1.0, 2.0, 3.0]])):
+            with self.subTest(value=value):
+                node.translate = value
+                self.assertTrue(np.allclose(node.translate, np.ravel(value)))
+                self.assertEqual(node._translate.shape, (3,))
+
+        # a column is not a row: numpy can not write it, so the channel says so
+        message = r'^TransformData\.translate must have shape \(3,\), got \(3, 1\)$'
+        with self.assertRaisesRegex(ValueError, message):
+            node.translate = np.array([[1.0], [2.0], [3.0]])
+
     def test_building_from_another_hierarchy_keeps_every_node(self):
         # append takes ownership by removing the node from its previous
         # hierarchy, so extend has to iterate a snapshot; iterating the live
@@ -282,6 +328,29 @@ class TestHierarchy(unittest.TestCase):
 
         # hierarchy queries still resolve correctly after indexing
         self.assertTrue(node.get_parent() == 'shoulder_left_joint')
+
+    def test_index_by_node_or_uuid_counts_a_negative_bound_from_the_end(self):
+        # a node or its uuid is looked up apart from a name; every start and
+        # stop must find what list.index finds for all three, negative ones too
+        names = ['a', 'b', 'c', 'd']
+        rig   = HierarchyData([TransformData(name=n) for n in names])
+        other = HierarchyData([TransformData(name='e')])['e']
+
+        for name, node in [(n, rig[n]) for n in names] + [('e', other)]:
+            for start in range(-5, 6):
+                for stop in list(range(-5, 6)) + [None]:
+                    bounds = (start,) if stop is None else (start, stop)
+                    try:
+                        expected = names.index(name, *bounds)
+                    except ValueError:
+                        expected = ValueError
+                    for key in (node, node.uuid, name):
+                        with self.subTest(key=key, start=start, stop=stop):
+                            if expected is ValueError:
+                                with self.assertRaises(ValueError):
+                                    rig.index(key, start, stop)
+                            else:
+                                self.assertEqual(rig.index(key, start, stop), expected)
 
     def test_boolean_mask_indexing(self):
         # a boolean mask selects nodes by position; numpy booleans must not
@@ -630,6 +699,147 @@ class TestHierarchy(unittest.TestCase):
         # rotate_axis and joint_orient are untouched by the setter
         self.assertTrue(np.allclose(node.rotate_axis, [12.0, -7.0, 25.0]))
         self.assertTrue(np.allclose(node.joint_orient, [5.0, 10.0, -15.0]))
+
+    def test_matrix_setters_keep_rotate_axis(self):
+        # the local matrix is [S][RO][R][JO][IS][T]; writing matrix or
+        # world_matrix solves S, R and T around the RO, JO and IS the node
+        # already has, so what is written reads back and rotate_axis stays.
+        # a mirrored child (a negative scale) reads back as well
+        rng = np.random.default_rng(11)
+        grid = itertools.product(
+            range(6),
+            (None, [12.0, -30.0, 45.0]),
+            (None, [25.0, -10.0, 60.0]),
+            (False, True),
+            ([1.3, 0.8, 1.1], [-1.3, 0.8, 1.1]),
+        )
+        for order, joint_orient, rotate_axis, compensate, scale in grid:
+            parent = TransformData(
+                name      = 'p',
+                node_type = 'joint',
+                scale     = [1.5, 0.7, 2.0],
+                rotate    = [10.0, 20.0, -35.0],
+                translate = [1.0, 2.0, 3.0],
+            )
+            child = TransformData(
+                name='c',
+                node_type='joint',
+                parent_node='p',
+                rotate_order=order,
+                joint_orient=joint_orient,
+                rotate_axis=rotate_axis,
+                segment_scale_compensate=compensate,
+                scale=scale,
+                rotate=rng.uniform(-170.0, 170.0, 3),
+                translate=[0.5, -2.0, 1.0],
+            )
+            HierarchyData([parent, child])
+            axis   = child.rotate_axis
+            orient = child.joint_orient
+            world  = child.world_matrix
+            local  = child.matrix
+
+            for setter, target in (('world_matrix', world), ('matrix', local)):
+                with self.subTest(
+                    setter       = setter,
+                    order        = order,
+                    joint_orient = joint_orient,
+                    rotate_axis  = rotate_axis,
+                    compensate   = compensate,
+                    scale        = scale,
+                ):
+                    child.rotate    = rng.uniform(-170.0, 170.0, 3)
+                    child.scale     = [2.0, 2.0, 2.0]
+                    child.translate = [9.0, 9.0, 9.0]
+
+                    setattr(child, setter, target)
+
+                    self.assertTrue(np.allclose(getattr(child, setter), target, atol=1e-9))
+                    self.assertTrue(np.allclose(child.world_matrix, world, atol=1e-9))
+                    self.assertTrue(np.allclose(child.rotate_axis, axis))
+                    self.assertTrue(np.allclose(child.joint_orient, orient))
+                    self.assertEqual(child.segment_scale_compensate, compensate)
+
+    def test_matrix_setters_read_back_mirrors_and_zero_scales(self):
+        # a mirror is told by the sign of the determinant and goes on scale
+        # z, the way Maya splits a matrix, even at 90 degrees where an euler
+        # guess loses it. a zero scale leaves part of the rotation free: the
+        # node's current rotation fills it, where NaN or a miss came back
+        angles  = (-90.0, -45.0)
+        mirrors = ([1.0, 1.0, -1.0], [-1.0, 1.0, 1.0], [1.0, -1.0, 1.0], [-1.0, -1.0, -1.0])
+        zeros = (
+            [0.0, 0.8, 1.1],
+            [1.3, 0.0, -1.1],
+            [1.3, 0.8, 0.0],
+            [0.0, 0.0, 1.1],
+            [1.3, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        )
+        grid = itertools.product(
+            range(6),
+            (None, [10.0, 20.0, 30.0]),
+            mirrors + zeros,
+            itertools.product(angles, repeat=3),
+        )
+        misses = []
+        for order, rotate_axis, scale, rotate in grid:
+            target = TransformData(
+                name         = 's',
+                rotate_order = order,
+                rotate_axis  = rotate_axis,
+                scale        = scale,
+                rotate       = rotate,
+                translate    = [1.0, 2.0, 3.0],
+            ).matrix
+            node = TransformData(
+                name         = 'd',
+                rotate_order = order,
+                rotate_axis  = rotate_axis,
+                rotate       = [5.0, 6.0, 7.0],
+            )
+            before            = node.rotate_matrix
+            node.world_matrix = target
+
+            mirrored = np.prod(scale) < 0
+            if not (
+                np.allclose(node.world_matrix, target, atol=1e-9)
+                and np.allclose(node.rotate_axis, rotate_axis or 0.0)
+                and np.allclose(np.abs(node.scale), np.abs(scale))
+                and (not mirrored or np.array_equal(np.sign(node.scale), [1.0, 1.0, -1.0]))
+                and (np.any(scale) or np.allclose(node.rotate_matrix, before))
+            ):
+                misses.append((order, rotate_axis, scale, rotate))
+
+        self.assertEqual([], misses[:5], f"{len(misses)} writes miss")
+
+    def test_set_parent_keeps_rotate_axis(self):
+        # set_parent goes through the world_matrix setter: the node keeps its
+        # world matrix, and its rotate_axis with it
+        h = HierarchyData([
+            TransformData(
+                name      = 'a',
+                rotate    = [30.0, -45.0, 60.0],
+                scale     = [2.0, 2.0, 2.0],
+                translate = [1.0, 2.0, 3.0],
+            ),
+            TransformData(
+                name         = 'b',
+                node_type    = 'joint',
+                rotate_axis  = [15.0, 5.0, -20.0],
+                joint_orient = [0.0, 0.0, 30.0],
+                rotate       = [10.0, 20.0, 30.0],
+                translate    = [4.0, 0.0, 0.0],
+            ),
+        ])
+        world = h['b'].world_matrix
+
+        for parent in ('a', None):
+            with self.subTest(parent=parent):
+                h['b'].set_parent(parent)
+
+                self.assertTrue(np.allclose(h['b'].world_matrix, world, atol=1e-9))
+                self.assertTrue(np.allclose(h['b'].rotate_axis, [15.0, 5.0, -20.0]))
+                self.assertTrue(np.allclose(h['b'].joint_orient, [0.0, 0.0, 30.0]))
 
     def test_set_rotate_to_joint_orient_preserves_orientation(self):
         # consolidating rotation into joint_orient must preserve the overall
@@ -1784,6 +1994,148 @@ class TestLoadGlbDuplicateLeaves(unittest.TestCase):
         self.assertEqual([str(node.name) for node in rig], ["A", "A", "B"])
 
 
+@unittest.skipIf(pygltflib is None, "pygltflib is not installed")
+class TestLoadGlbMeshNodes(unittest.TestCase):
+    """a node holding a mesh is not a joint, whatever its name says
+
+    The loader used to match mesh nodes by the part of their name before the
+    first colon, which read a namespaced mesh as a joint and dropped a real
+    joint named like that namespace.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def write(self, nodes, roots, name="meshes.glb"):
+        gltf         = GLTF2()
+        gltf.scene   = 0
+        gltf.nodes   = nodes
+        gltf.meshes  = [Mesh(name="geo", primitives=[])]
+        gltf.scenes  = [Scene(nodes=roots)]
+        gltf.buffers = [Buffer(byteLength=4)]
+        gltf.set_binary_blob(b"\x00\x00\x00\x00")
+
+        path = os.path.join(self.tmp.name, name)
+        gltf.save(path)
+        return path
+
+    def test_a_namespaced_mesh_neither_loads_nor_hides_a_joint(self):
+        path = self.write(
+            [
+                Node(name="ns", translation=[0.0, 1.0, 0.0], children=[1]),
+                Node(name="ns:spine", translation=[0.0, 1.0, 0.0]),
+                Node(name="ns:body", mesh=0),
+            ],
+            roots=[0, 2],
+        )
+
+        rig = HierarchyData.load_glb(path, scale_factor=1.0)
+
+        self.assertEqual([str(node.name) for node in rig], ["ns", "ns:spine"])
+        self.assertEqual(str(rig["ns:spine"].get_parent().name), "ns")
+
+    def test_a_plain_mesh_is_still_skipped(self):
+        path = self.write(
+            [
+                Node(name="root", translation=[0.0, 1.0, 0.0]),
+                Node(name="body", mesh=0),
+            ],
+            roots=[0, 1],
+        )
+
+        rig = HierarchyData.load_glb(path, scale_factor=1.0)
+
+        self.assertEqual([str(node.name) for node in rig], ["root"])
+
+    def namesake(self):
+        """root -> head, plus a mesh node also named head listed before it
+
+        Both are keyed in translation, the mesh's channel last: the joint
+        from [0, 1, 0] to [7, 1, 0], the mesh from [0, 0, 0] to [0, 5, 0].
+        """
+        times = np.array([0.0, 1.0], dtype=np.float32)
+        joint = np.array([[0.0, 1.0, 0.0], [7.0, 1.0, 0.0]], dtype=np.float32)
+        mesh  = np.array([[0.0, 0.0, 0.0], [0.0, 5.0, 0.0]], dtype=np.float32)
+
+        views, blob = [], b""
+        for array in (times, joint, mesh):
+            views.append(
+                BufferView(buffer=0, byteOffset=len(blob), byteLength=array.nbytes)
+            )
+            blob += array.tobytes()
+
+        gltf       = GLTF2()
+        gltf.scene = 0
+        gltf.nodes = [
+            Node(name="root", translation=[0.0, 1.0, 0.0], children=[2]),
+            Node(name="head", mesh=0),
+            Node(name="head", translation=[0.0, 1.0, 0.0]),
+        ]
+        gltf.meshes      = [Mesh(name="geo", primitives=[])]
+        gltf.scenes      = [Scene(nodes=[0, 1])]
+        gltf.buffers     = [Buffer(byteLength=len(blob))]
+        gltf.bufferViews = views
+        gltf.accessors = [
+            Accessor(bufferView=0, componentType=FLOAT, count=2, type="SCALAR"),
+            Accessor(bufferView=1, componentType=FLOAT, count=2, type="VEC3"),
+            Accessor(bufferView=2, componentType=FLOAT, count=2, type="VEC3"),
+        ]
+        gltf.animations = [
+            Animation(
+                samplers=[
+                    AnimationSampler(input=0, output=1),
+                    AnimationSampler(input=0, output=2),
+                ],
+                channels=[
+                    AnimationChannel(
+                        sampler = 0,
+                        target  = AnimationChannelTarget(node=2, path="translation"),
+                    ),
+                    AnimationChannel(
+                        sampler = 1,
+                        target  = AnimationChannelTarget(node=1, path="translation"),
+                    ),
+                ],
+            )
+        ]
+        gltf.set_binary_blob(blob)
+
+        path = os.path.join(self.tmp.name, "namesake.glb")
+        gltf.save(path)
+        return path
+
+    def test_pose_frame_reads_the_joint_not_a_mesh_of_its_name(self):
+        """the pose looked channels up by name, so the mesh's key, read
+        last, overwrote the joint's
+        """
+        path = self.namesake()
+
+        for frame, want in ((0, [0.0, 1.0, 0.0]), (1, [7.0, 1.0, 0.0])):
+            with self.subTest(pose_frame=frame):
+                rig = HierarchyData.load_glb(path, scale_factor=1.0, pose_frame=frame)
+
+                self.assertEqual([str(node.name) for node in rig], ["root", "head"])
+                self.assertTrue(
+                    np.allclose(rig["head"].translate, want), rig["head"].translate
+                )
+
+
+class TestSerializeStaysOutOfHome(unittest.TestCase):
+    """test_serialize used to save skeleton.pkl, .npz and .json into ~"""
+
+    def test_nothing_lands_in_the_home_folder(self):
+        with tempfile.TemporaryDirectory() as home:
+            # expanduser reads HOME on posix and USERPROFILE on windows
+            with mock.patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
+                result = unittest.TestResult()
+                TestHierarchy("test_serialize").run(result)
+
+            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+            self.assertEqual(os.listdir(home), [])
+
+
 class TestTransformListCopy(unittest.TestCase):
     """a copy holds new nodes that no hierarchy owns, so it owns them itself
 
@@ -2245,6 +2597,28 @@ class TestUserAttributes(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = HierarchyData([node]).save(os.path.join(tmp, "rig.json"))
             self.assertEqual(HierarchyData.load(path)["root"].heroHeight, 2.5)
+
+    def test_none_stores_an_empty_dict(self):
+        """the field is a dict; None means no attributes, never None itself"""
+        node                         = self.node()
+        node.user_defined_attributes = None
+        self.assertEqual(node.user_defined_attributes, {})
+
+        # and every reader takes it as the dict it is
+        node.add_user_attribute("hero", 1.0)
+        self.assertEqual(node.hero, 1.0)
+
+        rig = HierarchyData([TransformData("a"), TransformData("b")])
+        for each in rig:
+            each.user_defined_attributes = None
+        rig.add_user_attribute("tag", 2)
+        self.assertEqual(rig.tag, [2, 2])
+        self.assertIn("tag", dir(rig))
+
+        # a tree that holds None, as an older file can, loads as {}
+        tree                            = TransformData("c").to_dict()
+        tree["user_defined_attributes"] = None
+        self.assertEqual(TransformData.from_dict(tree).user_defined_attributes, {})
 
 
 class TestNodeType(unittest.TestCase):

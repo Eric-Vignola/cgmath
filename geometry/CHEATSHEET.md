@@ -317,6 +317,8 @@ print(len(meshes), meshes)
 print(meshes[0].name)                           # by position
 print(meshes["boxB"].name)                      # by name
 print(meshes.index("boxB"))                     # name -> position
+print(meshes.index("boxB", 1, 2))               # searched from start up to stop
+print(meshes.index("boxB", -1))                 # a negative bound counts from the end -> 1
 print("boxA" in meshes)                         # membership by name
 
 print([m.name for m in meshes[[1, 0]]])         # fancy indexing -> MeshList
@@ -374,7 +376,10 @@ print(is_ndarray_annotation("np.ndarray"), is_ndarray_annotation("int"))
 
 `Array(dtype, *shape)` declares an array field: an int fixes a dimension, a
 name leaves it free. A wrong fixed dimension raises `ValueError`, and an empty
-value takes the declared trailing size.
+value takes the declared trailing size. The error names the field the way it
+is set: a private `_field` behind a public property of the same name reads as
+the property, so `Object(base_color=(1, 2))` says
+`Object.base_color must have shape (3,), got (2,)`.
 
 ```python
 from cgmath.geometry._base import Array

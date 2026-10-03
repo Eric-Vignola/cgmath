@@ -9,7 +9,7 @@ from typing import Any, List, Optional, Union
 
 import numpy as np
 from cgmath.formats._fbx_io import open_fbx
-from cgmath.formats.glb import load_gltf, load_model
+from cgmath.formats.glb import load_model
 from cgmath.geometry import Data, DataList, ImmutableArray as numpy_array
 from cgmath.geometry._base import Array, _mask_to_indices
 from cgmath.transforms import (
@@ -104,22 +104,59 @@ def _duplicate_leaf(node, nodes) -> bool:
     return bool(node.name) and node.name == nodes[node.parent_index].name
 
 
+def _glb_node_type(node, nodes) -> Optional[str]:
+    """the node type ``load_glb`` reads a glb node as, None for one it skips
+
+    A momentum file says what each node is, and only its joints and locators
+    are kept. Anything else is read style2: every node is a joint but one
+    holding a mesh. That node is told by its mesh, not its name: a namespaced
+    name such as "ns:body" says nothing about what the node holds.
+    """
+    if (
+        not node.name
+        or node.skin is not None
+        or node.name == "RootNode"
+        or _duplicate_leaf(node, nodes)
+    ):
+        return None
+
+    # momentum skeleton, only keep joints and locators
+    if node.extensions and "FB_momentum" in node.extensions:
+        momentum = node.extensions["FB_momentum"]
+        if "limitOrigin" in momentum:
+            return None
+        if momentum["type"] == "skeleton_joint":
+            return "joint"
+        if momentum["type"] == "locator":
+            return "locator"
+        return None
+
+    # style2, everything's a joint but a node holding a mesh
+    return "joint" if node.mesh is None else None
+
+
 def _glb_columns(model, rig, filename: str) -> dict:
     """pairs a glb's node indexes with the rows of a rig read from it
 
     A file addresses nodes by index, and it can hold two nodes under the same
     name -- a rig exported once per mesh carries the whole skeleton twice --
     so the pairing is positional rather than by name. The rig is built from
-    the same parent first walk of the file and only drops nodes, so walking
-    that order pairs them, and names are read to confirm the walk stayed in
-    step rather than to do the matching.
+    the same parent first walk of the file and only drops the nodes
+    ``_glb_node_type`` skips, so walking that order over the nodes it keeps
+    pairs them, and names are read to confirm the walk stayed in step rather
+    than to do the matching. A skipped node never takes a row: a mesh named
+    like a joint would otherwise hand that joint its animation.
     """
     column    = {}
     cursor    = 0
     rig_names = list(rig.name)
 
     for index in model.ordered_node_indexes:
-        if cursor < len(rig_names) and model.nodes[index].name == rig_names[cursor]:
+        node = model.nodes[index]
+        if _glb_node_type(node, model.nodes) is None:
+            continue
+
+        if cursor < len(rig_names) and node.name == rig_names[cursor]:
             column[index] = cursor
             cursor += 1
 
@@ -205,6 +242,50 @@ def _rotation(matrix: np.ndarray) -> np.ndarray:
     matrix[..., :3, :3] = block / magnitude[..., None]
     matrix[..., 3, :3]  = 0.0
     return matrix
+
+
+def _scale_and_rotation(block: np.ndarray, current: np.ndarray) -> tuple:
+    """splits a 3x3 [S][Q] block into its signed scale S and rotation Q
+
+    each row of the block is a scale times a row of Q, so the row lengths
+    are the scale. a mirror (a negative determinant) goes on scale z, the
+    way Maya splits a matrix. a zero scale flattens its row, so the block
+    says nothing of where that row points: it comes from ``current``, the
+    orientation the node has now, squared to the rows the block does set.
+    """
+    scale = np.einsum("...i,...i", block, block) ** 0.5
+    held  = scale > 1e-12 * scale.max()
+
+    if held.all():
+        if np.linalg.det(block) < 0:
+            scale[2] = -scale[2]
+        return scale, block / scale[:, None]
+
+    rotation       = np.array(current, dtype=float)
+    rotation[held] = block[held] / scale[held, None]
+
+    if held.sum() == 2:
+        # one zero scale: its row closes the right handed frame
+        i           = np.flatnonzero(~held)[0]
+        rotation[i] = np.cross(rotation[(i + 1) % 3], rotation[(i + 2) % 3])
+
+    elif held.sum() == 1:
+        # two zero scales: the current row that leans least on the held one
+        # is squared to it, and the last row closes the right handed frame
+        i = np.flatnonzero(held)[0]
+        j, k = (i + 1) % 3, (i + 2) % 3
+        u = rotation[i]
+        if abs(np.dot(rotation[j], u)) <= abs(np.dot(rotation[k], u)):
+            v           = rotation[j] - np.dot(rotation[j], u) * u
+            rotation[j] = v / np.linalg.norm(v)
+            rotation[k] = np.cross(u, rotation[j])
+        else:
+            v           = rotation[k] - np.dot(rotation[k], u) * u
+            rotation[k] = v / np.linalg.norm(v)
+            rotation[j] = np.cross(rotation[k], u)
+
+    # three zero scales leave the current orientation as it is
+    return scale, rotation
 
 
 def _axis_permutation(axis0: int, axis1: int, negate: bool) -> np.ndarray:
@@ -472,7 +553,7 @@ def _declares(cls: type, name: str) -> bool:
 
 def _has_user_attr(node: "TransformData", name: str) -> bool:
     """whether ``node`` has a user attribute ``name`` a built-in does not hide"""
-    attrs = node.user_defined_attributes or {}
+    attrs = node.user_defined_attributes
     return name in attrs and not node._is_builtin_attr(name)
 
 
@@ -649,8 +730,28 @@ class TransformData(Data):
         The write is in place, so a channel bound to a view keeps writing
         through it. The class level default is one array the class shares,
         so a node ever left holding it takes its own copy first.
+
+        A value is written the way numpy writes into a (3,) array: one number
+        sets all three components, and a (1, 3) row, the shape a transforms
+        function returns for one matrix, writes its row. A value numpy can
+        not write there raises ValueError naming the channel, as the field
+        does, rather than numpy's broadcast error.
         """
-        value   = np.asarray(value, dtype=float)
+        cls   = type(self)
+        spec  = cls._array_specs()[name]
+        label = cls._field_label(name)
+        try:
+            value = np.asarray(value, dtype=float)
+        except ValueError as error:
+            raise ValueError(f"{label}: {error}") from None
+
+        shaped = np.empty(spec.shape)
+        try:
+            shaped[...] = value
+        except ValueError:
+            raise ValueError(f"{label} must have shape {spec.describe()}, got {value.shape}") from None
+
+        value   = shaped
         current = getattr(self, name)
 
         if not np.allclose(current, value):
@@ -1184,7 +1285,14 @@ class TransformData(Data):
 
     @world_matrix.setter
     def world_matrix(self, M: np.ndarray) -> None:
-        """set worldspace_matrix to this value, this will reset joint orient"""
+        """sets the world matrix, solving the local matrix under the parent
+
+        Scale, rotate and translate are solved; rotate_axis, joint_orient
+        and segment_scale_compensate are kept as they are, so a world matrix
+        the node can hold (one without shear) reads back as written. A
+        mirror goes on scale z, the way Maya splits a matrix, and what a
+        zero scale leaves of the rotation is kept from the current one.
+        """
         M = np.asarray(M, dtype=float).reshape(4, 4)
         if self._world_matrix is None or not np.allclose(self._world_matrix, M):
             W = self.get_parent_matrix()
@@ -1278,14 +1386,21 @@ class TransformData(Data):
 
     @matrix.setter
     def matrix(self, M: np.ndarray) -> None:
-        """sets the local transform matrix, this will reset joint orient"""
+        """sets the local transform matrix
+
+        Scale, rotate and translate are solved; rotate_axis, joint_orient
+        and segment_scale_compensate are kept as they are, so a matrix the
+        node can hold (one without shear) reads back as written. A mirror
+        goes on scale z, the way Maya splits a matrix, and what a zero scale
+        leaves of the rotation is kept from the current one.
+        """
         M = np.asarray(M, dtype=float).reshape(4, 4)
 
         # trigger the update only if the matrix has changed
         if not np.allclose(self.matrix, M):
-            # the local matrix is [S][RO][R][JO][IS][T]; rotate_axis (RO) is
-            # reset below, so strip the joint orient AND parent-scale-inverse
-            # factors (JO * IS) from the right to recover the pure [S][R] block.
+            # the local matrix is [S][RO][R][JO][IS][T]; strip the joint
+            # orient AND parent-scale-inverse factors (JO * IS) from the right
+            # to recover the [S][RO][R] block.
             # ignoring IS here corrupts the decomposition whenever the parent
             # has non-unit scale and this node is segment-scale-compensated.
             # NOTE: a true inverse is required -- IS carries a scale, so JO * IS
@@ -1295,27 +1410,23 @@ class TransformData(Data):
             IS = self.parent_scale_inverse_matrix
             B  = np.dot(M, np.linalg.inv(np.dot(JO, IS)))
 
-            # compute the scale from the [S][R] block (rotation preserves the
-            # row norms, so the row magnitudes are the scale)
-            scale = np.einsum("...i,...i", B[:3, :3], B[:3, :3]) ** 0.5
-
-            # compute the expected rotation matrix with no scale
-            B_ = euler_to_matrix(matrix_to_euler(B))[0]
-
-            # compute the sign to determine negative scale
-            sign = np.einsum("...i,...i", B[:3, :3], B_[:3, :3]) < 0
-            scale[sign] *= -1
+            # split the [S][RO][R] block into the signed scale and the
+            # orientation [RO][R]; the current one fills what a zero scale
+            # leaves out
+            RO      = self.rotate_axis_matrix
+            current = np.dot(RO, self.rotate_matrix)[:3, :3]
+            scale, rotation = _scale_and_rotation(B[:3, :3], current)
             self.scale = scale
 
-            # rotate (joint orient and parent scale are already stripped)
-            self.rotate = np.degrees(matrix_to_euler(B, self.rotate_order))[0]
+            # rotate: rotate_axis is kept, so R = inv(RO) * [RO][R], the way
+            # the quaternion setter solves it
+            RR          = np.eye(4)
+            RR[:3, :3]  = rotation
+            R           = np.dot(np.linalg.inv(RO), RR)
+            self.rotate = np.degrees(matrix_to_euler(R, self.rotate_order))[0]
 
             # translate
             self.translate = M[3, :3]
-
-            # reset joint_axis
-            # TODO: conserve rotate_axis
-            self.rotate_axis = np.zeros(3)
 
             # reset the branch cached world_matrix
             self._reset_branch_world_matrices()
@@ -1430,13 +1541,18 @@ class TransformData(Data):
     def __setattr__(self, name: str, value) -> None:
         """sets a user defined attribute the node has, as ``node.heroHeight =
         3.1416``, converted to its type; anything else goes to Data, which
-        raises on names the class does not declare"""
+        raises on names the class does not declare. ``user_defined_attributes
+        = None`` stores an empty dict."""
         if not name.startswith("_"):
             attrs = self.__dict__.get("user_defined_attributes")
             if attrs and name in attrs and not self._is_builtin_attr(name):
                 for spec, converted in _user_writes(attrs, name, value, self.name):
                     spec["value"] = converted
                 return
+
+        # no attributes is an empty dict, never None: every node holds its own
+        if name == "user_defined_attributes" and value is None:
+            value = {}
 
         try:
             super().__setattr__(name, value)
@@ -1459,7 +1575,7 @@ class TransformData(Data):
             raise ValueError(
                 f"{name!r} is a built-in attribute of {type(self).__name__}"
             )
-        if name in (self.user_defined_attributes or {}):
+        if name in self.user_defined_attributes:
             raise ValueError(f"{self.name} already has a user attribute {name!r}")
 
     def add_user_attribute(
@@ -1487,8 +1603,6 @@ class TransformData(Data):
         spec = _new_user_attr(
             value, attribute_type, keyable, enum_names, f"{self.name}.{name}"
         )
-        if self.user_defined_attributes is None:
-            self.user_defined_attributes = {}
         self.user_defined_attributes[name] = spec
 
 
@@ -1660,7 +1774,12 @@ class TransformList(DataList):
     def load_glb(
         cls, filename: str, scale_factor: float = 100.0, pose_frame: None | int = None
     ):
-        """primitive glb joint loader that supports style2 and momentum glbs"""
+        """primitive glb joint loader that supports style2 and momentum glbs
+
+        A node holding a mesh is not read as a joint, whatever its name, and
+        ``pose_frame`` leaves its channels out: a joint named like it keeps
+        its own pose.
+        """
 
         # make sure pygltflib is available
         if GLTF2 is None:
@@ -1671,62 +1790,31 @@ class TransformList(DataList):
 
         # parse the nodes and look for style2 or momentum joints
         data = load_model(filename)
-        gltf_data = load_gltf(
-            filename
-        )  # TODO this is a hack to weed out meshes, need to fix this in load_model
 
+        # None stands for a node skipped; _glb_columns skips the same ones
         node_list = []
         for node in data.nodes:
             node_list.append(None)
 
-            if (
-                node.name
-                and node.skin is None
-                and node.name != "RootNode"
-                and not _duplicate_leaf(node, data.nodes)
-            ):
-                new_node = {}
+            node_type = _glb_node_type(node, data.nodes)
+            if node_type is not None:
+                new_node              = {"name": node.name}
+                new_node["node_type"] = node_type
+                new_node["uuid"]      = generate_uuid()
 
-                # momentum skeleton, only keep joints and locators
-                if node.extensions and "FB_momentum" in node.extensions:
-                    if "limitOrigin" not in node.extensions["FB_momentum"]:
-                        if node.extensions["FB_momentum"]["type"] == "skeleton_joint":
-                            new_node              = {"name": node.name}
-                            new_node["node_type"] = "joint"
+                if node.scale:
+                    new_node["scale"] = node.scale
 
-                        elif node.extensions["FB_momentum"]["type"] == "locator":
-                            new_node              = {"name": node.name}
-                            new_node["node_type"] = "locator"
+                if node.rotation:
+                    new_node["rotate"] = node.rotation
 
-                # style2, everything's a joint
-                else:
-                    # Make sure this is not a mesh
-                    # TODO: this is a hack, need to fix this in load_model
-                    found = False
-                    for gltf_node in gltf_data.nodes:
-                        if gltf_node.mesh is not None and gltf_node.name is not None:
-                            if node.name == gltf_node.name.split(":")[0]:
-                                found = True
-                                break
-                    if not found:
-                        new_node              = {"name": node.name}
-                        new_node["node_type"] = "joint"
+                if node.translation:
+                    new_node["translate"] = node.translation
 
-                if "name" in new_node:
-                    new_node["uuid"] = generate_uuid()
-                    if node.scale:
-                        new_node["scale"] = node.scale
+                if node.children:
+                    new_node["children"] = node.children
 
-                    if node.rotation:
-                        new_node["rotate"] = node.rotation
-
-                    if node.translation:
-                        new_node["translate"] = node.translation
-
-                    if node.children:
-                        new_node["children"] = node.children
-
-                    node_list[-1] = new_node
+                node_list[-1] = new_node
 
         # convert the dict so it matches the TransformData class properties
         hierarchy_data = {}
@@ -1762,6 +1850,11 @@ class TransformList(DataList):
         if pose_frame is not None and data.animations:
             animation = data.animations[0]
             for channel in animation.channels:
+                # a node skipped has no row, and its name would pose a joint
+                # that shares it: a mesh named like a joint, say
+                if node_list[channel.node] is None:
+                    continue
+
                 node_name = data.nodes[channel.node].name
                 if node_name in hierarchy_data:
                     attribute = channel.path
@@ -1800,7 +1893,13 @@ class TransformList(DataList):
         return cls.from_dict(hierarchy_data)
 
     def save_fbx(self, filename, zero_root=False, as_ascii=False):
-        """saves the data to a .fbx file, binary unless as_ascii is set"""
+        """saves the data to a .fbx file, binary unless as_ascii is set
+
+        rotate_axis and joint_orient are written for joints only. A
+        transform or locator holding a rotate_axis (a matrix write or
+        set_parent() keeps it) loses it in the file; fold it into rotate
+        first by writing node.matrix back with rotate_axis zeroed.
+        """
 
         if FbxExporter is None:
             raise ImportError("fbx module not found")
@@ -1919,7 +2018,7 @@ class TransformList(DataList):
     def __dir__(self):
         names = set(super().__dir__())
         for node in self.__dict__.get("list", []):
-            names.update(node.user_defined_attributes or {})
+            names.update(node.user_defined_attributes)
         return sorted(names)
 
     def add_user_attribute(
@@ -1938,8 +2037,6 @@ class TransformList(DataList):
             spec  = _new_user_attr(value, attribute_type, keyable, enum_names, label)
             specs.append((node, spec))
         for node, spec in specs:
-            if node.user_defined_attributes is None:
-                node.user_defined_attributes = {}
             node.user_defined_attributes[name] = spec
 
     def _parent_first(self) -> List[int]:
@@ -2817,17 +2914,22 @@ class TransformList(DataList):
         return False
 
     def index(self, obj, start=0, stop=None) -> int:
+        """
+        The position of a node, given as the node, its uuid or its name,
+        searched from ``start`` up to ``stop`` the way ``list.index``
+        searches: a negative bound counts from the end. ValueError when no
+        node matches.
+        """
         if isinstance(obj, self.DATA_LIST_CLASS):
             obj = obj.uuid
 
         elif isinstance(obj, str) and not validate_uuid(obj):
             return super().index(obj, start=start, stop=stop)
 
-        if stop is None:
-            stop = len(self)
-        for i, shape in enumerate(self.list[start:stop]):
+        start, stop, _ = slice(start, stop).indices(len(self))
+        for i, shape in enumerate(self.list[start:stop], start):
             if shape.uuid == obj:
-                return i + start
+                return i
 
         raise ValueError("Object is not in NodeList")
 
@@ -3078,13 +3180,23 @@ def _frame_property(channel: str) -> property:
 
 
 def _frame_component(channel: str, axis: int) -> property:
-    """builds the x / y / z accessor for one framed channel"""
+    """builds the x / y / z accessor for one framed channel
+
+    One node reads back as (F, 1), and a flat list of F values writes it
+    the same way.
+    """
 
     def getter(self) -> np.ndarray:
         return np.ascontiguousarray(getattr(self, channel)[..., axis])
 
     def setter(self, value) -> None:
-        current            = np.array(getattr(self, channel))
+        current = np.array(getattr(self, channel))
+        value   = np.asarray(value, dtype=float)
+
+        frames, count = current.shape[:2]
+        if count == 1 and value.shape == (frames,):
+            value = value[:, None]
+
         current[..., axis] = value
         setattr(self, channel, current)
 
@@ -3536,6 +3648,8 @@ class ClipData(HierarchyData):
 
         A file with no animation gives a one frame clip rather than an
         error -- it is an accurate reading of a rig that does not move.
+        A channel on a node the rig does not read, such as a mesh, animates
+        nothing, even when a joint shares that node's name.
         """
         if fps <= 0.0:
             raise ValueError(f"fps must be positive, got {fps}")

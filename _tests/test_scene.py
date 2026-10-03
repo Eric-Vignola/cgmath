@@ -122,6 +122,24 @@ class TestSceneClasses(unittest.TestCase):
         expected = -np.array([5.0, 5.0, 5.0]) / np.linalg.norm([5.0, 5.0, 5.0])
         np.testing.assert_allclose(forward, expected, atol=1e-9)
 
+    def test_camera_look_at_keeps_rotate_axis(self):
+        """look_at writes world_matrix, which solves rotate around rotate_axis"""
+        cam = Camera(name="cam", translate=[5.0, 5.0, 5.0], rotate_axis=[0.0, 0.0, 20.0])
+        ref = Camera(name="ref", translate=[5.0, 5.0, 5.0])
+        cam.look_at((0.0, 0.0, 0.0))
+        ref.look_at((0.0, 0.0, 0.0))
+
+        np.testing.assert_allclose(cam.rotate_axis, [0.0, 0.0, 20.0])
+        np.testing.assert_allclose(cam.world_matrix, ref.world_matrix, atol=1e-9)
+
+    def test_object_shape_error_names_the_public_setting(self):
+        """base_color is stored as _base_color, but the caller set base_color"""
+        pattern = r"^Object\.base_color must have shape \(3,\), got \(2,\)$"
+        with self.assertRaisesRegex(ValueError, pattern):
+            Object(name="o", base_color=(1.0, 2.0))
+        with self.assertRaisesRegex(ValueError, pattern):
+            Object(name="o").base_color = (1.0, 2.0)
+
     def test_camera_default_view(self):
         pts = np.array([[-1, -1, -1], [1, 1, 1]], dtype=float)
         cam = Camera.default_view(pts)

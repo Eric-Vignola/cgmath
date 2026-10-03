@@ -23,6 +23,7 @@ if pygltflib is not None:
         BufferView,
         FLOAT,
         GLTF2,
+        Mesh,
         Node,
         Scene,
     )
@@ -867,6 +868,30 @@ class TestClipScopedFrames(unittest.TestCase):
         self.assertTrue(np.array_equal(got[:, 0, 0], self.block[:, 0, 0] + 100.0))
         self.assertTrue(np.array_equal(got[:, 1, 0], self.block[:, 1, 0]))
 
+    def test_one_node_takes_a_flat_list_of_frames(self):
+        """the read is (F, 1); a flat list of F values means the same thing"""
+        scoped = self.clip.frames["j2"]
+        values = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]
+
+        self.assertEqual(scoped.translate_y.shape, (6, 1))
+
+        for value in (values, np.array(values)):
+            with self.subTest(kind=type(value).__name__):
+                scoped.translate_y = value
+
+                got = self.clip.frames.translate
+                self.assertTrue(np.array_equal(got[:, 2, 1], values))
+                self.assertTrue(np.array_equal(got[:, 2, 0], self.block[:, 2, 0]))
+                self.assertTrue(np.array_equal(got[:, 1], self.block[:, 1]))
+
+        # the shape it reads back as still writes
+        scoped.translate_y = np.zeros((6, 1))
+        self.assertTrue(np.array_equal(self.clip.frames.translate[:, 2, 1], np.zeros(6)))
+
+        # a flat list of the wrong length is still refused
+        with self.assertRaises(ValueError):
+            scoped.translate_y = [1.0, 2.0]
+
     def test_every_channel_has_three_components(self):
         for channel in ("scale", "rotate", "translate", "rotate_axis", "joint_orient"):
             for axis in "xyz":
@@ -1406,6 +1431,107 @@ class TestClipLoadGlbNodeOrder(unittest.TestCase):
         self.assertAlmostEqual(
             float(translate[-1, names.index("mid"), 0]), 7.0, places=4
         )
+
+
+@unittest.skipIf(pygltflib is None, "pygltflib is not installed")
+class TestClipLoadGlbMeshNamesake(unittest.TestCase):
+    """a mesh node is no part of the rig, even when a joint shares its name
+
+    The rig skips the mesh and keeps the joint. Channels used to be paired
+    with rows by name over every node, so a mesh walked before the joint took
+    the joint's row: the joint played the mesh's animation and lost its own.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def build(self, mesh_first):
+        """root -> neck -> head, plus a mesh node also named head
+
+        The joint moves in x from 0 to 7, the mesh in y from 0 to 5. The
+        node array order is the order load_model walks the two in.
+        """
+        times = np.array([0.0, 1.0], dtype=np.float32)
+        joint = np.array([[0.0, 1.0, 0.0], [7.0, 1.0, 0.0]], dtype=np.float32)
+        mesh  = np.array([[0.0, 0.0, 0.0], [0.0, 5.0, 0.0]], dtype=np.float32)
+
+        head, prop = (3, 2) if mesh_first else (2, 3)
+
+        nodes       = [None] * 4
+        nodes[0]    = Node(name="root", translation=[0.0, 1.0, 0.0], children=[1])
+        nodes[1]    = Node(name="neck", translation=[0.0, 1.0, 0.0], children=[head])
+        nodes[head] = Node(name="head", translation=[0.0, 1.0, 0.0])
+        nodes[prop] = Node(name="head", mesh=0)
+
+        views, blob = [], b""
+        for array in (times, joint, mesh):
+            views.append(
+                BufferView(buffer=0, byteOffset=len(blob), byteLength=array.nbytes)
+            )
+            blob += array.tobytes()
+
+        gltf             = GLTF2()
+        gltf.scene       = 0
+        gltf.nodes       = nodes
+        gltf.meshes      = [Mesh(name="geo", primitives=[])]
+        gltf.scenes      = [Scene(nodes=[0, prop])]
+        gltf.buffers     = [Buffer(byteLength=len(blob))]
+        gltf.bufferViews = views
+        gltf.accessors = [
+            Accessor(
+                bufferView    = 0,
+                componentType = FLOAT,
+                count         = 2,
+                type          = "SCALAR",
+                min           = [0.0],
+                max           = [1.0],
+            ),
+            Accessor(bufferView=1, componentType=FLOAT, count=2, type="VEC3"),
+            Accessor(bufferView=2, componentType=FLOAT, count=2, type="VEC3"),
+        ]
+        gltf.animations = [
+            Animation(
+                samplers=[
+                    AnimationSampler(input=0, output=1, interpolation="LINEAR"),
+                    AnimationSampler(input=0, output=2, interpolation="LINEAR"),
+                ],
+                channels=[
+                    AnimationChannel(
+                        sampler = 0,
+                        target  = AnimationChannelTarget(node=head, path="translation"),
+                    ),
+                    AnimationChannel(
+                        sampler = 1,
+                        target  = AnimationChannelTarget(node=prop, path="translation"),
+                    ),
+                ],
+            )
+        ]
+        gltf.set_binary_blob(blob)
+
+        path = os.path.join(self.tmp.name, f"namesake_{int(mesh_first)}.glb")
+        gltf.save(path)
+        return path
+
+    def test_the_joint_plays_its_own_channel(self):
+        """either way round, and the mesh's curve lands on no node"""
+        want = np.stack([np.linspace(0.0, 7.0, 5), np.ones(5), np.zeros(5)], axis=1)
+
+        for mesh_first in (True, False):
+            with self.subTest(mesh_first=mesh_first):
+                clip = ClipData.load_glb(
+                    self.build(mesh_first), scale_factor=1.0, fps=4.0
+                )
+
+                names     = [str(node.name) for node in clip]
+                translate = np.array(clip.frames.translate)
+                head      = translate[:, names.index("head")]
+
+                self.assertEqual(names, ["root", "neck", "head"])
+                self.assertTrue(np.allclose(head, want), head.tolist())
+                self.assertFalse(np.isclose(translate[..., 1], 5.0).any())
 
 
 @unittest.skipIf(FBX is None, "fbx sdk is not installed")

@@ -300,6 +300,39 @@ class TestNaming(GlbSkinTest):
         with self.assertRaises(ValueError):
             load_glb(path)
 
+    def test_a_mesh_named_like_a_joint_leaves_the_joint_its_row(self):
+        """an unskinned prop named "spine" is walked before the joint "spine"
+
+        Pairing by name over every node gave the prop the joint's row, and the
+        skin bound to the joint then raised as bound to a node the rig did
+        not hold.
+        """
+        builder = Builder()
+        joints, weights = one_hot([0, 1, 1])
+        primitive = builder.primitive(triangle(), joints, weights)
+        prop      = builder.primitive(triangle(5.0))
+        binds     = builder.identity_binds(2)
+        path = builder.write(
+            self.path("namesake.glb"),
+            [
+                Mesh(primitives=[primitive], name="body"),
+                Mesh(primitives=[prop], name="prop"),
+            ],
+            [
+                Node(name="root", children=[3]),
+                Node(name="geo", mesh=0, skin=0),
+                Node(name="spine", mesh=1),
+                Node(name="spine"),
+            ],
+            [Skin(joints=[0, 3], inverseBindMatrices=binds)],
+            scene_nodes=[0, 1, 2],
+        )
+
+        skin = load_glb(path)[0]
+
+        self.assertEqual(skin.influences, ["root", "spine"])
+        np.testing.assert_allclose(skin.weights, [[1.0, 0.0], [0.0, 1.0], [0.0, 1.0]])
+
     def test_the_skin_carries_the_mesh_name(self):
         self.assertEqual(load_glb(self.decoy_file())[0].name, "body")
 
