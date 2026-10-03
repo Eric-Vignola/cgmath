@@ -64,9 +64,9 @@ BACK  = [4, 5, 6, 7]  # -Z face
 
 | Member | Kind | Shape | Notes |
 |---|---|---|---|
-| `points` | field | `(N, 3)` | rest pose, set by the constructor |
-| `transforms` | field | `(M, 4, 4)` | one rest matrix per constraint, grown by `attach()` |
-| `clusters` | field | `(M, K)` | point indices per constraint, `-1` padded |
+| `points` | field | `(N, 3)` | float64 rest pose, set by the constructor |
+| `transforms` | field | `(M, 4, 4)` | float64, one rest matrix per constraint, grown by `attach()` |
+| `clusters` | field | `(M, K)` | int32 point indices per constraint, `-1` padded |
 | `attach(transform, indices=None)` | method | — | append one constraint |
 | `update(target)` | method | — | set the deformed cloud, then `compute()` |
 | `compute()` | method | — | re-solve; raises if `valid` is `False` |
@@ -75,7 +75,7 @@ BACK  = [4, 5, 6, 7]  # -Z face
 | `translate` | property | `(M, 3)` | `matrix[:, 3, :3]` |
 | `rotate` | property | `(M, 3)` | euler **radians**, XYZ |
 | `scale` | property | `(M, 3)` | uniform, all three components equal |
-| `scale_offset` | property | `bool` | default `True`; setting it re-solves |
+| `scale_offset` | property | `bool` | default `True`, saved as the field `_scale_offset`; setting it re-solves once something is attached |
 
 ```python
 p = ProcrustesData(CUBE_POINTS)
@@ -90,13 +90,17 @@ print(p.matrix.shape, p.translate.shape, p.rotate.shape, p.scale.shape)
 
 ## Construction
 
-From a point array. Note `np.asarray` — an ndarray is **not** copied,
-`points` aliases what you passed in.
+From a point array. A float64 ndarray is **not** copied — `points`
+aliases what you passed in. Any other dtype becomes a new float64 array.
 
 ```python
 pts = CUBE_POINTS.copy()
 a   = ProcrustesData(pts)
 print(a.points is pts)          # True — same buffer
+
+pts32 = CUBE_POINTS.astype(np.float32)
+a32 = ProcrustesData(pts32)
+print(a32.points is pts32, a32.points.dtype)  # False float64 — converted
 ```
 
 From anything with a `.points` attribute (`MeshData`, `SkinData`, ...).
@@ -108,21 +112,29 @@ print(b.points is cube.points)  # False — copied
 print(np.allclose(b.points, CUBE_POINTS))
 ```
 
-From a nested list — `np.asarray` builds a fresh array.
+From a nested list — a fresh float64 array.
 
 ```python
 c = ProcrustesData([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
 print(c.points.shape)           # (3, 3)
 ```
 
-Fields are plain dataclass fields — you can fill `transforms` and
-`clusters` in bulk instead of calling `attach()` in a loop.
+Fields are dataclass fields — you can fill `transforms` and `clusters`
+in bulk instead of calling `attach()` in a loop. Every assignment is
+converted to the field's dtype (`clusters` int32, the others float64), and
+a wrong fixed dimension raises `ValueError`.
 
 ```python
 bulk            = ProcrustesData(CUBE_POINTS)
 bulk.transforms = matrix_identity(2)
 bulk.clusters   = np.array([FRONT, BACK])
 print(bulk.valid)               # True
+print(bulk.clusters.dtype)  # int32
+
+try:
+    bulk.transforms = np.eye(3)
+except ValueError:
+    print("a (3, 3) is not a stack of 4x4 matrices")
 ```
 
 ---
@@ -176,6 +188,19 @@ pivot[3, :3] = (0.0, 0.0, 1.0)          # 1 unit in front of the cube
 offset       = ProcrustesData(CUBE_POINTS)
 offset.attach(pivot, FRONT)
 print(offset.transforms[0][3, :3])      # [0. 0. 1.]
+```
+
+The matrix can be a nested list too. Anything that is not 4x4 raises
+`ValueError` and leaves the object as it was.
+
+```python
+listed = ProcrustesData(CUBE_POINTS)
+listed.attach(np.eye(4).tolist(), FRONT)
+print(listed.transforms.dtype)  # float64
+try:
+    listed.attach(np.eye(3), BACK)
+except ValueError:
+    print(listed.transforms.shape)  # (1, 4, 4) — not attached
 ```
 
 ---
@@ -352,15 +377,15 @@ off.scale_offset = True
 print(off.translate[0])              # [0. 0. 3.] again
 ```
 
-Because it re-solves, setting it on an object with nothing attached
-raises — attach first.
+With nothing attached there is nothing to re-solve: the flag is kept and
+the first solve uses it.
 
 ```python
 early = ProcrustesData(CUBE_POINTS)
-try:
-    early.scale_offset = False
-except RuntimeError as err:
-    print(err)                       # Cannot compute invalid ProcrustesData object
+early.scale_offset = False  # nothing attached yet, just stored
+early.attach(pivot)
+early.update(grown)
+print(early.translate[0])  # [0. 0. 1.] — offset unchanged
 ```
 
 Want the rotation without the baked scale? Normalize the output.
@@ -500,24 +525,33 @@ print(np.allclose(batch.translate, (1.0, 0.0, 0.0)))
 
 ## Serialization and copying
 
-`ProcrustesData` inherits the `Data` base, so the three fields
-round-trip through dicts, bytes and files. Cached results and the
-deformed cloud are **not** serialized — re-`update()` after loading.
+`ProcrustesData` inherits the `Data` base, so its fields — `points`,
+`transforms`, `clusters` and the `scale_offset` flag — round-trip
+through dicts, bytes and files. Cached results and the deformed cloud
+are **not** serialized — re-`update()` after loading.
+
+`to_dict()` names the class under `"__class__"` and leaves out a field
+equal to its default, so `_scale_offset` appears only when it is `False`.
 
 ```python
 import os
 import tempfile
 
 state = solve.to_dict()
-print(sorted(state))                 # ['clusters', 'points', 'transforms']
+print(sorted(state))                 # ['__class__', 'clusters', 'points', 'transforms']
 
 restored = ProcrustesData.from_dict(state)
 print(restored.valid)                # True
 restored.update(matrix_point_multiply(CUBE_POINTS, known))
 print(np.allclose(restored.matrix, solve.matrix))
+
+no_scale = solve.copy()
+no_scale.scale_offset = False
+print(sorted(no_scale.to_dict()))  # ['__class__', '_scale_offset', 'clusters', 'points', 'transforms']
+print(ProcrustesData.from_dict(no_scale.to_dict()).scale_offset)  # False
 ```
 
-`copy()` is a deep copy of the fields.
+`copy()` is a deep copy of the fields, `scale_offset` included.
 
 ```python
 clone = solve.copy()
@@ -525,7 +559,8 @@ print(clone is solve, clone == solve)     # False True
 ```
 
 Files: `.npz`, `.json` and `.pkl`, picked from the extension by
-`save()` / `load()`.
+`save()` / `load()`. All three hold the same tree, and each reads back
+with the same dtypes.
 
 ```python
 tmp = tempfile.mkdtemp()
@@ -533,7 +568,18 @@ tmp = tempfile.mkdtemp()
 for ext in ("npz", "json", "pkl"):
     path = solve.save(os.path.join(tmp, f"rivet.{ext}"))
     back = ProcrustesData.load(path)
-    print(ext, back.valid, back.points.shape, back.transforms.shape)
+    print(ext, back.valid, back.points.shape, back.transforms.shape, back.clusters.dtype)
+```
+
+`load()` returns the class the file names. Loading it through another
+class raises `TypeError`; a file saved by an older cgmath raises
+`LegacyFileError`.
+
+```python
+try:
+    MeshData.load(os.path.join(tmp, "rivet.npz"))
+except TypeError as err:
+    print(err)  # the data holds a ProcrustesData, not a MeshData
 ```
 
 The explicit per-format methods work too.
@@ -567,7 +613,7 @@ print(solve.to_json()[:80])
 ## Housekeeping
 
 `reset_cached_data()` drops the solved results and the deformed cloud but
-keeps the fields — the object stays `valid`.
+keeps the fields, `scale_offset` included — the object stays `valid`.
 
 ```python
 solve.reset_cached_data()
@@ -609,13 +655,13 @@ except AttributeError as err:
 | Gotcha | What happens |
 |---|---|
 | `ProcrustesData(points=..., transforms=..., clusters=...)` | `TypeError` — the constructor takes one positional `target` |
-| Passing an ndarray to the constructor | `points` aliases your array; pass `.copy()` if you will mutate it |
-| Passing a list to `attach()` | `TypeError` — the transform must be a `(4, 4)` ndarray |
-| First `attach()` | stores a view of your matrix; later ones copy. Pass a `.copy()` to be safe |
+| Passing a float64 ndarray to the constructor | `points` aliases your array; pass `.copy()` if you will mutate it. Any other dtype becomes a new float64 array |
+| Passing a matrix that is not 4x4 to `attach()` | `ValueError`; a nested list is accepted |
+| First `attach()` with a float64 ndarray | stores a view of your matrix; later ones, and other dtypes, copy. Pass a `.copy()` to be safe |
 | Reading `scale` before `compute()` | `AttributeError`; `matrix` / `rotate` / `translate` return `None` |
-| Setting `scale_offset` before `attach()` | `RuntimeError` — the setter re-solves |
 | Single-point cluster | `NaN` matrix (zero extent → `0/0` scale) |
 | Expecting shear or non-uniform scale back | not recoverable — orthogonal solve, uniform scale only |
 | `rotate` in degrees | it is **radians**; wrap in `np.degrees()` |
 | Loading a saved object and reading `matrix` | `None` until you `update()` or `compute()` again |
+| Loading a file saved by an older cgmath | `LegacyFileError` (a `ValueError`); rebuild the object and save it again |
 | Needing to remove a cluster | no `detach()`; rebuild, or assign `transforms` / `clusters` in bulk |

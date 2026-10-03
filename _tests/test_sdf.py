@@ -1,4 +1,7 @@
+import copy
 import os
+import pickle
+import tempfile
 import unittest
 
 import numpy as np
@@ -140,3 +143,106 @@ class TestSDFIgloo(unittest.TestCase):
         """Test that generated mesh is valid."""
         mesh = self._create_igloo()
         self.assertTrue(mesh.valid)
+
+
+class TestSDFPrimitiveSettings(unittest.TestCase):
+    """a primitive's shape settings are data: copies and files keep them"""
+
+    def setUp(self):
+        super().setUp()
+        self.primitives = [
+            SDFSphere(radius=2.5, translate=[1, 0, 0], name="ball"),
+            SDFBox(half_extents=[1, 2, 3], rotate=[0, 30, 0], name="crate"),
+            SDFCylinder(radius=0.3, height=4, axis=2, scale=[1, 2, 1], name="pipe"),
+        ]
+        self.field = DMCField(resolution=8)
+        for primitive in self.primitives:
+            self.field.add(primitive)
+
+        grid = np.linspace(-2, 2, 6)
+        self.X, self.Y, self.Z = np.meshgrid(grid, grid, grid, indexing="ij")
+
+    def assertSameShape(self, a, b):
+        self.assertIs(type(a), type(b))
+        for name in ("radius", "half_extents", "height", "axis"):
+            if hasattr(a, name):
+                self.assertTrue(np.array_equal(getattr(a, name), getattr(b, name)), name)
+        grid = (self.X, self.Y, self.Z)
+        self.assertTrue(np.allclose(a.sample(*grid), b.sample(*grid)))
+
+    def test_copy(self):
+        for primitive in self.primitives:
+            with self.subTest(primitive=primitive.name):
+                copy = primitive.copy()
+                self.assertSameShape(primitive, copy)
+
+                # a copy is not in the field: editing it leaves the field clean
+                self.assertIsNone(copy._field)
+                self.field.mesh_data
+                copy.translate = [5, 5, 5]
+                self.assertFalse(self.field._dirty)
+
+    def test_pickle(self):
+        for primitive in self.primitives:
+            with self.subTest(primitive=primitive.name):
+                self.assertSameShape(primitive, pickle.loads(pickle.dumps(primitive)))
+
+    def test_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for primitive in self.primitives:
+                for ext in ("pkl", "npz", "json"):
+                    with self.subTest(primitive=primitive.name, format=ext):
+                        f = os.path.join(temp_dir, f"{primitive.name}.{ext}")
+                        primitive.save(f)
+                        loaded = type(primitive).load(f)
+                        self.assertSameShape(primitive, loaded)
+                        self.assertTrue(loaded == primitive)
+
+    def test_settings_still_invalidate(self):
+        """the setters still mark the field dirty"""
+        sphere, box, cylinder = self.primitives
+        edits = [
+            (sphere, "radius", 1.0),
+            (box, "half_extents", [1, 1, 1]),
+            (cylinder, "radius", 1.0),
+            (cylinder, "height", 1.0),
+            (cylinder, "axis", 0),
+        ]
+        for primitive, name, value in edits:
+            with self.subTest(setting=f"{primitive.name}.{name}"):
+                self.field.mesh_data
+                self.assertFalse(self.field._dirty)
+                setattr(primitive, name, value)
+                self.assertTrue(self.field._dirty)
+
+    def test_a_copied_field_still_follows_its_primitives(self):
+        # its primitives are copies too: an edit must mark the copy dirty, not
+        # leave it showing the old mesh
+        self.field.mesh_data
+        for label, clone in (
+            ("deepcopy", copy.deepcopy(self.field)),
+            ("pickle", pickle.loads(pickle.dumps(self.field))),
+        ):
+            with self.subTest(label):
+                clone.mesh_data
+                self.assertFalse(clone._dirty)
+                clone._nodes[0].primitive.radius = 0.5
+                self.assertTrue(clone._dirty)
+                self.assertFalse(self.field._dirty)
+
+        # a shallow copy shares the original's primitives, which stay its own
+        shallow = copy.copy(self.field)
+        self.assertIs(shallow._nodes[0].primitive._field, self.field)
+
+    def test_settings_checked(self):
+        with self.assertRaises(ValueError):
+            SDFBox(half_extents=[1, 2])
+        with self.assertRaises(ValueError):
+            SDFCylinder(axis=3)
+        with self.assertRaises(ValueError):
+            self.primitives[2].axis = -1
+
+    def test_settings_are_floats(self):
+        sphere = SDFSphere(radius=1)
+        self.assertIs(type(sphere.radius), float)
+        self.assertEqual(SDFBox(half_extents=[1, 2, 3]).half_extents.dtype, np.float64)

@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from numbers import Number
 from typing import Any, List, Optional
 
 import numpy as np
-from cgmath.geometry._base import Data
-from cgmath.geometry.mesh import MeshData
+from cgmath.geometry._base import Array, Data
+from cgmath.geometry.mesh import _pxr_module, MeshData
 from cgmath.geometry.skin_weights import SkinData
-from cgmath.geometry.utils import pxr
 
 GEOM_SUBSET_PRIM_TYPE = "GeomSubset"
 VERT_MAP_PRIM_TYPE    = "VertFloatMap"
@@ -22,8 +20,8 @@ class GeomSubsetData(Data):
     """
 
     name:           str
-    indices:        np.ndarray
-    component_type: str = "v"  # v, f, e, etc
+    indices:        Array(np.int32)  # (N,); (N, 2) on surfaces, (N, 3) on lattices
+    component_type: str = "v"        # v, f, e, etc
     category:       Optional[str] = None
 
     EQUALITY_TEST_IGNORE = ["name"]
@@ -90,12 +88,12 @@ class GeomSubsetData(Data):
     @classmethod
     def from_prim(cls, prim: Any) -> "GeomSubsetData":
         """Constructs a data object from a prim."""
-        set_api = pxr().UsdGeom.Subset(prim)
+        set_api = _pxr_module("UsdGeom").Subset(prim)
         return cls(
             component_type = set_api.GetElementTypeAttr().Get()[0].lower(),
             indices        = np.array(set_api.GetIndicesAttr().Get()),
             name           = prim.GetName(),
-            category       = set_api.GetElementTypeAttr().Get() or None,
+            category       = set_api.GetFamilyNameAttr().Get() or None,
         )
 
     def to_prim(self, prim: Any) -> None:
@@ -109,7 +107,7 @@ class GeomSubsetData(Data):
         else:
             element_type = "edge"
 
-        set_api = pxr().UsdGeom.Subset(prim)
+        set_api = _pxr_module("UsdGeom").Subset(prim)
         set_api.CreateElementTypeAttr().Set(element_type)
         if self.category:
             set_api.CreateFamilyNameAttr().Set(self.category)
@@ -141,9 +139,9 @@ class MapData(Data):
     """
 
     name:           str
-    indices:        np.ndarray
-    values:         np.ndarray
-    default_value:  Number = 0
+    indices:        Array(np.int32, "N")
+    values:         Array(np.float64, "N")
+    default_value:  float = 0.0
     component_type: str = "v"  # v, f, e, etc
     categories:     Optional[List[str]] = None
 
@@ -151,7 +149,7 @@ class MapData(Data):
 
     def to_dense_array(self, component_count: int) -> np.ndarray:
         """Convert this object to a dense value array."""
-        array               = np.full((component_count,), self.default_value)
+        array               = np.full(component_count, self.default_value, dtype=np.float64)
         array[self.indices] = self.values
         return array
 
@@ -166,7 +164,9 @@ class MapData(Data):
             raise NotImplementedError(
                 "Converting non-vertex MapData to SkinData is not supported yet."
             )
-        weights                  = np.full((mesh_data.point_count, 1), self.default_value)
+        weights = np.full(
+            (mesh_data.point_count, 1), self.default_value, dtype=np.float64
+        )
         weights[self.indices, 0] = self.values
         return SkinData(weights=weights, influences=[influence])
 
@@ -197,16 +197,17 @@ class MapData(Data):
     # --- USD interface
 
     @classmethod
-    def from_prim(cls, prim: Any) -> "GeomSubsetData":
+    def from_prim(cls, prim: Any) -> "MapData":
         """Constructs a data object from a prim."""
         prim_type     = prim.GetTypeName()
         namespace     = prim_type[0].lower() + prim_type[1:]
-        default_value = prim.GetAttribute(f"{namespace}:default_value").Get()
+        default_value = prim.GetAttribute(f"{namespace}:defaultValue").Get()
         return cls(
-            name          = prim.GetName(),
-            indices       = np.array(prim.GetAttribute(f"{namespace}:indices").Get()),
-            values        = np.array(prim.GetAttribute(f"{namespace}:values").Get()),
-            default_value = 0.0 if default_value is None else default_value,
+            name           = prim.GetName(),
+            indices        = np.array(prim.GetAttribute(f"{namespace}:indices").Get()),
+            values         = np.array(prim.GetAttribute(f"{namespace}:values").Get()),
+            default_value  = 0.0 if default_value is None else float(default_value),
+            component_type = "f" if prim_type == FACE_MAP_PRIM_TYPE else "v",
         )
 
     def to_prim(self, prim: Any) -> None:
@@ -218,7 +219,7 @@ class MapData(Data):
             prim.SetTypeName(prim_type)
         namespace = prim_type[0].lower() + prim_type[1:]
 
-        Sdf  = pxr().Sdf
+        Sdf  = _pxr_module("Sdf")
         args = (False, Sdf.VariabilityVarying)
         attr = prim.CreateAttribute(
             f"{namespace}:indices", Sdf.ValueTypeNames.IntArray, *args

@@ -15,7 +15,7 @@ are reused everywhere below.
 | [`PatchRelaxData`](#patchrelaxdata--patch-aware-relaxation) | alpha, surface blend, mask, pinning |
 | [`SkinDeformData`](#skindeformdata--skeletal-skinning) | LBS / DQS, rigs, raw matrices, batching |
 | [`WrapData`](#wrapdata--rbf-wrap) | kernels, radius, geodesic radius, deform |
-| [Persistence](#persistence) | what survives `copy()` and what does not |
+| [Persistence](#persistence) | what `copy()` and `save()` keep, and two caveats |
 | [Gotchas](#gotchas) | the mistakes that cost an afternoon |
 
 ---
@@ -98,8 +98,8 @@ from cgmath.geometry.deform import (
 ```
 
 Every one of them subclasses `cgmath.geometry._base.Data`, so they all carry
-`.copy()`, `.to_dict()`, `.info()`, `.save()` / `.load()` — see
-[Persistence](#persistence) for which of those are actually useful per class.
+`.copy()`, `.to_dict()`, `.info()`, `.save()` / `.load()`, and all five
+round-trip ready to use — see [Persistence](#persistence) for what is saved.
 
 | Class | Rest geometry given to | Cache step | Evaluate with | Returns |
 |---|---|---|---|---|
@@ -207,7 +207,17 @@ hard                = ffd.update(deformed_lattice).points.copy()
 ffd.local_influence = 3               # scalar broadcasts to (3, 3, 3)
 soft                = ffd.update(deformed_lattice).points.copy()
 
-print(ffd.local_influence, np.abs(hard - soft).max() > 0)
+print(ffd.local_influence, np.abs(hard - soft).max() > 0)   # [3 3 3] True
+```
+
+It reads back as a read-only `(3,)` int32 array. Assign an int or three ints
+to change it; writing one element raises:
+
+```python
+try:
+    ffd.local_influence[0] = 4
+except ValueError as e:
+    print("as expected:", e)
 ```
 
 Changing it after `bind()` is free — no rebind needed.
@@ -250,7 +260,7 @@ except ValueError as e:
 
 ```python
 print("valid   ", ffd.valid)          # True once bind() ran
-print("cells   ", ffd.cells.shape)    # (N, 3) containing cell per point
+print("cells   ", ffd.cells.shape)    # (N, 3) int32 containing cell per point
 print("uvw     ", ffd.uvw.shape)      # (N, 3) parametric coords in that cell
 print("weights ", ffd.weights.shape)  # (N,) per-point deformation weight
 print("points  ", ffd.points.shape)   # (N, 3) last evaluated positions
@@ -288,7 +298,7 @@ Re-exported on `deform.ffd` from `cgmath.geometry.utils.main`.
 
 ```python
 from cgmath.geometry.deform.ffd import (
-    assign_cells,           # points + lattice -> (cells, uvw)
+    assign_cells,           # points + lattice -> (cells int32, uvw)
     bernstein_eval,         # cells + uvw + lattice delta -> displacement
     build_lattice_topology, # (lx, ly, lz) -> quad (indices, counts)
 )
@@ -1017,16 +1027,20 @@ print(np.round(kernel(np.array([[0.0, 0.5, 2.0]]), r=1.0), 3))
 
 Everything derives from `Data`, so `.info()`, `.to_dict()`, `.copy()`,
 `.to_bytes()` / `.from_bytes()` and `.save()` / `.load()` exist on all five.
-Whether a restored object is *usable* depends on whether its state lives in
-dataclass fields.
+All five round-trip ready to use: the settings and the arrays each operator
+needs are fields, so a copy, a pickle or a `.pkl` / `.npz` / `.json` file
+deforms like the original, without the mesh it was built from.
 
-| Class | Round-trips ready to use | Why |
+| Class | Saved | Rebuilt after a load |
 |---|---|---|
-| `SkinDeformData` | **yes** — deforms after `copy()` without its `SkinData` | weights, joints and matrices are all fields |
-| `WrapData` | **yes** — the solved system is a field | every knob is a field |
-| `FFDData` | geometry only | `outside`, `falloff_radius`, `local_influence` are not fields |
-| `DeltaMushData` | geometry only | `smooth_iterations`, `method`, `weight` are not fields |
-| `PatchRelaxData` | geometry only | `iterations`, `alpha`, `step_size`, `mask` scale are not fields |
+| `FFDData` | lattice, `outside`, `falloff_radius`, `local_influence`, the bind (`cells`, `uvw`, bound points) | per-point weights, at load |
+| `DeltaMushData` | rest points, neighbours, border vertices, first-face winding, every setting | smoothed rest and deltas, on the first `apply()` |
+| `PatchRelaxData` | rest points, 1-rings, border vertices, `mask`, every setting | decal maps and span weights, on the first `apply()` |
+| `SkinDeformData` | bind points, `joints`, inverse bind matrices, compacted weights, `method`, `name` | nothing |
+| `WrapData` | source, target, connectivity, kernel, radii, the pseudo-inverse | the right-hand side, on the first `deform()` |
+
+Files written by an older cgmath raise `LegacyFileError` and no longer load:
+rebuild the operator from its rest geometry and save it again.
 
 ```python
 import pickle, tempfile, os
@@ -1044,22 +1058,50 @@ deformer.save(path)                          # .json | .npz | .pkl by extension
 print(SkinDeformData.load(path).joints)
 ```
 
-The caveat, made concrete — rebuild these operators rather than reloading them:
+FFD, Delta Mush and patch relax keep their settings:
 
 ```python
 ffd_clone = ffd.copy()
-print("FFD copy loses tuning:", ffd_clone.outside, ffd_clone.local_influence)
+print(ffd_clone.outside, ffd_clone.local_influence, ffd_clone.valid)
+assert np.allclose(ffd_clone.update(deformed_lattice), ffd.update(deformed_lattice).points)
 
 mush_clone = mush.copy()
-print("mush copy loses tuning:", mush_clone.method, mush_clone.smooth_iterations)
+print(mush_clone.method, mush_clone.smooth_iterations)
+assert np.allclose(mush_clone.apply(noisy).points, mush.apply(noisy).points)
+
+relax_clone = PatchRelaxData.from_bytes(relaxer.to_bytes())
+print(relax_clone.iterations, relax_clone.alpha, relax_clone.surface_blend)
+assert np.allclose(relax_clone.relax(noisy.points), relaxer.relax(noisy.points))
 ```
 
-`WrapData` does survive intact:
+`WrapData` keeps its pseudo-inverse, so a copy only re-solves the right-hand
+side:
 
 ```python
 wrap_clone = wrap.copy()
 assert np.allclose(wrap_clone.deform(dense.points), wrap.deform(dense.points))
 print(wrap_clone.kernel_name, wrap_clone.src_points.shape)
+```
+
+### Two caveats
+
+A `SkinDeformData` must be bound before it is saved. Its `SkinData` is not
+saved, so an unbound copy has nothing to bind:
+
+```python
+unbound = SkinDeformData(mesh=bar, skin=skin, bind_rig=bind_rig).copy()
+try:
+    unbound.apply(posed_rig)
+except ValueError as e:
+    print("as expected:", e)
+```
+
+An `FFDData` bound to a mesh does not save that mesh. A copy or a loaded one
+returns points, not a mesh copy, from `update()`:
+
+```python
+print(type(ffd.update(deformed_lattice)).__name__)        # MeshData
+print(type(ffd_clone.update(deformed_lattice)).__name__)  # ndarray
 ```
 
 Class docstrings are available at runtime:
@@ -1085,7 +1127,9 @@ print(DeltaMushData.info().splitlines()[0])
 | `ValueError: negative skin weights` | compaction would silently drop them | `skin.prune()` / `skin.normalize()` first |
 | Wrap output is all `nan` / wild | compact kernel with a too-small radius | raise `set_radius()`, or use `thin_plate_spline` |
 | `UserWarning` about ill-conditioning | `geodesic_radius` with a non-compact kernel | use `wendland_c2` and friends |
-| Reloaded FFD / mush / relax behaves oddly | tuning is not serialized | rebuild the operator from its rest geometry |
+| Loaded `SkinDeformData` raises `no skin to bind` | it was saved before `bind()`; its `SkinData` is not saved | `bind()` before saving |
+| Loaded `FFDData.update()` returns an array, not a mesh | the bound mesh is not saved | set the points on your own copy of the mesh |
+| `LegacyFileError` on load | the file was written by an older cgmath | rebuild the operator and save it again |
 
 ---
 

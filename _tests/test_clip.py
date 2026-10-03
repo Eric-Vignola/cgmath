@@ -1,8 +1,12 @@
+import copy
+import json as std_json
 import os
+import pickle
 import tempfile
 import unittest
 
 import numpy as np
+from cgmath import hierarchy
 from cgmath.formats.glb import pygltflib
 from cgmath.transforms import euler_to_quaternion, quaternion_slerp
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData
@@ -211,6 +215,21 @@ class TestClipData(unittest.TestCase):
         self.assertTrue(np.array_equal(other.frames.translate, block))
         self.assertEqual(other.frame, 2)
 
+    def test_a_shallow_copy_leaves_the_clip_whole(self):
+        # the copy owns its nodes and blocks: growing or reordering it leaves
+        # the original's blocks matching its own nodes
+        clip                  = ClipData(self.rig, frames=3)
+        clip.frames.translate = np.arange(3 * 4 * 3, dtype=float).reshape(3, 4, 3)
+
+        twin = copy.copy(clip)
+        twin.append(TransformData("extra"))
+        twin.sort(reverse=True)
+        twin.frame = 1
+
+        back = ClipData.from_dict(clip.to_dict())
+        self.assertEqual(len(back), 4)
+        self.assertTrue(np.array_equal(back.frames.translate, clip.frames.translate))
+
     def test_equality_discriminates_on_animation(self):
         a = ClipData(self.rig, frames=3)
         b = a.copy()
@@ -267,6 +286,113 @@ class TestClipData(unittest.TestCase):
 
         clip.frame = 2
         self.assertEqual(clip["j1"].rotate_order, 3)
+
+
+class TestClipFiles(unittest.TestCase):
+    """a loaded clip is the clip that was saved, nodes still bound to the blocks"""
+
+    def setUp(self):
+        super().setUp()
+        self.clip                  = ClipData(chain(4), frames=3, start_frame=1001, fps=30.0)
+        self.clip.frames.translate = np.arange(3 * 4 * 3, dtype=float).reshape(3, 4, 3)
+        self.clip.frame            = 1
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def loaded(self):
+        """the clip back from every file format, pickle and deepcopy"""
+        out = {
+            "pickle":   pickle.loads(pickle.dumps(self.clip)),
+            "deepcopy": copy.deepcopy(self.clip),
+        }
+        for mode in ("json", "npz", "pkl"):
+            path      = self.clip.save(os.path.join(self.tmp.name, f"clip.{mode}"))
+            out[mode] = ClipData.load(path)
+        return out
+
+    def test_a_ragged_block_is_named(self):
+        # a hand-edited json with one row short says which block is wrong
+        path = self.clip.save(os.path.join(self.tmp.name, "ragged.json"))
+        with open(path, encoding="utf-8") as f:
+            tree = std_json.load(f)
+        tree["_blocks"]["_translate"][0][0] = [0.0, 0.0]
+        with open(path, "w", encoding="utf-8") as f:
+            std_json.dump(tree, f)
+        with self.assertRaisesRegex(ValueError, "ClipData block _translate must have shape"):
+            ClipData.load(path)
+
+    def test_a_loaded_clip_writes_through_to_its_blocks(self):
+        # a pickled clip used to come back with every node channel a copy of
+        # its row, so a write at the loaded frame never reached the block
+        for how, clip in self.loaded().items():
+            with self.subTest(how):
+                clip["j2"].translate = [7.0, 8.0, 9.0]
+                self.assertTrue(np.allclose(clip.frames.translate[1, 2], [7.0, 8.0, 9.0]))
+
+                clip.frame = 0
+                clip.frame = 1
+                self.assertTrue(np.allclose(clip["j2"].translate, [7.0, 8.0, 9.0]))
+
+                for channel in ClipData.FRAMED_CHANNELS:
+                    for node in clip:
+                        self.assertTrue(
+                            np.shares_memory(getattr(node, channel), clip._blocks[channel])
+                        )
+
+    def test_a_loaded_clip_is_the_saved_clip(self):
+        for how, clip in self.loaded().items():
+            with self.subTest(how):
+                self.assertIsInstance(clip, ClipData)
+                self.assertEqual(clip,             self.clip)
+                self.assertEqual(clip.frame,       1)
+                self.assertEqual(clip.start_frame, 1001)
+                self.assertEqual(clip.fps,         30.0)
+                self.assertEqual(clip.uuid,        self.clip.uuid)
+                self.assertTrue(all(node._hierarchy is clip for node in clip))
+                for channel, block in clip._blocks.items():
+                    self.assertEqual(block.dtype, np.float64)
+                    self.assertEqual(block.shape, (3, 4, 3))
+
+    def test_the_module_loader_hands_back_a_clip(self):
+        # cgmath.hierarchy.load() used to rebuild every file as a HierarchyData
+        for mode in ("json", "npz", "pkl"):
+            with self.subTest(mode):
+                path   = self.clip.save(os.path.join(self.tmp.name, f"clip.{mode}"))
+                loaded = hierarchy.load(path)
+
+                self.assertIsInstance(loaded, ClipData)
+                self.assertEqual(loaded, self.clip)
+
+    def test_a_block_of_the_wrong_shape_is_refused(self):
+        bad = {
+            "a channel short": ("_scale", np.ones((3, 4, 2))),
+            "a node short":    ("_rotate", np.ones((3, 3, 3))),
+            "no frames":       ("_rotate", np.ones((0, 4, 3))),
+            "a frame short":   ("_scale", np.ones((2, 4, 3))),
+            "an unknown name": ("_shear", np.ones((3, 4, 3))),
+        }
+        for label, (channel, block) in bad.items():
+            with self.subTest(label):
+                tree                     = self.clip.to_dict()
+                tree["_blocks"]          = dict(tree["_blocks"])
+                tree["_blocks"][channel] = block
+                with self.assertRaises(ValueError):
+                    ClipData.from_dict(tree)
+
+        tree            = self.clip.to_dict()
+        tree["_blocks"] = {"_scale": tree["_blocks"]["_scale"]}
+        with self.assertRaises(ValueError):
+            ClipData.from_dict(tree)
+
+    def test_equality_includes_the_loaded_frame(self):
+        # the nodes hold the loaded frame, so two clips on different frames
+        # do not hold the same values
+        other = self.clip.copy()
+        self.assertEqual(other, self.clip)
+
+        other.frame = 2
+        self.assertNotEqual(other, self.clip)
 
 
 def joint_chain(count=4):

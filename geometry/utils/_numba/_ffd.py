@@ -228,7 +228,7 @@ def _bernstein_eval(
 
     Parameters
     ----------
-    cells : (N, 3) int64
+    cells : (N, 3) int32
         Cell indices per point.
     uvw : (N, 3) float64
         Per-cell parametric coordinates.

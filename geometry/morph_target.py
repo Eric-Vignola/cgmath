@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from cgmath.geometry._base import _is_sequence, Data, DataList
-from cgmath.geometry.utils import pxr
+from cgmath.geometry._base import _is_sequence, Array, Data, DataList
+from cgmath.geometry.mesh import _pxr_module
 
 BLS_PRIM_TYPE = "MorphTarget"
 
@@ -19,27 +19,21 @@ class MorphData(Data):
     EQUALITY_TEST_IGNORE = ["name"]
 
     name:    str
-    offsets: np.ndarray
-    indices: Optional[np.ndarray] = None
+    offsets: Array(np.float64, "N", 3)
+    indices: Optional[Array(np.int32, "N")] = None
 
     def __init__(
         self, name: str, offsets: np.ndarray, indices: Optional[np.ndarray] = None
     ):
         self.name    = name
-        self.offsets = np.asarray(offsets)
+        self.offsets = offsets
+        self.indices = indices
+        self._post_load()
 
-        # assume whole mesh indices if none given
-        if indices is None:
-            self.indices = np.arange(offsets.shape[0])
-        else:
-            self.indices = np.asarray(indices)
-
-    def to_dict(self) -> dict:
-        """returns the annotated data as a dict"""
-        data = super().to_dict()
-        if "indices" not in data:
-            data.indices = np.arange(data.offsets.shape[0])
-        return data
+    def _post_load(self) -> None:
+        """no indices means every point, in order"""
+        if self.indices is None:
+            self.indices = np.arange(self.offsets.shape[0], dtype=np.int32)
 
     @property
     def size(self) -> int:
@@ -323,11 +317,11 @@ class MorphData(Data):
     @classmethod
     def from_prim(cls, prim) -> MorphData:
         """Constructs a data object from a prim."""
-        bls_api = pxr().UsdSkel.BlendShape(prim)
+        bls_api = _pxr_module("UsdSkel").BlendShape(prim)
         offsets = bls_api.GetOffsetsAttr().Get()
 
         # ensure the correct data type
-        indices = np.array(bls_api.GetPointIndicesAttr().Get(), dtype=int)
+        indices = np.array(bls_api.GetPointIndicesAttr().Get(), dtype=np.int32)
         # ensure the correct shape even if no offsets are present
         offsets = np.array(offsets) if offsets else np.empty(dtype=float, shape=(0, 3))
 
@@ -337,7 +331,7 @@ class MorphData(Data):
         """Streams data into a prim."""
         if not prim.GetTypeName():
             prim.SetTypeName(BLS_PRIM_TYPE)
-        bls_api = pxr().UsdSkel.BlendShape(prim)
+        bls_api = _pxr_module("UsdSkel").BlendShape(prim)
         bls_api.CreateOffsetsAttr().Set(self.offsets)
         bls_api.CreatePointIndicesAttr().Set(self.indices)
 

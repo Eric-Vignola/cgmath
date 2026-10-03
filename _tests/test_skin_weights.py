@@ -1,14 +1,26 @@
 import os
 import pickle
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 
 import numpy as np
+from cgmath.geometry._base import LegacyFileError
 from cgmath.geometry.mesh import MeshData
-from cgmath.geometry.skin_weights import CompactSkinData, SkinData, SkinList
+from cgmath.geometry.skin_weights import CompactSkinData, Patterns, SkinData, SkinList
+
+try:
+    from pxr import Usd
+except ImportError:
+    Usd = None
+
+# the folder holding the cgmath package, for a fresh interpreter to import it
+PROJECTS = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-EPSILON = np.finfo(np.float32).eps
+EPSILON  = np.finfo(np.float32).eps
 
 
 def allclose(x, y, atol=EPSILON):
@@ -333,6 +345,92 @@ class TestSkinData(unittest.TestCase):
                 obj5 = pickle.load(io)
                 self.assertTrue(obj1 == obj5)
 
+    def test_fields(self):
+        """weights are float64 (V, J) whatever was given"""
+        skin = SkinData(weights=np.eye(2, dtype=np.float32), influences=["a", "b"])
+        self.assertEqual(skin.weights.dtype, np.float64)
+
+        with self.assertRaises(ValueError):
+            skin.weights = np.ones(2)
+
+    def test_pickle_keeps_every_field(self):
+        """the sparse pickle keeps the name and the symmetry patterns"""
+        skin          = self.skin_cube.copy()
+        skin.patterns = Patterns.SHORT
+
+        loaded = pickle.loads(pickle.dumps(skin))
+        self.assertEqual(loaded.name,          "skin_cube")
+        self.assertEqual(loaded.patterns,      Patterns.SHORT)
+        self.assertEqual(loaded.influences,    skin.influences)
+        self.assertEqual(loaded.weights.dtype, np.float64)
+        self.assertTrue(np.array_equal(loaded.weights, skin.weights))
+
+    def test_pickle_is_sparse(self):
+        """zero weights are left out of a pickle"""
+        weights       = np.zeros((1000, 50))
+        weights[:, 0] = 1.0
+        skin          = SkinData(weights=weights, influences=[f"joint{i}" for i in range(50)])
+
+        data = pickle.dumps(skin)
+        self.assertLess(len(data), weights.nbytes // 10)
+        self.assertTrue(np.array_equal(pickle.loads(data).weights, weights))
+
+        # and wherever the skin sits: in a list
+        skins = SkinList([skin, skin.copy()])
+        data  = pickle.dumps(skins)
+        self.assertLess(len(data), 2 * weights.nbytes // 10)
+        self.assertTrue(all(np.array_equal(x.weights, weights) for x in pickle.loads(data)))
+
+    def test_older_pickle_refused(self):
+        """a pickle an older cgmath wrote raises LegacyFileError"""
+
+        class Older:
+            def __reduce__(self):
+                state = (["joint1"], np.ones(1), np.zeros(1, int), np.zeros(1, int), (1, 1))
+                return (SkinData._reconstruct, (state,))
+
+        with self.assertRaises(LegacyFileError):
+            pickle.loads(pickle.dumps(Older()))
+
+    def test_subdivide_any_influence_count(self):
+        """weights subdivide the way points do, whatever their column count"""
+        box = MeshData(
+            points=[
+                [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [-0.5, 0.5, 0.5], [0.5, 0.5, 0.5],
+                [-0.5, 0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, -0.5, -0.5], [0.5, -0.5, -0.5],
+            ],
+            indices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 1, 0, 1, 7, 5, 3, 6, 0, 2, 4],
+            counts  = [4, 4, 4, 4, 4, 4],
+        )
+
+        def subdivided_as_points(weights, steps):
+            """the weights subdivided three columns at a time, as mesh points"""
+            columns = []
+            for start in range(0, weights.shape[1], 3):
+                chunk                             = weights[:, start : start + 3]
+                proxy                             = box.copy()
+                proxy.points                      = np.zeros((weights.shape[0], 3))
+                proxy.points[:, : chunk.shape[1]] = chunk
+                proxy.subdivide(steps=steps)
+                columns.append(proxy.points[:, : chunk.shape[1]])
+            return np.concatenate(columns, axis=1)
+
+        rng = np.random.default_rng(7)
+        for count in (1, 2, 5):
+            with self.subTest(influences=count):
+                weights = rng.random((8, count))
+                weights /= weights.sum(axis=1, keepdims=True)
+                skin = SkinData(weights=weights, influences=[f"j{i}" for i in range(count)])
+
+                skin.subdivide(box, steps=2)
+                expected = subdivided_as_points(weights, 2)
+                self.assertEqual(skin.weights.shape, expected.shape)
+                self.assertTrue(np.allclose(skin.weights, expected))
+
+                kept = SkinData(weights=weights, influences=skin.influences)
+                kept.subdivide(box, steps=1, keep_size=True)
+                self.assertEqual(kept.weights.shape, (8, count))
+
     def test_list_like(self):
         # randomize list
         import random
@@ -480,6 +578,78 @@ class TestCompactSkinData(unittest.TestCase):
         compact2   = converted.to_compact_skin_data()
         converted2 = compact2.to_skin_data()
         self.assertTrue(converted.is_equivalent(converted2))
+
+    def test_compact_fields(self):
+        """flat int32 indices, flat float64 weights"""
+        compact = CompactSkinData(
+            max_influences    = 2,
+            influence_indices = np.array([0, 1, 0, 1], dtype=np.int64),
+            weights           = np.array([0.5, 0.5, 0.25, 0.75], dtype=np.float32),
+            influences        = ["joint1", "joint2"],
+        )
+        self.assertEqual(compact.influence_indices.dtype, np.int32)
+        self.assertEqual(compact.weights.dtype, np.float64)
+
+    def test_compact_pickle(self):
+        loaded = pickle.loads(pickle.dumps(self.compact_skin))
+        self.assertTrue(loaded == self.compact_skin)
+        self.assertEqual(loaded.max_influences, self.compact_skin.max_influences)
+        self.assertEqual(loaded.influence_indices.dtype, np.int32)
+
+    def test_compact_older_pickle_refused(self):
+        """a pickle an older cgmath wrote raises LegacyFileError"""
+
+        class Older:
+            def __reduce__(self):
+                state = (1, np.zeros(1, int), np.ones(1), ["joint1"])
+                return (CompactSkinData._reconstruct, (state,))
+
+        with self.assertRaises(LegacyFileError):
+            pickle.loads(pickle.dumps(Older()))
+
+    @unittest.skipIf(Usd is None, "USD is not installed")
+    def test_compact_prim_round_trip(self):
+        """from_prim gives the influences back as a list of str, which saves"""
+        stage = Usd.Stage.CreateInMemory()
+        prim  = stage.DefinePrim("/skin")
+        self.compact_skin.to_prim(prim)
+
+        loaded = CompactSkinData.from_prim(prim)
+        self.assertIs(type(loaded.influences), list)
+        self.assertTrue(all(type(x) is str for x in loaded.influences))
+        self.assertTrue(loaded == self.compact_skin)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            f = os.path.join(temp_dir, "skin.npz")
+            loaded.save(f)
+            self.assertTrue(CompactSkinData.load(f) == loaded)
+
+    @unittest.skipIf(Usd is None, "USD is not installed")
+    def test_compact_prim_round_trip_without_usd_skel_imported(self):
+        """to_prim / from_prim import pxr.UsdSkel themselves"""
+        script = textwrap.dedent(
+            """
+            import sys
+            from pxr import Usd
+            from cgmath.geometry.skin_weights import CompactSkinData
+
+            assert "pxr.UsdSkel" not in sys.modules
+            stage = Usd.Stage.CreateInMemory()
+            prim = stage.DefinePrim("/skin")
+            compact = CompactSkinData(
+                max_influences=1,
+                influence_indices=[0, 1],
+                weights=[1.0, 1.0],
+                influences=["joint1", "joint2"],
+            )
+            compact.to_prim(prim)
+            assert CompactSkinData.from_prim(prim) == compact
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script], cwd=PROJECTS, capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class TestSkinDataExtended(unittest.TestCase):

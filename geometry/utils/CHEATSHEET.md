@@ -567,12 +567,14 @@ print(gu.inverse_trilinear(targets, corners, max_iter=20, tol=1e-12))
 ```
 
 `assign_cells` does the whole binding step: bbox guess → Newton refine →
-cell-hop for anything that escaped `[0, 1]`.
+cell-hop for anything that escaped `[0, 1]`. Cells come back int32, `uvw`
+float64.
 
 ```python
 bound = cube.points * 0.9 + 0.05
 cells, uvw = gu.assign_cells(bound, lattice, max_hops=4)
 print(cells[0], np.round(uvw[0], 3))   # [0 0 0] [0.1 0.1 0.1]
+print(cells.dtype, uvw.dtype)          # int32 float64
 ```
 
 `bernstein_basis_1d` is the raw polynomial basis; `bernstein_eval` is the
@@ -962,7 +964,7 @@ normally calls it.
 | `trilinear(uvw, corners)` | forward trilinear interpolation | `assign_cells` |
 | `trilinear_jacobian(uvw, corners)` | `(N, 3, 3)` `dP/d(uvw)` | FFD gradients |
 | `inverse_trilinear(points, corners, uvw_init=None, max_iter=20, tol=1e-10)` | Newton solve for `uvw` | `assign_cells` |
-| `assign_cells(points, lattice, max_hops=4)` | bind points to cells → `(cells, uvw)` | `geometry/deform/ffd.py` |
+| `assign_cells(points, lattice, max_hops=4)` | bind points to cells → `(cells, uvw)`, int32 / float64 | `geometry/deform/ffd.py` |
 | `bernstein_basis_1d(t, degree)` | `(N, degree+1)` Bernstein weights | `bernstein_eval` |
 | `bernstein_eval(cells, uvw, delta, local_influence, divisions)` | Sederberg & Parry FFD displacement | `geometry/deform/ffd.py` |
 

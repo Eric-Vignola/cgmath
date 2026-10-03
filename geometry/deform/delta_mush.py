@@ -29,9 +29,10 @@ wrappers exposed via :mod:`cgmath.geometry.utils.main`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
-from cgmath.geometry._base import Data
+from cgmath.geometry._base import Array, Data
 
 
 # Allowed frame-construction methods.  Stored uppercase for easy
@@ -51,13 +52,17 @@ class DeltaMushData(Data):
     rest mesh and is then applied to any deformed pose of the same point
     cloud.
 
+    The constructor reads what it needs from the rest mesh: its points,
+    its edge neighbours, its border vertices (when pinning) and each
+    vertex's first-face winding (for ``"TBN"``).  All of it is saved, so a
+    loaded operator deforms without the mesh.
+
     The bind step caches:
 
-    * a Laplacian-smoothed copy of the rest mesh (``smooth_iterations``
-      passes of :meth:`MeshData.smooth`)
-    * an optional pinned-border mask, derived from
-      :meth:`MeshData.get_border_vertices`, that zeros the per-vertex
-      iteration count so border vertices stay where they are
+    * a Laplacian-smoothed copy of the rest points (``smooth_iterations``
+      passes of :func:`cgmath.geometry.utils.blur`, which is what
+      :meth:`MeshData.smooth` runs), with no passes on the border
+      vertices when pinning so they stay where they are
     * for each vertex, a representation of the rest displacement
       ``rest - smooth_rest``.  When :attr:`method` is ``"TBN"`` the
       displacement is projected into the vertex's first-face tangent
@@ -98,25 +103,29 @@ class DeltaMushData(Data):
         result = mush.apply(deformed)
     """
 
-    rest_points:     np.ndarray = None
-    neighbors:       np.ndarray = None
-    border_vertices: np.ndarray | None = None
+    rest_points:     Optional[Array(np.float64, "N", 3)] = None
+    neighbors:       Optional[Array(np.int32, "N", "K")] = None
+    border_vertices: Optional[Array(np.int32, "B")] = None
+
+    # --- settings, behind the properties that validate them --- #
+    _smooth_iterations: int = 10
+    _smooth_step_size:  float = 0.5
+    _pin_borders:       bool = True
+    _weight:            float = 1.0
+    _method:            str = "TBN"
+
+    # (N, 2) [next, prev] from each vertex's first face: the one part of the
+    # TBN bind that needs the mesh, so it is read at construction and saved.
+    # None for a point cloud, which binds as DDM.
+    _first_nbrs: Optional[Array(np.int32, "N", 2)] = None
 
     # --- cached --- #
-    _rest_mesh          = None
-    _smooth_points      = None
-    _local_deltas       = None  # TBN-encoded local deltas (TBN method)
-    _world_deltas       = None  # rest - smooth_rest (PROCRUSTES/DDM methods)
-    _first_nbrs         = None  # (N, 2) [next, prev] from each vertex's first face
-    _ddm_offsets        = None  # (N, K, 3) precomputed smoothed-rest offsets
-    _ddm_weights        = None  # (N, K) precomputed neighbour weights
-    _iteration_schedule = None
-    _smooth_iterations  = None
-    _smooth_step_size   = None
-    _pin_borders        = None
-    _weight             = None
-    _method             = None
-    _points             = None
+    _smooth_points = None
+    _local_deltas  = None  # TBN-encoded local deltas (TBN method)
+    _world_deltas  = None  # rest - smooth_rest (PROCRUSTES/DDM methods)
+    _ddm_offsets   = None  # (N, K, 3) precomputed smoothed-rest offsets
+    _ddm_weights   = None  # (N, K) precomputed neighbour weights
+    _points        = None
 
     # --------------------------- construction -------------------------------- #
 
@@ -164,22 +173,20 @@ class DeltaMushData(Data):
         from cgmath.geometry.mesh import MeshData
 
         if isinstance(rest, MeshData):
-            self._rest_mesh  = rest
             self.rest_points = np.asarray(rest.points, dtype=np.float64).copy()
+            self._first_nbrs = self._compute_first_face_neighbors(rest)
             if neighbors is None:
                 neighbors = rest.get_edge_vertex_neighbors()
             if pin_borders:
                 self.border_vertices = np.asarray(
-                    rest.get_border_vertices(flatten=True), dtype=np.int64
-                )
-                if self.border_vertices.ndim == 0:
-                    self.border_vertices = self.border_vertices[None]
+                    rest.get_border_vertices(flatten=True), dtype=np.int32
+                ).ravel()
             else:
                 self.border_vertices = None
         else:
-            self._rest_mesh  = None
             pts              = rest.points if hasattr(rest, "points") else rest
             self.rest_points = np.asarray(pts, dtype=np.float64).copy()
+            self._first_nbrs = None
             if neighbors is None:
                 raise ValueError(
                     "neighbors must be supplied when rest is not a MeshData"
@@ -243,8 +250,7 @@ class DeltaMushData(Data):
     def pin_borders(self, value: bool) -> None:
         v = bool(value)
         if v != self._pin_borders:
-            self._pin_borders        = v
-            self._iteration_schedule = None
+            self._pin_borders = v
             self._invalidate_bind()
 
     @property
@@ -310,11 +316,14 @@ class DeltaMushData(Data):
     # ------------------------ private helpers -------------------------------- #
 
     def _invalidate_bind(self) -> None:
-        """Drop all per-method bind caches.  Smoothing schedule is preserved."""
+        """Drop all per-method bind caches.
+
+        ``_first_nbrs`` is kept: it is topology read from the rest mesh at
+        construction, and no setting changes it.
+        """
         self._smooth_points = None
         self._local_deltas  = None
         self._world_deltas  = None
-        self._first_nbrs    = None
         self._ddm_offsets   = None
         self._ddm_weights   = None
 
@@ -329,11 +338,12 @@ class DeltaMushData(Data):
         exactly.
 
         Border vertices are forced to ``0`` when ``pin_borders`` is set,
-        so :meth:`MeshData.smooth` leaves them exactly where they are.
-        """
-        if self._iteration_schedule is not None:
-            return self._iteration_schedule
+        so the blur leaves them exactly where they are.
 
+        Built on every call rather than cached: it is O(N) against an
+        O(N * K * iterations) blur, and a cache went stale when
+        ``smooth_iterations`` or ``border_vertices`` changed.
+        """
         n     = self.rest_points.shape[0]
         iters = max(0, self._smooth_iterations - 1)
         sched = np.full(n, iters, dtype=np.int32)
@@ -343,17 +353,14 @@ class DeltaMushData(Data):
             and self.border_vertices.size > 0
         ):
             sched[self.border_vertices] = 0
-        self._iteration_schedule = sched
         return sched
 
     def _smooth(self, points: np.ndarray) -> np.ndarray:
         """Run the bound smoothing schedule on an arbitrary point set.
 
-        Uses :meth:`MeshData.smooth` when a rest mesh is available so we
-        share the same blur backend; otherwise falls back to calling
-        ``blur`` directly.  In both cases the per-vertex iteration count
-        is supplied as an array (with zeros at border vertices when
-        pinning is enabled), exactly as requested.
+        Calls ``blur`` -- what :meth:`MeshData.smooth` runs -- directly,
+        with the per-vertex iteration count as an array (zeros at border
+        vertices when pinning is enabled).  The input is not modified.
         """
         from cgmath.geometry.utils import blur
 
@@ -362,62 +369,46 @@ class DeltaMushData(Data):
         if self._smooth_iterations <= 1:
             return np.asarray(points, dtype=np.float64).copy()
 
-        sched = self._build_iteration_schedule().copy()  # blur mutates in-place
-
-        if self._rest_mesh is not None:
-            # use the public MeshData.smooth API as requested
-            mesh        = self._rest_mesh.copy()
-            mesh.points = np.asarray(points, dtype=np.float64).copy()
-            mesh.smooth(
-                neighbors     = self.neighbors,
-                iterations    = sched,
-                receptions    = self._smooth_step_size,
-                contributions = 1.0,
-            )
-            return np.asarray(mesh.points, dtype=np.float64)
-
-        # bare point cloud path -- call blur() directly
+        # blur smooths a copy of the points it is given
         return blur(
-            np.asarray(points, dtype=np.float64).copy(),
+            np.ascontiguousarray(points, dtype=np.float64),
             self.neighbors,
-            iterations    = sched,
+            iterations    = self._build_iteration_schedule(),
             receptions    = self._smooth_step_size,
             contributions = 1.0,
         )
 
-    def _compute_first_face_neighbors(self) -> np.ndarray:
+    @staticmethod
+    def _compute_first_face_neighbors(mesh) -> np.ndarray:
         """Per-vertex ``[next, prev]`` indices from the first face containing it.
 
-        Walks the mesh's index/counts arrays and, for every vertex,
-        records the ``next`` (CCW successor) and ``prev`` (CW predecessor)
-        vertex of the *first face* (lowest face_id) that contains the
-        vertex.  Vertices not present in any face -- or only used as
-        isolated points -- get ``[-1, -1]`` and the TBN encoder falls
-        back to a world-space identity store.
+        For every vertex, records the ``next`` (CCW successor) and ``prev``
+        (CW predecessor) vertex at its first corner in the *first face*
+        (lowest face_id) that contains it.  Vertices not present in any
+        face -- or only used as isolated points -- get ``[-1, -1]`` and
+        the TBN encoder falls back to a world-space identity store.
         """
-        n   = self.rest_points.shape[0]
-        out = -np.ones((n, 2), dtype=np.int32)
-        if self._rest_mesh is None:
+        indices = np.asarray(mesh.indices, dtype=np.int64).ravel()
+        counts  = np.asarray(mesh.counts, dtype=np.int64).ravel()
+        out     = np.full((len(mesh.points), 2), -1, dtype=np.int32)
+        if indices.size == 0:
             return out
 
-        indices = np.asarray(self._rest_mesh.indices, dtype=np.int64)
-        counts  = np.asarray(self._rest_mesh.counts, dtype=np.int64)
-
-        # cumulative starts for face cursoring
+        # each corner's face start, face size and position in its face
         starts = np.zeros(counts.size + 1, dtype=np.int64)
         np.cumsum(counts, out=starts[1:])
+        face  = np.repeat(np.arange(counts.size, dtype=np.int64), counts)
+        start = starts[face]
+        size  = counts[face]
+        pos   = np.arange(indices.size, dtype=np.int64) - start
 
-        seen = np.zeros(n, dtype=np.bool_)
-        for fid in range(counts.size):
-            fs   = int(counts[fid])
-            face = indices[starts[fid] : starts[fid] + fs]
-            for pos in range(fs):
-                vi = int(face[pos])
-                if seen[vi]:
-                    continue
-                seen[vi]   = True
-                out[vi, 0] = int(face[(pos + 1) % fs])  # next in winding
-                out[vi, 1] = int(face[(pos - 1) % fs])  # previous in winding
+        # corners run face by face in winding order, so a vertex's first
+        # occurrence is its first corner in its lowest face
+        vertices, first = np.unique(indices, return_index=True)
+        start, size, pos = start[first], size[first], pos[first]
+
+        out[vertices, 0] = indices[start + (pos + 1) % size]  # next in winding
+        out[vertices, 1] = indices[start + (pos - 1) % size]  # previous in winding
         return out
 
     # ---------------------------- bind / apply ------------------------------- #
@@ -442,10 +433,9 @@ class DeltaMushData(Data):
         if self._method == "TBN":
             # TBN needs first-face winding -- only available for mesh inputs.
             # Fall back to DDM on point clouds.
-            if self._rest_mesh is None:
+            if self._first_nbrs is None:
                 self._method = "DDM"
             else:
-                self._first_nbrs = self._compute_first_face_neighbors()
                 try:
                     self._local_deltas = encode_local_deltas_tbn(
                         self.rest_points, self._smooth_points, self._first_nbrs

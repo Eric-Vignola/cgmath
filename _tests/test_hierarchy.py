@@ -1,3 +1,4 @@
+import copy
 import os
 import pickle
 import tempfile
@@ -137,13 +138,13 @@ class TestHierarchy(unittest.TestCase):
         self.assertTrue(node.get_parent() == 'shoulder_left_joint') # shoulder_left_joint
 
         # find a path from the root to this node
-        self.assertTrue(node.get_root() == ['root_joint', 'pelvis_joint', 'spineLower_joint', 'spineMiddle_joint', 'spineUpper_joint', 'chest_joint', 'clavicle_left_joint', 'shoulder_left_joint', 'elbow_left_joint']) 
+        self.assertTrue(node.get_root().name == ['root_joint', 'pelvis_joint', 'spineLower_joint', 'spineMiddle_joint', 'spineUpper_joint', 'chest_joint', 'clavicle_left_joint', 'shoulder_left_joint', 'elbow_left_joint']) 
 
         # find this node's children
-        self.assertTrue(node.get_children() == ['elbow_partial_left_joint', 'handWrist_left_joint'])
+        self.assertTrue(node.get_children().name == ['elbow_partial_left_joint', 'handWrist_left_joint'])
 
         # find this node's branch (self + all decendents)
-        self.assertTrue(node.get_branch() == ['elbow_left_joint', 'elbow_partial_left_joint', 'handWrist_left_joint', 'handIndexMeta_left_joint', 'handIndex_00_left_joint', 'handIndex_01_left_joint', 'handIndex_02_left_joint', 'handMiddleMeta_left_joint', 'handMiddle_00_left_joint', 'handMiddle_01_left_joint', 'handMiddle_02_left_joint', 'handWrist_partial_left_joint', 'handPinkyMeta_left_joint', 'handPinky_00_left_joint', 'handPinky_01_left_joint', 'handPinky_02_left_joint', 'handRingMeta_left_joint', 'handRing_00_left_joint', 'handRing_01_left_joint', 'handRing_02_left_joint', 'handThumbMeta_left_joint', 'handThumb_00_left_joint', 'handThumb_01_left_joint', 'handThumb_02_left_joint']) 
+        self.assertTrue(node.get_branch().name == ['elbow_left_joint', 'elbow_partial_left_joint', 'handWrist_left_joint', 'handIndexMeta_left_joint', 'handIndex_00_left_joint', 'handIndex_01_left_joint', 'handIndex_02_left_joint', 'handMiddleMeta_left_joint', 'handMiddle_00_left_joint', 'handMiddle_01_left_joint', 'handMiddle_02_left_joint', 'handWrist_partial_left_joint', 'handPinkyMeta_left_joint', 'handPinky_00_left_joint', 'handPinky_01_left_joint', 'handPinky_02_left_joint', 'handRingMeta_left_joint', 'handRing_00_left_joint', 'handRing_01_left_joint', 'handRing_02_left_joint', 'handThumbMeta_left_joint', 'handThumb_00_left_joint', 'handThumb_01_left_joint', 'handThumb_02_left_joint']) 
 
 
 
@@ -218,8 +219,9 @@ class TestHierarchy(unittest.TestCase):
         self.assertTrue(np.shares_memory(node._translate, storage))
 
     def test_channel_write_does_not_mutate_the_class_default(self):
-        # copy() bypasses __init__, so an untouched channel still points at
-        # the class default, which is shared by every instance
+        # copy() goes through from_dict rather than __init__, and the channel
+        # it leaves at its default must not be the class default, which the
+        # class shares
         node       = TransformData(name='a').copy()
         node.scale = [3.0, 3.0, 3.0]
 
@@ -2352,3 +2354,50 @@ class TestNodeType(unittest.TestCase):
         # the child no longer cancels its parent's 2x scale; translate stays
         self.assertTrue(np.allclose(after[:3, :3], 2.0 * before[:3, :3], atol=1e-9))
         self.assertTrue(np.allclose(after[3], before[3], atol=1e-9))
+
+
+def _chain() -> HierarchyData:
+    """root (1, 0, 0) > spine (0, 2, 0) > head (0, 1, 0), parented by uuid"""
+    root  = TransformData("root",  translate=(1.0, 0.0, 0.0))
+    spine = TransformData("spine", translate=(0.0, 2.0, 0.0))
+    head  = TransformData("head",  translate=(0.0, 1.0, 0.0))
+    rig   = HierarchyData([root, spine, head])
+    spine.set_parent(root, world_space=False)
+    head.set_parent(spine, world_space=False)
+    return rig
+
+
+class TestCopiesOwnTheirNodes(unittest.TestCase):
+    """a node belongs to one hierarchy: an edit to a copy leaves the original whole"""
+
+    def test_a_shallow_copy_of_a_hierarchy_owns_its_nodes(self):
+        rig  = _chain()
+        twin = copy.copy(rig)
+        twin.pop(1)
+        self.assertEqual(rig.name, ["root", "spine", "head"])
+        self.assertIs(rig["spine"].get_parent(), rig["root"])
+        np.testing.assert_allclose(rig["head"].world_matrix[3, :3], [1.0, 3.0, 0.0])
+
+    def test_a_shallow_copy_of_a_view_is_a_view(self):
+        rig  = _chain()
+        view = TransformList(rig[1:])
+        twin = copy.copy(view)
+        self.assertIs(type(twin), TransformList)
+        self.assertIs(twin[0], rig["spine"])
+        twin.pop(0)
+        self.assertEqual(len(view), 2)
+
+    def test_pop_moves_the_orphans_to_the_root(self):
+        rig = _chain()
+        np.testing.assert_allclose(rig["head"].world_matrix[3, :3], [1.0, 3.0, 0.0])
+        rig.pop(1)
+        # head lost its parent: its cached world matrix goes with it
+        np.testing.assert_allclose(rig["head"].world_matrix[3, :3], [0.0, 1.0, 0.0])
+
+    def test_nodes_built_from_one_attribute_dict_do_not_share_it(self):
+        attrs  = {"hero": {"attributeType": "double", "value": 1.0, "keyable": True}}
+        p      = TransformData("p", user_defined_attributes=attrs)
+        q      = TransformData("q", user_defined_attributes=attrs)
+        p.hero = 3.0
+        self.assertEqual(q.hero, 1.0)
+        self.assertEqual(attrs["hero"]["value"], 1.0)

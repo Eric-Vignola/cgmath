@@ -62,10 +62,12 @@ OOP Scene API Example:
     >>> mesh = field.mesh_data  # recomputes automatically
 """
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
+from cgmath.geometry._base import Array, ImmutableArray
 from cgmath.geometry.mesh import MeshData
 from cgmath.geometry.utils._numba._sdf import (
     _build_cube_to_vertex_map,
@@ -399,8 +401,22 @@ class CSGOp(str, Enum):
     SMOOTH_UNION = "smooth_union"
 
 
+def _cylinder_axis(value: int) -> int:
+    """``value`` as a cylinder axis: 0 (X), 1 (Y) or 2 (Z)"""
+    if value not in (0, 1, 2):
+        raise ValueError(f"a cylinder axis is 0 (X), 1 (Y) or 2 (Z), not {value!r}")
+    return int(value)
+
+
+@dataclass(repr=False, eq=False)
 class SDFSphere(TransformData):
     """Sphere SDF primitive inheriting transform properties from TransformData."""
+
+    # under the radius property; TransformData's _radius is the joint radius
+    _sdf_radius: float = 1.0
+
+    # the DMCField the primitive was added to: a runtime link, never saved
+    _field = None
 
     def __init__(
         self,
@@ -416,8 +432,8 @@ class SDFSphere(TransformData):
             rotate    = rotate,
             scale     = scale,
         )
-        self._sdf_radius: float = radius
-        self._field:      Optional["DMCField"] = None
+        self._sdf_radius = float(radius)
+        self._field: Optional["DMCField"] = None
 
     def _invalidate(self) -> None:
         """Notify parent field that this primitive has changed."""
@@ -431,7 +447,7 @@ class SDFSphere(TransformData):
 
     @radius.setter
     def radius(self, value: float) -> None:
-        self._sdf_radius = value
+        self._sdf_radius = float(value)
         self._invalidate()
 
     def evaluate(self, X: np.ndarray, Y: np.ndarray, Z: np.ndarray) -> np.ndarray:
@@ -475,8 +491,15 @@ class SDFSphere(TransformData):
         return self.evaluate(Xt, Yt, Zt) * min_scale
 
 
+@dataclass(repr=False, eq=False)
 class SDFBox(TransformData):
     """Axis-aligned box SDF primitive inheriting transform properties from TransformData."""
+
+    # under the half_extents property
+    _half_extents: Array(np.float64, 3) = ImmutableArray(np.array([0.5, 0.5, 0.5]))
+
+    # the DMCField the primitive was added to: a runtime link, never saved
+    _field = None
 
     def __init__(
         self,
@@ -492,11 +515,7 @@ class SDFBox(TransformData):
             rotate    = rotate,
             scale     = scale,
         )
-        self._half_extents: np.ndarray = (
-            np.array([0.5, 0.5, 0.5], dtype=np.float64)
-            if half_extents is None
-            else np.asarray(half_extents, dtype=np.float64)
-        )
+        self._half_extents = [0.5, 0.5, 0.5] if half_extents is None else half_extents
         self._field: Optional["DMCField"] = None
 
     def _invalidate(self) -> None:
@@ -511,7 +530,7 @@ class SDFBox(TransformData):
 
     @half_extents.setter
     def half_extents(self, value: Union[List[float], np.ndarray]) -> None:
-        self._half_extents = np.asarray(value, dtype=np.float64)
+        self._half_extents = value
         self._invalidate()
 
     def evaluate(self, X: np.ndarray, Y: np.ndarray, Z: np.ndarray) -> np.ndarray:
@@ -555,8 +574,18 @@ class SDFBox(TransformData):
         return self.evaluate(Xt, Yt, Zt) * min_scale
 
 
+@dataclass(repr=False, eq=False)
 class SDFCylinder(TransformData):
     """Capped cylinder SDF primitive inheriting transform properties from TransformData."""
+
+    # under the radius, height and axis properties; TransformData's _radius is
+    # the joint radius
+    _sdf_radius: float = 0.5
+    _height:     float = 1.0
+    _axis:       int = 1
+
+    # the DMCField the primitive was added to: a runtime link, never saved
+    _field = None
 
     def __init__(
         self,
@@ -574,10 +603,10 @@ class SDFCylinder(TransformData):
             rotate    = rotate,
             scale     = scale,
         )
-        self._sdf_radius: float = radius
-        self._height:     float = height
-        self._axis:       int = axis
-        self._field:      Optional["DMCField"] = None
+        self._sdf_radius = float(radius)
+        self._height     = float(height)
+        self._axis       = _cylinder_axis(axis)
+        self._field: Optional["DMCField"] = None
 
     def _invalidate(self) -> None:
         """Notify parent field that this primitive has changed."""
@@ -591,7 +620,7 @@ class SDFCylinder(TransformData):
 
     @radius.setter
     def radius(self, value: float) -> None:
-        self._sdf_radius = value
+        self._sdf_radius = float(value)
         self._invalidate()
 
     @property
@@ -601,7 +630,7 @@ class SDFCylinder(TransformData):
 
     @height.setter
     def height(self, value: float) -> None:
-        self._height = value
+        self._height = float(value)
         self._invalidate()
 
     @property
@@ -611,7 +640,7 @@ class SDFCylinder(TransformData):
 
     @axis.setter
     def axis(self, value: int) -> None:
-        self._axis = value
+        self._axis = _cylinder_axis(value)
         self._invalidate()
 
     def evaluate(self, X: np.ndarray, Y: np.ndarray, Z: np.ndarray) -> np.ndarray:
@@ -732,6 +761,18 @@ class DMCField:
     def _invalidate(self) -> None:
         """Mark the cached mesh as dirty."""
         self._dirty = True
+
+    def __setstate__(self, state: dict) -> None:
+        """
+        A deep copy or an unpickled field: its primitives are copies, which
+        do not keep their link to a field, so they are pointed at this one,
+        and editing them marks it dirty. A shallow copy shares the original's
+        primitives, which stay with the original.
+        """
+        self.__dict__.update(state)
+        for node in self._nodes:
+            if node.primitive._field is None:
+                node.primitive._field = self
 
     @property
     def resolution(self) -> Tuple[int, int, int]:

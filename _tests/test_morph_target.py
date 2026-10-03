@@ -1,11 +1,22 @@
 import os
 import pickle
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 
 import numpy as np
 from cgmath.geometry.mesh import MeshData
 from cgmath.geometry.morph_target import MorphData, MorphList
+
+try:
+    from pxr import Usd
+except ImportError:
+    Usd = None
+
+# the folder holding the cgmath package, for a fresh interpreter to import it
+PROJECTS = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 
@@ -335,9 +346,60 @@ class TestMorphData(unittest.TestCase):
                                                   [ 9.5,  1.5,  2.5],
                                                   [-0.5,  1.5, -2.5]]))
         self.assertTrue(np.allclose(shape.indices, [0, 1, 2]))
-        
-        
-        
+
+    def test_fields(self):
+        """offsets are float64 (N, 3), indices int32, whatever was given"""
+        shape = MorphData(name="target", offsets=[[1, 2, 3], [4, 5, 6]], indices=[7, 9])
+        self.assertEqual(shape.offsets.dtype, np.float64)
+        self.assertEqual(shape.indices.dtype, np.int32)
+        self.assertEqual(MorphData(name="target", offsets=[[1, 2, 3]]).indices.dtype, np.int32)
+
+        with self.assertRaises(ValueError):
+            MorphData(name="target", offsets=np.zeros((2, 2)))
+
+    def test_no_indices_saves(self):
+        """indices set to None save, and load back as every point"""
+        shape         = self.shape.copy()
+        shape.indices = None
+
+        loaded = MorphData.from_dict(shape.to_dict())
+        self.assertTrue(np.array_equal(loaded.indices, [0, 1, 2]))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            f = os.path.join(temp_dir, "target.npz")
+            shape.save(f)
+            self.assertTrue(np.array_equal(MorphData.load(f).indices, [0, 1, 2]))
+
+    def test_from_dict_without_indices(self):
+        """a tree without indices reads them as every point, as __init__ does"""
+        shape = MorphData.from_dict({"name": "target", "offsets": [[0, 0, 1], [1, 0, 0]]})
+        self.assertEqual(shape.indices.dtype, np.int32)
+        self.assertTrue(np.array_equal(shape.indices, [0, 1]))
+
+    @unittest.skipIf(Usd is None, "USD is not installed")
+    def test_prim_round_trip_without_usd_skel_imported(self):
+        """to_prim / from_prim import pxr.UsdSkel themselves"""
+        script = textwrap.dedent(
+            """
+            import sys
+            from pxr import Usd
+            from cgmath.geometry.morph_target import MorphData
+
+            assert "pxr.UsdSkel" not in sys.modules
+            stage = Usd.Stage.CreateInMemory()
+            prim = stage.DefinePrim("/target")
+            MorphData(name="target", offsets=[[1, 2, 3]], indices=[4]).to_prim(prim)
+
+            loaded = MorphData.from_prim(prim)
+            assert loaded.indices.tolist() == [4], loaded.indices
+            assert loaded.offsets.tolist() == [[1, 2, 3]], loaded.offsets
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script], cwd=PROJECTS, capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_bytes(self):
         obj1 = self.shape.copy()
         b    = obj1.to_bytes()

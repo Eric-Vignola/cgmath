@@ -541,6 +541,37 @@ class TestPatchRelaxData(unittest.TestCase):
         with self.assertRaises(ValueError):
             relaxer.iterations = -1
 
+    def test_the_ring_is_read_at_construction(self):
+        # the only part of the bind that needs the topology
+        mesh    = _make_grid_mesh(5)
+        relaxer = PatchRelaxData(mesh)
+        ring, valence, is_boundary = build_vertex_rings(mesh.indices, mesh.counts, 25)
+        np.testing.assert_array_equal(relaxer.ring,        ring)
+        np.testing.assert_array_equal(relaxer.valence,     valence)
+        np.testing.assert_array_equal(relaxer.is_boundary, is_boundary)
+        self.assertFalse(relaxer.valid)
+
+    def test_a_copy_made_before_binding_relaxes_without_the_mesh(self):
+        mesh     = _make_grid_mesh(7, height=0.25)
+        rng      = np.random.default_rng(12)
+        noisy    = mesh.points + rng.normal(scale=0.02, size=mesh.points.shape)
+        relaxer  = PatchRelaxData(mesh, iterations=10, surface_blend=0.5)
+        restored = relaxer.copy()
+        np.testing.assert_array_equal(restored.relax(noisy), relaxer.relax(noisy))
+
+    def test_the_rest_points_are_a_copy(self):
+        mesh    = _make_grid_mesh(5)
+        relaxer = PatchRelaxData(mesh)
+        mesh.points[:] += 1.0
+        self.assertFalse(np.shares_memory(relaxer.rest_points, mesh.points))
+        self.assertTrue(np.allclose(relaxer.rest_points, _make_grid_mesh(5).points))
+
+    def test_a_closed_mesh_has_an_empty_border(self):
+        # a computed empty result is an empty array, not None
+        border = PatchRelaxData(_make_cube_mesh()).border_vertices
+        self.assertEqual(border.shape, (0,))
+        self.assertEqual(border.dtype, np.int32)
+
     def test_rejects_bad_input(self):
         mesh = _make_grid_mesh(5)
 

@@ -119,21 +119,21 @@ obj = Object(
     name      = "hero",
     mesh      = cube,         # cgmath.geometry.mesh.MeshData
     uv        = cube_uv,      # cgmath.geometry.mesh.UVData (optional)
-    texture   = checker,      # path, (H, W, 3) float array, or None for flat shading
+    texture   = checker,      # path, (H, W, C) uint8/uint16/float32 array, or None
 
-    base_color           = (0.7, 0.7, 0.7),  # used when texture is None
-    sample_method        = "bilinear",       # or "bezier" for smooth subdivision
+    base_color           = (0.7, 0.7, 0.7),  # when texture is None; float64 (3,)
+    sample_method        = "bilinear",       # or "bezier", or a SampleMethod enum
     wrap                 = "repeat",         # or "clamp" for UVs outside [0, 1]
     ambient              = 0.8,              # 0..1; 0 = pure shadow, 1 = unshaded
     twosided             = True,             # render back faces too
     cast_shadows         = True,             # reserved; no shadow pass yet
     skin                 = None,             # SkinDeformData, for .pose()
     samples_per_pixel    = 4,                # MSAA, 1 or any perfect square
-    resolution           = (500, 500),       # for the per-Object preview
+    resolution           = (500, 500),       # per-Object preview; int32 (2,)
 
     # baked-in (UV-space) wireframe — see also Frame.wireframe() for screen-space
     wireframe           = False,
-    wireframe_color     = (0, 0, 0),        # 0-255 ints
+    wireframe_color     = (0, 0, 0),        # 0-255 ints; int32 (3,)
     wireframe_thickness = 1,
 
     # SRT (inherited from TransformData)
@@ -143,6 +143,10 @@ obj = Object(
     visibility = True,
 )
 ```
+
+Colors and `resolution` take any sequence and are kept as numpy arrays;
+a value of the wrong size raises `ValueError`. A texture array keeps its
+dtype when it is uint8, uint16 or float32 (other floats become float32).
 
 ### Loading geometry
 
@@ -301,6 +305,9 @@ scene.aspect_ratio        = None
 scene.default_camera_name = "cam"
 ```
 
+`Scene.strip_namespace()` strips `default_camera_name` along with the
+node names, so it still names its Camera.
+
 ### Bulk loading
 
 ```python
@@ -323,6 +330,19 @@ scene.union_aabb()       # world-space AABB across all visible Objects
 scene.union_points()     # concatenated visible world points
 scene.scene_name              # "hero" — `scene.name` is the list of CHILD names
 ```
+
+### Saving and loading
+
+```python
+path  = scene.save(os.path.join(tmp, "hero.npz"))  # or .pkl / .json
+again = Scene.load(path)
+print([type(node).__name__ for node in again])     # ['Object', 'Camera', 'Light']
+```
+
+Every node loads back as its own type, with its uuid and parenting, and
+the scene keeps its name, `aspect_ratio`, `default_camera_name` and the
+`configure()` keys. The cached render is not saved. Two Objects sharing
+one `MeshData` each load with their own copy.
 
 ---
 
@@ -777,12 +797,15 @@ ortho.render().save("ortho.png")
 - **Camera-to-world matrices** handed to / returned by the renderer
   (`look_at()`, `Frame.camera_matrix`, `render(camera_matrix=...)`) are
   column-major OpenGL: eye at `M[:3, 3]`.
-- **Color tuples** are `[0, 1]` floats for textures, base colors and
+- **Colors** are `[0, 1]` floats for base colors, light colors and
   backgrounds; `0-255` ints for `wireframe_color` and
-  `Frame.wireframe(color=...)`.
+  `Frame.wireframe(color=...)`. The ones a node keeps take any sequence
+  and are stored as numpy arrays: float64, int32 for `wireframe_color`.
+  Textures are uint8, uint16, or float32 in `[0, 1]`.
 - **Wrap** modes: `"repeat"` (tile) or `"clamp"`.
 - **Sample method**: `"bilinear"` for flat patches, `"bezier"` for PN
-  Quad bicubic patches (smoother surfaces, ~3-4x slower).
+  Quad bicubic patches (smoother surfaces, ~3-4x slower). The
+  `SampleMethod` enum from `cgmath.geometry.mesh` works too.
 
 ---
 

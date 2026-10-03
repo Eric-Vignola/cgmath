@@ -1,38 +1,40 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
-from cgmath.geometry._base import Data
+from cgmath.geometry._base import Array, Data
 from cgmath.transforms import matrix_inverse, matrix_multiply, matrix_to_euler
 
 
 @dataclass(repr=False, eq=False)
 class ProcrustesData(Data):
-    points:     np.ndarray = None
-    transforms: np.ndarray = None
-    clusters:   np.ndarray = None
+    points:        Optional[Array(np.float64, "P", 3)] = None     # rest points
+    transforms:    Optional[Array(np.float64, "K", 4, 4)] = None  # one per cluster
+    clusters:      Optional[Array(np.int32, "K", "M")] = None     # point indices, -1 padded
+    _scale_offset: bool = True                                    # whether to apply scale to offset matrix
 
-    # --- cached attributes --- #
-    _scale        = None  # scale factors
-    _rotate       = None  # euler angles in radians
-    _translate    = None  # translation vectors
-    _matrix       = None  # output matrices
-    _points       = None  # the updated points
-    _scale_offset = None  # whether to apply scale to offset matrix
+    # --- cached attributes: the per-frame target and results, not saved --- #
+    _scale     = None  # scale factors
+    _rotate    = None  # euler angles in radians
+    _translate = None  # translation vectors
+    _matrix    = None  # output matrices
+    _points    = None  # the updated points
 
     @property
-    def scale_offset(self):
-        if self._scale_offset is None:
-            self._scale_offset = True
+    def scale_offset(self) -> bool:
         return self._scale_offset
 
     @scale_offset.setter
     def scale_offset(self, state: bool):
+        state = bool(state)
         if self._scale_offset != state:
             self._scale_offset = state
-            self.compute()
+
+            # nothing to recompute before a transform is attached
+            if self.valid:
+                self.compute()
 
     @property
     def scale(self):
@@ -64,14 +66,15 @@ class ProcrustesData(Data):
 
         # if indices is None, then use all points
         if indices is None:
-            indices = np.arange(self.points.shape[0])
+            indices = np.arange(self.points.shape[0], dtype=np.int32)
 
         # make sure indices are unique
         else:
-            indices = np.unique(indices).astype(np.intp)
+            indices = np.unique(np.asarray(indices, dtype=np.int32))
             indices = indices[indices >= 0]  # get rid of -1's
 
         # store inside self.matrix
+        transform = np.asarray(transform, dtype=np.float64)
         if self.transforms is None:
             self.transforms = transform[None]
         else:
@@ -85,7 +88,7 @@ class ProcrustesData(Data):
             if indices.size > self.clusters.shape[1]:
                 max_length = indices.size
 
-            clusters                                                     = np.ones((self.clusters.shape[0] + 1, max_length), dtype=int) * -1
+            clusters                                                     = np.full((self.clusters.shape[0] + 1, max_length), -1, dtype=np.int32)
             clusters[: self.clusters.shape[0], : self.clusters.shape[1]] = self.clusters
             clusters[-1, : indices.size]                                 = indices
             self.clusters                                                = clusters

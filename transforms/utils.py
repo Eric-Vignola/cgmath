@@ -73,7 +73,7 @@ class _ProgressResult(unittest.TextTestResult):
 
     ``startTest`` writes the counter and then defers to the stdlib for the
     description and `` ... ``, so the line format stays whatever this Python's
-    unittest produces. The hook has the same shape on 3.7 (Maya 2022) and 3.11
+    unittest produces. The hook has the same shape on 3.9 (Maya 2023) and 3.11
     (Maya 2025). ``**kwargs`` absorbs the ``durations=`` that 3.12+ passes.
     Only active when ``showAll`` is set, i.e. verbosity 2 -- dot mode is untouched.
     """

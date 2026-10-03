@@ -1338,7 +1338,7 @@ class TestSceneRenderConfig(unittest.TestCase):
         ``Scene().render()`` call produces a sensibly-sized preview."""
         scene = Scene("s")
         # resolution has a concrete default; everything else is None.
-        self.assertEqual(scene.resolution, (500, 500))
+        np.testing.assert_array_equal(scene.resolution, (500, 500))
         for k in Scene._RENDER_CONFIG_KEYS:
             if k == "resolution":
                 continue
@@ -1353,25 +1353,25 @@ class TestSceneRenderConfig(unittest.TestCase):
             autofit           = False,
         )
         self.assertEqual(scene.samples_per_pixel, 4)
-        self.assertEqual(scene.resolution, (640, 480))
+        np.testing.assert_array_equal(scene.resolution, (640, 480))
         # RGB input is auto-promoted to opaque RGBA by Scene.background's
         # _normalize_rgba pass at construction time.
-        self.assertEqual(scene.background, (0.1, 0.2, 0.3, 1.0))
+        np.testing.assert_array_equal(scene.background, (0.1, 0.2, 0.3, 1.0))
         self.assertFalse(scene.autofit)
 
     def test_configure_chainable_and_skips_none(self):
         scene = Scene("s")
         # Pre-condition: resolution starts at the (500, 500) default.
-        self.assertEqual(scene.resolution, (500, 500))
+        np.testing.assert_array_equal(scene.resolution, (500, 500))
         ret = scene.configure(samples_per_pixel=4, resolution=None)
         self.assertIs(ret, scene, "configure() should return self for chaining")
         self.assertEqual(scene.samples_per_pixel, 4)
         # ``resolution=None`` was passed -- configure() must SKIP it (not
         # overwrite the existing default with None).
-        self.assertEqual(
+        np.testing.assert_array_equal(
             scene.resolution,
             (500, 500),
-            "None values passed to configure() should be skipped",
+            err_msg="None values passed to configure() should be skipped",
         )
 
     def test_configure_unknown_attribute_raises(self):
@@ -1432,7 +1432,7 @@ class TestObjectWireframe(unittest.TestCase):
     def test_wireframe_defaults(self):
         obj = Object(name="cube", mesh=self.mesh, uv=self.uv)
         self.assertFalse(obj.wireframe)
-        self.assertEqual(obj.wireframe_color, (0, 0, 0))
+        np.testing.assert_array_equal(obj.wireframe_color, (0, 0, 0))
         self.assertEqual(obj.wireframe_thickness, 1)
 
     def test_wireframe_off_returns_plain_diffuse(self):
@@ -1525,7 +1525,7 @@ class TestObjectFrameRenderConfig(unittest.TestCase):
         obj = Object(name="cube", mesh=self.mesh)
         # Per-Object preview defaults: 500x500 + 4-sample MSAA
         # (smallest perfect square > 1 the renderer accepts).
-        self.assertEqual(obj.resolution, (500, 500))
+        np.testing.assert_array_equal(obj.resolution, (500, 500))
         self.assertEqual(obj.samples_per_pixel, 4)
 
     def test_constructor_args(self):
@@ -1535,14 +1535,34 @@ class TestObjectFrameRenderConfig(unittest.TestCase):
             resolution=(640, 480),
             samples_per_pixel=4,
         )
-        self.assertEqual(obj.resolution, (640, 480))
+        np.testing.assert_array_equal(obj.resolution, (640, 480))
         self.assertEqual(obj.samples_per_pixel, 4)
 
-    def test_resolution_setter_coerces_to_int_tuple(self):
+    def test_array_settings_change_only_through_their_setter(self):
+        # an edit in place would skip the setter and the re-render it
+        # triggers, so the getters hand out read-only views
+        obj   = Object(name="cube", mesh=self.mesh, background=(0, 0, 0))
+        scene = Scene("s", resolution=(32, 32), background=(0, 0, 0))
+        for owner, name in (
+            (obj, "base_color"),
+            (obj, "background"),
+            (obj, "wireframe_color"),
+            (obj, "resolution"),
+            (scene, "resolution"),
+            (scene, "background"),
+        ):
+            with self.subTest(owner=type(owner).__name__, name=name):
+                value = getattr(owner, name)
+                with self.assertRaises(ValueError):
+                    value[0] = 1
+                setattr(owner, name, np.ones_like(value))
+                self.assertEqual(getattr(owner, name)[0], 1)
+
+    def test_resolution_setter_coerces_to_int32(self):
         obj            = Object(name="cube", mesh=self.mesh)
         obj.resolution = [800.0, 600.0]
-        self.assertEqual(obj.resolution, (800, 600))
-        self.assertIsInstance(obj.resolution[0], int)
+        np.testing.assert_array_equal(obj.resolution, (800, 600))
+        self.assertEqual(obj.resolution.dtype, np.int32)
 
     def test_samples_per_pixel_setter_accepts_none(self):
         obj                   = Object(name="cube", mesh=self.mesh, samples_per_pixel=4)
@@ -1586,7 +1606,7 @@ class TestObjectFrameRenderConfig(unittest.TestCase):
         with patch.object(Scene, "render", return_value="sentinel") as mock_render:
             obj.render()
         _, kwargs = mock_render.call_args
-        self.assertEqual(kwargs["resolution"], (320, 240))
+        np.testing.assert_array_equal(kwargs["resolution"], (320, 240))
 
     def test_render_uses_self_samples_per_pixel_when_kwarg_omitted(self):
         obj                   = Object(name="cube", mesh=self.mesh)
@@ -1631,7 +1651,7 @@ class TestObjectFrameRenderConfig(unittest.TestCase):
         with patch.object(Scene, "turntable", return_value=[]) as mock_tt:
             obj.turntable(n_frames=1)
         _, kwargs = mock_tt.call_args
-        self.assertEqual(kwargs["resolution"], (320, 240))
+        np.testing.assert_array_equal(kwargs["resolution"], (320, 240))
 
     def test_turntable_uses_self_samples_per_pixel_when_kwarg_omitted(self):
         obj                   = Object(name="cube", mesh=self.mesh)
@@ -1736,7 +1756,7 @@ class TestSceneObjectIO(unittest.TestCase):
                 translate  = [5.0, 0.0, 0.0],
             )
         self.assertEqual(obj.name, "custom")
-        self.assertEqual(obj.base_color, (1.0, 0.0, 0.0))
+        np.testing.assert_array_equal(obj.base_color, (1.0, 0.0, 0.0))
         np.testing.assert_allclose(obj.world_matrix[3, :3], [5.0, 0.0, 0.0])
 
     def test_object_load_obj_index_out_of_range(self):
@@ -3008,7 +3028,7 @@ class TestObjectSerialization(unittest.TestCase):
         self.assertIn("points", d["_mesh"])
         self.assertIn("indices", d["_mesh"])
 
-    def test_to_dict_materializes_array_texture_as_uint8(self):
+    def test_to_dict_keeps_a_uint8_texture(self):
         obj, tex = self._make_full_obj()
         d = obj.to_dict()
         self.assertIsInstance(d["_texture"], np.ndarray)
@@ -3131,7 +3151,7 @@ class TestObjectSerialization(unittest.TestCase):
     def test_save_load_round_trip_pkl(self):
         obj, tex = self._make_full_obj()
         rebuilt = self._round_trip(obj, ".pkl")
-        # Pickle goes through our __reduce__ -> from_dict so nested
+        # Pickle saves the to_dict tree, as npz and json do, so nested
         # MeshData/UVData are properly reconstructed (not raw dicts).
         self.assertIsInstance(rebuilt,      Object)
         self.assertIsInstance(rebuilt.mesh, MeshData)
@@ -3419,15 +3439,15 @@ class TestBackgroundProperty(unittest.TestCase):
 
     def test_rgb_promoted_to_opaque_rgba_object(self):
         obj = Object(name="x", background=(0.2, 0.3, 0.4))
-        self.assertEqual(obj.background, (0.2, 0.3, 0.4, 1.0))
+        np.testing.assert_array_equal(obj.background, (0.2, 0.3, 0.4, 1.0))
 
     def test_rgb_promoted_to_opaque_rgba_scene(self):
         s = Scene("s", background=(0.2, 0.3, 0.4))
-        self.assertEqual(s.background, (0.2, 0.3, 0.4, 1.0))
+        np.testing.assert_array_equal(s.background, (0.2, 0.3, 0.4, 1.0))
 
     def test_rgba_kept_as_is(self):
         obj = Object(name="x", background=(0.2, 0.3, 0.4, 0.5))
-        self.assertEqual(obj.background, (0.2, 0.3, 0.4, 0.5))
+        np.testing.assert_array_equal(obj.background, (0.2, 0.3, 0.4, 0.5))
 
     def test_invalid_length_raises(self):
         with self.assertRaisesRegex(ValueError, "Object.background"):
@@ -3444,7 +3464,7 @@ class TestBackgroundProperty(unittest.TestCase):
     def test_setter_normalizes_rgb(self):
         obj            = Object(name="x")
         obj.background = (0.1, 0.2, 0.3)
-        self.assertEqual(obj.background, (0.1, 0.2, 0.3, 1.0))
+        np.testing.assert_array_equal(obj.background, (0.1, 0.2, 0.3, 1.0))
 
     def test_object_background_setter_marks_dirty(self):
         mesh, uv = _make_textured_cube()
@@ -3489,7 +3509,7 @@ class TestBackgroundProperty(unittest.TestCase):
         # Scene's green (promoted to opaque RGBA) reaches the renderer;
         # Object's red is ignored because Object.background is only
         # consulted in the standalone Object.render() preview path.
-        self.assertEqual(captured["background"], (0.0, 1.0, 0.0, 1.0))
+        np.testing.assert_array_equal(captured["background"], (0.0, 1.0, 0.0, 1.0))
 
     def test_object_background_used_in_standalone_preview(self):
         """obj.render() builds an internal one-Object Scene and forwards
@@ -3510,7 +3530,7 @@ class TestBackgroundProperty(unittest.TestCase):
         with patch.object(rt, "render", side_effect=fake_render):
             obj.render(resolution=(8, 8))
 
-        self.assertEqual(captured["background"], (1.0, 0.0, 0.0, 1.0))
+        np.testing.assert_array_equal(captured["background"], (1.0, 0.0, 0.0, 1.0))
 
     def test_scene_background_property_round_trips_via_getattr(self):
         """Regression for a bug where Scene.__init__ assigned _background
@@ -3522,7 +3542,7 @@ class TestBackgroundProperty(unittest.TestCase):
         # getattr must not raise; default is None.
         self.assertIsNone(getattr(scene, "background"))
         scene2 = Scene("s2", background=(0.1, 0.2, 0.3))
-        self.assertEqual(getattr(scene2, "background"), (0.1, 0.2, 0.3, 1.0))
+        np.testing.assert_array_equal(getattr(scene2, "background"), (0.1, 0.2, 0.3, 1.0))
 
     def test_scene_render_works_without_background(self):
         """Regression for the same bug as above: a fresh Scene with no

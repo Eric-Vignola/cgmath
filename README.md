@@ -151,6 +151,13 @@ If you know Maya, nothing below will surprise you.
   face and a raycast miss.
 - **A mesh is a face-vertex stream**, `indices` + `counts` + `points`.
   Mixed triangles, quads and n-gons in one mesh are normal.
+- **Arrays have fixed dtypes.** Indices and counts are `int32`; points,
+  normals, offsets, weights and values are `float64`; masks are `bool`. A
+  value is converted when it is set or loaded.
+- **One saved form.** `.pkl`, `.npz` and `.json` hold the same tree and
+  load as the class they name. A file written by an older cgmath raises
+  `LegacyFileError` — details in
+  [`geometry/README.md`](https://github.com/Eric-Vignola/cgmath/blob/main/geometry/README.md#saving-and-loading).
 - **Camera is OpenGL**: `-Z` forward, `+Y` up, `+X` right. `look_at()`
   and `Frame.camera_matrix` are **column**-major (eye at `M[:3, 3]`)
   while node matrices are row-major (eye at `M[3, :3]`).

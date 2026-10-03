@@ -3,7 +3,7 @@ from typing import Optional
 
 import numpy as np
 import scipy.integrate as si
-from cgmath.geometry._base import Data, ImmutableArray as numpy_array
+from cgmath.geometry._base import Array, Data, ImmutableArray as numpy_array
 from cgmath.geometry.utils import compute_basis, ordered_closest_params
 from cgmath.geometry.utils._numba._bspline import (
     _compute_basis_parallel,
@@ -22,11 +22,11 @@ class SampleData(Data):
     A dataclass to hold bspline sample data
     """
 
-    points:    np.ndarray
-    tangents:  np.ndarray
-    distances: np.ndarray
-    params:    np.ndarray
-    basis:     np.ndarray
+    points:    Array(np.float64, "N", "D")  # closest points on the curve
+    tangents:  Array(np.float64, "N", "D")  # derivatives there
+    distances: Array(np.float64, "N")       # distance from each query
+    params:    Array(np.float64, "N")       # curve parameter of each point
+    basis:     Array(np.float64, "N", "C")  # weight of each control point
 
     def __call__(self, values):
         return self.compute(values)
@@ -53,8 +53,10 @@ class BSplineData(Data):
     Parameters
     ----------
     points : np.ndarray
-        Control point positions (N, dims). Empty by default, so
-        ``BSplineData()`` is an empty cubic for ``fit()`` to fill.
+        Control point positions (N, dims), float64; dims is free (3 in
+        practice). Empty by default, so ``BSplineData()`` is an empty cubic
+        for ``fit()`` to fill. An empty value without its dims, such as
+        ``[]``, becomes the default's (0, 3).
     degree : int
         Degree of the B-spline curve. Default is 3.
     periodic : bool
@@ -79,7 +81,7 @@ class BSplineData(Data):
         Higher values give more accurate arc-length parameterization.
         Default is 1000.
     knots : np.ndarray, optional
-        Knot vector in Maya's layout, the one ``kv`` returns:
+        Knot vector (K,), float64, in Maya's layout, the one ``kv`` returns:
         count + degree - 1 values on open curves, count + 2 * degree - 1
         on periodic ones. None (default) gives uniform knots on
         [0, spans]. Their range is the curve's parameter range, as in Maya:
@@ -91,14 +93,14 @@ class BSplineData(Data):
         ``close()``; call ``invalidate()`` after changing it by hand.
     """
 
-    points:             np.ndarray = numpy_array(np.zeros((0, 3)))
+    points:             Array(np.float64, "N", "D") = numpy_array(np.zeros((0, 3)))
     degree:             int = field(default=3)
     periodic:           bool = field(default=False)
     uniform:            bool = field(default=False)
     use_numba:          bool = field(default=True)
     registered:         bool = field(default=False)
     arc_length_samples: int = field(default=1000)
-    knots:              Optional[np.ndarray] = None
+    knots:              Optional[Array(np.float64, "K")] = None
 
     # --- cached attributes --- #
     _kv               = None  # curve knot vector
@@ -118,6 +120,15 @@ class BSplineData(Data):
     _scale            = None  # parameter units per native unit
 
     __repr__ = Data.__repr__
+
+    def __setattr__(self, name, value):
+        # an empty value without its dims (json writes (0, 3) as []) is the
+        # default's empty curve
+        if name == "points" and value is not None and np.size(value) == 0:
+            shape = np.shape(value)
+            if len(shape) != 2 or shape[1] == 0:
+                value = np.zeros((0, 3))
+        super().__setattr__(name, value)
 
     def __eq__(self, other):
         return np.all(

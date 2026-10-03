@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import numpy as np
 from cgmath.geometry.deform.delta_mush import DeltaMushData
@@ -260,6 +261,69 @@ class TestDeltaMushData(unittest.TestCase):
         mush.bind()
         with self.assertRaises(ValueError):
             mush.apply(np.zeros((rest.point_count + 1, 3)))
+
+
+class TestDeltaMushState(unittest.TestCase):
+    """What the operator keeps from its rest mesh, and what it rebuilds."""
+
+    def test_apply_does_not_copy_the_rest_mesh(self):
+        # smoothing used to deep-copy the whole rest mesh on every apply, only
+        # to hand its points to blur()
+        rest = _make_grid_mesh(n=6, jitter=0.05, seed=60)
+        mush = DeltaMushData(rest, smooth_iterations=5)
+        mush.bind()
+
+        real   = MeshData.copy
+        copied = []
+
+        def counting(mesh):
+            copied.append(mesh)
+            return real(mesh)
+
+        with mock.patch.object(MeshData, "copy", counting):
+            for _ in range(3):
+                mush.apply(rest.points)
+        self.assertEqual(len(copied), 0)
+
+    def test_changing_smooth_iterations_after_a_bind_takes_effect(self):
+        # the iteration schedule was cached on the first bind and outlived
+        # a change of smooth_iterations
+        rest = _make_grid_mesh(n=8, jitter=0.05, seed=61)
+
+        changed = DeltaMushData(rest, smooth_iterations=3)
+        changed.bind()
+        changed.smooth_iterations = 12
+        changed.bind()
+
+        fresh = DeltaMushData(rest, smooth_iterations=12)
+        fresh.bind()
+        np.testing.assert_array_equal(changed.smoothed_points, fresh.smoothed_points)
+
+    def test_a_copy_made_before_binding_stays_tbn(self):
+        # the first-face winding is read from the mesh at construction, so
+        # a copy that never saw the mesh still binds as TBN, not as DDM
+        rest     = _make_grid_mesh(n=8, jitter=0.05, seed=62)
+        mush     = DeltaMushData(rest, smooth_iterations=6, method="TBN")
+        restored = mush.copy()
+
+        deformed = rest.copy()
+        deformed.points[:, 2] += 0.3 * deformed.points[:, 0]
+
+        np.testing.assert_array_equal(
+            restored.apply(deformed).points, mush.apply(deformed).points
+        )
+        self.assertEqual(restored.method, "TBN")
+
+    def test_a_method_change_keeps_the_first_face_winding(self):
+        rest        = _make_grid_mesh(n=4, jitter=0.0, seed=63)
+        mush        = DeltaMushData(rest, smooth_iterations=2)
+        nbrs        = mush._first_nbrs.copy()
+        mush.method = "DDM"
+        mush.bind()
+        mush.method = "TBN"
+        mush.bind()
+        self.assertEqual(mush.method, "TBN")
+        np.testing.assert_array_equal(mush._first_nbrs, nbrs)
 
 
 class TestDeltaMushNumpyFallback(unittest.TestCase):

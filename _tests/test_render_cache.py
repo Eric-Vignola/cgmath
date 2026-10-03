@@ -68,6 +68,14 @@ class RenderCacheCase(unittest.TestCase):
 
 
 class TestTurntable(RenderCacheCase):
+    def test_a_setting_passed_as_its_own_value_reads_the_frames_back(self):
+        # the stored resolution is an int32 array, the argument a tuple
+        scene            = self.scene()
+        scene.resolution = (32, 32)
+        scene.turntable(self.out("a"), n_frames=2, samples_per_pixel=1)
+        again = lambda: scene.turntable(self.out("b"), n_frames=2, **RES)
+        self.assertEqual(self.renders(again), 0)
+
     def test_a_second_encode_reads_the_frames_back(self):
         scene = self.scene()
         first = scene.turntable(self.out("a"), n_frames=4, **RES)

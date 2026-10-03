@@ -43,10 +43,18 @@ import tempfile
 import warnings
 import weakref
 from dataclasses import dataclass
+from enum import Enum
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
 from cgmath.formats._fbx_io import FbxReadError, open_fbx, typed
+from cgmath.geometry._base import (
+    _strip_namespace,
+    Array,
+    ArraySpec,
+    DTYPES_KEY,
+    ImmutableArray as numpy_array,
+)
 from cgmath.geometry.deform import SkinDeformData
 from cgmath.geometry.mesh import (
     load_fbx as _load_fbx,
@@ -101,12 +109,19 @@ class Object(TransformData):
 
     Domain fields are declared as ``@dataclass`` defaults so that the
     inherited :meth:`Data.to_dict` / :meth:`Data.from_dict` round-trip
-    them automatically.
+    them automatically, the mesh, UVs and skin nested as their own data.
 
     The ``texture`` attribute may be a path to an image or a pre-loaded
-    ``(H, W, 3)`` float32 array.  When it's a path, the renderer loads
-    it lazily on first render and caches the result on the Object via
-    the (non-serialized) ``_loaded_texture`` attribute.
+    ``(H, W, C)`` array, uint8, uint16 or float32 in [0, 1], kept in its
+    own dtype (any other float array becomes float32).  When it's a path,
+    the renderer loads it lazily on first render and caches the result on
+    the Object via the (non-serialized) ``_loaded_texture`` attribute, and
+    a save writes the image's pixels, as uint8, in its place.
+
+    ``base_color``, ``background``, ``resolution`` and ``wireframe_color``
+    are small arrays: float64 ``(3,)``, float64 ``(4,)`` (or ``None``),
+    int32 ``(2,)`` and int32 ``(3,)``.  A value of another size raises
+    ValueError.
 
     Render cache (``frame`` / ``buffer``):
       :meth:`render`, :meth:`imshow`, and :meth:`to_image` populate a
@@ -129,10 +144,10 @@ class Object(TransformData):
       still requires an explicit :meth:`render` call to refresh.
     """
 
-    # Renderable payload
+    # Renderable payload.  A texture path stays a str (see __setattr__).
     _mesh:    Optional[MeshData] = None
     _uv:      Optional[UVData] = None
-    _texture: Optional[Union[str, np.ndarray]] = None
+    _texture: Optional[Union[str, Array((np.uint8, np.uint16, np.float32))]] = None
 
     # Skeletal deformer driving ``_mesh`` -- see :meth:`pose`.  Not a render
     # input: attaching one changes nothing on screen until ``pose()`` runs,
@@ -140,7 +155,7 @@ class Object(TransformData):
     _skin: Optional[SkinDeformData] = None
 
     # Per-Object shader knobs (override Scene/render() defaults)
-    _base_color:    Tuple[float, float, float] = (0.7, 0.7, 0.7)
+    _base_color:    Array(np.float64, 3) = numpy_array([0.7, 0.7, 0.7])
     _sample_method: str = "bilinear"  # or "bezier"
     _wrap:          str = "repeat"    # or "clamp"
     _ambient:       float = 0.8
@@ -155,7 +170,7 @@ class Object(TransformData):
     # 3-tuples are auto-promoted to opaque ``(R, G, B, 1)`` by the
     # :func:`_normalize_rgba` helper; ``None`` falls through to the
     # renderer's own default ``(0, 0, 0, 0)`` (transparent black).
-    _background: Optional[Tuple[float, float, float, float]] = None
+    _background: Optional[Array(np.float64, 4)] = None
 
     # Per-Object frame-level render config -- only consulted by the
     # standalone preview entry points (:meth:`render` / :meth:`turntable`
@@ -163,24 +178,30 @@ class Object(TransformData):
     # user-built parent :class:`Scene` IGNORE these -- frame settings on
     # the Scene win there (see :attr:`Scene._RENDER_CONFIG_KEYS`).
     # Settable via property setters that invalidate the cached frame.
-    _resolution:        Tuple[int, int] = (500, 500)
-    _samples_per_pixel: Optional[int] = None
+    _resolution:        Array(np.int32, 2) = numpy_array(np.array([500, 500], dtype=np.int32))
+    _samples_per_pixel: Optional[int] = 4
 
     # Per-Object wireframe overlay (baked into a copy of the diffuse via
     # ``UVData.draw_edges()``).  Settable via property setters that
     # invalidate the bake cache when any of these or ``texture`` / ``uv``
     # change.  Default off; opt in per Object.
     _wireframe:           bool = False
-    _wireframe_color:     Tuple[int, int, int] = (0, 0, 0)
+    _wireframe_color:     Array(np.int32, 3) = numpy_array(np.zeros(3, dtype=np.int32))
     _wireframe_thickness: int = 1
 
-    # Lazy-loaded texture cache (intentionally NOT a dataclass field).
-    _loaded_texture: Optional[np.ndarray] = None
-    # Lazy-baked wireframe-on-diffuse cache (also non-serialized).
-    _wired_texture_cache: Optional[np.ndarray] = None
-    # Lazy-built bind-pose mesh handed to the deformer each frame (also
-    # non-serialized -- rebuilt from ``_skin.rest_points``, which persists).
-    _bind_mesh: Optional[MeshData] = None
+    # -- render caches: class-level defaults, NOT dataclass fields, so they
+    # are never saved and a loaded Object starts without them --
+    #
+    # Lazy-loaded texture.
+    _loaded_texture = None
+    # Lazy-baked wireframe-on-diffuse.
+    _wired_texture_cache = None
+    # Lazy-built bind-pose mesh handed to the deformer each frame, rebuilt
+    # from ``_skin.rest_points``, which persists.
+    _bind_mesh = None
+    # Most-recent render output, accessed via the ``frame`` property below.
+    # ``None`` until :meth:`render` (or :meth:`imshow`) has been called.
+    _frame = None
     # Snapshot of the local transform state + composed world matrix
     # at the time ``frame`` was populated.  ``None`` whenever the cache
     # is empty -- used by the ``frame`` getter to lazy-invalidate when
@@ -192,7 +213,7 @@ class Object(TransformData):
     # include the composed ``world_matrix`` bytes so ancestor mutations
     # (which DO propagate through ``_reset_branch_world_matrices``) are
     # caught even when our own SRT hasn't changed.
-    _render_transform_state: Optional[tuple] = None
+    _render_transform_state = None
 
     def __init__(
         self,
@@ -217,35 +238,41 @@ class Object(TransformData):
     ) -> None:
         super().__init__(name=name, node_type="object", **transform_kwargs)
         # Use private storage so the property setters below can validate
-        # and invalidate the wired-texture cache.
+        # and invalidate the wired-texture cache.  The array settings are
+        # copied: a caller's array edited later must not edit them.
         self._mesh          = mesh
         self._uv            = uv
         self._texture       = texture
         self._skin          = skin
-        self._base_color    = tuple(base_color)
-        self._sample_method = str(sample_method)
+        self._base_color    = np.array(base_color, dtype=np.float64)
+        self._sample_method = str(_enum_value(sample_method))
         self._wrap          = str(wrap)
         self._ambient       = float(ambient)
         self._twosided      = bool(twosided)
         self._cast_shadows  = bool(cast_shadows)
-        self._resolution    = tuple(int(v) for v in resolution)
+        self._resolution    = np.array(resolution, dtype=np.int32)
         self._samples_per_pixel = _validate_samples_per_pixel(
             samples_per_pixel, field_name="Object.samples_per_pixel"
         )
         self._wireframe           = bool(wireframe)
-        self._wireframe_color     = tuple(wireframe_color)
+        self._wireframe_color     = np.array(wireframe_color, dtype=np.int32)
         self._wireframe_thickness = int(wireframe_thickness)
         self._background          = _normalize_rgba(background, "Object.background")
-        self._loaded_texture      = None
-        self._wired_texture_cache = None
-        self._bind_mesh           = None
-        # Cached most-recent render output, accessed via the ``frame``
-        # property below.  Use private storage so the property setter
-        # can snapshot a transform-state tuple for later invalidation.
-        # ``None`` until :meth:`render` (or :meth:`imshow`) has been
-        # called.
-        self._frame: Optional["Frame"] = None
-        self._render_transform_state = None
+
+    def __setattr__(self, name: str, value) -> None:
+        # a texture path is kept as given, and read when the Object renders
+        # or saves; every other value goes through the field's conversion
+        if name == "_texture" and isinstance(value, str):
+            object.__setattr__(self, name, value)
+            return
+        super().__setattr__(name, value)
+
+    def _replace(self, name: str, value) -> bool:
+        """sets the setting ``name`` to ``value``, True when that changed it"""
+        if _same_setting(getattr(self, name), value):
+            return False
+        setattr(self, name, value)
+        return True
 
     # -- file IO: load an Object from disk -----------------------------
 
@@ -633,14 +660,13 @@ class Object(TransformData):
         return self
 
     @property
-    def base_color(self) -> Tuple[float, float, float]:
-        return self._base_color
+    def base_color(self) -> np.ndarray:
+        """Surface color in [0, 1] when there is no texture, float64 ``(3,)``."""
+        return _read_only(self._base_color)
 
     @base_color.setter
-    def base_color(self, value: Tuple[float, float, float]) -> None:
-        new = tuple(value)
-        if new != self._base_color:
-            self._base_color = new
+    def base_color(self, value) -> None:
+        if self._replace("_base_color", np.array(value, dtype=np.float64)):
             # base_color participates in the wireframe bake when there is
             # no diffuse texture (it fills the buffer before edges are
             # drawn), so invalidate the cache.
@@ -648,8 +674,8 @@ class Object(TransformData):
             self._mark_render_dirty()
 
     @property
-    def background(self) -> Optional[Tuple[float, float, float, float]]:
-        """Per-Object preview RGBA background in [0, 1].
+    def background(self) -> Optional[np.ndarray]:
+        """Per-Object preview RGBA background in [0, 1], float64 ``(4,)``.
 
         Used only by :meth:`render` / :meth:`to_image` / :meth:`imshow`
         / :meth:`turntable` standalone preview.  IGNORED when this
@@ -659,21 +685,19 @@ class Object(TransformData):
         Accepts:
           - ``None`` -> renderer falls through to ``(0, 0, 0, 0)``
             (transparent black).
-          - 3-tuple ``(R, G, B)`` -> auto-promoted to ``(R, G, B, 1)``
+          - 3 values ``(R, G, B)`` -> auto-promoted to ``(R, G, B, 1)``
             (opaque) for convenience.
-          - 4-tuple ``(R, G, B, A)`` -> stored as-is.
+          - 4 values ``(R, G, B, A)`` -> stored as-is.
 
         See :class:`Scene.background` for the alpha semantics in the
         renderer (bg.alpha=0 transparent miss, bg.alpha=1 opaque, in
         between yields a Porter-Duff "over" composite).
         """
-        return self._background
+        return _read_only(self._background)
 
     @background.setter
     def background(self, value) -> None:
-        new = _normalize_rgba(value, "Object.background")
-        if new != self._background:
-            self._background = new
+        if self._replace("_background", _normalize_rgba(value, "Object.background")):
             self._mark_render_dirty()
 
     # -- wireframe attributes: setters invalidate the bake cache -------
@@ -691,14 +715,13 @@ class Object(TransformData):
             self._mark_render_dirty()
 
     @property
-    def wireframe_color(self) -> Tuple[int, int, int]:
-        return self._wireframe_color
+    def wireframe_color(self) -> np.ndarray:
+        """Edge color in 0..255, int32 ``(3,)``."""
+        return _read_only(self._wireframe_color)
 
     @wireframe_color.setter
-    def wireframe_color(self, value: Tuple[int, int, int]) -> None:
-        new = tuple(value)
-        if new != self._wireframe_color:
-            self._wireframe_color     = new
+    def wireframe_color(self, value) -> None:
+        if self._replace("_wireframe_color", np.array(value, dtype=np.int32)):
             self._wired_texture_cache = None
             self._mark_render_dirty()
 
@@ -722,13 +745,14 @@ class Object(TransformData):
 
     @sample_method.setter
     def sample_method(self, value: str) -> None:
-        # Coerce numeric scalars to str (preserves the legacy
-        # ``sample_method = 42`` contract that
-        # ``test_sample_method_setter_coerces_to_str`` pins down) but
-        # preserve everything else (str, enum, mock).  This lets
-        # ``_scene_objects_use_bezier`` read ``.name`` as a fallback for
-        # enum-shaped values without forcing this leaf module to import
-        # the enum class.
+        # A real enum (``SampleMethod.BEZIER``) is stored as its value,
+        # ``"bezier"``: an Enum field saves to no file.  Numeric scalars
+        # become str (the legacy ``sample_method = 42`` contract that
+        # ``test_sample_method_setter_coerces_to_str`` pins down); anything
+        # else (str, an enum-shaped mock) is kept, so
+        # ``_scene_objects_use_bezier`` can still read ``.name`` as a
+        # fallback.
+        value = _enum_value(value)
         if isinstance(value, str):
             new = value
         elif isinstance(value, (int, float, bool)):
@@ -786,21 +810,19 @@ class Object(TransformData):
     # -- frame-level render config: setters invalidate the cached frame --
 
     @property
-    def resolution(self) -> Tuple[int, int]:
-        """Per-Object preview render resolution ``(width, height)``.
+    def resolution(self) -> np.ndarray:
+        """Per-Object preview render resolution ``(width, height)``, int32.
 
         Used as the default by :meth:`render` / :meth:`turntable` /
         :meth:`imshow` / :meth:`to_image` when no explicit ``resolution``
         kwarg is supplied.  IGNORED when this Object is rendered via a
         parent :class:`Scene` (Scene-level resolution wins there).
         """
-        return self._resolution
+        return _read_only(self._resolution)
 
     @resolution.setter
-    def resolution(self, value: Tuple[int, int]) -> None:
-        new = tuple(int(v) for v in value)
-        if new != self._resolution:
-            self._resolution = new
+    def resolution(self, value) -> None:
+        if self._replace("_resolution", np.array(value, dtype=np.int32)):
             self._mark_render_dirty()
 
     @property
@@ -985,11 +1007,12 @@ class Object(TransformData):
                 with Image.open(path) as img:
                     tex_uint8 = np.asarray(img.convert("RGB"), dtype=np.uint8)
             else:
-                tex_uint8 = np.asarray(self._texture, dtype=np.uint8)
+                tex_uint8 = _texture_as_uint8(self._texture)
             # UVData buffer is bottom-up; flip top-down -> bottom-up.
             self._uv.buffer = np.flipud(tex_uint8).copy()
+        # a tuple: draw_edges reads an array as one color per edge
         self._uv.draw_edges(
-            color     = self._wireframe_color,
+            color     = tuple(int(c) for c in self._wireframe_color),
             thickness = self._wireframe_thickness,
         )
         wired_uint8 = np.flipud(self._uv.buffer).copy()
@@ -1408,112 +1431,22 @@ class Object(TransformData):
         """
         _clear_render_cache(self)
 
-    # -- serialization: round-trip mesh / uv / texture -------------
+    # -- serialization: a texture path is saved as its pixels -----------
 
     def to_dict(self) -> dict:
-        """Serializable dict for :meth:`save` (npz / json / pkl).
+        """The tree :meth:`Data.to_dict` builds, with a texture given as a
+        file path read now and written as its ``(H, W, C)`` uint8 pixels,
+        so the saved file does not depend on the image.  It loads back as
+        that array: the path itself is not kept.
 
-        Overrides :meth:`Data.to_dict` to handle the three Object-
-        specific fields the base mechanism can't flatten on its own:
-
-          - ``_mesh`` (:class:`MeshData`) -> nested dict via the
-            child's own ``to_dict()`` (recursive).
-          - ``_uv`` (:class:`UVData`) -> same.
-          - ``_skin`` (:class:`SkinDeformData`) -> same.  Nesting it by
-            hand is not optional: the base mechanism only writes a field
-            whose value differs from the dataclass default, and ``Data``
-            compares equal to a foreign type, so the check would drop it.
-          - ``_texture`` (``str`` path | ``np.ndarray`` | None) ->
-            materialized to a ``(H, W, C) uint8`` numpy array so the
-            saved file is self-contained (path-loaded textures are
-            read off disk now, not at load time).
-
-        Transient render caches (``_loaded_texture``,
-        ``_wired_texture_cache``, ``_render_transform_state``) are
-        scrubbed so a render-then-save doesn't bloat the output.
+        Raises:
+            RuntimeError: If the texture is a path and PIL is not available.
         """
         data = super().to_dict()
-
-        if self._mesh is not None:
-            data["_mesh"] = self._mesh.to_dict()
-        if self._uv is not None:
-            data["_uv"] = self._uv.to_dict()
-        if self._skin is not None:
-            data["_skin"] = self._skin.to_dict()
-
-        if self._texture is not None:
-            if isinstance(self._texture, str):
-                data["_texture"] = _load_texture_path_to_uint8(self._texture)
-            else:
-                arr = np.asarray(self._texture)
-                if arr.dtype != np.uint8:
-                    if arr.dtype.kind == "f":
-                        arr = (arr.clip(0.0, 1.0) * 255.0).astype(np.uint8)
-                    else:
-                        arr = arr.astype(np.uint8)
-                data["_texture"] = arr
-
-        # Drop transient render caches in case base to_dict picked them up
-        # (they're declared as Optional dataclass fields but are caches).
-        for k in (
-            "_loaded_texture",
-            "_wired_texture_cache",
-            "_render_transform_state",
-            "_bind_mesh",
-        ):
-            data.pop(k, None)
-
+        if isinstance(self._texture, str):
+            data["_texture"] = _load_texture_path_to_uint8(self._texture)
+            data.setdefault(DTYPES_KEY, {})["_texture"] = "uint8"
         return data
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "Object":
-        """Reconstruct an Object from :meth:`to_dict`'s output.
-
-        Nested ``_mesh`` / ``_uv`` dicts are rebuilt via
-        :meth:`MeshData.from_dict` / :meth:`UVData.from_dict`.  The
-        texture (always restored as a numpy uint8 array) is assigned
-        to ``_texture`` directly -- the renderer's
-        :meth:`get_loaded_texture` accepts ndarrays so no temp file
-        is needed.  If you need a file path, write the array to disk
-        yourself after loading.
-        """
-        # Copy so we don't mutate the caller's dict.
-        data      = dict(data)
-        mesh_dict = data.pop("_mesh",    None)
-        uv_dict   = data.pop("_uv",      None)
-        tex_arr   = data.pop("_texture", None)
-        skin_dict = data.pop("_skin",    None)
-
-        obj = super().from_dict(data)
-
-        if mesh_dict is not None:
-            obj._mesh = MeshData.from_dict(mesh_dict)
-        if uv_dict is not None:
-            obj._uv = UVData.from_dict(uv_dict)
-        if tex_arr is not None:
-            obj._texture = np.asarray(tex_arr)
-        if skin_dict is not None:
-            obj._skin = SkinDeformData.from_dict(skin_dict)
-
-        # Initialize non-serialized caches (also defends against pickle
-        # paths that bypass __init__).
-        obj._loaded_texture         = None
-        obj._wired_texture_cache    = None
-        obj._frame                  = None
-        obj._render_transform_state = None
-        obj._bind_mesh              = None
-
-        return obj
-
-    def __reduce__(self):
-        """Pickle round-trip through :meth:`to_dict` / :meth:`from_dict`
-        so nested :class:`MeshData` / :class:`UVData` are properly
-        reconstructed.  The inherited :meth:`Data.__reduce__` uses
-        ``_reconstruct`` which calls ``__dict__.update(state)`` --
-        that would leave ``_mesh`` / ``_uv`` as raw dicts and skip
-        our cache reset.
-        """
-        return (self.__class__.from_dict, (self.to_dict(),))
 
 
 # -- Camera -------------------------------------------------------------------------
@@ -1636,11 +1569,12 @@ class Light(TransformData):
     ``kind="point"`` uses :attr:`world_matrix` translation as the light
     position with 1/r^2 falloff.  ``kind="infinite"`` uses the camera-style
     forward axis (``-world_matrix[:3, 2]``) as the parallel-ray direction
-    with no falloff (useful as a "sun" light).
+    with no falloff (useful as a "sun" light).  ``color`` is float64
+    ``(3,)``; a value of another size raises ValueError.
     """
 
     kind:      str = "point"  # "point" or "infinite"
-    color:     Tuple[float, float, float] = (1.0, 1.0, 1.0)
+    color:     Array(np.float64, 3) = numpy_array([1.0, 1.0, 1.0])
     intensity: float = 1.0
     falloff:   bool = True    # only meaningful for kind=="point"
 
@@ -1657,7 +1591,7 @@ class Light(TransformData):
         if kind not in ("point", "infinite"):
             raise ValueError(f"Light.kind must be 'point' or 'infinite', got {kind!r}")
         self.kind      = kind
-        self.color     = tuple(color)
+        self.color     = np.array(color, dtype=np.float64)
         self.intensity = float(intensity)
         self.falloff   = bool(falloff)
 
@@ -1687,7 +1621,7 @@ class Light(TransformData):
             "kind":      self.kind,
             "position":  tuple(self.position),
             "direction": tuple(self.direction),
-            "color":     tuple(self.color),
+            "color":     tuple(float(c) for c in self.color),
             "intensity": float(self.intensity),
             "falloff":   bool(self.falloff),
         }
@@ -1734,19 +1668,38 @@ class Scene(HierarchyData):
       auto-invalidation -- call :meth:`render` again to refresh.
       See :meth:`_compute_render_signature` for the full per-node
       signature spec.
+
+    Saving (pkl / npz / json) keeps every node, as its own type, with its
+    parenting, and every setting below; a loaded Scene has no cached
+    render.  ``resolution`` is int32 ``(2,)`` and ``background`` float64
+    ``(4,)``, either one ``None``.
     """
 
     # render settings __init__ and configure() set on the instance, declared so
     # the hierarchy lists' strict setter accepts them
     aspect_ratio:        Optional[float]
     default_camera_name: Optional[str]
-    resolution:          Optional[Tuple[int, int]]
     samples_per_pixel:   Optional[int]
     autofit:             Optional[bool]
     default_light:       Optional[bool]
     return_depth:        Optional[bool]
     angle_of_view:       Optional[float]
     fit_padding:         Optional[float]
+
+    # the settings saved with the nodes
+    LIST_FIELDS = HierarchyData.LIST_FIELDS + (
+        "scene_name",
+        "aspect_ratio",
+        "default_camera_name",
+        "resolution",
+        "samples_per_pixel",
+        "background",
+        "autofit",
+        "default_light",
+        "return_depth",
+        "angle_of_view",
+        "fit_padding",
+    )
 
     def __init__(
         self,
@@ -1779,14 +1732,11 @@ class Scene(HierarchyData):
         # to the per-call kwarg or render()'s internal default".  Per-call
         # kwargs always win; these are the Scene-level defaults that flow
         # through render() and turntable() without being repeated.
-        self.resolution:        Optional[Tuple[int, int]] = resolution
+        # ``resolution`` and ``background`` go through their property
+        # setters below: int32 (2,), and RGB or RGBA promoted to RGBA.
+        self.resolution = resolution
         self.samples_per_pixel: Optional[int] = samples_per_pixel
-        # ``background`` is normalized to RGBA via the property setter
-        # below; users may pass RGB or RGBA (or None) and it always
-        # round-trips to a 4-tuple in storage.
-        self._background: Optional[Tuple[float, float, float, float]] = _normalize_rgba(
-            background, "Scene.background"
-        )
+        self.background = background
         self.autofit:       Optional[bool] = autofit
         self.default_light: Optional[bool] = default_light
         self.return_depth:  Optional[bool] = return_depth
@@ -2016,6 +1966,10 @@ class Scene(HierarchyData):
           - In-place topology mutation via ``mesh.indices`` /
             ``mesh.counts``.
 
+        Array settings (``resolution``, ``background``, ``base_color``,
+        ``wireframe_color``, a Light's ``color``) enter as tuples, so the
+        signature compares by value and hashes.
+
         Cost: O(num_children) per check; ~one tuple build + a few attr
         reads per child.  Negligible for typical scenes.
         """
@@ -2027,7 +1981,7 @@ class Scene(HierarchyData):
         # in the signature -- mutating either invalidates ``self.frame``
         # / ``self.buffer`` on the next access.
         scene_part = (
-            tuple(getattr(self, k) for k in self._RENDER_CONFIG_KEYS),
+            tuple(_frozen(getattr(self, k)) for k in self._RENDER_CONFIG_KEYS),
             self.aspect_ratio,
             self.default_camera_name,
         )
@@ -2049,11 +2003,11 @@ class Scene(HierarchyData):
                         id(node._mesh) if mesh_token is None else mesh_token(node),
                         id(node._uv),
                         id(node._texture),
-                        node._base_color,
+                        _frozen(node._base_color),
                         node._wireframe,
-                        node._wireframe_color,
+                        _frozen(node._wireframe_color),
                         node._wireframe_thickness,
-                        node._resolution,
+                        _frozen(node._resolution),
                         node._samples_per_pixel,
                         node.sample_method,
                         node.wrap,
@@ -2085,7 +2039,7 @@ class Scene(HierarchyData):
                         node.visibility,
                         transform_state,
                         node.kind,
-                        node.color,
+                        _frozen(node.color),
                         node.intensity,
                         node.falloff,
                     )
@@ -2146,11 +2100,24 @@ class Scene(HierarchyData):
         self._scene_name = str(value) if value is not None else None
 
     @property
-    def background(self) -> Optional[Tuple[float, float, float, float]]:
-        """Optional RGBA background color in [0, 1] used by :meth:`render`.
+    def resolution(self) -> Optional[np.ndarray]:
+        """Render resolution ``(width, height)``, int32, or ``None`` to fall
+        through to the per-call kwarg or render()'s own default."""
+        return _read_only(self._resolution)
+
+    @resolution.setter
+    def resolution(self, value) -> None:
+        self._resolution = (
+            None if value is None else _SCENE_RESOLUTION.coerce(np.array(value), "Scene.resolution")
+        )
+
+    @property
+    def background(self) -> Optional[np.ndarray]:
+        """Optional RGBA background color in [0, 1] used by :meth:`render`,
+        float64 ``(4,)``.
 
         ``None`` (default) -> renderer falls through to its own default
-        ``(0, 0, 0, 0)`` (transparent black).  RGB 3-tuples passed to
+        ``(0, 0, 0, 0)`` (transparent black).  RGB values passed to
         the constructor or this setter are auto-promoted to opaque
         ``(R, G, B, 1.0)`` via :func:`_normalize_rgba`.
 
@@ -2159,7 +2126,7 @@ class Scene(HierarchyData):
           - ``alpha == 1`` -> opaque miss fill in the chosen RGB.
           - ``0 < alpha < 1`` -> Porter-Duff "over" composite at miss.
         """
-        return self._background
+        return _read_only(self._background)
 
     @background.setter
     def background(self, value) -> None:
@@ -2193,6 +2160,15 @@ class Scene(HierarchyData):
                 f"Scene only accepts TransformData (got {type(node).__name__}); "
                 "wrap your data in Object/Camera/Light"
             )
+
+    def strip_namespace(self, namespace: Optional[str] = None) -> None:
+        """
+        ``strip_namespace()`` on every node, all or nothing, and on
+        :attr:`default_camera_name`, so it still names its Camera. Nothing
+        is renamed when two nodes would share a name.
+        """
+        super().strip_namespace(namespace)
+        self.default_camera_name = _strip_namespace(self.default_camera_name, namespace)
 
     # ---- typed views ----
     @property
@@ -2906,24 +2882,24 @@ def _validate_samples_per_pixel(
 
 
 def _normalize_rgba(
-    value:      Optional[Union[Tuple[float, ...], List[float]]],
+    value:      Optional[Union[Tuple[float, ...], List[float], np.ndarray]],
     field_name: str,
-) -> Optional[Tuple[float, float, float, float]]:
-    """Normalize an optional RGB / RGBA color into a 4-tuple.
+) -> Optional[np.ndarray]:
+    """Normalize an optional RGB / RGBA color into a float64 ``(4,)`` array.
 
     Accepts:
       - ``None`` -> returns ``None`` (caller falls through to the
         renderer's own default ``(0, 0, 0, 0)`` transparent black).
-      - 3-element sequence ``(R, G, B)`` -> returns ``(R, G, B, 1.0)``
+      - 3 values ``(R, G, B)`` -> returns ``(R, G, B, 1.0)``
         (opaque).  Convenience for callers passing RGB.
-      - 4-element sequence ``(R, G, B, A)`` -> kept as-is.
+      - 4 values ``(R, G, B, A)`` -> kept as-is.
 
     Each component must be a float in ``[0, 1]``.  Anything else raises
     :class:`ValueError` with a message naming ``field_name`` (e.g.
     ``"Object.background"``) so the user knows which attribute was bad.
 
-    Returned tuples are plain ``float``-element ``tuple`` (hashable, so
-    they participate cleanly in :meth:`Scene._compute_render_signature`).
+    The array is new, never ``value`` itself, so a caller editing its own
+    array later does not edit the setting.
     """
     if value is None:
         return None
@@ -2942,7 +2918,58 @@ def _normalize_rgba(
         )
     if any(c < 0.0 or c > 1.0 for c in seq):
         raise ValueError(f"{field_name} components must be in [0, 1]; got {seq!r}")
-    return seq
+    return np.array(seq, dtype=np.float64)
+
+
+# Scene.resolution, converted as Object's resolution field is
+_SCENE_RESOLUTION = ArraySpec(np.int32, (2,))
+
+
+def _enum_value(value):
+    """an Enum setting as its value (``SampleMethod.BEZIER`` as ``"bezier"``),
+    anything else as given: ``str()`` of an enum is its name, and an Enum
+    field saves to no file"""
+    return value.value if isinstance(value, Enum) else value
+
+
+def _same_setting(old, new) -> bool:
+    """whether a setting keeps its value: arrays by content, ``None`` only as ``None``"""
+    if old is None or new is None:
+        return old is new
+    return bool(np.array_equal(old, new))
+
+
+def _read_only(array: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    """
+    A setting as its getter hands it out: a read-only view, since an edit in
+    place would skip the setter, and with it the re-render it triggers.
+    """
+    if array is None:
+        return None
+    view                 = array.view()
+    view.flags.writeable = False
+    return view
+
+
+def _frozen(value):
+    """a setting as a hashable value for the render signature: an array
+    becomes the tuple of its values"""
+    if isinstance(value, np.ndarray):
+        return tuple(value.tolist())
+    return value
+
+
+def _texture_as_uint8(texture: np.ndarray) -> np.ndarray:
+    """``texture``'s pixels as uint8, scaled by dtype as :func:`_load_texture`
+    reads them: uint8 as is, uint16 by 1/257, floats from [0, 1]"""
+    texture = np.asarray(texture)
+    if texture.dtype == np.uint8:
+        return texture
+    if texture.dtype == np.uint16:
+        return (texture // 257).astype(np.uint8)
+    if texture.dtype.kind == "f":
+        return np.rint(texture.clip(0.0, 1.0) * 255.0).astype(np.uint8)
+    return texture.astype(np.uint8)
 
 
 def _scene_objects_use_bezier(scene: "Scene") -> bool:
@@ -3225,6 +3252,10 @@ def _canonical(value):
     if isinstance(value, (list, tuple)):
         return tuple(_canonical(v) for v in value)
     if isinstance(value, np.ndarray):
+        if value.size <= 64 and value.dtype.kind in "biuf":
+            # a setting (a resolution, a colour): keyed as the tuple a caller
+            # may pass for it, so (40, 30) and the stored array match
+            return _canonical(value.tolist())
         array = np.ascontiguousarray(value)
         return ("ndarray", array.dtype.str, array.shape, hashlib.sha1(array.tobytes()).hexdigest())
     if isinstance(value, np.generic):

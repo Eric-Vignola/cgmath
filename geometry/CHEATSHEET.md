@@ -183,20 +183,24 @@ print(gu.compute_neighbors(cube.v2f, cube.f2v).shape)
 
 Every geometry type is a `@dataclass` deriving from `Data`. Fields are the
 whole payload: equality, hashing, `repr`, pickling and every file format read
-the same annotated fields, nothing else.
+the same annotated fields, nothing else. Array fields have a fixed dtype:
+`int32` indices and counts, `float64` points, normals, offsets, weights and
+values, `bool` masks. A value is converted when it is set or loaded.
 
 ```python
 from cgmath.geometry import Data, DataList, ImmutableArray
 
 print(sorted(MeshData._dataclass_field_names()))
-print(cube.to_dict().keys())  # only fields that differ from defaults
+print(cube.to_dict().keys())  # '__class__', then the fields that differ from their defaults
 print(str(cube), repr(cube))  # __str__ is the name when one is set
+print(cube.indices.dtype, cube.points.dtype)  # int32 float64, whatever was passed in
 ```
 
 ### Round trips
 
 `to_dict` / `from_dict` is the canonical form; every other format goes through
-it.
+it. A field exactly equal to its default is left out and loads back as a fresh
+copy of the default.
 
 ```python
 d = cube.to_dict()
@@ -212,8 +216,12 @@ assert isinstance(s, str)
 ### Files — `save` / `load` pick the format
 
 Extension drives the writer, the header byte drives the reader, so `load`
-never needs to be told what it is opening. `tmp` is the scratch directory from
-[Setup](#setup).
+never needs to be told what it is opening. All three formats hold the
+`to_dict()` tree: npz has no pickled objects (it is read with
+`allow_pickle=False`), json is utf-8 with NaN and the infinities as bare
+tokens, and a pickle holds its arrays as raw bytes, so it reads under another
+numpy version. A save that fails part way leaves the file as it was. `tmp` is
+the scratch directory from [Setup](#setup).
 
 ```python
 for ext in ("pkl", "json", "npz"):
@@ -223,6 +231,30 @@ for ext in ("pkl", "json", "npz"):
 # explicit mode overrides the extension
 path = cube.save(os.path.join(tmp, "cube.dat"), mode="npz")
 assert MeshData.load(path) == cube
+```
+
+A file loads as the class it names, which must be the class called or derive
+from it. A file without `"__class__"` was written by an older cgmath: it raises
+`LegacyFileError` and no longer loads.
+
+```python
+from cgmath.geometry import LegacyFileError
+
+path = cube_uv.save(os.path.join(tmp, "map1.npz"))
+print(type(MeshData.load(path)).__name__)  # UVData: a UVData is a MeshData
+
+try:
+    UVData.load(os.path.join(tmp, "cube.npz"))
+except TypeError as err:
+    print(err)  # the data holds a MeshData, not a UVData
+
+old = os.path.join(tmp, "old.json")
+with open(old, "w") as f:
+    f.write('{"points": [], "indices": [], "counts": []}')
+try:
+    MeshData.load(old)
+except LegacyFileError as err:  # a ValueError
+    print(type(err).__name__)
 ```
 
 Cached topology is never written — a reloaded object recomputes lazily.
@@ -298,12 +330,14 @@ meshes.append(cube.copy())                      # type-checked against DATA_LIST
 print(MeshList.DATA_LIST_CLASS.__name__, MeshList.UNIQUE_LIST)
 ```
 
-`DataList` saves and loads exactly like `Data`.
+`DataList` saves and loads exactly like `Data`. Its tree is `"__class__"`,
+`"__items__"` (one tree per item) and the class's own `LIST_FIELDS`.
 
 ```python
 path = meshes.save(os.path.join(tmp, "meshes.npz"))
 assert MeshList.load(path) == meshes
 assert MeshList.from_bytes(meshes.to_bytes()) == meshes
+print(sorted(meshes.to_dict()), MeshList.LIST_FIELDS)  # ['__class__', '__items__'] ()
 ```
 
 ### Module helpers
@@ -320,8 +354,6 @@ from cgmath.geometry._base import (
     get_annotations,
     get_file_type,
     is_ndarray_annotation,
-    nan_to_none,
-    none_to_nan,
     zip_to_dict,
 )
 
@@ -338,9 +370,25 @@ print(get_file_type(path))                           # 'npz' | 'json' | 'pkl'
 print(list(flatten_nested_lists([1, [2, [3, 4]]])))  # [1, 2, 3, 4]
 print(get_annotations(MeshData)["points"])           # resolved type hints
 print(is_ndarray_annotation("np.ndarray"), is_ndarray_annotation("int"))
+```
 
-# json has no NaN -- the writers swap it for null on the way out and back
-print(nan_to_none({"a": np.nan}), none_to_nan({"a": None}))
+`Array(dtype, *shape)` declares an array field: an int fixes a dimension, a
+name leaves it free. A wrong fixed dimension raises `ValueError`, and an empty
+value takes the declared trailing size.
+
+```python
+from cgmath.geometry._base import Array
+
+print(Array(np.float64, "N", 3))  # the annotation MeshData.points carries
+
+mesh = cube.copy()
+try:
+    mesh.points = np.zeros((8, 2))
+except ValueError as err:
+    print(err)  # MeshData.points must have shape (N, 3), got (8, 2)
+
+mesh.points = []
+print(mesh.points.shape, mesh.points.dtype)  # (0, 3) float64
 ```
 
 `ImmutableArray` exists so a numpy array can be a dataclass *default*
@@ -790,17 +838,21 @@ uv = cube_uv.copy()
 uv.pack(resolution=128, padding=1, rotations=1)    # skyline island packer
 print(uv.get_extent())
 print(cube_uv.get_minimum_resolution(pixels=3))
-print(cube_uv.get_overlap_faces(cube_uv, resolution=64))
+
+uv = cube_uv.copy()                                # get_overlap_faces sets both UVs' resolution
+print(uv.get_overlap_faces(uv, resolution=64))
 ```
 
 ### Rasterising
 
 `UVData` owns a render buffer keyed by `resolution`. Faces can be drawn with
-an id colour (`color=None`) that decodes back to face indices.
+an id colour (`color=None`) that decodes back to face indices. `resolution`
+(`int32`, `(2,)`) and `antialias` are saved with the UVs; the buffer is not.
 
 ```python
 uv            = cube_uv.copy()
 uv.resolution = 64
+print(uv.resolution, uv.resolution.dtype)          # [64 64] int32
 uv.clear_buffer()
 uv.draw_faces(color=(255, 255, 255))
 print(uv.buffer.shape, uv.buffer.max())
@@ -869,7 +921,9 @@ print([m.point_count for m in meshes])
 ## File loaders and savers
 
 Module-level readers return `list[(MeshData, UVList)]`; the classmethods pull
-a single object out of the file. OBJ is pure python and round-trips here.
+a single object out of the file. OBJ is pure python and round-trips here. A
+`v` line keeps its x y z and a `vt` line its u v; a trailing `w` or vertex
+colour is dropped.
 
 ```python
 from cgmath.geometry.mesh import load_obj, save_obj
@@ -918,9 +972,10 @@ mesh.to_prim(prim)
 
 ## `map` — `MapData` and `GeomSubsetData`
 
-`MapData` is a sparse per-component scalar map (a painted weight map).
-`GeomSubsetData` is a component *selection*. Both carry a `component_type` of
-`"v"`, `"f"` or `"e"`.
+`MapData` is a sparse per-component scalar map (a painted weight map):
+`int32` indices, `float64` values, and a `default_value` of `0.0` for every
+component it does not list. `GeomSubsetData` is a component *selection*. Both
+carry a `component_type` of `"v"`, `"f"` or `"e"`.
 
 ```python
 from cgmath.geometry import GeomSubsetData, MapData
@@ -932,7 +987,7 @@ weights = MapData(
     default_value  = 0.0,
     component_type = "v",
 )
-print(weights.to_dense_array(cube.point_count))
+print(weights.to_dense_array(cube.point_count))  # float64, default_value where unlisted
 
 skin = weights.to_skin_data(cube, influence="jaw")
 print(skin.influences, skin.weights.shape)
@@ -965,8 +1020,9 @@ assert GeomSubsetData.load(subset.save(os.path.join(tmp, "subset.json"))) == sub
 
 ## `morph_target` — `MorphData` and `MorphList`
 
-A morph target is a sparse set of point offsets. `indices` defaults to
-`arange(len(offsets))`, i.e. the whole mesh.
+A morph target is a sparse set of point offsets, `float64` `(N, 3)`, and the
+`int32` `indices` they apply to. `indices` defaults to `arange(len(offsets))`,
+i.e. the whole mesh, and a saved morph without them loads the same way.
 
 ```python
 from cgmath.geometry import MorphData, MorphList
@@ -1203,6 +1259,16 @@ s.patterns = Patterns.SHORT                  # '*_l_*' / '*_r_*'
 print(s.positive_patterns, s.negative_patterns)
 ```
 
+A pickled `SkinData` stores its weights as their nonzero entries, and keeps
+its name and patterns. npz and json save the weights dense.
+
+```python
+import pickle
+
+back = pickle.loads(pickle.dumps(s))
+print(back.name, back.patterns == Patterns.SHORT, back == s)
+```
+
 ### `CompactSkinData`
 
 Top-k storage: `max_influences` per vertex, flat `influence_indices` and
@@ -1373,6 +1439,19 @@ print(curve.max_param)  # count - degree == 2 for an open curve
 print(curve.cv.shape)   # (5, 3) — periodic curves wrap `degree` extra CVs
 print(curve.kv)         # unpadded knot vector (Maya convention, m + n - 1)
 print(curve.geometry)   # index of each CV into `points`
+```
+
+`points` is `float64` `(N, D)`, with `D` free (3 in practice), and `knots`,
+when given, is `float64` `(K,)`. A value of another shape raises `ValueError`;
+an empty one such as `[]` becomes the default's `(0, 3)`.
+
+```python
+print(BSplineData(points=[]).points.shape)  # (0, 3), an empty cubic for fit()
+
+try:
+    BSplineData(points=np.zeros(4))
+except ValueError as err:
+    print(err)  # BSplineData.points must have shape (N, D), got (4,)
 ```
 
 ### Evaluate: points and tangents
@@ -1662,8 +1741,9 @@ print(np.round(noisy.points, 3))
 
 ### Invalidating caches after editing control points
 
-`points` is stored by reference, so an in-place edit leaves the cached knot
-vector, scipy spline and arc-length table stale.
+`points` is stored by reference (a `float64` array is kept as given), so an
+in-place edit leaves the cached knot vector, scipy spline and arc-length table
+stale.
 
 ```python
 curve.points[0] = [-1.0, 0.0, 0.0]
@@ -1692,8 +1772,9 @@ assert np.allclose(scipy_curve.compute(u)[0], curve.compute(u)[0])
 
 ### Build a patch from a control grid
 
-Control points are a `(nu, nv, dims)` grid — a *tensor product* surface,
-so every parameter, degree and periodic flag comes in a `_u` / `_v` pair.
+Control points are a `float64` `(nu, nv, dims)` grid — a *tensor product*
+surface, so every parameter, degree and periodic flag comes in a `_u` / `_v`
+pair. Points that are not a 3-d array raise `ValueError`.
 
 ```python
 from cgmath.geometry import BSplinePatchData
@@ -1977,6 +2058,17 @@ print(np.round(sd.weights, 4))      # the 4 corner weights, sum to 1
 print(sd.geometry)                  # the 4 corner vertex indices
 ```
 
+Results are `float64` whatever the query dtype, with `int32` `indices` and
+`geometry` and `bool` masks. `geometry` is always `(N, 4)`, `-1` padded for
+a triangle.
+
+```python
+print(sd.projections.dtype, sd.indices.dtype, sd.occluded.dtype)  # float64 int32 bool
+
+tri_sd = sample(np.array([[0.2, 0.2, 1.0]], dtype=np.float32), tri, np.array([[0, 1, 2]]))
+print(tri_sd.distances.dtype, tri_sd.geometry)  # float64 [[ 0  1  2 -1]]
+```
+
 Pass vertex normals to get interpolated normals and an inside/outside test:
 
 ```python
@@ -2210,6 +2302,20 @@ print(box.half_extents, cyl.radius, cyl.height, cyl.axis)
 print(np.round(box.world_matrix, 3))
 ```
 
+The settings are saved fields, so they survive `copy()`, pickling and `save()`.
+`radius` and `height` are stored as floats, `half_extents` as `float64` `(3,)`,
+and `axis` must be 0, 1 or 2 (X, Y, Z).
+
+```python
+spare = SDFCylinder.load(cyl.save(os.path.join(tmp, "hole.json")))
+print(spare.radius, spare.height, spare.axis)  # 0.3 3.0 1
+
+try:
+    SDFCylinder(axis=3)
+except ValueError as err:
+    print(err)  # a cylinder axis is 0 (X), 1 (Y) or 2 (Z), not 3
+```
+
 ### `bounding_box()`, `evaluate()` and `sample()`
 
 `evaluate()` reads *local* coordinates (the primitive at the origin);
@@ -2280,7 +2386,8 @@ assert field.mesh_data is after          # nothing changed → cache hit
 
 Every mutating knob invalidates the cache: primitive `radius` /
 `half_extents` / `height` / `axis` / `translate` / `rotate` / `scale`, and
-the field's `resolution` / `position` / `iso_value` / `name`.
+the field's `resolution` / `position` / `iso_value` / `name`. A copy of a
+primitive starts detached from the field, so editing it leaves the field alone.
 
 ```python
 field.resolution = 8

@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import copy
 import os
 import uuid
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, List, Optional, Union
 
 import numpy as np
 from cgmath.formats._fbx_io import open_fbx
 from cgmath.formats.glb import load_gltf, load_model
 from cgmath.geometry import Data, DataList, ImmutableArray as numpy_array
-from cgmath.geometry._base import _mask_to_indices
+from cgmath.geometry._base import Array, _mask_to_indices
 from cgmath.transforms import (
     euler_filter,
     euler_to_matrix,
@@ -533,21 +534,21 @@ class TransformData(Data):
     parent_node: Optional[str] = None
 
     # general transform attributes
-    _scale:        Optional[np.ndarray] = numpy_array([1.0, 1.0, 1.0])
-    _rotate:       Optional[np.ndarray] = numpy_array([0.0, 0.0, 0.0])
-    _translate:    Optional[np.ndarray] = numpy_array([0.0, 0.0, 0.0])
+    _scale:        Array(np.float64, 3) = numpy_array([1.0, 1.0, 1.0])
+    _rotate:       Array(np.float64, 3) = numpy_array([0.0, 0.0, 0.0])
+    _translate:    Array(np.float64, 3) = numpy_array([0.0, 0.0, 0.0])
     _rotate_order: Optional[int] = 0  # xyz, yzx, zxy, xzy, yxz, zyx
-    _rotate_axis:  Optional[np.ndarray] = numpy_array([0.0, 0.0, 0.0])
+    _rotate_axis:  Array(np.float64, 3) = numpy_array([0.0, 0.0, 0.0])
 
     # attributes specific to joints as defined by Maya
-    _joint_orient:             Optional[np.ndarray] = numpy_array([0.0, 0.0, 0.0])
+    _joint_orient:             Array(np.float64, 3) = numpy_array([0.0, 0.0, 0.0])
     _visibility:               Optional[bool] = True
     _segment_scale_compensate: Optional[bool] = False
     _radius:                   Optional[float] = 1.0
     _draw_style:               Optional[int] = 0
 
-    # user defined attributes
-    user_defined_attributes: Optional[dict] = None
+    # user defined attributes, each node its own dict
+    user_defined_attributes: dict = field(default_factory=dict)
 
     # --- cached attributes --- #
     _hierarchy    = None  # HierarchyData reference pointer
@@ -583,18 +584,20 @@ class TransformData(Data):
         if parent_node is not None:
             self.parent_node = str(parent_node)
 
+        # each node owns its channels: a channel write is in place, so a node
+        # holding the caller's array would write through to it
         if scale is not None:
-            self._scale = np.asarray(scale, dtype=float)
+            self._scale = np.array(scale, dtype=float)
         else:
             self._scale = np.ones(3, dtype=float)
 
         if rotate is not None:
-            self._rotate = np.asarray(rotate, dtype=float)
+            self._rotate = np.array(rotate, dtype=float)
         else:
             self._rotate = np.zeros(3, dtype=float)
 
         if translate is not None:
-            self._translate = np.asarray(translate, dtype=float)
+            self._translate = np.array(translate, dtype=float)
         else:
             self._translate = np.zeros(3, dtype=float)
 
@@ -604,12 +607,12 @@ class TransformData(Data):
             self._rotate_order = 0  # xyz default
 
         if rotate_axis is not None:
-            self._rotate_axis = np.asarray(rotate_axis, dtype=float)
+            self._rotate_axis = np.array(rotate_axis, dtype=float)
         else:
             self._rotate_axis = np.zeros(3, dtype=float)
 
         if joint_orient is not None:
-            self._joint_orient = np.asarray(joint_orient, dtype=float)
+            self._joint_orient = np.array(joint_orient, dtype=float)
         else:
             self._joint_orient = np.zeros(3, dtype=float)
 
@@ -634,7 +637,9 @@ class TransformData(Data):
             self._draw_style = 0
 
         if user_defined_attributes is not None:
-            self.user_defined_attributes = user_defined_attributes
+            # its own, as the channels are: a write to one node's attribute
+            # would otherwise reach every node built from the caller's dict
+            self.user_defined_attributes = copy.deepcopy(user_defined_attributes)
         else:
             self.user_defined_attributes = {}
 
@@ -642,8 +647,8 @@ class TransformData(Data):
         """writes a vector channel into the storage it already holds
 
         The write is in place, so a channel bound to a view keeps writing
-        through it. The class level default is one array shared by every
-        instance, so a node still holding it takes its own copy first.
+        through it. The class level default is one array the class shares,
+        so a node ever left holding it takes its own copy first.
         """
         value   = np.asarray(value, dtype=float)
         current = getattr(self, name)
@@ -1644,7 +1649,8 @@ class TransformList(DataList):
     selection at once, and the pose algebra (:meth:`get_delta` /
     :meth:`add_delta`) is defined here so a delta can be taken over a
     selection. Because a delta has to own its nodes, ``get_delta`` returns a
-    :class:`HierarchyData` even when called on a view.
+    :class:`HierarchyData` even when called on a view. So does loading a saved
+    or pickled view: it saves as its :meth:`copy`.
     """
 
     DATA_LIST_CLASS = TransformData
@@ -2467,6 +2473,24 @@ class TransformList(DataList):
 
         return super().copy()
 
+    def __copy__(self):
+        """
+        A view: a new view over the same nodes. A hierarchy owns its nodes,
+        and a node belongs to one hierarchy, so a copy that shared them would
+        break the other on its first edit: it gets copy()'s own nodes.
+        """
+        if type(self) is TransformList:
+            return super().__copy__()
+        return self.copy()
+
+    def __deepcopy__(self, memo):
+        # a view copies into a hierarchy of its own, as copy() explains
+        if type(self) is TransformList:
+            new            = self._owned_copy()
+            memo[id(self)] = new
+            return new
+        return super().__deepcopy__(memo)
+
     def _owned_copy(self) -> "HierarchyData":
         """Copy these nodes into an owning hierarchy of their own.
 
@@ -2862,13 +2886,16 @@ class TransformList(DataList):
             self.list.insert(index, node)
 
     def to_dict(self) -> dict:
-        """set keys as uuid in the case of duplicate names"""
-        shape_dict = {}
-        if self.DATA_LIST_CLASS is not None:
-            for node in self.list:
-                shape_dict[node.uuid] = node.to_dict()
+        """
+        The list as a tree. A view saves as the hierarchy :meth:`copy`
+        gives: its own nodes, owned, a node whose parent the view left out
+        made a root. A view on its own has no hierarchy to point its nodes
+        at, so loading one back as a view would read every node as a root.
+        """
+        if type(self) is TransformList:
+            return self._owned_copy().to_dict()
 
-        return shape_dict
+        return super().to_dict()
 
     def match(
         self, *args, exclude: bool = False, exact: bool = True
@@ -2940,6 +2967,7 @@ class HierarchyData(TransformList):
         for obj in self.list:
             if obj.parent_node == node.uuid:
                 obj.parent_node = None
+                obj._reset_branch_world_matrices()
 
         return node
 
@@ -3248,7 +3276,10 @@ class ClipData(HierarchyData):
         "_rotate_axis",
         "_joint_orient",
     )
-    CLIP_KEY = "__clip__"
+
+    # saved beside the nodes: the timebase, the loaded frame and one (F, N, 3)
+    # block per framed channel, keyed by channel
+    LIST_FIELDS = ("_start_frame", "_fps", "_frame", "_blocks")
 
     def __init__(
         self,
@@ -3329,8 +3360,10 @@ class ClipData(HierarchyData):
             frame = self._resolve_frame(frame)
             for channel, block in self._blocks.items():
                 row = block[frame]
+                # each row is already the channel's float64 (3,): set it as
+                # the field directly, without the check every frame repeats
                 for i, node in enumerate(self.list):
-                    setattr(node, channel, row[i])
+                    node.__dict__[channel] = row[i]
             self._frame = frame
 
         for node in self.list:
@@ -3476,6 +3509,12 @@ class ClipData(HierarchyData):
         # realign reseed every frame from the one pose the nodes are bound to
         new._columns = list(self._columns)
         new._bind(self._frame)
+        return new
+
+    def __deepcopy__(self, memo):
+        # the blocks, columns and bound frame come only through copy()
+        new            = self.copy()
+        memo[id(self)] = new
         return new
 
     @classmethod
@@ -3713,55 +3752,83 @@ class ClipData(HierarchyData):
         super().save_fbx(filename, zero_root=zero_root, as_ascii=as_ascii)
 
     def to_dict(self) -> dict:
+        # the saved block columns follow the saved node order
         self._realign()
-        data = super().to_dict()
-        clip = {
-            "start_frame": self._start_frame,
-            "fps":         self._fps,
-            "frame":       self._frame,
-        }
-        clip.update(self._blocks)
-        data[self.CLIP_KEY] = clip
-        return data
+        return super().to_dict()
 
     @classmethod
-    def from_dict(cls, data: dict) -> "ClipData":
-        data = dict(data)
-        clip = data.pop(cls.CLIP_KEY, None)
+    def _from_state(cls, data: dict) -> "ClipData":
+        # the blocks hold only numbers: one array each now, rather than a
+        # walk over every json row looking for objects to rebuild
+        blocks = data.get("_blocks")
+        if isinstance(blocks, dict):
+            arrays = {}
+            for channel, block in blocks.items():
+                try:
+                    arrays[channel] = np.asarray(block, dtype=np.float64)
+                except (TypeError, ValueError):
+                    arrays[channel] = block  # _post_load names what is wrong with it
+            data["_blocks"] = arrays
+        return super()._from_state(data)
 
-        obj  = cls()
-        for key in data:
-            obj.append(cls.DATA_LIST_CLASS.from_dict(data[key]))
+    def _post_load(self) -> None:
+        """
+        Checks the loaded blocks and binds the nodes to the saved frame. A
+        node's channels are views of one row of the blocks, which no file
+        keeps, so they are rebound here.
 
-        if clip is not None:
-            obj._start_frame = int(clip["start_frame"])
-            obj._fps         = float(clip["fps"])
-            for channel in cls.FRAMED_CHANNELS:
-                if channel in clip:
-                    obj._blocks[channel] = np.asarray(clip[channel], dtype=float)
-            obj._columns = [node.uuid for node in obj.list]
-            obj._bind(int(clip.get("frame", 0)))
+        Raises
+        ------
+        ValueError
+            The blocks are not one (F, N, 3) array per framed channel, all
+            of the same F, N the node count.
+        """
+        super()._post_load()
 
-        return obj
+        count  = len(self.list)
+        blocks = {}
+        for channel, block in (self._blocks or {}).items():
+            if channel not in self.FRAMED_CHANNELS:
+                raise ValueError(f"ClipData has no framed channel {channel!r}")
+
+            try:
+                block = np.asarray(block, dtype=np.float64)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"ClipData block {channel} must have shape (F, {count}, 3), "
+                    f"got rows of different lengths"
+                ) from None
+            if block.size == 0 and block.ndim:
+                # json keeps no shape for an empty row: (F, 0) is (F, 0, 3)
+                block = block.reshape(len(block), 0, 3)
+            if block.ndim != 3 or not len(block) or block.shape[1:] != (count, 3):
+                raise ValueError(
+                    f"ClipData block {channel} must have shape (F, {count}, 3) "
+                    f"with F at least 1, got {block.shape}"
+                )
+            blocks[channel] = block
+
+        if blocks and set(blocks) != set(self.FRAMED_CHANNELS):
+            missing = sorted(set(self.FRAMED_CHANNELS) - set(blocks))
+            raise ValueError(f"ClipData is missing the blocks {missing}")
+        if len({block.shape[0] for block in blocks.values()}) > 1:
+            raise ValueError("ClipData blocks hold different frame counts")
+
+        self._blocks      = blocks
+        self._columns     = [node.uuid for node in self.list]
+        self._start_frame = int(self._start_frame)
+        self._fps         = float(self._fps)
+        self._frame       = int(self._frame) if blocks else 0
+        self._bind(self._frame)
 
     def __eq__(self, other) -> bool:
+        """the same nodes, timebase, loaded frame and blocks"""
         if not isinstance(other, ClipData):
             return False
 
+        # a column belongs to a uuid: line both clips up with their nodes
         self._realign()
         other._realign()
-
-        if self._start_frame != other._start_frame or self._fps != other._fps:
-            return False
-
-        if set(self._blocks) != set(other._blocks):
-            return False
-
-        for channel, block in self._blocks.items():
-            mine, theirs = block, other._blocks[channel]
-            if mine.shape != theirs.shape or not np.allclose(mine, theirs):
-                return False
-
         return super().__eq__(other)
 
     __hash__ = HierarchyData.__hash__
@@ -3774,7 +3841,8 @@ def load(filename: str, mode: Optional[str] = None) -> "HierarchyData":
     """
     The file's hierarchy: ``HierarchyData.load()``, which picks the reader
     from ``mode`` or from the file (fbx, glb, or cgmath's own npz / json /
-    pickle).
+    pickle). A cgmath file loads as the class it names, a :class:`ClipData`
+    as a clip; an fbx or a glb gives the rig, a :class:`HierarchyData`.
     """
     return HierarchyData.load(filename, mode)
 

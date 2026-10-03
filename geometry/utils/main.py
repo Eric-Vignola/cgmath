@@ -661,7 +661,7 @@ def bilinear_sample(
     radiuses  = np.asarray(radiuses,  dtype=np.float64)
     centroid_distance_tolerance = np.float64(centroid_distance_tolerance)
     iteration_count             = np.int32(iteration_count)
-    iteration_tolerance         = np.int32(iteration_tolerance)
+    iteration_tolerance         = np.float64(iteration_tolerance)
     uv_border_tolerance         = np.float64(uv_border_tolerance)
 
     if normals is not None:
@@ -1690,10 +1690,10 @@ def assign_cells(
         max_hops: maximum cell-hop iterations.
 
     Returns:
-        cells (N, 3) int, uvw (N, 3) float.
+        cells (N, 3) int32, uvw (N, 3) float64.
     """
     lx, ly, lz, _ = lattice.shape
-    max_cells = np.array([lx - 2, ly - 2, lz - 2])
+    max_cells = np.array([lx - 2, ly - 2, lz - 2], dtype=np.int32)
 
     flat = lattice.reshape(-1, 3)
     lo, hi = flat.min(axis=0), flat.max(axis=0)
@@ -1702,6 +1702,7 @@ def assign_cells(
 
     global_param = (points - lo) / size * (max_cells + 1)
     cells        = np.clip(np.floor(global_param).astype(np.int64), 0, max_cells)
+    cells        = cells.astype(np.int32)
     uvw          = np.clip(global_param - cells, 0.0, 1.0)
 
     corners = get_cell_corners(lattice, cells)
@@ -1905,7 +1906,7 @@ def bernstein_eval(
 
         out = np.empty((len(uvw), 3), dtype=np.float64)
         _bernstein_eval(
-            np.ascontiguousarray(cells, dtype=np.int64),
+            np.ascontiguousarray(cells, dtype=np.int32),
             np.ascontiguousarray(uvw, dtype=np.float64),
             np.ascontiguousarray(delta, dtype=np.float64),
             int(local_influence[0]),

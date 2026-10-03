@@ -61,9 +61,12 @@ with the solve done lazily and cached.
 - **Maya conventions** where there is a Maya equivalent: `FFDData.divisions`
   and `local_influence` count *control points*, not cells; `DeltaMushData`
   reproduces Maya's `smoothingIterations` off-by-one.
-- **Rest geometry is a constructor argument, not a field.** `Data` subclasses
-  cannot hold another `Data` as a field, so meshes, skins and rigs are passed
-  in and only arrays and names persist to disk.
+- **Rest geometry is a constructor argument, not a field.** Meshes, skins and
+  rigs are passed in and read once; only the arrays and names each operator
+  needs are saved. `DeltaMushData` reads its first-face winding and
+  `PatchRelaxData` its vertex rings from the mesh at construction, so a loaded
+  operator needs no mesh. Cheap bind state is rebuilt on the first apply.
+  Bind a `SkinDeformData` before saving it: its skin is not saved.
 - **Deform the bind pose every frame.** Feeding the previous frame's result
   back into an operator compounds the deformation.
 - Cheap knobs (`weight`, `alpha`, `iterations`, `local_influence`, `outside`)

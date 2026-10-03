@@ -24,7 +24,7 @@ see [Production settings](#production-settings) for real numbers.
 - [`Object`](#object) — [construction](#object-construction) · [loaders](#loading-geometry) · [texture](#texture--uv) · [shading](#shading-knobs) · [wireframe](#baked-wireframe) · [transforms](#transforms--world_points) · [topology](#topology-ops) · [preview](#preview-render--to_image--imshow) · [serialization](#serialization) · [skinning](#skinning--animation)
 - [`Camera`](#camera) — [lens](#camera-construction) · [aiming](#look_at--autofit--default_view) · [orthographic](#orthographic) · [`look_at()`](#the-free-function-look_at)
 - [`Light`](#light) — [point vs infinite](#point-vs-infinite) · [rig](#the-default-3-point-rig)
-- [`Scene`](#scene) — [building](#building-a-scene) · [queries](#inspecting-a-scene) · [`configure`](#configure) · [background](#background--coverage-alpha) · [render](#rendering-a-scene) · [frame cache](#the-frame-cache) · [file loaders](#scene-file-loaders)
+- [`Scene`](#scene) — [building](#building-a-scene) · [queries](#inspecting-a-scene) · [`configure`](#configure) · [background](#background--coverage-alpha) · [render](#rendering-a-scene) · [frame cache](#the-frame-cache) · [file loaders](#scene-file-loaders) · [saving](#saving-a-scene)
 - [`Frame`](#frame) — [fields](#frame-fields) · [interop](#numpy--pil-interop) · [wireframe overlay](#screen-space-wireframe-overlay) · [encoders](#encoders)
 - [Turntables](#turntables) — [re-encoding is free](#re-encoding-is-free)
 - [Functional `render()`](#functional-render)
@@ -163,21 +163,25 @@ Every constructor argument:
 | `name` | `"object"` | Node name |
 | `mesh` | `None` | `MeshData` to raytrace |
 | `uv` | `None` | `UVData`; required whenever `texture` is set |
-| `texture` | `None` | Image path or `(H, W, 3)` array |
+| `texture` | `None` | `(H, W, C)` uint8 / uint16 / float32 array, kept in its dtype (other floats become float32), or an image path |
 | `skin` | `None` | `SkinDeformData` driving `mesh` (see [Skinning](#skinning--animation)) |
-| `base_color` | `(0.7, 0.7, 0.7)` | Flat color used when `texture is None` |
-| `sample_method` | `"bilinear"` | `"bilinear"` (flat patches) or `"bezier"` (PN-quad bicubic) |
+| `base_color` | `(0.7, 0.7, 0.7)` | Flat color used when `texture is None`; float64 `(3,)` |
+| `sample_method` | `"bilinear"` | `"bilinear"` (flat patches) or `"bezier"` (PN-quad bicubic); a `SampleMethod` enum is stored as its string |
 | `wrap` | `"repeat"` | `"repeat"` or `"clamp"` for UVs outside `[0, 1]` |
 | `ambient` | `0.8` | Ambient term in `[0, 1]`, added once after all lights |
 | `twosided` | `True` | Shade back faces too |
 | `cast_shadows` | `True` | Reserved — the renderer has no shadow pass yet |
-| `resolution` | `(500, 500)` | Standalone-preview `(width, height)` |
+| `resolution` | `(500, 500)` | Standalone-preview `(width, height)`; int32 `(2,)` |
 | `samples_per_pixel` | `4` | Standalone-preview MSAA; `1` or a perfect square |
 | `wireframe` | `False` | Bake mesh edges into the diffuse, in UV space |
-| `wireframe_color` | `(0, 0, 0)` | RGB `0-255` for the bake |
+| `wireframe_color` | `(0, 0, 0)` | RGB `0-255` for the bake; int32 `(3,)` |
 | `wireframe_thickness` | `1` | Line width in texels for the bake |
-| `background` | `None` | Standalone-preview RGB/RGBA; ignored inside a user `Scene` |
+| `background` | `None` | Standalone-preview RGB/RGBA, float64 `(4,)` (RGB gets alpha 1) or `None`; ignored inside a user `Scene` |
 | `**transform_kwargs` | — | `translate` / `rotate` / `scale` / `visibility` / `parent_node` / ... |
+
+The colors and `resolution` take any sequence and are stored as numpy
+arrays of the dtype and size above. A value of another size raises
+`ValueError`.
 
 ```python
 cube = Object(
@@ -196,11 +200,18 @@ cube = Object(
     rotate=(0, 25, 0),
     scale=(1, 1, 1),
 )
-print(cube.name, cube.ambient, cube.resolution, cube.samples_per_pixel)
+print(cube.name, cube.ambient, cube.resolution, cube.samples_per_pixel)  # cube 0.8 [64 64] 1
+
+try:
+    cube.base_color = (1.0, 0.5)
+except ValueError as exc:
+    print("expected:", exc)
 ```
 
 Every one of those is also a read/write property, and assigning to it
-drops the cached frame:
+drops the cached frame. The array settings (`base_color`, `background`,
+`wireframe_color`, `resolution`) read back as read-only arrays: an edit in
+place would skip that, so assign a new value instead.
 
 ```python
 cube.ambient           = 0.5
@@ -266,7 +277,8 @@ ok = loaded.extract_texture_from_fbx("hero.fbx", mesh_index=0, material_index=0)
 ### Texture & UV
 
 `texture` accepts a path or an array; a path is loaded lazily on first
-render and cached.
+render and cached. An array keeps its dtype when it is uint8, uint16 or
+float32; any other float array becomes float32.
 
 ```python
 tex_path = os.path.join(tmp, "checker.png")
@@ -274,6 +286,7 @@ Frame(array=np.dstack([checker, np.full(checker.shape[:2], 255, np.uint8)])).sav
 
 from_array = Object(name="a", mesh=mesh, uv=uv, texture=checker)
 from_path  = Object(name="b", mesh=mesh, uv=uv, texture=tex_path)
+print(from_array.texture.dtype)                # uint8 -- as given
 print(from_array.get_loaded_texture().shape)   # (64, 64, 3) float32 in [0, 1]
 print(from_path.get_loaded_texture().dtype)
 ```
@@ -392,12 +405,24 @@ preview.imshow()
 
 ### Serialization
 
-`Object` round-trips through the inherited `Data` API.
+`Object` saves to pkl, npz and json through the inherited `Data` API.
+The mesh, UVs and skin nest as their own data, and a texture array keeps
+its dtype. A texture path is saved as its uint8 pixels and loads back as
+that array, not as the path. Render caches (the frame, the loaded
+texture, the baked wireframe) are not saved.
 
 ```python
 payload = cube.to_dict()
-clone   = Object.from_dict(payload)
-print(sorted(payload)[:4], clone.name, clone.mesh.points.shape)
+print(payload["__class__"], payload["_mesh"]["__class__"])
+clone = Object.from_dict(payload)
+print(clone.name, clone.mesh.points.shape, clone.texture.dtype)
+
+for ext in ("pkl", "npz", "json"):
+    path = cube.save(os.path.join(tmp, "cube." + ext))
+    print(ext, Object.load(path).texture.dtype)  # uint8 from all three
+
+from_path.save(os.path.join(tmp, "from_path.npz"))
+print(type(Object.load(os.path.join(tmp, "from_path.npz")).texture))  # ndarray
 ```
 
 ### Skinning & animation
@@ -527,10 +552,14 @@ fill = Light(name="fill", kind="point", intensity=40.0, falloff=False,
              translate=(-2, 1, 2))
 sun = Light(name="sun", kind="infinite", intensity=2.0, rotate=(-45, 0, 0))
 
+print(key.color)                   # [1.   0.95 0.9 ] -- float64 (3,)
 print(key.position)                # world-space position (read-only)
 print(np.round(sun.direction, 3))  # world-space -Z axis, normalised (read-only)
 print(key.as_dict())               # the dict shape render(point_light=...) takes
 ```
+
+`color` takes any three values and is stored as a float64 array; another
+size raises `ValueError`.
 
 Anything but `"point"` / `"infinite"` is rejected at construction:
 
@@ -706,11 +735,13 @@ print(scene.render(resolution=(32, 32)).shape)   # (32, 32, 4), not (64, 64, 4)
 ### Background & coverage alpha
 
 Every render is RGBA and the alpha channel is real MSAA coverage
-(`hits / samples_per_pixel`). RGB triples are promoted to opaque.
+(`hits / samples_per_pixel`). RGB triples are promoted to opaque, and
+the value is stored as a float64 `(4,)` array (`resolution` as int32
+`(2,)`).
 
 ```python
 scene.background = (0.1, 0.2, 0.3)
-print(scene.background)                      # (0.1, 0.2, 0.3, 1.0)
+print(scene.background)                      # [0.1 0.2 0.3 1. ]
 
 scene.background = (0.0, 0.0, 0.0, 0.0)      # transparent miss pixels
 cutout           = scene.render(resolution=(64, 64), samples_per_pixel=4)
@@ -782,6 +813,30 @@ from_obj.render(resolution=(48, 48), samples_per_pixel=1)
 ```python
 Scene.load_glb("hero.glb", name="hero", scale_factor=100.0,
                load_skin=True, extract_texture=True)
+```
+
+### Saving a scene
+
+`save` / `load` in pkl, npz or json keep every node as its own type
+(`Object`, `Camera`, `Light`, or a plain `TransformData` group) with its
+uuid and parenting. The scene keeps `scene_name`, `aspect_ratio`,
+`default_camera_name` and every `configure()` key. A loaded Scene has no
+cached render.
+
+```python
+path  = scene.save(os.path.join(tmp, "scene.npz"))  # or .pkl / .json
+again = Scene.load(path)
+print([type(node).__name__ for node in again])      # ['Object', 'Object', 'Camera']
+print(again.scene_name, again.default_camera_name, again.resolution)
+print(again.frame)                                   # None
+```
+
+Instancing is not kept: two Objects sharing one `MeshData` each load
+with their own copy.
+
+```python
+print(scene.objects[0].mesh is scene.objects[1].mesh)  # True
+print(again.objects[0].mesh is again.objects[1].mesh)  # False
 ```
 
 ---

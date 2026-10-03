@@ -1,4 +1,5 @@
 import json as stdlib_json
+import math
 import os
 import tempfile
 import unittest
@@ -252,6 +253,25 @@ class TestPrettyJsonJaggedLists(unittest.TestCase):
         parsed = stdlib_json.loads(result)
         self.assertEqual(parsed, data)
 
+    def test_any_nesting_writes_valid_json(self):
+        cases = [
+            ({"v": list(np.linspace(0, 1, 3))}, {"v": [0.0, 0.5, 1.0]}),
+            ({"v": [()]}, {"v": [[]]}),
+            ({"v": [[1, 2], [[3, 4], [5, 6]]]}, {"v": [[1, 2], [[3, 4], [5, 6]]]}),
+            ({"v": [[], [1]]}, {"v": [[], [1]]}),
+            ({"v": [np.int64(3), np.float32(0.5), np.bool_(True)]}, {"v": [3, 0.5, True]}),
+            ({"v": [[np.float64(1.5), 2.0], [3.0, 4.0]]}, {"v": [[1.5, 2.0], [3.0, 4.0]]}),
+        ]
+        for data, expected in cases:
+            with self.subTest(data=repr(data)):
+                self.assertEqual(stdlib_json.loads(pretty_json(data)), expected)
+
+    def test_what_json_cannot_hold_raises(self):
+        for value in ([1j], [[1j, 2j]], [object()]):
+            with self.subTest(value=value):
+                with self.assertRaises(TypeError):
+                    pretty_json({"v": value})
+
 
 class TestPrettyJsonNested(unittest.TestCase):
     def test_nested_dict_with_arrays(self):
@@ -335,23 +355,27 @@ class TestJsonClass(unittest.TestCase):
 
 
 class TestPrettyJsonEdgeCases(unittest.TestCase):
-    def test_nan_serializes_as_null(self):
-        data   = {"val": float("nan")}
+    def test_nan_and_infinities_read_back_as_floats(self):
+        # bare tokens, which python's json reads back as the floats they were
+        data   = {"nan": float("nan"), "inf": float("inf"), "ninf": float("-inf"), "row": [1.5, float("nan")]}
         result = pretty_json(data)
         parsed = stdlib_json.loads(result)
-        self.assertIsNone(parsed["val"])
+        self.assertTrue(math.isnan(parsed["nan"]))
+        self.assertEqual(parsed["inf"],    float("inf"))
+        self.assertEqual(parsed["ninf"],   float("-inf"))
+        self.assertEqual(parsed["row"][0], 1.5)
+        self.assertTrue(math.isnan(parsed["row"][1]))
 
-    def test_inf_serializes_as_string(self):
-        data   = {"val": float("inf")}
-        result = pretty_json(data)
-        parsed = stdlib_json.loads(result)
-        self.assertEqual(parsed["val"], "Infinity")
+    def test_numpy_scalars(self):
+        data   = {"flag": np.bool_(True), "int": np.int32(3), "float": np.float32(0.5), "zero_d": np.array(2.0)}
+        parsed = stdlib_json.loads(pretty_json(data))
+        self.assertEqual(parsed, {"flag": True, "int": 3, "float": 0.5, "zero_d": 2.0})
 
-    def test_negative_inf_serializes_as_string(self):
-        data   = {"val": float("-inf")}
-        result = pretty_json(data)
-        parsed = stdlib_json.loads(result)
-        self.assertEqual(parsed["val"], "-Infinity")
+    def test_unknown_types_raise(self):
+        # str() of them would write a token json cannot read back
+        for value in (b"bytes", object()):
+            with self.subTest(value=value), self.assertRaises(TypeError):
+                pretty_json({"val": value})
 
     def test_control_characters_escaped(self):
         data   = {"msg": "null\x00byte\x1f"}

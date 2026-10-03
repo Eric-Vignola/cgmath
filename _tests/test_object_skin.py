@@ -486,9 +486,8 @@ class TestPersistence(GlbCase):
         yield "copy", obj.copy()
 
     def test_the_skin_survives_every_round_trip(self):
-        """``Data.to_dict`` only writes a field that differs from its default,
-        and ``Data`` compares equal to a foreign type, so a nested ``Data``
-        is dropped unless it is handled by hand."""
+        """the skin is nested data: every route back must rebuild it as a
+        ``SkinDeformData``, not drop it or leave a dict"""
         for label, restored in self.round_trips():
             with self.subTest(label):
                 self.assertIsInstance(restored.skin, SkinDeformData)

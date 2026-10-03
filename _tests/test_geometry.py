@@ -1462,6 +1462,154 @@ class TestMesh(unittest.TestCase):
         self.assertNotIn("normals", d)
         self.assertNotIn("normal_indices", d)
 
+    def test_set_normals_hard_edge_angle_unwelded(self):
+        """An unwelded mesh shares no edge: nothing is hard, nothing raises."""
+        mesh = self.box.copy()
+        mesh.detach_faces()
+
+        mesh.set_normals(hard_edge_angle=30.0)
+
+        # each point belongs to one face and takes that face's normal
+        expected = np.repeat(mesh.get_face_normals(), mesh.counts, axis=0)
+        self.assertIsNone(mesh.normal_indices)
+        self.assertTrue(allclose(mesh.normals, expected))
+
+    def test_set_normals_hard_edge_angle_non_manifold(self):
+        """A non-manifold edge elsewhere does not hide a two-face hard edge."""
+        points = [
+            [0, 0, 0], [1, 0, 0],  # the edge three quads share
+            [0, 1, 0], [1, 1, 0],  # quad 0, in the XY plane
+            [0, 0, 1], [1, 0, 1],  # quad 1, in the XZ plane
+            [0, -1, 0], [1, -1, 0],  # quad 2, in the XY plane
+            [0, 1, 1], [1, 1, 1],  # quad 3, at 90 degrees to quad 0
+        ]
+        mesh = MeshData(
+            points  = np.array(points, dtype=float),
+            indices = np.array([0, 1, 3, 2, 1, 0, 4, 5, 1, 0, 6, 7, 2, 3, 9, 8]),
+            counts  = np.array([4, 4, 4, 4]),
+        )
+        mesh.set_normals(hard_edge_angle=30.0)
+
+        # point 2 is a corner of quads 0 and 3, across the 90 degree edge 2-3
+        slots = mesh.normal_indices[mesh.indices == 2]
+        self.assertEqual(slots.size, 2)
+        self.assertNotEqual(slots[0], slots[1])
+
+    # --- declared fields ---
+
+    def test_field_dtypes(self):
+        """every field takes its declared dtype on the way in"""
+        mesh = MeshData(
+            points  = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32),
+            indices = np.array([0, 1, 2], dtype=np.int64),
+            counts  = [3],
+        )
+        mesh.hole_faces     = np.array([0], dtype=np.int64)
+        mesh.normals        = np.zeros((3, 3), dtype=np.float32)
+        mesh.normal_indices = [0, 1, 2]
+
+        self.assertEqual(mesh.points.dtype,         np.float64)
+        self.assertEqual(mesh.indices.dtype,        np.int32)
+        self.assertEqual(mesh.counts.dtype,         np.int32)
+        self.assertEqual(mesh.hole_faces.dtype,     np.int32)
+        self.assertEqual(mesh.normals.dtype,        np.float64)
+        self.assertEqual(mesh.normal_indices.dtype, np.int32)
+        self.assertEqual(mesh.matrix.dtype,         np.float64)
+
+    def test_field_wrong_size_raises(self):
+        """points are (N, 3), uvs (N, 2), the matrix 4x4"""
+        with self.assertRaises(ValueError):
+            MeshData(points=np.zeros((3, 2)), indices=[0, 1, 2], counts=[3])
+        with self.assertRaises(ValueError):
+            UVData(points=np.zeros((3, 3)), indices=[0, 1, 2], counts=[3])
+        with self.assertRaises(ValueError):
+            self.box.copy().matrix = np.eye(3)
+
+    def test_matrix_default_per_mesh(self):
+        """meshes never share the default matrix, however they were made"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            f = os.path.join(temp_dir, "box.npz")
+            self.box.save(f)
+            a = MeshData.load(f)
+            b = MeshData.load(f)
+
+        a.matrix[3, 0] = 7.0
+        self.assertEqual(b.matrix[3, 0], 0.0)
+        self.assertEqual(self.box.copy().matrix[3, 0], 0.0)
+        self.assertEqual(MeshData.matrix[3, 0], 0.0)
+
+    # --- obj ---
+
+    OBJ_EXTRAS = (
+        "v 0 0 0 1 0 0\n"  # x y z r g b
+        "v 1 0 0 0 1 0\n"
+        "v 0 1 0 0 0 1\n"
+        "vt 0.25 0.5 0\n"  # u v w
+        "vt 1 0 0\n"
+        "vt 0 1 0\n"
+        "f 1/1 2/2 3/3\n"
+    )
+
+    def test_load_obj_vertex_colours(self):
+        """'v x y z r g b' keeps x y z, 'vt u v w' keeps u v"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            f = os.path.join(temp_dir, "extras.obj")
+            with open(f, "w") as stream:
+                stream.write(self.OBJ_EXTRAS)
+
+            mesh = MeshData.load_obj(f)
+            mesh2, uvs = load_obj(f)[0]
+
+        expected = [[0, 0, 0], [1, 0, 0], [0, 1, 0]]
+        self.assertEqual(mesh.points.shape, (3, 3))
+        self.assertTrue(np.array_equal(mesh.points, expected))
+        self.assertTrue(np.array_equal(mesh2.points, expected))
+        self.assertEqual(uvs[0].points.shape, (3, 2))
+        self.assertTrue(np.array_equal(uvs[0].points, [[0.25, 0.5], [1, 0], [0, 1]]))
+
+    # --- uv render settings ---
+
+    def test_uv_render_settings_survive_topology_edits(self):
+        """resolution and antialias are data: an edit's cache reset keeps them"""
+        # the box's uvs with face 0 missing, a hole fill_holes fills
+        holed         = self.box_uv.copy()
+        holed.indices = holed.indices[4:]
+        holed.counts  = [0, 4, 4, 4, 4, 4]
+
+        edits = {
+            "union":       (self.box_uv, lambda uv: uv.union(self.box_uv.copy())),
+            "triangulate": (self.box_uv, lambda uv: uv.triangulate(uv.get_triangulate_rules())),
+            "subdivide":   (self.box_uv, lambda uv: uv.subdivide()),
+            "fill_holes":  (holed, lambda uv: uv.fill_holes(self.box_uv.counts)),
+        }
+        for label, (source, edit) in edits.items():
+            with self.subTest(edit=label):
+                uv            = source.copy()
+                uv.resolution = (64, 32)
+                uv.antialias  = True
+
+                edit(uv)
+
+                self.assertEqual(uv.resolution.tolist(), [64, 32])
+                self.assertIs(uv.antialias, True)
+                self.assertEqual(uv.buffer.shape, (32, 64, 3))
+
+    def test_uv_render_settings_saved(self):
+        """resolution and antialias come back from every format"""
+        uv            = self.box_uv.copy()
+        uv.resolution = (64, 32)
+        uv.antialias  = True
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for ext in ("pkl", "npz", "json"):
+                f = os.path.join(temp_dir, f"uv.{ext}")
+                uv.save(f)
+                loaded = UVData.load(f)
+
+                self.assertEqual(loaded.resolution.dtype, np.int32)
+                self.assertEqual(loaded.resolution.tolist(), [64, 32])
+                self.assertIs(loaded.antialias, True)
+
     # --- tangent space (get_tangent_space) ---
 
     def test_get_tangent_space_shape(self):

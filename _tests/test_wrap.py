@@ -1,4 +1,8 @@
+import os
+import pickle
+import tempfile
 import unittest
+from dataclasses import fields
 
 import numpy as np
 from cgmath.geometry.deform.wrap import WrapData
@@ -191,6 +195,86 @@ class TestWrapCaching(unittest.TestCase):
         names = {x.name for x in fields(WrapData)}
         self.assertIn("_dirty", names)
         self.assertNotIn("_target_dirty", names)
+
+
+class TestWrapFiles(unittest.TestCase):
+    """What a save keeps: the inputs and the pseudo-inverse, nothing derived."""
+
+    def setUp(self):
+        self.cage   = _make_grid_mesh(4, height=0.4)
+        self.mesh   = np.asarray(_make_grid_mesh(9, height=0.15).points)
+        rng         = np.random.default_rng(8)
+        self.target = self.cage.points + rng.normal(0.0, 0.1, self.cage.points.shape)
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.folder = tmp.name
+
+    def _bound(self) -> WrapData:
+        wrap = WrapData()
+        wrap.set_source(self.cage)
+        wrap.set_target(self.target)
+        wrap.deform(self.mesh)
+        return wrap
+
+    def _loaded(self, wrap: WrapData) -> dict:
+        loaded = {"copy": wrap.copy(), "pickle": pickle.loads(pickle.dumps(wrap))}
+        for ext in ("pkl", "npz", "json"):
+            path        = wrap.save(os.path.join(self.folder, f"wrap.{ext}"))
+            loaded[ext] = WrapData.load(path)
+        return loaded
+
+    def test_an_unbound_wrap_has_every_field(self):
+        # _distance_matrix was a field that __init__ never set, so to_dict,
+        # save, copy and pickle all raised AttributeError on a fresh WrapData
+        wrap = WrapData()
+        for field in fields(WrapData):
+            getattr(wrap, field.name)
+
+    def test_an_unbound_wrap_saves_and_loads(self):
+        wrap = WrapData(kernel="cubic", name="unbound")
+        for how, loaded in self._loaded(wrap).items():
+            with self.subTest(how=how):
+                self.assertEqual(loaded, wrap)
+                self.assertEqual((loaded.name, loaded.kernel_name), ("unbound", "cubic"))
+
+                loaded.set_source(self.cage)
+                loaded.set_target(self.target)
+                fresh = WrapData(kernel="cubic")
+                fresh.set_source(self.cage)
+                fresh.set_target(self.target)
+                np.testing.assert_array_equal(
+                    loaded.deform(self.mesh), fresh.deform(self.mesh)
+                )
+
+    def test_the_derived_matrices_are_not_saved(self):
+        data = self._bound().to_dict()
+        for name in ("_system_matrix", "_distance_matrix", "_weights", "_target_matrix"):
+            self.assertNotIn(name, data)
+        for name in (
+            "src_points",
+            "dst_points",
+            "conn_matrix",
+            "conn_distances",
+            "_system_pinv",
+        ):
+            self.assertIn(name, data)
+
+    def test_a_loaded_wrap_reuses_the_saved_pseudo_inverse(self):
+        wrap     = self._bound()
+        expected = wrap.deform(self.mesh)
+        for how, loaded in self._loaded(wrap).items():
+            with self.subTest(how=how):
+                self.assertFalse(loaded._dirty)
+                pinv = loaded._system_pinv
+                np.testing.assert_array_equal(loaded.deform(self.mesh), expected)
+                self.assertIs(loaded._system_pinv, pinv)
+
+    def test_index_and_point_arrays_take_their_declared_dtypes(self):
+        wrap = self._bound()
+        self.assertEqual(wrap.conn_matrix.dtype, np.int32)
+        for name in ("src_points", "dst_points", "conn_distances", "_system_pinv"):
+            self.assertEqual(getattr(wrap, name).dtype, np.float64, name)
 
 
 if __name__ == "__main__":

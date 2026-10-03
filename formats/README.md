@@ -248,7 +248,7 @@ in `geometry`:
 | Meshes, any format | `cgmath.geometry.mesh.load(path)` / `MeshList.load(path)` |
 | One named mesh | `MeshData.load_fbx(path, name=...)` / `MeshData.load_glb(path, name=...)` |
 | Skin weights | `cgmath.geometry.skin_weights.load / load_fbx / load_glb` → `SkinList` |
-| Hierarchy | `cgmath.hierarchy.load / load_fbx / load_glb` → `HierarchyData` |
+| Hierarchy | `cgmath.hierarchy.load / load_fbx / load_glb` → `HierarchyData` from FBX and GLB; a cgmath file loads as the class it names (a `ClipData` stays a clip) |
 
 The one exception is `GlbData.mesh_list`, which is a `trimesh`-powered
 convenience on the GLB wrapper (points scaled ×100 — metres to centimetres).

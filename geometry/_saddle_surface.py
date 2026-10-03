@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 import numpy as np
-from cgmath.geometry._base import Data
+from cgmath.geometry._base import Array, Data
 from cgmath.geometry.utils import (
     bezier_raycast,
     bilinear_integrate,
@@ -18,19 +18,27 @@ from scipy.spatial import cKDTree
 # --------------------- SADDLE SURFACE SAMPLE ALGORITHM ---------------------- #
 
 
+def _quad_geometry(geometry) -> np.ndarray:
+    """face vertex indices as int32 quads: triangles padded with -1"""
+    geometry = np.asarray(geometry, dtype=np.int32)
+    if geometry.shape[1] > 4:
+        raise ValueError("ngons detected")
+
+    elif geometry.shape[1] < 4:
+        buffer                         = np.full((geometry.shape[0], 4), -1, dtype=np.int32)
+        buffer[:, : geometry.shape[1]] = geometry
+        geometry                       = buffer
+
+    return geometry
+
+
 def integrate(points, geometry, samples=10, method="gauss", tolerance=1e-4):
     """
     integrates the given topology and returns the surface area approximation
     """
 
     # make sure geometry is shaped for quads
-    if geometry.shape[1] > 4:
-        raise ValueError("ngons detected")
-
-    elif geometry.shape[1] < 4:
-        buffer                         = np.full((geometry.shape[0], 4), -1, dtype=geometry.dtype)
-        buffer[:, : geometry.shape[1]] = geometry
-        geometry                       = buffer
+    geometry = _quad_geometry(geometry)
 
     # make sure points are 3D
     if points.shape[1] > 3:
@@ -58,14 +66,14 @@ class SampleData(Data):
     A dataclass to hold saddle surface sample data
     """
 
-    projections: np.ndarray  # closest projection
-    distances:   np.ndarray  # distance to projection
-    weights:     np.ndarray  # influence weight of face points
-    indices:     np.ndarray  # closest face indices
-    normals:     np.ndarray  # closest face normals
-    occluded:    np.ndarray  # are the queried points contained by the mesh
-    uvs:         np.ndarray  # closest saddle surface uv value
-    geometry:    np.ndarray  # default geometry to use
+    projections: Array(np.float64, "N", "D")  # closest projection
+    distances:   Array(np.float64, "N")       # distance to projection
+    weights:     Array(np.float64, "N", 4)    # influence weight of face points
+    indices:     Array(np.int32, "N")         # closest face indices
+    normals:     Array(np.float64, "N", "D")  # closest face normals
+    occluded:    Array(np.bool_, "N")         # are the queried points contained by the mesh
+    uvs:         Array(np.float64, "N", 2)    # closest saddle surface uv value
+    geometry:    Array(np.int32, "N", 4)      # face vertices, -1 padded for triangles
 
     def __call__(self, values):
         return self.compute(values)
@@ -91,7 +99,7 @@ class SampleData(Data):
         sample_data.normals     = sample_data.normals[indices]
         sample_data.occluded    = sample_data.occluded[indices]
         sample_data.uvs         = sample_data.uvs[indices]
-        sample_data.geometry    = np.copy(src_mesh.geometry)[sample_data.indices]
+        sample_data.geometry    = _quad_geometry(src_mesh.geometry)[sample_data.indices]
 
         return sample_data
 
@@ -102,15 +110,15 @@ class RaycastData(Data):
     A dataclass to hold ray-mesh intersection data
     """
 
-    projections: np.ndarray  # intersection points (origins for misses)
-    distances:   np.ndarray  # ray t values (distance along ray to intersection)
-    weights:     np.ndarray  # bilinear weights of the 4 face vertices at hit point
-    indices:     np.ndarray  # face indices of hits (-1 for misses)
-    normals:     np.ndarray  # interpolated face normals at hit points
-    occluded:    np.ndarray  # boolean mask for occlusion
-    uvs:         np.ndarray  # bilinear (u, v) parameters at hit points
-    geometry:    np.ndarray  # face vertex indices for hit faces
-    hit:         np.ndarray  # boolean mask -- True where a face was intersected
+    projections: Array(np.float64, "N", "D")  # intersection points (origins for misses)
+    distances:   Array(np.float64, "N")       # ray t values (distance along ray to intersection)
+    weights:     Array(np.float64, "N", 4)    # bilinear weights of the 4 face vertices at hit point
+    indices:     Array(np.int32, "N")         # face indices of hits (-1 for misses)
+    normals:     Array(np.float64, "N", "D")  # interpolated face normals at hit points
+    occluded:    Array(np.bool_, "N")         # boolean mask for occlusion
+    uvs:         Array(np.float64, "N", 2)    # bilinear (u, v) parameters at hit points
+    geometry:    Array(np.int32, "N", 4)      # face vertex indices for hit faces
+    hit:         Array(np.bool_, "N")         # boolean mask -- True where a face was intersected
 
     def __call__(self, values):
         return self.compute(values)
@@ -149,12 +157,7 @@ def raycast(
     backward casts when ``forward_only=False``.
     """
     # pad geometry to 4-wide if needed
-    if face_geometry.shape[1] > 4:
-        raise ValueError("ngons detected")
-    elif face_geometry.shape[1] < 4:
-        buffer                              = np.full((face_geometry.shape[0], 4), -1, dtype=face_geometry.dtype)
-        buffer[:, : face_geometry.shape[1]] = face_geometry
-        face_geometry                       = buffer
+    face_geometry = _quad_geometry(face_geometry)
 
     n = origins.shape[0]
 
@@ -270,11 +273,18 @@ def sample(
     2- if not 100% match, precompute face centroids and radiuses for optimization.
        and send what remains to saddle surface sampler
     """
-    projections = np.copy(points)
-    distances   = np.zeros(points.shape[0], dtype=points.dtype)
-    weights     = np.empty((points.shape[0], 4), dtype=points.dtype)
-    indices     = np.empty(points.shape[0],      dtype=face_geometry.dtype)
-    uvs         = np.empty((points.shape[0], 2), dtype=points.dtype)
+    # the results are float64 whatever the queries are: int queries would
+    # truncate every weight to 0
+    points      = np.asarray(points)
+    projections = np.array(points, dtype=np.float64)
+    distances   = np.zeros(points.shape[0], dtype=np.float64)
+    weights     = np.empty((points.shape[0], 4), dtype=np.float64)
+    indices     = np.empty(points.shape[0],      dtype=np.int32)
+    uvs         = np.empty((points.shape[0], 2), dtype=np.float64)
+
+    # shaped for quads before anything reads it: the result's geometry is
+    # 4 wide even when every query matches a vertex
+    face_geometry = _quad_geometry(face_geometry)
 
     # sampling happens only on min dimension
     min_width = min(points.shape[1], face_points.shape[1])
@@ -297,15 +307,6 @@ def sample(
 
     # use saddle surface sampler for non 100% matches
     if not np.all(matched):
-        # make sure face_geometry is shaped for quads
-        if face_geometry.shape[1] > 4:
-            raise ValueError("ngons detected")
-
-        elif face_geometry.shape[1] < 4:
-            buffer                              = np.full((face_geometry.shape[0], 4), -1, dtype=face_geometry.dtype)
-            buffer[:, : face_geometry.shape[1]] = face_geometry
-            face_geometry                       = buffer
-
         unmatched = ~matched
         centroids, radiuses = compute_centroids(
             face_points[:, :min_width], face_geometry, return_radiuses=True
@@ -342,7 +343,7 @@ def sample(
 
     else:
         occluded = np.full(points.shape[0], False)
-        normals  = np.zeros(points.shape, dtype=points.dtype)
+        normals  = np.zeros(points.shape, dtype=np.float64)
 
     return SampleData(
         projections = projections,

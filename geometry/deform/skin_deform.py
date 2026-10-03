@@ -23,12 +23,11 @@ Conventions worth knowing before reading the code:
   authored matrix can bake a geometry-node transform that no bind pose can
   recover.  Pass the file's matrices when you have them; deriving from a bind
   rig is the fallback, not the default.
-* **Fields are plain arrays and strings.**  A :class:`Data` or ``DataList``
-  attribute cannot be a field on a ``Data`` subclass: ``__eq__`` returns True
-  against a foreign type (``_base.py``), so ``to_dict``'s
-  ``if attr_value != default_value`` gate drops it and the object silently
-  stops persisting.  Meshes, skins and rigs are constructor arguments; only
-  numbers and names survive to disk.
+* **Fields are plain arrays and strings.**  Meshes, skins and rigs are
+  constructor arguments, read once: only the bind-pose points, the matrices,
+  the joint names and the compacted weights are kept, and only they survive
+  to disk.  Bind before saving -- a deformer saved unbound has no weights,
+  and its skin is not saved with it.
 
 The numba-accelerated kernels backing this class live in
 :mod:`cgmath.geometry.utils._numba._skin_deform`.
@@ -38,10 +37,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING
 
 import numpy as np
-from cgmath.geometry._base import Data
+from cgmath.geometry._base import Array, Data
 
 
 if TYPE_CHECKING:
@@ -99,21 +98,20 @@ class SkinDeformData(Data):
             obj.mesh = deformer.apply(world[f, cols], mesh)
     """
 
-    rest_points:           np.ndarray = None
+    rest_points:           Optional[Array(np.float64, "N", 3)] = None
     joints:                List[str] = None
-    inverse_bind_matrices: np.ndarray = None
-    influence_indices:     np.ndarray = None
-    influence_weights:     np.ndarray = None
+    inverse_bind_matrices: Optional[Array(np.float64, "J", 4, 4)] = None
+    influence_indices:     Optional[Array(np.int32, "N", "K")] = None
+    influence_weights:     Optional[Array(np.float64, "N", "K")] = None
     method:                str = DeformMethod.LBS.value
-    name:                  str | None = None
+    name:                  Optional[str] = None
 
     # joints are node names: strip_namespace() strips them with the name
     NAMESPACED_FIELDS = ("name", "joints")
 
     # --- cached --- #
-    _rest_mesh = None
-    _skin      = None
-    _points    = None
+    _skin   = None  # the SkinData bind() compacts; not saved
+    _points = None
 
     def _namespace_parts(self) -> list:
         """the SkinData the deformer was built from: its influences name the same joints"""
@@ -134,9 +132,9 @@ class SkinDeformData(Data):
         """Create a skin deformation operator.
 
         Args:
-            mesh: Bind-pose geometry as a :class:`MeshData`, or a raw
-                ``(N, 3)`` array.  A mesh is needed if you want
-                :meth:`apply` to hand back geometry rather than points.
+            mesh: Bind-pose geometry as a :class:`MeshData` (only its
+                points are kept), or a raw ``(N, 3)`` array.  :meth:`apply`
+                hands back geometry when its *target* is a mesh.
             skin: :class:`SkinData` or :class:`CompactSkinData` holding the
                 per-vertex weights and their influence names.
             bind_rig: Bind-pose skeleton, used to derive the inverse bind
@@ -154,23 +152,20 @@ class SkinDeformData(Data):
                 neither *inverse_bind_matrices* nor *bind_rig* is supplied, or
                 if the matrices do not match the joint count.
         """
-        self._rest_mesh = None
-        self._skin      = skin
-        self._points    = None
+        self._skin   = skin
+        self._points = None
 
-        self.name   = name
-        self.method = DeformMethod(method).value
+        self.name    = name
+        self.method  = DeformMethod(method).value
 
         self.rest_points = None
         if mesh is not None:
             if hasattr(mesh, "points") and not isinstance(mesh, np.ndarray):
-                self._rest_mesh = mesh
-                points          = mesh.points
+                points = mesh.points
             else:
                 points = mesh
-            self.rest_points = np.ascontiguousarray(
-                np.asarray(points, dtype=np.float64)
-            )
+            # a copy: the deformer must not move with later edits to the mesh
+            self.rest_points = np.array(points, dtype=np.float64, order="C")
 
         if joints is not None:
             self.joints = [str(x) for x in joints]

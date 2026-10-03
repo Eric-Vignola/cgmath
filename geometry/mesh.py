@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import os
 import re
 import warnings
@@ -53,7 +54,7 @@ except ImportError:
 
 from cgmath.formats._fbx_io import open_fbx
 from cgmath.geometry import Data, DataList, ImmutableArray as numpy_array
-from cgmath.geometry._base import get_file_type
+from cgmath.geometry._base import Array, get_file_type
 from cgmath.geometry._saddle_surface import integrate, sample
 from cgmath.geometry.utils import (
     average_points,
@@ -90,6 +91,28 @@ MESH_PRIM_TYPE = "Mesh"
 UV_ATTR_PREFIX = "primvars:st"
 
 EPSILON = np.finfo(np.float32).eps
+
+
+def _pxr_module(name: str):
+    """
+    The USD module ``pxr.<name>``. ``pxr()`` only carries the submodules
+    something has already imported, so each one is imported here.
+    """
+    pxr()  # ImportError when USD is not installed
+    return importlib.import_module(f"pxr.{name}")
+
+
+def _usd_value(attr: Any, empty: Any = None) -> Any:
+    """
+    A USD attribute's value: its default, else its first time sample (an
+    animated cache keeps only samples), else ``empty``.
+    """
+    if not attr:
+        return empty
+    value = attr.Get()
+    if value is None and attr.GetNumTimeSamples():
+        value = attr.Get(_pxr_module("Usd").TimeCode.EarliestTime())
+    return empty if value is None else value
 
 
 class AreaMethod(Enum):
@@ -234,16 +257,16 @@ class MeshData(Data):
 
     EQUALITY_TEST_IGNORE = ["name"]
 
-    indices:        np.ndarray
-    counts:         np.ndarray
-    points:         np.ndarray
+    indices:        Array(np.int32, "N")
+    counts:         Array(np.int32, "N")
+    points:         Array(np.float64, "N", 3)
     name:           Optional[str] = None
-    matrix:         Optional[np.ndarray] = numpy_array(np.eye(4))
-    hole_faces:     Optional[np.ndarray] = None
-    hole_counts:    Optional[np.ndarray] = None
-    hole_indices:   Optional[np.ndarray] = None
-    normals:        Optional[np.ndarray] = None
-    normal_indices: Optional[np.ndarray] = None
+    matrix:         Optional[Array(np.float64, 4, 4)] = numpy_array(np.eye(4))
+    hole_faces:     Optional[Array(np.int32, "N")] = None
+    hole_counts:    Optional[Array(np.int32, "N")] = None
+    hole_indices:   Optional[Array(np.int32, "N")] = None
+    normals:        Optional[Array(np.float64, "N", 3)] = None
+    normal_indices: Optional[Array(np.int32, "N")] = None
 
     # --- cached attributes --- #
     _f2v = None  # faces to vertices
@@ -1868,7 +1891,7 @@ class MeshData(Data):
         if indices is None:
             # make each face its own island
             self.points  = self.points[self.indices]
-            self.indices = np.arange(self.indices.size)
+            self.indices = np.arange(self.indices.size, dtype=np.int32)
 
         else:
             # keep indices in range
@@ -2089,7 +2112,10 @@ class MeshData(Data):
                     (PN Quad bicubic Bezier patches using vertex normals for
                     higher accuracy on smooth meshes).
             iteration_count: max Newton iterations.
-            iteration_tolerance: convergence tolerance.
+            iteration_tolerance: Newton stops once a step moves (u, v) less than
+                    this, a fraction of the face, so it means the same on a
+                    face of any size.
+            BEZIER uses its own iteration count and tolerance (20, 1e-6).
         """
         _require_no_ngons("sample", self.counts)
         method = SampleMethod(method)
@@ -2506,10 +2532,11 @@ class MeshData(Data):
                         name = None
 
                 elif line.startswith("vn "):
-                    normals.append([float(x) for x in line.split()[1:]])
+                    normals.append([float(x) for x in line.split()[1:4]])
 
                 elif line.startswith("v "):
-                    points.append([float(x) for x in line.split(" ")[1:]])
+                    # x y z, then an optional w or vertex colour: kept out
+                    points.append([float(x) for x in line.split()[1:4]])
 
                 elif line.startswith("f "):
                     tokens       = line.split()[1:]
@@ -2524,9 +2551,9 @@ class MeshData(Data):
                     normal_ids.extend(face_normals)
                     vert_counts.append(len(face_verts))
 
-        points      = np.array(points)
-        vert_ids    = np.array(vert_ids) - 1
-        vert_counts = np.array(vert_counts)
+        points      = np.array(points, dtype=np.float64)
+        vert_ids    = np.array(vert_ids, dtype=np.int32) - 1
+        vert_counts = np.array(vert_counts, dtype=np.int32)
 
         # re-insert the term "Shape" back into the name
         if name is not None:
@@ -2540,9 +2567,9 @@ class MeshData(Data):
         mesh = cls(points=points, indices=vert_ids, counts=vert_counts, name=name)
 
         if normals:
-            mesh.normals = np.array(normals)
+            mesh.normals = np.array(normals, dtype=np.float64)
             if normal_ids:
-                mesh.normal_indices = np.array(normal_ids) - 1
+                mesh.normal_indices = np.array(normal_ids, dtype=np.int32) - 1
 
         return mesh
 
@@ -2621,10 +2648,10 @@ class MeshData(Data):
         Returns:
             A MeshData object.
         """
-        mesh_api    = pxr().UsdGeom.Mesh(prim)
-        vert_counts = np.array(mesh_api.GetFaceVertexCountsAttr().Get())
-        vert_ids    = np.array(mesh_api.GetFaceVertexIndicesAttr().Get())
-        points      = np.array(mesh_api.GetPointsAttr().Get())
+        mesh_api    = _pxr_module("UsdGeom").Mesh(prim)
+        vert_counts = np.array(_usd_value(mesh_api.GetFaceVertexCountsAttr(), []))
+        vert_ids    = np.array(_usd_value(mesh_api.GetFaceVertexIndicesAttr(), []))
+        points      = np.array(_usd_value(mesh_api.GetPointsAttr(), []))
         name        = prim.GetName()
 
         # read shading normals
@@ -2632,10 +2659,10 @@ class MeshData(Data):
         normal_indices = None
         normals_attr   = prim.GetAttribute("primvars:normals")
         if normals_attr and normals_attr.HasValue():
-            normals  = np.array(normals_attr.Get())
+            normals  = np.array(_usd_value(normals_attr))
             idx_attr = prim.GetAttribute("primvars:normals:indices")
             if idx_attr and idx_attr.HasValue():
-                normal_indices = np.array(idx_attr.Get(), dtype=int)
+                normal_indices = np.array(_usd_value(idx_attr), dtype=np.int32)
 
         return cls(
             points         = points,
@@ -2652,7 +2679,7 @@ class MeshData(Data):
             prim.SetTypeName(MESH_PRIM_TYPE)
 
         min_bbx, max_bbx = self.get_extent()
-        mesh_api = pxr().UsdGeom.Mesh(prim)
+        mesh_api = _pxr_module("UsdGeom").Mesh(prim)
         mesh_api.CreateFaceVertexCountsAttr().Set(self.counts)
         mesh_api.CreateFaceVertexIndicesAttr().Set(self.indices)
         mesh_api.CreatePointsAttr().Set(self.points)
@@ -2660,7 +2687,7 @@ class MeshData(Data):
 
         # write shading normals
         if self.normals is not None:
-            Sdf = pxr().Sdf
+            Sdf = _pxr_module("Sdf")
             attr = prim.CreateAttribute(
                 "primvars:normals",
                 Sdf.ValueTypeNames.Normal3fArray,
@@ -2997,8 +3024,8 @@ class MeshData(Data):
                 new_counts.append(3)
                 new_indices.extend(tri.tolist())
 
-        self.indices = np.array(new_indices, dtype=int)
-        self.counts  = np.array(new_counts, dtype=int)
+        self.indices = np.array(new_indices, dtype=np.int32)
+        self.counts  = np.array(new_counts, dtype=np.int32)
 
         # clear hole metadata -- mesh is now all triangles
         self.hole_faces   = None
@@ -3187,8 +3214,8 @@ class MeshData(Data):
             consumed[f] = True
             consumed[p] = True
 
-        self.indices = np.array(new_indices, dtype=int)
-        self.counts  = np.array(new_counts, dtype=int)
+        self.indices = np.array(new_indices, dtype=np.int32)
+        self.counts  = np.array(new_counts, dtype=np.int32)
 
         # Remap n-gon ``hole_faces`` because merging shifts later face
         # indices.  N-gons are never selected as merge candidates, so every
@@ -3201,7 +3228,7 @@ class MeshData(Data):
                     "consumed by a merge - this should not happen because "
                     "n-gons are not eligible for merging."
                 )
-            self.hole_faces = remapped.astype(self.hole_faces.dtype)
+            self.hole_faces = remapped
 
         # reset cached data - topology has changed
         self.reset_cached_data()
@@ -3389,13 +3416,16 @@ class UVData(MeshData):
     UV map topology treated as a Mesh object for resampling purposes
     """
 
-    name: str = "map1"
+    points: Array(np.float64, "N", 2)
+    name:   str = "map1"
+
+    # render settings, under the resolution and antialias properties
+    _resolution: Array(np.int32, 2) = numpy_array(np.array([2048, 2048], dtype=np.int32))
+    _antialias:  bool = False
 
     # --- cached attributes --- #
-    _buffer     = None                    # render buffer
-    _resolution = np.array([2048, 2048])  # render buffer resolution
-    _renderer   = None
-    _antialias  = False
+    _buffer   = None  # render buffer
+    _renderer = None
 
     # buffer pixel counters
     _pixel_counts   = None
@@ -3502,7 +3532,7 @@ class UVData(MeshData):
 
     @antialias.setter
     def antialias(self, antialias: bool = False):
-        self._antialias = antialias
+        self._antialias = bool(antialias)
 
     @property
     def renderer(self):
@@ -3539,9 +3569,9 @@ class UVData(MeshData):
     def resolution(self, resolution: Tuple[int, int]) -> None:
         """sets the render buffer resolution"""
         if isinstance(resolution, int):
-            resolution = np.array([resolution, resolution], dtype=int)
+            resolution = np.array([resolution, resolution], dtype=np.int32)
         else:
-            resolution = np.array(resolution, dtype=int)
+            resolution = np.array(resolution, dtype=np.int32)
 
         if not np.allclose(self._resolution, resolution):
             self._resolution = resolution
@@ -3561,7 +3591,9 @@ class UVData(MeshData):
     def buffer(self, buffer) -> None:
         """sets _buffer"""
         self._buffer     = np.asarray(buffer, dtype=np.uint8)
-        self._resolution = np.array([self._buffer.shape[1], self._buffer.shape[0]])
+        self._resolution = np.array(
+            [self._buffer.shape[1], self._buffer.shape[0]], dtype=np.int32
+        )
 
     def buffer_from_file(self, fname: str) -> None:
         """loads an image to the render buffer from a file"""
@@ -4319,26 +4351,29 @@ class UVData(MeshData):
                         id_attr_name = f"{attr_name}:indices"
                         yield attr, prim.GetAttribute(id_attr_name)
 
-        mesh_api    = pxr().UsdGeom.Mesh(prim)
-        vert_counts = mesh_api.GetFaceVertexCountsAttr().Get()
+        mesh_api    = _pxr_module("UsdGeom").Mesh(prim)
+        vert_counts = _usd_value(mesh_api.GetFaceVertexCountsAttr(), [])
 
         data_list   = []
         for i, (uv_attr, uv_ids_attr) in enumerate(iter_uv_attrs()):
             custom_data = uv_attr.GetCustomDataByKey("Maya") or {}
             uv_set      = custom_data.get("name", f"uv_set{i}")
-            uv_ids      = uv_ids_attr.Get()
-            data = cls(
-                name    = uv_set,
-                indices = np.array(uv_ids),
-                counts  = np.array(vert_counts),
-                points  = np.array(uv_attr.Get()),
-            )
+            uv_ids      = _usd_value(uv_ids_attr)
+            points      = np.array(_usd_value(uv_attr, []), dtype=np.float64)
+            if points.ndim == 2 and points.shape[1] > 2:
+                points = points[:, :2]  # a texCoord3f: u and v, w is not a uv
 
             # rare case where indices are not indexed, assume mesh is facetted
             # TODO change iter_uv_attrs to test if primvar "IsIndexed"
             if uv_ids is None:
-                data.indices = np.arange(data.points.shape[0])
+                uv_ids = np.arange(points.shape[0], dtype=np.int32)
 
+            data = cls(
+                name    = uv_set,
+                indices = np.array(uv_ids),
+                counts  = np.array(vert_counts),
+                points  = points,
+            )
             data_list.append(data)
 
         return UVList(data_list)
@@ -4350,7 +4385,7 @@ class UVData(MeshData):
             uv_set_id: An uv set index to write the UV data under.
             prim: A mesh prim to write the UV data to.
         """
-        Sdf      = pxr().Sdf
+        Sdf      = _pxr_module("Sdf")
         var_name = UV_ATTR_PREFIX if uv_set_id == 0 else f"{UV_ATTR_PREFIX}{uv_set_id}"
         attr = prim.CreateAttribute(
             var_name,
@@ -4675,9 +4710,9 @@ def load_glb(filename: str, scale_factor: float = 100.0) -> list:
 
     data = []
     for name, geometry in scene.geometry.items():
-        points  = np.array(geometry.vertices) * scale_factor
-        indices = np.array(geometry.faces)
-        counts  = np.ones(indices.shape[0], dtype=int) * 3
+        points  = np.array(geometry.vertices, dtype=np.float64) * scale_factor
+        indices = np.array(geometry.faces, dtype=np.int32)
+        counts  = np.full(indices.shape[0], 3, dtype=np.int32)
 
         mesh_data = MeshData(
             points  = points,
@@ -4692,11 +4727,12 @@ def load_glb(filename: str, scale_factor: float = 100.0) -> list:
         # Use getattr so the absent attribute is treated the same as no UVs.
         uv_attr = getattr(geometry.visual, "uv", None)
         if uv_attr is not None:
+            # the UVs take their own topology arrays, as every other reader's do
             uv_points = np.array(uv_attr)
             uv_data = UVData(
                 points  = uv_points,
-                indices = indices.ravel(),
-                counts  = counts,
+                indices = indices.ravel().copy(),
+                counts  = counts.copy(),
             )
             uv_data_list.append(uv_data)
 
@@ -4740,13 +4776,16 @@ def load_obj(filename: str) -> list:
                 current = _new_group(name)
 
             elif line.startswith("vn "):
-                all_normals.append([float(x) for x in line.split()[1:]])
+                all_normals.append([float(x) for x in line.split()[1:4]])
 
             elif line.startswith("vt "):
-                all_uvs.append([float(x) for x in line.split()[1:]])
+                # u [v [w]]: v defaults to 0, w is not kept
+                uv = [float(x) for x in line.split()[1:3]]
+                all_uvs.append(uv + [0.0] * (2 - len(uv)))
 
             elif line.startswith("v "):
-                all_points.append([float(x) for x in line.split()[1:]])
+                # x y z, then an optional w or vertex colour: kept out
+                all_points.append([float(x) for x in line.split()[1:4]])
 
             elif line.startswith("f "):
                 if current is None:
@@ -4768,17 +4807,17 @@ def load_obj(filename: str) -> list:
                 current["normal_ids"].extend(face_normals)
                 current["vert_counts"].append(len(face_verts))
 
-    all_points  = np.array(all_points)
-    all_uvs     = np.array(all_uvs) if all_uvs else None
-    all_normals = np.array(all_normals) if all_normals else None
+    all_points  = np.array(all_points, dtype=np.float64)
+    all_uvs     = np.array(all_uvs, dtype=np.float64) if all_uvs else None
+    all_normals = np.array(all_normals, dtype=np.float64) if all_normals else None
 
     data = []
     for group in groups:
         if not group["vert_ids"]:
             continue
 
-        vert_ids    = np.array(group["vert_ids"]) - 1
-        vert_counts = np.array(group["vert_counts"])
+        vert_ids    = np.array(group["vert_ids"], dtype=np.int32) - 1
+        vert_counts = np.array(group["vert_counts"], dtype=np.int32)
 
         # de-duplicate global points to a per-mesh point set
         used_points, point_remap = np.unique(vert_ids, return_inverse=True)
@@ -4796,26 +4835,26 @@ def load_obj(filename: str) -> list:
 
         mesh_data = MeshData(
             points  = mesh_points,
-            indices = point_remap.astype(np.int64),
+            indices = point_remap.astype(np.int32),
             counts  = vert_counts,
             name    = name,
         )
 
         if all_normals is not None and group["normal_ids"]:
-            normal_ids = np.array(group["normal_ids"]) - 1
+            normal_ids = np.array(group["normal_ids"], dtype=np.int32) - 1
             used_normals, normal_remap = np.unique(normal_ids, return_inverse=True)
             mesh_data.normals        = all_normals[used_normals]
-            mesh_data.normal_indices = normal_remap.astype(np.int64)
+            mesh_data.normal_indices = normal_remap.astype(np.int32)
 
         uv_data_list = []
         if all_uvs is not None and group["uv_ids"]:
-            uv_ids = np.array(group["uv_ids"]) - 1
+            uv_ids = np.array(group["uv_ids"], dtype=np.int32) - 1
             used_uvs, uv_remap = np.unique(uv_ids, return_inverse=True)
             uv_points = all_uvs[used_uvs]
             uv_data = UVData(
                 points  = uv_points,
-                indices = uv_remap.astype(np.int64),
-                counts  = vert_counts,
+                indices = uv_remap.astype(np.int32),
+                counts  = vert_counts.copy(),
             )
             uv_data_list.append(uv_data)
 
@@ -4892,11 +4931,11 @@ def _fbx_control_points(mesh) -> np.ndarray:
 def _fbx_polygon_streams(mesh) -> Tuple[np.ndarray, np.ndarray]:
     """Returns (indices, counts) -- flat face-vertex stream + per-face vertex count."""
     n_polys = mesh.GetPolygonCount()
-    counts  = np.empty(n_polys, dtype=np.int64)
+    counts  = np.empty(n_polys, dtype=np.int32)
     for i in range(n_polys):
         counts[i] = mesh.GetPolygonSize(i)
 
-    indices = np.empty(int(counts.sum()), dtype=np.int64)
+    indices = np.empty(int(counts.sum()), dtype=np.int32)
     offset  = 0
     for face_i in range(n_polys):
         sz = int(counts[face_i])
@@ -4930,7 +4969,7 @@ def _fbx_face_varying_indices(mesh, layer_element, counts: np.ndarray) -> np.nda
     ERef = fbx.FbxLayerElement.EReferenceMode
 
     total   = int(counts.sum())
-    indices = np.empty(total, dtype=np.int64)
+    indices = np.empty(total, dtype=np.int32)
 
     if mapping == EMap.eByPolygonVertex:
         if reference == ERef.eIndexToDirect:
@@ -5044,7 +5083,12 @@ def _detect_hard_edges(mesh, angle_deg):
     face_normals = mesh.get_face_normals()
     e2f          = mesh.e2f
 
-    valid     = np.all(e2f >= 0, axis=1)
+    # e2f is as wide as the most faces an edge has: one column when no edge
+    # is shared (an unwelded mesh), more than two when one is non-manifold
+    if e2f.shape[1] < 2:
+        return np.empty(0, dtype=np.int32)
+
+    valid     = (e2f[:, 0] >= 0) & (e2f[:, 1] >= 0)
     valid_idx = np.where(valid)[0]
 
     n0 = face_normals[e2f[valid_idx, 0]]

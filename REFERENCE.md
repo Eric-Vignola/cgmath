@@ -260,7 +260,6 @@ add_delta(self, delta, by: 'str' = 'index', translate: 'bool' = True) -> "'ClipD
     Every frame with ``delta`` applied, as a clip.
 copy(self) -> "'ClipData'"
     returns a deep copy, owning the nodes it holds.
-classmethod from_dict(cls, data: 'dict') -> "'ClipData'"
 classmethod from_poses(cls, poses, start_frame: 'int' = 0, fps: 'float' = 24.0) -> "'ClipData'"
     builds a clip from a sequence of HierarchyData poses
 get_delta(self, other, by: 'str' = 'index', translate: 'bool' = True) -> "'ClipData'"
@@ -272,7 +271,7 @@ classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, animat
 save_fbx(self, filename, zero_root=False, as_ascii=False)
     saves the bound frame to a .fbx file, binary unless as_ascii is set
 to_dict(self) -> 'dict'
-    set keys as uuid in the case of duplicate names
+    The list as a tree. A view saves as the hierarchy :meth:`copy`
 ```
 
 #### `HierarchyData(TransformList)`
@@ -309,7 +308,7 @@ name: str = None
 node_type: Optional[str] = 'transform'
 uuid: Optional[str] = None
 parent_node: Optional[str] = None
-user_defined_attributes: Optional[dict] = None
+user_defined_attributes: dict
 ```
 
 Properties:
@@ -503,7 +502,7 @@ swapaxes(self, axis0: 'int', axis1: 'int', negate: 'bool' = False) -> 'None'
 to_attributes(self, mapping: 'dict' = {'_scale': 'scale', '_rotate': 'rotate', '_translate': 'translate', '_rotate_order': 'rotateOrder', '_rotate_axis': 'rotateAxis', '_joint_orient': 'jointOrient', '_segment_scale_compensate': 'segmentScaleCompensate', '_radius': 'radius', '_visibility': 'visibility', '_draw_style': 'drawStyle'}) -> 'List[dict]'
     returns every node's attributes as a list of dicts
 to_dict(self) -> 'dict'
-    set keys as uuid in the case of duplicate names
+    The list as a tree. A view saves as the hierarchy :meth:`copy`
 ```
 
 Functions:
@@ -545,6 +544,7 @@ DataList
 DeltaMushData
 GeomSubsetData
 ImmutableArray
+LegacyFileError
 MapData
 MeshData
 MeshList
@@ -565,6 +565,23 @@ UVList
 
 the `Data` / `DataList` contract every type is built on.
 
+#### `ArraySpec`
+
+What an array field holds: one dtype, or a few that are kept as given,
+
+```text
+ArraySpec(dtypes, shape)
+```
+
+Methods:
+
+```text
+coerce(self, value, where: str) -> numpy.ndarray
+    ``value`` as this field's array; ``where`` names it in errors
+describe(self) -> str
+    the shape as written in an error: ``(N, 3)``
+```
+
 #### `Data`
 
 Base class with managed serialization.
@@ -583,9 +600,10 @@ Methods:
 
 ```text
 copy(self)
-    returns a deep copy of self
+    returns a deep copy of self: the object a save and load gives back
 classmethod from_bytes(cls, data: bytes) -> Any
 classmethod from_dict(cls, data: dict) -> Any
+    The object a tree describes: the class it names, which must be this
 classmethod info(cls) -> str
     Returns this class's docstring as a string.
 classmethod load(cls, filename: str, mode: Optional[str] = None) -> Any
@@ -596,9 +614,9 @@ classmethod load_pickle(cls, filename: str) -> Any
 match(self, *args, exact: bool = True) -> bool
     returns True if name matches any arguments
 reset_cached_data(self)
-    resets cached data
+    resets cached data: every attribute that is not an annotated field
 save(self, filename: str, mode: Optional[str] = None) -> str
-    saves the data to a file
+    saves the data as ``mode`` (pkl, npz or json), or as the extension says
 save_json(self, filename: str) -> str
 save_npz(self, filename: str, compression=8) -> str
 save_pickle(self, filename: str) -> str
@@ -607,7 +625,7 @@ strip_namespace(self, namespace: Optional[str] = None) -> None
 to_bytes(self) -> bytes
     returns a bytes object from the zipped data
 to_dict(self) -> dict
-    returns the annotated data as a dict
+    The data as a tree: its class, then every field that differs from its
 to_json(self) -> str
     formats the data as human readable json
 ```
@@ -638,6 +656,7 @@ extend(self, iterable)
     S.extend(iterable) -- extend sequence by appending elements from the iterable
 classmethod from_bytes(cls, data: bytes) -> Any
 classmethod from_dict(cls, data: dict) -> Any
+    The list a tree describes: the class it names, which must be this one
 get(self, name: str, default: Any = None) -> Any
     the first item named ``name``, or ``default``
 index(self, value, start=0, stop=None)
@@ -656,11 +675,9 @@ pop(self, index=-1)
 reset_cached_data(self)
     resets cached data
 save(self, filename: str, mode: Optional[str] = None) -> str
-    saves the data to a file
+    saves the list as ``mode`` (pkl, npz or json), or as the extension says
 save_json(self, filename: str) -> str
-    saves the morph target list to a json file
-save_npz(self, filename: str) -> str
-    saves the morph target list to a npz file
+save_npz(self, filename: str, compression=8) -> str
 save_pickle(self, filename: str) -> str
 sort(self, key=None, reverse=False)
 strip_namespace(self, namespace: Optional[str] = None) -> None
@@ -668,6 +685,7 @@ strip_namespace(self, namespace: Optional[str] = None) -> None
 to_bytes(self) -> bytes
     returns a bytes object from the zipped data
 to_dict(self) -> dict
+    the list as a tree: its class, its items' trees, and its LIST_FIELDS
 to_json(self) -> str
     formats the data as human readable json
 ```
@@ -680,15 +698,25 @@ A hack used to bypass a python 3.10+ limitation with dataclasses fields and nump
 ImmutableArray(input_array)
 ```
 
+#### `LegacyFileError(ValueError)`
+
+a file saved by an older cgmath, whose files are no longer read
+
+```text
+LegacyFileError(...)
+```
+
 Functions:
 
 ```text
-bytes_to_dict(data)
-    takes a bytes object and returns a deep dict of numpy arrays
-dict_to_bytes(data)
-    takes a deep dict and returns a zip file as bytes
-dict_to_zip(data, filename, compression=8)
-    takes a deep dict and saves a zip file with .npy data
+Array(dtype, *shape)
+    The annotation of an array field. ``Array(np.int32, "N")`` is a list of
+bytes_to_dict(data: bytes) -> dict
+    the tree in npz bytes
+dict_to_bytes(data: dict, compression=8) -> bytes
+    the npz file of a tree, as bytes
+dict_to_zip(data: dict, filename, compression=8) -> None
+    writes a tree of dicts, lists, arrays and scalars as an npz file
 flatten_nested_lists(xs)
 get_annotations(cls)
     returns a dict of all annotations including inherited ones
@@ -696,18 +724,18 @@ get_file_type(filename: str) -> str
     The file's type: ``"npz"``, ``"json"`` or ``"pkl"`` for cgmath's own
 is_ndarray_annotation(dtype) -> bool
     returns True if an annotation is np.ndarray, or a union holding it
-nan_to_none(obj)
-    convert np.nan (not a number) to None object
-none_to_nan(obj)
-    convert None object to np.nan (not a number)
-zip_to_dict(filename)
-    takes a zip file and returns a deep dict of numpy arrays
+zip_to_dict(filename) -> dict
+    reads back the tree :func:`dict_to_zip` wrote
 ```
 
 Constants:
 
 ```text
+CLASS_KEY = '__class__'
+DTYPES_KEY = '__dtypes__'
+ITEMS_KEY = '__items__'
 MISSING = <dataclasses._MISSING_TYPE object at 0x000001DC7F460F50>
+SHAPES_KEY = '__shapes__'
 ```
 
 ## `cgmath.geometry.mesh`
@@ -735,26 +763,26 @@ Axis(value, names=None, *, module=None, qualname=None, type=None, start=1, bound
 Polygonal descriptor representing an object with edges, faces and vertices.
 
 ```text
-MeshData(indices: 'np.ndarray', counts: 'np.ndarray', points: 'np.ndarray', name: 'Optional[str]' = None, matrix: 'Optional[np.ndarray]' = ImmutableArray([[1., 0., 0., 0.],
+MeshData(indices: "Array(np.int32, 'N')", counts: "Array(np.int32, 'N')", points: "Array(np.float64, 'N', 3)", name: 'Optional[str]' = None, matrix: 'Optional[Array(np.float64, 4, 4)]' = ImmutableArray([[1., 0., 0., 0.],
                 [0., 1., 0., 0.],
                 [0., 0., 1., 0.],
-                [0., 0., 0., 1.]]), hole_faces: 'Optional[np.ndarray]' = None, hole_counts: 'Optional[np.ndarray]' = None, hole_indices: 'Optional[np.ndarray]' = None, normals: 'Optional[np.ndarray]' = None, normal_indices: 'Optional[np.ndarray]' = None) -> None
+                [0., 0., 0., 1.]]), hole_faces: "Optional[Array(np.int32, 'N')]" = None, hole_counts: "Optional[Array(np.int32, 'N')]" = None, hole_indices: "Optional[Array(np.int32, 'N')]" = None, normals: "Optional[Array(np.float64, 'N', 3)]" = None, normal_indices: "Optional[Array(np.int32, 'N')]" = None) -> None
 ```
 
 Fields:
 
 ```text
-indices: np.ndarray
-counts: np.ndarray
-points: np.ndarray
+indices: Array(np.int32, 'N')
+counts: Array(np.int32, 'N')
+points: Array(np.float64, 'N', 3)
 name: Optional[str] = None
-matrix: Optional[np.ndarray] = ImmutableArray([[1., 0., 0., 0.],
+matrix: Optional[Array(np.float64, 4, 4)] = ImmutableArray([[1., 0., 0., 0.],
       
-hole_faces: Optional[np.ndarray] = None
-hole_counts: Optional[np.ndarray] = None
-hole_indices: Optional[np.ndarray] = None
-normals: Optional[np.ndarray] = None
-normal_indices: Optional[np.ndarray] = None
+hole_faces: Optional[Array(np.int32, 'N')] = None
+hole_counts: Optional[Array(np.int32, 'N')] = None
+hole_indices: Optional[Array(np.int32, 'N')] = None
+normals: Optional[Array(np.float64, 'N', 3)] = None
+normal_indices: Optional[Array(np.int32, 'N')] = None
 ```
 
 Properties:
@@ -1058,15 +1086,16 @@ ngon_tris: dict
 UV map topology treated as a Mesh object for resampling purposes
 
 ```text
-UVData(indices: 'np.ndarray', counts: 'np.ndarray', points: 'np.ndarray', name: 'str' = 'map1', matrix: 'Optional[np.ndarray]' = ImmutableArray([[1., 0., 0., 0.],
+UVData(indices: "Array(np.int32, 'N')", counts: "Array(np.int32, 'N')", points: "Array(np.float64, 'N', 2)", name: 'str' = 'map1', matrix: 'Optional[Array(np.float64, 4, 4)]' = ImmutableArray([[1., 0., 0., 0.],
                 [0., 1., 0., 0.],
                 [0., 0., 1., 0.],
-                [0., 0., 0., 1.]]), hole_faces: 'Optional[np.ndarray]' = None, hole_counts: 'Optional[np.ndarray]' = None, hole_indices: 'Optional[np.ndarray]' = None, normals: 'Optional[np.ndarray]' = None, normal_indices: 'Optional[np.ndarray]' = None) -> None
+                [0., 0., 0., 1.]]), hole_faces: "Optional[Array(np.int32, 'N')]" = None, hole_counts: "Optional[Array(np.int32, 'N')]" = None, hole_indices: "Optional[Array(np.int32, 'N')]" = None, normals: "Optional[Array(np.float64, 'N', 3)]" = None, normal_indices: "Optional[Array(np.int32, 'N')]" = None, _resolution: 'Array(np.int32, 2)' = ImmutableArray([2048, 2048]), _antialias: 'bool' = False) -> None
 ```
 
 Fields:
 
 ```text
+points: Array(np.float64, 'N', 2)
 name: str = 'map1'
 ```
 
@@ -1219,14 +1248,14 @@ painted maps and component subsets.
 Geometry subset data class.
 
 ```text
-GeomSubsetData(name: 'str', indices: 'np.ndarray', component_type: 'str' = 'v', category: 'Optional[str]' = None) -> None
+GeomSubsetData(name: 'str', indices: 'Array(np.int32)', component_type: 'str' = 'v', category: 'Optional[str]' = None) -> None
 ```
 
 Fields:
 
 ```text
 name: str
-indices: np.ndarray
+indices: Array(np.int32)
 component_type: str = 'v'
 category: Optional[str] = None
 ```
@@ -1251,16 +1280,16 @@ to_skin_data(self, mesh_data: 'MeshData | None' = None, influence: 'str' = 'inf'
 Maps/Painted Maps general data class.
 
 ```text
-MapData(name: 'str', indices: 'np.ndarray', values: 'np.ndarray', default_value: 'Number' = 0, component_type: 'str' = 'v', categories: 'Optional[List[str]]' = None) -> None
+MapData(name: 'str', indices: "Array(np.int32, 'N')", values: "Array(np.float64, 'N')", default_value: 'float' = 0.0, component_type: 'str' = 'v', categories: 'Optional[List[str]]' = None) -> None
 ```
 
 Fields:
 
 ```text
 name: str
-indices: np.ndarray
-values: np.ndarray
-default_value: Number = 0
+indices: Array(np.int32, 'N')
+values: Array(np.float64, 'N')
+default_value: float = 0.0
 component_type: str = 'v'
 categories: Optional[List[str]] = None
 ```
@@ -1268,7 +1297,7 @@ categories: Optional[List[str]] = None
 Methods:
 
 ```text
-classmethod from_prim(cls, prim: 'Any') -> "'GeomSubsetData'"
+classmethod from_prim(cls, prim: 'Any') -> "'MapData'"
     Constructs a data object from a prim.
 classmethod from_skin_data(cls, skin_data: 'SkinData', mesh_data: 'MeshData | None' = None, **kwargs) -> 'MapData'
     Converts this skin data to a MapData object, assuming there is
@@ -1304,8 +1333,8 @@ Fields:
 
 ```text
 name: str
-offsets: np.ndarray
-indices: Optional[np.ndarray] = None
+offsets: Array(np.float64, 'N', 3)
+indices: Optional[Array(np.int32, 'N')] = None
 ```
 
 Properties:
@@ -1332,8 +1361,6 @@ prune_offsets(self, tolerance: 'float | None' = None, neighbors: 'np.ndarray | N
     prunes offsets with magnidutes <= tolerance
 sort(self)
     sorts indices.
-to_dict(self) -> 'dict'
-    returns the annotated data as a dict
 to_prim(self, prim) -> 'None'
     Streams data into a prim.
 ```
@@ -1381,15 +1408,15 @@ dense and compact skin weights.
 Compact skin data class with optimized to_skin_data.
 
 ```text
-CompactSkinData(max_influences: 'int', influence_indices: 'np.ndarray', weights: 'np.ndarray', influences: 'List[str]') -> None
+CompactSkinData(max_influences: 'int', influence_indices: "Array(np.int32, 'N')", weights: "Array(np.float64, 'N')", influences: 'List[str]') -> None
 ```
 
 Fields:
 
 ```text
 max_influences: int
-influence_indices: np.ndarray
-weights: np.ndarray
+influence_indices: Array(np.int32, 'N')
+weights: Array(np.float64, 'N')
 influences: List[str]
 ```
 
@@ -1425,13 +1452,13 @@ Patterns()
 Skin data class with optimized operations.
 
 ```text
-SkinData(weights: 'np.ndarray', influences: 'List[str]', name: 'Optional[str]' = None) -> None
+SkinData(weights: "Array(np.float64, 'N', 'J')", influences: 'List[str]', name: 'Optional[str]' = None, _patterns: 'dict' = <factory>) -> None
 ```
 
 Fields:
 
 ```text
-weights: np.ndarray
+weights: Array(np.float64, 'N', 'J')
 influences: List[str]
 name: Optional[str] = None
 ```
@@ -1553,13 +1580,13 @@ B-spline curves.
 BSpline data class.
 
 ```text
-BSplineData(points: numpy.ndarray = ImmutableArray([], shape=(0, 3), dtype=float64), degree: int = 3, periodic: bool = False, uniform: bool = False, use_numba: bool = True, registered: bool = False, arc_length_samples: int = 1000, knots: Optional[numpy.ndarray] = None) -> None
+BSplineData(points: typing.Annotated[numpy.ndarray, Array(float64 (N, D))] = ImmutableArray([], shape=(0, 3), dtype=float64), degree: int = 3, periodic: bool = False, uniform: bool = False, use_numba: bool = True, registered: bool = False, arc_length_samples: int = 1000, knots: Optional[Annotated[numpy.ndarray, Array(float64 (K,))]] = None) -> None
 ```
 
 Fields:
 
 ```text
-points: ndarray = ImmutableArray([], shape=(0, 3), dtype=f
+points: Annotated = ImmutableArray([], shape=(0, 3), dtype=f
 degree: int = 3
 periodic: bool = False
 uniform: bool = False
@@ -1622,17 +1649,17 @@ smooth(self, n: int, polyorder: int = 3, lock_endpoints: bool = True, pad_endpoi
 A dataclass to hold bspline sample data
 
 ```text
-SampleData(points: numpy.ndarray, tangents: numpy.ndarray, distances: numpy.ndarray, params: numpy.ndarray, basis: numpy.ndarray) -> None
+SampleData(points: typing.Annotated[numpy.ndarray, Array(float64 (N, D))], tangents: typing.Annotated[numpy.ndarray, Array(float64 (N, D))], distances: typing.Annotated[numpy.ndarray, Array(float64 (N,))], params: typing.Annotated[numpy.ndarray, Array(float64 (N,))], basis: typing.Annotated[numpy.ndarray, Array(float64 (N, C))]) -> None
 ```
 
 Fields:
 
 ```text
-points: ndarray
-tangents: ndarray
-distances: ndarray
-params: ndarray
-basis: ndarray
+points: Annotated
+tangents: Annotated
+distances: Annotated
+params: Annotated
+basis: Annotated
 ```
 
 Methods:
@@ -1641,7 +1668,7 @@ Methods:
 compute(self, values)
     computes weighted values from given data
 copy(self)
-    returns a deep copy of self
+    returns a deep copy of self: the object a save and load gives back
 ```
 
 ## `cgmath.geometry.bspline_patch`
@@ -1653,13 +1680,13 @@ tensor-product B-spline patches.
 B-spline tensor-product surface.
 
 ```text
-BSplinePatchData(points: numpy.ndarray, degree_u: int, degree_v: int, periodic_u: bool, periodic_v: bool, uniform_u: bool = False, uniform_v: bool = False, use_numba: bool = True, registered_u: bool = False, registered_v: bool = False, arc_length_samples: int = 1000) -> None
+BSplinePatchData(points: typing.Annotated[numpy.ndarray, Array(float64 (Nu, Nv, D))], degree_u: int, degree_v: int, periodic_u: bool, periodic_v: bool, uniform_u: bool = False, uniform_v: bool = False, use_numba: bool = True, registered_u: bool = False, registered_v: bool = False, arc_length_samples: int = 1000) -> None
 ```
 
 Fields:
 
 ```text
-points: ndarray
+points: Annotated
 degree_u: int
 degree_v: int
 periodic_u: bool
@@ -1736,19 +1763,19 @@ smooth(self, n_u: int, n_v: int, polyorder: int = 3)
 Ray-surface intersection data for a B-spline patch.
 
 ```text
-PatchRaycastData(points: numpy.ndarray, tangents: numpy.ndarray, distances: numpy.ndarray, params: numpy.ndarray, basis: numpy.ndarray, occluded: numpy.ndarray, hit: numpy.ndarray) -> None
+PatchRaycastData(points: typing.Annotated[numpy.ndarray, Array(float64 (N, 3))], tangents: typing.Annotated[numpy.ndarray, Array(float64 (N, 2, 3))], distances: typing.Annotated[numpy.ndarray, Array(float64 (N,))], params: typing.Annotated[numpy.ndarray, Array(float64 (N, 2))], basis: typing.Annotated[numpy.ndarray, Array(float64 (N, C))], occluded: typing.Annotated[numpy.ndarray, Array(bool (N,))], hit: typing.Annotated[numpy.ndarray, Array(bool (N,))]) -> None
 ```
 
 Fields:
 
 ```text
-points: ndarray
-tangents: ndarray
-distances: ndarray
-params: ndarray
-basis: ndarray
-occluded: ndarray
-hit: ndarray
+points: Annotated
+tangents: Annotated
+distances: Annotated
+params: Annotated
+basis: Annotated
+occluded: Annotated
+hit: Annotated
 ```
 
 Properties:
@@ -1763,7 +1790,7 @@ Methods:
 compute(self, values)
     Compute weighted values from basis. values can be (nu, nv, d) or (nu*nv, d).
 copy(self)
-    returns a deep copy of self
+    returns a deep copy of self: the object a save and load gives back
 ```
 
 #### `PatchSampleData(SampleData)`
@@ -1771,7 +1798,14 @@ copy(self)
 Sample data for B-spline surface projections.
 
 ```text
-PatchSampleData(points: numpy.ndarray, tangents: numpy.ndarray, distances: numpy.ndarray, params: numpy.ndarray, basis: numpy.ndarray) -> None
+PatchSampleData(points: typing.Annotated[numpy.ndarray, Array(float64 (N, D))], tangents: typing.Annotated[numpy.ndarray, Array(float64 (N, 2, D))], distances: typing.Annotated[numpy.ndarray, Array(float64 (N,))], params: typing.Annotated[numpy.ndarray, Array(float64 (N, 2))], basis: typing.Annotated[numpy.ndarray, Array(float64 (N, C))]) -> None
+```
+
+Fields:
+
+```text
+tangents: Annotated
+params: Annotated
 ```
 
 Properties:
@@ -1786,7 +1820,7 @@ Methods:
 compute(self, values)
     Compute weighted values from basis. values can be (nu, nv, d) or (nu*nv, d).
 copy(self)
-    returns a deep copy of self
+    returns a deep copy of self: the object a save and load gives back
 ```
 
 ## `cgmath.geometry._saddle_surface`
@@ -1798,21 +1832,21 @@ bilinear / PN-Quad sampling, raycast and integration.
 A dataclass to hold ray-mesh intersection data
 
 ```text
-RaycastData(projections: numpy.ndarray, distances: numpy.ndarray, weights: numpy.ndarray, indices: numpy.ndarray, normals: numpy.ndarray, occluded: numpy.ndarray, uvs: numpy.ndarray, geometry: numpy.ndarray, hit: numpy.ndarray) -> None
+RaycastData(projections: typing.Annotated[numpy.ndarray, Array(float64 (N, D))], distances: typing.Annotated[numpy.ndarray, Array(float64 (N,))], weights: typing.Annotated[numpy.ndarray, Array(float64 (N, 4))], indices: typing.Annotated[numpy.ndarray, Array(int32 (N,))], normals: typing.Annotated[numpy.ndarray, Array(float64 (N, D))], occluded: typing.Annotated[numpy.ndarray, Array(bool (N,))], uvs: typing.Annotated[numpy.ndarray, Array(float64 (N, 2))], geometry: typing.Annotated[numpy.ndarray, Array(int32 (N, 4))], hit: typing.Annotated[numpy.ndarray, Array(bool (N,))]) -> None
 ```
 
 Fields:
 
 ```text
-projections: ndarray
-distances: ndarray
-weights: ndarray
-indices: ndarray
-normals: ndarray
-occluded: ndarray
-uvs: ndarray
-geometry: ndarray
-hit: ndarray
+projections: Annotated
+distances: Annotated
+weights: Annotated
+indices: Annotated
+normals: Annotated
+occluded: Annotated
+uvs: Annotated
+geometry: Annotated
+hit: Annotated
 ```
 
 Methods:
@@ -1827,20 +1861,20 @@ compute(self, values)
 A dataclass to hold saddle surface sample data
 
 ```text
-SampleData(projections: numpy.ndarray, distances: numpy.ndarray, weights: numpy.ndarray, indices: numpy.ndarray, normals: numpy.ndarray, occluded: numpy.ndarray, uvs: numpy.ndarray, geometry: numpy.ndarray) -> None
+SampleData(projections: typing.Annotated[numpy.ndarray, Array(float64 (N, D))], distances: typing.Annotated[numpy.ndarray, Array(float64 (N,))], weights: typing.Annotated[numpy.ndarray, Array(float64 (N, 4))], indices: typing.Annotated[numpy.ndarray, Array(int32 (N,))], normals: typing.Annotated[numpy.ndarray, Array(float64 (N, D))], occluded: typing.Annotated[numpy.ndarray, Array(bool (N,))], uvs: typing.Annotated[numpy.ndarray, Array(float64 (N, 2))], geometry: typing.Annotated[numpy.ndarray, Array(int32 (N, 4))]) -> None
 ```
 
 Fields:
 
 ```text
-projections: ndarray
-distances: ndarray
-weights: ndarray
-indices: ndarray
-normals: ndarray
-occluded: ndarray
-uvs: ndarray
-geometry: ndarray
+projections: Annotated
+distances: Annotated
+weights: Annotated
+indices: Annotated
+normals: Annotated
+occluded: Annotated
+uvs: Annotated
+geometry: Annotated
 ```
 
 Methods:
@@ -2442,7 +2476,7 @@ Fields:
 
 ```text
 kind: str = 'point'
-color: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+color: Array(np.float64, 3) = ImmutableArray([1., 1., 1.])
 intensity: float = 1.0
 falloff: bool = True
 ```
@@ -2473,13 +2507,13 @@ Properties:
 
 ```text
 ambient                            
-background                         Per-Object preview RGBA background in [0, 1].
-base_color                         
+background                         Per-Object preview RGBA background in [0, 1], float64 ``(4,)``.
+base_color                         Surface color in [0, 1] when there is no texture, float64 ``(3,)``.
 buffer                             Convenience accessor for ``self.frame.array`` -- the pixel
 cast_shadows                       
 frame                              Cached most-recent render output, or ``None`` when the cache
 mesh                               
-resolution                         Per-Object preview render resolution ``(width, height)``.
+resolution                         Per-Object preview render resolution ``(width, height)``, int32.
 sample_method                      
 samples_per_pixel                  Per-Object preview MSAA sample count.
 skin                               
@@ -2487,7 +2521,7 @@ texture
 twosided                           
 uv                                 
 wireframe                          
-wireframe_color                    
+wireframe_color                    Edge color in 0..255, int32 ``(3,)``.
 wireframe_thickness                
 world_points                       Mesh points transformed to world space via :attr:`world_matrix`.
 wrap                               
@@ -2504,8 +2538,6 @@ extract_texture_from_fbx(self, file_path: 'str', mesh_index: 'int' = 0, material
     Extract the diffuse (base color) texture from an FBX file and
 extract_texture_from_glb(self, file_path: 'str', material_index: 'int' = 0) -> 'bool'
     Extract the PBR base color (diffuse / albedo) texture from a
-classmethod from_dict(cls, data: 'dict') -> "'Object'"
-    Reconstruct an Object from :meth:`to_dict`'s output.
 get_loaded_texture(self) -> 'Optional[np.ndarray]'
     Returns the texture as a contiguous ``(H, W, 3) float32`` array,
 imshow(self) -> 'None'
@@ -2527,7 +2559,7 @@ render(self, output: 'Optional[str]' = None, resolution: 'Optional[Tuple[int, in
 restore_bind_pose(self) -> "'Object'"
     Put :attr:`mesh` back to the undeformed bind pose.
 to_dict(self) -> 'dict'
-    Serializable dict for :meth:`save` (npz / json / pkl).
+    The tree :meth:`Data.to_dict` builds, with a texture given as a
 to_image(self) -> "'Image'"
     Returns the rendered frame as a PIL Image.
 triangulate(self, ngons_only=False) -> 'None'
@@ -2547,12 +2579,13 @@ Scene(name: 'str' = 'scene', aspect_ratio: 'Optional[float]' = None, default_cam
 Properties:
 
 ```text
-background                         Optional RGBA background color in [0, 1] used by :meth:`render`.
+background                         Optional RGBA background color in [0, 1] used by :meth:`render`,
 buffer                             Convenience accessor for ``self.frame.array`` -- the pixel
 cameras                            
 frame                              Cached most-recent render output, or ``None`` when the cache
 lights                             
 objects                            
+resolution                         Render resolution ``(width, height)``, int32, or ``None`` to fall
 scene_name                         Returns the scene's own label (distinct from the inherited
 ```
 
@@ -2579,6 +2612,8 @@ classmethod load_obj(cls, filename: 'str', name: 'Optional[str]' = None) -> "'Sc
     Load every mesh in an OBJ file into a new :class:`Scene` as
 render(self, **kwargs)
     Convenience wrapper around the module-level ``render(scene=self, ...)``.
+strip_namespace(self, namespace: 'Optional[str]' = None) -> 'None'
+    ``strip_namespace()`` on every node, all or nothing, and on
 to_image(self, resolution: 'Tuple[int, int]' = (500, 500)) -> "'Image'"
     Returns the rendered frame as a PIL Image.
 turntable(self, output_pattern: 'str' = 'turntable.{frame:04d}.png', n_frames: 'int' = 120, rotation_axis: 'str' = 'y', start_angle: 'float' = 0.0, end_angle: 'float' = 360.0, fit: 'str' = 'auto', camera_name: 'Optional[str]' = None, fps: 'int' = 30, background: 'Optional[Tuple[float, float, float]]' = None, n_fit_samples: 'Optional[int]' = None, verbose: 'bool' = False, **render_kwargs) -> 'Union[str, List[str]]'
@@ -2587,6 +2622,12 @@ union_aabb(self, objects: 'Optional[List[Object]]' = None) -> 'Tuple[np.ndarray,
     Returns ``(min_corner, max_corner)`` of the world-space AABB
 union_points(self, objects: 'Optional[List[Object]]' = None) -> 'np.ndarray'
     Returns the concatenation of all visible Objects' world-space
+```
+
+Constants:
+
+```text
+DTYPES_KEY = '__dtypes__'
 ```
 
 ## `cgmath.render.frame`

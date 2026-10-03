@@ -3,7 +3,9 @@ import unittest
 import numpy as np
 from cgmath.geometry.deform.ffd import FFDData
 from cgmath.geometry.utils.main import (
+    _bernstein_eval_numpy,
     assign_cells,
+    bernstein_eval,
     get_cell_corners,
     inverse_trilinear,
     trilinear,
@@ -114,6 +116,26 @@ class TestCellAssignment(unittest.TestCase):
         cells, uvw = assign_cells(pts, lattice)
         self.assertEqual(cells.shape, (2, 3))
         self.assertEqual(uvw.shape, (2, 3))
+
+    def test_cells_are_int32(self):
+        # outside points take the cell-hopping path, which must keep int32 too
+        lattice = self._uniform_lattice(3)
+        pts     = np.random.default_rng(4).uniform(-0.3, 1.3, (50, 3))
+        cells, uvw = assign_cells(pts, lattice)
+        self.assertEqual(cells.dtype, np.int32)
+        self.assertEqual(uvw.dtype, np.float64)
+
+    def test_bernstein_eval_matches_the_numpy_fallback(self):
+        lattice = self._uniform_lattice(3)
+        pts     = np.random.default_rng(5).uniform(0.0, 1.0, (40, 3))
+        cells, uvw = assign_cells(pts, lattice)
+        delta     = np.random.default_rng(6).normal(size=lattice.shape)
+        divisions = np.array([3, 3, 3], dtype=np.int32)
+        influence = np.array([2, 3, 1], dtype=np.int32)
+
+        fast = bernstein_eval(cells, uvw, delta, influence, divisions)
+        slow = _bernstein_eval_numpy(cells, uvw, delta, influence, divisions)
+        np.testing.assert_allclose(fast, slow, atol=1e-12)
 
 
 class TestFFDDataConstruction(unittest.TestCase):
@@ -372,6 +394,68 @@ class TestFFDDegreeAndOutsideProperties(unittest.TestCase):
         ffd.outside = "freeze"
         self.assertAlmostEqual(ffd.weights[0], 1.0)
         self.assertAlmostEqual(ffd.weights[1], 0.0)
+
+
+class TestFFDLocalInfluence(unittest.TestCase):
+    """local_influence is a (3,) int32 array, set from an int or three ints."""
+
+    def _ffd(self) -> FFDData:
+        return FFDData.from_mesh(FFDData.create_lattice((4, 4, 4)), divisions=(4, 4, 4))
+
+    def test_the_default_is_trilinear(self):
+        value = self._ffd().local_influence
+        self.assertEqual(value.dtype, np.int32)
+        np.testing.assert_array_equal(value, [2, 2, 2])
+
+    def test_set_from_a_tuple_an_int_or_an_array(self):
+        ffd = self._ffd()
+        for value, expected in (
+            ((3, 4, 2), [3, 4, 2]),
+            (3, [3, 3, 3]),
+            (np.array([4, 2, 3]), [4, 2, 3]),
+        ):
+            ffd.local_influence = value
+            self.assertEqual(ffd.local_influence.dtype, np.int32)
+            np.testing.assert_array_equal(ffd.local_influence, expected)
+
+    def test_out_of_range_values_raise(self):
+        ffd = self._ffd()
+        for value in (1, (2, 2), (2, 1, 2)):
+            with self.assertRaises(ValueError):
+                ffd.local_influence = value
+
+    def test_it_cannot_be_edited_in_place(self):
+        # an in-place edit would skip the >= 2 check the setter makes
+        ffd = self._ffd()
+        with self.assertRaises(ValueError):
+            ffd.local_influence[0] = 1
+        np.testing.assert_array_equal(ffd.local_influence, [2, 2, 2])
+
+
+class TestFFDLoadedBind(unittest.TestCase):
+    """A loaded FFD carries its bind: it updates without the mesh."""
+
+    def _bound(self) -> FFDData:
+        lattice             = FFDData.create_lattice((4, 4, 4), bbox_min=[0, 0, 0], bbox_max=[1, 1, 1])
+        ffd                 = FFDData.from_mesh(lattice, divisions=(4, 4, 4))
+        ffd.outside         = "falloff"
+        ffd.local_influence = (3, 3, 3)
+        ffd.bind(np.array([[0.5, 0.5, 0.5], [-0.5, 0.5, 0.5], [0.2, 0.9, 0.1]]))
+        return ffd
+
+    def test_a_copy_has_the_weights_and_the_bind_points(self):
+        ffd      = self._bound()
+        restored = ffd.copy()
+        np.testing.assert_array_equal(restored.weights, ffd.weights)
+        np.testing.assert_array_equal(restored.points, ffd.points)
+        self.assertTrue(restored.valid)
+
+    def test_a_copy_updates_like_the_original(self):
+        ffd      = self._bound()
+        restored = ffd.copy()
+        deformed = ffd.lattice.copy()
+        deformed[:, :, :, 2] += 1.0
+        np.testing.assert_array_equal(restored.update(deformed), ffd.update(deformed))
 
 
 class TestFFDNonUniformLattice(unittest.TestCase):

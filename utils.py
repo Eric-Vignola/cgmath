@@ -86,7 +86,7 @@ class _ProgressResult(unittest.TextTestResult):
 
     ``startTest`` writes the counter and then defers to the stdlib for the
     description and `` ... ``, so the line format stays whatever this Python's
-    unittest produces. The hook has the same shape on 3.7 (Maya 2022) and 3.11
+    unittest produces. The hook has the same shape on 3.9 (Maya 2023) and 3.11
     (Maya 2025). ``**kwargs`` absorbs the ``durations=`` that 3.12+ passes.
     Only active when ``showAll`` is set, i.e. verbosity 2 -- dot mode is untouched.
     """
@@ -340,42 +340,51 @@ def _escape_json_string(s: str) -> str:
         mapped = _JSON_ESCAPE_MAP.get(c)
         if mapped is not None:
             parts.append(mapped)
-        elif ord(c) in _JSON_CONTROL_RANGE:
+        elif ord(c) in _JSON_CONTROL_RANGE or 0xD800 <= ord(c) <= 0xDFFF:
+            # a lone surrogate has no utf-8 form: json's escape carries it
             parts.append(f"\\u{ord(c):04x}")
         else:
             parts.append(c)
     return "".join(parts)
 
 
+_JSON_SCALARS = (int, float, str, bool, type(None), np.bool_, np.integer, np.floating, np.str_)
+
+
 def _is_flat_list(obj: Any) -> bool:
     """True if obj is a list/tuple of all JSON-compatible scalars."""
     if not isinstance(obj, (list, tuple)):
         return False
-    return all(isinstance(x, (int, float, str, bool, type(None))) for x in obj)
+    return all(isinstance(x, _JSON_SCALARS) for x in obj)
+
+
+def _uniform_shape(obj: Any) -> tuple[int, ...] | None:
+    """The shape of a rectangular nest of lists of scalars, or None."""
+    if not isinstance(obj, (list, tuple)):
+        return None
+    if not obj:
+        return (0,)
+    if _is_flat_list(obj):
+        return (len(obj),)
+    if all(isinstance(x, (list, tuple)) for x in obj):
+        # every row the same shape, depth included
+        shapes = {_uniform_shape(x) for x in obj}
+        if len(shapes) != 1 or None in shapes:
+            return None
+        return (len(obj),) + shapes.pop()
+    return None
 
 
 def _is_uniform_nd(obj: Any) -> bool:
     """Recursively check if a nested list has uniform shape (array-like)."""
-    if not isinstance(obj, (list, tuple)):
-        return False
-    if not obj:
-        return True
-    if _is_flat_list(obj):
-        return True
-    if all(isinstance(x, (list, tuple)) for x in obj):
-        lengths = {len(x) for x in obj}
-        if len(lengths) != 1:
-            return False
-        return all(_is_uniform_nd(x) for x in obj)
-    return False
+    return _uniform_shape(obj) is not None
 
 
 def _get_shape(obj: list | tuple) -> tuple[int, ...]:
     """Return the shape of a uniform nested list."""
     if not isinstance(obj, (list, tuple)) or not obj:
         return ()
-    inner = _get_shape(obj[0])
-    return (len(obj),) + inner
+    return _uniform_shape(obj) or ()
 
 
 def _max_depth(obj: Any) -> int:
@@ -390,14 +399,18 @@ def _max_depth(obj: Any) -> int:
 
 
 def _float_to_str(val: float) -> str:
-    """Convert a float to its JSON string representation."""
+    """Convert a float to its JSON string representation.
+
+    NaN and the infinities are written as the bare tokens Python's json reads
+    back as floats; a string or null would come back as another type.
+    """
     if val != val:  # nan
-        return "null"
+        return "NaN"
     if val == float("inf"):
-        return '"Infinity"'
+        return "Infinity"
     if val == float("-inf"):
-        return '"-Infinity"'
-    return repr(val)
+        return "-Infinity"
+    return repr(float(val))  # a np.float64's own repr is np.float64(0.5)
 
 
 def _decimal_align(str_items: list[str]) -> list[str]:
@@ -441,17 +454,20 @@ def _pad_column(items: list, str_items: list[str]) -> list[str]:
 
 def _scalar_to_str(x: Any) -> str:
     """Convert a scalar value to its JSON string representation."""
+    if isinstance(x, np.generic):
+        x = x.item()
     if x is None:
         return "null"
     if isinstance(x, bool):
         return "true" if x else "false"
     if isinstance(x, int):
-        return str(x)
+        return str(int(x))  # str() of an int Enum is its name, Mode.A
     if isinstance(x, float):
         return _float_to_str(x)
     if isinstance(x, str):
-        return f'"{_escape_json_string(x)}"'
-    return str(x)
+        return f'"{_escape_json_string(str.__str__(x))}"'
+    # str(x) would write a bare token json cannot read back
+    raise TypeError(f"cannot write a {type(x).__name__} to json")
 
 
 def _format_flat_list(
@@ -571,23 +587,27 @@ def _serialize(
 
     if obj is None:
         return "null"
-    if isinstance(obj, bool):
+    if isinstance(obj, (bool, np.bool_)):
         return "true" if obj else "false"
     if isinstance(obj, (int, np.integer)):
         return str(int(obj))
     if isinstance(obj, (float, np.floating)):
         return _float_to_str(float(obj))
-    if isinstance(obj, str):
-        return f'"{_escape_json_string(obj)}"'
+    if isinstance(obj, (str, np.str_)):
+        # the text itself: str() of a str Enum is its name, Mode.FAST
+        return f'"{_escape_json_string(str.__str__(obj))}"'
     if isinstance(obj, np.ndarray):
         obj = obj.tolist()
+        if not isinstance(obj, list):  # a 0-d array
+            return _serialize(obj, depth, indent, max_line_width, start_col)
 
     if isinstance(obj, dict):
         if not obj:
             return "{}"
         items = []
         for k, v in obj.items():
-            key_str = f'"{_escape_json_string(str(k))}": '
+            text    = str.__str__(k) if isinstance(k, str) else str(k)
+            key_str = f'"{_escape_json_string(text)}": '
             val_col = (depth + 1) * indent + len(key_str)
             val_str = _serialize(v, depth + 1, indent, max_line_width, val_col)
             items.append(f"{inner_pad}{key_str}{val_str}")
@@ -626,7 +646,8 @@ def _serialize(
             items.append(f"{inner_pad}{val_str}")
         return "[\n" + ",\n".join(items) + f"\n{pad}]"
 
-    return str(obj)
+    # str(obj) would write a bare token json cannot read back
+    raise TypeError(f"cannot write a {type(obj).__name__} to json")
 
 
 def pretty_json(

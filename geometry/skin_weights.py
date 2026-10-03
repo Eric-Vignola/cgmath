@@ -8,17 +8,24 @@ utilities to compare performance between original and optimized implementations.
 
 from __future__ import annotations
 
+import copy
 import fnmatch
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Tuple, Union
 
 import numpy as np
 from cgmath.formats._fbx_io import open_fbx
-from cgmath.geometry._base import Data, DataList
-from cgmath.geometry.utils import balance_center_weights, blur, inpaint, pxr
+from cgmath.geometry._base import Array, Data, DataList
+from cgmath.geometry.mesh import _pxr_module
+from cgmath.geometry.utils import (
+    balance_center_weights,
+    blur,
+    inpaint,
+    subdivide_catmull_clark,
+)
 from scipy.sparse import coo_matrix
 
 # autodesk fbx sdk
@@ -71,8 +78,8 @@ class CompactSkinData(Data):
     NAMESPACED_FIELDS = ("influences",)
 
     max_influences:    int
-    influence_indices: np.ndarray
-    weights:           np.ndarray
+    influence_indices: Array(np.int32, "N")    # flat (V * max_influences,)
+    weights:           Array(np.float64, "N")  # flat, parallel to influence_indices
     influences:        List[str]
 
     @property
@@ -104,32 +111,15 @@ class CompactSkinData(Data):
             influences = list(self.influences),
         )
 
-    def __reduce__(self):
-        """use a sparse matrix for smaller file size (pickle)"""
-        reconstructor = CompactSkinData._reconstruct
-        state = (
-            self.max_influences,
-            self.influence_indices,
-            self.weights,
-            [str(x) for x in self.influences],
-        )
-        return reconstructor, (state,)
-
     @staticmethod
     def _reconstruct(state):
-        """rebuilds a dense matrix from sparse data"""
-        max_inf, inf_ids, weights, influences = state
-        return CompactSkinData(
-            max_influences    = max_inf,
-            influence_indices = inf_ids,
-            weights           = weights,
-            influences        = influences,
-        )
+        """how an older cgmath pickled a compact skin, refused now"""
+        return Data._reconstruct(CompactSkinData, state)
 
     @classmethod
     def from_prim(cls, prim: Any) -> "CompactSkinData":
         """Constructs a data object from a prim."""
-        binding_api = pxr().UsdSkel.BindingAPI(prim)
+        binding_api = _pxr_module("UsdSkel").BindingAPI(prim)
         infs        = prim.GetAttribute(JOINT_NAMES_ATTR).Get()
         inf_ids     = binding_api.GetJointIndicesAttr().Get()
         weights     = binding_api.GetJointWeightsAttr().Get()
@@ -143,7 +133,7 @@ class CompactSkinData(Data):
             weights = _round_normalize(weights, 7)
 
         return cls(
-            influences        = infs,
+            influences        = [str(x) for x in infs],
             max_influences    = max_infs,
             influence_indices = np.array(inf_ids),
             weights           = weights.ravel(),
@@ -153,7 +143,7 @@ class CompactSkinData(Data):
         """Streams data into a prim."""
         if not prim.GetTypeName():
             prim.SetTypeName(SKIN_PRIM_TYPE)
-        binding_api = pxr().UsdSkel.BindingAPI(prim)
+        binding_api = _pxr_module("UsdSkel").BindingAPI(prim)
         binding_api.CreateJointIndicesAttr(self.influence_indices)
         binding_api.GetJointIndicesPrimvar().SetElementSize(self.max_influences)
         binding_api.GetJointIndicesPrimvar().SetInterpolation("vertex")
@@ -161,7 +151,7 @@ class CompactSkinData(Data):
         binding_api.GetJointWeightsPrimvar().SetElementSize(self.max_influences)
         binding_api.GetJointWeightsPrimvar().SetInterpolation("vertex")
 
-        Sdf = pxr().Sdf
+        Sdf = _pxr_module("Sdf")
         prim.CreateAttribute(
             JOINT_NAMES_ATTR,
             Sdf.ValueTypeNames.TokenArray,
@@ -180,11 +170,17 @@ class SkinData(Data):
     EQUALITY_TEST_IGNORE = ["name"]
     NAMESPACED_FIELDS    = ("name", "influences")
 
-    weights:    np.ndarray
+    weights:    Array(np.float64, "N", "J")  # J = len(influences)
     influences: List[str]
     name:       Optional[str] = None
 
-    _patterns = Patterns.DEFAULT
+    # the symmetry name patterns, under the patterns property
+    _patterns: dict = field(default_factory=lambda: copy.deepcopy(Patterns.DEFAULT))
+
+    def _post_load(self) -> None:
+        """json keeps no shape for empty weights: their columns are the influences"""
+        if self.weights.shape[0] == 0:
+            self.weights = np.zeros((0, len(self.influences)))
 
     @property
     def patterns(self) -> Patterns:
@@ -874,36 +870,67 @@ class SkinData(Data):
         keep_size:    bool = False,
     ) -> None:
         """uses the Catmull-Clark algorithm to subdivide the skin weights"""
-        proxy        = mesh_data.copy()
-        proxy.points = self.weights
-        proxy.subdivide(steps=steps, keep_borders=keep_borders, keep_edges=keep_edges)
+        # the weights are subdivided the way the mesh subdivides its points,
+        # and the mesh's copy walks the topology forward one step at a time
+        proxy   = mesh_data.copy()
+        weights = self.weights
+        for _ in range(steps):
+            weights, _, _ = subdivide_catmull_clark(
+                weights,
+                proxy.indices,
+                proxy.counts,
+                proxy.f2v,
+                proxy.f2e,
+                proxy.e2v,
+                proxy.e2f,
+                proxy.v2f,
+                proxy.v2e,
+                keep_borders = keep_borders,
+                keep_edges   = keep_edges,
+            )
+            proxy.subdivide(steps=1, keep_borders=keep_borders, keep_edges=keep_edges)
 
         if keep_size:
-            self.weights = proxy.points[: self.weights.shape[0]]
+            self.weights = weights[: self.weights.shape[0]]
         else:
-            self.weights = proxy.points
+            self.weights = weights
 
     # ------------------ serialization ------------------ #
 
-    def __reduce__(self):
-        """use a sparse matrix for smaller file size (pickle)"""
-        reconstructor = SkinData._reconstruct
-        sparse_matrix = coo_matrix(self.weights)
-        state = (
-            [str(x) for x in self.influences],
-            sparse_matrix.data,
-            sparse_matrix.row,
-            sparse_matrix.col,
-            sparse_matrix.shape,
-        )
-        return reconstructor, (state,)
+    @classmethod
+    def _pickle_tree(cls, tree: dict) -> dict:
+        """
+        A pickle holds the weights as their nonzero entries, for a smaller
+        file, wherever the skin sits (alone, in a SkinList, on an Object).
+        npz and json save them dense.
+        """
+        weights = tree.pop("weights", None)
+        if weights is not None:
+            sparse = coo_matrix(weights)
+            tree[_SPARSE_WEIGHTS] = {
+                "values": sparse.data,
+                "rows":   sparse.row.astype(np.int32),
+                "cols":   sparse.col.astype(np.int32),
+                "shape":  list(sparse.shape),
+            }
+        return tree
+
+    @classmethod
+    def _from_state(cls, data: dict) -> "SkinData":
+        sparse = data.pop(_SPARSE_WEIGHTS, None)
+        if sparse is not None:
+            data["weights"] = coo_matrix(
+                (sparse["values"], (sparse["rows"], sparse["cols"])), shape=tuple(sparse["shape"])
+            ).toarray()
+        return super()._from_state(data)
 
     @staticmethod
     def _reconstruct(state):
-        """rebuilds a dense matrix from sparse data"""
-        influences, data, row, col, shape = state
-        sparse_matrix = coo_matrix((data, (row, col)), shape=shape)
-        return SkinData(influences=influences, weights=sparse_matrix.toarray())
+        """how an older cgmath pickled a skin, refused now"""
+        return Data._reconstruct(SkinData, state)
+
+
+_SPARSE_WEIGHTS = "__sparse_weights__"
 
 
 # ---------------------- SkinList -------------------------------------------- #

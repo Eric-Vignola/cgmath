@@ -113,14 +113,15 @@ str(node)           # 'hero'
 | `segment_scale_compensate` | `False` | divide out the parent's scale |
 | `radius` | `1.0` | joint display radius |
 | `draw_style` | `0` | Maya `drawStyle` |
-| `user_defined_attributes` | `{}` | extra attributes carried through `save_fbx` |
+| `user_defined_attributes` | `{}` | extra attributes carried through `save_fbx`; each node gets its own dict |
 
 ---
 
 ## SRT channels
 
-Every vector channel is a read/write property returning a fresh `(3,)`
-array, plus three scalar per-axis accessors.
+Every vector channel is a read/write property returning a fresh float64
+`(3,)` array, plus three scalar per-axis accessors. A value that is not
+three long raises `ValueError`.
 
 ```python
 node.translate                    # array([0., 1., 0.])
@@ -439,7 +440,9 @@ strips its influences with its name, so strip the rig first, then the skins
 and meshes read from the same file.
 
 `cgmath.hierarchy.load` / `load_fbx` / `load_glb` read a file's hierarchy
-(names as in the file), like the other modules' loaders.
+(names as in the file), like the other modules' loaders. An fbx or glb
+gives a `HierarchyData`; a cgmath file gives the class it names, so a
+saved clip comes back a `ClipData`.
 
 ### User attributes
 
@@ -499,12 +502,16 @@ assert picked[0].index == 1                  # index is still the rig's
 ```
 
 `copy()` on a view returns an owning `HierarchyData`, with parent
-references that pointed outside the selection cleared.
+references that pointed outside the selection cleared. Saving, pickling
+or deep-copying a view gives the same `HierarchyData`.
 
 ```python
 detached = rig[1:].copy()
 assert isinstance(detached, HierarchyData)
 assert detached[0].get_parent() is None      # 'root' was left behind
+
+saved = TransformList.load(rig[1:].save(os.path.join(WORKDIR, "view.json")))
+assert type(saved) is HierarchyData and saved[0].get_parent() is None
 ```
 
 ---
@@ -671,7 +678,8 @@ built.clear()
 assert len(built) == 0
 ```
 
-Construct from an iterable, or from a dict keyed by uuid. Uuids must be
+Construct from an iterable, or with `from_dict` from a dict of node dicts
+keyed by uuid (what the fbx and glb readers build). Uuids must be
 real ones — `generate_uuid()` mints them, `validate_uuid()` checks them,
 and anything that fails that check is treated as a name instead.
 
@@ -1192,6 +1200,20 @@ loaded                = ClipData.load(path)
 assert loaded == clip and loaded.frame_count == 4 and loaded.fps == 30.0
 ```
 
+A file names its class, and `load` returns that class. It must be the
+class `load` is called on or derive from it; any other raises `TypeError`.
+A file saved by an older cgmath names no class: it raises
+`LegacyFileError` (a `ValueError`) and no longer loads.
+
+```python
+assert type(HierarchyData.load(path)) is ClipData   # the file says clip
+
+try:
+    ClipData.load(os.path.join(WORKDIR, "rig.json"))
+except TypeError as error:
+    print(error)                                # the data holds a HierarchyData, not a ClipData
+```
+
 The explicit pairs work too, on both the node and the list.
 
 ```python
@@ -1216,23 +1238,39 @@ rig.to_json()[:1]                               # '{'
 assert TransformData.from_dict(rig["hip"].to_dict()).name == "hip"
 ```
 
-A list's `to_dict` is keyed by uuid (so duplicate names are safe); a
-`ClipData` adds one extra key, `ClipData.CLIP_KEY` (`"__clip__"`),
-holding the timebase and the blocks.
+pkl, npz and json all save the one tree `to_dict` returns. A list's tree
+is `{"__class__": ..., "__items__": [...]}`, its nodes' trees in order (so
+duplicate names are safe). A node's tree holds its class and only the fields that
+differ from their default; a field left out loads back as the default.
 
 ```python
-sorted(clip.to_dict())[-1]                      # '__clip__'
-sorted(clip.to_dict()["__clip__"])
-# ['_joint_orient', '_rotate', '_rotate_axis', '_scale', '_translate',
-#  'fps', 'frame', 'start_frame']
+tree = rig.to_dict()
+tree["__class__"]                               # 'cgmath.hierarchy.hierarchy.HierarchyData'
+sorted(tree["__items__"][0])                    # root: everything else is default
+# ['__class__', 'name', 'node_type', 'uuid']
+sorted(tree["__items__"][1])
+# ['__class__', '_translate', 'name', 'node_type', 'parent_node', 'uuid']
+```
+
+A `ClipData` saves its `LIST_FIELDS` beside the items: `_start_frame`,
+`_fps`, `_frame` (the loaded frame, which a load scrubs back to) and
+`_blocks`, one `(F, N, 3)` array per framed channel.
+
+```python
+sorted(clip.to_dict())
+# ['__class__', '__items__', '_blocks', '_fps', '_frame', '_start_frame']
+clip.to_dict()["_blocks"]["_translate"].shape   # (4, 3, 3)
 ```
 
 `copy()` is deep and owning; `==` compares values, and on a clip it also
-compares the timebase and every block.
+compares the timebase, the loaded frame and every block.
 
 ```python
 twin = clip.copy()
 assert twin == clip
+twin.frame = 2
+assert twin != clip                             # another frame is loaded
+twin.frame = clip.frame
 twin.frames.rotate = np.full((4, 3, 3), 45.0)
 assert twin != clip
 ```

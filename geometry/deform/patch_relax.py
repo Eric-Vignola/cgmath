@@ -36,9 +36,10 @@ wrappers exposed via :mod:`cgmath.geometry.utils.main`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
-from cgmath.geometry._base import Data
+from cgmath.geometry._base import Array, Data
 
 
 # =========================== PatchRelaxData ============================== #
@@ -52,11 +53,13 @@ class PatchRelaxData(Data):
     patch layout.  Binds to a base :class:`MeshData` and is then applied
     to any deformed pose sharing its topology.
 
-    The bind step caches, from the baseline mesh:
+    The constructor reads what it needs from the baseline mesh: its points
+    and its winding-ordered 1-ring adjacency (the decal map needs neighbours
+    in angular order, which ``MeshData.get_edge_vertex_neighbors`` does not
+    provide).  Both are saved, so a loaded operator relaxes without the mesh.
 
-    * winding-ordered 1-ring adjacency (the decal map needs neighbours in
-      angular order, which ``MeshData.get_edge_vertex_neighbors`` does
-      not provide)
+    The bind step caches, from those:
+
     * the baseline decal maps -- each vertex's edge stencil flattened to
       geodesic polar coordinates
     * the span-aware edge weights derived from those decal maps
@@ -89,24 +92,25 @@ class PatchRelaxData(Data):
         result = relaxer.apply(deformed)
     """
 
-    rest_points:     np.ndarray = None
-    ring:            np.ndarray = None
-    valence:         np.ndarray = None
-    is_boundary:     np.ndarray = None
-    border_vertices: np.ndarray | None = None
-    mask:            np.ndarray | None = None
+    rest_points:     Optional[Array(np.float64, "N", 3)] = None
+    ring:            Optional[Array(np.int32, "N", "K")] = None
+    valence:         Optional[Array(np.int32, "N")] = None
+    is_boundary:     Optional[Array(np.bool_, "N")] = None
+    border_vertices: Optional[Array(np.int32, "B")] = None
+    mask:            Optional[Array(np.float64, "N")] = None
+
+    # --- settings, behind the properties that validate them --- #
+    _iterations:    int = 30
+    _alpha:         float = 1.0
+    _step_size:     float = 0.5
+    _surface_blend: float = 0.0
+    _pin_borders:   bool = True
 
     # --- cached --- #
-    _rest_mesh     = None
-    _rest_decals   = None  # (N, K, 2) baseline decal maps
-    _weights       = None  # (N, K) span-aware weights
-    _rest_vectors  = None  # (N, 3) weighted baseline offsets
-    _iterations    = None
-    _alpha         = None
-    _step_size     = None
-    _surface_blend = None
-    _pin_borders   = None
-    _points        = None
+    _rest_decals  = None  # (N, K, 2) baseline decal maps
+    _weights      = None  # (N, K) span-aware weights
+    _rest_vectors = None  # (N, 3) weighted baseline offsets
+    _points       = None
 
     # --------------------------- construction -------------------------------- #
 
@@ -149,6 +153,7 @@ class PatchRelaxData(Data):
         """
         # local import to avoid circular dependency with cgmath.geometry.mesh
         from cgmath.geometry.mesh import MeshData
+        from cgmath.geometry.utils import build_vertex_rings
 
         if not isinstance(base, MeshData):
             if not all(hasattr(base, x) for x in ("points", "indices", "counts")):
@@ -157,14 +162,16 @@ class PatchRelaxData(Data):
                     "topology to order each vertex's 1-ring"
                 )
 
-        self._rest_mesh = base
-        self.rest_points = np.ascontiguousarray(
-            np.asarray(base.points, dtype=np.float64)
+        self.rest_points = np.array(base.points, dtype=np.float64, order="C")
+
+        # the only part of the bind that needs the topology: done while it
+        # is here, so a saved operator binds without the mesh
+        self.ring, self.valence, self.is_boundary = build_vertex_rings(
+            base.indices, base.counts, self.rest_points.shape[0]
         )
 
         borders              = base.get_border_vertices(flatten=True)
-        borders              = np.asarray(borders, dtype=np.int64).ravel()
-        self.border_vertices = borders if borders.size else None
+        self.border_vertices = np.asarray(borders, dtype=np.int32).ravel()
 
         self.mask = None
         if mask is not None:
@@ -251,8 +258,7 @@ class PatchRelaxData(Data):
     def valid(self) -> bool:
         """True once :meth:`bind` has run."""
         return (
-            self.ring is not None
-            and self._rest_decals is not None
+            self._rest_decals is not None
             and self._weights is not None
             and self._rest_vectors is not None
         )
@@ -283,23 +289,14 @@ class PatchRelaxData(Data):
     # ---------------------------- bind / apply ------------------------------- #
 
     def bind(self) -> None:
-        """Cache the ring adjacency, baseline decal maps and span weights.
+        """Cache the baseline decal maps, span weights and offsets.
 
         Calling this is **optional** -- :meth:`apply` auto-binds on the
         first call.  Use it to pre-warm the cache before a tight
-        animation loop.
+        animation loop.  It reads only saved fields, so a loaded
+        operator binds without its mesh.
         """
-        from cgmath.geometry.utils import (
-            build_vertex_rings,
-            compute_decal_maps,
-            compute_span_weights,
-        )
-
-        self.ring, self.valence, self.is_boundary = build_vertex_rings(
-            self._rest_mesh.indices,
-            self._rest_mesh.counts,
-            self.rest_points.shape[0],
-        )
+        from cgmath.geometry.utils import compute_decal_maps, compute_span_weights
 
         # Sec.2 -- flatten the baseline stencils, Sec.3 -- weight them
         self._rest_decals = compute_decal_maps(

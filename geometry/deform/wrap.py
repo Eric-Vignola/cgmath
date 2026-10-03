@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
-from cgmath.geometry._base import Data
+from cgmath.geometry._base import Array, Data
 from cgmath.geometry.mesh import MeshData
 from cgmath.geometry.utils.main import (
     compute_neighbor_distances,
@@ -48,28 +49,43 @@ def cdist_euclidean(X, Y):
 
 @dataclass(repr=False, eq=False)
 class WrapData(Data):
-    geodesic_radius: float | None  # max geodesic distance for vertex connectivity
-    radius:          float | None  # kernel support radius for compact kernels
+    """
+    RBF wrap: control points move from ``src_points`` to ``dst_points``, and
+    :meth:`deform` carries any other points along.
 
-    src_points: np.ndarray  # source control points (Nx3)
-    dst_points: np.ndarray  # destination control points (Nx3)
+    A save keeps the source, the target, the mesh connectivity and the
+    pseudo-inverse of the interpolation system -- the one O(N^3) result --
+    so a loaded wrap only re-solves the right-hand side before it deforms.
+    """
 
-    conn_matrix:    np.ndarray  # face-vertex neighbor connectivity (from MeshData)
-    conn_distances: np.ndarray  # edge lengths for conn_matrix neighbors
+    # max geodesic distance for vertex connectivity, and the kernel support
+    # radius for compact kernels
+    geodesic_radius: Optional[float] = None
+    radius:          Optional[float] = None
 
-    # --- cached attributes --- #
-    _system_matrix:   np.ndarray   # augmented [K, 1, P] interpolation matrix
-    _distance_matrix: np.ndarray   # pairwise Euclidean distances between source points
-    _weights:         np.ndarray   # solved RBF weight matrix (system_pinv @ target_matrix)
+    # source and destination control points
+    src_points: Optional[Array(np.float64, "N", 3)] = None
+    dst_points: Optional[Array(np.float64, "N", 3)] = None
 
-    _system_pinv:     np.ndarray   # pseudo-inverse of system_matrix
-    _target_matrix:   np.ndarray   # augmented target-point RHS column
-    _dirty:           bool = True  # True when the system matrix needs recomputation
+    # face-vertex neighbor connectivity (from MeshData), and its edge lengths
+    conn_matrix:    Optional[Array(np.int32, "N", "K")] = None
+    conn_distances: Optional[Array(np.float64, "N", "K")] = None
+
+    # pseudo-inverse of the augmented (N + 4, N + 4) interpolation matrix
+    _system_pinv: Optional[Array(np.float64, "M", "M")] = None
+    _dirty:       bool = True  # True when the system matrix needs recomputation
+
+    # --- cached attributes, never saved --- #
+    _system_matrix   = None  # augmented [K, 1, P] interpolation matrix
+    _distance_matrix = None  # pairwise distances between source points
+    _weights         = None  # solved RBF weights (system_pinv @ target_matrix)
+    _target_matrix   = None  # augmented target-point RHS column
 
     # Deliberately unannotated, so it stays out of ``fields()`` and therefore
     # out of ``to_dict()`` and everything built on it. ``_dirty`` is a declared
     # field, so its name and meaning are part of the serialized schema and
-    # cannot be repurposed.
+    # cannot be repurposed. A load leaves it True: the right-hand side is
+    # re-solved against the saved pseudo-inverse.
     _target_dirty = True  # True when only the right-hand side needs re-solving
 
     name:        str = "wrap_data1"         # identifier for this wrap instance
@@ -78,14 +94,15 @@ class WrapData(Data):
     def __init__(self, kernel: str = "thin_plate_spline", name: str = "wrap_data1"):
         """Initialize the wrap data using a target mesh"""
 
-        self.name            = name
-        self.kernel_name     = kernel
-        self._system_matrix  = None
-        self._target_matrix  = None
+        self.name             = name
+        self.kernel_name      = kernel
+        self._system_matrix   = None
+        self._target_matrix   = None
 
-        self._system_pinv    = None
-        self.geodesic_radius = None
-        self.radius          = None
+        self._system_pinv     = None
+        self._distance_matrix = None
+        self.geodesic_radius  = None
+        self.radius           = None
 
         self.src_points = None
         self.dst_points = None
@@ -95,6 +112,11 @@ class WrapData(Data):
         self._target_dirty  = True
         self.conn_matrix    = None
         self.conn_distances = None
+
+    def _post_load(self) -> None:
+        """a wrap saved without its pseudo-inverse rebuilds it on deform"""
+        if self._system_pinv is None:
+            self._dirty = True
 
     def _effective_radius(self) -> float | None:
         """Resolve the kernel support radius.
@@ -289,7 +311,7 @@ class WrapData(Data):
 
     def deform(self, target: np.ndarray) -> np.ndarray:
         """deform the source points to the target points"""
-        if self._dirty or self._target_dirty:
+        if self._dirty or self._target_dirty or self._weights is None:
             self._rebuild()
 
         self._warn_configuration()

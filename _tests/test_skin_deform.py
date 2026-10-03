@@ -1,7 +1,9 @@
+import gc
 import os
 import pickle
 import tempfile
 import unittest
+import weakref
 
 import numpy as np
 from cgmath.geometry.deform import DeformMethod, SkinDeformData
@@ -842,6 +844,24 @@ class TestPersistence(unittest.TestCase):
             path = os.path.join(tmpdir, "skin_deform.json")
             d.save_json(path)
             self.assertEqual(SkinDeformData.load_json(path).method, "dqs")
+
+    def test_the_deformer_does_not_keep_the_bind_mesh(self):
+        # only the mesh's points are used; the mesh itself was held, unread
+        mesh = grid_mesh()
+        d    = deformer(mesh, two_joint_skin(len(mesh.points), split=0.5))
+        ref  = weakref.ref(mesh)
+
+        del mesh
+        gc.collect()
+        self.assertIsNone(ref())
+        self.assertTrue(np.allclose(d.apply(np.stack([np.eye(4)] * 2)), grid_mesh().points))
+
+    def test_editing_the_mesh_later_does_not_move_the_bind_pose(self):
+        mesh = grid_mesh()
+        d    = deformer(mesh, two_joint_skin(len(mesh.points), split=0.5))
+
+        mesh.points[:] += 5.0
+        self.assertTrue(np.allclose(d.rest_points, grid_mesh().points))
 
     def test_a_restored_dqs_deformer_still_deforms(self):
         mesh = grid_mesh()

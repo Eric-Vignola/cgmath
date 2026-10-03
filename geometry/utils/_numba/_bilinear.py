@@ -195,6 +195,9 @@ def _closest_point_on_face_newton(p0, p1, p2, p3, query, u0, v0, eps, max_its):
 
     Minimizes f(u,v) = ||S(u,v) - query||^2
     where S(u,v) = C*u*v + D*u + E*v + F
+
+    Returns (u, v, dist_sq, flat): flat when parallel tangents (a face with
+    no area there) stopped it, so (u, v) is no closest point.
     """
     ndim = p0.shape[0]
     u    = u0
@@ -211,8 +214,9 @@ def _closest_point_on_face_newton(p0, p1, p2, p3, query, u0, v0, eps, max_its):
         E[i] = p3[i] - p0[i]
         F[i] = p0[i]
 
-    eps_sq = eps * eps
-
+    # both tests are in face terms, so they hold the same on a face of any size:
+    # the step is in (u, v), and det is against the tangents' own lengths
+    flat = False
     for _ in range(max_its):
         grad_u = 0.0
         grad_v = 0.0
@@ -232,19 +236,22 @@ def _closest_point_on_face_newton(p0, p1, p2, p3, query, u0, v0, eps, max_its):
             H01    += 2.0 * du_i * dv_i
             H11    += 2.0 * dv_i * dv_i
 
-        if grad_u * grad_u + grad_v * grad_v < eps_sq:
-            break
-
         det = H00 * H11 - H01 * H01
-        if abs(det) < 1e-12:
+        if abs(det) <= 1e-12 * H00 * H11:
+            flat = True  # the tangents are parallel: no step to take
             break
 
         inv_det = 1.0 / det
         delta_u = (H11 * grad_u - H01 * grad_v) * inv_det
         delta_v = (H00 * grad_v - H01 * grad_u) * inv_det
 
-        u = _clamp(u - delta_u, 0.0, 1.0)
-        v = _clamp(v - delta_v, 0.0, 1.0)
+        new_u   = _clamp(u - delta_u, 0.0, 1.0)
+        new_v   = _clamp(v - delta_v, 0.0, 1.0)
+        step    = max(abs(new_u - u), abs(new_v - v))
+        u       = new_u
+        v       = new_v
+        if step < eps:
+            break
 
     dist_sq = 0.0
     for i in range(ndim):
@@ -252,7 +259,7 @@ def _closest_point_on_face_newton(p0, p1, p2, p3, query, u0, v0, eps, max_its):
         diff = si - query[i]
         dist_sq += diff * diff
 
-    return u, v, dist_sq
+    return u, v, dist_sq, flat
 
 
 @njit(fastmath=True, cache=True)
@@ -297,14 +304,16 @@ def _closest_point_on_face(p0, p1, p2, p3, query, eps=1e-6, max_its=20):
     """
     Combined Newton + edge fallback for closest point on bilinear face.
     Runs Newton from (0.5, 0.5). If the result lands on the domain
-    boundary, also checks all 4 edge projections for a better solution.
+    boundary, or the face has no area there, also checks all 4 edge
+    projections for a better solution.
     Returns (u, v, dist_sq).
     """
-    u, v, dist_sq = _closest_point_on_face_newton(
+    u, v, dist_sq, flat = _closest_point_on_face_newton(
         p0, p1, p2, p3, query, 0.5, 0.5, eps, max_its
     )
 
-    if 0.0 < u < 1.0 and 0.0 < v < 1.0:
+    # a face with no area (its corners on a line) has its closest point on an edge
+    if not flat and 0.0 < u < 1.0 and 0.0 < v < 1.0:
         return u, v, dist_sq
 
     best_u   = u
@@ -768,12 +777,13 @@ def _eval_bezier_surface(cp, u, v):
 def _closest_point_on_bezier_face_newton(cp, query, u0, v0, eps=1e-6, max_its=20):
     """
     Gauss-Newton iteration for closest point on bicubic Bezier patch.
-    Returns (u, v, dist_sq).
+    Returns (u, v, dist_sq, flat), as _closest_point_on_face_newton.
     """
-    u      = u0
-    v      = v0
-    eps_sq = eps * eps
+    u = u0
+    v = v0
 
+    # both tests are in face terms, as in _closest_point_on_face_newton
+    flat = False
     for _ in range(max_its):
         sx, sy, sz, dux, duy, duz, dvx, dvy, dvz = _eval_bezier_surface(cp, u, v)
 
@@ -784,27 +794,30 @@ def _closest_point_on_bezier_face_newton(cp, query, u0, v0, eps=1e-6, max_its=20
         grad_u = 2.0 * (diffx * dux + diffy * duy + diffz * duz)
         grad_v = 2.0 * (diffx * dvx + diffy * dvy + diffz * dvz)
 
-        if grad_u * grad_u + grad_v * grad_v < eps_sq:
-            break
-
         H00 = 2.0 * (dux * dux + duy * duy + duz * duz)
         H01 = 2.0 * (dux * dvx + duy * dvy + duz * dvz)
         H11 = 2.0 * (dvx * dvx + dvy * dvy + dvz * dvz)
 
         det = H00 * H11 - H01 * H01
-        if abs(det) < 1e-12:
+        if abs(det) <= 1e-12 * H00 * H11:
+            flat = True  # the tangents are parallel: no step to take
             break
 
         inv_det = 1.0 / det
         delta_u = (H11 * grad_u - H01 * grad_v) * inv_det
         delta_v = (H00 * grad_v - H01 * grad_u) * inv_det
 
-        u = _clamp(u - delta_u, 0.0, 1.0)
-        v = _clamp(v - delta_v, 0.0, 1.0)
+        new_u   = _clamp(u - delta_u, 0.0, 1.0)
+        new_v   = _clamp(v - delta_v, 0.0, 1.0)
+        step    = max(abs(new_u - u), abs(new_v - v))
+        u       = new_u
+        v       = new_v
+        if step < eps:
+            break
 
     sx, sy, sz, _, _, _, _, _, _ = _eval_bezier_surface(cp, u, v)
     dist_sq = (sx - query[0]) ** 2 + (sy - query[1]) ** 2 + (sz - query[2]) ** 2
-    return u, v, dist_sq
+    return u, v, dist_sq, flat
 
 
 @njit(fastmath=True, cache=True)
@@ -929,9 +942,9 @@ def _closest_point_on_bezier_face(cp, query):
     Newton from center, with boundary curve fallback.
     Returns (u, v, dist_sq).
     """
-    u, v, dist_sq = _closest_point_on_bezier_face_newton(cp, query, 0.5, 0.5)
+    u, v, dist_sq, flat = _closest_point_on_bezier_face_newton(cp, query, 0.5, 0.5)
 
-    if 0.0 < u < 1.0 and 0.0 < v < 1.0:
+    if not flat and 0.0 < u < 1.0 and 0.0 < v < 1.0:
         return u, v, dist_sq
 
     best_u   = u

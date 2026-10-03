@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 
 import numpy as np
-from cgmath.geometry._base import Data
+from cgmath.geometry._base import Array, Data
 from cgmath.geometry.bspline import SampleData
 from cgmath.geometry.utils import compute_basis
 from cgmath.geometry.utils._numba._bspline import (
@@ -38,6 +38,10 @@ class PatchSampleData(SampleData):
     basis : np.ndarray, (m, nu*nv)
         Flattened tensor-product basis values.
     """
+
+    # a surface has two of each: the curve's fields, redeclared in place
+    tangents: Array(np.float64, "N", 2, "D")
+    params:   Array(np.float64, "N", 2)
 
     @property
     def normals(self):
@@ -76,9 +80,9 @@ class PatchRaycastData(Data):
 
     Fields
     ------
-    points : np.ndarray, (n, dims)
+    points : np.ndarray, (n, 3)
         Intersection points (origins for misses).
-    tangents : np.ndarray, (n, 2, dims)
+    tangents : np.ndarray, (n, 2, 3)
         ``tangents[:, 0]`` = dS/du, ``tangents[:, 1]`` = dS/dv at hits.
     distances : np.ndarray, (n,)
         Ray ``t`` values at hits, NaN for misses.
@@ -92,13 +96,13 @@ class PatchRaycastData(Data):
         Boolean mask -- True where the ray intersected the surface.
     """
 
-    points:    np.ndarray
-    tangents:  np.ndarray
-    distances: np.ndarray
-    params:    np.ndarray
-    basis:     np.ndarray
-    occluded:  np.ndarray
-    hit:       np.ndarray
+    points:    Array(np.float64, "N", 3)
+    tangents:  Array(np.float64, "N", 2, 3)
+    distances: Array(np.float64, "N")
+    params:    Array(np.float64, "N", 2)
+    basis:     Array(np.float64, "N", "C")
+    occluded:  Array(np.bool_, "N")
+    hit:       Array(np.bool_, "N")
 
     @property
     def normals(self):
@@ -138,7 +142,8 @@ class BSplinePatchData(Data):
     Parameters
     ----------
     points : np.ndarray
-        Control point grid (nu, nv, dims).
+        Control point grid (nu, nv, dims), float64; dims is free (3 in
+        practice, and raycast() needs 3).
     degree_u, degree_v : int
         Degree per direction.
     periodic_u, periodic_v : bool
@@ -153,7 +158,7 @@ class BSplinePatchData(Data):
         Samples for arc-length lookup tables.
     """
 
-    points:             np.ndarray
+    points:             Array(np.float64, "Nu", "Nv", "D")
     degree_u:           int
     degree_v:           int
     periodic_u:         bool

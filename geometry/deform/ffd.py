@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
-from cgmath.geometry._base import Data
+from cgmath.geometry._base import Array, Data, ImmutableArray
 from cgmath.geometry.utils.main import (
     assign_cells,
     bernstein_eval,
@@ -59,21 +60,29 @@ class FFDData(Data):
         ffd.update(deformed_lattice)
 
         mesh.points = ffd.points
+
+    The bind is saved with the lattice and the settings: a loaded FFD
+    deforms without the mesh it was bound to, but :meth:`update` then
+    returns points rather than a copy of that mesh.
     """
 
-    lattice:   np.ndarray = None
-    divisions: np.ndarray = None
+    lattice:   Optional[Array(np.float64, "I", "J", "K", 3)] = None
+    divisions: Optional[Array(np.int32, 3)] = None
+
+    # --- settings, behind the properties that validate them --- #
+    _outside:         str = "extrapolate"
+    _falloff_radius:  float = 2.0
+    _local_influence: Array(np.int32, 3) = ImmutableArray(np.full(3, 2, dtype=np.int32))
+
+    # --- bind: the positions and the Newton solve, saved --- #
+    _source: Optional[Array(np.float64, "N", 3)] = None
+    _cells:  Optional[Array(np.int32, "N", 3)] = None
+    _uvw:    Optional[Array(np.float64, "N", 3)] = None
 
     # --- cached --- #
-    _source          = None
-    _source_mesh     = None
-    _cells           = None
-    _uvw             = None
-    _weights         = None
-    _points          = None
-    _outside         = None
-    _falloff_radius  = None
-    _local_influence = None
+    _source_mesh = None
+    _weights     = None  # (N,) from _source and the outside settings
+    _points      = None
 
     # --------------------------- construction -------------------------------- #
 
@@ -100,13 +109,13 @@ class FFDData(Data):
 
         if pts.ndim == 4:
             self.lattice   = pts
-            self.divisions = np.array(pts.shape[:3], dtype=int)
+            self.divisions = np.array(pts.shape[:3], dtype=np.int32)
         elif divisions is not None:
-            d        = np.asarray(divisions, dtype=int)
+            d        = np.asarray(divisions, dtype=np.int32)
             expected = int(np.prod(d))
             if pts.shape[0] != expected:
                 raise ValueError(
-                    f"Expected {expected} points for divisions {tuple(d)}, "
+                    f"Expected {expected} points for divisions {tuple(d.tolist())}, "
                     f"got {pts.shape[0]}"
                 )
             self.lattice   = pts.reshape(*d, 3)
@@ -116,7 +125,13 @@ class FFDData(Data):
 
         self._outside         = "extrapolate"
         self._falloff_radius  = 2.0
-        self._local_influence = (2, 2, 2)
+        self._local_influence = np.full(3, 2, dtype=np.int32)
+
+    def _post_load(self) -> None:
+        """a loaded bind is ready to update, as it is right after bind()"""
+        self._recompute_weights()
+        if self._source is not None:
+            self._points = self._source.copy()
 
     # ----------------------- convenience constructors ------------------------ #
 
@@ -198,7 +213,7 @@ class FFDData(Data):
         self._recompute_weights()
 
     @property
-    def local_influence(self) -> tuple[int, int, int]:
+    def local_influence(self) -> np.ndarray:
         """Per-axis Bernstein influence width in control points.
 
         Uses the Maya convention: ``(2, 2, 2)`` is the minimum (no
@@ -206,18 +221,23 @@ class FFDData(Data):
         a wider Bernstein polynomial window, spreading each control
         point's influence over more of the lattice.  Matches Maya's
         ``localInfluenceS/T/U`` attributes.
+
+        Reads back as a read-only ``(3,)`` int32 array; assign an int or
+        three ints to change it.
         """
-        return self._local_influence
+        view                 = self._local_influence.view()
+        view.flags.writeable = False
+        return view
 
     @local_influence.setter
     def local_influence(self, value: tuple[int, int, int] | int):
-        if isinstance(value, (int, float)):
-            value = (int(value), int(value), int(value))
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            value = [int(value)] * 3
         else:
-            value = tuple(int(v) for v in value)
+            value = [int(v) for v in np.ravel(value)]
         if len(value) != 3 or any(v < 2 for v in value):
             raise ValueError("local_influence must be 3 ints >= 2")
-        self._local_influence = value
+        self._local_influence = np.array(value, dtype=np.int32)
 
     @property
     def falloff_radius(self) -> float:
@@ -330,11 +350,13 @@ class FFDData(Data):
         """
         if self._cells is None or self._uvw is None:
             raise RuntimeError("call bind() before update()")
+        if self._weights is None:
+            self._recompute_weights()
 
         delta = np.ascontiguousarray(deformed_lattice - self.lattice)
 
         # Convert Maya-convention local_influence (CPs) to internal cells
-        li_cells  = tuple(v - 1 for v in self._local_influence)
+        li_cells  = self._local_influence - 1
         div_cells = self.divisions - 1
 
         displacement = bernstein_eval(

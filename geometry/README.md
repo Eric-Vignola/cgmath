@@ -66,7 +66,8 @@ A CSG stack in, a quad `MeshData` out.
 `CompactSkinData` all derive from `Data`, a `@dataclass` with managed
 serialization. The declared fields *are* the object: `to_dict`, `from_dict`,
 `to_json`, `to_bytes`, `save`, `load`, `copy`, `__eq__` and `__reduce__`
-(pickle) read exactly those fields and nothing else.
+(pickle) read exactly those fields, less any `TRANSIENT_FIELDS`, and nothing
+else.
 
 - **Caches are never persisted.** A `MeshData` memoises a dozen topology
   matrices on private `_`-prefixed attributes. They are excluded from every
@@ -90,6 +91,133 @@ serialization. The declared fields *are* the object: `to_dict`, `from_dict`,
 by index array, by boolean mask and by slice, filters with `match()` (fnmatch),
 sorts by `name`, type-checks `append` against `DATA_LIST_CLASS`, and carries the
 same save/load surface.
+
+### Saving and loading
+
+`pkl`, `npz` and `json` hold one tree, the dict `to_dict()` returns:
+`"__class__"` (module and class, `"cgmath.geometry.mesh.MeshData"`), then every
+field that differs from its default. A field exactly equal to its default is
+left out and loads back as a fresh copy of the default. A `DataList` saves
+`"__class__"`, `"__items__"` (one tree per item) and its `LIST_FIELDS`.
+`copy()` is the same round trip, in memory.
+
+- **A file loads as the class it names.** `MeshData.load()` on a saved `UVData`
+  gives a `UVData`. The named class must be the one called or derive from it;
+  any other raises `TypeError`.
+- **Older files are refused.** A file written by an older cgmath has no
+  `"__class__"` and raises `LegacyFileError`, a `ValueError`.
+- **npz holds no pickles.** One `.npy` member per array or value, read with
+  `allow_pickle=False`. A 1M-point mesh loads in about 0.2 s.
+- **json is utf-8 and plain lists.** NaN and the infinities are written as the
+  bare `NaN` / `Infinity` tokens Python's `json` reads back. The field
+  declarations restore the dtypes; a small `"__dtypes__"` / `"__shapes__"` note
+  covers what a list cannot say (an `Object` texture's own dtype, the shape of
+  an empty array).
+- **A pickle carries the same tree**, its arrays as their dtype, shape and raw
+  bytes, so it holds no numpy objects: a pickle written under numpy 2 reads
+  under Maya's numpy 1.24. `SkinData` pickles its weights as their nonzero
+  entries, alone or inside a list or an `Object`; npz and json keep them dense.
+- **Any dict key comes back.** An int or tuple key, or text a zip member name
+  cannot hold, is saved as a list of keys beside a list of values. Text with a
+  NUL, an int past 64 bits and bytes come back too.
+- **A failed save leaves the file as it was.** The whole file is written to
+  scratch first, then over the target in place, so a reader holding it open,
+  a link or a read-only file behave as with any plain write.
+- **Copies.** `copy()` is the save and load round trip, in memory. `copy.copy`
+  is shallow: the same field values, caches and links rebuilt; a list's is a
+  new list over the same items, but a hierarchy, which owns its nodes, gets
+  `copy()`'s own. `copy.deepcopy` copies every field and keeps what the
+  copied structure shares shared. A reloaded module's class still loads and
+  copies its own files.
+- **An `Enum` member is saved as its value**, in every format. A field that
+  declares the `Enum`, alone or in a `List` / `Tuple`, gives the member back.
+- **json keeps no type a field does not declare.** A tuple or a numpy array in
+  a field typed `dict` or `Any` reads back as a list; declared fields restore
+  theirs (`Tuple[int, int]`, `List[np.ndarray]`, `Array(...)`).
+
+Array fields are declared with `Array(dtype, *shape)`, where an int fixes a
+dimension and a name such as `"N"` leaves it free. A value is converted to the
+dtype whenever it is set or loaded, with no copy when it already matches. A
+fixed dimension that does not match raises `ValueError`, and an empty value
+takes the declared trailing size.
+
+| Arrays | dtype |
+|---|---|
+| indices, counts, face and vertex ids | `int32` |
+| points, normals, offsets, weights, values | `float64` |
+| masks (`hit`, `occluded`) | `bool` |
+
+`MeshData.points` is `(N, 3)`, `UVData.points` is `(N, 2)`.
+
+Your own type follows the same rules. Subclass `Data` under
+`@dataclass(repr=False, eq=False)`, which keeps its value equality and `repr`,
+and declare arrays with `Array` (from `cgmath.geometry._base`). A field named in
+`TRANSIENT_FIELDS` is never saved and `==` skips it: use it for caches and
+links, and rebuild them in `_post_load()`, which runs once a load or `copy()`
+has set every field. A `DataList` subclass names what it saves beside its items
+in `LIST_FIELDS`. Only cgmath modules are imported on demand, so a class of
+your own must be imported before a file that names it is loaded.
+
+```python
+import os
+import tempfile
+from dataclasses import dataclass
+from typing import Optional
+
+import numpy as np
+
+from cgmath.geometry import Data, DataList
+from cgmath.geometry._base import Array
+
+
+@dataclass(repr=False, eq=False)
+class PinData(Data):
+    """Vertices pinned to target positions."""
+
+    TRANSIENT_FIELDS = ("lookup",)
+
+    name: str
+    indices: Array(np.int32, "N")
+    targets: Array(np.float64, "N", 3)
+    weight: float = 1.0
+    lookup: Optional[dict] = None  # vertex id -> row: a cache, never saved
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self._post_load()
+
+    def _post_load(self) -> None:
+        self.lookup = {int(i): row for row, i in enumerate(self.indices)}
+
+
+class PinList(DataList):
+    DATA_LIST_CLASS = PinData
+    LIST_FIELDS = ("label",)
+
+    def __init__(self, iterable=None, label=""):
+        super().__init__(iterable)
+        self.label = label
+
+
+pins = PinData(name="lips", indices=[4, 9], targets=[[0, 1, 0], [0, 1, 0.5]])
+print(pins.indices.dtype, pins.targets.dtype)  # int32 float64
+
+# weight is at its default and lookup is transient: neither is saved
+print(sorted(pins.to_dict()))  # ['__class__', 'indices', 'name', 'targets']
+
+tmp = tempfile.mkdtemp()
+path = PinList([pins], label="mouth").save(os.path.join(tmp, "pins.json"))
+back = PinList.load(path)
+print(back.label, type(back[0]).__name__, back[0].lookup)  # mouth PinData {4: 0, 9: 1}
+
+try:
+    pins.targets = np.zeros((2, 2))
+except ValueError as err:
+    print(err)  # PinData.targets must have shape (N, 3), got (2, 2)
+
+pins.targets = []
+print(pins.targets.shape)  # (0, 3)
+```
 
 ### A mesh is a face-vertex stream
 
@@ -213,11 +341,12 @@ through the same weights.
 
 ### Control points are held by reference
 
-`BSplineData(points=arr)` stores `arr` itself; it does not copy. Two splines
-built from one array alias each other, and mutating the array behind a built
-spline leaves stale knot vectors, scipy splines and arc-length tables. After an
-in-place edit call `invalidate()` (rebuild lazily), `rebuild()` (rebuild now) or
-`rebuild_arc_length_table()`.
+`BSplineData(points=arr)` stores `arr` itself when it is already a `float64`
+array; it does not copy. Any other input is converted to a new `float64`
+array. Two splines built from one array alias each other, and mutating the
+array behind a built spline leaves stale knot vectors, scipy splines and
+arc-length tables. After an in-place edit call `invalidate()` (rebuild lazily),
+`rebuild()` (rebuild now) or `rebuild_arc_length_table()`.
 
 ### An SDF is a grid of floats
 
@@ -301,7 +430,7 @@ or `name=`, except `MeshData.load_obj`, which merges every group into one mesh.
 | `UVData.load_glb` / `load_fbx` | one `UVData` |
 | `skin_weights.load` / `load_fbx` / `load_glb`, `SkinList.load_*` | a `SkinList`, each skin named after its mesh |
 | `SkinData.load_fbx` / `load_glb` | one `SkinData` |
-| `cgmath.hierarchy.load` / `load_fbx` / `load_glb` | a `HierarchyData` |
+| `cgmath.hierarchy.load` / `load_fbx` / `load_glb` | a `HierarchyData` from fbx and glb; a cgmath file loads as the class it names (a `ClipData` stays a clip) |
 | `from_prim` / `to_prim` on `MeshData`, `UVData`, `MapData`, `GeomSubsetData`, `MorphData`, `CompactSkinData` | USD |
 
 OBJ is pure python and always available. There is **no** `MeshData.load_usd`.

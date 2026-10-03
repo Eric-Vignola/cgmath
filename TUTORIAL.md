@@ -93,8 +93,9 @@ hero.imshow()
 ```
 
 If you already have geometry on disk, the loaders return an `Object`
-directly. OBJ is pure python; GLB needs `pygltflib`, FBX needs the
-Autodesk SDK.
+directly. OBJ is pure python: a `v` line keeps its x y z and a `vt` line
+its u v, dropping any trailing `w` or vertex colour. GLB needs
+`pygltflib`, FBX needs the Autodesk SDK.
 
 <!-- notest: no .obj / .glb / .fbx asset ships with this package -->
 ```python
@@ -622,6 +623,17 @@ base.radius = 1.3
 fin.rotate  = [45, 0, 0]
 print(before, field.mesh_data.point_count)
 field.to_obj(os.path.join(WORK, "field.obj"))
+```
+
+A primitive's settings are saved fields like its SRT, so `copy()`,
+pickling and `save()` keep them. A copy starts outside any field: editing
+it leaves `field` alone. `radius` and `height` are stored as floats, and
+`SDFCylinder.axis` takes 0, 1 or 2 (X, Y, Z).
+
+```python
+spare = hole.copy()  # radius, height, axis and SRT come along
+spare.radius = 0.6  # the copy is in no field
+print(hole.radius, spare.radius, spare.height, spare.axis)  # 0.3 0.6 3.0 1
 ```
 
 ---

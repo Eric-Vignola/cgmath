@@ -568,6 +568,19 @@ out = blob.mesh_data                           # lazy; quad-only (dual marching 
 print(out.point_count, out.face_count, out.quads == out.face_count)
 ```
 
+A primitive's settings (`radius`, `half_extents`, `height`, `axis`) are saved
+fields: they survive `copy()`, pickling and `save()`, and a copy starts
+detached from its `DMCField`. `radius` and `height` are stored as floats;
+`SDFCylinder.axis` must be 0, 1 or 2.
+
+```python
+from cgmath.geometry.sdf import SDFCylinder
+
+hole = SDFCylinder(radius=0.3, height=3, axis=2)
+spare = hole.copy()
+print(spare.radius, spare.height, spare.axis)  # 0.3 3.0 2
+```
+
 The functional pipeline is `make_grid` -> `eval_*` -> `sdf_*` ->
 `dual_marching_cubes`:
 
@@ -676,7 +689,10 @@ frames directly when you want to build the motion yourself. `mp4` and
 
 Every `Data` subclass — meshes, UVs, skins, morphs, maps, rigs, clips —
 shares one persistence surface. The extension picks the writer; the file's
-first bytes pick the reader.
+first bytes pick the reader. All three formats hold the same tree,
+`to_dict()`: the class, then every field that differs from its default. A file
+loads as the class it names; one written by an older cgmath raises
+`LegacyFileError`.
 
 ```python
 cube.save(os.path.join(tmp, "cube.npz"))
@@ -685,7 +701,7 @@ cube.save(os.path.join(tmp, "cube.pkl"))
 
 for ext in ("npz", "json", "pkl"):
     print(ext, MeshData.load(os.path.join(tmp, f"cube.{ext}")) == cube)
-print(sorted(cube.to_dict()))                  # declared fields only -- no caches
+print(sorted(cube.to_dict()))                  # '__class__', fields not at their default -- no caches
 ```
 
 Caches are never persisted and `name` is excluded from equality. Public
@@ -698,12 +714,14 @@ except AttributeError as err:
     print(type(err).__name__)
 ```
 
-Rigs and clips add JSON and FBX of their own:
+Rigs and clips save the same way, and add FBX of their own (section 23). A
+clip loads back as a clip, even through `HierarchyData.load`:
 
 ```python
 clip.save(os.path.join(tmp, "clip.json"))
 reloaded = ClipData.load(os.path.join(tmp, "clip.json"))
 print(reloaded.name, len(reloaded.frames))
+print(type(HierarchyData.load(os.path.join(tmp, "clip.json"))).__name__)  # ClipData
 ```
 
 ---
