@@ -6,12 +6,19 @@ vector a curve can carry. The surface closest-point Newton kernel is checked
 step by step against the same steps taken with scipy's exact second
 derivatives. ``_curve_derivatives``, which the best-fit parameter repair
 evaluates the curve with, is checked against scipy's curve derivatives.
+``_bezier_pieces``, which cuts a curve into the pieces sample() searches, is
+checked to end each piece exactly on the curve's own spots, and
+``_piece_closest``, which searches each piece, to stop Newton's method at
+each root.
 """
 
 import unittest
+from unittest import mock
 
 import numpy as np
+from cgmath.geometry.utils._numba import _bspline
 from cgmath.geometry.utils._numba._bspline import (
+    _bezier_pieces,
     _compute_basis_derivatives,
     _curve_derivatives,
     _newton_closest_point_surface_parallel,
@@ -266,6 +273,72 @@ class TestCurveDerivativesKernel(unittest.TestCase):
             cv = rng.normal(size=(6, 3))
             with self.subTest(d=d):
                 self.assert_matches_scipy(kv, d, np.vstack([cv, cv[:d]]))
+
+
+class TestBezierPiecesKernel(unittest.TestCase):
+    """
+    _bezier_pieces puts each piece's first and last Bezier control points
+    exactly where _curve_derivatives puts the curve at the piece's start and
+    end, so that sample() measures an open curve's ends as compute() does.
+    """
+
+    def test_piece_ends_are_the_curves_spots(self):
+        rng   = np.random.default_rng(6)
+        cases = [(uniform_clamped(d, 5), d, rng.normal(size=(5 + d, 3))) for d in range(1, 6)]
+        cases.extend((kv, 3, rng.normal(size=(len(kv) - 4, 2)))
+                     for kv in (NON_UNIFORM, DOUBLE_KNOT, TRIPLE_KNOT))
+        for d in (1, 2, 3, 5):
+            cv = rng.normal(size=(6, 3))
+            cases.append((periodic_style(d, 6), d, np.vstack([cv, cv[:d]])))
+
+        for kv, d, cv in cases:
+            work = np.zeros((d + 2, d + 1))
+            out  = np.zeros((d + 1, cv.shape[1]))
+            for per_span in (1, 2, 3):
+                windows, bezier = _bezier_pieces(kv, cv, d, per_span)[:2]
+                for piece, (start, end) in enumerate(windows):
+                    with self.subTest(kv=kv.tolist(), d=d, per_span=per_span, piece=piece):
+                        _curve_derivatives(start, kv, cv, d, 0, work, out)
+                        np.testing.assert_array_equal(bezier[piece, 0], out[0])
+                        _curve_derivatives(end, kv, cv, d, 0, work, out)
+                        np.testing.assert_array_equal(bezier[piece, d], out[0])
+
+
+class TestPieceClosestKernel(unittest.TestCase):
+    """
+    _piece_closest finds each root of a piece's distance slope by Newton's
+    method inside a bracket, and stops once a step is too small to move t:
+    halving the bracket from there would only walk back to the same root,
+    over dozens more slope evaluations.
+    """
+
+    def test_newton_stops_at_the_root(self):
+        # run in Python, counting each piece's slope evaluations
+        real  = _bspline._bernstein
+        calls = []
+
+        def counting(coef, t, work):
+            calls.append(t)
+            return real(coef, t, work)
+
+        rng = np.random.default_rng(4)
+        for d in (2, 3, 5):
+            kv = uniform_clamped(d, 12 - d)
+            cv = np.cumsum(rng.normal(size=(12, 3)), axis=0)
+            windows, bezier, const, linear = _bezier_pieces(kv, cv, d, 2)[:4]
+
+            queries = bezier[:, 0] + rng.normal(scale=0.3, size=bezier[:, 0].shape)
+            scratch = (np.empty(2 * d), np.empty((96, 2 * d)), np.empty((96, 2)), np.empty(2 * d))
+            most    = 0
+            with mock.patch.object(_bspline, "_bernstein", counting):
+                for point in queries:
+                    for piece in range(len(windows)):
+                        del calls[:]
+                        _bspline._piece_closest.py_func(point, piece, bezier, const, linear, 0.0,
+                                                        *scratch)
+                        most = max(most, len(calls))
+            with self.subTest(d=d):
+                self.assertLessEqual(most, 12)
 
 
 if __name__ == "__main__":

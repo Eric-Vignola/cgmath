@@ -1638,8 +1638,8 @@ rebuild(self, count: Optional[int] = None, degree: Optional[int] = None, collaps
     Rebuilds the curve with a new control point count, degree or
 rebuild_arc_length_table(self) -> None
     Rebuild cached spline and arc-length lookup table.
-sample(self, obj, initial_samples=20, max_newton_iters=10, tolerance=1e-10)
-    Projects points onto the curve using Newton-Raphson refinement.
+sample(self, obj)
+    Projects points onto the curve: each one's exact closest spot.
 smooth(self, n: int, polyorder: int = 3, lock_endpoints: bool = True, pad_endpoints: bool = True)
     smoothes the curve points via a savgol_filter
 ```

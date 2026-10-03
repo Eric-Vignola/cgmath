@@ -12,6 +12,8 @@ Key optimizations:
 - Division-by-zero protection
 """
 
+import math
+
 import numpy as np
 from numba import njit, prange
 
@@ -865,342 +867,6 @@ def _normalize_parameters(u, kv, d):
         result[i] = val
 
     return result
-
-
-# --------------------------------------------------------------------------- #
-#                     Newton-Raphson closest point                            #
-# --------------------------------------------------------------------------- #
-
-
-@njit(parallel=True, fastmath=True, cache=True)
-def _newton_closest_point_parallel(
-    queries,
-    u_init,
-    kv,
-    cv,
-    degree,
-    max_param,
-    periodic,
-    max_iters,
-    tolerance,
-):
-    """
-    Parallel Newton-Raphson closest point computation on B-spline curve.
-
-    Finds the parameter u such that the curve point C(u) is closest to
-    each query point. Uses the perpendicularity condition:
-        f(u) = (C(u) - Q) * C'(u) = 0
-
-    Each query point is processed independently in parallel.
-
-    Parameters
-    ----------
-    queries : np.ndarray
-        Query points (n_queries, dims), float64.
-    u_init : np.ndarray
-        Initial parameter guesses (n_queries,), float64.
-    kv : np.ndarray
-        Knot vector, float64.
-    cv : np.ndarray
-        Control vertices (n_cv, dims), float64.
-    degree : int
-        Curve degree.
-    max_param : float
-        Maximum parameter value.
-    periodic : bool
-        Whether the curve is periodic.
-    max_iters : int
-        Maximum Newton-Raphson iterations.
-    tolerance : float
-        Convergence tolerance for parameter change.
-
-    Returns
-    -------
-    u_out : np.ndarray
-        Refined parameter values (n_queries,), float64.
-    points_out : np.ndarray
-        Closest points on curve (n_queries, dims), float64.
-    tangents_out : np.ndarray
-        Tangent vectors at closest points (n_queries, dims), float64.
-    """
-    n_queries = queries.shape[0]
-    n_cv      = cv.shape[0]
-    dims      = cv.shape[1]
-    order     = degree + 1
-
-    # For periodic curves, we need the "base" control point count
-    # The cv array may have wrapped points appended
-    if periodic:
-        # limit for span finding in periodic case
-        limit = int(max_param) - 1
-    else:
-        limit = n_cv - degree - 1
-
-    # Output arrays
-    u_out        = np.empty(n_queries,         dtype=np.float64)
-    points_out   = np.empty((n_queries, dims), dtype=np.float64)
-    tangents_out = np.empty((n_queries, dims), dtype=np.float64)
-
-    # Process each query point in parallel
-    for qi in prange(n_queries):
-        query = queries[qi]
-        ui    = u_init[qi]
-
-        # Local arrays for basis computation
-        local_b  = np.zeros(order + 1, dtype=np.float64)
-        local_bb = np.zeros(order + 1, dtype=np.float64)
-
-        # Basis at degree-1 for first derivative
-        local_b_d1  = np.zeros(order, dtype=np.float64)
-        local_bb_d1 = np.zeros(order, dtype=np.float64)
-
-        # Basis at degree-2 for second derivative
-        local_b_d2  = np.zeros(order, dtype=np.float64)
-        local_bb_d2 = np.zeros(order, dtype=np.float64)
-
-        # Newton-Raphson iterations
-        for _ in range(max_iters):
-            # Find knot span for current u
-            left_k  = _find_span(ui, kv, degree, limit)
-            right_k = left_k + order
-
-            # === Compute basis functions at degree d ===
-            for i in range(order + 1):
-                local_b[i] = 0.0
-            local_b[0] = 1.0
-
-            for j in range(1, order):
-                for i in range(j):
-                    local_bb[i] = local_b[i]
-                    local_b[i]  = 0.0
-
-                for i in range(j):
-                    ri    = right_k + i
-                    denom = kv[ri] - kv[ri - j]
-                    if denom != 0.0:
-                        f = local_bb[i] / denom
-                    else:
-                        f = 0.0
-                    local_b[i] += f * (kv[ri] - ui)
-                    local_b[i + 1] = f * (ui - kv[ri - j])
-
-            # === Compute basis functions at degree d-1 (for 1st derivative) ===
-            for i in range(order):
-                local_b_d1[i] = 0.0
-            local_b_d1[0] = 1.0
-
-            for j in range(1, degree):
-                for i in range(j):
-                    local_bb_d1[i] = local_b_d1[i]
-                    local_b_d1[i]  = 0.0
-
-                for i in range(j):
-                    ri    = right_k + i
-                    denom = kv[ri] - kv[ri - j]
-                    if denom != 0.0:
-                        f = local_bb_d1[i] / denom
-                    else:
-                        f = 0.0
-                    local_b_d1[i] += f * (kv[ri] - ui)
-                    local_b_d1[i + 1] = f * (ui - kv[ri - j])
-
-            # === Compute basis functions at degree d-2 (for 2nd derivative) ===
-            if degree >= 2:
-                for i in range(order):
-                    local_b_d2[i] = 0.0
-                local_b_d2[0] = 1.0
-
-                for j in range(1, degree - 1):
-                    for i in range(j):
-                        local_bb_d2[i] = local_b_d2[i]
-                        local_b_d2[i]  = 0.0
-
-                    for i in range(j):
-                        ri    = right_k + i
-                        denom = kv[ri] - kv[ri - j]
-                        if denom != 0.0:
-                            f = local_bb_d2[i] / denom
-                        else:
-                            f = 0.0
-                        local_b_d2[i] += f * (kv[ri] - ui)
-                        local_b_d2[i + 1] = f * (ui - kv[ri - j])
-
-            # === Evaluate C(u) ===
-            C = np.zeros(dims, dtype=np.float64)
-            for i in range(order):
-                cp_idx = left_k + i
-                if cp_idx < n_cv:
-                    basis_val = local_b[i]
-                    for d in range(dims):
-                        C[d] += basis_val * cv[cp_idx, d]
-
-            # === Evaluate C'(u) using derivative formula ===
-            # C'(u) = degree * sum_i (Q_i * B_{i,degree-1}(u))
-            # where Q_i = (P_{i+1} - P_i) / (kv[i+degree+1] - kv[i+1])
-            C_prime = np.zeros(dims, dtype=np.float64)
-            for i in range(degree):
-                cp_idx = left_k + i
-                if cp_idx + 1 < n_cv:
-                    kv_idx = cp_idx + 1
-                    denom  = kv[kv_idx + degree] - kv[kv_idx]
-                    if denom != 0.0:
-                        scale = degree * local_b_d1[i] / denom
-                        for d in range(dims):
-                            diff = cv[cp_idx + 1, d] - cv[cp_idx, d]
-                            C_prime[d] += scale * diff
-
-            # === Evaluate C''(u) using second derivative formula ===
-            C_double_prime = np.zeros(dims, dtype=np.float64)
-            if degree >= 2:
-                for i in range(degree - 1):
-                    cp_idx = left_k + i
-                    if cp_idx + 2 < n_cv:
-                        # Q_i for first derivative
-                        kv_idx1 = cp_idx + 1
-                        denom1  = kv[kv_idx1 + degree] - kv[kv_idx1]
-
-                        kv_idx2 = cp_idx + 2
-                        denom2  = kv[kv_idx2 + degree] - kv[kv_idx2]
-
-                        if denom1 != 0.0 and denom2 != 0.0:
-                            # Second derivative uses difference of Q vectors,
-                            # divided by kv[i+degree+1] - kv[i+2]
-                            kv_idx_dd = cp_idx + 2
-                            denom_dd  = kv[kv_idx_dd + degree - 1] - kv[kv_idx_dd]
-                            if denom_dd != 0.0:
-                                scale = (
-                                    degree
-                                    * (degree - 1)
-                                    * local_b_d2[i]
-                                    / (denom_dd * denom1)
-                                )
-                                for d in range(dims):
-                                    # Q_{i+1} - Q_i approximation
-                                    q1 = (
-                                        cv[cp_idx + 2, d] - cv[cp_idx + 1, d]
-                                    ) / denom2
-                                    q0 = (cv[cp_idx + 1, d] - cv[cp_idx, d]) / denom1
-                                    C_double_prime[d] += scale * denom1 * (q1 - q0)
-
-            # === Compute f(u) = (C(u) - Q) * C'(u) ===
-            f_val = 0.0
-            for d in range(dims):
-                f_val += (C[d] - query[d]) * C_prime[d]
-
-            # === Compute f'(u) = |C'(u)|^2 + (C(u) - Q) * C''(u) ===
-            f_prime = 0.0
-            for d in range(dims):
-                f_prime += C_prime[d] * C_prime[d]
-                f_prime += (C[d] - query[d]) * C_double_prime[d]
-
-            # Avoid division by zero
-            if abs(f_prime) < 1e-14:
-                f_prime = 1e-14 if f_prime >= 0 else -1e-14
-
-            # Newton step with trust region
-            du = -f_val / f_prime
-            if du > 0.5:
-                du = 0.5
-            elif du < -0.5:
-                du = -0.5
-
-            # Update parameter
-            ui_new = ui + du
-
-            # Handle bounds
-            if periodic:
-                while ui_new < 0:
-                    ui_new += max_param
-                while ui_new >= max_param:
-                    ui_new -= max_param
-            else:
-                if ui_new < 0:
-                    ui_new = 0.0
-                elif ui_new > max_param:
-                    ui_new = max_param
-
-            # Check convergence
-            if abs(du) < tolerance:
-                ui = ui_new
-                break
-
-            ui = ui_new
-
-        # === Final evaluation at converged parameter ===
-        left_k  = _find_span(ui, kv, degree, limit)
-        right_k = left_k + order
-
-        # Recompute basis at final u
-        for i in range(order + 1):
-            local_b[i] = 0.0
-        local_b[0] = 1.0
-
-        for j in range(1, order):
-            for i in range(j):
-                local_bb[i] = local_b[i]
-                local_b[i]  = 0.0
-
-            for i in range(j):
-                ri    = right_k + i
-                denom = kv[ri] - kv[ri - j]
-                if denom != 0.0:
-                    f = local_bb[i] / denom
-                else:
-                    f = 0.0
-                local_b[i] += f * (kv[ri] - ui)
-                local_b[i + 1] = f * (ui - kv[ri - j])
-
-        # Recompute basis at degree-1 for tangent
-        for i in range(order):
-            local_b_d1[i] = 0.0
-        local_b_d1[0] = 1.0
-
-        for j in range(1, degree):
-            for i in range(j):
-                local_bb_d1[i] = local_b_d1[i]
-                local_b_d1[i]  = 0.0
-
-            for i in range(j):
-                ri    = right_k + i
-                denom = kv[ri] - kv[ri - j]
-                if denom != 0.0:
-                    f = local_bb_d1[i] / denom
-                else:
-                    f = 0.0
-                local_b_d1[i] += f * (kv[ri] - ui)
-                local_b_d1[i + 1] = f * (ui - kv[ri - j])
-
-        # Evaluate final C(u)
-        for d in range(dims):
-            C[d] = 0.0
-        for i in range(order):
-            cp_idx = left_k + i
-            if cp_idx < n_cv:
-                basis_val = local_b[i]
-                for d in range(dims):
-                    C[d] += basis_val * cv[cp_idx, d]
-
-        # Evaluate final C'(u)
-        for d in range(dims):
-            C_prime[d] = 0.0
-        for i in range(degree):
-            cp_idx = left_k + i
-            if cp_idx + 1 < n_cv:
-                kv_idx = cp_idx + 1
-                denom  = kv[kv_idx + degree] - kv[kv_idx]
-                if denom != 0.0:
-                    scale = degree * local_b_d1[i] / denom
-                    for d in range(dims):
-                        diff = cv[cp_idx + 1, d] - cv[cp_idx, d]
-                        C_prime[d] += scale * diff
-
-        # Store results
-        u_out[qi] = ui
-        for d in range(dims):
-            points_out[qi, d]   = C[d]
-            tangents_out[qi, d] = C_prime[d]
-
-    return u_out, points_out, tangents_out
 
 
 # --------------------------------------------------------------------------- #
@@ -2070,6 +1736,750 @@ def _ordered_closest_params(points, u, kv, cv, degree, periodic, rounds=200, sam
                 u[i] = seam
 
     return u
+
+
+# --------------------------------------------------------------------------- #
+#                     Closest points on the whole curve                       #
+# --------------------------------------------------------------------------- #
+#
+# sample() finds each point's exact closest spot on the whole curve. The
+# curve is cut into pieces, every knot span split evenly into 16 / spans
+# pieces rounded up, at most 8 (so 16 or more in all, but 8 on a one-span
+# curve and fewer where knots repeat), each held in Bezier form, built once
+# per call. A piece's ends are exactly the spots _curve_derivatives (scipy's
+# evaluator) gives there, so an open curve's ends tie exactly when compute()
+# says they do.
+# On a piece the distance slope (C - p).C' is a polynomial of degree
+# 2 x degree - 1 in the piece's own t in [0, 1], in Bernstein form too: its
+# coefficients are const - p . linear, both built with the piece, so a point
+# costs a dot product per coefficient. Their sign changes bound the slope's
+# roots: none means no root, one exactly one. A part with more is halved (de
+# Casteljau) until each part holds at most one, which Newton's method finds
+# without leaving the part.
+#
+# A piece lies inside the box around its Bezier control points, so a piece
+# whose box is farther than the best spot so far cannot hold a closer one.
+# The nearest box is solved first, then every other box no farther than the
+# best, nearest first; long curves group their pieces by 16, whose boxes are
+# tried the same way first.
+#
+# Distances are compared squared. So that a huge or a tiny curve neither
+# overflows nor underflows them, the search runs on the curve and the points
+# scaled by a power of two to a largest control point coordinate in
+# [0.5, 1): exact, it changes no result of a curve that does neither.
+#
+# Parameters are native: the curve runs on [0, spans]. The winner is polished
+# on _curve_derivatives (scipy's own evaluator), within its piece. fastmath
+# stays off: ties are decided on exactly equal distances.
+
+
+@njit(cache=True)
+def _bezier_pieces(kv, cv, degree, per_span):
+    """
+    The curve cut into pieces, each in Bezier form, for ``_closest_points``.
+
+    Parameters
+    ----------
+    kv, cv, degree
+        The curve, as in ``_curve_derivatives``; degree 1 or more, no knot
+        inside the domain repeated past degree.
+    per_span : int
+        Pieces per knot span, cut evenly; empty spans have none.
+
+    Returns
+    -------
+    tuple
+        (windows, bezier, const, linear, lower, upper): windows (pieces, 2)
+        each piece's native start and end, in order; bezier (pieces,
+        degree + 1, dims) its Bezier control points, the first and last the
+        curve at its start and end as ``_curve_derivatives`` gives; const
+        (pieces, 2 x degree) and linear (pieces, 2 x degree, dims) the
+        Bernstein coefficients of its distance slope at a point p,
+        const - p . linear; lower and upper (pieces, dims) the box around its
+        control points, padded by 1e-12 x the largest control point
+        coordinate.
+    """
+    spans = cv.shape[0] - degree
+    dims  = cv.shape[1]
+    knots = kv[degree : degree + spans + 1]
+    count = 0
+    for s in range(spans):
+        if knots[s + 1] > knots[s]:
+            count += per_span
+
+    # Pascal's triangle up to row 2 x degree (exact), and 0! .. degree!
+    binom = np.zeros((2 * degree + 1, 2 * degree + 1))
+    for r in range(2 * degree + 1):
+        binom[r, 0] = 1.0
+        for c in range(1, r + 1):
+            binom[r, c] = binom[r - 1, c - 1] + binom[r - 1, c]
+    fact = np.ones(degree + 1)
+    for m in range(2, degree + 1):
+        fact[m] = fact[m - 1] * m
+
+    windows = np.empty((count, 2))
+    bezier  = np.empty((count, degree + 1, dims))
+    const   = np.zeros((count, 2 * degree))
+    linear  = np.zeros((count, 2 * degree, dims))
+    lower   = np.empty((count, dims))
+    upper   = np.empty((count, dims))
+    work    = np.zeros((degree + 2, degree + 1))
+    derivs  = np.zeros((degree + 1, dims))
+    power   = np.zeros((degree + 1, dims))
+    pad     = 1e-12 * np.abs(cv).max() + 1e-300
+
+    piece   = 0
+    for s in range(spans):
+        width = knots[s + 1] - knots[s]
+        if not width > 0.0:
+            continue
+        for p in range(per_span):
+            start = knots[s] + width * p / per_span
+            end   = knots[s] + width * (p + 1) / per_span
+            if p == per_span - 1:
+                end = knots[s + 1]
+            windows[piece, 0] = start
+            windows[piece, 1] = end
+
+            # On a knot span the Taylor expansion C(start + t w) =
+            # sum_m C^(m)(start) (t w)^m / m!, w the piece's width, is exact.
+            # Its power coefficients a_m give the Bezier control points
+            # b_i = sum_(m <= i) C(i, m) / C(degree, m) a_m
+            _curve_derivatives(start, kv, cv, degree, degree, work, derivs)
+            for m in range(degree + 1):
+                scale = (end - start) ** m / fact[m]
+                for dim in range(dims):
+                    power[m, dim] = derivs[m, dim] * scale
+            for i in range(degree + 1):
+                for dim in range(dims):
+                    total = 0.0
+                    for m in range(i + 1):
+                        total += binom[i, m] / binom[degree, m] * power[m, dim]
+                    bezier[piece, i, dim] = total
+
+            # The first control point is C(start) exactly, the last one a sum
+            # that can round a step off C(end): it is replaced by C(end), so
+            # that piece ends are measured where scipy puts them and an open
+            # curve's ends tie exactly when compute() says they do. At a knot
+            # C(end) is the next span's start, the same spot: the curve's
+            # setup rejects a knot repeated past degree, where it would jump
+            _curve_derivatives(end, kv, cv, degree, 0, work, derivs)
+            for dim in range(dims):
+                bezier[piece, degree, dim] = derivs[0, dim]
+
+            # dC/dt = degree x sum_j B_j(t) (b_(j + 1) - b_j), B_j of degree
+            # degree - 1. A product of Bernstein polynomials is one of degree
+            # 2 x degree - 1: B_i B_j = C(degree, i) C(degree - 1, j) /
+            # C(2 x degree - 1, i + j) B_(i + j), so (b_i - p).(b_(j + 1) - b_j)
+            # lands on coefficient i + j
+            for i in range(degree + 1):
+                for j in range(degree):
+                    w = (degree * binom[degree, i] * binom[degree - 1, j]
+                         / binom[2 * degree - 1, i + j])
+                    for dim in range(dims):
+                        step = w * (bezier[piece, j + 1, dim] - bezier[piece, j, dim])
+                        const[piece, i + j]       += bezier[piece, i, dim] * step
+                        linear[piece, i + j, dim] += step
+
+            # The piece lies inside the box around its control points
+            for dim in range(dims):
+                low  = bezier[piece, 0, dim]
+                high = low
+                for i in range(1, degree + 1):
+                    low  = min(low, bezier[piece, i, dim])
+                    high = max(high, bezier[piece, i, dim])
+                lower[piece, dim] = low - pad
+                upper[piece, dim] = high + pad
+            piece += 1
+
+    return windows, bezier, const, linear, lower, upper
+
+
+@njit(cache=True)
+def _group_boxes(lower, upper, size):
+    """
+    The box around each run of ``size`` pieces, the last run maybe shorter.
+
+    Parameters
+    ----------
+    lower, upper : np.ndarray
+        The pieces' boxes (pieces, dims), from ``_bezier_pieces``.
+    size : int
+        Pieces per group, 1 or more.
+
+    Returns
+    -------
+    tuple
+        (lower, upper) of the groups' boxes, (groups, dims) each.
+    """
+    count  = lower.shape[0]
+    groups = (count + size - 1) // size
+    low    = np.empty((groups, lower.shape[1]))
+    high   = np.empty((groups, lower.shape[1]))
+    for g in range(groups):
+        for dim in range(lower.shape[1]):
+            low[g, dim]  = lower[g * size, dim]
+            high[g, dim] = upper[g * size, dim]
+            for b in range(g * size + 1, min(count, (g + 1) * size)):
+                low[g, dim]  = min(low[g, dim], lower[b, dim])
+                high[g, dim] = max(high[g, dim], upper[b, dim])
+    return low, high
+
+
+@njit(cache=True, inline="always")
+def _box_distance(point, lower, upper, index):
+    """
+    Squared distance from a point to box ``index``; 0 inside it.
+
+    Parameters
+    ----------
+    point : np.ndarray
+        The point (dims,), float64.
+    lower, upper : np.ndarray
+        Boxes (boxes, dims).
+    index : int
+        The box.
+
+    Returns
+    -------
+    float
+        The squared distance.
+    """
+    total = 0.0
+    for dim in range(point.shape[0]):
+        gap = 0.0
+        if point[dim] < lower[index, dim]:
+            gap = lower[index, dim] - point[dim]
+        elif point[dim] > upper[index, dim]:
+            gap = point[dim] - upper[index, dim]
+        total += gap * gap
+    return total
+
+
+@njit(cache=True, inline="always")
+def _rank(t, wrap):
+    """
+    A spot's rank on a piece, for ties: t, or t + 2 before ``wrap``.
+
+    Parameters
+    ----------
+    t : float
+        Where on the piece, in [0, 1].
+    wrap : float
+        Where the user's parameter range starts inside the piece, or 0.0.
+
+    Returns
+    -------
+    float
+        The rank, the smaller the earlier in the user's range.
+    """
+    return t if t >= wrap else t + 2.0
+
+
+@njit(cache=True, inline="always")
+def _closer(dist, rank, best, best_rank):
+    """
+    Whether a spot beats the best so far: closer, or as close and ranked first.
+
+    Parameters
+    ----------
+    dist, rank : float
+        The spot's squared distance and rank (the smaller the earlier).
+    best, best_rank : float
+        The best's.
+
+    Returns
+    -------
+    bool
+        True when the spot wins.
+    """
+    return dist < best or (dist == best and rank < best_rank)
+
+
+@njit(cache=True)
+def _bezier_distance(point, bezier, piece, t, work):
+    """
+    Squared distance from a point to a piece at t, by de Casteljau.
+
+    Parameters
+    ----------
+    point : np.ndarray
+        The point (dims,), float64.
+    bezier : np.ndarray
+        The pieces' Bezier control points, from ``_bezier_pieces``.
+    piece : int
+        The piece.
+    t : float
+        Where on the piece, in [0, 1].
+    work : np.ndarray
+        Scratch (degree + 1,) or more.
+
+    Returns
+    -------
+    float
+        The squared distance.
+    """
+    degree = bezier.shape[1] - 1
+    total  = 0.0
+    for dim in range(point.shape[0]):
+        for i in range(degree + 1):
+            work[i] = bezier[piece, i, dim]
+        for r in range(1, degree + 1):
+            for i in range(degree + 1 - r):
+                work[i] = (1.0 - t) * work[i] + t * work[i + 1]
+        offset = work[0] - point[dim]
+        total += offset * offset
+    return total
+
+
+@njit(cache=True)
+def _bernstein(coef, t, work):
+    """
+    A Bernstein polynomial's value and derivative at t, by de Casteljau.
+
+    Parameters
+    ----------
+    coef : np.ndarray
+        Its coefficients (degree + 1,), degree 1 or more.
+    t : float
+        Where, in [0, 1].
+    work : np.ndarray
+        Scratch (degree + 1,) or more.
+
+    Returns
+    -------
+    tuple
+        (value, derivative).
+    """
+    size = coef.shape[0] - 1
+    for i in range(size + 1):
+        work[i] = coef[i]
+    for r in range(1, size):
+        for i in range(size + 1 - r):
+            work[i] = (1.0 - t) * work[i] + t * work[i + 1]
+    return (1.0 - t) * work[0] + t * work[1], size * (work[1] - work[0])
+
+
+@njit(cache=True)
+def _piece_closest(point, piece, bezier, const, linear, wrap, coef, parts, ends,
+                   work):
+    """
+    A point's exact closest spot on one piece.
+
+    Parameters
+    ----------
+    point : np.ndarray
+        The point (dims,), float64.
+    piece : int
+        The piece.
+    bezier, const, linear : np.ndarray
+        The pieces, from ``_bezier_pieces``.
+    wrap : float
+        Where the user's parameter range starts inside the piece, as a t (a
+        registered periodic curve's start); 0.0 when it does not: on a tie,
+        spots before it rank after the others.
+    coef, parts, ends, work : np.ndarray
+        Scratch: coef (2 x degree,); parts (depth, 2 x degree) and ends
+        (depth, 2), a stack of parts still to search; work (2 x degree,).
+
+    Returns
+    -------
+    tuple
+        (t, squared distance) of the closest spot, t in [0, 1] across the
+        piece; on an exact tie the one ranked first.
+    """
+    size = coef.shape[0] - 1  # the slope's degree
+
+    # The slope's Bernstein coefficients at this point
+    for c in range(size + 1):
+        value = const[piece, c]
+        for dim in range(point.shape[0]):
+            value -= point[dim] * linear[piece, c, dim]
+        coef[c] = value
+
+    # The piece's ends always compete: its first and last control points
+    degree = bezier.shape[1] - 1
+    best_t = 0.0
+    best   = 0.0
+    dist   = 0.0
+    for dim in range(point.shape[0]):
+        best += (bezier[piece, 0, dim] - point[dim]) ** 2
+        dist += (bezier[piece, degree, dim] - point[dim]) ** 2
+    if _closer(dist, _rank(1.0, wrap), best, _rank(0.0, wrap)):
+        best_t = 1.0
+        best   = dist
+
+    # A stack of parts of [0, 1] still to search: parts[row] the slope's
+    # coefficients over the part, ends[row] its start and end
+    parts[0, :] = coef
+    ends[0, 0]  = 0.0
+    ends[0, 1]  = 1.0
+    top         = 1
+    while top > 0:
+        top -= 1
+        lo = ends[top, 0]
+        hi = ends[top, 1]
+
+        # The coefficients' sign changes (zeros skipped): the roots in the
+        # part, or more by an even number
+        changes = 0
+        last    = 0.0
+        for c in range(size + 1):
+            value = parts[top, c]
+            if value != 0.0:
+                if last != 0.0 and (value > 0.0) != (last > 0.0):
+                    changes += 1
+                last = value
+        if changes == 0:
+            continue
+
+        # Several: halve the part by de Casteljau, the left half on top. The
+        # middle competes when the slope is exactly zero there (neither half
+        # sees that root)
+        if changes > 1 and hi - lo > 1e-12 and top + 2 <= parts.shape[0]:
+            mid = 0.5 * (lo + hi)
+            for c in range(size + 1):
+                work[c] = parts[top, c]
+            parts[top + 1, 0] = work[0]
+            parts[top, size]  = work[size]
+            for r in range(1, size + 1):
+                for i in range(size + 1 - r):
+                    work[i] = 0.5 * (work[i] + work[i + 1])
+                parts[top + 1, r]    = work[0]
+                parts[top, size - r] = work[size - r]
+            ends[top + 1, 0] = lo
+            ends[top + 1, 1] = mid
+            ends[top, 0]     = mid
+            ends[top, 1]     = hi
+            if parts[top, 0] == 0.0:
+                dist = _bezier_distance(point, bezier, piece, mid, work)
+                if _closer(dist, _rank(mid, wrap), best, _rank(best_t, wrap)):
+                    best_t = mid
+                    best   = dist
+            top += 2
+            continue
+
+        # One root (or a part too small to halve): a minimum when the slope
+        # goes from negative to positive. Newton's method from where the
+        # coefficients' polygon crosses zero, each step kept inside a bracket
+        # that shrinks to the side the slope points at. A step too small to
+        # move t means t is the root: halving the bracket then would only
+        # walk back to it
+        if changes == 1 and not (parts[top, 0] <= 0.0 <= parts[top, size]):
+            continue
+        t = 0.5 * (lo + hi)
+        for c in range(size):
+            if parts[top, c] < 0.0 <= parts[top, c + 1]:
+                cross = (c + parts[top, c] / (parts[top, c] - parts[top, c + 1])) / size
+                t     = lo + (hi - lo) * cross
+                break
+        low  = lo
+        high = hi
+        for _ in range(64):
+            slope, bend = _bernstein(coef, t, work)
+            if slope < 0.0:
+                low = t
+            elif slope > 0.0:
+                high = t
+            else:
+                break
+            step = t - slope / bend if bend > 0.0 else -1.0
+            if not abs(step - t) > 4e-16:
+                break
+            if not low < step < high:
+                step = 0.5 * (low + high)
+            moved = abs(step - t)
+            t     = step
+            if not moved > 4e-16:
+                break
+        dist = _bezier_distance(point, bezier, piece, t, work)
+        if _closer(dist, _rank(t, wrap), best, _rank(best_t, wrap)):
+            best_t = t
+            best   = dist
+
+    return best_t, best
+
+
+@njit(cache=True)
+def _polish(point, x, lo, hi, kv, cv, degree, periodic, work, derivs, spot, tangent):
+    """
+    Newton's method on the curve's own evaluator, from a spot found in Bezier form.
+
+    Parameters
+    ----------
+    point : np.ndarray
+        The point (dims,), float64.
+    x : float
+        The spot, native.
+    lo, hi : float
+        Its piece's window; every step stays inside it.
+    kv, cv, degree, periodic
+        The curve, as in ``_curve_derivatives``.
+    work, derivs : np.ndarray
+        Scratch for ``_curve_derivatives``; derivs (3, dims) or more.
+    spot, tangent : np.ndarray
+        Receive the curve and its derivative at the result (dims,), as
+        scipy's.
+
+    Returns
+    -------
+    tuple
+        (x, squared distance): x, or the last of up to 3 steps from it while
+        each came strictly closer, and the point's squared distance there.
+    """
+    period = float(cv.shape[0] - degree)
+    best   = 0.0
+    best_x = x
+    y      = x
+    for k in range(4):
+        _curve_derivatives(y % period if periodic else y, kv, cv, degree, 2, work,
+                           derivs)
+        dist = 0.0
+        for dim in range(point.shape[0]):
+            offset = derivs[0, dim] - point[dim]
+            dist += offset * offset
+
+        # x itself is always kept, so spot and tangent are always written
+        if k > 0 and not dist < best:
+            break
+        best_x     = y
+        best       = dist
+        spot[:]    = derivs[0]
+        tangent[:] = derivs[1]
+
+        # slope = (C - p).C', bend = its derivative |C'|^2 + (C - p).C''
+        slope = 0.0
+        bend  = 0.0
+        for dim in range(point.shape[0]):
+            offset = derivs[0, dim] - point[dim]
+            slope += offset * derivs[1, dim]
+            bend  += derivs[1, dim] * derivs[1, dim] + offset * derivs[2, dim]
+        if not bend > 0.0:
+            break
+        y = min(max(y - slope / bend, lo), hi)
+        if y == best_x:
+            break
+
+    return best_x, best
+
+
+@njit(cache=True, inline="always")
+def _piece_param(windows, piece, t):
+    """
+    The native parameter at t on a piece; t = 1 is exactly the piece's end.
+
+    Parameters
+    ----------
+    windows : np.ndarray
+        The pieces' native start and end (pieces, 2).
+    piece : int
+        The piece.
+    t : float
+        Where on the piece, in [0, 1].
+
+    Returns
+    -------
+    float
+        The native parameter.
+    """
+    if t == 1.0:
+        return windows[piece, 1]
+    return windows[piece, 0] + t * (windows[piece, 1] - windows[piece, 0])
+
+
+@njit(cache=True)
+def _search_pieces(point, pieces, size, start, period, periodic, scratch):
+    """
+    One point's exact closest spot on the curve, among its pieces.
+
+    Parameters
+    ----------
+    point : np.ndarray
+        The point (dims,), float64.
+    pieces : tuple
+        (windows, bezier, const, linear, lower, upper, group_lower,
+        group_upper, wrap): ``_bezier_pieces``' arrays, the boxes of the
+        groups of ``size`` pieces, and where the user's range starts inside
+        each piece (``_piece_closest``'s wrap).
+    size : int
+        Pieces per group.
+    start, period : float
+        Where the user's range starts, native, and the curve's period
+        (periodic curves).
+    periodic : bool
+        Whether the curve is periodic.
+    scratch : tuple
+        (group_bound, bound, order, coef, parts, ends, work): a float per
+        group, a float and an int per piece, then ``_piece_closest``'s
+        scratch.
+
+    Returns
+    -------
+    tuple
+        (piece, x): the closest spot's piece and native parameter; on an
+        exact tie the spot first in the user's range.
+    """
+    windows, bezier, const, linear, lower, upper = pieces[:6]
+    group_lower, group_upper, wrap = pieces[6:]
+    group_bound, bound, order, coef, parts, ends, work = scratch
+    count = windows.shape[0]
+
+    # A first best: the nearest box of the nearest group
+    near = 0
+    for g in range(group_lower.shape[0]):
+        group_bound[g] = _box_distance(point, group_lower, group_upper, g)
+        if group_bound[g] < group_bound[near]:
+            near = g
+    first = near * size
+    for b in range(near * size, min(count, (near + 1) * size)):
+        bound[b] = _box_distance(point, lower, upper, b)
+        if bound[b] < bound[first]:
+            first = b
+    t, best = _piece_closest(point, first, bezier, const, linear, wrap[first], coef,
+                             parts, ends, work)
+    best_b = first
+    best_x = _piece_param(windows, first, t)
+
+    # Every other box no farther than the best, nearest first (insertion
+    # sort: few are left), while the next one is still no farther. A box
+    # exactly as far as the best may hold a spot exactly as close, a tie:
+    # rounding never puts a box farther than a spot inside it, the box's
+    # distance being summed the same way from coordinates no farther out
+    found = 0
+    for g in range(group_lower.shape[0]):
+        if group_bound[g] > best:
+            continue
+        for b in range(g * size, min(count, (g + 1) * size)):
+            bound[b] = _box_distance(point, lower, upper, b)
+            if b == first or bound[b] > best:
+                continue
+            at = found
+            while at > 0 and bound[order[at - 1]] > bound[b]:
+                order[at] = order[at - 1]
+                at -= 1
+            order[at] = b
+            found += 1
+    for k in range(found):
+        b = order[k]
+        if bound[b] > best:
+            break
+        t, dist = _piece_closest(point, b, bezier, const, linear, wrap[b], coef, parts,
+                                 ends, work)
+        x = _piece_param(windows, b, t)
+
+        # On a tie the spot first in the user's range wins: on a periodic
+        # curve, the one the least far past its start
+        rank      = (x - start) % period if periodic else x
+        best_rank = (best_x - start) % period if periodic else best_x
+        if _closer(dist, rank, best, best_rank):
+            best_b = b
+            best_x = x
+            best   = dist
+
+    return best_b, best_x
+
+
+@njit(parallel=True, cache=True)
+def _closest_points(points, kv, cv, degree, periodic, origin, chunk=16):
+    """
+    Each point's exact closest spot on the whole curve, in parallel.
+
+    Parameters
+    ----------
+    points : np.ndarray
+        The points (n, dims), float64, finite. Scaled with the curve, every
+        coordinate under 2^500 (sample() checks), so that no squared distance
+        overflows.
+    kv, cv, degree, periodic
+        The curve, as in ``_curve_derivatives``; degree 1 or more, its domain
+        longer than zero.
+    origin : float
+        Where the user's parameter range starts on a periodic curve, native
+        (a registered curve's offset, else 0.0); unused on open curves.
+    chunk : int
+        Points per parallel task, which allocates its scratch once.
+
+    Returns
+    -------
+    tuple
+        (u, spots, tangents, distances): native parameters (n,), in
+        [0, spans], periodic ones in [0, spans); the curve there (n, dims)
+        and its derivative (n, dims), as scipy's; each point's distance to
+        its spot (n,). On an exact tie, the spot first in the user's range.
+    """
+    n         = points.shape[0]
+    dims      = points.shape[1]
+    spans     = cv.shape[0] - degree
+    period    = float(spans)
+    u         = np.empty(n)  # np.zeros would start a parallel loop of its own
+    spots     = np.empty((n, dims))
+    tangents  = np.empty((n, dims))
+    distances = np.empty(n)
+
+    # The curve scaled by 2^-exponent, its largest coordinate in [0.5, 1); the
+    # points are scaled the same way, one at a time
+    exponent = math.frexp(np.abs(cv).max())[1]
+    scaled   = np.empty((cv.shape[0], dims))
+    for i in range(cv.shape[0]):
+        for dim in range(dims):
+            scaled[i, dim] = math.ldexp(cv[i, dim], -exponent)
+
+    # Every span cut into 16 / spans pieces rounded up, at most 8; groups of
+    # 16 pieces on curves of more than 32, else one group
+    per_span = min(8, max(1, (16 + spans - 1) // spans))
+    windows, bezier, const, linear, lower, upper = _bezier_pieces(kv, scaled, degree,
+                                                                  per_span)
+    count = windows.shape[0]
+    size  = 16 if count > 32 else count
+    group_lower, group_upper = _group_boxes(lower, upper, size)
+
+    # On a periodic curve the user's range starts at origin: a spot's rank on
+    # a tie is how far past it the spot is, and inside the piece holding it,
+    # spots before it rank after the others
+    start = origin % period if periodic else 0.0
+    wrap  = np.empty(count)
+    for b in range(count):
+        wrap[b] = 0.0
+        if windows[b, 0] < start < windows[b, 1]:
+            wrap[b] = (start - windows[b, 0]) / (windows[b, 1] - windows[b, 0])
+    pieces = (windows, bezier, const, linear, lower, upper, group_lower, group_upper,
+              wrap)
+
+    # Each task's scratch. The stack of parts is 96 deep: halving stops at
+    # parts 1e-12 wide, 40 halvings, and each adds one part to the stack
+    blocks = (n + chunk - 1) // chunk
+    for block in prange(blocks):
+        scratch = (
+            np.empty(group_lower.shape[0]),
+            np.empty(count),
+            np.empty(count, dtype=np.int64),
+            np.empty(2 * degree),
+            np.empty((96, 2 * degree)),
+            np.empty((96, 2)),
+            np.empty(2 * degree),
+        )
+        work   = np.zeros((degree + 2, degree + 1))
+        derivs = np.zeros((max(degree, 2) + 1, dims))
+        point  = np.empty(dims)
+        for i in range(block * chunk, min(n, (block + 1) * chunk)):
+            for dim in range(dims):
+                point[dim] = math.ldexp(points[i, dim], -exponent)
+            b, x = _search_pieces(point, pieces, size, start, period, periodic, scratch)
+
+            # The winner, polished within its piece, then scaled back
+            x, dist = _polish(point, x, windows[b, 0], windows[b, 1], kv, scaled, degree,
+                              periodic, work, derivs, spots[i], tangents[i])
+            for dim in range(dims):
+                spots[i, dim]    = math.ldexp(spots[i, dim], exponent)
+                tangents[i, dim] = math.ldexp(tangents[i, dim], exponent)
+            distances[i] = math.ldexp(math.sqrt(dist), exponent)
+            if periodic:
+                x = x % period
+                if x >= period:
+                    x = 0.0
+            u[i] = x
+
+    return u, spots, tangents, distances
 
 
 # --------------------------------------------------------------------------- #

@@ -6,10 +6,10 @@ import scipy.integrate as si
 from cgmath.geometry._base import Array, Data, ImmutableArray as numpy_array
 from cgmath.geometry.utils import compute_basis, ordered_closest_params
 from cgmath.geometry.utils._numba._bspline import (
+    _closest_points,
     _compute_basis_parallel,
     _evaluate_bspline_curve,
     _evaluate_bspline_curve_derivative,
-    _newton_closest_point_parallel,
 )
 from scipy.interpolate import BSpline
 from scipy.signal import savgol_filter
@@ -1734,52 +1734,58 @@ class BSplineData(Data):
 
         return b
 
-    def sample(
-        self,
-        obj,
-        initial_samples  = 20,
-        max_newton_iters = 10,
-        tolerance        = 1e-10,
-    ):
+    def sample(self, obj):
         """
-        Projects points onto the curve using Newton-Raphson refinement.
+        Projects points onto the curve: each one's exact closest spot.
 
-        Algorithm:
-        1. Coarse sampling to find initial parameter guesses (single KD-tree)
-        2. Newton-Raphson iteration to refine to true closest point
+        The whole curve is searched. It is cut into pieces held in Bezier
+        form; on each piece the distance's slope is a polynomial whose roots
+        are isolated exactly (by the sign changes of its Bernstein
+        coefficients, halving the piece where they are not enough) and then
+        found by Newton's method, never leaving the root's bracket. A piece
+        whose bounding box is farther than the best spot so far is skipped.
+        The ends of an open curve compete like any other spot, and a
+        periodic curve wraps across its seam. Distances are compared in
+        double precision on the curve scaled by a power of two, so its size
+        does not matter.
 
-        The Newton-Raphson method solves for the parameter u where the
-        vector from query point Q to curve point C(u) is perpendicular
-        to the tangent C'(u):
+        A query exactly as close to two spots gets the smaller param. An
+        open curve's ends are measured exactly where compute() puts them,
+        so they tie exactly when compute() says they do. Other spots are
+        found to within rounding: two that are equally close only up to
+        rounding (mirror images, say) go to whichever comes out closer. A
+        query so far away that every spot rounds to the same distance is
+        such a tie.
 
-            f(u) = (C(u) - Q) * C'(u) = 0
-
-        This gives quadratic convergence (~3-5 iterations vs ~10+ for
-        the previous interval refinement approach).
-
-        When use_numba=True (default), the Newton-Raphson refinement is
-        parallelized across all CPU cores using Numba, providing significant
-        speedup for large numbers of query points.
+        The search runs in parallel with Numba, use_numba or not;
+        ``use_numba=False`` evaluates the points, tangents and basis there
+        with scipy.
 
         Parameters
         ----------
         obj : array-like or object with .points attribute
-            Query points to project onto the curve.
-        initial_samples : int
-            Number of samples per control point for initial guess.
-        max_newton_iters : int
-            Maximum Newton-Raphson iterations per query point.
-        tolerance : float
-            Convergence tolerance for parameter change.
+            Query points (N, dims), or one point (dims,); dims the curve's,
+            every coordinate finite and within 1e150 times the curve's
+            largest coordinate.
 
         Returns
         -------
         SampleData
             Contains projected points, tangents, distances, params, and basis.
             params are in [0, 1] if uniform=True, else [min_param, max_param].
+
+        Raises
+        ------
+        ValueError
+            If a control point or a query is not finite, a query does not
+            have the curve's dims, or a query is so far out (some 1e150 times
+            the curve's largest coordinate) that its squared distance could
+            overflow.
         """
         if self._max_param is None:
             self._init_bspline()
+        if not np.isfinite(self._cv_f64).all():
+            raise ValueError("control points must be finite, check for nan or inf values")
 
         if hasattr(obj, "points"):
             queries = np.asarray(obj.points, dtype=np.float64)
@@ -1789,43 +1795,45 @@ class BSplineData(Data):
         # Ensure 2D array
         if queries.ndim == 1:
             queries = queries.reshape(1, -1)
+        queries = np.ascontiguousarray(queries)
 
-        # === Phase 1: Coarse sampling for initial guesses ===
-        n_coarse = initial_samples * self._count
-        u_coarse = np.linspace(0, self._max_param, n_coarse, endpoint=not self.periodic)
-
-        # Evaluate curve at coarse samples
-        pts_coarse = self._spl(u_coarse)
-
-        # Build KD-tree for fast nearest neighbor (ONLY ONCE!)
-        tree = cKDTree(pts_coarse)
-        _, indices = tree.query(queries)
-
-        # Initial parameter guesses
-        u_init = u_coarse[indices].astype(np.float64)
-
-        # === Phase 2: Newton-Raphson refinement ===
-        if self.use_numba:
-            # Use parallel Numba kernel
-            u, points, tangents = _newton_closest_point_parallel(
-                queries,
-                u_init,
-                self._kv.astype(np.float64),
-                self._cv_f64,
-                self.degree,
-                float(self._max_param),
-                self.periodic,
-                max_newton_iters,
-                tolerance,
+        dims = self._cv_f64.shape[1]
+        if queries.ndim != 2 or queries.shape[1] != dims:
+            raise ValueError(
+                f"queries must be points with {dims} coordinates, got shape {queries.shape}"
             )
-        else:
-            # Fallback to scipy-based Newton-Raphson
-            u, points, tangents = self._newton_scipy(
-                queries, u_init, max_newton_iters, tolerance
+        if not np.isfinite(queries).all():
+            raise ValueError("queries must be finite, check for nan or inf values")
+
+        # The search scales the curve by 2^-exponent to a largest coordinate
+        # in [0.5, 1), and the queries with it. A query past 2^500 once
+        # scaled could overflow its squared distance
+        exponent = np.frexp(np.abs(self._cv_f64).max())[1]
+        if queries.size and np.frexp(np.abs(queries).max())[1] > exponent + 500:
+            raise ValueError(
+                "queries must be within 1e150 times the curve's largest coordinate, "
+                "or their squared distances overflow"
             )
 
-        # Compute distances
-        distances = np.linalg.norm(queries - points, axis=1)
+        # Each query's closest spot, native; ties go to the spot first in the
+        # user's range, which a registered periodic curve starts at its offset
+        origin = self._offset if self.registered and self.periodic else 0.0
+        u, points, tangents, distances = _closest_points(
+            queries,
+            self._kv.astype(np.float64),
+            self._cv_f64,
+            self.degree,
+            self.periodic,
+            float(origin),
+        )
+        if not self.use_numba:
+            points   = self._spl(u)
+            tangents = self._der(u)
+
+            # measured at the search's scale, so they neither overflow nor
+            # underflow
+            offsets   = np.ldexp(queries, -exponent) - np.ldexp(points, -exponent)
+            distances = np.ldexp(np.linalg.norm(offsets, axis=1), exponent)
 
         # Convert to user parameter space
         # This handles uniform (returns [0,1]) and registered offset
@@ -1846,95 +1854,6 @@ class BSplineData(Data):
             params    = params,
             basis     = basis,
         )
-
-    def _newton_scipy(self, queries, u_init, max_iters, tolerance):
-        """
-        Newton-Raphson refinement using scipy BSpline evaluation.
-
-        Fallback when use_numba=False.
-
-        Parameters
-        ----------
-        queries : np.ndarray
-            Query points (n, dims).
-        u_init : np.ndarray
-            Initial parameter guesses (n,).
-        max_iters : int
-            Maximum iterations.
-        tolerance : float
-            Convergence tolerance.
-
-        Returns
-        -------
-        tuple
-            (u, points, tangents) arrays.
-        """
-        u = u_init.copy()
-
-        # Get first and second derivatives
-        der1 = self._spl.derivative(1)
-        der2 = self._spl.derivative(2)
-
-        for _ in range(max_iters):
-            # Evaluate curve and derivatives at current u
-            C              = self._spl(u)
-            C_prime        = der1(u)
-            C_double_prime = der2(u)
-
-            # Vector from query to curve point
-            diff = C - queries
-
-            # f(u) = (C(u) - Q) * C'(u)
-            f = np.einsum("ij,ij->i", diff, C_prime)
-
-            # f'(u) = |C'(u)|^2 + (C(u) - Q) * C''(u)
-            f_prime = np.einsum("ij,ij->i", C_prime, C_prime) + np.einsum(
-                "ij,ij->i", diff, C_double_prime
-            )
-
-            # Avoid division by zero
-            f_prime = np.where(np.abs(f_prime) < 1e-14, 1e-14, f_prime)
-
-            # Newton step with trust region
-            du = -f / f_prime
-            du = np.clip(du, -0.5, 0.5)
-
-            # Update parameters
-            u_new = u + du
-
-            # Handle bounds
-            if self.periodic:
-                u_new = u_new % self._max_param
-                # Periodic distance: shortest signed step around the loop.
-                actual_step = u_new - u
-                actual_step = np.where(
-                    actual_step > self._max_param / 2,
-                    actual_step - self._max_param,
-                    actual_step,
-                )
-                actual_step = np.where(
-                    actual_step < -self._max_param / 2,
-                    actual_step + self._max_param,
-                    actual_step,
-                )
-            else:
-                u_new       = np.clip(u_new, 0, self._max_param)
-                actual_step = u_new - u
-
-            # Check convergence on the ACTUAL change (post-clip / post-wrap),
-            # not the requested du. Otherwise queries whose true closest
-            # point lies outside the domain oscillate forever.
-            if np.max(np.abs(actual_step)) < tolerance:
-                u = u_new
-                break
-
-            u = u_new
-
-        # Final evaluation
-        points   = self._spl(u)
-        tangents = der1(u)
-
-        return u, points, tangents
 
 
 # ------------------------------- Knots and fit ------------------------------- #

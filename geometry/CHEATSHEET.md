@@ -1693,6 +1693,17 @@ print(ring.basis(np.array([0.5]), collapse=True).shape)   # (1, 5)
 
 ### Closest point projection — `sample()`
 
+`sample()` returns each query's exact closest spot on the whole curve: on a
+tight fold, a coil or past an open end it never settles for a stretch that
+only looks closest. A query exactly as close to two spots gets the smaller
+`u`: an open curve's ends are measured exactly where `compute()` puts them,
+so they tie exactly when it says they do, while other spots are found to
+within rounding, so two mirror images go to whichever comes out closer.
+There is nothing to tune, and `use_numba=False` runs the same search, then
+evaluates the result with scipy. The curve's size does not matter (scaled by
+1e160 or 1e-170 it gives the same `u`); a query some 1e150 times the curve's
+largest coordinate out raises `ValueError`.
+
 ```python
 queries = np.array([[0.0, 3.0, 0.0], [3.0, -1.0, 0.0], [6.0, 3.0, 0.0]])
 sd      = curve.sample(queries)

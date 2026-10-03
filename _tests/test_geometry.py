@@ -20,6 +20,7 @@ from cgmath.geometry.mesh import (
     UVList,
 )
 from cgmath.geometry.utils import compute_topological_neighborhood, ordered_closest_params
+from scipy.spatial import cKDTree
 
 EPSILON = np.finfo(np.float32).eps
 
@@ -3372,18 +3373,24 @@ class TestBSplineFit(unittest.TestCase):
             self.assertTrue(np.allclose(a.points, b.points, atol=1e-9), tag)
             self.assertTrue(np.allclose(a.params, b.params, atol=1e-9), tag)
 
-    def test_sample_newton_matches_scipy(self):
-        # numba's closest-point Newton step uses the exact second
-        # derivative, so it takes the same steps as scipy's; a knot index
-        # one off made them drift apart (3e-4 after one step)
+    def test_sample_search_ignores_use_numba(self):
+        # use_numba=False runs the same exact search, so it finds the very
+        # same params; only the points, tangents and basis there come from
+        # scipy. The coarse search's tuning arguments are gone
         queries = self.CHAIN + np.random.default_rng(3).normal(scale=0.2, size=self.CHAIN.shape)
         for knots in (None, self.MAYA_KNOTS):
-            fast = BSplineData(points=self.MAYA_CVS, knots=knots)
-            slow = BSplineData(points=self.MAYA_CVS, knots=knots, use_numba=False)
-            for iterations in (1, 2):
-                a = fast.sample(queries, max_newton_iters=iterations).params
-                b = slow.sample(queries, max_newton_iters=iterations).params
-                self.assertTrue(np.allclose(a, b, atol=1e-12), (knots is None, iterations))
+            fast = BSplineData(points=self.MAYA_CVS, knots=knots).sample(queries)
+            slow = BSplineData(points=self.MAYA_CVS, knots=knots, use_numba=False).sample(queries)
+            tag  = knots is None
+            self.assertTrue(np.array_equal(fast.params, slow.params), tag)
+            for a, b in ((fast.points, slow.points), (fast.tangents, slow.tangents),
+                         (fast.basis, slow.basis)):
+                self.assertTrue(np.allclose(a, b, atol=1e-12), tag)
+
+        curve = BSplineData(points=self.MAYA_CVS)
+        for name in ("initial_samples", "max_newton_iters", "tolerance"):
+            with self.assertRaises(TypeError):
+                curve.sample(queries, **{name: 10})
 
     def test_knots_serialize(self):
         curve = BSplineData()
@@ -3418,6 +3425,232 @@ class TestBSplineFit(unittest.TestCase):
         curve.open()
         self.assertIsNone(curve.knots)
         self.assertTrue(np.allclose(curve.kv, BSplineData(points=curve.points).kv))
+
+
+class TestBSplineSample(unittest.TestCase):
+    """
+    sample() finds each query's exact closest spot on the whole curve: never
+    farther than the nearest of 200,000 spots along it. The coarse search
+    plus Newton it replaced missed 952 of 132,000 random queries over 66
+    cubic curves: on folds whose legs nearly touch, on coils, and where the
+    closest spot is an open end (Newton walked away from it).
+    """
+
+    @staticmethod
+    def hairpin(gap):
+        """12 joints up a leg and down another one gap away, starting a little higher"""
+        up   = np.column_stack([np.zeros(6), np.linspace(0.0, 5.0, 6), np.zeros(6)])
+        down = np.column_stack([np.full(6, gap), np.r_[5.2, np.linspace(4.0, 0.0, 5)], np.zeros(6)])
+        return np.vstack([up, down])
+
+    @staticmethod
+    def near(curve, count, noise, seed=0):
+        """count queries scattered by noise around random spots of the curve"""
+        rng = np.random.default_rng(seed)
+        on  = curve.compute(rng.uniform(curve.min_param, curve.max_param, count))[0]
+        return on + rng.normal(scale=noise, size=on.shape)
+
+    def assert_closest(self, curve, queries, tag=None):
+        """sample() is no farther than the nearest dense spot, and consistent"""
+        found = curve.sample(queries)
+        u     = np.linspace(curve.min_param, curve.max_param, 200_000)
+        dense = cKDTree(curve.compute(u)[0]).query(queries)[0]
+        back  = curve.compute(found.params)[0]
+        gaps  = np.linalg.norm(queries - found.points, axis=1)
+
+        self.assertTrue(np.all(found.distances <= dense + 1e-12),       tag)
+        self.assertTrue(np.allclose(back, found.points, atol=1e-9),     tag)
+        self.assertTrue(np.allclose(gaps, found.distances, atol=1e-12), tag)
+        return found
+
+    def test_hairpin(self):
+        # legs 0.01 and 0.001 apart: every joint is on the curve, at its own u
+        for gap in (0.01, 0.001):
+            joints = self.hairpin(gap)
+            curve  = BSplineData.from_edit_points(joints)
+            found  = self.assert_closest(curve, joints, gap)
+            self.assertTrue(np.all(found.distances < 1e-9), gap)
+            self.assertTrue(np.allclose(found.params, BSplineData().fit(joints), atol=1e-9), gap)
+            self.assert_closest(curve, self.near(curve, 2000, gap), gap)
+
+    def test_helix(self):
+        # 4 turns 0.031 apart, a best fit to 16 control points
+        angles = np.linspace(0.0, 8.0 * np.pi, 64)
+        helix  = np.column_stack([np.cos(angles), np.sin(angles), 0.005 * angles])
+        curve  = BSplineData()
+        curve.fit(helix, count=16)
+        self.assert_closest(curve, helix)
+        self.assert_closest(curve, self.near(curve, 2000, 0.02))
+
+    def test_open_end(self):
+        # the closest spot is the start, whose slope points away from a
+        # farther stretch Newton used to slide to
+        for dims in (2, 3):
+            points = np.array([[3.0, 0.0, 0.0], [3.0, 2.0, 0.0], [0.0, -3.0, 0.0],
+                               [-3.0, -3.0, 0.0]])[:, :dims]
+            query = np.array([[2.9, -1.0, 0.0]])[:, :dims]
+            found = self.assert_closest(BSplineData(points=points), query, dims)
+            self.assertEqual(found.params[0], 0.0, dims)
+            self.assertTrue(np.isclose(found.distances[0], np.sqrt(1.01)), dims)
+
+    def test_periodic_seam(self):
+        # queries just off the curve on either side of the seam come back
+        # there, in [0, max_param), registered or not
+        angles = 2 * np.pi * np.arange(8) / 8
+        loop   = np.column_stack([3 * np.cos(angles), np.sin(3 * angles), 2 * np.sin(angles)])
+        for registered in (False, True):
+            curve = BSplineData(points=loop, periodic=True, registered=registered)
+            top   = curve.max_param
+            u     = np.array([0.0, 1e-3, top - 1e-3, 1e-9, top - 1e-9])
+            on, tangents = curve.compute(u)
+            side = np.cross(tangents, [0.0, 1.0, 0.0])
+            side /= np.linalg.norm(side, axis=1, keepdims=True)
+            found = self.assert_closest(curve, on + 0.01 * side, registered)
+            steps = (found.params - u + top / 2) % top - top / 2
+
+            self.assertTrue(np.all((found.params >= 0.0) & (found.params < top)), registered)
+            self.assertTrue(np.allclose(steps, 0.0, atol=1e-7), registered)
+
+    def test_exact_tie(self):
+        # a query exactly as close to several spots gets the smallest u
+        square = np.array([[1.0, 1.0, 0.0], [-1.0, 1.0, 0.0], [-1.0, -1.0, 0.0],
+                           [1.0, -1.0, 0.0]])
+        center = np.zeros((1, 3))
+        for degree, registered, expected in ((1, False, 0.5), (2, False, 0.0), (2, True, 0.5),
+                                             (3, False, 0.5), (3, True, 0.5)):
+            curve = BSplineData(points=square, degree=degree, periodic=True,
+                                registered=registered)
+            found = curve.sample(center)
+            tag   = (degree, registered)
+            self.assertTrue(np.isclose(found.params[0], expected, atol=1e-12), tag)
+
+        # both ends of an arch, below it
+        arch  = np.array([[-2.0, 0.0, 0.0], [-2.0, 2.0, 0.0], [2.0, 2.0, 0.0], [2.0, 0.0, 0.0]])
+        found = BSplineData(points=arch).sample(np.array([[0.0, -5.0, 0.0]]))
+        self.assertEqual(found.params[0], 0.0)
+        self.assertEqual(found.distances[0], np.sqrt(29.0))
+
+    def test_exact_tie_at_the_ends(self):
+        # both ends of an open curve exactly as close, as compute() puts
+        # them, and the closest spots: the start wins. Arches of degree 1 to
+        # 5 seen from straight below, and a curve drawn as a loop, its ends
+        # one spot, seen from just outside it
+        angles   = np.linspace(0.0, 2.0 * np.pi, 10)
+        loop     = np.column_stack([3.0 * np.cos(angles), 3.0 * np.sin(angles), np.zeros(10)])
+        loop[-1] = loop[0]
+        cases    = [(loop, 3, [3.1, 0.0, 0.0])]
+        for degree in range(1, 6):
+            count = degree + 1 + (degree == 1)
+            for width in (0.3, 0.7, 1.1, 1.3, 1.7, 2.9):
+                x    = width * np.cos(np.linspace(np.pi, 0.0, count))
+                x    = 0.5 * (x - x[::-1])  # exactly mirrored
+                arch = np.column_stack([x, np.r_[0.0, np.ones(count - 2), 0.0], np.zeros(count)])
+                cases.extend((arch, degree, [0.0, -depth, 0.0]) for depth in (0.5, 1.0, 3.0))
+
+        ties = 0
+        for points, degree, query in cases:
+            for use_numba in (True, False):
+                curve = BSplineData(points=points, degree=degree, use_numba=use_numba)
+                ends  = curve.compute(np.array([curve.min_param, curve.max_param]))[0]
+                gaps  = np.linalg.norm(ends - query, axis=1)
+                found = curve.sample(np.array([query]))
+
+                # skip: no exact tie, or a spot in between is closer
+                if gaps[0] != gaps[1] or found.distances[0] < gaps[0]:
+                    continue
+                tag = (points.tolist(), degree, query, use_numba)
+                ties += 1
+                self.assertEqual(found.params[0], 0.0, tag)
+                self.assertEqual(found.distances[0], gaps[0], tag)
+        self.assertGreater(ties, 100)
+
+    def test_exact_tie_far_away(self):
+        # both ends of a polyline, from far below it. From 1e5 away the box
+        # around the start's piece rounds to exactly the best distance: it is
+        # still searched, or the end would win
+        bend = np.array([[-1.0, 0.0, 0.0], [-1.0, 1.0, 0.0], [0.5, 1.0, 0.0], [1.0, 0.0, 0.0]])
+        for use_numba in (True, False):
+            curve = BSplineData(points=bend, degree=1, use_numba=use_numba)
+            for depth in (1.0, 1e5, 1e7):
+                found = curve.sample(np.array([[0.0, -depth, 0.0]]))
+                self.assertEqual(found.params[0], 0.0, (use_numba, depth))
+
+    def test_degree_one_and_corners(self):
+        # polylines and curves with a corner (a knot repeated degree times),
+        # use_numba True and False: the same params
+        rng    = np.random.default_rng(1)
+        points = rng.uniform(-1.0, 1.0, (7, 3))
+        cases = (
+            dict(points=points[:4], degree=1),
+            dict(points=points[:4], degree=1, periodic=True),
+            dict(points=points, degree=3, knots=np.array([0, 0, 0, 1, 1, 1, 2, 2, 2.0])),
+            dict(points=points[:5], degree=2, knots=np.array([0, 0, 1, 1, 2, 2.0])),
+        )
+        queries = rng.uniform(-1.2, 1.2, (500, 3))
+        for settings in cases:
+            tag  = str(settings)
+            fast = self.assert_closest(BSplineData(**settings), queries, tag)
+            slow = self.assert_closest(BSplineData(**settings, use_numba=False), queries, tag)
+            self.assertTrue(np.array_equal(fast.params, slow.params), tag)
+
+    def test_2d_and_3d(self):
+        # random walks, queries all over their bounding box
+        rng = np.random.default_rng(2)
+        for dims, count in ((2, 20), (3, 64)):
+            for periodic in (False, True):
+                curve = BSplineData(points=np.cumsum(rng.normal(size=(count, dims)), axis=0),
+                                    periodic=periodic)
+                on   = curve.compute(np.linspace(curve.min_param, curve.max_param, 2000))[0]
+                low  = on.min(axis=0) - 0.1 * np.ptp(on, axis=0)
+                high = on.max(axis=0) + 0.1 * np.ptp(on, axis=0)
+                found = self.assert_closest(curve, rng.uniform(low, high, (2000, dims)),
+                                            (dims, periodic))
+                self.assertEqual(found.points.shape, (2000, dims))
+
+    def test_queries_checked(self):
+        # not finite, not the curve's dims, or so far out (1e155 here) that
+        # a squared distance could overflow
+        curve = BSplineData(points=np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0],
+                                             [3.0, 1.0, 0.0]]))
+        for queries in ([[np.nan, 0.0, 0.0]], [[np.inf, 0.0, 0.0]], [[1.0, 2.0]],
+                        [[1e155, 0.0, 0.0]]):
+            with self.assertRaises(ValueError):
+                curve.sample(np.array(queries))
+
+        # one point, and nothing
+        self.assertEqual(curve.sample(np.array([1.0, 2.0, 0.0])).params.shape, (1,))
+        self.assertEqual(curve.sample(np.zeros((0, 3))).params.shape, (0,))
+
+    def test_control_points_checked(self):
+        # a control point that is not finite raises, as a query does
+        points = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0], [3.0, 1.0, 0.0]])
+        for bad in (np.nan, np.inf):
+            for use_numba in (True, False):
+                broken       = points.copy()
+                broken[1, 1] = bad
+                with self.assertRaises(ValueError):
+                    BSplineData(points=broken, use_numba=use_numba).sample(points)
+
+    def test_huge_and_tiny_curves(self):
+        # scaled by 1e160 or 1e-170, a curve's squared distances would
+        # overflow or underflow a double: the params are still the unscaled
+        # curve's, the rest scaled with it
+        points  = np.array([[1.0, 1.0, 0.0], [2.0, 0.0, 0.0], [3.0, 1.0, 0.0], [4.0, 0.0, 0.0]])
+        queries = np.array([[5.0, 0.0, 0.0], [3.9, 0.1, 0.0], [2.5, -1e-3, 0.0]])
+        for use_numba in (True, False):
+            found = BSplineData(points=points, use_numba=use_numba).sample(queries)
+            for scale in (1e160, 1e-170):
+                tag    = (use_numba, scale)
+                curve  = BSplineData(points=points * scale, use_numba=use_numba)
+                scaled = curve.sample(queries * scale)
+                on, tangents = curve.compute(scaled.params)
+
+                self.assertTrue(np.allclose(scaled.params, found.params, rtol=0.0, atol=1e-12), tag)
+                self.assertTrue(np.allclose(scaled.distances / scale, found.distances, rtol=1e-12,
+                                            atol=0.0), tag)
+                self.assertTrue(np.allclose(scaled.points, on, rtol=0.0, atol=1e-12 * scale), tag)
+                self.assertTrue(np.allclose(scaled.tangents, tangents, rtol=0.0, atol=1e-12 * scale),
+                                tag)
 
 
 class TestBSplineKnotRange(unittest.TestCase):
