@@ -5,6 +5,7 @@ import functools
 import inspect
 import json as original_json
 import locale
+import math
 import os
 import pstats
 import re
@@ -13,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from io import StringIO
+from itertools import chain, repeat
 from typing import Any, IO, Sequence
 
 import numpy as np
@@ -318,7 +320,8 @@ def run_tests(
 
 
 # ------------------------------- PRETTY JSON -------------------------------- #
-#   (pure python recursive serializer with columnar array formatting)
+#   (recursive serializer with columnar array formatting; numeric arrays are
+#   laid out a whole array at a time)
 
 _JSON_ESCAPE_MAP: dict[str, str] = {
     "\\": "\\\\",
@@ -571,6 +574,192 @@ def _format_nd_array(
     return separator.join(parts)
 
 
+# The same text for a numeric array, laid out a whole array at a time: saving
+# a 1000 x 1000 quad grid mesh to json takes 7.5 s through the per-value path
+# above, 1.8 s through this one.
+
+# the exact types a list may hold to be laid out in bulk, and their dtype
+_BULK_LIST_DTYPES: dict[type, type] = {float: np.float64, int: np.int64, bool: np.bool_}
+
+# the fewest values the bulk path takes: from here on it is the quicker of the
+# two for every kind and shape of array measured, while under it the
+# per-value path can be. That path writes a 1D column of ints or bools
+# cheaply, so one of those needs twice as many.
+_BULK_MIN_SIZE:        int = 64
+_BULK_MIN_SIZE_1D_INT: int = 128  # a 1D array of ints or bools
+
+# the most dimensions numpy 1 holds (numpy 2 holds 64): a list nested deeper
+# is left to the per-value path
+_BULK_MAX_NDIM: int = 32
+
+
+def _is_bulk_array(array: np.ndarray) -> bool:
+    """True if _format_array writes ``array`` as the per-value path writes its tolist()."""
+    # not a longdouble, whose tolist() keeps numpy scalars (on Windows it has
+    # a float64's size, so only its type tells the two apart), nor a masked
+    # array, whose tolist() writes its masked values as None
+    kind  = array.dtype.kind
+    least = _BULK_MIN_SIZE_1D_INT if array.ndim == 1 and kind in "biu" else _BULK_MIN_SIZE
+    return (
+        array.size >= least
+        and (kind in "biu" or (kind == "f" and array.dtype.type is not np.longdouble))
+        and type(array).tolist is np.ndarray.tolist
+    )
+
+
+def _list_array(obj: list | tuple) -> np.ndarray | None:
+    """A rectangular nest of lists of one exact number type as an array, or None.
+
+    float, int and bool qualify. A mix of them, a subclass (an IntEnum,
+    np.float64), a string or an empty row is left to the per-value path,
+    which writes each of those its own way. ``obj`` is not empty.
+    """
+    # a quick no for most lists, from the first value down: a nest that
+    # qualifies holds as many values as its first rows' lengths multiply to,
+    # all of the first value's type. The walk stops at _BULK_MAX_NDIM, so on
+    # a list that holds itself it ends too, and the per-value path raises its
+    # RecursionError as it always did.
+    ndim, size, first = 1, len(obj), obj[0]
+    while type(first) in (list, tuple) and first and ndim < _BULK_MAX_NDIM:
+        ndim += 1
+        size *= len(first)
+        first = first[0]
+    least = _BULK_MIN_SIZE_1D_INT if ndim == 1 and type(first) in (int, bool) else _BULK_MIN_SIZE
+    if size < least or type(first) not in _BULK_LIST_DTYPES:
+        return None
+
+    shape = [len(obj)]
+    items = obj
+    types = set(map(type, items))
+    while types <= {list, tuple}:
+        sizes = set(map(len, items))
+        if len(sizes) != 1 or 0 in sizes:
+            return None  # ragged, or an empty row
+        shape.append(sizes.pop())
+        items = list(chain.from_iterable(items))
+        types = set(map(type, items))
+
+    dtype = _BULK_LIST_DTYPES.get(types.pop()) if len(types) == 1 else None
+    if dtype is None:
+        return None
+    try:
+        return np.array(items, dtype=dtype).reshape(shape)
+    except OverflowError:  # an int past int64
+        return None
+
+
+def _number_strings(array: np.ndarray) -> tuple[list[str], np.ndarray]:
+    """Every value of a bool, int or float array as json writes it, in C order,
+    and the length of each, shaped like the array.
+    """
+    flat  = array.ravel()
+    kind  = flat.dtype.kind
+    table = None
+    if kind == "b":
+        table, index = ["false", "true"], flat.astype(np.intp)
+    elif kind == "i" or (kind == "u" and flat.dtype.itemsize < 8):  # what int64 holds
+        low, high = int(flat.min()), int(flat.max())
+        if high - low < flat.size:
+            # values that repeat (indices, counts): each one written once
+            table = list(map(str, range(low, high + 1)))
+            index = flat.astype(np.int64) - low
+
+    if table is not None:
+        lens = np.fromiter(map(len, table), np.intp, len(table))[index]
+        return np.array(table, dtype=object)[index].tolist(), lens.reshape(array.shape)
+
+    values = flat.tolist()
+    if kind == "f":
+        strs = list(map(repr, values))
+        # NaN and the infinities: the bare tokens _float_to_str writes
+        for i in np.flatnonzero(~np.isfinite(flat)).tolist():
+            strs[i] = _float_to_str(values[i])
+    else:
+        strs = list(map(str, values))
+    return strs, np.fromiter(map(len, strs), np.intp, len(strs)).reshape(array.shape)
+
+
+def _format_array(
+    array:          np.ndarray,
+    start_col:      int,
+    max_line_width: int,
+) -> str:
+    """The text _format_nd_array writes for ``array.tolist()``, laid out in bulk.
+
+    Each value is written once, and numpy works out every column's padding:
+    a 1D array is one column, a 2D one has its columns, and a 3D+ one the
+    columns of each of its 2D blocks. What goes between two values (padding,
+    a comma, line breaks, brackets) comes from a handful of distinct texts,
+    each built once, and one join strings the lot together.
+    """
+    strs, lens = _number_strings(array)
+    count = len(strs)
+
+    # a column runs down axis -2, or is the whole of a 1D array (_pad_column)
+    axis  = 0 if array.ndim == 1 else -2
+    width = lens.max(axis, keepdims=True)
+    left  = width - lens  # right-justified
+    if array.dtype.kind == "f":
+        # decimal-aligned in a column whose every value has a point (_decimal_align)
+        dots  = np.fromiter(map(str.find, strs, repeat(".")), np.intp, count).reshape(array.shape)
+        point = (dots >= 0).all(axis, keepdims=True)
+        head  = dots.max(axis, keepdims=True)           # the widest part before the point
+        tail  = (lens - dots).max(axis, keepdims=True)  # and from the point on
+        left  = np.where(point, head - dots, left)
+        width = np.where(point, head + tail, width)
+    right = width - left - lens
+
+    # what follows each value is texts[kinds[i]]: a comma, or a line's end
+    kinds = np.zeros(count, np.intp)
+    if array.ndim == 1:
+        # one line if it fits, or if wrapped it would take two (_format_flat_list)
+        single   = int(lens.sum()) + 2 * count + 2
+        per_line = max(1, (max_line_width - start_col) // (int(width[0]) + 2))
+        if start_col + single <= max_line_width or count <= 2 * per_line:
+            return "[ " + ", ".join(strs) + " ]"
+
+        texts = [", ", ",\n" + " " * (start_col + 2)]
+        # a line ends after every per_line values
+        kinds[per_line - 1 :: per_line] = 1
+        opening, closing = "[ ", " ]"
+    else:
+        # a row ends with its bracket, those of the blocks it closes, a comma,
+        # a line break and a blank line per level it climbs, then the opening
+        # brackets of the next row (_format_nd_array); innermost level first,
+        # so a block's end overwrites its last row's
+        ndim  = array.ndim
+        texts = [", "]
+        ends  = kinds[array.shape[-1] - 1 :: array.shape[-1]]  # a view: one per row
+        for level in range(ndim - 2, -1, -1):
+            block                    = math.prod(array.shape[level + 1 : -1])
+            closed                   = ndim - 2 - level
+            ends[block - 1 :: block] = len(texts)
+            texts.append(
+                " ]" + "]" * closed + "," + "\n" * (closed + 1)
+                + " " * (start_col + 1 + level) + "[" * closed + "[ "
+            )
+        opening, closing = "[" * (ndim - 1) + "[ ", " ]" + "]" * (ndim - 1)
+
+    kinds[-1] = len(texts)
+    texts.append(closing)
+
+    # after each value: its right padding, what follows it and the next
+    # value's left padding, numbered so each distinct gap is built once
+    left, right = left.ravel(), right.ravel()
+    size  = int(width.max()) + 1
+    codes = (kinds * size + right) * size + np.append(left[1:], 0)
+    gaps  = np.empty(len(texts) * size * size, dtype=object)
+    for code in np.flatnonzero(np.bincount(codes)).tolist():
+        kind, pads = divmod(code, size * size)
+        gaps[code] = " " * (pads // size) + texts[kind] + " " * (pads % size)
+
+    pieces       = [""] * (2 * count + 1)
+    pieces[0]    = opening + " " * int(left[0])
+    pieces[1::2] = strs
+    pieces[2::2] = gaps[codes].tolist()
+    return "".join(pieces)
+
+
 def _serialize(
     obj:            Any,
     depth:          int,
@@ -597,6 +786,8 @@ def _serialize(
         # the text itself: str() of a str Enum is its name, Mode.FAST
         return f'"{_escape_json_string(str.__str__(obj))}"'
     if isinstance(obj, np.ndarray):
+        if _is_bulk_array(obj):
+            return _format_array(np.asarray(obj), start_col, max_line_width)
         obj = obj.tolist()
         if not isinstance(obj, list):  # a 0-d array
             return _serialize(obj, depth, indent, max_line_width, start_col)
@@ -617,10 +808,14 @@ def _serialize(
         if not obj:
             return "[]"
 
-        if _is_uniform_nd(obj):
-            shape = _get_shape(obj)
-            if len(shape) >= 1:
-                return _format_nd_array(obj, start_col, indent, max_line_width)
+        array = _list_array(obj)
+        if array is not None:
+            return _format_array(array, start_col, max_line_width)
+
+        # one look at the shape here, where _is_uniform_nd then _get_shape
+        # took two (_format_nd_array takes its own)
+        if _uniform_shape(obj) is not None:
+            return _format_nd_array(obj, start_col, indent, max_line_width)
 
         # Non-uniform but all elements are lists -> inline brackets with spacing
         if all(isinstance(x, (list, tuple)) for x in obj):
@@ -657,6 +852,9 @@ def pretty_json(
 
     Arrays of uniform shape are formatted with aligned columns, wrapping
     at ``max_line_width``. Works identically for numeric and string lists.
+    A bool, int or float array, and a list nest holding one of those types,
+    is laid out a whole array at a time, to the same text, once it holds 64
+    values (128 for a 1D one of ints or bools).
 
     Args:
         data: The data to serialize (dict, list, or tuple).

@@ -1,15 +1,23 @@
+import enum
 import json as stdlib_json
 import math
 import os
+import sys
 import tempfile
+import threading
 import unittest
+from unittest import mock
 
 import numpy as np
+from cgmath import utils
 from cgmath.utils import (
     _escape_json_string,
+    _format_array,
+    _format_nd_array,
     _get_shape,
     _is_flat_list,
     _is_uniform_nd,
+    _list_array,
     json,
     pretty_json,
 )
@@ -382,6 +390,266 @@ class TestPrettyJsonEdgeCases(unittest.TestCase):
         result = pretty_json(data)
         parsed = stdlib_json.loads(result)
         self.assertEqual(parsed, data)
+
+
+# floats whose text differs in shape: with and without a point, an exponent,
+# a sign on zero, the bare tokens, the longest and shortest
+_EDGE_FLOATS = (
+    0.0, -0.0, 0.5, -12.25, 7.0, 100.0, 0.1, 3.141592653589793, 123456789.0,
+    1e-05, 1.5e-07, 1e16, 1.5e16, 1e-300, 5e-324, 1.7976931348623157e308,
+    float("nan"), float("inf"), float("-inf"),
+)
+_DTYPES = (
+    np.float64, np.float32, np.float16, np.int8, np.int32, np.int64, np.uint8,
+    np.uint64, np.bool_,
+)
+
+
+def _random_array(rng):
+    """an array of any dtype pretty_json lays out in bulk, of 1 to 4 dimensions"""
+    ndim  = int(rng.integers(1, 5))
+    shape = tuple(int(x) for x in rng.integers(1, 5, ndim))
+    if rng.random() < 0.5:  # often past the bulk writer's thresholds
+        shape = shape[:-1] + (int(rng.integers(8, 160)),)
+    dtype = _DTYPES[rng.integers(len(_DTYPES))]
+    if dtype == np.bool_:
+        return rng.random(shape) < 0.5
+    if np.issubdtype(dtype, np.integer):
+        info = np.iinfo(dtype)
+        high = min(info.max, int(rng.choice([9, 1000, info.max])))
+        return rng.integers(max(info.min, -high), high, shape, dtype=dtype, endpoint=True)
+
+    # a few of the edge floats, so some columns have a point throughout and some do not
+    pool   = rng.choice(np.array(_EDGE_FLOATS), int(rng.integers(1, 6)))
+    spread = rng.normal(0, 10.0 ** rng.integers(-3, 8), shape)
+    values = np.where(rng.random(shape) < 0.5, rng.choice(pool, shape), spread)
+    with np.errstate(over="ignore"):
+        return values.astype(dtype)
+
+
+def _random_tree(rng, depth=0):
+    """arrays, their lists, scalars, strings, dicts and tuples, nested"""
+    pick = int(rng.integers(7)) if depth < 3 else 0
+    if pick == 0:
+        scalars = (None, True, 3, -0.0, 1e-05, float("nan"), 'a\n"\u00e9"', np.float32(0.1))
+        return scalars[rng.integers(len(scalars))]
+    if pick == 1:
+        return _random_array(rng)
+    if pick == 2:
+        return _random_array(rng).tolist()  # exact floats, ints or bools
+    if pick == 3:
+        return _random_array(rng).reshape(-1, 1).tolist() + [[]]  # ragged
+    if pick == 4:
+        return {f"key {i}": _random_tree(rng, depth + 1) for i in range(rng.integers(4))}
+    items = [_random_tree(rng, depth + 1) for _ in range(rng.integers(4))]
+    return items if pick == 5 else tuple(items)
+
+
+def _json_from(least, data, **kwargs):
+    """pretty_json with the bulk writer taking arrays of ``least`` values or more"""
+    with mock.patch.multiple(utils, _BULK_MIN_SIZE=least, _BULK_MIN_SIZE_1D_INT=least):
+        return pretty_json(data, **kwargs)
+
+
+def _per_value_json(data, **kwargs):
+    """pretty_json with the bulk writer off: every value written one at a time"""
+    return _json_from(sys.maxsize, data, **kwargs)
+
+
+def _bulk_json(data, **kwargs):
+    """pretty_json with the bulk writer taking every numeric array, however short"""
+    return _json_from(1, data, **kwargs)
+
+
+class TestPrettyJsonBulk(unittest.TestCase):
+    """Numeric arrays, and lists of one number type, are laid out a whole
+    array at a time, to exactly the text the per-value path writes."""
+
+    def test_a_tree_writes_the_text_it_always_did(self):
+        # written by cgmath before the bulk writer existed
+        rows = [
+            [0.5, -12.25, 1e-05],
+            [3.0, float("nan"), 0.125],
+            [-0.0, 7.5, 100.0],
+            [42.0, float("inf"), -2.5],
+        ]
+        scale = np.array([1, -10, 100, 7, 1000, 3])
+        data = {
+            "rows":  np.array(rows * 3),
+            "ids":   np.arange(-3, 37, dtype=np.int32),
+            "flags": np.arange(40) % 3 == 0,
+            "block": np.arange(36, dtype=np.int64).reshape(2, 3, 6) * scale,
+        }
+        expected = "\n".join([
+            '{',
+            '    "rows": [[  0.5,   -12.25, 1e-05 ],',
+            '             [  3.0,      NaN, 0.125 ],',
+            '             [ -0.0,      7.5, 100.0 ],',
+            '             [ 42.0, Infinity,  -2.5 ],',
+            '             [  0.5,   -12.25, 1e-05 ],',
+            '             [  3.0,      NaN, 0.125 ],',
+            '             [ -0.0,      7.5, 100.0 ],',
+            '             [ 42.0, Infinity,  -2.5 ],',
+            '             [  0.5,   -12.25, 1e-05 ],',
+            '             [  3.0,      NaN, 0.125 ],',
+            '             [ -0.0,      7.5, 100.0 ],',
+            '             [ 42.0, Infinity,  -2.5 ]],',
+            '    "ids": [ -3, -2, -1,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13,',
+            '             14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,',
+            '             31, 32, 33, 34, 35, 36 ],',
+            '    "flags": [  true, false, false,  true, false, false,  true, false, false,',
+            '                true, false, false,  true, false, false,  true, false, false,',
+            '                true, false, false,  true, false, false,  true, false, false,',
+            '                true, false, false,  true, false, false,  true, false, false,',
+            '                true, false, false,  true ],',
+            '    "block": [[[  0,  -10,  200,  21,  4000, 15 ],',
+            '               [  6,  -70,  800,  63, 10000, 33 ],',
+            '               [ 12, -130, 1400, 105, 16000, 51 ]],',
+            '',
+            '              [[ 18, -190, 2000, 147, 22000,  69 ],',
+            '               [ 24, -250, 2600, 189, 28000,  87 ],',
+            '               [ 30, -310, 3200, 231, 34000, 105 ]]]',
+            '}',
+        ])
+        # these arrays are under the bulk writer's thresholds, so it is made
+        # to take them too
+        lists = {key: value.tolist() for key, value in data.items()}
+        for write in (pretty_json, _bulk_json):
+            with self.subTest(write.__name__):
+                self.assertEqual(write(data), expected)
+                self.assertEqual(write(lists), expected)
+
+    def test_any_tree_writes_as_the_per_value_path_does(self):
+        rng = np.random.default_rng(2024)
+        for case in range(300):
+            tree   = {"root": _random_tree(rng)}
+            indent = int(rng.choice([0, 2, 4]))
+            width  = int(rng.choice([1, 20, 40, 80, 500]))
+            text   = _per_value_json(tree, indent=indent, max_line_width=width)
+            for write in (pretty_json, _bulk_json):
+                with self.subTest(write.__name__, case=case, indent=indent, width=width):
+                    self.assertEqual(write(tree, indent=indent, max_line_width=width), text)
+
+    def test_small_arrays_lay_out_as_their_lists(self):
+        # under the thresholds pretty_json keeps the per-value path; the bulk
+        # one must agree there too
+        rng = np.random.default_rng(5)
+        for case in range(300):
+            array = _random_array(rng)[..., :3]
+            start = int(rng.integers(0, 40))
+            width = int(rng.choice([1, 20, 80]))
+            with self.subTest(case=case, shape=array.shape, dtype=array.dtype.name):
+                self.assertEqual(
+                    _format_array(array, start, width),
+                    _format_nd_array(array.tolist(), start, 4, width),
+                )
+
+    def test_lists_of_mixed_or_derived_types_keep_the_per_value_path(self):
+        class Mode(enum.IntEnum):
+            A = 1
+
+        # 200 values each, past the bulk writer's thresholds
+        cases = {
+            "int and float": [1, 2.5] * 100,  # the 1 stays 1, not 1.0
+            "bool and int":  [True, 2] * 100,
+            "np.float64":    [np.float64(0.5)] * 200,
+            "np.float32":    [np.float32(0.1)] * 200,
+            "IntEnum":       [Mode.A] * 200,
+            "past int64":    [2**64] * 200,
+            "ragged":        [[1.0, 2.0]] * 100 + [[1.0]],
+            "empty rows":    [[]] * 200,
+            "strings":       ["a"] * 200,
+        }
+        for name, value in cases.items():
+            with self.subTest(name):
+                self.assertIsNone(_list_array(value))
+                self.assertEqual(pretty_json({"v": value}), _per_value_json({"v": value}))
+
+    def test_a_masked_array_writes_its_masked_values_as_null(self):
+        array = np.ma.masked_array(np.arange(200.0), mask=np.arange(200) % 2 == 0)
+        text  = pretty_json({"v": array})
+        self.assertEqual(stdlib_json.loads(text)["v"][:3], [None, 1.0, None])
+        self.assertEqual(text, _per_value_json({"v": array}))
+
+    def test_a_longdouble_array_is_refused_as_before(self):
+        # its tolist() keeps numpy scalars, which would be written as
+        # np.longdouble('0.0'); on Windows it has a float64's size
+        for shape in ((200,), (100, 3)):
+            array = np.zeros(shape, np.longdouble)
+            with self.subTest(shape=shape):
+                self.assertFalse(utils._is_bulk_array(array))
+                with self.assertRaisesRegex(TypeError, "longdouble"):
+                    pretty_json({"v": array})
+
+    def test_a_short_list_is_turned_down_without_a_pass_over_it(self):
+        # pretty_json asks this of every list it writes: a short one, or one
+        # of strings or dicts, is answered from its first value down
+        class Watched(list):
+            passes = 0
+
+            def __iter__(self):
+                Watched.passes += 1
+                return super().__iter__()
+
+        cases = {
+            "3 floats":          Watched([1.0, 2.0, 3.0]),
+            "60 floats":         Watched([1.0] * 60),
+            "100 ints":          Watched([1] * 100),
+            "20 rows of 3 ints": Watched([[1, 2, 3]] * 20),
+            "200 strings":       Watched(["a"] * 200),
+            "200 dicts":         Watched([{"a": 1}] * 200),
+        }
+        for name, value in cases.items():
+            with self.subTest(name):
+                Watched.passes = 0
+                self.assertIsNone(_list_array(value))
+                self.assertEqual(Watched.passes, 0)
+
+    def test_short_arrays_and_lists_keep_the_per_value_path(self):
+        # where it can be the quicker one: under 64 values, or 128 for a 1D
+        # array of ints or bools
+        for shape, dtype, bulk in (
+            ((63,), float, False), ((64,), float, True),
+            ((127,), int, False), ((128,), int, True),
+            ((127,), bool, False), ((128,), bool, True),
+            ((21, 3), int, False), ((16, 4), int, True),
+            ((3, 3, 7), float, False), ((2, 4, 8), float, True),
+        ):
+            array = np.ones(shape, dtype)
+            with self.subTest(shape=shape, dtype=dtype.__name__):
+                self.assertEqual(utils._is_bulk_array(array), bulk)
+                self.assertEqual(_list_array(array.tolist()) is not None, bulk)
+
+    def test_a_list_that_holds_itself_raises_as_before(self):
+        # the per-value path's recursion ends in a RecursionError; the bulk
+        # writer's walk down a list's first values has to end too
+        a = []
+        a.append(a)
+        b = []
+        b.extend([b, b])
+        for name, value in {"a = [a]": a, "b = [b, b]": b, "[a]": [a]}.items():
+            with self.subTest(name):
+                # in a thread, so a walk that never ends fails the test rather
+                # than hangs it
+                answer = []
+                thread = threading.Thread(
+                    target=lambda: answer.append(_list_array(value)), daemon=True
+                )
+                thread.start()
+                thread.join(10)
+                self.assertEqual(answer, [None])
+                with self.assertRaises(RecursionError):
+                    pretty_json({"v": value})
+
+    def test_a_list_nested_deeper_than_numpy_holds_writes_as_before(self):
+        # numpy holds 32 dimensions (64 in numpy 2), the per-value path any number
+        for ndim in (33, 70):
+            value = [0.5] * 200
+            for _ in range(ndim - 1):
+                value = [value]
+            with self.subTest(ndim=ndim):
+                self.assertIsNone(_list_array(value))
+                self.assertEqual(pretty_json({"v": value}), _per_value_json({"v": value}))
 
 
 class TestRunTestsFindsEverySuite(unittest.TestCase):
