@@ -1,5 +1,6 @@
 import os
 import pickle
+import re
 import tempfile
 import unittest
 
@@ -38,6 +39,38 @@ class TestProcrustesData(unittest.TestCase):
             counts=np.array([4, 4, 4, 4, 4, 4]),
         )
 
+
+    def test_field_shapes_name_the_documented_dimensions(self):
+        # N points, M constraints, K the widest cluster, as in the README
+        constraint = ProcrustesData(self.box)
+        with self.assertRaisesRegex(ValueError, r"points must have shape \(N, 3\)"):
+            constraint.points = np.zeros((8, 2))
+        with self.assertRaisesRegex(ValueError, r"transforms must have shape \(M, 4, 4\)"):
+            constraint.transforms = np.eye(3)
+        with self.assertRaisesRegex(ValueError, r"clusters must have shape \(M, K\)"):
+            constraint.clusters = np.zeros((2, 3, 4), dtype=np.int32)
+
+    def test_every_attach_checks_the_matrix_shape(self):
+        # the first attach and every later one give the same shape error,
+        # and none of them leaves a cluster without its transform
+        for bad in (np.eye(3), np.eye(4)[None], np.zeros(0)):
+            message = rf"must have shape \(4, 4\), got {re.escape(str(bad.shape))}"
+
+            with self.subTest("first attach", shape=bad.shape):
+                first = ProcrustesData(self.box)
+                with self.assertRaisesRegex(ValueError, message):
+                    first.attach(bad, [0, 1, 2])
+                self.assertIsNone(first.transforms)
+                self.assertIsNone(first.clusters)
+
+            with self.subTest("later attach", shape=bad.shape):
+                later = ProcrustesData(self.box)
+                later.attach(np.eye(4), [0, 1, 2, 3])
+                with self.assertRaisesRegex(ValueError, message):
+                    later.attach(bad, [4, 5, 6])
+                self.assertEqual(later.transforms.shape, (1, 4, 4))
+                self.assertEqual(later.clusters.shape, (1, 4))
+                self.assertTrue(later.valid)
 
     def test_procrustes(self):
 

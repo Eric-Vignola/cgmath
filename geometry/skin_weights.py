@@ -1033,9 +1033,10 @@ def _read_skins_fbx(filename: str, bind_matrices: bool = False) -> list:
     if fbx is None:
         raise ImportError("Autodesk FBX Python SDK is not installed")
 
-    # imported here rather than at module scope: transforms reaches
-    # back into cgmath.geometry as it loads, so a top level import closes the
-    # cycle. cgmath.geometry.mesh is lazy for symmetry, not necessity.
+    # imported here rather than at module scope: cgmath.hierarchy imports
+    # formats.glb, which imports cgmath.geometry, so a top level import closes
+    # the cycle while cgmath.geometry is still loading.
+    # cgmath.geometry.mesh is lazy for symmetry, not necessity.
     from cgmath.geometry.mesh import _walk_fbx_mesh_nodes
     from cgmath.hierarchy import _fbx_enum, _walk_fbx
 

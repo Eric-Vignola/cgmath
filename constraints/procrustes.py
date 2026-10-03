@@ -10,9 +10,9 @@ from cgmath.transforms import matrix_inverse, matrix_multiply, matrix_to_euler
 
 @dataclass(repr=False, eq=False)
 class ProcrustesData(Data):
-    points:        Optional[Array(np.float64, "P", 3)] = None     # rest points
-    transforms:    Optional[Array(np.float64, "K", 4, 4)] = None  # one per cluster
-    clusters:      Optional[Array(np.int32, "K", "M")] = None     # point indices, -1 padded
+    points:        Optional[Array(np.float64, "N", 3)] = None     # rest points
+    transforms:    Optional[Array(np.float64, "M", 4, 4)] = None  # one per cluster
+    clusters:      Optional[Array(np.int32, "M", "K")] = None     # point indices, -1 padded
     _scale_offset: bool = True                                    # whether to apply scale to offset matrix
 
     # --- cached attributes: the per-frame target and results, not saved --- #
@@ -62,7 +62,11 @@ class ProcrustesData(Data):
             self.points = np.asarray(target)
 
     def attach(self, transform: np.ndarray, indices: np.ndarray | None = None):
-        """Attach a 4x4 transform matrix to a specified cluster of point indices"""
+        """Attach a 4x4 transform matrix to a specified cluster of point indices.
+
+        A matrix of any other shape raises ValueError, on the first attach and
+        every later one, and leaves the object as it was.
+        """
 
         # if indices is None, then use all points
         if indices is None:
@@ -73,8 +77,12 @@ class ProcrustesData(Data):
             indices = np.unique(np.asarray(indices, dtype=np.int32))
             indices = indices[indices >= 0]  # get rid of -1's
 
-        # store inside self.matrix
+        # store inside self.transforms. Check the matrix first: the field only
+        # checks the whole stack, and a later attach builds that stack with
+        # np.concatenate, which fails on a wrong shape with numpy's own message
         transform = np.asarray(transform, dtype=np.float64)
+        if transform.shape != (4, 4):
+            raise ValueError(f"{type(self).__name__}.attach() transform must have shape (4, 4), got {transform.shape}")
         if self.transforms is None:
             self.transforms = transform[None]
         else:

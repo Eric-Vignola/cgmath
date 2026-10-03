@@ -44,8 +44,8 @@ from cgmath.geometry._base import Array, Data
 
 
 if TYPE_CHECKING:
-    # NEVER import transforms at module scope: this module is reachable
-    # during cgmath.geometry.__init__, and transforms imports back into a
+    # NEVER import cgmath.hierarchy at module scope: this module is reachable
+    # during cgmath.geometry.__init__, and hierarchy imports back into a
     # partially initialized cgmath.geometry via formats.glb.
     from cgmath.hierarchy import HierarchyData
 

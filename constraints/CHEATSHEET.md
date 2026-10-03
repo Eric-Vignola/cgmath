@@ -122,7 +122,8 @@ print(c.points.shape)           # (3, 3)
 Fields are dataclass fields — you can fill `transforms` and `clusters`
 in bulk instead of calling `attach()` in a loop. Every assignment is
 converted to the field's dtype (`clusters` int32, the others float64), and
-a wrong fixed dimension raises `ValueError`.
+a wrong fixed dimension raises `ValueError` naming the shape with the
+letters of the table above.
 
 ```python
 bulk            = ProcrustesData(CUBE_POINTS)
@@ -133,8 +134,8 @@ print(bulk.clusters.dtype)  # int32
 
 try:
     bulk.transforms = np.eye(3)
-except ValueError:
-    print("a (3, 3) is not a stack of 4x4 matrices")
+except ValueError as err:
+    print(err)  # ProcrustesData.transforms must have shape (M, 4, 4), got (3, 3)
 ```
 
 ---
@@ -191,7 +192,8 @@ print(offset.transforms[0][3, :3])      # [0. 0. 1.]
 ```
 
 The matrix can be a nested list too. Anything that is not 4x4 raises
-`ValueError` and leaves the object as it was.
+`ValueError` and leaves the object as it was — the same error on the
+first `attach()` and on every later one.
 
 ```python
 listed = ProcrustesData(CUBE_POINTS)
@@ -199,7 +201,8 @@ listed.attach(np.eye(4).tolist(), FRONT)
 print(listed.transforms.dtype)  # float64
 try:
     listed.attach(np.eye(3), BACK)
-except ValueError:
+except ValueError as err:
+    print(err)                      # ProcrustesData.attach() transform must have shape (4, 4), got (3, 3)
     print(listed.transforms.shape)  # (1, 4, 4) — not attached
 ```
 

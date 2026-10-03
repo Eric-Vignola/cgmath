@@ -592,12 +592,11 @@ class Object(TransformData):
     def _bind_target(self) -> MeshData:
         """The bind-pose mesh to hand the deformer, built once and cached.
 
-        Topology comes from ``_mesh`` and points from ``_skin.rest_points``,
-        rather than from the deformer's own ``_rest_mesh``, because that one
-        is a cache and does not survive a save/load -- ``rest_points`` is a
-        real field and does.  Rebuilding it also means this stays correct
-        when ``_mesh`` currently holds a POSED mesh, which it does from the
-        second frame onward.
+        Topology comes from ``_mesh`` and points from ``_skin.rest_points``:
+        the deformer keeps the bind points but no mesh, and ``rest_points``
+        is a real field, so it survives a save/load.  Rebuilding it also
+        means this stays correct when ``_mesh`` currently holds a POSED mesh,
+        which it does from the second frame onward.
         """
         if self._bind_mesh is None:
             mesh        = self._mesh.copy()
