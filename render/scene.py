@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
+from cgmath.formats._fbx_io import FbxReadError, open_fbx
 from cgmath.geometry.deform import SkinDeformData
 from cgmath.geometry.mesh import (
     load_fbx as _load_fbx,
@@ -369,7 +370,8 @@ class Object(TransformData):
                 material's diffuse (base color) map from the FBX and
                 assign it to the returned Object's :attr:`texture` via
                 :meth:`extract_texture_from_fbx`.  Embedded media is
-                automatically unpacked.  An explicit ``texture=`` in
+                read through a temporary folder; nothing is written
+                next to the file.  An explicit ``texture=`` in
                 ``object_kwargs`` always wins -- auto-extraction is
                 suppressed so caller-supplied textures are honoured.
             load_skin: When True (default), also read this mesh's skin
@@ -450,13 +452,12 @@ class Object(TransformData):
         """Extract the diffuse (base color) texture from an FBX file and
         wire it into this Object's :attr:`texture`.
 
-        Uses :func:`_extract_fbx_textures` internally, which enables FBX
-        embedded-media extraction (``IMP_FBX_EXTRACT_EMBEDDED_DATA``) so
-        textures packed inside the FBX container resolve to readable
-        files on disk.  Also extracts the other standard PBR-ish slots
-        (``normal`` / ``specular`` / ``emissive`` / ``occlusion``);
-        those are discarded here but the parser is ready for a future
-        multi-texture shader upgrade.
+        Uses :func:`_extract_fbx_textures` internally, which reads
+        textures packed inside the FBX container through a temporary
+        folder deleted after the read.  Also extracts the other standard
+        PBR-ish slots (``normal`` / ``specular`` / ``emissive`` /
+        ``occlusion``); those are discarded here but the parser is ready
+        for a future multi-texture shader upgrade.
 
         Args:
             file_path: Path to the ``.fbx`` file (``~`` and env vars OK).
@@ -3824,10 +3825,10 @@ def _find_fbx_file_texture(prop):
 def _load_fbx_texture_to_array(file_texture, fbx_path: str) -> Optional[np.ndarray]:
     """Resolve an FbxFileTexture to a ``(H, W, C) uint8`` numpy array.
 
-    Tries the absolute path first (this is what the SDK populates after
-    ``IMP_FBX_EXTRACT_EMBEDDED_DATA`` extracts embedded media to disk),
-    then falls back to the relative path resolved against the FBX file's
-    directory.  Returns None when neither resolves to a readable file.
+    Tries the absolute path first (this is what the SDK populates after it
+    extracts embedded media to disk), then falls back to the relative path
+    resolved against the FBX file's directory.  Returns None when neither
+    resolves to a readable file.
     """
     path = file_texture.GetFileName()
     if not path or not os.path.exists(path):
@@ -3876,11 +3877,9 @@ def _extract_fbx_textures(
         are extracted here so a future multi-texture shader upgrade can
         consume them without rewriting this parser.
 
-        Enables ``IMP_FBX_EXTRACT_EMBEDDED_DATA`` on import so textures
-        packed inside the FBX container resolve to readable temp files.
-        Those files are written next to the FBX in a ``<name>.fbm/``
-        directory (Maya / Motionbuilder convention) and left in place
-        for subsequent calls.
+        Textures packed inside the FBX container are extracted to a
+        temporary folder, read, and deleted with it: nothing is written
+        next to the FBX.
     """
     if _fbx is None or Image is None:
         return {}
@@ -3889,58 +3888,33 @@ def _extract_fbx_textures(
     if not os.path.exists(file_path):
         return {}
 
-    manager = _fbx.FbxManager.Create()
     try:
-        ios = _fbx.FbxIOSettings.Create(manager, _fbx.IOSROOT)
-        # ``IMP_FBX_EXTRACT_EMBEDDED_DATA`` is a C macro in the FBX SDK
-        # that expands to the literal string ``"Import|ExtractEmbeddedData"``.
-        # Some Python bindings (notably Maya's bundled fbx module) expose
-        # only the ``EXP_*`` constants and omit the ``IMP_*`` ones, so we
-        # fall back to the raw IOSettings path string when the attribute
-        # is missing.
-        ios.SetBoolProp(
-            getattr(
-                _fbx,
-                "IMP_FBX_EXTRACT_EMBEDDED_DATA",
-                "Import|ExtractEmbeddedData",
-            ),
-            True,
-        )
-        manager.SetIOSettings(ios)
+        # embedded media go to a temporary folder that dies with the scene,
+        # so every texture is decoded inside the block
+        with open_fbx(file_path, _fbx, media=True) as scene:
+            mesh_nodes: list = []
+            _walk_fbx_mesh_nodes(scene.GetRootNode(), mesh_nodes)
+            if not mesh_nodes or not -len(mesh_nodes) <= mesh_index < len(mesh_nodes):
+                return {}
+            node = mesh_nodes[mesh_index]
 
-        importer = _fbx.FbxImporter.Create(manager, "TexImporter")
-        if not importer.Initialize(file_path, -1, manager.GetIOSettings()):
-            importer.Destroy()
-            return {}
-        scene = _fbx.FbxScene.Create(manager, "TexExtractScene")
-        if not importer.Import(scene):
-            importer.Destroy()
-            return {}
-        importer.Destroy()
+            n_materials = node.GetMaterialCount()
+            if n_materials == 0 or not -n_materials <= material_index < n_materials:
+                return {}
+            material = node.GetMaterial(material_index)
 
-        mesh_nodes: list = []
-        _walk_fbx_mesh_nodes(scene.GetRootNode(), mesh_nodes)
-        if not mesh_nodes or not -len(mesh_nodes) <= mesh_index < len(mesh_nodes):
-            return {}
-        node = mesh_nodes[mesh_index]
-
-        n_materials = node.GetMaterialCount()
-        if n_materials == 0 or not -n_materials <= material_index < n_materials:
-            return {}
-        material = node.GetMaterial(material_index)
-
-        result: dict = {}
-        for fbx_prop, slot_name in _FBX_TEXTURE_SLOTS.items():
-            prop = material.FindProperty(fbx_prop)
-            if not prop.IsValid():
-                continue
-            tex = _find_fbx_file_texture(prop)
-            if tex is None:
-                continue
-            decoded = _load_fbx_texture_to_array(tex, file_path)
-            if decoded is not None:
-                # setdefault so NormalMap wins over a later Bump entry
-                result.setdefault(slot_name, decoded)
-        return result
-    finally:
-        manager.Destroy()
+            result: dict = {}
+            for fbx_prop, slot_name in _FBX_TEXTURE_SLOTS.items():
+                prop = material.FindProperty(fbx_prop)
+                if not prop.IsValid():
+                    continue
+                tex = _find_fbx_file_texture(prop)
+                if tex is None:
+                    continue
+                decoded = _load_fbx_texture_to_array(tex, file_path)
+                if decoded is not None:
+                    # setdefault so NormalMap wins over a later Bump entry
+                    result.setdefault(slot_name, decoded)
+            return result
+    except FbxReadError:
+        return {}

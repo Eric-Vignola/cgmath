@@ -1,9 +1,13 @@
+import atexit
+import filecmp
 import logging
 import os
 import pathlib
+import shutil
 import warnings
 
 import numpy as np
+from cgmath.formats._fbx_io import import_scene, media_folder, new_manager
 
 LOGGER = logging.getLogger(__name__)
 
@@ -61,8 +65,30 @@ FBX Data manipulation class for Autodesk Maya
 """
 
 
+class _SceneLife:
+    """
+    Whether the FBX scene a SceneData loaded still exists, and which of its
+    objects were deleted. Every take, layer and curve read from it shares the
+    token, so once the scene is destroyed, or the object they wrap deleted,
+    they raise instead of reaching into freed memory, which crashes Maya.
+    """
+
+    __slots__ = ("alive", "deleted")
+
+    def __init__(self):
+        self.alive   = True
+        self.deleted = set()  # unique ids of the objects deleted from the scene
+
+
+# the _SceneLife of each scene a SceneData holds, by the scene's unique id
+_SCENE_LIVES = {}
+
+
 class BaseData:
     """Base class for FBX data objects with common functionality"""
+
+    _life = None  # the _SceneLife of the scene this was read from
+    _uid  = None  # the unique id of the FBX object wrapped
 
     def __init__(self, scene, data_object):
         """
@@ -74,6 +100,62 @@ class BaseData:
         """
         self._scene = scene
         self._data  = data_object
+
+        # a wrapper built by hand shares its scene's lifetime too
+        if scene is not None and data_object is not None:
+            self._life = _SCENE_LIVES.get(scene.GetUniqueID())
+            self._uid  = data_object.GetUniqueID()
+
+    @property
+    def _scene(self):
+        self._check_alive()
+        return self._fbx_scene
+
+    @_scene.setter
+    def _scene(self, value):
+        self._fbx_scene = value
+
+    @property
+    def _data(self):
+        self._check_alive()
+        return self._fbx_data
+
+    @_data.setter
+    def _data(self, value):
+        self._fbx_data = value
+
+    @property
+    def _destroyed(self) -> bool:
+        """whether the scene this was read from, or the object, is gone"""
+        life = self._life
+        return life is not None and (not life.alive or self._uid in life.deleted)
+
+    def _check_alive(self):
+        life = self._life
+        if life is None:
+            return
+
+        if not life.alive:
+            raise RuntimeError(
+                f"this {type(self).__name__} was read from an FBX scene that has "
+                "since been destroyed or reloaded; read it again from the SceneData"
+            )
+        if self._uid in life.deleted:
+            raise RuntimeError(f"this {type(self).__name__} was deleted from its FBX scene")
+
+    def _child(self, cls, *args):
+        """a ``cls`` read from this object's scene, sharing its lifetime"""
+        child       = cls(self._scene, *args)
+        child._life = self._life
+        child._uid  = child._fbx_data.GetUniqueID()
+        return child
+
+    def _retire(self):
+        """destroys the FBX object; every wrapper of it raises from now on"""
+        data = self._data
+        if self._life is not None:
+            self._life.deleted.add(data.GetUniqueID())
+        data.Destroy()
 
     @property
     def name(self):
@@ -153,6 +235,8 @@ class BaseData:
         Returns:
             str: String in format "ClassName('name_of_object')"
         """
+        if self._destroyed:
+            return f"{type(self).__name__}(<destroyed>)"
         return f"{type(self).__name__}('{self.name}')"
 
 
@@ -186,7 +270,7 @@ class TakeData(BaseData):
             anim_layer = self._data.GetSrcObject(
                 fbx.FbxCriteria.ObjectType(fbx.FbxAnimLayer.ClassId), i
             )
-            layer_data = LayerData(self._scene, anim_layer)
+            layer_data = self._child(LayerData, anim_layer)
             layer_list.append(layer_data)
 
         return layer_list
@@ -286,7 +370,7 @@ class TakeData(BaseData):
         self._data.AddMember(new_layer)
 
         # Return a LayerData object
-        return LayerData(self._scene, new_layer)
+        return self._child(LayerData, new_layer)
 
     @property
     def start_time(self):
@@ -719,8 +803,8 @@ class LayerData(BaseData):
                             anim_curve = curve_node.GetCurve(0)
                             if anim_curve:
                                 curve_key = f"{node_name}.{attribute_name}"
-                                curve_data = CurveData(
-                                    self._scene, anim_curve, curve_key
+                                curve_data = self._child(
+                                    CurveData, anim_curve, curve_key
                                 )
                                 curve_list.append(curve_data)
                         else:
@@ -734,8 +818,8 @@ class LayerData(BaseData):
                                         curve_key = f"{node_name}.{attribute_name}{channel_name}"
                                     else:
                                         curve_key = f"{node_name}.{attribute_name}[{k}]"
-                                    curve_data = CurveData(
-                                        self._scene, anim_curve, curve_key
+                                    curve_data = self._child(
+                                        CurveData, anim_curve, curve_key
                                     )
                                     curve_list.append(curve_data)
 
@@ -967,7 +1051,7 @@ class LayerData(BaseData):
         curve_key = f"{original_node_name}.{original_property_name}"
 
         # Return a CurveData object
-        return CurveData(self._scene, anim_curve, curve_key)
+        return self._child(CurveData, anim_curve, curve_key)
 
     def _translate_maya_to_fbx(self, node_name, property_name):
         """
@@ -1394,6 +1478,8 @@ class CurveData(BaseData):
         Returns:
             str: String in format "CurveData('maya_style_name')"
         """
+        if self._destroyed:
+            return "CurveData(<destroyed>)"
         maya_name = self._fbx_to_maya_name(self._curve_name)
         return f"CurveData('{maya_name}')"
 
@@ -1444,7 +1530,10 @@ class BaseList:
         Returns:
             str: String in format "ClassName([item_name,...])"
         """
-        item_names = [item.name for item in self._data]
+        item_names = [
+            "<destroyed>" if getattr(item, "_destroyed", False) else item.name
+            for item in self._data
+        ]
         return f"{type(self).__name__}({item_names})"
 
     def __iter__(self):
@@ -1474,7 +1563,7 @@ class BaseList:
         if isinstance(key, int):
             return self._data[key]
         elif isinstance(key, str):
-            for item in self._data:
+            for item in self._live_items():
                 if item.name == key:
                     return item
             raise KeyError(f"Item '{key}' not found in {type(self).__name__}")
@@ -1503,10 +1592,14 @@ class BaseList:
             bool: True if item is found in any item's name, False otherwise
         """
         search_str = str(item)
-        for data_item in self._data:
+        for data_item in self._live_items():
             if search_str in data_item.name:
                 return True
         return False
+
+    def _live_items(self):
+        """the items whose FBX object still exists"""
+        return [x for x in self._data if not getattr(x, "_destroyed", False)]
 
     def append(self, data_object):
         """
@@ -1537,7 +1630,7 @@ class BaseList:
         object_index     = None
 
         for i, obj in enumerate(self._data):
-            if obj.name == name:
+            if not getattr(obj, "_destroyed", False) and obj.name == name:
                 object_to_delete = obj
                 object_index     = i
                 break
@@ -1625,7 +1718,8 @@ class LayerList(BaseList):
                     layer = stack.GetSrcObject(
                         fbx.FbxCriteria.ObjectType(fbx.FbxAnimLayer.ClassId), j
                     )
-                    if layer == anim_layer:
+                    # == holds for any two layers in this binding
+                    if layer.GetUniqueID() == anim_layer.GetUniqueID():
                         parent_stack = stack
                         break
 
@@ -1637,7 +1731,7 @@ class LayerList(BaseList):
             parent_stack.RemoveMember(anim_layer)
 
         # Destroy the animation layer object
-        anim_layer.Destroy()
+        layer_to_delete._retire()
 
 
 class CurveList(BaseList):
@@ -1682,7 +1776,7 @@ class CurveList(BaseList):
         if isinstance(key, int):
             return self._data[key]
         elif isinstance(key, str):
-            for item in self._data:
+            for item in self._live_items():
                 # Check both FBX format name and Maya format name
                 fbx_name  = item.name  # This returns the FBX format
                 maya_name = item._fbx_to_maya_name(item._curve_name)
@@ -1709,6 +1803,8 @@ class CurveList(BaseList):
         curve_index     = None
 
         for i, curve in enumerate(self._data):
+            if curve._destroyed:
+                continue
             fbx_name  = curve.name
             maya_name = curve._fbx_to_maya_name(curve._curve_name)
 
@@ -1733,30 +1829,9 @@ class CurveList(BaseList):
         Args:
             curve_to_delete (CurveData): The curve object to delete from the scene
         """
-        # Get the FBX animation curve object
-        anim_curve = curve_to_delete._data
-
-        # Find and remove all connections to this curve
-        # Animation curves are connected through animation curve nodes
-        curve_node_count = curve_to_delete._scene.GetSrcObjectCount(
-            fbx.FbxCriteria.ObjectType(fbx.FbxAnimCurveNode.ClassId)
-        )
-
-        for i in range(curve_node_count):
-            curve_node = curve_to_delete._scene.GetSrcObject(
-                fbx.FbxCriteria.ObjectType(fbx.FbxAnimCurveNode.ClassId), i
-            )
-
-            # Check if this curve node contains our animation curve
-            channels_count = curve_node.GetChannelsCount()
-            for j in range(channels_count):
-                if curve_node.GetCurve(j) == anim_curve:
-                    # Remove the curve from this channel
-                    curve_node.DisconnectFromChannel(j)
-                    break
-
-        # Destroy the animation curve object
-        anim_curve.Destroy()
+        # Destroy the animation curve object; that also disconnects it from
+        # the curve node channel it drives
+        curve_to_delete._retire()
 
 
 class TakeList(BaseList):
@@ -1801,11 +1876,27 @@ class TakeList(BaseList):
             take_to_delete._scene.RemoveMember(anim_stack)
 
         # Destroy the animation stack object
-        anim_stack.Destroy()
+        take_to_delete._retire()
+
+
+# SceneData media folders not yet removed by close(), removed at exit
+_MEDIA_FOLDERS = set()
+
+
+@atexit.register
+def _remove_media_folders():
+    for folder in list(_MEDIA_FOLDERS):
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 class SceneData(BaseData):
-    """Class to manipulate animation data in FBX files from Autodesk Maya"""
+    """
+    Class to manipulate animation data in FBX files from Autodesk Maya
+
+    The scene lives until :meth:`close` (or :meth:`destroy`), which frees the
+    FBX SDK's memory: use it as a context manager, ``with SceneData(path) as
+    data:``. Takes, layers and curves read from it raise once it is closed.
+    """
 
     def __init__(self, filename=None):
         """
@@ -1818,8 +1909,10 @@ class SceneData(BaseData):
         """
         # Initialize BaseData with None initially (scene will be set on load)
         super().__init__(None, None)
-        self._manager  = None
-        self._filename = None
+        self._manager   = None
+        self._filename  = None
+        self._media     = None
+        self._scene_uid = None
 
         # If filename is provided, load it automatically
         if filename is not None:
@@ -1873,34 +1966,31 @@ class SceneData(BaseData):
         if not os.path.exists(expanded_filename):
             raise FileNotFoundError(f"FBX file not found: {expanded_filename}")
 
-        # Create FBX manager if it doesn't exist
-        if self._manager is None:
-            self._manager = fbx.FbxManager.Create()
-            ios           = fbx.FbxIOSettings.Create(self._manager, fbx.IOSROOT)
-            self._manager.SetIOSettings(ios)
+        # embedded media are extracted to a folder of this object's own, so
+        # save() can embed them again, and removed with the manager
+        made = self._manager is None
+        try:
+            if made:
+                self._media = media_folder()
+                if self._media is not None:
+                    _MEDIA_FOLDERS.add(self._media)
+                self._manager = new_manager(fbx, self._media or True)
 
-        # Create scene
-        self._scene = fbx.FbxScene.Create(self._manager, "ImportedScene")
+            scene = import_scene(self._manager, expanded_filename, fbx)
+        except BaseException:
+            if made:
+                self.destroy()
+            raise
 
-        # Create importer
-        importer = fbx.FbxImporter.Create(self._manager, "Importer")
-
-        # Initialize the importer
-        if not importer.Initialize(
-            expanded_filename, -1, self._manager.GetIOSettings()
-        ):
-            error = importer.GetStatus().GetErrorString()
-            importer.Destroy()
-            raise RuntimeError(f"Failed to initialize FBX importer: {error}")
-
-        # Import the scene
-        if not importer.Import(self._scene):
-            error = importer.GetStatus().GetErrorString()
-            importer.Destroy()
-            raise RuntimeError(f"Failed to import FBX scene: {error}")
-
-        # Clean up importer
-        importer.Destroy()
+        # a reload frees the previous scene, and with it everything read from it
+        if self._life is not None:
+            self._life.alive = False
+            _SCENE_LIVES.pop(self._scene_uid, None)
+            self._fbx_scene.Destroy()
+        self._life                    = _SceneLife()
+        self._scene                   = scene
+        self._scene_uid               = scene.GetUniqueID()
+        _SCENE_LIVES[self._scene_uid] = self._life
 
         # Store filename for reference
         self._filename = filename
@@ -2169,7 +2259,7 @@ class SceneData(BaseData):
         self._scene.AddMember(new_stack)
 
         # Create a TakeData object for the new take
-        take_data = TakeData(self._scene, new_stack)
+        take_data = self._child(TakeData, new_stack)
 
         # Create a default "BaseLayer" in the new take
         take_data.create_layer("BaseLayer")
@@ -2241,23 +2331,78 @@ class SceneData(BaseData):
         self._manager.GetIOSettings().SetBoolProp(fbx.EXP_FBX_ANIMATION, True)
         self._manager.GetIOSettings().SetBoolProp(fbx.EXP_FBX_GLOBAL_SETTINGS, True)
 
-        # Initialize the exporter
-        result = exporter.Initialize(
-            expanded_filename, file_format, self._manager.GetIOSettings()
-        )
-        if result == True:
-            result = exporter.Export(self._scene)
+        # media that lived only inside the source were extracted to this
+        # object's temporary folder: a file that does not embed them points at
+        # copies of its own, beside it, made once the file is written. The
+        # scene is pointed back afterwards, whatever happened.
+        moved = []
+        try:
+            if not embed_media:
+                self._point_media_beside(expanded_filename, moved)
 
-        if not result:
-            error = exporter.GetStatus().GetErrorString()
+            # Initialize the exporter
+            result = exporter.Initialize(
+                expanded_filename, file_format, self._manager.GetIOSettings()
+            )
+            if result == True:
+                result = exporter.Export(self._scene)
+
+            if not result:
+                error = exporter.GetStatus().GetErrorString()
+                raise RuntimeError(f"Failed to export FBX scene: {error}")
+
+            for source, target in {(x[3], x[4]) for x in moved}:
+                if os.path.isfile(target) and filecmp.cmp(source, target, shallow=False):
+                    continue
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.copy2(source, target)
+        finally:
+            # Clean up exporter
             exporter.Destroy()
-            raise RuntimeError(f"Failed to export FBX scene: {error}")
-
-        # Clean up exporter
-        exporter.Destroy()
+            for item, path, relative, _, _ in moved:
+                item.SetFileName(path)
+                item.SetRelativeFileName(relative)
 
         # Return the expanded filename on successful save
         return expanded_filename
+
+    def _point_media_beside(self, filename, moved):
+        """
+        Points every texture and video extracted to this object's temporary
+        folder at ``<stem>.fbm`` beside ``filename``. Each one goes into
+        ``moved`` first, as ``(object, file name, relative file name, source,
+        target)``, so a failure part way can still be put back.
+        """
+        if self._media is None:
+            return
+
+        filename = os.path.abspath(filename)
+        media    = os.path.normcase(os.path.abspath(self._media)) + os.sep
+        folder   = os.path.splitext(filename)[0] + ".fbm"
+
+        for kind in (fbx.FbxFileTexture, fbx.FbxVideo):
+            criteria = fbx.FbxCriteria.ObjectType(kind.ClassId)
+            for index in range(self._scene.GetSrcObjectCount(criteria)):
+                # the binding can hand back a live wrapper of another type for
+                # an object at a reused address: re-type it
+                item = self._scene.GetSrcObject(criteria, index)
+                if not isinstance(item, kind):
+                    item = fbx.cast(fbx.cast(item, fbx.FbxObject), kind)
+
+                # a texture's names come back as str, a video's as FbxString
+                name     = str(item.GetFileName())
+                relative = str(item.GetRelativeFileName())
+                path     = os.path.abspath(name or ".")
+                if not os.path.normcase(path).startswith(media) or not os.path.isfile(path):
+                    continue
+
+                # extracted as <media>/<source>.fbm/<file>: keep what follows
+                inside = os.path.relpath(path, self._media).split(os.sep, 1)[-1]
+                target = os.path.join(folder, inside)
+
+                moved.append((item, name, relative, path, target))
+                item.SetFileName(target)
+                item.SetRelativeFileName(os.path.relpath(target, os.path.dirname(filename)))
 
     @property
     def takes(self):
@@ -2279,7 +2424,7 @@ class SceneData(BaseData):
             anim_stack = self._scene.GetSrcObject(
                 fbx.FbxCriteria.ObjectType(fbx.FbxAnimStack.ClassId), i
             )
-            take_data = TakeData(self._scene, anim_stack)
+            take_data = self._child(TakeData, anim_stack)
             take_list.append(take_data)
 
         return take_list
@@ -2355,16 +2500,46 @@ class SceneData(BaseData):
         return nodes[1:]
 
     def destroy(self):
-        """Clean up FBX manager and scene"""
+        """
+        Frees the FBX manager and the scene; safe to call twice.
+
+        Takes, layers and curves read from this SceneData raise from now on.
+        """
+        if self._life is not None:
+            self._life.alive = False
+            self._life       = None
+            _SCENE_LIVES.pop(self._scene_uid, None)
+
         if self._manager is not None:
             self._manager.Destroy()
-            self._manager  = None
-            self._scene    = None
-            self._filename = None
+
+        if self._media is not None:
+            shutil.rmtree(self._media, ignore_errors=True)
+            _MEDIA_FOLDERS.discard(self._media)
+
+        self._manager  = None
+        self._scene    = None
+        self._data     = None
+        self._filename = None
+        self._media    = None
+
+    close = destroy
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.destroy()
+        return False
 
 
 class FbxExporter:
-    """Export fbx files from pipeline components"""
+    """
+    Export fbx files from pipeline components
+
+    The FBX SDK's memory is freed by :meth:`close`: use it as a context
+    manager, ``with FbxExporter() as exporter:``.
+    """
 
     _ROTATE_ORDER_MAP = {
         0: fbx.EFbxRotationOrder.eEulerXYZ,
@@ -2395,27 +2570,32 @@ class FbxExporter:
     time, etc.) are left out on purpose, those attrs are skipped on export."""
 
     def __init__(self):
-        self._skeleton = None
-        self._meshes   = set()
+        self._skeleton  = None
+        self._meshes    = set()
+        self._fbx_nodes = {}
 
-        self._manager  = None
-        self._scene    = None
+        self._manager   = None
+        self._scene     = None
+        self._closed    = False
+
+    def _check_open(self):
+        if self._closed:
+            raise RuntimeError("this FbxExporter is closed; make a new one")
 
     @property
     def manager(self):
         """fbx.FbxManager: the fbx manager that handles the memory"""
+        self._check_open()
 
         if self._manager is None:
-            self._manager = fbx.FbxManager.Create()
             # import/export requires IO settings
-            self._manager.SetIOSettings(
-                fbx.FbxIOSettings.Create(self._manager, fbx.IOSROOT)
-            )
+            self._manager = new_manager(fbx)
         return self._manager
 
     @property
     def scene(self):
         """fbx.FbxScene: the fbx scene to export"""
+        self._check_open()
 
         if self._scene is None:
             self._scene = fbx.FbxScene.Create(self.manager, "")
@@ -2424,19 +2604,35 @@ class FbxExporter:
             self._scene.GetGlobalSettings().SetAxisSystem(fbx.FbxAxisSystem.MayaYUp)
         return self._scene
 
+    def close(self) -> None:
+        """frees the manager, and with it the scene and every node added"""
+        if self._manager is not None:
+            self._manager.Destroy()
+        self._manager = None
+        self._scene   = None
+        self._closed  = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
     def add_skeleton(self, skeleton_component) -> None:
         """Add a skeleton component to the scene.
 
         Notes:
             Only a single skeleton is supported.
         """
+        self._check_open()
         if self._skeleton is not None:
             raise ValueError(f"Skeleton already set: {self._skeleton}!")
         self._skeleton = skeleton_component
 
         # the fbx node of every item, keyed by item identity.
         # parents can't be found by name, names may be duplicated across branches.
-        fbx_nodes = {}
+        fbx_nodes = self._fbx_nodes = {}
 
         # user defined attrs with no fbx data type, skipped and reported once
         skipped = {}
@@ -2568,7 +2764,6 @@ class FbxExporter:
 
     def export(self, path: pathlib.Path, as_ascii=False, zero_root=False) -> None:
         """Export the scene to the given path"""
-        exporter    = fbx.FbxExporter.Create(self.manager, "")
         file_format = self.manager.GetIOPluginRegistry().GetNativeWriterFormat()
         if as_ascii:
             file_format = self._get_acsii_type()
@@ -2576,6 +2771,14 @@ class FbxExporter:
         if not isinstance(path, pathlib.Path):
             path = pathlib.Path(path)
 
+        exporter = fbx.FbxExporter.Create(self.manager, "")
+        try:
+            self._export(exporter, path, file_format, zero_root)
+        finally:
+            exporter.Destroy()
+        LOGGER.info(f"exported to: {path}")
+
+    def _export(self, exporter, path, file_format, zero_root) -> None:
         if not exporter.Initialize(
             path.as_posix(), file_format, self.manager.GetIOSettings()
         ):
@@ -2588,12 +2791,19 @@ class FbxExporter:
 
         # zero-out root translations and rotations
         if zero_root:
-            skel_root = self._skeleton.data.get_roots()[0]
-            root_name = skel_root.name
+            # a HierarchyData, or a pipeline component holding one as .data;
+            # meshes and locators can sit at the world too: the root joint
+            skeleton = self._skeleton
+            skeleton = skeleton if hasattr(skeleton, "get_roots") else skeleton.data
+            roots    = [x for x in skeleton.get_roots() if x.node_type == "joint"]
+            if not roots:
+                raise ValueError("zero_root needs a joint parented to the world")
+            root_name = roots[0].name
 
+            # by identity: names may repeat across branches
             LOGGER.debug(f"Zero-ing Root: {root_name}")
-            skel_root = self.scene.FindNodeByName(root_name)
-            if not skel_root:
+            skel_root = self._fbx_nodes.get(id(roots[0]))
+            if skel_root is None:
                 raise RuntimeError(f"Could not find {root_name} to reset!")
 
             skel_root.LclTranslation.Set(fbx.FbxDouble3(0, 0, 0))
@@ -2611,10 +2821,7 @@ class FbxExporter:
             )
 
         if not exporter.Export(self.scene):
-            exporter.Destroy()
             raise Exception(f"Failed to export to: {path}!")
-        exporter.Destroy()
-        LOGGER.info(f"exported to: {path}")
 
     def _get_acsii_type(self):
         plg_rego     = self.manager.GetIOPluginRegistry()

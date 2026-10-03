@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Tuple, Union
 
 import numpy as np
+from cgmath.formats._fbx_io import open_fbx
 from cgmath.geometry._base import Data, DataList
 from cgmath.geometry.utils import balance_center_weights, blur, inpaint, pxr
 from scipy.sparse import coo_matrix
@@ -1009,76 +1010,72 @@ def _read_skins_fbx(filename: str, bind_matrices: bool = False) -> list:
     # back into cgmath.geometry as it loads, so a top level import closes the
     # cycle. cgmath.geometry.mesh is lazy for symmetry, not necessity.
     from cgmath.geometry.mesh import _walk_fbx_mesh_nodes
-    from cgmath.hierarchy import _fbx_enum, _read_fbx
+    from cgmath.hierarchy import _fbx_enum, _walk_fbx
 
     filename = os.path.expanduser(filename)
-    if not os.path.exists(filename):
-        raise FileNotFoundError(f"FBX file not found: {filename}")
 
-    # manager goes unread, but it owns the scene and every node reached below,
-    # so the name has to stay bound for the rest of the call
-    manager, scene, hierarchy_data, nodes = _read_fbx(
-        filename, 1.0
-    )
+    # everything read from the scene dies with it: copy out inside the block
+    with open_fbx(filename, fbx) as scene:
+        hierarchy_data, nodes = _walk_fbx(scene, 1.0)
 
-    named = {
-        node.GetUniqueID(): hierarchy_data[unique_id]["name"]
-        for unique_id, node in nodes.items()
-    }
+        named = {
+            node.GetUniqueID(): hierarchy_data[unique_id]["name"]
+            for unique_id, node in nodes.items()
+        }
 
-    skin_type  = _fbx_enum(fbx.FbxDeformer, "EDeformerType", "eSkin")
+        skin_type  = _fbx_enum(fbx.FbxDeformer, "EDeformerType", "eSkin")
 
-    mesh_nodes = []
-    _walk_fbx_mesh_nodes(scene.GetRootNode(), mesh_nodes)
+        mesh_nodes = []
+        _walk_fbx_mesh_nodes(scene.GetRootNode(), mesh_nodes)
 
-    data = []
-    for node in mesh_nodes:
-        mesh    = node.GetNodeAttribute()
-        columns = []
-        binds   = {}
+        data = []
+        for node in mesh_nodes:
+            mesh    = node.GetNodeAttribute()
+            columns = []
+            binds   = {}
 
-        for index in range(mesh.GetDeformerCount(skin_type)):
-            skin = mesh.GetDeformer(index, skin_type)
+            for index in range(mesh.GetDeformerCount(skin_type)):
+                skin = mesh.GetDeformer(index, skin_type)
 
-            for cluster_index in range(skin.GetClusterCount()):
-                cluster = skin.GetCluster(cluster_index)
-                link    = cluster.GetLink()
-                if link is None:
-                    continue
+                for cluster_index in range(skin.GetClusterCount()):
+                    cluster = skin.GetCluster(cluster_index)
+                    link    = cluster.GetLink()
+                    if link is None:
+                        continue
 
-                joint = named.get(link.GetUniqueID())
-                if joint is None:
-                    raise ValueError(
-                        f"cluster {cluster.GetName()!r} links {link.GetName()!r}, "
-                        f"which the rig read from {filename!r} does not hold"
+                    joint = named.get(link.GetUniqueID())
+                    if joint is None:
+                        raise ValueError(
+                            f"cluster {cluster.GetName()!r} links {link.GetName()!r}, "
+                            f"which the rig read from {filename!r} does not hold"
+                        )
+
+                    columns.append(
+                        (
+                            joint,
+                            np.asarray(cluster.GetControlPointIndices(), dtype=np.int64),
+                            np.asarray(cluster.GetControlPointWeights(), dtype=np.float64),
+                        )
                     )
 
-                columns.append(
-                    (
-                        joint,
-                        np.asarray(cluster.GetControlPointIndices(), dtype=np.int64),
-                        np.asarray(cluster.GetControlPointWeights(), dtype=np.float64),
-                    )
-                )
+                    if bind_matrices:
+                        link_bind, mesh_bind = fbx.FbxAMatrix(), fbx.FbxAMatrix()
+                        cluster.GetTransformLinkMatrix(link_bind)
+                        cluster.GetTransformMatrix(mesh_bind)
+                        # first cluster wins, the way _dense_weights collapses a
+                        # joint reached twice onto its first column
+                        binds.setdefault(
+                            joint,
+                            _fbx_matrix(mesh_bind) @ np.linalg.inv(_fbx_matrix(link_bind)),
+                        )
 
-                if bind_matrices:
-                    link_bind, mesh_bind = fbx.FbxAMatrix(), fbx.FbxAMatrix()
-                    cluster.GetTransformLinkMatrix(link_bind)
-                    cluster.GetTransformMatrix(mesh_bind)
-                    # first cluster wins, the way _dense_weights collapses a
-                    # joint reached twice onto its first column
-                    binds.setdefault(
-                        joint,
-                        _fbx_matrix(mesh_bind) @ np.linalg.inv(_fbx_matrix(link_bind)),
-                    )
+            if not columns:
+                continue
 
-        if not columns:
-            continue
-
-        weights, influences = _dense_weights(mesh.GetControlPointsCount(), columns)
-        skin  = SkinData(weights=weights, influences=influences, name=node.GetName())
-        bound = np.asarray([binds[x] for x in influences]) if bind_matrices else None
-        data.append((skin, bound))
+            weights, influences = _dense_weights(mesh.GetControlPointsCount(), columns)
+            skin  = SkinData(weights=weights, influences=influences, name=node.GetName())
+            bound = np.asarray([binds[x] for x in influences]) if bind_matrices else None
+            data.append((skin, bound))
 
     return data
 

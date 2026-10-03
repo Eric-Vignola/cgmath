@@ -51,6 +51,7 @@ except ImportError:
     fbx = None
 
 
+from cgmath.formats._fbx_io import open_fbx
 from cgmath.geometry import Data, DataList, ImmutableArray as numpy_array
 from cgmath.geometry._base import get_file_type
 from cgmath.geometry._saddle_surface import integrate, sample
@@ -5008,28 +5009,8 @@ def load_fbx(filename: str) -> list:
     if fbx is None:
         raise ImportError("Autodesk FBX Python SDK is not installed")
 
-    file_path = os.path.expanduser(filename)
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"FBX file not found: {file_path}")
-
-    manager = fbx.FbxManager.Create()
-    try:
-        ios = fbx.FbxIOSettings.Create(manager, fbx.IOSROOT)
-        manager.SetIOSettings(ios)
-
-        importer = fbx.FbxImporter.Create(manager, "Importer")
-        if not importer.Initialize(file_path, -1, manager.GetIOSettings()):
-            error = importer.GetStatus().GetErrorString()
-            importer.Destroy()
-            raise RuntimeError(f"Failed to initialize FBX importer: {error}")
-
-        scene = fbx.FbxScene.Create(manager, "ImportedScene")
-        if not importer.Import(scene):
-            error = importer.GetStatus().GetErrorString()
-            importer.Destroy()
-            raise RuntimeError(f"Failed to import FBX scene: {error}")
-        importer.Destroy()
-
+    # everything read from the scene dies with it: copy out inside the block
+    with open_fbx(filename, fbx) as scene:
         mesh_nodes = []
         _walk_fbx_mesh_nodes(scene.GetRootNode(), mesh_nodes)
 
@@ -5053,8 +5034,6 @@ def load_fbx(filename: str) -> list:
             data.append((mesh_data, UVList(uv_data_list)))
 
         return data
-    finally:
-        manager.Destroy()
 
 
 # --------------------------------- NORMAL HELPERS ---------------------------------- #

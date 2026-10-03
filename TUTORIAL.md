@@ -823,17 +823,11 @@ auto = HierarchyData.load(skel_path)         # header sniffing picks the reader
 print(auto.name == back.name)
 ```
 
-`save_fbx(path, zero_root=True)` is meant to write the root at identity,
-but reaching it through `TransformList.save_fbx` currently raises
-`AttributeError` — the exporter expects a pipeline skeleton *component*
-with a `.data` attribute. Zero the root yourself instead.
+`save_fbx(path, zero_root=True)` writes the root joint at identity, so the
+file carries the skeleton at the origin.
 
 ```python
-flat                   = rig.copy()
-flat["root"].translate = (0.0, 0.0, 0.0)
-flat["root"].rotate    = (0.0, 0.0, 0.0)
-flat["root"].scale     = (1.0, 1.0, 1.0)
-flat.save_fbx(os.path.join(WORK, "flat.fbx"))
+rig.save_fbx(os.path.join(WORK, "flat.fbx"), zero_root=True)
 print(os.path.exists(os.path.join(WORK, "flat.fbx")))
 ```
 

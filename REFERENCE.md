@@ -2498,6 +2498,8 @@ Methods:
 ```text
 animate(self, clip, output: 'str' = 'animation.{frame:04d}.png', resolution: 'Optional[Tuple[int, int]]' = None, samples_per_pixel: 'Optional[int]' = None, fps: 'Optional[int]' = None, **animate_kwargs) -> 'Union[str, List[str]]'
     Quick standalone render of this Object animated by *clip*.
+clear_render_cache(self) -> 'None'
+    Deletes the frames kept from this Object's last :meth:`turntable` or
 extract_texture_from_fbx(self, file_path: 'str', mesh_index: 'int' = 0, material_index: 'int' = 0) -> 'bool'
     Extract the diffuse (base color) texture from an FBX file and
 extract_texture_from_glb(self, file_path: 'str', material_index: 'int' = 0) -> 'bool'
@@ -2561,6 +2563,8 @@ animate(self, clip, output_pattern: 'str' = 'animation.{frame:04d}.png', fit: 's
     Render a :class:`ClipData` frame by frame, deforming as it goes.
 append(self, node: 'TransformData') -> 'None'
     S.append(value) -- append value to the end of the sequence
+clear_render_cache(self) -> 'None'
+    Deletes the frames kept from this Scene's last :meth:`turntable` or
 configure(self, **kwargs) -> "'Scene'"
     Bulk-set persistent render defaults; ``None`` values are ignored.
 get_camera(self, name: 'Optional[str]' = None) -> 'Optional[Camera]'
@@ -2883,6 +2887,8 @@ Methods:
 ```text
 add_skeleton(self, skeleton_component) -> None
     Add a skeleton component to the scene.
+close(self) -> None
+    frees the manager, and with it the scene and every node added
 export(self, path: pathlib.Path, as_ascii=False, zero_root=False) -> None
     Export the scene to the given path
 ```
@@ -2941,10 +2947,12 @@ takes                              Get all takes (animation stacks) in the scene
 Methods:
 
 ```text
+close(self)
+    Frees the FBX manager and the scene; safe to call twice.
 create_take(self, name: str)
     Create a new take (animation stack) in the scene with a default "BaseLayer"
 destroy(self)
-    Clean up FBX manager and scene
+    Frees the FBX manager and the scene; safe to call twice.
 load(self, filename)
     Load an FBX file and store its scene data
 rename(self, name: str)

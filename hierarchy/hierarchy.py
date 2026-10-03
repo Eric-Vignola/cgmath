@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, List, Optional, Union
 
 import numpy as np
+from cgmath.formats._fbx_io import open_fbx
 from cgmath.formats.glb import load_gltf, load_model
 from cgmath.geometry import Data, DataList, ImmutableArray as numpy_array
 from cgmath.geometry._base import _mask_to_indices
@@ -1486,32 +1487,15 @@ class TransformData(Data):
         self.user_defined_attributes[name] = spec
 
 
-def _read_fbx(filename: str, scale_factor: float):
-    """opens an fbx and walks its joints into TransformData dicts
+def _walk_fbx(scene, scale_factor: float):
+    """walks an open fbx scene's joints into TransformData dicts
 
     Hands back the ``FbxNode`` behind each uuid alongside the dicts, because
     an animated read has to sample those same objects and fbx lets two nodes
     share a name, so pairing them up afterwards by name would be ambiguous.
 
-    The manager comes back too and has to be held for as long as the scene is
-    used: it owns everything reachable from it.
+    The nodes live only as long as the ``open_fbx`` block the scene came from.
     """
-    if FBX is None:
-        raise ImportError("fbx module not found")
-
-    manager = FBX.FbxManager.Create()
-    ios     = FBX.FbxIOSettings.Create(manager, FBX.IOSROOT)
-    manager.SetIOSettings(ios)
-    importer = FBX.FbxImporter.Create(manager, "")
-
-    filename = os.path.expanduser(filename)
-    if not importer.Initialize(filename, -1, manager.GetIOSettings()):
-        raise RuntimeError("Unable to open file!")
-
-    scene = FBX.FbxScene.Create(manager, "scene")
-    importer.Import(scene)
-    importer.Destroy()
-
     skeleton       = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eSkeleton")
     marker         = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eMarker")
     null           = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eNull")
@@ -1608,7 +1592,7 @@ def _read_fbx(filename: str, scale_factor: float):
         if node.get("parent_node") not in uuids:
             node.pop("parent_node", None)
 
-    return manager, scene, hierarchy_data, nodes
+    return hierarchy_data, nodes
 
 
 def _fbx_has_curves(stack) -> bool:
@@ -1800,8 +1784,11 @@ class TransformList(DataList):
     @classmethod
     def load_fbx(cls, filename: str, scale_factor: float = 1.0):
         """primitive fbx joint loader"""
+        if FBX is None:
+            raise ImportError("fbx module not found")
 
-        _, _, hierarchy_data, _ = _read_fbx(filename, scale_factor)
+        with open_fbx(filename, FBX) as scene:
+            hierarchy_data, _ = _walk_fbx(scene, scale_factor)
 
         # build the TransformList
         return cls.from_dict(hierarchy_data)
@@ -1815,14 +1802,14 @@ class TransformList(DataList):
         # expand ~, consistent with the other IO paths
         filename = os.path.expanduser(filename)
 
-        exporter = FbxExporter()
-        exporter.add_skeleton(self)
+        with FbxExporter() as exporter:
+            exporter.add_skeleton(self)
 
-        exporter.export(
-            path      = filename,
-            as_ascii  = as_ascii,
-            zero_root = zero_root,
-        )
+            exporter.export(
+                path      = filename,
+                as_ascii  = as_ascii,
+                zero_root = zero_root,
+            )
 
     # --------- vectorized properties and methods --------- #
     def set_rotate_to_joint_orient(self) -> None:
@@ -3623,83 +3610,84 @@ class ClipData(HierarchyData):
         if fps is not None and fps <= 0.0:
             raise ValueError(f"fps must be positive, got {fps}")
 
-        # manager goes unread, but it owns the scene and the nodes sampled
-        # below, so the name has to stay bound for the rest of the call
-        manager, scene, hierarchy_data, nodes = _read_fbx(
-            filename, scale_factor
-        )
+        if FBX is None:
+            raise ImportError("fbx module not found")
 
-        rig = HierarchyData.from_dict(hierarchy_data)
+        # everything read from the scene dies with it: copy out inside the block
+        with open_fbx(filename, FBX) as scene:
+            hierarchy_data, nodes = _walk_fbx(scene, scale_factor)
 
-        criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimStack.ClassId)
-        count    = scene.GetSrcObjectCount(criteria)
+            rig = HierarchyData.from_dict(hierarchy_data)
 
-        if not count:
-            return cls(rig, frames=1, start_frame=start_frame or 0, fps=fps or 24.0)
+            criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimStack.ClassId)
+            count    = scene.GetSrcObjectCount(criteria)
 
-        stacks = [scene.GetSrcObject(criteria, index) for index in range(count)]
+            if not count:
+                return cls(rig, frames=1, start_frame=start_frame or 0, fps=fps or 24.0)
 
-        if take is None:
-            stack = next((x for x in stacks if _fbx_has_curves(x)), stacks[0])
-        else:
-            if not -count <= take < count:
-                raise IndexError(f"take {take} out of range, the file holds {count}")
+            stacks = [scene.GetSrcObject(criteria, index) for index in range(count)]
 
-            stack = stacks[take % count]
+            if take is None:
+                stack = next((x for x in stacks if _fbx_has_curves(x)), stacks[0])
+            else:
+                if not -count <= take < count:
+                    raise IndexError(f"take {take} out of range, the file holds {count}")
 
-        # the evaluator reads whichever stack is current, not the one we hold
-        scene.SetCurrentAnimationStack(stack)
+                stack = stacks[take % count]
 
-        if fps is None:
-            fps = _fbx_frame_rate(scene.GetGlobalSettings().GetTimeMode())
-            if fps <= 0.0:
-                raise ValueError(
-                    f"{filename!r} uses a time mode the fbx sdk reports no "
-                    "frame rate for, so the frame rate has to be given: "
-                    "load_fbx(..., fps=...)"
-                )
+            # the evaluator reads whichever stack is current, not the one we hold
+            scene.SetCurrentAnimationStack(stack)
 
-        span  = stack.GetLocalTimeSpan()
-        first = span.GetStart().GetSecondDouble()
-        last  = span.GetStop().GetSecondDouble()
+            if fps is None:
+                fps = _fbx_frame_rate(scene.GetGlobalSettings().GetTimeMode())
+                if fps <= 0.0:
+                    raise ValueError(
+                        f"{filename!r} uses a time mode the fbx sdk reports no "
+                        "frame rate for, so the frame rate has to be given: "
+                        "load_fbx(..., fps=...)"
+                    )
 
-        # ceil, so the tail of the take is inside the grid rather than half a
-        # frame past its end
-        start = round(first * fps) if start_frame is None else int(start_frame)
-        stop = (
-            start + int(np.ceil((last - first) * fps))
-            if end_frame is None
-            else int(end_frame)
-        )
+            span  = stack.GetLocalTimeSpan()
+            first = span.GetStart().GetSecondDouble()
+            last  = span.GetStop().GetSecondDouble()
 
-        if stop < start:
-            raise ValueError(f"end_frame {stop} is before start_frame {start}")
+            # ceil, so the tail of the take is inside the grid rather than half a
+            # frame past its end
+            start = round(first * fps) if start_frame is None else int(start_frame)
+            stop = (
+                start + int(np.ceil((last - first) * fps))
+                if end_frame is None
+                else int(end_frame)
+            )
 
-        clip      = cls(rig, frames=stop - start + 1, start_frame=start, fps=fps)
-        column    = {uuid: index for index, uuid in enumerate(clip.uuid)}
-        sampled   = [(nodes[uuid], column[uuid]) for uuid in nodes if uuid in column]
+            if stop < start:
+                raise ValueError(f"end_frame {stop} is before start_frame {start}")
 
-        scale     = np.array(clip.frames.scale)
-        rotate    = np.array(clip.frames.rotate)
-        translate = np.array(clip.frames.translate)
+            clip      = cls(rig, frames=stop - start + 1, start_frame=start, fps=fps)
+            column    = {uuid: index for index, uuid in enumerate(clip.uuid)}
+            sampled   = [(nodes[uuid], column[uuid]) for uuid in nodes if uuid in column]
 
-        for frame in range(clip.frame_count):
-            time = FBX.FbxTime()
-            time.SetSecondDouble((start + frame) / fps)
+            scale     = np.array(clip.frames.scale)
+            rotate    = np.array(clip.frames.rotate)
+            translate = np.array(clip.frames.translate)
 
-            for node, index in sampled:
-                values = node.EvaluateLocalTranslation(time)
-                translate[frame, index] = (
-                    values[0] * scale_factor,
-                    values[1] * scale_factor,
-                    values[2] * scale_factor,
-                )
+            for frame in range(clip.frame_count):
+                time = FBX.FbxTime()
+                time.SetSecondDouble((start + frame) / fps)
 
-                values               = node.EvaluateLocalRotation(time)
-                rotate[frame, index] = (values[0], values[1], values[2])
+                for node, index in sampled:
+                    values = node.EvaluateLocalTranslation(time)
+                    translate[frame, index] = (
+                        values[0] * scale_factor,
+                        values[1] * scale_factor,
+                        values[2] * scale_factor,
+                    )
 
-                values               = node.EvaluateLocalScaling(time)
-                scale[frame, index]  = (values[0], values[1], values[2])
+                    values               = node.EvaluateLocalRotation(time)
+                    rotate[frame, index] = (values[0], values[1], values[2])
+
+                    values               = node.EvaluateLocalScaling(time)
+                    scale[frame, index]  = (values[0], values[1], values[2])
 
         clip.frames.scale     = scale
         clip.frames.rotate    = rotate

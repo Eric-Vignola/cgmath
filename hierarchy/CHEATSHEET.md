@@ -1136,18 +1136,12 @@ assert isinstance(clip, ClipData) and clip.frame_count == 1
 | `ClipData.load_glb` | `(filename, scale_factor=100.0, animation=0, fps=24.0, start_frame=0)` |
 | `TransformList.save_fbx` | `(filename, zero_root=False)` |
 
-`zero_root=True` is meant to write the root with an identity transform.
-Reaching it through `TransformList.save_fbx` currently raises
-`AttributeError` — the exporter looks for a `.data` attribute on the
-skeleton it was handed, which a `HierarchyData` does not have. Zero the
-root yourself before exporting instead:
+`zero_root=True` writes the root joint with an identity transform, so the
+file carries the skeleton at the origin. Meshes and locators at the world
+are left as they are; a skeleton with no root joint raises `ValueError`.
 
 ```python
-flat                   = make_chain()
-flat["root"].translate = (0.0, 0.0, 0.0)
-flat["root"].rotate    = (0.0, 0.0, 0.0)
-flat["root"].scale     = (1.0, 1.0, 1.0)
-flat.save_fbx(os.path.join(WORKDIR, "flat.fbx"))
+make_chain().save_fbx(os.path.join(WORKDIR, "flat.fbx"), zero_root=True)
 ```
 
 `ClipData.save_fbx` writes one pose and no animation stack, so a

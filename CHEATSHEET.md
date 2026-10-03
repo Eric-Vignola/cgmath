@@ -716,9 +716,9 @@ in `geometry`.
 ```python
 from cgmath.formats.fbx import FbxExporter
 
-exporter = FbxExporter()
-exporter.add_skeleton(rig)                     # a HierarchyData of joints
-exporter.export(os.path.join(tmp, "rig.fbx"))  # not .save(); no file_format kwarg
+with FbxExporter() as exporter:                    # the block frees the SDK's memory
+    exporter.add_skeleton(rig)                     # a HierarchyData of joints
+    exporter.export(os.path.join(tmp, "rig.fbx"))  # not .save(); no file_format kwarg
 
 back = HierarchyData.load_fbx(os.path.join(tmp, "rig.fbx"))
 print(back.name, back.world_matrix[:, 3, :3].round(3).tolist())

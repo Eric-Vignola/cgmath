@@ -656,6 +656,15 @@ data = SceneData(DEMO_FBX)          # ~ is expanded; FileNotFoundError if absent
 print(data.name)                    # 'demo' — set from the file stem on load
 ```
 
+The scene holds the FBX SDK's memory until `.close()` (or `.destroy()`,
+the same call). A `with` block closes it for you:
+
+```python
+with SceneData(DEMO_FBX) as scoped:
+    print(len(scoped.takes))
+print(scoped.name)                  # 'No Scene' — closed
+```
+
 Empty first, load later:
 
 ```python
@@ -663,14 +672,14 @@ later = SceneData()
 print(later.name, later.fps, later.takes, later.nodes)   # 'No Scene' None TakeList([]) []
 later.load(DEMO_FBX)
 print(later.name)
-later.destroy()
+later.close()
 ```
 
 | Member | Type | Notes |
 |---|---|---|
 | `.name` | `str` | `"No Scene"` when nothing is loaded |
 | `.rename(name)` | — | `RuntimeError` if unloaded, `ValueError` if empty |
-| `.load(filename)` | — | `FileNotFoundError` / `RuntimeError` on a bad file |
+| `.load(filename)` | — | `FileNotFoundError` / `RuntimeError` on a bad file; loading again frees the previous scene |
 | `.save(filename=None, embed_media=True, file_format=-1)` | `str` | returns the expanded path |
 | `.scene` | `fbx.FbxScene` | the raw SDK scene, or `None` |
 | `.fps` | `float` | get/set; `None` for an unknown time mode |
@@ -679,7 +688,7 @@ later.destroy()
 | `.takes` | `TakeList` | rebuilt on every access |
 | `.nodes` | `list[str]` | hierarchy + `"blendshape.channel"` names, root excluded |
 | `.create_take(name)` | `TakeData` | also creates a `"BaseLayer"` |
-| `.destroy()` | — | destroys the FBX manager; call it |
+| `.close()` / `.destroy()` | — | frees the FBX manager; `with` calls it; safe twice |
 
 Global settings:
 
@@ -1009,12 +1018,18 @@ hand_rolled.append(data.takes[0])    # type-checked on the way in
 print(hand_rolled, len(hand_rolled))
 ```
 
-Clean up when you are done — `SceneData.destroy()` tears down the FBX
-manager and everything under it.
+Clean up when you are done — `SceneData.close()` tears down the FBX
+manager and everything under it. A take, layer or curve read from it raises
+from then on, instead of reaching into freed memory:
 
 ```python
-data.destroy()
+take = data.takes[0]
+data.close()
 print(data.scene)                          # None
+try:
+    take.name
+except RuntimeError as error:
+    print(str(error)[:44])                 # this TakeData was read from an FBX scene
 ```
 
 ---
@@ -1026,6 +1041,7 @@ Writes a `HierarchyData` skeleton out as an FBX. One skeleton per exporter.
 | Member | Type | Notes |
 |---|---|---|
 | `.manager` | `fbx.FbxManager` | lazily created, with IO settings |
+| `.close()` | — | frees the manager and scene; `with` calls it; safe twice |
 | `.scene` | `fbx.FbxScene` | lazily created, Maya Y-up axis system |
 | `.add_skeleton(component)` | — | `ValueError` if one is already set |
 | `.export(path, as_ascii=False, zero_root=False)` | — | `path` may be a `str` or `Path` |
@@ -1041,34 +1057,33 @@ skeleton = HierarchyData([
     TransformData("head", parent_node="spine", translate=(0, 10, 0), node_type="joint"),
 ])
 
-exporter = FbxExporter()
-print(type(exporter.manager).__name__, type(exporter.scene).__name__)
-exporter.add_skeleton(skeleton)
-
 skel_path = os.path.join(WORK, "skeleton.fbx")
-exporter.export(skel_path)
+
+with FbxExporter() as exporter:
+    print(type(exporter.manager).__name__, type(exporter.scene).__name__)
+    exporter.add_skeleton(skeleton)
+    exporter.export(skel_path)
 print(os.path.exists(skel_path))
 ```
 
 Read it straight back:
 
 ```python
-check = SceneData(skel_path)
-print(check.nodes)                   # ['root', 'spine', 'head']
-check.destroy()
+with SceneData(skel_path) as check:
+    print(check.nodes)               # ['root', 'spine', 'head']
 ```
 
 ASCII output, and the one-skeleton rule:
 
 ```python
-ascii_exporter = FbxExporter()
-ascii_exporter.add_skeleton(skeleton)
-ascii_exporter.export(os.path.join(WORK, "skeleton_ascii.fbx"), as_ascii=True)
-
-try:
+with FbxExporter() as ascii_exporter:
     ascii_exporter.add_skeleton(skeleton)
-except ValueError as error:
-    print(str(error)[:30])
+    ascii_exporter.export(os.path.join(WORK, "skeleton_ascii.fbx"), as_ascii=True)
+
+    try:
+        ascii_exporter.add_skeleton(skeleton)
+    except ValueError as error:
+        print(str(error)[:30])
 ```
 
 Each `TransformData` maps onto FBX like this:
@@ -1084,14 +1099,15 @@ Each `TransformData` maps onto FBX like this:
 `attributeType` (or `dataType`) key: `string`, `double`, `int`, `bool`,
 `short`.
 
-<!-- notest: zero_root reads skeleton_component.data.get_roots(), which a bare HierarchyData does not have -->
+`zero_root=True` resets the root joint's translate, rotate and scale before
+writing, so the file carries the skeleton at the origin:
+
 ```python
-exporter.export(skel_path, zero_root=True)
+skeleton.save_fbx(os.path.join(WORK, "skeleton_zeroed.fbx"), zero_root=True)
 ```
 
-`zero_root=True` expects a pipeline skeleton **component** — an object with
-a `.data` attribute holding the `HierarchyData`. A bare `HierarchyData`
-raises `AttributeError`.
+It takes a `HierarchyData`, or a pipeline skeleton component holding one as
+`.data`.
 
 ---
 
@@ -1131,7 +1147,8 @@ rig_fbx("hero.fbx")   # -> HierarchyData
 | `Primitive.triangles` is 1-D | `.reshape(-1, 3)` yourself |
 | `JOINTS_0` slots look like node indices | They index `Skin.joints`, which then indexes the nodes |
 | `Model.nodes` order surprises you | Use `Model.ordered_node_indexes` |
-| `SceneData` leaks memory | Call `.destroy()` |
+| `SceneData` / `FbxExporter` hold memory | `.close()` them, or use a `with` block |
+| A take / layer / curve raises `RuntimeError` | Its `SceneData` was closed or reloaded; read it again |
 
 ---
 

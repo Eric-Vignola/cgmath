@@ -122,10 +122,11 @@ skeleton = HierarchyData([
     TransformData("head", parent_node="spine", translate=(0, 10, 0), node_type="joint"),
 ])
 
-exporter = FbxExporter()
-exporter.add_skeleton(skeleton)
 import os, tempfile
-exporter.export(os.path.join(tempfile.mkdtemp(), "skeleton.fbx"))
+
+with FbxExporter() as exporter:            # the block frees the FBX SDK's memory
+    exporter.add_skeleton(skeleton)
+    exporter.export(os.path.join(tempfile.mkdtemp(), "skeleton.fbx"))
 ```
 
 ### Read animation curves back out
@@ -134,13 +135,19 @@ exporter.export(os.path.join(tempfile.mkdtemp(), "skeleton.fbx"))
 ```python
 from cgmath.formats.fbx import SceneData
 
-scene = SceneData("hero.fbx")              # constructor loads; there is no from_file
-for take in scene.takes:                   # TakeList
-    for layer in take.layers:              # LayerList
-        for curve in layer.curves:         # CurveList
-            print(curve.name, curve.times, curve.values)
-scene.destroy()
+with SceneData("hero.fbx") as scene:          # constructor loads; there is no from_file
+    for take in scene.takes:                  # TakeList
+        for layer in take.layers:             # LayerList
+            for curve in layer.curves:        # CurveList
+                print(curve.name, curve.times, curve.values)
 ```
+
+The FBX SDK frees what it read only when told to, so `SceneData` and
+`FbxExporter` hold their memory until `close()`; a `with` block calls it.
+Takes, layers and curves read from a closed `SceneData` raise
+`RuntimeError` rather than reaching into freed memory. Every other FBX
+reader in cgmath (rigs, clips, meshes, skins, render objects) frees its
+memory before it returns, and none of them writes anything next to the file.
 
 ### Pull a GLB apart
 
