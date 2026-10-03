@@ -21,7 +21,7 @@ import shutil
 import tempfile
 import warnings
 
-__all__ = ["FbxReadError", "import_scene", "media_folder", "new_manager", "open_fbx"]
+__all__ = ["FbxReadError", "import_scene", "media_folder", "new_manager", "open_fbx", "typed"]
 
 # IOSettings paths, spelled out: Maya's fbx binding has no IMP_* constants.
 # Extraction defaults to on, which writes a <name>.fbm folder beside the file.
@@ -102,6 +102,17 @@ def import_scene(manager, filename, sdk):
         importer.Destroy()
 
     return scene
+
+
+def typed(obj, kind, sdk):
+    """
+    ``obj`` as a ``kind`` wrapper. The binding can hand back a live wrapper
+    of another type for an object that sits where a destroyed one did; going
+    through ``FbxObject`` re-types it.
+    """
+    if obj is None or not isinstance(kind, type) or isinstance(obj, kind):
+        return obj
+    return sdk.cast(sdk.cast(obj, sdk.FbxObject), kind)
 
 
 @contextlib.contextmanager

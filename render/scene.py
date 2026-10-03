@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
-from cgmath.formats._fbx_io import FbxReadError, open_fbx
+from cgmath.formats._fbx_io import FbxReadError, open_fbx, typed
 from cgmath.geometry.deform import SkinDeformData
 from cgmath.geometry.mesh import (
     load_fbx as _load_fbx,
@@ -3859,16 +3859,18 @@ def _find_fbx_file_texture(prop):
     ``FbxLayeredTexture`` indirection (common when materials author a
     stack of textures with blend modes).
     """
+    # the class id is the object's own; the wrapper's type may not be, so
+    # every match is re-typed before use
     for i in range(prop.GetSrcObjectCount()):
         obj = prop.GetSrcObject(i)
         cid = obj.GetClassId()
         if cid == _fbx.FbxFileTexture.ClassId:
-            return obj
+            return typed(obj, _fbx.FbxFileTexture, _fbx)
         if cid == _fbx.FbxLayeredTexture.ClassId:
             for j in range(obj.GetSrcObjectCount()):
                 sub = obj.GetSrcObject(j)
                 if sub.GetClassId() == _fbx.FbxFileTexture.ClassId:
-                    return sub
+                    return typed(sub, _fbx.FbxFileTexture, _fbx)
     return None
 
 

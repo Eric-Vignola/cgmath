@@ -7,7 +7,7 @@ import shutil
 import warnings
 
 import numpy as np
-from cgmath.formats._fbx_io import import_scene, media_folder, new_manager
+from cgmath.formats._fbx_io import import_scene, media_folder, new_manager, typed
 
 LOGGER = logging.getLogger(__name__)
 
@@ -2383,11 +2383,7 @@ class SceneData(BaseData):
         for kind in (fbx.FbxFileTexture, fbx.FbxVideo):
             criteria = fbx.FbxCriteria.ObjectType(kind.ClassId)
             for index in range(self._scene.GetSrcObjectCount(criteria)):
-                # the binding can hand back a live wrapper of another type for
-                # an object at a reused address: re-type it
-                item = self._scene.GetSrcObject(criteria, index)
-                if not isinstance(item, kind):
-                    item = fbx.cast(fbx.cast(item, fbx.FbxObject), kind)
+                item = typed(self._scene.GetSrcObject(criteria, index), kind, fbx)
 
                 # a texture's names come back as str, a video's as FbxString
                 name     = str(item.GetFileName())

@@ -472,8 +472,28 @@ class TestEmbeddedMedia(FbxFixtures):
 
         self.assertTrue(handed and not isinstance(handed[0], fbx.FbxFileTexture))
 
+        # wrappers of the closed scene, dropped before the next read
+        del handed, scene, get_object, base_typed
         textures = scene_mod._extract_fbx_textures(saved)
         np.testing.assert_array_equal(textures["base_color"][0, 0, :3], [0, 255, 0])
+
+    def test_typed(self):
+        manager = fbx.FbxManager.Create()
+        try:
+            scene   = fbx.FbxScene.Create(manager, "")
+            texture = fbx.FbxFileTexture.Create(scene, "tex")
+            texture.SetFileName("C:/a/b.png")
+            base    = fbx.cast(texture, fbx.FbxObject)
+            self.assertNotIsInstance(base, fbx.FbxFileTexture)
+
+            again = _fbx_io.typed(base, fbx.FbxFileTexture, fbx)
+            self.assertIsInstance(again, fbx.FbxFileTexture)
+            self.assertEqual(again.GetUniqueID(), texture.GetUniqueID())
+            self.assertEqual(again.GetFileName(), "C:/a/b.png")
+            self.assertIs(_fbx_io.typed(texture, fbx.FbxFileTexture, fbx), texture)
+            self.assertIsNone(_fbx_io.typed(None, fbx.FbxFileTexture, fbx))
+        finally:
+            manager.Destroy()
 
     def test_a_save_without_embedding_brings_its_textures(self):
         from cgmath.formats.fbx import SceneData
