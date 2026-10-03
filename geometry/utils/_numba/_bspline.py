@@ -2485,9 +2485,892 @@ def _closest_points(points, kv, cv, degree, periodic, origin, chunk=16):
 # --------------------------------------------------------------------------- #
 #            2D Newton-Raphson closest point (surface)                         #
 # --------------------------------------------------------------------------- #
+#
+# BSplinePatchData.sample()'s search. From each seed, a Newton search on the
+# squared distance that only ever takes a step that comes closer. An open
+# edge stops a parameter: one whose slope points out of the patch stays on
+# the edge while the other slides along it, the closest point of that edge's
+# iso-curve; a corner where both point out is the answer.
+#
+# A degree-1 direction folds on every knot (the patch is only C0 there): the
+# search keeps to one span of it at a time, its ends stopping the parameter
+# like edges, and crosses into the next span when the slope there points on.
+# A span of no width (two rows the same, within roundoff) is one more such
+# line: the search steps across it into the span on either side that slopes
+# on down, and the other side, when it comes closer too, starts one more.
+# A pole (an open edge collapsed to one point, or nearly) that a search
+# reaches is left by more searches, from where along it the patch heads
+# toward the query most steeply.
+#
+# Parameters are native: each direction runs on [0, max_param], periodic ones
+# modulo it. The basis functions come from scipy's own de Boor recursion, as
+# in _curve_derivatives.
+#
+# fastmath stays off: every step is kept only when it is strictly closer.
 
 
-@njit(parallel=True, fastmath=True, cache=True)
+@njit(cache=True)
+def _patch_basis(x, kv, degree, order, below, work, out):
+    """
+    One direction's nonzero basis functions and their derivatives at x.
+
+    Parameters
+    ----------
+    x : float
+        Native parameter, inside the domain [kv[degree], kv[c]].
+    kv : np.ndarray
+        Knot vector (c + degree + 1,) in scipy's layout, float64.
+    degree, order : int
+        Degree of the direction; highest derivative wanted (past degree:
+        zero).
+    below : bool
+        On a knot, take the span below it (left-sided derivatives) instead
+        of the one above.
+    work, out : np.ndarray
+        Scratch (degree + 1,); output (order + 1 or more, degree + 1), row m
+        the m-th derivatives of the degree + 1 functions.
+
+    Returns
+    -------
+    int
+        The first of those functions: the control point they start at.
+    """
+    # Right-sided at the knots, like scipy, unless below; an empty span at
+    # either end of the domain hands x to the nearest non-empty one
+    limit = kv.shape[0] - 2 * degree - 2
+    span  = _find_span(x, kv, degree, limit)
+    if below and span > 0 and x <= kv[degree + span]:
+        span -= 1
+    while span > 0 and not kv[degree + span] < kv[degree + span + 1]:
+        span -= 1
+    while span < limit and not kv[degree + span] < kv[degree + span + 1]:
+        span += 1
+
+    # _curve_derivatives' recursion: raise the basis to degree - m, then m
+    # steps differentiate it back up (highest m first, the raising shared)
+    knot    = span + degree
+    work[0] = 1.0
+    level   = 0
+    top     = min(order, degree)
+    for m in range(top, -1, -1):
+        while level < degree - m:
+            level += 1
+            carry = 0.0
+            for n in range(1, level + 1):
+                upper = kv[knot + n]
+                lower = kv[knot + n - level]
+                if upper == lower:
+                    work[n - 1] = carry
+                    carry       = 0.0
+                    continue
+                w           = work[n - 1] / (upper - lower)
+                work[n - 1] = carry + w * (upper - x)
+                carry       = w * (x - lower)
+            work[level] = carry
+
+        row              = out[m]
+        row[: level + 1] = work[: level + 1]
+        for j in range(level + 1, degree + 1):
+            carry = 0.0
+            for n in range(1, j + 1):
+                upper = kv[knot + n]
+                lower = kv[knot + n - j]
+                if upper == lower:
+                    row[n - 1] = carry
+                    carry      = 0.0
+                    continue
+                w          = j * row[n - 1] / (upper - lower)
+                row[n - 1] = carry - w
+                carry      = w
+            row[j] = carry
+    out[top + 1 : order + 1] = 0.0
+    return span
+
+
+@njit(cache=True)
+def _patch_derivatives(u, v, kv_u, kv_v, cv, du, dv, order, below_u, below_v, work,
+                       basis_u, basis_v, out):
+    """
+    The patch and its partial derivatives at one native (u, v).
+
+    Parameters
+    ----------
+    u, v : float
+        Native parameters, inside the domain (periodic ones wrapped).
+    kv_u, kv_v, cv, du, dv
+        The patch: knot vectors in scipy's layout, control points
+        (cu, cv_n, dims) wrapped on periodic directions, degrees.
+    order : int
+        1: position and first partials; 2: second partials too.
+    below_u, below_v : bool
+        Per direction: on a knot, the derivatives of the span below it
+        (``_patch_basis``).
+    work, basis_u, basis_v : np.ndarray
+        Scratch for ``_patch_basis``: (max(du, dv) + 1,), (3, du + 1) and
+        (3, dv + 1).
+    out : np.ndarray
+        Output (6, dims): rows S, S_u, S_v, then with order 2 S_uu, S_uv
+        and S_vv.
+
+    Returns
+    -------
+    None
+    """
+    first_u = _patch_basis(u, kv_u, du, order, below_u, work, basis_u)
+    first_v = _patch_basis(v, kv_v, dv, order, below_v, work, basis_v)
+    second  = order >= 2
+    out[: 6 if second else 3] = 0.0
+    for i in range(du + 1):
+        for j in range(dv + 1):
+            w00 = basis_u[0, i] * basis_v[0, j]
+            w10 = basis_u[1, i] * basis_v[0, j]
+            w01 = basis_u[0, i] * basis_v[1, j]
+            w20 = basis_u[2, i] * basis_v[0, j] if second else 0.0
+            w11 = basis_u[1, i] * basis_v[1, j] if second else 0.0
+            w02 = basis_u[0, i] * basis_v[2, j] if second else 0.0
+            for k in range(cv.shape[2]):
+                p = cv[first_u + i, first_v + j, k]
+                out[0, k] += w00 * p
+                out[1, k] += w10 * p
+                out[2, k] += w01 * p
+                if second:
+                    out[3, k] += w20 * p
+                    out[4, k] += w11 * p
+                    out[5, k] += w02 * p
+
+
+@njit(cache=True)
+def _patch_slopes(query, derivs):
+    """
+    The squared distance from a query to the patch and its derivatives.
+
+    Parameters
+    ----------
+    query : np.ndarray
+        The point (dims,), float64.
+    derivs : np.ndarray
+        ``_patch_derivatives``' order 2 output at (u, v).
+
+    Returns
+    -------
+    tuple
+        (f, g_u, g_v, h_uu, h_uv, h_vv, j_uu, j_uv, j_vv): f = |S - Q|^2;
+        g = (S - Q) . S_u and . S_v, half its slopes; h its Hessian, halved;
+        j the part of h without (S - Q) . S_uu and the like (S_u . S_u ...).
+    """
+    f = g_u = g_v = h_uu = h_uv = h_vv = j_uu = j_uv = j_vv = 0.0
+    for k in range(query.shape[0]):
+        r = derivs[0, k] - query[k]
+        f    += r * r
+        g_u  += r * derivs[1, k]
+        g_v  += r * derivs[2, k]
+        h_uu += r * derivs[3, k]
+        h_uv += r * derivs[4, k]
+        h_vv += r * derivs[5, k]
+        j_uu += derivs[1, k] * derivs[1, k]
+        j_uv += derivs[1, k] * derivs[2, k]
+        j_vv += derivs[2, k] * derivs[2, k]
+    return f, g_u, g_v, h_uu + j_uu, h_uv + j_uv, h_vv + j_vv, j_uu, j_uv, j_vv
+
+
+@njit(cache=True)
+def _span_exit(x, lo, g, end, periodic):
+    """
+    The next span along a degree-1 direction, for a search on an end of its
+    span (lo, lo + 1) whose slope points past that end.
+
+    Parameters
+    ----------
+    x, lo : float
+        The parameter and the start of its span.
+    g : float
+        The squared distance's slope along the direction, halved.
+    end : float
+        End of the direction's domain.
+    periodic : bool
+        Whether the direction wraps: past either end of the domain is the
+        span across the seam.
+
+    Returns
+    -------
+    tuple
+        (x, lo): the same spot on the next span (0 and end swap across the
+        seam); lo is -1 when there is none.
+    """
+    if x <= lo and g > 0.0:
+        if lo > 0.0:
+            return x, lo - 1.0
+        if periodic:
+            return end, end - 1.0
+    elif x >= lo + 1.0 and g < 0.0:
+        if lo + 1.0 < end:
+            return x, lo + 1.0
+        if periodic:
+            return 0.0, 0.0
+    return x, -1.0
+
+
+@njit(cache=True)
+def _pinned(x, g, low, high, ends):
+    """
+    Whether a parameter sits on an end of its range (low, high) with the
+    squared distance's slope pointing out of it; ends: whether the range
+    has ends (a periodic direction of degree 2 or more has none).
+    """
+    return ends and ((x <= low and g > 0.0) or (x >= high and g < 0.0))
+
+
+@njit(cache=True)
+def _patch_poles(cv, periodic_u, periodic_v):
+    """
+    Which open edges are poles, or nearly: collapsed to one point, or to a
+    spot so small next to the patch's first span off it (all of the edge's
+    control points within a tenth of how far the next row's lie from them)
+    that a search can stall on it.
+
+    Parameters
+    ----------
+    cv : np.ndarray
+        Control point grid (cu, cv_n, dims), float64.
+    periodic_u, periodic_v : bool
+        Whether each direction wraps (and has no edges).
+
+    Returns
+    -------
+    np.ndarray
+        (4,) int8 for the edges u = 0, u = end, v = 0 and v = end: 0 not a
+        pole, 1 nearly one, 2 one point (its control points within 1e-12
+        of that distance).
+    """
+    count_u, count_v, dims = cv.shape
+    low   = np.empty(dims)
+    high  = np.empty(dims)
+    poles = np.zeros(4, dtype=np.int8)
+    for e in range(4):
+        if periodic_u if e < 2 else periodic_v:
+            continue
+
+        # The edge's extent, and the farthest one of its control points is
+        # from the next row's
+        outer   = 0 if e % 2 == 0 else (count_u if e < 2 else count_v) - 1
+        inner   = 1 if e % 2 == 0 else outer - 1
+        low[:]  = np.inf
+        high[:] = -np.inf
+        reach   = 0.0
+        for j in range(count_v if e < 2 else count_u):
+            if e < 2:
+                point = cv[outer, j]
+                after = cv[inner, j]
+            else:
+                point = cv[j, outer]
+                after = cv[j, inner]
+            gap = 0.0
+            for k in range(dims):
+                low[k]  = min(low[k], point[k])
+                high[k] = max(high[k], point[k])
+                gap += (after[k] - point[k]) ** 2
+            reach = max(reach, np.sqrt(gap))
+        extent = (high - low).max()
+        if extent <= 1e-12 * reach:
+            poles[e] = 2
+        elif extent <= 1e-1 * reach:
+            poles[e] = 1
+    return poles
+
+
+@njit(cache=True)
+def _mark_pole(u, v, poles, max_u, max_v, on_poles):
+    """
+    The pole (0 to 3, as in ``_patch_poles``) that (u, v) lies on, flagged
+    in on_poles (4,); -1 when none.
+    """
+    pole = -1
+    if u <= 0.0 and poles[0] > 0:
+        pole = 0
+    elif u >= max_u and poles[1] > 0:
+        pole = 1
+    elif v <= 0.0 and poles[2] > 0:
+        pole = 2
+    elif v >= max_v and poles[3] > 0:
+        pole = 3
+    if pole >= 0:
+        on_poles[pole] = True
+    return pole
+
+
+@njit(cache=True)
+def _pole_slope(query, edge, x, on_u, kv_u, kv_v, cv, du, dv, work, basis_u, basis_v,
+                trial):
+    """
+    The squared distance's slope (halved) from a pole into the patch, at x
+    along the pole: negative when leaving the pole there comes closer.
+
+    Parameters
+    ----------
+    query : np.ndarray
+        The point (dims,), float64.
+    edge : float
+        The pole's parameter: 0 or its direction's end.
+    x : float
+        The parameter along the pole.
+    on_u : bool
+        Whether the pole is a u edge (x is v) or a v edge (x is u).
+    kv_u, kv_v, cv, du, dv
+        The patch, as in ``_patch_derivatives``.
+    work, basis_u, basis_v, trial : np.ndarray
+        Scratch for ``_patch_derivatives``.
+
+    Returns
+    -------
+    float
+    """
+    if on_u:
+        _patch_derivatives(edge, x, kv_u, kv_v, cv, du, dv, 1, False, False, work,
+                           basis_u, basis_v, trial)
+    else:
+        _patch_derivatives(x, edge, kv_u, kv_v, cv, du, dv, 1, False, False, work,
+                           basis_u, basis_v, trial)
+    row   = 1 if on_u else 2
+    slope = 0.0
+    for k in range(query.shape[0]):
+        slope += (trial[0, k] - query[k]) * trial[row, k]
+    return slope if edge <= 0.0 else -slope
+
+
+@njit(cache=True)
+def _patch_pole_turns(query, edge, on_u, end, periodic, kv_u, kv_v, cv, du, dv, work,
+                      basis_u, basis_v, trial, rim, starts):
+    """
+    Where along a pole searches leave it: where the patch heads toward the
+    query most steeply, one spot per way out that comes closer, and on a
+    nearly collapsed pole each spot of its rim closest to the query.
+
+    Every spot along a pole is the same point, or nearly, so a search
+    stopped there can leave it anywhere along it: 4 samples per span, then
+    a golden-section search between the neighbours of each sample whose
+    slope is negative and lower than theirs. A nearly collapsed pole is
+    also a small rim: each sample closer to the query than its neighbours
+    starts a search too, unless the rim looks like one point from the query.
+
+    Parameters
+    ----------
+    query : np.ndarray
+        The point (dims,), float64.
+    edge : float
+        The pole's parameter: 0 or its direction's end.
+    on_u : bool
+        Whether the pole is a u edge (it runs along v) or a v edge.
+    end : float
+        End of the domain along the pole.
+    periodic : bool
+        Whether the direction along the pole wraps.
+    kv_u, kv_v, cv, du, dv
+        The patch, as in ``_patch_derivatives``.
+    work, basis_u, basis_v, trial : np.ndarray
+        Scratch for ``_patch_derivatives``.
+    rim : bool
+        Whether the pole is nearly collapsed (``_patch_poles`` 1).
+    starts : np.ndarray
+        Output, (8 * spans + 2,) or more: the parameters along the pole,
+        inside its domain, the ways out first.
+
+    Returns
+    -------
+    int
+        How many starts were found.
+    """
+    spans  = max(int(end + 0.5), 1)
+    step   = end / (4 * spans)
+    count  = 4 * spans + (0 if periodic else 1)
+    slopes = np.empty(count)
+    dists  = np.empty(count)
+    for i in range(count):
+        slopes[i] = _pole_slope(query, edge, i * step, on_u, kv_u, kv_v, cv, du, dv,
+                                work, basis_u, basis_v, trial)
+        dists[i] = 0.0
+        for k in range(query.shape[0]):
+            dists[i] += (trial[0, k] - query[k]) ** 2
+
+    # Each sample lower than its neighbours (the first of a tie; around the
+    # seam on a periodic direction), refined by a golden-section search
+    # between them
+    ratio = 0.6180339887498949
+    found = 0
+    for i in range(count):
+        before = (i - 1) % count if periodic else i - 1
+        after  = (i + 1) % count if periodic else i + 1
+        if not slopes[i] < 0.0:
+            continue
+        if before >= 0 and not slopes[i] < slopes[before]:
+            continue
+        if after < count and slopes[after] < slopes[i]:
+            continue
+
+        best_x = i * step
+        best   = slopes[i]
+        lo     = best_x - step
+        hi     = best_x + step
+        if not periodic:
+            lo = max(lo, 0.0)
+            hi = min(hi, end)
+        a = hi - ratio * (hi - lo)
+        b = lo + ratio * (hi - lo)
+        f_a = _pole_slope(query, edge, a % end if periodic else a, on_u, kv_u, kv_v, cv,
+                          du, dv, work, basis_u, basis_v, trial)
+        f_b = _pole_slope(query, edge, b % end if periodic else b, on_u, kv_u, kv_v, cv,
+                          du, dv, work, basis_u, basis_v, trial)
+        for _ in range(30):
+            if f_a < f_b:
+                hi, b, f_b = b, a, f_a
+                a = hi - ratio * (hi - lo)
+                f_a = _pole_slope(query, edge, a % end if periodic else a, on_u, kv_u,
+                                  kv_v, cv, du, dv, work, basis_u, basis_v, trial)
+            else:
+                lo, a, f_a = a, b, f_b
+                b = lo + ratio * (hi - lo)
+                f_b = _pole_slope(query, edge, b % end if periodic else b, on_u, kv_u,
+                                  kv_v, cv, du, dv, work, basis_u, basis_v, trial)
+        if f_a < best:
+            best_x = a % end if periodic else a
+            best   = f_a
+        if f_b < best:
+            best_x = b % end if periodic else b
+            best   = f_b
+
+        if periodic and best_x >= end:
+            best_x -= end
+        starts[found] = best_x
+        found += 1
+
+    # A nearly collapsed pole is a rim too: each sample closer to the query
+    # than its neighbours, unless the rim's spots all lie within a thousandth
+    # of one distance from the query (it looks like one point from there)
+    near = np.sqrt(dists.min())
+    if rim and np.sqrt(dists.max()) - near > 1e-3 * near:
+        for i in range(count):
+            before = (i - 1) % count if periodic else i - 1
+            after  = (i + 1) % count if periodic else i + 1
+            if before >= 0 and not dists[i] < dists[before]:
+                continue
+            if after < count and dists[after] < dists[i]:
+                continue
+            starts[found] = i * step
+            found += 1
+    return found
+
+
+@njit(cache=True)
+def _patch_flat_exit(query, u, v, lo, on_u, f, below, kv_u, kv_v, cv, du, dv, end,
+                     periodic, work, basis_u, basis_v, trial):
+    """
+    A way out of a flat span: for a search on a span (lo, lo + 1) of a
+    degree-1 direction along which the patch hardly moves (its two rows
+    within roundoff of each other, say), a spot strictly closer than f on
+    the first span on either side along which the patch moves, when that
+    span slopes on down away from it.
+
+    Every spot of a flat span is on the same curve, so its two ends are one
+    knot line with a span on each side. On each side (past any more flat
+    spans), the closest spot along the direction, the other parameter
+    held: the patch is straight along it there, so that is one Newton step,
+    kept inside the span. The closer of the two wins; the other, when it
+    comes closer too, may hold another basin (``_patch_descend``'s fork).
+
+    Parameters
+    ----------
+    query : np.ndarray
+        The point (dims,), float64.
+    u, v : float
+        The search's spot, native.
+    lo : float
+        Start of the flat span along the direction.
+    on_u : bool
+        Whether the direction is u (else v).
+    f : float
+        The squared distance to beat.
+    below : bool
+        The other direction's ``below_u`` / ``below_v`` for
+        ``_patch_derivatives``.
+    kv_u, kv_v, cv, du, dv
+        The patch, as in ``_patch_derivatives``.
+    end : float
+        End of the direction's domain.
+    periodic : bool
+        Whether the direction wraps.
+    work, basis_u, basis_v, trial : np.ndarray
+        Scratch for ``_patch_derivatives``.
+
+    Returns
+    -------
+    tuple
+        (x, lo, other_x, other_lo, moves): the closer side's parameter along
+        the direction and the start of its span (lo -1 when neither side
+        comes closer), the other side's (other_lo -1 unless it comes closer
+        too), and whether the patch moves along the direction on any span
+        at all (else it is collapsed there, every span flat).
+    """
+    spans    = int(end + 0.5)
+    best_x   = 0.0
+    best_lo  = -1.0
+    best_f   = f
+    other_x  = 0.0
+    other_lo = -1.0
+    moves    = False
+    for side in range(2):
+        # Through the end on this side, span by span, to the first along
+        # which the patch moves: the same spot, within the flat spans'
+        # width. Its derivatives are its own, one-sided on that end
+        g     = 1.0 if side == 0 else -1.0
+        x     = lo if side == 0 else lo + 1.0
+        at    = lo
+        found = False
+        for _ in range(spans - 1):
+            x, at = _span_exit(x, at, g, end, periodic)
+            if at < 0.0:
+                break
+            if on_u:
+                _patch_derivatives(x, v, kv_u, kv_v, cv, du, dv, 2, side == 0, below,
+                                   work, basis_u, basis_v, trial)
+            else:
+                _patch_derivatives(u, x, kv_u, kv_v, cv, du, dv, 2, below, side == 0,
+                                   work, basis_u, basis_v, trial)
+            slopes = _patch_slopes(query, trial)
+            along  = slopes[6] if on_u else slopes[8]
+            across = slopes[8] if on_u else slopes[6]
+            if not along < 1e-20 * across:
+                found = True
+                break
+            x = at if side == 0 else at + 1.0
+        if not found:
+            continue
+        moves = True
+
+        # Its slope must point on, away from the flat span
+        slope = slopes[1] if on_u else slopes[2]
+        if not slope * g > 0.0:
+            continue
+        trial_x = min(max(x - slope / along, at), at + 1.0)
+        if on_u:
+            _patch_derivatives(trial_x, v, kv_u, kv_v, cv, du, dv, 1, False, below,
+                               work, basis_u, basis_v, trial)
+        else:
+            _patch_derivatives(u, trial_x, kv_u, kv_v, cv, du, dv, 1, below, False,
+                               work, basis_u, basis_v, trial)
+        f_new = 0.0
+        for k in range(query.shape[0]):
+            r = trial[0, k] - query[k]
+            f_new += r * r
+        if not f_new < f:
+            continue
+        if f_new < best_f:
+            other_x  = best_x
+            other_lo = best_lo
+            best_x   = trial_x
+            best_lo  = at
+            best_f   = f_new
+        else:
+            other_x  = trial_x
+            other_lo = at
+    return best_x, best_lo, other_x, other_lo, moves
+
+
+@njit(cache=True)
+def _patch_descend(query, u, v, kv_u, kv_v, cv, du, dv, max_u, max_v, periodic_u,
+                   periodic_v, poles, on_poles, fork, off, below, max_iters, tolerance,
+                   work, basis_u, basis_v, here, trial):
+    """
+    Newton's method on the squared distance, keeping only steps that come closer.
+
+    Parameters
+    ----------
+    query : np.ndarray
+        The point (dims,), float64.
+    u, v : float
+        Start, native, inside the domain.
+    kv_u, kv_v, cv, du, dv
+        The patch, as in ``_patch_derivatives``.
+    max_u, max_v : float
+        End of each direction's domain.
+    periodic_u, periodic_v : bool
+        Whether each direction wraps; an open one has edges.
+    poles, on_poles : np.ndarray
+        ``_patch_poles``' (4,) codes; (4,) flags set here for each pole the
+        search reaches (``_mark_pole``).
+    fork : np.ndarray
+        (3,): (u, v, set). Unless already set (1), set here to a start on
+        the other side of a flat span the search left, when that side came
+        closer too.
+    off : bool
+        Whether the start is on a pole, to leave it: the first step goes
+        straight across it, from the start's span.
+    below : bool
+        Whether a start on a knot of a degree-1 direction takes the span
+        below it (across the seam from 0 on a periodic one) instead of the
+        one above.
+    max_iters : int
+        Most steps.
+    tolerance : float
+        Done once a step moves (u, v) less than this.
+    work, basis_u, basis_v : np.ndarray
+        Scratch for ``_patch_derivatives``.
+    here, trial : np.ndarray
+        Scratch (6, dims); ``here`` ends holding the derivatives at the
+        result (right-sided on a knot, as everywhere else).
+
+    Returns
+    -------
+    tuple
+        (u, v, f): the result, periodic parameters in [0, end), and its
+        squared distance, never more than the start's.
+    """
+    # Each step: Newton's (the Hessian when it curves up, else its S_u . S_v
+    # part, which always does unless S_u and S_v are parallel), cut to half a
+    # span, then halved until it comes strictly closer. When it never does,
+    # the slopes scaled per direction (a step that always comes closer once
+    # short enough). Open directions are clipped to their domain. A
+    # parameter on its edge whose slope points out stays there: the other
+    # one solves its own 1-D Newton along the edge. So does a direction
+    # along which the patch hardly moves, as on a patch collapsed onto a
+    # curve: its slopes are roundoff, and its share of a 2-D step would be
+    # so large that the other's, cut with it, never comes closer
+    #
+    # A degree-1 direction keeps to one span (lo, lo + 1) at a time: its
+    # derivatives are that span's (one-sided on its ends), and its ends hold
+    # the parameter like edges unless the next span slopes on down. A span
+    # along which the patch hardly moves is not held but crossed, as a knot
+    # line, into the closer side that slopes on down (``_patch_flat_exit``);
+    # the other side, when it comes closer too, is the fork
+    span_u = du == 1
+    span_v = dv == 1
+    lo_u   = min(np.floor(u), max_u - 1.0) if span_u else 0.0
+    lo_v   = min(np.floor(v), max_v - 1.0) if span_v else 0.0
+    if below and span_u:
+        next_u, next_lo = _span_exit(u, lo_u, 1.0, max_u, periodic_u)
+        if next_lo >= 0.0:
+            u    = next_u
+            lo_u = next_lo
+    if below and span_v:
+        next_v, next_lo = _span_exit(v, lo_v, 1.0, max_v, periodic_v)
+        if next_lo >= 0.0:
+            v    = next_v
+            lo_v = next_lo
+    _patch_derivatives(u, v, kv_u, kv_v, cv, du, dv, 2, span_u and u >= lo_u + 1.0,
+                       span_v and v >= lo_v + 1.0, work, basis_u, basis_v, here)
+    f, g_u, g_v, h_uu, h_uv, h_vv, j_uu, j_uv, j_vv = _patch_slopes(query, here)
+    shortest  = 1e-15 * max(max_u, max_v, 1.0)
+    collapsed = False
+
+    for _ in range(max_iters):
+        # On a span's end with the slope pointing past it: into the next
+        # span when the slope there points on too (the same spot, so the
+        # same distance); not before the first step off a pole
+        if span_u and not off:
+            next_u, next_lo = _span_exit(u, lo_u, g_u, max_u, periodic_u)
+            if next_lo >= 0.0:
+                _patch_derivatives(next_u, v, kv_u, kv_v, cv, du, dv, 2,
+                                   next_u >= next_lo + 1.0, span_v and v >= lo_v + 1.0,
+                                   work, basis_u, basis_v, trial)
+                slopes = _patch_slopes(query, trial)
+                if slopes[1] * g_u > 0.0:
+                    u       = next_u
+                    lo_u    = next_lo
+                    here[:] = trial
+                    f, g_u, g_v, h_uu, h_uv, h_vv, j_uu, j_uv, j_vv = slopes
+        if span_v and not off:
+            next_v, next_lo = _span_exit(v, lo_v, g_v, max_v, periodic_v)
+            if next_lo >= 0.0:
+                _patch_derivatives(u, next_v, kv_u, kv_v, cv, du, dv, 2,
+                                   span_u and u >= lo_u + 1.0, next_v >= next_lo + 1.0,
+                                   work, basis_u, basis_v, trial)
+                slopes = _patch_slopes(query, trial)
+                if slopes[2] * g_v > 0.0:
+                    v       = next_v
+                    lo_v    = next_lo
+                    here[:] = trial
+                    f, g_u, g_v, h_uu, h_uv, h_vv, j_uu, j_uv, j_vv = slopes
+
+        low_u  = lo_u if span_u else 0.0
+        low_v  = lo_v if span_v else 0.0
+        high_u = lo_u + 1.0 if span_u else max_u
+        high_v = lo_v + 1.0 if span_v else max_v
+        ends_u = span_u or not periodic_u
+        ends_v = span_v or not periodic_v
+        pin_u  = _pinned(u, g_u, low_u, high_u, ends_u)
+        pin_v  = _pinned(v, g_v, low_v, high_v, ends_v)
+
+        # A pole a search reaches is left by more searches, from where the
+        # patch heads toward the query most steeply
+        # (``_newton_closest_point_surface_parallel``); their first step
+        # goes straight across it (along it the patch hardly moves, so a
+        # 2-D step would mostly turn). On a pole that is one point, so does
+        # every step, and a slope pointing out ends the search: every spot
+        # along it is the same point. A nearly collapsed one is an edge to
+        # slide along
+        pole = _mark_pole(u, v, poles, max_u, max_v, on_poles)
+        held = pole >= 0 and (off or poles[pole] == 2)
+        if held:
+            if (pin_u if pole < 2 else pin_v) and not off:
+                break
+            pin_u = pole >= 2
+            pin_v = pole < 2
+        off = False
+
+        # A direction along which the patch hardly moves (first and second
+        # derivatives under 1e-10 of the other's first) is held like a
+        # pinned one. Its second derivative counts: an iso-line where only
+        # the first vanishes, as along a doubled row, still bends away. The
+        # other's first must not vanish: the step left needs a slope
+        bend_u = 0.0
+        bend_v = 0.0
+        for k in range(query.shape[0]):
+            bend_u += here[3, k] * here[3, k]
+            bend_v += here[5, k] * here[5, k]
+        flat_u = j_uu + bend_u < 1e-20 * j_vv
+        flat_v = j_vv + bend_v < 1e-20 * j_uu
+
+        # Such a span of a degree-1 direction (two of its rows within
+        # roundoff of each other, say) is one knot line, not a place to
+        # stop: first, a step into the span on either side of it when that
+        # comes closer (``_patch_flat_exit``). Once no span along it moves
+        # (a patch collapsed onto a curve), the search stops looking
+        if not held and not collapsed and (span_u and flat_u or span_v and flat_v):
+            if flat_u:
+                exit_x, exit_lo, other_x, other_lo, moves = _patch_flat_exit(
+                    query, u, v, lo_u, True, f, span_v and v >= lo_v + 1.0, kv_u, kv_v,
+                    cv, du, dv, max_u, periodic_u, work, basis_u, basis_v, trial)
+                if other_lo >= 0.0 and fork[2] == 0.0:
+                    fork[0] = other_x
+                    fork[1] = v
+                    fork[2] = 1.0
+                if exit_lo >= 0.0:
+                    u    = exit_x
+                    lo_u = exit_lo
+            else:
+                exit_x, exit_lo, other_x, other_lo, moves = _patch_flat_exit(
+                    query, u, v, lo_v, False, f, span_u and u >= lo_u + 1.0, kv_u, kv_v,
+                    cv, du, dv, max_v, periodic_v, work, basis_u, basis_v, trial)
+                if other_lo >= 0.0 and fork[2] == 0.0:
+                    fork[0] = u
+                    fork[1] = other_x
+                    fork[2] = 1.0
+                if exit_lo >= 0.0:
+                    v    = exit_x
+                    lo_v = exit_lo
+            collapsed = not moves
+            if exit_lo >= 0.0:
+                _patch_derivatives(u, v, kv_u, kv_v, cv, du, dv, 2,
+                                   span_u and u >= lo_u + 1.0,
+                                   span_v and v >= lo_v + 1.0, work, basis_u, basis_v,
+                                   here)
+                slopes = _patch_slopes(query, here)
+                f, g_u, g_v, h_uu, h_uv, h_vv, j_uu, j_uv, j_vv = slopes
+                continue
+        if flat_u:
+            pin_u = True
+        if flat_v:
+            pin_v = True
+        if pin_u and pin_v:
+            break
+
+        moved = False
+        new_u = u
+        new_v = v
+        for kind in range(2):
+            step_u = 0.0
+            step_v = 0.0
+            if kind == 1:
+                if not pin_u and j_uu > 0.0:
+                    step_u = -g_u / j_uu
+                if not pin_v and j_vv > 0.0:
+                    step_v = -g_v / j_vv
+            elif pin_u:
+                curve  = h_vv if h_vv > 0.0 else j_vv
+                step_v = -g_v / curve if curve > 0.0 else 0.0
+            elif pin_v:
+                curve  = h_uu if h_uu > 0.0 else j_uu
+                step_u = -g_u / curve if curve > 0.0 else 0.0
+            else:
+                det = h_uu * h_vv - h_uv * h_uv
+                if h_uu > 0.0 and det > 0.0:
+                    step_u = (h_uv * g_v - h_vv * g_u) / det
+                    step_v = (h_uv * g_u - h_uu * g_v) / det
+                else:
+                    det = j_uu * j_vv - j_uv * j_uv
+                    if det > 1e-12 * j_uu * j_vv:
+                        step_u = (j_uv * g_v - j_vv * g_u) / det
+                        step_v = (j_uv * g_u - j_uu * g_v) / det
+
+            size = max(abs(step_u), abs(step_v))
+            if not size > 0.0:
+                continue
+            if size > 0.5:
+                step_u *= 0.5 / size
+                step_v *= 0.5 / size
+                size = 0.5
+
+            t = 1.0
+            while t * size > shortest:
+                new_u = u + t * step_u
+                new_v = v + t * step_v
+                if ends_u:
+                    new_u = min(max(new_u, low_u), high_u)
+                else:
+                    new_u = new_u % max_u
+                    if new_u >= max_u:
+                        new_u -= max_u
+                if ends_v:
+                    new_v = min(max(new_v, low_v), high_v)
+                else:
+                    new_v = new_v % max_v
+                    if new_v >= max_v:
+                        new_v -= max_v
+                _patch_derivatives(new_u, new_v, kv_u, kv_v, cv, du, dv, 2,
+                                   span_u and new_u >= high_u,
+                                   span_v and new_v >= high_v, work, basis_u, basis_v,
+                                   trial)
+                f_new = 0.0
+                for k in range(query.shape[0]):
+                    r = trial[0, k] - query[k]
+                    f_new += r * r
+                if f_new < f:
+                    moved = True
+                    break
+                t *= 0.5
+            if moved:
+                break
+        if not moved:
+            break
+
+        # How far it moved, the short way round a periodic direction
+        gap_u = abs(new_u - u)
+        gap_v = abs(new_v - v)
+        if periodic_u:
+            gap_u = min(gap_u, max_u - gap_u)
+        if periodic_v:
+            gap_v = min(gap_v, max_v - gap_v)
+
+        u       = new_u
+        v       = new_v
+        here[:] = trial
+        f, g_u, g_v, h_uu, h_uv, h_vv, j_uu, j_uv, j_vv = _patch_slopes(query, here)
+        if max(gap_u, gap_v) < tolerance:
+            break
+    _mark_pole(u, v, poles, max_u, max_v, on_poles)
+
+    # A degree-1 direction: back to the right-sided derivatives compute()
+    # gives on a knot, and from the seam's end to 0
+    if span_u or span_v:
+        if periodic_u and u >= max_u:
+            u = 0.0
+        if periodic_v and v >= max_v:
+            v = 0.0
+        _patch_derivatives(u, v, kv_u, kv_v, cv, du, dv, 2, False, False, work, basis_u,
+                           basis_v, here)
+
+    return u, v, f
+
+
+@njit(parallel=True, cache=True)
 def _newton_closest_point_surface_parallel(
     queries,
     u_init,
@@ -2503,21 +3386,30 @@ def _newton_closest_point_surface_parallel(
     periodic_v,
     max_iters,
     tolerance,
+    reach_u,
+    reach_v,
 ):
     """
-    Parallel 2D Newton-Raphson closest point on B-spline surface.
+    Parallel closest point on a B-spline surface.
 
-    Finds (u, v) such that S(u, v) is closest to each query point.
-    Solves the perpendicularity system:
-        f1 = (S - Q) . S_u = 0
-        f2 = (S - Q) . S_v = 0
+    Finds (u, v) such that S(u, v) is closest to each query point: from
+    each seed, ``_patch_descend``'s Newton search, which only takes steps
+    that come closer and slides along an open edge or a degree-1
+    direction's fold when the closest spot is on it. On a patch open both
+    ways, a corner closer than the best result starts one more search, and
+    so does the first fork of a query's searches (the other side of a flat
+    span, ``_patch_descend``). A pole any of them reached is left by more
+    searches, from each spot ``_patch_pole_turns`` finds. The closest result
+    wins.
 
     Parameters
     ----------
     queries : np.ndarray
         Query points (n_queries, dims), float64.
     u_init, v_init : np.ndarray
-        Initial parameter guesses (n_queries,), float64.
+        Seeds (n_queries, n_seeds), float64, native and inside the domain,
+        best first. A seed within reach of where an earlier search of its
+        query ended, in both directions, is skipped: it would end there too.
     kv_u, kv_v : np.ndarray
         Knot vectors, float64.
     cv : np.ndarray
@@ -2529,9 +3421,12 @@ def _newton_closest_point_surface_parallel(
     periodic_u, periodic_v : bool
         Whether the surface is periodic per direction.
     max_iters : int
-        Maximum Newton iterations.
+        Most Newton steps per search.
     tolerance : float
         Convergence tolerance for parameter change.
+    reach_u, reach_v : float
+        How close, in native parameters, a seed must be to an earlier
+        search's end to be skipped; 0 skips only a seed right on one.
 
     Returns
     -------
@@ -2543,22 +3438,8 @@ def _newton_closest_point_surface_parallel(
         Tangent vectors at closest points (n_queries, dims), float64.
     """
     n_queries = queries.shape[0]
-    n_cv_u    = cv.shape[0]
-    n_cv_v    = cv.shape[1]
+    n_seeds   = u_init.shape[1]
     dims      = cv.shape[2]
-
-    order_u   = du + 1
-    order_v   = dv + 1
-
-    if periodic_u:
-        limit_u = int(max_param_u) - 1
-    else:
-        limit_u = n_cv_u - du - 1
-
-    if periodic_v:
-        limit_v = int(max_param_v) - 1
-    else:
-        limit_v = n_cv_v - dv - 1
 
     u_out          = np.empty(n_queries,         dtype=np.float64)
     v_out          = np.empty(n_queries,         dtype=np.float64)
@@ -2566,523 +3447,152 @@ def _newton_closest_point_surface_parallel(
     tangents_u_out = np.empty((n_queries, dims), dtype=np.float64)
     tangents_v_out = np.empty((n_queries, dims), dtype=np.float64)
 
+    # Which open edges are poles, and the corners of a patch open both ways:
+    # (u, v) and position
+    poles   = _patch_poles(cv, periodic_u, periodic_v)
+    corners = 0 if periodic_u or periodic_v else 4
+    corner  = np.zeros((4, 2 + dims))
+    if corners:
+        work    = np.empty(max(du, dv) + 1)
+        basis_u = np.empty((3, du + 1))
+        basis_v = np.empty((3, dv + 1))
+        derivs  = np.empty((6, dims))
+        for c in range(4):
+            corner[c, 0] = max_param_u if c % 2 else 0.0
+            corner[c, 1] = max_param_v if c // 2 else 0.0
+            _patch_derivatives(corner[c, 0], corner[c, 1], kv_u, kv_v, cv, du, dv, 1,
+                               False, False, work, basis_u, basis_v, derivs)
+            corner[c, 2:] = derivs[0]
+
     for qi in prange(n_queries):
         query = queries[qi]
-        ui    = u_init[qi]
-        vi    = v_init[qi]
 
-        # Thread-local basis buffers
-        b_u     = np.zeros(order_u + 1, dtype=np.float64)
-        bb_u    = np.zeros(order_u + 1, dtype=np.float64)
-        b_u_d1  = np.zeros(order_u,     dtype=np.float64)
-        bb_u_d1 = np.zeros(order_u,     dtype=np.float64)
-        b_u_d2  = np.zeros(order_u,     dtype=np.float64)
-        bb_u_d2 = np.zeros(order_u,     dtype=np.float64)
+        # Thread-local scratch; best holds the derivatives at the result,
+        # on_poles the poles this query's searches reached, fork the other
+        # side of the first flat span one left (``_patch_descend``)
+        work     = np.empty(max(du, dv) + 1)
+        basis_u  = np.empty((3, du + 1))
+        basis_v  = np.empty((3, dv + 1))
+        here     = np.empty((6, dims))
+        trial    = np.empty((6, dims))
+        best     = np.empty((6, dims))
+        ends     = np.empty((n_seeds, 2))
+        on_poles = np.zeros(4, dtype=np.bool_)
+        fork     = np.zeros(3)
+        spans    = max(int(max_param_u + 0.5), int(max_param_v + 0.5), 1)
+        starts   = np.empty(8 * spans + 2)
 
-        b_v     = np.zeros(order_v + 1, dtype=np.float64)
-        bb_v    = np.zeros(order_v + 1, dtype=np.float64)
-        b_v_d1  = np.zeros(order_v,     dtype=np.float64)
-        bb_v_d1 = np.zeros(order_v,     dtype=np.float64)
-        b_v_d2  = np.zeros(order_v,     dtype=np.float64)
-        bb_v_d2 = np.zeros(order_v,     dtype=np.float64)
+        ui = u_init[qi, 0]
+        vi = v_init[qi, 0]
+        fi = np.inf
+        for s in range(n_seeds):
+            su = u_init[qi, s]
+            sv = v_init[qi, s]
 
-        for _ in range(max_iters):
-            # --- Find spans ---
-            left_u = int(np.floor(ui))
-            if left_u < 0:
-                left_u = 0
-            elif left_u > limit_u:
-                left_u = limit_u
-            right_u = left_u + order_u
+            # Skip a seed within reach of where an earlier search ended: it
+            # would end there too. Along a degree-1 direction, only one on
+            # the span that search ended on: a fold can part two basins
+            near = False
+            for e in range(s):
+                gap_u = abs(su - ends[e, 0])
+                gap_v = abs(sv - ends[e, 1])
+                if periodic_u:
+                    gap_u = min(gap_u, max_param_u - gap_u)
+                if periodic_v:
+                    gap_v = min(gap_v, max_param_v - gap_v)
+                if du == 1 and not np.floor(su) <= ends[e, 0] <= np.floor(su) + 1.0:
+                    gap_u = np.inf
+                if dv == 1 and not np.floor(sv) <= ends[e, 1] <= np.floor(sv) + 1.0:
+                    gap_v = np.inf
+                if gap_u <= reach_u and gap_v <= reach_v:
+                    near    = True
+                    ends[s] = ends[e]
+                    break
+            if near:
+                continue
 
-            left_v  = int(np.floor(vi))
-            if left_v < 0:
-                left_v = 0
-            elif left_v > limit_v:
-                left_v = limit_v
-            right_v = left_v + order_v
+            u, v, f = _patch_descend(query, su, sv, kv_u, kv_v, cv, du, dv, max_param_u,
+                                     max_param_v, periodic_u, periodic_v, poles,
+                                     on_poles, fork, False, False, max_iters, tolerance,
+                                     work, basis_u, basis_v, here, trial)
+            ends[s, 0] = u
+            ends[s, 1] = v
+            if s == 0 or f < fi:
+                ui, vi, fi = u, v, f
+                best[:] = here
 
-            # === U basis at degree du ===
-            for i in range(order_u + 1):
-                b_u[i] = 0.0
-            b_u[0] = 1.0
-            for j in range(1, order_u):
-                for i in range(j):
-                    bb_u[i] = b_u[i]
-                    b_u[i]  = 0.0
-                for i in range(j):
-                    ri    = right_u + i
-                    denom = kv_u[ri] - kv_u[ri - j]
-                    if denom != 0.0:
-                        f = bb_u[i] / denom
-                    else:
-                        f = 0.0
-                    b_u[i] += f * (kv_u[ri] - ui)
-                    b_u[i + 1] = f * (ui - kv_u[ri - j])
+        # A corner closer than the result: search from there too
+        for c in range(corners):
+            f = 0.0
+            for k in range(dims):
+                r = corner[c, 2 + k] - query[k]
+                f += r * r
+            if not f < fi:
+                continue
+            u, v, f = _patch_descend(query, corner[c, 0], corner[c, 1], kv_u, kv_v, cv,
+                                     du, dv, max_param_u, max_param_v, periodic_u,
+                                     periodic_v, poles, on_poles, fork, False, False,
+                                     max_iters, tolerance, work, basis_u, basis_v, here,
+                                     trial)
+            if f < fi:
+                ui, vi, fi = u, v, f
+                best[:] = here
 
-            # === U basis at degree du-1 ===
-            for i in range(order_u):
-                b_u_d1[i] = 0.0
-            b_u_d1[0] = 1.0
-            for j in range(1, du):
-                for i in range(j):
-                    bb_u_d1[i] = b_u_d1[i]
-                    b_u_d1[i]  = 0.0
-                for i in range(j):
-                    ri    = right_u + i
-                    denom = kv_u[ri] - kv_u[ri - j]
-                    if denom != 0.0:
-                        f = bb_u_d1[i] / denom
-                    else:
-                        f = 0.0
-                    b_u_d1[i] += f * (kv_u[ri] - ui)
-                    b_u_d1[i + 1] = f * (ui - kv_u[ri - j])
+        # A flat span's two sides can hold two basins: when a search left
+        # one with both sides closer, one more search from the other
+        if fork[2] > 0.0:
+            u, v, f = _patch_descend(query, fork[0], fork[1], kv_u, kv_v, cv, du, dv,
+                                     max_param_u, max_param_v, periodic_u, periodic_v,
+                                     poles, on_poles, fork, False, False, max_iters,
+                                     tolerance, work, basis_u, basis_v, here, trial)
+            if f < fi:
+                ui, vi, fi = u, v, f
+                best[:] = here
 
-            # === U basis at degree du-2 ===
-            if du >= 2:
-                for i in range(order_u):
-                    b_u_d2[i] = 0.0
-                b_u_d2[0] = 1.0
-                for j in range(1, du - 1):
-                    for i in range(j):
-                        bb_u_d2[i] = b_u_d2[i]
-                        b_u_d2[i]  = 0.0
-                    for i in range(j):
-                        ri    = right_u + i
-                        denom = kv_u[ri] - kv_u[ri - j]
-                        if denom != 0.0:
-                            f = bb_u_d2[i] / denom
-                        else:
-                            f = 0.0
-                        b_u_d2[i] += f * (kv_u[ri] - ui)
-                        b_u_d2[i + 1] = f * (ui - kv_u[ri - j])
-
-            # === V basis at degree dv ===
-            for i in range(order_v + 1):
-                b_v[i] = 0.0
-            b_v[0] = 1.0
-            for j in range(1, order_v):
-                for i in range(j):
-                    bb_v[i] = b_v[i]
-                    b_v[i]  = 0.0
-                for i in range(j):
-                    ri    = right_v + i
-                    denom = kv_v[ri] - kv_v[ri - j]
-                    if denom != 0.0:
-                        f = bb_v[i] / denom
-                    else:
-                        f = 0.0
-                    b_v[i] += f * (kv_v[ri] - vi)
-                    b_v[i + 1] = f * (vi - kv_v[ri - j])
-
-            # === V basis at degree dv-1 ===
-            for i in range(order_v):
-                b_v_d1[i] = 0.0
-            b_v_d1[0] = 1.0
-            for j in range(1, dv):
-                for i in range(j):
-                    bb_v_d1[i] = b_v_d1[i]
-                    b_v_d1[i]  = 0.0
-                for i in range(j):
-                    ri    = right_v + i
-                    denom = kv_v[ri] - kv_v[ri - j]
-                    if denom != 0.0:
-                        f = bb_v_d1[i] / denom
-                    else:
-                        f = 0.0
-                    b_v_d1[i] += f * (kv_v[ri] - vi)
-                    b_v_d1[i + 1] = f * (vi - kv_v[ri - j])
-
-            # === V basis at degree dv-2 ===
-            if dv >= 2:
-                for i in range(order_v):
-                    b_v_d2[i] = 0.0
-                b_v_d2[0] = 1.0
-                for j in range(1, dv - 1):
-                    for i in range(j):
-                        bb_v_d2[i] = b_v_d2[i]
-                        b_v_d2[i]  = 0.0
-                    for i in range(j):
-                        ri    = right_v + i
-                        denom = kv_v[ri] - kv_v[ri - j]
-                        if denom != 0.0:
-                            f = bb_v_d2[i] / denom
-                        else:
-                            f = 0.0
-                        b_v_d2[i] += f * (kv_v[ri] - vi)
-                        b_v_d2[i + 1] = f * (vi - kv_v[ri - j])
-
-            # === Evaluate S ===
-            S = np.zeros(dims, dtype=np.float64)
-            for iu in range(order_u):
-                cp_u = left_u + iu
-                if cp_u < n_cv_u:
-                    bu_val = b_u[iu]
-                    for iv in range(order_v):
-                        cp_v = left_v + iv
-                        if cp_v < n_cv_v:
-                            w = bu_val * b_v[iv]
-                            for d in range(dims):
-                                S[d] += w * cv[cp_u, cp_v, d]
-
-            # === Evaluate S_u ===
-            S_u = np.zeros(dims, dtype=np.float64)
-            for iu in range(du):
-                cp_u = left_u + iu
-                if cp_u + 1 < n_cv_u:
-                    kv_idx_u = cp_u + 1
-                    denom_u  = kv_u[kv_idx_u + du] - kv_u[kv_idx_u]
-                    if denom_u != 0.0:
-                        for iv in range(order_v):
-                            cp_v = left_v + iv
-                            if cp_v < n_cv_v:
-                                sc = du * b_u_d1[iu] * b_v[iv] / denom_u
-                                for d in range(dims):
-                                    S_u[d] += sc * (
-                                        cv[cp_u + 1, cp_v, d] - cv[cp_u, cp_v, d]
-                                    )
-
-            # === Evaluate S_v ===
-            S_v = np.zeros(dims, dtype=np.float64)
-            for iu in range(order_u):
-                cp_u = left_u + iu
-                if cp_u < n_cv_u:
-                    for iv in range(dv):
-                        cp_v = left_v + iv
-                        if cp_v + 1 < n_cv_v:
-                            kv_idx_v = cp_v + 1
-                            denom_v  = kv_v[kv_idx_v + dv] - kv_v[kv_idx_v]
-                            if denom_v != 0.0:
-                                sc = dv * b_u[iu] * b_v_d1[iv] / denom_v
-                                for d in range(dims):
-                                    S_v[d] += sc * (
-                                        cv[cp_u, cp_v + 1, d] - cv[cp_u, cp_v, d]
-                                    )
-
-            # === Evaluate S_uu ===
-            S_uu = np.zeros(dims, dtype=np.float64)
-            if du >= 2:
-                for iu in range(du - 1):
-                    cp_u = left_u + iu
-                    if cp_u + 2 < n_cv_u:
-                        ki1 = cp_u + 1
-                        d1  = kv_u[ki1 + du] - kv_u[ki1]
-                        ki2 = cp_u + 2
-                        d2  = kv_u[ki2 + du] - kv_u[ki2]
-                        if d1 != 0.0 and d2 != 0.0:
-                            # divided by kv_u[i+du+1] - kv_u[i+2]
-                            kid = cp_u + 2
-                            dd  = kv_u[kid + du - 1] - kv_u[kid]
-                            if dd != 0.0:
-                                for iv in range(order_v):
-                                    cp_v = left_v + iv
-                                    if cp_v < n_cv_v:
-                                        sc = (
-                                            du
-                                            * (du - 1)
-                                            * b_u_d2[iu]
-                                            * b_v[iv]
-                                            / (dd * d1)
-                                        )
-                                        for d in range(dims):
-                                            q1 = (
-                                                cv[cp_u + 2, cp_v, d]
-                                                - cv[cp_u + 1, cp_v, d]
-                                            ) / d2
-                                            q0 = (
-                                                cv[cp_u + 1, cp_v, d]
-                                                - cv[cp_u, cp_v, d]
-                                            ) / d1
-                                            S_uu[d] += sc * d1 * (q1 - q0)
-
-            # === Evaluate S_vv ===
-            S_vv = np.zeros(dims, dtype=np.float64)
-            if dv >= 2:
-                for iu in range(order_u):
-                    cp_u = left_u + iu
-                    if cp_u < n_cv_u:
-                        for iv in range(dv - 1):
-                            cp_v = left_v + iv
-                            if cp_v + 2 < n_cv_v:
-                                ki1 = cp_v + 1
-                                d1  = kv_v[ki1 + dv] - kv_v[ki1]
-                                ki2 = cp_v + 2
-                                d2  = kv_v[ki2 + dv] - kv_v[ki2]
-                                if d1 != 0.0 and d2 != 0.0:
-                                    # divided by kv_v[i+dv+1] - kv_v[i+2]
-                                    kid = cp_v + 2
-                                    dd  = kv_v[kid + dv - 1] - kv_v[kid]
-                                    if dd != 0.0:
-                                        sc = (
-                                            dv
-                                            * (dv - 1)
-                                            * b_u[iu]
-                                            * b_v_d2[iv]
-                                            / (dd * d1)
-                                        )
-                                        for d in range(dims):
-                                            q1 = (
-                                                cv[cp_u, cp_v + 2, d]
-                                                - cv[cp_u, cp_v + 1, d]
-                                            ) / d2
-                                            q0 = (
-                                                cv[cp_u, cp_v + 1, d]
-                                                - cv[cp_u, cp_v, d]
-                                            ) / d1
-                                            S_vv[d] += sc * d1 * (q1 - q0)
-
-            # === Evaluate S_uv ===
-            S_uv = np.zeros(dims, dtype=np.float64)
-            if du >= 1 and dv >= 1:
-                for iu in range(du):
-                    cp_u = left_u + iu
-                    if cp_u + 1 < n_cv_u:
-                        kv_idx_u = cp_u + 1
-                        denom_u  = kv_u[kv_idx_u + du] - kv_u[kv_idx_u]
-                        if denom_u != 0.0:
-                            for iv in range(dv):
-                                cp_v = left_v + iv
-                                if cp_v + 1 < n_cv_v:
-                                    kv_idx_v = cp_v + 1
-                                    denom_v  = kv_v[kv_idx_v + dv] - kv_v[kv_idx_v]
-                                    if denom_v != 0.0:
-                                        sc = (
-                                            du
-                                            * dv
-                                            * b_u_d1[iu]
-                                            * b_v_d1[iv]
-                                            / (denom_u * denom_v)
-                                        )
-                                        for d in range(dims):
-                                            dj1 = (
-                                                cv[cp_u + 1, cp_v + 1, d]
-                                                - cv[cp_u, cp_v + 1, d]
-                                            )
-                                            dj0 = (
-                                                cv[cp_u + 1, cp_v, d]
-                                                - cv[cp_u, cp_v, d]
-                                            )
-                                            S_uv[d] += sc * (dj1 - dj0)
-
-            # === Perpendicularity conditions ===
-            f1 = 0.0
-            f2 = 0.0
-            for d in range(dims):
-                diff_d = S[d] - query[d]
-                f1 += diff_d * S_u[d]
-                f2 += diff_d * S_v[d]
-
-            # === 2x2 Jacobian ===
-            J11 = 0.0
-            J12 = 0.0
-            J22 = 0.0
-            for d in range(dims):
-                diff_d = S[d] - query[d]
-                J11 += S_u[d] * S_u[d] + diff_d * S_uu[d]
-                J12 += S_u[d] * S_v[d] + diff_d * S_uv[d]
-                J22 += S_v[d] * S_v[d] + diff_d * S_vv[d]
-
-            # === Cramer's rule ===
-            det = J11 * J22 - J12 * J12
-            if abs(det) < 1e-14:
-                det = 1e-14 if det >= 0 else -1e-14
-
-            delta_u = (-f1 * J22 + f2 * J12) / det
-            delta_v = (f1 * J12 - f2 * J11) / det
-
-            # Trust region
-            if delta_u > 0.5:
-                delta_u = 0.5
-            elif delta_u < -0.5:
-                delta_u = -0.5
-            if delta_v > 0.5:
-                delta_v = 0.5
-            elif delta_v < -0.5:
-                delta_v = -0.5
-
-            ui_new = ui + delta_u
-            vi_new = vi + delta_v
-
-            # Handle bounds
-            if periodic_u:
-                while ui_new < 0:
-                    ui_new += max_param_u
-                while ui_new >= max_param_u:
-                    ui_new -= max_param_u
+        # A search that reached a pole stopped there, slid along it (a
+        # nearly collapsed one) or left it where it reached it, so others
+        # leave it: one per way off it that comes closer, from where the
+        # patch heads toward the query most steeply, and on a nearly
+        # collapsed pole one from each spot of its rim closest to the query
+        for pole in range(4):
+            if not on_poles[pole]:
+                continue
+            on_u = pole < 2
+            if on_u:
+                edge = 0.0 if pole == 0 else max_param_u
+                found = _patch_pole_turns(query, edge, True, max_param_v, periodic_v,
+                                          kv_u, kv_v, cv, du, dv, work, basis_u,
+                                          basis_v, trial, poles[pole] == 1, starts)
             else:
-                if ui_new < 0:
-                    ui_new = 0.0
-                elif ui_new > max_param_u:
-                    ui_new = max_param_u
+                edge = 0.0 if pole == 2 else max_param_v
+                found = _patch_pole_turns(query, edge, False, max_param_u, periodic_u,
+                                          kv_u, kv_v, cv, du, dv, work, basis_u,
+                                          basis_v, trial, poles[pole] == 1, starts)
+            # Along a degree-1 direction, a start on a knot (two facets meet
+            # there) is tried on the span on each side of it
+            facets = (dv if on_u else du) == 1
+            for t in range(2 * found):
+                x     = starts[t // 2]
+                below = t % 2 == 1
+                if below and not (facets and x == np.floor(x)):
+                    continue
+                su = edge if on_u else x
+                sv = x if on_u else edge
+                u, v, f = _patch_descend(query, su, sv, kv_u, kv_v, cv, du, dv,
+                                         max_param_u, max_param_v, periodic_u,
+                                         periodic_v, poles, on_poles, fork, True,
+                                         below, max_iters, tolerance, work, basis_u,
+                                         basis_v, here, trial)
+                if f < fi:
+                    ui, vi, fi = u, v, f
+                    best[:] = here
 
-            if periodic_v:
-                while vi_new < 0:
-                    vi_new += max_param_v
-                while vi_new >= max_param_v:
-                    vi_new -= max_param_v
-            else:
-                if vi_new < 0:
-                    vi_new = 0.0
-                elif vi_new > max_param_v:
-                    vi_new = max_param_v
-
-            # Convergence
-            conv = abs(delta_u)
-            if abs(delta_v) > conv:
-                conv = abs(delta_v)
-
-            if conv < tolerance:
-                ui = ui_new
-                vi = vi_new
-                break
-
-            ui = ui_new
-            vi = vi_new
-
-        # === Final evaluation at converged (u, v) ===
-        left_u = int(np.floor(ui))
-        if left_u < 0:
-            left_u = 0
-        elif left_u > limit_u:
-            left_u = limit_u
-        right_u = left_u + order_u
-
-        left_v  = int(np.floor(vi))
-        if left_v < 0:
-            left_v = 0
-        elif left_v > limit_v:
-            left_v = limit_v
-        right_v = left_v + order_v
-
-        # Recompute U basis at degree du
-        for i in range(order_u + 1):
-            b_u[i] = 0.0
-        b_u[0] = 1.0
-        for j in range(1, order_u):
-            for i in range(j):
-                bb_u[i] = b_u[i]
-                b_u[i]  = 0.0
-            for i in range(j):
-                ri    = right_u + i
-                denom = kv_u[ri] - kv_u[ri - j]
-                if denom != 0.0:
-                    f = bb_u[i] / denom
-                else:
-                    f = 0.0
-                b_u[i] += f * (kv_u[ri] - ui)
-                b_u[i + 1] = f * (ui - kv_u[ri - j])
-
-        # Recompute U basis at degree du-1
-        for i in range(order_u):
-            b_u_d1[i] = 0.0
-        b_u_d1[0] = 1.0
-        for j in range(1, du):
-            for i in range(j):
-                bb_u_d1[i] = b_u_d1[i]
-                b_u_d1[i]  = 0.0
-            for i in range(j):
-                ri    = right_u + i
-                denom = kv_u[ri] - kv_u[ri - j]
-                if denom != 0.0:
-                    f = bb_u_d1[i] / denom
-                else:
-                    f = 0.0
-                b_u_d1[i] += f * (kv_u[ri] - ui)
-                b_u_d1[i + 1] = f * (ui - kv_u[ri - j])
-
-        # Recompute V basis at degree dv
-        for i in range(order_v + 1):
-            b_v[i] = 0.0
-        b_v[0] = 1.0
-        for j in range(1, order_v):
-            for i in range(j):
-                bb_v[i] = b_v[i]
-                b_v[i]  = 0.0
-            for i in range(j):
-                ri    = right_v + i
-                denom = kv_v[ri] - kv_v[ri - j]
-                if denom != 0.0:
-                    f = bb_v[i] / denom
-                else:
-                    f = 0.0
-                b_v[i] += f * (kv_v[ri] - vi)
-                b_v[i + 1] = f * (vi - kv_v[ri - j])
-
-        # Recompute V basis at degree dv-1
-        for i in range(order_v):
-            b_v_d1[i] = 0.0
-        b_v_d1[0] = 1.0
-        for j in range(1, dv):
-            for i in range(j):
-                bb_v_d1[i] = b_v_d1[i]
-                b_v_d1[i]  = 0.0
-            for i in range(j):
-                ri    = right_v + i
-                denom = kv_v[ri] - kv_v[ri - j]
-                if denom != 0.0:
-                    f = bb_v_d1[i] / denom
-                else:
-                    f = 0.0
-                b_v_d1[i] += f * (kv_v[ri] - vi)
-                b_v_d1[i + 1] = f * (vi - kv_v[ri - j])
-
-        # Final S(u,v)
-        for d in range(dims):
-            S[d] = 0.0
-        for iu in range(order_u):
-            cp_u = left_u + iu
-            if cp_u < n_cv_u:
-                bu_val = b_u[iu]
-                for iv in range(order_v):
-                    cp_v = left_v + iv
-                    if cp_v < n_cv_v:
-                        w = bu_val * b_v[iv]
-                        for d in range(dims):
-                            S[d] += w * cv[cp_u, cp_v, d]
-
-        # Final S_u
-        for d in range(dims):
-            S_u[d] = 0.0
-        for iu in range(du):
-            cp_u = left_u + iu
-            if cp_u + 1 < n_cv_u:
-                kv_idx_u = cp_u + 1
-                denom_u  = kv_u[kv_idx_u + du] - kv_u[kv_idx_u]
-                if denom_u != 0.0:
-                    for iv in range(order_v):
-                        cp_v = left_v + iv
-                        if cp_v < n_cv_v:
-                            sc = du * b_u_d1[iu] * b_v[iv] / denom_u
-                            for d in range(dims):
-                                S_u[d] += sc * (
-                                    cv[cp_u + 1, cp_v, d] - cv[cp_u, cp_v, d]
-                                )
-
-        # Final S_v
-        for d in range(dims):
-            S_v[d] = 0.0
-        for iu in range(order_u):
-            cp_u = left_u + iu
-            if cp_u < n_cv_u:
-                for iv in range(dv):
-                    cp_v = left_v + iv
-                    if cp_v + 1 < n_cv_v:
-                        kv_idx_v = cp_v + 1
-                        denom_v  = kv_v[kv_idx_v + dv] - kv_v[kv_idx_v]
-                        if denom_v != 0.0:
-                            sc = dv * b_u[iu] * b_v_d1[iv] / denom_v
-                            for d in range(dims):
-                                S_v[d] += sc * (
-                                    cv[cp_u, cp_v + 1, d] - cv[cp_u, cp_v, d]
-                                )
-
-        # Store results
         u_out[qi] = ui
         v_out[qi] = vi
-        for d in range(dims):
-            points_out[qi, d]     = S[d]
-            tangents_u_out[qi, d] = S_u[d]
-            tangents_v_out[qi, d] = S_v[d]
+        for k in range(dims):
+            points_out[qi, k]     = best[0, k]
+            tangents_u_out[qi, k] = best[1, k]
+            tangents_v_out[qi, k] = best[2, k]
 
     return u_out, v_out, points_out, tangents_u_out, tangents_v_out
 

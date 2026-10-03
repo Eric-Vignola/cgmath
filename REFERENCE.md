@@ -1753,7 +1753,7 @@ rebuild(self) -> None
 rebuild_arc_length_table(self) -> None
     Rebuild cached spline, cv cache, and arc-length tables.
 sample(self, obj, initial_samples=20, max_newton_iters=10, tolerance=1e-10)
-    Project points onto the surface via Newton-Raphson refinement.
+    Project points onto the surface: each query's closest point.
 smooth(self, n_u: int, n_v: int, polyorder: int = 3)
     Separable Savgol smoothing along U then V with periodic wrapping.
 ```

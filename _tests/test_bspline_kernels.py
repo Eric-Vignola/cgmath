@@ -2,14 +2,14 @@
 
 ``_compute_basis_derivatives`` has no public wrapper, so it is checked
 against scipy's derivatives of every basis function, on each kind of knot
-vector a curve can carry. The surface closest-point Newton kernel is checked
-step by step against the same steps taken with scipy's exact second
-derivatives. ``_curve_derivatives``, which the best-fit parameter repair
-evaluates the curve with, is checked against scipy's curve derivatives.
-``_bezier_pieces``, which cuts a curve into the pieces sample() searches, is
-checked to end each piece exactly on the curve's own spots, and
-``_piece_closest``, which searches each piece, to stop Newton's method at
-each root.
+vector a curve can carry. ``_patch_derivatives``, which the surface
+closest-point search evaluates the patch with, is checked against scipy's
+partial derivatives up to the second. ``_curve_derivatives``, which the
+best-fit parameter repair evaluates the curve with, is checked against
+scipy's curve derivatives. ``_bezier_pieces``, which cuts a curve into the
+pieces sample() searches, is checked to end each piece exactly on the
+curve's own spots, and ``_piece_closest``, which searches each piece, to
+stop Newton's method at each root.
 """
 
 import unittest
@@ -21,7 +21,7 @@ from cgmath.geometry.utils._numba._bspline import (
     _bezier_pieces,
     _compute_basis_derivatives,
     _curve_derivatives,
-    _newton_closest_point_surface_parallel,
+    _patch_derivatives,
 )
 from scipy.interpolate import BSpline
 
@@ -51,6 +51,18 @@ def domain_knots(kv, d):
     """every knot of the domain, both ends included"""
     c = len(kv) - d - 1
     return kv[d:c + 1]
+
+
+def one_sided(kv, d, count, below):
+    """
+    every basis function's derivative of order nu at x: scipy's, right-sided
+    on a knot, or with below the left-sided ones, from the mirrored spline
+    """
+    if not below:
+        splines = BSpline(kv, np.eye(count), d)
+        return lambda x, nu: splines(x, nu)
+    mirror = BSpline(kv[0] + kv[-1] - kv[::-1], np.eye(count)[::-1], d)
+    return lambda x, nu: (-1) ** nu * mirror(kv[0] + kv[-1] - x, nu)
 
 
 class TestBasisDerivativeKernel(unittest.TestCase):
@@ -161,84 +173,60 @@ def patch(d, spans_u, spans_v, periodic_u, seed=8):
     return kv_u, uniform_clamped(d, spans_v), cvs, max_u, float(spans_v)
 
 
-def exact_newton_steps(queries, u, v, kv_u, kv_v, cvs, d, max_u, max_v, periodic_u, steps):
+class TestPatchDerivativesKernel(unittest.TestCase):
     """
-    The kernel's closest-point Newton steps, with exact second derivatives
-    from scipy: same trust region, clamping and wrapping.
-    """
-    bu = BSpline(kv_u, np.eye(cvs.shape[0]), d)
-    bv = BSpline(kv_v, np.eye(cvs.shape[1]), d)
-    for _ in range(steps):
-        eu = [bu(u), bu.derivative(1)(u), bu.derivative(2)(u)]
-        ev = [bv(v), bv.derivative(1)(v), bv.derivative(2)(v)]
-
-        def surface(i, j):
-            return np.einsum("ni,nj,ijd->nd", eu[i], ev[j], cvs)
-
-        def dot(a, b):
-            return np.einsum("nd,nd->n", a, b)
-
-        su, sv = surface(1, 0), surface(0, 1)
-        r      = surface(0, 0) - queries
-        f1     = dot(r, su)
-        f2     = dot(r, sv)
-        j11    = dot(su, su) + dot(r, surface(2, 0))
-        j12    = dot(su, sv) + dot(r, surface(1, 1))
-        j22    = dot(sv, sv) + dot(r, surface(0, 2))
-        det    = j11 * j22 - j12 * j12
-        det    = np.where(np.abs(det) < 1e-14, np.where(det >= 0, 1e-14, -1e-14), det)
-        step_u = np.clip((-f1 * j22 + f2 * j12) / det, -0.5, 0.5)
-        step_v = np.clip((f1 * j12 - f2 * j11) / det, -0.5, 0.5)
-
-        u = (u + step_u) % max_u if periodic_u else np.clip(u + step_u, 0.0, max_u)
-        v = np.clip(v + step_v, 0.0, max_v)
-    return u, v
-
-
-class TestSurfaceNewtonKernel(unittest.TestCase):
-    """
-    Each Newton step uses exact second derivatives; S_uu and S_vv once
-    divided by a knot difference one index off (0.14 off after one step).
+    S and its partial derivatives up to the second match scipy's, inside
+    the domain, on its knots and at both ends; with below, on a knot, they
+    are the span below's (left-sided). The closest-point search takes its
+    Newton steps from them; its first version divided S_uu and S_vv by a
+    knot difference one index off (0.14 off after one step).
     """
 
-    def assert_steps_exact(self, periodic_u):
-        d = 3
-        kv_u, kv_v, cvs, max_u, max_v = patch(d, 4, 3, periodic_u)
+    ORDERS = ((0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (0, 2))
 
-        rng = np.random.default_rng(9)
-        u   = rng.uniform(0.05, max_u - 0.05, 40)
-        v   = rng.uniform(0.05, max_v - 0.05, 40)
-        on = np.einsum(
-            "ni,nj,ijd->nd",
-            BSpline(kv_u, np.eye(cvs.shape[0]), d)(u),
-            BSpline(kv_v, np.eye(cvs.shape[1]), d)(v),
-            cvs,
-        )
-        queries = on + rng.normal(scale=0.15, size=on.shape)
-        u0      = u + rng.uniform(-0.25, 0.25, u.shape)
-        u0      = u0 % max_u if periodic_u else np.clip(u0, 0.0, max_u)
-        v0      = np.clip(v + rng.uniform(-0.25, 0.25, v.shape), 0.0, max_v)
+    def assert_matches_scipy(self, d, periodic_u, below=False):
+        kv_u, kv_v, cvs, _, _ = patch(d, 4, 3, periodic_u)
+        if below:
+            # every knot past the domain's start has a span below it
+            u_all = domain_knots(kv_u, d)[1:]
+            v_all = domain_knots(kv_v, d)[1:]
+        else:
+            u_all = np.r_[inside_domain(kv_u, d, 9), domain_knots(kv_u, d)]
+            v_all = np.r_[inside_domain(kv_v, d, 7), domain_knots(kv_v, d)]
+        bu = one_sided(kv_u, d, cvs.shape[0], below)
+        bv = one_sided(kv_v, d, cvs.shape[1], below)
 
-        for steps in (1, 2):
-            with self.subTest(steps=steps):
-                found_u, found_v = _newton_closest_point_surface_parallel(
-                    queries, u0, v0, kv_u, kv_v, cvs, d, d, max_u, max_v,
-                    periodic_u, False, steps, 0.0,
-                )[:2]
-                exact_u, exact_v = exact_newton_steps(
-                    queries, u0, v0, kv_u, kv_v, cvs, d, max_u, max_v, periodic_u, steps
+        work    = np.zeros(d + 1)
+        basis_u = np.zeros((3, d + 1))
+        basis_v = np.zeros((3, d + 1))
+        out     = np.zeros((6, 3))
+        for u in u_all:
+            for v in v_all:
+                _patch_derivatives(
+                    u, v, kv_u, kv_v, cvs, d, d, 2, below, below, work, basis_u, basis_v, out
                 )
-                gap_u = found_u - exact_u
-                if periodic_u:
-                    gap_u = (gap_u + max_u / 2) % max_u - max_u / 2
-                np.testing.assert_allclose(gap_u, 0.0, atol=1e-12)
-                np.testing.assert_allclose(found_v, exact_v, atol=1e-12)
+                for row, (a, b) in enumerate(self.ORDERS):
+                    want = np.einsum("i,j,ijd->d", bu(u, a), bv(v, b), cvs)
+                    np.testing.assert_allclose(
+                        out[row], want, rtol=1e-12, atol=1e-12, err_msg=f"{(a, b)} at {(u, v)}"
+                    )
 
     def test_open_patch(self):
-        self.assert_steps_exact(periodic_u=False)
+        for d in (1, 2, 3):
+            with self.subTest(d=d):
+                self.assert_matches_scipy(d, periodic_u=False)
 
     def test_periodic_patch(self):
-        self.assert_steps_exact(periodic_u=True)
+        for d in (1, 2, 3):
+            with self.subTest(d=d):
+                self.assert_matches_scipy(d, periodic_u=True)
+
+    def test_left_sided_on_knots(self):
+        # S_u jumps across a degree-1 knot, S_uu across a degree-2 one
+        for d in (1, 2, 3):
+            for periodic_u in (False, True):
+                with self.subTest(d=d, periodic_u=periodic_u):
+                    self.assert_matches_scipy(d, periodic_u, below=True)
 
 
 class TestCurveDerivativesKernel(unittest.TestCase):

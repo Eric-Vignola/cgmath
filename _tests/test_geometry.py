@@ -6363,3 +6363,438 @@ class TestBSplinePatchData(unittest.TestCase):
         # All rays should hit (origins are 1 unit above the surface, direction
         # toward the surface).
         self.assertTrue(np.all(result.hit))
+
+
+def patch_grid_distances(patch, queries, n=400, ends=None):
+    """
+    distance from each query to the nearest of n x n samples spread over the
+    patch's whole native domain, or with ends, of n x 4n within ends of
+    either end of u (fine enough for what lies around poles there): never
+    less than its closest point's
+    """
+    patch.sample(queries[:1])  # builds the caches
+    if ends is None:
+        u = np.linspace(0, patch.max_param_u, n, endpoint=not patch.periodic_u)
+        v = np.linspace(0, patch.max_param_v, n, endpoint=not patch.periodic_v)
+    else:
+        part = np.linspace(0, ends, n // 2)
+        u    = np.r_[part, patch.max_param_u - part]
+        v    = np.linspace(0, patch.max_param_v, 4 * n, endpoint=not patch.periodic_v)
+    uu, vv = np.meshgrid(u, v, indexing="ij")
+    points = patch.evaluate(uu.ravel(), vv.ravel(), _native=True)
+    return cKDTree(points).query(queries)[0]
+
+
+class TestBSplinePatchSample(unittest.TestCase):
+    """
+    sample() finds each query's closest point. Its Newton search used to run
+    free from the nearest sample of a coarse grid: a step could end farther
+    away, a parameter clamped on an open edge left the other one solving
+    the unclamped problem, and on a patch folded back onto itself the
+    nearest sample could sit on the wrong sheet. 6047 of 10000 queries
+    around random 4-8 x 4-8 cubic patches ended farther than a dense grid's
+    nearest sample; on another draw of such patches, 5472 of 10000 ended
+    farther than their own seed. A degree-1 patch folds on every knot line,
+    where a search approaching the fold stalled short of a closest point on
+    it (708 of 6000 queries), and on a pole (an edge collapsed to one point,
+    or nearly: a small hole, a tapered tip) the search stayed on the pole.
+    """
+
+    @staticmethod
+    def random_patch(rng, periodic_u=False):
+        count_u, count_v = rng.integers(4, 9, 2)
+        return BSplinePatchData(
+            points     = rng.uniform(-1, 1, size=(count_u, count_v, 3)),
+            degree_u   = 3,
+            degree_v   = 3,
+            periodic_u = periodic_u,
+            periodic_v = False,
+        )
+
+    def check(self, patch, queries, reference=None, **kwargs):
+        """never farther than a dense grid (or reference), on the patch at its params"""
+        if reference is None:
+            reference = patch_grid_distances(patch, queries)
+        result = patch.sample(queries, **kwargs)
+        excess = result.distances - reference
+        self.assertLessEqual(float(excess.max()), 1e-9)
+
+        u, v = result.params[:, 0], result.params[:, 1]
+        np.testing.assert_allclose(patch.evaluate(u, v), result.points, atol=1e-12)
+        return result
+
+    def test_random_patches(self):
+        rng = np.random.default_rng(3)
+        for k in range(4):
+            with self.subTest(patch=k):
+                self.check(self.random_patch(rng), rng.uniform(-1.2, 1.2, size=(250, 3)))
+        with self.subTest(patch="periodic"):
+            self.check(self.random_patch(rng, True), rng.uniform(-1.2, 1.2, size=(250, 3)))
+
+    def test_edges_and_corners(self):
+        # queries around a bent, twisted sheet: most closest points sit on
+        # its edges, the far ones on its corners
+        rng = np.random.default_rng(4)
+        x, y = np.meshgrid(np.linspace(-1, 1, 6), np.linspace(-1, 1, 5), indexing="ij")
+        points = np.stack([x, y, 0.8 * x * y + 0.3 * x * x], axis=-1)
+        patch = BSplinePatchData(
+            points=points, degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
+        )
+        queries = rng.uniform(-2.5, 2.5, size=(400, 3))
+        result  = self.check(patch, queries)
+
+        u, v = result.params[:, 0], result.params[:, 1]
+        on_edge = (u == 0) | (u == patch.max_param_u) | (v == 0) | (v == patch.max_param_v)
+        self.assertGreater(int(on_edge.sum()), 200)
+
+    def test_folded_patch(self):
+        # u runs up one sheet and back down another 0.01 above it: the
+        # nearest grid sample of a point on one sheet can be on the other
+        count_u, count_v, half = 12, 5, 6
+        points = np.zeros((count_u, count_v, 3))
+        for i in range(count_u):
+            for j in range(count_v):
+                if i < half:
+                    y, z = i / (half - 1) * 5.0, 0.0
+                else:
+                    y, z = (count_u - 1 - i) / (half - 1) * 5.0 + 0.2, 0.01
+                points[i, j] = (j / (count_v - 1) * 4.0, y, z)
+        patch = BSplinePatchData(
+            points=points, degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
+        )
+
+        rng    = np.random.default_rng(3)
+        u      = rng.uniform(0, patch.max_param_u, 400)
+        v      = rng.uniform(0, patch.max_param_v, 400)
+        on     = patch.evaluate(u, v)
+        result = patch.sample(on)
+        self.assertLess(float(result.distances.max()), 1e-7)
+
+    def test_wavy_patch(self):
+        x, y = np.meshgrid(np.linspace(0, 4, 16), np.linspace(0, 4, 16), indexing="ij")
+        z = 0.6 * np.sin(3 * x) * np.cos(3 * y)
+        patch = BSplinePatchData(
+            points=np.stack([x, y, z], -1), degree_u=3, degree_v=3,
+            periodic_u=False, periodic_v=False,
+        )
+        rng = np.random.default_rng(3)
+        self.check(patch, rng.uniform([0, 0, -1], [4, 4, 1], size=(500, 3)))
+
+    def test_degree_one_patches(self):
+        # every knot line is a fold: the search keeps to one span at a time
+        # and slides along a fold that holds the closest point
+        rng = np.random.default_rng(1)
+        for degree_v, periodic in ((1, False), (3, False), (1, True)):
+            patch = BSplinePatchData(
+                points     = rng.uniform(-1, 1, size=(6, 7, 3)),
+                degree_u   = 1,
+                degree_v   = degree_v,
+                periodic_u = periodic,
+                periodic_v = periodic,
+            )
+            with self.subTest(degree_v=degree_v, periodic=periodic):
+                self.check(patch, rng.uniform(-1.2, 1.2, size=(250, 3)))
+
+    @staticmethod
+    def pole_patches():
+        """a sphere (poles at both u ends) and a cone's open sector (tip at u = 0)"""
+        theta = np.linspace(0, np.pi, 7)
+        phi   = np.linspace(0, 2 * np.pi, 8, endpoint=False)
+        sphere = np.stack(
+            [
+                np.outer(np.sin(theta), np.cos(phi)),
+                np.outer(np.sin(theta), np.sin(phi)),
+                np.outer(np.cos(theta), np.ones(8)),
+            ],
+            axis=-1,
+        )
+        cone          = sphere[:, :5].copy()
+        cone[:, :, 2] = np.linspace(1, -1, 7)[:, None]
+        cone[0]       = [0.0, 0.0, 1.0]
+        return (
+            BSplinePatchData(
+                points=sphere, degree_u=3, degree_v=3, periodic_u=False, periodic_v=True
+            ),
+            BSplinePatchData(
+                points=cone, degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
+            ),
+        )
+
+    def test_poles(self):
+        # every v on a pole is the same point: the search leaves it the way
+        # the patch heads toward the query most steeply; the same patches
+        # with u and v swapped have their poles on v edges
+        rng     = np.random.default_rng(0)
+        queries = rng.uniform([-0.3, -0.3, 0.7], [0.3, 0.3, 1.6], size=(200, 3))
+        queries[100:, 2] *= -1
+        for name, patch in zip(("sphere", "cone"), self.pole_patches()):
+            swapped = BSplinePatchData(
+                points     = np.transpose(patch.points, (1, 0, 2)),
+                degree_u   = 3,
+                degree_v   = 3,
+                periodic_u = patch.periodic_v,
+                periodic_v = False,
+            )
+            with self.subTest(patch=name):
+                self.check(patch, queries)
+            with self.subTest(patch=name + ", swapped"):
+                self.check(swapped, queries)
+
+    def test_near_poles(self):
+        # a pole whose control points are scattered by 1e-10, not in one
+        # spot: a search on it stayed there like on an edge, 93 of these 300
+        # queries up to 226 times farther than their closest point
+        rng    = np.random.default_rng(5)
+        points = np.array(self.pole_patches()[0].points)
+        points[[0, -1]] += 1e-10 * rng.normal(size=(2, 8, 3))
+        queries = np.vstack(
+            [
+                points[0, 0] + rng.normal(scale=3e-3, size=(150, 3)),
+                points[-1, 0] + rng.normal(scale=3e-2, size=(150, 3)),
+            ]
+        )
+        for use_numba in (True, False):
+            patch = BSplinePatchData(
+                points     = points,
+                degree_u   = 3,
+                degree_v   = 3,
+                periodic_u = False,
+                periodic_v = True,
+                use_numba  = use_numba,
+            )
+            with self.subTest(use_numba=use_numba):
+                self.check(patch, queries)
+
+    def scattered_poles(self, scatter, seed, scales, count):
+        """the sphere, its pole points scattered, and count queries per scale
+        around each pole, each a patch per path"""
+        rng    = np.random.default_rng(seed)
+        points = np.array(self.pole_patches()[0].points)
+        points[[0, -1]] += scatter * rng.normal(size=(2, 8, 3))
+        queries = np.vstack(
+            [
+                points[end].mean(0) + rng.normal(scale=scale, size=(count, 3))
+                for end in (0, -1)
+                for scale in scales
+            ]
+        )
+        patches = [
+            BSplinePatchData(
+                points     = points,
+                degree_u   = 3,
+                degree_v   = 3,
+                periodic_u = False,
+                periodic_v = True,
+                use_numba  = use_numba,
+            )
+            for use_numba in (True, False)
+        ]
+        return patches, queries
+
+    def test_nearly_collapsed_poles(self):
+        # pole points scattered by 1e-3 (the edge 1/100 of the first span
+        # across) and queries within 1e-4 of them: every search turned off
+        # the pole where it first reached it, all the same way, and 60 of
+        # these 200 ended farther than a fine grid around the poles finds,
+        # up to 15 times
+        patches, queries = self.scattered_poles(1e-3, 100, (1e-4,), 100)
+        reference = patch_grid_distances(patches[0], queries, ends=0.01)
+        for patch in patches:
+            with self.subTest(use_numba=patch.use_numba):
+                self.check(patch, queries, reference)
+
+    def test_small_holes(self):
+        # pole points scattered by 3e-3 and 5e-3 (a hole 0.02 to 0.05 of
+        # the first span across): searches stopped on its rim, and 144 and
+        # 117 of these 300 queries ended farther than a grid, up to 61 times
+        for scatter, seed in ((3e-3, 203), (5e-3, 202)):
+            scales = (1e-3, 3e-3, 1e-2)
+            patches, queries = self.scattered_poles(scatter, seed, scales, 50)
+            reference = np.minimum(
+                patch_grid_distances(patches[0], queries),
+                patch_grid_distances(patches[0], queries, ends=0.05),
+            )
+            for patch in patches:
+                with self.subTest(scatter=scatter, use_numba=patch.use_numba):
+                    self.check(patch, queries, reference)
+
+    def test_tapered_tips(self):
+        # strips 100 long whose end edges are 0.003 to 0.02 of the row
+        # spacing wide (0.06 to 0.4), the rows between widened up to 30
+        # times and bent, queried around their ends: every search turned
+        # off a tip the same way, and 6 of these 1200 queries per path ended
+        # farther than a grid, by up to 0.06
+        rng = np.random.default_rng(12)
+        for k in range(6):
+            count_u  = int(rng.integers(4, 8))
+            count_v  = int(rng.integers(2, 6))
+            degree_u = int(rng.integers(1, 4))
+            degree_v = int(min(count_v - 1, rng.integers(1, 4)))
+            spacing  = 100.0 / (count_u - 1)
+            width    = (0.003, 0.006, 0.009, 0.02)[k % 4] * spacing
+            widen    = np.r_[1.0, rng.uniform(1, 30, count_u - 2), 1.0]
+            x        = np.repeat(np.linspace(0, 100, count_u)[:, None], count_v, 1)
+            y        = widen[:, None] * np.linspace(-width / 2, width / 2, count_v)
+            z        = rng.normal(scale=0.05 * spacing, size=(count_u, count_v))
+            points   = np.stack([x, y, z * (widen[:, None] > 1)], -1)
+            points[0] += rng.normal(scale=0.2 * width, size=(count_v, 3))
+            queries = np.vstack(
+                [
+                    points[end].mean(0) + rng.normal(scale=scale, size=(50, 3))
+                    for end in (0, -1)
+                    for scale in (0.5 * width, 3 * width)
+                ]
+            )
+            for use_numba in (True, False):
+                patch = BSplinePatchData(
+                    points     = points,
+                    degree_u   = degree_u,
+                    degree_v   = degree_v,
+                    periodic_u = False,
+                    periodic_v = False,
+                    use_numba  = use_numba,
+                )
+                with self.subTest(strip=k, use_numba=use_numba):
+                    self.check(patch, queries)
+
+    def test_collapsed_onto_a_curve(self):
+        # every row across v the same curve, so the patch hardly moves along
+        # v (S_v is roundoff): a 2-D step was all v and searches stopped on
+        # their seeds, 637 of these 1000 queries farther than the curve's
+        # closest point, up to 1.09 times (523 with u and v swapped)
+        t       = np.linspace(0, 1, 6)
+        curve   = np.stack([3 * t, np.sin(3 * t), 0.5 * np.cos(2 * t)], -1)
+        points  = np.repeat(curve[:, None], 5, 1)
+        rng     = np.random.default_rng(11)
+        queries = rng.uniform(curve.min(0) - 0.5, curve.max(0) + 0.5, size=(1000, 3))
+        for swap in (False, True):
+            for use_numba in (True, False):
+                patch = BSplinePatchData(
+                    points     = np.transpose(points, (1, 0, 2)) if swap else points,
+                    degree_u   = 2 if swap else 3,
+                    degree_v   = 3 if swap else 2,
+                    periodic_u = swap,
+                    periodic_v = not swap,
+                    use_numba  = use_numba,
+                )
+
+                # the curve, finely sampled: every v gives the same point
+                patch.sample(queries[:1])  # builds the caches
+                along = np.linspace(0, 3, 200001)
+                still = np.zeros_like(along)
+                u, v = (still, along) if swap else (along, still)
+                reference = cKDTree(patch.evaluate(u, v, _native=True)).query(queries)[0]
+                with self.subTest(swap=swap, use_numba=use_numba):
+                    self.check(patch, queries, reference)
+
+    def test_repeated_row_at_degree_one(self):
+        # a degree-1 sheet folded up 90 degrees along y = 1, its fold row
+        # repeated within roundoff: the span between the two copies has no
+        # width, so the patch hardly moves along v there, yet it is a knot
+        # line to step across, not a place to stop. Held there like a
+        # collapsed direction, searches seeded on the fold stayed on it:
+        # 800 of these 9600 queries ended farther, up to 4.3 times as far
+        rng     = np.random.default_rng(12)
+        queries = rng.uniform([0.1, 0.95, -0.05], [0.9, 1.05, 0.05], size=(300, 3))
+        flat    = np.hypot(np.maximum(queries[:, 1] - 1.0, 0.0), queries[:, 2])
+        upright = np.hypot(queries[:, 1] - 1.0, np.maximum(-queries[:, 2], 0.0))
+        exact   = np.minimum(flat, upright)
+        for gap in (0.0, 1e-16, 1e-14, 1e-12):
+            for side in (1.0, -1.0):
+                rows   = [(0.0, 0.0), (1.0, 0.0), (1.0 + side * gap, 0.0), (1.0, 1.0)]
+                points = np.array([[[x, y, z] for y, z in rows] for x in (0.0, 1.0)])
+                for swap in (False, True):
+                    for use_numba in (True, False):
+                        patch = BSplinePatchData(
+                            points     = np.transpose(points, (1, 0, 2)) if swap else points,
+                            degree_u   = 1,
+                            degree_v   = 1,
+                            periodic_u = False,
+                            periodic_v = False,
+                            use_numba  = use_numba,
+                        )
+                        with self.subTest(gap=gap, side=side, swap=swap, use_numba=use_numba):
+                            self.check(patch, queries, exact)
+
+    def test_repeated_row_two_basins(self):
+        # random degree-1 patches whose third row repeats the second (within
+        # 1e-14 or exactly): both spans beside that flat one can come closer
+        # and lead to different basins, so the side not taken starts one
+        # more search; without it, one query of the first patch ends 1.26
+        # times as far
+        rng = np.random.default_rng(13)
+        for k in range(3):
+            points       = rng.uniform(-1, 1, size=(4, 5, 3))
+            points[:, 2] = points[:, 1] + [0.0, 1e-14][k % 2] * rng.normal(size=(4, 3))
+            queries      = rng.uniform(-1.4, 1.4, size=(300, 3))
+            for use_numba in (True, False):
+                patch = BSplinePatchData(
+                    points     = points,
+                    degree_u   = 1,
+                    degree_v   = 1,
+                    periodic_u = False,
+                    periodic_v = False,
+                    use_numba  = use_numba,
+                )
+                with self.subTest(patch=k, use_numba=use_numba):
+                    self.check(patch, queries)
+
+    def test_no_queries(self):
+        points = np.random.default_rng(6).uniform(-1, 1, size=(6, 5, 3))
+        for use_numba in (True, False):
+            patch = BSplinePatchData(
+                points     = points,
+                degree_u   = 3,
+                degree_v   = 3,
+                periodic_u = False,
+                periodic_v = False,
+                use_numba  = use_numba,
+            )
+            with self.subTest(use_numba=use_numba):
+                result = patch.sample(np.zeros((0, 3)))
+                self.assertEqual(result.points.shape,    (0, 3))
+                self.assertEqual(result.params.shape,    (0, 2))
+                self.assertEqual(result.distances.shape, (0,))
+
+    def test_scipy_search_matches_numba(self):
+        rng = np.random.default_rng(5)
+        for periodic_u in (False, True):
+            points  = rng.uniform(-1, 1, size=(6, 7, 3))
+            queries = rng.uniform(-1.3, 1.3, size=(200, 3))
+            fast = BSplinePatchData(
+                points=points, degree_u=3, degree_v=2, periodic_u=periodic_u, periodic_v=False
+            )
+            slow = BSplinePatchData(
+                points     = points,
+                degree_u   = 3,
+                degree_v   = 2,
+                periodic_u = periodic_u,
+                periodic_v = False,
+                use_numba  = False,
+            )
+            with self.subTest(periodic_u=periodic_u):
+                a = fast.sample(queries)
+                b = slow.sample(queries)
+                np.testing.assert_allclose(a.distances, b.distances, rtol=0, atol=1e-12)
+                self.check(slow, queries)
+
+        # folds (degree 1, across the seam too) and poles
+        linear = BSplinePatchData(
+            points=rng.uniform(-1, 1, size=(5, 6, 3)), degree_u=1, degree_v=1,
+            periodic_u=True, periodic_v=True,
+        )
+        for name, fast in zip(("degree 1", "sphere", "cone"), (linear, *self.pole_patches())):
+            slow = BSplinePatchData(
+                points     = fast.points,
+                degree_u   = fast.degree_u,
+                degree_v   = fast.degree_v,
+                periodic_u = fast.periodic_u,
+                periodic_v = fast.periodic_v,
+                use_numba  = False,
+            )
+            queries = rng.uniform(-1.3, 1.3, size=(200, 3))
+            with self.subTest(patch=name):
+                a = fast.sample(queries)
+                b = slow.sample(queries)
+                np.testing.assert_allclose(a.distances, b.distances, rtol=0, atol=1e-12)
+                self.check(slow, queries)

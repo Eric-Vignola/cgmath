@@ -1855,6 +1855,18 @@ assert np.allclose(b @ flat_cv, patch.evaluate(uu, vv))
 
 ### Closest point projection — `sample()`
 
+Each query's closest point on the patch: its edges and corners, the knot
+lines a degree-1 patch folds on (a row repeated within roundoff makes a
+span of no width, one more such line), poles (an edge collapsed to one
+point as on a sphere, or nearly, as a small hole or a tapered tip) and a
+patch collapsed onto a curve (every row the same) included. The 8 samples of a
+coarse grid nearest to a query (`initial_samples` per control point per
+direction) seed a Newton search that only takes steps that come closer,
+so no result is farther than its nearest grid sample.
+Where another part of the patch comes nearly as close (a patch folded back
+onto itself, say), all 8 can sit on that part: a larger `initial_samples`
+finds the closest point.
+
 ```python
 queries = np.array([[0.0, 0.0, 2.0], [1.0, -1.0, -1.5], [-1.5, 1.5, 0.5]])
 ps      = patch.sample(queries)

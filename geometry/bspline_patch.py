@@ -1174,18 +1174,45 @@ class BSplinePatchData(Data):
         tolerance        = 1e-10,
     ):
         """
-        Project points onto the surface via Newton-Raphson refinement.
+        Project points onto the surface: each query's closest point.
+
+        Each query starts from the 8 samples of a coarse (u, v) grid nearest
+        to it, nearest first; a seed within 2.5 grid steps of where an
+        earlier search ended is skipped, as it would end there too. From
+        each seed, a Newton search that only takes steps that come closer.
+        On an open edge, a parameter whose slope points out of the patch
+        stays on the edge while the other one slides along it, to the
+        closest point of that edge; on a patch open both ways, a corner
+        closer than the result starts one more search. A direction along
+        which the patch hardly moves (a patch collapsed onto a curve, every
+        row the same) is held the same way. A degree-1 direction folds on
+        every knot: the search keeps to one span of it at a time, and a knot
+        line holds it like an edge unless the next span slopes on down. A
+        span of no width (two rows the same) is one more knot line, crossed
+        into the closer span beside it that slopes on down; when the other
+        comes closer too, one more search starts there. A pole is an open
+        edge collapsed to one point, as on a sphere, or nearly, as a small
+        hole or a tapered tip: its control points within a tenth of how far
+        the next row's lie from them. One that a search reaches is left by
+        more searches, from each spot along it where the patch heads toward
+        the query most steeply and, on a nearly collapsed one, each spot of
+        it closest to the query. The closest result wins, so none is farther
+        than its nearest grid sample.
 
         Parameters
         ----------
         obj : array-like or object with .points attribute
             Query points to project.
         initial_samples : int
-            Samples per control point per direction for coarse guess.
+            Samples per control point per direction for the seed grid.
+            Where another part of the patch comes nearly as close (a patch
+            folded back onto itself, say), all 8 seeds can sit on that part;
+            more samples find the closest point.
         max_newton_iters : int
-            Maximum Newton iterations per query.
+            Maximum Newton steps per search.
         tolerance : float
-            Convergence tolerance.
+            Convergence tolerance: a search stops once a step moves its
+            native (u, v) less than this.
 
         Returns
         -------
@@ -1224,14 +1251,21 @@ class BSplinePatchData(Data):
             self.degree_v,
         )
 
-        tree = cKDTree(pts_coarse)
-        _, indices = tree.query(queries)
+        # The 8 nearest samples seed each query, nearest first (found on
+        # every core): one sheet of a patch that folds back may hold the
+        # nearest sample while the other holds the closest point
+        seeds = min(8, pts_coarse.shape[0])
+        tree  = cKDTree(pts_coarse)
+        _, indices = tree.query(queries, k=seeds, workers=-1)
+        indices = indices.reshape(queries.shape[0], seeds)
 
-        u_init = u_flat[indices]
-        v_init = v_flat[indices]
+        u_init  = u_flat[indices]
+        v_init  = v_flat[indices]
+        reach_u = 2.5 * (u_lin[1] - u_lin[0])
+        reach_v = 2.5 * (v_lin[1] - v_lin[0])
 
         # --- Newton refinement ---
-        if self.use_numba:
+        if self.use_numba or self._spl is None:
             u_out, v_out, points, tang_u, tang_v = (
                 _newton_closest_point_surface_parallel(
                     queries,
@@ -1248,11 +1282,13 @@ class BSplinePatchData(Data):
                     self.periodic_v,
                     max_newton_iters,
                     tolerance,
+                    reach_u,
+                    reach_v,
                 )
             )
         else:
             u_out, v_out, points, tang_u, tang_v = self._newton_fallback(
-                queries, u_init, v_init, max_newton_iters, tolerance
+                queries, u_init, v_init, max_newton_iters, tolerance, reach_u, reach_v
             )
 
         distances = np.linalg.norm(queries - points, axis=1)
@@ -1274,77 +1310,719 @@ class BSplinePatchData(Data):
             basis     = b,
         )
 
-    def _newton_fallback(self, queries, u_init, v_init, max_iters, tolerance):
+    def _newton_fallback(
+        self, queries, u_init, v_init, max_iters, tolerance, reach_u=0.0, reach_v=0.0
+    ):
         """
-        Non-numba Newton-Raphson refinement using scipy.interpolate.NdBSpline
-        for analytical position and partial derivative evaluation.
+        sample()'s search without numba: the numba kernel's seeds, steps,
+        folds, forks, poles and corners
+        (``_newton_closest_point_surface_parallel``, ``_patch_descend``), in
+        numpy, with positions and partial derivatives from
+        scipy.interpolate.NdBSpline (``_spl``, scipy >= 1.13; sample() uses
+        the kernel without it).
 
-        If scipy NdBSpline is unavailable (older scipy), falls back to the
-        numba surface kernel (which would be the same as use_numba=True for
-        this step). Either way, the algorithm itself runs in pure numpy.
+        Parameters
+        ----------
+        queries : np.ndarray
+            Query points (n, dims).
+        u_init, v_init : np.ndarray
+            Native seeds (n, seeds), or (n,) for one each, nearest first.
+        max_iters, tolerance : int, float
+            As sample()'s max_newton_iters and tolerance.
+        reach_u, reach_v : float
+            A seed this close to where an earlier search of its query ended
+            is skipped.
+
+        Returns
+        -------
+        tuple
+            (u, v, points, tangents_u, tangents_v): native parameters (n,)
+            and positions and first partials there (n, dims).
         """
-        u = u_init.copy()
-        v = v_init.copy()
+        n      = queries.shape[0]
+        u_init = np.asarray(u_init, dtype=np.float64)
+        v_init = np.asarray(v_init, dtype=np.float64)
+        if u_init.ndim == 1:
+            u_init = u_init[:, None]
+            v_init = v_init[:, None]
+        max_u = float(self._max_param_u)
+        max_v = float(self._max_param_v)
 
-        def _eval(uu, vv):
-            if self._spl is not None:
-                xi = np.column_stack([uu, vv])
-                return (
-                    np.asarray(self._spl(xi)),
-                    np.asarray(self._spl(xi, nu=(1, 0))),
-                    np.asarray(self._spl(xi, nu=(0, 1))),
-                )
-            return _evaluate_bspline_surface_derivatives(
-                uu,
-                vv,
-                self._kv_u,
-                self._kv_v,
-                self._cv_f64,
-                self.degree_u,
-                self.degree_v,
+        # Seed by seed: one within reach of where an earlier search of its
+        # query ended is skipped (it would end there too; along a degree-1
+        # direction, only one on the span that search ended on); the
+        # closest result wins, the earlier one on a tie. on_poles: the poles
+        # each query's searches reached; fork: the first fork among them
+        seeds    = u_init.shape[1]
+        ends_u   = np.zeros((n, seeds))
+        ends_v   = np.zeros((n, seeds))
+        on_poles = np.zeros((n, 4), dtype=bool)
+        fork     = np.zeros((n, 3))
+        for s in range(seeds):
+            skip = np.zeros(n, dtype=bool)
+            for e in range(s):
+                gap_u = np.abs(u_init[:, s] - ends_u[:, e])
+                gap_v = np.abs(v_init[:, s] - ends_v[:, e])
+                if self.periodic_u:
+                    gap_u = np.minimum(gap_u, max_u - gap_u)
+                if self.periodic_v:
+                    gap_v = np.minimum(gap_v, max_v - gap_v)
+                if self.degree_u == 1:
+                    span  = np.floor(u_init[:, s])
+                    on    = (span <= ends_u[:, e]) & (ends_u[:, e] <= span + 1.0)
+                    gap_u = np.where(on, gap_u, np.inf)
+                if self.degree_v == 1:
+                    span  = np.floor(v_init[:, s])
+                    on    = (span <= ends_v[:, e]) & (ends_v[:, e] <= span + 1.0)
+                    gap_v = np.where(on, gap_v, np.inf)
+                near            = ~skip & (gap_u <= reach_u) & (gap_v <= reach_v)
+                ends_u[near, s] = ends_u[near, e]
+                ends_v[near, s] = ends_v[near, e]
+                skip |= near
+
+            rows = np.flatnonzero(~skip)
+            u, v, f, derivs, reached, forks = self._descend_fallback(
+                queries[rows], u_init[rows, s], v_init[rows, s], max_iters, tolerance
             )
+            on_poles[rows] |= reached
+            first             = (fork[rows, 2] == 0.0) & (forks[:, 2] > 0.0)
+            fork[rows[first]] = forks[first]
+            ends_u[rows, s]   = u
+            ends_v[rows, s]   = v
+            if s == 0:
+                best_u, best_v, best_f, best_derivs = u, v, f, derivs
+                continue
+            better              = f < best_f[rows]
+            hit                 = rows[better]
+            best_u[hit]         = u[better]
+            best_v[hit]         = v[better]
+            best_f[hit]         = f[better]
+            best_derivs[:, hit] = derivs[:, better]
 
-        for _ in range(max_iters):
-            pts, su, sv = _eval(u, v)
+        # A corner of a patch open both ways closer than the result: search
+        # from there too, corner by corner
+        if not (self.periodic_u or self.periodic_v):
+            corners = ((0.0, 0.0), (max_u, 0.0), (0.0, max_v), (max_u, max_v))
+            for corner_u, corner_v in corners:
+                point  = np.asarray(self._spl(np.array([[corner_u, corner_v]])))[0]
+                closer = np.flatnonzero(np.sum((queries - point) ** 2, axis=1) < best_f)
+                if closer.size == 0:
+                    continue
+                u, v, f, derivs, reached, forks = self._descend_fallback(
+                    queries[closer],
+                    np.full(closer.size, corner_u),
+                    np.full(closer.size, corner_v),
+                    max_iters,
+                    tolerance,
+                )
+                on_poles[closer] |= reached
+                first               = (fork[closer, 2] == 0.0) & (forks[:, 2] > 0.0)
+                fork[closer[first]] = forks[first]
+                better              = f < best_f[closer]
+                hit                 = closer[better]
+                best_u[hit]         = u[better]
+                best_v[hit]         = v[better]
+                best_f[hit]         = f[better]
+                best_derivs[:, hit] = derivs[:, better]
 
-            diff  = pts - queries
-            f1    = np.einsum("ij,ij->i", diff, su)
-            f2    = np.einsum("ij,ij->i", diff, sv)
+        # A flat span's two sides can hold two basins: where a search left
+        # one with both sides closer, one more search from the other
+        rows = np.flatnonzero(fork[:, 2] > 0.0)
+        if rows.size:
+            u, v, f, derivs, reached, _ = self._descend_fallback(
+                queries[rows], fork[rows, 0], fork[rows, 1], max_iters, tolerance
+            )
+            on_poles[rows] |= reached
+            better              = f < best_f[rows]
+            hit                 = rows[better]
+            best_u[hit]         = u[better]
+            best_v[hit]         = v[better]
+            best_f[hit]         = f[better]
+            best_derivs[:, hit] = derivs[:, better]
 
-            J11   = np.einsum("ij,ij->i", su,   su)
-            J12   = np.einsum("ij,ij->i", su,   sv)
-            J22   = np.einsum("ij,ij->i", sv,   sv)
+        # A search that reached a pole stopped there, slid along it (a
+        # nearly collapsed one) or left it where it reached it, so others
+        # leave it from each spot ``_pole_turns`` finds, pole by pole; a
+        # query's starts are tried in order
+        poles = _poles(self._cv_f64, self.periodic_u, self.periodic_v)
+        for pole in range(4):
+            rows = np.flatnonzero(on_poles[:, pole])
+            if rows.size == 0:
+                continue
+            on_u = pole < 2
+            edge = 0.0 if pole % 2 == 0 else (max_u if on_u else max_v)
+            at, x = self._pole_turns(queries[rows], edge, on_u, poles[pole] == 1)
+            rows = rows[at]
+            if rows.size == 0:
+                continue
 
-            det   = J11 * J22 - J12 * J12
-            det   = np.where(np.abs(det) < 1e-14, 1e-14, det)
+            # Along a degree-1 direction, a start on a knot (two facets
+            # meet there) is tried on the span on each side of it, in turn
+            facets = (self.degree_v if on_u else self.degree_u) == 1
+            twice  = facets & (x == np.floor(x))
+            order  = np.repeat(np.arange(rows.size), np.where(twice, 2, 1))
+            below  = np.r_[False, order[1:] == order[:-1]]
+            rows   = rows[order]
+            x      = x[order]
+            across = np.full(rows.size, edge)
+            u, v, f, derivs, reached, _ = self._descend_fallback(
+                queries[rows],
+                across if on_u else x,
+                x if on_u else across,
+                max_iters,
+                tolerance,
+                off   = True,
+                below = below,
+            )
+            np.logical_or.at(on_poles, rows, reached)
+            first = np.r_[True, rows[1:] != rows[:-1]]
+            rank = np.arange(rows.size) - np.maximum.accumulate(
+                np.where(first, np.arange(rows.size), 0)
+            )
+            for k in range(int(rank.max(initial=-1)) + 1):
+                pick                = np.flatnonzero(rank == k)
+                better              = f[pick] < best_f[rows[pick]]
+                pick                = pick[better]
+                hit                 = rows[pick]
+                best_u[hit]         = u[pick]
+                best_v[hit]         = v[pick]
+                best_f[hit]         = f[pick]
+                best_derivs[:, hit] = derivs[:, pick]
 
-            du    = (-f1 * J22 + f2 * J12) / det
-            dv    = (f1 * J12 - f2 * J11) / det
-            du    = np.clip(du, -0.5, 0.5)
-            dv    = np.clip(dv, -0.5, 0.5)
-
-            u_new = u + du
-            v_new = v + dv
-
-            if self.periodic_u:
-                u_new = u_new % self._max_param_u
-            else:
-                u_new = np.clip(u_new, 0, self._max_param_u)
-            if self.periodic_v:
-                v_new = v_new % self._max_param_v
-            else:
-                v_new = np.clip(v_new, 0, self._max_param_v)
-
-            if max(np.max(np.abs(du)), np.max(np.abs(dv))) < tolerance:
-                u, v = u_new, v_new
-                break
-            u, v = u_new, v_new
-
-        pts, tang_u, tang_v = _eval(u, v)
-        return u, v, pts, tang_u, tang_v
+        return best_u, best_v, best_derivs[0], best_derivs[1], best_derivs[2]
 
     # Backwards-compat alias
     _newton_scipy = _newton_fallback
+
+    def _descend_fallback(
+        self, queries, u, v, max_iters, tolerance, off=False, below=None
+    ):
+        """
+        ``_patch_descend`` (the numba kernel's search, see there) from every
+        start at once, in numpy, evaluated with ``_spl``.
+
+        Parameters
+        ----------
+        queries : np.ndarray
+            Query points (m, dims), one per start.
+        u, v : np.ndarray
+            Native starts (m,), inside the domain.
+        max_iters, tolerance : int, float
+            As sample()'s max_newton_iters and tolerance.
+        off : bool
+            Whether every start is on a pole, to leave it: the first step
+            goes straight across it, from the start's span.
+        below : np.ndarray, optional
+            (m,) bool: whether a start on a knot of a degree-1 direction
+            takes the span below it (across the seam from 0 on a periodic
+            one) instead of the one above.
+
+        Returns
+        -------
+        tuple
+            (u, v, f, derivs, reached, fork): results (m,), periodic ones in
+            [0, end), their squared distances (m,), ``_spl_derivatives``
+            there (6, m, dims), the poles (``_poles``) each search reached
+            (m, 4) and its fork, (u, v, set) as ``_patch_descend``'s (m, 3).
+        """
+        max_u    = float(self._max_param_u)
+        max_v    = float(self._max_param_v)
+        shortest = 1e-15 * max(max_u, max_v, 1.0)
+        poles    = np.array(_poles(self._cv_f64, self.periodic_u, self.periodic_v))
+        reached  = np.zeros((len(queries), 4), dtype=bool)
+        fork     = np.zeros((len(queries), 3))
+
+        # A degree-1 direction keeps to one span (lo, lo + 1) at a time; a
+        # direction has ends unless it wraps at degree 2 or more
+        span_u = self.degree_u == 1
+        span_v = self.degree_v == 1
+        ends_u = span_u or not self.periodic_u
+        ends_v = span_v or not self.periodic_v
+
+        u      = np.array(u, dtype=np.float64)
+        v      = np.array(v, dtype=np.float64)
+        lo_u   = np.minimum(np.floor(u), max_u - 1.0) if span_u else None
+        lo_v   = np.minimum(np.floor(v), max_v - 1.0) if span_v else None
+        if below is not None:
+            for x, lo, end, wraps in (
+                (u, lo_u, max_u, self.periodic_u),
+                (v, lo_v, max_v, self.periodic_v),
+            ):
+                if lo is None:
+                    continue
+                next_x, next_lo = _span_exits(x, lo, np.ones_like(x), end, wraps)
+                down     = below & (next_lo >= 0.0)
+                x[down]  = next_x[down]
+                lo[down] = next_lo[down]
+        derivs    = self._span_derivatives(u, v, lo_u, lo_v)
+        slopes    = _slopes(queries, derivs)
+        live      = np.ones(u.shape[0], dtype=bool)
+        collapsed = np.zeros(u.shape[0], dtype=bool)
+
+        def _sides(rows):
+            return (
+                None if lo_u is None else lo_u[rows],
+                None if lo_v is None else lo_v[rows],
+            )
+
+        for _ in range(max_iters):
+            # On a span's end with the slope pointing past it: into the next
+            # span when the slope there points on too (u first, then v); not
+            # before the first step off a pole
+            for axis in (0, 1):
+                lo = (lo_u, lo_v)[axis]
+                if lo is None or off:
+                    continue
+                x     = (u, v)[axis]
+                end   = (max_u, max_v)[axis]
+                wraps = (self.periodic_u, self.periodic_v)[axis]
+                next_x, next_lo = _span_exits(x, lo, slopes[1 + axis], end, wraps)
+                rows = np.flatnonzero(live & (next_lo >= 0.0))
+                if rows.size == 0:
+                    continue
+                at             = [u[rows], v[rows]]
+                sides          = list(_sides(rows))
+                at[axis]       = next_x[rows]
+                sides[axis]    = next_lo[rows]
+                trial          = self._span_derivatives(*at, *sides)
+                trial_slopes   = _slopes(queries[rows], trial)
+                cross          = trial_slopes[1 + axis] * slopes[1 + axis, rows] > 0.0
+                hit            = rows[cross]
+                x[hit]         = next_x[hit]
+                lo[hit]        = next_lo[hit]
+                derivs[:, hit] = trial[:, cross]
+                slopes[:, hit] = trial_slopes[:, cross]
+
+            f, g_u, g_v, h_uu, h_uv, h_vv, j_uu, j_uv, j_vv = slopes
+            low_u  = lo_u if span_u else np.zeros_like(u)
+            low_v  = lo_v if span_v else np.zeros_like(v)
+            high_u = lo_u + 1.0 if span_u else np.full_like(u, max_u)
+            high_v = lo_v + 1.0 if span_v else np.full_like(v, max_v)
+            pin_u  = ends_u & ((u <= low_u) & (g_u > 0.0) | (u >= high_u) & (g_u < 0.0))
+            pin_v  = ends_v & ((v <= low_v) & (g_v > 0.0) | (v >= high_v) & (g_v < 0.0))
+
+            # A pole a search reaches is left by more searches
+            # (``_newton_fallback``), whose first step goes straight across
+            # it. On a pole that is one point, so does every step, and a
+            # slope pointing out ends the search. A nearly collapsed one is
+            # an edge to slide along
+            pole = _pole_at(u, v, poles, max_u, max_v)
+            at   = live & (pole >= 0)
+            reached[np.flatnonzero(at), pole[at]] = True
+            special = at & (off | (poles[pole] == 2))
+            out     = np.where(pole < 2, pin_u, pin_v)
+            live &= ~(special & out & (not off))
+            pin_u = np.where(special, pole >= 2, pin_u)
+            pin_v = np.where(special, pole < 2, pin_v)
+            off   = False
+
+            # A direction along which the patch hardly moves (as on a patch
+            # collapsed onto a curve) is held like a pinned one
+            bend_u = np.sum(derivs[3] ** 2, axis=1)
+            bend_v = np.sum(derivs[5] ** 2, axis=1)
+            flat_u = j_uu + bend_u < 1e-20 * j_vv
+            flat_v = j_vv + bend_v < 1e-20 * j_uu
+
+            # Such a span of a degree-1 direction is one knot line: first, a
+            # step into the span on either side of it when that comes closer
+            # (``_flat_exits``); the other side, when it comes closer too, is
+            # the search's fork unless it has one. Once no span along it
+            # moves (collapsed), the search stops looking
+            left = np.zeros_like(live)
+            for axis, flat in ((0, flat_u), (1, flat_v)):
+                lo = (lo_u, lo_v)[axis]
+                if lo is None:
+                    continue
+                rows = np.flatnonzero(live & flat & ~special & ~collapsed)
+                if rows.size == 0:
+                    continue
+                exit_x, exit_lo, other_x, other_lo, moves = self._flat_exits(
+                    queries[rows], u[rows], v[rows], *_sides(rows), axis == 0, f[rows]
+                )
+                collapsed[rows]   = ~moves
+
+                first             = (other_lo >= 0.0) & (fork[rows, 2] == 0.0)
+                start             = np.ones((rows.size, 3))
+                start[:, 0]       = u[rows]
+                start[:, 1]       = v[rows]
+                start[:, axis]    = other_x
+                fork[rows[first]] = start[first]
+
+                x        = (u, v)[axis]
+                hit      = exit_lo >= 0.0
+                rows     = rows[hit]
+                x[rows]  = exit_x[hit]
+                lo[rows] = exit_lo[hit]
+                derivs[:, rows] = self._span_derivatives(
+                    u[rows], v[rows], *_sides(rows)
+                )
+                slopes[:, rows] = _slopes(queries[rows], derivs[:, rows])
+                left[rows]      = True
+            pin_u |= flat_u
+            pin_v |= flat_v
+            live  &= ~(pin_u & pin_v) | left
+
+            moved = np.zeros_like(live)
+            new_u = u.copy()
+            new_v = v.copy()
+            with np.errstate(divide="ignore", invalid="ignore"):
+                for kind in range(2):
+                    if kind == 1:
+                        step_u = np.where(~pin_u & (j_uu > 0.0), -g_u / j_uu, 0.0)
+                        step_v = np.where(~pin_v & (j_vv > 0.0), -g_v / j_vv, 0.0)
+                    else:
+                        # Newton's step, its S_u . S_v part where the
+                        # Hessian does not curve up; 1-D on a pinned edge
+                        det     = h_uu * h_vv - h_uv * h_uv
+                        newton  = (h_uu > 0.0) & (det > 0.0)
+                        det_j   = j_uu * j_vv - j_uv * j_uv
+                        gauss   = ~newton & (det_j > 1e-12 * j_uu * j_vv)
+                        step_u  = np.where(newton, (h_uv * g_v - h_vv * g_u) / det, 0.0)
+                        step_v  = np.where(newton, (h_uv * g_u - h_uu * g_v) / det, 0.0)
+                        gauss_u = (j_uv * g_v - j_vv * g_u) / det_j
+                        gauss_v = (j_uv * g_u - j_uu * g_v) / det_j
+                        step_u  = np.where(gauss,         gauss_u,        step_u)
+                        step_v  = np.where(gauss,         gauss_v,        step_v)
+                        curve_u = np.where(h_uu > 0.0,    h_uu,           j_uu)
+                        curve_v = np.where(h_vv > 0.0,    h_vv,           j_vv)
+                        step_u  = np.where(pin_u,         0.0,            step_u)
+                        along_v = np.where(curve_v > 0.0, -g_v / curve_v, 0.0)
+                        along_u = np.where(curve_u > 0.0, -g_u / curve_u, 0.0)
+                        step_v  = np.where(pin_u,         along_v,        step_v)
+                        step_u  = np.where(pin_v,         along_u,        step_u)
+                        step_v  = np.where(pin_v,         0.0,            step_v)
+
+                    # Cut to half a span, then halved until strictly closer;
+                    # kept inside each direction's span or domain
+                    size   = np.maximum(np.abs(step_u), np.abs(step_v))
+                    scale  = np.where(size > 0.5, 0.5 / size, 1.0)
+                    step_u = step_u * scale
+                    step_v = step_v * scale
+                    size   = np.minimum(size, 0.5)
+                    todo   = live & ~moved & ~left & (size > shortest)
+
+                    t = np.ones_like(u)
+                    while todo.any():
+                        idx     = np.flatnonzero(todo)
+                        trial_u = u[idx] + t[idx] * step_u[idx]
+                        trial_v = v[idx] + t[idx] * step_v[idx]
+                        trial_u = _keep_inside(
+                            trial_u, low_u[idx], high_u[idx], max_u, ends_u
+                        )
+                        trial_v = _keep_inside(
+                            trial_v, low_v[idx], high_v[idx], max_v, ends_v
+                        )
+                        trial  = np.column_stack([trial_u, trial_v])
+                        points = np.asarray(self._spl(trial))
+                        closer = np.sum((points - queries[idx]) ** 2, axis=1) < f[idx]
+
+                        new_u[idx[closer]] = trial_u[closer]
+                        new_v[idx[closer]] = trial_v[closer]
+                        moved[idx[closer]] = True
+                        todo[idx[closer]]  = False
+                        t[idx[~closer]] *= 0.5
+                        todo            &= t * size > shortest
+
+            live &= moved | left
+            idx = np.flatnonzero(live & moved)
+            if not live.any():
+                break
+            if idx.size == 0:
+                continue
+
+            # How far each moved, the short way round a periodic direction
+            gap_u = np.abs(new_u[idx] - u[idx])
+            gap_v = np.abs(new_v[idx] - v[idx])
+            if self.periodic_u:
+                gap_u = np.minimum(gap_u, max_u - gap_u)
+            if self.periodic_v:
+                gap_v = np.minimum(gap_v, max_v - gap_v)
+
+            u[idx] = new_u[idx]
+            v[idx] = new_v[idx]
+            side_u, side_v = _sides(idx)
+            derivs[:, idx] = self._span_derivatives(u[idx], v[idx], side_u, side_v)
+            slopes[:, idx] = _slopes(queries[idx], derivs[:, idx])
+            live[idx] &= np.maximum(gap_u, gap_v) >= tolerance
+
+        # A degree-1 direction: back to the right-sided derivatives compute()
+        # gives on a knot, and from the seam's end to 0
+        if span_u or span_v:
+            if self.periodic_u:
+                u = np.where(u >= max_u, 0.0, u)
+            if self.periodic_v:
+                v = np.where(v >= max_v, 0.0, v)
+            derivs = self._spl_derivatives(u, v)
+        pole                                  = _pole_at(u, v, poles, max_u, max_v)
+        at                                    = pole >= 0
+        reached[np.flatnonzero(at), pole[at]] = True
+
+        return u, v, slopes[0], derivs, reached, fork
+
+    def _span_derivatives(self, u, v, lo_u=None, lo_v=None):
+        """
+        ``_spl_derivatives``, a degree-1 direction's taken inside its span
+        (lo, lo + 1) when its lo is given: the patch is linear along it
+        there, so its first derivative is the difference of the span's two
+        ends and its second is zero. On a knot, those are the one-sided
+        derivatives of the span the search is on (scipy's are right-sided).
+        """
+        if lo_u is None and lo_v is None:
+            return self._spl_derivatives(u, v)
+
+        def part(uu, vv, a, b):
+            if lo_u is not None and a:
+                if a == 2:
+                    return np.zeros((len(u), self._cv_f64.shape[2]))
+                return part(lo_u + 1.0, vv, 0, b) - part(lo_u, vv, 0, b)
+            if lo_v is not None and b:
+                if b == 2:
+                    return np.zeros((len(u), self._cv_f64.shape[2]))
+                return part(uu, lo_v + 1.0, a, 0) - part(uu, lo_v, a, 0)
+            return np.asarray(self._spl(np.column_stack([uu, vv]), nu=(a, b)))
+
+        orders = ((0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (0, 2))
+        return np.stack([part(u, v, a, b) for a, b in orders])
+
+    def _flat_exits(self, queries, u, v, lo_u, lo_v, on_u, f):
+        """
+        ``_patch_flat_exit`` for many searches at once: for each, on a flat
+        span of the degree-1 direction u (on_u) or v, the closest spot along
+        that direction on the first span on either side along which the
+        patch moves and that slopes on down away from it, when it comes
+        closer than f.
+
+        Parameters
+        ----------
+        queries : np.ndarray
+            Query points (m, dims).
+        u, v : np.ndarray
+            The searches' spots (m,), native.
+        lo_u, lo_v : np.ndarray or None
+            The start of each degree-1 direction's span (m,), None for one
+            of degree 2 or more.
+        on_u : bool
+            Whether the flat direction is u (else v).
+        f : np.ndarray
+            The squared distances to beat (m,).
+
+        Returns
+        -------
+        tuple
+            (x, lo, other_x, other_lo, moves), each (m,): the closer side's
+            parameter along the direction and the start of its span (lo -1
+            where neither side comes closer), the other side's (other_lo -1
+            unless it comes closer too), and whether the patch moves along
+            the direction on any span at all.
+        """
+        axis     = 0 if on_u else 1
+        end      = float(self._max_param_u if on_u else self._max_param_v)
+        periodic = self.periodic_u if on_u else self.periodic_v
+        lo       = lo_u if on_u else lo_v
+        best_x   = np.zeros_like(f)
+        best_lo  = np.full_like(f, -1.0)
+        best_f   = f.copy()
+        other_x  = np.zeros_like(f)
+        other_lo = np.full_like(f, -1.0)
+        moves    = np.zeros(f.shape, dtype=bool)
+        for side in range(2):
+            # Through the end on this side, span by span, to the first along
+            # which the patch moves: the same spot, within the flat spans'
+            # width. Its derivatives are its own, one-sided on that end
+            g      = np.full_like(f, 1.0 if side == 0 else -1.0)
+            x      = lo.copy() if side == 0 else lo + 1.0
+            at     = lo.copy()
+            found  = np.zeros(f.shape, dtype=bool)
+            walk   = np.ones(f.shape, dtype=bool)
+            slopes = np.zeros((9,) + f.shape)
+            for _ in range(int(end + 0.5) - 1):
+                rows = np.flatnonzero(walk)
+                next_x, at[rows] = _span_exits(
+                    x[rows], at[rows], g[rows], end, periodic
+                )
+                x[rows]    = next_x
+                walk[rows] = at[rows] >= 0.0
+                rows       = rows[walk[rows]]
+                if rows.size == 0:
+                    break
+                spot = [u[rows], v[rows]]
+                sides = [
+                    None if lo_u is None else lo_u[rows],
+                    None if lo_v is None else lo_v[rows],
+                ]
+                spot[axis]      = x[rows]
+                sides[axis]     = at[rows]
+                derivs          = self._span_derivatives(*spot, *sides)
+                slopes[:, rows] = _slopes(queries[rows], derivs)
+                along           = slopes[6 + 2 * axis, rows]
+                across          = slopes[8 - 2 * axis, rows]
+                flat            = along < 1e-20 * across
+                found[rows]     = ~flat
+                walk[rows]      = flat
+                rows            = rows[flat]
+                x[rows]         = at[rows] if side == 0 else at[rows] + 1.0
+            moves |= found
+
+            # Its slope must point on, away from the flat span; the patch is
+            # straight along the direction there, so its closest spot along
+            # it is one Newton step, kept inside the span
+            slope = slopes[1 + axis]
+            along = slopes[6 + 2 * axis]
+            rows  = np.flatnonzero(found & (slope * g > 0.0))
+            if rows.size == 0:
+                continue
+            trial_x    = x[rows] - slope[rows] / along[rows]
+            trial_x    = np.clip(trial_x, at[rows], at[rows] + 1.0)
+            spot       = [u[rows], v[rows]]
+            spot[axis] = trial_x
+            points     = np.asarray(self._spl(np.column_stack(spot)))
+            f_new      = np.sum((points - queries[rows]) ** 2, axis=1)
+            closer     = f_new < f[rows]
+            rows       = rows[closer]
+            trial_x    = trial_x[closer]
+            f_new      = f_new[closer]
+
+            # The closer side wins; the other is kept when it comes closer
+            # too (the search's fork)
+            better         = f_new < best_f[rows]
+            won            = rows[better]
+            lost           = rows[~better]
+            other_x[won]   = best_x[won]
+            other_lo[won]  = best_lo[won]
+            best_x[won]    = trial_x[better]
+            best_lo[won]   = at[won]
+            best_f[won]    = f_new[better]
+            other_x[lost]  = trial_x[~better]
+            other_lo[lost] = at[lost]
+        return best_x, best_lo, other_x, other_lo, moves
+
+    def _pole_turns(self, queries, edge, on_u, rim=False):
+        """
+        ``_patch_pole_turns`` for many queries at once: where along a pole
+        searches leave it, the ways out that come closer (4 samples per
+        span, then a golden-section search between the neighbours of each
+        sample whose slope is negative and lower than theirs) and on a
+        nearly collapsed pole the spots of its rim closest to each query.
+
+        Parameters
+        ----------
+        queries : np.ndarray
+            Query points (m, dims).
+        edge : float
+            The pole's parameter: 0 or its direction's end.
+        on_u : bool
+            Whether the pole is a u edge (it runs along v) or a v edge.
+        rim : bool
+            Whether the pole is nearly collapsed, a rim: each sample closer
+            to the query than its neighbours starts a search too, after
+            those, unless the rim looks like one point from the query.
+
+        Returns
+        -------
+        tuple
+            (at, x): for each start, its query's row (int, in order) and
+            its parameter along the pole.
+        """
+        end      = float(self._max_param_v if on_u else self._max_param_u)
+        periodic = self.periodic_v if on_u else self.periodic_u
+        inward   = 1.0 if edge <= 0.0 else -1.0
+        across   = (1, 0) if on_u else (0, 1)
+
+        def slopes_at(rows, x, dists=False):
+            # (k,) starts' rows and parameters along the pole -> (k,) slopes
+            # into the patch there (and squared distances)
+            pairs = [np.full(x.shape, edge), x] if on_u else [x, np.full(x.shape, edge)]
+            xi    = np.column_stack(pairs)
+            point = np.asarray(self._spl(xi)) - queries[rows]
+            slope = np.asarray(self._spl(xi, nu=across))
+            slope = inward * np.einsum("kd,kd->k", point, slope)
+            if dists:
+                return slope, np.einsum("kd,kd->k", point, point)
+            return slope
+
+        def wrap(x):
+            return x % end if periodic else x
+
+        spans = max(int(end + 0.5), 1)
+        step  = end / (4 * spans)
+        count = 4 * spans + (0 if periodic else 1)
+        grid  = np.arange(count) * step
+        rows  = np.repeat(np.arange(len(queries)), count)
+        slope, dists = slopes_at(rows, np.tile(grid, len(queries)), True)
+        slope = slope.reshape(-1, count)
+        dists = dists.reshape(-1, count)
+
+        def lowest(values):
+            # each sample lower than its neighbours (the first of a tie;
+            # around the seam on a periodic direction)
+            if periodic:
+                before = np.roll(values, 1, axis=1)
+                after  = np.roll(values, -1, axis=1)
+            else:
+                past   = np.full((len(values), 1), np.inf)
+                before = np.hstack([past, values[:, :-1]])
+                after  = np.hstack([values[:, 1:], past])
+            return (values < before) & ~(after < values)
+
+        at, i = np.nonzero((slope < 0.0) & lowest(slope))
+        best_x = grid[i]
+        best   = slope[at, i]
+
+        # Golden section between the neighbours of each
+        ratio = 0.6180339887498949
+        lo    = best_x - step
+        hi    = best_x + step
+        if not periodic:
+            lo = np.maximum(lo, 0.0)
+            hi = np.minimum(hi, end)
+        a   = hi - ratio * (hi - lo)
+        b   = lo + ratio * (hi - lo)
+        f_a = slopes_at(at, wrap(a))
+        f_b = slopes_at(at, wrap(b))
+        for _ in range(30):
+            left   = f_a < f_b
+            hi     = np.where(left, b, hi)
+            lo     = np.where(left, lo, a)
+            kept   = np.where(left, a, b)
+            kept_f = np.where(left, f_a, f_b)
+            fresh  = np.where(left, hi - ratio * (hi - lo), lo + ratio * (hi - lo))
+            f_new  = slopes_at(at, wrap(fresh))
+            a      = np.where(left, fresh,  kept)
+            b      = np.where(left, kept,   fresh)
+            f_a    = np.where(left, f_new,  kept_f)
+            f_b    = np.where(left, kept_f, f_new)
+        for x, f in ((a, f_a), (b, f_b)):
+            better         = f < best
+            best_x[better] = wrap(x)[better]
+            best[better]   = f[better]
+
+        if periodic:
+            best_x = np.where(best_x >= end, best_x - end, best_x)
+        if not rim:
+            return at, best_x
+
+        # A nearly collapsed pole is a rim too: each sample closer to the
+        # query than its neighbours, after the ways out of its query, unless
+        # the rim's spots all lie within a thousandth of one distance from
+        # it (it looks like one point from there)
+        nearest = np.sqrt(dists.min(axis=1))
+        seen    = np.sqrt(dists.max(axis=1)) - nearest > 1e-3 * nearest
+        near, j = np.nonzero(lowest(dists) & seen[:, None])
+        order = np.argsort(np.r_[at, near], kind="stable")
+        return np.r_[at, near][order], np.r_[best_x, grid[j]][order]
+
+    def _spl_derivatives(self, u, v):
+        """
+        S, S_u, S_v, S_uu, S_uv and S_vv at native (u, v) from ``_spl``,
+        stacked (6, n, dims).
+        """
+        xi = np.column_stack([u, v])
+        return np.stack(
+            [
+                np.asarray(self._spl(xi, nu=nu))
+                for nu in ((0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (0, 2))
+            ]
+        )
 
     # ------------------------------------------------------------------ #
     #  Raycast                                                            #
@@ -1919,3 +2597,126 @@ class BSplinePatchData(Data):
             return float(np.sum(weights * norms) * du * dv / 9.0)
 
         return float(np.sum(norms) * du * dv)
+
+
+def _slopes(queries, derivs):
+    """
+    The numba kernel's ``_patch_slopes`` for many points at once: the
+    squared distances from queries to the patch and their derivatives.
+
+    Parameters
+    ----------
+    queries : np.ndarray
+        Query points (m, dims).
+    derivs : np.ndarray
+        S, S_u, S_v, S_uu, S_uv and S_vv at each point's (u, v), stacked
+        (6, m, dims).
+
+    Returns
+    -------
+    np.ndarray
+        (f, g_u, g_v, h_uu, h_uv, h_vv, j_uu, j_uv, j_vv) stacked (9, m):
+        see ``_patch_slopes``.
+    """
+    r    = derivs[0] - queries
+    j_uu = np.einsum("ij,ij->i", derivs[1], derivs[1])
+    j_uv = np.einsum("ij,ij->i", derivs[1], derivs[2])
+    j_vv = np.einsum("ij,ij->i", derivs[2], derivs[2])
+    return np.stack(
+        [
+            np.einsum("ij,ij->i", r, r),
+            np.einsum("ij,ij->i", r, derivs[1]),
+            np.einsum("ij,ij->i", r, derivs[2]),
+            np.einsum("ij,ij->i", r, derivs[3]) + j_uu,
+            np.einsum("ij,ij->i", r, derivs[4]) + j_uv,
+            np.einsum("ij,ij->i", r, derivs[5]) + j_vv,
+            j_uu,
+            j_uv,
+            j_vv,
+        ]
+    )
+
+
+def _span_exits(x, lo, g, end, periodic):
+    """
+    The numba kernel's ``_span_exit`` for many points at once: where each
+    search on an end of its degree-1 span (lo, lo + 1), its slope pointing
+    past that end, would go on.
+
+    Parameters
+    ----------
+    x, lo, g : np.ndarray
+        Parameters, the starts of their spans and the slopes along them
+        (m,).
+    end : float
+        End of the direction's domain.
+    periodic : bool
+        Whether the direction wraps.
+
+    Returns
+    -------
+    tuple
+        (x, lo), each (m,): the same spot on the next span, lo -1 where
+        there is none.
+    """
+    down                  = (x <= lo) & (g > 0.0)
+    up                    = (x >= lo + 1.0) & (g < 0.0)
+    inner                 = lo > 0.0
+    below                 = lo + 1.0 < end
+    next_x                = x.copy()
+    next_lo               = np.full_like(lo, -1.0)
+    next_lo[down & inner] = lo[down & inner] - 1.0
+    next_lo[up & below]   = lo[up & below] + 1.0
+    if periodic:
+        next_x[down & ~inner]  = end
+        next_lo[down & ~inner] = end - 1.0
+        next_x[up & ~below]    = 0.0
+        next_lo[up & ~below]   = 0.0
+    return next_x, next_lo
+
+
+def _keep_inside(x, low, high, end, ends):
+    """
+    Trial parameters kept inside their range: clipped to (low, high) when
+    the direction has ends, else wrapped into [0, end).
+    """
+    if ends:
+        return np.minimum(np.maximum(x, low), high)
+    x = x % end
+    return np.where(x >= end, x - end, x)
+
+
+def _poles(cv, periodic_u, periodic_v):
+    """
+    The numba kernel's ``_patch_poles``: for the edges u = 0, u = end,
+    v = 0 and v = end, 0 not a pole, 1 nearly one (all of the edge's
+    control points within a tenth of how far the next row's lie from
+    them), 2 one point (within 1e-12 of that).
+    """
+    rows  = (cv[0], cv[-1], cv[:, 0], cv[:, -1])
+    after = (cv[1], cv[-2], cv[:, 1], cv[:, -2])
+    edged = (not periodic_u, not periodic_u, not periodic_v, not periodic_v)
+    codes = []
+    for open_edge, row, inner in zip(edged, rows, after):
+        extent = np.ptp(row, axis=0).max()
+        reach  = np.linalg.norm(inner - row, axis=-1).max()
+        if not open_edge:
+            codes.append(0)
+        elif extent <= 1e-12 * reach:
+            codes.append(2)
+        elif extent <= 1e-1 * reach:
+            codes.append(1)
+        else:
+            codes.append(0)
+    return codes
+
+
+def _pole_at(u, v, poles, max_u, max_v):
+    """
+    The numba kernel's ``_mark_pole`` for many points at once: the pole
+    (0 to 3, as in ``_poles``) each (u, v) lies on, -1 where none.
+    """
+    pole = np.full(u.shape, -1)
+    for index, on in enumerate((u <= 0.0, u >= max_u, v <= 0.0, v >= max_v)):
+        pole = np.where((pole < 0) & on & (poles[index] > 0), index, pole)
+    return pole
