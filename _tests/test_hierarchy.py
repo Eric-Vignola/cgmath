@@ -235,6 +235,50 @@ class TestHierarchy(unittest.TestCase):
         self.assertTrue(np.allclose(TransformData._scale, 1.0))
         self.assertTrue(np.allclose(TransformData(name='b').scale, 1.0))
 
+    def test_a_small_channel_write_far_from_the_origin_is_a_change(self):
+        # the change check was relative to the value: 0.009 at x = 1000 is
+        # below it, so the move kept the cached world matrix at 1000
+        node = TransformData(name='a', translate=[1000.0, 0.0, 0.0])
+        node.world_matrix
+
+        node.translate = [1000.009, 0.0, 0.0]
+
+        self.assertAlmostEqual(node.world_matrix[3, 0], 1000.009, places=9)
+
+    def test_a_small_matrix_write_far_from_the_origin_is_a_change(self):
+        # the matrix setters had the same check: a matrix moved 0.009 at
+        # x = 1000 was taken for the one the node already held
+        for setter in ('matrix', 'world_matrix'):
+            with self.subTest(setter):
+                node    = TransformData(name='a', translate=[1000.0, 0.0, 0.0])
+                M       = getattr(node, setter)
+                M[3, 0] = 1000.009
+                setattr(node, setter, M)
+
+                self.assertAlmostEqual(node.translate[0], 1000.009, places=9)
+                self.assertAlmostEqual(node.world_matrix[3, 0], 1000.009, places=9)
+
+    def test_a_world_matrix_written_back_keeps_the_channels(self):
+        # through the parent's inverse the local comes back off in its last
+        # bits. that is no change: rebuilding the channels from it would turn
+        # rotate [0, 180, 0] into [180, 0, -180], the same rotation
+        h      = HierarchyData()
+        parent = TransformData(name='p', translate=[3.0, 1.0, -2.0], rotate=[10.0, 20.0, 30.0])
+        child = TransformData(
+            name        = 'c',
+            translate   = [1.0, 2.0, 3.0],
+            rotate      = [0.0, 180.0, 0.0],
+            rotate_axis = [15.0, 0.0, 0.0],
+        )
+        h.append(parent)
+        h.append(child)
+        child.set_parent('p', world_space=False)
+
+        child.set_parent('p', world_space=True)
+
+        self.assertTrue(np.allclose(child.rotate, [0.0, 180.0, 0.0]))
+        self.assertTrue(np.allclose(child.rotate_axis, [15.0, 0.0, 0.0]))
+
     def test_channel_defaults_are_float(self):
         # an integer default would silently truncate an in place write
         node        = TransformData(name='a').copy()

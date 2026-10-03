@@ -646,7 +646,9 @@ scene = Scene(
     aspect_ratio        = None,
 )
 scene.append(Object(name="cube", mesh=mesh, uv=uv, texture=checker))
-scene.append(Camera(name="cam", angle_of_view=35.0))
+cam = Camera(name="cam", angle_of_view=35.0, translate=(3, 2, 4))
+cam.look_at((0, 0, 0))                       # outside the cube, aimed at it
+scene.append(cam)
 scene.append(Light(name="key", kind="point", intensity=1e2, translate=(2, 3, 2)))
 print(scene.scene_name, len(scene))
 ```
@@ -745,7 +747,9 @@ print(scene.background)                      # [0.1 0.2 0.3 1. ]
 
 scene.background = (0.0, 0.0, 0.0, 0.0)      # transparent miss pixels
 cutout           = scene.render(resolution=(64, 64), samples_per_pixel=4)
-print(cutout.array[..., 3].min(), cutout.array[..., 3].max())   # 0 .. 255
+alpha            = cutout.array[..., 3]
+print(alpha.min(), alpha.max())  # 0 255: misses clear, the cubes solid
+print(np.unique(alpha))          # [  0  63 127 191 255]: 0 to 4 of 4 samples hit
 cutout.save(os.path.join(tmp, "cutout.png"))
 ```
 

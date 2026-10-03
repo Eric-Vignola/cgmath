@@ -2472,12 +2472,16 @@ after              = field.mesh_data  # recomputed automatically
 print(before.point_count, after.point_count)
 
 assert field.mesh_data is after          # nothing changed → cache hit
+
+sphere_body.translate = [0.0, 0.25, 0.0]  # moving it marks the field dirty too
+print(field.mesh_data is after)           # False -- recomputed
 ```
 
 Every mutating knob invalidates the cache: primitive `radius` /
-`half_extents` / `height` / `axis` / `translate` / `rotate` / `scale`, and
-the field's `resolution` / `position` / `iso_value` / `name`. A copy of a
-primitive starts detached from the field, so editing it leaves the field alone.
+`half_extents` / `height` / `axis`, any change to its transform (`translate`
+/ `rotate` / `scale` and the rest), and the field's `resolution` /
+`position` / `iso_value` / `name`. A copy of a primitive starts detached
+from the field, so editing it leaves the field alone.
 
 ```python
 field.resolution = 8

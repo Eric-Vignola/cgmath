@@ -288,6 +288,19 @@ def _scale_and_rotation(block: np.ndarray, current: np.ndarray) -> tuple:
     return scale, rotation
 
 
+def _same_transform(A: np.ndarray, B: np.ndarray) -> bool:
+    """whether two 4x4 matrices hold the same transform, up to round-off
+
+    a matrix that came through a product or an inverse differs in its last
+    bits from the one the channels compute. taking that for a change would
+    rebuild the channels from it, and rotate can come back as other angles
+    for the same rotation. the band is a fixed size: np.allclose's default
+    band grows with the value, so a small move far from the origin fell
+    inside it and was dropped.
+    """
+    return np.allclose(A, B, rtol=0.0, atol=1e-8)
+
+
 def _axis_permutation(axis0: int, axis1: int, negate: bool) -> np.ndarray:
     """4x4 signed permutation swapping two axes, with a determinant of +1
 
@@ -754,7 +767,9 @@ class TransformData(Data):
         value   = shaped
         current = getattr(self, name)
 
-        if not np.allclose(current, value):
+        # any difference is a change: a tolerance relative to the value would
+        # miss a small move far from the origin and keep a stale world matrix
+        if not np.array_equal(current, value):
             self._reset_branch_world_matrices()
 
         if current is getattr(type(self), name, None):
@@ -1008,10 +1023,20 @@ class TransformData(Data):
         self._draw_style = int(value)
 
     # --- methods --- #
+    def _transform_changed(self) -> None:
+        """this node's transform, or a parent's, has changed: drops the
+        cached world matrix
+
+        A subclass that keeps something else built from its transform
+        extends this to drop that too.
+        """
+        self._world_matrix = None
+
     def _reset_branch_world_matrices(self):
-        """resets the world matrix of this node and all its decendents"""
+        """resets the world matrix of this node and all its decendents, and
+        anything else they built from their transform"""
         for node in self.get_branch():
-            node._world_matrix = None
+            node._transform_changed()
 
     def _reject_animated(self, what: str) -> None:
         """refuses a rig level edit that an animated clip cannot hold
@@ -1294,7 +1319,7 @@ class TransformData(Data):
         zero scale leaves of the rotation is kept from the current one.
         """
         M = np.asarray(M, dtype=float).reshape(4, 4)
-        if self._world_matrix is None or not np.allclose(self._world_matrix, M):
+        if self._world_matrix is None or not _same_transform(self._world_matrix, M):
             W = self.get_parent_matrix()
             # a true inverse is required: a scaled parent's world matrix has
             # non-orthogonal rows, and matrix_local's fast affine inverse
@@ -1397,7 +1422,7 @@ class TransformData(Data):
         M = np.asarray(M, dtype=float).reshape(4, 4)
 
         # trigger the update only if the matrix has changed
-        if not np.allclose(self.matrix, M):
+        if not _same_transform(self.matrix, M):
             # the local matrix is [S][RO][R][JO][IS][T]; strip the joint
             # orient AND parent-scale-inverse factors (JO * IS) from the right
             # to recover the [S][RO][R] block.
@@ -3510,7 +3535,7 @@ class ClipData(HierarchyData):
             self._frame = frame
 
         for node in self.list:
-            node._world_matrix = None
+            node._transform_changed()
 
     # --- timebase --- #
     @property

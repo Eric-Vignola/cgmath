@@ -278,7 +278,9 @@ print(fill.as_dict())
 ```python
 scene = Scene("hero")
 scene.append(Object(name="cube", mesh=cube, uv=cube_uv))
-scene.append(Camera(name="cam", angle_of_view=28.0))
+cam = Camera(name="cam", angle_of_view=28.0, translate=(3, 2, 4))
+cam.look_at((0, 0, 0))  # outside the cube, aimed at it
+scene.append(cam)
 scene.append(Light(name="key", kind="point", intensity=17.0, translate=(2, 3, 2)))
 
 # Persistent render config (per-call kwargs always win)
@@ -459,7 +461,8 @@ alpha, miss pixels get 0, fully-covered pixels get 255.
 ```python
 cutout = scene.render(background=(0, 0, 0, 0), samples_per_pixel=4)
 alpha  = cutout.array[..., 3]
-print(alpha.min(), alpha.max())     # 0 (miss) .. 255 (solid)
+print(alpha.min(), alpha.max())  # 0 255: misses clear, the cube solid
+print(np.unique(alpha))          # [  0  63 127 191 255]: 0 to 4 of 4 samples hit
 cutout.save("cutout.png")
 ```
 

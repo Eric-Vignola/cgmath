@@ -7,6 +7,7 @@ import unittest
 import numpy as np
 from cgmath.geometry import MeshData
 from cgmath.geometry.sdf import DMCField, SDFBox, SDFCylinder, SDFSphere
+from cgmath.hierarchy import ClipData, HierarchyData, TransformData
 
 
 class TestSDFIgloo(unittest.TestCase):
@@ -246,3 +247,133 @@ class TestSDFPrimitiveSettings(unittest.TestCase):
         sphere = SDFSphere(radius=1)
         self.assertIs(type(sphere.radius), float)
         self.assertEqual(SDFBox(half_extents=[1, 2, 3]).half_extents.dtype, np.float64)
+
+
+class TestSDFFieldFollowsTransforms(unittest.TestCase):
+    """moving, rotating or scaling a primitive, or a parent, marks its field dirty"""
+
+    def setUp(self):
+        super().setUp()
+        self.primitives = [
+            SDFSphere(radius=0.5, name="ball"),
+            SDFBox(half_extents=[0.5, 0.25, 0.25], name="crate"),
+            SDFCylinder(radius=0.25, height=1.0, name="pipe"),
+        ]
+
+    def test_a_transform_change_marks_the_field_dirty(self):
+        edits = [
+            ("translate", [0.5, 0.0, 0.0]),
+            ("rotate", [0.0, 0.0, 30.0]),
+            ("scale", [1.0, 2.0, 1.0]),
+            ("translate_y", 0.25),
+            ("rotate_order", 2),
+        ]
+        for primitive in self.primitives:
+            field = DMCField(resolution=8).add(primitive)
+            for name, value in edits:
+                with self.subTest(primitive=primitive.name, channel=name):
+                    field.mesh_data
+                    self.assertFalse(field._dirty)
+                    setattr(primitive, name, value)
+                    self.assertTrue(field._dirty)
+
+    def test_the_mesh_follows_a_moved_primitive(self):
+        sphere = self.primitives[0]
+        field  = DMCField(resolution=16).add(sphere)
+        centre = field.mesh_data.points.mean(axis=0)
+        self.assertTrue(np.allclose(centre, [0.0, 0.0, 0.0], atol=1e-3))
+
+        # the old mesh, still centred on the origin, must not come back
+        sphere.translate = [2.0, 0.0, 0.0]
+        centre           = field.mesh_data.points.mean(axis=0)
+        self.assertTrue(np.allclose(centre, [2.0, 0.0, 0.0], atol=1e-3))
+
+    def test_a_small_move_far_from_the_origin_marks_the_field_dirty(self):
+        # 0.0009 at x = 100 is below the change check's old tolerance, which
+        # grew with the value, so the move counted as no change
+        sphere           = self.primitives[0]
+        sphere.translate = [100.0, 0.0, 0.0]
+        field            = DMCField(resolution=8).add(sphere)
+        field.mesh_data
+
+        sphere.translate = [100.0009, 0.0, 0.0]
+        self.assertTrue(field._dirty)
+
+    def test_a_small_matrix_move_far_from_the_origin_marks_the_field_dirty(self):
+        # the matrix setters had the same check, so the move was dropped and
+        # the field kept its mesh
+        sphere = self.primitives[0]
+        field  = DMCField(resolution=8).add(sphere)
+        for setter in ("matrix", "world_matrix"):
+            with self.subTest(setter):
+                sphere.translate = [100.0, 0.0, 0.0]
+                field.mesh_data
+
+                M       = getattr(sphere, setter)
+                M[3, 0] = 100.0009
+                setattr(sphere, setter, M)
+                self.assertTrue(field._dirty)
+
+    def test_an_unchanged_transform_keeps_the_mesh(self):
+        sphere = self.primitives[0]
+        field  = DMCField(resolution=8).add(sphere)
+        mesh   = field.mesh_data
+
+        sphere.translate = sphere.translate
+        self.assertIs(field.mesh_data, mesh)
+
+        # nor does a primitive the field no longer holds
+        field.remove(sphere)
+        mesh             = field.mesh_data
+        sphere.translate = [1.0, 0.0, 0.0]
+        self.assertIs(field.mesh_data, mesh)
+
+    def test_a_parent_moving_marks_the_field_dirty(self):
+        group = TransformData(name="group")
+        rig   = HierarchyData([group])
+        field = DMCField(resolution=8)
+        for primitive in self.primitives:
+            primitive.parent_node = group.uuid
+            rig.append(primitive)
+            field.add(primitive)
+
+        edits = [
+            ("translate", [1.0, 0.0, 0.0]),
+            ("rotate", [0.0, 45.0, 0.0]),
+            ("scale", [2.0, 2.0, 2.0]),
+        ]
+        for name, value in edits:
+            with self.subTest(channel=name):
+                field.mesh_data
+                self.assertFalse(field._dirty)
+                setattr(group, name, value)
+                self.assertTrue(field._dirty)
+
+    def test_a_clip_changing_frame_marks_the_field_dirty(self):
+        clip           = ClipData([self.primitives[0]], frames=2)
+        ball           = clip[0]
+        clip.frame     = 1
+        ball.translate = [1.0, 0.0, 0.0]
+
+        clip.frame = 0
+        field      = DMCField(resolution=8).add(ball)
+        field.mesh_data
+        clip.frame = 1
+        self.assertTrue(field._dirty)
+
+    def test_a_copied_field_follows_its_moved_primitives(self):
+        field = DMCField(resolution=8)
+        for primitive in self.primitives:
+            field.add(primitive)
+        field.mesh_data
+
+        for label, clone in (
+            ("deepcopy", copy.deepcopy(field)),
+            ("pickle", pickle.loads(pickle.dumps(field))),
+        ):
+            with self.subTest(label):
+                clone.mesh_data
+                self.assertFalse(clone._dirty)
+                clone.primitives[0].translate = [1.0, 0.0, 0.0]
+                self.assertTrue(clone._dirty)
+                self.assertFalse(field._dirty)

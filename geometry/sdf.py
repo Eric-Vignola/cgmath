@@ -440,6 +440,11 @@ class SDFSphere(TransformData):
         if self._field is not None:
             self._field._invalidate()
 
+    def _transform_changed(self) -> None:
+        """Moved, rotated or scaled, or a parent was: the field is dirty."""
+        super()._transform_changed()
+        self._invalidate()
+
     @property
     def radius(self) -> float:
         """Sphere radius."""
@@ -522,6 +527,11 @@ class SDFBox(TransformData):
         """Notify parent field that this primitive has changed."""
         if self._field is not None:
             self._field._invalidate()
+
+    def _transform_changed(self) -> None:
+        """Moved, rotated or scaled, or a parent was: the field is dirty."""
+        super()._transform_changed()
+        self._invalidate()
 
     @property
     def half_extents(self) -> np.ndarray:
@@ -612,6 +622,11 @@ class SDFCylinder(TransformData):
         """Notify parent field that this primitive has changed."""
         if self._field is not None:
             self._field._invalidate()
+
+    def _transform_changed(self) -> None:
+        """Moved, rotated or scaled, or a parent was: the field is dirty."""
+        super()._transform_changed()
+        self._invalidate()
 
     @property
     def radius(self) -> float:
@@ -711,9 +726,11 @@ class DMCField:
     A field that combines SDF primitives via CSG operations.
 
     The field manages a list of primitives and their CSG operations,
-    automatically recomputing the mesh when primitives change. Bounds are
-    auto-computed from the registered primitives' bounding boxes with 10%
-    padding.
+    automatically recomputing the mesh when primitives change: a shape
+    setting, or a move, rotation or scale. A primitive is placed by its own
+    translate, rotate and scale alone: a parent's transform does not move
+    it in the field. Bounds are auto-computed from the registered
+    primitives' bounding boxes with 10% padding.
 
     Resolution is specified as "subdivisions per world-space unit" in each
     axis. The actual grid shape is computed dynamically based on the
