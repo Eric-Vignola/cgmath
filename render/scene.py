@@ -304,8 +304,8 @@ class Object(TransformData):
                 files are typically authored in metres; the default of
                 100 matches :meth:`MeshData.load_glb`).
             extract_texture: When True (default), also extract the
-                material's base color map from the GLB and assign it to
-                the returned Object's :attr:`texture` via
+                mesh's own material's base color map from the GLB and
+                assign it to the returned Object's :attr:`texture` via
                 :meth:`extract_texture_from_glb`.  An explicit
                 ``texture=`` in ``object_kwargs`` always wins -- auto-
                 extraction is suppressed so caller-supplied textures are
@@ -342,10 +342,12 @@ class Object(TransformData):
 
         obj = cls(mesh=mesh, uv=uv, **object_kwargs)
         # Only auto-extract when the caller didn't supply an explicit
-        # texture; explicit always wins.  No-op when the GLB has no
-        # base color map (returns False) or PIL is unavailable.
+        # texture; explicit always wins.  No-op when the mesh has no
+        # material, the material no base color map, or PIL is unavailable.
         if extract_texture and obj.texture is None:
-            obj.extract_texture_from_glb(filename)
+            material = _glb_material_indices(filename, len(data))[index]
+            if material is not None:
+                obj.extract_texture_from_glb(filename, material_index=material)
         return obj
 
     @classmethod
@@ -1840,12 +1842,13 @@ class Scene(HierarchyData):
                 :class:`SkinDeformData` to each Object that has skin
                 weights, ready for :meth:`Object.pose`.  The file is read
                 once for the whole Scene, not once per Object.
-            extract_texture: When True (default), also extract the
-                material's base color map and assign it to each Object's
-                :attr:`texture` via :meth:`Object.extract_texture_from_glb`,
-                matching :meth:`Object.load_glb`.  A file with no base
-                color map leaves :attr:`texture` unset rather than raising,
-                so an untextured GLB loads exactly as it did before.
+            extract_texture: When True (default), also extract each
+                mesh's own material's base color map and assign it to that
+                Object's :attr:`texture` via
+                :meth:`Object.extract_texture_from_glb`, matching
+                :meth:`Object.load_glb`.  A mesh with no material, or a
+                material with no base color map, leaves :attr:`texture`
+                unset rather than raising.
 
         Returns:
             A Scene populated with one Object per geometry in the file.
@@ -1861,11 +1864,16 @@ class Scene(HierarchyData):
             if load_skin
             else [None] * len(meshes)
         )
-        for (mesh, uv_list), skin in zip(data, skins):
+        materials = (
+            _glb_material_indices(filename, len(meshes))
+            if extract_texture
+            else [None] * len(meshes)
+        )
+        for (mesh, uv_list), skin, material in zip(data, skins, materials):
             uv  = uv_list[0] if len(uv_list) > 0 else None
             obj = Object(name=mesh.name or "object", mesh=mesh, uv=uv, skin=skin)
-            if extract_texture:
-                obj.extract_texture_from_glb(filename)
+            if extract_texture and material is not None:
+                obj.extract_texture_from_glb(filename, material_index=material)
             scene.append(obj)
         return scene
 
@@ -3026,6 +3034,48 @@ def _glb_skins(
         )
         for mesh, entry in zip(meshes, skins)
     ]
+
+
+def _glb_material_indices(file_path: str, count: int) -> List[Optional[int]]:
+    """The material index of each of the ``count`` meshes ``mesh.load_glb``
+    reads from the file, ``None`` where a mesh has no material.
+
+    Paired by position, as :func:`_glb_skins` pairs skins: the file holds one
+    entry per primitive, in file order, and trimesh reads them in that order,
+    skipping every primitive that is not triangles or a triangle strip (an
+    older trimesh keeps triangles alone). The mode is in the file, so the
+    same primitives are skipped here. Should the counts still differ, a file
+    whose primitives all use its one material gives it to every mesh, and
+    any other warns and gives none rather than guess.
+    """
+    json_chunk, _ = _parse_glb(file_path)
+    if json_chunk is None:
+        return [None] * count
+
+    primitives = [
+        (primitive.get("mode", 4), primitive.get("material"))
+        for mesh in json_chunk.get("meshes", [])
+        for primitive in mesh.get("primitives", [])
+    ]
+    for kept in (None, (4, 5), (4,)):
+        indices = [m for mode, m in primitives if kept is None or mode in kept]
+        if len(indices) == count:
+            return indices
+
+    indices = [m for _, m in primitives]
+    if len(json_chunk.get("materials", [])) == 1 and set(indices) <= {0}:
+        return [0] * count
+
+    # nothing to mis-pair in a file without materials: not worth a warning
+    if not any(x is not None for x in indices):
+        return [None] * count
+
+    warnings.warn(
+        f"{file_path}: {count} meshes but {len(indices)} primitives, so their "
+        f"materials cannot be paired up -- loading without textures.",
+        stacklevel=3,
+    )
+    return [None] * count
 
 
 def _scaled_binds(matrices: np.ndarray, scale_factor: float) -> np.ndarray:

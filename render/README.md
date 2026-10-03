@@ -157,8 +157,9 @@ obj.extract_texture_from_glb("model.glb", material_index=0)
 obj.extract_texture_from_fbx("model.fbx", material_index=0)
 ```
 
-`load_glb` pulls the PBR **base color (albedo) map** into `Object.texture`
-and, with `load_skin=True` (the default), attaches the mesh's
+`load_glb` pulls the PBR **base color (albedo) map** of the mesh's own
+material into `Object.texture` (`Scene.load_glb` does the same for every
+mesh) and, with `load_skin=True` (the default), attaches the mesh's
 `SkinDeformData` to `Object.skin`. The GLB parser also reads
 metallic-roughness, normal, occlusion and emissive maps; the shader
 discards them today, but they're there for a future multi-texture pass.

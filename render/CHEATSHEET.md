@@ -249,9 +249,9 @@ Object.load_glb("hero.glb", index=0, scale_factor=100.0,
 Object.load_fbx("hero.fbx", index=0, extract_texture=True, load_skin=True)
 ```
 
-`load_glb` pulls the PBR base-color map into `texture` automatically
-(`extract_texture=True`) and attaches skin weights when present
-(`load_skin=True`). An explicit `texture=` kwarg always wins.
+`load_glb` pulls the PBR base-color map of the mesh's own material into
+`texture` automatically (`extract_texture=True`) and attaches skin weights
+when present (`load_skin=True`). An explicit `texture=` kwarg always wins.
 
 Pull a texture onto an existing Object after the fact. Both return
 `True`/`False` rather than raising when the slot is empty:
