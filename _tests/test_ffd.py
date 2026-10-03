@@ -200,6 +200,29 @@ class TestFFDDataConstruction(unittest.TestCase):
         with self.assertRaises(ValueError):
             FFDData.from_mesh(pts, divisions=(4, 4, 4))
 
+    def test_the_rest_lattice_is_a_copy(self):
+        # every form but a mesh handed to __init__ kept the caller's float64
+        # array, so editing the lattice mesh or array moved the rest lattice
+        lattice_mesh = FFDData.create_lattice((3, 3, 3))
+        flat         = lattice_mesh.points.copy()
+        grid         = flat.reshape(3, 3, 3, 3).copy()
+        expected     = grid.copy()
+
+        made = {
+            "from_mesh(mesh)":  FFDData.from_mesh(lattice_mesh, divisions=(3, 3, 3)),
+            "from_mesh(array)": FFDData.from_mesh(flat, divisions=(3, 3, 3)),
+            "FFDData(mesh)":    FFDData(lattice_mesh, divisions=(3, 3, 3)),
+            "FFDData(flat)":    FFDData(flat, divisions=(3, 3, 3)),
+            "FFDData(grid)":    FFDData(grid),
+        }
+        lattice_mesh.points[:] += 1.0
+        flat[:]                += 1.0
+        grid[:]                += 1.0
+
+        for how, ffd in made.items():
+            with self.subTest(how=how):
+                np.testing.assert_array_equal(ffd.lattice, expected)
+
 
 class TestFFDDataIdentity(unittest.TestCase):
     """Deforming with the rest lattice should return the original points."""

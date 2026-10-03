@@ -145,11 +145,12 @@ class PatchRelaxData(Data):
             mask: Optional ``(N,)`` per-vertex weight in ``[0, 1]``
                 scaling each vertex's step, for painted falloff.  ``0``
                 pins a vertex; pinned vertices still influence their
-                neighbours.
+                neighbours.  Flattened and clipped to ``[0, 1]``, here
+                and whenever :attr:`mask` is assigned or loaded.
 
         Raises:
             ValueError: If *base* is not mesh-like, or *mask* does not
-                match the point count.
+                match the point count (an assigned mask raises too).
         """
         # local import to avoid circular dependency with cgmath.geometry.mesh
         from cgmath.geometry.mesh import MeshData
@@ -173,21 +174,27 @@ class PatchRelaxData(Data):
         borders              = base.get_border_vertices(flatten=True)
         self.border_vertices = np.asarray(borders, dtype=np.int32).ravel()
 
-        self.mask = None
-        if mask is not None:
-            mask = np.asarray(mask, dtype=np.float64).ravel()
-            if mask.size != self.rest_points.shape[0]:
-                raise ValueError(
-                    f"mask size ({mask.size}) must match point count "
-                    f"({self.rest_points.shape[0]})"
-                )
-            self.mask = np.clip(mask, 0.0, 1.0)
+        self.mask = mask  # checked by __setattr__
 
         self._iterations    = int(iterations)
         self._alpha         = float(alpha)
         self._surface_blend = float(np.clip(surface_blend, 0.0, 1.0))
         self._step_size     = float(step_size)
         self._pin_borders   = bool(pin_borders)
+
+    def __setattr__(self, name: str, value) -> None:
+        # a mask is checked however it arrives -- the constructor, an
+        # assignment or a load -- so a wrong size raises here rather than
+        # inside apply(); the field keeps its name, so saved files still load
+        if name == "mask" and value is not None:
+            value = np.asarray(value, dtype=np.float64).ravel()
+            if self.rest_points is not None and value.size != self.rest_points.shape[0]:
+                raise ValueError(
+                    f"mask size ({value.size}) must match point count "
+                    f"({self.rest_points.shape[0]})"
+                )
+            value = np.clip(value, 0.0, 1.0)
+        super().__setattr__(name, value)
 
     # ------------------------------ properties ------------------------------- #
 

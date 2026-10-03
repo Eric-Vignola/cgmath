@@ -487,6 +487,28 @@ class TestPatchRelaxData(unittest.TestCase):
         relaxer.mask = np.zeros(mesh.points.shape[0])
         self.assertTrue(np.allclose(relaxer.relax(noisy), noisy))
 
+    def test_an_assigned_mask_is_checked_like_the_constructors(self):
+        # assigning skipped the constructor's ravel, size check and clip: a
+        # wrong size was accepted and failed later, inside relax()
+        mesh    = _make_grid_mesh(5)
+        relaxer = PatchRelaxData(mesh, iterations=2)
+
+        with self.assertRaises(ValueError):
+            relaxer.mask = np.ones(3)
+        self.assertIsNone(relaxer.mask)
+
+        painted      = np.full((25, 1), 2.0)
+        relaxer.mask = painted
+        self.assertEqual(relaxer.mask.shape, (25,))
+        np.testing.assert_array_equal(relaxer.mask, 1.0)
+        self.assertFalse(np.shares_memory(relaxer.mask, painted))
+
+        relaxer.mask = np.full(25, -1.0)
+        np.testing.assert_array_equal(relaxer.mask, 0.0)
+
+        relaxer.mask = None
+        self.assertIsNone(relaxer.mask)
+
     def test_zero_iterations_is_a_noop(self):
         mesh  = _make_grid_mesh(5, height=0.2)
         noisy = mesh.points + 0.05

@@ -174,6 +174,18 @@ c = FFDData.from_mesh(lattice_mesh, divisions=(3, 3, 3))  # MeshData + divisions
 print(a.divisions, b.lattice.shape, c.lattice.shape)
 ```
 
+Every form copies the points, so editing the lattice mesh or the arrays
+afterwards leaves the rest lattice alone:
+
+```python
+rest  = a.lattice.copy()
+saved = lattice_mesh.points.copy()
+
+lattice_mesh.points[:, 2] += 1.0             # flat and grid4d are views of these
+print([np.array_equal(x.lattice, rest) for x in (a, b, c)])   # [True, True, True]
+lattice_mesh.points[:] = saved
+```
+
 `from_mesh` wants the **lattice**, not the mesh you are deforming — it needs
 exactly `nx * ny * nz` points in structured-grid order.
 
@@ -410,6 +422,8 @@ assert np.allclose(soft.apply(plane).points, soft.smoothed_points, atol=1e-9)
 soft.weight = 0.5  # cheap, no rebind
 soft.weight = 5.0  # clamped into [0, 1]
 print(soft.weight)
+
+print(DeltaMushData(plane, weight=-2.0).weight)  # -> 0.0, the constructor clamps too
 ```
 
 ### Borders
@@ -427,6 +441,15 @@ assert np.allclose(pinned.smoothed_points[edge], plane.points[edge], atol=1e-12)
 loose = DeltaMushData(plane, smooth_iterations=20, pin_borders=False)
 loose.bind()
 print("border moved:", np.abs(loose.smoothed_points[edge] - plane.points[edge]).max() > 1e-6)
+```
+
+The border vertices are read from the mesh pinning or not, so pinning can be
+turned on later — it invalidates the bind like the other smoothing knobs:
+
+```python
+loose.pin_borders = True
+loose.bind()
+assert np.allclose(loose.smoothed_points[edge], plane.points[edge], atol=1e-12)
 ```
 
 ### Point clouds
@@ -566,6 +589,20 @@ Reassigning the mask takes effect immediately — the step scale is never cached
 ```python
 relaxer.mask = np.zeros(plane.point_count)
 assert np.allclose(relaxer.relax(noisy.points), noisy.points)
+relaxer.mask = None
+```
+
+An assigned (or loaded) mask gets the constructor's checks: flattened, clipped
+to `[0, 1]`, and a wrong size raises right away instead of inside `relax()`.
+
+```python
+relaxer.mask = np.full((plane.point_count, 1), 2.0)
+print(relaxer.mask.shape, relaxer.mask.max())   # (81,) 1.0
+
+try:
+    relaxer.mask = np.ones(3)
+except ValueError as e:
+    print("as expected:", e)
 relaxer.mask = None
 ```
 
@@ -896,6 +933,20 @@ try:
     WrapData().deform(dense.points)
 except ValueError as e:
     print("as expected:", e)
+```
+
+`set_source()` and `set_target()` copy the points. The solve waits for the
+first `deform()`, so without the copy an edit to `moved` made in between
+would move the wrap:
+
+```python
+fresh = WrapData()
+fresh.set_source(cage)
+fresh.set_target(moved)
+held = moved.copy()
+moved[:, 2] += 1.0                          # edited before fresh has solved
+assert np.array_equal(fresh.deform(dense), result)
+moved[:] = held
 ```
 
 ### Kernels

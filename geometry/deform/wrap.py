@@ -130,9 +130,11 @@ class WrapData(Data):
         return self.geodesic_radius
 
     def _get_points(self, target):
+        """``target``'s points as the wrap's own float64 copy: a caller
+        editing its array afterwards must not move the source or target"""
         if isinstance(target, MeshData):
             return target.points.copy()
-        return np.asarray(target)
+        return np.array(target, dtype=np.float64)
 
     def _eval_kernel(self, cdist):
         """Evaluate kernel on distance matrix with appropriate parameters."""
@@ -179,9 +181,9 @@ class WrapData(Data):
         Parameters
         ----------
         target : np.ndarray or MeshData
-            Source control points. If MeshData and geodesic_radius property
-            is set, geodesic surface distance determines vertex pair
-            connectivity.
+            Source control points, copied. If MeshData and geodesic_radius
+            property is set, geodesic surface distance determines vertex
+            pair connectivity.
         """
         self.src_points = self._get_points(target)
 
@@ -197,7 +199,8 @@ class WrapData(Data):
         self._dirty = True
 
     def set_target(self, target: np.ndarray) -> None:
-        """set target points
+        """set target points, copied: editing the array afterwards does not
+        move the target
 
         Only the right-hand side of the interpolation system moves, so this
         does not invalidate the kernel matrix or its pseudo-inverse.

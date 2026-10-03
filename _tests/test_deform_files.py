@@ -107,8 +107,19 @@ class TestDeltaMushFiles(_RoundTrip):
                     self.assert_round_trips(mush, lambda d: d.apply(self.noisy))
 
     def test_unpinned(self):
+        # the border is saved pinning or not, so a loaded operator can pin later
         mush = DeltaMushData(self.mesh, smooth_iterations=6, pin_borders=False)
-        self.assertIsNone(mush.border_vertices)
+        np.testing.assert_array_equal(
+            mush.border_vertices, self.mesh.get_border_vertices(flatten=True)
+        )
+        self.assert_round_trips(mush, lambda d: d.apply(self.noisy))
+
+    def test_an_unpinned_file_without_its_border_loads(self):
+        # how an unpinned operator was saved before the border was always
+        # read: no border_vertices. It loads and deforms as it did
+        mush                 = DeltaMushData(self.mesh, smooth_iterations=6, pin_borders=False)
+        mush.border_vertices = None
+        self.assertNotIn("border_vertices", mush.to_dict())
         self.assert_round_trips(mush, lambda d: d.apply(self.noisy))
 
     def test_a_point_cloud(self):
@@ -153,6 +164,24 @@ class TestPatchRelaxFiles(_RoundTrip):
     def test_unpinned_without_a_mask(self):
         relaxer = PatchRelaxData(self.mesh, iterations=5, pin_borders=False)
         self.assert_round_trips(relaxer, lambda d: d.apply(self.noisy))
+
+    def test_the_mask_is_saved_under_its_name(self):
+        mask    = np.linspace(0.0, 1.0, len(self.mesh.points))
+        relaxer = PatchRelaxData(self.mesh, mask=mask)
+        self.assertIn("mask", relaxer.to_dict())
+        for how, loaded in self._loads(relaxer).items():
+            with self.subTest(how=how):
+                np.testing.assert_array_equal(loaded.mask, mask)
+
+    def test_a_loaded_mask_is_checked(self):
+        # a load sets the mask as an assignment does: clipped, size checked
+        tree         = PatchRelaxData(self.mesh).to_dict()
+        tree["mask"] = np.full(len(self.mesh.points), 3.0)
+        np.testing.assert_array_equal(PatchRelaxData.from_dict(tree).mask, 1.0)
+
+        tree["mask"] = np.ones(3)
+        with self.assertRaises(ValueError):
+            PatchRelaxData.from_dict(tree)
 
 
 class TestFFDFiles(_RoundTrip):

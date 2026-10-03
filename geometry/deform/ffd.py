@@ -46,9 +46,15 @@ class FFDData(Data):
         outside = "freeze"        # no deformation outside the lattice
         outside = "falloff"       # smooth decay over ``falloff_radius`` cells
 
-    Example::
+    Example -- :meth:`from_mesh` takes the *lattice*, built here around the
+    mesh's extent; the mesh is what gets bound::
 
-        ffd = FFDData.from_mesh(mesh, divisions=(5, 5, 5))
+        lattice = FFDData.create_lattice(
+            (5, 5, 5),
+            bbox_min = mesh.points.min(axis=0),
+            bbox_max = mesh.points.max(axis=0),
+        )
+        ffd = FFDData.from_mesh(lattice, divisions=(5, 5, 5))
         ffd.bind(mesh)
 
         ffd.local_influence = (4, 4, 4)  # cubic Bernstein smoothing
@@ -99,13 +105,16 @@ class FFDData(Data):
                 - ``np.ndarray`` shaped ``(N, 3)`` -- *divisions* required
                 - object with ``.points`` attribute (e.g. MeshData) -- *divisions*
                   required
+
+                The points are copied: editing the array or mesh afterwards
+                does not move the rest lattice.
             divisions: ``(nx, ny, nz)`` control points per axis (Maya convention).
                 Minimum is ``(2, 2, 2)``.
         """
         pts = lattice
         if not isinstance(pts, np.ndarray) and hasattr(pts, "points"):
-            pts = pts.points.copy()
-        pts = np.asarray(pts, dtype=np.float64)
+            pts = pts.points
+        pts = np.array(pts, dtype=np.float64)  # the FFD's own copy, not the caller's
 
         if pts.ndim == 4:
             self.lattice   = pts
@@ -188,7 +197,8 @@ class FFDData(Data):
             divisions: ``(nx, ny, nz)`` control points per axis (Maya convention).
 
         Returns:
-            A new :class:`FFDData` with the mesh points as the rest lattice.
+            A new :class:`FFDData` with a copy of the mesh points as the rest
+            lattice.
         """
         pts = mesh.points if hasattr(mesh, "points") else np.asarray(mesh)
         return cls(pts, divisions=divisions)

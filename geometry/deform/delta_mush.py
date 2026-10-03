@@ -53,7 +53,7 @@ class DeltaMushData(Data):
     cloud.
 
     The constructor reads what it needs from the rest mesh: its points,
-    its edge neighbours, its border vertices (when pinning) and each
+    its edge neighbours, its border vertices (pinning or not) and each
     vertex's first-face winding (for ``"TBN"``).  All of it is saved, so a
     loaded operator deforms without the mesh.
 
@@ -159,11 +159,13 @@ class DeltaMushData(Data):
             pin_borders: When True (default) and *rest* is a
                 :class:`MeshData`, the smoothing iteration count is
                 forced to ``0`` on border vertices so they stay
-                exactly where they started.
-            weight: Final blend weight in ``[0, 1]``.  ``0`` returns the
-                smoothed mesh, ``1`` (default) returns the fully
-                reconstructed mesh.  Can be changed any time without
-                rebinding.
+                exactly where they started.  A mesh's border vertices
+                are read either way, so turning :attr:`pin_borders` on
+                later pins them.
+            weight: Final blend weight, clipped to ``[0, 1]``.  ``0``
+                returns the smoothed mesh, ``1`` (default) returns the
+                fully reconstructed mesh.  Can be changed any time
+                without rebinding.
             method: Frame-construction method -- one of ``"TBN"``
                 (default), ``"PROCRUSTES"`` or ``"DDM"``.  Case-
                 insensitive.  Changing the method invalidates the bind
@@ -177,12 +179,13 @@ class DeltaMushData(Data):
             self._first_nbrs = self._compute_first_face_neighbors(rest)
             if neighbors is None:
                 neighbors = rest.get_edge_vertex_neighbors()
-            if pin_borders:
-                self.border_vertices = np.asarray(
-                    rest.get_border_vertices(flatten=True), dtype=np.int32
-                ).ravel()
-            else:
-                self.border_vertices = None
+            # read whether pinning or not: only the iteration schedule looks
+            # at pin_borders, so turning it on later still pins the border.
+            # The vertices of the edges with a single face are the set that
+            # get_border_vertices() returns, without tracing it into loops
+            # (seconds on a big or unwelded mesh)
+            one_face             = np.sum(rest.e2f >= 0, axis=1) == 1
+            self.border_vertices = np.unique(rest.e2v[one_face]).astype(np.int32)
         else:
             pts              = rest.points if hasattr(rest, "points") else rest
             self.rest_points = np.asarray(pts, dtype=np.float64).copy()
@@ -203,7 +206,7 @@ class DeltaMushData(Data):
         self._smooth_iterations = int(smooth_iterations)
         self._smooth_step_size  = float(smooth_step_size)
         self._pin_borders       = bool(pin_borders)
-        self._weight            = float(weight)
+        self._weight            = float(np.clip(float(weight), 0.0, 1.0))  # as the setter does
         self._method            = self._normalize_method(method)
 
     # ------------------------------ properties ------------------------------- #

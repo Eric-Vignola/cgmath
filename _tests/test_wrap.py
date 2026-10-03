@@ -76,6 +76,24 @@ class TestWrapDeform(unittest.TestCase):
         with self.assertRaises(ValueError):
             wrap.deform(self.mesh)
 
+    def test_the_source_and_target_are_copies(self):
+        # both kept the caller's float64 array, so editing it afterwards moved
+        # the wrap with nothing marked to re-solve
+        src = self.cage_points.copy()
+        dst = self.cage_points.copy()
+        dst[:, 2] += 0.35 * dst[:, 0]
+
+        wrap = WrapData()
+        wrap.set_source(src)
+        wrap.set_target(dst)
+        expected = wrap.deform(self.mesh)
+
+        src       += 1.0
+        dst[:, 2] += 0.5
+        self.assertFalse(np.shares_memory(wrap.src_points, src))
+        self.assertFalse(np.shares_memory(wrap.dst_points, dst))
+        np.testing.assert_array_equal(wrap.deform(self.mesh), expected)
+
 
 class TestWrapCaching(unittest.TestCase):
     """The system matrix depends on the source, the kernel and the radii.

@@ -220,6 +220,18 @@ class TestDeltaMushData(unittest.TestCase):
         mush.weight = -1.0
         self.assertEqual(mush.weight, 0.0)
 
+    def test_the_constructor_clamps_weight_too(self):
+        # the setter clipped, the constructor stored 5.0 and -1.0 as given
+        rest = _make_grid_mesh(n=4, jitter=0.0, seed=10)
+        self.assertEqual(DeltaMushData(rest, weight=5.0).weight, 1.0)
+        self.assertEqual(DeltaMushData(rest, weight=-1.0).weight, 0.0)
+
+    def test_the_constructor_still_takes_a_numeric_string(self):
+        # the constructor ran float(weight); clipping it first broke "0.5"
+        rest = _make_grid_mesh(n=4, jitter=0.0, seed=10)
+        self.assertEqual(DeltaMushData(rest, weight="0.5").weight, 0.5)
+        self.assertEqual(DeltaMushData(rest, weight="5").weight, 1.0)
+
     def test_smooth_iterations_invalidates_bind(self):
         rest = _make_grid_mesh(n=4, jitter=0.0, seed=11)
         mush = DeltaMushData(rest, smooth_iterations=2, pin_borders=False)
@@ -324,6 +336,70 @@ class TestDeltaMushState(unittest.TestCase):
         mush.bind()
         self.assertEqual(mush.method, "TBN")
         np.testing.assert_array_equal(mush._first_nbrs, nbrs)
+
+    def test_pinning_turned_on_later_pins_the_border(self):
+        # built unpinned, the operator kept no border vertices, so turning
+        # pin_borders on afterwards pinned nothing
+        rest   = _make_grid_mesh(n=8, jitter=0.05, seed=64)
+        border = rest.get_border_vertices(flatten=True)
+
+        later             = DeltaMushData(rest, smooth_iterations=20, pin_borders=False)
+        later.pin_borders = True
+        later.bind()
+        np.testing.assert_array_equal(later.smoothed_points[border], rest.points[border])
+
+        pinned = DeltaMushData(rest, smooth_iterations=20, pin_borders=True)
+        pinned.bind()
+        np.testing.assert_array_equal(later.smoothed_points, pinned.smoothed_points)
+
+    def test_building_does_not_trace_the_border_into_loops(self):
+        # the tracing slows down much faster than the border grows (2 s for
+        # 4000 unwelded quads), and the operator only needs the vertices
+        real   = MeshData._compute_borders
+        traced = []
+
+        def counting(mesh):
+            traced.append(mesh)
+            return real(mesh)
+
+        with mock.patch.object(MeshData, "_compute_borders", counting):
+            for pin in (False, True):
+                DeltaMushData(_make_grid_mesh(n=8), pin_borders=pin)
+        self.assertEqual(len(traced), 0)
+
+    def test_the_border_is_the_meshs_border(self):
+        # the same vertices get_border_vertices() gives, holes, several
+        # shells and closed meshes included
+        grid  = _make_grid_mesh(n=6)
+        quads = grid.indices.reshape(-1, 4)
+        holed = np.delete(quads, [6, 18], axis=0)
+        cube  = [0, 2, 3, 1, 4, 5, 7, 6, 0, 1, 5, 4, 2, 6, 7, 3, 0, 4, 6, 2, 1, 3, 7, 5]
+        meshes = {
+            "grid": grid,
+            "holes": MeshData(
+                points  = grid.points,
+                indices = holed.ravel(),
+                counts  = np.full(len(holed), 4, dtype=np.int32),
+            ),
+            "shells": MeshData(
+                points  = np.vstack([grid.points, grid.points + 3.0]),
+                indices = np.concatenate([grid.indices, grid.indices + grid.point_count]),
+                counts  = np.concatenate([grid.counts, grid.counts]),
+            ),
+            "closed": MeshData(
+                points  = np.array([[x, y, z] for z in (0, 1) for y in (0, 1) for x in (0, 1)], float),
+                indices = np.asarray(cube, dtype=np.int32),
+                counts  = np.full(6, 4, dtype=np.int32),
+            ),
+        }
+        for name, mesh in meshes.items():
+            border = np.sort(mesh.get_border_vertices(flatten=True))
+            for pin in (False, True):
+                with self.subTest(mesh=name, pin_borders=pin):
+                    mush = DeltaMushData(mesh, pin_borders=pin)
+                    self.assertEqual(mush.border_vertices.dtype, np.int32)
+                    np.testing.assert_array_equal(mush.border_vertices, border)
+        self.assertEqual(DeltaMushData(meshes["closed"]).border_vertices.size, 0)
 
 
 class TestDeltaMushNumpyFallback(unittest.TestCase):
