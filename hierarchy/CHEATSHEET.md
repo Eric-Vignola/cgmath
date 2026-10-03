@@ -113,7 +113,7 @@ str(node)           # 'hero'
 | `segment_scale_compensate` | `False` | divide out the parent's scale |
 | `radius` | `1.0` | joint display radius |
 | `draw_style` | `0` | Maya `drawStyle` |
-| `user_defined_attributes` | `{}` | extra attributes carried through `save_fbx`; each node gets its own dict |
+| `user_defined_attributes` | `{}` | extra attributes carried through `save_fbx` and back by `load_fbx`, but for arrays, matrices, multis and other compounds; each node gets its own dict |
 
 ---
 
@@ -1163,6 +1163,37 @@ assert np.allclose(back.world_matrix[:, 3, :3], rig.world_matrix[:, 3, :3])
 
 auto = HierarchyData.load(path)                 # header sniffing: fbx / glb / else
 assert auto.name == back.name
+```
+
+User attributes make the trip too: numbers, bools, enums, strings,
+stringArrays and `double3` or `float3` vectors come back as the specs they
+were, binary or `as_ascii=True`. Arrays such as `doubleArray`, matrices,
+multis and other compounds are skipped with a logged warning. Only a
+string's value must be plain ASCII, the only text the fbx sdk takes: one
+that is not raises `ValueError` before anything is written.
+
+```python
+rig["hip"].add_user_attribute("twist", 0.5, attribute_type="float")
+rig["hip"].add_user_attribute("tags", ["deform", "L"])
+rig["hip"].add_user_attribute("side", "gauche")
+rig.save_fbx(path)
+
+hip = HierarchyData.load_fbx(path)["hip"]
+assert (hip.twist, hip.tags, hip.side) == (0.5, ["deform", "L"], "gauche")
+assert hip.user_defined_attributes == rig["hip"].user_defined_attributes
+
+rig["hip"].side = "gauche \u00e9"
+try:
+    rig.save_fbx(path)                          # path keeps the file it had
+except ValueError as error:
+    print(str(error)[:43])                      # user defined attr hip.side can't be written
+rig["hip"].side = "gauche"
+
+arrays = make_chain()
+arrays["hip"].add_user_attribute("weights", [0.5, 0.25])   # a doubleArray
+arrays.save_fbx(os.path.join(WORKDIR, "arrays.fbx"))       # logs: skipped ... 1 doubleArray
+back = HierarchyData.load_fbx(os.path.join(WORKDIR, "arrays.fbx"))
+assert "weights" not in back["hip"].user_defined_attributes
 ```
 
 Reading the same file as an animation gives a clip.

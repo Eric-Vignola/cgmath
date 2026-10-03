@@ -1,9 +1,13 @@
 import atexit
 import filecmp
+import json
 import logging
+import math
 import os
 import pathlib
+import re
 import shutil
+import urllib.parse
 import warnings
 
 import numpy as np
@@ -848,6 +852,10 @@ class LayerData(BaseData):
         # Get current name to avoid false positive when checking uniqueness
         current_name = self.name
 
+        # layers are told apart by unique id: == holds for any two layers in
+        # this binding, so every layer passed for this one
+        own_id = self._data.GetUniqueID()
+
         # Find the parent animation stack (take) that contains this layer
         parent_stack = None
         stack_count = self._scene.GetSrcObjectCount(
@@ -868,7 +876,7 @@ class LayerData(BaseData):
                 layer = anim_stack.GetSrcObject(
                     fbx.FbxCriteria.ObjectType(fbx.FbxAnimLayer.ClassId), j
                 )
-                if layer == self._data:  # Found our layer
+                if layer.GetUniqueID() == own_id:  # Found our layer
                     parent_stack = anim_stack
                     break
 
@@ -889,7 +897,7 @@ class LayerData(BaseData):
                 fbx.FbxCriteria.ObjectType(fbx.FbxAnimLayer.ClassId), i
             )
             layer_name = layer.GetName()
-            if layer != self._data:  # Exclude current layer
+            if layer.GetUniqueID() != own_id:  # Exclude current layer
                 existing_names.append(layer_name)
 
         if new_name in existing_names:
@@ -2529,6 +2537,142 @@ class SceneData(BaseData):
         return False
 
 
+def _ascii_json(value) -> str:
+    """
+    ``value`` as json any .fbx keeps as it is, however long: every character
+    escaped to ASCII, then all but _PLAIN_TEXT %-escaped. It is read back by
+    unquoting it, then json.
+    """
+    text = json.dumps(value, ensure_ascii=True, separators=(",", ":"), default=_json_plain)
+    return urllib.parse.quote(text, safe=_PLAIN_TEXT)
+
+
+def _json_plain(value):
+    """a numpy number or array in a spec, as the python value json writes"""
+    if isinstance(value, (np.generic, np.ndarray)):
+        return value.tolist()
+    raise TypeError(f"a {type(value).__name__} does not go to json")
+
+
+# what a long string keeps as it is in any .fbx, the rest is %-escaped:
+# printable ASCII but the spaces, quote, semicolon and braces the FBX SDK's
+# ASCII reader can break (see _ASCII_TEXT_LIMIT), the & it unescapes, the
+# backslash Maya's FBX importer drops, and the %
+_PLAIN_TEXT = "".join(chr(x) for x in range(33, 127) if chr(x) not in '"\\&%{};')
+
+
+def _string_array_text(items) -> str:
+    """a stringArray as the string FbxExporter writes: the mark, then the list
+    as _ascii_json"""
+    return FbxExporter._STRING_ARRAY_MARK + _ascii_json([str(x) for x in items])
+
+
+# an ASCII .fbx writes a quote and the line breaks as these, and its reader
+# turns them back, typed ones too: a typed &quot; comes back as a quote
+_ASCII_ESCAPES = {"quot": '"', "lf": "\n", "cr": "\r"}
+
+# the longest string, in bytes as an ASCII .fbx writes it, its reader gives
+# back as it is whatever it holds. past about 6,100 it reads a string in
+# pieces, and a quote, line break, tab, semicolon or &-entity where two meet
+# comes back changed, as does a run of spaces across it; a brace there loses
+# the whole scene
+_ASCII_TEXT_LIMIT = 4096
+
+
+def _ascii_text(text: str) -> str:
+    """
+    ``text`` as FbxExporter writes it to an ASCII .fbx: as it is, but for a
+    string over _ASCII_TEXT_LIMIT bytes holding a character the reader can
+    break, whose every character but _PLAIN_TEXT is then %-escaped. What it
+    can't break: _PLAIN_TEXT, the % and backslash, and single spaces.
+    """
+    # a quote is written as &quot;, a line break as &lf; or &cr;
+    size = len(text.encode("utf-8")) + 5 * text.count('"')
+    size += 3 * (text.count("\n") + text.count("\r"))
+    if size <= _ASCII_TEXT_LIMIT:
+        return text
+    if "  " not in text and set(text) <= set(_PLAIN_TEXT + "%\\ "):
+        return text
+    return urllib.parse.quote(text, safe=_PLAIN_TEXT)
+
+
+def _set_enum_fields(prop, fields) -> None:
+    """an enum property's field list replaced by ``fields``, every field
+    removed then added again: the SDK's SetEnumValue leaves a field as it was
+    when its new text is in the list already, and AddEnumValue skips a field
+    listed already, which Maya allows"""
+    for i in reversed(range(prop.GetEnumCount())):
+        prop.RemoveEnumValue(i)
+    for field in fields:
+        prop.AddEnumValue(field)
+
+
+def _ascii_read_back(value, kind: str):
+    """
+    ``value`` as an ASCII .fbx gives it back, written by FbxExporter to a
+    ``kind`` user defined property: a string as _ascii_text writes it, with a
+    typed &quot;, &lf; or &cr; read as the quote or line break; a double to 15
+    significant digits; the smallest short or long as the largest. A binary
+    .fbx gives back every value as it is, but for -inf and a double under
+    1e-307, which it reads as 0 too.
+    """
+    # imported here, cgmath.hierarchy imports this module
+    from cgmath.hierarchy.hierarchy import _FLOAT_TYPES
+
+    if isinstance(value, str):
+        text = _ascii_text(value)
+        return re.sub("&(quot|lf|cr);", lambda found: _ASCII_ESCAPES[found[1]], text)
+
+    if kind in _FLOAT_TYPES and isinstance(value, (int, float, np.number)):
+        text = f"{float(value):.15g}"
+        back = float(text)
+
+        # the SDK reads -inf, what the digits overflow below it and a power of
+        # ten under -307 as 0
+        if back == -math.inf or int(text.partition("e")[2] or 0) < -307:
+            return 0.0
+        return back
+
+    # and the smallest short or long as the largest
+    if kind == "short" and value == -(2**15):
+        return 2**15 - 1
+    if kind in ("long", "int", "enum") and value == -(2**31):
+        return 2**31 - 1
+    return value
+
+
+def _user_property_value(spec: dict, value):
+    """
+    what FbxExporter writes to the property of the user defined attr ``spec``
+    for ``value``: an empty string for a string with none, as Maya leaves one
+    it has not set; a stringArray as _string_array_text; an enum value as its
+    position in the field list, Maya's indices can be explicit ("a=1:b=5:c");
+    the rest as it is.
+    """
+    # imported here, cgmath.hierarchy imports this module
+    from cgmath.hierarchy.hierarchy import _enum_fields, _user_attr_type
+
+    kind = _user_attr_type(spec)
+    if value is None:
+        return ""
+    if kind == "stringArray":
+        return _string_array_text(value)
+    if kind == "enum":
+        enum_name = spec.get("enumName", "")
+        fields    = _enum_fields(enum_name if isinstance(enum_name, str) else "")
+        return {index: i for i, (_, index) in enumerate(fields)}.get(value, value)
+    return value
+
+
+def _kept_spec(spec: dict, keep: bool) -> dict:
+    """``spec`` as _USER_ATTR_SPECS keeps it: its value None, left to the
+    property, or as ``[value]`` when ``keep``"""
+    return {
+        key: ([entry] if keep else None) if key == "value" else entry
+        for key, entry in spec.items()
+    }
+
+
 class FbxExporter:
     """
     Export fbx files from pipeline components
@@ -2549,6 +2693,7 @@ class FbxExporter:
 
     _USER_ATTR_TYPE_MAP = {
         "string":       fbx.FbxStringDT,
+        "stringArray":  fbx.FbxStringDT,
         "bool":         fbx.FbxBoolDT,
         "short":        fbx.FbxShortDT,
         "int":          fbx.FbxIntDT,
@@ -2560,10 +2705,28 @@ class FbxExporter:
         "double":       fbx.FbxDoubleDT,
         "doubleAngle":  fbx.FbxDoubleDT,
         "doubleLinear": fbx.FbxDoubleDT,
+        "double3":      fbx.FbxDouble3DT,
+        "float3":       fbx.FbxDouble3DT,
     }
     """dict: mapping Maya user defined attr types to fbx data types, the same types
-    Maya's own FBX plugin writes. Types it does not write (stringArray, doubleArray,
-    time, etc.) are left out on purpose, those attrs are skipped on export."""
+    Maya's own FBX plugin writes: a double3 or float3 is one vector holding its three
+    children. A stringArray, which that plugin skips, is a string holding
+    _STRING_ARRAY_MARK and the list as json, %-escaped to plain ASCII. A string with
+    no value, as Maya leaves one it has not set, is written empty. Types it does not
+    write (doubleArray, time, other compounds, etc.) are left out on purpose, those
+    attrs are skipped on export."""
+
+    _STRING_ARRAY_MARK = "cgmath:stringArray:"
+    """str: what a stringArray's string starts with, ahead of the list as json"""
+
+    _USER_ATTR_SPECS = "cgmath:userAttributes"
+    """str: the hidden property on each node keeping its user defined attr specs,
+    less the values the properties hold: fbx types alone can't tell a float from a
+    double, nor keep an enum's own indices, a double3's children or the channel box
+    state. A value its property can't give back is kept there as ``[value]``: a
+    string with none, an enum value that is no field's index, what an ASCII .fbx
+    changes (see _ascii_read_back). It is not flagged user defined, so Maya's FBX
+    importer leaves it alone."""
 
     def __init__(self):
         self._skeleton  = None
@@ -2573,6 +2736,11 @@ class FbxExporter:
         self._manager   = None
         self._scene     = None
         self._closed    = False
+
+        # (property, text) of the long strings an ASCII export %-escapes, and
+        # (property, fields) of the long enum field lists
+        self._long_texts = []
+        self._long_enums = []
 
     def _check_open(self):
         if self._closed:
@@ -2618,17 +2786,16 @@ class FbxExporter:
     def add_skeleton(self, skeleton_component) -> None:
         """Add a skeleton component to the scene.
 
+        Raises ValueError, before anything is added, when a user defined string
+        attr is not plain ASCII, the only text the FBX SDK takes, or a node's user
+        defined attr specs do not go to json.
+
         Notes:
             Only a single skeleton is supported.
         """
         self._check_open()
         if self._skeleton is not None:
             raise ValueError(f"Skeleton already set: {self._skeleton}!")
-        self._skeleton = skeleton_component
-
-        # the fbx node of every item, keyed by item identity.
-        # parents can't be found by name, names may be duplicated across branches.
-        fbx_nodes = self._fbx_nodes = {}
 
         # user defined attrs with no fbx data type, skipped and reported once
         skipped = {}
@@ -2638,18 +2805,28 @@ class FbxExporter:
         # never writes them as scene nodes. parents come first.
         # imported here, cgmath.hierarchy imports this module.
         from cgmath.hierarchy import SUPPORTED_NODE_TYPES
-        from cgmath.hierarchy.hierarchy import _enum_fields
 
         skipped_nodes = {}
         dropped       = set()
 
-        for item in self._skeleton:
+        # every node's user defined attrs are worked out first, so one that
+        # can't be written raises before anything is added
+        kept = []
+        for item in skeleton_component:
             supported = item.node_type in SUPPORTED_NODE_TYPES
             if not supported or id(item.get_parent()) in dropped:
                 dropped.add(id(item))
                 skipped_nodes[item.node_type] = skipped_nodes.get(item.node_type, 0) + 1
                 continue
+            kept.append((item, self._user_properties(item, skipped)))
 
+        self._skeleton = skeleton_component
+
+        # the fbx node of every item, keyed by item identity.
+        # parents can't be found by name, names may be duplicated across branches.
+        fbx_nodes = self._fbx_nodes = {}
+
+        for item, (props, specs) in kept:
             node = fbx.FbxNode.Create(self.manager, item.name)
 
             fbx_nodes[id(item)] = node
@@ -2710,42 +2887,27 @@ class FbxExporter:
                 node_attr.Look.Set(fbx.FbxNull.ELook.eCross.value)
 
             # set user defined attrs
-            ud_attrs = item.user_defined_attributes
-            if ud_attrs:
-                for name, deets in ud_attrs.items():
-                    if "attributeType" in deets:
-                        attr_type = deets["attributeType"]
-                    else:
-                        attr_type = deets["dataType"]
+            for name, fbx_att, value, fields, keyable in props:
+                prop = fbx.FbxProperty.Create(node, fbx_att, name, name)
+                for field in fields:
+                    prop.AddEnumValue(field)
+                if isinstance(value, str) and _ascii_text(value) != value:
+                    self._long_texts.append((prop, value))
 
-                    # skip what Maya's own FBX plugin does not write either:
-                    # unmapped types, multi attrs and compound parents (no value)
-                    fbx_att = self._USER_ATTR_TYPE_MAP.get(attr_type)
-                    value   = deets.get("value")
-                    if deets.get("multi"):
-                        attr_type = f"{attr_type}[]"
-                    if fbx_att is None or value is None or deets.get("multi"):
-                        skipped[attr_type] = skipped.get(attr_type, 0) + 1
-                        continue
+                # an ASCII .fbx writes the field list as one string, "~" between
+                listed = "~".join(fields)
+                if _ascii_text(listed) != listed:
+                    self._long_enums.append((prop, fields))
+                prop.Set(value)
 
-                    prop = fbx.FbxProperty.Create(node, fbx_att, name, name)
+                # flagged the way Maya's importer expects a custom attr
+                prop.ModifyFlag(fbx.FbxPropertyFlags.EFlags.eUserDefined, True)
+                prop.ModifyFlag(fbx.FbxPropertyFlags.EFlags.eAnimatable, keyable)
 
-                    # fbx enum values are positions in the field list,
-                    # Maya's can be explicit ("a=1:b=5:c")
-                    if attr_type == "enum":
-                        fields = _enum_fields(deets.get("enumName", ""))
-                        for field, _ in fields:
-                            prop.AddEnumValue(field)
-                        positions = {index: i for i, (_, index) in enumerate(fields)}
-                        value     = positions.get(value, value)
-
-                    prop.Set(value)
-
-                    # flagged the way Maya's importer expects a custom attr
-                    prop.ModifyFlag(fbx.FbxPropertyFlags.EFlags.eUserDefined, True)
-                    prop.ModifyFlag(
-                        fbx.FbxPropertyFlags.EFlags.eAnimatable, bool(deets.get("keyable"))
-                    )
+            # not flagged user defined: Maya's importer makes no attr of it
+            if specs is not None:
+                prop = fbx.FbxProperty.Create(node, fbx.FbxStringDT, self._USER_ATTR_SPECS, "")
+                prop.Set(specs)
 
             node.SetNodeAttribute(node_attr)
 
@@ -2758,8 +2920,120 @@ class FbxExporter:
             LOGGER.warning(f"skipped user defined attrs with no fbx type: {counts}")
         LOGGER.info(f"added skeleton: {skeleton_component}")
 
+    @classmethod
+    def _user_properties(cls, item, skipped) -> tuple:
+        """A node's user defined attrs as fbx properties, nothing written yet.
+
+        Returns ``([(name, fbx type, value, enum fields, keyable), ...], specs)``,
+        ``specs`` the json of the attrs' specs for _USER_ATTR_SPECS, or None.
+        What has no fbx type is counted in ``skipped``.
+
+        Raises ValueError when a string is not plain ASCII, or a spec does not
+        go to json.
+        """
+        # imported here, cgmath.hierarchy imports this module
+        from cgmath.hierarchy.hierarchy import _FLOAT_TYPES, _compound_children, _enum_fields
+
+        attrs = item.user_defined_attributes or {}
+
+        # a double3 or float3 is one vector of its three children, as Maya's own
+        # FBX plugin writes it; any other compound's children go on their own
+        vectors = {}
+        for name, spec in attrs.items():
+            if spec.get("attributeType") not in ("double3", "float3") or spec.get("multi"):
+                continue
+            children = _compound_children(attrs, name)
+            if len(children) == 3 and all(
+                attrs[child].get("attributeType") in _FLOAT_TYPES
+                and attrs[child].get("value") is not None
+                and not attrs[child].get("multi")
+                for child in children
+            ):
+                vectors[name] = children
+        held  = {child for children in vectors.values() for child in children}
+
+        props = []
+        specs = {}
+        for name, spec in attrs.items():
+            if name in held:
+                continue
+
+            if "attributeType" in spec:
+                attr_type = spec["attributeType"]
+            else:
+                attr_type = spec["dataType"]
+
+            fbx_att = cls._USER_ATTR_TYPE_MAP.get(attr_type)
+            value   = spec.get("value")
+            if attr_type in ("double3", "float3") and name not in vectors:
+                fbx_att = None
+
+            # skip what Maya's own FBX plugin does not write either: unmapped
+            # types, multi attrs and compound parents (no value). a string
+            # with no value, as Maya leaves one it has not set, is written empty
+            if spec.get("multi"):
+                attr_type = f"{attr_type}[]"
+            unset = value is None and name not in vectors
+            if (
+                fbx_att is None
+                or spec.get("multi")
+                or (unset and attr_type not in ("string", "stringArray"))
+            ):
+                skipped[attr_type] = skipped.get(attr_type, 0) + 1
+                continue
+            if isinstance(value, str) and not value.isascii():
+                # the first character that is not, the string can be long
+                at = re.search(r"[^\x00-\x7f]", value).start()
+                raise ValueError(
+                    f"user defined attr {item.name}.{name} can't be written to fbx: "
+                    f"its character {value[at]!r} (U+{ord(value[at]):04X}) at index "
+                    f"{at} is not plain ASCII, the only text the FBX SDK takes"
+                )
+
+            # the spec comes back as it is, its value from the property, but
+            # for one the property can't give back: no value, an enum value that
+            # is no field's index, what an ASCII .fbx changes
+            fields = []
+            keep   = unset
+            if name in vectors:
+                written = fbx.FbxDouble3(*[attrs[child]["value"] for child in vectors[name]])
+            else:
+                written = _user_property_value(spec, value)
+                keep    = keep or _ascii_read_back(written, attr_type) != written
+            if attr_type == "enum":
+                pairs  = _enum_fields(spec.get("enumName", ""))
+                fields = [field for field, _ in pairs]
+                keep   = keep or value not in [index for _, index in pairs]
+
+            props.append((name, fbx_att, written, fields, bool(spec.get("keyable"))))
+
+            # a child of a compound left out comes back on its own
+            specs[name] = _kept_spec(spec, keep)
+            specs[name].pop("parent", None)
+            for child in vectors.get(name, ()):
+                number       = attrs[child]["value"]
+                kind         = attrs[child]["attributeType"]
+                specs[child] = _kept_spec(attrs[child], _ascii_read_back(number, kind) != number)
+
+        if not specs:
+            return props, None
+        try:
+            return props, _ascii_json(specs)
+        except TypeError as error:
+            raise ValueError(
+                f"the user defined attrs of {item.name} can't be written to fbx: {error}"
+            ) from None
+
     def export(self, path: pathlib.Path, as_ascii=False, zero_root=False) -> None:
-        """Export the scene to the given path"""
+        """Export the scene to the given path, binary unless as_ascii is set.
+
+        The FBX SDK's ASCII reader changes a long string holding a quote, line
+        break, tab, semicolon, &-entity or run of spaces, and loses the whole
+        scene for a brace, so in an ASCII file a user defined string, or an
+        enum's field list, over _ASCII_TEXT_LIMIT bytes holding one is
+        %-escaped, with a warning. load_fbx reads it back as it was; Maya reads
+        the escaped text.
+        """
         file_format = self.manager.GetIOPluginRegistry().GetNativeWriterFormat()
         if as_ascii:
             file_format = self._get_acsii_type()
@@ -2767,11 +3041,31 @@ class FbxExporter:
         if not isinstance(path, pathlib.Path):
             path = pathlib.Path(path)
 
+        # escaped while this file is written only, a binary one keeps them as they are
+        escaped = self._long_texts if as_ascii else []
+        enums   = self._long_enums if as_ascii else []
+        for prop, text in escaped:
+            prop.Set(_ascii_text(text))
+        for prop, fields in enums:
+            _set_enum_fields(prop, [urllib.parse.quote(x, safe=_PLAIN_TEXT) for x in fields])
+
         exporter = fbx.FbxExporter.Create(self.manager, "")
         try:
             self._export(exporter, path, file_format, zero_root)
         finally:
             exporter.Destroy()
+            for prop, text in escaped:
+                prop.Set(text)
+            for prop, fields in enums:
+                _set_enum_fields(prop, fields)
+
+        if escaped or enums:
+            LOGGER.warning(
+                "%-escaped user defined strings and enum field lists over "
+                f"{_ASCII_TEXT_LIMIT} bytes, which an ASCII file can't keep as they are "
+                "(load_fbx reads them back as they were, a binary file keeps them as "
+                f"they are): {len(escaped) + len(enums)}"
+            )
         LOGGER.info(f"exported to: {path}")
 
     def _export(self, exporter, path, file_format, zero_root) -> None:

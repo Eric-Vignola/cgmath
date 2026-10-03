@@ -397,7 +397,14 @@ class TestEmbeddedMedia(FbxFixtures):
         def unicode_temp(prefix="", **kwargs):
             return mkdtemp(prefix=prefix + "\u00e9_", **kwargs)
 
-        with patch.object(_fbx_io.tempfile, "mkdtemp", unicode_temp):
+        # on a volume keeping no short (8.3) names, which new folders here
+        # may well have anyway
+        def no_short_name(path):
+            return path
+
+        with patch.object(_fbx_io.tempfile, "mkdtemp", unicode_temp), patch.object(
+            _fbx_io, "short_path", no_short_name, create=True
+        ):
             with self.assertWarnsRegex(RuntimeWarning, "ASCII"):
                 textures = scene_mod._extract_fbx_textures(source)
             with self.assertWarnsRegex(RuntimeWarning, "ASCII"), SceneData(source) as data:
@@ -405,6 +412,52 @@ class TestEmbeddedMedia(FbxFixtures):
 
         np.testing.assert_array_equal(textures["base_color"][0, 0, :3], [0, 255, 0])
         self.assertEqual(sorted(os.listdir(folder)), ["quad.fbm", "quad.fbx"])
+
+    @unittest.skipUnless(os.name == "nt", "short (8.3) names and junctions are Windows'")
+    def test_a_non_ascii_temp_folder_is_reached_by_its_short_name(self):
+        import _winapi
+        import warnings
+
+        from cgmath.formats.fbx import SceneData
+        from cgmath.render import scene as scene_mod
+
+        # a temp folder by a non-ASCII path, and an ASCII path to the same
+        # folder standing in for its short name: giving it a real one takes
+        # an administrator
+        folder = self.file("short_name")
+        temp   = os.path.join(folder, "temp \u00e9")
+        alias  = os.path.join(folder, "TEMP~1")
+        os.makedirs(temp)
+        _winapi.CreateJunction(temp, alias)
+        self.addCleanup(os.rmdir, alias)  # the junction, not what it points at
+
+        source = os.path.join(folder, "quad.fbx")
+        with open(self.quad, "rb") as f, open(source, "wb") as g:
+            g.write(f.read())
+
+        mkdtemp = tempfile.mkdtemp
+
+        def in_temp(prefix="", **kwargs):
+            return mkdtemp(prefix=prefix, dir=temp)
+
+        def short_name(path):
+            return path.replace(temp, alias)
+
+        with patch.object(_fbx_io.tempfile, "mkdtemp", in_temp), patch.object(
+            _fbx_io, "short_path", short_name, create=True
+        ), warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            textures = scene_mod._extract_fbx_textures(source)
+            with SceneData(source) as data:
+                self.assertEqual(os.path.dirname(data._media), alias)
+                self.assertTrue(os.path.isdir(data._media))
+
+        self.assertEqual([str(x.message) for x in caught if "ASCII" in str(x.message)], [])
+        np.testing.assert_array_equal(textures["base_color"][0, 0, :3], [0, 255, 0])
+
+        # nothing beside the file, and the media folders are gone
+        self.assertEqual(sorted(os.listdir(folder)), ["TEMP~1", "quad.fbx", "temp \u00e9"])
+        self.assertEqual(os.listdir(temp), [])
 
     def test_an_identical_read_only_texture_is_left_alone(self):
         import stat
@@ -593,6 +646,27 @@ class TestSceneData(FbxFixtures):
                 data.load(self.bad)
             self.assertEqual(take.name, "take")
             self.assertEqual(data.name, "rig")
+
+    def test_a_layer_can_not_take_a_sibling_layer_name(self):
+        from cgmath.formats.fbx import SceneData
+
+        with SceneData(self.rig) as data:
+            take   = data.takes[0]
+            second = take.create_layer("second")
+            other  = data.create_take("other")  # comes with a BaseLayer
+
+            # == holds for any two layers in this binding, so every layer
+            # passed for the one renamed and any name was free
+            with self.assertRaisesRegex(ValueError, "already exists in take 'take'"):
+                second.rename("base")
+            self.assertEqual([x.name for x in take.layers], ["base", "second"])
+
+            # its own name, and a name only another take's layer has
+            second.rename("second")
+            second.rename("BaseLayer")
+            other.layers[0].rename("base")
+            self.assertEqual([x.name for x in take.layers], ["base", "BaseLayer"])
+            self.assertEqual([x.name for x in other.layers], ["base"])
 
 
 class TestDelete(FbxFixtures):
@@ -839,6 +913,19 @@ class TestOpenFbx(unittest.TestCase):
                     pass
         self.assertEqual(len(made), 1)
         self.assertFalse(os.path.exists(made[0]))
+
+    def test_short_path(self):
+        # a folder comes back by its short (8.3) name when it has one, else
+        # as given, as a path that does not exist does
+        here = os.path.dirname(os.path.abspath(__file__))
+        for path in (here, os.environ.get("ProgramFiles", here)):
+            with self.subTest(path=path):
+                short = _fbx_io.short_path(path)
+                self.assertTrue(os.path.samefile(short, path))
+                self.assertTrue(short == path or "~" in short, short)
+
+        missing = os.path.join(here, "no such folder \u00e9")
+        self.assertEqual(_fbx_io.short_path(missing), missing)
 
 
 class TestOneManagerSite(unittest.TestCase):

@@ -2555,6 +2555,60 @@ class TestUserAttributes(unittest.TestCase):
         self.assertFalse(attrs["uuids"]["keyable"])
         self.assertFalse(attrs["size"]["keyable"])
 
+    def test_an_enum_name_reads_as_maya_reads_it(self):
+        # the fields Maya 2025's addAttr makes: a "=" gives an index only when
+        # it splits the field into a name and a whole number, spaces or tabs
+        # around it, and a run of "=", or one at either end, splits nothing;
+        # any other field keeps its "=" in its name. a field holding one, as
+        # another tool's fbx can, raised a bare int() ValueError on any read
+        # or write of the attr, and "k==2" was one field, Maya's field k at 2
+        from cgmath.hierarchy.hierarchy import _enum_fields
+
+        for enum_name, fields in (
+            ("a=1:b=5:c", [("a", 1), ("b", 5), ("c", 6)]),
+            ("size=small:size=large", [("size=small", 0), ("size=large", 1)]),
+            ("a= 1 :b", [("a", 1), ("b", 2)]),
+            ("a=-1:b", [("a", -1), ("b", 0)]),
+            ("a=1=2:b", [("a=1=2", 0), ("b", 1)]),
+            ("a=1_0:b", [("a=1_0", 0), ("b", 1)]),
+            ("a=1.0:b", [("a=1.0", 0), ("b", 1)]),
+            ("a=:b", [("a=", 0), ("b", 1)]),
+            ("=3:b", [("=3", 0), ("b", 1)]),
+            ("a b=2:c", [("a b", 2), ("c", 3)]),
+            ("k==2:b", [("k", 2), ("b", 3)]),
+            ("k=2=:b", [("k", 2), ("b", 3)]),
+            ("=k=2:b", [("k", 2), ("b", 3)]),
+            ("k===2:b", [("k", 2), ("b", 3)]),
+            ("k=2==:b", [("k", 2), ("b", 3)]),
+            ("=a==1==:c", [("a", 1), ("c", 2)]),
+            ("a=1:b==5:c", [("a", 1), ("b", 5), ("c", 6)]),
+            ("==2:b", [("==2", 0), ("b", 1)]),
+            ("a==:b", [("a==", 0), ("b", 1)]),
+            ("a==b:c", [("a==b", 0), ("c", 1)]),
+            ("k= =2:b", [("k= =2", 0), ("b", 1)]),
+            ("= =1:b", [(" ", 1), ("b", 2)]),
+            ("a=\t1\t:b", [("a", 1), ("b", 2)]),
+            ("a=\n1:b", [("a=\n1", 0), ("b", 1)]),
+            ("a=\x1c1:b", [("a=\x1c1", 0), ("b", 1)]),
+        ):
+            with self.subTest(enum_name=enum_name):
+                self.assertEqual(_enum_fields(enum_name), fields)
+
+        node = TransformData(name="root")
+        node.add_user_attribute(
+            "mode", "size=large", attribute_type="enum", enum_names="size=small:size=large"
+        )
+        self.assertEqual(node.mode, 1)
+        node.mode = 0
+        self.assertEqual(node.mode, 0)
+        with self.assertRaisesRegex(ValueError, "root.mode has no field 'size'"):
+            node.mode = "size"
+
+        node.add_user_attribute("runs", "b", attribute_type="enum", enum_names="k==2:b")
+        self.assertEqual(node.runs, 3)
+        node.runs = "k"
+        self.assertEqual(node.runs, 2)
+
     def test_add_user_attribute_refuses(self):
         node = TransformData(name="root")
         node.add_user_attribute("heroHeight", 1.8)

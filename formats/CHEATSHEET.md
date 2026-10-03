@@ -1095,9 +1095,63 @@ Each `TransformData` maps onto FBX like this:
 | `"locator"` | `FbxMarker` | — |
 | anything else | — | `RuntimeError` |
 
-`user_defined_attributes` become real FBX properties, typed by their
-`attributeType` (or `dataType`) key: `string`, `double`, `int`, `bool`,
-`short`.
+`user_defined_attributes` become real FBX properties, typed the way Maya's
+own FBX plug-in types them, and `load_fbx` reads them back as the same
+specs, binary or ASCII. A number, `bool`, `enum` or `string` is one
+property, and a string Maya has not set (its value `None`) an empty one; a
+`double3` or `float3` is one vector holding its three children; a
+`stringArray`, which Maya's plug-in skips, is a string holding the list.
+What the FBX types can't say (a `float` from a `double`, an enum's own
+indices, `channel_box`), and a value the file can't give back (an enum
+value that is no field's index, what an ASCII file changes), rides along
+in a hidden property Maya's importer leaves alone. Arrays, matrices,
+multis and other compounds are skipped with one warning, and the children
+of a skipped compound come back on their own.
+
+```python
+tagged = HierarchyData([TransformData("root", node_type="joint")])
+tagged[0].add_user_attribute("heroHeight", 1.8)
+tagged[0].add_user_attribute("tags", ["deform", "twist"])
+tagged[0].add_user_attribute(
+    "space", 5, attribute_type="enum", enum_names="local=1:world=5"
+)
+tagged.save_fbx(os.path.join(WORK, "tagged.fbx"))
+
+back = HierarchyData.load_fbx(os.path.join(WORK, "tagged.fbx"))
+print(back[0].heroHeight, back[0].tags, back[0].space)   # 1.8 ['deform', 'twist'] 5
+assert back[0].user_defined_attributes == tagged[0].user_defined_attributes
+```
+
+An ASCII file (`as_ascii=True`) changes some values, and `load_fbx` still
+gives them back as they went in: it keeps 15 significant digits of a
+double, and reads the smallest `short` or `long` back as the largest and a
+typed `&quot;` as a quote. Past about 6,100 bytes its reader changes a
+string holding a quote, line break, tab, semicolon, `&` or run of spaces,
+and loses the whole scene for a brace, so a string, or an enum's field
+list, over 4,096 bytes holding one is %-escaped there, with a warning. Maya
+reads those as the file holds them.
+
+```python
+tagged[0].add_user_attribute("note", "a typed &quot; stays")
+tagged[0].add_user_attribute("third", 1 / 3)
+tagged[0].add_user_attribute("blob", '{"say": "hi"}\n' * 1000)
+tagged.save_fbx(os.path.join(WORK, "label.fbx"), as_ascii=True)
+
+back = HierarchyData.load_fbx(os.path.join(WORK, "label.fbx"))
+print(back[0].note, back[0].third)       # a typed &quot; stays 0.3333333333333333
+assert back[0].user_defined_attributes == tagged[0].user_defined_attributes
+```
+
+The FBX SDK takes plain ASCII text only: a string that is not raises
+`ValueError`, naming the node and attribute, before anything is written.
+
+```python
+tagged[0].add_user_attribute("label", "hanche gauche \u00e9")
+try:
+    tagged.save_fbx(os.path.join(WORK, "label.fbx"))
+except ValueError as error:
+    print(str(error)[:45])               # user defined attr root.label can't be written
+```
 
 `zero_root=True` resets the root joint's translate, rotate and scale before
 writing, so the file carries the skeleton at the origin:

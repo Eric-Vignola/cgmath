@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
+import re
+import urllib.parse
 import uuid
+import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Union
@@ -35,10 +39,12 @@ except ImportError:
 
 try:
     import fbx as FBX
-    from cgmath.formats.fbx import FbxExporter
+    from cgmath.formats.fbx import FbxExporter, _ascii_read_back, _user_property_value
 except ImportError:
-    FBX         = None
-    FbxExporter = None
+    FBX                  = None
+    FbxExporter          = None
+    _ascii_read_back     = None
+    _user_property_value = None
 
 
 __all__ = [
@@ -386,13 +392,21 @@ def _enum_fields(enum_name: str) -> list:
     """Splits a Maya enumName ("a=1:b=5:c") into (field, index) pairs.
 
     A field without an explicit index follows the previous one, the way
-    Maya numbers them.
+    Maya numbers them. As in Maya 2025's addAttr, a token is a field and
+    its index only when its "=" splits it into a name and a whole number,
+    spaces or tabs around it; a run of "=", or one at either end, splits
+    nothing, so "k==2" and "=k=2" are field k at index 2. Any other token
+    is the field's whole name: "size=small", "a=1=2", "=3".
     """
     fields = []
     index  = -1
     for token in enum_name.split(":"):
-        name, _, given = token.partition("=")
-        index = int(given) if given else index + 1
+        # Maya splits at "=" the way C's strtok does, skipping empty pieces
+        pieces = [piece for piece in token.split("=") if piece]
+        if len(pieces) == 2 and re.fullmatch(r"[ \t]*[+-]?[0-9]+[ \t]*", pieces[1]):
+            name, index = pieces[0], int(pieces[1])
+        else:
+            name, index = token, index + 1
         fields.append((name, index))
     return fields
 
@@ -1617,8 +1631,12 @@ class TransformData(Data):
         doubleLinear, long, short, byte, char, bool, enum, string, stringArray,
         doubleArray, floatArray, Int32Array, vectorArray or pointArray. Without
         one it comes from ``value``: bool, long, double, string, stringArray or
-        doubleArray. An enum needs ``enum_names``, e.g. ``"a=1:b=5:c"``. String
-        and array attributes are never keyable, as in Maya.
+        doubleArray. An enum needs ``enum_names``, e.g. ``"a=1:b=5:c"``, read
+        as Maya reads it: a "=" gives an index only when it splits the field
+        into a name and a whole number, and a run of "=", or one at either
+        end, splits nothing, so ``"size=small"`` and ``"=3"`` are one field
+        each and ``"k==2"`` is field k at index 2. String and array
+        attributes are never keyable, as in Maya.
 
         Raises ValueError when the name exists, is built in or is not a valid
         attribute name, and TypeError or ValueError when the value does not
@@ -1629,6 +1647,236 @@ class TransformData(Data):
             value, attribute_type, keyable, enum_names, f"{self.name}.{name}"
         )
         self.user_defined_attributes[name] = spec
+
+
+def _fbx_user_attributes(node) -> dict:
+    """the user defined attributes of an fbx node, as specs, parents first
+
+    A node FbxExporter wrote comes back with the specs it had, kept in a
+    hidden property, its values read from the properties, or kept there too
+    for a value a property can't give back. Any other property reads the way
+    Maya's own FBX importer reads it.
+
+    A property whose name, string or enum field is not UTF-8, which the fbx
+    binding can't read, is left out, and so is an enum with a field an
+    enumName can't hold, with a warning.
+    """
+    user_defined = FBX.FbxPropertyFlags.EFlags.eUserDefined
+    written      = _fbx_written_specs(node)
+    attrs        = {}
+
+    prop = node.GetFirstProperty()
+    while prop.IsValid():
+        if prop.GetFlag(user_defined):
+            # an older exporter's Latin-1 text loses this property only, not
+            # the whole load, nor the clip and skin loads that walk it too
+            try:
+                name = str(prop.GetName())
+                attrs.update(
+                    _fbx_written_attr(prop, name, written)
+                    or _fbx_inferred_attr(prop, name, node)
+                )
+            except UnicodeDecodeError:
+                pass
+        prop = node.GetNextProperty(prop)
+
+    return attrs
+
+
+def _fbx_written_specs(node) -> dict:
+    """the specs FbxExporter kept on a node, by name; {} for one it did not write"""
+    prop = node.FindProperty(FbxExporter._USER_ATTR_SPECS)
+    if not prop.IsValid():
+        return {}
+
+    # FbxExporter %-escapes the json, see _ascii_json
+    try:
+        specs = json.loads(urllib.parse.unquote(str(FBX.FbxPropertyString(prop).Get())))
+    except ValueError:
+        return {}
+    if not isinstance(specs, dict):
+        return {}
+    return {
+        name: spec
+        for name, spec in specs.items()
+        if isinstance(spec, dict) and isinstance(_user_attr_type(spec), str)
+    }
+
+
+def _fbx_value(prop, kind: str):
+    """a user defined fbx property's value, as a ``kind`` attribute holds it;
+    raises UnicodeDecodeError for a string that is not UTF-8"""
+    if kind in _FLOAT_TYPES:
+        return float(FBX.FbxPropertyDouble1(prop).Get())
+    if kind == "bool":
+        return bool(FBX.FbxPropertyBool1(prop).Get())
+    if kind in ("string", "stringArray"):
+        return str(FBX.FbxPropertyString(prop).Get())
+    if kind in ("double3", "float3"):
+        return [float(x) for x in FBX.FbxPropertyDouble3(prop).Get()]
+
+    # whole numbers, and an enum's position in its field list
+    return int(FBX.FbxPropertyInteger1(prop).Get())
+
+
+def _fbx_string_array(text: str) -> Optional[list]:
+    """the list a stringArray's string holds, None for any other string"""
+    mark = FbxExporter._STRING_ARRAY_MARK
+    if not text.startswith(mark):
+        return None
+
+    # FbxExporter %-escapes the json, see _string_array_text
+    try:
+        items = json.loads(urllib.parse.unquote(text[len(mark) :]))
+    except ValueError:
+        return None
+    if isinstance(items, list) and all(isinstance(x, str) for x in items):
+        return items
+    return None
+
+
+def _fbx_written_attr(prop, name: str, written: dict) -> Optional[dict]:
+    """a property FbxExporter wrote, as ``{name: spec}``, a double3 or float3
+    with its three children; None when its spec is missing or no longer fits"""
+    spec = written.get(name)
+    kind = _user_attr_type(spec) if spec else None
+    want = FbxExporter._USER_ATTR_TYPE_MAP.get(kind)
+    if want is None or want.GetType() != prop.GetPropertyDataType().GetType():
+        return None
+
+    raw = _fbx_value(prop, kind)
+    if kind not in ("double3", "float3"):
+        attr = _fbx_kept_attr(spec, raw)
+        return None if attr is None else {name: attr}
+
+    children = [child for child, entry in written.items() if entry.get("parent") == name]
+    if len(children) != 3 or any(
+        _user_attr_type(written[child]) not in _FLOAT_TYPES for child in children
+    ):
+        return None
+
+    attrs = {name: dict(spec)}
+    for child, number in zip(children, raw):
+        attrs[child] = _fbx_kept_attr(written[child], number)
+    if "value" in spec:
+        attrs[name]["value"] = [attrs[child]["value"] for child in children]
+    return attrs
+
+
+def _fbx_kept_attr(spec: dict, raw) -> Optional[dict]:
+    """a spec FbxExporter kept, with its value from a property read as ``raw``;
+    None for a stringArray whose string is not one
+
+    A value the property can't give back is kept in the spec as ``[value]``,
+    and taken while the property still holds what FbxExporter wrote for it,
+    as a binary or an ASCII .fbx gives it back: one changed since wins.
+    """
+    kept = spec.get("value")
+    if isinstance(kept, list) and len(kept) == 1:
+        if _fbx_holds(spec, kept[0], raw):
+            return {**spec, "value": kept[0]}
+    elif "value" not in spec and _fbx_holds(spec, None, raw):
+        return dict(spec)  # a string Maya has not set, still empty
+
+    kind  = _user_attr_type(spec)
+    value = raw
+    if kind == "stringArray":
+        value = _fbx_string_array(raw)
+        if value is None:
+            return None
+    elif kind == "enum":
+        # fbx keeps the position in the field list, Maya its own index
+        enum_name = spec.get("enumName")
+        fields    = _enum_fields(enum_name) if isinstance(enum_name, str) else []
+        if 0 <= raw < len(fields):
+            value = fields[raw][1]
+    return {**spec, "value": value}
+
+
+def _fbx_holds(spec: dict, value, raw) -> bool:
+    """whether a property read as ``raw`` holds what FbxExporter wrote for the
+    user defined attr ``spec`` holding ``value``, binary or ASCII"""
+    held = _user_property_value(spec, value)
+    return raw in (held, _ascii_read_back(held, _user_attr_type(spec)))
+
+
+def _fbx_inferred_attr(prop, name: str, node) -> dict:
+    """a user defined property of ``node`` with no spec, as ``{name: spec}`` the
+    way Maya's own FBX importer reads it; {} for a type it makes no attribute
+    of, and, with a warning, for an enum with a field an enumName can't hold"""
+    kinds = {
+        "eFbxDouble":  "double",
+        "eFbxFloat":   "float",
+        "eFbxInt":     "long",
+        "eFbxShort":   "short",
+        "eFbxUChar":   "byte",
+        "eFbxChar":    "char",
+        "eFbxBool":    "bool",
+        "eFbxEnum":    "enum",
+        "eFbxString":  "string",
+        "eFbxDouble3": "double3",
+    }
+    kinds = {
+        _fbx_enum(FBX, "EFbxType", fbx_type): attr_type
+        for fbx_type, attr_type in kinds.items()
+    }
+
+    data_type = prop.GetPropertyDataType()
+    kind      = kinds.get(data_type.GetType())
+    if kind is None:
+        return {}
+
+    keyable = prop.GetFlag(FBX.FbxPropertyFlags.EFlags.eAnimatable)
+    value   = _fbx_value(prop, kind)
+
+    def spec(attr_type, held, parent=None, **extra):
+        """a spec laid out the way rig serializes one"""
+        if attr_type in _NEW_DATA_TYPES:
+            made = {"dataType": attr_type}
+        else:
+            made = {"attributeType": attr_type}
+        if held is not None:
+            made["value"] = held
+        made.update(extra)
+        if parent is not None:
+            made["parent"] = parent
+        made["keyable"]     = keyable
+        made["channel_box"] = False
+        return made
+
+    if kind == "string":
+        items = _fbx_string_array(value)
+        if items is not None:
+            return {name: spec("stringArray", items)}
+    elif kind == "enum":
+        fields = [str(prop.GetEnumValue(i)) for i in range(prop.GetEnumCount())]
+
+        # an enumName splits fields at ":" and reads "k=2", or "k==2", as field
+        # k, index 2: a file's field like that would come back as other fields,
+        # so its enum is left out. Maya's importer keeps such a field, but its
+        # own enumName of it reads back as other fields too
+        lost = [field for field in fields if _enum_fields(field) != [(field, 0)]]
+        if lost:
+            warnings.warn(
+                f"user defined enum {node.GetName()}.{name} left out: its field "
+                f"{lost[0]!r} holds ':' or reads as a field and its index, which "
+                "an enumName can't hold"
+            )
+            return {}
+        return {name: spec("enum", value, enumName=":".join(fields))}
+    elif kind == "double3":
+        # a color is a float3 of R, G and B, any other vector a double3 of 0, 1, 2
+        if str(data_type.GetName()) == "Color":
+            kind, child, suffixes = "float3", "float", "RGB"
+        else:
+            kind, child, suffixes = "double3", "double", "012"
+
+        attrs = {name: spec(kind, None, numberOfChildren=3)}
+        for suffix, number in zip(suffixes, value):
+            attrs[name + suffix] = spec(child, number, parent=name)
+        return attrs
+
+    return {name: spec(kind, value)}
 
 
 def _walk_fbx(scene, scale_factor: float):
@@ -1716,6 +1964,10 @@ def _walk_fbx(scene, scale_factor: float):
                     data["node_type"] = "locator"
                 else:
                     data["node_type"] = "transform"
+
+                attrs = _fbx_user_attributes(node)
+                if attrs:
+                    data["user_defined_attributes"] = attrs
 
                 hierarchy_data[unique_id] = data
                 nodes[unique_id]          = node
@@ -1907,7 +2159,15 @@ class TransformList(DataList):
     # TODO scale_factor is prolly not the best name, think of a better way to handle unit conversions
     @classmethod
     def load_fbx(cls, filename: str, scale_factor: float = 1.0):
-        """primitive fbx joint loader"""
+        """primitive fbx joint loader
+
+        User defined attributes come back as the specs save_fbx wrote; those
+        of a file from Maya's own FBX plugin, the way its importer reads them.
+        One whose name, string or enum field is not UTF-8, which the fbx
+        binding can't read, is left out, and so is an enum from another tool
+        with a field an enumName can't hold (one holding ":", or reading as a
+        field and its index, "k=2" or "k==2"), with a warning.
+        """
         if FBX is None:
             raise ImportError("fbx module not found")
 
@@ -1924,6 +2184,19 @@ class TransformList(DataList):
         transform or locator holding a rotate_axis (a matrix write or
         set_parent() keeps it) loses it in the file; fold it into rotate
         first by writing node.matrix back with rotate_axis zeroed.
+
+        User defined numbers (double, float, doubleAngle, doubleLinear, long,
+        short, byte, char), bools, enums, strings, stringArrays and double3 or
+        float3 vectors of three numbers come back from load_fbx as they went
+        in, binary or ASCII. Any other (a doubleArray or other array, a
+        matrix, a multi, another compound) is skipped with a logged warning,
+        the children of a skipped compound written on their own. Raises
+        ValueError, before anything is written, when a string attribute's
+        value is not plain ASCII, the only text the fbx sdk takes. In an ASCII
+        file a string or enum field list over 4096 bytes holding a quote, line
+        break, tab, semicolon, brace, & or run of spaces is %-escaped, and
+        Maya reads the escaped text: the fbx sdk's ASCII reader changes it
+        otherwise, or loses the whole scene for a brace.
         """
 
         if FbxExporter is None:

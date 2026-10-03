@@ -2928,7 +2928,7 @@ add_skeleton(self, skeleton_component) -> None
 close(self) -> None
     frees the manager, and with it the scene and every node added
 export(self, path: pathlib.Path, as_ascii=False, zero_root=False) -> None
-    Export the scene to the given path
+    Export the scene to the given path, binary unless as_ascii is set.
 ```
 
 #### `LayerData(BaseData)`

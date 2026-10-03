@@ -21,7 +21,15 @@ import shutil
 import tempfile
 import warnings
 
-__all__ = ["FbxReadError", "import_scene", "media_folder", "new_manager", "open_fbx", "typed"]
+__all__ = [
+    "FbxReadError",
+    "import_scene",
+    "media_folder",
+    "new_manager",
+    "open_fbx",
+    "short_path",
+    "typed",
+]
 
 # IOSettings paths, spelled out: Maya's fbx binding has no IMP_* constants.
 # Extraction defaults to on, which writes a <name>.fbm folder beside the file.
@@ -35,20 +43,54 @@ class FbxReadError(RuntimeError):
     """the FBX SDK could not open or import a file"""
 
 
+def short_path(path):
+    """
+    ``path`` spelled with the Windows short (8.3) name of each folder that has
+    one, which is plain ASCII where the long name may not be. Elsewhere, for a
+    path that does not exist, or on a volume that keeps no short names, it
+    comes back as given.
+    """
+    if os.name != "nt":
+        return path
+
+    import ctypes
+    from ctypes import wintypes
+
+    # a kernel32 of our own, so setting argtypes touches no one else's
+    get_short          = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+    get_short.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    get_short.restype  = wintypes.DWORD
+
+    size = get_short(path, None, 0)
+    if not size:
+        return path
+    buffer = ctypes.create_unicode_buffer(size)
+    if not get_short(path, buffer, size) or not buffer.value:
+        return path
+    return buffer.value
+
+
 def media_folder():
     """
-    A new temporary folder for extracted media, or None when its path is not
-    plain ASCII: Maya's fbx binding cannot hand any other string to the SDK.
+    A new temporary folder for extracted media, by a plain ASCII path: Maya's
+    fbx binding cannot hand any other string to the SDK. A temp folder whose
+    path is not ASCII is reached through its Windows short (8.3) name; with no
+    ASCII one it is None, and media are extracted beside the file.
     """
     folder = tempfile.mkdtemp(prefix="cgmath_fbm_")
     if folder.isascii():
         return folder
 
+    short = short_path(folder)
+    if short.isascii():
+        return short
+
     os.rmdir(folder)
     warnings.warn(
         f"the FBX SDK cannot use the temp folder {os.path.dirname(folder)!r}, whose "
-        "path is not plain ASCII, so embedded media are extracted beside the FBX "
-        "file instead; point TEMP at an ASCII folder to avoid it",
+        "path is not plain ASCII and has no ASCII short (8.3) name, so embedded "
+        "media are extracted beside the FBX file instead; point TEMP at an ASCII "
+        "folder to avoid it",
         RuntimeWarning,
         stacklevel=3,
     )

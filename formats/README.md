@@ -149,6 +149,12 @@ Takes, layers and curves read from a closed `SceneData` raise
 reader in cgmath (rigs, clips, meshes, skins, render objects) frees its
 memory before it returns, and none of them writes anything next to the file.
 
+Textures packed inside a file are extracted to a temporary folder, which
+Maya's fbx binding can only name to the SDK by a plain ASCII path. A temp
+folder whose path is not ASCII is reached by its Windows short (8.3) name;
+only without one are the textures extracted beside the file, with a
+`RuntimeWarning`.
+
 ### Pull a GLB apart
 
 <!-- notest: no .glb asset ships with this repo; CHEATSHEET.md builds one inline first -->
