@@ -45,7 +45,12 @@ class PatchSampleData(SampleData):
 
     @property
     def normals(self):
-        """Surface normals via cross(dS/du, dS/dv), normalized."""
+        """
+        Surface normals via cross(dS/du, dS/dv), normalized; None unless the
+        patch is 3-D (a 2-D patch has no normal).
+        """
+        if self.tangents.shape[-1] != 3:
+            return None
         t_u   = self.tangents[:, 0]
         t_v   = self.tangents[:, 1]
         n     = np.cross(t_u, t_v)
@@ -57,15 +62,6 @@ class PatchSampleData(SampleData):
         """Compute weighted values from basis. values can be (nu, nv, d) or (nu*nv, d)."""
         d = values.shape[-1]
         return np.einsum("jk,ij->ik", values.reshape(-1, d), self.basis)
-
-    def copy(self):
-        return PatchSampleData(
-            points    = np.copy(self.points),
-            tangents  = np.copy(self.tangents),
-            distances = np.copy(self.distances),
-            params    = np.copy(self.params),
-            basis     = np.copy(self.basis),
-        )
 
 
 @dataclass(repr=False, eq=False)
@@ -106,7 +102,12 @@ class PatchRaycastData(Data):
 
     @property
     def normals(self):
-        """Surface normals via cross(dS/du, dS/dv), normalized."""
+        """
+        Surface normals via cross(dS/du, dS/dv), normalized; None unless the
+        patch is 3-D (a 2-D patch has no normal).
+        """
+        if self.tangents.shape[-1] != 3:
+            return None
         t_u   = self.tangents[:, 0]
         t_v   = self.tangents[:, 1]
         n     = np.cross(t_u, t_v)
@@ -121,17 +122,6 @@ class PatchRaycastData(Data):
         """Compute weighted values from basis. values can be (nu, nv, d) or (nu*nv, d)."""
         d = values.shape[-1]
         return np.einsum("jk,ij->ik", values.reshape(-1, d), self.basis)
-
-    def copy(self):
-        return PatchRaycastData(
-            points    = np.copy(self.points),
-            tangents  = np.copy(self.tangents),
-            distances = np.copy(self.distances),
-            params    = np.copy(self.params),
-            basis     = np.copy(self.basis),
-            occluded  = np.copy(self.occluded),
-            hit       = np.copy(self.hit),
-        )
 
 
 @dataclass
@@ -192,18 +182,22 @@ class BSplinePatchData(Data):
     __repr__ = Data.__repr__
 
     def __eq__(self, other):
-        return np.all(
-            [
-                np.allclose(self.cv, other.cv),
-                self.degree_u == other.degree_u,
-                self.degree_v == other.degree_v,
-                self.periodic_u == other.periodic_u,
-                self.periodic_v == other.periodic_v,
-                self.uniform_u == other.uniform_u,
-                self.uniform_v == other.uniform_v,
-                self.registered_u == other.registered_u,
-                self.registered_v == other.registered_v,
-            ]
+        if not isinstance(other, self.__class__):
+            return False
+
+        # The fields first: another grid shape, degree or wrap is another
+        # patch, whose control points would not line up with these
+        return bool(
+            self.points.shape == other.points.shape
+            and self.degree_u == other.degree_u
+            and self.degree_v == other.degree_v
+            and self.periodic_u == other.periodic_u
+            and self.periodic_v == other.periodic_v
+            and self.uniform_u == other.uniform_u
+            and self.uniform_v == other.uniform_v
+            and self.registered_u == other.registered_u
+            and self.registered_v == other.registered_v
+            and np.allclose(self.cv, other.cv)
         )
 
     # ------------------------------------------------------------------ #
@@ -2370,6 +2364,9 @@ class BSplinePatchData(Data):
             Half-window widths for U and V directions.
         polyorder : int
             Polynomial order for the filter.
+
+        After smoothing, all internal caches are invalidated since
+        self.points has been replaced.
         """
         if self._max_param_u is None:
             self._init_bspline()
@@ -2407,7 +2404,11 @@ class BSplinePatchData(Data):
             else:
                 pts = savgol_filter(pts, win_v, po, axis=1)
 
+        # self.points was replaced; every cached value (knots, cv float64,
+        # scipy spline, arc-length tables, cp_params) is now stale.
+        # Invalidate so the next access rebuilds from the new points.
         self.points = pts
+        self.invalidate()
 
     # ------------------------------------------------------------------ #
     #  Length & Area                                                      #

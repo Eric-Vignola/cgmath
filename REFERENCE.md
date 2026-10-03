@@ -1599,7 +1599,7 @@ knots: Optional = None
 Properties:
 
 ```text
-control_point_params               Monotonically increasing parameter values for each control point,
+control_point_params               Parameter values for each control point, in order: each one's
 count                              
 cv                                 control vertices
 domain                             The curve's parameter range, (min_param, max_param), like Maya's knotDomain.
@@ -1781,7 +1781,7 @@ hit: Annotated
 Properties:
 
 ```text
-normals                            Surface normals via cross(dS/du, dS/dv), normalized.
+normals                            Surface normals via cross(dS/du, dS/dv), normalized; None unless the
 ```
 
 Methods:
@@ -1789,8 +1789,6 @@ Methods:
 ```text
 compute(self, values)
     Compute weighted values from basis. values can be (nu, nv, d) or (nu*nv, d).
-copy(self)
-    returns a deep copy of self: the object a save and load gives back
 ```
 
 #### `PatchSampleData(SampleData)`
@@ -1811,7 +1809,7 @@ params: Annotated
 Properties:
 
 ```text
-normals                            Surface normals via cross(dS/du, dS/dv), normalized.
+normals                            Surface normals via cross(dS/du, dS/dv), normalized; None unless the
 ```
 
 Methods:
@@ -1819,8 +1817,6 @@ Methods:
 ```text
 compute(self, values)
     Compute weighted values from basis. values can be (nu, nv, d) or (nu*nv, d).
-copy(self)
-    returns a deep copy of self: the object a save and load gives back
 ```
 
 ## `cgmath.geometry._saddle_surface`

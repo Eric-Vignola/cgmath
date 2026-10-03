@@ -1669,8 +1669,12 @@ print(np.round(reg.compute(0.0)[0], 3))    # close to points[0]
 
 ### Control point parameters
 
+One u per CV, in order: each CV's closest spot on the curve between its
+neighbours' u. The values never decrease, but neighbours can share one (two
+CVs in one spot, or a CV whose own closest spot lies past its neighbour's).
+
 ```python
-print(np.round(curve.control_point_params, 4))  # one u per CV, monotonic
+print(np.round(curve.control_point_params, 4))  # one u per CV, never decreasing
 print(np.round(ring.control_point_params, 4))   # count + 1, last closes the loop
 ```
 
@@ -1875,7 +1879,7 @@ print(ps.points.shape)          # (3, 3)
 print(ps.params.shape)          # (3, 2) → [:, 0] = u, [:, 1] = v
 print(ps.tangents.shape)        # (3, 2, 3) → [:, 0] = dS/du, [:, 1] = dS/dv
 print(np.round(ps.distances, 4))
-print(np.round(ps.normals, 3))  # cross(dS/du, dS/dv), normalized
+print(np.round(ps.normals, 3))  # cross(dS/du, dS/dv), normalized; None on a 2-D patch
 print(ps.basis.shape)           # (3, count_u * count_v)
 ```
 
@@ -2013,7 +2017,7 @@ bumpy = BSplinePatchData(
     degree_u=3, degree_v=3,
     periodic_u=False, periodic_v=False,
 )
-bumpy.smooth(n_u=1, n_v=1, polyorder=2)
+bumpy.smooth(n_u=1, n_v=1, polyorder=2)  # new points; the caches rebuild on next use
 
 bumpy.points[0, 0] = [-2.0, -2.0, 1.0]
 bumpy.invalidate()                # lazy rebuild

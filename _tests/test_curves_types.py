@@ -80,6 +80,14 @@ def grid(n=6):
     return np.stack([u, v, np.sin(u * 0.5) * np.cos(v * 0.5)], axis=-1)
 
 
+class Projected(PatchSampleData):
+    """a class of one's own over a patch's sample results"""
+
+
+class Cast(PatchRaycastData):
+    """a class of one's own over a patch's raycast results"""
+
+
 # --------------------------------- CURVES ----------------------------------- #
 
 
@@ -147,6 +155,32 @@ class TestBSplineTypes(_Same):
         for tag, curve in curves.items():
             self.assertRoundTrips(curve, tag)
 
+    def test_equality(self):
+        curve = BSplineData(points=chain())
+        patch = BSplinePatchData(
+            points=grid(), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
+        )
+        self.assertTrue(curve == BSplineData(points=chain()))
+        self.assertFalse(curve == BSplineData(points=chain() + 1.0))
+
+        # another type is never equal
+        self.assertFalse(curve == 5)
+        self.assertFalse(curve == "curve")
+        self.assertFalse(curve == patch)
+
+        # nor another count, dimension, degree or wrap
+        self.assertFalse(curve == BSplineData(points=chain(7)))
+        self.assertFalse(curve == BSplineData(points=chain(dims=2)))
+        self.assertFalse(curve == BSplineData(points=chain(), degree=2))
+        self.assertFalse(curve == BSplineData(points=chain(), periodic=True))
+
+        # blank curves have no knots to build: their fields decide
+        self.assertTrue(BSplineData() == BSplineData())
+        self.assertFalse(BSplineData() == BSplineData(degree=2))
+        self.assertFalse(BSplineData() == BSplineData(points=np.zeros((0, 2))))
+        self.assertFalse(BSplineData() == curve)
+        self.assertFalse(curve == BSplineData())
+
     def test_caches_are_not_saved(self):
         curve = BSplineData(points=chain(), uniform=True)
         before, _ = curve.compute([0.1, 0.5, 0.9])
@@ -211,6 +245,56 @@ class TestBSplinePatchTypes(_Same):
         }
         for tag, patch in patches.items():
             self.assertRoundTrips(patch, tag)
+
+    def test_equality(self):
+        patch = BSplinePatchData(
+            points=grid(), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
+        )
+        self.assertTrue(patch == patch.copy())
+
+        # another type is never equal
+        self.assertFalse(patch == 5)
+        self.assertFalse(patch == BSplineData(points=chain()))
+
+        # nor another grid shape, degree or wrap
+        for points, degree_u, periodic_u in (
+            (grid(7), 3, False),
+            (grid()[:5], 3, False),
+            (grid(), 2, False),
+            (grid(), 3, True),
+        ):
+            other = BSplinePatchData(
+                points     = points,
+                degree_u   = degree_u,
+                degree_v   = 3,
+                periodic_u = periodic_u,
+                periodic_v = False,
+            )
+            self.assertFalse(patch == other)
+
+    def test_normals(self):
+        queries = np.array([[0.0, 0.0, 2.0], [1.0, -2.0, 1.0]])
+        patch = BSplinePatchData(
+            points=grid(), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
+        )
+        self.assertArray(patch.sample(queries).normals, np.float64, (2, 3))
+
+        # a 2-D patch has no normal
+        flat = BSplinePatchData(
+            points=grid()[..., :2], degree_u=3, degree_v=3, periodic_u=False, periodic_v=True
+        )
+        self.assertIsNone(flat.sample(queries[:, :2]).normals)
+
+    def test_results_copy_as_their_own_class(self):
+        patch = BSplinePatchData(
+            points=grid(), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
+        )
+        origins = np.array([[0.0, 0.0, 5.0], [50.0, 50.0, 5.0]])
+        sampled = patch.sample(np.array([[0, 0, 2], [1, -2, 1]]))
+        cast    = patch.raycast(origins, np.array([0.0, 0.0, -1.0]))
+        for result, cls in ((sampled, Projected), (cast, Cast)):
+            mine = cls(**{field.name: getattr(result, field.name) for field in fields(result)})
+            self.assertSame(mine, mine.copy(), cls.__name__)
 
     def test_sample_types(self):
         patch = BSplinePatchData(

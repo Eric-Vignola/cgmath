@@ -4179,6 +4179,64 @@ class TestBSplineBestFitParams(unittest.TestCase):
                 ordered_closest_params(*bad)
 
 
+class TestBSplineControlPointParams(unittest.TestCase):
+    """
+    control_point_params: each control point's closest spot on the curve
+    between its neighbours' u, in order. Searched only inside fixed
+    partitions, 48 of 1399 interior control points of random open curves
+    stopped on a partition's edge, 39 of them with a closer spot between
+    their neighbours' u (up to 0.067 closer).
+    """
+
+    def check(self, curve, name):
+        """in order, ends kept, no closer spot between the neighbours' u"""
+        u      = np.asarray(curve.control_point_params, dtype=np.float64)
+        points = curve.points
+        count  = len(points)
+        span   = float(curve._max_param)
+        self.assertTrue(np.all(np.diff(u) >= 0.0), name)
+        if curve.periodic:
+            self.assertEqual(len(u), count + 1, name)
+            self.assertAlmostEqual(u[-1] - u[0], span, msg=name)
+            inner = range(count)
+        else:
+            self.assertEqual((u[0], u[-1]), (0.0, span), name)
+            inner = range(1, count - 1)
+
+        for i in inner:
+            lo   = u[i - 1] if i > 0 else u[count - 1] - span
+            at   = u[i] % span if curve.periodic else u[i]
+            got  = float(np.linalg.norm(curve._spl(at) - points[i]))
+            best = closest_between(curve, points[i], lo, u[i + 1])
+            self.assertLessEqual(got, best + 1e-9, f"{name}, control point {i}")
+
+    def test_random_open_curves(self):
+        rng = np.random.default_rng(7)
+        for trial in range(120):
+            count  = int(rng.integers(5, 14))
+            degree = int(rng.choice([2, 3, 5])) if count > 6 else 3
+            points = rng.uniform(-1, 1, size=(count, 3))
+            self.check(BSplineData(points=points, degree=degree), f"open {trial}")
+
+    def test_random_periodic_curves(self):
+        rng = np.random.default_rng(8)
+        for trial in range(140):
+            count  = int(rng.integers(5, 12))
+            degree = int(rng.choice([2, 3]))
+            points = rng.uniform(-1, 1, size=(count, 3))
+            curve  = BSplineData(points=points, degree=degree, periodic=True)
+            self.check(curve, f"periodic {trial}")
+
+    def test_one_spot_one_u(self):
+        # two control points in one spot share their closest spot's u: the
+        # values never decrease, but they can repeat
+        points = np.array([[0, 0, 0], [1, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]], float)
+        curve  = BSplineData(points=points, degree=3)
+        u      = curve.control_point_params
+        self.assertAlmostEqual(u[1], u[2], places=12)
+        self.check(curve, "one spot")
+
+
 class TestUVList(unittest.TestCase):
     def setUp(self):
         super().setUp()
@@ -5902,6 +5960,30 @@ class TestBSplinePatchData(unittest.TestCase):
 
         self.assertLessEqual(smoothed_range, original_range * 1.5)
         self.assertEqual(obj.points.shape, noisy.shape)
+
+    def test_smooth_refreshes_the_surface(self):
+        """
+        compute() follows the smoothed points, not the surface cached before
+        (0.27 off on the open patch, 2.8 on the periodic ones)
+        """
+        for patch in [self.open_open, self.closed_open, self.open_closed]:
+            obj    = patch.copy()
+            u      = np.linspace(0, obj.max_param_u, 7)
+            v      = np.linspace(0, obj.max_param_v, 7)
+            before = obj.compute(u, v)[0]  # builds the caches
+            obj.smooth(n_u=2, n_v=2, polyorder=1)
+
+            fresh = BSplinePatchData(
+                points     = obj.points.copy(),
+                degree_u   = obj.degree_u,
+                degree_v   = obj.degree_v,
+                periodic_u = obj.periodic_u,
+                periodic_v = obj.periodic_v,
+            )
+            after = fresh.compute(u, v)[0]
+            self.assertGreater(float(np.abs(after - before).max()), 0.1)
+            np.testing.assert_allclose(obj.compute(u, v)[0], after, atol=1e-12)
+            np.testing.assert_allclose(obj.evaluate(u, v), after, atol=1e-12)
 
     # -------------------------------------------------------------- #
     #  Periodic seam continuity                                        #

@@ -131,15 +131,34 @@ class BSplineData(Data):
         super().__setattr__(name, value)
 
     def __eq__(self, other):
-        return np.all(
-            [
-                np.allclose(self.cv, other.cv),
-                self.degree == other.degree,
-                self.periodic == other.periodic,
-                self.uniform == other.uniform,
-                self.registered == other.registered,
-                self.kv.shape == other.kv.shape and np.allclose(self.kv, other.kv),
-            ]
+        if not isinstance(other, self.__class__):
+            return False
+
+        # The fields first: another control point count or dimension,
+        # degree or wrap is another curve, whose control points would not
+        # line up with these
+        same = (
+            self.points.shape == other.points.shape
+            and self.degree == other.degree
+            and self.periodic == other.periodic
+            and self.uniform == other.uniform
+            and self.registered == other.registered
+        )
+        if not same:
+            return False
+
+        # A blank curve has no knots to build: only its given ones are left
+        if len(self.points) == 0:
+            if self.knots is None or other.knots is None:
+                return self.knots is None and other.knots is None
+            return self.knots.shape == other.knots.shape and bool(
+                np.allclose(self.knots, other.knots)
+            )
+
+        return bool(
+            np.allclose(self.cv, other.cv)
+            and self.kv.shape == other.kv.shape
+            and np.allclose(self.kv, other.kv)
         )
 
     def _init_bspline(self) -> None:
@@ -1473,12 +1492,17 @@ class BSplineData(Data):
     @property
     def control_point_params(self) -> np.ndarray:
         """
-        Monotonically increasing parameter values for each control point,
-        representing the closest point on the curve to each CP.
+        Parameter values for each control point, in order: each one's
+        closest spot on the curve between its neighbours' values. They never
+        decrease, but neighbours can share one (two control points in one
+        spot, or one whose own closest spot lies past its neighbour's).
 
         Uses Greville abscissae (knot averages) as initial guesses and
         Newton-Raphson refinement constrained to non-overlapping partitions
-        derived from midpoints between adjacent Greville points.
+        derived from midpoints between adjacent Greville points. Then, as in
+        ``fit()``, each control point moves to its closest spot on the curve
+        between its neighbours' values (``ordered_closest_params``), so none
+        stops on a partition's edge with a closer spot past it.
 
         For periodic curves, returns count + 1 values where the last
         value is the first plus the period (closing the loop).
@@ -1554,6 +1578,13 @@ class BSplineData(Data):
             mask[-1] = False
 
         u = self._partitioned_newton(self.points[:n], greville.copy(), u_min, u_max, mask)
+
+        # The partitions are fixed: the repair fit() runs moves each control
+        # point to its closest spot between its neighbours' u (open ends stay
+        # on the ends, periodic u stay unwrapped)
+        u = ordered_closest_params(
+            self.points[:n], u, self._kv, self._cv_f64, self.degree, self.periodic
+        )
 
         if self.periodic:
             u = u % self._max_param
