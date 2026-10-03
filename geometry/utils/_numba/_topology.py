@@ -27,6 +27,50 @@ def _matrix_index_lookup(matrix, indices):
     return faces, idx
 
 
+@njit(cache=True)
+def _vertex_faces(points, geometry):
+    """
+    one pass over the faces; per vertex, the first face that holds it and
+    its slot there, as _matrix_index_lookup finds them, and the shortest
+    edge of all the faces that hold it. A vertex no face holds gets -1, -1
+    and inf. geometry is -1 padded; an index past the last point raises
+    IndexError
+    """
+    faces    = np.full(points.shape[0], -1, dtype=np.int32)
+    slots    = np.full(points.shape[0], -1, dtype=np.int32)
+    shortest = np.full(points.shape[0], np.inf)
+
+    for i in range(geometry.shape[0]):
+        count = 0
+        while count < geometry.shape[1] and geometry[i, count] >= 0:
+            # checked: the writes below are not
+            if geometry[i, count] >= points.shape[0]:
+                raise IndexError("a face holds a vertex index past the last point")
+            count += 1
+
+        # the face's shortest edge; the last one, back to the first corner,
+        # closes it
+        edge_sq = np.inf
+        for j in range(count):
+            a         = geometry[i, j]
+            b         = geometry[i, (j + 1) % count]
+            length_sq = 0.0
+            for k in range(points.shape[1]):
+                diff = points[a, k] - points[b, k]
+                length_sq += diff * diff
+            edge_sq = min(edge_sq, length_sq)
+        edge = np.sqrt(edge_sq)
+
+        for j in range(count):
+            vertex = geometry[i, j]
+            if faces[vertex] < 0:
+                faces[vertex] = i
+                slots[vertex] = j
+            shortest[vertex] = min(shortest[vertex], edge)
+
+    return faces, slots, shortest
+
+
 @njit(fastmath=True, cache=True)
 def _matrix_row_combine(matrix, from_rows, to_rows):
     """

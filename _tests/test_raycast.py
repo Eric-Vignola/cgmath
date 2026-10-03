@@ -980,3 +980,127 @@ class TestMeshDataBezierRaycast(unittest.TestCase):
         self.assertTrue(result_str.hit[0])
         self.assertTrue(result_enum.hit[0])
         self.assertTrue(allclose(result_str.distances, result_enum.distances))
+
+
+class TestRaycastScale(unittest.TestCase):
+    """Every ray hits a grid of faces of any size: no test is in absolute units."""
+
+    def grid(self, size, count=10, offset=0.0):
+        """count x count square faces of the given size on XY, moved by offset
+        along every axis; u runs along X"""
+        steps = np.arange(count + 1) * size
+        x, y = np.meshgrid(steps, steps, indexing="ij")
+        points  = np.stack([x.ravel(), y.ravel(), np.zeros(x.size)], 1) + offset
+        corner  = (np.arange(count)[:, None] * (count + 1) + np.arange(count)[None]).ravel()
+        indices = np.stack([corner, corner + count + 1, corner + count + 2, corner + 1], 1)
+        return MeshData(
+            points  = points,
+            indices = indices.ravel(),
+            counts  = np.full(count * count, 4),
+        )
+
+    def test_small_and_large_faces_are_hit(self):
+        # under 1e-3 the absolute tests missed most rays: 2 of 1000 at 1e-4
+        xy = np.random.default_rng(0).uniform(0.0, 10.0, size=(200, 2))
+        for size in (1e-6, 1e-4, 1e-3, 1e3):
+            mesh    = self.grid(size)
+            origins = np.column_stack([xy * size, np.full(len(xy), 2.0 * size + 1.0)])
+            for method in ("bilinear", "bezier"):
+                with self.subTest(size=size, method=method):
+                    result = mesh.raycast(origins, np.array([0.0, 0.0, -1.0]), method=method)
+                    self.assertTrue(result.hit.all())
+
+                    # the hit's (u, v) is where the ray is in its face
+                    face = result.indices
+                    uv   = np.column_stack([xy[:, 0] - face // 10, xy[:, 1] - face % 10])
+                    np.testing.assert_allclose(result.uvs, uv, atol=1e-9)
+
+    def test_hits_are_precise_on_twisted_faces(self):
+        # Newton stopped once the point was within 1e-6 of the face from the
+        # ray: on a twisted face, hit by oblique rays, (u, v) was off by up
+        # to 5e-7 and the hit point by 1e-6 of the face. One last step past
+        # the tolerance takes both to rounding, at any size
+        from cgmath.geometry.utils.main import bezier_evaluate
+
+        corners   = np.array([[0, 0, 0], [1, 0, 0.5], [1, 1, 0], [0, 1, 0.5]], float)
+        direction = np.array([0.3, -0.2, -1.0]) / np.linalg.norm([0.3, -0.2, -1.0])
+        target_uv = np.random.default_rng(4).uniform(0.1, 0.9, size=(100, 2))
+        u, v = target_uv[:, :1], target_uv[:, 1:]
+        weights = np.hstack([(1 - u) * (1 - v), u * (1 - v), u * v, (1 - u) * v])
+        for size in (1e-3, 1.0, 1e3, 1e5):
+            mesh    = MeshData(points=corners * size, indices=np.arange(4), counts=np.array([4]))
+            origins = weights @ mesh.points - 3.0 * size * direction
+            normals = mesh.get_vertex_normals(angle_weighted=True, area_weighted=False)
+            for method in ("bilinear", "bezier"):
+                with self.subTest(size=size, method=method):
+                    result = mesh.raycast(origins, direction, method=method)
+                    self.assertTrue(result.hit.all())
+                    if method == "bilinear":
+                        np.testing.assert_allclose(result.uvs, target_uv, atol=1e-11)
+                        np.testing.assert_allclose(result.distances, 3.0 * size, rtol=1e-12)
+                        continue
+
+                    # the Bezier hit point is on its ray, at its distance
+                    hit_points = bezier_evaluate(
+                        mesh.points, normals, np.repeat(mesh.geometry, 100, 0), result.uvs
+                    )
+                    along = (hit_points - origins) @ direction
+                    off   = hit_points - origins - along[:, None] * direction
+                    self.assertLess(np.abs(off).max(), 1e-11 * size)
+                    np.testing.assert_allclose(result.distances, along, rtol=1e-12)
+
+    def test_rays_through_vertices_and_edges_hit(self):
+        # a face is not solved when the ray passes clear of its corners' (or
+        # control points') hull; a ray through a vertex or an edge it shares
+        # with its neighbours still hits, where it was aimed
+        mesh     = self.grid(1.0, count=4)
+        vertices = mesh.points[(mesh.points[:, :2] % 4 != 0).all(axis=1)]
+        edges    = (mesh.points[mesh.geometry[:, 0]] + mesh.points[mesh.geometry[:, 1]]) / 2
+        targets  = np.vstack([vertices, edges])
+        for direction in ([0.0, 0.0, -1.0], [0.3, -0.2, -1.0]):
+            direction = np.array(direction) / np.linalg.norm(direction)
+            origins   = targets - 3.0 * direction
+            for method in ("bilinear", "bezier"):
+                with self.subTest(direction=direction, method=method):
+                    result = mesh.raycast(origins, direction, method=method)
+                    self.assertTrue(result.hit.all())
+                    np.testing.assert_allclose(result.projections, targets, atol=1e-12)
+
+    def test_small_faces_far_from_either_origin_are_hit(self):
+        # the tests are fractions of the face, and were met in coordinates
+        # that round coarser than that: Bezier faces 1e-6 wide at 1e5 missed
+        # 243 of these 461 oblique rays, and faces 1e-9 wide at 1e2, hit from
+        # 1e2 away, missed every one with either method. Newton works from
+        # the ray's origin and asks for no more than the rounding there; a
+        # ray through a vertex or an edge between two faces still hits
+        count  = 10
+        inside = np.random.default_rng(0).uniform(0.01, count - 0.01, size=(200, 2))
+        seams  = np.arange(1, count)
+        halves = np.arange(count) + 0.5
+        targets = np.vstack([
+            inside,
+            np.stack(np.meshgrid(seams, seams), -1).reshape(-1, 2),
+            np.stack(np.meshgrid(halves, seams), -1).reshape(-1, 2),
+            np.stack(np.meshgrid(seams, halves), -1).reshape(-1, 2),
+        ])
+        targets   = np.column_stack([targets, np.zeros(len(targets))])
+        direction = np.array([0.3, -0.2, -1.0]) / np.linalg.norm([0.3, -0.2, -1.0])
+        for offset, size, reach in (
+            (1e5, 1e-6, 3e-6),
+            (1e2, 1e-9, 3e-9),
+            (1e2, 1e-9, 1e2),
+            (0.0, 1e-6, 1e6),
+        ):
+            mesh    = self.grid(size, count, offset)
+            aimed   = targets * size + offset
+            origins = aimed - reach * direction
+            for method in ("bilinear", "bezier"):
+                with self.subTest(offset=offset, size=size, reach=reach, method=method):
+                    result = mesh.raycast(origins, direction, method=method)
+                    self.assertTrue(result.hit.all())
+                    np.testing.assert_allclose(
+                        result.projections,
+                        aimed,
+                        rtol = 0,
+                        atol = 1e-9 * size + 1e-14 * (offset + reach),
+                    )

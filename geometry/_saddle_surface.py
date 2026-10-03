@@ -6,13 +6,12 @@ from cgmath.geometry.utils import (
     bezier_raycast,
     bilinear_integrate,
     bilinear_raycast,
-    bilinear_sample,
     bilinear_vectors,
     compute_centroids,
     compute_samples,
-    matrix_index_lookup,
     remap_indices,
 )
+from cgmath.geometry.utils.main import _seeded_bilinear_sample
 from scipy.spatial import cKDTree
 
 # --------------------- SADDLE SURFACE SAMPLE ALGORITHM ---------------------- #
@@ -269,10 +268,16 @@ def sample(
 ):
     """
     preprocess data before going into the saddle surface algorithm
-    1- weed out exact matches is a cKDTree (much faster!)
+    1- weed out exact matches is a cKDTree (much faster!): a query closer to
+       a vertex than perfect_match_tolerance times the shortest edge of the
+       faces around it gets that vertex, at its real distance. A vertex no
+       face holds is never matched, wherever it is stored, so it changes no
+       answer
     2- if not 100% match, precompute face centroids and radiuses for optimization.
        and send what remains to saddle surface sampler
     """
+    from cgmath.geometry.utils._numba._topology import _vertex_faces
+
     # the results are float64 whatever the queries are: int queries would
     # truncate every weight to 0
     points      = np.asarray(points)
@@ -289,21 +294,46 @@ def sample(
     # sampling happens only on min dimension
     min_width = min(points.shape[1], face_points.shape[1])
 
-    # do a quick kdtree lookup to weed out perfect matches
-    matched = np.full(points.shape[0], False)
-    tree    = cKDTree(face_points[:, :min_width])
-    dist, idx = tree.query(points[:, :min_width])
-    matched = dist <= perfect_match_tolerance
+    # per vertex, in one pass over the faces: the first face that holds it
+    # and its slot there, -1 for a vertex no face holds, and the shortest
+    # edge of all the faces that hold it
+    vertex_faces, vertex_slots, shortest = _vertex_faces(
+        np.asarray(face_points[:, :min_width], dtype=np.float64), face_geometry
+    )
 
-    # if any matches, find their indices and set their weights to 1.0
+    # do a quick kdtree lookup to weed out perfect matches. Only the vertices
+    # a face holds are looked up: a vertex no face holds has no face to
+    # answer with, and a copy of a vertex, stored before it, would take its
+    # queries away
+    held = vertex_faces >= 0
+    if np.all(held):
+        tree = cKDTree(face_points[:, :min_width])
+        dist, idx = tree.query(points[:, :min_width])
+
+    else:
+        held_vertices = np.nonzero(held)[0]
+        tree          = cKDTree(face_points[held_vertices, :min_width])
+        dist, idx = tree.query(points[:, :min_width])
+        idx = held_vertices[idx]
+
+    # the match radius is a fraction of the shortest edge around the vertex,
+    # so it means the same on a mesh of any size, and in any face order
+    matched = dist <= perfect_match_tolerance * shortest[idx]
+
+    # if any matches, set their weights to 1.0
     if np.any(matched):
-        f_, i_ = matrix_index_lookup(face_geometry, idx[matched])
-        w                         = np.zeros((i_.size, 4))
+        f_ = vertex_faces[idx[matched]]
+        i_ = vertex_slots[idx[matched]]
+        w  = np.zeros((i_.size, 4))
         w[np.arange(i_.size), i_] = 1
         weights[matched]          = w
         indices[matched]          = f_
         uvs[matched, 0]           = w[:, 1] + w[:, 2]
         uvs[matched, 1]           = w[:, 2] + w[:, 3]
+
+        # the vertex itself, at its real distance from the query
+        projections[matched, :min_width] = face_points[idx[matched], :min_width]
+        distances[matched]               = dist[matched]
 
     # use saddle surface sampler for non 100% matches
     if not np.all(matched):
@@ -315,13 +345,16 @@ def sample(
         kdtree   = cKDTree(centroids)
         max_dist = kdtree.query(points[unmatched, :min_width])[0].max() ** 2
 
-        proj, d, w, uv, i = bilinear_sample(
+        # a face of each query's nearest vertex, which the sampler solves
+        # first to skip the faces beyond it
+        proj, d, w, uv, i = _seeded_bilinear_sample(
             points[unmatched, :min_width],
             face_points[:, :min_width],
             face_geometry,
             centroids,
             radiuses,
             centroid_distance_tolerance=max_dist,
+            seed_faces=vertex_faces[idx[unmatched]],
             iteration_count=iteration_count,
             iteration_tolerance=iteration_tolerance,
             uv_border_tolerance=uv_border_tolerance,

@@ -1,3 +1,4 @@
+import time
 import unittest
 
 import numpy as np
@@ -167,6 +168,97 @@ class TestSaddleSurfaceSample(unittest.TestCase):
         self.assertTrue(allclose(sample_data.distances[0], 0.0))
         self.assertTrue(allclose(sample_data.projections[0], [0.5, 0.5, 0.0]))
 
+    def test_a_query_on_a_vertex_gets_the_vertex_at_its_real_distance(self):
+        # it got distance 0 and itself as its projection
+        query       = np.array([[0.5, 0.5, 1e-7]])
+        sample_data = sample(query, self.face_points, self.face_geometry)
+
+        np.testing.assert_array_equal(sample_data.projections[0], [0.5, 0.5, 0.0])
+        self.assertAlmostEqual(sample_data.distances[0], 1e-7, delta=1e-20)
+        self.assertEqual(sample_data.weights[0].max(), 1.0)
+
+    def test_the_vertex_match_is_relative_to_the_face_size(self):
+        # 1e-6 from a vertex was a match on any face: on one 1e-4 wide that
+        # is a hundredth of the face, so the query answered with distance 0
+        for scale in (1e-4, 1e-6):
+            with self.subTest(scale=scale):
+                points      = self.face_points * scale
+                query       = np.array([[0.5 * scale, 0.5 * scale, 5e-7]])
+                sample_data = sample(query, points, self.face_geometry)
+                self.assertAlmostEqual(sample_data.distances[0], 5e-7, delta=1e-15)
+                np.testing.assert_allclose(
+                    sample_data.projections[0], [0.5 * scale, 0.5 * scale, 0.0], atol=1e-15
+                )
+
+    def test_the_vertex_match_radius_is_the_smallest_face_around_the_vertex(self):
+        # the radius came from the first face that holds the vertex: a face
+        # 10 wide listed before a 0.01 wide one that shares the vertex
+        # snapped a query lying on the small face, 7e-4 of it from the
+        # vertex, to the vertex
+        points = np.array([
+            [0, 0, 0], [-10, 0, 0], [-10, -10, 0], [0, -10, 0],
+            [0.01, 0, 0], [0.01, 0.01, 0], [0, 0.01, 0.0],
+        ])
+        big   = [0, 3, 2, 1]
+        small = [0, 4, 5, 6]
+        query = np.array([[5e-6, 5e-6, 0.0]])
+        for faces in ([big, small], [small, big]):
+            with self.subTest(small_face=faces.index(small)):
+                found = sample(query, points, np.array(faces))
+                self.assertLess(found.distances[0], 1e-15)
+                np.testing.assert_allclose(
+                    found.projections[0], query[0], rtol=0, atol=1e-15
+                )
+                self.assertEqual(found.indices[0], faces.index(small))
+                np.testing.assert_allclose(found.uvs[0], [5e-4, 5e-4], rtol=1e-9)
+
+    def test_a_face_index_past_the_last_point_raises(self):
+        # the vertex lookup writes per vertex, which numba does not check
+        query = np.array([[0.2, 0.3, 1.0]])
+        for faces in ([[0, 1, 2, 4]], [[0, 1, 5]]):
+            with self.subTest(faces=faces):
+                with self.assertRaises(IndexError):
+                    sample(query, self.face_points, np.array(faces))
+
+    def test_a_vertex_no_face_holds_is_never_matched(self):
+        # a stray vertex has no face to answer with: a query on it, or near
+        # enough to match it, read a face index that was never set and
+        # crashed or answered a random face. A stray copy of a corner must
+        # not change that corner's queries either, stored after the corner
+        # or before it: before it, the copy took the queries near the corner
+        # away from the vertex match
+        points = self.face_points * 1000
+        strays = np.array([points[1], [5000.0, 5000.0, 5000.0]])
+        queries = np.array([
+            [5000.0, 5000.0, 5000.0],
+            [5000.0, 5000.0, 5000.0 + 1e-4],
+            [500.0, 500.0, 0.0],
+            [500.0, 500.0, 1e-5],
+            [500.0 - 2e-4, 500.0 - 2e-4, 3e-4],
+            [500.0 + 2e-4, 500.0 - 2e-4, 3e-4],
+            [0.0, 0.0, 10.0],
+        ])
+        expected = sample(queries, points, self.face_geometry)
+        for where in ("after", "before"):
+            if where == "after":
+                stored = np.vstack([points, strays])
+                offset = 0
+            else:
+                stored = np.vstack([strays, points])
+                offset = len(strays)
+
+            found = sample(queries, stored, self.face_geometry + offset)
+            for name in ("projections", "distances", "weights", "indices", "uvs"):
+                with self.subTest(where=where, name=name):
+                    np.testing.assert_array_equal(getattr(found, name), getattr(expected, name))
+
+            with self.subTest(where=where, name="geometry"):
+                np.testing.assert_array_equal(found.geometry, expected.geometry + offset)
+
+            with self.subTest(where=where, name="MeshData.sample"):
+                mesh = MeshData(points=stored, indices=np.arange(4) + offset, counts=np.array([4]))
+                np.testing.assert_array_equal(mesh.sample(queries).distances, expected.distances)
+
     def test_sample_with_normals(self):
         """Test sampling with normal calculation"""
         query_points = np.array([[0.0, 0.0, 1.5]])
@@ -234,6 +326,48 @@ class TestSaddleSurfaceSample(unittest.TestCase):
         with self.assertRaises(ValueError) as context:
             sample(query_points, pentagon_points, pentagon_geometry)
         self.assertIn("ngons detected", str(context.exception))
+
+
+class TestSaddleSurfaceSampleSpeed(unittest.TestCase):
+    def test_a_few_queries_cost_about_what_the_trees_cost(self):
+        # each call measured every face's shortest edge and found a face for
+        # every vertex in numpy, 26 ms on 100k faces over the 30 ms of the
+        # kd-trees and centroids the call needs anyway, so few queries on a
+        # big mesh took 1.6-2x as long. One pass over the faces finds both
+        from scipy.spatial import cKDTree
+        from cgmath.geometry.utils import compute_centroids
+
+        count = 316
+        steps = np.linspace(0.0, 1.0, count + 1)
+        x, y = np.meshgrid(steps, steps, indexing="ij")
+        x        = x.ravel()
+        y        = y.ravel()
+        points   = np.stack([x, y, 0.1 * np.sin(6.0 * x) * np.cos(5.0 * y)], 1)
+        first    = np.arange(count)
+        corner   = (first[:, None] * (count + 1) + first).ravel()
+        step     = count + 1
+        geometry = np.stack([corner, corner + step, corner + step + 1, corner + 1], 1)
+        query    = np.array([[0.4, 0.6, 0.3]])
+
+        def needed():
+            start = time.perf_counter()
+            cKDTree(points).query(query)
+            centroids, _ = compute_centroids(points, geometry, return_radiuses=True)
+            cKDTree(centroids).query(query)
+            return time.perf_counter() - start
+
+        def sampled():
+            start = time.perf_counter()
+            sample(query, points, geometry)
+            return time.perf_counter() - start
+
+        # a warm-up, then the best of 7, the two taken in turn so a busy
+        # machine slows both
+        needed()
+        sampled()
+        times = [(needed(), sampled()) for _ in range(7)]
+        best_needed, best_sampled = np.min(times, axis=0)
+        self.assertLess(best_sampled, 1.5 * best_needed)
 
 
 class TestSampleData(unittest.TestCase):

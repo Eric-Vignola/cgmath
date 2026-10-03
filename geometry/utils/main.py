@@ -660,7 +660,43 @@ def bilinear_sample(
 
     When normals are provided, uses PN Quad bicubic Bezier patches
     for higher accuracy on smooth meshes. Normals should be per-vertex
-    unit normals of shape (num_points, 3).
+    unit normals of shape (num_points, 3). iteration_count and
+    iteration_tolerance stop the solve on either kind of patch.
+    """
+    return _seeded_bilinear_sample(
+        p,
+        points,
+        geometry,
+        centroids,
+        radiuses,
+        centroid_distance_tolerance,
+        iteration_count     = iteration_count,
+        iteration_tolerance = iteration_tolerance,
+        uv_border_tolerance = uv_border_tolerance,
+        normals             = normals,
+    )
+
+
+def _seeded_bilinear_sample(
+    p,
+    points,
+    geometry,
+    centroids,
+    radiuses,
+    centroid_distance_tolerance,
+    seed_faces          = None,
+    iteration_count     = 100,
+    iteration_tolerance = 1e-8,
+    uv_border_tolerance = 1e-5,
+    normals             = None,
+):
+    """bilinear_sample, solving first, per query, the face seed_faces names
+
+    seed_faces holds one face index per query, or -1 for none. It only
+    makes the sample faster: that face's closest point bounds the query's
+    distance, so the faces beyond it are skipped. Any face gives the same
+    answer; one near the query, such as a face of its nearest vertex (what
+    sample() passes), gives it soonest.
     """
     from cgmath.geometry.utils._numba._bilinear import _bilinear_sample
 
@@ -673,6 +709,20 @@ def bilinear_sample(
     iteration_count             = np.int32(iteration_count)
     iteration_tolerance         = np.float64(iteration_tolerance)
     uv_border_tolerance         = np.float64(uv_border_tolerance)
+
+    # checked before the int32 cast, which would wrap a large index onto a
+    # face and truncate a fraction: the solver reads the face unchecked
+    if seed_faces is None:
+        seed_faces = np.full(p.shape[0], -1, dtype=np.int32)
+    else:
+        seed_faces = np.asarray(seed_faces)
+        if (
+            seed_faces.shape != (p.shape[0],)
+            or not np.issubdtype(seed_faces.dtype, np.integer)
+            or np.any((seed_faces < -1) | (seed_faces >= geometry.shape[0]))
+        ):
+            raise ValueError("seed_faces needs one face index, or -1, per query")
+        seed_faces = seed_faces.astype(np.int32)
 
     if normals is not None:
         from cgmath.geometry.utils._numba._bilinear import (
@@ -693,6 +743,7 @@ def bilinear_sample(
             bezier_centroids,
             bezier_radii,
             centroid_distance_tolerance,
+            seed_faces,
             iteration_count,
             iteration_tolerance,
             uv_border_tolerance,
@@ -705,6 +756,7 @@ def bilinear_sample(
         centroids,
         radiuses,
         centroid_distance_tolerance,
+        seed_faces,
         iteration_count,
         iteration_tolerance,
         uv_border_tolerance,

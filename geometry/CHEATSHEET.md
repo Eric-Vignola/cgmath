@@ -2164,6 +2164,20 @@ print(np.round(sd.weights, 4))      # the 4 corner weights, sum to 1
 print(sd.geometry)                  # the 4 corner vertex indices
 ```
 
+The answer is the face's true closest point, not the nearest local one: its
+corners, its edges and the points inside where the distance stops changing are
+all solved for, so a twisted quad or a folded UV face is answered exactly, at
+any scale. A query on a vertex, closer than `perfect_match_tolerance` (a
+millionth) of the shortest edge of the faces around it, gets that vertex at its
+real distance. A vertex no face uses is never matched, even a copy of a corner
+stored before it, so it changes no answer; its queries get the surface's
+closest point like any other:
+
+```python
+sd_v = sample(np.array([[0.5, 0.5, 0.5 + 1e-8]]), cube.points, cube.geometry)
+print(sd_v.projections, sd_v.distances.round(10))  # [[0.5 0.5 0.5]] [1.e-08]
+```
+
 Results are `float64` whatever the query dtype, with `int32` `indices` and
 `geometry` and `bool` masks. `geometry` is always `(N, 4)`, `-1` padded for
 a triangle.
@@ -2185,7 +2199,10 @@ print(sd.occluded)                     # [False False  True] — True == inside
 ```
 
 `surface_normals=` switches from flat bilinear patches to PN-Quad bicubic
-Bézier patches — slower, but curves the patch to match the vertex normals:
+Bézier patches — slower, but curves the patch to match the vertex normals.
+Their closest point is Newton's from two starts, the boundary curves and
+corners checked, and `iteration_count` / `iteration_tolerance` stop it as they
+stop the bilinear solve:
 
 ```python
 sd_bezier = sample(

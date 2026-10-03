@@ -344,6 +344,14 @@ to quads with a `-1` fourth index. An n-gon's area is the sum of the triangles
 it triangulates into; `sample()` and `raycast()` **raise on n-gons** —
 triangulate first.
 
+The closest point on a bilinear patch is exact: corners, edges and the inside
+are all solved for, so a twisted or folded quad gives its true closest point.
+The closest point's, the raycast's and the vertex match's tolerances are all
+fractions of the face, so a mesh answers the same at any size, and a raycast
+hit's `(u, v)` and `t` are precise to rounding. The raycast solves a face as
+seen from the ray's origin and never asks for more than the rounding there, so
+a small face far from the world's origin, or far from the ray's, is still hit.
+
 Passing `surface_normals=` swaps flat bilinear patches for PN-Quad bicubic
 Bézier patches: slower, but each patch curves to match the vertex normals.
 `SampleMethod.BILINEAR` and `SampleMethod.BEZIER` select the same two on the

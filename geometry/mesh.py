@@ -2373,16 +2373,23 @@ class MeshData(Data):
     ):
         """a humble saddle surface sampler
 
+        BILINEAR gives each face's exact closest point: the closest of its
+        corners, its edges' closest points and the points inside where the
+        distance stops changing, all solved for. BEZIER runs Newton from two
+        starts and checks the boundary curves, corners included. A query on
+        a vertex, within a millionth of the shortest edge of the faces
+        around it, gets that vertex at its real distance.
+
         Args:
             obj: query points or MeshData whose vertices are used as query points.
             method: SampleMethod.BILINEAR (flat patches) or SampleMethod.BEZIER
                     (PN Quad bicubic Bezier patches using vertex normals for
                     higher accuracy on smooth meshes).
-            iteration_count: max Newton iterations.
-            iteration_tolerance: Newton stops once a step moves (u, v) less than
+            iteration_count: max Newton iterations, for either method.
+            iteration_tolerance: Newton, and the root solve behind the exact
+                    closest point, stop once a step moves (u, v) less than
                     this, a fraction of the face, so it means the same on a
                     face of any size.
-            BEZIER uses its own iteration count and tolerance (20, 1e-6).
         """
         _require_no_ngons("sample", self.counts)
         method = SampleMethod(method)

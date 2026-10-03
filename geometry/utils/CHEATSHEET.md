@@ -408,7 +408,9 @@ print(gu.bilinear_integrate(cube.points, cube.f2v,
 
 `bilinear_sample` is the closest-point-on-surface query. It returns five
 arrays: `projected, distance, weights, uv, face`. Passing `normals=`
-switches the whole thing to PN-Quad bicubic Bézier patches.
+switches the whole thing to PN-Quad bicubic Bézier patches. On bilinear
+patches the closest point is exact; `iteration_count` and
+`iteration_tolerance` stop the solve on either kind.
 
 ```python
 queries = np.array([[0.5, 0.5, 2.0], [0.25, 0.25, -1.0]])
@@ -451,7 +453,10 @@ print(np.round(Ub, 6), np.round(Vb, 6))
 
 Both raycasters are forward-only and return `(t, uv, face_index)` for the
 closest hit. `twosided=False` rejects back faces. Faces must be tris or
-quads; `< 4` wide geometry is `-1`-padded automatically.
+quads; `< 4` wide geometry is `-1`-padded automatically. A face is solved
+only when the ray passes within its corners' (or control points') hull, and
+a hit's `t` and `uv` are precise to rounding on faces of any size, wherever
+they are: the face is solved as seen from the ray's origin.
 
 ```python
 origins    = np.array([[0.5, 0.5, 5.0], [0.25, 0.25, 5.0]])
