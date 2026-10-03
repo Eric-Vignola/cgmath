@@ -20,7 +20,7 @@ from dataclasses import fields
 
 import numpy as np
 import cgmath
-from cgmath.geometry._base import Data, DataList
+from cgmath.geometry._base import CLASS_KEY, Data, DataList, ID_KEY
 
 # the builder modules: each holds EXAMPLES = {class: builder}, and may hold
 # SAVES_AS = {class: function}, for a class that by design loads back as
@@ -183,6 +183,25 @@ class TestEveryClass(unittest.TestCase):
             with self.subTest(cls=name):
                 obj = builder()
                 assert_same(self, self.saves_as.get(cls, lambda x: x)(obj), obj.copy(), f"{cls.__name__}.copy()")
+
+    def test_a_tree_that_shares_nothing_numbers_nothing(self):
+        # only an object reached twice is numbered: an object that shares
+        # nothing saves the same file as before numbers existed
+        def numbered(value):
+            if isinstance(value, dict):
+                if ID_KEY in value or value.get(CLASS_KEY) == "~ref":
+                    return True
+                return any(numbered(x) for x in value.values())
+            if isinstance(value, (list, tuple)):
+                return any(numbered(x) for x in value)
+            return False
+
+        for name, cls in sorted(self.classes.items()):
+            builder = self.builders.get(cls)
+            if builder is None:
+                continue
+            with self.subTest(cls=name):
+                self.assertFalse(numbered(builder().to_dict()))
 
 
 class TestNpzSpeed(unittest.TestCase):

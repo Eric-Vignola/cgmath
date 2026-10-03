@@ -10,6 +10,7 @@ import pickle
 import shutil
 import sys
 import tempfile
+import threading
 import zipfile
 from collections.abc import Iterable, MutableSequence
 from dataclasses import dataclass, fields, is_dataclass, MISSING
@@ -101,6 +102,7 @@ CLASS_KEY   = "__class__"
 ITEMS_KEY   = "__items__"
 DTYPES_KEY  = "__dtypes__"
 SHAPES_KEY  = "__shapes__"
+ID_KEY      = "__id__"
 
 _CLASSES    = {}  # every Data / DataList class, by its tag
 
@@ -176,9 +178,252 @@ def _resolve_class(tag: Optional[str], expected=None):
     return found
 
 
+# an object a tree reaches twice, a mesh two Objects share, is saved once: its
+# first tree carries ID_KEY, a number, and every later one is a reference to
+# that number, {"__class__": "~ref", "id": number}. A load builds the object
+# at its first tree and gives that same object for each reference. Only the
+# objects reached twice are numbered: a tree that shares nothing is unchanged.
+_REF = "~ref"
+
+
+class _Running(threading.local):
+    """the saves and loads running on this thread, innermost last"""
+
+    def __init__(self):
+        self.saves = []  # a _Save, or None where a save of its own starts
+        self.loads = []  # each load's objects so far, by number
+
+
+_RUNNING = _Running()
+
+
+# the values that hold no object, skipped by their type alone: a row of
+# numbers, or a node's arrays, is walked quickly
+_LEAVES = frozenset((bool, int, float, complex, str, bytes, type(None), np.ndarray))
+
+
+def _reached_twice(root) -> dict:
+    """
+    The Data and DataList objects the tree of ``root`` reaches more than
+    once, by id.
+
+    Raises
+    ------
+    ValueError
+        A dict, list or tuple holds itself: its tree would never end.
+    """
+    seen  = set()  # the Data and DataList objects walked
+    open_ = set()  # the dicts, lists and tuples being walked
+    twice = {}
+    stack = [root]
+    while stack:
+        value = stack.pop()
+        if type(value) is int:
+            # a container's id, pushed below what it holds (no int is walked):
+            # all of that is walked now
+            open_.discard(value)
+            continue
+
+        if isinstance(value, (Data, DataList)):
+            if id(value) in seen:
+                twice[id(value)] = value
+                continue  # what it holds is walked already
+            seen.add(id(value))
+            values = value._saved_parts()
+        elif isinstance(value, (dict, list, tuple)):
+            # one held twice is walked twice: what it holds is in the tree twice
+            if id(value) in open_:
+                raise ValueError(f"cannot save a {type(value).__name__} that holds itself")
+            open_.add(id(value))
+            stack.append(id(value))
+            values = value.values() if isinstance(value, dict) else value
+        else:
+            continue  # an array, a numpy scalar: a save keeps it as it is
+        stack.extend([x for x in values if type(x) not in _LEAVES])
+    return twice
+
+
+def _holds_shared(value, shared: dict) -> bool:
+    """
+    Whether ``value`` holds one of ``shared``, the objects a save reaches
+    twice: then a field equal to its default is saved still, as a load's
+    fresh default would share nothing.
+    """
+    if type(value) in _LEAVES:
+        return False
+
+    walked = set()  # each value once: one that holds none of them still holds none
+    stack  = [value]
+    while stack:
+        value = stack.pop()
+        if id(value) in shared:
+            return True
+        if id(value) in walked:
+            continue
+        walked.add(id(value))
+
+        if isinstance(value, (Data, DataList)):
+            values = value._saved_parts()
+        elif isinstance(value, (dict, list, tuple)):
+            values = value.values() if isinstance(value, dict) else value
+        else:
+            continue
+        stack.extend([x for x in values if type(x) not in _LEAVES])
+    return False
+
+
+class _Save:
+    """
+    One save: the objects its tree reaches more than once, and the number
+    each takes when its tree is written.
+    """
+
+    __slots__ = ("shared", "numbers", "writing")
+
+    def __init__(self, root=None):
+        # with no root, nothing is shared: every object is written in full
+        self.shared  = {} if root is None else _reached_twice(root)
+        self.numbers = {}
+        self.writing = set() if root is None else {id(root)}  # the trees being written
+
+
+class _Saving:
+    """
+    ``with _Saving(obj) as save:`` around what a base to_dict() writes. The
+    outermost one on a thread, or the first inside an _OwnSave block, is a
+    save of its own, which first finds what the tree of ``obj`` reaches
+    twice; the to_dict() calls inside join that save. A with block, not a
+    wrapper around to_dict(), which would cost each nested object two more
+    frames: a deep tree would reach the recursion limit at half the depth.
+    """
+
+    __slots__ = ("root", "starts")
+
+    def __init__(self, root):
+        self.root = root
+
+    def __enter__(self) -> _Save:
+        saves       = _RUNNING.saves
+        self.starts = not saves or saves[-1] is None
+        if self.starts:
+            saves.append(_Save(self.root))
+        return saves[-1]
+
+    def __exit__(self, *exc) -> None:
+        if self.starts:
+            _RUNNING.saves.pop()
+
+
+class _OwnSave:
+    """
+    ``with _OwnSave():`` a to_dict() inside is a save of its own, whatever
+    save is running. Not ``numbered``, an object held twice is written in
+    full each time. A with block, as _Saving is, so it costs no frame.
+    """
+
+    __slots__ = ("numbered",)
+
+    def __init__(self, numbered: bool = True):
+        self.numbered = numbered
+
+    def __enter__(self) -> None:
+        _RUNNING.saves.append(None if self.numbered else _Save())
+
+    def __exit__(self, *exc) -> None:
+        _RUNNING.saves.pop()
+
+
+def _numbered_tree(obj, save: _Save) -> dict:
+    """
+    The tree of ``obj``, an object ``save`` reaches twice: in full, numbered,
+    the first time, and a reference to that number after.
+
+    Raises
+    ------
+    ValueError
+        The object holds itself: a load builds an object after what it holds.
+    """
+    key = id(obj)
+    if key in save.writing:
+        raise ValueError(f"cannot save a {type(obj).__name__} that holds itself")
+    if key in save.numbers:
+        return {CLASS_KEY: _REF, "id": save.numbers[key]}
+
+    number = save.numbers[key] = len(save.numbers)
+    save.writing.add(key)
+    try:
+        tree = obj.to_dict()
+    finally:
+        save.writing.discard(key)
+    return {CLASS_KEY: tree.pop(CLASS_KEY), ID_KEY: number, **tree}
+
+
+def _save_shares(obj) -> bool:
+    """
+    Whether ``obj`` is being written in a save that reaches twice an object
+    its tree holds; False with no save running.
+    """
+    saves = _RUNNING.saves
+    save  = saves[-1] if saves else None
+    return save is not None and bool(save.shared) and _holds_shared(obj._saved_parts(), save.shared)
+
+
+def _load(data: dict, cls):
+    """the object a whole tree describes; its numbers are its own, whatever load is running"""
+    loads = _RUNNING.loads
+    loads.append({})
+    try:
+        return _from_tagged(data, cls)
+    finally:
+        loads.pop()
+
+
 def _from_tagged(data: dict, expected=None):
-    """the object a tagged tree describes"""
-    return _resolve_class(data.get(CLASS_KEY), expected).from_dict(data)
+    """
+    The object a tagged tree describes, in the running load: a numbered tree
+    is kept under its number, and a reference to it gives that object back.
+
+    Raises
+    ------
+    ValueError
+        A reference comes before the tree it refers to.
+    """
+    loads = _RUNNING.loads
+    built = loads[-1] if loads else {}
+    tag   = data.get(CLASS_KEY)
+    if tag == _REF:
+        number = data.get("id")
+        if number not in built:
+            raise ValueError(f"the data refers to object {number!r} before saving it")
+        obj = built[number]
+        if expected is not None and not _derives(type(obj), expected):
+            raise TypeError(f"the data holds a {type(obj).__name__}, not a {expected.__name__}")
+        return obj
+
+    data = dict(data)
+    data.pop(CLASS_KEY, None)
+    number = data.pop(ID_KEY, None)
+    obj    = _resolve_class(tag, expected)._from_state(data)
+    if number is not None:
+        built[number] = obj
+    return obj
+
+
+def _holds_numbered(value) -> bool:
+    """whether a saved value holds a numbered tree, the one a later reference to its object needs"""
+    stack = [value]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            if CLASS_KEY in value and ID_KEY in value:
+                return True
+            values = value.values()
+        elif isinstance(value, (list, tuple)):
+            values = value
+        else:
+            continue
+        stack.extend([x for x in values if isinstance(x, (dict, list, tuple))])
+    return False
 
 
 # pickle: the tree to_dict() returns, its arrays as their raw bytes. A pickle
@@ -255,6 +500,12 @@ _PLAIN_DICT = "~dict"
 def _encode(value):
     """``value`` as plain data: a nested Data or DataList becomes its tree"""
     if isinstance(value, (Data, DataList)):
+        # an object the running save reaches twice is numbered. Any other is
+        # asked for its tree here, not through a helper, which would cost
+        # each nested object one more frame
+        saves = _RUNNING.saves
+        if saves and saves[-1] is not None and id(value) in saves[-1].shared:
+            return _numbered_tree(value, saves[-1])
         return value.to_dict()
     if isinstance(value, Enum):
         # its value, in every format alike; a field declaring the Enum restores it
@@ -914,8 +1165,14 @@ def _same_value(a, b) -> bool:
     if a is b:
         return True
     if isinstance(a, (Data, DataList)) or isinstance(b, (Data, DataList)):
-        # == on data is within tolerance and skips EQUALITY_TEST_IGNORE (a name)
-        return type(a) is type(b) and _same_value(a.to_dict(), b.to_dict())
+        # == on data is within tolerance and skips EQUALITY_TEST_IGNORE (a name).
+        # Trees of their own, numbering nothing: what a value shares is for
+        # the save to ask (_holds_shared), and the hash asks nothing of it
+        if type(a) is not type(b):
+            return False
+        with _OwnSave(numbered=False):
+            a, b = a.to_dict(), b.to_dict()
+        return _same_value(a, b)
     if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
         if not (isinstance(a, np.ndarray) and isinstance(b, np.ndarray)):
             return False
@@ -1438,11 +1695,14 @@ class Data:
     def __hash__(self):
         # the tree as a pickle holds it, numpy scalars as python ones and
         # arrays as their bytes: a loaded copy hashes the same. With no memo,
-        # a value held twice is written twice, shared or not
+        # and no numbers, a value held twice is written twice, shared or not,
+        # as == compares it
         buffer       = io.BytesIO()
         pickler      = pickle.Pickler(buffer, protocol=4)
         pickler.fast = True
-        pickler.dump(_pickled(self.to_dict()))
+        with _OwnSave(numbered=False):
+            tree = self.to_dict()
+        pickler.dump(_pickled(tree))
         return hash(buffer.getvalue())
 
     def __eq__(self, other) -> bool:
@@ -1483,7 +1743,9 @@ class Data:
 
     def copy(self):
         """returns a deep copy of self: the object a save and load gives back"""
-        return type(self).from_dict(_tree_copy(self.to_dict()))
+        with _OwnSave():
+            tree = self.to_dict()
+        return type(self).from_dict(_tree_copy(tree))
 
     def __copy__(self):
         """
@@ -1632,10 +1894,10 @@ class Data:
         """
         The object a tree describes: the class it names, which must be this
         one or derive from it, or this class when it names none. Fields the
-        tree leaves out take fresh copies of their defaults.
+        tree leaves out take fresh copies of their defaults. An object the
+        tree saves once and refers to after is one object again.
         """
-        data = dict(data)
-        return _resolve_class(data.pop(CLASS_KEY, None), cls)._from_state(data)
+        return _load(data, cls)
 
     @classmethod
     def _from_state(cls, data: dict) -> Any:
@@ -1646,12 +1908,19 @@ class Data:
 
         specs  = cls._array_specs()
 
+        # every value rebuilt in the order the tree holds it, the order it was
+        # saved in, whatever order the class declares its fields in now: an
+        # object saved once is built before what refers to it. An array's
+        # lists hold no object. A loop, not a comprehension, which would cost
+        # each nested object one more frame
+        for key in list(data):
+            if key not in specs:
+                data[key] = _decode(data[key])
+
         for field in fields(cls):
             if field.name in data:
                 hint  = hints.get(field.name)
                 value = data.pop(field.name)
-                if field.name not in specs:  # an array's lists hold no object
-                    value = _decode(value)
                 if isinstance(value, (dict, list)) and _holds_data(hint):
                     # an older cgmath saved a nested object as its bare fields
                     raise LegacyFileError(_OLDER_FILE.format("the data"))
@@ -1678,7 +1947,7 @@ class Data:
 
         # what a class saves beside its fields
         for key, value in data.items():
-            setattr(obj, key, _decode(value))
+            setattr(obj, key, value)
 
         obj._post_load()
         return obj
@@ -1712,11 +1981,22 @@ class Data:
         """
         return _load_as(cls, filename, mode)
 
+    def _saved_parts(self) -> list:
+        """the values this object's tree is built from, walked by a save for what it reaches twice"""
+        cls = type(self)
+        return [
+            getattr(self, name, None)
+            for name in cls._dataclass_field_names()
+            if name not in cls.TRANSIENT_FIELDS
+        ]
+
     def to_dict(self) -> dict:
         """
         The data as a tree: its class, then every field that differs from its
         default (one exactly equal to it is left out, and a load gives it a
-        fresh copy back). Pickle, npz and json all save this.
+        fresh copy back). Pickle, npz and json all save this. A Data or
+        DataList the tree reaches twice is written once, and referred to after,
+        even in a field equal to its default.
         """
         cls    = type(self)
         data   = {CLASS_KEY: _class_tag(cls)}
@@ -1724,31 +2004,37 @@ class Data:
         dtypes = {}
         shapes = {}
 
-        for field in fields(self):
-            if field.name in cls.TRANSIENT_FIELDS:
-                continue
+        # in the running save, or one this starts
+        with _Saving(self) as save:
+            shared = save.shared  # what the save reaches twice
 
-            value = getattr(self, field.name, _NO_DEFAULT)
-            if value is _NO_DEFAULT:
-                continue  # never set: nothing to save
-
-            default = _field_default(field)
-            if default is not _NO_DEFAULT:
-                if isinstance(default, ImmutableArray):
-                    default = np.asarray(default)
-                if _same_value(value, default):
+            for field in fields(self):
+                if field.name in cls.TRANSIENT_FIELDS:
                     continue
 
-            data[field.name] = _encode(value)
+                value = getattr(self, field.name, _NO_DEFAULT)
+                if value is _NO_DEFAULT:
+                    continue  # never set: nothing to save
 
-            # json keeps no dtype: a field that may hold more than one notes it
-            spec = specs.get(field.name)
-            if spec is not None and len(spec.dtypes) > 1 and isinstance(value, np.ndarray):
-                dtypes[field.name] = value.dtype.name
+                # left at its default, the field is left out, but not when it holds
+                # an object the tree reaches twice: a fresh default shares nothing
+                default = _field_default(field)
+                if default is not _NO_DEFAULT and not (shared and _holds_shared(value, shared)):
+                    if isinstance(default, ImmutableArray):
+                        default = np.asarray(default)
+                    if _same_value(value, default):
+                        continue
 
-            # nor the shape of an empty array: [] could be (0,), (0, 3) or (0, 0)
-            if isinstance(value, np.ndarray) and value.size == 0 and value.ndim > 1:
-                shapes[field.name] = list(value.shape)
+                data[field.name] = _encode(value)
+
+                # json keeps no dtype: a field that may hold more than one notes it
+                spec = specs.get(field.name)
+                if spec is not None and len(spec.dtypes) > 1 and isinstance(value, np.ndarray):
+                    dtypes[field.name] = value.dtype.name
+
+                # nor the shape of an empty array: [] could be (0,), (0, 3) or (0, 0)
+                if isinstance(value, np.ndarray) and value.size == 0 and value.ndim > 1:
+                    shapes[field.name] = list(value.shape)
 
         if dtypes:
             data[DTYPES_KEY] = dtypes
@@ -1909,13 +2195,13 @@ class DataList(MutableSequence):
         return hash(tuple(self.list))
 
     def copy(self):
-        """deep copy"""
-        new = self.__class__()
-        for elem in self.list:
-            new.append(elem.copy())
-        for name in self.LIST_FIELDS:
-            setattr(new, name, copy.deepcopy(getattr(self, name)))
-        return new
+        """
+        Returns a deep copy of self: the list a save and load gives back, an
+        item or part held twice copied once.
+        """
+        with _OwnSave():
+            tree = self.to_dict()
+        return type(self).from_dict(_tree_copy(tree))
 
     def __copy__(self):
         """a shallow copy: a new list over the same items"""
@@ -1986,14 +2272,28 @@ class DataList(MutableSequence):
 
     # --------------------------------- FILE I/O --------------------------------- #
 
+    def _saved_parts(self) -> list:
+        """the values this list's tree is built from: its items and LIST_FIELDS"""
+        return self.list + [getattr(self, name) for name in self.LIST_FIELDS]
+
     def to_dict(self) -> dict:
-        """the list as a tree: its class, its items' trees, and its LIST_FIELDS"""
-        data = {
-            CLASS_KEY: _class_tag(type(self)),
-            ITEMS_KEY: [item.to_dict() for item in self.list],
-        }
-        for name in self.LIST_FIELDS:
-            data[name] = _encode(getattr(self, name))
+        """
+        The list as a tree: its class, its items' trees, and its LIST_FIELDS.
+        A Data or DataList the tree reaches twice is written once, and
+        referred to after.
+        """
+        # in the running save, or one this starts
+        with _Saving(self) as save:
+            shared = save.shared  # what the save reaches twice
+            data = {
+                CLASS_KEY: _class_tag(type(self)),
+                ITEMS_KEY: [
+                    _numbered_tree(item, save) if id(item) in shared else item.to_dict()
+                    for item in self.list
+                ],
+            }
+            for name in self.LIST_FIELDS:
+                data[name] = _encode(getattr(self, name))
         return data
 
     def to_json(self) -> str:
@@ -2030,10 +2330,10 @@ class DataList(MutableSequence):
     def from_dict(cls, data: dict) -> Any:
         """
         The list a tree describes: the class it names, which must be this one
-        or derive from it, each item rebuilt as the class it names.
+        or derive from it, each item rebuilt as the class it names. An object
+        the tree saves once and refers to after is one object again.
         """
-        data = dict(data)
-        return _resolve_class(data.pop(CLASS_KEY, None), cls)._from_state(data)
+        return _load(data, cls)
 
     @classmethod
     def _from_state(cls, data: dict) -> Any:
@@ -2045,10 +2345,15 @@ class DataList(MutableSequence):
             items, data = list(data.values()), {}
 
         for item in items:
-            obj.append(cls.DATA_LIST_CLASS.from_dict(item))
-        for name in cls.LIST_FIELDS:
-            if name in data:
-                setattr(obj, name, _decode(data.pop(name)))
+            obj.append(_from_tagged(item, cls.DATA_LIST_CLASS))
+        # in the order the tree holds them, as a Data's fields. A part the
+        # class no longer declares is left out, but an object first saved
+        # there is built still: a later part may refer to it
+        for name, value in data.items():
+            if name in cls.LIST_FIELDS:
+                setattr(obj, name, _decode(value))
+            elif _holds_numbered(value):
+                _decode(value)
 
         obj._post_load()
         return obj

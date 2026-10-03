@@ -831,12 +831,14 @@ print(again.scene_name, again.default_camera_name, again.resolution)
 print(again.frame)                                   # None
 ```
 
-Instancing is not kept: two Objects sharing one `MeshData` each load
-with their own copy.
+Instancing is kept: two Objects sharing one `MeshData` still share one
+after a load or `copy()`. The file holds the mesh once.
 
 ```python
+twin = scene.copy()
 print(scene.objects[0].mesh is scene.objects[1].mesh)  # True
-print(again.objects[0].mesh is again.objects[1].mesh)  # False
+print(again.objects[0].mesh is again.objects[1].mesh)  # True
+print(twin.objects[0].mesh is twin.objects[1].mesh)    # True
 ```
 
 ---

@@ -123,6 +123,17 @@ left out and loads back as a fresh copy of the default. A `DataList` saves
 - **A failed save leaves the file as it was.** The whole file is written to
   scratch first, then over the target in place, so a reader holding it open,
   a link or a read-only file behave as with any plain write.
+- **An object held twice is saved once.** Two `Object`s over one `MeshData`,
+  or one `Data` in two fields, a dict or a list's items: its first tree
+  carries `"__id__"`, a number, and each later one is only
+  `{"__class__": "~ref", "id": number}`. Every format and `copy()` give back
+  one object, held in each place again, even in a field equal to its
+  default: that field is then saved, not left out. A load builds the objects
+  in the order the file holds them, so a class that reorders its fields
+  still loads its files. Only an object reached twice is numbered, so a file
+  that shares nothing is as before. A file whose reference comes before its
+  object raises `ValueError`, and so does saving an object, a dict or a list
+  that holds itself.
 - **Copies.** `copy()` is the save and load round trip, in memory. `copy.copy`
   is shallow: the same field values, caches and links rebuilt; a list's is a
   new list over the same items, but a hierarchy, which owns its nodes, gets
@@ -217,6 +228,14 @@ except ValueError as err:
 
 pins.targets = []
 print(pins.targets.shape)  # (0, 3)
+```
+
+One object held twice, here one pin set twice in a list, loads back as one:
+
+```python
+twice = PinList([pins, pins], label="twice")
+back  = PinList.load(twice.save(os.path.join(tmp, "twice.npz")))
+print(back[0] is back[1], back[0] is pins)  # True False
 ```
 
 ### A mesh is a face-vertex stream

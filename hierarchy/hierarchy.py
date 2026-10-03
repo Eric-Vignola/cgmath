@@ -11,7 +11,7 @@ import numpy as np
 from cgmath.formats._fbx_io import open_fbx
 from cgmath.formats.glb import load_model
 from cgmath.geometry import Data, DataList, ImmutableArray as numpy_array
-from cgmath.geometry._base import Array, _mask_to_indices
+from cgmath.geometry._base import Array, _mask_to_indices, _reached_twice, _save_shares
 from cgmath.transforms import (
     euler_filter,
     euler_to_matrix,
@@ -2561,7 +2561,9 @@ class TransformList(DataList):
         silently: ``get_parent`` returns None for the whole copy and a caller
         rebuilding from it gets a flat list. A copy therefore has to own what
         it holds, the same reason ``get_delta`` hands back a
-        :class:`HierarchyData` when it is called on a view.
+        :class:`HierarchyData` when it is called on a view. An object two
+        nodes hold, a mesh two Objects instance, is one object in the copy
+        too, as in any copy().
 
         Subclasses already own their nodes and keep their own class.
         """
@@ -2596,8 +2598,23 @@ class TransformList(DataList):
         reference dangles: ``get_parent`` hands back the raw uuid string and
         ``world_matrix`` raises on it. Those references are cleared, so the
         node becomes a root of the result instead.
+
+        Nodes that share nothing are copied one by one. When two of them hold
+        one object, a mesh two Objects instance, they are copied together, as
+        one save and load, so that object is one object in the copy too.
         """
-        new = HierarchyData([node.copy() for node in self])
+        if _reached_twice(self):
+            return self._owned([copy.copy(node) for node in self]).copy()
+        return self._owned([node.copy() for node in self])
+
+    def _owned(self, nodes: list) -> "HierarchyData":
+        """
+        ``nodes``, copies of these, in an owning hierarchy of their own, a
+        node whose parent is not among them made a root. A shallow copy is
+        over the values its node holds: the nodes themselves keep their owner
+        and parent, and an object they share is still one object.
+        """
+        new = HierarchyData(nodes)
         for node in new:
             if isinstance(node.get_parent(), str):
                 node.parent_node = None
@@ -2993,11 +3010,25 @@ class TransformList(DataList):
         gives: its own nodes, owned, a node whose parent the view left out
         made a root. A view on its own has no hierarchy to point its nodes
         at, so loading one back as a view would read every node as a root.
+        An object two of its nodes hold, a mesh two Objects instance, is
+        saved once, as in any tree. Inside another save that reaches an
+        object they hold twice, a mesh the view and a field both hold, the
+        view saves its nodes over the very objects they hold, not over
+        copies, so that object is saved once too.
         """
         if type(self) is TransformList:
+            if _save_shares(self):
+                return self._owned([copy.copy(node) for node in self]).to_dict()
             return self._owned_copy().to_dict()
 
         return super().to_dict()
+
+    def _saved_parts(self) -> list:
+        # a view saves copies of its nodes: a save reaches what its nodes
+        # hold, never the nodes themselves
+        if type(self) is TransformList:
+            return [part for node in self for part in node._saved_parts()]
+        return super()._saved_parts()
 
     def match(
         self, *args, exclude: bool = False, exact: bool = True

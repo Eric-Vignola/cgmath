@@ -342,7 +342,8 @@ print([type(node).__name__ for node in again])     # ['Object', 'Camera', 'Light
 Every node loads back as its own type, with its uuid and parenting, and
 the scene keeps its name, `aspect_ratio`, `default_camera_name` and the
 `configure()` keys. The cached render is not saved. Two Objects sharing
-one `MeshData` each load with their own copy.
+one `MeshData` still share one after a load or `copy()`: the file holds
+the mesh once.
 
 ---
 

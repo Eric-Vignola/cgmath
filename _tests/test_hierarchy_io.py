@@ -3,7 +3,8 @@ import os
 import pickle
 import tempfile
 import unittest
-from dataclasses import fields
+import zipfile
+from dataclasses import dataclass, field, fields
 
 import numpy as np
 from cgmath import hierarchy
@@ -47,6 +48,13 @@ def rig():
     hip.add_user_attribute("points", [[1, 2, 3], [4, 5, 6]], attribute_type="vectorArray")
     hip.add_user_attribute("empty", [], attribute_type="doubleArray")
     return h
+
+
+@dataclass(repr=False, eq=False)
+class _Holder(Data):
+    """data holding whatever a test puts in its dict"""
+
+    payload: dict = field(default_factory=dict)
 
 
 class TestHierarchyFiles(unittest.TestCase):
@@ -158,6 +166,38 @@ class TestHierarchyFiles(unittest.TestCase):
         self.assertIs(type(view), TransformList)
         self.assertIs(source["hip"].get_parent(), source["ns:root"])
         self.assertTrue(all(node._hierarchy is source for node in source))
+
+    def test_a_view_saves_the_values_its_copy_holds(self):
+        # a copy holds a numpy scalar as a python value and an array in C
+        # order, as a file gives them back. A view that shares nothing saves
+        # what its copy holds, alone or inside other data
+        source = HierarchyData()
+        values = (
+            np.float32(0.5),
+            np.int32(3),
+            np.asfortranarray(np.arange(6.0).reshape(2, 3)),
+            [np.float32(0.5), np.float32(1.5)],
+        )
+        for i, value in enumerate(values):
+            node                         = TransformData(f"n{i}")
+            node.user_defined_attributes = {"v": value}
+            source.append(node)
+        view   = source[0:4]
+
+        copied = [item["user_defined_attributes"]["v"] for item in view.copy().to_dict()["__items__"]]
+        trees = {
+            "alone":  view.to_dict(),
+            "inside": _Holder(payload={"view": view}).to_dict()["payload"]["view"],
+        }
+        for how, tree in trees.items():
+            with self.subTest(how):
+                saved = [item["user_defined_attributes"]["v"] for item in tree["__items__"]]
+                self.assertSameValue(copied, saved, "v")
+                self.assertTrue(saved[2].flags.c_contiguous)
+
+        path = view.save(os.path.join(self.tmp.name, "view.npz"))
+        with zipfile.ZipFile(path) as z, z.open("__items__/0/user_defined_attributes/v.npy") as f:
+            self.assertEqual(np.load(f).dtype, np.float64)
 
     def test_an_empty_rig_round_trips(self):
         for how, loaded in self.loaded(HierarchyData(), "empty").items():

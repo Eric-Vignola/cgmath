@@ -200,7 +200,8 @@ print(cube.indices.dtype, cube.points.dtype)  # int32 float64, whatever was pass
 
 `to_dict` / `from_dict` is the canonical form; every other format goes through
 it. A field exactly equal to its default is left out and loads back as a fresh
-copy of the default.
+copy of the default, unless it holds an object the data holds twice: then it
+is saved, and loads back as that one object.
 
 ```python
 d = cube.to_dict()

@@ -1,15 +1,16 @@
 """pkl / npz / json round trips of the render classes: Object, Camera, Light and Scene."""
 
+import copy
 import os
 import pickle
 import tempfile
 import unittest
-from dataclasses import fields
+from dataclasses import dataclass, field, fields
 
 import numpy as np
 from cgmath.geometry._base import Data, DataList
 from cgmath.geometry.mesh import MeshData, UVData
-from cgmath.hierarchy import TransformData
+from cgmath.hierarchy import HierarchyData, TransformData
 from cgmath.render import Camera, Light, Object, Scene
 
 try:
@@ -132,6 +133,13 @@ def _scene():
     return scene
 
 
+@dataclass(repr=False, eq=False)
+class _Holder(Data):
+    """data holding whatever a test puts in its dict"""
+
+    payload: dict = field(default_factory=dict)
+
+
 class RoundTripCase(unittest.TestCase):
     def assert_same(self, a, b, where="data"):
         """``b`` is exactly ``a``: its type, and every field's value, dtype and shape"""
@@ -203,6 +211,77 @@ class TestSceneRoundTrip(RoundTripCase):
     def test_a_copy_keeps_the_settings(self):
         scene = _scene()
         self.assert_same(scene, scene.copy(), "scene")
+
+    def test_objects_sharing_a_mesh_share_it_again(self):
+        """instancing: two Objects over one MeshData and UVData loaded back,
+        or copied, as two Objects over one, not over two copies"""
+        mesh, uv = _cube()
+        scene = Scene("instances")
+        scene.append(Object(name="a", mesh=mesh, uv=uv))
+        scene.append(Object(name="b", mesh=mesh, uv=uv, translate=[2.0, 0.0, 0.0]))
+        scene.append(Object(name="c", mesh=mesh.copy(), uv=uv))
+
+        loads         = {suffix: _round_trip(scene, suffix) for suffix in FORMATS}
+        loads["copy"] = scene.copy()
+        for how, loaded in loads.items():
+            with self.subTest(how):
+                a, b, c = loaded.objects
+                self.assertIs(b.mesh, a.mesh)
+                self.assertIs(b.uv,   a.uv)
+                self.assertIs(c.uv,   a.uv)
+                self.assertIsNot(c.mesh, a.mesh)
+                self.assertIsNot(a.mesh, mesh)
+                self.assert_same(mesh, a.mesh, "mesh")
+                self.assert_same(mesh, c.mesh, "mesh")
+
+    def test_a_selection_keeps_its_instancing(self):
+        """a view over Objects sharing a mesh saves and copies as a hierarchy
+        whose Objects share one, and leaves the scene's nodes as they were"""
+        mesh, uv = _cube()
+        scene = Scene("instances")
+        group = TransformData(name="group")
+        scene.append(group)
+        for name, shape in (("a", mesh), ("b", mesh), ("c", mesh.copy())):
+            scene.append(Object(name=name, mesh=shape, uv=uv))
+            scene[name].set_parent(group)
+        view = scene[1:4]
+
+        loads             = {suffix: _round_trip(view, suffix) for suffix in FORMATS}
+        loads["copy"]     = view.copy()
+        loads["deepcopy"] = copy.deepcopy(view)
+        for how, loaded in loads.items():
+            with self.subTest(how):
+                self.assertIs(type(loaded), HierarchyData)
+                a, b, c = loaded
+                self.assertIs(b.mesh, a.mesh)
+                self.assertIs(c.uv, a.uv)
+                self.assertIsNot(c.mesh, a.mesh)
+                self.assertIsNot(a.mesh, mesh)
+                self.assert_same(mesh, a.mesh, "mesh")
+                self.assertIsNone(a.get_parent())  # the group was left behind
+
+        # the scene's own nodes keep their owner and their parent
+        for name in "abc":
+            self.assertIs(scene[name]._hierarchy, scene)
+            self.assertIs(scene[name].get_parent(), group)
+
+    def test_a_selection_inside_other_data_keeps_its_instancing(self):
+        """a view a field holds shares its mesh with the field's other values"""
+        mesh, uv = _cube()
+        scene = Scene("instances")
+        scene.append(Object(name="a", mesh=mesh, uv=uv))
+        scene.append(Object(name="b", mesh=mesh, uv=uv))
+        holder = _Holder(payload={"view": scene[0:2], "mesh": mesh})
+
+        loads         = {suffix: _round_trip(holder, suffix) for suffix in FORMATS}
+        loads["copy"] = holder.copy()
+        for how, loaded in loads.items():
+            with self.subTest(how):
+                a, b = loaded.payload["view"]
+                self.assertIs(type(loaded.payload["view"]), HierarchyData)
+                self.assertIs(b.mesh, a.mesh)
+                self.assertIs(loaded.payload["mesh"], a.mesh)
+                self.assertIsNot(a.mesh, mesh)
 
     def test_none_settings_round_trip(self):
         scene = Scene("bare", resolution=None)

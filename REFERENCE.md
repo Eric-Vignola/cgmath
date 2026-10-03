@@ -651,7 +651,7 @@ Methods:
 append(self, value)
     S.append(value) -- append value to the end of the sequence
 copy(self)
-    deep copy
+    Returns a deep copy of self: the list a save and load gives back, an
 extend(self, iterable)
     S.extend(iterable) -- extend sequence by appending elements from the iterable
 classmethod from_bytes(cls, data: bytes) -> Any
@@ -685,7 +685,7 @@ strip_namespace(self, namespace: Optional[str] = None) -> None
 to_bytes(self) -> bytes
     returns a bytes object from the zipped data
 to_dict(self) -> dict
-    the list as a tree: its class, its items' trees, and its LIST_FIELDS
+    The list as a tree: its class, its items' trees, and its LIST_FIELDS.
 to_json(self) -> str
     formats the data as human readable json
 ```
@@ -733,6 +733,7 @@ Constants:
 ```text
 CLASS_KEY = '__class__'
 DTYPES_KEY = '__dtypes__'
+ID_KEY = '__id__'
 ITEMS_KEY = '__items__'
 MISSING = <dataclasses._MISSING_TYPE object at 0x000001DC7F460F50>
 SHAPES_KEY = '__shapes__'

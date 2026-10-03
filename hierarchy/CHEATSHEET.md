@@ -534,7 +534,8 @@ assert picked[0].index == 1                  # index is still the rig's
 
 `copy()` on a view returns an owning `HierarchyData`, with parent
 references that pointed outside the selection cleared. Saving, pickling
-or deep-copying a view gives the same `HierarchyData`.
+or deep-copying a view gives the same `HierarchyData`. An object two of
+its nodes hold, a mesh two Objects instance, stays one object.
 
 ```python
 detached = rig[1:].copy()

@@ -9,7 +9,8 @@ from :class:`TransformData`, so:
 
   - parent a Camera under an Object -> orbit camera
   - parent a Light under a Camera -> headlight
-  - same MeshData under multiple Objects -> free instancing (BVH shared)
+  - same MeshData under multiple Objects -> free instancing (BVH shared),
+    kept by save, load and copy(), which hold the mesh once
 
 Minimum viable scene::
 
@@ -1671,8 +1672,9 @@ class Scene(HierarchyData):
 
     Saving (pkl / npz / json) keeps every node, as its own type, with its
     parenting, and every setting below; a loaded Scene has no cached
-    render.  ``resolution`` is int32 ``(2,)`` and ``background`` float64
-    ``(4,)``, either one ``None``.
+    render.  A MeshData several Objects share is saved once and loads
+    shared again.  ``resolution`` is int32 ``(2,)`` and ``background``
+    float64 ``(4,)``, either one ``None``.
     """
 
     # render settings __init__ and configure() set on the instance, declared so
