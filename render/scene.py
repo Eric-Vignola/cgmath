@@ -72,7 +72,7 @@ from cgmath.render.camera import (
     look_at as _look_at,
 )
 from cgmath.render.texture import _load_texture
-from cgmath.hierarchy import HierarchyData, TransformData
+from cgmath.hierarchy import HierarchyData, TransformData, generate_uuid
 
 # opencv (optional) -- required by :meth:`Object.imshow` / :meth:`Scene.imshow`.
 # Lazy-import pattern matching ``cgmath.geometry.mesh`` so the module loads
@@ -2279,6 +2279,13 @@ class Scene(HierarchyData):
             pts = self.union_points()
             if pts.size > 0:
                 auto_lights = _default_lighting_rig_for(pts)
+
+            # named by a fresh uuid rather than key / fill / rim: a node that
+            # names its parent "key" would hang from the light during the
+            # render, and lose that parent_node when the pop below orphans
+            # the light's children. A uuid-shaped name never matches by name
+            for light in auto_lights:
+                light.name = generate_uuid()
 
         try:
             for light in auto_lights:

@@ -2839,6 +2839,108 @@ def _chain() -> HierarchyData:
     return rig
 
 
+def _named_chain() -> HierarchyData:
+    """the same chain as _chain, parented by name"""
+    return HierarchyData(
+        [
+            TransformData("root", translate=(1.0, 0.0, 0.0)),
+            TransformData("spine", translate=(0.0, 2.0, 0.0), parent_node="root"),
+            TransformData("head", translate=(0.0, 1.0, 0.0), parent_node="spine"),
+        ]
+    )
+
+
+class TestParentedByName(unittest.TestCase):
+    """parent_node may hold a name; children resolve the way get_parent does"""
+
+    def test_children_and_branch_follow_a_name(self):
+        rig = _named_chain()
+        self.assertIs(rig["spine"].get_parent(), rig["root"])
+        self.assertEqual(rig["root"].get_children().name, ["spine"])
+        self.assertEqual(rig["root"].get_branch().name, ["root", "spine", "head"])
+
+    def test_a_parent_edit_clears_the_childrens_cached_world_matrix(self):
+        rig = _named_chain()
+        np.testing.assert_allclose(rig["head"].world_matrix[3, :3], [1.0, 3.0, 0.0])
+
+        rig["root"].translate = (5.0, 0.0, 0.0)
+        np.testing.assert_allclose(rig["head"].world_matrix[3, :3], [5.0, 3.0, 0.0])
+
+        rig["spine"].rotate = (0.0, 0.0, 90.0)
+        np.testing.assert_allclose(
+            rig["head"].world_matrix[3, :3], [4.0, 2.0, 0.0], atol=1e-9
+        )
+
+    def test_a_shared_name_resolves_to_the_first_node_only(self):
+        # get_parent takes the first node of a name; get_children must agree
+        first  = TransformData("twin",  translate=(1.0, 0.0, 0.0))
+        second = TransformData("twin",  translate=(9.0, 0.0, 0.0))
+        child  = TransformData("child", parent_node="twin")
+        rig    = HierarchyData([first, second, child])
+
+        self.assertIs(rig["twin"], first)
+        self.assertIs(child.get_parent(), first)
+        self.assertEqual(first.get_children().name, ["child"])
+        self.assertEqual(len(second.get_children()), 0)
+
+    def test_a_uuid_shaped_name_is_matched_as_a_uuid_only(self):
+        # a parent_node shaped like a uuid looks for that uuid: a node that
+        # merely carries it as a name is not the parent, either way round
+        shaped = TransformData(generate_uuid())
+        child  = TransformData("child", parent_node=shaped.name)
+        rig    = HierarchyData([shaped, child])
+
+        self.assertEqual(rig["child"].get_parent(),  shaped.name)
+        self.assertEqual(len(shaped.get_children()), 0)
+        self.assertEqual(shaped.get_branch().name,   [shaped.name])
+
+    def test_uuid_and_name_parents_mix(self):
+        rig  = _named_chain()
+        leaf = TransformData("leaf", parent_node=rig["head"].uuid)
+        rig.append(leaf)
+        self.assertEqual(rig["root"].get_branch().name, ["root", "spine", "head", "leaf"])
+
+    def test_a_node_taken_out_with_del_or_remove_can_still_be_edited(self):
+        # del and remove() leave the node pointing at its old hierarchy, where
+        # a child still names it: an edit's branch walk must not trip on that
+        for how in ("del", "remove"):
+            with self.subTest(how):
+                rig  = _named_chain()
+                root = rig["root"]
+                if how == "del":
+                    del rig[0]
+                else:
+                    rig.remove(root)
+
+                root.translate = (4.0, 0.0, 0.0)
+                np.testing.assert_allclose(root.translate, [4.0, 0.0, 0.0])
+
+    def test_set_parent_keeps_a_link_to_a_shared_name(self):
+        # set_parent moves the branch to the end of the list. g names `c` and
+        # finds the first one, inside the branch; the move must not hand it
+        # to the other `c`, which the move leaves first
+        rig = HierarchyData(
+            [
+                TransformData("r"),
+                TransformData("p", parent_node="r"),
+                TransformData("c", translate=(1.0, 0.0, 0.0), parent_node="p"),
+                TransformData("c", translate=(9.0, 0.0, 0.0), parent_node="r"),
+                TransformData("g", parent_node="c"),
+            ]
+        )
+        first, g = rig.list[2], rig["g"]
+        self.assertIs(g.get_parent(), first)
+
+        rig["p"].set_parent("r", world_space=False)
+        self.assertEqual(rig.name, ["r", "c", "p", "c", "g"])
+        self.assertIs(g.get_parent(), first)
+        np.testing.assert_allclose(g.world_matrix[3, :3], [1.0, 0.0, 0.0])
+
+        # only a shared name is pinned to a uuid: `p` names one node
+        self.assertEqual(first.parent_node, "p")
+        self.assertEqual(g.parent_node, first.uuid)
+
+
 class TestParentLookup(unittest.TestCase):
     """_parent_indices and _owning_parent_first look parents up through dicts;
     they must give get_parent's answer for every kind of parent_node"""
@@ -2920,6 +3022,13 @@ class TestCopiesOwnTheirNodes(unittest.TestCase):
         np.testing.assert_allclose(rig["head"].world_matrix[3, :3], [1.0, 3.0, 0.0])
         rig.pop(1)
         # head lost its parent: its cached world matrix goes with it
+        np.testing.assert_allclose(rig["head"].world_matrix[3, :3], [0.0, 1.0, 0.0])
+
+    def test_pop_orphans_children_parented_by_name(self):
+        rig = _named_chain()
+        np.testing.assert_allclose(rig["head"].world_matrix[3, :3], [1.0, 3.0, 0.0])
+        rig.pop(1)
+        self.assertIsNone(rig["head"].parent_node)
         np.testing.assert_allclose(rig["head"].world_matrix[3, :3], [0.0, 1.0, 0.0])
 
     def test_nodes_built_from_one_attribute_dict_do_not_share_it(self):

@@ -1411,6 +1411,29 @@ class TestSceneRenderConfig(unittest.TestCase):
         f = scene.render(resolution=(40, 30), default_light=True)
         self.assertEqual(f.shape, (30, 40, 4))
 
+    def test_render_leaves_a_parent_named_like_a_default_light_alone(self):
+        # the default rig goes in for the render and comes out after it: a
+        # node that names a parent "key" must neither hang from that light
+        # meanwhile nor lose the name when the light is popped
+        import cgmath.render.raytracer as raytracer
+
+        scene = Scene("s", resolution=(16, 12))
+        scene.append(Object(name="cube", mesh=self.mesh, parent_node="key"))
+        parents = []
+        real    = raytracer.render
+
+        def spy(scene, **kwargs):
+            # what the cube hangs from while the lights are in the scene
+            parents.append(type(scene["cube"].get_parent()).__name__)
+            return real(scene=scene, **kwargs)
+
+        with patch.object(raytracer, "render", spy):
+            scene.render(default_light=True)
+
+        self.assertEqual(parents, ["str"])
+        self.assertEqual(scene["cube"].parent_node, "key")
+        self.assertEqual(len(scene), 1)
+
     @unittest.skipIf(Image is None, "PIL is not installed")
     def test_turntable_uses_scene_attrs(self):
         """Scene.resolution should propagate to turntable() too."""

@@ -792,13 +792,8 @@ class TestClipDeltas(unittest.TestCase):
 
 
 def _parent_by_uuid(rig):
-    """points parent_node at uuids, as every file reader does
-
-    built by name, a rig resolves its parents (get_parent accepts names) but
-    not its children (get_children matches uuids only), so writes never clear
-    a descendant's cached world matrix and the per frame reference would read
-    stale matrices
-    """
+    """points every parent_node at the parent's uuid, the form every file
+    reader writes"""
     for node in rig:
         parent = node.get_parent()
         if isinstance(parent, TransformData):
@@ -809,6 +804,8 @@ def _parent_by_uuid(rig):
 class TestClipDeltaVectorised(unittest.TestCase):
     """a single delta is solved for every frame at once; it must agree with
     HierarchyData.add_delta run against each frame on its own"""
+
+    by_uuid = False  # parent_node holds names; a subclass points it at uuids
 
     def _rig(self, names, parents, seed):
         rng = np.random.default_rng(seed)
@@ -830,7 +827,7 @@ class TestClipDeltaVectorised(unittest.TestCase):
                 for name, parent in zip(names, parents)
             ]
         )
-        return _parent_by_uuid(rig)
+        return _parent_by_uuid(rig) if self.by_uuid else rig
 
     def _chain(self, count, seed):
         names = [f"j{i}" for i in range(count)]
@@ -987,10 +984,17 @@ class TestClipDeltaVectorised(unittest.TestCase):
         self.assertEqual((sub.call_count, add.call_count), (0, 0))
 
 
+class TestClipDeltaVectorisedByUuid(TestClipDeltaVectorised):
+    """the same, parented by uuid as a file reader writes a rig"""
+
+    by_uuid = True
+
+
 class TestDeltaSolveOrder(unittest.TestCase):
     """a paired node under an unpaired one must still solve after its paired
     ancestors, or the ancestor moves afterwards and drags it off target"""
 
+    by_uuid        = False  # parent_node holds names; a subclass points it at uuids
     children_first = False  # a subclass lists every rig children first
 
     def _rig(self, names, parents, seed):
@@ -1007,7 +1011,7 @@ class TestDeltaSolveOrder(unittest.TestCase):
             for name, parent in zip(names, parents)
         ]
         rig = HierarchyData(nodes[::-1] if self.children_first else nodes)
-        return _parent_by_uuid(rig)
+        return _parent_by_uuid(rig) if self.by_uuid else rig
 
     def setUp(self):
         super().setUp()
@@ -1073,6 +1077,12 @@ class TestDeltaSolveOrder(unittest.TestCase):
 
     def test_clip_by_index_lands_every_node_on_target(self):
         self._assert_clip_lands(self.full_pose, self.full_delta, by="index")
+
+
+class TestDeltaSolveOrderByUuid(TestDeltaSolveOrder):
+    """the same, parented by uuid as a file reader writes a rig"""
+
+    by_uuid = True
 
 
 class TestDeltaSolveOrderChildrenFirst(TestDeltaSolveOrder):

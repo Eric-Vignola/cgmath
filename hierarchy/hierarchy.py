@@ -7,6 +7,7 @@ import re
 import urllib.parse
 import uuid
 import warnings
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Union
@@ -1484,12 +1485,32 @@ class TransformData(Data):
         return TransformList(branch_list[::-1])
 
     def get_children(self) -> "TransformList":
-        """returns the node's children"""
+        """returns the node's children
+
+        A child is matched the way :meth:`get_parent` resolves it: its
+        ``parent_node`` holds this node's uuid, or this node's name when this
+        is the first node carrying that name. Matching uuids alone left a rig
+        parented by name with no children below any node, so an edit never
+        cleared a descendant's cached world matrix.
+        """
         children = []
         if self._hierarchy is not None:
-            for node in self._hierarchy:
-                if node.parent_node == self.uuid:
+            # read once, and walk the plain list rather than the hierarchy's
+            # item access: this loop runs on every cache reset of a branch
+            uuid, name = self.uuid, self.name
+            by_name = None  # whether this node is the one its name resolves to
+            for node in self._hierarchy.list:
+                ref = node.parent_node
+                if ref == uuid:
                     children.append(node)
+
+                elif ref == name and ref is not None and not validate_uuid(ref):
+                    # get() rather than index(): a node taken out with del or
+                    # remove() still points here, and is no longer listed
+                    if by_name is None:
+                        by_name = self._hierarchy.get(name) is self
+                    if by_name:
+                        children.append(node)
 
         return TransformList(children)
 
@@ -1538,9 +1559,29 @@ class TransformData(Data):
             # stale and must be invalidated
             self._reset_branch_world_matrices()
 
-        # move the node and all its decendents to the end of the list
-        affected = [self._hierarchy.list.pop(node.index) for node in self.get_branch()]
+        # move the node and all its decendents to the end of the list. a name
+        # resolves to the first node carrying it, so a link inside the branch
+        # whose name another node shares would follow that node once the
+        # branch lands behind it: those links are pinned to the uuid first
+        branch = self.get_branch()
+        self._pin_shared_names(branch)
+        affected = [self._hierarchy.list.pop(node.index) for node in branch]
         self._hierarchy.extend(affected)
+
+    def _pin_shared_names(self, nodes) -> None:
+        """points each of ``nodes`` whose ``parent_node`` is a name other
+        nodes carry too at its parent's uuid, so that a reorder cannot hand
+        it to another node of that name"""
+        refs = [n.parent_node for n in nodes]
+        if not any(isinstance(ref, str) and not validate_uuid(ref) for ref in refs):
+            return
+
+        counts = Counter(n.name for n in self._hierarchy.list)
+        for node, ref in zip(nodes, refs):
+            if isinstance(ref, str) and counts[ref] > 1 and not validate_uuid(ref):
+                parent = node.get_parent()
+                if isinstance(parent, TransformData):
+                    node.parent_node = parent.uuid
 
     def add_prefix(self, prefix: str) -> None:
         """adds a prefix to the node's name
@@ -3463,15 +3504,18 @@ class HierarchyData(TransformList):
         if index < 0 or index >= len(self.list):
             raise IndexError("pop index out of range")
 
+        # its children are found while it is still listed: a child may name
+        # it by uuid or by name, and get_children resolves both
+        children = list(self.list[index].get_children())
+
         # extract the node and remove pointer
         node            = self.list.pop(index)
         node._hierarchy = None
 
         # any node in the list which had this node as a parent is now at root
-        for obj in self.list:
-            if obj.parent_node == node.uuid:
-                obj.parent_node = None
-                obj._reset_branch_world_matrices()
+        for obj in children:
+            obj.parent_node = None
+            obj._reset_branch_world_matrices()
 
         return node
 

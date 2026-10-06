@@ -203,8 +203,10 @@ rig["hip"].rotate_z = 90.0                 # the branch follows
 print(rig["knee"].world_matrix[3, :3].round(6))     # [-10. 10. 0.]
 ```
 
-Parenting is by **uuid**. Use `set_parent(name)` — passing a name straight
-to `parent_node=` builds a rig whose `get_children()` comes back empty.
+`set_parent(name)` stores the parent's **uuid**. A name passed straight to
+`parent_node=` works as well — `get_parent()` and `get_children()` both
+follow it to the first node of that name — but only a uuid holds when names
+repeat or change.
 
 ```python
 print(rig["hip"].parent_node == rig["root"].uuid)   # True

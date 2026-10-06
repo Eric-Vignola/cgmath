@@ -42,8 +42,8 @@ overview see [`README.md`](README.md); for the rest of the library see
 ## Setup
 
 No rig assets ship with this package, so build one inline. `set_parent`
-is used rather than a raw `parent_node` string, because parenting is
-resolved through the parent's **uuid** (see [Gotchas](#gotchas)).
+is used rather than a raw `parent_node` string: it stores the parent's
+**uuid**, a link no repeated name can move (see [Gotchas](#gotchas)).
 
 ```python
 import os
@@ -300,9 +300,22 @@ rig["hip"].translate = (0.0, 4.0, 0.0)             # a parent moves
 assert np.allclose(rig["knee"].world_matrix[3, :3], [0.0, 14.0, 0.0])
 ```
 
-The branch walk is `get_children`, which matches on **uuid**. A node
-whose `parent_node` holds a *name* is not seen as a child, so its cached
-world matrix is not cleared — parent with `set_parent` or a uuid.
+The branch walk is `get_children`, which reads `parent_node` the way
+`get_parent` does: the parent's uuid, or its name, meaning the first node
+that carries it. A child parented either way is cleared with the branch.
+
+```python
+named = HierarchyData(
+    [
+        TransformData("root"),
+        TransformData("tip", translate=(0.0, 1.0, 0.0), parent_node="root"),
+    ]
+)
+assert np.allclose(named["tip"].world_matrix[3, :3], [0.0, 1.0, 0.0])
+
+named["root"].translate = (5.0, 0.0, 0.0)          # parented by name, still cleared
+assert np.allclose(named["tip"].world_matrix[3, :3], [5.0, 1.0, 0.0])
+```
 
 ---
 
@@ -1386,7 +1399,7 @@ rig["hip"].match("hip")                         # True
 
 | Trap | What happens | Do this |
 |---|---|---|
-| `parent_node` holding a **name** | `get_parent()` resolves it, but `get_children()` / `get_branch()` match on **uuid** and come back empty — so the world-matrix cache of the branch is never invalidated | parent with `set_parent(name)`, or set `parent_node` to the parent's `uuid` |
+| `parent_node` holding a **name** | `get_parent()`, `get_children()` and `get_branch()` follow it to the **first** node of that name: another node of that name never gets the child, one inserted ahead of the parent takes it over, and renaming the parent leaves the child naming a node that is gone | parent with `set_parent(name)`, or set `parent_node` to the parent's `uuid` |
 | `world_matrix` as a call | it is a **property** on every type here | `node.world_matrix`, not `node.world_matrix()` |
 | mutating a channel getter | `node.rotate[0] = 5` writes to a throwaway copy | read, edit, assign back |
 | `clip.frames.rotate += 5` | the block getter is read-only, so `+=` raises | `np.array(...)` then assign, or use `rotate_y += 5` |
