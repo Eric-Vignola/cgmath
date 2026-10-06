@@ -1083,7 +1083,9 @@ for frame in range(4):
     assert np.allclose(recovered.world_matrix, clip.world_matrix, atol=1e-6)
 ```
 
-The retarget case — one fixed offset applied to every frame:
+The retarget case — one fixed offset applied to every frame. A single delta
+is solved for every frame at once, with no copy of the rig per frame; a
+clip of deltas is solved a frame at a time:
 
 ```python
 target     = make_chain(("root", "hip", "knee"), step=(0.0, 12.0, 0.0))

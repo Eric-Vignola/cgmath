@@ -4,13 +4,15 @@ import os
 import pickle
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 from cgmath import hierarchy
 from cgmath.formats.glb import pygltflib
-from cgmath.transforms import euler_to_quaternion, quaternion_slerp
-from cgmath.hierarchy import ClipData, HierarchyData, TransformData
+from cgmath.transforms import euler_to_quaternion, quaternion_slerp, quaternion_to_matrix
+from cgmath.hierarchy import ClipData, HierarchyData, TransformData, TransformList
 from cgmath.hierarchy import _fbx_frame_rate, FBX
+from cgmath.hierarchy.hierarchy import _rotation
 
 if pygltflib is not None:
     from pygltflib import (
@@ -787,6 +789,297 @@ class TestClipDeltas(unittest.TestCase):
         self.assertFalse(
             np.allclose(with_translate.frames.translate, without.frames.translate)
         )
+
+
+def _parent_by_uuid(rig):
+    """points parent_node at uuids, as every file reader does
+
+    built by name, a rig resolves its parents (get_parent accepts names) but
+    not its children (get_children matches uuids only), so writes never clear
+    a descendant's cached world matrix and the per frame reference would read
+    stale matrices
+    """
+    for node in rig:
+        parent = node.get_parent()
+        if isinstance(parent, TransformData):
+            node.parent_node = parent.uuid
+    return rig
+
+
+class TestClipDeltaVectorised(unittest.TestCase):
+    """a single delta is solved for every frame at once; it must agree with
+    HierarchyData.add_delta run against each frame on its own"""
+
+    def _rig(self, names, parents, seed):
+        rng = np.random.default_rng(seed)
+        rig = HierarchyData(
+            [
+                TransformData(
+                    name         = name,
+                    node_type    = "joint",
+                    parent_node  = parent,
+                    translate    = rng.normal(size=3),
+                    rotate       = rng.uniform(-90.0, 90.0, size=3),
+                    joint_orient = rng.uniform(-30.0, 30.0, size=3),
+                    rotate_axis  = rng.uniform(-20.0, 20.0, size=3),
+                    rotate_order = int(rng.integers(0, 6)),
+                    # mixed: compensation is the one solve that reads the
+                    # parent's solved scale
+                    segment_scale_compensate=bool(rng.integers(0, 2)),
+                )
+                for name, parent in zip(names, parents)
+            ]
+        )
+        return _parent_by_uuid(rig)
+
+    def _chain(self, count, seed):
+        names = [f"j{i}" for i in range(count)]
+        return self._rig(names, [None] + names[:-1], seed)
+
+    def _animated(self, rig, frames=6, seed=9, scale=True):
+        rng                   = np.random.default_rng(seed)
+        clip                  = ClipData(rig, frames=frames, start_frame=1001, fps=30.0)
+        shape                 = clip.frames.rotate.shape
+        clip.frames.rotate    = clip.frames.rotate + rng.normal(size=shape) * 20.0
+        clip.frames.translate = clip.frames.translate + rng.normal(size=shape) * 0.3
+        if scale:
+            clip.frames.scale = 1.0 + rng.uniform(-0.3, 0.3, size=shape)
+        return clip
+
+    def _per_frame(self, clip, delta, **kwargs):
+        """the reference: the single pose add_delta against every frame"""
+        poses = []
+        for frame in range(clip.frame_count):
+            clip.frame = frame
+            poses.append(HierarchyData.add_delta(clip, delta, **kwargs))
+        return ClipData.from_poses(poses, start_frame=clip.start_frame, fps=clip.fps)
+
+    def _frozen(self, clip, frame):
+        """the whole clip at one frame, as a pose of its own"""
+        clip.frame = frame
+        return HierarchyData([node.copy() for node in clip])
+
+    def _assert_same(self, fast, slow):
+        # exact: the same algebra, step for step, gives the same bits
+        self.assertEqual(fast.name, slow.name)
+        self.assertEqual(fast.uuid, slow.uuid)
+        self.assertEqual([n.parent_node for n in fast], [n.parent_node for n in slow])
+        self.assertEqual(fast.frame_count, slow.frame_count)
+        self.assertEqual(fast.start_frame, slow.start_frame)
+        self.assertEqual(fast.fps, slow.fps)
+        for channel in ("rotate", "translate", "scale", "joint_orient", "rotate_axis"):
+            np.testing.assert_array_equal(
+                getattr(fast.frames, channel), getattr(slow.frames, channel), channel
+            )
+        np.testing.assert_array_equal(fast.frames.world_matrix, slow.frames.world_matrix)
+
+    # --- add_delta with one delta --- #
+    def test_index_pairing_matches_per_frame(self):
+        source = self._chain(6, seed=5)
+        target = self._chain(6, seed=17)
+        clip   = self._animated(source)
+        delta  = target.get_delta(source)
+
+        self._assert_same(clip.add_delta(delta), self._per_frame(clip, delta))
+
+    def test_orientation_only_matches_per_frame(self):
+        source = self._chain(6, seed=5)
+        target = self._chain(6, seed=17)
+        clip   = self._animated(source)
+        delta  = target.get_delta(source, translate=False)
+
+        self._assert_same(
+            clip.add_delta(delta, translate=False),
+            self._per_frame(clip, delta, translate=False),
+        )
+
+    def test_name_pairing_over_part_of_the_rig_matches_per_frame(self):
+        # the delta covers joints the clip never drives (d_extra, j2) and the
+        # clip drives one the delta lacks (c_extra)
+        names   = ["j0", "j1", "j2", "j3", "d_extra"]
+        parents = [None, "j0", "j1", "j2", "j1"]
+        target  = self._rig(names, parents, seed=17)
+        bind    = self._rig(names, parents, seed=5)
+        delta   = target.get_delta(bind, by="name")
+
+        animated = self._rig(
+            ["j0", "j1", "j3", "c_extra"], [None, "j0", "j1", "j3"], seed=5
+        )
+        clip = self._animated(animated)
+
+        self._assert_same(
+            clip.add_delta(delta, by="name"),
+            self._per_frame(clip, delta, by="name"),
+        )
+
+    def test_a_scaled_delta_matches_per_frame(self):
+        # a delta scale other than 1: under compensation each joint's scale
+        # delta is rebuilt through its parent's
+        source       = self._chain(6, seed=5)
+        target       = self._chain(6, seed=17)
+        target.scale = np.linspace(0.8, 1.4, 18).reshape(6, 3)
+        clip         = self._animated(source)
+        delta        = target.get_delta(source)
+        self.assertFalse(np.allclose(delta.scale, 1.0))
+
+        self._assert_same(clip.add_delta(delta), self._per_frame(clip, delta))
+
+    def test_a_clip_of_deltas_still_pairs_frame_for_frame(self):
+        # no scale animation: a non-uniform parent scale without segment
+        # scale compensation shears the child, which a delta (a rotation per
+        # node) cannot carry, so that round trip was never exact
+        rig = self._chain(5, seed=5)
+        a   = self._animated(rig, seed=9, scale=False)
+        b   = self._animated(rig, seed=21, scale=False)
+
+        recovered = b.add_delta(a.get_delta(b))
+        self.assertTrue(
+            np.allclose(recovered.frames.world_matrix, a.frames.world_matrix, atol=1e-6)
+        )
+
+    def test_source_clip_is_left_alone(self):
+        source     = self._chain(5, seed=5)
+        clip       = self._animated(source)
+        clip.frame = 3
+        before     = {c: np.array(getattr(clip.frames, c)) for c in ("rotate", "translate", "scale")}
+
+        clip.add_delta(self._chain(5, seed=17).get_delta(source))
+
+        self.assertEqual(clip.frame, 3)
+        for channel, values in before.items():
+            self.assertTrue(np.array_equal(getattr(clip.frames, channel), values))
+
+    def test_a_view_of_the_clip_is_one_delta_at_its_bound_frame(self):
+        # a selection is one pose, even one of the clip that receives it: it
+        # is read at the frame the clip is on, not paired frame for frame
+        clip   = self._animated(self._chain(5, seed=5))
+        frozen = self._frozen(clip, 1)
+
+        self._assert_same(
+            clip.add_delta(clip.match("j1", "j2", "j3"), by="name"),
+            clip.add_delta(frozen.match("j1", "j2", "j3"), by="name"),
+        )
+
+    def test_a_clip_with_no_frames_is_one_delta(self):
+        source = self._chain(5, seed=5)
+        clip   = self._animated(source)
+        delta  = self._chain(5, seed=17).get_delta(source)
+
+        self._assert_same(clip.add_delta(ClipData(delta)), clip.add_delta(delta))
+
+    def test_no_frame_is_solved_on_its_own(self):
+        # one delta, every frame at once: it may not run the single pose
+        # solve, which is what a loop over the frames calls
+        source = self._chain(5, seed=5)
+        target = self._chain(5, seed=17)
+        clip   = self._animated(source, frames=12)
+        delta  = target.get_delta(source)
+
+        isub = mock.patch.object(
+            TransformList, "__isub__", autospec=True, side_effect=TransformList.__isub__
+        )
+        iadd = mock.patch.object(
+            TransformList, "__iadd__", autospec=True, side_effect=TransformList.__iadd__
+        )
+        with isub as sub, iadd as add:
+            clip.add_delta(delta)
+
+        self.assertEqual((sub.call_count, add.call_count), (0, 0))
+
+
+class TestDeltaSolveOrder(unittest.TestCase):
+    """a paired node under an unpaired one must still solve after its paired
+    ancestors, or the ancestor moves afterwards and drags it off target"""
+
+    children_first = False  # a subclass lists every rig children first
+
+    def _rig(self, names, parents, seed):
+        rng = np.random.default_rng(seed)
+        nodes = [
+            TransformData(
+                name         = name,
+                node_type    = "joint",
+                parent_node  = parent,
+                translate    = rng.normal(size=3),
+                rotate       = rng.uniform(-90.0, 90.0, size=3),
+                joint_orient = rng.uniform(-30.0, 30.0, size=3),
+            )
+            for name, parent in zip(names, parents)
+        ]
+        rig = HierarchyData(nodes[::-1] if self.children_first else nodes)
+        return _parent_by_uuid(rig)
+
+    def setUp(self):
+        super().setUp()
+        # under a name pairing `c` is a subset root (its parent `b` is not in
+        # the pose), so the pairing alone would rank it beside `root`, ahead
+        # of `a` -- which it hangs under
+        names       = ["root", "a", "b", "c"]
+        parents     = [None, "root", "a", "b"]
+        self.target = self._rig(names, parents, seed=17)
+        self.bind   = self._rig(names, parents, seed=5)
+        self.delta  = self.target.get_delta(self.bind, by="name")
+        self.pose   = self._rig(["root", "a", "c"], [None, "root", "a"], seed=23)
+
+        # by index the pairing is the whole rig, so its parents are the real
+        # ones: only the list order can still put a child ahead of its parent
+        self.full_delta = self.target.get_delta(self.bind)
+        self.full_pose  = self._rig(names, parents, seed=29)
+
+    def _expected(self, pose, delta):
+        """the world matrix each paired node of the result must land on"""
+        expected = {}
+        for node in pose:
+            offset              = delta[node.name]
+            M                   = quaternion_to_matrix(offset.quaternion)[0]
+            W                   = node.world_matrix
+            target              = np.dot(M, _rotation(W))
+            target[3, :3]       = W[3, :3] + offset.translate
+            expected[node.name] = target
+        return expected
+
+    def _assert_lands(self, pose, delta, by):
+        # read through a copy, whose world matrices are rebuilt from the
+        # solved channels: a cached matrix can hide a wrong solve
+        posed = pose.add_delta(delta, by=by).copy()
+        for name, target in self._expected(pose, delta).items():
+            np.testing.assert_allclose(
+                posed[name].world_matrix, target, rtol=0, atol=1e-9, err_msg=name
+            )
+
+    def _assert_clip_lands(self, pose, delta, by):
+        clip               = ClipData(pose, frames=3)
+        rng                = np.random.default_rng(3)
+        clip.frames.rotate = clip.frames.rotate + rng.normal(size=(3, len(pose), 3)) * 20.0
+
+        posed = clip.add_delta(delta, by=by)
+        world = posed.frames.world_matrix
+        for frame in range(clip.frame_count):
+            clip.frame = frame
+            for name, target in self._expected(clip, delta).items():
+                np.testing.assert_allclose(
+                    world[frame, posed.index(name)], target, rtol=0, atol=1e-9,
+                    err_msg=f"{name} frame {frame}",
+                )
+
+    def test_single_pose_lands_every_paired_node_on_target(self):
+        self._assert_lands(self.pose, self.delta, by="name")
+
+    def test_clip_lands_every_paired_node_on_target(self):
+        self._assert_clip_lands(self.pose, self.delta, by="name")
+
+    def test_single_pose_by_index_lands_every_node_on_target(self):
+        self._assert_lands(self.full_pose, self.full_delta, by="index")
+
+    def test_clip_by_index_lands_every_node_on_target(self):
+        self._assert_clip_lands(self.full_pose, self.full_delta, by="index")
+
+
+class TestDeltaSolveOrderChildrenFirst(TestDeltaSolveOrder):
+    """the same with every rig listing children ahead of their parents: the
+    solve order comes from the hierarchy, never from the list"""
+
+    children_first = True
 
 
 class TestClipScopedFrames(unittest.TestCase):

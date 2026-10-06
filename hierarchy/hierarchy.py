@@ -2023,6 +2023,41 @@ def _fbx_frame_rate(mode) -> float:
     return 0.0
 
 
+def _parent_resolver():
+    """a function giving a node's parent by :meth:`TransformData.get_parent`'s
+    rules, through dicts
+
+    get_parent scans its hierarchy twice a call, so resolving every node of a
+    rig that way costs N^2. This keeps one uuid and one name dict per owning
+    hierarchy, built the first time a node of it is asked about, and applies
+    the same rules: a uuid-shaped reference is matched against uuids only,
+    any other string is the first node of that name, and a reference nothing
+    matches comes back as the string. Only for a pass that does not edit the
+    hierarchy while it resolves.
+    """
+    tables = {}
+
+    def parent_of(node):
+        hierarchy, ref = node._hierarchy, node.parent_node
+        if hierarchy is None or ref is None:
+            return None
+        if not isinstance(ref, str):
+            return node.get_parent()
+
+        table = tables.get(id(hierarchy))
+        if table is None:
+            by_uuid, by_name = {}, {}
+            for member in hierarchy.list:
+                by_uuid.setdefault(member.uuid, member)
+                by_name.setdefault(member.name, member)
+            table = tables[id(hierarchy)] = (by_uuid, by_name)
+
+        found = table[0] if validate_uuid(ref) else table[1]
+        return found.get(ref, ref)
+
+    return parent_of
+
+
 class TransformList(DataList):
     """Non-owning ordered view over ``TransformData`` nodes.
 
@@ -2346,18 +2381,44 @@ class TransformList(DataList):
         parent and is then dragged when the parent moves. depth is measured in
         the owning hierarchy, so a view that skips levels still orders right.
         """
-        depth = np.zeros(len(self), dtype=int)
-        for i, node in enumerate(self):
-            seen, parent, count = set(), node.get_parent(), 0
+        return TransformList._owning_parent_first(self)
 
-            # a parent outside the hierarchy resolves to a uuid string, which
-            # ends the walk; the seen set guards a cyclic parent_node
-            while isinstance(parent, TransformData) and id(parent) not in seen:
+    @staticmethod
+    def _owning_parent_first(nodes) -> List[int]:
+        """:meth:`_parent_first` for any sequence of nodes, eg: a pairing
+
+        A node's depth is its parent's plus one, so each ancestor is resolved
+        once however many nodes hang below it, and through dicts rather than
+        get_parent's scans of the hierarchy.
+        """
+        parent_of = _parent_resolver()
+        known     = {}  # id(node) -> depth, for nodes whose walk reaches a root
+        depth     = np.zeros(len(nodes), dtype=int)
+        for i, node in enumerate(nodes):
+            walked, seen, parent = [], set(), parent_of(node)
+
+            # a parent outside the hierarchy resolves to a string, which ends
+            # the walk; so does an ancestor whose depth is already known
+            while (
+                isinstance(parent, TransformData)
+                and id(parent) not in known
+                and id(parent) not in seen
+            ):
                 seen.add(id(parent))
-                count += 1
-                parent = parent.get_parent()
+                walked.append(parent)
+                parent = parent_of(parent)
 
-            depth[i] = count
+            # a cyclic parent_node: the walk stops where it repeats, and the
+            # depths it passed depend on where it started, so none is kept
+            if isinstance(parent, TransformData) and id(parent) in seen:
+                depth[i] = len(walked)
+                continue
+
+            level = known[id(parent)] + 1 if isinstance(parent, TransformData) else 0
+            for ancestor in reversed(walked):
+                known[id(ancestor)] = level
+                level += 1
+            known[id(node)] = depth[i] = level
 
         return list(np.argsort(depth, kind="stable"))
 
@@ -2912,9 +2973,10 @@ class TransformList(DataList):
         over the values its node holds: the nodes themselves keep their owner
         and parent, and an object they share is still one object.
         """
-        new = HierarchyData(nodes)
-        for node in new:
-            if isinstance(node.get_parent(), str):
+        new       = HierarchyData(nodes)
+        parent_of = _parent_resolver()
+        for node in new.list:
+            if isinstance(parent_of(node), str):
                 node.parent_node = None
 
         return new
@@ -2975,10 +3037,11 @@ class TransformList(DataList):
         # positions within THIS pairing, never `node.index`: that is the
         # position in the OWNING hierarchy, which for a selection or a
         # partial rig points at the wrong node -- or at the node itself
-        position = {node.uuid: i for i, node in enumerate(nodes)}
-        indices  = np.full(len(nodes), -1, dtype=int)
+        position  = {node.uuid: i for i, node in enumerate(nodes)}
+        indices   = np.full(len(nodes), -1, dtype=int)
+        parent_of = _parent_resolver()
         for i, node in enumerate(nodes):
-            parent = node.get_parent()
+            parent = parent_of(node)
 
             # a parent left out of the pairing resolves to a uuid string
             # or is simply absent; either way the node is a subset root
@@ -3025,6 +3088,13 @@ class TransformList(DataList):
         the pairing. :meth:`_parent_first` is the equivalent for a plain view
         and measures depth in the owning hierarchy instead.
         """
+        depth = TransformList._parent_depths(parents)
+        return list(np.argsort(depth, kind="stable"))
+
+    @staticmethod
+    def _parent_depths(parents: np.ndarray) -> np.ndarray:
+        """How many ancestors each node has through ``parents``, a cyclic
+        parent map counting each ancestor once."""
         depth = np.zeros(len(parents), dtype=int)
         for i in range(len(parents)):
             d, p, seen = 0, parents[i], set()
@@ -3033,7 +3103,7 @@ class TransformList(DataList):
                 d += 1
                 p = parents[p]
             depth[i] = d
-        return list(np.argsort(depth, kind="stable"))
+        return depth
 
     def __isub__(self, other, by: str = "index", translate: bool = True):
         """In-place subtraction: ``self`` becomes the delta ``self - other``."""
@@ -3143,8 +3213,11 @@ class TransformList(DataList):
             target[:, 3, :3] = w_other[:, 3, :3] + t_self
 
         # parent first, so every node solves against a parent already
-        # converted into the target frame
-        for i in self._parent_first_order(parents):
+        # converted into the target frame. the order comes from the OWNING
+        # hierarchy, not the pairing: under a name pairing a node whose
+        # parent is unpaired is a subset root there, and could be solved
+        # before a paired grandparent that later moves and drags it
+        for i in self._owning_parent_first(nodes_self):
             node = nodes_self[i]
 
             # a true inverse is required: a scaled parent's world matrix has
@@ -3442,10 +3515,30 @@ def _euler_matrices(degrees: np.ndarray, orders: Optional[np.ndarray]) -> np.nda
     return out.reshape(frames, count, 4, 4)
 
 
-def _evaluate_local(clip: "ClipData") -> np.ndarray:
+def _matrices_to_euler(matrices: np.ndarray, orders: np.ndarray) -> np.ndarray:
+    """(F, N, 4, 4) rotations as (F, N, 3) euler degrees, ``orders`` per node
+
+    The inverse of :func:`_euler_matrices`, batched the same way: one solve
+    per rotate order actually present.
+    """
+    frames, count = matrices.shape[:2]
+    out = np.empty((frames, count, 3), dtype=float)
+    for order in np.unique(orders):
+        cols = np.flatnonzero(orders == order)
+        flat = np.ascontiguousarray(matrices[:, cols]).reshape(-1, 4, 4)
+        out[:, cols] = np.degrees(matrix_to_euler(flat, int(order))).reshape(
+            frames, len(cols), 3
+        )
+    return out
+
+
+def _evaluate_local(
+    clip: "ClipData", parents: Optional[np.ndarray] = None
+) -> np.ndarray:
     """every frame's local matrices as (F, N, 4, 4)
 
     Mirrors TransformData.matrix factor for factor: S * RO * R * JO * IS * T.
+    ``parents`` is the clip's parent map, when the caller already has it.
     """
     blocks = clip._blocks
     scale  = blocks["_scale"]
@@ -3455,7 +3548,8 @@ def _evaluate_local(clip: "ClipData") -> np.ndarray:
     compensate = np.array(
         [bool(node.segment_scale_compensate) for node in nodes], dtype=bool
     )
-    parents = clip._parent_indices(nodes)
+    if parents is None:
+        parents = clip._parent_indices(nodes)
 
     # the parent's scale is per frame, the flag that applies it is structural
     inverse  = np.ones(scale.shape, dtype=float)
@@ -3644,8 +3738,9 @@ class _FrameAxis:
     @property
     def world_matrix(self) -> np.ndarray:
         """every frame's world matrices, (F, N, 4, 4)"""
-        clip  = self._clip
-        world = _evaluate_world(_evaluate_local(clip), clip._parent_indices(clip.list))
+        clip    = self._clip
+        parents = clip._parent_indices(clip.list)
+        world   = _evaluate_world(_evaluate_local(clip, parents), parents)
         return self._scoped(world)
 
     scale          = _frame_property("_scale")
@@ -3866,6 +3961,31 @@ class ClipData(HierarchyData):
         clip.frame = 0
         return clip
 
+    @classmethod
+    def _adopt(
+        cls, hierarchy: HierarchyData, frames: int, start_frame: int, fps: float
+    ) -> "ClipData":
+        """a clip of ``frames`` frames over the very nodes of ``hierarchy``,
+        which is left empty
+
+        The constructor copies every node, so a clip never takes a caller's
+        rig. A hierarchy built only to become a clip -- a delta's working
+        copy -- is handed over instead of being copied a second time.
+        """
+        clip              = cls.__new__(cls)
+        clip._blocks      = {}
+        clip._columns     = []
+        clip._frame       = 0
+        clip._start_frame = int(start_frame)
+        clip._fps         = float(fps)
+        clip.list         = hierarchy.list
+        hierarchy.list    = []
+        for node in clip.list:
+            node._hierarchy = clip
+
+        clip._allocate(int(frames))
+        return clip
+
     # --- pose algebra --- #
     def _other_pose(self, other, frame: int):
         """the pose of ``other`` to pair with ``frame`` of this clip"""
@@ -3912,15 +4032,176 @@ class ClipData(HierarchyData):
 
         ``delta`` is either one delta applied to every frame -- the retarget
         case, where the offset is fixed to the bone -- or a clip of deltas.
+        One delta is solved for every frame at once; a clip of deltas is
+        solved a frame at a time. A selection or view, even one of this clip,
+        is one delta, read at the frame it is bound to; so is a clip with no
+        frames.
         """
         if not self._blocks:
             return HierarchyData.add_delta(self, delta, by=by, translate=translate)
+
+        # one delta for the whole clip is solved every frame at once; a clip
+        # of deltas pairs frame for frame and keeps the per frame route
+        if not (isinstance(delta, ClipData) and delta._blocks):
+            return self._add_delta_all_frames(delta, by=by, translate=translate)
 
         return self._per_frame(
             lambda frame: HierarchyData.add_delta(
                 self, self._other_pose(delta, frame), by=by, translate=translate
             )
         )
+
+    def _add_delta_all_frames(self, delta, by: str, translate: bool) -> "ClipData":
+        """:meth:`HierarchyData.add_delta` against every frame, vectorised.
+
+        The per frame route copies the whole rig and solves it node by node
+        once per frame. This runs the same algebra -- step for step, so the
+        channels come out the same to rounding -- once per level of the
+        delta's hierarchy, batched over the frame axis and the level's nodes:
+        the source's world matrices come from one evaluation of the clip, and
+        a level solves against the final world matrices of the level above.
+        The delta is read once, so what is built from it alone -- its
+        orientation offsets, rotate axes and joint orients -- is built once
+        and broadcast over the frames. Nodes of ``delta`` the clip does not
+        pair keep the delta's own channels, as they do per frame.
+        """
+        self._realign()
+        frames = self.frame_count
+
+        # the result is built from the delta, as HierarchyData.add_delta is
+        new = delta._owned_copy()
+        nodes_new, nodes_clip, pairing_parents = new._matched_subset(self, by=by)
+
+        nodes   = list(new.list)
+        count   = len(nodes)
+        parents = self._parent_indices(nodes)
+        row     = {id(node): i for i, node in enumerate(nodes)}
+        column  = {id(node): j for j, node in enumerate(self.list)}
+
+        # paired[i]: position of node i within the pairing, -1 when unpaired
+        paired = np.full(count, -1, dtype=int)
+        for k, node in enumerate(nodes_new):
+            paired[row[id(node)]] = k
+        source = np.array([column[id(node)] for node in nodes_clip], dtype=int)
+        rows   = [row[id(n)] for n in nodes_new]
+
+        # the delta's own channels, read once: a single frame, which
+        # broadcasts against the clip's frames below
+        d = {}
+        for channel in self.FRAMED_CHANNELS:
+            pose       = np.array([getattr(n, channel) for n in nodes], dtype=float)
+            d[channel] = pose.reshape(1, count, 3)
+        orders     = np.array([n.rotate_order for n in nodes], dtype=int)
+        compensate = np.array([bool(n.segment_scale_compensate) for n in nodes])
+        RO         = _euler_matrices(d["_rotate_axis"], None)  # (1, N, 4, 4)
+        RO_inverse = np.linalg.inv(RO)
+        JO         = _euler_matrices(d["_joint_orient"], None)
+        R          = _euler_matrices(d["_rotate"][:, rows], orders[rows])
+
+        # F: each paired node's orientation chain RO * R * JO, through a
+        # quaternion as TransformData.quaternion reads it
+        chain = RO[:, rows] @ R @ JO[:, rows]
+        f_delta = quaternion_to_matrix(
+            matrix_to_quaternion(chain.reshape(-1, 4, 4))
+        ).reshape(chain.shape)
+
+        # scale: the uncompensated base delta, rebuilt over the pairing as
+        # HierarchyData.__iadd__ does, then offset by the source scale
+        s_pair     = d["_scale"][:, rows]
+        base_delta = s_pair.copy()
+        for k in self._parent_first_order(pairing_parents):
+            if compensate[rows[k]] and pairing_parents[k] > -1:
+                base_delta[:, k] = s_pair[:, k] * base_delta[:, pairing_parents[k]]
+
+        w_source = self.frames.world_matrix  # (F, Nc, 4, 4)
+        s_source = self._blocks["_scale"]    # (F, Nc, 3)
+
+        # output blocks, seeded with the delta's channels for the unpaired nodes
+        shape  = (frames, count, 3)
+        scale  = np.array(np.broadcast_to(d["_scale"], shape))
+        rotate = np.array(np.broadcast_to(d["_rotate"], shape))
+        offset = np.array(np.broadcast_to(d["_translate"], shape))
+        world  = np.empty((frames, count, 4, 4), dtype=float)
+
+        # one level of the delta's hierarchy at a time, every node of it
+        # together, against the final world matrices of the level above.
+        # `parents` covers all of `new`, so its depths are the owning
+        # hierarchy's: the order HierarchyData.__iadd__ solves in
+        depth = self._parent_depths(parents)
+        for level in range(int(depth.max()) + 1):
+            idx    = np.flatnonzero(depth == level)
+            above  = parents[idx]
+            rooted = above > -1
+
+            parent_world            = np.empty((frames, len(idx), 4, 4), dtype=float)
+            parent_world[:]         = np.eye(4)
+            parent_world[:, rooted] = world[:, above[rooted]]
+
+            # i: the level's paired nodes, k: their places in the pairing
+            solved = paired[idx] > -1
+            if solved.any():
+                i    = idx[solved]
+                k    = paired[i]
+                many = (frames, len(i), 4, 4)
+                flat = (frames * len(i), 4, 4)
+
+                # target world: the source orientation carried into this rig's
+                # frame by F, at the source position plus the stored offset
+                w_other = w_source[:, source[k]]
+                offsets = np.ascontiguousarray(np.broadcast_to(f_delta[:, k], many))
+                target = matrix_multiply(
+                    offsets.reshape(flat), _rotation(w_other).reshape(flat)
+                ).reshape(many)
+                if translate:
+                    target[..., 3, :3] = w_other[..., 3, :3] + d["_translate"][:, i]
+
+                # a true inverse: a scaled parent's world is not orthogonal
+                local = target @ np.linalg.inv(parent_world[:, solved])
+
+                # TransformData.quaternion's setter, step for step: the chain
+                # is RO * R * JO, solved for the pure rotate R
+                Q      = matrix_to_quaternion(_rotation(local).reshape(flat))
+                M      = quaternion_to_matrix(Q).reshape(many)
+                orient = np.ascontiguousarray(np.broadcast_to(JO[:, i], many))
+                L = local_matrix(
+                    (RO_inverse[:, i] @ M).reshape(flat), orient.reshape(flat)
+                )
+                rotate[:, i] = _matrices_to_euler(L.reshape(many), orders[i])
+                scale[:, i]  = s_source[:, source[k]] - 1 + base_delta[:, k]
+                if translate:
+                    offset[:, i] = local[..., 3, :3]
+
+            # the level's world for the children below it, factor for factor
+            # S * RO * R * JO * IS * T as TransformData.matrix composes it
+            inverse                 = np.ones((frames, len(idx), 3))
+            compensated             = rooted & compensate[idx]
+            inverse[:, compensated] = scale[:, above[compensated]]
+
+            local_world = (
+                _diagonal(scale[:, idx])
+                @ RO[:, idx]
+                @ _euler_matrices(rotate[:, idx], orders[idx])
+                @ JO[:, idx]
+                @ _diagonal(1.0 / inverse)
+                @ _translation(offset[:, idx])
+            )
+            world[:, idx] = local_world @ parent_world
+
+        # the result takes over `new`, which nothing else holds, rather than
+        # copying every node of it a second time
+        clip = ClipData._adopt(new, frames, self._start_frame, self._fps)
+
+        # block columns belong to uuids; line the solved rows up through them
+        # rather than trusting the clip to keep `new`'s order
+        place = {uuid: j for j, uuid in enumerate(clip._columns)}
+        cols  = [place[node.uuid] for node in nodes]
+
+        # the solved channels
+        clip._blocks["_scale"][:, cols]     = scale
+        clip._blocks["_rotate"][:, cols]    = rotate
+        clip._blocks["_translate"][:, cols] = offset
+        clip._bind(0)
+        return clip
 
     # --- serialization --- #
     def _subclip(self, span: slice) -> "ClipData":

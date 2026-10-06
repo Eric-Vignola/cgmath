@@ -8,7 +8,7 @@ from unittest import mock
 
 import numpy as np
 from cgmath.formats.glb import pygltflib
-from cgmath.hierarchy import HierarchyData, TransformData, TransformList
+from cgmath.hierarchy import HierarchyData, TransformData, TransformList, generate_uuid
 from cgmath.hierarchy import _fbx_enum, _rotation, FBX
 from cgmath.transforms import (
     euler_to_matrix,
@@ -2837,6 +2837,62 @@ def _chain() -> HierarchyData:
     spine.set_parent(root, world_space=False)
     head.set_parent(spine, world_space=False)
     return rig
+
+
+class TestParentLookup(unittest.TestCase):
+    """_parent_indices and _owning_parent_first look parents up through dicts;
+    they must give get_parent's answer for every kind of parent_node"""
+
+    def _rig(self) -> HierarchyData:
+        named  = TransformData("named")
+        first  = TransformData("twin", translate=(1.0, 0.0, 0.0))
+        second = TransformData("twin", translate=(2.0, 0.0, 0.0))
+        shaped = TransformData(generate_uuid())   # a name shaped like a uuid
+        odd    = TransformData("odd", uuid="j1")  # a uuid not shaped like one
+        rig    = HierarchyData([named, first, second, shaped, odd])
+
+        # a name equal to another node's uuid, and a cycle
+        rig.append(TransformData(rig["twin"].uuid))
+        rig.append(TransformData("cycle_a", parent_node="cycle_b"))
+        rig.append(TransformData("cycle_b", parent_node="cycle_a"))
+        refs = [
+            None, "named", "twin", second.uuid, shaped.name, "j1", "odd",
+            first.uuid, generate_uuid(), "ghost", named.uuid.lower(), "cycle_a",
+        ]
+        for i, ref in enumerate(refs):
+            rig.append(TransformData(f"child{i}", parent_node=ref))
+        for i, ref in enumerate(refs):
+            rig.append(TransformData(f"grandchild{i}", parent_node=f"child{i}"))
+        return rig
+
+    @staticmethod
+    def _position(nodes, parent) -> int:
+        for i, node in enumerate(nodes):
+            if node is parent:
+                return i
+        return -1
+
+    def test_parent_indices_match_get_parent(self):
+        rig = self._rig()
+        for nodes in (rig.list, rig.list[::-1], rig.list[::3]):
+            expected = [self._position(nodes, node.get_parent()) for node in nodes]
+            self.assertEqual(list(TransformList._parent_indices(nodes)), expected)
+
+    def test_owning_parent_first_matches_a_get_parent_walk(self):
+        def depth(node):
+            seen, parent, count = set(), node.get_parent(), 0
+            while isinstance(parent, TransformData) and id(parent) not in seen:
+                seen.add(id(parent))
+                count += 1
+                parent = parent.get_parent()
+            return count
+
+        rig = self._rig()
+        for nodes in (rig.list, rig.list[::-1], rig.list[::3]):
+            expected = np.argsort([depth(node) for node in nodes], kind="stable")
+            self.assertEqual(
+                list(TransformList._owning_parent_first(nodes)), list(expected)
+            )
 
 
 class TestCopiesOwnTheirNodes(unittest.TestCase):
