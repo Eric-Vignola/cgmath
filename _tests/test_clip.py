@@ -802,8 +802,8 @@ def _parent_by_uuid(rig):
 
 
 class TestClipDeltaVectorised(unittest.TestCase):
-    """a single delta is solved for every frame at once; it must agree with
-    HierarchyData.add_delta run against each frame on its own"""
+    """clip pose algebra solves every frame at once; it must agree with the
+    single pose HierarchyData.get_delta / add_delta run on each frame"""
 
     by_uuid = False  # parent_node holds names; a subclass points it at uuids
 
@@ -833,7 +833,7 @@ class TestClipDeltaVectorised(unittest.TestCase):
         names = [f"j{i}" for i in range(count)]
         return self._rig(names, [None] + names[:-1], seed)
 
-    def _animated(self, rig, frames=6, seed=9, scale=True):
+    def _animated(self, rig, frames=6, seed=9, scale=True, orient=False):
         rng                   = np.random.default_rng(seed)
         clip                  = ClipData(rig, frames=frames, start_frame=1001, fps=30.0)
         shape                 = clip.frames.rotate.shape
@@ -841,14 +841,21 @@ class TestClipDeltaVectorised(unittest.TestCase):
         clip.frames.translate = clip.frames.translate + rng.normal(size=shape) * 0.3
         if scale:
             clip.frames.scale = 1.0 + rng.uniform(-0.3, 0.3, size=shape)
+        if orient:
+            # framed too: each frame must solve through its own RO * R * JO
+            clip.frames.joint_orient = clip.frames.joint_orient + rng.normal(size=shape) * 10.0
+            clip.frames.rotate_axis  = clip.frames.rotate_axis + rng.normal(size=shape) * 10.0
         return clip
 
-    def _per_frame(self, clip, delta, **kwargs):
-        """the reference: the single pose add_delta against every frame"""
+    def _per_frame(self, method, clip, other, **kwargs):
+        """the reference: the single pose get_delta / add_delta on every frame,
+        against one pose or frame for frame against a clip"""
         poses = []
         for frame in range(clip.frame_count):
             clip.frame = frame
-            poses.append(HierarchyData.add_delta(clip, delta, **kwargs))
+            if isinstance(other, ClipData):
+                other.frame = frame
+            poses.append(getattr(HierarchyData, method)(clip, other, **kwargs))
         return ClipData.from_poses(poses, start_frame=clip.start_frame, fps=clip.fps)
 
     def _frozen(self, clip, frame):
@@ -877,7 +884,7 @@ class TestClipDeltaVectorised(unittest.TestCase):
         clip   = self._animated(source)
         delta  = target.get_delta(source)
 
-        self._assert_same(clip.add_delta(delta), self._per_frame(clip, delta))
+        self._assert_same(clip.add_delta(delta), self._per_frame("add_delta", clip, delta))
 
     def test_orientation_only_matches_per_frame(self):
         source = self._chain(6, seed=5)
@@ -887,7 +894,7 @@ class TestClipDeltaVectorised(unittest.TestCase):
 
         self._assert_same(
             clip.add_delta(delta, translate=False),
-            self._per_frame(clip, delta, translate=False),
+            self._per_frame("add_delta", clip, delta, translate=False),
         )
 
     def test_name_pairing_over_part_of_the_rig_matches_per_frame(self):
@@ -906,7 +913,7 @@ class TestClipDeltaVectorised(unittest.TestCase):
 
         self._assert_same(
             clip.add_delta(delta, by="name"),
-            self._per_frame(clip, delta, by="name"),
+            self._per_frame("add_delta", clip, delta, by="name"),
         )
 
     def test_a_scaled_delta_matches_per_frame(self):
@@ -919,7 +926,7 @@ class TestClipDeltaVectorised(unittest.TestCase):
         delta        = target.get_delta(source)
         self.assertFalse(np.allclose(delta.scale, 1.0))
 
-        self._assert_same(clip.add_delta(delta), self._per_frame(clip, delta))
+        self._assert_same(clip.add_delta(delta), self._per_frame("add_delta", clip, delta))
 
     def test_a_clip_of_deltas_still_pairs_frame_for_frame(self):
         # no scale animation: a non-uniform parent scale without segment
@@ -965,12 +972,14 @@ class TestClipDeltaVectorised(unittest.TestCase):
         self._assert_same(clip.add_delta(ClipData(delta)), clip.add_delta(delta))
 
     def test_no_frame_is_solved_on_its_own(self):
-        # one delta, every frame at once: it may not run the single pose
-        # solve, which is what a loop over the frames calls
+        # every frame at once: none of these may run the single pose solve,
+        # which is what a loop over the frames calls
         source = self._chain(5, seed=5)
         target = self._chain(5, seed=17)
         clip   = self._animated(source, frames=12)
+        other  = self._animated(target, frames=12, seed=21)
         delta  = target.get_delta(source)
+        deltas = other.get_delta(clip)
 
         isub = mock.patch.object(
             TransformList, "__isub__", autospec=True, side_effect=TransformList.__isub__
@@ -979,9 +988,140 @@ class TestClipDeltaVectorised(unittest.TestCase):
             TransformList, "__iadd__", autospec=True, side_effect=TransformList.__iadd__
         )
         with isub as sub, iadd as add:
+            clip.get_delta(target)
+            clip.get_delta(other, by="name")
             clip.add_delta(delta)
+            clip.add_delta(deltas, by="name")
 
         self.assertEqual((sub.call_count, add.call_count), (0, 0))
+
+    # --- get_delta --- #
+    def test_get_delta_against_a_pose_matches_per_frame(self):
+        target = self._chain(6, seed=17)
+        clip   = self._animated(self._chain(6, seed=5), orient=True)
+
+        self._assert_same(
+            clip.get_delta(target), self._per_frame("get_delta", clip, target)
+        )
+
+    def test_get_delta_against_a_clip_matches_per_frame(self):
+        clip  = self._animated(self._chain(6, seed=5), seed=9, orient=True)
+        other = self._animated(self._chain(6, seed=17), seed=21, orient=True)
+
+        self._assert_same(
+            clip.get_delta(other), self._per_frame("get_delta", clip, other)
+        )
+
+    def test_get_delta_orientation_only_matches_per_frame(self):
+        clip  = self._animated(self._chain(6, seed=5), seed=9)
+        other = self._animated(self._chain(6, seed=17), seed=21)
+
+        self._assert_same(
+            clip.get_delta(other, translate=False),
+            self._per_frame("get_delta", clip, other, translate=False),
+        )
+
+    def test_get_delta_name_pairing_over_part_of_the_rig_matches_per_frame(self):
+        names   = ["j0", "j1", "j2", "j3", "c_extra"]
+        parents = [None, "j0", "j1", "j2", "j1"]
+        clip    = self._animated(self._rig(names, parents, seed=5))
+        pose    = self._rig(["j0", "j1", "j3", "p_extra"], [None, "j0", "j1", "j3"], seed=17)
+
+        self._assert_same(
+            clip.get_delta(pose, by="name"),
+            self._per_frame("get_delta", clip, pose, by="name"),
+        )
+
+    def test_get_delta_on_a_clip_missing_a_parent_makes_its_child_a_root(self):
+        # a clip of part of a rig: j1 names a parent the clip lacks. The
+        # delta, like a copy of a selection, makes such a node a root
+        clip = self._animated(ClipData(self._chain(5, seed=5)[1:]))
+        pose = self._chain(5, seed=17)[1:]
+        self.assertIsInstance(clip["j1"].get_parent(), str)
+
+        delta = clip.get_delta(pose)
+        self.assertIsNone(delta["j1"].parent_node)
+        self._assert_same(delta, self._per_frame("get_delta", clip, pose))
+
+    def test_get_delta_against_a_view_of_the_clip_reads_its_bound_frame(self):
+        clip   = self._animated(self._chain(5, seed=5), orient=True)
+        frozen = self._frozen(clip, 1)
+
+        self._assert_same(
+            clip.get_delta(clip.match("j1", "j2", "j3"), by="name"),
+            clip.get_delta(frozen.match("j1", "j2", "j3"), by="name"),
+        )
+
+    def test_get_delta_against_a_clip_with_no_frames_is_one_pose(self):
+        target = self._chain(5, seed=17)
+        clip   = self._animated(self._chain(5, seed=5))
+
+        self._assert_same(clip.get_delta(ClipData(target)), clip.get_delta(target))
+
+    def test_get_delta_rejects_a_clip_of_a_different_length(self):
+        clip  = self._animated(self._chain(4, seed=5), frames=6)
+        other = self._animated(self._chain(4, seed=17), frames=5)
+        with self.assertRaisesRegex(ValueError, "clips hold 6 and 5 frames"):
+            clip.get_delta(other)
+
+    def test_the_other_clip_of_get_delta_is_left_alone(self):
+        other       = self._animated(self._chain(5, seed=17), seed=21)
+        other.frame = 2
+        before      = {c: np.array(getattr(other.frames, c)) for c in ("rotate", "translate", "scale")}
+
+        self._animated(self._chain(5, seed=5)).get_delta(other)
+
+        self.assertEqual(other.frame, 2)
+        for channel, values in before.items():
+            self.assertTrue(np.array_equal(getattr(other.frames, channel), values))
+
+    # --- add_delta with a clip of deltas --- #
+    def test_a_clip_of_deltas_matches_per_frame(self):
+        deltas = self._animated(self._chain(6, seed=17), seed=21, orient=True)
+        clip   = self._animated(self._chain(6, seed=5), seed=9)
+
+        self._assert_same(
+            clip.add_delta(deltas), self._per_frame("add_delta", clip, deltas)
+        )
+
+    def test_a_clip_of_deltas_by_name_matches_per_frame(self):
+        names   = ["j0", "j1", "j2", "j3", "d_extra"]
+        parents = [None, "j0", "j1", "j2", "j1"]
+        deltas  = self._animated(self._rig(names, parents, seed=17), seed=21, orient=True)
+        clip = self._animated(
+            self._rig(["j0", "j1", "j3", "c_extra"], [None, "j0", "j1", "j3"], seed=5)
+        )
+
+        self._assert_same(
+            clip.add_delta(deltas, by="name"),
+            self._per_frame("add_delta", clip, deltas, by="name"),
+        )
+
+    def test_a_clip_of_deltas_orientation_only_matches_per_frame(self):
+        deltas = self._animated(self._chain(5, seed=17), seed=21)
+        clip   = self._animated(self._chain(5, seed=5), seed=9)
+
+        self._assert_same(
+            clip.add_delta(deltas, translate=False),
+            self._per_frame("add_delta", clip, deltas, translate=False),
+        )
+
+    def test_a_clip_of_deltas_of_a_different_length_is_rejected(self):
+        deltas = self._animated(self._chain(4, seed=17), frames=5)
+        clip   = self._animated(self._chain(4, seed=5), frames=6)
+        with self.assertRaisesRegex(ValueError, "clips hold 6 and 5 frames"):
+            clip.add_delta(deltas)
+
+    def test_the_delta_clip_is_left_alone(self):
+        deltas       = self._animated(self._chain(5, seed=17), seed=21)
+        deltas.frame = 2
+        before       = {c: np.array(getattr(deltas.frames, c)) for c in ("rotate", "translate", "scale")}
+
+        self._animated(self._chain(5, seed=5)).add_delta(deltas)
+
+        self.assertEqual(deltas.frame, 2)
+        for channel, values in before.items():
+            self.assertTrue(np.array_equal(getattr(deltas.frames, channel), values))
 
 
 class TestClipDeltaVectorisedByUuid(TestClipDeltaVectorised):
