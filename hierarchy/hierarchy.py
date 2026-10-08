@@ -1287,10 +1287,16 @@ class TransformData(Data):
             mag = np.einsum("ij,ij->i", M[:3, :3], M[:3, :3]) ** 0.5
             M[:3, :3] /= mag[:, None]
 
-        # preserve the joint orient value if any
+        # the world orientation is RO * R * JO * IS * P with the scale
+        # divided out, so the pure rotate is R = inv(RO) * M * inv(JO * IS * P).
+        # leaving RO out applies rotate_axis twice, as the quaternion setter
+        # explains; leaving IS out lets a compensated parent scale skew it
         P  = self.get_parent_matrix()
-        JO = matrix_multiply(self.joint_orient_matrix, P)
-        L  = local_matrix(M, JO)
+        RO = self.rotate_axis_matrix
+        JO = matrix_multiply(
+            np.dot(self.joint_orient_matrix, self.parent_scale_inverse_matrix), P
+        )
+        L = local_matrix(np.dot(np.linalg.inv(RO), M), JO)
 
         # set the rotate value
         self.rotate = np.degrees(matrix_to_euler(L, self.rotate_order))[0]

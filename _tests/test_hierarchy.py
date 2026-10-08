@@ -746,6 +746,48 @@ class TestHierarchy(unittest.TestCase):
         self.assertTrue(np.allclose(node.rotate_axis, [12.0, -7.0, 25.0]))
         self.assertTrue(np.allclose(node.joint_orient, [5.0, 10.0, -15.0]))
 
+    def test_match_rotate_lands_on_the_target_orientation(self):
+        # the world orientation is RO * R * JO * IS * P with the scale divided
+        # out, so match_rotate solves R around the rotate_axis, joint_orient
+        # and compensated parent scale the node already has. leaving RO out
+        # missed by up to 1.0 per matrix element, leaving IS out by 0.5. a
+        # non-uniform parent scale without compensation shears the child,
+        # which no rotate can follow, so that case is left out
+        target = TransformData('t', rotate=[33.0, -48.0, 121.0], translate=[4.0, 5.0, 6.0])
+        want   = _rotation(target.world_matrix)
+        cases = itertools.product(
+            range(6),
+            ([0.0, 0.0, 0.0], [25.0, -40.0, 60.0]),
+            ((False, [1.0, 1.0, 1.0]), (True, [1.0, 1.0, 1.0]), (True, [2.0, 0.5, 1.5])),
+        )
+        for order, rotate_axis, (compensate, parent_scale) in cases:
+            operands = {
+                'node':       target,
+                'euler':      np.degrees(matrix_to_euler(want, order))[0],
+                'quaternion': matrix_to_quaternion(want)[0],
+            }
+            for kind, other in operands.items():
+                with self.subTest(order=order, rotate_axis=rotate_axis,
+                                  compensate=compensate, scale=parent_scale, operand=kind):
+                    rig = HierarchyData([
+                        TransformData('a', node_type='joint', rotate=[10.0, 20.0, 30.0],
+                                      scale=parent_scale, joint_orient=[5.0, -10.0, 15.0]),
+                        TransformData('b', node_type='joint', parent_node='a',
+                                      translate=[1.0, 2.0, 3.0], rotate=[40.0, -15.0, 70.0],
+                                      rotate_axis=rotate_axis, joint_orient=[-20.0, 35.0, 10.0],
+                                      scale=[1.3, 0.7, 1.1], rotate_order=order,
+                                      segment_scale_compensate=compensate),
+                    ])
+                    node = rig['b']
+                    node.match_rotate(other)
+
+                    got = _rotation(node.world_matrix)
+                    self.assertTrue(np.allclose(got[:3, :3], want[:3, :3], atol=1e-9))
+                    # rotate is all it writes
+                    self.assertTrue(np.array_equal(node.translate, [1.0, 2.0, 3.0]))
+                    self.assertTrue(np.array_equal(node.scale, [1.3, 0.7, 1.1]))
+                    self.assertTrue(np.array_equal(node.rotate_axis, rotate_axis))
+
     def test_matrix_setters_keep_rotate_axis(self):
         # the local matrix is [S][RO][R][JO][IS][T]; writing matrix or
         # world_matrix solves S, R and T around the RO, JO and IS the node

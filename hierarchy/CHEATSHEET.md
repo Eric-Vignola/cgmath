@@ -408,6 +408,10 @@ other["b"].match_matrix(rig["knee"])                       # the whole frame
 assert np.allclose(other["b"].world_matrix, rig["knee"].world_matrix)
 ```
 
+`match_rotate` writes `rotate` alone, solved around the `rotate_axis`,
+`joint_orient` and compensated parent scale the node already has, so the
+node lands on the orientation whatever those hold.
+
 ### Consolidate rotation (joints only)
 
 ```python
