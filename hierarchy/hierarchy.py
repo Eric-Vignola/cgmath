@@ -3408,7 +3408,9 @@ class TransformList(DataList):
     # This lives on TransformList, not HierarchyData, so a delta can be taken
     # over any selection -- `rig.match("L_*")`, `rig[1:]`, `node.get_branch()`.
     # A delta must own its nodes, so `get_delta` always returns a HierarchyData
-    # whatever the receiver was.
+    # whatever the receiver was -- a ClipData of every frame when the other
+    # side is a clip of several frames, as `add_delta` returns for a clip of
+    # deltas.
     #
     # `translate=False` transfers orientation only: the delta keeps its own
     # bone offsets rather than a position difference, so the result holds the
@@ -3679,7 +3681,24 @@ class TransformList(DataList):
                 keeps this rig's proportions. :meth:`add_delta` MUST be
                 passed the same value -- the two store different things in
                 the same channel.
+
+        A :class:`ClipData` is the pose of the frame it is bound to, like
+        any other. Its frame axis, ``clip.frames``, is every frame: the
+        delta is taken against each, all solved at once, and comes back as
+        a :class:`ClipData` on that clip's timebase, bound to its first
+        frame. The axis of a clip of one frame, or none, is one pose.
         """
+        # clip.frames stands for every frame of its clip: this pose, repeated
+        # down the clip, is taken against each
+        other, every = _framed_operand(other)
+        if every:
+            new = ClipData._adopt(
+                self._owned_copy(), other.frame_count, other.start_frame, other.fps
+            )
+            new._subtract_all_frames(other, by=by, translate=translate)
+            new._bind(0)
+            return new
+
         new = self._owned_copy()
         return new.__isub__(other, by=by, translate=translate)
 
@@ -3761,7 +3780,22 @@ class TransformList(DataList):
                 offset it already has and the rig holds its proportions at
                 any pose of ``self``; a joint that moves rather than rotates
                 (a root, an IK offset) will not follow.
+
+        A :class:`ClipData` of deltas is the delta of the frame it is bound
+        to. Its frame axis, ``deltas.frames``, is a delta per frame: each
+        poses ``self``, all solved at once, and the result is a
+        :class:`ClipData` on the delta clip's timebase, bound to its first
+        frame. The axis of a clip of one frame, or none, is one delta.
         """
+        # deltas.frames stands for every frame: a copy of the clip takes this
+        # pose on every frame at once
+        delta, every = _framed_operand(delta)
+        if every:
+            new = delta._rooted_copy()
+            new._add_all_frames(self, by=by, translate=translate)
+            new._bind(0)
+            return new
+
         new = delta._owned_copy()
         return new.__iadd__(self, by=by, translate=translate)
 
@@ -4640,6 +4674,23 @@ def _framed_clip(nodes) -> Optional["ClipData"]:
     return clip
 
 
+def _framed_operand(other) -> tuple:
+    """an operand of the pose algebra as ``(operand, every frame)``
+
+    A clip's frame axis, ``clip.frames``, stands for every frame of its
+    clip: it comes back as the clip, and True when the clip holds more than
+    one frame. Anything else -- a clip itself included, the pose of the
+    frame it is bound to -- is one pose and comes back as it is, with False.
+    """
+    if isinstance(other, _FrameAxis):
+        if other._uuids is not None:
+            raise TypeError(
+                "the pose algebra takes a whole clip.frames, not one scoped to some nodes"
+            )
+        return other._clip, other._clip.frame_count > 1
+    return other, False
+
+
 def _holds_nodes(other) -> bool:
     """whether a match_* operand is nodes, a clip or a frame axis, rather
     than values"""
@@ -4785,6 +4836,22 @@ def _parent_scale(
     if parented.any():
         out[:, parented] = scale[:, parents[parented]]
     return out
+
+
+class _PoseFrame:
+    """the pose some nodes hold, as the one frame clip the clip evaluators
+    read: their ``list`` and ``(1, N, 3)`` blocks of the framed channels"""
+
+    __slots__ = ("list", "_blocks")
+
+    def __init__(self, nodes: list):
+        self.list = nodes
+        self._blocks = {
+            channel: np.array(
+                [getattr(node, channel) for node in nodes], dtype=float
+            ).reshape(1, len(nodes), 3)
+            for channel in ClipData.FRAMED_CHANNELS
+        }
 
 
 def _local_factors(
@@ -5204,12 +5271,13 @@ class _FrameAxis:
 
     def _worlds(self, other) -> np.ndarray:
         """(F, n, 4, 4) world matrices to match: a clip or a frame axis pairs
-        frame for frame, a node, a list of nodes or a pose holds on every frame"""
+        frame for frame, a node, a list of nodes or a pose holds on every
+        frame, and so does a clip of one frame"""
         frames, count = self._clip.frame_count, len(self._positions())
 
         if isinstance(other, _FrameAxis) or (isinstance(other, ClipData) and other._blocks):
             source = other._clip if isinstance(other, _FrameAxis) else other
-            if source.frame_count != frames:
+            if source.frame_count not in (frames, 1):
                 raise ValueError(f"clips hold {frames} and {source.frame_count} frames")
             world = np.asarray(other.world_matrix if isinstance(other, _FrameAxis)
                                else other.frames.world_matrix)
@@ -5221,6 +5289,56 @@ class _FrameAxis:
         if world.shape[1] not in (1, count):
             raise ValueError(f"expected {count} nodes to match against, got {world.shape[1]}")
         return np.broadcast_to(world, (frames, count, 4, 4))
+
+    # --- the pose algebra, every frame at once --- #
+    # clip.frames stands for every frame where the clip itself stands for
+    # the frame it is bound to: ``clip -= pose`` is that frame alone,
+    # ``clip.frames -= pose`` every frame
+    def _every(self, op: str) -> "ClipData":
+        """the clip, for ``op`` over every frame of it"""
+        if self._uuids is not None:
+            raise TypeError(f"{op} covers every node of a clip: use clip.frames, not a scoped axis")
+        if not self._clip._blocks:
+            raise ValueError("the clip holds no frames")
+        return self._clip
+
+    def __isub__(self, other, by: str = "index", translate: bool = True):
+        """``clip.frames -= other``: every frame becomes its delta against
+        ``other``, all solved at once, in place, as :meth:`ClipData.get_delta`
+        solves them; the clip stays on its frame. ``other`` is one pose, or a
+        clip of the same length, or its frame axis, paired frame for frame."""
+        clip = self._every("-=")
+        other, _ = _framed_operand(other)
+        if not isinstance(other, TransformList):
+            return NotImplemented
+
+        clip._subtract_all_frames(other, by=by, translate=translate)
+        clip._bind(clip._frame)
+        return self
+
+    def __iadd__(self, other, by: str = "index", translate: bool = True):
+        """``deltas.frames += other``: every frame's delta poses ``other``,
+        all solved at once, in place, as :meth:`ClipData.add_delta` solves
+        them; the clip stays on its frame. ``other`` is one pose, or a clip of
+        the same length, or its frame axis, paired frame for frame."""
+        clip = self._every("+=")
+        other, _ = _framed_operand(other)
+        if not isinstance(other, TransformList):
+            return NotImplemented
+
+        clip._add_all_frames(other, by=by, translate=translate)
+        clip._bind(clip._frame)
+        return self
+
+    def __sub__(self, other):
+        """``clip.frames - other``: :meth:`ClipData.get_delta`, every frame"""
+        return self._every("-").get_delta(other)
+
+    def __add__(self, other):
+        """``deltas.frames + rig``: ``rig.add_delta(deltas.frames)``, every frame"""
+        if not isinstance(other, TransformList):
+            return NotImplemented
+        return other.add_delta(self)
 
     def _solve(self, op: str, target: np.ndarray, axes=None) -> None:
         # a node listed twice takes its last value, as writing in turn would
@@ -5398,6 +5516,16 @@ class ClipData(HierarchyData):
         clip.frames["hips"].match_rotate(pose)   # one pose on every frame
         clip.world_matrix = W[12]                # frame 12, the one bound above
 
+    So does the pose algebra. The clip stands for the frame it is bound to,
+    its frame axis for every frame:
+
+        clip.frames -= rest                      # every frame, in place
+        rest.get_delta(clip.frames)              # a clip: rest against each frame
+        clip -= rest                             # frame 12 alone
+        rest.get_delta(clip)                     # one pose: rest against frame 12
+
+    A clip's own get_delta and add_delta answer for every frame.
+
     Only the channels a pose setting path writes are framed. Everything else
     -- names, uuids, parenting, rotate_order, segment_scale_compensate,
     radius, draw_style -- is structural and shared by every frame.
@@ -5553,6 +5681,16 @@ class ClipData(HierarchyData):
         self._realign()
         return _FrameAxis(self)
 
+    @frames.setter
+    def frames(self, value) -> None:
+        # ``clip.frames -= pose`` solves every frame in place and hands the
+        # axis back to be assigned here: nothing is left to do
+        if not (isinstance(value, _FrameAxis) and value._clip is self and value._uuids is None):
+            raise AttributeError(
+                "clip.frames is not assigned; write through it, eg: "
+                "clip.frames[:] = other or clip.frames.rotate = values"
+            )
+
     # --- construction --- #
     @classmethod
     def from_poses(cls, poses, start_frame: int = 0, fps: float = 24.0) -> "ClipData":
@@ -5605,23 +5743,86 @@ class ClipData(HierarchyData):
         clip._allocate(int(frames))
         return clip
 
+    def _rooted_copy(self) -> "ClipData":
+        """a copy in which a node whose parent the clip lacks is a root
+
+        What an owned copy of a selection does, so what the single pose
+        algebra starts from: a delta taken off a clip of part of a rig makes
+        such a node a root.
+        """
+        clip    = self.copy()
+        lookups = _Lookups()
+        for node in clip.list:
+            if isinstance(lookups.parent(node), str):
+                node.parent_node = None
+        return clip
+
     # --- pose algebra --- #
+    @staticmethod
+    def _pose_world(nodes) -> np.ndarray:
+        """``(n, 4, 4)`` world matrices of ``nodes`` at the pose they hold
+
+        Each owning hierarchy is evaluated once, every node of it together,
+        through the evaluators a clip's frames go through, so the matrices
+        are the ones ``world_matrix`` reads node by node. A node is placed in
+        its owner's whole rig, so a selection reads the world matrices it
+        reads node by node; a node no hierarchy owns is a root, as
+        ``get_parent`` has it, and a node its owner no longer lists reads its
+        own ``world_matrix``.
+        """
+        nodes  = list(nodes)
+        world  = np.empty((len(nodes), 4, 4), dtype=float)
+        owners = {}
+        for i, node in enumerate(nodes):
+            owners.setdefault(id(node._hierarchy), []).append(i)
+
+        for rows in owners.values():
+            owner   = nodes[rows[0]]._hierarchy
+            members = [nodes[i] for i in rows] if owner is None else list(owner.list)
+
+            # a node its owner does not list cannot be placed in its rig; it
+            # answers for itself, as it does node by node
+            position = {id(node): j for j, node in enumerate(members)}
+            listed   = [i for i in rows if id(nodes[i]) in position]
+            for i in rows:
+                if id(nodes[i]) not in position:
+                    world[i] = nodes[i].world_matrix
+            if not listed:
+                continue
+
+            if owner is None:
+                parents = np.full(len(members), -1, dtype=int)
+            else:
+                parents = TransformList._parent_indices(members)
+
+            local     = _evaluate_local(_PoseFrame(members), parents)
+            evaluated = _evaluate_world(local, parents)[0]
+            for i in listed:
+                world[i] = evaluated[position[id(nodes[i])]]
+
+        return world
+
     def _operand(self, other, nodes, world: bool = True) -> dict:
         """every frame of ``nodes``, taken from ``other``
 
-        ``other`` is either a clip of the same length, paired frame for
-        frame, or one pose for every frame of this clip: a hierarchy, a clip
-        with no frames, or a selection or view -- even one of this clip, read
-        at the frame it is bound to. ``nodes`` are the nodes to read, in
-        order: other's own, or copies of them, so a clip finds their columns
-        by uuid. Returns the framed channels as ``(F, n, 3)`` blocks and,
-        with ``world``, the ``(F, n, 4, 4)`` world matrices. A pose is read
-        once, with a frame axis of 1 rather than F that broadcasts against
-        the frames, so whatever is built from it alone is built once.
+        ``other`` is either a clip of the same length, or its frame axis,
+        paired frame for frame, or one pose for every frame of this clip: a
+        hierarchy, a clip of one frame or none, or a selection or view --
+        even one of this clip, read at the frame it is bound to. Against a
+        clip of one frame, a longer clip is read at its bound frame too.
+        ``nodes`` are the nodes to read, in order: other's own, or copies of
+        them, so a clip finds their columns by uuid. Returns the framed channels as ``(F, n, 3)`` blocks and,
+        with ``world``, the ``(F, n, 4, 4)`` world matrices: a clip's from
+        one evaluation of every frame, a pose's from one of the pose
+        (:meth:`_pose_world`). A pose is read once, with a frame axis of 1
+        rather than F that broadcasts against the frames, so whatever is
+        built from it alone is built once.
         """
         frames = self.frame_count
+        other, _ = _framed_operand(other)
 
-        if isinstance(other, ClipData) and other._blocks:
+        framed = isinstance(other, ClipData) and other.frame_count > 1 and frames > 1
+        if framed:
             if other.frame_count != frames:
                 raise ValueError(
                     f"clips hold {frames} and {other.frame_count} frames"
@@ -5642,34 +5843,48 @@ class ClipData(HierarchyData):
             pose         = np.array([getattr(n, channel) for n in nodes], dtype=float)
             out[channel] = pose.reshape(1, count, 3)
         if world:
-            pose         = np.array([n.world_matrix for n in nodes], dtype=float)
-            out["world"] = pose.reshape(1, count, 4, 4)
+            out["world"] = self._pose_world(nodes)[None]
         return out
 
     def get_delta(self, other, by: str = "index", translate: bool = True) -> "ClipData":
         """The delta of every frame against ``other``, as a clip.
 
         ``other`` is either one pose, compared against every frame, or another
-        clip of the same length, compared frame for frame. A selection or
-        view, even one of this clip, is one pose, read at the frame it is
-        bound to; so is a clip with no frames. Every frame is solved at once,
-        and ``other`` keeps its current frame.
+        clip of the same length, or its frame axis, compared frame for frame.
+        A selection or view, even one of this clip, is one pose, read at the
+        frame it is bound to; so is a clip of one frame or none. This clip
+        holding one frame or none is one pose too, and is compared against
+        every frame of a longer clip, as ``pose.get_delta(clip.frames)``.
+        Every frame is solved at once, and ``other`` keeps its current frame.
+        Rotate is rebuilt from matrices, so each paired node's rotate curve
+        goes through ``euler_filter`` with its rotate order, frame 0 kept as
+        solved.
         """
+        other, _ = _framed_operand(other)
+        if self.frame_count < 2 and isinstance(other, ClipData) and other.frame_count > 1:
+            return TransformList.get_delta(self, other.frames, by=by, translate=translate)
+
         if not self._blocks:
             return HierarchyData.get_delta(self, other, by=by, translate=translate)
 
-        return self._get_delta_all_frames(other, by=by, translate=translate)
+        clip = self._rooted_copy()
+        clip._subtract_all_frames(other, by=by, translate=translate)
+        clip._bind(0)
+        return clip
 
-    def _get_delta_all_frames(self, other, by: str, translate: bool) -> "ClipData":
-        """:meth:`HierarchyData.get_delta` for every frame, vectorised.
+    def _subtract_all_frames(self, other, by: str, translate: bool) -> None:
+        """:meth:`HierarchyData.__isub__` on every frame at once, in place.
 
         ``__isub__`` reads only world matrices, scales and the segment scale
         compensate flags, and writes each node on its own -- no node solves
         against another -- so every frame of every node is one batched solve.
         The steps follow ``__isub__`` and the ``TransformData.quaternion``
         setter it writes through, so the channels match a frame by frame
-        solve to rounding. Nodes left out of the pairing keep this clip's own
-        channels, as they do per frame.
+        solve to rounding. That solve picks each frame's euler branch on its
+        own, so the rebuilt rotate curves then go through ``euler_filter``
+        with each node's rotate order, frame 0 kept. Nodes left out of the
+        pairing keep their channels. Everything is read before anything is
+        written; the caller rebinds.
         """
         self._realign()
         frames = self.frame_count
@@ -5683,11 +5898,10 @@ class ClipData(HierarchyData):
 
         # scale: additive delta around 1, divided by the parent's delta for
         # segment-scale-compensated joints (the inverse of __iadd__)
-        base  = 1 + (mine["_scale"] - theirs["_scale"])
-        scale = base.copy()
-        for i in range(count):
-            if compensate[i] and parents[i] > -1:
-                scale[:, i] = base[:, i] / base[:, parents[i]]
+        base              = 1 + (mine["_scale"] - theirs["_scale"])
+        scale             = base.copy()
+        divided           = compensate & (parents > -1)
+        scale[:, divided] = base[:, divided] / base[:, parents[divided]]
 
         # rotate: the frame offset F where `W_self == F * W_other`, written
         # through the quaternion setter: the chain is RO * R * JO, solved for R
@@ -5703,41 +5917,42 @@ class ClipData(HierarchyData):
         L      = local_matrix((np.linalg.inv(RO) @ M).reshape(flat), JO.reshape(flat))
         rotate = _matrices_to_euler(L.reshape(shape), orders)
 
-        # a copy keeps a parent the clip lacks; the per frame route started
-        # from an owned copy, which makes such a node a root
-        clip    = self.copy()
-        lookups = _Lookups()
-        for node in clip.list:
-            if isinstance(lookups.parent(node), str):
-                node.parent_node = None
+        # each frame picked its euler branch on its own
+        rotate = _filtered(rotate, orders)
 
-        place = {uuid: j for j, uuid in enumerate(clip._columns)}
-        cols  = [place[node.uuid] for node in nodes_self]
+        place  = {uuid: j for j, uuid in enumerate(self._columns)}
+        cols   = [place[node.uuid] for node in nodes_self]
 
         # the paired columns take the solved scale and rotate
-        clip._blocks["_scale"][:, cols]  = scale
-        clip._blocks["_rotate"][:, cols] = rotate
+        self._blocks["_scale"][:, cols]  = scale
+        self._blocks["_rotate"][:, cols] = rotate
 
         # translate: a world-space offset; with `translate` off this clip's
         # own bone offsets stay, for add_delta to reuse
         if translate:
-            clip._blocks["_translate"][:, cols] = (
+            self._blocks["_translate"][:, cols] = (
                 mine["world"][..., 3, :3] - theirs["world"][..., 3, :3]
             )
-
-        clip._bind(0)
-        return clip
 
     def add_delta(self, delta, by: str = "index", translate: bool = True) -> "ClipData":
         """Every frame with ``delta`` applied, as a clip.
 
         ``delta`` is either one delta applied to every frame -- the retarget
         case, where the offset is fixed to the bone -- or a clip of deltas of
-        the same length, paired frame for frame. A selection or view, even
-        one of this clip, is one delta, read at the frame it is bound to; so
-        is a clip with no frames. Every frame is solved at once, and a clip
-        of deltas keeps its current frame.
+        the same length, or its frame axis, paired frame for frame. A
+        selection or view, even one of this clip, is one delta, read at the
+        frame it is bound to; so is a clip of one frame or none. This clip
+        holding one frame or none is one pose, posed by every delta of a
+        longer clip of them, as ``pose.add_delta(deltas.frames)``. Every
+        frame is solved at once, and a clip of deltas keeps its current
+        frame. Rotate is rebuilt from matrices, so each paired node's rotate
+        curve goes through ``euler_filter`` with its rotate order, frame 0
+        kept as solved.
         """
+        delta, _ = _framed_operand(delta)
+        if self.frame_count < 2 and isinstance(delta, ClipData) and delta.frame_count > 1:
+            return TransformList.add_delta(self, delta.frames, by=by, translate=translate)
+
         if not self._blocks:
             return HierarchyData.add_delta(self, delta, by=by, translate=translate)
 
@@ -5746,47 +5961,98 @@ class ClipData(HierarchyData):
     def _add_delta_all_frames(self, delta, by: str, translate: bool) -> "ClipData":
         """:meth:`HierarchyData.add_delta` against every frame, vectorised.
 
-        Frame by frame, this copies the whole rig and solves it node by node
-        once per frame. Here the same algebra -- step for step, so the
-        channels come out the same to rounding -- runs once per level of the
-        delta's hierarchy, batched over the frame axis and the level's nodes:
-        the source's world matrices come from one evaluation of the clip, and
-        a level solves against the final world matrices of the level above.
-        A clip of deltas brings one delta per frame. A single delta is read
-        once, so what is built from it alone -- its orientation offsets,
-        rotate axes and joint orients -- is built once and broadcast over the
-        frames. Nodes of ``delta`` the clip does not pair keep the delta's
-        own channels, as they do per frame.
+        The result is built from the delta, as ``HierarchyData.add_delta``
+        is, on this clip's timebase; :meth:`_add_solve` poses it by this
+        clip. A clip of deltas brings one delta per frame. A single delta is
+        read once, so what is built from it alone -- its orientation
+        offsets, rotate axes and joint orients -- is built once and
+        broadcast over the frames.
         """
         self._realign()
         frames = self.frame_count
 
         # the result is built from the delta, as HierarchyData.add_delta is
-        new = delta._owned_copy()
-        nodes_new, nodes_clip, pairing_parents = new._matched_subset(self, by=by)
+        new   = delta._owned_copy()
+        nodes = list(new.list)
 
-        nodes   = list(new.list)
+        # the delta's channels: one row per frame for a clip of deltas, one
+        # row for a single delta, which broadcasts against the frames
+        d = self._operand(delta, nodes, world=False)
+        scale, rotate, offset = self._add_solve(new, d, self, by, translate)
+
+        # the result takes over `new`, which nothing else holds, rather than
+        # copying every node of it a second time
+        clip = ClipData._adopt(new, frames, self._start_frame, self._fps)
+
+        # block columns belong to uuids; line the solved rows up through them
+        # rather than trusting the clip to keep `new`'s order
+        place = {uuid: j for j, uuid in enumerate(clip._columns)}
+        cols  = [place[node.uuid] for node in nodes]
+
+        # the solved channels, and the delta's own orientation channels
+        clip._blocks["_scale"][:, cols]        = scale
+        clip._blocks["_rotate"][:, cols]       = rotate
+        clip._blocks["_translate"][:, cols]    = offset
+        clip._blocks["_rotate_axis"][:, cols]  = d["_rotate_axis"]
+        clip._blocks["_joint_orient"][:, cols] = d["_joint_orient"]
+        clip._bind(0)
+        return clip
+
+    def _add_all_frames(self, source, by: str, translate: bool) -> None:
+        """:meth:`HierarchyData.__iadd__` on every frame at once, in place.
+
+        This clip holds the deltas and ``source`` is what they pose: one
+        pose, or a clip of the same length, solved by :meth:`_add_solve`.
+        Nodes the pairing leaves out keep their channels. Everything is read
+        before anything is written; the caller rebinds.
+        """
+        self._realign()
+        blocks = self._blocks
+        scale, rotate, offset = self._add_solve(self, blocks, source, by, translate)
+
+        blocks["_scale"][...]     = scale
+        blocks["_rotate"][...]    = rotate
+        blocks["_translate"][...] = offset
+
+    def _add_solve(self, deltas, d: dict, source, by: str, translate: bool) -> tuple:
+        """every frame of the deltas ``deltas`` holds, posed by ``source``
+
+        ``d`` holds the deltas' framed channels in ``deltas``' order, one row
+        per frame of this clip or one row for every frame; ``source`` is one
+        pose, read once, or a clip of this clip's length. Frame by frame,
+        ``HierarchyData.__iadd__`` copies the whole rig and solves it node by
+        node. Here the same algebra -- step for step, so the channels come
+        out the same to rounding -- runs once per level of the deltas'
+        hierarchy, batched over the frame axis and the level's nodes: the
+        source's world matrices come from one evaluation, and a level solves
+        against the final world matrices of the level above. That solve
+        picks each frame's euler branch on its own, so the rebuilt rotate
+        curves then go through ``euler_filter`` with each node's rotate
+        order, frame 0 kept. Returns the ``(F, N, 3)`` scale, rotate and
+        translate in ``deltas``' order; a node the pairing leaves out holds
+        its delta's own channels, as it does per frame.
+        """
+        frames = self.frame_count
+
+        nodes_new, nodes_source, pairing_parents = deltas._matched_subset(source, by=by)
+
+        nodes   = list(deltas.list)
         count   = len(nodes)
         parents = self._parent_indices(nodes)
         row     = {id(node): i for i, node in enumerate(nodes)}
-        column  = {id(node): j for j, node in enumerate(self.list)}
 
-        # paired[i]: position of node i within the pairing, -1 when unpaired
-        paired = np.full(count, -1, dtype=int)
-        for k, node in enumerate(nodes_new):
-            paired[row[id(node)]] = k
-        source = np.array([column[id(node)] for node in nodes_clip], dtype=int)
-        rows   = [row[id(n)] for n in nodes_new]
+        # rows[k]: the node at pairing position k; paired[i]: node i's place
+        # in the pairing, -1 when unpaired
+        rows         = np.array([row[id(node)] for node in nodes_new], dtype=int)
+        paired       = np.full(count, -1, dtype=int)
+        paired[rows] = np.arange(len(rows))
 
-        # the delta's channels: one row per frame for a clip of deltas, one
-        # row for a single delta, which broadcasts against the frames below
-        d          = self._operand(delta, nodes, world=False)
-        orders     = np.array([n.rotate_order for n in nodes], dtype=int)
-        compensate = np.array([bool(n.segment_scale_compensate) for n in nodes])
-        RO         = _euler_matrices(d["_rotate_axis"], None)  # (F or 1, N, 4, 4)
-        RO_inverse = np.linalg.inv(RO)
-        JO         = _euler_matrices(d["_joint_orient"], None)
-        R          = _euler_matrices(d["_rotate"][:, rows], orders[rows])
+        orders       = np.array([n.rotate_order for n in nodes], dtype=int)
+        compensate   = np.array([bool(n.segment_scale_compensate) for n in nodes])
+        RO           = _euler_matrices(d["_rotate_axis"], None)  # (F or 1, N, 4, 4)
+        RO_inverse   = np.linalg.inv(RO)
+        JO           = _euler_matrices(d["_joint_orient"], None)
+        R            = _euler_matrices(d["_rotate"][:, rows], orders[rows])
 
         # F: each paired node's orientation chain RO * R * JO, through a
         # quaternion as TransformData.quaternion reads it
@@ -5803,8 +6069,11 @@ class ClipData(HierarchyData):
             if compensate[rows[k]] and pairing_parents[k] > -1:
                 base_delta[:, k] = s_pair[:, k] * base_delta[:, pairing_parents[k]]
 
-        w_source = self.frames.world_matrix  # (F, Nc, 4, 4)
-        s_source = self._blocks["_scale"]    # (F, Nc, 3)
+        # the source in pairing order: one row per frame for a clip, one row
+        # for a single pose, which broadcasts against the frames below
+        src      = self._operand(source, nodes_source)
+        w_source = src["world"]   # (F or 1, P, 4, 4)
+        s_source = src["_scale"]  # (F or 1, P, 3)
 
         # output blocks, seeded with the delta's channels for the unpaired nodes
         shape  = (frames, count, 3)
@@ -5813,9 +6082,9 @@ class ClipData(HierarchyData):
         offset = np.array(np.broadcast_to(d["_translate"], shape))
         world  = np.empty((frames, count, 4, 4), dtype=float)
 
-        # one level of the delta's hierarchy at a time, every node of it
+        # one level of the deltas' hierarchy at a time, every node of it
         # together, against the final world matrices of the level above.
-        # `parents` covers all of `new`, so its depths are the owning
+        # `parents` covers all of `deltas`, so its depths are the owning
         # hierarchy's: the order HierarchyData.__iadd__ solves in
         depth = _chain_depths(parents)
         for level in range(int(depth.max()) + 1):
@@ -5836,8 +6105,11 @@ class ClipData(HierarchyData):
                 flat = (frames * len(i), 4, 4)
 
                 # target world: the source orientation carried into this rig's
-                # frame by F, at the source position plus the stored offset
-                w_other = w_source[:, source[k]]
+                # frame by F, at the source position plus the stored offset.
+                # A pose is laid out frame by frame as a clip's world is: a
+                # copy of a broadcast keeps the frame axis innermost, and
+                # sums over it round differently
+                w_other = np.ascontiguousarray(np.broadcast_to(w_source[:, k], many))
                 offsets = np.ascontiguousarray(np.broadcast_to(f_delta[:, k], many))
                 target = matrix_multiply(
                     offsets.reshape(flat), _rotation(w_other).reshape(flat)
@@ -5857,7 +6129,7 @@ class ClipData(HierarchyData):
                     (RO_inverse[:, i] @ M).reshape(flat), orient.reshape(flat)
                 )
                 rotate[:, i] = _matrices_to_euler(L.reshape(many), orders[i])
-                scale[:, i]  = s_source[:, source[k]] - 1 + base_delta[:, k]
+                scale[:, i]  = s_source[:, k] - 1 + base_delta[:, k]
                 if translate:
                     offset[:, i] = local[..., 3, :3]
 
@@ -5877,23 +6149,10 @@ class ClipData(HierarchyData):
             )
             world[:, idx] = local_world @ parent_world
 
-        # the result takes over `new`, which nothing else holds, rather than
-        # copying every node of it a second time
-        clip = ClipData._adopt(new, frames, self._start_frame, self._fps)
-
-        # block columns belong to uuids; line the solved rows up through them
-        # rather than trusting the clip to keep `new`'s order
-        place = {uuid: j for j, uuid in enumerate(clip._columns)}
-        cols  = [place[node.uuid] for node in nodes]
-
-        # the solved channels, and the delta's own orientation channels
-        clip._blocks["_scale"][:, cols]        = scale
-        clip._blocks["_rotate"][:, cols]       = rotate
-        clip._blocks["_translate"][:, cols]    = offset
-        clip._blocks["_rotate_axis"][:, cols]  = d["_rotate_axis"]
-        clip._blocks["_joint_orient"][:, cols] = d["_joint_orient"]
-        clip._bind(0)
-        return clip
+        # each frame picked its euler branch on its own; the levels below
+        # were solved under the rotate as solved, as they are frame by frame
+        rotate[:, rows] = _filtered(rotate[:, rows], orders[rows])
+        return scale, rotate, offset
 
     # --- serialization --- #
     def _subclip(self, span: slice) -> "ClipData":

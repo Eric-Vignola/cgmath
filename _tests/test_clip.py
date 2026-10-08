@@ -19,7 +19,7 @@ from cgmath.transforms import (
 )
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData, TransformList
 from cgmath.hierarchy import _fbx_frame_rate, FBX
-from cgmath.hierarchy.hierarchy import _rotation
+from cgmath.hierarchy.hierarchy import _filtered, _rotation
 
 if pygltflib is not None:
     from pygltflib import (
@@ -808,13 +808,22 @@ def _parent_by_uuid(rig):
     return rig
 
 
-class TestClipDeltaVectorised(unittest.TestCase):
-    """clip pose algebra solves every frame at once; it must agree with the
-    single pose HierarchyData.get_delta / add_delta run on each frame"""
+CHANNELS = ("rotate", "translate", "scale", "joint_orient", "rotate_axis")
+
+
+def pose_at(clip, frame):
+    """one frame of a clip as a plain single pose HierarchyData of its own"""
+    clip.frame = frame
+    return TransformList._owned_copy(clip)
+
+
+class _DeltaRigs:
+    """random rigs and clips for the clip pose algebra tests, and the frame
+    by frame reference they are held to"""
 
     by_uuid = False  # parent_node holds names; a subclass points it at uuids
 
-    def _rig(self, names, parents, seed):
+    def _rig(self, names, parents, seed, scale=False):
         rng = np.random.default_rng(seed)
         rig = HierarchyData(
             [
@@ -830,15 +839,16 @@ class TestClipDeltaVectorised(unittest.TestCase):
                     # mixed: compensation is the one solve that reads the
                     # parent's solved scale
                     segment_scale_compensate=bool(rng.integers(0, 2)),
+                    scale=rng.uniform(0.8, 1.25, size=3) if scale else None,
                 )
                 for name, parent in zip(names, parents)
             ]
         )
         return _parent_by_uuid(rig) if self.by_uuid else rig
 
-    def _chain(self, count, seed):
+    def _chain(self, count, seed, **kwargs):
         names = [f"j{i}" for i in range(count)]
-        return self._rig(names, [None] + names[:-1], seed)
+        return self._rig(names, [None] + names[:-1], seed, **kwargs)
 
     def _animated(self, rig, frames=6, seed=9, scale=True, orient=False):
         rng                   = np.random.default_rng(seed)
@@ -854,16 +864,33 @@ class TestClipDeltaVectorised(unittest.TestCase):
             clip.frames.rotate_axis  = clip.frames.rotate_axis + rng.normal(size=shape) * 10.0
         return clip
 
-    def _per_frame(self, method, clip, other, **kwargs):
-        """the reference: the single pose get_delta / add_delta on every frame,
-        against one pose or frame for frame against a clip"""
+    def _per_frame(self, method, receiver, other, by="index", **kwargs):
+        """the reference: ``receiver.<method>(other)`` on every frame, both
+        sides plain single poses -- a clip read one frame at a time, frame for
+        frame against a clip -- gathered by from_poses on the clip's timebase.
+        ``method`` is get_delta / add_delta or an in place operator, __isub__
+        / __iadd__.
+
+        Each frame picks its euler branch on its own, so the rotate curves of
+        the paired nodes then go through euler_filter with each node's rotate
+        order, frame 0 kept as solved bit for bit, as the clip algebra's must.
+        """
+        clip  = receiver if isinstance(receiver, ClipData) else other
         poses = []
         for frame in range(clip.frame_count):
-            clip.frame = frame
-            if isinstance(other, ClipData):
-                other.frame = frame
-            poses.append(getattr(HierarchyData, method)(clip, other, **kwargs))
-        return ClipData.from_poses(poses, start_frame=clip.start_frame, fps=clip.fps)
+            mine   = pose_at(receiver, frame) if isinstance(receiver, ClipData) else receiver
+            theirs = pose_at(other, frame) if isinstance(other, ClipData) else other
+            poses.append(getattr(mine, method)(theirs, by=by, **kwargs))
+        result = ClipData.from_poses(poses, start_frame=clip.start_frame, fps=clip.fps)
+
+        # by name, only the nodes both sides hold are solved
+        paired               = set(receiver.name) & set(other.name) if by == "name" else None
+        cols                 = [i for i, n in enumerate(result.name) if paired is None or n in paired]
+        orders               = np.array([result[i].rotate_order for i in cols], dtype=int)
+        rotate               = np.array(result.frames.rotate)
+        rotate[:, cols]      = _filtered(rotate[:, cols], orders)
+        result.frames.rotate = rotate
+        return result
 
     def _frozen(self, clip, frame):
         """the whole clip at one frame, as a pose of its own"""
@@ -871,7 +898,9 @@ class TestClipDeltaVectorised(unittest.TestCase):
         return HierarchyData([node.copy() for node in clip])
 
     def _assert_same(self, fast, slow):
-        # exact: the same algebra, step for step, gives the same bits
+        # exact: the same algebra, step for step, and the same filter give
+        # the same bits
+        self.assertIsInstance(fast, ClipData)
         self.assertEqual(fast.name, slow.name)
         self.assertEqual(fast.uuid, slow.uuid)
         self.assertEqual([n.parent_node for n in fast], [n.parent_node for n in slow])
@@ -883,6 +912,12 @@ class TestClipDeltaVectorised(unittest.TestCase):
                 getattr(fast.frames, channel), getattr(slow.frames, channel), channel
             )
         np.testing.assert_array_equal(fast.frames.world_matrix, slow.frames.world_matrix)
+
+
+class TestClipDeltaVectorised(_DeltaRigs, unittest.TestCase):
+    """clip pose algebra solves every frame at once; it must agree with the
+    single pose HierarchyData.get_delta / add_delta run on each frame, its
+    rotate curves euler filtered"""
 
     # --- add_delta with one delta --- #
     def test_index_pairing_matches_per_frame(self):
@@ -1237,6 +1272,654 @@ class TestDeltaSolveOrderChildrenFirst(TestDeltaSolveOrder):
     solve order comes from the hierarchy, never from the list"""
 
     children_first = True
+
+
+class TestClipAlgebraEveryFrame(_DeltaRigs, unittest.TestCase):
+    """clip.frames stands for every frame of a clip, where the clip itself is
+    the frame it is bound to: ``clip.frames -= pose``, ``pose.get_delta(
+    clip.frames)`` and ``rig.add_delta(deltas.frames)`` solve every frame at
+    once and equal the single pose algebra on each frame; ``clip -= pose``
+    and ``pose.get_delta(clip)`` are the bound frame alone"""
+
+    # a partial overlap by name: each side holds a node the other lacks
+    PARTIAL = (["j0", "j1", "j2", "j3", "c_extra"], [None, "j0", "j1", "j2", "j1"])
+    POSE    = (["j0", "j1", "j3", "p_extra"], [None, "j0", "j1", "j3"])
+
+    def _scaled(self, count, seed):
+        return self._chain(count, seed, scale=True)
+
+    # --- clip.frames -= ... --- #
+    def test_subtracting_a_pose_from_every_frame_matches_per_frame(self):
+        clip       = self._animated(self._scaled(6, seed=5), orient=True)
+        pose       = self._scaled(6, seed=17)
+        expected   = self._per_frame("__isub__", clip, pose)
+
+        clip.frame = 2
+        frames     = clip.frames
+        frames -= pose
+
+        self.assertIs(frames._clip, clip)
+        self.assertEqual(clip.frame, 2)
+        self._assert_same(clip, expected)
+        # the bound nodes read the solved frame
+        expected.frame = 2
+        np.testing.assert_array_equal(clip["j3"].rotate, expected["j3"].rotate)
+
+    def test_subtracting_a_clip_from_every_frame_matches_per_frame(self):
+        clip     = self._animated(self._scaled(6, seed=5), seed=9, orient=True)
+        other    = self._animated(self._scaled(6, seed=17), seed=21, orient=True)
+        expected = self._per_frame("__isub__", clip, other)
+        twin     = clip.copy()
+
+        clip.frames -= other
+        self._assert_same(clip, expected)
+
+        # its frame axis pairs the same way
+        twin.frames -= other.frames
+        self._assert_same(twin, expected)
+
+    def test_subtracting_by_name_orientation_only_matches_per_frame(self):
+        clip     = self._animated(self._rig(*self.PARTIAL, seed=5))
+        pose     = self._rig(*self.POSE, seed=17)
+        expected = self._per_frame("__isub__", clip, pose, by="name", translate=False)
+
+        clip.frames.__isub__(pose, by="name", translate=False)
+        self._assert_same(clip, expected)
+
+    # --- clip.frames += ... --- #
+    def test_adding_a_pose_to_every_frame_matches_per_frame(self):
+        deltas   = self._animated(self._scaled(6, seed=17), seed=21, orient=True)
+        pose     = self._scaled(6, seed=5)
+        expected = self._per_frame("__iadd__", deltas, pose)
+
+        deltas.frame = 4
+        frames       = deltas.frames
+        frames += pose
+
+        self.assertIs(frames._clip, deltas)
+        self.assertEqual(deltas.frame, 4)
+        self._assert_same(deltas, expected)
+
+    def test_adding_a_clip_to_every_frame_matches_per_frame(self):
+        deltas   = self._animated(self._scaled(6, seed=17), seed=21, orient=True)
+        source   = self._animated(self._scaled(6, seed=5), seed=9)
+        expected = self._per_frame("__iadd__", deltas, source)
+
+        deltas.frames += source
+        self._assert_same(deltas, expected)
+
+    def test_adding_by_name_orientation_only_matches_per_frame(self):
+        deltas   = self._animated(self._rig(*self.PARTIAL, seed=17), seed=21)
+        pose     = self._rig(*self.POSE, seed=5)
+        expected = self._per_frame("__iadd__", deltas, pose, by="name", translate=False)
+
+        deltas.frames.__iadd__(pose, by="name", translate=False)
+        self._assert_same(deltas, expected)
+
+    def test_every_frame_refuses_a_clip_of_another_length(self):
+        clip   = self._animated(self._chain(4, seed=5), frames=6)
+        other  = self._animated(self._chain(4, seed=17), frames=5)
+        before = {c: np.array(getattr(clip.frames, c)) for c in CHANNELS}
+
+        with self.assertRaisesRegex(ValueError, "clips hold 6 and 5 frames"):
+            clip.frames -= other
+        with self.assertRaisesRegex(ValueError, "clips hold 6 and 5 frames"):
+            clip.frames += other
+
+        for channel, values in before.items():
+            np.testing.assert_array_equal(getattr(clip.frames, channel), values)
+
+    def test_every_frame_needs_a_whole_axis_of_a_clip_with_frames(self):
+        clip = self._animated(self._chain(4, seed=5))
+        pose = self._chain(4, seed=17)
+        with self.assertRaises(TypeError):
+            clip.frames["j1"].__isub__(pose)
+        with self.assertRaises(TypeError):
+            pose.get_delta(clip.frames[["j1", "j2"]])
+        with self.assertRaisesRegex(ValueError, "holds no frames"):
+            ClipData(pose).frames.__isub__(pose)
+        with self.assertRaises(AttributeError):
+            clip.frames = self._animated(self._chain(4, seed=5)).frames
+
+    def test_a_clip_with_no_frames_is_one_pose_in_place(self):
+        rig  = self._chain(4, seed=5)
+        pose = self._chain(4, seed=17)
+
+        clip = ClipData(rig)
+        clip -= pose
+        self.assertEqual(clip.frame_count, 0)
+        np.testing.assert_array_equal(clip.rotate, rig.get_delta(pose).rotate)
+
+    # --- the clip itself: the frame it is bound to --- #
+    def test_in_place_on_the_clip_is_the_bound_frame_alone(self):
+        # clip.<op> acts on the frame the clip is bound to, as every other
+        # write on the clip does: a view of it, clip.frames[i] (the clip
+        # scrubbed to i) and a scrub loop all agree
+        pose = self._scaled(6, seed=17)
+        forms = {
+            "clip -= pose":           lambda c: c.__isub__(pose),
+            "clip += pose":           lambda c: c.__iadd__(pose),
+            "clip[:] -= pose":        lambda c: c[:].__isub__(pose),
+            "clip.frames[2] -= pose": lambda c: c.frames[2].__isub__(pose),
+        }
+        for label, write in forms.items():
+            with self.subTest(label):
+                clip       = self._animated(self._scaled(6, seed=5), orient=True)
+                clip.frame = 2
+                single     = pose_at(clip, 2)
+                (single.__iadd__ if "+=" in label else single.__isub__)(pose)
+                clip.frame = 2
+                before     = {c: np.array(getattr(clip.frames, c)) for c in CHANNELS}
+
+                write(clip)
+
+                self.assertEqual(clip.frame, 2)
+                others = [f for f in range(clip.frame_count) if f != 2]
+                for channel, values in before.items():
+                    got = np.asarray(getattr(clip.frames, channel))
+                    np.testing.assert_array_equal(got[others], values[others], channel)
+                    np.testing.assert_allclose(
+                        got[2], getattr(single, channel), rtol=0.0, atol=1e-12,
+                        err_msg=channel,
+                    )
+
+    def test_a_frame_range_written_in_place_is_its_first_frame_alone(self):
+        # clip.frames[a:b] is an independent cut, bound to its own first
+        # frame, and the cut is the clip it stands for: the statement
+        # clip.frames[a:b] -= pose solves that one frame, which the paste
+        # then writes back, frame a alone (hierarchy/CHEATSHEET.md, Gotchas).
+        # The whole range is the cut's frame axis, pasted back
+        pose = self._scaled(6, seed=17)
+
+        def isub_range(clip):
+            clip.frames[1:4] -= pose
+
+        def iadd_range(clip):
+            clip.frames[1:4] += pose
+
+        def isub_all(clip):
+            clip.frames[:] -= pose
+
+        for label, statement, first in (
+            ("clip.frames[1:4] -= pose", isub_range, 1),
+            ("clip.frames[1:4] += pose", iadd_range, 1),
+            ("clip.frames[:] -= pose", isub_all, 0),
+        ):
+            with self.subTest(label):
+                clip   = self._animated(self._scaled(6, seed=5), orient=True)
+                single = pose_at(clip, first)
+                (single.__iadd__ if "+=" in label else single.__isub__)(pose)
+                clip.frame = 2
+                before     = {c: np.array(getattr(clip.frames, c)) for c in CHANNELS}
+
+                statement(clip)
+
+                self.assertEqual(clip.frame, 2)
+                others = [f for f in range(clip.frame_count) if f != first]
+                for channel, values in before.items():
+                    got = np.asarray(getattr(clip.frames, channel))
+                    np.testing.assert_array_equal(got[others], values[others], channel)
+                    np.testing.assert_allclose(
+                        got[first], getattr(single, channel), rtol=0.0, atol=1e-12,
+                        err_msg=channel,
+                    )
+
+        # the range, every frame of it: solved on the cut's own frame axis
+        clip       = self._animated(self._scaled(6, seed=5), orient=True)
+        clip.frame = 2
+        whole      = clip.copy()
+        whole.frames -= pose
+        before = {c: np.array(getattr(clip.frames, c)) for c in CHANNELS}
+
+        cut = clip.frames[1:4]
+        cut.frames -= pose
+        clip.frames[1:4] = cut
+
+        self.assertEqual(clip.frame, 2)
+        for channel, values in before.items():
+            got = np.asarray(getattr(clip.frames, channel))
+            np.testing.assert_array_equal(got[[0, 4, 5]], values[[0, 4, 5]], channel)
+        np.testing.assert_allclose(
+            np.asarray(clip.frames.world_matrix)[1:4],
+            np.asarray(whole.frames.world_matrix)[1:4],
+            rtol = 0.0,
+            atol = 1e-12,
+        )
+
+    def test_a_scrub_loop_of_in_place_writes_is_each_frame_once(self):
+        # before clip.frames took the every frame form, scrubbing and writing
+        # once a frame was how a clip was covered, and it still is: written
+        # every frame, each pass solved the whole clip again, 72 off in world
+        clip = self._animated(self._scaled(6, seed=5), orient=True)
+        pose = self._scaled(6, seed=17)
+        want = self._per_frame("__isub__", clip, pose)
+
+        for frame in range(clip.frame_count):
+            clip.frame = frame
+            clip -= pose
+
+        np.testing.assert_allclose(
+            clip.frames.world_matrix, want.frames.world_matrix, rtol=0.0, atol=1e-12
+        )
+
+    def test_a_clip_operand_is_its_bound_frame(self):
+        pose         = self._scaled(6, seed=17)
+        clip         = self._animated(self._scaled(6, seed=5), orient=True)
+        deltas       = self._animated(self._scaled(6, seed=23), seed=21)
+        clip.frame   = 3
+        deltas.frame = 1
+
+        delta = pose.get_delta(clip)
+        self.assertNotIsInstance(delta, ClipData)
+        np.testing.assert_array_equal(delta.rotate, pose.get_delta(pose_at(clip, 3)).rotate)
+        np.testing.assert_array_equal((pose - clip).rotate, delta.rotate)
+
+        posed = pose.add_delta(deltas)
+        self.assertNotIsInstance(posed, ClipData)
+        np.testing.assert_array_equal(
+            posed.rotate, pose.add_delta(pose_at(deltas, 1)).rotate
+        )
+        np.testing.assert_array_equal((deltas + pose).rotate, posed.rotate)
+        self.assertEqual((clip.frame, deltas.frame), (3, 1))
+
+    # --- one pose against every frame of a clip --- #
+    def test_a_pose_less_every_frame_is_a_clip_of_every_frame(self):
+        pose  = self._scaled(6, seed=17)
+        clip  = self._animated(self._scaled(6, seed=5), orient=True)
+        delta = pose.get_delta(clip.frames)
+
+        self._assert_same(delta, self._per_frame("get_delta", pose, clip))
+        self.assertEqual(delta.frame, 0)
+        self._assert_same(pose - clip.frames, delta)
+        self._assert_same(clip.frames - pose, clip.get_delta(pose))
+
+    def test_a_pose_less_every_frame_by_name_orientation_only_matches_per_frame(self):
+        pose = self._rig(*self.POSE, seed=17)
+        clip = self._animated(self._rig(*self.PARTIAL, seed=5))
+
+        self._assert_same(
+            pose.get_delta(clip.frames, by="name", translate=False),
+            self._per_frame("get_delta", pose, clip, by="name", translate=False),
+        )
+
+    def test_a_selection_less_every_frame_matches_per_frame(self):
+        view = self._scaled(6, seed=17)[2:5]
+        clip = self._animated(self._scaled(6, seed=5))
+
+        self._assert_same(
+            view.get_delta(clip.frames, by="name"),
+            self._per_frame("get_delta", view, clip, by="name"),
+        )
+
+    def test_a_rig_posed_by_every_delta_is_a_clip_of_every_frame(self):
+        rig          = self._scaled(6, seed=5)
+        deltas       = self._animated(self._scaled(6, seed=17), seed=21, orient=True)
+        deltas.frame = 3
+        posed        = rig.add_delta(deltas.frames)
+
+        self._assert_same(posed, self._per_frame("add_delta", rig, deltas))
+        self.assertEqual(posed.frame, 0)
+        self._assert_same(deltas.frames + rig, posed)
+
+    def test_a_rig_posed_by_every_delta_by_name_orientation_only_matches_per_frame(self):
+        rig    = self._rig(*self.POSE, seed=5)
+        deltas = self._animated(self._rig(*self.PARTIAL, seed=17), seed=21)
+
+        self._assert_same(
+            rig.add_delta(deltas.frames, by="name", translate=False),
+            self._per_frame("add_delta", rig, deltas, by="name", translate=False),
+        )
+
+    def test_a_selection_posed_by_every_delta_matches_per_frame(self):
+        # the source is read where it sits: in its whole rig
+        view   = self._scaled(6, seed=5)[[1, 3, 4]]
+        deltas = self._animated(self._scaled(6, seed=17), seed=21)
+
+        self._assert_same(
+            view.add_delta(deltas.frames, by="name"),
+            self._per_frame("add_delta", view, deltas, by="name"),
+        )
+
+    def test_a_pose_receiver_leaves_both_sides_alone(self):
+        rig        = self._chain(5, seed=5)
+        clip       = self._animated(self._chain(5, seed=17), seed=21)
+        clip.frame = 3
+        before     = {c: np.array(getattr(clip.frames, c)) for c in CHANNELS}
+        rest       = {c: np.array(getattr(rig, c)) for c in CHANNELS}
+
+        rig.get_delta(clip.frames)
+        rig.add_delta(clip.frames)
+        rig.get_delta(clip)
+        rig.add_delta(clip)
+
+        self.assertEqual(clip.frame, 3)
+        for channel, values in before.items():
+            np.testing.assert_array_equal(getattr(clip.frames, channel), values)
+        for channel, values in rest.items():
+            np.testing.assert_array_equal(getattr(rig, channel), values)
+
+    def test_a_one_frame_clip_is_still_one_pose(self):
+        rig  = self._chain(4, seed=5)
+        clip = ClipData(self._chain(4, seed=17), frames=1)
+
+        for operand in (clip, clip.frames):
+            self.assertNotIsInstance(rig.get_delta(operand), ClipData)
+            self.assertNotIsInstance(rig.add_delta(operand), ClipData)
+
+    def test_a_one_frame_clip_beside_a_longer_one_is_one_pose(self):
+        # a clip of one frame is one pose wherever it stands; against a clip
+        # of six it raised "clips hold 6 and 1 frames", where a pose did not
+        long   = self._animated(self._scaled(6, seed=5), orient=True)
+        short  = ClipData(self._scaled(6, seed=17), frames=1)
+        deltas = self._animated(self._scaled(6, seed=23), seed=21)
+        pose   = pose_at(short, 0)
+
+        fast   = long.copy()
+        fast.frames -= short
+        slow = long.copy()
+        slow.frames -= pose
+        self._assert_same(fast, slow)
+
+        fast = deltas.copy()
+        fast.frames += short
+        slow = deltas.copy()
+        slow.frames += pose
+        self._assert_same(fast, slow)
+
+        self._assert_same(long.get_delta(short), long.get_delta(pose))
+        self._assert_same(long.add_delta(short), long.add_delta(pose))
+
+        matched = long.copy()
+        matched.frames.match_matrix(short)
+        held = long.copy()
+        held.frames.match_matrix(pose)
+        self._assert_same(matched, held)
+
+        # the one frame clip as the receiver: one pose against every frame
+        self._assert_same(short.get_delta(long), pose.get_delta(long.frames))
+        self._assert_same(short.add_delta(deltas), pose.add_delta(deltas.frames))
+
+        # in place it stays one frame, reading the other's bound frame
+        long.frame = 4
+        one        = short.copy()
+        one.frames -= long
+        self.assertEqual(one.frame_count, 1)
+        np.testing.assert_array_equal(
+            one.rotate, pose.get_delta(pose_at(long, 4)).rotate
+        )
+
+    def test_no_frame_is_solved_on_its_own(self):
+        # every frame at once: none of these may run the single pose solve,
+        # which is what solving one frame at a time calls
+        rig    = self._chain(5, seed=5)
+        clip   = self._animated(self._chain(5, seed=17), frames=12)
+        deltas = self._animated(self._chain(5, seed=23), frames=12, seed=21)
+
+        isub = mock.patch.object(
+            TransformList, "__isub__", autospec=True, side_effect=TransformList.__isub__
+        )
+        iadd = mock.patch.object(
+            TransformList, "__iadd__", autospec=True, side_effect=TransformList.__iadd__
+        )
+        with isub as sub, iadd as add:
+            rig.get_delta(clip.frames)
+            rig - clip.frames
+            rig.add_delta(deltas.frames)
+            deltas.frames + rig
+            work = clip.copy()
+            work.frames -= rig
+            work.frames += rig
+
+        self.assertEqual((sub.call_count, add.call_count), (0, 0))
+
+
+class TestClipAlgebraEveryFrameByUuid(TestClipAlgebraEveryFrame):
+    """the same, parented by uuid as a file reader writes a rig"""
+
+    by_uuid = True
+
+
+class TestClipAlgebraEulerFilter(unittest.TestCase):
+    """every rotate the clip algebra rebuilds from matrices goes through
+    euler_filter per node, frame 0 kept as solved: one frame at a time,
+    matrix_to_euler wraps a turn through 180 degrees into a 360 degree step"""
+
+    def _rest(self, extra=False):
+        # nothing in the orientation chain, so a delta's rotate is the clip's
+        # own rotation read back through matrix_to_euler
+        nodes = [
+            TransformData(
+                name        = f"j{i}",
+                node_type   = "joint",
+                parent_node = None if i == 0 else f"j{i - 1}",
+                translate   = [0.0, 1.0 if i else 0.0, 0.0],
+            )
+            for i in range(3)
+        ]
+        if extra:
+            nodes.append(TransformData(name="extra", parent_node="j0", translate=[1.0, 0.0, 0.0]))
+        return HierarchyData(nodes)
+
+    def _sweep(self, first, extra=False):
+        """j1 turns about x from ``first`` in 10 degree steps over 9 frames"""
+        rest            = self._rest(extra)
+        clip            = ClipData(rest, frames=9, start_frame=1, fps=24.0)
+        sweep           = first + 10.0 * np.arange(9)
+        rotate          = np.zeros((9, len(rest), 3))
+        rotate[:, 1, 0] = sweep
+        if extra:
+            # authored with steps: no matrix rebuilds it, so it is kept as is
+            rotate[:, 3, 0] = np.where(np.arange(9) % 2, -170.0, 170.0)
+        clip.frames.rotate = rotate
+        return rest, clip, sweep
+
+    def _assert_curve(self, clip, node, expected):
+        """``node``'s rotate x follows ``expected`` and y, z stay at rest"""
+        rotate = np.asarray(clip.frames[node].rotate)[:, 0]
+        self.assertTrue(np.allclose(rotate[:, 0], expected, atol=1e-9), rotate[:, 0])
+        self.assertTrue(np.allclose(rotate[:, 1:], 0.0, atol=1e-9), rotate[:, 1:])
+
+    def test_a_delta_against_a_pose_does_not_step(self):
+        rest, clip, sweep = self._sweep(140.0)
+        delta = clip.get_delta(rest)
+
+        # j2 hangs under the turn, so its offset is the same turn
+        self._assert_curve(delta, "j1", sweep)
+        self._assert_curve(delta, "j2", sweep)
+        self._assert_curve(delta, "j0", np.zeros(9))
+
+    def test_a_delta_between_clips_does_not_step(self):
+        rest, clip, sweep = self._sweep(140.0)
+        delta = clip.get_delta(ClipData(rest, frames=9))
+        self._assert_curve(delta, "j1", sweep)
+
+    def test_an_identity_delta_hands_the_curves_back(self):
+        rest, clip, sweep = self._sweep(140.0)
+
+        posed = clip.add_delta(rest.get_delta(rest))
+        self._assert_curve(posed, "j1", sweep)
+
+        # and a clip of them
+        posed = clip.add_delta(ClipData(rest.get_delta(rest), frames=9))
+        self._assert_curve(posed, "j1", sweep)
+
+    def test_the_in_place_operators_filter_too(self):
+        rest, clip, sweep = self._sweep(140.0)
+
+        delta = clip.copy()
+        delta.frames -= rest
+        self._assert_curve(delta, "j2", sweep)
+
+        # rest + (clip - rest) is the clip again
+        delta.frames += rest
+        self._assert_curve(delta, "j1", sweep)
+        self._assert_curve(delta, "j2", np.zeros(9))
+
+    def test_a_pose_receiver_filters_too(self):
+        rest, clip, sweep = self._sweep(140.0)
+
+        self._assert_curve(rest.get_delta(clip.frames), "j1", -sweep)
+        self._assert_curve(rest.add_delta(clip.get_delta(rest).frames), "j1", sweep)
+
+    def test_a_frame_scaled_to_zero_stays_on_its_own_frame(self):
+        # a joint scaled to 0 on one frame, the way a game hides it, has no
+        # rotation there: nan. euler_filter carried that nan to every later
+        # frame of the curve, so every later frame of the joint and the
+        # joints below lost their rotate and world matrices
+        rest, clip, sweep = self._sweep(140.0)
+        scale             = np.array(clip.frames.scale)
+        scale[3, 1]       = 0.0
+        clip.frames.scale = scale
+        identity          = rest.get_delta(rest)
+        deltas            = clip.get_delta(rest)
+
+        def reference(solve, source=clip):
+            poses             = [solve(pose_at(source, frame)) for frame in range(source.frame_count)]
+            out               = ClipData.from_poses(poses, start_frame=clip.start_frame, fps=clip.fps)
+            out.frames.rotate = _filtered(np.array(out.frames.rotate), out.rotate_order)
+            return out
+
+        cases = {
+            "get_delta": (
+                lambda: clip.get_delta(rest), lambda p: p.get_delta(rest)
+            ),
+            "add_delta": (
+                lambda: clip.add_delta(identity), lambda p: p.add_delta(identity)
+            ),
+            "frames -=": (
+                lambda: clip.copy().frames.__isub__(rest)._clip, lambda p: p.__isub__(rest)
+            ),
+            "frames +=": (
+                lambda: deltas.copy().frames.__iadd__(rest)._clip,
+                lambda p: p.__iadd__(rest),
+                deltas,
+            ),
+            "pose - frames": (
+                lambda: rest - clip.frames, lambda p: rest.get_delta(p)
+            ),
+            "pose.add_delta(frames)": (
+                lambda: rest.add_delta(deltas.frames), lambda p: rest.add_delta(p), deltas
+            ),
+        }
+        for label, (fast, slow, *source) in cases.items():
+            with self.subTest(label):
+                got, want = fast(), reference(slow, *source)
+                rotate = np.array(got.frames.rotate)
+                np.testing.assert_allclose(
+                    rotate, want.frames.rotate, rtol=0.0, atol=1e-9, equal_nan=True
+                )
+                np.testing.assert_allclose(
+                    got.frames.world_matrix, want.frames.world_matrix,
+                    rtol=0.0, atol=1e-9, equal_nan=True,
+                )
+                # whatever is lost is lost on the degenerate frame alone
+                lost = np.flatnonzero(np.isnan(rotate).any(axis=(1, 2)))
+                self.assertTrue(set(lost.tolist()) <= {3}, lost)
+
+    def test_frame_0_is_kept_as_solved(self):
+        # 200 degrees solves to -160 on its own; the filter starts from there
+        rest, clip, sweep = self._sweep(200.0)
+        delta = clip.get_delta(rest)
+
+        alone = pose_at(clip, 0).get_delta(rest)
+        self.assertAlmostEqual(alone["j1"].rotate_x, -160.0, places=9)
+        self._assert_curve(delta, "j1", sweep - 360.0)
+
+    def test_a_curve_no_matrix_rebuilds_is_left_as_authored(self):
+        rest, clip, _ = self._sweep(140.0, extra=True)
+        authored = np.array(clip.frames["extra"].rotate)
+        part     = HierarchyData([node.copy() for node in rest if node.name != "extra"])
+
+        # get_delta keeps the clip's own channels on an unpaired node
+        delta = clip.get_delta(part, by="name")
+        np.testing.assert_array_equal(delta.frames["extra"].rotate, authored)
+
+        # add_delta keeps the delta's own channels on one
+        posed = part.add_delta(clip.frames, by="name")
+        np.testing.assert_array_equal(posed.frames["extra"].rotate, authored)
+
+
+class TestPoseOperandWorld(_DeltaRigs, unittest.TestCase):
+    """a pose operand's world matrices come from one batched evaluation of
+    the hierarchy owning it, and are the ones world_matrix reads node by
+    node, bit for bit"""
+
+    def _assert_world(self, nodes):
+        expected = np.array([node.world_matrix for node in nodes])
+        np.testing.assert_array_equal(ClipData._pose_world(nodes), expected)
+
+    def _scaled(self, count, seed):
+        return self._chain(count, seed, scale=True)
+
+    def test_a_whole_rig(self):
+        self._assert_world(list(self._scaled(6, seed=3)))
+
+    def test_a_branching_rig_parented_by_uuid(self):
+        uuids   = [hierarchy.generate_uuid() for _ in range(6)]
+        parents = [None, 0, 1, 0, 3, 1]
+        rng     = np.random.default_rng(4)
+        rig = HierarchyData(
+            [
+                TransformData(
+                    name=f"n{i}",
+                    uuid=uuids[i],
+                    parent_node=None if p is None else uuids[p],
+                    rotate=rng.uniform(-90.0, 90.0, size=3),
+                    translate=rng.normal(size=3),
+                    scale=rng.uniform(0.5, 2.0, size=3),
+                    rotate_axis=rng.uniform(-30.0, 30.0, size=3),
+                    joint_orient=rng.uniform(-60.0, 60.0, size=3),
+                    rotate_order=int(rng.integers(0, 6)),
+                    segment_scale_compensate=bool(i % 2),
+                )
+                for i, p in enumerate(parents)
+            ]
+        )
+        self._assert_world(list(rig))
+
+    def test_a_selection_is_placed_in_its_whole_rig(self):
+        rig = self._scaled(6, seed=3)
+        self._assert_world(rig[2:5])
+        self._assert_world(rig[[4, 1]])
+
+    def test_nodes_of_two_rigs_and_nodes_no_rig_owns(self):
+        a = self._scaled(4, seed=3)
+        b = self._scaled(4, seed=4)
+        loose = TransformData(
+            name        = "loose",
+            parent_node = "j0",
+            rotate      = [10.0, 20.0, 30.0],
+            translate   = [1.0, 2.0, 3.0],
+            scale       = [1.0, 2.0, 3.0],
+        )
+        self._assert_world([a["j2"], b["j3"], loose, a["j0"], b["j1"]])
+
+    def test_a_node_its_owner_no_longer_lists_reads_its_own(self):
+        # del leaves the node pointing at the rig it left
+        rig  = self._scaled(5, seed=3)
+        gone = rig[4]
+        del rig[4]
+        self._assert_world([rig["j1"], gone])
+
+        # an owner left listing nothing at all
+        alone = self._scaled(1, seed=4)
+        last  = alone[0]
+        del alone[0]
+        self._assert_world([last])
+
+    def test_a_clip_view_reads_the_bound_frame(self):
+        clip       = self._animated(self._scaled(5, seed=3), orient=True)
+        clip.frame = 4
+        self._assert_world(clip[1:4])
+
+    def test_get_delta_against_a_selection_matches_per_frame(self):
+        clip = self._animated(self._scaled(6, seed=5), orient=True)
+        view = self._scaled(6, seed=17)[[1, 3, 4]]
+
+        self._assert_same(
+            clip.get_delta(view, by="name"),
+            self._per_frame("get_delta", clip, view, by="name"),
+        )
 
 
 class TestClipBranchResets(unittest.TestCase):

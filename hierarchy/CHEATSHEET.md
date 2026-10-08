@@ -1219,7 +1219,8 @@ for frame in range(4):
 
 Every clip delta, taken or applied, against one pose or another clip, is
 solved for all its frames at once, with no copy of the rig per frame:
-1000 frames of a 271-joint rig take 0.7 to 1.5 s.
+1000 frames of a 271-joint rig take 0.5 to 1.4 s, the every-frame
+in-place forms included.
 
 The retarget case — one fixed offset applied to every frame:
 
@@ -1239,6 +1240,44 @@ try:
     clip.get_delta(ClipData(rest, frames=3))
 except ValueError as error:
     print(error)                                # clips hold 4 and 3 frames
+```
+
+As everywhere else on a clip, the clip itself stands for the frame it is
+bound to and `clip.frames` for every frame. The operators follow that:
+`clip -= pose` and `clip += pose` solve the bound frame alone, as they
+always have, so a loop that scrubs and writes still writes each frame
+once; `clip.frames -= pose` and `clip.frames += pose` solve every frame
+at once and keep the clip on its frame. A single pose against a clip
+reads the clip's bound frame -- `pose.get_delta(clip)`, `pose - clip`,
+`rig.add_delta(deltas)`, `deltas + rig` -- and against its frame axis it
+covers every frame: `pose.get_delta(clip.frames)`, `pose - clip.frames`,
+`rig.add_delta(deltas.frames)` and `deltas.frames + rig` return a
+`ClipData` on the clip's timebase, bound to its first frame. A clip's
+own `get_delta` / `add_delta` (and `clip - pose`) cover every frame, as
+above. A clip of one frame is one pose wherever it stands. Each rotate
+the algebra rebuilds from matrices goes through `euler_filter` per node
+in its rotate order, frame 0 kept as solved, so a curve turning through
+180 degrees comes back continuous rather than stepping by 360; a node
+the pairing leaves out keeps its curves as they were.
+
+```python
+per_frame = rest.get_delta(clip.frames)         # one pose against each frame
+assert isinstance(per_frame, ClipData) and per_frame.frame_count == 4
+
+delta = clip.copy()
+delta.frames -= rest                            # in place, every frame
+assert np.allclose(delta.frames.rotate, clip.get_delta(rest).frames.rotate)
+
+delta.frames += rest                            # rest + (clip - rest): the clip
+assert np.allclose(delta.frames.world_matrix, clip.frames.world_matrix, atol=1e-6)
+
+posed = rest.add_delta(clip.get_delta(rest).frames)  # a clip of deltas poses one rig
+assert isinstance(posed, ClipData) and posed.frame_count == 4
+
+clip.frame = 2
+bound      = clip.copy()
+bound -= rest                                   # the bound frame, frame 2, alone
+assert np.allclose(bound.frames.rotate[0], clip.frames.rotate[0])
 ```
 
 ---
@@ -1534,3 +1573,4 @@ rig["hip"].match("hip")                         # True
 | `ClipData(rig)` with no `frames=` | `frame_count == 0`; it is a plain hierarchy until frames are allocated | pass `frames=N`, or build with `from_poses` |
 | rig edits on an animated clip | `swapaxes`, the orient helpers and `set_parent(world_space=True)` raise `RuntimeError` | apply them to the rest pose, then build the clip |
 | `clip.frames[12]` | scrubs and hands back the **same** clip — two frames cannot be held at once | `clip.frames[12:13]` for an independent cut, or `copy()` |
+| `clip.frames[a:b] -= pose` (or `+=`, or `[:]`) | the slice is an independent cut bound to its own first frame, and `-=` on a clip solves its bound frame: the paste writes back frame `a` alone, with no error | `clip.frames -= pose` for every frame; for a range, `cut = clip.frames[a:b]`, `cut.frames -= pose`, `clip.frames[a:b] = cut` |
