@@ -9,8 +9,10 @@ the test, so a new class cannot slip past it.
 
 from __future__ import annotations
 
+import gc
 import importlib
 import inspect
+import json
 import os
 import pkgutil
 import tempfile
@@ -225,6 +227,7 @@ class TestNpzSpeed(unittest.TestCase):
 
 class TestJsonSpeed(unittest.TestCase):
     def test_a_million_points_write_quickly(self):
+        """to_json takes under three times as long as json.dumps of the same arrays"""
         from cgmath.geometry import MeshData
 
         count  = 1_000_000
@@ -234,10 +237,49 @@ class TestJsonSpeed(unittest.TestCase):
             counts  = np.full(count // 4, 4, np.int32),
             points  = points,
         )
-        start = time.perf_counter()
-        mesh.to_json()
-        # the per-value writer took 6.4 s, the bulk one 1.6 s
-        self.assertLess(time.perf_counter() - start, 4.0)
+
+        def seconds(write):
+            start = time.perf_counter()
+            write()
+            return time.perf_counter() - start
+
+        def dumps():
+            json.dumps([mesh.points.tolist(), mesh.indices.tolist(), mesh.counts.tolist()])
+
+        # a time in seconds failed on a slower machine (4.5 s against a 4 s
+        # limit), so the yardstick is the standard library's json.dumps of the
+        # same arrays as lists, timed in the same run: a slower machine slows
+        # both. It is timed on either side of to_json and the quicker of the
+        # two taken, as a burst of load can slow either: under load, with the
+        # collector on, the per-value writer once took 1.95 times the slower,
+        # which would pass, and 3.95 times the quicker. The garbage collector
+        # is off while they run, as in timeit: json.dumps makes a million
+        # small lists, and the collections they set off walk every object the
+        # process holds, so with it on the same json.dumps took 1.1 to 3.3 s,
+        # depending on what ran before.
+        bound   = 3.0
+        rounds  = []
+        enabled = gc.isenabled()
+        gc.collect()
+        gc.disable()
+        try:
+            # a round that misses the bound runs once more, so a burst of load
+            # that lands on to_json alone does not fail the test
+            for _ in range(2):
+                before = seconds(dumps)
+                took   = seconds(mesh.to_json)
+                after  = seconds(dumps)
+                ratio  = took / min(before, after)
+                rounds.append(f"to_json took {took:.2f} s, json.dumps {before:.2f} s and {after:.2f} s")
+                if ratio < bound:
+                    break
+        finally:
+            if enabled:
+                gc.enable()
+        # the per-value writer took at least 4.6 times as long as the quicker
+        # json.dumps, the bulk one 1.3 to 1.8 idle and at most 2.8 in a round
+        # under load (python 3.11 and mayapy 2025, alone and in the full suite)
+        self.assertLess(ratio, bound, "; ".join(rounds))
 
 
 if __name__ == "__main__":
