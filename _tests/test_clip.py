@@ -7,9 +7,15 @@ import unittest
 from unittest import mock
 
 import numpy as np
+from cgmath.transforms._numba._euler import MAYA_EA
 from cgmath import hierarchy
 from cgmath.formats.glb import pygltflib
-from cgmath.transforms import euler_to_quaternion, quaternion_slerp, quaternion_to_matrix
+from cgmath.transforms import (
+    euler_filter,
+    euler_to_quaternion,
+    quaternion_slerp,
+    quaternion_to_matrix,
+)
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData, TransformList
 from cgmath.hierarchy import _fbx_frame_rate, FBX
 from cgmath.hierarchy.hierarchy import _rotation
@@ -1430,6 +1436,686 @@ class TestClipBranchResets(unittest.TestCase):
                             err_msg=f"{label} frames.world_matrix {frame}",
                         )
 
+
+class TestClipFramedSolve(unittest.TestCase):
+    """world_matrix / matrix / quaternion writes and match_* solve every frame
+    of a clip at once. Each must equal the single pose route: every frame
+    copied out as a HierarchyData and solved by HierarchyData / TransformData
+    methods alone, world matrices within 1e-9, rotate equal once that route's
+    curves go through euler_filter as well"""
+
+    def _rig(self, seed, count=9):
+        # a branching tree with everything that makes a solve non trivial:
+        # rotate_axis, joint_orient, every rotate order, non-uniform scale and
+        # mixed segment scale compensation; parented by name and by uuid
+        rng   = np.random.default_rng(seed)
+        nodes = []
+        for i in range(count):
+            parent = None
+            if i:
+                p      = int(rng.integers(0, i))
+                parent = f"j{p}" if i % 2 else nodes[p].uuid
+            nodes.append(
+                TransformData(
+                    name=f"j{i}",
+                    node_type="joint",
+                    parent_node=parent,
+                    translate=rng.normal(size=3),
+                    rotate=rng.uniform(-60.0, 60.0, size=3),
+                    scale=rng.uniform(0.8, 1.25, size=3),
+                    joint_orient=rng.uniform(-90.0, 90.0, size=3),
+                    rotate_axis=rng.uniform(-30.0, 30.0, size=3),
+                    rotate_order=i % 6,
+                    segment_scale_compensate=bool(rng.integers(0, 2)),
+                )
+            )
+        return HierarchyData(nodes)
+
+    def _animated(self, rig, frames=6, seed=9, orient=False):
+        rng                   = np.random.default_rng(seed)
+        clip                  = ClipData(rig, frames=frames, start_frame=1001, fps=30.0)
+        shape                 = clip.frames.rotate.shape
+        clip.frames.rotate    = clip.frames.rotate + np.cumsum(rng.normal(size=shape) * 8.0, axis=0)
+        clip.frames.translate = clip.frames.translate + rng.normal(size=shape) * 0.2
+        clip.frames.scale     = clip.frames.scale * rng.uniform(0.85, 1.15, size=shape)
+        if orient:
+            clip.frames.joint_orient = clip.frames.joint_orient + rng.normal(size=shape) * 10.0
+            clip.frames.rotate_axis  = clip.frames.rotate_axis + rng.normal(size=shape) * 10.0
+        clip.frame = 0
+        return clip
+
+    def _pair(self, orient=False):
+        clip  = self._animated(self._rig(5), seed=9, orient=orient)
+        other = self._animated(self._rig(17), seed=21, orient=orient)
+        return clip, other
+
+    @staticmethod
+    def _view(rig, names):
+        """the nodes of ``rig`` called ``names``, as a TransformList view"""
+        return TransformList([rig[name] for name in names])
+
+    @staticmethod
+    def _pose(clip, frame):
+        """frame ``frame`` of a clip as a plain single pose HierarchyData"""
+        clip.frame = frame
+        return clip._owned_copy()
+
+    def _reference(self, clip, solve, names=None):
+        """the single pose route: ``solve(pose, frame)`` on a copy of every
+        frame, gathered back into a clip, the rotate of ``names`` (every
+        node by default) through euler_filter, frame 0 kept"""
+        poses = []
+        for frame in range(clip.frame_count):
+            pose = self._pose(clip, frame)
+            solve(pose, frame)
+            poses.append(pose)
+        out               = ClipData.from_poses(poses, start_frame=clip.start_frame, fps=clip.fps)
+        cols              = [out.index(n) for n in (names or out.name)]
+        orders            = np.asarray(out.rotate_order, dtype=np.intp)[cols]
+        rotate            = np.array(out.frames.rotate)
+        rotate[:, cols]   = np.degrees(euler_filter(np.radians(rotate[:, cols]), orders))
+        out.frames.rotate = rotate
+        return out
+
+    def _assert_same(self, fast, slow):
+        self.assertEqual(fast.name, slow.name)
+        self.assertTrue(
+            np.allclose(fast.frames.world_matrix, slow.frames.world_matrix, rtol=0.0, atol=1e-9),
+            "world",
+        )
+        for channel in ("rotate", "translate", "scale", "rotate_axis", "joint_orient"):
+            self.assertTrue(
+                np.allclose(
+                    getattr(fast.frames, channel), getattr(slow.frames, channel),
+                    rtol=0.0, atol=1e-9,
+                ),
+                channel,
+            )
+
+    # --- framed writes --- #
+    def test_world_matrix_matches_per_frame(self):
+        for orient in (False, True):
+            with self.subTest(orient=orient):
+                clip, other = self._pair(orient)
+                W    = np.array(other.frames.world_matrix)
+                slow = self._reference(clip, lambda p, f: setattr(p, "world_matrix", W[f]))
+
+                clip.frames.world_matrix = W
+                self._assert_same(clip, slow)
+
+    def test_a_world_the_rig_can_hold_reads_back(self):
+        # another take of the same rig: the same compensation flags, so every
+        # world it holds can be held here too
+        clip  = self._animated(self._rig(5), seed=9, orient=True)
+        other = self._animated(self._rig(5), seed=21, orient=True)
+        W     = np.array(other.frames.world_matrix)
+        clip.frames.world_matrix = W
+        self.assertTrue(np.allclose(clip.frames.world_matrix, W, rtol=0.0, atol=1e-9))
+
+        clip = self._animated(self._rig(5), seed=9)
+        clip.frames.match_matrix(other)
+        self.assertTrue(np.allclose(clip.frames.world_matrix, W, rtol=0.0, atol=1e-9))
+
+    def test_matrix_matches_per_frame(self):
+        clip, other = self._pair(orient=True)
+        L    = np.array(other.frames.matrix)
+        slow = self._reference(clip, lambda p, f: setattr(p, "matrix", L[f]))
+
+        clip.frames.matrix = L
+        self._assert_same(clip, slow)
+
+    def test_quaternion_reads_and_writes_every_frame(self):
+        clip, other = self._pair(orient=True)
+
+        # the read: TransformData.quaternion of every node on every frame
+        Q = np.array(other.frames.quaternion)
+        self.assertEqual(Q.shape, (other.frame_count, len(other), 4))
+        for frame in range(other.frame_count):
+            other.frame = frame
+            each        = np.array([node.quaternion for node in other])
+            self.assertTrue(np.allclose(Q[frame], each, rtol=0.0, atol=1e-12))
+            self.assertTrue(np.allclose(other.quaternion, each, rtol=0.0, atol=1e-12))
+
+        # the write: was silently dropped on a throwaway axis before
+        slow                   = self._reference(clip, lambda p, f: setattr(p, "quaternion", Q[f]))
+        clip.frames.quaternion = Q
+        self._assert_same(clip, slow)
+
+    def test_values_broadcast_over_nodes_and_frames(self):
+        clip, other = self._pair()
+        frames = clip.frame_count
+        names  = ["j3", "j7", "j8"]
+        cols   = [clip.index(n) for n in names]
+        W      = np.array(other.frames.world_matrix)
+
+        # (n, 4, 4): one matrix per node, held on every frame
+        held = W[2, cols]
+        slow = self._reference(
+            clip, lambda p, f: setattr(self._view(p, names), "world_matrix", held), names
+        )
+        fast                            = clip.copy()
+        fast.frames[names].world_matrix = held
+        self._assert_same(fast, slow)
+
+        # (4, 4): one matrix for every node and frame
+        one  = W[4, 0]
+        slow = self._reference(clip, lambda p, f: setattr(p["j8"], "world_matrix", one), ["j8"])
+        fast = clip.copy()
+        fast.frames["j8"].world_matrix = one
+        self._assert_same(fast, slow)
+
+        # (F, n, 4, 4) on a scoped axis
+        slow = self._reference(
+            clip, lambda p, f: setattr(self._view(p, names), "world_matrix", W[f, cols]), names
+        )
+        fast                            = clip.copy()
+        fast.frames[names].world_matrix = W[:, cols]
+        self._assert_same(fast, slow)
+        self.assertEqual(frames, fast.frame_count)
+
+    # --- framed match_* --- #
+    def test_match_against_a_clip_pairs_frame_for_frame(self):
+        clip, other = self._pair(orient=True)
+        for method in ("match_matrix", "match_translate", "match_rotate"):
+            with self.subTest(method=method):
+                slow = self._reference(
+                    clip, lambda p, f: getattr(p, method)(self._pose(other, f))
+                )
+                fast = clip.copy()
+                getattr(fast.frames, method)(other)
+                self._assert_same(fast, slow)
+
+    def test_match_against_a_pose_holds_it_on_every_frame(self):
+        clip, other = self._pair()
+        pose = self._pose(other, 3)
+        for method in ("match_matrix", "match_translate", "match_rotate"):
+            with self.subTest(method=method):
+                slow = self._reference(clip, lambda p, f: getattr(p, method)(pose))
+                fast = clip.copy()
+                getattr(fast.frames, method)(pose)
+                self._assert_same(fast, slow)
+
+    def test_match_a_scoped_axis_against_another(self):
+        clip, other = self._pair()
+        names = ["j1", "j4", "j6"]
+        slow = self._reference(
+            clip,
+            lambda p, f: self._view(p, names).match_matrix(
+                self._view(self._pose(other, f), names)
+            ),
+            names,
+        )
+        fast = clip.copy()
+        fast.frames[names].match_matrix(other.frames[names])
+        self._assert_same(fast, slow)
+
+        # one node against one node, held on every frame
+        node = self._pose(other, 2)["j5"]
+        slow = self._reference(clip, lambda p, f: p["j6"].match_translate(node, y=False), ["j6"])
+        fast = clip.copy()
+        fast.frames["j6"].match_translate(node, y=False)
+        self._assert_same(fast, slow)
+
+    def test_match_translate_takes_positions(self):
+        clip, other = self._pair()
+        P = np.array(other.frames.world_matrix)[..., 3, :3]
+        for label, value, at in (
+            ("(F, n, 3)", P, lambda f: P[f]),
+            ("(n, 3)", P[1], lambda f: P[1]),
+            ("(3,)", P[2, 0], lambda f: P[2, 0]),
+        ):
+            with self.subTest(value=label):
+                slow = self._reference(
+                    clip, lambda p, f: p.match_translate(at(f), x=True, y=False, z=True)
+                )
+                fast = clip.copy()
+                fast.frames.match_translate(value, y=False)
+                self._assert_same(fast, slow)
+
+    def test_match_rotate_takes_eulers_and_quaternions(self):
+        clip, other = self._pair(orient=True)
+        E = np.array(other.frames.rotate)
+        Q = np.array(other.frames.quaternion)
+        for label, value, at in (
+            ("eulers (F, n, 3)", E, lambda f: E[f]),
+            ("quaternions (F, n, 4)", Q, lambda f: Q[f]),
+            ("one euler", E[3, 2], lambda f: E[3, 2]),
+            ("quaternions (n, 4)", Q[1], lambda f: Q[1]),
+        ):
+            with self.subTest(value=label):
+                slow = self._reference(clip, lambda p, f: p.match_rotate(at(f)))
+                fast = clip.copy()
+                fast.frames.match_rotate(value)
+                self._assert_same(fast, slow)
+
+    # --- what the solve keeps --- #
+    def test_rebuilt_rotate_is_euler_filtered(self):
+        # one joint spun a full turn and a half about x over the clip: read
+        # back one frame at a time its rotate steps by 360 at +-180, which
+        # euler_filter takes out, frame 0 kept as computed
+        rig    = HierarchyData([TransformData("a", node_type="joint", rotate_order=0)])
+        clip   = ClipData(rig, frames=19)
+        angles = np.linspace(0.0, 540.0, 19)
+        spun   = ClipData(rig, frames=19)
+        spun.frames.rotate = np.stack(
+            [angles, np.zeros(19), np.zeros(19)], axis=-1
+        )[:, None]
+        for write in ("world_matrix", "matrix", "quaternion"):
+            with self.subTest(write=write):
+                fast = clip.copy()
+                setattr(fast.frames, write, np.asarray(getattr(spun.frames, write)))
+                rotate = np.asarray(fast.frames.rotate)[:, 0]
+                self.assertTrue(np.allclose(rotate[:, 0], angles, atol=1e-9))
+                self.assertTrue(np.abs(np.diff(rotate, axis=0)).max() < 31.0)
+
+    def test_an_element_already_on_target_keeps_its_channels(self):
+        # a clip written its own world is left exactly as it was, wrapped
+        # curves and all: nothing was rebuilt, so nothing is filtered
+        clip, _ = self._pair()
+        rotate = np.array(clip.frames.rotate)
+        rotate[3:, 2] += 360.0
+        clip.frames.rotate = rotate
+        before             = {c: np.array(getattr(clip.frames, c)) for c in ("scale", "rotate", "translate")}
+
+        clip.frames.world_matrix = np.array(clip.frames.world_matrix)
+        clip.frames.matrix       = np.array(clip.frames.matrix)
+        clip.frames.match_matrix(clip.copy())
+
+        for channel, values in before.items():
+            self.assertTrue(np.array_equal(getattr(clip.frames, channel), values), channel)
+
+    def test_untargeted_nodes_keep_their_channels_and_follow(self):
+        clip, other = self._pair()
+        below  = [node.name for node in clip["j0"].get_branch()][1:]
+        before = {c: np.array(getattr(clip.frames, c)) for c in ("scale", "rotate", "translate")}
+        world  = np.array(clip.frames[below].world_matrix)
+
+        clip.frames["j0"].match_matrix(other.frames["j0"])
+
+        rest = [clip.index(name) for name in below]
+        for channel, values in before.items():
+            got = np.asarray(getattr(clip.frames, channel))
+            self.assertTrue(np.array_equal(got[:, rest], values[:, rest]), channel)
+        self.assertTrue(np.allclose(
+            clip.frames["j0"].world_matrix, other.frames["j0"].world_matrix, rtol=0.0, atol=1e-9
+        ))
+        # the branch below rides along with the root it hangs from
+        self.assertTrue(len(below) > 1)
+        self.assertFalse(np.allclose(clip.frames[below].world_matrix, world))
+
+    def test_a_zero_or_mirrored_scale_splits_as_the_setter_does(self):
+        # a flattened row takes what it leaves out from the node's current
+        # orientation; a mirror goes on scale z. a zero scale goes on a leaf:
+        # a child can not solve under a parent with no inverse
+        clip, other = self._pair()
+        parents             = clip._parent_indices(clip.list)
+        leaves              = [i for i in range(len(clip)) if i not in parents]
+        W                   = np.array(other.frames.world_matrix)
+        W[1, leaves[0], 0]  = 0.0          # one flattened row
+        W[2, leaves[1], :2] = 0.0          # two
+        W[4, leaves[0], :3] = 0.0          # all three
+        W[3, 1, 2]          = -W[3, 1, 2]  # a mirror, above other nodes
+        slow                = self._reference(clip, lambda p, f: setattr(p, "world_matrix", W[f]))
+
+        clip.frames.world_matrix = W
+        self._assert_same(clip, slow)
+
+    def test_a_node_listed_twice_keeps_its_last_value(self):
+        clip, other = self._pair()
+        W = np.array(other.frames.world_matrix)
+        first, last = W[:, 2], W[:, 3]
+
+        fast                                   = clip.copy()
+        fast.frames[["j4", "j4"]].world_matrix = np.stack([first, last], axis=1)
+        once                                   = clip.copy()
+        once.frames["j4"].world_matrix         = last[:, None]
+        self._assert_same(fast, once)
+
+    def test_bad_operands_raise_before_writing(self):
+        clip, other = self._pair()
+        before = np.array(clip.frames.rotate)
+        short  = self._animated(self._rig(17), frames=4, seed=21)
+
+        with self.assertRaises(ValueError):
+            clip.frames.world_matrix = np.zeros((4, 3))
+        with self.assertRaises(ValueError):
+            clip.frames.world_matrix = np.zeros((2, 3, 4, 4))
+        with self.assertRaises(ValueError):
+            clip.frames.match_matrix(short)
+        with self.assertRaises(ValueError):
+            clip.frames.match_rotate(np.zeros(5))
+        with self.assertRaises(ValueError):
+            clip.frames[["j1", "j2"]].match_translate(other)
+        with self.assertRaises(TypeError):
+            clip.frames.match_matrix(np.eye(4))
+        self.assertTrue(np.array_equal(clip.frames.rotate, before))
+
+    def test_a_held_axis_solves_the_nodes_it_was_given(self):
+        # an axis kept across an edit that reordered the nodes solved the
+        # node now at its old position: clip['j2'].set_parent('j0') moved j6
+        # where j5 was written, and children with it
+        reorders = {
+            "set_parent local": lambda c: c["j2"].set_parent(None, world_space=False),
+            "sort":             lambda c: c.sort(key=lambda node: -int(node.name[1:])),
+        }
+        _, other = self._pair()
+        W = np.array(other.frames.world_matrix)
+        L = np.array(other.frames.matrix)
+        Q = np.array(other.frames.quaternion)
+        writes = {
+            "world_matrix": lambda a, n: setattr(a, "world_matrix", W[:, n]),
+            "matrix": lambda a, n: setattr(a, "matrix", L[:, n]),
+            "quaternion": lambda a, n: setattr(a, "quaternion", Q[:, n]),
+            "match_matrix": lambda a, n: a.match_matrix(TransformList([other[i] for i in n])),
+            "match_rotate": lambda a, n: a.match_rotate(TransformList([other[i] for i in n])),
+            "match_translate": lambda a, n: a.match_translate(
+                TransformList([other[i] for i in n])
+            ),
+        }
+        for label, reorder in reorders.items():
+            for scope in (["j5"], ["j7", "j3"], None):
+                for write_label, write in writes.items():
+                    with self.subTest(label, scope=scope, write=write_label):
+                        held, fresh = self._pair()[0], self._pair()[0]
+                        axis = held.frames if scope is None else held.frames[scope]
+                        reorder(held)
+                        reorder(fresh)
+                        nodes = list(range(len(other))) if scope is None else [
+                            int(name[1:]) for name in scope
+                        ]
+
+                        write(axis, nodes)
+                        write(fresh.frames if scope is None else fresh.frames[scope], nodes)
+                        self.assertEqual(held.name, fresh.name)
+                        for channel in ("scale", "rotate", "translate"):
+                            self.assertTrue(np.array_equal(
+                                getattr(held.frames, channel), getattr(fresh.frames, channel)
+                            ), channel)
+
+    def test_a_node_taken_out_of_its_clip_takes_the_single_pose_route(self):
+        # a removed node still points at its clip: the list setters and the
+        # quaternion read took it for a playback head and looked for its
+        # column, a KeyError
+        for take_out in ("remove", "del"):
+            with self.subTest(take_out):
+                clip, other = self._pair()
+                gone = clip["j3"]
+                if take_out == "remove":
+                    clip.remove(gone)
+                else:
+                    del clip[clip.index("j3")]
+                self.assertIs(gone._hierarchy, clip)
+                kept = clip["j1"]
+
+                np.testing.assert_allclose(
+                    TransformList([gone]).quaternion[0], gone.quaternion, atol=1e-12
+                )
+                TransformList([gone]).quaternion = [0.0, 0.0, 0.0, 1.0]
+                TransformList([gone]).matrix = np.eye(4)
+                world = gone.world_matrix
+                world[3, :3] += 1.0
+                TransformList([gone]).world_matrix = world
+                np.testing.assert_allclose(gone.world_matrix, world, atol=1e-9)
+
+                pair = TransformList([gone, kept])
+                pair.match_matrix(other["j0"])
+                pair.match_rotate([10.0, 20.0, 30.0])
+                pair.match_translate([1.0, 2.0, 3.0])
+                for node in pair:
+                    np.testing.assert_allclose(
+                        node.world_matrix[3, :3], [1.0, 2.0, 3.0], atol=1e-9
+                    )
+
+    def _small_scale_chain(self, frames=4, count=8, seed=3):
+        rng   = np.random.default_rng(seed)
+        nodes = []
+        for i in range(count):
+            nodes.append(
+                TransformData(
+                    name         = f"j{i}",
+                    node_type    = "joint",
+                    parent_node  = nodes[-1].uuid if nodes else None,
+                    uuid         = hierarchy.generate_uuid(),
+                    translate    = rng.normal(size=3),
+                    rotate       = rng.uniform(-60.0, 60.0, size=3),
+                    scale        = [1e-4] * 3 if i == 0 else rng.uniform(0.8, 1.25, size=3),
+                    rotate_order = i % 6,
+                )
+            )
+        return self._animated(HierarchyData(nodes), frames=frames, seed=seed)
+
+    def test_the_keep_test_is_on_the_local_matrix(self):
+        # under a parent scaled 1e-4 a child within 1e-8 of its target in
+        # world is not within 1e-8 in local: a fresh copy of the frame solves
+        # it, so the clip has to as well. testing the world too kept the
+        # channels of every child 5e-9 from its target
+        clip = self._small_scale_chain()
+        W    = np.array(clip.frames.world_matrix)
+        W[..., 3, :3] += 5e-9
+        slow = self._reference(clip, lambda p, f: setattr(p, "world_matrix", W[f]))
+
+        clip.frames.world_matrix = W
+        self._assert_same(clip, slow)
+        below = np.array(clip.frames.world_matrix)[:, 1:]
+        self.assertTrue(np.allclose(below, W[:, 1:], rtol=0.0, atol=1e-12))
+
+    def _gimbal_chain(self, eps, seed, count=12, frames=5):
+        # every joint's middle euler angle eps degrees from +-90, where
+        # matrix_to_euler snaps the angles a rotation reads back as
+        rng   = np.random.default_rng(seed)
+        nodes = []
+        for i in range(count):
+            order          = i % 6
+            rotate         = rng.uniform(-170.0, 170.0, size=3)
+            middle         = MAYA_EA[order][1]
+            rotate[middle] = (90.0 - eps) * rng.choice([-1.0, 1.0])
+            nodes.append(
+                TransformData(
+                    name         = f"j{i}",
+                    node_type    = "joint",
+                    parent_node  = nodes[-1].uuid if nodes else None,
+                    uuid         = hierarchy.generate_uuid(),
+                    translate    = rng.normal(size=3),
+                    rotate       = rotate,
+                    scale        = rng.uniform(0.8, 1.25, size=3),
+                    rotate_order = order,
+                )
+            )
+        clip                  = ClipData(HierarchyData(nodes), frames=frames)
+        shape                 = clip.frames.translate.shape
+        clip.frames.translate = clip.frames.translate + rng.normal(size=shape) * 0.1
+        return clip
+
+    def test_next_to_gimbal_lock_the_solve_matches_the_single_pose_route(self):
+        # the eulers a rotation reads back as there hold a slightly other
+        # rotation: carried down as a matrix it left the children up to 2e-7
+        # from where the frame by frame route puts them
+        for eps in (1e-7, 1e-3):
+            for seed in (1, 2, 3):
+                with self.subTest(eps=eps, seed=seed):
+                    clip  = self._gimbal_chain(eps, seed)
+                    other = self._gimbal_chain(eps, seed + 10)
+                    W     = np.array(other.frames.world_matrix)
+                    slow  = self._reference(clip, lambda p, f: setattr(p, "world_matrix", W[f]))
+
+                    clip.frames.world_matrix = W
+                    self.assertTrue(np.allclose(
+                        clip.frames.world_matrix, slow.frames.world_matrix, rtol=0.0, atol=1e-9
+                    ))
+
+    def test_a_sheared_target_makes_the_round_trip_on_its_level(self):
+        # a target its channels can not hold, here a shear, is whatever the
+        # eulers make of it, and the nodes below solve under that, as they do
+        # frame by frame. carried down as the sheared matrix instead, the
+        # child landed 0.4 to 1.0 off in world, 19 to 62 degrees in rotate
+        rng   = np.random.default_rng(5)
+        nodes = []
+        for i in range(3):
+            nodes.append(
+                TransformData(
+                    name         = f"j{i}",
+                    node_type    = "joint",
+                    parent_node  = nodes[-1].uuid if nodes else None,
+                    uuid         = hierarchy.generate_uuid(),
+                    translate    = rng.normal(size=3),
+                    rotate       = rng.uniform(-60.0, 60.0, size=3),
+                    rotate_order = i,
+                )
+            )
+        rig  = HierarchyData(nodes)
+        clip = self._animated(rig, frames=5, seed=7)
+        W    = np.array(self._animated(rig, frames=5, seed=8).frames.world_matrix)
+        W[:, 1, 0, :3] += 0.45 * W[:, 1, 1, :3]  # j1 sheared, j2 targeted below it
+        slow                     = self._reference(clip, lambda p, f: setattr(p, "world_matrix", W[f]))
+        fast                     = clip.copy()
+        fast.frames.world_matrix = W
+        self._assert_same(fast, slow)
+
+        # the same through match_matrix: a source whose j1 hangs under a
+        # non-uniformly scaled j0 that does not compensate, while j1 is a
+        # root of the clip
+        source             = HierarchyData([node.copy() for node in rig])
+        source["j0"].scale = (1.6, 0.7, 1.0)
+        source             = self._animated(source, frames=5, seed=9)
+        target             = clip.copy()
+        target["j1"].set_parent(None, world_space=False)
+        slow = self._reference(
+            target,
+            lambda p, f: TransformList([p["j1"], p["j2"]]).match_matrix(
+                TransformList(self._pose(source, f)[1:])
+            ),
+            names=["j1", "j2"],
+        )
+        target.frames[["j1", "j2"]].match_matrix(source.frames[["j1", "j2"]])
+        self._assert_same(target, slow)
+
+    def test_the_filter_keeps_frame_0_and_untouched_keys_bit_for_bit(self):
+        # euler_filter works in radians: sending every key there and back
+        # moved some by an ulp, frame 0 included, which the filter keeps
+        from cgmath.hierarchy.hierarchy import _filtered
+
+        rng     = np.random.default_rng(3)
+        degrees = rng.uniform(-170.0, 170.0, (6, 40, 3))
+        degrees[2:, :20] += 360.0  # a turn the filter takes out
+        orders = np.arange(40) % 6
+        self.assertFalse(np.array_equal(np.degrees(np.radians(degrees)), degrees))
+
+        out = _filtered(degrees, orders)
+        self.assertTrue(np.array_equal(out[0], degrees[0]))
+        reference = np.degrees(euler_filter(np.radians(degrees), orders))
+        moved     = np.abs(reference - degrees) > 1e-9
+        self.assertTrue(moved.any() and not moved.all())
+        self.assertTrue(np.array_equal(out[~moved], degrees[~moved]))
+        self.assertTrue(np.allclose(out, reference, rtol=0.0, atol=1e-10))
+
+    def test_every_framed_solve_filters_through_the_one_helper(self):
+        clip, other = self._pair(orient=True)
+        writes = {
+            "world_matrix": lambda c: setattr(c.frames, "world_matrix", other.frames.world_matrix),
+            "matrix":       lambda c: setattr(c.frames, "matrix", other.frames.matrix),
+            "quaternion":   lambda c: setattr(c.frames, "quaternion", other.frames.quaternion),
+            "match_rotate": lambda c: c.frames.match_rotate(other),
+        }
+        for label, write in writes.items():
+            with self.subTest(write=label), mock.patch.object(
+                hierarchy.hierarchy, "_filtered", wraps=hierarchy.hierarchy._filtered
+            ) as helper, mock.patch.object(
+                hierarchy.hierarchy, "euler_filter", wraps=hierarchy.hierarchy.euler_filter
+            ) as kernel:
+                write(clip.copy())
+                self.assertEqual(helper.call_count, 1)
+                self.assertEqual(kernel.call_count, 1)
+
+    # --- the bound frame --- #
+    def test_bound_frame_writes_solve_that_frame_alone(self):
+        # a setter on the clip's nodes writes the frame they are bound to,
+        # as it always has: the other frames are left exactly as they were
+        clip, other = self._pair(orient=True)
+        frame       = 3
+        W           = np.array(other.frames.world_matrix)
+        L           = np.array(other.frames.matrix)
+        other.frame = frame
+        Q           = np.array([node.quaternion for node in other])
+        cases = {
+            "clip.world_matrix": lambda c, o: setattr(c, "world_matrix", W[frame]),
+            "clip.matrix": lambda c, o: setattr(c, "matrix", L[frame]),
+            "clip.quaternion": lambda c, o: setattr(c, "quaternion", Q),
+            "clip.match_matrix": lambda c, o: c.match_matrix(o),
+            "clip.match_translate": lambda c, o: c.match_translate(o, z=False),
+            "clip.match_rotate": lambda c, o: c.match_rotate(o),
+            "view.match_rotate": lambda c, o: self._view(c, ["j2", "j5"]).match_rotate(
+                self._view(o, ["j1", "j3"])
+            ),
+            "node.world_matrix": lambda c, o: setattr(c["j6"], "world_matrix", W[frame, 2]),
+            "node.matrix": lambda c, o: setattr(c["j6"], "matrix", W[frame, 2]),
+            "node.quaternion": lambda c, o: setattr(c["j6"], "quaternion", [0.5, 0.5, 0.5, 0.5]),
+            "node.match_matrix": lambda c, o: c["j8"].match_matrix(o["j8"]),
+            "node.match_translate": lambda c, o: c["j8"].match_translate(o["j1"], x=False),
+            "node.match_rotate": lambda c, o: c["j8"].match_rotate([10.0, 20.0, 30.0]),
+        }
+        for label, write in cases.items():
+            with self.subTest(write=label):
+                fast = clip.copy()
+                twin = other.copy()
+                fast.frame, twin.frame = frame, frame
+                before = {c: np.array(getattr(fast.frames, c)) for c in ("scale", "rotate", "translate")}
+                write(fast, twin)
+
+                pose = self._pose(clip, frame)
+                write(pose, self._pose(other, frame))
+
+                self.assertEqual(fast.frame, frame)
+                fast_pose = self._pose(fast, frame)
+                self.assertTrue(np.allclose(
+                    fast_pose.world_matrix, pose.world_matrix, rtol=0.0, atol=1e-9
+                ))
+                for channel, values in before.items():
+                    got = np.asarray(getattr(fast.frames, channel))
+                    self.assertTrue(np.allclose(
+                        got[frame], getattr(pose, channel), rtol=0.0, atol=1e-9
+                    ), channel)
+                    others = [f for f in range(clip.frame_count) if f != frame]
+                    self.assertTrue(np.array_equal(got[others], values[others]), channel)
+
+    def test_bound_frame_list_writes_solve_the_frame_at_once(self):
+        # the single pose list setters solve node by node, every channel they
+        # write clearing that node's branch: 3 kernel calls and a branch walk
+        # per channel. on the head of a multi-frame clip the frame is solved
+        # for every node at once, the blocks written and the clip rebound
+        # once, so no node's branch is ever cleared on its own
+        clip, other = self._pair(orient=True)
+        clip.frame = other.frame = 2
+        W          = np.array(other.frames.world_matrix)[2]
+        L          = np.array(other.frames.matrix)[2]
+        Q          = np.array([node.quaternion for node in other])
+        writes = {
+            "clip.world_matrix":    lambda c: setattr(c, "world_matrix", W),
+            "clip.matrix":          lambda c: setattr(c, "matrix", L),
+            "clip.quaternion":      lambda c: setattr(c, "quaternion", Q),
+            "clip.match_matrix":    lambda c: c.match_matrix(other),
+            "clip.match_translate": lambda c: c.match_translate(other),
+            "clip.match_rotate":    lambda c: c.match_rotate(other),
+            "view.match_rotate": lambda c: self._view(c, ["j2", "j5"]).match_rotate(
+                np.zeros((2, 3))
+            ),
+        }
+        for label, write in writes.items():
+            fast       = clip.copy()
+            fast.frame = 2
+            with self.subTest(write=label), mock.patch.object(
+                TransformData,
+                "_reset_branch_world_matrices",
+                autospec    = True,
+                side_effect = TransformData._reset_branch_world_matrices,
+            ) as resets:
+                write(fast)
+                self.assertEqual(resets.call_count, 0)
+
+        # a node's own setter keeps the single pose route and lands as before
+        clip["j4"].match_translate(other["j4"])
+        self.assertTrue(np.allclose(
+            clip["j4"].world_matrix[3, :3], other["j4"].world_matrix[3, :3], rtol=0.0, atol=1e-9
+        ))
 
 class TestClipScopedFrames(unittest.TestCase):
     """the frame axis narrowed to some nodes, or to a range of frames"""

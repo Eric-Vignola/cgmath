@@ -2968,18 +2968,30 @@ class TransformList(DataList):
         self, other, x: bool = True, y: bool = True, z: bool = True
     ) -> None:
         """matches the world position of a node, a list of nodes or a translation"""
+        # the head of a multi-frame clip writes its frame through the clip solve
+        if _clip_setter(self, "translate", other, axes=(x, y, z)):
+            return
+
         others = self._match_operands(other, ndim=2)
         for i in self._parent_first():
             self[i].match_translate(others[i], x=x, y=y, z=z)
 
     def match_rotate(self, other) -> None:
         """matches the world rotation of a node, a list of nodes or a rotation"""
+        # the head of a multi-frame clip writes its frame through the clip solve
+        if _clip_setter(self, "rotate", other):
+            return
+
         others = self._match_operands(other, ndim=2)
         for i in self._parent_first():
             self[i].match_rotate(others[i])
 
     def match_matrix(self, other) -> None:
         """matches the world matrix of a node or a list of nodes"""
+        # the head of a multi-frame clip writes its frame through the clip solve
+        if _clip_setter(self, "match", other):
+            return
+
         others = self._match_operands(other, ndim=3)
         for i in self._parent_first():
             self[i].match_matrix(others[i])
@@ -3014,6 +3026,10 @@ class TransformList(DataList):
 
     @matrix.setter
     def matrix(self, M: np.ndarray) -> None:
+        # the head of a multi-frame clip writes its frame through the clip solve
+        if _clip_setter(self, "local", M):
+            return
+
         M = np.asarray(M)
 
         # decomposing a local matrix reads the parent's scale through
@@ -3035,6 +3051,10 @@ class TransformList(DataList):
 
     @world_matrix.setter
     def world_matrix(self, M: np.ndarray) -> None:
+        # the head of a multi-frame clip writes its frame through the clip solve
+        if _clip_setter(self, "world", M):
+            return
+
         M = np.asarray(M)
 
         # solving a local matrix reads the parent's world matrix, so a child
@@ -3287,6 +3307,14 @@ class TransformList(DataList):
 
     @property
     def quaternion(self) -> np.ndarray:
+        # the head of a multi-frame clip reads its frame, every node at once
+        clip = _framed_clip(self)
+        if clip is not None:
+            clip._realign()
+            frame = clip.frame
+            span  = slice(frame, frame + 1)
+            return _span_quaternions(clip, _clip_columns(clip, self), span)[0]
+
         values = []
         for node in self:
             values.append(node.quaternion)
@@ -3294,6 +3322,10 @@ class TransformList(DataList):
 
     @quaternion.setter
     def quaternion(self, Q: np.ndarray) -> None:
+        # the head of a multi-frame clip writes its frame through the clip solve
+        if _clip_setter(self, "quaternion", Q):
+            return
+
         Q = np.asarray(Q)
 
         if _is_sequence(Q, ndim=2):
@@ -4137,14 +4169,617 @@ def _matrices_to_euler(matrices: np.ndarray, orders: np.ndarray) -> np.ndarray:
     return out
 
 
-def _parent_scale(clip: "ClipData", parents: np.ndarray) -> np.ndarray:
+def _scales_and_rotations(block: np.ndarray, current) -> tuple:
+    """:func:`_scale_and_rotation` over a stack of (..., 3, 3) blocks at once
+
+    The same split, element for element: the row lengths are the signed
+    scale, a mirror goes on scale z, and a zero scale takes what its row
+    leaves out from ``current``, the orientation the node holds now.
+    ``current`` may be a callable building that stack; it is only called
+    when some scale is zero.
+    """
+    scale = np.einsum("...ij,...ij->...i", block, block) ** 0.5
+    held  = scale > 1e-12 * scale.max(axis=-1, keepdims=True)
+    kept  = held.sum(axis=-1)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rotation = block / np.where(held, scale, 1.0)[..., None]
+
+    mirror              = (kept == 3) & (_det3(block) < 0)
+    scale[mirror, 2]    = -scale[mirror, 2]
+    rotation[mirror, 2] = -rotation[mirror, 2]
+    if (kept == 3).all():
+        return scale, rotation
+
+    current  = np.asarray(current() if callable(current) else current, dtype=float)
+    rotation = np.where(held[..., None], rotation, current)
+
+    for i in range(3):
+        j, k = (i + 1) % 3, (i + 2) % 3
+
+        # one zero scale: its row closes the right handed frame
+        one = (kept == 2) & ~held[..., i]
+        if one.any():
+            rotation[one, i] = np.cross(rotation[one, j], rotation[one, k])
+
+        # two zero scales: the current row that leans least on the held one
+        # is squared to it, and the last row closes the right handed frame
+        two = (kept == 1) & held[..., i]
+        if two.any():
+            rows = rotation[two]
+            u    = rows[:, i]
+            dj   = np.einsum("mi,mi->m", rows[:, j], u)
+            dk   = np.einsum("mi,mi->m", rows[:, k], u)
+            lean = (np.abs(dj) <= np.abs(dk))[:, None]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                vj = rows[:, j] - dj[:, None] * u
+                vj = vj / np.linalg.norm(vj, axis=-1, keepdims=True)
+                vk = rows[:, k] - dk[:, None] * u
+                vk = vk / np.linalg.norm(vk, axis=-1, keepdims=True)
+            rows[:, j]    = np.where(lean, vj, np.cross(vk, u))
+            rows[:, k]    = np.where(lean, np.cross(u, vj), vk)
+            rotation[two] = rows
+
+    # three zero scales leave the current orientation as it is
+    return scale, rotation
+
+
+def _same_transforms(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+    """:func:`_same_transform` per matrix of two (..., 4, 4) stacks"""
+    return np.all(np.abs(A - B) <= 1e-8, axis=(-2, -1))
+
+
+def _eulers_to_matrices(degrees: np.ndarray, orders) -> np.ndarray:
+    """(..., 3) euler degrees as (..., 4, 4) rotations, ``orders`` broadcast
+    over the leading axes
+
+    One kernel call whatever orders are present: a call into the parallel
+    kernels costs far more than the work in it once the machine is busy, so
+    a solve makes as few of them as it can.
+    """
+    degrees = np.asarray(degrees, dtype=float)
+    lead    = degrees.shape[:-1]
+    if not int(np.prod(lead)):
+        return np.zeros(lead + (4, 4), dtype=float)
+    axes = np.broadcast_to(np.asarray(orders, dtype=np.int32), lead).reshape(-1)
+    flat = np.radians(degrees).reshape(-1, 3)
+    return euler_to_matrix(flat, axes).reshape(lead + (4, 4))
+
+
+def _matrices_to_eulers(matrices: np.ndarray, orders) -> np.ndarray:
+    """(..., 4, 4) or (..., 3, 3) rotations as (..., 3) euler degrees,
+    ``orders`` broadcast over the leading axes, in one kernel call"""
+    matrices = np.asarray(matrices, dtype=float)
+    lead     = matrices.shape[:-2]
+    if not int(np.prod(lead)):
+        return np.zeros(lead + (3,), dtype=float)
+    flat            = np.zeros((int(np.prod(lead)), 4, 4), dtype=float)
+    flat[:, :3, :3] = matrices[..., :3, :3].reshape(-1, 3, 3)
+    flat[:, 3, 3]   = 1.0
+    axes            = np.broadcast_to(np.asarray(orders, dtype=np.int32), lead).reshape(-1)
+    return np.degrees(matrix_to_euler(flat, axes)).reshape(lead + (3,))
+
+
+def _chain_matrices(rotate_axis, rotate, joint_orient, orders) -> tuple:
+    """RO, R and JO for (F, n, 3) channel blocks, ``orders`` per node of
+    ``rotate``, from one kernel call"""
+    first, count = rotate_axis.shape[1], rotate.shape[1]
+    every = np.concatenate([rotate_axis, rotate, joint_orient], axis=1)
+    axes = np.concatenate(
+        [np.zeros(first, dtype=int), orders, np.zeros(joint_orient.shape[1], dtype=int)]
+    )
+    M = _eulers_to_matrices(every, axes[None])
+    return M[:, :first], M[:, first:first + count], M[:, first + count:]
+
+
+def _det3(block: np.ndarray) -> np.ndarray:
+    """the determinants of a stack of (..., 3, 3) blocks"""
+    return np.einsum(
+        "...i,...i->...", block[..., 0, :], np.cross(block[..., 1, :], block[..., 2, :])
+    )
+
+
+def _rotation_local(M: np.ndarray, parent: np.ndarray) -> np.ndarray:
+    """the 3x3 block of ``matrix_local(M, parent)`` from their 3x3 blocks
+
+    M times the inverse ``matrix_inverse`` computes, which takes the parent
+    for scale times rotation: its transpose, each column divided by its
+    source row's squared length. The block is all the euler and quaternion
+    solves read of a local matrix.
+    """
+    lengths = np.einsum("...ij,...ij->...i", parent, parent)
+    return M @ (np.swapaxes(parent, -1, -2) / lengths[..., None, :])
+
+
+def _local_matrices(scale, RO, R, JO, inverse, translate) -> np.ndarray:
+    """(..., 4, 4) local matrices from their factors
+
+    S * RO * R * JO * IS * T, as TransformData.matrix composes them, with
+    the diagonal and translation factors applied as the row and column
+    scales and the row they are; ``inverse`` is the parent scale a
+    compensated node divides out, 1 for any other.
+    """
+    block            = RO[..., :3, :3] @ R[..., :3, :3] @ JO[..., :3, :3]
+    out              = np.zeros(block.shape[:-2] + (4, 4), dtype=float)
+    out[..., :3, :3] = block * scale[..., :, None] * (1.0 / inverse)[..., None, :]
+    out[..., 3, :3]  = translate
+    out[..., 3, 3]   = 1.0
+    return out
+
+
+def _span_world(clip: "ClipData", span: slice) -> np.ndarray:
+    """the world matrices of every node over the frames in ``span``
+
+    :func:`_evaluate_local` and :func:`_evaluate_world` for a run of frames
+    rather than all of them, so reading the frame a clip is bound to costs
+    one frame, not the whole clip.
+    """
+    clip._realign()
+    blocks     = clip._blocks
+    nodes      = clip.list
+    orders     = np.array([node.rotate_order for node in nodes], dtype=int)
+    compensate = np.array([bool(n.segment_scale_compensate) for n in nodes], dtype=bool)
+    parents    = clip._parent_indices(nodes)
+
+    scale   = blocks["_scale"][span]
+    inverse = np.where(compensate[:, None], _parent_scale(clip, parents, span), 1.0)
+
+    RO, R, JO = _chain_matrices(
+        blocks["_rotate_axis"][span],
+        blocks["_rotate"][span],
+        blocks["_joint_orient"][span],
+        orders,
+    )
+    local = _local_matrices(scale, RO, R, JO, inverse, blocks["_translate"][span])
+    return _evaluate_world(local, parents)
+
+
+def _span_quaternions(clip: "ClipData", columns: np.ndarray, span: slice) -> np.ndarray:
+    """(F, n, 4) orientations of ``columns`` over the frames in ``span``
+
+    TransformData.quaternion for every frame at once: RO * R * JO.
+    """
+    blocks = clip._blocks
+    orders = np.array([clip.list[c].rotate_order for c in columns], dtype=int)
+    RO, R, JO = _chain_matrices(
+        blocks["_rotate_axis"][span][:, columns],
+        blocks["_rotate"][span][:, columns],
+        blocks["_joint_orient"][span][:, columns],
+        orders,
+    )
+    M = RO @ R @ JO
+    return matrix_to_quaternion(M.reshape(-1, 4, 4)).reshape(M.shape[:2] + (4,))
+
+
+def _filtered(degrees: np.ndarray, orders) -> np.ndarray:
+    """(F, n, 3) euler degrees through euler_filter, column k in orders[k]
+
+    Every later frame takes the solution nearest the one before it, the way
+    Maya's Euler Filter keeps the first key. Only what the filter changes is
+    added back, in degrees: a key it leaves alone, frame 0 always, comes
+    back bit for bit as computed, where a round trip through radians would
+    move some of them by an ulp.
+    """
+    degrees = np.asarray(degrees, dtype=float)
+    if degrees.shape[0] < 2 or degrees.shape[1] == 0:
+        return degrees.copy()
+
+    radians = np.radians(degrees)
+    turned  = euler_filter(radians, np.asarray(orders, dtype=int)) - radians
+    out     = degrees + np.degrees(turned)
+    out[0]  = degrees[0]
+    return out
+
+
+# a rotation whose middle euler angle is this close to +-90 degrees, its
+# cosine below sin(0.01 degrees), is next to gimbal lock: matrix_to_euler
+# snaps there, so the eulers hold a slightly different rotation
+_GIMBAL_COSINE = np.sin(np.radians(1e-2))
+
+
+def _solve_frames(clip, columns, span: slice, op: str, target, axes=None) -> None:
+    """Writes a pose into nodes of a clip, every frame of ``span`` at once.
+
+    The TransformData setters batched over frames, step for step, so each
+    frame's channels come out as the single pose setter writes them:
+
+    * ``"world"``: ``target`` holds (F, n, 4, 4) world matrices, as the
+      world_matrix setter and match_matrix take them;
+    * ``"local"``: (F, n, 4, 4) local matrices, the matrix setter;
+    * ``"translate"``: (F, n, 3) world positions, match_translate, taking
+      the components ``axes`` names;
+    * ``"rotate"``: (F, n, 4, 4) world orientations, match_rotate;
+    * ``"quaternion"``: (F, n, 4), the quaternion setter.
+
+    ``columns`` are positions in the clip's node list, each once, one per
+    target column. A node solves against its parent's final world, so nodes
+    go parent first, one depth level at a time, the frames of a level
+    together. An element whose local matrix already holds its target, to
+    the setters' 1e-8, keeps its channels, as the matrix setter keeps them;
+    a world target is tested on the local matrix it solves to, as a node
+    with no world matrix cached tests it, so a node a fresh copy of the
+    frame would solve is solved here too. Rotate rebuilt from a matrix picks
+    its euler branch one frame at a time, so every node with a rebuilt
+    rotate goes through euler_filter with its rotate order, the first frame
+    kept as computed. The blocks are written, and the clip rebound, once.
+
+    A rebuilt rotation is carried down the levels as a matrix and read off
+    as eulers once at the end. Only one the eulers can not hold exactly --
+    sheared, mirrored, or within 0.01 degrees of gimbal lock, where
+    matrix_to_euler snaps -- makes the round trip on its own level, so its
+    children solve under what the channels will hold, as they do frame by
+    frame. The inverses of RO and of JO * IS are their transposes, scaled
+    for IS; a parent's world takes a true inverse.
+    """
+    from cgmath.transforms._numba._euler import MAYA_EA
+
+    clip._realign()
+    if not clip._blocks:
+        raise ValueError("the clip holds no frames to write")
+
+    blocks  = clip._blocks
+    nodes   = clip.list
+    columns = np.asarray(columns, dtype=int)
+    frames  = blocks["_scale"][span].shape[0]
+    count   = len(columns)
+
+    if op == "quaternion":
+        # rotate alone, under the node's own rotate_axis and joint_orient:
+        # no node solves against another, so this is one batched solve
+        orders = np.array([nodes[c].rotate_order for c in columns], dtype=int)
+        RO, _, JO = _chain_matrices(
+            blocks["_rotate_axis"][span][:, columns],
+            np.zeros((frames, 0, 3)),
+            blocks["_joint_orient"][span][:, columns],
+            orders[:0],
+        )
+        M = quaternion_to_matrix(np.reshape(target, (-1, 4))).reshape(frames, count, 4, 4)
+        L = _rotation_local(
+            np.swapaxes(RO[..., :3, :3], -1, -2) @ M[..., :3, :3], JO[..., :3, :3]
+        )
+        rotate                           = _matrices_to_eulers(L, orders)
+        blocks["_rotate"][span, columns] = _filtered(rotate, orders)
+        clip._bind(clip._frame)
+        return
+
+    # the nodes taking part: the targets and, for a world target, every
+    # ancestor, whose world the targets solve under
+    parents         = clip._parent_indices(nodes)
+    depth           = _chain_depths(parents)
+    taking          = np.zeros(len(nodes), dtype=bool)
+    taking[columns] = True
+    if op != "local":
+        up = parents[columns]
+        for _ in range(len(nodes)):
+            up = np.unique(up[up >= 0])
+            up = up[~taking[up]]
+            if not len(up):
+                break
+            taking[up] = True
+            up         = parents[up]
+
+    rel         = np.flatnonzero(taking)
+    slot        = np.full(len(nodes), -1, dtype=int)
+    slot[rel]   = np.arange(len(rel))
+    tpos        = slot[columns]
+    which       = np.full(len(rel), -1, dtype=int)
+    which[tpos] = np.arange(count)
+
+    pcol   = parents[rel]
+    prel   = np.where(pcol >= 0, slot[np.maximum(pcol, 0)], -1)
+    orders = np.array([nodes[i].rotate_order for i in rel], dtype=int)
+    compensate = np.array(
+        [bool(nodes[i].segment_scale_compensate) for i in rel], dtype=bool
+    )
+
+    # working copies of the channels written; rotate_axis and joint_orient
+    # are kept, as every setter keeps them
+    scale  = blocks["_scale"][span][:, rel]
+    rotate = blocks["_rotate"][span][:, rel]
+    offset = blocks["_translate"][span][:, rel]
+    RO, R, JO = _chain_matrices(
+        blocks["_rotate_axis"][span][:, rel],
+        rotate,
+        blocks["_joint_orient"][span][:, rel],
+        orders,
+    )
+    R = np.array(R)
+    RO3, JO3 = RO[..., :3, :3], JO[..., :3, :3]
+
+    # the parent scale a compensated node divides out: read as solved for a
+    # parent taking part, as the block holds it for any other
+    fixed = np.ones((frames, len(rel), 3), dtype=float)
+    still = compensate & (pcol >= 0) & (prel < 0)
+    if still.any():
+        fixed[:, still] = blocks["_scale"][span][:, pcol[still]]
+    live = compensate & (prel >= 0)
+
+    eye     = np.eye(4)
+    world   = None if op == "local" else np.empty((frames, len(rel), 4, 4))
+    rebuilt = np.zeros(len(rel), dtype=bool)
+    unread  = np.zeros((frames, len(rel)), dtype=bool)
+
+    def rebuild(M, t, mask):
+        # the rotations M (F, len(t), 3, 3) rotate of the nodes t is read off,
+        # where mask says. a proper one is carried as M itself and read once
+        # at the end; any other is whatever the eulers make of it, which its
+        # children have to solve under, so it is read now
+        block  = M / np.linalg.norm(M, axis=-1, keepdims=True)
+        drift  = np.abs(block @ np.swapaxes(block, -1, -2) - np.eye(3)).max(axis=(-2, -1))
+        proper = (drift <= 1e-12) & (_det3(block) > 0)
+
+        # |sin| of the middle euler angle is element [a0, a2] of the block,
+        # the first and last axes of the rotate order
+        ea     = MAYA_EA[orders[t]]
+        sine   = block[:, np.arange(len(t)), ea[:, 0], ea[:, 2]]
+        proper = proper & (1.0 - sine * sine > _GIMBAL_COSINE**2)
+
+        take              = proper & mask
+        held              = R[:, t]
+        held[..., :3, :3] = np.where(take[..., None, None], block, held[..., :3, :3])
+        R[:, t]           = held
+        unread[:, t]      = unread[:, t] | take
+
+        bad = mask & ~proper
+        if bad.any():
+            f, j = np.nonzero(bad)
+            n            = t[j]
+            eulers       = _matrices_to_eulers(M[f, j], orders[n])
+            rotate[f, n] = eulers
+            R[f, n]      = _eulers_to_matrices(eulers, orders[n])
+            unread[f, n] = False
+
+        rebuilt[t[mask.any(axis=0)]] = True
+
+    for level in np.unique(depth[rel]):
+        lvl     = np.flatnonzero(depth[rel] == level)
+        inverse = fixed[:, lvl]
+        moved   = live[lvl]
+        if moved.any():
+            inverse[:, moved] = scale[:, prel[lvl[moved]]]
+
+        local = _local_matrices(
+            scale[:, lvl], RO[:, lvl], R[:, lvl], JO[:, lvl], inverse, offset[:, lvl]
+        )
+        if world is not None:
+            PW           = np.broadcast_to(eye, (frames, len(lvl), 4, 4)).copy()
+            under        = prel[lvl] >= 0
+            PW[:, under] = world[:, prel[lvl[under]]]
+
+        hit = np.flatnonzero(which[lvl] >= 0)
+        if len(hit):
+            t    = lvl[hit]
+            k    = which[t]
+            RO3t = np.swapaxes(RO3[:, t], -1, -2)
+
+            if op == "rotate":
+                # match_rotate: R = inv(RO) * M * inv(JO * IS * P), rotate only
+                JP = (JO3[:, t] * (1.0 / inverse[:, hit])[..., None, :]) @ PW[:, hit, :3, :3]
+                L  = _rotation_local(RO3t @ target[:, k, :3, :3], JP)
+                rebuild(L, t, np.ones(L.shape[:2], dtype=bool))
+
+            else:
+                current = local[:, hit]
+                if op == "local":
+                    goal = np.asarray(target[:, k], dtype=float)
+                    same = _same_transforms(goal, current)
+                else:
+                    parent = PW[:, hit]
+                    now    = current @ parent
+                    if op == "world":
+                        aim = np.asarray(target[:, k], dtype=float)
+                    else:
+                        aim             = now.copy()
+                        aim[..., 3, :3] = np.where(axes, target[:, k], now[..., 3, :3])
+
+                    # a true inverse: a scaled parent's world is not orthogonal
+                    goal = aim @ np.linalg.inv(parent)
+                    same = _same_transforms(goal, current)
+
+                todo = ~same
+                if todo.any():
+                    # the matrix setter, step for step: strip JO * IS from the
+                    # right, split the [S][RO][R] block, rotate = inv(RO) * [RO][R]
+                    B = goal[..., :3, :3] @ (
+                        inverse[:, hit][..., :, None] * np.swapaxes(JO3[:, t], -1, -2)
+                    )
+                    s, rotation = _scales_and_rotations(
+                        B, lambda: RO3[:, t] @ R[:, t, :3, :3]
+                    )
+                    scale[:, t]  = np.where(todo[..., None], s, scale[:, t])
+                    offset[:, t] = np.where(todo[..., None], goal[..., 3, :3], offset[:, t])
+                    rebuild(RO3t @ rotation, t, todo)
+
+            # the solved nodes' local from what their channels now hold, for
+            # the world their children solve under
+            local[:, hit] = _local_matrices(
+                scale[:, t], RO[:, t], R[:, t], JO[:, t], inverse[:, hit], offset[:, t]
+            )
+
+        if world is not None:
+            world[:, lvl] = local @ PW
+
+    f, n = np.nonzero(unread)
+    if len(f):
+        rotate[f, n] = _matrices_to_eulers(R[f, n], orders[n])
+
+    # every frame picked its euler branch on its own: filter the curves
+    done = tpos[rebuilt[tpos]]
+    if len(done):
+        rotate[:, done] = _filtered(rotate[:, done], orders[done])
+
+    solved = {"_scale": scale, "_rotate": rotate, "_translate": offset}
+    for channel in ("_rotate",) if op == "rotate" else solved:
+        blocks[channel][span, columns] = solved[channel][:, tpos]
+    clip._bind(clip._frame)
+
+
+def _framed_clip(nodes) -> Optional["ClipData"]:
+    """the multi-frame clip every one of ``nodes`` is the playback head of
+
+    A node taken out of its clip with del or remove() still points at it,
+    but has no column there: such a node is not a head, and the single pose
+    route takes it.
+    """
+    nodes = list(nodes)
+    clip  = None
+    for node in nodes:
+        owner = getattr(node, "_hierarchy", None)
+        if clip is None:
+            if not isinstance(owner, ClipData) or owner.frame_count < 2:
+                return None
+            clip = owner
+        elif owner is not clip:
+            return None
+
+    # listed by identity: list membership would compare uuids node by node
+    if clip is not None:
+        listed = {id(node) for node in clip.list}
+        if any(id(node) not in listed for node in nodes):
+            return None
+    return clip
+
+
+def _holds_nodes(other) -> bool:
+    """whether a match_* operand is nodes, a clip or a frame axis, rather
+    than values"""
+    if isinstance(other, (TransformData, TransformList, _FrameAxis)):
+        return True
+    return (
+        isinstance(other, (list, tuple))
+        and len(other) > 0
+        and all(isinstance(item, TransformData) for item in other)
+    )
+
+
+def _clip_columns(clip: "ClipData", nodes) -> np.ndarray:
+    """each node's position in the clip's node list"""
+    place = {id(node): i for i, node in enumerate(clip.list)}
+    return np.array([place[id(node)] for node in nodes], dtype=int)
+
+
+def _last_of_each(columns: np.ndarray) -> tuple:
+    """the columns without repeats, and which entry each one keeps: the last,
+    which is what writing them in turn would leave"""
+    columns = np.asarray(columns, dtype=int)
+    _, first = np.unique(columns[::-1], return_index=True)
+    keep = np.sort(len(columns) - 1 - first)
+    return columns[keep], keep
+
+
+def _orientations(world: np.ndarray) -> np.ndarray:
+    """world matrices with their rows divided by their length, the
+    orientation match_rotate takes from a node; the position stays"""
+    world              = np.array(world, dtype=float)
+    block              = world[..., :3, :3]
+    world[..., :3, :3] = block / np.einsum("...ij,...ij->...i", block, block)[..., None] ** 0.5
+    return world
+
+
+def _rotation_targets(values: np.ndarray, orders: np.ndarray) -> np.ndarray:
+    """(F, n, 3) eulers in degrees in each node's rotate order, or (F, n, 4)
+    quaternions, as (F, n, 4, 4) rotations: what match_rotate takes"""
+    if values.shape[-1] == 3:
+        return _eulers_to_matrices(values, np.asarray(orders)[None])
+    frames, count = values.shape[:2]
+    return quaternion_to_matrix(values.reshape(-1, 4)).reshape(frames, count, 4, 4)
+
+
+def _clip_setter(nodes, op: str, value, axes=None) -> bool:
+    """Runs a TransformList setter on the playback head of a multi-frame clip
+    as a clip solve.
+
+    The nodes of a clip are bound to its current frame, so a setter there
+    writes that frame. Rather than solving node by node, the frame is solved
+    the way ``clip.frames`` solves every frame, all the nodes in one solve
+    and the clip rebound once, with the operand taken the way the
+    TransformList setter takes it. Returns False, having done nothing, when
+    the nodes are not all heads of one multi-frame clip, or when the operand
+    is one only the single pose setter knows what to make of.
+
+    A single node's own setters keep the single pose route: a write there
+    clears the node's branch alone, where a solve rebinds the whole clip.
+    """
+    nodes = list(nodes)
+    clip  = _framed_clip(nodes)
+    if clip is None:
+        return False
+
+    count = len(nodes)
+    if op in ("world", "local", "quaternion"):
+        shape  = (4,) if op == "quaternion" else (4, 4)
+        values = np.asarray(value, dtype=float)
+        if _is_sequence(values, ndim=len(shape) + 1):
+            values = values.reshape((count,) + shape)
+        else:
+            values = np.broadcast_to(values.reshape(shape), (count,) + shape)
+
+    else:
+        ndim     = 3 if op == "match" else 2
+        operands = TransformList(nodes)._match_operands(value, ndim=ndim)
+        if all(isinstance(o, TransformData) for o in operands):
+            if (
+                isinstance(value, ClipData)
+                and value._blocks
+                and len(operands) == len(value)
+                and all(a is b for a, b in zip(operands, value.list))
+            ):
+                # a clip read at its own frame, every node at once
+                frame = value.frame
+                world = _span_world(value, slice(frame, frame + 1))[0]
+            else:
+                world = np.array([o.world_matrix for o in operands]).reshape(-1, 4, 4)
+            if op == "rotate":
+                values = _orientations(world)
+            elif op == "translate":
+                values = world[:, 3, :3]
+            else:
+                values = world
+
+        elif op == "translate" and all(_is_sequence(o, ndim=1) for o in operands):
+            values = np.array([np.asarray(o, dtype=float) for o in operands]).reshape(count, 3)
+
+        elif op == "rotate" and all(_is_sequence(o, ndim=1) for o in operands):
+            for o in operands:
+                if len(o) not in (3, 4):
+                    raise ValueError(
+                        "match_rotate expects a length-3 euler (degrees) or "
+                        f"length-4 quaternion sequence, got length {len(o)}"
+                    )
+            if len({len(o) for o in operands}) > 1:
+                return False
+            orders = np.array([node.rotate_order for node in nodes], dtype=int)
+            raw    = np.array([np.asarray(o, dtype=float) for o in operands])
+            values = _rotation_targets(raw[None], orders)[0]
+
+        else:
+            return False
+
+    clip._realign()
+    columns, keep = _last_of_each(_clip_columns(clip, nodes))
+    frame = clip.frame
+    _solve_frames(
+        clip,
+        columns,
+        slice(frame, frame + 1),
+        "world" if op == "match" else op,
+        np.asarray(values)[keep][None],
+        axes=None if axes is None else np.asarray(axes, dtype=bool),
+    )
+    return True
+
+
+def _parent_scale(
+    clip: "ClipData", parents: np.ndarray, span: slice = slice(None)
+) -> np.ndarray:
     """every frame's parent scale as (F, N, 3), ones for a root
 
     What TransformData.parent_scale_inverse reads: the parent's scale,
     whether or not the node compensates for it. ``parents`` holds each
-    node's parent as a position in the clip, -1 for a root.
+    node's parent as a position in the clip, -1 for a root; ``span`` picks
+    the frames.
     """
-    scale    = clip._blocks["_scale"]
+    scale    = clip._blocks["_scale"][span]
     out      = np.ones(scale.shape, dtype=float)
     parented = parents >= 0
     if parented.any():
@@ -4429,6 +5064,131 @@ class _FrameAxis:
         world   = _evaluate_world(_evaluate_local(clip, parents), parents)
         return self._scoped(world, columns)
 
+    # --- solved writes: every frame at once --- #
+    @matrix.setter
+    def matrix(self, value) -> None:
+        """writes local matrices as TransformData.matrix does, every frame at
+        once: (4, 4) for every node and frame, (n, 4, 4) per node, or
+        (F, n, 4, 4) frame for frame"""
+        self._solve("local", self._values(value, (4, 4)))
+
+    @world_matrix.setter
+    def world_matrix(self, value) -> None:
+        """writes world matrices as TransformData.world_matrix does, every
+        frame at once: (4, 4), (n, 4, 4) or (F, n, 4, 4)"""
+        self._solve("world", self._values(value, (4, 4)))
+
+    @property
+    def quaternion(self) -> np.ndarray:
+        """every frame's orientation RO * R * JO as quaternions, (F, n, 4)"""
+        return _span_quaternions(self._clip, self._positions(), slice(None))
+
+    @quaternion.setter
+    def quaternion(self, value) -> None:
+        """writes orientations as TransformData.quaternion does, every frame
+        at once: (4,), (n, 4) or (F, n, 4)"""
+        self._solve("quaternion", self._values(value, (4,)))
+
+    def match_translate(self, other, x: bool = True, y: bool = True, z: bool = True) -> None:
+        """matches world positions on every frame at once
+
+        ``other`` is a clip or a frame axis, paired frame for frame; a node,
+        a list of nodes or a pose, held on every frame; or positions: (3,),
+        (n, 3) or (F, n, 3).
+        """
+        if _holds_nodes(other):
+            target = self._worlds(other)[..., 3, :3]
+        else:
+            target = self._values(other, (3,))
+        self._solve("translate", target, axes=np.array([x, y, z], dtype=bool))
+
+    def match_rotate(self, other) -> None:
+        """matches world orientations on every frame at once
+
+        ``other`` is what :meth:`match_translate` takes, or rotations: eulers
+        in degrees in each node's rotate order, (3,), (n, 3) or (F, n, 3), or
+        quaternions, (4,), (n, 4) or (F, n, 4).
+        """
+        if _holds_nodes(other):
+            target = _orientations(self._worlds(other))
+        else:
+            values = np.asarray(other, dtype=float)
+            if values.ndim == 0 or values.shape[-1] not in (3, 4):
+                raise ValueError(
+                    "match_rotate expects a length-3 euler (degrees) or "
+                    f"length-4 quaternion sequence, got shape {values.shape}"
+                )
+            values = self._values(values, values.shape[-1:])
+            orders = np.array([node.rotate_order for node in self._nodes()], dtype=int)
+            target = _rotation_targets(np.ascontiguousarray(values), orders)
+        self._solve("rotate", target)
+
+    def match_matrix(self, other) -> None:
+        """matches world matrices on every frame at once
+
+        ``other`` is a clip or a frame axis, paired frame for frame, or a
+        node, a list of nodes or a pose, held on every frame.
+        """
+        if not _holds_nodes(other):
+            raise TypeError(
+                "match_matrix matches nodes, clips or frame axes; "
+                "set world_matrix to write matrices"
+            )
+        self._solve("world", self._worlds(other))
+
+    def _positions(self) -> np.ndarray:
+        """the positions in the clip of the nodes this axis covers, the clip
+        lined up with its nodes first"""
+        columns = self._columns
+        if columns is None:
+            return np.arange(len(self._clip))
+        return columns
+
+    def _values(self, value, shape: tuple) -> np.ndarray:
+        """``value`` as (F, n) + ``shape``: one value for every node and frame,
+        one per node held on every frame, or one per node and frame"""
+        frames, count = self._clip.frame_count, len(self._positions())
+        value = np.asarray(value, dtype=float)
+        lead  = value.ndim - len(shape)
+        if not 0 <= lead <= 2 or value.shape[lead:] != tuple(shape):
+            raise ValueError(
+                f"expected {tuple(shape)}, (n,) + {tuple(shape)} or (F, n) + "
+                f"{tuple(shape)} values, got shape {value.shape}"
+            )
+        value = value.reshape((1,) * (2 - lead) + value.shape)
+        try:
+            return np.broadcast_to(value, (frames, count) + tuple(shape))
+        except ValueError:
+            raise ValueError(
+                f"values of shape {value.shape} do not fit {frames} frames "
+                f"of {count} nodes"
+            ) from None
+
+    def _worlds(self, other) -> np.ndarray:
+        """(F, n, 4, 4) world matrices to match: a clip or a frame axis pairs
+        frame for frame, a node, a list of nodes or a pose holds on every frame"""
+        frames, count = self._clip.frame_count, len(self._positions())
+
+        if isinstance(other, _FrameAxis) or (isinstance(other, ClipData) and other._blocks):
+            source = other._clip if isinstance(other, _FrameAxis) else other
+            if source.frame_count != frames:
+                raise ValueError(f"clips hold {frames} and {source.frame_count} frames")
+            world = np.asarray(other.world_matrix if isinstance(other, _FrameAxis)
+                               else other.frames.world_matrix)
+        elif isinstance(other, TransformData):
+            world = other.world_matrix[None, None]
+        else:
+            world = np.array([node.world_matrix for node in other]).reshape(1, -1, 4, 4)
+
+        if world.shape[1] not in (1, count):
+            raise ValueError(f"expected {count} nodes to match against, got {world.shape[1]}")
+        return np.broadcast_to(world, (frames, count, 4, 4))
+
+    def _solve(self, op: str, target: np.ndarray, axes=None) -> None:
+        # a node listed twice takes its last value, as writing in turn would
+        columns, keep = _last_of_each(self._positions())
+        _solve_frames(self._clip, columns, slice(None), op, target[:, keep], axes=axes)
+
     scale          = _frame_property("_scale")
     rotate         = _frame_property("_rotate")
     translate      = _frame_property("_translate")
@@ -4590,6 +5350,15 @@ class ClipData(HierarchyData):
         clip.frames["hips"].translate_y = 3.0    # one node, all frames
         clip.frames[10:20]                       # a new 10 frame clip
         clip.frames[10:20] = other               # paste 10 frames in
+
+    The pose setters work the same way: on the frame axis they solve every
+    frame at once, and a rotate rebuilt from a matrix is then euler filtered
+    along the frames, while on the clip they write the frame it is bound to:
+
+        clip.frames.world_matrix = W             # (300, N, 4, 4), one solve
+        clip.frames.match_matrix(other_clip)     # frame for frame
+        clip.frames["hips"].match_rotate(pose)   # one pose on every frame
+        clip.world_matrix = W[12]                # frame 12, the one bound above
 
     Only the channels a pose setting path writes are framed. Everything else
     -- names, uuids, parenting, rotate_order, segment_scale_compensate,

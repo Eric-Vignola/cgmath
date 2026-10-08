@@ -31,6 +31,7 @@ overview see [`README.md`](README.md); for the rest of the library see
 | [Scrubbing](#scrubbing) | `clip.frame`, the nodes as a playback head |
 | [The frame axis](#the-frame-axis) | `clip.frames` blocks, components, scoping, cuts, pastes |
 | [Batched evaluation](#batched-evaluation) | `frames.matrix`, `frames.world_matrix`, the factor matrices, `parent_matrix`, `to_attributes()` |
+| [Solving every frame](#solving-every-frame) | `frames.world_matrix =`, `frames.matrix =`, `frames.quaternion`, `frames.match_*` |
 | [Clip deltas](#clip-deltas) | retargeting a whole clip |
 | [Clip guard rails](#clip-guard-rails) | the rig edits an animated clip refuses |
 | [Importers and exporters](#importers-and-exporters) | fbx, glb, auto-detect |
@@ -1131,6 +1132,61 @@ try:
     clip.frames.rotate_order = 0
 except AttributeError as error:
     print(error)                                # clip.frames has no 'rotate_order' to write; ...
+```
+
+---
+
+## Solving every frame
+
+The pose setters have every-frame forms on the frame axis, solved for
+every frame at once. Each equals the node setters run frame by frame on
+a copy of each pose (world matrices within 1e-9), and a rotate rebuilt
+from a matrix then goes through `euler_filter` in each node's rotate
+order, frame 0 kept, so the curves carry no 180 or 360 degree steps.
+Within about 1e-4 degrees of gimbal lock, where `matrix_to_euler` snaps
+the angles a rotation reads back as, neither route holds a world matrix
+to better than a few 1e-9.
+
+| Write | Takes |
+|---|---|
+| `frames.world_matrix = W` | `(4, 4)` for every node and frame, `(n, 4, 4)` per node, `(F, n, 4, 4)` frame for frame |
+| `frames.matrix = L` | the same, local matrices |
+| `frames.quaternion = Q` | `(4,)`, `(n, 4)` or `(F, n, 4)`; reading it gives `(F, n, 4)` |
+| `frames.match_matrix(other)` | a clip or a frame axis, frame for frame; a node, a list of nodes or a pose, on every frame |
+| `frames.match_translate(other, x=, y=, z=)` | the same, or positions `(3,)`, `(n, 3)`, `(F, n, 3)` |
+| `frames.match_rotate(other)` | the same, or eulers in degrees `(..., 3)` in each node's rotate order, or quaternions `(..., 4)` |
+
+```python
+take               = ClipData(make_chain(("root", "hip", "knee", "ankle")), frames=5)
+take.frames.rotate = np.random.default_rng(1).normal(size=(5, 4, 3)) * 30.0
+
+clip.frames.world_matrix = take.frames.world_matrix    # every frame, one solve
+assert np.allclose(clip.frames.world_matrix, take.frames.world_matrix, atol=1e-9)
+
+clip.frames["knee"].match_rotate([0.0, 0.0, 45.0])     # held on every frame
+clip.frames.match_translate(take, y=False)             # paired frame for frame
+clip.frames.quaternion.shape                           # (5, 4, 4)
+```
+
+The clip's own setters, `clip.world_matrix = W`, `clip.match_rotate(...)`
+and `clip["hip"].quaternion = q` among them, write the frame the clip is
+bound to, as every channel setter does. A loop over the frames picks each
+frame's euler branch on its own; the frame axis filters the curve.
+
+```python
+spin                        = ClipData(make_chain(), frames=7)
+spin.frames["hip"].rotate_x = np.linspace(0.0, 540.0, 7)   # 90 degrees a frame
+W                           = np.array(spin.frames.world_matrix)
+
+looped = ClipData(make_chain(), frames=7)
+for frame in range(7):
+    looped.frame        = frame
+    looped.world_matrix = W[frame]                   # this frame alone
+looped.frames["hip"].rotate_x[:, 0]                  # [0, 90, 180, -90, 0, 90, 180]
+
+solved                     = ClipData(make_chain(), frames=7)
+solved.frames.world_matrix = W
+assert np.allclose(solved.frames["hip"].rotate_x[:, 0], np.linspace(0.0, 540.0, 7))
 ```
 
 ---
