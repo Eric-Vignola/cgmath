@@ -4131,13 +4131,30 @@ def _matrices_to_euler(matrices: np.ndarray, orders: np.ndarray) -> np.ndarray:
     return out
 
 
-def _evaluate_local(
-    clip: "ClipData", parents: Optional[np.ndarray] = None
-) -> np.ndarray:
-    """every frame's local matrices as (F, N, 4, 4)
+def _parent_scale(clip: "ClipData", parents: np.ndarray) -> np.ndarray:
+    """every frame's parent scale as (F, N, 3), ones for a root
 
-    Mirrors TransformData.matrix factor for factor: S * RO * R * JO * IS * T.
-    ``parents`` is the clip's parent map, when the caller already has it.
+    What TransformData.parent_scale_inverse reads: the parent's scale,
+    whether or not the node compensates for it. ``parents`` holds each
+    node's parent as a position in the clip, -1 for a root.
+    """
+    scale    = clip._blocks["_scale"]
+    out      = np.ones(scale.shape, dtype=float)
+    parented = parents >= 0
+    if parented.any():
+        out[:, parented] = scale[:, parents[parented]]
+    return out
+
+
+def _local_factors(
+    clip: "ClipData", parents: Optional[np.ndarray] = None
+) -> tuple:
+    """every frame's local matrix factors, and each node's parent
+
+    Returns S, RO, R, JO, IS and T, each (F, N, 4, 4) and built as the
+    TransformData property of that factor builds it, then each node's
+    parent as a position in the clip, -1 for a root. ``parents`` is the
+    clip's parent map, when the caller already has it.
     """
     blocks = clip._blocks
     scale  = blocks["_scale"]
@@ -4151,10 +4168,7 @@ def _evaluate_local(
         parents = clip._parent_indices(nodes)
 
     # the parent's scale is per frame, the flag that applies it is structural
-    inverse  = np.ones(scale.shape, dtype=float)
-    parented = (parents >= 0) & compensate
-    if parented.any():
-        inverse[:, parented] = scale[:, parents[parented]]
+    inverse = np.where(compensate[:, None], _parent_scale(clip, parents), 1.0)
 
     S  = _diagonal(scale)
     RO = _euler_matrices(blocks["_rotate_axis"],  None)
@@ -4163,6 +4177,18 @@ def _evaluate_local(
     IS = _diagonal(1.0 / inverse)
     T  = _translation(blocks["_translate"])
 
+    return S, RO, R, JO, IS, T, parents
+
+
+def _evaluate_local(
+    clip: "ClipData", parents: Optional[np.ndarray] = None
+) -> np.ndarray:
+    """every frame's local matrices as (F, N, 4, 4)
+
+    Mirrors TransformData.matrix factor for factor: S * RO * R * JO * IS * T.
+    ``parents`` is the clip's parent map, when the caller already has it.
+    """
+    S, RO, R, JO, IS, T, _ = _local_factors(clip, parents)
     return S @ RO @ R @ JO @ IS @ T
 
 
@@ -4184,18 +4210,20 @@ def _frame_property(channel: str) -> property:
     def getter(self) -> np.ndarray:
         # read only: an in place edit would land in the block without
         # rebinding the nodes, so half the write would be visible
-        block = self._clip._blocks[channel]
-        view  = block.view() if self._columns is None else block[:, self._columns]
+        columns = self._columns
+        block   = self._clip._blocks[channel]
+        view    = block.view() if columns is None else block[:, columns]
         view.setflags(write=False)
         return view
 
     def setter(self, value: np.ndarray) -> None:
-        clip  = self._clip
-        value = np.asarray(value, dtype=float)
-        if self._columns is None:
+        clip    = self._clip
+        columns = self._columns
+        value   = np.asarray(value, dtype=float)
+        if columns is None:
             clip._blocks[channel][...] = value
         else:
-            clip._blocks[channel][:, self._columns] = value
+            clip._blocks[channel][:, columns] = value
         clip._bind(clip._frame)
 
     return property(getter, setter)
@@ -4241,11 +4269,60 @@ class _FrameAxis:
     The two do not combine: a scoped axis addresses channels, so slicing one
     or writing a pose into one raises rather than quietly widening back to
     the whole clip.
+
+    Only what the axis defines can be written. Each ``clip.frames`` is a new
+    axis, so a write to anything else, ``clip.frames.rotate_order = 0`` say,
+    would land on a throwaway object and change nothing; it raises instead.
+
+    An axis can be held across an edit that reorders the clip's nodes: it
+    keeps its nodes' uuids, not their positions, and lines the clip up with
+    them on every read and write.
     """
 
+    __slots__ = ("_clip", "_uuids")
+
     def __init__(self, clip: "ClipData", columns=None):
-        self._clip    = clip
-        self._columns = None if columns is None else np.asarray(columns, dtype=int)
+        # ``columns`` are positions in the clip's node list as it is now
+        self._clip  = clip
+        self._uuids = None
+        if columns is not None:
+            nodes       = clip.list
+            positions   = np.asarray(columns, dtype=int).reshape(-1)
+            self._uuids = [nodes[i].uuid for i in positions]
+
+    @property
+    def _columns(self) -> Optional[np.ndarray]:
+        """the positions in the clip of the nodes this axis covers, None for
+        every node, worked out when asked
+
+        The clip is realigned first, its block columns put back in the order
+        of its nodes: an edit since the axis was taken -- set_parent moving a
+        branch to the end of the list, a sort, a node added or taken out --
+        would otherwise pair one node's columns with another's rotate order
+        and parent. A scoped axis finds its nodes by uuid, and raises when the
+        clip no longer holds one of them; a clip with no frames has nothing to
+        read or write and raises too.
+        """
+        clip = self._clip
+        clip._realign()
+        if not clip._blocks:
+            raise ValueError("the clip holds no frames")
+        if self._uuids is None:
+            return None
+
+        place = {node.uuid: i for i, node in enumerate(clip.list)}
+        for uuid in self._uuids:
+            if uuid not in place:
+                raise ValueError(f"the clip no longer holds the node {uuid!r} this axis covers")
+        return np.array([place[uuid] for uuid in self._uuids], dtype=int)
+
+    def __setattr__(self, name: str, value) -> None:
+        if not hasattr(type(self), name):
+            raise AttributeError(
+                f"clip.frames has no {name!r} to write; a value every frame "
+                f"shares, such as rotate_order, is set on the clip itself"
+            )
+        object.__setattr__(self, name, value)
 
     def __len__(self) -> int:
         return self._clip.frame_count
@@ -4264,7 +4341,7 @@ class _FrameAxis:
         if _is_sequence(query):
             return _FrameAxis(clip, [self._column(item) for item in query])
 
-        if self._columns is not None:
+        if self._uuids is not None:
             raise TypeError("cut the frame range before scoping to nodes")
 
         if isinstance(query, slice):
@@ -4286,7 +4363,7 @@ class _FrameAxis:
         """int writes one pose, slice writes a run of them"""
         clip = self._clip
 
-        if self._columns is not None:
+        if self._uuids is not None:
             raise TypeError("a node scoped axis writes channels, not poses")
 
         if isinstance(query, slice):
@@ -4329,18 +4406,22 @@ class _FrameAxis:
     @property
     def matrix(self) -> np.ndarray:
         """every frame's local matrices, (F, N, 4, 4)"""
-        return self._scoped(_evaluate_local(self._clip))
+        columns = self._columns
+        return self._scoped(_evaluate_local(self._clip), columns)
 
-    def _scoped(self, values: np.ndarray) -> np.ndarray:
-        return values if self._columns is None else values[:, self._columns]
+    @staticmethod
+    def _scoped(values: np.ndarray, columns) -> np.ndarray:
+        """``values`` over every node, cut to ``columns`` (None for all)"""
+        return values if columns is None else values[:, columns]
 
     @property
     def world_matrix(self) -> np.ndarray:
         """every frame's world matrices, (F, N, 4, 4)"""
+        columns = self._columns
         clip    = self._clip
         parents = clip._parent_indices(clip.list)
         world   = _evaluate_world(_evaluate_local(clip, parents), parents)
-        return self._scoped(world)
+        return self._scoped(world, columns)
 
     scale          = _frame_property("_scale")
     rotate         = _frame_property("_rotate")
@@ -4363,6 +4444,120 @@ class _FrameAxis:
     joint_orient_x = _frame_component("joint_orient", 0)
     joint_orient_y = _frame_component("joint_orient", 1)
     joint_orient_z = _frame_component("joint_orient", 2)
+
+    # --- what the nodes build from their channels, every frame at once ---- #
+    # each equals the TransformData read of the same name taken frame by
+    # frame, scoped the way the channels are
+    def _nodes(self) -> list:
+        """the nodes this axis covers, in column order"""
+        columns = self._columns
+        nodes   = self._clip.list
+        return nodes if columns is None else [nodes[i] for i in columns]
+
+    @property
+    def scale_matrix(self) -> np.ndarray:
+        """every frame's scale matrices, (F, N, 4, 4)"""
+        return _diagonal(self.scale)
+
+    @property
+    def rotate_axis_matrix(self) -> np.ndarray:
+        """every frame's rotate axis matrices, (F, N, 4, 4)"""
+        return _euler_matrices(self.rotate_axis, None)
+
+    @property
+    def rotate_matrix(self) -> np.ndarray:
+        """every frame's rotate matrices, (F, N, 4, 4), in each node's order"""
+        orders = np.array([node.rotate_order for node in self._nodes()], dtype=int)
+        return _euler_matrices(self.rotate, orders)
+
+    @property
+    def joint_orient_matrix(self) -> np.ndarray:
+        """every frame's joint orient matrices, (F, N, 4, 4)"""
+        return _euler_matrices(self.joint_orient, None)
+
+    @property
+    def parent_scale_inverse(self) -> np.ndarray:
+        """every frame's parent scale, (F, N, 3), ones for a root
+
+        As on a node, this is the parent's scale whether or not the node
+        compensates for it; parent_scale_inverse_matrix applies the flag.
+        """
+        columns = self._columns
+        clip    = self._clip
+        return self._scoped(_parent_scale(clip, clip._parent_indices(clip.list)), columns)
+
+    @property
+    def parent_scale_inverse_matrix(self) -> np.ndarray:
+        """every frame's parent scale inverse matrices, (F, N, 4, 4)
+
+        Identity for a node that does not compensate segment scale.
+        """
+        compensate = np.array(
+            [bool(node.segment_scale_compensate) for node in self._nodes()], dtype=bool
+        )
+        inverse = np.where(compensate[:, None], self.parent_scale_inverse, 1.0)
+        return _diagonal(1.0 / inverse)
+
+    @property
+    def translate_matrix(self) -> np.ndarray:
+        """every frame's translate matrices, (F, N, 4, 4)"""
+        return _translation(self.translate)
+
+    @property
+    def parent_matrix(self) -> np.ndarray:
+        """every frame's parent world matrices, (F, N, 4, 4)
+
+        What get_parent_matrix gives a node on each frame: identity for a
+        root, and for a node whose parent is not in the clip.
+        """
+        columns = self._columns
+        clip    = self._clip
+        parents = clip._parent_indices(clip.list)
+        world   = _evaluate_world(_evaluate_local(clip, parents), parents)
+        if columns is not None:
+            parents = parents[columns]
+
+        out      = np.empty((len(world), len(parents), 4, 4), dtype=float)
+        out[...] = np.eye(4)
+
+        parented = parents >= 0
+        if parented.any():
+            out[:, parented] = world[:, parents[parented]]
+        return out
+
+    def get_parent_matrix(self) -> np.ndarray:
+        """every frame's parent world matrices, the same as parent_matrix"""
+        return self.parent_matrix
+
+    def to_attributes(self, mapping: dict = MAYA_ATTRIBUTE_MAP) -> List[dict]:
+        """every node's attributes as a list of dicts, covering every frame
+
+        What TransformData.to_attributes gives on each frame, gathered: a
+        framed channel maps to one [x, y, z] per frame, anything else to
+        the single value every frame shares.
+        """
+        # one (n, F, 3) list per framed channel, rather than a tolist per node
+        columns = self._columns
+        framed = {
+            channel: np.swapaxes(self._scoped(block, columns), 0, 1).tolist()
+            for channel, block in self._clip._blocks.items()
+            if channel in mapping
+        }
+
+        out = []
+        for column, node in enumerate(self._nodes()):
+            attributes = {}
+            for key, value in node.__dict__.items():
+                if key not in mapping:
+                    continue
+                if key in framed:
+                    attributes[mapping[key]] = framed[key][column]
+                elif isinstance(value, np.ndarray):
+                    attributes[mapping[key]] = value.tolist()
+                else:
+                    attributes[mapping[key]] = value
+            out.append(attributes)
+        return out
 
 
 class ClipData(HierarchyData):

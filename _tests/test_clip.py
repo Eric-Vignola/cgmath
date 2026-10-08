@@ -1615,6 +1615,350 @@ class TestClipScopedFrames(unittest.TestCase):
             view[0, 0, 0] = 1.0
 
 
+class TestClipFramedReads(unittest.TestCase):
+    """what a node builds from its channels, read for every frame at once
+
+    Each read must equal the single pose TransformData read of the same
+    name, taken frame by frame on a plain HierarchyData copy of that frame.
+    """
+
+    MATRICES = (
+        "scale_matrix",
+        "rotate_axis_matrix",
+        "rotate_matrix",
+        "joint_orient_matrix",
+        "parent_scale_inverse",
+        "parent_scale_inverse_matrix",
+        "translate_matrix",
+    )
+    FRAMED = ("scale", "rotate", "translate", "rotateAxis", "jointOrient")
+
+    def _rig(self, count=14, seed=7, by_name=True):
+        # every feature a factor reads: rotate orders, segment scale
+        # compensation both ways, a branching tree, parented by name or uuid
+        rng   = np.random.default_rng(seed)
+        uuids = [hierarchy.generate_uuid() for _ in range(count)]
+        names = [f"j{i}" for i in range(count)]
+        nodes = []
+        for i in range(count):
+            parent = None
+            if i:
+                p      = int(rng.integers(0, i))
+                parent = names[p] if by_name else uuids[p]
+            nodes.append(
+                TransformData(
+                    name=names[i],
+                    uuid=uuids[i],
+                    node_type="joint",
+                    parent_node=parent,
+                    translate=rng.normal(size=3),
+                    rotate=rng.uniform(-180.0, 180.0, size=3),
+                    scale=rng.uniform(0.5, 2.0, size=3),
+                    rotate_axis=rng.uniform(-40.0, 40.0, size=3),
+                    joint_orient=rng.uniform(-90.0, 90.0, size=3),
+                    rotate_order=int(rng.integers(0, 6)),
+                    segment_scale_compensate=bool(i % 2),
+                )
+            )
+        return HierarchyData(nodes)
+
+    def _animated(self, rig, frames=7, seed=11):
+        # all five framed channels move, scale included, so a parent's scale
+        # differs from frame to frame
+        rng   = np.random.default_rng(seed)
+        clip  = ClipData(rig, frames=frames, start_frame=1001, fps=30.0)
+        shape = clip.frames.rotate.shape
+        for channel in ("rotate", "translate", "rotate_axis", "joint_orient"):
+            block = getattr(clip.frames, channel) + rng.normal(size=shape) * 10.0
+            setattr(clip.frames, channel, block)
+        clip.frames.scale = clip.frames.scale * rng.uniform(0.7, 1.3, size=shape)
+        clip.frame        = 0
+        return clip
+
+    def _clips(self):
+        for by_name in (True, False):
+            yield ("name" if by_name else "uuid"), self._animated(self._rig(by_name=by_name))
+
+    def _per_frame(self, clip, read):
+        """the reference: ``read(node)`` on every node of a single pose copy
+        of each frame, as a list of frames of lists of nodes"""
+        out = []
+        for frame in range(clip.frame_count):
+            clip.frame = frame
+            pose       = hierarchy.TransformList._owned_copy(clip)
+            self.assertIs(type(pose), HierarchyData)
+            out.append([read(node) for node in pose])
+        return out
+
+    def test_every_factor_matches_the_node_read_on_every_frame(self):
+        for parented, clip in self._clips():
+            for name in self.MATRICES:
+                with self.subTest(parented_by=parented, read=name):
+                    want = np.array(self._per_frame(clip, lambda node: getattr(node, name)))
+                    got  = getattr(clip.frames, name)
+
+                    self.assertEqual(got.shape, want.shape)
+                    self.assertTrue(np.array_equal(got, want))
+
+    def test_parent_matrix_matches_get_parent_matrix_on_every_frame(self):
+        for parented, clip in self._clips():
+            with self.subTest(parented_by=parented):
+                want = np.array(self._per_frame(clip, lambda node: node.get_parent_matrix()))
+                got  = clip.frames.parent_matrix
+
+                self.assertEqual(got.shape, want.shape)
+                self.assertTrue(np.allclose(got, want, rtol=0.0, atol=1e-9))
+                self.assertTrue(np.array_equal(got, want))
+                self.assertTrue(np.array_equal(clip.frames.get_parent_matrix(), got))
+
+    def test_the_parent_scale_reads_follow_the_parents_animated_scale(self):
+        # the per frame scale of a parent is what IS divides out, so a
+        # compensating child must see it change, and a root must not
+        clip   = self._animated(self._rig())
+        parent = clip.frames.parent_scale_inverse
+        matrix = clip.frames.parent_scale_inverse_matrix
+
+        self.assertTrue(np.array_equal(parent[:, 0], np.ones((clip.frame_count, 3))))
+        self.assertFalse(np.allclose(parent[0, 1:], parent[-1, 1:]))
+
+        identity = np.broadcast_to(np.eye(4), (clip.frame_count, 4, 4))
+        for i, node in enumerate(clip):
+            diagonal = matrix[:, i, [0, 1, 2], [0, 1, 2]]
+            if node.segment_scale_compensate:
+                self.assertTrue(np.array_equal(diagonal, 1.0 / parent[:, i]))
+            else:
+                self.assertTrue(np.array_equal(matrix[:, i], identity))
+
+    def test_a_parent_outside_the_clip_reads_as_a_root(self):
+        # a clip of part of a rig: the first node's parent is left behind,
+        # which get_parent_matrix answers with identity and a scale of one
+        rig     = self._rig(by_name=False)
+        clip    = self._animated(HierarchyData([node.copy() for node in rig][3:]))
+        orphans = [i for i, node in enumerate(clip) if isinstance(node.get_parent(), str)]
+        self.assertTrue(orphans)
+
+        world    = clip.frames.parent_matrix
+        scale    = clip.frames.parent_scale_inverse
+        identity = np.broadcast_to(np.eye(4), (clip.frame_count, 4, 4))
+        for i in orphans:
+            self.assertTrue(np.array_equal(world[:, i], identity))
+            self.assertTrue(np.array_equal(scale[:, i], np.ones((clip.frame_count, 3))))
+
+        # and the node itself, scrubbed, says the same
+        for frame in range(clip.frame_count):
+            clip.frame = frame
+            for i in orphans:
+                self.assertTrue(np.array_equal(world[frame, i], clip[i].get_parent_matrix()))
+                self.assertTrue(np.array_equal(scale[frame, i], clip[i].parent_scale_inverse))
+
+    def test_a_scoped_axis_reads_its_own_columns(self):
+        clip    = self._animated(self._rig())
+        names   = ["j9", "j0", "j4"]
+        columns = [9, 0, 4]
+        for name in self.MATRICES + ("parent_matrix",):
+            with self.subTest(read=name):
+                full   = getattr(clip.frames, name)
+                scoped = getattr(clip.frames[names], name)
+                self.assertTrue(np.array_equal(scoped, full[:, columns]))
+
+        one = clip.frames["j5"].rotate_matrix
+        self.assertEqual(one.shape, (clip.frame_count, 1, 4, 4))
+
+        full = clip.frames.to_attributes()
+        self.assertEqual(clip.frames[names].to_attributes(), [full[i] for i in columns])
+
+    def test_to_attributes_gathers_every_frame(self):
+        for parented, clip in self._clips():
+            with self.subTest(parented_by=parented):
+                got  = clip.frames.to_attributes()
+                want = self._per_frame(clip, lambda node: node.to_attributes())
+
+                self.assertEqual(len(got), len(clip))
+                for i, attributes in enumerate(got):
+                    # same keys, in the same order, as one frame's dict
+                    self.assertEqual(list(attributes), list(want[0][i]))
+                    for key, value in attributes.items():
+                        frames = [want[f][i][key] for f in range(clip.frame_count)]
+                        if key in self.FRAMED:
+                            self.assertEqual(value, frames)
+                        else:
+                            self.assertTrue(all(value == v for v in frames))
+
+    def test_to_attributes_takes_a_mapping(self):
+        clip    = self._animated(self._rig())
+        mapping = {"_rotate": "r", "_rotate_order": "ro"}
+
+        got  = clip.frames.to_attributes(mapping)
+        want = self._per_frame(clip, lambda node: node.to_attributes(mapping))
+        for i, attributes in enumerate(got):
+            self.assertEqual(set(attributes),  {"r", "ro"})
+            self.assertEqual(attributes["r"],  [want[f][i]["r"] for f in range(clip.frame_count)])
+            self.assertEqual(attributes["ro"], want[0][i]["ro"])
+
+    def test_the_reads_follow_an_edit_and_change_nothing(self):
+        clip       = self._animated(self._rig())
+        clip.frame = 3
+        blocks     = {c: b.copy() for c, b in clip._blocks.items()}
+
+        before = clip.frames.parent_matrix.copy()
+        for name in self.MATRICES:
+            getattr(clip.frames, name)
+        clip.frames.to_attributes()
+
+        # nothing scrubbed, nothing written
+        self.assertEqual(clip.frame, 3)
+        for channel, block in clip._blocks.items():
+            self.assertTrue(np.array_equal(block, blocks[channel]))
+
+        # a write through the bound frame is seen on that frame only
+        clip[0].scale = [3.0, 3.0, 3.0]
+        scale         = clip.frames.scale_matrix
+        self.assertTrue(np.array_equal(scale[3, 0], np.diag([3.0, 3.0, 3.0, 1.0])))
+        self.assertTrue(
+            np.array_equal(scale[2, 0], np.diag(np.append(blocks["_scale"][2, 0], 1.0)))
+        )
+
+        after = clip.frames.parent_matrix
+        child = [i for i, node in enumerate(clip) if node.get_parent() is clip[0]]
+        self.assertTrue(child)
+        self.assertFalse(np.allclose(after[3, child], before[3, child]))
+        self.assertTrue(np.array_equal(after[2], before[2]))
+
+    def test_the_reads_cannot_be_written(self):
+        clip = self._animated(self._rig())
+        for name in self.MATRICES + ("parent_matrix",):
+            with self.subTest(read=name):
+                value = getattr(clip.frames, name)
+                with self.assertRaises(AttributeError):
+                    setattr(clip.frames, name, value)
+
+    def test_a_write_the_axis_does_not_hold_raises(self):
+        # each clip.frames is a new axis, so a write it does not hold used to
+        # land on that throwaway object and vanish without a word
+        clip   = self._animated(self._rig())
+        blocks = {c: b.copy() for c, b in clip._blocks.items()}
+        orders = list(clip.rotate_order)
+
+        axes = {
+            "whole clip": clip.frames,
+            "one node":   clip.frames["j2"],
+            "matched":    clip.frames.match("j1*", exact=False),
+        }
+        for label, axis in axes.items():
+            for name, value in (
+                ("rotate_order", 0),
+                ("segment_scale_compensate", True),
+                ("radius", 2.0),
+                ("rotate_xyz", np.zeros(3)),
+            ):
+                with self.subTest(axis=label, write=name):
+                    with self.assertRaises(AttributeError):
+                        setattr(axis, name, value)
+
+        self.assertEqual(list(clip.rotate_order), orders)
+        for channel, block in clip._blocks.items():
+            self.assertTrue(np.array_equal(block, blocks[channel]))
+
+        # the channels it does hold still write
+        clip.frames["j2"].rotate_y += 5.0
+        self.assertTrue(
+            np.array_equal(clip.frames.rotate[:, 2, 1], blocks["_rotate"][:, 2, 1] + 5.0)
+        )
+
+    # every read of an axis, by name; to_attributes as its framed channels
+    READS = MATRICES + (
+        "scale",
+        "rotate",
+        "translate",
+        "rotate_axis",
+        "joint_orient",
+        "rotate_y",
+        "matrix",
+        "world_matrix",
+        "parent_matrix",
+    )
+
+    REORDERS = {
+        "sort":             lambda clip: clip.sort(key=lambda node: -int(node.name[1:])),
+        "reverse":          lambda clip: clip.reverse(),
+        "set_parent local": lambda clip: clip["j2"].set_parent(None, world_space=False),
+        "a node added":     lambda clip: clip.insert(0, TransformData("extra", translate=(1, 2, 3))),
+    }
+
+    def _reads(self, axis) -> dict:
+        out = {name: np.array(getattr(axis, name)) for name in self.READS}
+        out["to_attributes"] = [
+            [node[key] for key in self.FRAMED] for node in axis.to_attributes()
+        ]
+        return out
+
+    def test_an_axis_held_across_a_reorder_reads_its_own_nodes(self):
+        # an axis held across an edit that reordered the nodes read block
+        # columns in the old order against rotate orders, compensation and
+        # parents in the new one: up to 7.9 off in world_matrix after a sort
+        for label, reorder in self.REORDERS.items():
+            for scope in (None, ["j5", "j9", "j2"]):
+                with self.subTest(label, scope=scope):
+                    clip = self._animated(self._rig(by_name=False))
+                    held = clip.frames if scope is None else clip.frames[scope]
+                    reorder(clip)
+
+                    # read before anything else lines the clip up again
+                    got   = self._reads(held)
+                    fresh = clip.frames if scope is None else clip.frames[scope]
+                    want  = self._reads(fresh)
+                    for name in want:
+                        self.assertTrue(
+                            np.array_equal(got[name], want[name]), f"{label}: {name}"
+                        )
+                    if scope is not None:
+                        self.assertEqual([n.name for n in held._nodes()], scope)
+
+    def test_a_held_scoped_axis_writes_its_own_nodes(self):
+        clip = self._animated(self._rig(by_name=False))
+        held = clip.frames["j5"]
+        clip.sort(key=lambda node: -int(node.name[1:]))
+        before = np.array(clip.frames.rotate)
+
+        held.rotate_y = 7.0
+
+        after = np.array(clip.frames.rotate)
+        j5    = clip.index("j5")
+        self.assertTrue(np.array_equal(after[:, j5, 1], np.full(clip.frame_count, 7.0)))
+        others = [i for i in range(len(clip)) if i != j5]
+        self.assertTrue(np.array_equal(after[:, others], before[:, others]))
+
+    def test_a_node_taken_out_of_the_clip_is_refused(self):
+        clip = self._animated(self._rig())
+        held = clip.frames[["j3", "j4"]]
+        clip.remove(clip["j4"])
+        for name in ("rotate", "world_matrix", "to_attributes"):
+            with self.subTest(read=name):
+                with self.assertRaisesRegex(ValueError, "no longer holds"):
+                    value = getattr(held, name)
+                    if callable(value):
+                        value()
+        with self.assertRaisesRegex(ValueError, "no longer holds"):
+            held.rotate_x = 1.0
+
+    def test_a_clip_with_no_frames_has_nothing_to_read(self):
+        # the reads raised a bare KeyError naming a channel, to_attributes
+        # gave back the pose the nodes hold
+        clip = ClipData(self._rig())
+        self.assertEqual(clip.frame_count, 0)
+        for axis in (clip.frames, clip.frames[["j1", "j2"]]):
+            for name in self.READS + ("to_attributes",):
+                with self.subTest(read=name, scoped=axis._uuids is not None):
+                    with self.assertRaisesRegex(ValueError, "holds no frames"):
+                        value = getattr(axis, name)
+                        if callable(value):
+                            value()
+            with self.assertRaisesRegex(ValueError, "holds no frames"):
+                axis.rotate = np.zeros((0, len(clip), 3))
+        self.assertEqual(len(clip.frames), 0)
+        self.assertEqual(clip.frames.times.shape, (0,))
+
+
 class TestClipSaveFbx(unittest.TestCase):
     """the fbx exporter writes one pose and no animation stack
 

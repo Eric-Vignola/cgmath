@@ -30,7 +30,7 @@ overview see [`README.md`](README.md); for the rest of the library see
 | [`ClipData` — construction](#clipdata--construction) | frames, timebase |
 | [Scrubbing](#scrubbing) | `clip.frame`, the nodes as a playback head |
 | [The frame axis](#the-frame-axis) | `clip.frames` blocks, components, scoping, cuts, pastes |
-| [Batched evaluation](#batched-evaluation) | `frames.matrix`, `frames.world_matrix` |
+| [Batched evaluation](#batched-evaluation) | `frames.matrix`, `frames.world_matrix`, the factor matrices, `parent_matrix`, `to_attributes()` |
 | [Clip deltas](#clip-deltas) | retargeting a whole clip |
 | [Clip guard rails](#clip-guard-rails) | the rig edits an animated clip refuses |
 | [Importers and exporters](#importers-and-exporters) | fbx, glb, auto-detect |
@@ -971,6 +971,7 @@ except IndexError as error:
 | `clip.frames.times` | `(F,)` seconds, `(start_frame + i) / fps` |
 | `len(clip.frames)` | `F` |
 | `iter(clip.frames)` | scrubs frame by frame, yielding the clip |
+| `clip.frames.rotate_order = 0` | raises `AttributeError`: the axis writes only what it defines, and a value every frame shares is set on the clip |
 
 ### Whole blocks
 
@@ -1091,6 +1092,41 @@ Scoped axes evaluate the same way, narrowed to their columns.
 
 ```python
 clip.frames.match("hip").world_matrix.shape     # (5, 1, 4, 4)
+```
+
+What a node builds from its channels reads the same way, every frame at
+once, each equal bit for bit to the node's own read on every frame:
+
+| Read | Every frame |
+|---|---|
+| `scale_matrix`, `rotate_axis_matrix`, `rotate_matrix`, `joint_orient_matrix`, `translate_matrix` | `(F, N, 4, 4)`, `rotate_matrix` in each node's rotate order |
+| `parent_scale_inverse` | `(F, N, 3)`: the parent's scale, ones for a root, whatever `segment_scale_compensate` says |
+| `parent_scale_inverse_matrix` | `(F, N, 4, 4)`: identity for a node that does not compensate |
+| `parent_matrix`, `get_parent_matrix()` | `(F, N, 4, 4)`: identity for a root, or a parent the clip does not hold |
+| `to_attributes()` | one dict per node: a framed channel as one `[x, y, z]` per frame, anything else as its one value |
+
+```python
+parents = clip.frames.parent_matrix
+rotates = clip.frames.rotate_matrix
+for frame in range(clip.frame_count):
+    clip.frame = frame
+    assert np.array_equal(parents[frame], clip.get_parent_matrix())
+    assert np.array_equal(rotates[frame], clip.rotate_matrix)
+
+knee = clip.frames["knee"].to_attributes()[0]
+len(knee["rotate"])                             # 5 -- one [x, y, z] per frame
+knee["rotateOrder"]                             # 0 -- shared by every frame
+```
+
+They are reads: assigning one raises, and so does any name the axis does
+not define, since each `clip.frames` is a new object a write would be lost
+on.
+
+```python
+try:
+    clip.frames.rotate_order = 0
+except AttributeError as error:
+    print(error)                                # clip.frames has no 'rotate_order' to write; ...
 ```
 
 ---
