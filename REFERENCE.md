@@ -1,6 +1,6 @@
 # `cgmath` Reference
 
-Generated from the live code by `gen_reference.py` (kept in the `tools/` folder beside the packages, not in this repository) on 2026-09-24. Do not edit by hand; re-run the script after any API change.
+Generated from the live code by `gen_reference.py` (kept outside this repository, in the maintainer's own tools folder; the repository's `tools/` holds only the Maya fixture generator) on 2026-09-24. Do not edit by hand; re-run the script after any API change.
 
 Every public class, property, method, function and constant of the modules below, with the real signature (`inspect.signature`) and the first line of its docstring. To *learn* a subpackage read its `README.md` and `CHEATSHEET.md`; this page is for looking things up.
 

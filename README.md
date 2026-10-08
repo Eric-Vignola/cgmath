@@ -61,8 +61,9 @@ for it) and a **CHEATSHEET** (every public name, with a runnable example).
 | `cgmath.constraints` | `ProcrustesData` — rivet a transform to a deforming patch | [README](https://github.com/Eric-Vignola/cgmath/blob/main/constraints/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/constraints/CHEATSHEET.md) |
 
 [`REFERENCE.md`](https://github.com/Eric-Vignola/cgmath/blob/main/REFERENCE.md), a flat API listing, also sits in this
-directory. It is generated from the live code by `gen_reference.py` (kept in
-the `tools/` folder beside the packages, not in this repository): every public
+directory. It is generated from the live code by `gen_reference.py` (kept
+outside this repository, in the maintainer's own tools folder; the
+repository's `tools/` holds only the Maya fixture generator): every public
 name with its real signature and first docstring line.
 
 ---

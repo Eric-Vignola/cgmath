@@ -836,8 +836,12 @@ def euler_filter(euler, axes):
 
         # both candidates slide onto the turn nearest the previous frame,
         # then the shorter move wins. summing the axes rather than squaring
-        # them is what maya's filterCurve does, and the two disagree once
-        # the pose moves more than about 30 degrees in a frame
+        # them is what maya's filterCurve does: cgmath's
+        # _tests/test_euler_maya.py checks it against maya 2025 on every key
+        # of 222 curves (_tests/test_assets/maya_euler.npz). the two costs
+        # can pick differently on a step of under a degree near gimbal; with
+        # the middle axis 20 or more degrees from +-90, only once the pose
+        # moves 20 degrees or more in a frame
         candidates = np.stack((current, flipped))
         candidates += 2.0 * np.pi * np.round((previous - candidates) / (2.0 * np.pi))
         cost   = np.abs(candidates - previous).sum(axis=-1)
