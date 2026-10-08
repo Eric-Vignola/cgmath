@@ -440,7 +440,7 @@ translate_matrix
 translate_x                        
 translate_y                        
 translate_z                        
-unique_name                        
+unique_name                        whether each node's name is its own in its owning hierarchy
 uuid                               returns a list of all node uuids
 visibility                         
 world_matrix                       
@@ -461,6 +461,8 @@ append(self, node: "'TransformData'") -> 'None'
     S.append(value) -- append value to the end of the sequence
 copy(self) -> "'TransformList'"
     returns a deep copy, owning the nodes it holds.
+extend(self, iterable) -> 'None'
+    appends every node in turn, exactly as append() would
 get_branch(self) -> "'TransformList'"
     returns every node in the view and all of their decendents
 get_children(self) -> "'TransformList'"
@@ -470,7 +472,7 @@ get_delta(self, other, by: 'str' = 'index', translate: 'bool' = True) -> "'Hiera
 get_parent_matrix(self) -> 'np.ndarray'
     returns every node's parent worldspace matrix
 get_parents(self) -> 'np.ndarray'
-    returns the node's parent index
+    returns each node's parent index in its owning hierarchy, -1 for none
 get_roots(self) -> "'TransformList'"
     returns all contained nodes parented to the world
 index(self, obj, start=0, stop=None) -> 'int'

@@ -635,7 +635,8 @@ rig.parent_scale_inverse.shape         # (3, 3)
 rig = make_chain(("root", "hip", "knee", "ankle"))
 
 rig.get_roots().name                   # ['root']
-rig.get_parents()                      # array([-1,  0,  1,  2]) parent indices
+rig.get_parents()                      # array([-1,  0,  1,  2]) parent indices, -1 at a root
+                                       # or for a parent the hierarchy does not hold
 rig.get_parent_matrix().shape          # (4, 4, 4)
 rig[:2].get_children().name            # ['hip', 'knee']  (deduplicated)
 rig[:2].get_branch().name              # ['root', 'hip', 'knee', 'ankle']

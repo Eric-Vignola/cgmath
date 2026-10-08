@@ -1725,7 +1725,7 @@ class TransformData(Data):
             # once every link is pinned, so that the walk finds the renamed
             # nodes' children too
             if stale:
-                _reset_branches(hierarchy, stale)
+                _reset_branches(stale)
 
     def __dir__(self):
         attrs = self.__dict__.get("user_defined_attributes") or {}
@@ -2148,64 +2148,253 @@ def _fbx_frame_rate(mode) -> float:
     return 0.0
 
 
-def _parent_resolver():
-    """a function giving a node's parent by :meth:`TransformData.get_parent`'s
-    rules, through dicts
+# a uuid, name or parent_node the rig index can key on
+_INDEX_KEYS = (str, type(None))
 
-    get_parent scans its hierarchy twice a call, so resolving every node of a
-    rig that way costs N^2. This keeps one uuid and one name dict per owning
-    hierarchy, built the first time a node of it is asked about, and applies
-    the same rules: a uuid-shaped reference is matched against uuids only,
-    any other string is the first node of that name, and a reference nothing
-    matches comes back as the string. Only for a pass that does not edit the
-    hierarchy while it resolves.
+
+class _RigIndex:
+    """One pass over a hierarchy's nodes, so that get_parent, get_children,
+    index and unique_name read dicts rather than scanning the nodes
+
+    ``uuids`` and ``names`` hold the position of the first node carrying
+    each uuid and each name, ``refs`` the positions of the nodes holding
+    each ``parent_node`` value, in order. Every answer follows the node
+    method's rule:
+
+    * a ``parent_node`` shaped like a uuid names a node by uuid only; any
+      other string names the first node carrying it as a name; one that
+      matches nothing comes back as the string, as get_parent returns it;
+    * a node's children hold its uuid, or its name when it is the first
+      node carrying that name and the name is not shaped like a uuid, and
+      come in hierarchy order;
+    * a node's index is the position of the first node with its uuid.
+
+    :meth:`build` gives None for a hierarchy it cannot stand for: a class
+    that answers these lookups its own way, or a node whose uuid, name or
+    parent_node is not a string. Its callers ask the nodes instead.
     """
-    tables = {}
 
-    def parent_of(node):
+    __slots__ = ("nodes", "uuids", "names", "refs", "_shapes", "_holders")
+
+    def __init__(self, nodes: list, uuids: dict, names: dict, refs: dict):
+        self.nodes    = nodes
+        self.uuids    = uuids
+        self.names    = names
+        self.refs     = refs
+        self._shapes  = {}    # text -> whether it is shaped like a uuid
+        self._holders = None  # name -> the uuids carrying it, on first use
+
+    @classmethod
+    def build(cls, hierarchy) -> Optional["_RigIndex"]:
+        kind = type(hierarchy)
+        if not (
+            kind.__contains__ is TransformList.__contains__
+            and kind.index is TransformList.index
+            and kind.__getitem__ is TransformList.__getitem__
+        ):
+            return None
+
+        nodes = hierarchy.list
+        uuids, names, refs = {}, {}, {}
+        for position, node in enumerate(nodes):
+            uuid, name, ref = node.uuid, node.name, node.parent_node
+            if not (
+                isinstance(uuid, _INDEX_KEYS)
+                and isinstance(name, _INDEX_KEYS)
+                and isinstance(ref, _INDEX_KEYS)
+            ):
+                return None
+            uuids.setdefault(uuid, position)
+            names.setdefault(name, position)
+            refs.setdefault(ref, []).append(position)
+
+        return cls(nodes, uuids, names, refs)
+
+    def is_uuid(self, text: str) -> bool:
+        """validate_uuid(text), worked out once per text"""
+        shape = self._shapes.get(text)
+        if shape is None:
+            shape = self._shapes[text] = validate_uuid(text)
+        return shape
+
+    def parent(self, node):
+        """``node.get_parent()`` for a ``parent_node`` that is a string"""
+        ref      = node.parent_node
+        position = self.uuids.get(ref) if self.is_uuid(ref) else self.names.get(ref)
+        return ref if position is None else self.nodes[position]
+
+    def children(self, node) -> list:
+        """``node.get_children()``, as a list"""
+        uuid, name = node.uuid, node.name
+        rows = self.refs.get(uuid, ())
+
+        # a child naming this node counts when this is the first node of its
+        # name; a name shaped like a uuid is left to the uuid rule
+        if isinstance(name, str) and name != uuid:
+            named = self.refs.get(name)
+            if named and not self.is_uuid(name):
+                first = self.names.get(name)
+                if first is not None and self.nodes[first] is node:
+                    rows = sorted(list(rows) + named)
+
+        return [self.nodes[position] for position in rows]
+
+    def unique_name(self, node) -> bool:
+        """``node.unique_name`` for a node of this hierarchy"""
+        if self._holders is None:
+            self._holders = {}
+            for member in self.nodes:
+                self._holders.setdefault(member.name, set()).add(member.uuid)
+
+        # shared when a node of another uuid carries the name too
+        return all(uuid == node.uuid for uuid in self._holders.get(node.name, ()))
+
+
+class _Lookups:
+    """get_parent, get_children, index and unique_name for many nodes at once
+
+    Each of those scans the owning hierarchy, get_parent twice, so asking
+    them of every node of a rig costs the rig's size squared. Here each
+    owning hierarchy is indexed (:class:`_RigIndex`) the first time one of
+    its nodes is asked about, and indexed once for the length of the call:
+    a pass that edits as it goes reads the rig as it was when it started.
+    A node whose hierarchy can not be indexed is asked itself.
+    """
+
+    __slots__ = ("_indexes",)
+
+    def __init__(self):
+        self._indexes = {}
+
+    def index_of(self, hierarchy) -> Optional[_RigIndex]:
+        """the index of ``hierarchy``, built on first use"""
+        entry = self._indexes.get(id(hierarchy))
+        if entry is None:
+            entry                        = (hierarchy, _RigIndex.build(hierarchy))
+            self._indexes[id(hierarchy)] = entry
+        return entry[1]
+
+    def parent(self, node):
+        """``node.get_parent()``"""
         hierarchy, ref = node._hierarchy, node.parent_node
         if hierarchy is None or ref is None:
             return None
-        if not isinstance(ref, str):
+
+        index = self.index_of(hierarchy)
+        if index is None or not isinstance(ref, str):
             return node.get_parent()
+        return index.parent(node)
 
-        table = tables.get(id(hierarchy))
-        if table is None:
-            by_uuid, by_name = {}, {}
-            for member in hierarchy.list:
-                by_uuid.setdefault(member.uuid, member)
-                by_name.setdefault(member.name, member)
-            table = tables[id(hierarchy)] = (by_uuid, by_name)
+    def children(self, node) -> list:
+        """``node.get_children()``, as a list"""
+        hierarchy = node._hierarchy
+        if hierarchy is None:
+            return []
 
-        found = table[0] if validate_uuid(ref) else table[1]
-        return found.get(ref, ref)
+        index = self.index_of(hierarchy)
+        if (
+            index is None
+            or not isinstance(node.uuid, _INDEX_KEYS)
+            or not isinstance(node.name, _INDEX_KEYS)
+        ):
+            return list(node.get_children())
+        return index.children(node)
 
-    return parent_of
+    def index(self, node) -> int:
+        """``node.index``"""
+        hierarchy = node._hierarchy
+        index     = None if hierarchy is None else self.index_of(hierarchy)
+        if index is not None and isinstance(node.uuid, str):
+            position = index.uuids.get(node.uuid)
+            if position is not None:
+                return position
+
+        # not listed, or no hierarchy: raises as it always has
+        return node.index
+
+    def unique_name(self, node) -> bool:
+        """``node.unique_name``"""
+        hierarchy = node._hierarchy
+        index     = None if hierarchy is None else self.index_of(hierarchy)
+        if index is None or not isinstance(node.name, str):
+            return node.unique_name
+        return index.unique_name(node)
 
 
-def _reset_branches(hierarchy, nodes) -> None:
-    """drops the cached world matrices of ``nodes`` of ``hierarchy`` and of
-    every node below them, as _reset_branch_world_matrices does for one
+def _walk(roots, lookups: _Lookups) -> list:
+    """each of ``roots`` not met yet, followed by its branch: every node
+    before its children, the children in hierarchy order, each node once
 
-    A branch walk calls get_children once per node it reaches, and each call
-    scans the hierarchy, so clearing the branches of many nodes that way
-    costs N^2: one map of every node's children, built through
-    :func:`_parent_resolver`, is walked once for all of them.
+    Walked with a stack rather than by recursion, so a chain deeper than
+    Python's recursion limit is walked too, and a cyclic parent_node ends
+    where the walk meets a node again.
     """
-    parent_of = _parent_resolver()
-    children  = {}
-    for node in hierarchy.list:
-        parent = parent_of(node)
-        if isinstance(parent, TransformData):
-            children.setdefault(id(parent), []).append(node)
+    walked, seen = [], set()
+    for root in roots:
+        if id(root) in seen:
+            continue
+        seen.add(id(root))
+        walked.append(root)
 
-    todo, seen = list(nodes), set()
-    while todo:
-        node = todo.pop()
-        if id(node) not in seen:
-            seen.add(id(node))
-            node._transform_changed()
-            todo.extend(children.get(id(node), ()))
+        stack = [iter(lookups.children(root))]
+        while stack:
+            child = next(stack[-1], None)
+            if child is None:
+                stack.pop()
+            elif id(child) not in seen:
+                seen.add(id(child))
+                walked.append(child)
+                stack.append(iter(lookups.children(child)))
+
+    return walked
+
+
+def _chain_depths(parents) -> np.ndarray:
+    """the number of ancestors above each entry of a parent array
+
+    ``parents[i]`` is the position of i's parent, negative for none. The
+    count is the one a walk up the array makes, every distinct entry met on
+    the way up, stopping at a root or at an entry met already. It is found
+    once per entry rather than once per entry per level, so a chain N deep
+    costs N steps instead of N squared. A cycle counts its own members, as
+    the walk does, so a cyclic parent_node still orders the same.
+    """
+    parents = [int(p) for p in parents]
+    depth   = [-1] * len(parents)
+    cyclic  = [False] * len(parents)
+
+    for start in range(len(parents)):
+        path, on_path, i = [], {}, start
+        while i > -1 and depth[i] < 0 and i not in on_path:
+            on_path[i] = len(path)
+            path.append(i)
+            i = parents[i]
+
+        # the walk came back on itself: every member of the loop meets the
+        # whole loop, itself included, on its way up
+        if i > -1 and i in on_path:
+            loop = path[on_path[i] :]
+            for j in loop:
+                depth[j], cyclic[j] = len(loop), True
+            path = path[: on_path[i]]
+
+        for j in reversed(path):
+            p        = parents[j]
+            depth[j] = 0 if p < 0 else depth[p] + (not cyclic[p])
+
+    return np.array(depth, dtype=int)
+
+
+def _reset_branches(nodes) -> None:
+    """drops the cached world matrices of ``nodes`` and of every node below
+    them, as _reset_branch_world_matrices does for one
+
+    A branch walk node by node scans the hierarchy for every node it
+    reaches, so clearing the branches of many nodes that way costs N^2:
+    they are walked together, through one index of each hierarchy.
+    """
+    for node in _walk(nodes, _Lookups()):
+        node._transform_changed()
 
 
 class TransformList(DataList):
@@ -2421,18 +2610,25 @@ class TransformList(DataList):
 
     def get_roots(self) -> "TransformList":
         """returns all contained nodes parented to the world"""
-        roots = []
-        for obj in self:
-            if obj.get_parent() is None:
-                roots.append(obj)
-
-        return TransformList(roots)
+        lookups = _Lookups()
+        return TransformList([obj for obj in self if lookups.parent(obj) is None])
 
     def get_parents(self) -> np.ndarray:
-        """returns the node's parent index"""
-        return np.array(
-            [-1 if x.get_parent() is None else x.get_parent().index for x in self]
-        )
+        """returns each node's parent index in its owning hierarchy, -1 for none
+
+        A parent_node naming a node the hierarchy does not hold, by uuid or
+        by name, gives -1 too, as get_parent_matrix reads such a node as a
+        root.
+        """
+        lookups = _Lookups()
+        parents = []
+        for node in self:
+            parent = lookups.parent(node)
+            if isinstance(parent, TransformData):
+                parents.append(lookups.index(parent))
+            else:
+                parents.append(-1)
+        return np.array(parents, dtype=int)
 
     def set_parent(self, parent: Union[str, None], world_space: bool = True) -> None:
         """sets all the nodes under a given parent"""
@@ -2545,39 +2741,30 @@ class TransformList(DataList):
     def _owning_parent_first(nodes) -> List[int]:
         """:meth:`_parent_first` for any sequence of nodes, eg: a pairing
 
-        A node's depth is its parent's plus one, so each ancestor is resolved
-        once however many nodes hang below it, and through dicts rather than
-        get_parent's scans of the hierarchy.
+        Depth counts every ancestor in the owning hierarchy, the ones left
+        out of ``nodes`` too. Each node met on the way up is resolved once,
+        through one index of the rig, into one parent array over all of
+        them, so the cost is a pass over the rig rather than a walk to the
+        root from every node.
         """
-        parent_of = _parent_resolver()
-        known     = {}  # id(node) -> depth, for nodes whose walk reaches a root
-        depth     = np.zeros(len(nodes), dtype=int)
-        for i, node in enumerate(nodes):
-            walked, seen, parent = [], set(), parent_of(node)
+        lookups = _Lookups()
+        met, place = [], {}
 
-            # a parent outside the hierarchy resolves to a string, which ends
-            # the walk; so does an ancestor whose depth is already known
-            while (
-                isinstance(parent, TransformData)
-                and id(parent) not in known
-                and id(parent) not in seen
-            ):
-                seen.add(id(parent))
-                walked.append(parent)
-                parent = parent_of(parent)
+        def slot(node) -> int:
+            if id(node) not in place:
+                place[id(node)] = len(met)
+                met.append(node)
+            return place[id(node)]
 
-            # a cyclic parent_node: the walk stops where it repeats, and the
-            # depths it passed depend on where it started, so none is kept
-            if isinstance(parent, TransformData) and id(parent) in seen:
-                depth[i] = len(walked)
-                continue
+        rows    = [slot(node) for node in nodes]
+        parents = []
+        while len(parents) < len(met):
+            # a parent outside the hierarchy resolves to a string, which
+            # ends the chain; _chain_depths guards a cyclic parent_node
+            parent = lookups.parent(met[len(parents)])
+            parents.append(slot(parent) if isinstance(parent, TransformData) else -1)
 
-            level = known[id(parent)] + 1 if isinstance(parent, TransformData) else 0
-            for ancestor in reversed(walked):
-                known[id(ancestor)] = level
-                level += 1
-            known[id(node)] = depth[i] = level
-
+        depth = _chain_depths(parents)[rows]
         return list(np.argsort(depth, kind="stable"))
 
     def _match_operands(self, other, ndim: int) -> list:
@@ -2609,9 +2796,10 @@ class TransformList(DataList):
 
     def get_children(self) -> "TransformList":
         """returns the children of every node in the view, without duplicates"""
+        lookups = _Lookups()
         children, seen = [], set()
         for node in self:
-            for child in node.get_children():
+            for child in lookups.children(node):
                 if child.uuid not in seen:
                     seen.add(child.uuid)
                     children.append(child)
@@ -2619,13 +2807,17 @@ class TransformList(DataList):
         return TransformList(children)
 
     def get_branch(self) -> "TransformList":
-        """returns every node in the view and all of their decendents"""
+        """returns every node in the view and all of their decendents
+
+        Each node's branch in the order its own get_branch() lists it, parent
+        before children. A node already walked is not walked again, which
+        also ends a cyclic parent_node.
+        """
         branch, seen = [], set()
-        for node in self:
-            for member in node.get_branch():
-                if member.uuid not in seen:
-                    seen.add(member.uuid)
-                    branch.append(member)
+        for member in _walk(self, _Lookups()):
+            if member.uuid not in seen:
+                seen.add(member.uuid)
+                branch.append(member)
 
         return TransformList(branch)
 
@@ -2669,14 +2861,14 @@ class TransformList(DataList):
         named ``indices`` rather than ``index`` because ``DataList.index`` is
         already the name-lookup method.
         """
-        return np.array([node.index for node in self])
+        lookups = _Lookups()
+        return np.array([lookups.index(node) for node in self])
 
     @property
     def unique_name(self) -> np.ndarray:
-        values = []
-        for node in self:
-            values.append(node.unique_name)
-        return np.array(values)
+        """whether each node's name is its own in its owning hierarchy"""
+        lookups = _Lookups()
+        return np.array([lookups.unique_name(node) for node in self])
 
     @property
     def matrix(self) -> np.ndarray:
@@ -3131,10 +3323,10 @@ class TransformList(DataList):
         over the values its node holds: the nodes themselves keep their owner
         and parent, and an object they share is still one object.
         """
-        new       = HierarchyData(nodes)
-        parent_of = _parent_resolver()
+        new     = HierarchyData(nodes)
+        lookups = _Lookups()
         for node in new.list:
-            if isinstance(parent_of(node), str):
+            if isinstance(lookups.parent(node), str):
                 node.parent_node = None
 
         return new
@@ -3181,8 +3373,9 @@ class TransformList(DataList):
 
         subset_pos  = {name: k for k, name in enumerate(matched)}
         parents     = np.full(len(matched), -1, dtype=int)
+        lookups     = _Lookups()
         for k, node in enumerate(nodes_self):
-            parent = node.get_parent()
+            parent = lookups.parent(node)
             if parent is not None and not isinstance(parent, str):
                 parents[k] = subset_pos.get(parent.name, -1)
 
@@ -3195,11 +3388,11 @@ class TransformList(DataList):
         # positions within THIS pairing, never `node.index`: that is the
         # position in the OWNING hierarchy, which for a selection or a
         # partial rig points at the wrong node -- or at the node itself
-        position  = {node.uuid: i for i, node in enumerate(nodes)}
-        indices   = np.full(len(nodes), -1, dtype=int)
-        parent_of = _parent_resolver()
+        position = {node.uuid: i for i, node in enumerate(nodes)}
+        indices  = np.full(len(nodes), -1, dtype=int)
+        lookups  = _Lookups()
         for i, node in enumerate(nodes):
-            parent = parent_of(node)
+            parent = lookups.parent(node)
 
             # a parent left out of the pairing resolves to a uuid string
             # or is simply absent; either way the node is a subset root
@@ -3246,22 +3439,7 @@ class TransformList(DataList):
         the pairing. :meth:`_parent_first` is the equivalent for a plain view
         and measures depth in the owning hierarchy instead.
         """
-        depth = TransformList._parent_depths(parents)
-        return list(np.argsort(depth, kind="stable"))
-
-    @staticmethod
-    def _parent_depths(parents: np.ndarray) -> np.ndarray:
-        """How many ancestors each node has through ``parents``, a cyclic
-        parent map counting each ancestor once."""
-        depth = np.zeros(len(parents), dtype=int)
-        for i in range(len(parents)):
-            d, p, seen = 0, parents[i], set()
-            while p > -1 and p not in seen:
-                seen.add(p)
-                d += 1
-                p = parents[p]
-            depth[i] = d
-        return depth
+        return list(np.argsort(_chain_depths(parents), kind="stable"))
 
     def __isub__(self, other, by: str = "index", translate: bool = True):
         """In-place subtraction: ``self`` becomes the delta ``self - other``."""
@@ -3491,18 +3669,69 @@ class TransformList(DataList):
         if node.uuid is None:
             while True:
                 new = generate_uuid()
-                if new not in self:
+                if not self._holds(new):
                     node.uuid = new
                     break
             self.list.append(node)
 
         # otherwise make sure TransformData not already in self
-        elif node in self:
+        elif self._holds(node.uuid):
             raise RuntimeError("TransformData is already in NodeList")
 
         # append the node to the list
         else:
             self.list.append(node)
+
+        self._listed(node)
+
+    def extend(self, iterable) -> None:
+        """appends every node in turn, exactly as append() would
+
+        append() looks for the node's uuid through the whole list, so
+        building an N node hierarchy one append at a time is quadratic. For
+        the length of this call that check reads a set of the uuids the list
+        holds instead, kept up to date as the nodes go in, and dropped when
+        the call returns: nothing outlives it to go stale.
+        """
+        # snapshot first, as DataList.extend does; a few nodes are checked
+        # quicker by append's own scan than by building the set
+        values = list(iterable)
+        if len(values) < 4 or "_held" in self.__dict__:
+            return super().extend(values)
+
+        held = set()
+        for node in self.list:
+            uuid = getattr(node, "uuid", None)
+            if not isinstance(uuid, str):
+                return super().extend(values)
+            held.add(uuid)
+
+        self._held = held
+        try:
+            super().extend(values)
+        finally:
+            self.__dict__.pop("_held", None)
+
+    def _holds(self, uuid) -> bool:
+        """whether a node of this list carries ``uuid``, compared as uuids"""
+        held = self.__dict__.get("_held")
+        if held is not None and isinstance(uuid, str):
+            return uuid in held
+
+        for shape in self.list:
+            if shape.uuid == uuid:
+                return True
+        return False
+
+    def _listed(self, node: "TransformData") -> None:
+        """records a node just added in the set extend() keeps, if any"""
+        held = self.__dict__.get("_held")
+        if held is not None:
+            if isinstance(node.uuid, str):
+                held.add(node.uuid)
+            else:
+                # a uuid the set cannot stand for: back to scanning the list
+                del self.__dict__["_held"]
 
     def insert(self, index: int, node: "TransformData") -> None:
         # reject wrong-typed input up front (matches DataList's contract)
@@ -3519,19 +3748,21 @@ class TransformList(DataList):
         if node.uuid is None:
             while True:
                 new = generate_uuid()
-                if new not in self:
+                if not self._holds(new):
                     node.uuid = new
                     break
 
             self.list.insert(index, node)
 
         # otherwise make sure TransformData not already in self
-        elif node in self:
+        elif self._holds(node.uuid):
             raise RuntimeError("TransformData is already in NodeList")
 
         # insert the node to the list
         else:
             self.list.insert(index, node)
+
+        self._listed(node)
 
     def to_dict(self) -> dict:
         """
@@ -4247,10 +4478,10 @@ class ClipData(HierarchyData):
 
         # a copy keeps a parent the clip lacks; the per frame route started
         # from an owned copy, which makes such a node a root
-        clip      = self.copy()
-        parent_of = _parent_resolver()
+        clip    = self.copy()
+        lookups = _Lookups()
         for node in clip.list:
-            if isinstance(parent_of(node), str):
+            if isinstance(lookups.parent(node), str):
                 node.parent_node = None
 
         place = {uuid: j for j, uuid in enumerate(clip._columns)}
@@ -4359,7 +4590,7 @@ class ClipData(HierarchyData):
         # together, against the final world matrices of the level above.
         # `parents` covers all of `new`, so its depths are the owning
         # hierarchy's: the order HierarchyData.__iadd__ solves in
-        depth = self._parent_depths(parents)
+        depth = _chain_depths(parents)
         for level in range(int(depth.max()) + 1):
             idx    = np.flatnonzero(depth == level)
             above  = parents[idx]
