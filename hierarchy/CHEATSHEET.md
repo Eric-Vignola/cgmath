@@ -1380,6 +1380,110 @@ clip = ClipData.load_fbx(path)
 assert isinstance(clip, ClipData) and clip.frame_count == 1
 ```
 
+`ClipData.load_fbx` reads each translate, rotate and scale curve's keys
+once and evaluates every frame from them at once, as the SDK evaluates a
+curve. On a key, so on every frame of a take baked on its frames, the
+values are the SDK's bit for bit. Between keys the SDK works in single
+precision, so there the two agree to its rounding, a few times 1e-6 of
+the curve's range at most, but on a weighted span whose two handles
+crowd one end: one weight at most about 0.01 and the other about 0.88 or
+more, the smaller the one, the lower the other can be (the SDK holds a
+weight to 0.0001 at least and 0.99 at most). There the SDK's own solve
+for the bezier's time stops short of the exact one the loader takes, by
+up to 2e-5 of the curve's range at weights 0.01 and 0.99, 3e-5 at 0.0001
+and 0.88, 4e-4 at 0.0001 and 0.89, 3e-3 at 0.0001 and 0.9 and 0.55 at
+0.0001 and 0.99. Maya's own import of such a span gives the loader's
+values, to a few times 1e-15 of the range: on a crowded span the loader
+follows Maya, not the SDK. A curve that repeats or mirrors its keys
+before or after them is read where that sends each frame, for as many
+periods as its count says, then holds its end key, as the SDK does; one
+that repeats with an offset (Maya's cycle with offset, which the
+bindings leave unnamed) climbs by its last key less its first each
+period, and holds its end key shifted as many times. Keep slope holds
+its end key too, unless its count is 2**32 - 1, the count Maya writes
+for every infinity it exports (linear infinity is keep slope): then it
+carries the end key's slope on, as this SDK evaluates it. One evaluation
+of the curve past its keys checks that, and an SDK that evaluates it
+otherwise raises ValueError. An extrapolation number the SDK does not
+know (a file carries one) reads 0 for as many periods as the count says,
+and an interpolation number it does not know 0 up to the next key, as
+the SDK reads them.
+
+Animation layers are blended as the SDK blends them, every frame at
+once: from the first layer that is not muted and holds anything (a
+channel it holds no curve node for starts from 0, scaling too, under a
+later layer that holds it; a channel no live layer holds keeps the rest
+pose), each later layer that is not muted, by its weight (its own weight
+curve, if it holds one) and blend mode. Translation, rotation blended by
+channel (angle by angle) and added scaling: additive adds weight x
+value, override takes weight x value, passthrough mixes the two.
+Rotation blended by layer (the default) goes through quaternions, and
+there override takes the layer's rotation whatever the weight.
+Multiplied scaling (the default): additive |below| x |value| ** weight,
+override |value| ** weight, passthrough |below| ** (1 - weight) x
+|value| ** weight, every term unsigned. With every curve keyed on the
+frames, weights included, translation and scaling are the SDK's bit for
+bit and rotation within 1e-9 degrees of it, or of it through
+`euler_filter` where a rotation blended by layer is filtered (below);
+within about 3e-3 degrees of a middle angle of +-90 that becomes a few
+times 1e-16 / cos(middle angle) radians, the rounding both lose reading
+the angles back so near gimbal. Within about 1e-15 of the cosine the SDK
+splits the turn at (gimbal: the last angle 0, the first the whole turn),
+each side's rounding picks the branch, and the two can be whole
+rotations apart. No frame is asked of the SDK.
+
+Maya's own evaluation of a take differs from the SDK's, and so from the
+loader's, where:
+
+- a rotation is blended by layer on a node whose rotate order is not
+  xyz: the SDK hands the x, y and z angles to its euler code as they
+  are, so an even order (yzx, zxy) blends as an xyz node does and an odd
+  one (xzy, yxz, zyx) as the SDK blends a zyx node, whose additive layer
+  turns on the other side of what is below: M(below) @ M(layer), both
+  matrices of zyx angles, where Maya gives M(layer) @ M(below) in the
+  node's own order. Maya blends every node in its own order the way it
+  blends xyz. Additive layers agree only on xyz (but for the sign cases
+  below), passthrough layers on xyz and zyx; the others are up to 2.0
+  apart as matrices;
+- an additive layer blends a rotation by layer at a weight other than 0
+  or 100, and the quaternion Maya builds from the layer's angles (qz qy
+  qx of the half angles on an xyz node) has the other sign from the one
+  the SDK solves from its matrix: the scaled turn goes round the other
+  way (up to 2.0 apart as matrices, in every rotate order, xyz
+  included). The SDK's w is positive on every turn under 120 degrees, so
+  such a turn parts whenever Maya's w is negative: an angle keyed past
+  180 (a 20 degree turn keyed as (380, 0, 0) is 1.9 apart at weight 50)
+  or all three angles near +-180 (a 40 degree turn Maya keyed as (150.4,
+  154.1, -176.7) is 1.5 apart). Over 120 degrees either sign can come
+  out;
+- a rotation is overridden by layer at a weight under 100: the SDK takes
+  the layer's rotation whatever the weight, and Maya weighs it (0.86
+  apart as matrices at weight 50);
+- a negative scale is multiplied by a layer: the SDK takes every term
+  unsigned, and Maya keeps the sign (1.6 apart in scale on Maya's own
+  export);
+- the first live layer holds no curve node for a channel a later layer
+  holds: the SDK starts it from 0, and Maya does not (0.82 units apart
+  in translation, 1.94 in scale);
+- a layer is soloed: solo changes nothing in the SDK, and Maya honours
+  it;
+- the base layer is muted: the SDK skips it, but Maya's exporter does
+  not write that mute, so a Maya take whose base layer is muted loads
+  with it playing;
+- a curve has weighted tangents: Maya's exporter does not write them as
+  the scene holds them, so between keys a Maya export loads up to about
+  2.5e-2 of the curve's range off what Maya showed (over 5e-3 on 7 of 72
+  test exports, whatever the infinity); Maya's own import of the file
+  gives the loader's values;
+- the curve has linear infinity: past the keys the SDK carries on along
+  the end key's derivative as the file holds it, where Maya follows the
+  key's outer tangent. Unweighted spline, clamped, flat, stepped,
+  plateau and auto tangents agree; linear, fixed and every weighted
+  tangent do not (up to 158 units 48 frames out on Maya's own exports).
+  A weighted one on no layer is the export again: Maya's own import of
+  it carries on past the keys as the loader does, but for linear and
+  stepped tangents.
+
 | Loader | Signature |
 |---|---|
 | `TransformList.load` | `(filename, mode=None)` — `mode` in `"gltf" / "glb" / "fbx" / "json" / "npz" / "pkl"` |
@@ -1446,9 +1550,13 @@ own channels, and a skin bound to the joint loads.
 
 glTF keys every property on its own timeline, so `load_glb` resamples
 the samplers onto a uniform grid at `fps` and runs the result through
-`euler_filter`. `load_fbx` does neither — fbx already stores euler
-curves, and rewriting their branches would change the animation. A file
-with no animation gives a one-frame clip rather than an error.
+`euler_filter`. `load_fbx` does neither for the curves a file holds —
+fbx already stores euler curves, and rewriting their branches would
+change the animation. A rotation an animation layer blends by layer is
+rebuilt from quaternions frame by frame, by the SDK as here, so that
+curve, and only that one, goes through `euler_filter` in the node's
+rotate order, frame 0 as the SDK gives it. A file with no animation
+gives a one-frame clip rather than an error.
 
 `ClipData.load_fbx` defaults to the first take that was actually keyed,
 not to index 0, because a file can hold takes with no curves at all.

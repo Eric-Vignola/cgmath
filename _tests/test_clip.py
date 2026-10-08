@@ -1,5 +1,6 @@
 import contextlib
 import copy
+import itertools
 import json as std_json
 import os
 import pickle
@@ -13,6 +14,7 @@ from cgmath import hierarchy
 from cgmath.formats.glb import pygltflib
 from cgmath.transforms import (
     euler_filter,
+    euler_to_matrix,
     euler_to_quaternion,
     quaternion_slerp,
     quaternion_to_matrix,
@@ -4576,6 +4578,1432 @@ class TestClipLoadFbx(unittest.TestCase):
 
         with self.assertRaises(IndexError):
             ClipData.load_fbx(path, take=9)
+
+
+@unittest.skipIf(FBX is None, "fbx sdk is not installed")
+class TestClipLoadFbxSampling(unittest.TestCase):
+    """load_fbx reads each curve's keys once and evaluates every frame at
+    once. These hold it to the sdk's own evaluation, asked one frame at a
+    time the way the loader used to ask it.
+
+    The sdk evaluates between keys in single precision, so there the two
+    agree to its rounding; on keys, outside them and across flat spans they
+    are the same numbers. A weighted span whose two handles crowd one end
+    is the exception: the sdk's own time solve stops short there, and the
+    loader follows Maya's own import instead, the exact bezier, which the
+    crowded span tests hold it to.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.rng = np.random.default_rng(2026)
+
+    def take(self, fill, *, name="take.fbx", joints=4, time_mode="eFrames24", layers=1):
+        """a chain of joints at a random rest pose over a one second take;
+        ``fill(nodes, layers)`` keys it"""
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        scene.GetGlobalSettings().SetTimeMode(getattr(FBX.FbxTime.EMode, time_mode))
+
+        nodes  = []
+        parent = scene.GetRootNode()
+        for index in range(joints):
+            attr = FBX.FbxSkeleton.Create(scene, f"j{index}Attr")
+            attr.SetSkeletonType(FBX.FbxSkeleton.EType.eLimbNode)
+            node = FBX.FbxNode.Create(scene, f"j{index}")
+            node.SetNodeAttribute(attr)
+            node.LclTranslation.Set(FBX.FbxDouble3(*self.rng.normal(size=3)))
+            node.LclRotation.Set(FBX.FbxDouble3(*(self.rng.normal(size=3) * 30.0)))
+            node.LclScaling.Set(FBX.FbxDouble3(*(1.0 + 0.1 * self.rng.normal(size=3))))
+            parent.AddChild(node)
+            nodes.append(node)
+            parent = node
+
+        stack = FBX.FbxAnimStack.Create(scene, "Take 001")
+        made  = []
+        for index in range(layers):
+            layer = FBX.FbxAnimLayer.Create(scene, f"Layer {index}" if index else "Base Layer")
+            stack.AddMember(layer)
+            made.append(layer)
+
+        fill(nodes, made)
+
+        first, last = FBX.FbxTime(), FBX.FbxTime()
+        first.SetSecondDouble(0.0)
+        last.SetSecondDouble(1.0)
+        stack.SetLocalTimeSpan(FBX.FbxTimeSpan(first, last))
+
+        path     = os.path.join(self.tmp.name, name)
+        exporter = FBX.FbxExporter.Create(manager, "")
+        if not exporter.Initialize(path, -1, manager.GetIOSettings()):
+            raise RuntimeError(f"cannot write {path}")
+        exporter.Export(scene)
+        exporter.Destroy()
+        manager.Destroy()
+        return path
+
+    @staticmethod
+    def key(
+        curve,
+        time,
+        value,
+        kind    = "cubic",
+        tangent = "eTangentAuto",
+        data    = (0.0, 0.0),
+        weights = None,
+        to_next = False,
+    ):
+        """one key at ``time``, in seconds (a float) or in ticks (an int);
+        ``weights`` is (weighted mode, right weight, next left weight)"""
+        definition = FBX.FbxAnimCurveDef
+        when       = FBX.FbxTime()
+        if isinstance(time, float):
+            when.SetSecondDouble(time)
+        else:
+            when.Set(int(time))
+
+        index = curve.KeyAdd(when)[0]
+        curve.KeySet(
+            index,
+            when,
+            float(value),
+            getattr(definition.EInterpolationType, f"eInterpolation{kind.title()}"),
+            getattr(definition.ETangentMode, tangent),
+            float(data[0]),
+            float(data[1]),
+            definition.EWeightedMode.eWeightedNone if weights is None else weights[0],
+            1.0 / 3.0 if weights is None else float(weights[1]),
+            1.0 / 3.0 if weights is None else float(weights[2]),
+        )
+        mode = "eConstantNext" if to_next else "eConstantStandard"
+        curve.KeySetConstantMode(index, getattr(definition.EConstantMode, mode))
+
+    def random_curves(self, nodes, layers):
+        """every channel of every joint keyed, a few keys each, on and off
+        the 24 fps frame grid, with every interpolation, tangent mode and
+        weighting the sdk resolves"""
+        definition = FBX.FbxAnimCurveDef
+        second     = FBX.FbxTime()
+        second.SetSecondDouble(1.0)
+        per_second = second.Get()
+        tangents = (
+            "eTangentAuto",
+            "eTangentUser",
+            "eTangentBreak",
+            "eTangentTCB",
+            "eTangentAutoBreak",
+            "eTangentGenericClamp",
+            "eTangentGenericTimeIndependent",
+        )
+        weightings = (
+            definition.EWeightedMode.eWeightedAll,
+            definition.EWeightedMode.eWeightedRight,
+            definition.EWeightedMode.eWeightedNextLeft,
+        )
+        for node in nodes:
+            for prop, size in ((node.LclTranslation, 5.0), (node.LclRotation, 90.0), (node.LclScaling, 0.5)):
+                for axis in "XYZ":
+                    curve = prop.GetCurve(layers[0], axis, True)
+                    count = int(self.rng.integers(1, 8))
+                    ticks = set(self.rng.integers(per_second // 10, 9 * per_second // 10, count).tolist())
+                    ticks |= {round(int(frame) * per_second / 24) for frame in self.rng.integers(3, 21, 2)}
+
+                    curve.KeyModifyBegin()
+                    for tick in sorted(ticks):
+                        kind    = ("constant", "linear", "cubic", "cubic", "cubic")[int(self.rng.integers(5))]
+                        tangent = tangents[int(self.rng.integers(len(tangents)))]
+                        weights = None
+                        if kind == "cubic" and self.rng.random() < 0.3:
+                            weights = (
+                                weightings[int(self.rng.integers(3))],
+                                self.rng.uniform(0.05, 0.95),
+                                self.rng.uniform(0.05, 0.95),
+                            )
+                        self.key(
+                            curve,
+                            int(tick),
+                            self.rng.normal() * size,
+                            kind    = kind,
+                            tangent = tangent,
+                            data    = self.rng.normal(size=2) * (0.5 if tangent == "eTangentTCB" else size),
+                            weights = weights,
+                            to_next = bool(self.rng.integers(2)),
+                        )
+                    curve.KeyModifyEnd()
+
+    def reference(self, path, clip, scale_factor=1.0):
+        """the sdk's own evaluation, one frame and one node at a time, of the
+        nodes the clip holds: translate, rotate and scale stacked"""
+        with hierarchy.hierarchy.open_fbx(path, FBX) as scene:
+            criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimStack.ClassId)
+            scene.SetCurrentAnimationStack(scene.GetSrcObject(criteria, 0))
+
+            found = {}
+
+            def walk(node):
+                found[node.GetName()] = node
+                for index in range(node.GetChildCount()):
+                    walk(node.GetChild(index))
+
+            walk(scene.GetRootNode())
+            nodes  = [found[name] for name in clip.name]
+
+            frames = np.zeros((3, clip.frame_count, len(nodes), 3))
+            for frame in range(clip.frame_count):
+                time = FBX.FbxTime()
+                time.SetSecondDouble((clip.start_frame + frame) / clip.fps)
+                for column, node in enumerate(nodes):
+                    evaluations = (
+                        node.EvaluateLocalTranslation,
+                        node.EvaluateLocalRotation,
+                        node.EvaluateLocalScaling,
+                    )
+                    for channel, evaluate in enumerate(evaluations):
+                        values                         = evaluate(time)
+                        frames[channel, frame, column] = (values[0], values[1], values[2])
+
+        frames[0] *= scale_factor
+        return frames
+
+    @staticmethod
+    def sampled(clip):
+        """the clip's translate, rotate and scale stacked"""
+        return np.stack(
+            [
+                np.array(clip.frames.translate),
+                np.array(clip.frames.rotate),
+                np.array(clip.frames.scale),
+            ]
+        )
+
+    @staticmethod
+    def error(got, want):
+        """the largest difference as a fraction of its curve's largest value:
+        between keys the sdk rounds terms of the curve's size to single
+        precision, so a value near zero carries an error of that size too"""
+        scale = np.maximum(1.0, np.abs(want).max(axis=1, keepdims=True))
+        return float((np.abs(got - want) / scale).max())
+
+    def counted(self, path, **kwargs):
+        """load_fbx, with every Evaluate* call on an fbx node counted"""
+        from unittest import mock
+
+        calls = []
+        walk  = hierarchy.hierarchy._walk_fbx
+
+        class Counted:
+            """an FbxNode whose Evaluate* calls are counted"""
+
+            def __init__(self, node):
+                self._node = node
+
+            def __getattr__(self, name):
+                found = getattr(self._node, name)
+                if not name.startswith("Evaluate"):
+                    return found
+
+                def counting(*args):
+                    calls.append(name)
+                    return found(*args)
+
+                return counting
+
+        def counted_walk(scene, scale_factor):
+            data, nodes = walk(scene, scale_factor)
+            return data, {uuid: Counted(node) for uuid, node in nodes.items()}
+
+        with mock.patch.object(hierarchy.hierarchy, "_walk_fbx", counted_walk):
+            clip = ClipData.load_fbx(path, **kwargs)
+        return clip, calls
+
+    def test_no_frame_is_handed_to_the_sdk(self):
+        """the keys are read once and the grid evaluated from them: not one
+        EvaluateLocal* call, where a per frame loader makes three per node
+        and frame
+        """
+        path = self.take(self.random_curves)
+
+        clip, calls = self.counted(path, start_frame=-3, end_frame=27)
+
+        self.assertEqual(clip.frame_count, 31)
+        self.assertEqual(calls, [])
+
+    def test_every_frame_matches_the_sdk(self):
+        """random keys of every kind, a grid that starts before them and ends
+        after them, and translation scaled"""
+        path = self.take(self.random_curves)
+
+        clip = ClipData.load_fbx(path, scale_factor=2.5, start_frame=-3, end_frame=27)
+        got  = self.sampled(clip)
+        want = self.reference(path, clip, scale_factor=2.5)
+
+        # between keys, to the sdk's single precision
+        self.assertLess(self.error(got, want), 1e-5)
+
+        # before the first key and after the last: the same numbers
+        self.assertTrue(np.array_equal(got[:, :3], want[:, :3]))
+        self.assertTrue(np.array_equal(got[:, -3:], want[:, -3:]))
+
+    def test_a_long_take_goes_a_batch_of_curves_at_a_time(self):
+        """the same numbers when the curves are split into small batches"""
+        from unittest import mock
+
+        path  = self.take(self.random_curves)
+        whole = self.sampled(ClipData.load_fbx(path, start_frame=-3, end_frame=27))
+
+        # five curves of 31 frames a batch: the 36 curves take eight
+        with mock.patch.object(hierarchy.hierarchy, "_FBX_SAMPLE_BUDGET", 5 * 31):
+            batched = self.sampled(ClipData.load_fbx(path, start_frame=-3, end_frame=27))
+
+        self.assertTrue(np.array_equal(batched, whole))
+
+    def test_a_take_baked_on_its_frames_is_the_sdk_bit_for_bit(self):
+        """a key on every frame, as exported takes have: every sample lands on
+        a key, at each rate tried and from a negative start too"""
+        for mode, start in (
+            ("eFrames24", 0),
+            ("eFrames30", -7),
+            ("eNTSCFullFrame", 3),
+            ("ePAL", 0),
+            ("eFrames60", -2),
+        ):
+            with self.subTest(mode=mode, start=start):
+                fps = _fbx_frame_rate(getattr(FBX.FbxTime.EMode, mode))
+
+                def baked(nodes, layers):
+                    for node in nodes:
+                        for prop in (node.LclTranslation, node.LclRotation, node.LclScaling):
+                            for axis in "XYZ":
+                                curve = prop.GetCurve(layers[0], axis, True)
+                                curve.KeyModifyBegin()
+                                for frame in range(start, start + 20):
+                                    self.key(curve, frame / fps, self.rng.normal() * 20.0)
+                                curve.KeyModifyEnd()
+
+                path = self.take(baked, name=f"{mode}.fbx", time_mode=mode)
+                clip = ClipData.load_fbx(path, start_frame=start, end_frame=start + 19)
+
+                self.assertEqual(clip.fps, fps)
+                self.assertTrue(np.array_equal(self.sampled(clip), self.reference(path, clip)))
+
+    def test_frame_times_round_to_ticks_the_way_the_sdk_does(self):
+        """a frame time a hair short of a whole tick has to land on it, or a
+        key baked on that frame is missed"""
+        per_second = hierarchy.hierarchy._fbx_ticks_per_second()
+        rates      = np.array([24.0, 30.0, 25.0, 30000.0 / 1001.0, 60.0, 23.976, 7.0, 6000.0])
+        seconds = np.concatenate(
+            [
+                (np.arange(-300, 3000)[:, None] / rates).ravel(),
+                self.rng.normal(size=4000) * 100.0,
+            ]
+        )
+
+        want = []
+        for value in seconds.tolist():
+            time = FBX.FbxTime()
+            time.SetSecondDouble(value)
+            want.append(time.Get())
+
+        got = hierarchy.hierarchy._fbx_ticks(seconds, per_second)
+
+        self.assertTrue(np.array_equal(got, np.array(want, dtype=np.int64)))
+
+    def test_channels_without_keys_hold_what_the_sdk_holds(self):
+        """a curve node's own value where its channel has no keys, and the
+        property where the node has no curve node at all"""
+
+        def partly(nodes, layers):
+            first, second = nodes[0], nodes[1]
+
+            curve = first.LclTranslation.GetCurve(layers[0], "X", True)
+            curve.KeyModifyBegin()
+            self.key(curve, 0.25, 4.0)
+            self.key(curve, 0.75, -2.0)
+            curve.KeyModifyEnd()
+
+            # Y gets an empty curve, which the exporter drops, and Z none;
+            # the curve node holds values the property does not
+            first.LclTranslation.GetCurve(layers[0], "Y", True)
+            curve_node = first.LclTranslation.GetCurveNode(layers[0])
+            curve_node.SetChannelValue(1, 0.1)
+            curve_node.SetChannelValue(2, 7.3)
+
+            curve = second.LclRotation.GetCurve(layers[0], "Z", True)
+            curve.KeyModifyBegin()
+            self.key(curve, 0.5, 45.0, kind="linear")
+            curve.KeyModifyEnd()
+
+        path = self.take(partly)
+        clip = ClipData.load_fbx(path, fps=8.0)
+
+        got  = self.sampled(clip)
+        want = self.reference(path, clip)
+
+        self.assertTrue(np.array_equal(got, want))
+        self.assertEqual(float(got[0, 0, 0, 1]), 0.1)
+        self.assertEqual(float(got[0, 0, 0, 2]), 7.3)
+
+    def test_an_empty_curve_holds_its_value_in_single_precision(self):
+        """the exporter drops a curve with no keys, so this one is built in
+        memory and sampled straight from the scene"""
+        manager = FBX.FbxManager.Create()
+        self.addCleanup(manager.Destroy)
+        scene = FBX.FbxScene.Create(manager, "scene")
+        node  = FBX.FbxNode.Create(scene, "n")
+        scene.GetRootNode().AddChild(node)
+        stack = FBX.FbxAnimStack.Create(scene, "Take 001")
+        layer = FBX.FbxAnimLayer.Create(scene, "Base Layer")
+        stack.AddMember(layer)
+        scene.SetCurrentAnimationStack(stack)
+
+        node.LclTranslation.Set(FBX.FbxDouble3(0.1, 0.2, 0.3))
+        curve = node.LclTranslation.GetCurve(layer, "Y", True)
+        curve.KeyModifyBegin()
+        self.key(curve, 0.5, 4.0)
+        curve.KeyModifyEnd()
+        node.LclTranslation.GetCurve(layer, "X", True)
+
+        per_second   = hierarchy.hierarchy._fbx_ticks_per_second()
+        ticks        = hierarchy.hierarchy._fbx_ticks(np.arange(5) / 4.0, per_second)
+        blocks       = [np.zeros((5, 1, 3)), np.zeros((5, 1, 3)), np.ones((5, 1, 3))]
+        blocks[0][:] = (0.1, 0.2, 0.3)
+
+        hierarchy.hierarchy._fbx_sample_take(stack, [(node, 0)], ticks, 1.0, blocks)
+
+        want = []
+        for tick in ticks.tolist():
+            time = FBX.FbxTime()
+            time.Set(tick)
+            values = node.EvaluateLocalTranslation(time)
+            want.append((values[0], values[1], values[2]))
+
+        self.assertTrue(np.array_equal(blocks[0][:, 0], np.array(want)))
+        self.assertEqual(float(blocks[0][0, 0, 0]), float(np.float32(0.1)))
+        self.assertEqual(float(blocks[0][0, 0, 2]), 0.3)
+
+    def test_no_take_goes_through_the_sdk_frame_by_frame(self):
+        """several layers, a muted one, a curve repeating past its keys and a
+        take with no layer at all come back as the sdk evaluates them, and
+        not one frame is asked of the sdk: blending the layers is done here
+        too. Before the first key and after the last, the very same numbers;
+        between keys, to the sdk's single precision. The muted take's only
+        layer is muted, so it holds the rest pose"""
+
+        def keyed(nodes, layers):
+            for node in nodes[:2]:
+                curve = node.LclTranslation.GetCurve(layers[0], "X", True)
+                curve.KeyModifyBegin()
+                self.key(curve, 0.25, 1.0, tangent="eTangentUser", data=(8.0, -3.0))
+                self.key(curve, 0.5, -1.0, tangent="eTangentUser", data=(2.0, 5.0))
+                self.key(curve, 0.75, 3.0)
+                curve.KeyModifyEnd()
+
+        def layered(nodes, layers):
+            keyed(nodes, layers)
+            curve = nodes[0].LclTranslation.GetCurve(layers[1], "X", True)
+            curve.KeyModifyBegin()
+            self.key(curve, 0.0, 5.0, kind="linear")
+            self.key(curve, 1.0, -5.0, kind="linear")
+            curve.KeyModifyEnd()
+
+        def muted(nodes, layers):
+            keyed(nodes, layers)
+            layers[0].Mute.Set(True)
+
+        def cycling(nodes, layers):
+            keyed(nodes, layers)
+            curve = nodes[1].LclTranslation.GetCurve(layers[0], "X")
+            curve.SetPreExtrapolation(FBX.FbxAnimCurve.EExtrapolationType.eRepetition)
+            curve.SetPreExtrapolationCount(3)
+            curve.SetPostExtrapolation(FBX.FbxAnimCurve.EExtrapolationType.eMirrorRepetition)
+            curve.SetPostExtrapolationCount(3)
+
+        def bare(nodes, layers):
+            pass
+
+        frames = 37
+        for name, fill, layers in (
+            ("layered", layered, 2),
+            ("muted", muted, 1),
+            ("cycling", cycling, 1),
+            ("bare", bare, 0),
+        ):
+            with self.subTest(name=name):
+                path = self.take(fill, name=f"{name}.fbx", layers=layers)
+
+                clip, calls = self.counted(path, fps=24.0, start_frame=-6, end_frame=30)
+                got  = self.sampled(clip)
+                want = self.reference(path, clip)
+
+                self.assertEqual(clip.frame_count, frames)
+                self.assertEqual(calls, [])
+                self.assertLess(self.error(got, want), 1e-5)
+                if name != "cycling":
+                    # before frame 0 and after frame 24, past every key
+                    self.assertTrue(np.array_equal(got[:, :6], want[:, :6]))
+                    self.assertTrue(np.array_equal(got[:, -6:], want[:, -6:]))
+                if name == "muted":
+                    self.assertTrue(np.array_equal(got, want))
+
+    def layered(self, rng, nodes, layers, baked, weight_curves=True):
+        """every layer set at random -- blend mode, weight in and out of
+        0..100, mute, solo, rotation and scaling accumulation, the double3
+        blend mode bypassed -- and keyed at random: each node's channels on
+        some layers and not others, a curve node's own values set where it
+        has no curve, every rotate order, scaling signed. ``baked`` keys
+        every 24 fps frame from -3 to 27, where every sample lands on a key;
+        otherwise a few keys of every interpolation off the grid. Some layers
+        carry a weight curve, keyed the same way, most in the layer itself
+        and the others in the layer below, which the sdk does not read"""
+        per_second = hierarchy.hierarchy._fbx_ticks_per_second()
+        orders     = list(FBX.EFbxRotationOrder)[:6]
+        source     = FBX.FbxNode.EPivotSet.eSourcePivot
+        kinds      = ("constant", "linear", "cubic")
+        for index, layer in enumerate(layers):
+            layer.BlendMode.Set(float(rng.integers(3)))
+            layer.RotationAccumulationMode.Set(float(rng.integers(2)))
+            layer.ScaleAccumulationMode.Set(float(rng.integers(2)))
+            layer.Weight.Set(float(rng.choice([100.0, rng.uniform(-30.0, 130.0)])))
+            layer.Mute.Set(bool(rng.random() < 0.15))
+            layer.Solo.Set(bool(rng.random() < 0.15))
+            if rng.random() < 0.15:
+                layer.SetBlendModeBypass(FBX.EFbxType.eFbxDouble3, True)
+
+        for node in nodes:
+            node.SetRotationOrder(source, orders[int(rng.integers(6))])
+            node.SetRotationActive(bool(rng.integers(2)))
+            for layer in layers:
+                channels = ((node.LclTranslation, 5.0), (node.LclRotation, 180.0), (node.LclScaling, 1.0))
+                for prop, size in channels:
+                    if rng.random() < 0.3:
+                        continue
+                    for axis in "XYZ":
+                        if rng.random() < 0.3:
+                            continue
+                        curve = prop.GetCurve(layer, axis, True)
+                        if baked:
+                            ticks = [round(frame * per_second / 24) for frame in range(-3, 28)]
+                        else:
+                            ticks = sorted(set(rng.integers(0, per_second, int(rng.integers(1, 5))).tolist()))
+                        curve.KeyModifyBegin()
+                        for tick in ticks:
+                            value = rng.normal() * size
+                            if prop is node.LclScaling:
+                                value = rng.uniform(0.3, 2.0) * rng.choice([1.0, -1.0], p=[0.85, 0.15])
+                            self.key(curve, int(tick), value, kind=kinds[int(rng.integers(3))])
+                        curve.KeyModifyEnd()
+                    curve_node = prop.GetCurveNode(layer)
+                    if curve_node is not None and rng.random() < 0.5:
+                        for axis in range(3):
+                            curve_node.SetChannelValue(axis, float(rng.uniform(0.3, 2.0) * size))
+
+        if weight_curves:
+            for index, layer in enumerate(layers[1:], 1):
+                if rng.random() < 0.6:
+                    host  = layer if rng.random() < 0.8 else layers[index - 1]
+                    curve = layer.Weight.GetCurve(host, True)
+                    if baked:
+                        ticks = [round(frame * per_second / 24) for frame in range(-3, 28)]
+                    else:
+                        ticks = sorted(set(rng.integers(0, per_second, 3).tolist()))
+                    curve.KeyModifyBegin()
+                    for tick in ticks:
+                        self.key(curve, int(tick), rng.uniform(-20.0, 120.0), kind="linear")
+                    curve.KeyModifyEnd()
+
+    @staticmethod
+    def turned(got, want):
+        """the largest difference of two arrays of angles, a whole turn apart
+        counting as none"""
+        return float(np.abs((got - want + 180.0) % 360.0 - 180.0).max())
+
+    def rotation_against(self, got, want, orders, tolerance):
+        """each joint's rotate curve against the sdk's: the same angles, or,
+        where the loader rebuilt the rotation from quaternions and filtered
+        it, the same rotation on every frame, frame 0 the same angles and
+        the curve one the filter leaves as it is. Within ``tolerance``
+        degrees, a whole turn counting as none. How many joints took the
+        filter"""
+        filtered = 0
+        for joint in range(got.shape[1]):
+            mine, sdk = got[:, joint], want[:, joint]
+            if self.turned(mine, sdk) < tolerance:
+                continue
+            order = int(orders[joint])
+            turns = euler_to_matrix(np.radians(mine), order) - euler_to_matrix(np.radians(sdk), order)
+            self.assertLess(float(np.abs(turns).max()), np.radians(tolerance), f"joint {joint}")
+            self.assertLess(self.turned(mine[:1], sdk[:1]), tolerance, f"joint {joint}")
+            again = _filtered(mine[:, None], orders[[joint]])[:, 0]
+            self.assertLess(self.turned(again, mine), tolerance, f"joint {joint}")
+            filtered += 1
+        return filtered
+
+    def test_layers_blend_as_the_sdk_blends_them(self):
+        """30 takes of 2 to 4 layers set and keyed at random over 6 joints:
+        no frame goes through the sdk. Baked on every frame, translation and
+        scaling are the sdk's bit for bit and rotation, blended by layer
+        through quaternions, within 1e-9 degrees of it, or of it put through
+        the euler filter where the sdk's curve steps (the loader filters a
+        rotation it rebuilds); keyed off the grid, within the single
+        precision the sdk works in between keys"""
+        filtered = 0
+        for seed in range(30):
+            rng    = np.random.default_rng(seed)
+            baked  = seed % 2 == 0
+            layers = int(rng.integers(2, 5))
+            with self.subTest(seed=seed, baked=baked, layers=layers):
+                path = self.take(
+                    lambda nodes, made: self.layered(rng, nodes, made, baked),
+                    name   = f"layered{seed}.fbx",
+                    joints = 6,
+                    layers = layers,
+                )
+                clip, calls = self.counted(path, fps=24.0, start_frame=-3, end_frame=27)
+                got, want = self.sampled(clip), self.reference(path, clip)
+
+                self.assertEqual(calls, [])
+                orders = np.array(clip.rotate_order)
+                if baked:
+                    self.assertTrue(np.array_equal(got[0], want[0]))
+                    self.assertTrue(np.array_equal(got[2], want[2]))
+                    filtered += self.rotation_against(got[1], want[1], orders, 1e-9)
+                else:
+                    self.assertLess(self.error(got[[0, 2]], want[[0, 2]]), 1e-5)
+                    scale = np.maximum(1.0, np.abs(want[1]).max())
+                    filtered += self.rotation_against(got[1], want[1], orders, 1e-5 * scale)
+        self.assertGreater(filtered, 0)
+
+    def test_a_rotation_blended_by_layer_is_euler_filtered(self):
+        """an additive layer turns a joint spinning a whole turn a little
+        more: blended by layer, the sdk rebuilds each frame's rotation from
+        quaternions and its curve steps by a whole turn; the loader's goes
+        through euler_filter in the joint's rotate order, frame 0 the sdk's,
+        and holds the same rotation every frame. Blended by channel, angles
+        add and nothing is rebuilt, and a joint no layer above touches keeps
+        the file's own curve, a whole turn step the file holds included:
+        both the sdk's bit for bit"""
+
+        def fill(nodes, layers):
+            source = FBX.FbxNode.EPivotSet.eSourcePivot
+            for index, node in enumerate(nodes[:3]):
+                node.SetRotationOrder(source, list(FBX.EFbxRotationOrder)[(0, 4, 1)[index]])
+                curve = node.LclRotation.GetCurve(layers[0], "X", True)
+                curve.KeyModifyBegin()
+                for frame in range(25):
+                    # joints 1 and 2 hold a whole turn step of their own
+                    turn = 360.0 if index and frame > 12 else 0.0
+                    self.key(curve, frame / 24.0, 15.0 * frame - turn, kind="linear")
+                curve.KeyModifyEnd()
+            for node, layer in ((nodes[0], layers[1]), (nodes[1], layers[2])):
+                for axis, value in (("Y", 10.0), ("Z", 5.0)):
+                    curve = node.LclRotation.GetCurve(layer, axis, True)
+                    curve.KeyModifyBegin()
+                    self.key(curve, 0.0, value, kind="linear")
+                    curve.KeyModifyEnd()
+            layers[2].RotationAccumulationMode.Set(
+                float(FBX.FbxAnimLayer.ERotationAccumulationMode.eRotationByChannel.value)
+            )
+
+        path = self.take(fill, name="spin.fbx", layers=3)
+        clip, calls = self.counted(path, fps=24.0, start_frame=0, end_frame=24)
+        got, want = self.sampled(clip)[1], self.reference(path, clip)[1]
+        orders = np.array(clip.rotate_order)
+
+        self.assertEqual(calls, [])
+        steps = np.abs(np.diff(want[:, 0], axis=0)).max()
+        self.assertGreater(steps, 300.0)
+        self.assertLess(np.abs(np.diff(got[:, 0], axis=0)).max(), 20.0)
+        self.assertLess(np.abs(got[0, 0] - want[0, 0]).max(), 1e-9)
+        self.assertLess(np.abs(got[:, 0] - _filtered(want[:, [0]], orders[[0]])[:, 0]).max(), 1e-9)
+        mine   = euler_to_matrix(np.radians(got[:, 0]), int(orders[0]))
+        theirs = euler_to_matrix(np.radians(want[:, 0]), int(orders[0]))
+        self.assertLess(np.abs(mine - theirs).max(), 1e-12)
+
+        self.assertTrue(np.array_equal(got[:, 1:], want[:, 1:]))
+        for joint in (1, 2):
+            self.assertGreater(np.abs(np.diff(got[:, joint, 0])).max(), 300.0)
+
+    def test_the_blend_starts_from_the_first_live_layer_holding_anything(self):
+        """the sdk blends from the first layer that is not muted and holds
+        anything: that layer's value is taken whatever its weight and blend
+        mode. A channel it holds no curve node for starts from 0 under the
+        later layers, scaling too, and a channel no live layer holds keeps
+        the rest pose. Layer 1 adds 100 to translate x at weight 50 over
+        each base"""
+
+        def fill(base):
+            def keyed(nodes, layers):
+                if base == "muted":
+                    curve = nodes[0].LclTranslation.GetCurve(layers[0], "X", True)
+                    curve.KeyModifyBegin()
+                    self.key(curve, 0.0, 2.0, kind="linear")
+                    curve.KeyModifyEnd()
+                    layers[0].Mute.Set(True)
+                if base == "another node's":
+                    curve = nodes[1].LclRotation.GetCurve(layers[0], "Z", True)
+                    curve.KeyModifyBegin()
+                    self.key(curve, 0.0, 2.0, kind="linear")
+                    curve.KeyModifyEnd()
+                if base == "its own":
+                    curve = nodes[0].LclTranslation.GetCurve(layers[0], "X", True)
+                    curve.KeyModifyBegin()
+                    self.key(curve, 0.0, 2.0, kind="linear")
+                    curve.KeyModifyEnd()
+                for prop, value in ((nodes[0].LclTranslation, 100.0), (nodes[0].LclScaling, 3.0)):
+                    curve = prop.GetCurve(layers[1], "X", True)
+                    curve.KeyModifyBegin()
+                    self.key(curve, 0.0, value, kind="linear")
+                    curve.KeyModifyEnd()
+                layers[1].Weight.Set(50.0)
+
+            return keyed
+
+        for base, x, scale in (
+            ("muted", 100.0, 3.0),
+            ("empty", 100.0, 3.0),
+            ("another node's", 50.0, 0.0),
+            ("its own", 52.0, 0.0),
+        ):
+            with self.subTest(base=base):
+                path = self.take(fill(base), name=f"base_{base[:5]}.fbx", layers=2)
+                clip, calls = self.counted(path, fps=24.0, start_frame=0, end_frame=4)
+                got, want = self.sampled(clip), self.reference(path, clip)
+
+                self.assertEqual(calls, [])
+                self.assertTrue(np.array_equal(got, want))
+                self.assertEqual(float(got[0, 0, 0, 0]), x)
+                self.assertEqual(float(got[2, 0, 0, 0]), scale)
+
+    def test_a_layer_weight_curve_is_read_from_its_own_layer(self):
+        """a weight curve the layer holds itself animates its weight; one
+        held in another layer is not read, as the sdk does not read it"""
+        for host in (1, 0):
+
+            def fill(nodes, layers):
+                for index, value in ((0, 2.0), (1, 100.0)):
+                    curve = nodes[0].LclTranslation.GetCurve(layers[index], "X", True)
+                    curve.KeyModifyBegin()
+                    self.key(curve, 0.0, value, kind="linear")
+                    curve.KeyModifyEnd()
+                curve = layers[1].Weight.GetCurve(layers[host], True)
+                curve.KeyModifyBegin()
+                self.key(curve, 0.0, 0.0, kind="linear")
+                self.key(curve, 1.0, 100.0, kind="linear")
+                curve.KeyModifyEnd()
+
+            with self.subTest(host=host):
+                path = self.take(fill, name=f"weight{host}.fbx", layers=2)
+                clip, calls = self.counted(path, fps=4.0, start_frame=0, end_frame=4)
+                got, want = self.sampled(clip), self.reference(path, clip)
+
+                self.assertEqual(calls, [])
+                self.assertTrue(np.array_equal(got, want))
+                expected = [2.0, 27.0, 52.0, 77.0, 102.0] if host == 1 else [102.0] * 5
+                self.assertEqual(got[0, :, 0, 0].tolist(), expected)
+
+    def test_a_curve_repeating_past_its_keys_is_read_where_the_sdk_reads_it(self):
+        """repetition, mirror repetition and relative repetition (Maya's
+        cycle with offset), before the keys, after them or both, for 0 to 4
+        periods: each frame past the keys reads the keys where the sdk reads
+        them, a relative one shifted a period at a time, and holds the end
+        key once the count runs out. Keep slope holds the end key in this
+        sdk. No frame goes through the sdk; a curve repeating only after its
+        keys used to, flagged by its post extrapolation alone, and a relative
+        one held its end key"""
+        kinds = {
+            "constant": "eConstant",
+            "repeat":   "eRepetition",
+            "mirror":   "eMirrorRepetition",
+            "slope":    "eKeepSlope",
+            "offset":   5,  # relative repetition, which the bindings leave unnamed
+        }
+        cases = [
+            ("repeat", 3, "mirror", 3),
+            ("constant", 0, "repeat", 2),  # after the keys only
+            ("mirror", 4, "constant", 0),  # before them only
+            ("repeat", 1, "repeat", 0),  # a count of 0 holds
+            ("mirror", 2, "mirror", 1),
+            ("slope", 2, "slope", 2),
+            ("offset", 3, "offset", 2),
+            ("constant", 0, "offset", 4),
+            ("offset", 1, "mirror", 2),
+            ("offset", 0, "offset", 1),
+            ("offset", 2**31, "offset", 2**31),
+        ]
+        extrapolation = FBX.FbxAnimCurve.EExtrapolationType
+
+        def past(name):
+            spelled = kinds[name]
+            return extrapolation(spelled) if isinstance(spelled, int) else getattr(extrapolation, spelled)
+
+        def cycling(nodes, layers):
+            for index, (pre, pre_count, post, post_count) in enumerate(cases):
+                node = nodes[index % len(nodes)]
+                prop = (node.LclTranslation, node.LclRotation, node.LclScaling)[index // len(nodes)]
+                for axis in "XYZ":
+                    curve = prop.GetCurve(layers[0], axis, True)
+                    curve.KeyModifyBegin()
+                    times = np.sort(self.rng.uniform(0.25, 0.75, 3))
+                    times[0], times[-1] = 0.25, 0.75
+                    for when, kind in zip(times, ("cubic", "linear", "cubic")):
+                        self.key(curve, float(when), self.rng.normal() * 10.0, kind=kind)
+                    curve.KeyModifyEnd()
+                    curve.SetPreExtrapolation(past(pre))
+                    curve.SetPreExtrapolationCount(pre_count)
+                    curve.SetPostExtrapolation(past(post))
+                    curve.SetPostExtrapolationCount(post_count)
+
+        path = self.take(cycling, name="cycling.fbx", joints=6)
+        clip, calls = self.counted(path, fps=24.0, start_frame=-36, end_frame=72)
+        got, want = self.sampled(clip), self.reference(path, clip)
+
+        self.assertEqual(calls, [])
+        self.assertLess(self.error(got, want), 1e-5)
+
+        # every frame a whole number of key spans from a key reads that key
+        whole = (np.arange(clip.frame_count) + clip.start_frame - 6) % 12 == 0
+        self.assertTrue(whole.sum() > 4)
+        self.assertTrue(np.array_equal(got[:, whole], want[:, whole]))
+
+    def test_what_the_sdk_does_not_know_reads_as_it_reads_it(self):
+        """an extrapolation number the sdk does not know (a file carries one
+        as 0) reads 0 for as many periods as the count says, then holds the
+        end key; an interpolation it does not know (carried as 0 too) gives 0
+        between its key and the next. Both as the sdk evaluates them, and no
+        frame asked of it, where the loader sent such a joint through the
+        sdk frame by frame. Keep slope is checked once a curve and side, with
+        the curve's own Evaluate at the frame farthest past its keys: an sdk
+        that carries the slope on is refused"""
+        extrapolation = FBX.FbxAnimCurve.EExtrapolationType
+        interpolation = FBX.FbxAnimCurveDef.EInterpolationType
+
+        def fill(nodes, layers):
+            for node, how in ((nodes[1], "slope"), (nodes[2], "past"), (nodes[3], "between")):
+                curve = node.LclTranslation.GetCurve(layers[0], "X", True)
+                curve.KeyModifyBegin()
+                self.key(curve, 0.25, 1.0, kind="linear")
+                self.key(curve, 0.5, 4.0)
+                self.key(curve, 0.75, 2.0, kind="linear")
+                curve.KeyModifyEnd()
+                if how == "slope":
+                    curve.SetPostExtrapolation(extrapolation.eKeepSlope)
+                elif how == "past":
+                    curve.SetPreExtrapolation(extrapolation(7))
+                    curve.SetPreExtrapolationCount(2)
+                    curve.SetPostExtrapolation(extrapolation(7))
+                    curve.SetPostExtrapolationCount(1)
+                else:
+                    curve.KeySetInterpolation(1, interpolation(16))
+
+        path  = self.take(fill, name="unknown.fbx")
+        holds = hierarchy.hierarchy._fbx_agrees_past
+        with mock.patch.object(hierarchy.hierarchy, "_fbx_agrees_past", wraps=holds) as checked:
+            clip, calls = self.counted(path, fps=24.0, start_frame=-12, end_frame=36)
+        got, want = self.sampled(clip), self.reference(path, clip)
+
+        self.assertEqual(checked.call_count, 1)
+        self.assertEqual(calls, [])
+        self.assertLess(self.error(got, want), 1e-5)
+
+        # the keys sit on frames 6, 12 and 18: joint 2 reads 0 for two spans
+        # before them and one after, joint 3 between its last two keys
+        frame = np.arange(clip.frame_count) + clip.start_frame
+        past  = (frame < 6) | (frame > 18)
+        self.assertTrue(np.array_equal(got[0, past, 2, 0], want[0, past, 2, 0]))
+        self.assertEqual(got[0, (frame >= -18) & (frame < 6), 2, 0].tolist(), [0.0] * 18)
+        self.assertEqual(got[0, (frame > 18) & (frame < 30), 2, 0].tolist(), [0.0] * 11)
+        self.assertEqual(got[0, frame >= 30, 2, 0].tolist(), [2.0] * 7)
+        inside = (frame > 12) & (frame < 18)
+        self.assertEqual(got[0, inside, 3, 0].tolist(), [0.0] * 5)
+        self.assertTrue(np.array_equal(got[0, inside, 3], want[0, inside, 3]))
+
+        with mock.patch.object(hierarchy.hierarchy, "_fbx_agrees_past", lambda *args: False):
+            with self.assertRaisesRegex(ValueError, "keep slope"):
+                ClipData.load_fbx(path, fps=24.0, start_frame=-12, end_frame=36)
+
+    def test_a_repetition_lands_on_the_ticks_the_sdk_reads(self):
+        """the periods counted in whole ticks: a tick a whole number of
+        periods past the last key starts the next period, as far before the
+        first key ends the previous one. An offset repetition reads the
+        ticks a repetition reads, each shifted by its period, the count once
+        it runs out; nothing else is shifted. An extrapolation number the sdk
+        does not know reads 0 for the count's periods, counted the same way,
+        then the end key"""
+        from cgmath.hierarchy.hierarchy import _fbx_extrapolated
+
+        first, last = 100, 160
+        ticks  = np.array([30, 40, 41, 99, 100, 160, 161, 219, 220, 221, 280, 281])
+        repeat = _fbx_extrapolated(ticks, first, last, ("repeat", 2), ("repeat", 2))
+        mirror = _fbx_extrapolated(ticks, first, last, ("mirror", 2), ("mirror", 2))
+        held   = _fbx_extrapolated(ticks, first, last, (None, 0),     ("repeat", 0))
+        offset = _fbx_extrapolated(ticks, first, last, ("offset", 2), ("offset", 2))
+        zero   = _fbx_extrapolated(ticks, first, last, ("zero", 2),   ("zero", 1))
+
+        self.assertEqual(repeat[0].tolist(), [150, 160, 101, 159, 100, 160, 101, 159, 100, 101, 160, 160])
+        self.assertEqual(mirror[0].tolist(), [150, 160, 159, 101, 100, 160, 159, 101, 100, 101, 160, 160])
+        self.assertEqual(held[0].tolist(),   np.clip(ticks, first, last).tolist())
+        self.assertEqual(offset[0].tolist(), repeat[0].tolist())
+        self.assertEqual(offset[1].tolist(), [-2, -2, -1, -1, 0, 0, 1, 1, 2, 2, 2, 2])
+        for other in (repeat, mirror, held):
+            self.assertFalse(other[1].any())
+        self.assertEqual(zero[0].tolist(), [100] * 5 + [160] * 7)
+        self.assertEqual(zero[2].tolist(), [True] * 4 + [False] * 2 + [True] * 2 + [False] * 4)
+        self.assertFalse(zero[1].any())
+        for other in (repeat, mirror, held, offset):
+            self.assertFalse(other[2].any())
+
+    def by_layer(self, nodes, layers, cases):
+        """``cases`` is (layer index, blend mode, weight, base angles, layer
+        angles), one per node: the base keyed on layer 0, the layer's angles
+        on its own layer, rotation blended by layer; each case's layer touches
+        its own nodes only, every node a rotate order of its own"""
+        source = FBX.FbxNode.EPivotSet.eSourcePivot
+        orders = list(FBX.EFbxRotationOrder)[:6]
+        # by position: the binding's == holds for any two fbx objects
+        for at, (node, (index, mode, weight, base, turn)) in enumerate(zip(nodes, cases)):
+            node.SetRotationOrder(source, orders[at % 6])
+            layers[index].BlendMode.Set(float(mode))
+            layers[index].Weight.Set(float(weight))
+            for layer, angles in ((layers[0], base), (layers[index], turn)):
+                for axis, angle in zip("XYZ", angles):
+                    curve = node.LclRotation.GetCurve(layer, axis, True)
+                    curve.KeyModifyBegin()
+                    self.key(curve, 0.0, float(angle), kind="constant")
+                    curve.KeyModifyEnd()
+
+    def test_a_rotation_blended_onto_gimbal_splits_as_the_sdk_splits_it(self):
+        """where a blend by layer lands exactly on a middle angle of +-90, the
+        sdk gives the last angle 0 and the first the whole turn, and
+        everything a cosine of 16 double epsilons from it counts: the base
+        held at (0, +-90, 0) or (30, +-90, 10) under an additive layer of 0,
+        an override layer holding it and a passthrough layer holding it too,
+        and 45 under an additive 45, in every rotate order. The loader gave
+        (180, 90, 180) for (0, 90, 0), a turn of half a revolution in four of
+        the orders"""
+        additive, override, passthrough = 0, 1, 2
+        held  = [(0, 90, 0), (0, -90, 0), (30, 90, 10), (30, -90, 10)]
+        cases = []
+        for angles in held:
+            cases += [(1, additive, 100, angles, (0, 0, 0))] * 6
+            cases += [(2, override, 100, (0, 0, 0), angles)] * 6
+            cases += [(3, passthrough, 50, angles, angles)] * 6
+        cases += [(4, additive, 100, (0, 45, 0), (0, 45, 0))] * 6
+
+        path = self.take(
+            lambda nodes, layers: self.by_layer(nodes, layers, cases),
+            name   = "gimbal.fbx",
+            joints = len(cases),
+            layers = 5,
+        )
+        clip, calls = self.counted(path, fps=24.0, start_frame=0, end_frame=2)
+        got, want = self.sampled(clip)[1], self.reference(path, clip)[1]
+        orders = np.array(clip.rotate_order)
+
+        self.assertEqual(calls, [])
+        self.assertTrue(np.all(np.abs(np.abs(want[0, :, 1]) - 90.0) < 1e-9))
+        for joint in range(len(cases)):
+            with self.subTest(joint=joint, case=cases[joint]):
+                self.assertLess(self.turned(got[:, joint], want[:, joint]), 1e-9)
+                mine   = euler_to_matrix(np.radians(got[:, joint]), int(orders[joint]))
+                theirs = euler_to_matrix(np.radians(want[:, joint]), int(orders[joint]))
+                self.assertLess(float(np.abs(mine - theirs).max()), 1e-12)
+        # the sdk's split, the last angle 0
+        self.assertTrue(np.array_equal(want[0, -6:, 2], np.zeros(6)))
+
+    def test_a_rotation_blended_next_to_gimbal_keeps_its_three_angles(self):
+        """a hair off gimbal the sdk does not split, and neither does the
+        loader: the base held at (30, +-89.99999, 10) under an additive layer
+        of 0 (single precision keys, 89.9999924, a cosine of 1.3e-7), and a
+        base of (0, 0, 10) under an additive y = 90 layer at weight 100 (1 -
+        d), d from 1e-7 to 7e-15 (a cosine of 1.1e-14), an additive x = 30
+        layer on top, in every rotate order. Reading the angles back loses a
+        few times 1e-16 / cos(middle angle) radians in the sdk as here, so
+        the two agree to that, as matrices within 1e-15 / cos. Split at 16
+        single precision epsilons, as Shoemake's published code splits, the
+        loader gave (40, 89.9999924, 0) for the sdk's (30, 89.9999924, 10);
+        split at 1e-9, 1e-12 or 64 double epsilons, rotations 0.17 to 0.18
+        off as matrices from d = 1e-10, 1e-14 and 7e-15 on. The two sides'
+        rounding of the cosine picks the branch within about 1e-15 of the
+        split, so no d here comes nearer"""
+        additive = 0
+        offsets  = (1e-7, 3e-8, 1e-8, 3e-9, 1e-9, 1e-10, 1e-12, 1e-14, 7e-15)
+
+        def fill(nodes, layers):
+            source = FBX.FbxNode.EPivotSet.eSourcePivot
+            orders = list(FBX.EFbxRotationOrder)[:6]
+            for layer in layers[1:]:
+                layer.BlendMode.Set(float(additive))
+                layer.Weight.Set(100.0)
+            for at, offset in enumerate(offsets):
+                layers[2 + at].Weight.Set(100.0 * (1.0 - offset))
+
+            for index, node in enumerate(nodes):
+                node.SetRotationOrder(source, orders[index % 6])
+                case = index // 6
+                if case < 2:
+                    keyed = ((0, (30.0, (89.99999, -89.99999)[case], 10.0)), (1, (0.0, 0.0, 0.0)))
+                else:
+                    keyed = ((0, (0.0, 0.0, 10.0)), (case, (0.0, 90.0, 0.0)), (len(layers) - 1, (30.0, 0.0, 0.0)))
+                for at, angles in keyed:
+                    for axis, angle in zip("XYZ", angles):
+                        curve = node.LclRotation.GetCurve(layers[at], axis, True)
+                        curve.KeyModifyBegin()
+                        self.key(curve, 0.0, angle, kind="constant")
+                        curve.KeyModifyEnd()
+
+        path = self.take(
+            fill,
+            name   = "near_gimbal.fbx",
+            joints = 6 * (2 + len(offsets)),
+            layers = 3 + len(offsets),
+        )
+        clip, calls = self.counted(path, fps=24.0, start_frame=0, end_frame=1)
+        got, want = self.sampled(clip)[1], self.reference(path, clip)[1]
+        cosine = np.abs(np.cos(np.radians(want[..., 1])))
+        orders = np.array(clip.rotate_order)
+
+        self.assertEqual(calls, [])
+        self.assertTrue(np.all((cosine > 5e-15) & (cosine < 2e-7)))
+        self.assertTrue(np.all(want[..., 2] != 0.0))
+        np.testing.assert_allclose(want[:, :12, 0::2], np.tile([30.0, 10.0], (2, 12, 1)), atol=1e-4)
+        for joint in range(got.shape[1]):
+            with self.subTest(joint=joint):
+                bound = np.degrees(3e-15 / cosine[:, joint]).max()
+                self.assertLess(self.turned(got[:, joint], want[:, joint]), bound)
+                mine   = euler_to_matrix(np.radians(got[:, joint]), int(orders[joint]))
+                theirs = euler_to_matrix(np.radians(want[:, joint]), int(orders[joint]))
+                apart  = np.abs(mine - theirs).max(axis=(-2, -1)) * cosine[:, joint]
+                self.assertLess(float(apart.max()), 1e-15)
+
+    def test_a_tie_breaks_the_way_the_sdk_breaks_it(self):
+        """every layer angle a multiple of 45 degrees, where the sdk's own
+        rounding decides the sign of a quaternion (a turn of a third of a
+        revolution has a trace of exactly 0, diagonal entries tie, half
+        turns) and so which way an additive layer turns at a partial weight,
+        and where a passthrough layer sits exactly half a revolution from
+        the one below; over four poses below, in every rotate order. The
+        sdk builds each quaternion from the matrix of the angles in the
+        order's own axes and sums a dot product w first; the loader built
+        them straight from the angles and broke the ties its own way, off by
+        up to a half turn"""
+        steps = (-180, -90, -45, 0, 45, 90, 180, 270)
+        turns = list(itertools.product(steps, repeat=3))
+        below = ((0, 0, 0), (90, 0, 0), (0, 90, 0), (45, 135, -90))
+        blend = ((0, 25.0), (0, 150.0), (2, 25.0), (2, -50.0))
+        frame = 1.0 / 24.0
+
+        def fill(nodes, layers):
+            source = FBX.FbxNode.EPivotSet.eSourcePivot
+            orders = list(FBX.EFbxRotationOrder)[:6]
+            for index, node in enumerate(nodes):
+                kind, pose = divmod(index // 6, len(below))
+                layer = layers[1 + kind]
+                layer.BlendMode.Set(float(blend[kind][0]))
+                layer.Weight.Set(blend[kind][1])
+                node.SetRotationOrder(source, orders[index % 6])
+                for axis in range(3):
+                    curve = node.LclRotation.GetCurve(layers[0], "XYZ"[axis], True)
+                    curve.KeyModifyBegin()
+                    self.key(curve, 0.0, float(below[pose][axis]), kind="constant")
+                    curve.KeyModifyEnd()
+                    curve = node.LclRotation.GetCurve(layer, "XYZ"[axis], True)
+                    curve.KeyModifyBegin()
+                    for at, turn in enumerate(turns):
+                        self.key(curve, at * frame, float(turn[axis]), kind="constant")
+                    curve.KeyModifyEnd()
+
+        path = self.take(fill, name="ties.fbx", joints=6 * len(below) * len(blend), layers=1 + len(blend))
+        clip = ClipData.load_fbx(path, fps=24.0, start_frame=0, end_frame=len(turns) - 1)
+        got, want = self.sampled(clip)[1], self.reference(path, clip)[1]
+        orders = np.array(clip.rotate_order)
+
+        for joint in range(got.shape[1]):
+            with self.subTest(joint=joint):
+                mine   = euler_to_matrix(np.radians(got[:, joint]), int(orders[joint]))
+                theirs = euler_to_matrix(np.radians(want[:, joint]), int(orders[joint]))
+                self.assertLess(float(np.abs(mine - theirs).max()), 1e-11)
+                self.assertLess(self.turned(got[:1, joint], want[:1, joint]), 1e-9)
+
+    def test_a_quarter_turn_layer_fading_in_blends_as_the_sdk_blends_it(self):
+        """an additive layer turning (-90, 0, 90) by layer, its weight keyed
+        from 0 to 100 over a second, a key a frame, over a base of 0: a turn
+        of a third of a revolution, whose quaternion's sign the sdk's
+        rounding picks, so on every frame in between the loader turned the
+        other way round, off by up to 1.7 as a matrix. Every rotate order"""
+
+        def fill(nodes, layers):
+            self.by_layer(nodes, layers, [(1, 0, 0, (0, 0, 0), (-90, 0, 90))] * 6)
+            curve = layers[1].Weight.GetCurve(layers[1], True)
+            curve.KeyModifyBegin()
+            for frame in range(25):
+                self.key(curve, frame / 24.0, frame * 100.0 / 24.0, kind="linear")
+            curve.KeyModifyEnd()
+
+        path = self.take(fill, name="fade.fbx", joints=6, layers=2)
+        clip, calls = self.counted(path, fps=24.0, start_frame=0, end_frame=24)
+        got, want = self.sampled(clip)[1], self.reference(path, clip)[1]
+
+        self.assertEqual(calls, [])
+        self.rotation_against(got, want, np.array(clip.rotate_order), 1e-9)
+        self.assertLess(self.turned(got, want), 1e-9)
+
+    def test_keep_slope_carries_on_at_the_count_maya_writes(self):
+        """keep slope with a count of 2**32 - 1, which Maya writes for every
+        infinity it exports (linear infinity among them): the sdk carries the
+        end key's slope on, the first key's left derivative before the keys
+        and the last key's right one after them, in single precision; any
+        other count holds the end key. Linear, user and auto tangents, before
+        and after the keys, one side repeating or mirroring while the other
+        carries on, plain and under an additive layer: the sdk's numbers bit
+        for bit past the keys, where the loader raised ValueError"""
+        extrapolation = FBX.FbxAnimCurve.EExtrapolationType
+        forever       = 2**32 - 1
+        slope         = (extrapolation.eKeepSlope, forever)
+        sloped = (
+            ("linear", "eTangentAuto", (0.0, 0.0), slope, slope),
+            ("cubic", "eTangentUser", (5.0, -7.0), slope, slope),
+            ("cubic", "eTangentAuto", (0.0, 0.0), slope, slope),
+            ("cubic", "eTangentUser", (5.0, -7.0), (extrapolation.eKeepSlope, 2**32 - 2), (extrapolation.eKeepSlope, 3)),
+            ("cubic", "eTangentUser", (5.0, -7.0), (extrapolation.eRepetition, 2), slope),
+            ("linear", "eTangentAuto", (0.0, 0.0), slope, (extrapolation.eMirrorRepetition, 3)),
+        )
+
+        def fill(layered):
+            def keyed(nodes, layers):
+                for node, (kind, tangent, data, before, after) in zip(nodes, sloped):
+                    curve = node.LclTranslation.GetCurve(layers[0], "X", True)
+                    curve.KeyModifyBegin()
+                    for when, value in ((0.25, 1.0), (0.5, 3.0), (0.75, 2.0)):
+                        self.key(curve, when, value, kind=kind, tangent=tangent, data=data)
+                    curve.KeyModifyEnd()
+                    curve.SetPreExtrapolation(before[0])
+                    curve.SetPreExtrapolationCount(before[1])
+                    curve.SetPostExtrapolation(after[0])
+                    curve.SetPostExtrapolationCount(after[1])
+                    if layered:
+                        curve = node.LclTranslation.GetCurve(layers[1], "X", True)
+                        curve.KeyModifyBegin()
+                        self.key(curve, 0.0, 2.0, kind="linear")
+                        self.key(curve, 1.0, -3.0, kind="linear")
+                        curve.KeyModifyEnd()
+                        layers[1].Weight.Set(40.0)
+
+            return keyed
+
+        for layered in (False, True):
+            with self.subTest(layered=layered):
+                path = self.take(fill(layered), name=f"slope{int(layered)}.fbx", joints=6, layers=1 + layered)
+                clip, calls = self.counted(path, fps=24.0, start_frame=-24, end_frame=48)
+                got, want = self.sampled(clip)[0], self.reference(path, clip)[0]
+
+                self.assertEqual(calls, [])
+                self.assertLess(self.error(got[None], want[None]), 1e-5)
+                # frames 6 and 18 hold the end keys, and frames 0 and 24 the
+                # layer's: past them, on the sides that do not repeat, the
+                # very same numbers
+                frame  = np.arange(clip.frame_count) + clip.start_frame
+                before = frame < (0 if layered else 6)
+                after  = frame > (24 if layered else 18)
+                for node, (_, _, _, pre, post) in enumerate(sloped):
+                    for side, (kind, _) in ((before, pre), (after, post)):
+                        if kind == extrapolation.eKeepSlope:
+                            self.assertTrue(np.array_equal(got[side, node], want[side, node]), f"node {node}")
+                if not layered:
+                    # the slopes carry on, the other counts hold
+                    self.assertEqual(got[frame == -6, 0, 0].tolist(),  [-3.0])
+                    self.assertEqual(got[frame == 30, 0, 0].tolist(),  [0.0])
+                    self.assertEqual(float(got[frame == 30, 1, 0][0]), float(np.float32(2.0 - 3.5)))
+                    self.assertEqual(got[frame == 30, 3, 0].tolist(),  [2.0])
+                    self.assertEqual(got[frame == -6, 3, 0].tolist(),  [1.0])
+                    self.assertEqual(float(got[frame == 30, 4, 0][0]), float(np.float32(2.0 - 3.5)))
+                    self.assertEqual(got[frame == -6, 5, 0].tolist(),  [-3.0])
+
+    def test_a_take_maya_exported_with_linear_infinity_loads(self):
+        """Maya's own export of spline curves with linear infinity, before
+        and after the keys, plain and under an additive animation layer:
+        Maya writes the infinity as keep slope with a count of 2**32 - 1,
+        which the loader raised ValueError on. Now the sdk's numbers, and
+        Maya's own values, on every frame. Needs mayapy with the fbxmaya
+        plug-in"""
+        try:
+            import maya.cmds as cmds
+            import maya.mel as mel
+
+            cmds.loadPlugin("fbxmaya", quiet=True)
+        except Exception:  # not running in Maya, or no fbx plug-in
+            self.skipTest("needs Maya and its fbxmaya plug-in")
+
+        frames = list(range(-12, 37))
+        self.addCleanup(cmds.file, new=True, force=True)
+        for layered in (False, True):
+            with self.subTest(layered=layered):
+                cmds.file(new=True, force=True)
+                cmds.currentUnit(time="film")
+                joints = []
+                for index in range(3):
+                    cmds.select(clear=True)
+                    joints.append(cmds.joint(name=f"j{index}", position=(index, 0, 0)))
+                    cmds.setAttr(f"{joints[-1]}.rotateOrder", index)
+                for index, joint in enumerate(joints):
+                    for frame, value in ((0, 1.0), (12, 4.0 + index), (24, 2.0)):
+                        for attr in ("translateX", "rotateY", "scaleZ"):
+                            cmds.setKeyframe(joint, attribute=attr, time=frame, value=value * (10.0 if attr == "rotateY" else 1.0))
+                    for attr in ("translateX", "rotateY", "scaleZ"):
+                        cmds.keyTangent(f"{joint}.{attr}", inTangentType="spline", outTangentType="spline")
+                        cmds.setInfinity(f"{joint}.{attr}", preInfinite="linear", postInfinite="linear")
+                if layered:
+                    layer = cmds.animLayer("L1")
+                    for joint in joints:
+                        cmds.animLayer(layer, edit=True, attribute=f"{joint}.translateX")
+                        for frame, value in ((0, 0.5), (24, -1.5)):
+                            cmds.setKeyframe(joint, attribute="translateX", time=frame, value=value, animLayer=layer)
+                    cmds.setAttr(f"{layer}.weight", 0.5)
+
+                maya = np.zeros((len(frames), len(joints)))
+                for row, frame in enumerate(frames):
+                    for column, joint in enumerate(joints):
+                        maya[row, column] = cmds.getAttr(f"{joint}.translateX", time=frame)
+
+                path = os.path.join(self.tmp.name, f"maya_linear{int(layered)}.fbx").replace("\\", "/")
+                mel.eval("FBXResetExport")
+                mel.eval("FBXExportBakeComplexAnimation -v false")
+                cmds.select(joints)
+                mel.eval(f'FBXExport -f "{path}" -s')
+
+                clip, calls = self.counted(path, fps=24.0, start_frame=frames[0], end_frame=frames[-1])
+                got, want = self.sampled(clip), self.reference(path, clip)
+
+                self.assertEqual(calls, [])
+                self.assertLess(self.error(got, want), 1e-5)
+                past = (np.array(frames) < 0) | (np.array(frames) > 24)
+                self.assertTrue(np.array_equal(got[:, past], want[:, past]))
+                # the infinity carried on, as Maya has it
+                self.assertLess(float(np.abs(got[0, :, :, 0] - maya).max()), 1e-5)
+                self.assertGreater(float(np.abs(got[0, past, :, 0] - got[0, frames.index(0), :, 0]).max()), 1.0)
+
+    def crowded(self):
+        """a take of weighted spans whose two handles crowd one end, each on
+        its own joint's translate x: a weight of 0.0001, 0.001, 0.005 or 0.01
+        on the first key's right handle or on the next key's left one,
+        against 0.95 or 0.99 on the other, over five spans a second, half a
+        second and two seconds long, rising, falling and overshooting their
+        keys. Hands back the file and, joint by joint, (small weight, large
+        weight, whether the small one is the next key's, span), each span
+        its two keys as (seconds, value) and the first key's right
+        derivative and the next key's left one"""
+        spans = (
+            ((0.0, 0.0), (1.0, 1.0), (0.0, 5.0)),
+            ((0.0, 0.0), (1.0, 1.0), (3.0, -4.0)),
+            ((0.25, -2.0), (0.75, 6.0), (40.0, -10.0)),
+            ((0.0, 3.0), (2.0, -1.5), (-6.0, 1.0)),
+            ((0.5, 10.0), (1.5, 10.5), (-30.0, 30.0)),
+        )
+        cases    = list(itertools.product((0.0001, 0.001, 0.005, 0.01), (0.95, 0.99), (False, True), spans))
+        weighted = (FBX.FbxAnimCurveDef.EWeightedMode.eWeightedAll, 1.0 / 3.0, 1.0 / 3.0)
+
+        def fill(nodes, layers):
+            for node, (small, large, on_next, (first, last, slopes)) in zip(nodes, cases):
+                curve = node.LclTranslation.GetCurve(layers[0], "X", True)
+                curve.KeyModifyBegin()
+                for when, value in (first, last):
+                    self.key(curve, when, value, tangent="eTangentUser", weights=weighted)
+                curve.KeySetRightDerivative(0, slopes[0])
+                curve.KeySetLeftDerivative(1, slopes[1])
+                curve.KeySetRightTangentWeight(0, large if on_next else small)
+                curve.KeySetLeftTangentWeight(1, small if on_next else large)
+                curve.KeyModifyEnd()
+
+        return self.take(fill, name="crowded.fbx", joints=len(cases)), cases
+
+    def bezier(self, path, clip):
+        """(frames, joints) translate x of the clip's joints, a span of two
+        keys each, as the closed-form weighted bezier of the keys the file
+        holds gives it, written out here rather than taken from the loader.
+        A span from (k0, v0) to (k1, v1), s seconds long, runs through (k0 +
+        wr (k1 - k0), v0 + wr s d0) and (k1 - wl (k1 - k0), v1 - wl s d1), d0
+        and wr the first key's right derivative and weight, d1 and wl the
+        next key's left ones. A frame a fraction u of the way along the span
+        is where the bezier's time, 3 wr t (1 - t)**2 + 3 (1 - wl) t**2 (1 -
+        t) + t**3, is u: its one root t in 0..1, which numpy's roots solves,
+        gives the value. The keys, and the frames before and after them,
+        hold the keys' values"""
+        from cgmath.formats._fbx_io import typed
+
+        with hierarchy.hierarchy.open_fbx(path, FBX) as scene:
+            stacks = FBX.FbxCriteria.ObjectType(FBX.FbxAnimStack.ClassId)
+            layers = FBX.FbxCriteria.ObjectType(FBX.FbxAnimLayer.ClassId)
+            stack  = typed(scene.GetSrcObject(stacks, 0), FBX.FbxAnimStack, FBX)
+            layer  = typed(stack.GetSrcObject(layers, 0), FBX.FbxAnimLayer, FBX)
+
+            found  = {}
+
+            def walk(node):
+                found[node.GetName()] = node
+                for index in range(node.GetChildCount()):
+                    walk(node.GetChild(index))
+
+            walk(scene.GetRootNode())
+
+            second = FBX.FbxTime()
+            second.SetSecondDouble(1.0)
+            ticks = []
+            for frame in range(clip.frame_count):
+                time = FBX.FbxTime()
+                time.SetSecondDouble((clip.start_frame + frame) / clip.fps)
+                ticks.append(time.Get())
+            ticks  = np.array(ticks)
+
+            values = np.zeros((clip.frame_count, len(clip.name)))
+            for column, name in enumerate(clip.name):
+                curve = typed(found[name].LclTranslation.GetCurve(layer, "X"), FBX.FbxAnimCurve, FBX)
+                k0, k1 = curve.KeyGetTime(0).Get(), curve.KeyGetTime(1).Get()
+                v0, v1 = curve.KeyGetValue(0), curve.KeyGetValue(1)
+                d0, d1 = curve.KeyGetRightDerivative(0), curve.KeyGetLeftDerivative(1)
+                wr, wl = curve.KeyGetRightTangentWeight(0), curve.KeyGetLeftTangentWeight(1)
+                s       = (k1 - k0) / second.Get()
+                handles = np.array([v0, v0 + wr * s * d0, v1 - wl * s * d1, v1])
+
+                values[:, column] = np.where(ticks <= k0, v0, v1)
+                for row in np.flatnonzero((ticks > k0) & (ticks < k1)):
+                    u      = (ticks[row] - k0) / (k1 - k0)
+                    roots  = np.roots([3.0 * (wr + wl) - 2.0, 3.0 * (1.0 - wl) - 6.0 * wr, 3.0 * wr, -u])
+                    inside = (np.abs(roots.imag) < 1e-9) & (roots.real > -1e-9) & (roots.real < 1.0 + 1e-9)
+                    self.assertEqual(int(inside.sum()), 1, f"{name} at tick {ticks[row]}: {roots}")
+                    t         = min(max(float(roots[inside].real[0]), 0.0), 1.0)
+                    bernstein = np.array([(1.0 - t) ** 3, 3.0 * (1.0 - t) ** 2 * t, 3.0 * (1.0 - t) * t**2, t**3])
+
+                    values[row, column] = bernstein @ handles
+        return values
+
+    def test_a_crowded_weighted_span_is_the_exact_bezier(self):
+        """a weighted span whose two handles crowd one end, 80 of them
+        (crowded): the clip is the closed-form weighted bezier of the file's
+        keys (bezier) on every frame, within 1e-12 of the span's range, the
+        values Maya's own import gives. The sdk's own solve for the bezier's
+        time stops short there, more than a tenth of the range off at
+        weights 0.0001 and 0.99 either way round, and the loader does not
+        follow it"""
+        path, cases = self.crowded()
+
+        clip  = ClipData.load_fbx(path, fps=24.0, start_frame=0, end_frame=48)
+        got   = self.sampled(clip)[0, :, :, 0]
+        want  = self.bezier(path, clip)
+        sdk   = self.reference(path, clip)[0, :, :, 0]
+        names = list(clip.name)
+
+        self.assertEqual(clip.frame_count, 49)
+        for joint, (small, large, on_next, span) in enumerate(cases):
+            column = names.index(f"j{joint}")
+            size   = float(np.ptp(want[:, column]))
+            with self.subTest(small=small, large=large, on_next=on_next, span=span):
+                self.assertLess(float(np.abs(got[:, column] - want[:, column]).max()), 1e-12 * size)
+                if (small, large) == (0.0001, 0.99):
+                    self.assertGreater(float(np.abs(sdk[:, column] - want[:, column]).max()), 0.1 * size)
+
+    def test_a_crowded_weighted_span_loads_as_maya_imports_it(self):
+        """Maya's own FBXImport of the 80 crowded spans: its values on every
+        frame are the clip's, within 1e-12 of the span's range, where the
+        sdk's own evaluation is up to half the range off. Needs mayapy with
+        the fbxmaya plug-in"""
+        try:
+            import maya.cmds as cmds
+            import maya.mel as mel
+
+            cmds.loadPlugin("fbxmaya", quiet=True)
+        except Exception:  # not running in Maya, or no fbx plug-in
+            self.skipTest("needs Maya and its fbxmaya plug-in")
+
+        path, cases = self.crowded()
+        clip  = ClipData.load_fbx(path, fps=24.0, start_frame=0, end_frame=48)
+        got   = self.sampled(clip)[0, :, :, 0]
+        names = list(clip.name)
+
+        self.addCleanup(cmds.file, new=True, force=True)
+        cmds.file(new=True, force=True)
+        cmds.currentUnit(time="film")
+        mel.eval("FBXResetImport")
+        mel.eval(f'FBXImport -f "{path.replace(os.sep, "/")}"')
+
+        frames = range(clip.start_frame, clip.start_frame + clip.frame_count)
+        for joint, (small, large, on_next, span) in enumerate(cases):
+            column = names.index(f"j{joint}")
+            maya   = np.array([cmds.getAttr(f"j{joint}.translateX", time=frame) for frame in frames])
+            with self.subTest(small=small, large=large, on_next=on_next, span=span):
+                self.assertLess(float(np.abs(maya - got[:, column]).max()), 1e-12 * float(np.ptp(maya)))
+
+    def test_an_axis_a_curve_node_holds_no_channel_for_keeps_the_layer_below(self):
+        """an upper layer's curve node holding an X channel alone (an
+        exporter can write one): the sdk keeps what the layers below hold on
+        Y and Z, and the loader blended 0 there, scaling to 0 and translation
+        pulled to it. Every blend mode, rotation by layer and by channel,
+        scaling multiplied and added: as the sdk evaluates them, rotation by
+        layer reading the missing angles as 0 as the sdk does"""
+        modes = list(itertools.product((0, 1, 2), (0, 1), (0, 1)))
+
+        def fill(nodes, layers):
+            scene = nodes[0].GetScene()
+            for node, layer, (mode, rotation, scaling) in zip(nodes, layers[1:], modes):
+                layer.BlendMode.Set(float(mode))
+                layer.Weight.Set(60.0)
+                layer.RotationAccumulationMode.Set(float(rotation))
+                layer.ScaleAccumulationMode.Set(float(scaling))
+                for prop, values in (
+                    (node.LclTranslation, (10.0, 20.0)),
+                    (node.LclRotation, (10.0, 20.0)),
+                    (node.LclScaling, (1.5, 2.5)),
+                ):
+                    curve = prop.GetCurve(layers[0], "Y", True)
+                    curve.KeyModifyBegin()
+                    self.key(curve, 0.0, values[0], kind="linear")
+                    self.key(curve, 1.0, values[1], kind="linear")
+                    curve.KeyModifyEnd()
+
+                    curve_node = FBX.FbxAnimCurveNode.Create(scene, "x only")
+                    curve_node.AddChannel("X", 0.0)
+                    layer.AddMember(curve_node)
+                    prop.ConnectSrcObject(curve_node)
+                    curve = FBX.FbxAnimCurve.Create(scene, "x")
+                    curve_node.ConnectToChannel(curve, 0)
+                    curve.KeyModifyBegin()
+                    self.key(curve, 0.0, 1.5, kind="linear")
+                    self.key(curve, 1.0, 2.5, kind="linear")
+                    curve.KeyModifyEnd()
+
+        path = self.take(fill, name="x_only.fbx", joints=len(modes), layers=1 + len(modes))
+        clip, calls = self.counted(path, fps=24.0, start_frame=0, end_frame=24)
+        got, want = self.sampled(clip), self.reference(path, clip)
+
+        self.assertEqual(calls, [])
+        for joint, (mode, rotation, scaling) in enumerate(modes):
+            with self.subTest(mode=mode, rotation=rotation, scaling=scaling):
+                self.assertLess(self.error(got[[0, 2], :, [joint]], want[[0, 2], :, [joint]]), 1e-5)
+                orders = np.array(clip.rotate_order)[[joint]]
+                self.rotation_against(got[1][:, [joint]], want[1][:, [joint]], orders, 1e-5)
+        # the base's own Y, 15 at frame 12, kept under an override
+        self.assertAlmostEqual(float(got[0, 12, 4, 1]), 15.0, places=5)
+
+    def test_wrappers_of_a_closed_scene_leave_the_load_alone(self):
+        """the fbx binding can hand back a live wrapper of an object of a
+        scene already closed, of whatever type it was, for an object that
+        sits where it did: load_fbx re-types the stacks, layers, curve nodes
+        and curves it looks up, so holding every object of other scenes
+        across a load leaves it as a clean load, where the stack lookup
+        raised TypeError"""
+        first  = self.take(self.random_curves, name="first.fbx", joints=6)
+        second = self.take(lambda nodes, made: self.layered(np.random.default_rng(1), nodes, made, True), name="second.fbx", joints=3, layers=3)
+        clean  = {path: self.sampled(ClipData.load_fbx(path, fps=24.0)) for path in (first, second)}
+
+        held   = []
+        for trial in range(6):
+            source, target = (first, second) if trial % 2 else (second, first)
+            with hierarchy.hierarchy.open_fbx(source, FBX) as scene:
+                held.append([scene.GetSrcObject(index) for index in range(scene.GetSrcObjectCount())])
+            with self.subTest(trial=trial):
+                got = self.sampled(ClipData.load_fbx(target, fps=24.0))
+                self.assertTrue(np.array_equal(got, clean[target], equal_nan=True))
 
 
 @unittest.skipIf(FBX is None, "fbx sdk is not installed")

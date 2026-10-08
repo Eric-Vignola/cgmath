@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional, Union
 
 import numpy as np
-from cgmath.formats._fbx_io import open_fbx
+from cgmath.formats._fbx_io import open_fbx, typed
 from cgmath.formats.glb import load_model
 from cgmath.geometry import Data, DataList, ImmutableArray as numpy_array
 from cgmath.geometry._base import Array, _mask_to_indices, _reached_twice, _save_shares
@@ -2101,6 +2101,10 @@ def _fbx_inferred_attr(prop, name: str, node) -> dict:
     return {name: spec(kind, value)}
 
 
+# the sdk's euler orders (xyz, xzy, yzx, yxz, zxy, zyx) as rotate_order
+_FBX_ROTATE_ORDERS = {0: 0, 2: 1, 4: 2, 1: 3, 3: 4, 5: 5}
+
+
 def _walk_fbx(scene, scale_factor: float):
     """walks an open fbx scene's joints into TransformData dicts
 
@@ -2144,11 +2148,9 @@ def _walk_fbx(scene, scale_factor: float):
                     data["parent_node"] = parent_uuid
 
                 # rotate_order, which newer bindings hand back as an enum
-                rotate_order = node.GetRotationOrder(source_pivot)
-                rotate_order = getattr(rotate_order, "value", rotate_order)
-                data["rotate_order"] = {0: 0, 2: 1, 4: 2, 1: 3, 3: 4, 5: 5}[
-                    rotate_order
-                ]
+                rotate_order         = node.GetRotationOrder(source_pivot)
+                rotate_order         = getattr(rotate_order, "value", rotate_order)
+                data["rotate_order"] = _FBX_ROTATE_ORDERS[rotate_order]
 
                 # get SRT
                 data["scale"]  = np.array(tuple(x for x in node.LclScaling.Get()))
@@ -2223,7 +2225,8 @@ def _fbx_has_curves(stack) -> bool:
     curves = FBX.FbxCriteria.ObjectType(FBX.FbxAnimCurveNode.ClassId)
 
     for index in range(stack.GetSrcObjectCount(layers)):
-        if stack.GetSrcObject(layers, index).GetSrcObjectCount(curves):
+        layer = typed(stack.GetSrcObject(layers, index), FBX.FbxAnimLayer, FBX)
+        if layer.GetSrcObjectCount(curves):
             return True
 
     return False
@@ -2243,6 +2246,787 @@ def _fbx_frame_rate(mode) -> float:
         )
 
     return 0.0
+
+
+# curves x frames entries one batch of fbx curves is evaluated over: a few
+# arrays that size are alive at once, so a long take goes a batch at a time
+_FBX_SAMPLE_BUDGET = 2**22
+
+
+def _fbx_ticks_per_second() -> int:
+    """the sdk's time unit: ``FbxTime`` counts in ticks, and how many make a
+    second depends on the sdk version"""
+    second = FBX.FbxTime()
+    second.SetSecondDouble(1.0)
+    return int(second.Get())
+
+
+def _fbx_ticks(seconds, per_second: int) -> np.ndarray:
+    """times in seconds as fbx ticks, rounded the way ``FbxTime.SetSecondDouble``
+    rounds them
+
+    That is toward zero once the product is pushed 0.005 of a tick away from
+    zero, which no plain rounding reproduces. It is what lands a frame time a
+    hair short of a whole tick on that tick, so keys baked on frames are hit
+    exactly. Checked against the sdk on 75,000 times, negative ones included.
+    """
+    scaled = np.asarray(seconds, dtype=np.float64) * float(per_second)
+    return np.trunc(scaled + np.copysign(0.005, scaled)).astype(np.int64)
+
+
+# the extrapolation count at which keep slope carries the end key's slope
+# on rather than holding the key, as any other count does: the one Maya
+# writes for every infinity it exports
+_FBX_KEEP_SLOPE_ON = 2**32 - 1
+
+
+def _fbx_agrees_past(curve, tick: int, expected: float) -> bool:
+    """whether the sdk's own evaluation of ``curve`` at ``tick``, past its
+    keys, is ``expected``: the check on the keep slope model, which another
+    sdk need not follow"""
+    time = FBX.FbxTime()
+    time.Set(int(tick))
+    got = curve.Evaluate(time)
+    got = got[0] if isinstance(got, tuple) else got
+    return float(got) == float(expected)
+
+
+def _fbx_extrapolated(ticks, first: int, last: int, before, after) -> tuple:
+    """the tick inside a curve's keys, ``first`` to ``last``, that the sdk
+    reads for each of ``ticks``, the tick itself between them, the number of
+    periods each one's value is shifted by, and whether the sdk reads it as 0
+
+    ``before`` and ``after`` are ``(kind, count)``, the curve's pre and post
+    extrapolation, each ``"repeat"``, ``"mirror"``, ``"offset"``, ``"zero"``
+    or None for the end key's value. A repetition reads the keys again,
+    period after period, a mirror reads them forward and backward in turn;
+    past ``count`` periods the end key's value holds. Worked out in whole
+    ticks, as the sdk reads them: a tick exactly a whole number of periods
+    past the last key starts the next period, one as far before the first
+    key ends the previous one.
+
+    ``"offset"`` is a repetition that climbs (the sdk's relative repetition,
+    Maya's cycle with offset): a tick ``n`` periods away reads the keys as a
+    repetition does, its value shifted by ``n`` times the last key's value
+    less the first's, ``-n`` before the keys; past ``count`` periods the end
+    key holds, shifted ``count`` times. The shifts come back as the second
+    array, 0 for every tick no offset moves.
+
+    ``"zero"`` is how the sdk reads an extrapolation number it does not
+    know: 0 for ``count`` periods, then the end key. The third array flags
+    the ticks it reads as 0.
+    """
+    ticks   = np.asarray(ticks, dtype=np.int64)
+    out     = np.clip(ticks, first, last)
+    periods = np.zeros(len(ticks), dtype=np.int64)
+    zeroed  = np.zeros(len(ticks), dtype=bool)
+    span    = last - first
+    if span <= 0:
+        return out, periods, zeroed
+
+    for side, (kind, count) in (("before", before), ("after", after)):
+        if kind is None or count < 1:
+            continue
+        rows = np.flatnonzero(ticks < first if side == "before" else ticks > last)
+        if not len(rows):
+            continue
+
+        reach  = first - ticks[rows] if side == "before" else ticks[rows] - last
+        period = reach // span + 1            # 1 for the period next to the keys
+        offset = reach - (period - 1) * span  # 0 <= offset < span
+        if side == "before":
+            # read back from the last key, or, mirrored, forward from the first
+            ahead = first + offset
+            back  = last - offset
+            held  = first
+        else:
+            ahead = last - offset
+            back  = first + offset
+            held  = last
+        if kind == "mirror":
+            u = np.where(period % 2 == 1, ahead, back)
+        else:
+            u = back
+        out[rows] = np.where(period <= count, u, held)
+        if kind == "offset":
+            periods[rows] = np.minimum(period, count) * (-1 if side == "before" else 1)
+        if kind == "zero":
+            out[rows]    = held
+            zeroed[rows] = period <= count
+    return out, periods, zeroed
+
+
+def _fbx_sample_curves(curves, ticks, per_second: int) -> np.ndarray:
+    """fbx animation curves evaluated on a grid of ticks, every frame at once,
+    as (curves, frames) values
+
+    :func:`_fbx_sample_span` evaluates the grid; a curve that repeats or
+    mirrors past its keys is evaluated again where the extrapolation sends
+    each tick (:func:`_fbx_extrapolated`), every curve sent the same way in
+    one more batch. A side of it that does not repeat keeps what the first
+    pass gave it: the end key, or a keep slope carried on.
+    """
+    ticks = np.asarray(ticks, dtype=np.int64)
+    values, extrapolated = _fbx_sample_span(curves, ticks, per_second)
+
+    groups = {}
+    for row, (spec, ends) in extrapolated.items():
+        groups.setdefault(spec, []).append((row, ends))
+
+    for (first, last, before, after), members in groups.items():
+        rows = [row for row, _ in members]
+        read, periods, zeroed = _fbx_extrapolated(ticks, first, last, before, after)
+        grid, back = np.unique(read, return_inverse=True)
+        again   = _fbx_sample_curves([curves[r] for r in rows], grid, per_second)[:, back]
+        shifted = np.flatnonzero(periods)
+        if len(shifted):
+            # an offset repetition climbs by the last key less the first a
+            # period, added in single precision as the sdk adds it
+            ends              = np.array([pair for _, pair in members], dtype=np.float32)
+            rise              = (ends[:, 1] - ends[:, 0])[:, None]
+            climbed           = again[:, shifted].astype(np.float32) + periods[shifted].astype(np.float32) * rise
+            again[:, shifted] = climbed
+        again[:, zeroed] = 0.0
+        kept             = ((ticks < first) & (before[0] is None)) | ((ticks > last) & (after[0] is None))
+        values[rows]     = np.where(kept, values[rows], again)
+    return values
+
+
+def _fbx_sample_span(curves, ticks, per_second: int):
+    """fbx animation curves evaluated on a grid of ticks, every frame at once
+
+    Each curve's key times and values are read once; derivatives, weights and
+    interpolation only for the keys that start a span some grid tick falls
+    strictly inside, which is none at all for a take baked on its frames.
+    The sdk has no batch evaluator, and reading a key costs a fraction of
+    the few microseconds one ``EvaluateLocal*`` call costs.
+
+    Hands back ``values`` (curves, frames) and ``extrapolated``: for each
+    curve that repeats, mirrors or climbs past its keys where some tick
+    falls, its row, ``(first key, last key, (kind, count) before, (kind,
+    count) after)`` and its first and last key values, for
+    :func:`_fbx_sample_curves` to evaluate again.
+
+    The sdk's own evaluation, as measured against ``EvaluateLocalTranslation``:
+
+    - on a key's tick, that key's value, whatever its interpolation;
+    - before the first key and after the last, the end key's value, unless
+      the curve repeats, mirrors or repeats with an offset there, for as
+      many periods as its count says (:func:`_fbx_extrapolated`). An
+      extrapolation number the sdk does not know reads as 0 for as many
+      periods. Keep slope holds the end key's value too, unless its count is
+      2**32 - 1 (:data:`_FBX_KEEP_SLOPE_ON`, the count Maya writes): then
+      the end key's value carries on along its slope, the first key's left
+      derivative before the keys and the last key's right one after them,
+      the product rounded to single precision and added in it, as the sdk
+      adds it. The curve's own ``Evaluate`` at the frame farthest past its
+      keys checks that, once a curve and side, and an sdk that evaluates it
+      otherwise is refused with a ValueError rather than sampled frame by
+      frame;
+    - between two keys, by the first key's interpolation. Constant holds its
+      value, or the next key's under ``eConstantNext``. Linear blends the
+      two. Cubic is a bezier whose handles sit ``weight * span`` along the
+      key's right derivative and the next key's left one. ``KeyGet*Derivative``
+      already resolves auto, tcb, clamped and broken tangents; tangent
+      velocity changes nothing. An unweighted handle sits at a third, which
+      makes the bezier a hermite; a weighted one needs its time solved, done
+      here by bisection. An interpolation the sdk does not know (a file can
+      carry one, read back as 0) gives 0, as the sdk gives it.
+
+    The sdk works in single precision between keys, so values there agree to
+    its rounding rather than to the bit, a few times 1e-6 of the curve's
+    range at most, but on a weighted span whose two handles crowd one end:
+    one weight at most about 0.01 and the other about 0.88 or more, the
+    smaller the one, the lower the other can be (the sdk holds a weight to
+    0.0001 at least and 0.99 at most). There the sdk's own solve for the
+    bezier's time stops short of the exact time solved here, by up to 2e-5
+    of the curve's range at weights 0.01 and 0.99, 3e-5 at 0.0001 and 0.88,
+    4e-4 at 0.0001 and 0.89, 3e-3 at 0.0001 and 0.9 and 0.55 at 0.0001 and
+    0.99. Maya's own import of such a span gives the values solved here, to
+    a few times 1e-15 of the range, and they are kept: on a crowded span the
+    loader follows Maya, not the sdk. On keys they are the same values.
+    """
+    constant, linear, cubic = 0, 1, 2
+    interpolation = [
+        (_fbx_enum(FBX.FbxAnimCurveDef, "EInterpolationType", name), code)
+        for name, code in (
+            ("eInterpolationConstant", constant),
+            ("eInterpolationLinear", linear),
+            ("eInterpolationCubic", cubic),
+        )
+    ]
+    # how a curve goes on past its keys, by the sdk's number for it, which a
+    # file carries: these bindings leave relative repetition (5) unnamed, and
+    # a file can carry a number the sdk does not know
+    def number(member) -> int:
+        return int(getattr(member, "value", member))
+
+    extrapolation = "EExtrapolationType"
+    flat_past     = number(_fbx_enum(FBX.FbxAnimCurve, extrapolation, "eConstant"))
+    slope_past    = number(_fbx_enum(FBX.FbxAnimCurve, extrapolation, "eKeepSlope"))
+    repetition    = number(_fbx_enum(FBX.FbxAnimCurve, extrapolation, "eRepetition"))
+    mirror        = number(_fbx_enum(FBX.FbxAnimCurve, extrapolation, "eMirrorRepetition"))
+    repeats       = {repetition: "repeat", mirror: "mirror", 5: "offset"}
+    next_key      = _fbx_enum(FBX.FbxAnimCurveDef, "EConstantMode", "eConstantNext")
+
+    ticks  = np.asarray(ticks, dtype=np.int64)
+    counts = np.array([curve.KeyGetCount() for curve in curves], dtype=np.int64)
+    starts = np.cumsum(counts) - counts
+    owner  = np.repeat(np.arange(len(curves)), counts)
+
+    # one sdk call per key and field, looped in C by map() and np.fromiter
+    tick_of = FBX.FbxTime.Get
+    pairs   = list(zip(curves, counts.tolist()))
+    when = np.concatenate(
+        [
+            np.fromiter(map(tick_of, map(curve.KeyGetTime, range(count))), np.int64, count)
+            for curve, count in pairs
+        ]
+    )
+    value = np.concatenate(
+        [np.fromiter(map(curve.KeyGetValue, range(count)), np.float64, count) for curve, count in pairs]
+    )
+
+    # the last key at or before each grid tick, for every curve at once. Each
+    # key goes in the cell of the first grid tick at or after it, the last
+    # key of a cell wins, and a running maximum along each curve's row hands
+    # every later tick the latest key behind it; -1 is before the first key
+    width             = len(ticks) + 1
+    cell              = owner * width + np.searchsorted(ticks, when, side="left")
+    wins              = np.append(cell[1:] != cell[:-1], True)
+    index             = np.full(len(curves) * width, -1, dtype=np.int64)
+    index[cell[wins]] = np.flatnonzero(wins)
+    index             = np.maximum.accumulate(index.reshape(len(curves), width), axis=1)[:, :-1]
+
+    first   = starts[:, None]
+    last    = (starts + counts - 1)[:, None]
+    before  = index < 0
+    index   = np.maximum(index, first)
+    on_key  = when[index] == ticks
+    after   = (index == last) & ~on_key & ~before
+    between = ~(before | on_key | after)
+
+    # on a key it is that key, and either side of the keys the end key holds
+    values = value[index]
+
+    # past the keys: a curve that repeats, mirrors or climbs there is read
+    # again where that sends each tick, and one extrapolated by a number the
+    # sdk does not know reads 0 there; constant holds the end key's value,
+    # and so does keep slope, or carries its slope on, once the curve's own
+    # evaluation agrees
+    extrapolated = {}
+    edges        = np.flatnonzero(before.any(axis=1) | after.any(axis=1))
+    for row in edges.tolist():
+        curve = curves[row]
+        ends  = (starts[row], starts[row] + counts[row] - 1)
+        sides = []
+        for past, kind, count, end, far in (
+            (before[row], curve.GetPreExtrapolation(), curve.GetPreExtrapolationCount(), ends[0], 0),
+            (after[row], curve.GetPostExtrapolation(), curve.GetPostExtrapolationCount(), ends[1], -1),
+        ):
+            sides.append((None, 0))
+            kind = number(kind)
+            if not past.any() or kind == flat_past:
+                continue
+            if kind == slope_past:
+                beyond = np.flatnonzero(past)
+                if count == _FBX_KEEP_SLOPE_ON:
+                    # the end key's slope, in single precision as the sdk
+                    # carries it on
+                    if far == 0:
+                        slope = curve.KeyGetLeftDerivative(0)
+                    else:
+                        slope = curve.KeyGetRightDerivative(int(counts[row]) - 1)
+                    seconds             = (ticks[beyond] - when[end]) / per_second
+                    values[row, beyond] = np.float32(value[end]) + (slope * seconds).astype(np.float32)
+
+                # the frame farthest from the keys, where a slope would show most
+                farthest = beyond[far]
+                if not _fbx_agrees_past(curve, ticks[farthest], values[row, farthest]):
+                    raise ValueError(
+                        "this fbx sdk evaluates a keep slope curve past its keys "
+                        "otherwise than load_fbx does: the sdk it was measured "
+                        "against holds the end key, or carries its slope on "
+                        "when the count is 2**32 - 1"
+                    )
+                continue
+            sides[-1] = (repeats.get(kind, "zero"), count) if count > 0 else (None, 0)
+
+        bounds = (int(when[ends[0]]), int(when[ends[1]]))
+        if bounds[1] > bounds[0] and (sides[0][0] or sides[1][0]):
+            extrapolated[row] = (bounds + tuple(sides), (value[ends[0]], value[ends[1]]))
+
+    # the grid ticks strictly inside a span, as flat indexes into values
+    inside = np.flatnonzero(between)
+    if not len(inside):
+        return values, extrapolated
+
+    # each span's first key, read once however many grid ticks fall inside it
+    at          = index.ravel()[inside]
+    needed      = np.zeros(len(when), dtype=bool)
+    needed[at]  = True
+    key         = np.flatnonzero(needed)
+    lookup      = np.zeros(len(when), dtype=np.intp)
+    lookup[key] = np.arange(len(key))
+    slot        = lookup[at]
+    curve_of    = owner[key]
+    local       = key - starts[curve_of]
+
+    def read(getter, spans, step=0):
+        """one sdk getter over the first key of ``spans`` (or the key ``step``
+        after it), a C loop per curve: the spans are sorted, so each curve's
+        are one run"""
+        got   = []
+        whose = curve_of[spans]
+        keys  = (local[spans] + step).tolist()
+        cuts  = (np.flatnonzero(np.diff(whose)) + 1).tolist()
+        for lo, hi in zip([0, *cuts], [*cuts, len(keys)]):
+            got.extend(map(getattr(curves[whose[lo]], getter), keys[lo:hi]))
+        return got
+
+    # enum members, compared by identity rather than hashed one by one
+    kinds = np.array(read("KeyGetInterpolation", np.arange(len(key))), dtype=object)
+    # an interpolation the sdk does not know stays -1, and gives 0 as there
+    kind = np.full(len(key), -1, dtype=np.int8)
+    for member, code in interpolation:
+        kind[kinds == member] = code
+
+    # each span as a cubic in its own parameter u, 0 to 1 across the span:
+    # value = ((c3 u + c2) u + c1) u + c0, which holds constant and linear too
+    v0           = value[key]
+    v1           = value[key + 1]
+    coefficients = np.zeros((len(key), 4))
+
+    held = np.flatnonzero(kind == constant)
+    if len(held):
+        to_next               = np.array([mode == next_key for mode in read("KeyGetConstantMode", held)])
+        coefficients[held, 0] = np.where(to_next, v1[held], v0[held])
+
+    blend                  = np.flatnonzero(kind == linear)
+    coefficients[blend, 0] = v0[blend]
+    coefficients[blend, 1] = v1[blend] - v0[blend]
+
+    # a cubic span is a bezier, its handles weight * span along the key's
+    # right derivative and the next key's left one. Unweighted, the weights
+    # are a third and the bezier is this hermite
+    bent    = np.flatnonzero(kind == cubic)
+    seconds = (when[key + 1] - when[key]) / per_second
+    out_arm = np.zeros(len(key))
+    in_arm  = np.zeros(len(key))
+    w_right = np.full(len(key), 1.0 / 3.0)
+    w_left  = np.full(len(key), 1.0 / 3.0)
+    if len(bent):
+        out_arm[bent] = np.array(read("KeyGetRightDerivative", bent)) * seconds[bent]
+        in_arm[bent]  = np.array(read("KeyGetLeftDerivative", bent, 1)) * seconds[bent]
+        w_right[bent] = read("KeyGetRightTangentWeight", bent)
+        w_left[bent]  = read("KeyGetLeftTangentWeight", bent, 1)
+
+        a, b = v0[bent], v1[bent]
+        coefficients[bent, 0] = a
+        coefficients[bent, 1] = out_arm[bent]
+        coefficients[bent, 2] = 3.0 * (b - a) - 2.0 * out_arm[bent] - in_arm[bent]
+        coefficients[bent, 3] = 2.0 * (a - b) + out_arm[bent] + in_arm[bent]
+
+    first_tick = when[key][slot]
+    span_ticks = (when[key + 1] - when[key])[slot]
+    u          = (ticks[inside % len(ticks)] - first_tick) / span_ticks
+    c          = coefficients[slot]
+    result     = ((c[:, 3] * u + c[:, 2]) * u + c[:, 1]) * u + c[:, 0]
+
+    weighted = (kind == cubic) & (
+        (np.abs(w_right - 1.0 / 3.0) > 1e-6) | (np.abs(w_left - 1.0 / 3.0) > 1e-6)
+    )
+    points = np.flatnonzero(weighted[slot])
+    if len(points):
+        # the bezier's time runs 0, wr, 1 - wl, 1: solve it for each u. Both
+        # weights lie in 0..1, which keeps it rising
+        spans = slot[points]
+        wr, wl = w_right[spans], w_left[spans]
+        x  = u[points]
+        lo = np.zeros(len(points))
+        hi = np.ones(len(points))
+        for _ in range(60):
+            mid   = 0.5 * (lo + hi)
+            rest  = 1.0 - mid
+            below = 3.0 * rest * mid * (rest * wr + mid * (1.0 - wl)) + mid**3 < x
+            lo    = np.where(below, mid, lo)
+            hi    = np.where(below, hi, mid)
+
+        t    = 0.5 * (lo + hi)
+        rest = 1.0 - t
+        a, b = v0[spans], v1[spans]
+        p1 = a + wr * out_arm[spans]
+        p2 = b - wl * in_arm[spans]
+
+        result[points] = rest**3 * a + 3.0 * rest * t * (rest * p1 + t * p2) + t**3 * b
+
+    values.ravel()[inside] = result
+    return values, extrapolated
+
+
+def _fbx_euler_axes(order: int) -> tuple:
+    """the axes ``(i, j, k)`` and the parity the sdk's euler code (Shoemake's,
+    from Graphics Gems IV) gives an fbx rotate order. The sdk hands it the x,
+    y and z angles as they are, whatever the order, so a rotation blended by
+    layer comes out as an xyz node's blend for an even order and as a zyx
+    node's for an odd one, whose additive layer turns on the other side of
+    what is below (M(below) @ M(layer), both matrices of zyx angles, where
+    Maya gives M(layer) @ M(below) in the node's own order); only the
+    rounding, and so which way a tie breaks, follows the order"""
+    first = (0, 0, 1, 1, 2, 2)[order]
+    odd   = order % 2
+    after = (1, 2, 0, 1)
+    return first, after[first + odd], after[first + 1 - odd], odd
+
+
+def _fbx_turns(euler: np.ndarray, order: int) -> np.ndarray:
+    """(..., 4) quaternions, x y z w, of (..., 3) euler angles in degrees, as
+    the sdk builds them to blend rotations a layer at a time: the matrix of
+    the angles in the order's axes (:func:`_fbx_euler_axes`), then its
+    quaternion, solved for w when the trace is positive and otherwise for
+    the axis of the largest diagonal entry, the first of a tie; the
+    component solved for comes out positive. That sign is what sends an
+    additive layer's turn the long way round or not, so it is worked out
+    on the same terms the sdk works it out on"""
+    i, j, k, odd = _fbx_euler_axes(order)
+    angles = np.radians(np.asarray(euler, dtype=np.float64))
+    if odd:
+        angles = -angles
+    cos, sin = np.cos(angles), np.sin(angles)
+    ci, cj, ch = cos[..., 0], cos[..., 1], cos[..., 2]
+    si, sj, sh = sin[..., 0], sin[..., 1], sin[..., 2]
+    cc, cs = ci * ch, ci * sh
+    sc, ss = si * ch, si * sh
+
+    m            = np.empty(angles.shape[:-1] + (3, 3))
+    m[..., i, i] = cj * ch
+    m[..., i, j] = sj * sc - cs
+    m[..., i, k] = sj * cc + ss
+    m[..., j, i] = cj * sh
+    m[..., j, j] = sj * ss + cc
+    m[..., j, k] = sj * cs - sc
+    m[..., k, i] = -sj
+    m[..., k, j] = cj * si
+    m[..., k, k] = cj * ci
+
+    diagonal = np.stack([m[..., 0, 0], m[..., 1, 1], m[..., 2, 2]], axis=-1)
+    trace    = diagonal[..., 0] + diagonal[..., 1] + diagonal[..., 2]
+    largest  = np.where(diagonal[..., 1] > diagonal[..., 0], 1, 0)
+    reached  = np.take_along_axis(diagonal, largest[..., None], axis=-1)[..., 0]
+    largest  = np.where(diagonal[..., 2] > reached, 2, largest)
+
+    # every branch is worked out everywhere, and each frame keeps its own:
+    # a branch another frame takes can take a root of a negative number
+    with np.errstate(divide="ignore", invalid="ignore"):
+        root = np.sqrt(trace + 1.0)
+        half = 0.5 / root
+        q = np.stack(
+            [
+                (m[..., 2, 1] - m[..., 1, 2]) * half,
+                (m[..., 0, 2] - m[..., 2, 0]) * half,
+                (m[..., 1, 0] - m[..., 0, 1]) * half,
+                root * 0.5,
+            ],
+            axis=-1,
+        )
+        for a in range(3):
+            b, c = (a + 1) % 3, (a + 2) % 3
+            root = np.sqrt((m[..., a, a] - (m[..., b, b] + m[..., c, c])) + 1.0)
+            half = 0.5 / root
+            turn = np.empty_like(q)
+
+            turn[..., a] = root * 0.5
+            turn[..., b] = (m[..., a, b] + m[..., b, a]) * half
+            turn[..., c] = (m[..., c, a] + m[..., a, c]) * half
+            turn[..., 3] = (m[..., c, b] - m[..., b, c]) * half
+            q            = np.where(((trace <= 0.0) & (largest == a))[..., None], turn, q)
+    return q
+
+
+def _fbx_turn_product(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """the quaternion product a b, x y z w: b turns first, then a"""
+    ax, ay, az, aw = np.moveaxis(a, -1, 0)
+    bx, by, bz, bw = np.moveaxis(b, -1, 0)
+    return np.stack(
+        [
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz,
+        ],
+        axis=-1,
+    )
+
+
+def _fbx_slerp(a: np.ndarray, b: np.ndarray, t: np.ndarray, shortest: bool) -> np.ndarray:
+    """the sdk's spherical blend from ``a`` to ``b`` (x y z w) by ``t``, which
+    need not lie in 0..1; ``shortest`` turns ``b`` round when it is the long
+    way. The dot is summed as the sdk sums it, w first: when the two lie a
+    half turn apart its rounding is what picks the way round"""
+    dot = ((a[..., 3] * b[..., 3] + a[..., 0] * b[..., 0]) + a[..., 1] * b[..., 1]) + a[..., 2] * b[..., 2]
+    if shortest:
+        b   = np.where((dot < 0.0)[..., None], -b, b)
+        dot = np.abs(dot)
+    angle = np.arccos(np.clip(dot, -1.0, 1.0))
+    sine  = np.sin(angle)
+    t     = np.broadcast_to(t, dot.shape)
+    flat  = sine < 1e-12
+    safe  = np.where(flat, 1.0,     sine)
+    out   = np.where(flat, 1.0 - t, np.sin((1.0 - t) * angle) / safe)
+    into  = np.where(flat, t,       np.sin(t * angle) / safe)
+    return out[..., None] * a + into[..., None] * b
+
+
+# how far from 0 the cosine of the middle angle has to be for the sdk to
+# split the turn between the first and the last angle: 16 double epsilons
+_FBX_GIMBAL = 16.0 * np.finfo(np.float64).eps
+
+
+def _fbx_turns_to_euler(q: np.ndarray, order: int) -> np.ndarray:
+    """(..., 3) euler angles in degrees of quaternions, x y z w, as the sdk
+    reads a blended rotation back: from its matrix, in the order's axes
+    (:func:`_fbx_euler_axes`), the middle angle within -90..90. At gimbal,
+    where that angle's cosine is within :data:`_FBX_GIMBAL` of 0, the last
+    angle is 0 and the first takes the whole turn, as the sdk splits it:
+    measured on the sdk, a cosine of 3.3e-15 splits and one of 4.0e-15
+    does not. Short of it the first and last angles lose a few times 1e-16
+    / cos(middle angle) radians to the rounding (6.4 times at most,
+    measured), in the sdk as here, so a hair off gimbal the two agree only
+    to that. Within about 1e-15 of the split each side's rounding of the
+    cosine decides the branch -- the sdk's 4.1e-15 where this one is 3.2e-15
+    -- and there the two can be whole rotations apart"""
+    i, j, k, odd = _fbx_euler_axes(order)
+    x, y, z, w = np.moveaxis(np.asarray(q, dtype=np.float64), -1, 0)
+    norm = x * x + y * y + z * z + w * w
+    s    = np.where(norm > 0.0, 2.0 / np.where(norm > 0.0, norm, 1.0), 0.0)
+    xs, ys, zs = x * s, y * s, z * s
+    wx, wy, wz = w * xs, w * ys, w * zs
+    xx, xy, xz = x * xs, x * ys, x * zs
+    yy, yz, zz = y * ys, y * zs, z * zs
+
+    m            = np.empty(x.shape + (3, 3))
+    m[..., 0, 0] = 1.0 - (yy + zz)
+    m[..., 0, 1] = xy - wz
+    m[..., 0, 2] = xz + wy
+    m[..., 1, 0] = xy + wz
+    m[..., 1, 1] = 1.0 - (xx + zz)
+    m[..., 1, 2] = yz - wx
+    m[..., 2, 0] = xz - wy
+    m[..., 2, 1] = yz + wx
+    m[..., 2, 2] = 1.0 - (xx + yy)
+
+    cy     = np.sqrt(m[..., i, i] * m[..., i, i] + m[..., j, i] * m[..., j, i])
+    locked = cy <= _FBX_GIMBAL
+    first  = np.where(locked, np.arctan2(-m[..., j, k], m[..., j, j]), np.arctan2(m[..., k, j], m[..., k, k]))
+    middle = np.arctan2(-m[..., k, i], cy)
+    last   = np.where(locked, 0.0, np.arctan2(m[..., j, i], m[..., i, i]))
+    euler  = np.degrees(np.stack([first, middle, last], axis=-1))
+    return -euler if odd else euler
+
+
+def _fbx_held(curve_node, curve, axis: int) -> float:
+    """what the sdk takes for a channel with a curve node but no keys: the
+    curve node's own value, rounded to single precision when a curve is
+    there at all"""
+    held = curve_node.GetChannelValue(axis, 0.0)
+    if curve is not None:
+        held = float(np.float32(held))
+    return held
+
+
+def _fbx_layer_channel(layer, props, ticks, per_second: int) -> tuple:
+    """one layer's values of one channel (translation, rotation or scaling)
+    of every node, every frame at once: ``present`` (nodes,), whether the
+    layer holds a curve node for the node's channel, ``owned`` (nodes, 3),
+    the axes that curve node holds a channel for (an exporter can write a
+    curve node with fewer than three), and ``values`` (frames, nodes, 3), 0
+    where there is no curve node or no channel"""
+    present = np.zeros(len(props), dtype=bool)
+    owned   = np.zeros((len(props), 3), dtype=bool)
+    values  = np.zeros((len(ticks), len(props), 3))
+    curves  = []
+    targets = []
+    for column, prop in enumerate(props):
+        curve_node = typed(prop.GetCurveNode(layer), FBX.FbxAnimCurveNode, FBX)
+        if curve_node is None:
+            continue
+
+        present[column]                                = True
+        owned[column, : curve_node.GetChannelsCount()] = True
+        for axis in range(3):
+            curve = typed(curve_node.GetCurve(axis), FBX.FbxAnimCurve, FBX)
+            if curve is not None and curve.KeyGetCount():
+                curves.append(curve)
+                targets.append((column, axis))
+            else:
+                values[:, column, axis] = _fbx_held(curve_node, curve, axis)
+
+    # as many curves at a time as keep the working arrays, curves x frames,
+    # inside the budget however long the take
+    targets = np.array(targets, dtype=np.intp).reshape(-1, 2)
+    step    = max(1, _FBX_SAMPLE_BUDGET // len(ticks))
+    for begin in range(0, len(curves), step):
+        batch   = targets[begin : begin + step]
+        sampled = _fbx_sample_curves(curves[begin : begin + step], ticks, per_second)
+        # each curve's frames to its node and axis
+        values[:, batch[:, 0], batch[:, 1]] = sampled.T
+    return present, owned, values
+
+
+def _fbx_layer_weight(layer, ticks, per_second: int) -> np.ndarray:
+    """(frames,) a layer's weight, in percent: its own curve, the one its
+    Weight property holds in the layer itself, or its value"""
+    curve_node = typed(layer.Weight.GetCurveNode(layer), FBX.FbxAnimCurveNode, FBX)
+    if curve_node is None:
+        return np.full(len(ticks), float(layer.Weight.Get()))
+
+    curve = typed(curve_node.GetCurve(0), FBX.FbxAnimCurve, FBX)
+    if curve is not None and curve.KeyGetCount():
+        return _fbx_sample_curves([curve], ticks, per_second)[0]
+    return np.full(len(ticks), _fbx_held(curve_node, curve, 0))
+
+
+def _fbx_blend(
+    layer,
+    channel: int,
+    below:   np.ndarray,
+    values:  np.ndarray,
+    weight:  np.ndarray,
+    orders:  np.ndarray,
+    owned:   np.ndarray,
+) -> np.ndarray:
+    """a layer's ``values`` (frames, nodes, 3) of one channel over what the
+    layers ``below`` it hold, as the sdk blends them
+
+    ``weight`` is the layer's (frames,) in percent and need not lie in
+    0..100. Additive adds weight x values, override takes weight x values,
+    passthrough mixes the two by the weight. Scaling multiplies by default:
+    additive by values ** weight, override takes values ** weight,
+    passthrough below ** (1 - weight) x values ** weight, every term
+    unsigned, as the sdk takes them. Rotation by layer (the default) blends
+    quaternions built as the sdk builds them for each node's fbx rotate
+    order (``orders``, see :func:`_fbx_turns`), which blend as an xyz node's
+    for an even order and as a zyx node's for an odd one, an additive layer
+    then turning on the other side of what is below
+    (:func:`_fbx_euler_axes`): additive turns by the layer's rotation scaled
+    by the weight, the long way round when that is how its quaternion comes
+    out, after what is below; passthrough is the shortest spherical blend;
+    override takes the layer's rotation, whatever the weight. The blend is
+    read back as the sdk reads it, gimbal included
+    (:func:`_fbx_turns_to_euler`). By channel, rotation blends angle by
+    angle. A layer whose blend mode is bypassed for double3 values
+    overrides.
+
+    An axis the layer's curve node holds no channel for (``owned`` (nodes,
+    3) False) keeps what is below, as the sdk keeps it, except in a
+    rotation blended by layer, which reads it as 0 as the sdk does.
+    """
+    mode = int(layer.BlendMode.Get())
+    if layer.GetBlendModeBypass(_fbx_enum(FBX, "EFbxType", "eFbxDouble3")):
+        mode = 1
+    additive, override = mode == 0, mode == 1
+    w = (weight / 100.0)[:, None, None]
+
+    if channel == 1 and int(layer.RotationAccumulationMode.Get()) == 0:
+        # one pass per rotate order the nodes hold, every frame at once
+        blended = np.empty_like(values)
+        for order in np.unique(orders).tolist():
+            nodes = orders == order
+            under = _fbx_turns(below[:, nodes], order)
+            turns = _fbx_turns(values[:, nodes], order)
+            if override:
+                turned = turns
+            elif additive:
+                identity         = np.zeros_like(turns)
+                identity[..., 3] = 1.0
+                scaled           = _fbx_slerp(identity, turns, w[..., 0], shortest=False)
+                turned           = _fbx_turn_product(under, scaled)
+            else:
+                turned = _fbx_slerp(under, turns, w[..., 0], shortest=True)
+            blended[:, nodes] = _fbx_turns_to_euler(turned, order)
+        return blended
+
+    if channel == 2 and int(layer.ScaleAccumulationMode.Get()) == 0:
+        # a zero scaling to a negative power is infinite, in the sdk too
+        with np.errstate(divide="ignore", invalid="ignore"):
+            if additive:
+                out = np.abs(below) * np.abs(values) ** w
+            elif override:
+                out = np.abs(values) ** w
+            else:
+                out = np.abs(below) ** (1.0 - w) * np.abs(values) ** w
+    elif additive:
+        out = below + w * values
+    elif override:
+        out = w * values
+    else:
+        out = (1.0 - w) * below + w * values
+    return np.where(owned[None], out, below)
+
+
+def _fbx_sample_take(stack, sampled, ticks, scale_factor: float, blocks) -> None:
+    """the current take's local channels of ``sampled`` ((node, column) pairs)
+    on the ``ticks`` grid, written into ``blocks`` (translate, rotate, scale,
+    each frames x nodes x 3)
+
+    The curves of every node are evaluated together, every frame at once,
+    and the take's animation layers blended over them as the sdk blends
+    them: from the first layer that is not muted and holds anything (a
+    muted or empty one below it does not count), each later layer that is
+    not muted over it, by its weight, blend mode and accumulation modes
+    (:func:`_fbx_blend`); solo changes nothing. A node's channel the first
+    layer holds no curve node for starts from 0 under the later ones. A
+    channel no layer holds a curve node for keeps the rest pose ``blocks``
+    already hold, the same value the sdk hands back.
+
+    A rotation blended by layer is rebuilt from quaternions, each frame on
+    its own, as the sdk rebuilds it, so its curve goes through
+    euler_filter in the node's rotate order, frame 0 as the sdk gives it,
+    where the sdk's curve can step by a whole turn or flip near gimbal. A
+    curve no such layer touches keeps the branches the file holds.
+    """
+    criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimLayer.ClassId)
+    layers   = [stack.GetSrcObject(criteria, i) for i in range(stack.GetSrcObjectCount(criteria))]
+    layers   = [typed(layer, FBX.FbxAnimLayer, FBX) for layer in layers]
+    layers   = [layer for layer in layers if not layer.Mute.Get()]
+    while layers and not layers[0].GetMemberCount():
+        layers.pop(0)
+    if not layers or not sampled:
+        return
+
+    per_second = _fbx_ticks_per_second()
+    columns    = np.array([index for _, index in sampled], dtype=np.intp)
+    weights    = [_fbx_layer_weight(layer, ticks, per_second) for layer in layers[1:]]
+    source     = _fbx_enum(FBX.FbxNode, "EPivotSet", "eSourcePivot")
+    orders     = [node.GetRotationOrder(source) for node, _ in sampled]
+    orders     = np.array([int(getattr(order, "value", order)) for order in orders])
+
+    channels   = (("LclTranslation", scale_factor), ("LclRotation", 1.0), ("LclScaling", 1.0))
+    for channel, (name, factor) in enumerate(channels):
+        props = [getattr(node, name) for node, _ in sampled]
+        keyed, _, blended = _fbx_layer_channel(layers[0], props, ticks, per_second)
+        rebuilt = np.zeros(len(sampled), dtype=bool)
+        for layer, weight in zip(layers[1:], weights):
+            present, owned, values = _fbx_layer_channel(layer, props, ticks, per_second)
+            if present.any():
+                blended[:, present] = _fbx_blend(
+                    layer,
+                    channel,
+                    blended[:, present],
+                    values[:, present],
+                    weight,
+                    orders[present],
+                    owned[present],
+                )
+                keyed |= present
+                if channel == 1 and int(layer.RotationAccumulationMode.Get()) == 0:
+                    rebuilt |= present
+
+        if rebuilt.any():
+            rotate_orders       = np.array([_FBX_ROTATE_ORDERS[order] for order in orders.tolist()])
+            blended[:, rebuilt] = _filtered(blended[:, rebuilt], rotate_orders[rebuilt])
+        if keyed.any():
+            blocks[channel][:, columns[keyed]] = blended[:, keyed] * factor
 
 
 # a uuid, name or parent_node the rig index can key on
@@ -6307,9 +7091,89 @@ class ClipData(HierarchyData):
         folded in joint orient, rotate axis and the inherit type, so pulling
         euler angles back out of it would not give the curves the file holds.
 
-        Nothing is euler filtered here, unlike the glb path. Fbx stores euler
-        curves, so the branches are the ones the file was authored with and
-        rewriting them would change the animation.
+        The curves the file holds are not euler filtered, unlike the glb
+        path. Fbx stores euler curves, so the branches are the ones the file
+        was authored with and rewriting them would change the animation. A
+        rotation an animation layer blends by layer is rebuilt from
+        quaternions frame by frame, by the sdk as here, so that curve goes
+        through euler_filter in the node's rotate order, frame 0 as the sdk
+        gives it.
+
+        Every frame is sampled at once: each curve's keys are read once and
+        evaluated on the frame grid the way the sdk evaluates them, the same
+        values on keys and to the sdk's single precision rounding between
+        them, past them too where a curve repeats, mirrors or repeats with
+        an offset (Maya's cycle with offset); keep slope holds the end key,
+        or carries its slope on when its count is 2**32 - 1, as Maya writes
+        it, as this sdk evaluates it, which one evaluation of the curve
+        checks (an sdk that evaluates it otherwise raises ValueError). The
+        one exception between keys is a weighted span whose two handles
+        crowd one end (one weight at most about 0.01, the other about 0.88
+        or more, the smaller the one the lower the other), where the sdk's
+        own time solve stops short of the exact one taken here, by up to
+        0.55 of the curve's range; Maya's own import gives the values taken
+        here, and there the loader follows Maya, not the sdk. The take's
+        animation layers are blended here as the sdk blends them: from the
+        first layer that is not muted and holds anything, a channel it holds
+        no curve node for starting from 0, scaling too, then each later one
+        that is not muted by its weight (animated or not), blend mode,
+        rotation and scaling accumulation; a channel no live layer holds
+        keeps the rest pose. A rotation blended a hair off gimbal agrees to
+        a few times 1e-16 / cos(middle angle) radians, the rounding either
+        side loses there; within about 1e-15 of the cosine the sdk splits
+        the turn at, each side's rounding picks the branch, and the two can
+        be whole rotations apart. No frame is asked of the sdk.
+
+        Maya's own evaluation of a take differs from the sdk's, and so from
+        the clip, where:
+
+        - a rotation is blended by layer on a node whose rotate order is not
+          xyz: the sdk hands the x, y and z angles to its euler code as they
+          are, so an even order (yzx, zxy) blends as an xyz node does and an
+          odd one (xzy, yxz, zyx) as the sdk blends a zyx node, whose additive
+          layer turns on the other side of what is below: M(below) @ M(layer),
+          both matrices of zyx angles, where Maya gives M(layer) @ M(below) in
+          the node's own order. Maya blends every node in its own order the
+          way it blends xyz. Additive layers agree only on xyz (but for the
+          sign cases below), passthrough layers on xyz and zyx; the others
+          are up to 2.0 apart as matrices;
+        - an additive layer blends a rotation by layer at a weight other than
+          0 or 100, and the quaternion Maya builds from the layer's angles
+          (qz qy qx of the half angles on an xyz node) has the other sign
+          from the one the sdk solves from its matrix: the scaled turn goes
+          round the other way (up to 2.0 apart as matrices, in every rotate
+          order, xyz included). The sdk's w is positive on every turn under
+          120 degrees, so such a turn parts whenever Maya's w is negative:
+          an angle keyed past 180 (a 20 degree turn keyed as (380, 0, 0) is
+          1.9 apart at weight 50) or all three angles near +-180 (a 40 degree
+          turn Maya keyed as (150.4, 154.1, -176.7) is 1.5 apart). Over 120
+          degrees either sign can come out;
+        - a rotation is overridden by layer at a weight under 100: the sdk
+          takes the layer's rotation whatever the weight, and Maya weighs it
+          (0.86 apart as matrices at weight 50);
+        - a negative scale is multiplied by a layer: the sdk takes every
+          term unsigned, and Maya keeps the sign (1.6 apart in scale on
+          Maya's own export);
+        - the first live layer holds no curve node for a channel a later layer
+          holds: the sdk starts it from 0, and Maya does not (0.82 units apart
+          in translation, 1.94 in scale);
+        - a layer is soloed: solo changes nothing here, and Maya honours it;
+        - the base layer is muted: it is skipped here, but Maya's exporter
+          does not write that mute, so a Maya take whose base layer is muted
+          loads with it playing;
+        - a curve has weighted tangents: Maya's exporter does not write them
+          as the scene holds them, so between keys a Maya export loads up to
+          about 2.5e-2 of the curve's range off what Maya showed (over 5e-3 on
+          7 of 72 test exports, whatever the infinity); Maya's own import of
+          the file gives the clip's values;
+        - the curve has linear infinity: past the keys the clip carries on
+          along the end key's derivative as the file holds it, where Maya
+          follows the key's outer tangent. Unweighted spline, clamped, flat,
+          stepped, plateau and auto tangents agree; linear, fixed and every
+          weighted tangent do not (up to 158 units 48 frames out on Maya's
+          own exports). A weighted one on no layer is the export again:
+          Maya's own import of it carries on past the keys as the clip does,
+          but for linear and stepped tangents.
 
         ``take`` defaults to the first one that was actually keyed rather than
         to index 0, because a file can carry takes holding no curves at all
@@ -6339,7 +7203,9 @@ class ClipData(HierarchyData):
             if not count:
                 return cls(rig, frames=1, start_frame=start_frame or 0, fps=fps or 24.0)
 
-            stacks = [scene.GetSrcObject(criteria, index) for index in range(count)]
+            # typed: the binding can hand back a live wrapper of an earlier
+            # scene's object for one that sits where it did
+            stacks = [typed(scene.GetSrcObject(criteria, index), FBX.FbxAnimStack, FBX) for index in range(count)]
 
             if take is None:
                 stack = next((x for x in stacks if _fbx_has_curves(x)), stacks[0])
@@ -6385,23 +7251,11 @@ class ClipData(HierarchyData):
             rotate    = np.array(clip.frames.rotate)
             translate = np.array(clip.frames.translate)
 
-            for frame in range(clip.frame_count):
-                time = FBX.FbxTime()
-                time.SetSecondDouble((start + frame) / fps)
-
-                for node, index in sampled:
-                    values = node.EvaluateLocalTranslation(time)
-                    translate[frame, index] = (
-                        values[0] * scale_factor,
-                        values[1] * scale_factor,
-                        values[2] * scale_factor,
-                    )
-
-                    values               = node.EvaluateLocalRotation(time)
-                    rotate[frame, index] = (values[0], values[1], values[2])
-
-                    values               = node.EvaluateLocalScaling(time)
-                    scale[frame, index]  = (values[0], values[1], values[2])
+            # the frame grid in the sdk's ticks, every frame sampled at once
+            ticks = _fbx_ticks(
+                (start + np.arange(clip.frame_count)) / fps, _fbx_ticks_per_second()
+            )
+            _fbx_sample_take(stack, sampled, ticks, scale_factor, (translate, rotate, scale))
 
         clip.frames.scale     = scale
         clip.frames.rotate    = rotate
