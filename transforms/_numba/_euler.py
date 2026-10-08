@@ -154,3 +154,68 @@ def _euler_to_quaternion(euler, axes):
             quat[ii, j] = -quat[ii, j]
 
     return quat
+
+
+@njit(parallel=True, cache=True)
+def _euler_filter(euler, middle):
+    """Filters (frames, curves, 3) euler angles along the frames, in place.
+
+    The curves are shared out between threads; within a curve the frames run
+    in order, since each one depends on the frame before it, filtered. A
+    frame is replaced by whichever of its two representations, slid onto
+    the turn nearest the frame before, moves the least. The other
+    representation turns every axis by half a turn and reflects the
+    ``middle`` one of the curve's rotate order. The cost sums the axes, left
+    to right, as maya's filterCurve does; on a tie the frame keeps its own
+    representation.
+
+    A frame holding a nan or an inf on any axis is a gap: it is left as it
+    is, and the next finite frame is filtered against the last finite one,
+    so one bad key stays on its own frame instead of turning every later
+    key of its curve into nan. The first finite frame is kept as given.
+
+    No fastmath: on finite frames every step is the arithmetic numpy did
+    when this was a loop over frames, so the result is bit for bit the same.
+    """
+    turn = 2.0 * np.pi
+    for c in prange(euler.shape[1]):
+        reflect = middle[c]
+        kept    = np.empty(3, dtype=euler.dtype)
+        flipped = np.empty(3, dtype=euler.dtype)
+        last    = -1  # the last finite frame, filtered
+        for f in range(euler.shape[0]):
+            finite = True
+            for axis in range(3):
+                if not np.isfinite(euler[f, c, axis]):
+                    finite = False
+            if not finite:
+                continue
+            if last < 0:
+                last = f
+                continue
+
+            kept_cost    = 0.0
+            flipped_cost = 0.0
+            for axis in range(3):
+                previous = euler[last, c, axis]
+                current  = euler[f, c, axis]
+                if axis == reflect:
+                    other = np.pi - current
+                else:
+                    other = current + np.pi
+
+                kept[axis]    = current + turn * np.rint((previous - current) / turn)
+                flipped[axis] = other + turn * np.rint((previous - other) / turn)
+                kept_cost    += abs(kept[axis] - previous)
+                flipped_cost += abs(flipped[axis] - previous)
+
+            # numpy's argmin: the first minimum wins, and a nan counts as one
+            if flipped_cost < kept_cost or (
+                np.isnan(flipped_cost) and not np.isnan(kept_cost)
+            ):
+                for axis in range(3):
+                    euler[f, c, axis] = flipped[axis]
+            else:
+                for axis in range(3):
+                    euler[f, c, axis] = kept[axis]
+            last = f

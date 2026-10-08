@@ -794,8 +794,13 @@ def euler_filter(euler, axes):
 
     Motion faster than half a turn per frame cannot be recovered, being
     indistinguishable from the same motion running backwards.
+
+    A frame holding a nan or an inf on any axis is left as it is, and the
+    next finite frame is filtered against the last finite one, so a single
+    degenerate key -- a rotate rebuilt from a matrix scaled to zero -- stays
+    on its own frame rather than spreading to the rest of its curve.
     """
-    from cgmath.transforms._numba._euler import MAYA_EA
+    from cgmath.transforms._numba._euler import MAYA_EA, _euler_filter
 
     euler = _set_dimension(euler, 2)
     if euler.shape[-1] != 3:
@@ -823,29 +828,19 @@ def euler_filter(euler, axes):
             f"be length {count} or 1"
         ) from None
 
-    middle = MAYA_EA[per_curve][:, 1]
-    rows   = np.arange(count)
+    middle = MAYA_EA[per_curve, 1]
 
-    out = curves.copy()
-    for f in range(1, frames):
-        previous = out[f - 1]
-        current  = curves[f]
-
-        flipped               = current + np.pi
-        flipped[rows, middle] = np.pi - current[rows, middle]
-
-        # both candidates slide onto the turn nearest the previous frame,
-        # then the shorter move wins. summing the axes rather than squaring
-        # them is what maya's filterCurve does: cgmath's
-        # _tests/test_euler_maya.py checks it against maya 2025 on every key
-        # of 222 curves (_tests/test_assets/maya_euler.npz). the two costs
-        # can pick differently on a step of under a degree near gimbal; with
-        # the middle axis 20 or more degrees from +-90, only once the pose
-        # moves 20 degrees or more in a frame
-        candidates = np.stack((current, flipped))
-        candidates += 2.0 * np.pi * np.round((previous - candidates) / (2.0 * np.pi))
-        cost   = np.abs(candidates - previous).sum(axis=-1)
-        out[f] = candidates[np.argmin(cost, axis=0), rows]
+    # both candidates slide onto the turn nearest the previous frame, then
+    # the shorter move wins. summing the axes rather than squaring them is
+    # what maya's filterCurve does: cgmath's _tests/test_euler_maya.py checks
+    # it against maya 2025 on every key of 222 curves
+    # (_tests/test_assets/maya_euler.npz). the two costs can pick
+    # differently on a step of under a degree near gimbal; with the middle
+    # axis 20 or more degrees from +-90, only once the pose moves 20 degrees
+    # or more in a frame. the kernel solves every curve at once and filters
+    # in place, so it gets a copy the caller never sees
+    out = np.array(curves, dtype=np.float64, order="C", copy=True)
+    _euler_filter(out, middle)
 
     return out.reshape(shape)
 

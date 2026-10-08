@@ -1,5 +1,7 @@
+import sys
 import unittest
 
+import numba
 import numpy as np
 from cgmath.transforms import (
     euler_filter,
@@ -218,3 +220,187 @@ class TestEulerFilter(unittest.TestCase):
         for euler in (np.zeros((1, 3)), np.zeros(3)):
             with self.assertRaises(ValueError):
                 euler_filter(euler, 6)
+
+
+def frame_by_frame(euler, axes):
+    """The reference: euler_filter as it was before its kernel, one frame at
+    a time, each frame batched over the curves. That loop is the one checked
+    key for key against maya's filterCurve, every rotate order."""
+    euler  = np.asarray(euler, dtype=float)
+    curves = euler.reshape(len(euler), -1, 3)
+    rows   = np.arange(curves.shape[1])
+    middle = np.asarray(MIDDLE_AXIS)[np.broadcast_to(axes, rows.shape)]
+
+    out = curves.copy()
+    for f in range(1, len(curves)):
+        previous = out[f - 1]
+        current  = curves[f]
+
+        flipped               = current + np.pi
+        flipped[rows, middle] = np.pi - current[rows, middle]
+
+        candidates = np.stack((current, flipped))
+        candidates += 2.0 * np.pi * np.round((previous - candidates) / (2.0 * np.pi))
+        cost   = np.abs(candidates - previous).sum(axis=-1)
+        out[f] = candidates[np.argmin(cost, axis=0), rows]
+
+    return out.reshape(euler.shape)
+
+
+def decomposed(frames, count, step, seed=RANDOM_SEED):
+    """(frames, count, 3) rotates rebuilt from matrices, and their rotate
+    orders: a random walk of up to ``step`` degrees a frame on every axis,
+    decomposed frame by frame in each curve's own order, so the curves jump
+    from branch to branch the way a clip op's rebuilt rotate does"""
+    rng     = np.random.default_rng(seed)
+    orders  = np.arange(count) % 6
+    steps   = rng.uniform(-step, step, (frames, count, 3))
+    walk    = np.radians(np.cumsum(steps, axis=0))
+    matrix  = euler_to_matrix(walk.reshape(-1, 3), 0)
+    rebuilt = matrix_to_euler(matrix, np.tile(orders, frames))
+    return rebuilt.reshape(frames, count, 3), orders
+
+
+class TestEulerFilterKernel(unittest.TestCase):
+    """euler_filter filters every curve in one numba kernel, frames in order
+    within each curve, and must give back exactly what the frame loop did."""
+
+    def assertSameAsFrameByFrame(self, euler, axes):
+        filtered  = euler_filter(euler, axes)
+        reference = frame_by_frame(euler, axes)
+        first     = np.asarray(euler)[0]
+        self.assertTrue(np.array_equal(filtered, reference, equal_nan=True))
+        self.assertTrue(np.array_equal(filtered[0], first, equal_nan=True))
+        return filtered
+
+    def testMatchesTheFrameByFrameFilterBitForBit(self):
+        # slow and fast motion: from 4 degrees a frame up to past half a turn
+        for step in (4.0, 25.0, 60.0, 110.0, 170.0, 240.0):
+            euler, orders = decomposed(120, 60, step)
+            self.assertSameAsFrameByFrame(euler, orders)
+
+    def testMatchesTheFrameByFrameFilterOnAClip(self):
+        """a clip's rotate block, (frames, nodes, 3), any rotate order per node"""
+        rng = np.random.default_rng(RANDOM_SEED)
+        for frames in (47, 300):
+            euler, _ = decomposed(frames, 271, 4.0, seed=frames)
+            orders = rng.integers(0, 6, 271)
+            self.assertSameAsFrameByFrame(euler, orders)
+
+    def testMatchesTheFrameByFrameFilterFarFromZero(self):
+        """whole turns added at random to every key, starting far outside
+        -180..180"""
+        rng = np.random.default_rng(RANDOM_SEED)
+        euler, ax = decomposed(90, 30, 40.0)
+        turns = rng.integers(-3, 4, euler.shape) * 2.0 * np.pi
+        self.assertSameAsFrameByFrame(euler + turns + np.radians(1000.0), ax)
+
+    def testMatchesTheFrameByFrameFilterOnALongCurve(self):
+        euler, _ = decomposed(5000, 1, 60.0)
+        for axes in range(6):
+            self.assertSameAsFrameByFrame(euler, axes)
+
+    def testKeepsTheFrameOnATie(self):
+        """with the middle axis at 90 degrees both representations can move
+        exactly as far: the frame keeps its own, as filterCurve does"""
+        for axes in range(6):
+            euler    = np.zeros((2, 3))
+            euler[0] = np.pi / 2.0
+            euler[:, MIDDLE_AXIS[axes]] = np.pi / 2.0
+            filtered = self.assertSameAsFrameByFrame(euler, axes)
+            self.assertTrue(np.array_equal(filtered[1], euler[1]))
+
+    def testLeavesANonFiniteKeyOnItsOwnFrame(self):
+        """a frame holding a nan or an inf is a gap: it stays as it is, and
+        the frames after it filter as if it were not there. The frame loop
+        carried a nan to every later key of its curve, which turned a whole
+        clip curve into nan after one degenerate frame (a joint scaled to 0)"""
+        euler, orders = decomposed(30, 12, 30.0)
+        euler[5, 2, 0]  = np.nan
+        euler[9, 7, 1]  = np.inf
+        euler[0, 4, 2]  = -np.inf  # a gap on the first frame
+        euler[:3, 5, 1] = np.nan   # leading gaps: the first finite frame is kept
+        euler[4:7, 8]   = np.inf   # a run of gaps
+        euler[:, 10, 0] = np.nan   # nothing finite at all
+        euler[1:, 11]   = np.nan   # one finite frame, the first
+
+        filtered  = euler_filter(euler, orders)
+
+        reference = euler.copy()
+        for c in range(euler.shape[1]):
+            finite = np.flatnonzero(np.isfinite(euler[:, c]).all(axis=-1))
+            if len(finite):
+                reference[finite, c] = frame_by_frame(euler[finite, c], orders[c])
+        self.assertTrue(np.array_equal(filtered, reference, equal_nan=True))
+
+        # the gaps are left exactly as given, nan, inf and -inf alike
+        gaps = ~np.isfinite(euler)
+        self.assertTrue(np.array_equal(filtered[gaps], euler[gaps], equal_nan=True))
+        self.assertTrue(np.isfinite(filtered[:, 2, 0][6:]).all())
+
+    def testFiltersAcrossAGap(self):
+        """a flipped key right after a nan is filtered against the last
+        finite key: (190, 170, -170) in xyz is (10, 10, 10)"""
+        euler = np.radians(
+            [[0.0, 0.0, 0.0], [np.nan, 5.0, 5.0], [190.0, 170.0, -170.0], [15.0, 15.0, 15.0]]
+        )
+        filtered = np.degrees(euler_filter(euler, 0))
+        self.assertTrue(np.isnan(filtered[1, 0]))
+        np.testing.assert_allclose(filtered[1, 1:], [5.0, 5.0],         atol=1e-12)
+        np.testing.assert_allclose(filtered[2],     [10.0, 10.0, 10.0], atol=1e-12)
+        np.testing.assert_allclose(filtered[3],     [15.0, 15.0, 15.0], atol=1e-12)
+
+    def testSolvesEveryFrameAtOnce(self):
+        """no python work per frame: the python calls one euler_filter makes
+        do not grow with the frame count"""
+        def calls(euler, axes):
+            count = [0]
+
+            def profile(frame, event, arg):
+                count[0] += 1
+
+            euler_filter(euler, axes)  # numba loads the kernel on its first call
+            previous = sys.getprofile()
+            sys.setprofile(profile)
+            try:
+                euler_filter(euler, axes)
+            finally:
+                sys.setprofile(previous)
+            return count[0]
+
+        short, orders = decomposed(8, 20, 30.0)
+        long, _ = decomposed(800, 20, 30.0)
+        self.assertEqual(calls(short, orders), calls(long, orders))
+
+    def testLeavesItsInputAlone(self):
+        """the kernel filters in place, on a copy of its own"""
+        euler, orders = decomposed(40, 10, 110.0)
+        before   = euler.copy()
+
+        filtered = euler_filter(euler, orders)
+
+        self.assertTrue(np.array_equal(euler, before))
+        self.assertFalse(np.shares_memory(filtered, euler))
+        self.assertFalse(np.array_equal(filtered, euler))
+
+    def testAnyMemoryLayout(self):
+        euler, orders = decomposed(40, 10, 110.0)
+        expected   = euler_filter(euler, orders)
+
+        transposed = np.ascontiguousarray(euler.transpose(1, 0, 2)).transpose(1, 0, 2)
+        fortran    = np.asfortranarray(euler)
+        strided    = np.repeat(euler, 2, axis=-1)[..., ::2]
+        for view in (transposed, fortran, strided):
+            self.assertTrue(np.array_equal(view, euler))
+            self.assertTrue(np.array_equal(euler_filter(view, orders), expected))
+
+    def testOneThreadOrMany(self):
+        euler, orders = decomposed(60, 48, 110.0)
+        threads = numba.get_num_threads()
+        many    = euler_filter(euler, orders)
+        numba.set_num_threads(1)
+        try:
+            one = euler_filter(euler, orders)
+        finally:
+            numba.set_num_threads(threads)
+        self.assertTrue(np.array_equal(one, many))
