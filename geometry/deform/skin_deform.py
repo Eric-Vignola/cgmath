@@ -35,6 +35,7 @@ The numba-accelerated kernels backing this class live in
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional, TYPE_CHECKING
@@ -48,6 +49,90 @@ if TYPE_CHECKING:
     # during cgmath.geometry.__init__, and hierarchy imports back into a
     # partially initialized cgmath.geometry via formats.glb.
     from cgmath.hierarchy import HierarchyData
+
+
+# ============================= posed rigs ================================= #
+
+
+class _BoundFrame:
+    """The frame a ClipData is bound to, shaped as a one-frame clip.
+
+    It holds exactly what the clip's batched evaluator reads -- the channel
+    blocks, the node list and the parent lookup -- with every block cut to
+    the bound row, so reading one frame costs one frame rather than the
+    whole clip.  The alternative, ``clip.world_matrix``, solves node by node
+    and is about ten times slower on a few hundred joints: 9.5 ms against
+    1.0 ms for 271.  The clip's own one-span read, ``_span_world``, builds
+    the local matrices from their factors and lands within 1e-14 of the
+    nodes' world matrices; this goes through the evaluator that mirrors
+    ``TransformData.matrix`` factor for factor, so a frame skinned here is
+    bit for bit the frame skinned through its nodes.
+
+    A node put back in the clip from elsewhere -- ``clip[i] = rig[i]``, a
+    copy -- keeps its own channels rather than a row of the blocks, and the
+    clip does not own it: the bound frame is then read from the nodes
+    themselves, each read once, as the nodes would answer.
+    """
+
+    def __init__(self, clip):
+        from cgmath.hierarchy.hierarchy import _PoseFrame
+
+        if all(node._hierarchy is clip for node in clip.list):
+            row          = slice(clip.frame, clip.frame + 1)
+            self._blocks = {name: block[row] for name, block in clip._blocks.items()}
+        else:
+            self._blocks = _PoseFrame(clip.list)._blocks
+        self.list            = clip.list
+        self._parent_indices = clip._parent_indices
+
+    def _realign(self) -> None:
+        """the frame is cut from a clip already lined up with its nodes"""
+
+
+@contextmanager
+def _one_thread():
+    """Runs numba's parallel kernels on the calling thread alone.
+
+    One frame of a few hundred joints is microseconds of work, less than
+    waking every core for each kernel: 1.0 ms against 1.2 to 1.3 ms on a
+    quiet machine for 271 joints.  On a machine other processes keep busy,
+    each kernel can also wait a whole scheduler slice for its slowest
+    thread, hundreds of milliseconds.
+    """
+    import numba
+
+    count = numba.get_num_threads()
+    numba.set_num_threads(1)
+    try:
+        yield
+    finally:
+        numba.set_num_threads(count)
+
+
+def _world_matrices(pose) -> tuple:
+    """``(names, world)`` for a posed skeleton, one name per world matrix.
+
+    ``world`` is ``(N, 4, 4)`` for one pose -- a rig, or a ClipData at its
+    bound frame -- and ``(F, N, 4, 4)`` for a clip's frame axis
+    (``clip.frames``, or one scoped to some of its nodes).  A clip is read
+    from its blocks in one batched evaluation, never node by node.
+    """
+    # imported here, not at module scope: see the TYPE_CHECKING note above
+    from cgmath.hierarchy.hierarchy import ClipData, _FrameAxis
+
+    if isinstance(pose, _FrameAxis):
+        # a scoped axis reads back its own columns, in the order it holds them
+        world = pose.world_matrix
+        names = [node.name for node in pose._nodes()]
+        return names, np.asarray(world, dtype=np.float64)
+
+    if isinstance(pose, ClipData) and pose.frame_count:
+        clip = pose.frames._clip  # .frames realigns the blocks with the nodes
+        with _one_thread():
+            world = _FrameAxis(_BoundFrame(clip)).world_matrix[0]
+        return list(clip.name), np.asarray(world, dtype=np.float64)
+
+    return list(pose.name), np.asarray(pose.world_matrix, dtype=np.float64)
 
 
 # ============================ DeformMethod ================================ #
@@ -86,16 +171,18 @@ class SkinDeformData(Data):
         deformer = SkinDeformData(mesh, skin, bind_rig=rig)
         posed = deformer.apply(rig, mesh)      # -> a new MeshData
 
-    Rendering a sequence, hoisting everything that does not change per frame::
+    Every frame of a clip at once, in one kernel call rather than one call
+    per frame::
 
-        deformer.bind()
-        cols = deformer.pose_indices(clip)
-        world = clip.frames.world_matrix       # (F, N, 4, 4), one evaluation
+        sequence = deformer.apply(clip.frames)  # (F, N, 3)
 
-        for f in range(clip.frame_count):
-            # target is the BIND mesh every frame -- feeding obj.mesh back in
-            # would deform the previous frame's result and compound
-            obj.mesh = deformer.apply(world[f, cols], mesh)
+        # the same from world matrices already in hand, e.g. a chunk of them
+        cols     = deformer.pose_indices(clip)
+        world    = clip.frames.world_matrix     # (F, N, 4, 4), one evaluation
+        sequence = deformer.apply(world[:, cols])
+
+    Every frame deforms the BIND points: feeding a posed mesh back in would
+    deform the previous frame's result and compound.
     """
 
     rest_points:           Optional[Array(np.float64, "N", 3)] = None
@@ -138,7 +225,8 @@ class SkinDeformData(Data):
             skin: :class:`SkinData` or :class:`CompactSkinData` holding the
                 per-vertex weights and their influence names.
             bind_rig: Bind-pose skeleton, used to derive the inverse bind
-                matrices when *inverse_bind_matrices* is not supplied.
+                matrices when *inverse_bind_matrices* is not supplied.  A
+                :class:`ClipData` binds at the frame it is on.
             inverse_bind_matrices: ``(J, 4, 4)`` authored matrices, ordered to
                 *joints*.  Preferred over *bind_rig*: a file's matrices can
                 encode a transform the bind pose alone cannot reproduce.
@@ -179,11 +267,13 @@ class SkinDeformData(Data):
             ibm                        = np.asarray(inverse_bind_matrices, dtype=np.float64)
             self.inverse_bind_matrices = np.ascontiguousarray(ibm.reshape(-1, 4, 4))
         elif bind_rig is not None:
-            world = np.asarray(bind_rig.world_matrix, dtype=np.float64)
-            cols  = self.pose_indices(bind_rig)
-            self.inverse_bind_matrices = np.ascontiguousarray(
-                np.linalg.inv(world[cols])
-            )
+            world = self._posed_world(bind_rig)
+            if world.ndim != 3:
+                raise ValueError(
+                    "bind_rig must hold one pose -- a rig, or a ClipData at its "
+                    "bind frame, not every frame of a clip"
+                )
+            self.inverse_bind_matrices = np.ascontiguousarray(np.linalg.inv(world))
         else:
             raise ValueError(
                 "one of inverse_bind_matrices or bind_rig is required -- there "
@@ -321,11 +411,37 @@ class SkinDeformData(Data):
             np.ascontiguousarray(weights),
         )
 
+    def _columns(self, names: List[str]) -> np.ndarray:
+        """Positions in *names* of each of :attr:`joints`, in that order."""
+        lookup  = self._lookup(names, "rig")
+
+        missing = [j for j in self.joints if j not in lookup]
+        if missing:
+            raise ValueError(
+                f"{len(missing)} joint(s) are absent from the rig, first few: "
+                f"{missing[:8]}"
+            )
+
+        return np.array([lookup[j] for j in self.joints], dtype=np.int64)
+
+    def _posed_world(self, pose) -> np.ndarray:
+        """World matrices of a posed skeleton, ordered to :attr:`joints`.
+
+        ``(J, 4, 4)`` for one pose and ``(F, J, 4, 4)`` for a clip's frame
+        axis -- see :func:`_world_matrices`.
+        """
+        names, world = _world_matrices(pose)
+        return world[..., self._columns(names), :, :]
+
     def _skin_matrices(self, pose) -> np.ndarray:
         """``inverse_bind @ world_posed`` -- row-vector order, do not swap."""
-        if hasattr(pose, "world_matrix") and not isinstance(pose, np.ndarray):
-            cols  = self.pose_indices(pose)
-            world = np.asarray(pose.world_matrix, dtype=np.float64)[cols]
+        # never hasattr(pose, ...): that evaluates the property, which on a
+        # rig solves every node's world matrix just to answer the question
+        if not isinstance(pose, np.ndarray) and (
+            hasattr(type(pose), "world_matrix")
+            or "world_matrix" in getattr(pose, "__dict__", ())
+        ):
+            world = self._posed_world(pose)
         else:
             world = np.asarray(pose, dtype=np.float64)
 
@@ -379,16 +495,7 @@ class SkinDeformData(Data):
             ValueError: If a joint is missing from *rig*, or *rig* carries
                 duplicate names for one of the joints.
         """
-        lookup  = self._lookup(list(rig.name), "rig")
-
-        missing = [j for j in self.joints if j not in lookup]
-        if missing:
-            raise ValueError(
-                f"{len(missing)} joint(s) are absent from the rig, first few: "
-                f"{missing[:8]}"
-            )
-
-        return np.array([lookup[j] for j in self.joints], dtype=np.int64)
+        return self._columns(list(rig.name))
 
     def deform(self, points: np.ndarray, matrices: np.ndarray) -> np.ndarray:
         """Deform a raw point array with a set of skin matrices.
@@ -405,6 +512,11 @@ class SkinDeformData(Data):
             ValueError: If the point count does not match the bound weights.
             NotImplementedError: If :attr:`method` is not yet implemented.
         """
+        return self._deform(points, matrices, frames=False)
+
+    def _deform(self, points: np.ndarray, matrices: np.ndarray, frames: bool):
+        """:meth:`deform` for one pose, or with *frames* for ``(F, J, 4, 4)``
+        skin matrices, every frame in one kernel call: ``(F, N, 3)``."""
         from cgmath.geometry.utils._numba._skin_deform import (
             dqs_compact_fast,
             lbs_compact_fast,
@@ -427,13 +539,13 @@ class SkinDeformData(Data):
         # this in _skin_matrices; deform() is public and must too. The index
         # check also covers a restored object, which never re-runs bind().
         matrices = np.asarray(matrices, dtype=np.float64)
-        if matrices.ndim != 3 or matrices.shape[1:] != (4, 4):
+        rank     = 4 if frames else 3
+        if matrices.ndim != rank or matrices.shape[-2:] != (4, 4):
+            shape = ("F, " if frames else "") + f"{len(self.joints)}, 4, 4"
+            raise ValueError(f"matrices must be ({shape}), got {matrices.shape}")
+        if matrices.shape[-3] <= int(self.influence_indices.max()):
             raise ValueError(
-                f"matrices must be ({len(self.joints)}, 4, 4), got {matrices.shape}"
-            )
-        if matrices.shape[0] <= int(self.influence_indices.max()):
-            raise ValueError(
-                f"matrices has {matrices.shape[0]} entries but the bound weights "
+                f"matrices has {matrices.shape[-3]} entries but the bound weights "
                 f"reference joint {int(self.influence_indices.max())}"
             )
 
@@ -455,10 +567,13 @@ class SkinDeformData(Data):
         Auto-binds on first call.
 
         Args:
-            pose: A posed skeleton (:class:`HierarchyData`), or raw world
-                matrices shaped ``(J, 4, 4)`` for one frame or ``(F, J, 4, 4)``
-                for a sequence.  Raw matrices must already be ordered to
-                :attr:`joints` -- see :meth:`pose_indices`.
+            pose: A posed skeleton (:class:`HierarchyData`, or a
+                :class:`ClipData` at the frame it is on), every frame of a
+                clip (``clip.frames``), or raw world matrices shaped
+                ``(J, 4, 4)`` for one frame or ``(F, J, 4, 4)`` for a
+                sequence.  Raw matrices must already be ordered to
+                :attr:`joints` -- see :meth:`pose_indices`.  A sequence is
+                deformed in one call, every frame at once.
             target: What to deform and what to hand back.  A :class:`MeshData`
                 returns a copy of it with deformed points; a raw ``(N, 3)``
                 array, or None (meaning the bind points), returns an array.
@@ -491,7 +606,7 @@ class SkinDeformData(Data):
                     "packed into a single MeshData -- pass target=None and "
                     "build the meshes yourself"
                 )
-            stacked      = np.stack([self.deform(points, m) for m in matrices])
+            stacked      = self._deform(points, matrices, frames=True)
             self._points = stacked[-1] if len(stacked) else None
             return stacked
 

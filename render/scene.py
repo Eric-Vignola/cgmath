@@ -614,7 +614,8 @@ class Object(TransformData):
         deformation and melt the geometry over a sequence.
 
         Args:
-            pose: A posed skeleton (:class:`HierarchyData`), or raw world
+            pose: A posed skeleton (:class:`HierarchyData`, or a
+                :class:`ClipData` at the frame it is on), or raw world
                 matrices shaped ``(J, 4, 4)`` ordered to the deformer's
                 joints.  Batched ``(F, J, 4, 4)`` poses are rejected -- an
                 Object holds one mesh, not F of them.
@@ -625,6 +626,17 @@ class Object(TransformData):
         Raises:
             ValueError: If no skin is attached, or there is no mesh to deform.
         """
+        self._require_poseable()
+
+        target    = self._bind_target()
+        self.mesh = self._skin.apply(pose, target)
+        # The mesh setter just dropped the bind pose; hand it back rather
+        # than rebuild it next frame -- we only replaced the points.
+        self._bind_mesh = target
+        return self
+
+    def _require_poseable(self) -> None:
+        """Raises the ValueError :meth:`pose` documents: no skin, or no mesh."""
         if self._skin is None:
             raise ValueError(
                 f"Object {self.name!r} has no skin to pose -- load it with "
@@ -633,12 +645,42 @@ class Object(TransformData):
         if self._mesh is None:
             raise ValueError(f"Object {self.name!r} has no mesh to deform")
 
-        target    = self._bind_target()
-        self.mesh = self._skin.apply(pose, target)
-        # The mesh setter just dropped the bind pose; hand it back rather
-        # than rebuild it next frame -- we only replaced the points.
+    def _deformed_frames(self, world: np.ndarray) -> np.ndarray:
+        """What :meth:`pose` would put in :attr:`mesh`, for many frames at once.
+
+        Args:
+            world: ``(F, J, 4, 4)`` world matrices ordered to the deformer's
+                joints.
+
+        Returns:
+            ``(F, V, 3)`` deformed bind points, from one deformer call.
+            :attr:`mesh` is not touched; :meth:`_show_deformed` puts one
+            frame of them there.
+        """
+        self._require_poseable()
+        return self._skin.apply(world, self._bind_target().points)
+
+    def _show_deformed(self, points: np.ndarray) -> "Object":
+        """Puts one frame of :meth:`_deformed_frames` in :attr:`mesh`, leaving
+        the Object as :meth:`pose` would for that frame."""
+        target      = self._bind_target()
+        mesh        = target.copy()
+        mesh.points = np.array(points, dtype=np.float64)
+        if getattr(mesh, "normals", None) is not None:
+            mesh.normals = None
+        self.mesh       = mesh
         self._bind_mesh = target
         return self
+
+    def _posed_world_points(self, world: np.ndarray) -> np.ndarray:
+        """:attr:`world_points` as :meth:`pose` would leave them, for many
+        frames at once: ``(F, V, 3)`` for ``(F, J, 4, 4)`` world matrices.
+        :attr:`mesh` is not touched."""
+        points = self._deformed_frames(world)
+        M      = self.world_matrix
+        # Silence spurious BLAS warnings on Apple Accelerate (matmul on arm64).
+        with np.errstate(all="ignore"):
+            return points @ M[:3, :3] + M[3, :3]
 
     def restore_bind_pose(self) -> "Object":
         """Put :attr:`mesh` back to the undeformed bind pose.
@@ -2521,9 +2563,12 @@ class Scene(HierarchyData):
         render_kwargs, verbose,
     ):
         """
-        The animation's frames, posed and rendered one by one as they are
-        taken: the camera framing is worked out now. The scene goes back to
-        its bind pose when the frames run out or are abandoned.
+        The animation's frames, rendered one by one as they are taken: the
+        camera framing is worked out now. The skinned Objects are deformed
+        a chunk of frames per call (every frame, unless that many points
+        would pass ``_ANIMATE_CHUNK_BYTES``), then shown a frame at a time.
+        The scene goes back to its bind pose when the frames run out or are
+        abandoned.
         """
         render_kwargs = dict(render_kwargs)
 
@@ -2544,24 +2589,31 @@ class Scene(HierarchyData):
                 verbose,
             )
         finally:
-            # The fit pass deforms to sample poses; do not leave it that way
-            # even if it failed part way through.
+            # The fit pass reads posed points without showing them; the
+            # scene still starts the frames from its bind pose, as it ends.
             for obj in skinned:
                 obj.restore_bind_pose()
 
         render_kwargs.setdefault("autofit", False)
-        span = float(end_angle - start_angle)
+        span  = float(end_angle - start_angle)
+        chunk = _animate_chunk(skinned, frame_count)
 
         def _frame_stream():
             try:
-                for index in range(frame_count):
-                    for obj, column in zip(skinned, columns):
-                        obj.pose(world[index, column])
-                    angle = start_angle + span * index / max(frame_count, 1)
-                    render_kwargs["camera_matrix"] = _orbit_camera_col(
-                        chosen_cam_col, centroid, rotation_axis, angle
-                    )
-                    yield self.render(**render_kwargs)
+                for start in range(0, frame_count, chunk):
+                    stop = min(start + chunk, frame_count)
+                    deformed = [
+                        obj._deformed_frames(world[start:stop, column])
+                        for obj, column in zip(skinned, columns)
+                    ]
+                    for index in range(start, stop):
+                        for obj, points in zip(skinned, deformed):
+                            obj._show_deformed(points[index - start])
+                        angle = start_angle + span * index / max(frame_count, 1)
+                        render_kwargs["camera_matrix"] = _orbit_camera_col(
+                            chosen_cam_col, centroid, rotation_axis, angle
+                        )
+                        yield self.render(**render_kwargs)
             finally:
                 # Runs on early close too, so an encoder that dies part way
                 # through still hands the scene back undeformed.
@@ -2595,12 +2647,8 @@ class Scene(HierarchyData):
         if fit not in ("auto", "static"):
             raise ValueError(f"animate: fit must be 'auto' or 'static', got {fit!r}")
 
-        clouds = []
-        for index in _pose_sample_frames_for(frame_count, n_pose_samples):
-            for obj, column in zip(skinned, columns):
-                obj.pose(world[index, column])
-            clouds.append(self._visible_world_points("animate"))
-        all_pts  = np.concatenate(clouds, axis=0)
+        samples  = _pose_sample_frames_for(frame_count, n_pose_samples)
+        all_pts  = self._posed_cloud(skinned, columns, world[samples])
 
         centroid = 0.5 * (all_pts.min(axis=0) + all_pts.max(axis=0))
         base_cam_col, R_cam, aov, width, height = self._base_camera(
@@ -2633,6 +2681,35 @@ class Scene(HierarchyData):
             verbose=verbose,
         )
         return chosen, centroid
+
+    def _posed_cloud(self, skinned, columns, world) -> np.ndarray:
+        """The cloud :meth:`_visible_world_points` gives with the skinned
+        Objects posed to each frame of *world*, frame after frame, as one
+        array.
+
+        Each skinned Object deforms every frame in one call, and no mesh is
+        touched.  Static Objects contribute the same points to every frame.
+
+        Args:
+            skinned / columns: From :meth:`_skinned_objects`.
+            world: ``(F, N, 4, 4)`` world matrices of the frames to pose.
+        """
+        posed = {
+            id(obj): obj._posed_world_points(world[:, column])
+            for obj, column in zip(skinned, columns)
+        }
+
+        frames = len(world)
+        chunks = []
+        for o in self.objects:
+            if id(o) in posed:
+                chunks.append(posed[id(o)])
+            elif o.visibility and o.mesh is not None:
+                still = o.world_points
+                chunks.append(np.broadcast_to(still, (frames,) + still.shape))
+        if not chunks:
+            raise ValueError("animate: scene has no visible Objects with meshes")
+        return np.concatenate(chunks, axis=1).reshape(-1, 3)
 
     def turntable(
         self,
@@ -3436,6 +3513,20 @@ def _pose_sample_frames_for(
     # stop an over-large request allocating a huge intermediate first.
     count = max(1, min(int(n_pose_samples), frame_count))
     return np.unique(np.linspace(0, frame_count - 1, count).astype(int))
+
+
+# How many deformed points :meth:`Scene.animate` holds at once: it deforms a
+# chunk of frames per deformer call rather than one frame per call.
+_ANIMATE_CHUNK_BYTES = 64 * 1024 * 1024
+
+
+def _animate_chunk(skinned, frame_count: int) -> int:
+    """Frames :meth:`Scene.animate` deforms per call: every frame, unless
+    the skinned Objects' points for that many would pass
+    ``_ANIMATE_CHUNK_BYTES``."""
+    vertices  = sum(0 if o.mesh is None else len(o.mesh.points) for o in skinned)
+    per_frame = max(vertices, 1) * 3 * np.dtype(np.float64).itemsize
+    return int(max(1, min(frame_count, _ANIMATE_CHUNK_BYTES // per_frame)))
 
 
 def _orbit_camera_col(

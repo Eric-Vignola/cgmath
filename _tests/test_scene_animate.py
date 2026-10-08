@@ -20,13 +20,16 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+from cgmath.geometry.deform import SkinDeformData
 from cgmath.render.scene import (
+    _clear_render_cache,
     _encode_frame_stream,
     _pose_sample_frames_for,
     Object,
     Scene,
 )
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData
+from cgmath._tests.test_skin_deform import branching_clip, pose_at, skinned_mesh
 
 try:
     import pygltflib
@@ -342,6 +345,170 @@ class TestFraming(AnimateCase):
         written = scene.animate(self.clip(path), self.out(), n_pose_samples=2, **RES)
 
         self.assertEqual(len(written), 5)
+
+
+@unittest.skipIf(Image is None, "PIL is not installed")
+class TestAnimateBatched(unittest.TestCase):
+    """``animate`` deforms many frames per deformer call: the fit pass's
+    samples in one call, the render loop's frames a chunk at a time.
+
+    Every rendered frame must still show what a single-pose rig of that
+    frame gives, seen from the camera the frame-by-frame fit would choose.
+    Two skinned Objects, one moved off the origin, and a static prop.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+        rig, self.clip = branching_clip(joints=8, frames=7, seed=31)
+        mesh, skin = skinned_mesh(rig, seed=37)
+        self.joints = len(skin.influences)
+
+        self.scene  = Scene("batched")
+        for name, offset in (("a", (0.0, 0.0, 0.0)), ("b", (4.0, 1.0, -2.0))):
+            self.scene.append(
+                Object(
+                    name      = name,
+                    mesh      = mesh.copy(),
+                    skin      = SkinDeformData(mesh, skin, bind_rig=rig),
+                    translate = offset,
+                )
+            )
+        self.scene.append(Object(name="prop", mesh=mesh.copy(), translate=(-3.0, 0.0, 0.0)))
+        self.skinned = [o for o in self.scene.objects if o.skin is not None]
+
+    def out(self):
+        return os.path.join(self.tmp.name, "anim.{frame:04d}.png")
+
+    def reference_cloud(self, samples):
+        """the frame-by-frame fit cloud: pose to each sample, gather, restore"""
+        clip   = self.clip.copy()
+        clouds = []
+        for sample in samples:
+            pose = pose_at(clip, sample)
+            for obj in self.skinned:
+                obj.pose(pose)
+            clouds.append(self.scene._visible_world_points("animate"))
+        for obj in self.skinned:
+            obj.restore_bind_pose()
+        return np.concatenate(clouds)
+
+    def reference_points(self, frame):
+        pose   = pose_at(self.clip.copy(), frame)
+        points = [np.array(obj.pose(pose).mesh.points) for obj in self.skinned]
+        for obj in self.skinned:
+            obj.restore_bind_pose()
+        return points
+
+    def animate(self, **kwargs):
+        """animate, keeping what every render saw: each skinned mesh's points
+        and the camera; and the shape of every pose handed to a deformer"""
+        seen, poses = [], []
+        render  = Scene.render
+        apply   = SkinDeformData.apply
+        skinned = self.skinned
+
+        def spy_render(scene, *args, **kw):
+            points = [np.array(obj.mesh.points) for obj in skinned]
+            seen.append((points, np.array(kw["camera_matrix"])))
+            return render(scene, *args, **kw)
+
+        def spy_apply(deformer, pose, target=None):
+            poses.append(np.shape(pose) if isinstance(pose, np.ndarray) else pose)
+            return apply(deformer, pose, target)
+
+        _clear_render_cache(self.scene)
+        with patch.object(Scene, "render", spy_render), patch.object(
+            SkinDeformData, "apply", spy_apply
+        ):
+            self.scene.animate(self.clip, self.out(), **RES, **kwargs)
+        return seen, poses
+
+    def test_the_fit_cloud_is_every_sampled_pose(self):
+        samples = _pose_sample_frames_for(self.clip.frame_count, None)
+        skinned, columns = self.scene._skinned_objects(self.clip)
+        world = np.asarray(self.clip.frames.world_matrix)
+        rest  = [np.array(obj.mesh.points) for obj in skinned]
+
+        got   = self.scene._posed_cloud(skinned, columns, world[samples])
+
+        np.testing.assert_allclose(got, self.reference_cloud(samples), atol=1e-9)
+        for obj, points in zip(skinned, rest):
+            np.testing.assert_array_equal(obj.mesh.points, points)
+
+    def test_every_frame_shows_its_pose_from_the_reference_camera(self):
+        seen, _ = self.animate(end_angle=90.0)
+
+        self.assertEqual(len(seen), self.clip.frame_count)
+        for frame, (points, _) in enumerate(seen):
+            for got, expected in zip(points, self.reference_points(frame)):
+                np.testing.assert_allclose(
+                    got, expected, atol=1e-9, err_msg=f"frame {frame}"
+                )
+
+        # the same animation with its fit fed the frame-by-frame cloud
+        samples = _pose_sample_frames_for(self.clip.frame_count, None)
+        cloud   = self.reference_cloud(samples)
+        with patch.object(Scene, "_posed_cloud", lambda *args: cloud):
+            expected, _ = self.animate(end_angle=90.0)
+
+        for frame, ((_, got), (_, camera)) in enumerate(zip(seen, expected)):
+            np.testing.assert_allclose(got, camera, atol=1e-9, err_msg=f"frame {frame}")
+
+    def test_samples_and_frames_deform_in_one_call_each(self):
+        """one deformer call per Object for the fit, one for the frames;
+        posing frame by frame made (samples + frames) calls per Object"""
+        frames  = self.clip.frame_count
+        samples = len(_pose_sample_frames_for(frames, None))
+        _, poses = self.animate()
+
+        fit    = (samples, self.joints, 4, 4)
+        render = (frames, self.joints, 4, 4)
+        self.assertEqual(poses, [fit, fit, render, render])
+
+    def test_a_small_chunk_budget_still_shows_every_pose(self):
+        frames   = self.clip.frame_count
+        samples  = len(_pose_sample_frames_for(frames, None))
+        vertices = sum(len(obj.mesh.points) for obj in self.skinned)
+
+        # room for three frames of every skinned Object's points
+        with patch("cgmath.render.scene._ANIMATE_CHUNK_BYTES", vertices * 3 * 8 * 3):
+            seen, poses = self.animate()
+
+        shape = lambda count: (count, self.joints, 4, 4)  # noqa: E731
+        self.assertEqual(
+            poses,
+            [shape(samples)] * 2 + [shape(3)] * 2 + [shape(3)] * 2 + [shape(1)] * 2,
+        )
+        self.assertEqual(len(seen), frames)
+        for frame, (points, _) in enumerate(seen):
+            for got, expected in zip(points, self.reference_points(frame)):
+                np.testing.assert_allclose(
+                    got, expected, atol=1e-9, err_msg=f"frame {frame}"
+                )
+
+    def test_the_scene_is_handed_back_undeformed(self):
+        rest = [np.array(obj.mesh.points) for obj in self.skinned]
+        self.animate()
+        for obj, points in zip(self.skinned, rest):
+            np.testing.assert_allclose(obj.mesh.points, points, atol=1e-12)
+
+    def test_an_object_poses_to_a_clip_at_its_frame(self):
+        """read from the clip's blocks, not node by node"""
+        obj      = self.skinned[1]
+        expected = self.reference_points(5)[1]
+
+        def refuse(node):
+            raise AssertionError(f"{node.name}.world_matrix was read")
+
+        clip       = self.clip.copy()
+        clip.frame = 5
+        with patch.object(TransformData, "world_matrix", property(refuse)):
+            obj.pose(clip)
+
+        np.testing.assert_allclose(obj.mesh.points, expected, atol=1e-9)
+        self.assertEqual(clip.frame, 5)
 
 
 class TestPoseSampling(unittest.TestCase):

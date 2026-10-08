@@ -4,19 +4,22 @@ import pickle
 import tempfile
 import unittest
 import weakref
+from unittest.mock import patch
 
 import numpy as np
 from cgmath.geometry.deform import DeformMethod, SkinDeformData
 from cgmath.geometry.mesh import MeshData
 from cgmath.geometry.skin_weights import SkinData
+from cgmath.geometry.utils._numba import _skin_deform as kernels
 from cgmath.geometry.utils._numba._skin_deform import (
     _dqs_compact_numpy,
     _dqs_decompose,
+    _dqs_decompose_frames,
     _lbs_compact_numpy,
     dqs_compact_fast,
     lbs_compact_fast,
 )
-from cgmath.hierarchy import HierarchyData, TransformData
+from cgmath.hierarchy import ClipData, HierarchyData, TransformData
 from cgmath.transforms import matrix_point_multiply
 
 
@@ -93,6 +96,113 @@ def deformer(points, skin, ibm=None, **kwargs) -> SkinDeformData:
     if ibm is None:
         ibm = np.stack([np.eye(4)] * len(skin.influences))
     return SkinDeformData(mesh=points, skin=skin, inverse_bind_matrices=ibm, **kwargs)
+
+
+def skin_matrices(count: int, frames: int, seed: int) -> np.ndarray:
+    """``(frames, count, 4, 4)`` rotations with a non-uniform scale and an
+    offset, the shape a posed rig's skin matrices take"""
+    rng = np.random.default_rng(seed)
+    out = np.empty((frames, count, 4, 4))
+    for f in range(frames):
+        for j in range(count):
+            out[f, j] = scale(rng.uniform(0.7, 1.3, 3)) @ rotation(
+                rng.normal(size=3), rng.uniform(-170.0, 170.0), rng.normal(size=3)
+            )
+    return out
+
+
+# --- a clip to skin ------------------------------------------------------ #
+
+
+def branching_clip(joints: int = 12, frames: int = 9, seed: int = 23):
+    """``(rig, clip)``: a branching rig and a clip animating every framed
+    channel of it.
+
+    Every joint has a random joint orient, rotate axis, rotate order and
+    scale, half of them compensate segment scale, and half name their
+    parent while the other half give its uuid.
+    """
+    rng   = np.random.default_rng(seed)
+    nodes = []
+    for i in range(joints):
+        parent = None
+        if i:
+            p      = i - 1 if rng.random() < 0.7 else int(rng.integers(0, i))
+            parent = nodes[p].name if i % 2 else nodes[p].uuid
+        nodes.append(
+            TransformData(
+                name=f"j{i:02d}",
+                parent_node=parent,
+                translate=rng.normal(size=3),
+                rotate=rng.uniform(-60.0, 60.0, 3),
+                scale=rng.uniform(0.8, 1.25, 3),
+                joint_orient=rng.uniform(-90.0, 90.0, 3),
+                rotate_axis=rng.uniform(-30.0, 30.0, 3),
+                rotate_order=int(rng.integers(0, 6)),
+                segment_scale_compensate=bool(rng.random() < 0.5),
+            )
+        )
+    rig   = HierarchyData(nodes)
+
+    clip  = ClipData(rig, frames=frames, start_frame=3, fps=24.0)
+    shape = (frames, joints, 3)
+    for channel, step in (
+        ("rotate", 8.0),
+        ("translate", 0.1),
+        ("joint_orient", 3.0),
+        ("rotate_axis", 3.0),
+    ):
+        walk = np.cumsum(rng.normal(size=shape) * step, axis=0)
+        setattr(clip.frames, channel, getattr(clip.frames, channel) + walk)
+    clip.frames.scale = clip.frames.scale * rng.uniform(0.9, 1.1, shape)
+    clip.frame        = 0
+    return rig, clip
+
+
+def skinned_mesh(rig, seed: int = 29):
+    """``(mesh, skin)``: a small tetrahedron around every joint but the last.
+
+    Each vertex weighs its own joint, its parent and one more joint. The
+    skin lists its influences in a shuffled order, so the joint columns are
+    looked up rather than lined up, and the last joint is left out of it: a
+    rig may carry joints a skin does not use.
+    """
+    rng    = np.random.default_rng(seed)
+    names  = list(rig.name)
+    world  = np.asarray(rig.world_matrix)
+    used   = names[:-1]
+    order  = [str(x) for x in rng.permutation(used)]
+    column = {name: k for k, name in enumerate(order)}
+    tetra  = np.array([[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]])
+
+    points, faces, rows = [], [], []
+    for j, name in enumerate(used):
+        parent = rig[j].get_parent()
+        for _ in range(4):
+            row               = np.zeros(len(order))
+            row[column[name]] = rng.uniform(0.4, 1.0)
+            if parent is not None:
+                row[column[parent.name]] = rng.uniform(0.1, 0.5)
+            row[column[used[rng.integers(len(used))]]] += rng.uniform(0.0, 0.3)
+            rows.append(row / row.sum())
+            points.append(world[j, 3, :3] + rng.normal(size=3) * 0.3)
+        faces.append(tetra + 4 * j)
+
+    faces = np.concatenate(faces)
+    mesh = MeshData(
+        name    = "tetras",
+        points  = np.array(points),
+        indices = faces.ravel(),
+        counts  = np.full(len(faces), 3, dtype=np.int64),
+    )
+    return mesh, SkinData(weights=np.array(rows), influences=order)
+
+
+def pose_at(clip, frame: int) -> HierarchyData:
+    """frame *frame* of *clip* as a plain single-pose HierarchyData: the
+    frame-by-frame reference every clip result is checked against"""
+    clip.frame = frame
+    return HierarchyData([node.copy() for node in clip])
 
 
 class TestConvention(unittest.TestCase):
@@ -226,6 +336,54 @@ class TestKernelParity(unittest.TestCase):
         d        = deformer(points, two_joint_skin(len(points), split=1.0))
         d.deform(points, np.stack([translation([3.0, 0, 0]), np.eye(4)]))
         self.assertTrue(np.array_equal(points, original))
+
+    def test_a_sequence_matches_the_numpy_fallback(self):
+        """the batched kernels against the independent numpy expression,
+        which takes the same frame axis and agrees with itself frame by frame"""
+        rng     = np.random.default_rng(3)
+        points  = rng.normal(size=(61, 3)) * 4.0
+        indices = rng.integers(0, 5, size=(61, 3)).astype(np.int32)
+        weights = rng.random((61, 3))
+        weights[rng.random((61, 3)) < 0.2] = 0.0
+        weights /= np.maximum(weights.sum(axis=1, keepdims=True), 1e-12)
+        matrices = skin_matrices(5, 7, seed=4)
+
+        slow = _lbs_compact_numpy(points, indices, weights, matrices)
+        for f in range(7):
+            np.testing.assert_allclose(
+                slow[f],
+                _lbs_compact_numpy(points, indices, weights, matrices[f]),
+                atol = 1e-12,
+                rtol = 0,
+            )
+        np.testing.assert_allclose(
+            lbs_compact_fast(points, indices, weights, matrices), slow, atol=1e-10
+        )
+
+        quats   = np.empty((7, 5, 4))
+        duals   = np.empty((7, 5, 4))
+        stretch = np.empty((7, 5, 3, 3))
+        _dqs_decompose_frames(matrices, quats, duals, stretch)
+        for f in range(7):
+            q, d, s = np.empty((5, 4)), np.empty((5, 4)), np.empty((5, 3, 3))
+            _dqs_decompose(matrices[f], q, d, s)
+            np.testing.assert_array_equal(quats[f],   q)
+            np.testing.assert_array_equal(duals[f],   d)
+            np.testing.assert_array_equal(stretch[f], s)
+
+        slow = _dqs_compact_numpy(points, indices, weights, quats, duals, stretch)
+        for f in range(7):
+            np.testing.assert_allclose(
+                slow[f],
+                _dqs_compact_numpy(
+                    points, indices, weights, quats[f], duals[f], stretch[f]
+                ),
+                atol = 1e-12,
+                rtol = 0,
+            )
+        np.testing.assert_allclose(
+            dqs_compact_fast(points, indices, weights, matrices), slow, atol=1e-10
+        )
 
 
 class TestMapping(unittest.TestCase):
@@ -1010,6 +1168,341 @@ class TestCompactPadding(unittest.TestCase):
         got_dense   = deformer(points, skin).deform(points, matrices)
         got_compact = deformer(points, compact).deform(points, matrices)
         self.assertTrue(np.allclose(got_dense, got_compact, atol=1e-8))
+
+
+class TestBatchedPoses(unittest.TestCase):
+    """``(F, J, 4, 4)`` world matrices deform every frame in one kernel call,
+    each frame as a ``(J, 4, 4)`` pose on its own would."""
+
+    def setUp(self):
+        rng     = np.random.default_rng(17)
+        points  = rng.normal(size=(40, 3)) * 3.0
+        weights = rng.random((40, 4))
+        weights[rng.random((40, 4)) < 0.3] = 0.0
+        weights[:, 0] += 0.05
+
+        self.points = points
+        self.skin = SkinData(
+            weights    = weights / weights.sum(axis=1, keepdims=True),
+            influences = list("abcd"),
+        )
+        self.world = skin_matrices(4, 6, seed=19)
+
+    def make(self, method):
+        ibm = np.linalg.inv(skin_matrices(4, 1, seed=21)[0])
+        return deformer(self.points, self.skin, ibm=ibm, method=method)
+
+    def test_a_sequence_matches_one_pose_at_a_time(self):
+        for method in ("lbs", "dqs"):
+            with self.subTest(method):
+                d        = self.make(method)
+                expected = np.stack([d.apply(w) for w in self.world])
+                got      = d.apply(self.world)
+                self.assertEqual(got.shape, (6, 40, 3))
+                np.testing.assert_allclose(got, expected, atol=1e-12, rtol=0)
+                np.testing.assert_array_equal(d.points, got[-1])
+
+    def test_a_sequence_is_one_kernel_call(self):
+        """one call per frame was the old route: F kernel launches, each far
+        too small to fill the cores"""
+        for method, name in (("lbs", "lbs_compact_fast"), ("dqs", "dqs_compact_fast")):
+            with self.subTest(method):
+                d    = self.make(method)
+                real = getattr(kernels, name)
+                with patch.object(kernels, name, wraps=real) as spy:
+                    d.apply(self.world)
+                self.assertEqual(spy.call_count, 1)
+                self.assertEqual(spy.call_args.args[3].shape, (6, 4, 4, 4))
+
+    def test_a_numba_failure_splits_every_frame_at_once(self):
+        """with numba failing, DQS splits the joints in numpy, every frame
+        at once: the per joint helper is never called from python and the
+        numpy split runs once a call, whatever the frame count, giving what
+        the kernels give. The fallback split one joint of one frame at a
+        time through the kernel's python body, F x J calls"""
+        from numba.core.errors import NumbaError
+
+        class Failing:
+            """a kernel numba failed to compile: a call raises, its python
+            body is still there"""
+
+            def __init__(self, kernel):
+                self.py_func = kernel.py_func
+
+            def __call__(self, *args):
+                raise NumbaError("forced")
+
+        d = self.make("dqs")
+        for frames in (1, 10, 40):
+            world = skin_matrices(4, frames, seed=frames + 1)
+            for label, pose in (("sequence", world), ("one pose", world[0])):
+                with self.subTest(label, frames=frames):
+                    want = d.apply(pose)
+                    with patch.object(
+                        kernels, "_dqs_decompose_frames", Failing(kernels._dqs_decompose_frames)
+                    ), patch.object(
+                        kernels, "_dqs_decompose", Failing(kernels._dqs_decompose)
+                    ), patch.object(
+                        kernels, "_polar_rotation", wraps=kernels._polar_rotation
+                    ) as per_joint, patch.object(
+                        kernels,
+                        "_dqs_decompose_numpy",
+                        wraps  = getattr(kernels, "_dqs_decompose_numpy", None),
+                        create = True,
+                    ) as split:
+                        got = d.apply(pose)
+                    self.assertEqual(per_joint.call_count, 0)
+                    self.assertEqual(split.call_count,     1)
+                    self.assertEqual(got.shape,            want.shape)
+                    np.testing.assert_allclose(got, want, atol=1e-10, rtol=0)
+
+    def test_the_numpy_split_matches_the_kernels(self):
+        """the fallback's split against _dqs_decompose_frames and
+        _dqs_decompose, a singular, a mirrored and a near zero joint among
+        scaled and rotated ones"""
+        from cgmath.geometry.utils._numba._skin_deform import _dqs_decompose_numpy
+
+        world               = skin_matrices(6, 5, seed=29)
+        world[0, 0, :3, :3] = 0.0
+        world[0, 1, :3, :3] = np.diag([1.0, 2.0, -1.0])
+        world[0, 2, :3, :3] = np.eye(3) * 1e-13
+        world[1, 3, :3, :3] = np.diag([-0.5, 1.5, 1.0]) @ world[1, 3, :3, :3]
+
+        quats, duals, stretch = np.empty((5, 6, 4)), np.empty((5, 6, 4)), np.empty((5, 6, 3, 3))
+        _dqs_decompose_frames(world, quats, duals, stretch)
+        for got, want in zip(_dqs_decompose_numpy(world), (quats, duals, stretch)):
+            np.testing.assert_allclose(got, want, atol=1e-12, rtol=0)
+        np.testing.assert_array_equal(_dqs_decompose_numpy(world)[0][0, 0], [0.0, 0.0, 0.0, 1.0])
+
+        one = (np.empty((6, 4)), np.empty((6, 4)), np.empty((6, 3, 3)))
+        _dqs_decompose(world[0], *one)
+        for got, want in zip(_dqs_decompose_numpy(world[0]), one):
+            self.assertEqual(got.shape, want.shape)
+            np.testing.assert_allclose(got, want, atol=1e-12, rtol=0)
+
+    def test_an_empty_sequence_returns_no_frames(self):
+        d   = self.make("lbs")
+        got = d.apply(np.empty((0, 4, 4, 4)))
+        self.assertEqual(got.shape, (0, 40, 3))
+        self.assertIsNone(d.points)
+
+    def test_a_sequence_with_the_wrong_joint_count_raises(self):
+        d = self.make("lbs")
+        with self.assertRaisesRegex(ValueError, "pose must be"):
+            d.apply(self.world[:, :3])
+
+
+class TestClipPoses(unittest.TestCase):
+    """A :class:`ClipData` is skinned from its channel blocks.
+
+    The reference is the frame-by-frame route: the same frame copied into a
+    plain HierarchyData, skinned through its single-pose world matrices.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rig, cls.source = branching_clip()
+        cls.mesh, cls.skin = skinned_mesh(cls.rig)
+
+    def setUp(self):
+        self.clip = self.source.copy()
+
+    def make(self, method="lbs", bind_rig=None):
+        rig = self.rig if bind_rig is None else bind_rig
+        return SkinDeformData(self.mesh, self.skin, bind_rig=rig, method=method)
+
+    def reference(self, d, frames=None):
+        clip   = self.clip.copy()
+        frames = range(clip.frame_count) if frames is None else frames
+        return np.stack([d.apply(pose_at(clip, f)) for f in frames])
+
+    def test_a_clip_deforms_at_the_frame_it_is_on(self):
+        for method in ("lbs", "dqs"):
+            d = self.make(method)
+            for frame in (0, 4, self.clip.frame_count - 1):
+                with self.subTest(method=method, frame=frame):
+                    self.clip.frame = frame
+                    np.testing.assert_allclose(
+                        d.apply(self.clip), self.reference(d, [frame])[0], atol=1e-9
+                    )
+
+    def test_a_clip_deforms_a_mesh_target_at_its_frame(self):
+        d               = self.make()
+        self.clip.frame = 6
+        got             = d.apply(self.clip, self.mesh)
+        self.assertIsInstance(got, MeshData)
+        np.testing.assert_allclose(got.points, self.reference(d, [6])[0], atol=1e-9)
+
+    def test_every_frame_of_a_clip_deforms_in_one_call(self):
+        for method in ("lbs", "dqs"):
+            with self.subTest(method):
+                d   = self.make(method)
+                got = d.apply(self.clip.frames)
+                self.assertEqual(
+                    got.shape, (self.clip.frame_count, len(self.mesh.points), 3)
+                )
+                np.testing.assert_allclose(got, self.reference(d), atol=1e-9)
+                np.testing.assert_array_equal(d.points, got[-1])
+
+    def test_a_node_scoped_frame_axis_finds_the_joints_among_its_nodes(self):
+        d     = self.make()
+        names = list(self.clip.name)
+        for scope in (names[::-1], names[:-1], self.skin.influences):
+            with self.subTest(scope=scope[:3]):
+                got = d.apply(self.clip.frames[list(scope)])
+                np.testing.assert_allclose(got, self.reference(d), atol=1e-9)
+
+    def test_a_frame_axis_without_a_joint_raises(self):
+        d = self.make()
+        with self.assertRaisesRegex(ValueError, "absent from the rig"):
+            d.apply(self.clip.frames[list(self.clip.name)[:3]])
+
+    def test_every_frame_of_a_clip_cannot_fill_one_mesh(self):
+        with self.assertRaisesRegex(ValueError, "batched pose"):
+            self.make().apply(self.clip.frames, self.mesh)
+
+    def test_the_clip_keeps_its_frame_and_its_channels(self):
+        d               = self.make()
+        self.clip.frame = 5
+        before          = np.array(self.clip.frames.rotate)
+
+        d.apply(self.clip.frames)
+        d.apply(self.clip)
+        self.make(bind_rig=self.clip)
+
+        self.assertEqual(self.clip.frame, 5)
+        np.testing.assert_array_equal(self.clip.frames.rotate, before)
+
+    def test_an_edit_on_the_bound_frame_is_seen(self):
+        d               = self.make()
+        self.clip.frame = 2
+        names           = list(self.clip.name)
+
+        self.clip[names[3]].rotate    = (10.0, 20.0, 30.0)
+        self.clip[names[0]].translate = (1.0, -2.0, 0.5)
+
+        expected = d.apply(HierarchyData([node.copy() for node in self.clip]))
+        np.testing.assert_allclose(d.apply(self.clip), expected, atol=1e-9)
+
+    def test_a_clip_without_frames_is_one_pose(self):
+        d = self.make()
+        np.testing.assert_allclose(
+            d.apply(ClipData(self.rig)), d.apply(self.rig), atol=1e-12
+        )
+
+    def test_a_clip_binds_at_the_frame_it_is_on(self):
+        self.clip.frame = 4
+        got             = self.make(bind_rig=self.clip)
+        ref             = self.make(bind_rig=pose_at(self.clip.copy(), 4))
+        np.testing.assert_allclose(
+            got.inverse_bind_matrices, ref.inverse_bind_matrices, atol=1e-9
+        )
+        # that frame is then the bind pose
+        np.testing.assert_allclose(got.apply(self.clip), self.mesh.points, atol=1e-9)
+
+    def test_every_frame_of_a_clip_is_not_a_bind_pose(self):
+        with self.assertRaisesRegex(ValueError, "one pose"):
+            self.make(bind_rig=self.clip.frames)
+
+    def test_reading_a_frame_hands_numba_its_threads_back(self):
+        """the bound frame is read on one thread, and only while it is read,
+        even when the read fails. The count is set here rather than read:
+        a test before this one that kept the thread taken left 1 to compare
+        against, and a regression passed"""
+        import numba
+        from cgmath.geometry.deform import skin_deform
+
+        if numba.config.NUMBA_NUM_THREADS < 2:
+            self.skipTest("numba runs on one thread here")
+        self.addCleanup(numba.set_num_threads, numba.config.NUMBA_NUM_THREADS)
+        numba.set_num_threads(2)
+
+        self.make().apply(self.clip)
+        self.assertEqual(numba.get_num_threads(), 2)
+
+        with patch.object(
+            skin_deform, "_BoundFrame", side_effect=RuntimeError("boom")
+        ), self.assertRaisesRegex(RuntimeError, "boom"):
+            self.make().apply(self.clip)
+        self.assertEqual(numba.get_num_threads(), 2)
+
+    def test_a_frame_axis_held_across_a_reorder_skins_its_own_joints(self):
+        # an axis read block columns in the old order against names and
+        # parents in the new: 6 to 16 off the reference, or an IndexError
+        # once a node had been added or taken out
+        unbound = [n for n in self.clip.name if n not in self.skin.influences]
+        reorders = {
+            "sort":             lambda c: c.sort(key=lambda node: node.name[::-1]),
+            "reverse":          lambda c: c.reverse(),
+            "set_parent local": lambda c: c["j05"].set_parent("j09", world_space=False),
+            "a node added":     lambda c: c.append(TransformData("extra", translate=(1, 0, 0))),
+            "a node taken out": lambda c: c.remove(c[unbound[0]]),
+        }
+        for method in ("lbs", "dqs"):
+            for label, reorder in reorders.items():
+                for scoped in (False, True):
+                    with self.subTest(method=method, edit=label, scoped=scoped):
+                        clip      = self.source.copy()
+                        self.clip = clip
+                        d         = self.make(method)
+                        axis      = clip.frames[list(self.skin.influences)] if scoped else clip.frames
+                        reorder(clip)
+
+                        got = d.apply(axis)  # before anything lines the clip up
+                        np.testing.assert_allclose(got, self.reference(d), atol=1e-9)
+
+    def test_a_node_put_back_from_elsewhere_is_read_at_the_bound_frame(self):
+        # a node assigned into the clip keeps its own channels and is not the
+        # clip's: the blocks know nothing of it, the nodes do
+        for method in ("lbs", "dqs"):
+            with self.subTest(method):
+                self.clip       = self.source.copy()
+                self.clip.frame = 3
+                d               = self.make(method)
+                node            = self.clip[0].copy()
+                node.rotate     = (11.0, 22.0, 33.0)
+                self.clip[0]    = node
+                self.assertIsNot(node._hierarchy, self.clip)
+
+                expected = HierarchyData([n.copy() for n in self.clip])
+                np.testing.assert_allclose(d.apply(self.clip), d.apply(expected), atol=1e-9)
+                np.testing.assert_allclose(
+                    self.make(method, bind_rig=self.clip).inverse_bind_matrices,
+                    self.make(method, bind_rig=expected).inverse_bind_matrices,
+                    atol=1e-9,
+                )
+
+    def test_the_world_matrices_are_the_nodes_bit_for_bit(self):
+        # the bound frame goes through the evaluator that mirrors
+        # TransformData.matrix factor for factor, so a skinned frame is the
+        # frame skinned through its nodes, to the bit: the clip's own one
+        # span read lands 1e-15 away
+        d     = self.make()
+        every = [d._posed_world(pose_at(self.clip.copy(), f)) for f in range(self.clip.frame_count)]
+        for frame in (0, 4, self.clip.frame_count - 1):
+            with self.subTest(frame=frame):
+                self.clip.frame = frame
+                np.testing.assert_array_equal(d._posed_world(self.clip), every[frame])
+        np.testing.assert_array_equal(d._posed_world(self.clip.frames), np.stack(every))
+
+    def test_a_clip_is_read_from_its_blocks_not_node_by_node(self):
+        """node by node, a world matrix costs ~30 ms a frame on a few hundred
+        joints; the blocks evaluate a frame in a fraction of that"""
+        d        = self.make()
+        expected = self.reference(d)
+
+        def refuse(node):
+            raise AssertionError(f"{node.name}.world_matrix was read")
+
+        self.clip.frame = 3
+        with patch.object(TransformData, "world_matrix", property(refuse)):
+            one   = d.apply(self.clip)
+            every = d.apply(self.clip.frames)
+            bound = self.make(bind_rig=self.clip)
+
+        np.testing.assert_allclose(one, expected[3], atol=1e-9)
+        np.testing.assert_allclose(every, expected, atol=1e-9)
+        np.testing.assert_allclose(bound.apply(self.clip), self.mesh.points, atol=1e-9)
 
 
 if __name__ == "__main__":
