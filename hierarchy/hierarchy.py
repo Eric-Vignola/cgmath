@@ -5001,39 +5001,77 @@ class _FrameAxis:
         return self._clip.index(item) if isinstance(item, str) else int(item)
 
     def __setitem__(self, query, value) -> None:
-        """int writes one pose, slice writes a run of them"""
+        """int writes one pose, slice writes a run of them
+
+        A run is written in one go. A clip's blocks are copied across whole,
+        without scrubbing it, so its current frame stays where it was. A
+        single pose is read once and repeated down the range. Either way the
+        nodes pair by position, as they do for one pose.
+        """
         clip = self._clip
 
         if self._uuids is not None:
             raise TypeError("a node scoped axis writes channels, not poses")
 
+        # this axis may have been taken before the nodes were reordered, and
+        # pairing by position needs column i to be node i
+        clip._realign()
+
+        paste = isinstance(query, slice) and isinstance(value, ClipData)
         if isinstance(query, slice):
-            frames = range(*query.indices(clip.frame_count))
-            paste  = isinstance(value, ClipData)
-
-            if paste and value.frame_count != len(frames):
-                raise ValueError(
-                    f"{len(frames)} frames selected, {value.frame_count} supplied"
-                )
-
-            for i, frame in enumerate(frames):
-                # value.frames[i] scrubs value and hands back the same object,
-                # so each pose is consumed before the next one is asked for
-                self._write_pose(frame, value.frames[i] if paste else value)
+            span     = query
+            selected = len(range(*query.indices(clip.frame_count)))
         else:
-            self._write_pose(clip._resolve_frame(query), value)
+            span     = clip._resolve_frame(query)
+            selected = 1
+
+        if paste and value.frame_count != selected:
+            raise ValueError(f"{selected} frames selected, {value.frame_count} supplied")
+
+        if selected and paste:
+            rows = self._clip_rows(value)
+        elif selected:
+            rows = self._pose_rows(value, len(clip), clip._blocks)
+        else:
+            rows = {}
+
+        # a slice takes a pose's (N, 3) rows down the whole range at once
+        for channel, values in rows.items():
+            clip._blocks[channel][span] = values
 
         clip._bind(clip._frame)
 
-    def _write_pose(self, frame: int, pose) -> None:
-        clip = self._clip
-        if len(pose) != len(clip):
-            raise ValueError(f"pose holds {len(pose)} nodes, clip holds {len(clip)}")
+    def _clip_rows(self, source: "ClipData") -> dict:
+        """every frame of ``source``, as ``(F, N, 3)`` blocks per channel
 
-        for channel, block in clip._blocks.items():
-            block[frame] = [
-                np.asarray(getattr(node, channel), dtype=float) for node in pose
-            ]
+        ``source`` is realigned, so column ``i`` is its node ``i``. The
+        blocks themselves are handed over: numpy copies a source that
+        overlaps the rows it is written into, so a clip pasted into itself
+        reads every frame before any is written over.
+        """
+        clip = self._clip
+        source._realign()
+        if len(source) != len(clip):
+            raise ValueError(f"pose holds {len(source)} nodes, clip holds {len(clip)}")
+
+        return {channel: source._blocks[channel] for channel in clip._blocks}
+
+    @staticmethod
+    def _pose_rows(pose, count: int, channels) -> dict:
+        """one pose's ``channels`` as ``(count, 3)`` rows, each node read once
+
+        A clip given as the pose gives the frame it is bound to.
+        """
+        nodes = pose.list if isinstance(pose, DataList) else list(pose)
+        if len(nodes) != count:
+            raise ValueError(f"pose holds {len(nodes)} nodes, clip holds {count}")
+
+        return {
+            channel: np.array(
+                [getattr(node, channel) for node in nodes], dtype=float
+            ).reshape(count, 3)
+            for channel in channels
+        }
 
     def __repr__(self) -> str:
         return f"<frames 0..{max(len(self) - 1, 0)} of {self._clip}>"
@@ -5518,16 +5556,28 @@ class ClipData(HierarchyData):
     # --- construction --- #
     @classmethod
     def from_poses(cls, poses, start_frame: int = 0, fps: float = 24.0) -> "ClipData":
-        """builds a clip from a sequence of HierarchyData poses"""
+        """builds a clip from a sequence of HierarchyData poses
+
+        The nodes are copies of the first pose's, and every pose pairs with
+        them by position. Each pose is read once, straight into the blocks,
+        and the nodes are bound once, to frame 0.
+        """
         poses = list(poses)
         if not poses:
             raise ValueError("from_poses needs at least one pose")
 
-        clip = cls(poses[0], frames=len(poses), start_frame=start_frame, fps=fps)
-        for i, pose in enumerate(poses):
-            clip.frames[i] = pose
+        clip     = cls(poses[0], start_frame=start_frame, fps=fps)
+        count    = len(clip)
+        channels = cls.FRAMED_CHANNELS
+        blocks   = {c: np.empty((len(poses), count, 3), dtype=float) for c in channels}
 
-        clip.frame = 0
+        for i, pose in enumerate(poses):
+            for channel, values in _FrameAxis._pose_rows(pose, count, channels).items():
+                blocks[channel][i] = values
+
+        clip._blocks  = blocks
+        clip._columns = [node.uuid for node in clip.list]
+        clip._bind(0)
         return clip
 
     @classmethod

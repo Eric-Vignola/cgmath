@@ -1,3 +1,4 @@
+import contextlib
 import copy
 import json as std_json
 import os
@@ -2643,6 +2644,354 @@ class TestClipFramedReads(unittest.TestCase):
                 axis.rotate = np.zeros((0, len(clip), 3))
         self.assertEqual(len(clip.frames), 0)
         self.assertEqual(clip.frames.times.shape, (0,))
+
+
+class TestClipPoseWrites(unittest.TestCase):
+    """from_poses, a pose filled down a range and a clip pasted into one
+    write every frame at once
+
+    Each must agree with a reference read one frame at a time through the
+    single pose HierarchyData / TransformData API: channels exactly, since a
+    write copies them, and world matrices to 1e-9. Rotate wanders well past
+    180 degrees, so a write that refiltered its keys would show.
+    """
+
+    CHANNELS = ("scale", "rotate", "translate", "rotate_axis", "joint_orient")
+
+    def _rig(self, count=9, seed=3, prefix="j"):
+        # branching, parented by uuid as files are, with every factor the
+        # world matrix composes: rotate_order, joint_orient, rotate_axis,
+        # non unit scale and mixed segment scale compensation
+        rng   = np.random.default_rng(seed)
+        nodes = []
+        for i in range(count):
+            nodes.append(
+                TransformData(
+                    name=f"{prefix}{i}",
+                    node_type="joint",
+                    parent_node=nodes[int(rng.integers(0, i))].uuid if i else None,
+                    translate=rng.normal(size=3),
+                    rotate=rng.uniform(-90.0, 90.0, size=3),
+                    scale=rng.uniform(0.5, 2.0, size=3),
+                    rotate_axis=rng.uniform(-30.0, 30.0, size=3),
+                    joint_orient=rng.uniform(-60.0, 60.0, size=3),
+                    rotate_order=int(rng.integers(0, 6)),
+                    segment_scale_compensate=bool(rng.integers(0, 2)),
+                )
+            )
+        return HierarchyData(nodes)
+
+    def _animated(self, rig, frames=7, seed=5):
+        rng   = np.random.default_rng(seed)
+        clip  = ClipData(rig, frames=frames, start_frame=1001, fps=30.0)
+        shape = clip.frames.rotate.shape
+        walk  = np.cumsum(rng.normal(size=shape) * 90.0, axis=0)
+        clip.frames.rotate       = clip.frames.rotate + walk
+        clip.frames.translate    = clip.frames.translate + rng.normal(size=shape)
+        clip.frames.scale        = clip.frames.scale * rng.uniform(0.8, 1.25, size=shape)
+        clip.frames.rotate_axis  = clip.frames.rotate_axis + rng.normal(size=shape) * 9
+        clip.frames.joint_orient = clip.frames.joint_orient + rng.normal(size=shape) * 9
+        clip.frame               = 0
+        return clip
+
+    # --- the reference: one pose at a time --- #
+    def _read(self, pose):
+        """one pose through the single pose API"""
+        out                 = {c: np.array([getattr(node, c) for node in pose]) for c in self.CHANNELS}
+        out["world_matrix"] = np.array(pose.world_matrix)
+        return out
+
+    def _pose_at(self, clip, frame):
+        """frame ``frame`` of ``clip`` as a plain hierarchy of its own"""
+        clip.frame = frame
+        return TransformList._owned_copy(clip)
+
+    def _frames(self, clip):
+        """every frame of ``clip`` read one at a time, scrubbing
+
+        Back on the frame it was bound to, that frame is read once more, so
+        its nodes hold cached world matrices that a write has to clear.
+        """
+        bound = clip.frame
+        reads = []
+        for frame in range(clip.frame_count):
+            clip.frame = frame
+            reads.append(self._read(clip))
+        clip.frame = bound
+        clip.world_matrix
+        return reads
+
+    def _assert_frames(self, clip, expected):
+        """``clip`` holds ``expected``, one single pose read per frame, and
+        the frame it is bound to reads the same through its nodes"""
+        self.assertEqual(clip.frame_count, len(expected))
+        for channel in self.CHANNELS:
+            got  = getattr(clip.frames, channel)
+            want = np.array([pose[channel] for pose in expected])
+            self.assertTrue(np.array_equal(got, want), channel)
+
+        want = np.array([pose["world_matrix"] for pose in expected])
+        self.assertLessEqual(np.abs(clip.frames.world_matrix - want).max(), 1e-9)
+
+        # the bound nodes must not keep a world matrix cached before the write
+        for key, values in self._read(clip).items():
+            error = np.abs(values - expected[clip.frame][key]).max()
+            self.assertLessEqual(error, 1e-9, key)
+
+    def _target(self, frame=4):
+        """an animated clip bound to ``frame``"""
+        clip       = self._animated(self._rig(), seed=5)
+        clip.frame = frame
+        return clip
+
+    @contextlib.contextmanager
+    def _binds(self):
+        """counts ClipData._bind calls: each is a pass over every node"""
+        calls    = []
+        original = ClipData._bind
+
+        def counting(clip, frame):
+            calls.append(frame)
+            return original(clip, frame)
+
+        with mock.patch.object(ClipData, "_bind", counting):
+            yield calls
+
+    @contextlib.contextmanager
+    def _channel_reads(self, nodes):
+        """counts reads of ``nodes``' framed channel fields"""
+        watched = {id(node) for node in nodes}
+        fields  = set(ClipData.FRAMED_CHANNELS)
+        reads   = []
+
+        def getattribute(node, name):
+            if name in fields and id(node) in watched:
+                reads.append(name)
+            return object.__getattribute__(node, name)
+
+        with mock.patch.object(TransformData, "__getattribute__", getattribute):
+            yield reads
+
+    # --- from_poses --- #
+    def test_from_poses_matches_the_poses(self):
+        source = self._animated(self._rig(), seed=8)
+        poses  = [self._pose_at(source, f) for f in range(source.frame_count)]
+
+        clip   = ClipData.from_poses(poses, start_frame=1001, fps=30.0)
+
+        self._assert_frames(clip, [self._read(pose) for pose in poses])
+        self.assertEqual(clip.frame, 0)
+        self.assertEqual(clip.name, poses[0].name)
+        self.assertTrue(np.array_equal(clip.rotate_order, poses[0].rotate_order))
+        self.assertEqual((clip.start_frame, clip.fps), (1001, 30.0))
+
+    def test_from_poses_binds_the_nodes_once(self):
+        # not once per pose: every pose goes straight into the blocks
+        source = self._animated(self._rig(), seed=8)
+        poses  = [self._pose_at(source, f) for f in range(source.frame_count)]
+
+        with self._binds() as calls:
+            ClipData.from_poses(poses)
+
+        self.assertEqual(calls, [0])
+
+    def test_from_poses_leaves_the_poses_alone(self):
+        source = self._animated(self._rig(), seed=8)
+        poses  = [self._pose_at(source, f) for f in range(source.frame_count)]
+        before = [self._read(pose) for pose in poses]
+
+        clip                  = ClipData.from_poses(poses)
+        clip.frames.translate = np.zeros(clip.frames.translate.shape)
+
+        for pose, want in zip(poses, before):
+            for key, values in self._read(pose).items():
+                self.assertTrue(np.array_equal(values, want[key]), key)
+
+    def test_from_poses_refuses_a_pose_of_another_size(self):
+        poses = [self._rig(), self._rig(count=8)]
+        with self.assertRaises(ValueError):
+            ClipData.from_poses(poses)
+
+    # --- one pose: a frame, or filled down a range --- #
+    def test_one_pose_write_matches_the_pose(self):
+        pose = self._pose_at(self._animated(self._rig(), seed=8), 3)
+
+        for frame in (0, 4, 6, -2):
+            with self.subTest(frame=frame):
+                clip     = self._target()
+                expected = self._frames(clip)
+
+                clip.frames[frame] = pose
+
+                expected[frame] = self._read(pose)
+                self._assert_frames(clip, expected)
+
+    def test_a_pose_fills_any_range(self):
+        pose = self._pose_at(self._animated(self._rig(), seed=8), 3)
+        read = self._read(pose)
+
+        for span in (
+            slice(None),
+            slice(2, 5),
+            slice(1, None, 2),
+            slice(None, None, -3),
+            slice(5, 1, -1),
+            slice(3, 3),
+        ):
+            with self.subTest(span=span):
+                clip     = self._target()
+                expected = self._frames(clip)
+
+                clip.frames[span] = pose
+
+                for frame in range(*span.indices(clip.frame_count)):
+                    expected[frame] = read
+                self._assert_frames(clip, expected)
+
+    def test_any_sequence_of_nodes_is_a_pose(self):
+        # a hierarchy, a selection view of one and a plain list of its nodes
+        pose = self._pose_at(self._animated(self._rig(), seed=8), 3)
+        read = self._read(pose)
+
+        for given in (pose, pose[:], list(pose)):
+            with self.subTest(kind=type(given).__name__):
+                clip     = self._target()
+                expected = self._frames(clip)
+
+                clip.frames[1:4] = given
+
+                expected[1:4] = [read] * 3
+                self._assert_frames(clip, expected)
+
+    def test_a_fill_reads_the_pose_once(self):
+        # not once per frame: 5 framed channels of each node, read one time
+        clip = self._target()
+        pose = self._pose_at(self._animated(self._rig(), seed=8), 3)
+
+        with self._channel_reads(pose.list) as reads:
+            clip.frames[:] = pose
+
+        self.assertEqual(len(reads), 5 * len(pose))
+
+    def test_an_axis_held_across_a_reorder_writes_by_the_current_order(self):
+        # set_parent sorts the new parent ahead of its child after the axis
+        # was taken; the pose still pairs with the nodes as they are now
+        rig  = HierarchyData([TransformData(name=n) for n in ("a", "b", "root")])
+        clip = ClipData(rig, frames=3)
+        axis = clip.frames
+        clip["a"].set_parent("root", world_space=False)
+
+        names = clip.name
+        pose = HierarchyData(
+            [
+                TransformData(name=name, translate=[i + 1.0, 0.0, 0.0])
+                for i, name in enumerate(names)
+            ]
+        )
+        axis[0:3] = pose
+
+        self.assertEqual(names, ["b", "root", "a"])
+        want = [1.0, 2.0, 3.0]
+        self.assertTrue(np.array_equal(clip.frames.translate[..., 0], [want] * 3))
+        self.assertTrue(np.array_equal(clip.translate[:, 0], want))
+
+    def test_a_pose_of_another_size_is_refused(self):
+        clip = self._target()
+        for span in (2, slice(1, 4)):
+            with self.subTest(span=span):
+                with self.assertRaises(ValueError):
+                    clip.frames[span] = self._rig(count=8)
+
+    # --- a clip pasted into a range --- #
+    def test_a_paste_matches_the_source_read_frame_by_frame(self):
+        for span in (slice(None), slice(2, 5), slice(None, None, -2), slice(6, 1, -2)):
+            with self.subTest(span=span):
+                clip     = self._target()
+                frames   = range(*span.indices(clip.frame_count))
+                source   = self._animated(self._rig(), frames=len(frames), seed=13)
+                expected = self._frames(clip)
+                pasted   = self._frames(source)
+
+                clip.frames[span] = source
+
+                for i, frame in enumerate(frames):
+                    expected[frame] = pasted[i]
+                self._assert_frames(clip, expected)
+
+    def test_a_paste_leaves_the_source_alone(self):
+        # the source is read whole, never scrubbed: its frame stays put
+        clip         = self._target()
+        source       = self._animated(self._rig(), frames=3, seed=13)
+        source.frame = 1
+        before       = self._frames(source)
+
+        clip.frames[2:5] = source
+
+        self.assertEqual(source.frame, 1)
+        self._assert_frames(source, before)
+
+    def test_a_paste_binds_the_nodes_once(self):
+        clip   = self._target()
+        source = self._animated(self._rig(), seed=13)
+
+        with self._binds() as calls:
+            clip.frames[:] = source
+
+        self.assertEqual(calls, [4])
+
+    def test_a_clip_pasted_into_itself_reversed_plays_backwards(self):
+        # every frame is read before any is written over
+        clip     = self._target()
+        expected = self._frames(clip)
+
+        clip.frames[::-1] = clip
+
+        self._assert_frames(clip, expected[::-1])
+
+    def test_a_paste_pairs_nodes_by_position(self):
+        # as a single pose does: the source's names play no part
+        clip   = self._target()
+        source = self._animated(self._rig(seed=21, prefix="other"), frames=3, seed=13)
+        pasted = self._frames(source)
+
+        clip.frames[0:3] = source
+
+        want = [pose["rotate"] for pose in pasted]
+        self.assertTrue(np.array_equal(clip.frames.rotate[0:3], want))
+        self.assertEqual(clip.name[0], "j0")
+
+    def test_a_paste_of_another_node_count_is_refused(self):
+        clip   = self._target()
+        source = self._animated(self._rig(count=8), frames=3, seed=13)
+        with self.assertRaises(ValueError):
+            clip.frames[0:3] = source
+
+    def test_a_source_whose_nodes_were_reordered_pastes_by_its_current_order(self):
+        # a sort or a set_parent reorders a clip's nodes and leaves its block
+        # columns behind until something lines them up: the paste has to do
+        # that first, or node i takes the curves of whichever node had
+        # column i, 96 to 106 degrees off here
+        reorders = {
+            "sort":             lambda c: c.sort(reverse=True),
+            "set_parent local": lambda c: c[c.index("j1")].set_parent(None, world_space=False),
+        }
+        for label, reorder in reorders.items():
+            with self.subTest(label):
+                clip   = self._target()
+                source = self._animated(self._rig(), frames=clip.frame_count, seed=13)
+                reorder(source)
+                self.assertNotEqual(source._columns, [node.uuid for node in source.list])
+
+                # each node's curves, read off the raw blocks by its uuid
+                column = {uuid: j for j, uuid in enumerate(source._columns)}
+                cols   = [column[node.uuid] for node in source.list]
+                want   = {c: source._blocks["_" + c][:, cols] for c in self.CHANNELS}
+
+                clip.frames[:] = source
+
+                for channel in self.CHANNELS:
+                    got = getattr(clip.frames, channel)
+                    self.assertTrue(np.array_equal(got, want[channel]), channel)
 
 
 class TestClipSaveFbx(unittest.TestCase):

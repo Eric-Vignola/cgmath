@@ -1064,6 +1064,12 @@ clip.frames[4:6] = pose                                   # or fill with one pos
 assert np.allclose(clip.frames.translate[5], 9.0)
 ```
 
+A paste copies the source's frames across whole, nodes paired by
+position, and leaves the source on the frame it was on; a clip pasted
+into itself reads every frame first, so `clip.frames[::-1] = clip` plays
+it backwards. A pose is read once and repeated down the range. Either
+way the nodes are bound once.
+
 Pasting a clip of the wrong length raises.
 
 ```python
