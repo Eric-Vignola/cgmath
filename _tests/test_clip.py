@@ -1232,6 +1232,205 @@ class TestDeltaSolveOrderChildrenFirst(TestDeltaSolveOrder):
     children_first = True
 
 
+class TestClipBranchResets(unittest.TestCase):
+    """a write on the bound frame clears the cached world matrices of the
+    written node's whole branch, so every read after it, and every node
+    solved after it, sees the new pose. The reference is the same write made
+    on a single pose copy of that frame, its world matrices then computed
+    from scratch"""
+
+    def _rig(self, by_name, count=14, seed=3):
+        rng   = np.random.default_rng(seed)
+        uuids = [hierarchy.generate_uuid() for _ in range(count)]
+        nodes = []
+        for i in range(count):
+            parent = None
+            if i:
+                p      = int(rng.integers(max(0, i - 4), i))
+                parent = f"j{p}" if by_name else uuids[p]
+            nodes.append(
+                TransformData(
+                    name=f"j{i}",
+                    node_type="joint",
+                    uuid=uuids[i],
+                    parent_node=parent,
+                    translate=rng.normal(size=3),
+                    rotate=rng.uniform(-90.0, 90.0, size=3),
+                    scale=rng.uniform(0.7, 1.4, size=3),
+                    joint_orient=rng.uniform(-45.0, 45.0, size=3),
+                    rotate_axis=rng.uniform(-20.0, 20.0, size=3),
+                    rotate_order=int(rng.integers(0, 6)),
+                    segment_scale_compensate=bool(rng.integers(0, 2)),
+                )
+            )
+        return HierarchyData(nodes)
+
+    def _clip(self, rig, frames=4, seed=4):
+        rng                   = np.random.default_rng(seed)
+        clip                  = ClipData(rig, frames=frames)
+        shape                 = clip.frames.rotate.shape
+        clip.frames.rotate    = clip.frames.rotate + rng.normal(size=shape) * 25.0
+        clip.frames.translate = clip.frames.translate + rng.normal(size=shape) * 0.3
+        clip.frames.scale     = clip.frames.scale * rng.uniform(0.8, 1.25, size=shape)
+        clip.frame            = 0
+        return clip
+
+    @staticmethod
+    def _pose(clip) -> HierarchyData:
+        """the bound frame as a single pose hierarchy of its own"""
+        return TransformList._owned_copy(clip)
+
+    def _assert_like(self, clip, pose, label):
+        """the clip's cached reads equal the pose's channels and its world
+        matrices computed from scratch"""
+        self.assertEqual(clip.name, pose.name, label)
+        for channel in ("rotate", "translate", "scale", "rotate_axis", "joint_orient"):
+            np.testing.assert_allclose(
+                getattr(clip, channel), getattr(pose, channel), atol=1e-9,
+                err_msg=f"{label}: {channel}",
+            )
+        np.testing.assert_allclose(
+            clip.world_matrix, pose.copy().world_matrix, atol=1e-9, err_msg=label
+        )
+
+    # --- one write per frame, as a user scrubs and writes --- #
+    WRITES = {
+        "rotate": lambda h, f, o: setattr(h, "rotate", o.frames.rotate[f]),
+        "rotate_x": lambda h, f, o: setattr(h, "rotate_x", o.frames.rotate_x[f]),
+        "translate": lambda h, f, o: setattr(h, "translate", o.frames.translate[f]),
+        "scale": lambda h, f, o: setattr(h, "scale", o.frames.scale[f]),
+        "joint_orient": lambda h, f, o: setattr(h, "joint_orient", o.frames.joint_orient[f]),
+        "rotate_axis": lambda h, f, o: setattr(h, "rotate_axis", o.frames.rotate_axis[f]),
+        "one node": lambda h, f, o: setattr(h["j1"], "translate_y", 3.0 + f),
+        "isub": lambda h, f, o: h.__isub__(TransformList._owned_copy(o)),
+    }
+
+    def test_a_write_on_every_frame_matches_the_single_pose_write(self):
+        for by_name in (False, True):
+            for label, write in self.WRITES.items():
+                with self.subTest(label, by_name=by_name):
+                    clip  = self._clip(self._rig(by_name))
+                    other = self._clip(self._rig(by_name), seed=9)
+                    for frame in range(clip.frame_count):
+                        clip.frame  = frame
+                        other.frame = frame
+                        pose        = self._pose(clip)
+
+                        clip.world_matrix  # every node's world matrix cached
+                        write(clip, frame, other)
+                        write(pose, frame, other)
+                        self._assert_like(clip, pose, f"{label} frame {frame}")
+
+    def test_a_solve_on_every_frame_lands_on_its_target(self):
+        # each node solves against its parent's world matrix: a parent whose
+        # write missed a child's cache would leave that child off target. The
+        # two rigs share every structural value, so each frame is reachable
+        for by_name in (False, True):
+            for label in ("world_matrix", "match_matrix"):
+                with self.subTest(label, by_name=by_name):
+                    clip   = self._clip(self._rig(by_name))
+                    other  = self._clip(self._rig(by_name), seed=9)
+                    target = other.frames.world_matrix
+                    for frame in range(clip.frame_count):
+                        clip.frame  = frame
+                        other.frame = frame
+                        pose        = self._pose(clip)
+
+                        clip.world_matrix
+                        if label == "world_matrix":
+                            clip.world_matrix = target[frame]
+                            pose.world_matrix = target[frame]
+                        else:
+                            clip.match_matrix(other)
+                            pose.match_matrix(TransformList._owned_copy(other))
+
+                        np.testing.assert_allclose(
+                            clip.world_matrix, target[frame], atol=1e-9,
+                            err_msg=f"{label} frame {frame}",
+                        )
+                        self._assert_like(clip, pose, f"{label} frame {frame}")
+
+    def test_a_write_scans_the_clip_a_few_times_not_once_per_node(self):
+        # finding a node's children used to scan the whole clip, once for
+        # every node of every branch a write reset: 406 passes over the
+        # clip's 40 nodes for one rotate write, 1739 for world_matrix. A
+        # node's get_parent still scans the clip, and solving a world matrix
+        # asks it a few times a node, so that write is held to 3 passes a
+        # node rather than 3 in all
+        class Walked(list):
+            walks = 0
+
+            def __iter__(self):
+                self.walks += 1
+                return super().__iter__()
+
+        rig       = self._rig(by_name=False, count=40)
+        clip      = ClipData(rig, frames=3)
+        clip.list = Walked(clip.list)
+        other     = self._clip(rig, seed=9)
+        writes = {
+            "rotate":       lambda: setattr(clip, "rotate", other.frames.rotate[1]),
+            "rotate_order": lambda: setattr(clip, "rotate_order", (clip.rotate_order + 1) % 6),
+            "segment_scale_compensate": lambda: setattr(
+                clip, "segment_scale_compensate", ~clip.segment_scale_compensate
+            ),
+            "world_matrix": lambda: setattr(clip, "world_matrix", other.frames.world_matrix[2]),
+            "isub":         lambda: clip.__isub__(rig),
+        }
+        limits = {"world_matrix": 3 * len(clip)}
+        for label, write in writes.items():
+            clip.world_matrix
+            clip.list.walks = 0
+            write()
+            self.assertLessEqual(clip.list.walks, limits.get(label, 3), label)
+
+    # --- one structural edit, shared by every frame --- #
+    EDITS = {
+        "rotate_order": lambda h: setattr(
+            h, "rotate_order", [(i * 5) % 6 for i in range(len(h))]
+        ),
+        "segment_scale_compensate": lambda h: setattr(
+            h, "segment_scale_compensate", [i % 3 == 0 for i in range(len(h))]
+        ),
+        "set_parent local": lambda h: h[5:9].set_parent("j2", world_space=False),
+        "set_parent to the world": lambda h: h["j6"].set_parent(None, world_space=False),
+        "pop": lambda h: h.pop(3),
+        # raw structural writes: nothing clears a branch, the world matrices
+        # cached before them must not be trusted after
+        "parent_node to the world": lambda h: setattr(h["j6"], "parent_node", None),
+        "parent_node by uuid": lambda h: setattr(h["j7"], "parent_node", h["j1"].uuid),
+        "del": lambda h: h.__delitem__(3),
+    }
+
+    def test_a_structural_edit_matches_the_single_pose_edit(self):
+        for by_name in (False, True):
+            for label, edit in self.EDITS.items():
+                with self.subTest(label, by_name=by_name):
+                    clip  = self._clip(self._rig(by_name))
+                    poses = []
+                    for frame in range(clip.frame_count):
+                        clip.frame = frame
+                        poses.append(self._pose(clip))
+                        edit(poses[-1])
+
+                    # made on the last frame with every cache filled, the
+                    # clip's index too, then read before any scrub could
+                    # clear them
+                    clip.world_matrix
+                    clip.get_branch()
+                    edit(clip)
+                    self._assert_like(clip, poses[-1], f"{label} bound frame")
+
+                    framed = clip.frames.world_matrix
+                    for frame, pose in enumerate(poses):
+                        clip.frame = frame
+                        self._assert_like(clip, pose, f"{label} frame {frame}")
+                        np.testing.assert_allclose(
+                            framed[frame], pose.copy().world_matrix, atol=1e-9,
+                            err_msg=f"{label} frames.world_matrix {frame}",
+                        )
+
+
 class TestClipScopedFrames(unittest.TestCase):
     """the frame axis narrowed to some nodes, or to a range of frames"""
 

@@ -303,6 +303,24 @@ assert np.allclose(rig["knee"].world_matrix[3, :3], [0.0, 14.0, 0.0])
 The branch walk is `get_children`, which reads `parent_node` the way
 `get_parent` does: the parent's uuid, or its name, meaning the first node
 that carries it. A child parented either way is cleared with the branch.
+The hierarchy keeps an index of every node's children for the walk, so a
+write costs the size of its branch, not of the rig. Any edit to a
+`parent_node`, `name` or `uuid` of one of its nodes, or to the node list
+through the hierarchy's own methods, retires the index; an assignment, sort
+or reverse made on the raw `rig.list` is not seen, so go through
+`rig[i] = node` or `rig.sort()`. Such an edit, a rename aside, can give any
+node of the rig another parent, so a world matrix cached before it is not
+trusted after it: the next read computes it again, down from the nearest
+parent still cached, though the edit cleared no branch. A rename clears the
+branches it moves itself and leaves the rest cached; an edit in another
+rig, or on a node no rig holds, leaves every cache of this one standing.
+
+```python
+rig = make_chain()
+rig["knee"].world_matrix                          # cached under hip
+rig["knee"].parent_node = rig["root"].uuid        # a raw write, no branch cleared
+assert np.allclose(rig["knee"].world_matrix[3, :3], [0.0, 10.0, 0.0])
+```
 
 ```python
 named = HierarchyData(

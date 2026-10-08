@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import itertools
 import json
 import os
 import re
@@ -640,6 +641,35 @@ def _prefixed(name: str, prefix: str) -> str:
     return head + colon + prefix + short
 
 
+# which node is whose child follows every node's parent_node, name and
+# uuid, and what each hierarchy lists. A hierarchy counts the edits to those
+# among its own nodes: the index it keeps (HierarchyData._rig_index) and its
+# nodes' cached world matrices hold the count they were built at, so an edit
+# retires them in its own rig and nowhere else. Every count is drawn from
+# one sequence, so no two rigs, or two edits, ever share one
+_STRUCTURAL_FIELDS = frozenset(("parent_node", "name", "uuid"))
+_structure_ticks   = itertools.count(1)
+
+
+def _structure_changed(owner, renamed: bool = False) -> None:
+    """an edit may have given some node of ``owner`` another parent or
+    other children; a node no hierarchy owns has neither, so None counts
+    nothing. ``renamed``: a rename, whose moved children _set_names has
+    seen to, retires the index alone"""
+    if owner is not None:
+        tick                 = next(_structure_ticks)
+        owner._index_version = tick
+        if not renamed:
+            owner._structure_version = tick
+
+
+def _structure_stamp(node) -> int:
+    """the structure count ``node``'s world matrix holds while it is
+    current: its hierarchy's, 0 for a node no hierarchy owns"""
+    owner = node._hierarchy
+    return 0 if owner is None else owner._structure_version
+
+
 @dataclass(repr=False, eq=False)
 class TransformData(Data):
     # name, node_type, uuid, and parent_node
@@ -666,8 +696,9 @@ class TransformData(Data):
     user_defined_attributes: dict = field(default_factory=dict)
 
     # --- cached attributes --- #
-    _hierarchy    = None  # HierarchyData reference pointer
-    _world_matrix = None  # cached world matrix
+    _hierarchy     = None  # HierarchyData reference pointer
+    _world_matrix  = None  # cached world matrix
+    _world_version = None  # its rig's structure count it was cached at
 
     def __init__(
         self,
@@ -1055,8 +1086,21 @@ class TransformData(Data):
 
     def _reset_branch_world_matrices(self):
         """resets the world matrix of this node and all its decendents, and
-        anything else they built from their transform"""
-        for node in self.get_branch():
+        anything else they built from their transform
+
+        The branch is walked through the index the hierarchy keeps. When an
+        edit has retired it since, one scan first tells whether the node has
+        children at all: a leaf written after every node added, or every
+        parent changed, would otherwise rebuild the index on each write.
+        """
+        hierarchy = self._hierarchy
+        if hierarchy is not None:
+            current = getattr(hierarchy, "_rig_index_is_current", None)
+            if (current is None or not current()) and not self._scan_children():
+                self._transform_changed()
+                return
+
+        for node in _walk((self,), _Lookups()):
             node._transform_changed()
 
     def _reject_animated(self, what: str) -> None:
@@ -1321,13 +1365,37 @@ class TransformData(Data):
 
         return self._hierarchy.index(self)
 
+    def _cached_world(self) -> Optional[np.ndarray]:
+        """the cached world matrix, None when there is none or when the
+        rig's structure has changed since it was cached
+
+        A channel write clears its branch's caches, but a structural edit --
+        a parent_node, name or uuid written, a node added, removed, replaced
+        or reordered -- can give any node of its rig another parent, and
+        finding the nodes it moves would cost a walk of the rig per edit. The
+        cache holds its rig's structure version instead, so one built before
+        such an edit in its own rig is not trusted. An edit in another rig,
+        or on a node no rig owns, leaves it alone.
+        """
+        # _structure_stamp, written out: this is every world read's first step
+        owner = self._hierarchy
+        if self._world_version != (0 if owner is None else owner._structure_version):
+            return None
+        return self._world_matrix
+
     @property
     def world_matrix(self):
-        """compute a world matrix"""
-        if self._world_matrix is None:
-            P                  = self.get_parent_matrix()
-            self._world_matrix = np.dot(self.matrix, P)
-        return self._world_matrix.copy()
+        """compute a world matrix
+
+        Up the parents to the first one whose world matrix is cached, or to
+        a root, then back down, caching each node's on the way: a read after
+        a structural edit fills its chain once, and a chain deeper than the
+        recursion limit reads as any other.
+        """
+        world = self._cached_world()
+        if world is None:
+            world = _world_down(self)
+        return world.copy()
 
     @world_matrix.setter
     def world_matrix(self, M: np.ndarray) -> None:
@@ -1339,8 +1407,9 @@ class TransformData(Data):
         mirror goes on scale z, the way Maya splits a matrix, and what a
         zero scale leaves of the rotation is kept from the current one.
         """
-        M = np.asarray(M, dtype=float).reshape(4, 4)
-        if self._world_matrix is None or not _same_transform(self._world_matrix, M):
+        M      = np.asarray(M, dtype=float).reshape(4, 4)
+        cached = self._cached_world()
+        if cached is None or not _same_transform(cached, M):
             W = self.get_parent_matrix()
             # a true inverse is required: a scaled parent's world matrix has
             # non-orthogonal rows, and matrix_local's fast affine inverse
@@ -1498,11 +1567,22 @@ class TransformData(Data):
         is the first node carrying that name. Matching uuids alone left a rig
         parented by name with no children below any node, so an edit never
         cleared a descendant's cached world matrix.
+
+        The children come from the index the hierarchy keeps until its
+        structure changes, not from a scan of every node, so a branch walk,
+        and with it every channel write, costs the size of the branch.
         """
+        return TransformList(_Lookups().children(self))
+
+    def _scan_children(self) -> list:
+        """:meth:`get_children` by a scan of every node of the hierarchy: for
+        a hierarchy the index can not stand for, and for a reset whose index
+        an edit has just retired"""
         children = []
         if self._hierarchy is not None:
             # read once, and walk the plain list rather than the hierarchy's
-            # item access: this loop runs on every cache reset of a branch
+            # item access: a reset runs this on a node whose index an edit
+            # has just retired
             uuid, name = self.uuid, self.name
             by_name = None  # whether this node is the one its name resolves to
             for node in self._hierarchy.list:
@@ -1518,21 +1598,17 @@ class TransformData(Data):
                     if by_name:
                         children.append(node)
 
-        return TransformList(children)
+        return children
 
     def get_branch(self) -> "TransformList":
-        """returns a recursive NodeList from of all decendents"""
+        """returns a recursive NodeList from of all decendents
 
-        def _recurse(leaf):
-            for child in leaf.get_children():
-                branch.append(child)
-                _recurse(child)
-
-        # recurse through the hierarchy
-        branch = [self]
-        _recurse(self)
-
-        return TransformList(branch)
+        This node, then each child followed by that child's own branch.
+        Walked with a stack rather than by recursion, so a chain deeper than
+        Python's recursion limit is walked too, and a node is listed once
+        even when a cyclic parent_node leads back to it.
+        """
+        return TransformList(_walk((self,), _Lookups()))
 
     def set_parent(self, parent: Union[str, None], world_space: bool = True) -> None:
         """reparents node to a given parent and resets internal SRTs"""
@@ -1629,6 +1705,12 @@ class TransformData(Data):
         raises on names the class does not declare. ``user_defined_attributes
         = None`` stores an empty dict."""
         if not name.startswith("_"):
+            # a new parent_node or uuid can move a node of the rig to another
+            # parent, so the rig's index of its children and its cached world
+            # matrices have to go. A rename is _set_names' to count
+            if name in _STRUCTURAL_FIELDS and name != "name":
+                _structure_changed(self._hierarchy)
+
             attrs = self.__dict__.get("user_defined_attributes")
             if attrs and name in attrs and not self._is_builtin_attr(name):
                 for spec, converted in _user_writes(attrs, name, value, self.name):
@@ -1671,13 +1753,17 @@ class TransformData(Data):
         hierarchy whatever the number of nodes renamed, where a node at a
         time would scan it once per node, and the branches to clear are
         walked together.
+
+        A rename retires the hierarchy's index, whose names it changes, but
+        not its cached world matrices: the children it would move are the
+        ones pinned or cleared here, so every other node keeps its parent.
         """
-        set_name = Data.__setattr__  # past the rename in __setattr__
-        owners   = {}
+        set_raw = Data.__setattr__  # past the rename and count in __setattr__
+        owners  = {}
         for node, value in pairs:
             owner = node._hierarchy
             if owner is None:
-                set_name(node, "name", value)
+                set_raw(node, "name", value)
             else:
                 _, renamed = owners.setdefault(id(owner), (owner, {}))
                 renamed[id(node)] = (node, value)
@@ -1708,19 +1794,24 @@ class TransformData(Data):
 
             before = first_named() if linked else {}
             for n, value in changes:
-                set_name(n, "name", value)
+                set_raw(n, "name", value)
+            if changes:
+                _structure_changed(hierarchy, renamed=True)
 
             if not linked:
                 continue
 
+            # a link pinned keeps its parent: written past __setattr__, it
+            # retires the index alone
             after = first_named()
             stale = []
             for child in linked:
                 parent = before.get(child.parent_node)
                 if parent is not None and id(parent) in moved:
-                    child.parent_node = parent.uuid
+                    set_raw(child, "parent_node", parent.uuid)
                 elif after.get(child.parent_node) is not parent:
                     stale.append(child)
+            _structure_changed(hierarchy, renamed=True)
 
             # once every link is pinned, so that the walk finds the renamed
             # nodes' children too
@@ -2253,12 +2344,14 @@ class _RigIndex:
 class _Lookups:
     """get_parent, get_children, index and unique_name for many nodes at once
 
-    Each of those scans the owning hierarchy, get_parent twice, so asking
-    them of every node of a rig costs the rig's size squared. Here each
-    owning hierarchy is indexed (:class:`_RigIndex`) the first time one of
-    its nodes is asked about, and indexed once for the length of the call:
-    a pass that edits as it goes reads the rig as it was when it started.
-    A node whose hierarchy can not be indexed is asked itself.
+    A node's get_parent, index and unique_name scan its hierarchy,
+    get_parent twice, so asking them of every node of a rig costs the rig's
+    size squared. Here each owning hierarchy's index (:class:`_RigIndex`) is
+    fetched the first time one of its nodes is asked about, and held for the
+    length of the call: a pass that edits as it goes reads the rig as it was
+    when it started. A HierarchyData keeps its index between calls, until
+    its structure changes (:meth:`HierarchyData._rig_index`). A node whose
+    hierarchy can not be indexed is asked itself.
     """
 
     __slots__ = ("_indexes",)
@@ -2267,10 +2360,13 @@ class _Lookups:
         self._indexes = {}
 
     def index_of(self, hierarchy) -> Optional[_RigIndex]:
-        """the index of ``hierarchy``, built on first use"""
+        """the index of ``hierarchy``, fetched on first use"""
         entry = self._indexes.get(id(hierarchy))
         if entry is None:
-            entry                        = (hierarchy, _RigIndex.build(hierarchy))
+            # a HierarchyData keeps its index until its structure changes
+            kept  = getattr(hierarchy, "_rig_index", None)
+            index = kept() if kept is not None else _RigIndex.build(hierarchy)
+            entry = (hierarchy, index)
             self._indexes[id(hierarchy)] = entry
         return entry[1]
 
@@ -2297,7 +2393,7 @@ class _Lookups:
             or not isinstance(node.uuid, _INDEX_KEYS)
             or not isinstance(node.name, _INDEX_KEYS)
         ):
-            return list(node.get_children())
+            return node._scan_children()
         return index.children(node)
 
     def index(self, node) -> int:
@@ -2349,6 +2445,39 @@ def _walk(roots, lookups: _Lookups) -> list:
     return walked
 
 
+def _world_down(node) -> np.ndarray:
+    """``node``'s world matrix, worked out from the nearest ancestor whose
+    world matrix is cached, or from a root, every node on the way cached
+
+    A loop rather than each node asking its parent: a chain deeper than the
+    recursion limit reads too. The parents come from the index the rig
+    keeps, one build after a structural edit, then a dict read a level,
+    where each node's get_parent scanned the rig twice. A cyclic
+    parent_node has no world matrix: RecursionError, as the recursion gave.
+    """
+    lookups, chain, seen = _Lookups(), [], set()
+    parent_world = None
+    while parent_world is None:
+        chain.append(node)
+        seen.add(id(node))
+        parent = lookups.parent(node)
+        if not isinstance(parent, TransformData):
+            # a root, or a parent the hierarchy does not hold
+            parent_world = np.eye(4)
+        elif id(parent) in seen:
+            raise RecursionError(f"the parent_node of {parent.name!r} leads back to it")
+        else:
+            parent_world = parent._cached_world()
+            node         = parent
+
+    world = parent_world
+    for node in reversed(chain):
+        world               = np.dot(node.matrix, world)
+        node._world_matrix  = world
+        node._world_version = _structure_stamp(node)
+    return world
+
+
 def _chain_depths(parents) -> np.ndarray:
     """the number of ancestors above each entry of a parent array
 
@@ -2389,9 +2518,9 @@ def _reset_branches(nodes) -> None:
     """drops the cached world matrices of ``nodes`` and of every node below
     them, as _reset_branch_world_matrices does for one
 
-    A branch walk node by node scans the hierarchy for every node it
-    reaches, so clearing the branches of many nodes that way costs N^2:
-    they are walked together, through one index of each hierarchy.
+    The branches are walked together, each node once, through one index
+    of each hierarchy: a branch shared by several of ``nodes`` is not
+    walked again for each.
     """
     for node in _walk(nodes, _Lookups()):
         node._transform_changed()
@@ -3832,18 +3961,88 @@ class HierarchyData(TransformList):
             for i, existing in enumerate(prior.list):
                 if existing is node:
                     prior.list.pop(i)
+                    _structure_changed(prior)
                     break
         node._hierarchy = self
+
+    def __setattr__(self, name: str, value) -> None:
+        super().__setattr__(name, value)
+        # a list replaced can hand a shared name to another node, which moves
+        # the children naming it: cached world matrices are not trusted past it
+        if name == "list":
+            _structure_changed(self)
+
+    # the structure counts of this rig (_structure_changed): the last edit
+    # of any kind, which retires the index, and the last that can give a
+    # node another parent, which retires the cached world matrices too. -1
+    # until the list is first set, never a count a node with no rig holds
+    _index_version     = -1
+    _structure_version = -1
+
+    # (index version, list, length) the index was built at, and the index
+    _rig_index_cache = None
+
+    def _rig_index(self) -> Optional[_RigIndex]:
+        """the index :class:`_Lookups` reads this hierarchy's parents,
+        children, positions and unique names from, kept between calls
+
+        A branch walk, which every channel write makes to clear the cached
+        world matrices below the node, asks each node of the branch for its
+        children: an index built for each walk would cost the hierarchy's
+        size every write. It is kept until this rig's structure count moves:
+        a parent_node, name or uuid written on one of its nodes, or any edit
+        to its list through its methods. A ``list`` replaced, or grown
+        or shrunk in place, is caught as well; an assignment, sort or
+        reverse made on the raw ``list`` is not, and nothing in cgmath makes
+        one.
+        """
+        if self._rig_index_is_current():
+            return self._rig_index_cache[3]
+
+        nodes                 = self.list
+        index                 = _RigIndex.build(self)
+        self._rig_index_cache = (self._index_version, nodes, len(nodes), index)
+        return index
+
+    def _rig_index_is_current(self) -> bool:
+        """whether the index kept is the one the structure would build now"""
+        cache = self._rig_index_cache
+        return (
+            cache is not None
+            and cache[0] == self._index_version
+            and cache[1] is self.list
+            and cache[2] == len(self.list)
+        )
 
     def append(self, node: "TransformData") -> None:
         # validate + add first (raises before we claim the node), then
         # take ownership (detaching from any prior hierarchy)
         super().append(node)
         self._claim(node)
+        _structure_changed(self)
 
     def insert(self, index: int, node: "TransformData") -> None:
         super().insert(index=index, node=node)
         self._claim(node)
+        _structure_changed(self)
+
+    def __setitem__(self, index, value) -> None:
+        super().__setitem__(index, value)
+        _structure_changed(self)
+
+    def __delitem__(self, index) -> None:
+        super().__delitem__(index)
+        _structure_changed(self)
+
+    def sort(self, key=None, reverse=False) -> None:
+        """sorts the nodes in place, by name unless ``key`` says otherwise"""
+        # the order decides which node a shared name resolves to. a sort
+        # whose comparison raises can leave the list part sorted, so the
+        # index is retired whatever happens
+        try:
+            super().sort(key=key, reverse=reverse)
+        finally:
+            _structure_changed(self)
 
     def pop(self, index=-1):
         # retrieves a node and removes pointer
@@ -3853,17 +4052,25 @@ class HierarchyData(TransformList):
             raise IndexError("pop index out of range")
 
         # its children are found while it is still listed: a child may name
-        # it by uuid or by name, and get_children resolves both
-        children = list(self.list[index].get_children())
+        # it by uuid or by name, and get_children resolves both. the
+        # previous pop retired the index, so a loop of pops (clear(), say)
+        # would rebuild it every time: a scan finds them as cheaply
+        target = self.list[index]
+        if self._rig_index_is_current():
+            children = _Lookups().children(target)
+        else:
+            children = target._scan_children()
 
         # extract the node and remove pointer
         node            = self.list.pop(index)
         node._hierarchy = None
+        _structure_changed(self)
 
-        # any node in the list which had this node as a parent is now at root
+        # any node in the list which had this node as a parent is now at
+        # root. all of them first, so the resets walk one index
         for obj in children:
             obj.parent_node = None
-            obj._reset_branch_world_matrices()
+        _reset_branches(children)
 
         return node
 

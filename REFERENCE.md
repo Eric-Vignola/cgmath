@@ -291,6 +291,8 @@ insert(self, index: 'int', node: "'TransformData'") -> 'None'
     S.insert(index, value) -- insert value before index
 pop(self, index=-1)
     S.pop([index]) -> item -- remove and return item at index (default last).
+sort(self, key=None, reverse=False) -> 'None'
+    sorts the nodes in place, by name unless ``key`` says otherwise
 ```
 
 #### `TransformData(Data)`

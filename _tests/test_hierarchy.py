@@ -2,6 +2,7 @@ import copy
 import itertools
 import os
 import pickle
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -9,6 +10,7 @@ from unittest import mock
 import numpy as np
 from cgmath.formats.glb import pygltflib
 from cgmath.hierarchy import HierarchyData, TransformData, TransformList, generate_uuid
+from cgmath.hierarchy import validate_uuid
 from cgmath.hierarchy import _fbx_enum, _rotation, FBX
 from cgmath.transforms import (
     euler_to_matrix,
@@ -3286,3 +3288,521 @@ class TestCopiesOwnTheirNodes(unittest.TestCase):
         p.hero = 3.0
         self.assertEqual(q.hero, 1.0)
         self.assertEqual(attrs["hero"]["value"], 1.0)
+
+
+def _mixed_rig() -> HierarchyData:
+    """a branching rig parented by uuid and by name, with a name two nodes
+    share: root > spine > neck > head > tip, spine > twin > hand, root > twin
+    > toe. neck, hand and tip name their parent; "twin" resolves to the first
+    twin"""
+    rng = np.random.default_rng(23)
+    specs = [
+        ("root", None),
+        ("spine", "root"),
+        ("neck", "spine"),
+        ("head", "neck"),
+        ("twin", "spine"),
+        ("hand", "twin"),
+        ("twin", "root"),
+        ("toe", -1),
+        ("tip", "head"),
+    ]
+    by_name = ("neck", "hand", "tip")
+    nodes   = []
+    for name, parent in specs:
+        if parent == -1:
+            ref = nodes[-1].uuid  # the second twin, which a name can not reach
+        elif parent is None or name in by_name:
+            ref = parent
+        else:
+            ref = next(n for n in nodes if n.name == parent).uuid
+        nodes.append(
+            TransformData(
+                name=name,
+                uuid=generate_uuid(),
+                parent_node=ref,
+                translate=rng.normal(size=3),
+                rotate=rng.uniform(-90.0, 90.0, size=3),
+                scale=rng.uniform(0.7, 1.4, size=3),
+                rotate_order=int(rng.integers(0, 6)),
+                segment_scale_compensate=bool(rng.integers(0, 2)),
+            )
+        )
+    return HierarchyData(nodes)
+
+
+def _children_by_scan(node) -> list:
+    """get_children's rule, by a scan of every node of the hierarchy"""
+    rig = node._hierarchy
+    if rig is None:
+        return []
+    first    = next((n for n in rig.list if n.name == node.name), None)
+    children = []
+    for other in rig.list:
+        ref = other.parent_node
+        if ref == node.uuid:
+            children.append(other)
+        elif ref is not None and ref == node.name and not validate_uuid(ref):
+            if first is node:
+                children.append(other)
+    return children
+
+
+def _branch_by_scan(node) -> list:
+    branch = [node]
+    for child in _children_by_scan(node):
+        branch.extend(_branch_by_scan(child))
+    return branch
+
+
+class _Walked(list):
+    """a node list that counts the passes over it"""
+
+    walks = 0
+
+    def __iter__(self):
+        self.walks += 1
+        return super().__iter__()
+
+
+def _swap_twins(rig) -> None:
+    first  = rig.index("twin")
+    second = [i for i, n in enumerate(rig) if n.name == "twin"][1]
+    rig[first], rig[second] = rig[second], rig[first]
+
+
+class TestRigIndex(unittest.TestCase):
+    """get_children reads the index a hierarchy keeps; every edit that can
+    give a node other children has to retire it"""
+
+    EDITS = {
+        "append": lambda rig: rig.append(
+            TransformData("extra", parent_node=rig["neck"].uuid, translate=(0, 1, 0))
+        ),
+        "insert": lambda rig: rig.insert(
+            1, TransformData("early", parent_node="head", translate=(1, 0, 0))
+        ),
+        "extend": lambda rig: rig.extend(
+            [TransformData("x0", parent_node="twin"), TransformData("x1", parent_node="x0")]
+        ),
+        "pop": lambda rig: rig.pop(rig.index("spine")),
+        "del": lambda rig: rig.__delitem__(rig.index("neck")),
+        "remove": lambda rig: rig.remove(rig["head"]),
+        "setitem swap": _swap_twins,
+        "reverse": lambda rig: rig.reverse(),
+        "sort": lambda rig: rig.sort(reverse=True),
+        "name taken": lambda rig: setattr(rig["root"], "name", "twin"),
+        "name dropped": lambda rig: setattr(rig["spine"], "name", "back"),
+        "add_prefix": lambda rig: rig["twin"].add_prefix("L_"),
+        "add_suffix": lambda rig: rig["head"].add_suffix("_x"),
+        "uuid": lambda rig: setattr(rig["spine"], "uuid", generate_uuid()),
+        "parent_node uuid": lambda rig: setattr(rig["toe"], "parent_node", rig["head"].uuid),
+        "parent_node name": lambda rig: setattr(rig["toe"], "parent_node", "neck"),
+        "parent_node none": lambda rig: setattr(rig["spine"], "parent_node", None),
+        "set_parent local": lambda rig: rig["twin"].set_parent("head", world_space=False),
+        "set_parent world": lambda rig: rig["neck"].set_parent("root", world_space=True),
+        "claimed elsewhere": lambda rig: HierarchyData().append(rig["neck"]),
+        "list replaced": lambda rig: setattr(rig, "list", rig.list[::-1]),
+        "list popped": lambda rig: rig.list.pop(rig.index("tip")),
+    }
+
+    def _assert_current(self, rig, label):
+        """children and branches match a scan of the hierarchy, so do the
+        parents and unique names read through the index, and a channel write
+        on any node reaches its whole branch: every cached world matrix then
+        equals one computed from scratch"""
+        for node in rig:
+            self.assertEqual(
+                [id(n) for n in node.get_children()],
+                [id(n) for n in _children_by_scan(node)],
+                f"{label}: children of {node.name}",
+            )
+            self.assertEqual(
+                [id(n) for n in node.get_branch()],
+                [id(n) for n in _branch_by_scan(node)],
+                f"{label}: branch of {node.name}",
+            )
+
+        parents = [node.get_parent() for node in rig]
+        self.assertEqual(
+            rig.get_parents().tolist(),
+            [rig.index(p) if isinstance(p, TransformData) else -1 for p in parents],
+            f"{label}: parents",
+        )
+        self.assertEqual(
+            rig.unique_name.tolist(),
+            [node.unique_name for node in rig],
+            f"{label}: unique names",
+        )
+
+        for i in range(len(rig)):
+            rig.world_matrix  # every cache filled
+            rig[i].translate = rig[i].translate + (0.25, -0.5, 0.125)
+            np.testing.assert_allclose(
+                rig.world_matrix,
+                rig.copy().world_matrix,
+                atol    = 1e-12,
+                err_msg = f"{label}: after a write on {rig[i].name}",
+            )
+
+    def test_every_edit_retires_the_index(self):
+        for label, edit in self.EDITS.items():
+            with self.subTest(label):
+                rig = _mixed_rig()
+                self._assert_current(rig, label + " (before)")
+
+                # the index built just ahead of the edit, which then has to
+                # retire it on its own
+                rig._rig_index()
+                edit(rig)
+
+                # an edit that moves a node to another parent leaves the
+                # cached world matrices it moved stale: that is not the map's
+                # to fix, so they are dropped here, and what is checked is
+                # that every later write reaches the branch the edit made
+                for node in rig:
+                    node._transform_changed()
+                self._assert_current(rig, label)
+
+    def test_no_edit_leaves_a_stale_world_matrix(self):
+        # every cached world matrix filled, then the edit: a world matrix read
+        # after it is the one the rig now makes, though no branch was cleared.
+        # a node the edit moved used to keep the world of its old parent
+        for label, edit in self.EDITS.items():
+            with self.subTest(label):
+                rig = _mixed_rig()
+                rig.world_matrix
+                edit(rig)
+                np.testing.assert_allclose(
+                    rig.world_matrix,
+                    rig.copy().world_matrix,
+                    atol    = 1e-12,
+                    err_msg = label,
+                )
+
+    def test_a_sort_that_raises_retires_the_index(self):
+        # list.sort can leave the list part sorted when a comparison raises
+        b   = TransformData("b", uuid=generate_uuid(), translate=(0.0, 1.0, 0.0))
+        a   = TransformData("a", parent_node=b.uuid, translate=(0.0, 1.0, 0.0))
+        rig = HierarchyData([b, a, TransformData("c"), TransformData("x")])
+        rig["x"].__dict__["name"] = None  # a name sort() cannot compare
+        rig._rig_index()
+        a.world_matrix
+
+        with self.assertRaises(TypeError):
+            rig.sort()
+
+        self.assertFalse(rig._rig_index_is_current())
+        self.assertEqual([id(n) for n in b.get_children()], [id(a)])
+        self.assertEqual(rig.indices.tolist(), list(range(len(rig))))
+        b.translate = (0.0, 100.0, 0.0)
+        np.testing.assert_allclose(a.world_matrix[3, :3], [0.0, 101.0, 0.0])
+
+    def test_popping_leaves_builds_no_index(self):
+        # every pop retires the index, so a pop that read it would rebuild it
+        # on each call: clear() on a rig of N nodes cost N builds
+        from cgmath.hierarchy.hierarchy import _RigIndex
+
+        build  = _RigIndex.build.__func__
+        builds = []
+
+        def counted(cls, hierarchy):
+            builds.append(1)
+            return build(cls, hierarchy)
+
+        rig = _mixed_rig()
+        for i in range(30):
+            rig.append(TransformData(f"leaf{i}", parent_node=rig["head"].uuid))
+        with mock.patch.object(_RigIndex, "build", classmethod(counted)):
+            for _ in range(30):
+                rig.pop()
+            self.assertEqual(len(builds), 0)
+            rig.clear()
+        self.assertEqual(len(rig), 0)
+        self.assertLessEqual(len(builds), 1)
+
+    def test_a_pop_orphans_the_children_it_finds_by_scan(self):
+        # the index retired by an edit, the children found by a scan: by
+        # uuid and by name alike
+        rig             = _mixed_rig()
+        rig["toe"].name = "foot"  # retires the index
+        self.assertFalse(rig._rig_index_is_current())
+        twin = rig.index("twin")
+        kids = _children_by_scan(rig[twin])
+        rig.world_matrix
+        rig.pop(twin)
+        self.assertTrue(kids)
+        self.assertTrue(all(n.parent_node is None for n in kids))
+        np.testing.assert_allclose(rig.world_matrix, rig.copy().world_matrix, atol=1e-12)
+
+    def test_a_name_moves_children_to_the_node_now_first(self):
+        rig  = _mixed_rig()
+        hand = rig["hand"]
+        self.assertIs(hand.get_parent(), rig["twin"])
+        self.assertEqual(rig["twin"].get_children().name, ["hand"])
+
+        rig["root"].name = "twin"
+        self.assertIs(hand.get_parent(), rig[0])
+        self.assertIn("hand", rig[0].get_children().name)
+        self.assertNotIn("hand", rig[4].get_children().name)
+
+    def test_the_index_is_kept_until_an_edit(self):
+        rig                       = _mixed_rig()
+        built                     = rig._rig_index()
+        rig["spine"].rotate       = (10.0, 20.0, 30.0)
+        rig["spine"].rotate_order = 3
+        rig["spine"].get_branch()
+        self.assertIs(rig._rig_index(), built)
+
+        rig["neck"].name = "collar"
+        self.assertIsNot(rig._rig_index(), built)
+
+        # a strip that renames nothing keeps it
+        built = rig._rig_index()
+        rig.strip_namespace()
+        self.assertIs(rig._rig_index(), built)
+
+    def test_a_rename_through_a_view_retires_the_index(self):
+        # a view renames its nodes together, past __setattr__: the child that
+        # names a node by the name the rename gives it finds it at once
+        rig = HierarchyData(
+            [
+                TransformData("a"),
+                TransformData("b"),
+                TransformData("c", parent_node="a_L"),
+            ]
+        )
+        self.assertEqual(rig.get_parents().tolist(), [-1, -1, -1])
+
+        TransformList([rig["a"], rig["b"]]).add_suffix("_L")
+        self.assertEqual(rig.get_parents().tolist(),     [-1, -1, 0])
+        self.assertEqual(rig["a_L"].get_children().name, ["c"])
+        self.assertEqual(rig.unique_name.tolist(),       [True, True, True])
+
+    def test_a_channel_write_does_not_scan_the_hierarchy_per_node(self):
+        # get_children used to scan every node, once for each node of the
+        # branch, so a write on a root cost the size of the rig squared
+        uuids = [generate_uuid() for _ in range(60)]
+        rig = HierarchyData(
+            [
+                TransformData(f"j{i}", uuid=u, parent_node=uuids[i // 2] if i else None)
+                for i, u in enumerate(uuids)
+            ]
+        )
+        rig.list = _Walked(rig.list)
+        rig[0].world_matrix
+        rig.list.walks = 0
+
+        # the first write finds the index the rig's construction retired:
+        # one scan tells the root has children, one pass builds the index,
+        # and the other nine writes read it
+        for i in range(10):
+            rig[0].translate = (float(i), 0.0, 0.0)
+        self.assertLessEqual(rig.list.walks, 2)
+
+    def test_a_leaf_written_after_each_node_added_leaves_the_index_unbuilt(self):
+        # every append retires the index: a write on the node just added
+        # learns from one scan that it has no children, where rebuilding the
+        # index would cost several scans on every write
+        from cgmath.hierarchy.hierarchy import _RigIndex
+
+        rig    = _mixed_rig()
+        head   = rig["head"]
+        build  = _RigIndex.build.__func__
+        builds = []
+
+        def counted(cls, hierarchy):
+            builds.append(1)
+            return build(cls, hierarchy)
+
+        leaves = []
+        with mock.patch.object(_RigIndex, "build", classmethod(counted)):
+            for i in range(20):
+                leaf = TransformData(f"leaf{i}", parent_node=head.uuid)
+                rig.append(leaf)
+                leaf.translate = (float(i), 1.0, 0.0)
+                leaves.append(leaf)
+            self.assertEqual(len(builds), 0)
+
+            # a write on their parent builds it once and reaches them all
+            for leaf in leaves:
+                leaf.world_matrix
+            head.translate = head.translate + 1.0
+            self.assertEqual(len(builds), 1)
+
+        self.assertTrue(all(leaf._world_matrix is None for leaf in leaves))
+
+    def test_a_chain_deeper_than_the_recursion_limit(self):
+        depth = sys.getrecursionlimit() + 50
+        uuids = [generate_uuid() for _ in range(depth)]
+        rig = HierarchyData(
+            [
+                TransformData(
+                    f"j{i}",
+                    uuid        = u,
+                    parent_node = uuids[i - 1] if i else None,
+                    translate   = (0.0, 1.0, 0.0),
+                )
+                for i, u in enumerate(uuids)
+            ]
+        )
+        self.assertEqual(len(rig[0].get_branch()), depth)
+
+        # parent first, so each read stops at its parent's cached matrix
+        for node in rig:
+            node.world_matrix
+        rig[0].translate = (2.0, 0.0, 0.0)
+        self.assertTrue(all(node._world_matrix is None for node in rig))
+
+        for node in rig:
+            node.world_matrix
+        np.testing.assert_allclose(rig[-1].world_matrix[3, :3], [2.0, depth - 1.0, 0.0])
+
+    def test_a_cyclic_parent_is_walked_once(self):
+        rig                  = HierarchyData([TransformData("a"), TransformData("b", parent_node="a")])
+        rig["a"].parent_node = "b"
+        self.assertEqual(rig["a"].get_branch().name, ["a", "b"])
+        rig["a"].translate = (1.0, 0.0, 0.0)
+        self.assertIsNone(rig["b"]._world_matrix)
+
+        # nor has a world matrix, read by a loop that names the cycle
+        with self.assertRaises(RecursionError):
+            rig["b"].world_matrix
+
+    def test_an_edit_elsewhere_keeps_a_deep_chain_cached(self):
+        # the structure count is the rig's own: a node built, or an edit in
+        # another rig, leaves every cached world matrix of this one standing.
+        # it was one count for every rig, so each of these left the whole
+        # chain to be read again by recursion, past the recursion limit
+        depth = max(1500, sys.getrecursionlimit() + 50)
+        chain = HierarchyData(
+            [
+                TransformData(
+                    f"j{i}",
+                    parent_node = f"j{i - 1}" if i else None,
+                    translate   = (0.0, 1.0, 0.0),
+                )
+                for i in range(depth)
+            ]
+        )
+        for node in chain:
+            node.world_matrix
+        leaf  = chain[depth - 1]
+        other = HierarchyData([TransformData("x"), TransformData("w", parent_node="x")])
+
+        edits = (
+            ("a node built", lambda: TransformData("z")),
+            ("a rename in another rig", lambda: setattr(other[0], "name", "y")),
+            ("a parent_node in another rig", lambda: setattr(other[1], "parent_node", None)),
+            ("a node added to another rig", lambda: other.append(TransformData("v"))),
+            ("a node of another rig popped", lambda: other.pop()),
+        )
+        for label, edit in edits:
+            with self.subTest(label):
+                edit()
+                self.assertTrue(all(node._cached_world() is not None for node in chain))
+                self.assertEqual(leaf.world_matrix[3, 1], float(depth))
+
+        # an edit of its own rig: read again from the root down, by a loop,
+        # every node of the chain cached on the way
+        chain.append(TransformData("extra"))
+        self.assertIsNone(leaf._cached_world())
+        self.assertEqual(leaf.world_matrix[3, 1], float(depth))
+        self.assertTrue(all(node._cached_world() is not None for node in chain[:depth]))
+
+    def test_an_edit_elsewhere_leaves_the_world_setter_keep_test_alone(self):
+        # a world matrix written within 1e-8 of the cached one keeps the
+        # channels. under a parent scaled 1e-4 the local matrix it solves to
+        # is 5e-5 off, so whether the cache is current decides the answer: a
+        # node built, or an edit in another rig, used to retire it
+        def written(edit):
+            parent = TransformData("parent", scale=(1e-4, 1e-4, 1e-4))
+            child  = TransformData("child", parent_node="parent", translate=(1.0, 2.0, 3.0))
+            HierarchyData([parent, child])
+            W = child.world_matrix
+            W[3, :3] += 5e-9
+            edit()
+            child.world_matrix = W
+            return np.array(child.translate)
+
+        kept = written(lambda: None)
+        np.testing.assert_array_equal(kept, [1.0, 2.0, 3.0])
+        edits = (
+            ("a node built", lambda: TransformData("z")),
+            ("a rename in another rig", lambda: setattr(HierarchyData([TransformData("x")])[0], "name", "y")),
+        )
+        for label, edit in edits:
+            with self.subTest(label):
+                np.testing.assert_array_equal(written(edit), kept)
+
+    def test_reads_between_edits_cost_a_chain_not_a_rig(self):
+        # ten chains 15 deep under a root, parented by uuid and by name. a
+        # rename keeps the cached world matrices it does not move, so a loop
+        # of renames and reads costs what the renames alone cost; an edit
+        # that can move a node retires the rig's cached worlds, and a read
+        # after it computes its chain once, its parents read from one index
+        # of the rig rather than two scans of the rig a level
+        from cgmath._tests.test_parent_lookups import _Counted
+
+        depth, chains = 15, 10
+        matrix   = TransformData.matrix
+        computed = []
+
+        def counted(node):
+            computed.append(node)
+            return matrix.fget(node)
+
+        def counted_node(name, parent=None):
+            # counted strings set past the constructor, which copies to str
+            made      = TransformData(name, translate=(0.0, 1.0, 0.0))
+            made.name = _Counted(name)
+            made.uuid = _Counted(generate_uuid())
+            if parent is not None:
+                made.parent_node = _Counted(parent)
+            return made
+
+        def rig(by_name):
+            nodes = [counted_node("root")]
+            for k in range(chains):
+                for j in range(depth):
+                    parent = nodes[0] if j == 0 else nodes[-1]
+                    nodes.append(counted_node(f"c{k}_{j}", parent.name if by_name else parent.uuid))
+            return HierarchyData(nodes)
+
+        def cost(rig, edit):
+            """comparisons and world matrices computed, per leaf"""
+            leaves = [rig[k * depth + depth] for k in range(chains)]
+            for node in rig:
+                node.world_matrix
+            _Counted.compared = 0
+            del computed[:]
+            for leaf in leaves:
+                edit(leaf)
+            return _Counted.compared / chains, len(computed) / chains
+
+        def rename(node):
+            node.name = _Counted(node.name + "_x")
+
+        def rename_and_read(node):
+            rename(node)
+            np.testing.assert_allclose(node.world_matrix[3, 1], depth + 1)
+
+        def reparent_and_read(node):
+            node.parent_node = _Counted(str(node.parent_node))
+            np.testing.assert_allclose(node.world_matrix[3, 1], depth + 1)
+
+        for by_name in (False, True):
+            with self.subTest(by_name=by_name), mock.patch.object(
+                TransformData, "matrix", property(counted, matrix.fset)
+            ):
+                h     = rig(by_name)
+                alone = cost(h, rename)
+                read  = cost(h, rename_and_read)
+                self.assertEqual(read, alone)
+                self.assertEqual(read[1], 0)
+
+                # one index build, a few comparisons a node, and the chain
+                # computed once; two scans a level made 2160 comparisons
+                compared, matrices = cost(h, reparent_and_read)
+                self.assertLessEqual(matrices, depth + 1)
+                self.assertLess(compared, len(h) / 2)
