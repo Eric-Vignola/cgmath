@@ -2997,6 +2997,254 @@ class TestParentLookup(unittest.TestCase):
             )
 
 
+class TestRenameKeepsChildren(unittest.TestCase):
+    """a rename inside a hierarchy keeps every child that names the node"""
+
+    class Walked(list):
+        """a node list that counts the passes over it"""
+
+        walks = 0
+
+        def __iter__(self):
+            self.walks += 1
+            return super().__iter__()
+
+    def _chain(self) -> HierarchyData:
+        return HierarchyData(
+            [
+                TransformData("root", translate=(1.0, 0.0, 0.0)),
+                TransformData("a", translate=(0.0, 1.0, 0.0), parent_node="root"),
+                TransformData("b", translate=(0.0, 1.0, 0.0), parent_node="a"),
+                TransformData("c", translate=(0.0, 1.0, 0.0), parent_node="b"),
+            ]
+        )
+
+    def test_a_suffix_over_a_branch_keeps_the_branch(self):
+        rig = self._chain()
+        rig["a"].get_branch().add_suffix("_L")
+        self.assertEqual(rig["root"].get_branch().name, ["root", "a_L", "b_L", "c_L"])
+        self.assertEqual(rig["b_L"].parent_node, rig["a_L"].uuid)
+
+        # every cached world matrix follows the root, as a fresh copy does
+        rig["root"].translate = (5.0, 0.0, 0.0)
+        fresh                 = rig.copy()
+        for node in rig:
+            np.testing.assert_array_equal(node.world_matrix, fresh[node.name].world_matrix)
+
+    def test_a_rename_onto_an_earlier_nodes_name_keeps_the_children(self):
+        # the new name resolves to the earlier node: a child left holding a
+        # name would follow it, so it holds the renamed node's uuid instead
+        rig = HierarchyData(
+            [
+                TransformData("a_L", translate=(9.0, 0.0, 0.0)),
+                TransformData("a", translate=(1.0, 0.0, 0.0)),
+                TransformData("b", translate=(0.0, 1.0, 0.0), parent_node="a"),
+            ]
+        )
+        renamed = rig.list[1]
+        renamed.add_suffix("_L")
+
+        self.assertIs(rig["b"].get_parent(), renamed)
+        np.testing.assert_allclose(rig["b"].world_matrix[3, :3], [1.0, 1.0, 0.0])
+
+    def test_a_child_the_new_name_captures_drops_its_cached_world_matrix(self):
+        rig = HierarchyData(
+            [
+                TransformData("x", translate=(5.0, 0.0, 0.0)),
+                TransformData("y", translate=(0.0, 1.0, 0.0), parent_node="ghost"),
+            ]
+        )
+        np.testing.assert_allclose(rig["y"].world_matrix[3, :3], [0.0, 1.0, 0.0])
+
+        rig["x"].name = "ghost"
+        self.assertIs(rig["y"].get_parent(), rig["ghost"])
+        np.testing.assert_allclose(rig["y"].world_matrix[3, :3], [5.0, 1.0, 0.0])
+
+    def test_strip_namespace_keeps_a_rig_parented_by_name(self):
+        rig = HierarchyData(
+            [
+                TransformData("ns:root", translate=(1.0, 0.0, 0.0)),
+                TransformData("ns:a", translate=(0.0, 1.0, 0.0), parent_node="ns:root"),
+                TransformData("ns:b", translate=(0.0, 1.0, 0.0), parent_node="ns:a"),
+            ]
+        )
+        rig.strip_namespace()
+
+        self.assertEqual(rig.name, ["root", "a", "b"])
+        self.assertEqual(rig["root"].get_branch().name, ["root", "a", "b"])
+        np.testing.assert_allclose(rig["b"].world_matrix[3, :3], [1.0, 2.0, 0.0])
+
+    def test_a_suffix_onto_a_name_another_renamed_node_gives_up(self):
+        # a takes a_L's name as a_L moves on to a_L_L: renamed a node at a
+        # time, a took a_L's children over before a_L was renamed
+        rig = HierarchyData(
+            [
+                TransformData("root"),
+                TransformData("a", translate=(1.0, 0.0, 0.0), parent_node="root"),
+                TransformData("a_L", translate=(9.0, 0.0, 0.0), parent_node="root"),
+                TransformData("x", translate=(0.0, 1.0, 0.0), parent_node="a"),
+                TransformData("y", translate=(0.0, 1.0, 0.0), parent_node="a_L"),
+            ]
+        )
+        a, a_l = rig.list[1], rig.list[2]
+        _ = [node.world_matrix for node in rig]
+        TransformList([a, a_l]).add_suffix("_L")
+
+        self.assertEqual(rig.name, ["root", "a_L", "a_L_L", "x", "y"])
+        self.assertIs(rig["x"].get_parent(), a)
+        self.assertIs(rig["y"].get_parent(), a_l)
+        np.testing.assert_allclose(rig["y"].world_matrix[3, :3], [9.0, 1.0, 0.0])
+
+    def test_strip_namespace_moving_names_up_one_level_keeps_the_children(self):
+        # "A:A:x" becomes "A:x" as "A:x" becomes "x": each keeps its own child
+        rig = HierarchyData(
+            [
+                TransformData("A:A:x", translate=(1.0, 0.0, 0.0)),
+                TransformData("A:x", translate=(9.0, 0.0, 0.0)),
+                TransformData("inner", translate=(0.0, 1.0, 0.0), parent_node="A:A:x"),
+                TransformData("outer", translate=(0.0, 1.0, 0.0), parent_node="A:x"),
+            ]
+        )
+        _ = [node.world_matrix for node in rig]
+        rig.strip_namespace("A")
+
+        self.assertEqual(rig.name, ["A:x", "x", "inner", "outer"])
+        self.assertIs(rig["inner"].get_parent(), rig["A:x"])
+        self.assertIs(rig["outer"].get_parent(), rig["x"])
+        np.testing.assert_allclose(rig["outer"].world_matrix[3, :3], [9.0, 1.0, 0.0])
+
+    def test_a_captured_child_drops_its_renamed_childrens_cached_world(self):
+        # s_L captures c, renamed in the same call: the walk that clears c's
+        # branch has to find d, which named c by its old name
+        rig = HierarchyData(
+            [
+                TransformData("s", translate=(5.0, 0.0, 0.0)),
+                TransformData("c", translate=(0.0, 1.0, 0.0), parent_node="s_L"),
+                TransformData("d", translate=(0.0, 1.0, 0.0), parent_node="c"),
+            ]
+        )
+        _ = [node.world_matrix for node in rig]
+        TransformList([rig["s"], rig["c"]]).add_suffix("_L")
+
+        self.assertIs(rig["c_L"].get_parent(), rig["s_L"])
+        self.assertIs(rig["d"].get_parent(), rig["c_L"])
+        np.testing.assert_allclose(rig["d"].world_matrix[3, :3], [5.0, 2.0, 0.0])
+
+    def test_a_rename_of_the_second_node_of_a_name_leaves_the_first_its_children(self):
+        # c follows the first "a": renaming the second neither hands c to it
+        # nor pins c, whose link the rename did not touch
+        rig = HierarchyData(
+            [
+                TransformData("a", translate=(1.0, 0.0, 0.0)),
+                TransformData("a", translate=(9.0, 0.0, 0.0)),
+                TransformData("c", translate=(0.0, 1.0, 0.0), parent_node="a"),
+            ]
+        )
+        first, second = rig.list[0], rig.list[1]
+        _           = [node.world_matrix for node in rig]
+        second.name = "b"
+
+        self.assertIs(rig["c"].get_parent(), first)
+        self.assertEqual(rig["c"].parent_node, "a")
+        np.testing.assert_allclose(rig["c"].world_matrix[3, :3], [1.0, 1.0, 0.0])
+
+    def test_a_rename_ahead_of_a_parent_takes_its_children_and_clears_them(self):
+        # x takes "a" ahead of the node carrying it, so y now follows x: y
+        # and z below it drop their cached world matrices
+        rig = HierarchyData(
+            [
+                TransformData("x", translate=(5.0, 0.0, 0.0)),
+                TransformData("a", translate=(9.0, 0.0, 0.0)),
+                TransformData("y", translate=(0.0, 1.0, 0.0), parent_node="a"),
+                TransformData("z", translate=(0.0, 1.0, 0.0), parent_node="y"),
+            ]
+        )
+        renamed      = rig.list[0]
+        _            = [node.world_matrix for node in rig]
+        renamed.name = "a"
+
+        self.assertIs(rig["y"].get_parent(), renamed)
+        np.testing.assert_allclose(rig["y"].world_matrix[3, :3], [5.0, 1.0, 0.0])
+        np.testing.assert_allclose(rig["z"].world_matrix[3, :3], [5.0, 2.0, 0.0])
+
+    def test_a_view_over_two_rigs_and_a_loose_node_renames_each(self):
+        rigs  = [self._chain(), self._chain()]
+        loose = TransformData("loose")
+        TransformList([rigs[0]["a"], rigs[1]["b"], loose]).add_suffix("_L")
+
+        self.assertEqual(loose.name, "loose_L")
+        self.assertEqual(rigs[0]["root"].get_branch().name, ["root", "a_L", "b", "c"])
+        self.assertEqual(rigs[1]["root"].get_branch().name, ["root", "a", "b_L", "c"])
+
+    def test_a_rename_over_a_rig_walks_it_as_often_whatever_its_size(self):
+        # renamed a node at a time, every rename walked the whole rig for the
+        # children naming the node: a bulk rename cost N^2 in nodes
+        def walks(count: int, by_name: bool) -> list:
+            uuids   = [generate_uuid() for _ in range(count)]
+            names   = [f"ns:j{i}" for i in range(count)]
+            parents = [None] + (names if by_name else uuids)[:-1]
+            rig = HierarchyData(
+                [
+                    TransformData(name, uuid=uuid, parent_node=parent)
+                    for name, uuid, parent in zip(names, uuids, parents)
+                ]
+            )
+            rig.list = self.Walked(rig.list)
+            out      = []
+            for rename in (
+                lambda: rig.add_suffix("_L"),
+                lambda: rig.add_prefix("L_"),
+                lambda: rig.strip_namespace(),
+            ):
+                before = rig.list.walks
+                rename()
+                out.append(rig.list.walks - before)
+
+            self.assertEqual(rig.name, [f"L_j{i}_L" for i in range(count)])
+            self.assertEqual(len(rig[0].get_branch()), count)
+            return out
+
+        for by_name in (False, True):
+            self.assertEqual(walks(10, by_name), walks(200, by_name))
+
+    def test_a_rename_capturing_a_rig_walks_it_as_often_whatever_its_size(self):
+        # every child names a node the rig lacks until the rename: clearing
+        # each captured child's branch on a walk of its own scanned the rig
+        # once per node below it, which cost N^2 in nodes
+        renames = (
+            ("j{}", "j{}_L", lambda rig: rig.add_suffix("_L")),
+            ("j{}", "L_j{}", lambda rig: rig.add_prefix("L_")),
+            ("ns:j{}", "j{}", lambda rig: rig.strip_namespace()),
+        )
+
+        def walks(count: int) -> list:
+            out = []
+            for name, parent, rename in renames:
+                rig = HierarchyData(
+                    [
+                        TransformData(
+                            name.format(i),
+                            translate   = (0.0, 1.0, 0.0),
+                            parent_node = parent.format(i - 1) if i else None,
+                        )
+                        for i in range(count)
+                    ]
+                )
+                _        = [node.world_matrix for node in rig]
+                rig.list = self.Walked(rig.list)
+                rename(rig)
+                out.append(rig.list.walks)
+
+                # the rename captures the whole chain, read as a fresh copy is
+                self.assertEqual(len(rig[0].get_branch()), count)
+                fresh = rig.copy()
+                for node, copied in zip(rig, fresh):
+                    np.testing.assert_array_equal(node.world_matrix, copied.world_matrix)
+            return out
+
+        self.assertEqual(walks(10), walks(200))
+
+
 class TestCopiesOwnTheirNodes(unittest.TestCase):
     """a node belongs to one hierarchy: an edit to a copy leaves the original whole"""
 

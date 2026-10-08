@@ -1416,8 +1416,17 @@ def _strip_namespaces(items: list, namespace: Optional[str] = None) -> None:
             f"one item, nothing renamed: {'; '.join(clashes[:10])}{more}"
         )
 
+    # the names go through their type's _set_names, all of a type at once: a
+    # hierarchy renames its nodes in one pass rather than one per node
+    names = {}
     for obj, field, new in changes:
-        setattr(obj, field, new)
+        if field == "name":
+            names.setdefault(type(obj)._set_names, []).append((obj, new))
+        else:
+            setattr(obj, field, new)
+
+    for set_names, pairs in names.items():
+        set_names(pairs)
 
 
 # ------------------------------ BASE DATACLASS ------------------------------ #
@@ -1845,6 +1854,14 @@ class Data:
     def _namespace_parts(self) -> list:
         """data the item owns whose names are stripped with its own"""
         return []
+
+    @staticmethod
+    def _set_names(pairs) -> None:
+        """sets the name of each ``(item, name)`` of ``pairs``. A type whose
+        names link its items together, a hierarchy's nodes, sets them all at
+        once"""
+        for item, name in pairs:
+            item.name = name
 
     def match(self, *args, exact: bool = True) -> bool:
         """returns True if name matches any arguments"""

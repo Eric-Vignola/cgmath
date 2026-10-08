@@ -634,6 +634,12 @@ def _new_user_attr(
     return spec
 
 
+def _prefixed(name: str, prefix: str) -> str:
+    """``name`` with ``prefix`` on its own part, after its namespace"""
+    head, colon, short = name.rpartition(":")
+    return head + colon + prefix + short
+
+
 @dataclass(repr=False, eq=False)
 class TransformData(Data):
     # name, node_type, uuid, and parent_node
@@ -1589,8 +1595,7 @@ class TransformData(Data):
         The prefix goes on the node's own name, after its namespace: ``"L_"``
         turns ``A:B:root`` into ``A:B:L_root``.
         """
-        head, colon, short = self.name.rpartition(":")
-        self.name = head + colon + prefix + short
+        self.name = _prefixed(self.name, prefix)
 
     def add_suffix(self, suffix: str) -> None:
         """adds a suffix to the node's name"""
@@ -1634,6 +1639,11 @@ class TransformData(Data):
         if name == "user_defined_attributes" and value is None:
             value = {}
 
+        # a rename inside a hierarchy keeps the children that name this node
+        if name == "name" and self._hierarchy is not None and value != self.name:
+            self._set_names([(self, value)])
+            return
+
         try:
             super().__setattr__(name, value)
         except AttributeError as error:
@@ -1642,6 +1652,80 @@ class TransformData(Data):
             raise AttributeError(
                 f"{error}; add_user_attribute() creates a user attribute"
             ) from None
+
+    @staticmethod
+    def _set_names(pairs) -> None:
+        """sets the name of each ``(node, name)`` of ``pairs``, the last one
+        given for a node listed twice
+
+        A child whose ``parent_node`` holds a renamed node's old name would be
+        cut loose, or would follow another node of that name: it is pointed
+        at that node's uuid instead. A child whose name now finds another
+        node -- it named a node the hierarchy lacks, or a later node of a
+        name a renamed node took -- has the cached world matrices of its
+        branch cleared.
+
+        The nodes of one hierarchy are renamed together, against the names
+        they all held before: two nodes trading names, or one taking a name
+        another gives up, keep their own children. That is one pass over the
+        hierarchy whatever the number of nodes renamed, where a node at a
+        time would scan it once per node, and the branches to clear are
+        walked together.
+        """
+        set_name = Data.__setattr__  # past the rename in __setattr__
+        owners   = {}
+        for node, value in pairs:
+            owner = node._hierarchy
+            if owner is None:
+                set_name(node, "name", value)
+            else:
+                _, renamed = owners.setdefault(id(owner), (owner, {}))
+                renamed[id(node)] = (node, value)
+
+        for hierarchy, renamed in owners.values():
+            changes = [(n, value) for n, value in renamed.values() if value != n.name]
+            moved   = {id(n) for n, _ in changes}
+            names   = {name for n, value in changes for name in (n.name, value)}
+            names.discard(None)
+
+            # one pass: the children naming an old or a new name, the only
+            # ones that can change parent, and the nodes carrying those names
+            linked, carriers = [], []
+            for node in hierarchy.list:
+                ref = node.parent_node
+                if isinstance(ref, str) and ref in names and not validate_uuid(ref):
+                    linked.append(node)
+                if node.name in names:
+                    carriers.append(node)
+
+            # the first node carrying each name, the one get_parent finds;
+            # before the renames and after, every such node is a carrier
+            def first_named():
+                found = {}
+                for n in carriers:
+                    found.setdefault(n.name, n)
+                return found
+
+            before = first_named() if linked else {}
+            for n, value in changes:
+                set_name(n, "name", value)
+
+            if not linked:
+                continue
+
+            after = first_named()
+            stale = []
+            for child in linked:
+                parent = before.get(child.parent_node)
+                if parent is not None and id(parent) in moved:
+                    child.parent_node = parent.uuid
+                elif after.get(child.parent_node) is not parent:
+                    stale.append(child)
+
+            # once every link is pinned, so that the walk finds the renamed
+            # nodes' children too
+            if stale:
+                _reset_branches(hierarchy, stale)
 
     def __dir__(self):
         attrs = self.__dict__.get("user_defined_attributes") or {}
@@ -2099,6 +2183,31 @@ def _parent_resolver():
     return parent_of
 
 
+def _reset_branches(hierarchy, nodes) -> None:
+    """drops the cached world matrices of ``nodes`` of ``hierarchy`` and of
+    every node below them, as _reset_branch_world_matrices does for one
+
+    A branch walk calls get_children once per node it reaches, and each call
+    scans the hierarchy, so clearing the branches of many nodes that way
+    costs N^2: one map of every node's children, built through
+    :func:`_parent_resolver`, is walked once for all of them.
+    """
+    parent_of = _parent_resolver()
+    children  = {}
+    for node in hierarchy.list:
+        parent = parent_of(node)
+        if isinstance(parent, TransformData):
+            children.setdefault(id(parent), []).append(node)
+
+    todo, seen = list(nodes), set()
+    while todo:
+        node = todo.pop()
+        if id(node) not in seen:
+            seen.add(id(node))
+            node._transform_changed()
+            todo.extend(children.get(id(node), ()))
+
+
 class TransformList(DataList):
     """Non-owning ordered view over ``TransformData`` nodes.
 
@@ -2341,13 +2450,21 @@ class TransformList(DataList):
 
     def add_prefix(self, prefix: str) -> None:
         """adds a prefix to the node's name"""
-        for node in self:
-            node.add_prefix(prefix)
+        self._rename_each(lambda name: _prefixed(name, prefix))
 
     def add_suffix(self, suffix: str) -> None:
         """adds a suffix to the node's name"""
-        for node in self:
-            node.add_suffix(suffix)
+        self._rename_each(lambda name: name + suffix)
+
+    def _rename_each(self, rename) -> None:
+        """renames every node to ``rename(its name)``, all of a hierarchy at
+        once (TransformData._set_names); a node listed twice is renamed twice"""
+        renamed = {}
+        for node in self.list:
+            name              = renamed.get(id(node), (node, node.name))[1]
+            renamed[id(node)] = (node, rename(name))
+
+        TransformData._set_names(renamed.values())
 
     # --- user defined attributes, as properties --- #
 

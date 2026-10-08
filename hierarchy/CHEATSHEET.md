@@ -1401,7 +1401,7 @@ rig["hip"].match("hip")                         # True
 
 | Trap | What happens | Do this |
 |---|---|---|
-| `parent_node` holding a **name** | `get_parent()`, `get_children()` and `get_branch()` follow it to the **first** node of that name: another node of that name never gets the child, one inserted ahead of the parent takes it over, and renaming the parent leaves the child naming a node that is gone | parent with `set_parent(name)`, or set `parent_node` to the parent's `uuid` |
+| `parent_node` holding a **name** | `get_parent()`, `get_children()` and `get_branch()` follow it to the **first** node of that name: another node of that name never gets the child, and one inserted ahead of the parent takes it over | parent with `set_parent(name)`, or set `parent_node` to the parent's `uuid` |
 | `world_matrix` as a call | it is a **property** on every type here | `node.world_matrix`, not `node.world_matrix()` |
 | mutating a channel getter | `node.rotate[0] = 5` writes to a throwaway copy | read, edit, assign back |
 | `clip.frames.rotate += 5` | the block getter is read-only, so `+=` raises | `np.array(...)` then assign, or use `rotate_y += 5` |
