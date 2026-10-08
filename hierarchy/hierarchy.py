@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import itertools
+import bisect
 import json
 import os
 import re
@@ -20,6 +21,7 @@ from cgmath.geometry import Data, DataList, ImmutableArray as numpy_array
 from cgmath.geometry._base import Array, _mask_to_indices, _reached_twice, _save_shares
 from cgmath.transforms import (
     euler_filter,
+    euler_reorder,
     euler_to_matrix,
     matrix_local as local_matrix,
     matrix_multiply,
@@ -945,6 +947,13 @@ class TransformData(Data):
 
     @property
     def rotate_order(self) -> int:
+        """the rotate order, 0..5: xyz, yzx, zxy, xzy, yxz, zyx
+
+        Setting it changes the order alone, as Maya's setAttr does: rotate
+        keeps its three angles, which now read in the new order, so the node
+        turns and its children move with it. :meth:`set_rotate_order` keeps
+        the pose instead.
+        """
         return int(self._rotate_order)
 
     @rotate_order.setter
@@ -1103,26 +1112,6 @@ class TransformData(Data):
         for node in _walk((self,), _Lookups()):
             node._transform_changed()
 
-    def _reject_animated(self, what: str) -> None:
-        """refuses a rig level edit that an animated clip cannot hold
-
-        These rebuild rotate from a matrix, and a clip would have to do it
-        one frame at a time. Each frame then picks its euler branch on its
-        own, so the poses stay exact while the curves come out with 180 and
-        360 degree steps in them. Nothing here can filter that back out, so
-        the edit belongs on the rest pose, before the clip is built.
-
-        Duck typed on frame_count rather than on ClipData, which is defined
-        further down the module.
-        """
-        frames = getattr(self._hierarchy, "frame_count", 0)
-        if frames > 1:
-            raise RuntimeError(
-                f"{what} on {self.name!r} rebuilds rotation a frame at a "
-                f"time and would break the curves across {frames} frames; "
-                f"apply it to the rest pose before building the clip"
-            )
-
     def __eq__(self, other):
         """use assigned uuid for equality"""
 
@@ -1180,9 +1169,17 @@ class TransformData(Data):
         return np.eye(4)
 
     def set_rotate_to_joint_orient(self) -> None:
-        """sets rotate and rotate_axis to 0 and applies all rotation to joint_orient"""
+        """sets rotate and rotate_axis to 0 and applies all rotation to joint_orient
+
+        On a clip every frame is solved at once and joint_orient's curves
+        go through euler_filter, frame 0 kept.
+        """
         if self.node_type == "joint":
-            self._reject_animated("set_rotate_to_joint_orient()")
+            frames, row = _clip_row(self)
+            if frames is not None:
+                _orient_rows(frames, [row], into_rotate=False)
+                return
+
             # quaternion captures the full RO * R * JO orientation, so rotate
             # AND rotate_axis must both be zeroed or RO would be double-applied
             Q                 = self.quaternion
@@ -1191,9 +1188,17 @@ class TransformData(Data):
             self.joint_orient = np.degrees(quaternion_to_euler(Q, 0)[0])
 
     def set_joint_orient_to_rotate(self) -> None:
-        """sets joint_orient and rotate_axis to 0 and applies all rotation to rotate"""
+        """sets joint_orient and rotate_axis to 0 and applies all rotation to rotate
+
+        On a clip every frame is solved at once and rotate's curves go
+        through euler_filter in this node's rotate order, frame 0 kept.
+        """
         if self.node_type == "joint":
-            self._reject_animated("set_joint_orient_to_rotate()")
+            frames, row = _clip_row(self)
+            if frames is not None:
+                _orient_rows(frames, [row], into_rotate=True)
+                return
+
             # quaternion captures the full RO * R * JO orientation, so
             # joint_orient AND rotate_axis must both be zeroed or RO would be
             # double-applied
@@ -1201,6 +1206,34 @@ class TransformData(Data):
             self.joint_orient = np.zeros(3, dtype=float)
             self.rotate_axis  = np.zeros(3, dtype=float)
             self.rotate       = np.degrees(quaternion_to_euler(Q, self.rotate_order)[0])
+
+    def set_rotate_order(self, order: Union[int, str]) -> None:
+        """
+        Changes the rotate order and keeps the pose.
+
+        As Maya's ``xform -rotateOrder <order> -preserve`` does: ``order`` is
+        0..5 or the axes as a string, eg: ``"zyx"``, and only rotate changes.
+        It is re-expressed in the new order, picking the solution Maya
+        picks, so no world matrix moves. joint_orient and rotate_axis
+        are built in xyz whatever the rotate order, so they are kept.
+        Setting the order it already has changes nothing.
+
+        On a clip every frame is re-expressed at once and the curves go
+        through euler_filter in the new order, frame 0 kept.
+
+        Assigning ``rotate_order`` directly changes the order alone, as
+        Maya's setAttr does, and the node turns.
+        """
+        order = _rotate_order_index(order)
+        frames, row = _clip_row(self)
+        if frames is not None:
+            _reorder_rows(frames, [row], [order])
+            return
+
+        if order != self.rotate_order:
+            rotate            = _reorder_like_maya(self.rotate, self.rotate_order, order)
+            self.rotate       = rotate
+            self.rotate_order = order
 
     def set_node_type(self, node_type: str) -> None:
         """
@@ -1213,18 +1246,23 @@ class TransformData(Data):
         off moves the node when its parent is scaled, since it no longer
         cancels that scale. Any other change only sets the type.
 
-        Assigning ``node_type`` directly sets the type and nothing else.
+        On a clip every frame with a joint_orient is folded at once, and the
+        rotate curves rebuilt go through euler_filter, frame 0 kept.
 
-        Raises
-        ------
-        RuntimeError
-            A joint with a joint_orient in an animated clip: its rotate
-            would have to be rebuilt one frame at a time.
+        Assigning ``node_type`` directly sets the type and nothing else.
         """
+        self._set_node_type(node_type, fold=True)
+
+    def _set_node_type(self, node_type: str, fold: bool) -> None:
+        """set_node_type; ``fold`` False when a clip's joint_orient curves
+        were already folded, every node of a selection in one batch"""
         node_type = str(node_type)
         if self.node_type == "joint" and node_type != "joint":
-            if np.any(self.joint_orient != 0.0):
-                self._reject_animated("set_node_type()")
+            frames, row = _clip_row(self) if fold else (None, None)
+            if frames is not None:
+                _fold_orient_rows(frames, [row])
+
+            elif fold and np.any(self.joint_orient != 0.0):
                 # the orientation chain is RO * R * JO, so R * JO as the new
                 # rotate leaves the local matrix as it was once JO is zero
                 RJ                = np.dot(self.rotate_matrix, self.joint_orient_matrix)
@@ -1318,10 +1356,23 @@ class TransformData(Data):
         the position never moves and direct children keep their world matrix,
         so only this node's frame changes. the swap lands in joint_orient, so
         an unposed joint keeps a rotate of zero.
-        """
-        self._reject_animated("swapaxes()")
 
-        P  = _axis_permutation(axis0, axis1, negate)
+        one exception: a child is put back through the matrix setter, which
+        puts a mirror on scale z, the way Maya splits a matrix. a child whose
+        parent chain mirrors another axis comes back with its scale signs
+        moved, so a segment scale compensated child of it, and the nodes
+        below, move with it.
+
+        on a clip every frame is solved at once, and every curve rebuilt --
+        this node's rotate, rotate_axis and joint_orient, its children's
+        rotate -- goes through euler_filter, frame 0 kept.
+        """
+        P = _axis_permutation(axis0, axis1, negate)
+        frames, row = _clip_row(self)
+        if frames is not None:
+            _swap_rows(frames, [row], axis0, axis1, negate)
+            return
+
         Pi = P.T  # a signed permutation is orthogonal, so the inverse is the transpose
 
         # children are positioned relative to this frame, so snapshot their
@@ -1617,28 +1668,52 @@ class TransformData(Data):
         return TransformList(_walk((self,), _Lookups()))
 
     def set_parent(self, parent: Union[str, None], world_space: bool = True) -> None:
-        """reparents node to a given parent and resets internal SRTs"""
+        """reparents node to a given parent and resets internal SRTs
+
+        With ``world_space`` the node keeps its world matrix: scale, rotate
+        and translate are solved under the new parent. On a clip that holds
+        for every frame, all solved at once, and a rotate curve the solve
+        rebuilds goes through euler_filter, frame 0 kept; one that already
+        held its world on every frame keeps its keys as they are. Without it
+        the channels are left as they are and the node moves with its new
+        parent. A parent in the node's own branch, the node itself included,
+        would close a loop: it raises ValueError before anything moves.
+        """
 
         # raise error if _hierarchy is missing
         if self._hierarchy is None:
             raise RuntimeError("undefined hierarchy")
 
-        # world_space=False writes no pose at all, so it is safe on a clip
-        if world_space:
-            self._reject_animated("set_parent(world_space=True)")
+        # an unknown parent, or one in this node's own branch, raises before
+        # anything moves
+        above = None
+        if parent is not None:
+            above = self._hierarchy[self._hierarchy.index(parent)]
+            if above is self:
+                raise ValueError(f"{self.name!r} can not be its own parent")
+            _refuse_a_cycle([self], above)
 
-        # grab the original world_matrix ahead of time
-        M = self.world_matrix
+        # grab the original world_matrix ahead of time, every frame of a clip
+        frames, row = _clip_row(self) if world_space else (None, None)
+        if frames is not None:
+            M      = frames.world([row])
+            before = frames.read("_rotate", [row])
+        else:
+            M = self.world_matrix
 
         # set new parent_node and retrieve TransformData parent object
-        if parent is None:
+        if above is None:
             self.parent_node = None
         else:
-            index            = self._hierarchy.index(parent)
-            self.parent_node = self._hierarchy[index].uuid
+            self.parent_node = above.uuid
 
         # --- recompute matrices if world_space is True --- #
-        if world_space:
+        if frames is not None:
+            up = -1 if above is None else frames.row_of(above)
+            _write_solved(frames, [row], _solve_under(frames, [row], M, -1 if up is None else up))
+            _filter_rotate(frames, [row], before)
+            frames.finish()
+        elif world_space:
             self._world_matrix = None
             self.world_matrix  = M
         else:
@@ -1647,29 +1722,17 @@ class TransformData(Data):
             # stale and must be invalidated
             self._reset_branch_world_matrices()
 
-        # move the node and all its decendents to the end of the list. a name
-        # resolves to the first node carrying it, so a link inside the branch
-        # whose name another node shares would follow that node once the
-        # branch lands behind it: those links are pinned to the uuid first
-        branch = self.get_branch()
-        self._pin_shared_names(branch)
-        affected = [self._hierarchy.list.pop(node.index) for node in branch]
-        self._hierarchy.extend(affected)
+        self._to_the_end()
 
-    def _pin_shared_names(self, nodes) -> None:
-        """points each of ``nodes`` whose ``parent_node`` is a name other
-        nodes carry too at its parent's uuid, so that a reorder cannot hand
-        it to another node of that name"""
-        refs = [n.parent_node for n in nodes]
-        if not any(isinstance(ref, str) and not validate_uuid(ref) for ref in refs):
-            return
+    def _to_the_end(self) -> None:
+        """moves the node and all its decendents to the end of the list
 
-        counts = Counter(n.name for n in self._hierarchy.list)
-        for node, ref in zip(nodes, refs):
-            if isinstance(ref, str) and counts[ref] > 1 and not validate_uuid(ref):
-                parent = node.get_parent()
-                if isinstance(parent, TransformData):
-                    node.parent_node = parent.uuid
+        A name resolves to the first node carrying it, so a link inside the
+        branch whose name another node shares would follow that node once
+        the branch lands behind it: those links are pinned to the uuid
+        first.
+        """
+        _to_the_end(self._hierarchy, [self])
 
     def add_prefix(self, prefix: str) -> None:
         """adds a prefix to the node's name
@@ -3509,23 +3572,77 @@ class TransformList(DataList):
 
     # --------- vectorized properties and methods --------- #
     def set_rotate_to_joint_orient(self) -> None:
-        """sets rotate to 0 and applies all rotation to joint_orient"""
-        for node in self[:]:
-            node.set_rotate_to_joint_orient()
+        """sets rotate to 0 and applies all rotation to joint_orient
+
+        On a clip every node and frame is solved at once.
+        """
+        self._orient(into_rotate=False)
 
     def set_joint_orient_to_rotate(self) -> None:
-        """sets joint_orient to 0 and applies all rotation to rotate"""
-        for node in self[:]:
-            node.set_joint_orient_to_rotate()
+        """sets joint_orient to 0 and applies all rotation to rotate
+
+        On a clip every node and frame is solved at once.
+        """
+        self._orient(into_rotate=True)
+
+    def _orient(self, into_rotate: bool) -> None:
+        for owner, nodes in _by_owner(self[:]):
+            frames = _clip_frames(owner)
+            if frames is not None:
+                _orient_rows(frames, frames.rows_of(nodes), into_rotate)
+            elif into_rotate:
+                for node in nodes:
+                    node.set_joint_orient_to_rotate()
+            else:
+                for node in nodes:
+                    node.set_rotate_to_joint_orient()
 
     def swapaxes(self, axis0: int, axis1: int, negate: bool = False) -> None:
         """swaps two local axes on every node in the view
 
-        each node restores its own children, so the result does not depend on
-        the order the view happens to be in -- no parent-first pass needed.
+        every node is solved at once, over every frame of a clip: each swapped
+        node's world becomes the permutation times what it was and each of its
+        children keeps its world, so the result does not depend on the order
+        the view happens to be in. The result is the per node method's run
+        parent first, the exception it makes included: under a parent chain
+        that mirrors an axis other than z, a restored child's scale signs
+        move, and its segment scale compensated children with them.
         """
-        for node in self[:]:
-            node.swapaxes(axis0, axis1, negate=negate)
+        _axis_permutation(axis0, axis1, negate)  # bad axes raise before anything moves
+        for owner, nodes in _by_owner(self[:]):
+            if owner is None:
+                for node in nodes:
+                    node.swapaxes(axis0, axis1, negate=negate)
+                continue
+
+            frames = _RigFrames(owner)
+            _swap_rows(frames, frames.rows_of(nodes), axis0, axis1, negate)
+
+    def set_rotate_order(self, order) -> None:
+        """
+        Changes every node's rotate order and keeps the pose.
+
+        ``order`` is one order for every node or one per node, each 0..5 or
+        the axes as a string, eg: ``"zyx"``. Every node is solved at once,
+        over every frame of a clip; see :meth:`TransformData.set_rotate_order`.
+        """
+        if _is_sequence(order):
+            orders = [_rotate_order_index(o) for o in order]
+            if len(orders) != len(self):
+                raise ValueError(f"got {len(orders)} rotate orders for {len(self)} nodes")
+        else:
+            orders = [_rotate_order_index(order)] * len(self)
+
+        wanted = {id(node): o for node, o in zip(self, orders)}
+        for owner, nodes in _by_owner(self[:]):
+            if owner is None:
+                for node in nodes:
+                    node.set_rotate_order(wanted[id(node)])
+                continue
+
+            frames = _RigFrames(owner)
+            rows   = frames.rows_of(nodes)
+            _reorder_rows(frames, rows, [wanted[id(n)] for n in nodes])
 
     def get_roots(self) -> "TransformList":
         """returns all contained nodes parented to the world"""
@@ -3550,15 +3667,39 @@ class TransformList(DataList):
         return np.array(parents, dtype=int)
 
     def set_parent(self, parent: Union[str, None], world_space: bool = True) -> None:
-        """sets all the nodes under a given parent"""
+        """sets all the nodes under a given parent
 
-        # first parent everything to world
-        for node in self[:]:
+        The result is the one a node at a time gives: every node to the
+        world, then each under ``parent``, resolved once the first pass has
+        moved the nodes, the parent itself left at the world when it is one
+        of them. Each node's branch moves to the end of the list, where its
+        last move puts it. A parent that hangs below one of the nodes raises
+        ValueError before anything moves.
+
+        Nodes of one hierarchy are done together, in one pass over it. In
+        world space every node keeps its world matrix, solved for every node
+        at once, over every frame of a clip, and each rotate curve the solve
+        rebuilds goes through euler_filter, frame 0 kept; a node that already
+        held its world on every frame keeps its keys as they are. Where
+        solving one node would move a later one before its turn -- a shear
+        its channels can not hold, the matrix setter's keep test holding a
+        node's channels, or a new scale reaching a segment scale compensated
+        child -- the nodes are solved one at a time instead, each over every
+        frame at once, the list still reordered once.
+        """
+        nodes  = self[:]
+        owners = _by_owner(nodes)
+        if len(owners) == 1 and isinstance(owners[0][0], HierarchyData):
+            _reparent(owners[0][0], list(nodes), parent, world_space)
+            return
+
+        # nodes of several hierarchies, or of none: one at a time
+        for node in nodes:
             node.set_parent(None, world_space=world_space)
 
         # parent to new node if parent is not None
         if parent is not None:
-            for node in self[:]:
+            for node in nodes:
                 # ignore self
                 if node != parent:
                     node.set_parent(parent, world_space=world_space)
@@ -3907,6 +4048,12 @@ class TransformList(DataList):
 
     @property
     def rotate_order(self) -> np.ndarray:
+        """every node's rotate order, 0..5
+
+        Setting it, one order for all or one per node, changes the orders
+        alone, as Maya's setAttr does, so the nodes turn.
+        :meth:`set_rotate_order` keeps the pose instead.
+        """
         values = []
         for node in self:
             values.append(node.rotate_order)
@@ -4045,8 +4192,8 @@ class TransformList(DataList):
         """
         Sets the type of every node, one value for all or one per node.
         Joints that become another type shed their joint-only attributes,
-        see ``TransformData.set_node_type``. Every node is checked before
-        any changes, so a refused change leaves them all as they were.
+        see ``TransformData.set_node_type``; on a clip their joint_orient
+        curves are folded into rotate for every node and frame at once.
         """
         if _is_sequence(value):
             values = [str(v) for v in value]
@@ -4057,16 +4204,19 @@ class TransformList(DataList):
         else:
             values = [str(value)] * len(self)
 
-        for node, node_type in zip(self, values):
-            if (
-                node.node_type == "joint"
-                and node_type != "joint"
-                and np.any(node.joint_orient != 0.0)
-            ):
-                node._reject_animated("node_type")
+        wanted = {id(node): v for node, v in zip(self, values)}
+        folded = set()
+        for owner, nodes in _by_owner(self[:]):
+            frames = _clip_frames(owner)
+            if frames is not None:
+                shed = [
+                    n for n in nodes if n.node_type == "joint" and wanted[id(n)] != "joint"
+                ]
+                _fold_orient_rows(frames, frames.rows_of(shed))
+                folded.update(id(n) for n in shed)
 
         for node, node_type in zip(self, values):
-            node.set_node_type(node_type)
+            node._set_node_type(node_type, fold=id(node) not in folded)
 
     @property
     def scale_matrix(self) -> np.ndarray:
@@ -4860,6 +5010,23 @@ class HierarchyData(TransformList):
         self._rig_index_cache = (self._index_version, nodes, len(nodes), index)
         return index
 
+    # (the index they were read from, each node's parent position)
+    _parent_rows_cache = None
+
+    def _parent_rows(self) -> np.ndarray:
+        """each node's parent as a position in the list, -1 for a root or a
+        parent the hierarchy does not hold (:meth:`TransformList._parent_indices`),
+        kept with the index: read only, a rig edit copies it to write"""
+        index = self._rig_index()
+        cache = self._parent_rows_cache
+        if index is not None and cache is not None and cache[0] is index:
+            return cache[1]
+
+        rows = TransformList._parent_indices(self.list)
+        rows.setflags(write=False)
+        self._parent_rows_cache = (index, rows)
+        return rows
+
     def _rig_index_is_current(self) -> bool:
         """whether the index kept is the one the structure would build now"""
         cache = self._rig_index_cache
@@ -5649,7 +5816,6 @@ def _local_factors(
     clip's parent map, when the caller already has it.
     """
     blocks = clip._blocks
-    scale  = blocks["_scale"]
     nodes  = clip.list
 
     orders = np.array([node.rotate_order for node in nodes], dtype=int)
@@ -5662,14 +5828,33 @@ def _local_factors(
     # the parent's scale is per frame, the flag that applies it is structural
     inverse = np.where(compensate[:, None], _parent_scale(clip, parents), 1.0)
 
-    S  = _diagonal(scale)
-    RO = _euler_matrices(blocks["_rotate_axis"],  None)
-    R  = _euler_matrices(blocks["_rotate"],       orders)
-    JO = _euler_matrices(blocks["_joint_orient"], None)
-    IS = _diagonal(1.0 / inverse)
-    T  = _translation(blocks["_translate"])
+    return _factors(blocks, orders, inverse) + (parents,)
 
-    return S, RO, R, JO, IS, T, parents
+
+def _factors(channels: dict, orders: np.ndarray, inverse: np.ndarray) -> tuple:
+    """S, RO, R, JO, IS and T for (F, N, 3) channels, each (F, N, 4, 4)
+
+    Each built as the TransformData property of that factor builds it.
+    ``inverse`` is the parent scale each node's IS divides by, ones where
+    segment scale compensation is off or there is no parent.
+    """
+    S  = _diagonal(channels["_scale"])
+    RO = _euler_matrices(channels["_rotate_axis"],  None)
+    R  = _euler_matrices(channels["_rotate"],       orders)
+    JO = _euler_matrices(channels["_joint_orient"], None)
+    IS = _diagonal(1.0 / inverse)
+    T  = _translation(channels["_translate"])
+    return S, RO, R, JO, IS, T
+
+
+def _compose_local(channels: dict, orders: np.ndarray, inverse: np.ndarray) -> np.ndarray:
+    """(F, N, 3) channels as (F, N, 4, 4) local matrices
+
+    Mirrors TransformData.matrix factor for factor: S * RO * R * JO * IS * T,
+    as :func:`_evaluate_local` does for a whole clip.
+    """
+    S, RO, R, JO, IS, T = _factors(channels, orders, inverse)
+    return S @ RO @ R @ JO @ IS @ T
 
 
 def _evaluate_local(
@@ -5694,6 +5879,1433 @@ def _evaluate_world(local: np.ndarray, parents: np.ndarray) -> np.ndarray:
         else:
             world[:, i] = local[:, i] @ world[:, parent]
     return world
+
+
+# --- rig edits, every frame at once --------------------------------------- #
+# A rig edit -- swapaxes, the orient helpers, set_parent in world space, a
+# joint becoming another type, set_rotate_order -- rebuilds channels out of
+# matrices. On a clip every frame is solved in one batch, through the same
+# steps the single pose methods take, and each rebuilt euler curve then goes
+# through euler_filter in its own rotate order, frame 0 kept as computed,
+# the way Maya's Euler Filter keeps the first key. Solving frames one at a
+# time instead lets each pick its euler branch on its own: the poses stay
+# exact while the curves step by 180 and 360 degrees.
+
+_ROTATE_ORDERS = ("xyz", "yzx", "zxy", "xzy", "yxz", "zyx")
+
+
+def _rotate_order_index(order) -> int:
+    """a rotate order as 0..5, given as that number or as its axes, eg: "zyx" """
+    if isinstance(order, str):
+        if order.lower() in _ROTATE_ORDERS:
+            return _ROTATE_ORDERS.index(order.lower())
+
+    elif not isinstance(order, (bool, np.bool_)):
+        try:
+            value = int(order)
+        except (TypeError, ValueError):
+            value = None
+        if value is not None and value == order and 0 <= value < len(_ROTATE_ORDERS):
+            return value
+
+    raise ValueError(
+        f"a rotate order is 0..5 or one of {', '.join(_ROTATE_ORDERS)}, got {order!r}"
+    )
+
+
+def _reorder_like_maya(rotate: np.ndarray, before, after) -> np.ndarray:
+    """(..., 3) euler degrees in rotate order ``before``, re-expressed in ``after``
+
+    A rotation has two euler solutions in any order, plus whole turns on any
+    axis. This picks the one Maya's ``xform -rotateOrder <order> -preserve``
+    picks: euler_reorder's solution with every angle in [-180, 180), or its
+    alternate -- the first and last axes applied turned by 180, the middle
+    one mirrored to 180 minus itself -- when that sums to fewer degrees, the
+    first one on a tie. ``before`` and ``after`` broadcast against the
+    leading axes of ``rotate``.
+    """
+    from cgmath.transforms._numba._euler import MAYA_EA
+
+    rotate    = np.asarray(rotate, dtype=float)
+    shape     = rotate.shape
+    flat      = rotate.reshape(-1, 3)
+    before    = np.broadcast_to(np.asarray(before, dtype=int), shape[:-1]).reshape(-1)
+    after     = np.broadcast_to(np.asarray(after, dtype=int), shape[:-1]).reshape(-1)
+
+    standard  = np.degrees(euler_reorder(np.radians(flat), before, after))
+    standard  = (standard + 180.0) % 360.0 - 180.0
+
+    axes      = MAYA_EA[after]
+    rows      = np.arange(len(flat))
+    alternate = standard.copy()
+    alternate[rows, axes[:, 0]] += 180.0
+    alternate[rows, axes[:, 2]] += 180.0
+    alternate[rows, axes[:, 1]] = 180.0 - standard[rows, axes[:, 1]]
+
+    shorter = np.abs(alternate).sum(axis=-1) < np.abs(standard).sum(axis=-1)
+    return np.where(shorter[:, None], alternate, standard).reshape(shape)
+
+
+def _solve_local(target: np.ndarray, channels: dict, orders, inverse: np.ndarray, gap: bool = False) -> tuple:
+    """TransformData.matrix's setter for (F, n) frames and nodes at once
+
+    ``target`` holds the (F, n, 4, 4) local matrices to reach, ``channels``
+    the (F, n, 3) channels the nodes hold now, and ``inverse`` the parent
+    scale each one's IS divides by. Scale, rotate and translate are solved
+    and rotate_axis, joint_orient and segment_scale_compensate kept, step for
+    step as the setter does, so a frame whose channels already make the
+    target, to round-off, keeps them as the setter would.
+
+    Returns the new (scale, rotate, translate), each (F, n, 3), and with
+    ``gap`` the largest entry the keep test found between the channels'
+    matrix and the target, (F, n).
+    """
+    shape = target.shape[:-2]
+    S, RO, R, JO, IS, T = _factors(channels, orders, inverse)
+    composed = S @ RO @ R @ JO @ IS @ T
+    same     = _same_transforms(composed, target)
+
+    # strip JO * IS from the right, split [S][RO][R] into scale and [RO][R],
+    # then R = inv(RO) * [RO][R]: rotate_axis is kept
+    B = target @ np.linalg.inv(JO @ IS)
+    scale, rotation = _scales_and_rotations(
+        B[..., :3, :3], lambda: (RO @ R)[..., :3, :3]
+    )
+    RR              = np.zeros(shape + (4, 4), dtype=float)
+    RR[..., :3, :3] = rotation
+    RR[..., 3, 3]   = 1.0
+    rotate          = _matrices_to_euler(np.linalg.inv(RO) @ RR, np.asarray(orders))
+
+    keep = same[..., None]
+    solved = (
+        np.where(keep, channels["_scale"], scale),
+        np.where(keep, channels["_rotate"], rotate),
+        np.where(keep, channels["_translate"], target[..., 3, :3]),
+    )
+    if gap:
+        return solved + (np.abs(composed - target).max(axis=(-2, -1)),)
+    return solved
+
+
+def _store_channel(node: "TransformData", name: str, value: np.ndarray) -> None:
+    """writes a (3,) channel the way _write_channel does, minus the cache reset
+
+    A batched edit drops every cached world matrix once at the end, instead
+    of once per write over each node's whole branch.
+    """
+    current = getattr(node, name)
+    if current is getattr(type(node), name, None):
+        setattr(node, name, np.array(value, dtype=float))
+    else:
+        current[...] = value
+
+
+class _RowValues:
+    """one value per row of a :class:`_RigFrames`, read off its node the
+    first time it is asked for, so an edit of a few nodes reads a few"""
+
+    __slots__ = ("_read", "_held", "_dtype")
+
+    def __init__(self, read, dtype):
+        self._read  = read
+        self._held  = {}
+        self._dtype = dtype
+
+    def __getitem__(self, rows):
+        if np.ndim(rows) == 0:
+            row   = int(rows)
+            value = self._held.get(row)
+            if value is None:
+                value = self._held[row] = self._read(row)
+            return value
+        return np.array([self[row] for row in np.asarray(rows, dtype=int).tolist()], dtype=self._dtype)
+
+    def __setitem__(self, rows, values) -> None:
+        rows   = np.atleast_1d(np.asarray(rows, dtype=int))
+        values = np.broadcast_to(np.asarray(values, dtype=self._dtype), rows.shape)
+        for row, value in zip(rows.tolist(), values.tolist()):
+            self._held[row] = value
+
+
+class _RigFrames:
+    """every frame of one hierarchy's framed channels, for a batched rig edit
+
+    A clip's (F, N, 3) blocks are read and written in place through their
+    uuid columns, so nothing is realigned or copied wholesale; a hierarchy
+    without frames is the same thing with one frame, read from and written
+    to the nodes. Rows are positions in the owner's node list.
+
+    An edit pays for the rows it touches, not for the rig: a node's row and
+    its parent come from the index the hierarchy keeps, its rotate order and
+    compensation are read when asked for, its column from the map the clip
+    keeps, and :meth:`finish` clears the branches of the rows written, so a
+    loop of one node edits costs the nodes it edits. ``snapshot`` keeps the
+    rows of the list as it is now, for an edit that reorders it.
+    """
+
+    def __init__(self, owner: "HierarchyData", snapshot: bool = False):
+        self.owner   = owner
+        self.nodes   = list(owner.list) if snapshot else owner.list
+        self.frames  = owner.frame_count if getattr(owner, "_blocks", None) else 1
+        self.lookups = _Lookups()
+        self.orders  = _RowValues(lambda row: int(self.nodes[row].rotate_order), int)
+        self.compensate = _RowValues(
+            lambda row: bool(self.nodes[row].segment_scale_compensate), bool
+        )
+        self._index     = self.lookups.index_of(owner)
+        self._place     = None   # id(node) -> row, built only when the index can not say
+        self._parents   = None   # every row's parent, once the whole map is asked for
+        self._shared    = False  # whether _parents is the owner's, to copy before a write
+        self._parent_of = {}
+        self._touched   = set()
+        if snapshot:
+            self.parents  # the rows of the list as it is now
+
+    # --- rows --- #
+    def row_of(self, node) -> Optional[int]:
+        """the row of ``node``, None when the owner does not list it"""
+        index = self._index
+        if index is not None and isinstance(node.uuid, str):
+            row = index.uuids.get(node.uuid)
+            if row is not None and row < len(self.nodes) and self.nodes[row] is node:
+                return row
+
+        if self._place is None:
+            self._place = {id(n): i for i, n in enumerate(self.nodes)}
+        return self._place.get(id(node))
+
+    def rows_of(self, nodes) -> list:
+        """the rows of ``nodes``, every one of which the owner lists"""
+        return [self.row_of(node) for node in nodes]
+
+    @property
+    def parents(self) -> np.ndarray:
+        """every row's parent row, -1 for a root"""
+        if self._parents is None:
+            owner = self.owner
+            if isinstance(owner, HierarchyData) and owner.list is self.nodes:
+                self._parents, self._shared = owner._parent_rows(), True
+            else:
+                self._parents = TransformList._parent_indices(self.nodes)
+        return self._parents
+
+    def parent_row(self, row: int) -> int:
+        """the parent row of one row, -1 for a root"""
+        if self._parents is not None:
+            return int(self._parents[row])
+
+        up = self._parent_of.get(row)
+        if up is None:
+            parent = self.lookups.parent(self.nodes[row])
+            found  = self.row_of(parent) if isinstance(parent, TransformData) else None
+            up     = self._parent_of[row] = -1 if found is None else found
+        return up
+
+    def set_parents(self, rows, parent: int) -> None:
+        """the rows now hang under row ``parent``, -1 for none"""
+        parents = self.parents
+        if self._shared:
+            self._parents, self._shared = parents.copy(), False
+        self._parents[np.asarray(rows, dtype=int)] = parent
+
+    def children_rows(self, row: int) -> list:
+        """the rows of a row's children"""
+        found = (self.row_of(child) for child in self.lookups.children(self.nodes[row]))
+        return [child for child in found if child is not None]
+
+    # --- channels --- #
+    def _columns_of(self, rows: np.ndarray) -> np.ndarray:
+        owner = self.owner
+        place = owner._column_place()
+        nodes = self.nodes
+        try:
+            return np.array([place[nodes[r].uuid] for r in rows.tolist()], dtype=int)
+        except KeyError:
+            # a node added since the blocks were last lined up has no column
+            owner._realign()
+            place = owner._column_place()
+            return np.array([place[nodes[r].uuid] for r in rows.tolist()], dtype=int)
+
+    def read(self, channel: str, rows) -> np.ndarray:
+        """(F, n, 3) copy of one channel"""
+        rows = np.asarray(rows, dtype=int)
+        if getattr(self.owner, "_blocks", None):
+            return self.owner._blocks[channel][:, self._columns_of(rows)]
+
+        values = [getattr(self.nodes[i], channel) for i in rows]
+        return np.array(values, dtype=float).reshape(1, len(rows), 3)
+
+    def channels(self, rows) -> dict:
+        return {c: self.read(c, rows) for c in ClipData.FRAMED_CHANNELS}
+
+    def write(self, channel: str, rows, values: np.ndarray) -> None:
+        rows = np.asarray(rows, dtype=int)
+        self._touched.update(rows.tolist())
+        if getattr(self.owner, "_blocks", None):
+            self.owner._blocks[channel][:, self._columns_of(rows)] = values
+        else:
+            for k, i in enumerate(rows):
+                _store_channel(self.nodes[i], channel, values[0, k])
+
+    def inverse(self, rows) -> np.ndarray:
+        """(F, n, 3): the parent scale each row's IS divides by"""
+        rows    = np.asarray(rows, dtype=int)
+        parents = np.array([self.parent_row(r) for r in rows.tolist()], dtype=int)
+        out     = np.ones((self.frames, len(rows), 3), dtype=float)
+        on      = (parents > -1) & self.compensate[rows]
+        if on.any():
+            out[:, on] = self.read("_scale", parents[on])
+        return out
+
+    def world(self, rows) -> np.ndarray:
+        """(F, n, 4, 4) world matrices, evaluated over the rows' chains alone"""
+        rows  = [int(r) for r in rows]
+        need  = []
+        depth = {}
+        for r in rows:
+            chain = []
+            while r > -1 and r not in depth and len(chain) <= len(self.nodes):
+                chain.append(r)
+                r = self.parent_row(r)
+            base = depth.get(r, -1)
+            for count, member in enumerate(reversed(chain), 1):
+                depth[member] = base + count
+            need.extend(chain)
+
+        need  = sorted(need, key=depth.__getitem__)
+        at    = {r: m for m, r in enumerate(need)}
+
+        local = _compose_local(self.channels(need), self.orders[need], self.inverse(need))
+        world = np.empty_like(local)
+        for m, r in enumerate(need):
+            parent = self.parent_row(r)
+            if parent in at:
+                world[:, m] = local[:, m] @ world[:, at[parent]]
+            else:
+                world[:, m] = local[:, m]
+
+        return world[:, [at[r] for r in rows]]
+
+    def finish(self) -> None:
+        """drops the cached world matrices of every row written and of every
+        node below them: the edit may have moved them"""
+        _reset_branches([self.nodes[r] for r in sorted(self._touched)])
+        self._touched.clear()
+
+
+def _clip_frames(owner) -> Optional[_RigFrames]:
+    """the frames of a clip, for an edit that has to cover all of them;
+    None for anything that holds one pose"""
+    if owner is not None and getattr(owner, "_blocks", None):
+        return _RigFrames(owner)
+    return None
+
+
+def _clip_row(node) -> tuple:
+    """(frames, row) of a node of a clip, for an edit that covers every
+    frame; (None, None) for a node of one pose, and for a node its clip no
+    longer lists (taken out with del or remove()), which the single pose
+    route takes"""
+    frames = _clip_frames(node._hierarchy)
+    if frames is not None:
+        row = frames.row_of(node)
+        if row is not None:
+            return frames, row
+    return None, None
+
+
+def _refuse_a_cycle(nodes, above) -> None:
+    """raises ValueError when ``above``, once ``nodes`` are taken to the
+    world, would hang below one of them: parenting that node under it
+    would close a loop"""
+    chosen = {id(node) for node in nodes}
+    if id(above) in chosen:
+        return
+
+    lookups = _Lookups()
+    seen    = set()
+    up      = lookups.parent(above)
+    while isinstance(up, TransformData) and id(up) not in seen:
+        if id(up) in chosen:
+            raise ValueError(
+                f"{up.name!r} can not go under {above.name!r}, which hangs below it"
+            )
+        seen.add(id(up))
+        up = lookups.parent(up)
+
+
+# _to_the_end's ref when the nodes keep the parent_node they hold
+_KEEP_PARENT = object()
+
+
+def _to_the_end(owner, nodes, ref=_KEEP_PARENT) -> list:
+    """moves the branch of each of ``nodes`` to the end of ``owner``'s list,
+    in one pass, where moving one node after another would put it
+
+    ``ref``, when given, is first written as each node's parent_node. A
+    node lands where its last move puts it and its branch follows it in
+    walk order, every node before its children; the nodes the moves leave
+    alone keep their order. A name resolves to the first node carrying it,
+    so a link inside a moved branch whose name another node shares would
+    follow that node once the branch lands behind it: those links are
+    pinned to the uuid first. Returns the nodes moved, in their new order.
+    """
+    listed = {id(node) for node in owner.list}
+    nodes  = [node for node in nodes if id(node) in listed]
+    if ref is not _KEEP_PARENT:
+        for node in nodes:
+            node.parent_node = ref
+
+    # each node where its last move puts it: in the order of its last
+    # occurrence, its branch walked as it stands once every link is written
+    last  = {id(node): (i, node) for i, node in enumerate(nodes)}
+    roots = [node for _, node in sorted(last.values(), key=lambda pair: pair[0])]
+    moved = _walk(roots, _Lookups())
+    _pin_shared_names(owner, moved)
+
+    gone          = {id(node) for node in moved}
+    owner.list[:] = [node for node in owner.list if id(node) not in gone] + moved
+    _structure_changed(owner)
+    return moved
+
+
+def _pin_shared_names(owner, nodes) -> None:
+    """points each of ``nodes`` whose ``parent_node`` is a name other nodes
+    carry too at its parent's uuid, so that a reorder cannot hand it to
+    another node of that name"""
+    refs = [n.parent_node for n in nodes]
+    if not any(isinstance(ref, str) and not validate_uuid(ref) for ref in refs):
+        return
+
+    counts  = Counter(n.name for n in owner.list)
+    lookups = _Lookups()
+    pinned  = []
+    for node, ref in zip(nodes, refs):
+        if isinstance(ref, str) and counts[ref] > 1 and not validate_uuid(ref):
+            parent = lookups.parent(node)
+            if isinstance(parent, TransformData):
+                pinned.append((node, parent.uuid))
+
+    # every parent found before any link is pinned: a pin retires the index
+    for node, uuid in pinned:
+        node.parent_node = uuid
+
+
+def _named_after_the_move(owner, nodes, parent):
+    """the node ``parent`` names once ``nodes`` are taken to the world and
+    their branches moved to the end of the list, as :func:`_to_the_end`
+    moves them, worked out without moving anything
+
+    A uuid, or a name only one node carries, names the same node whatever
+    the order. A name several nodes carry names the first of them: the
+    first one no branch moves, or when every one of them moves, the first
+    to land.
+    """
+    position = owner.index(parent)  # an unknown parent raises here
+    named    = owner[position]
+    if not isinstance(parent, str) or validate_uuid(parent):
+        return named
+    carriers = [node for node in owner.list if node.name == parent]
+    if len(carriers) < 2:
+        return named
+
+    # the branches as they will walk once every node is a root: a node's
+    # chosen child is walked as a root of its own
+    listed  = {id(node) for node in owner.list}
+    chosen  = {id(node) for node in nodes}
+    lookups = _Lookups()
+    last    = {id(node): (i, node) for i, node in enumerate(nodes) if id(node) in listed}
+    order, seen = [], set()
+    for _, root in sorted(last.values(), key=lambda pair: pair[0]):
+        if id(root) in seen:
+            continue
+        seen.add(id(root))
+        order.append(root)
+        stack = [iter(lookups.children(root))]
+        while stack:
+            child = next(stack[-1], None)
+            if child is None:
+                stack.pop()
+            elif id(child) not in seen and id(child) not in chosen:
+                seen.add(id(child))
+                order.append(child)
+                stack.append(iter(lookups.children(child)))
+
+    for node in carriers:
+        if id(node) not in seen:
+            return node
+    return next(node for node in order if node.name == parent)
+
+
+def _reparent(owner, nodes, parent, world_space: bool) -> None:
+    """TransformList.set_parent for nodes of one hierarchy, all at once
+
+    The result one node at a time gives, in one pass over the rig: every
+    node to the world, the list reordered once; ``parent`` resolved then,
+    as each later call resolves it; every other node under it, the list
+    reordered once more. In world space a frame per pose of a hierarchy
+    without frames, every frame of a clip, solved at once.
+    """
+    named = None
+    if parent is not None:
+        named = _named_after_the_move(owner, nodes, parent)
+        _refuse_a_cycle(nodes, named)
+
+    frames = _RigFrames(owner, snapshot=True) if world_space else None
+    if frames is not None:
+        rows    = np.array(frames.rows_of(nodes), dtype=int)
+        parents = frames.parents.copy()
+        rotate  = frames.read("_rotate", rows)
+        above   = -1 if named is None else frames.row_of(named)
+
+        # every node to the world
+        worlds = frames.world(rows)
+        first  = _solve_under(frames, rows, worlds, -1, gap=True)
+        first, gap = first[:3], first[3]
+        if _cascades(frames, rows, parents, worlds, first, above, gap):
+            # one at a time, each reading what the ones before it wrote
+            frames.set_parents(rows, parents[rows])
+            _to_the_world_in_turn(frames, rows, parents, worlds)
+        else:
+            _write_solved(frames, rows, first)
+
+    moved = _to_the_end(owner, nodes, None)
+
+    # then under the parent, as the list now resolves it, the parent itself
+    # left at the world
+    if parent is not None:
+        above = owner[owner.index(parent)]
+        _refuse_a_cycle(nodes, above)
+        rest = [node for node in nodes if node is not above]
+        if rest:
+            if frames is not None:
+                under  = np.array(frames.rows_of(rest), dtype=int)
+                solved = _solve_under(frames, under, frames.world(under), frames.row_of(above))
+                _write_solved(frames, under, solved)
+            moved = moved + _to_the_end(owner, rest, above.uuid)
+
+    if frames is not None:
+        _filter_rotate(frames, rows, rotate)
+        frames.finish()
+    else:
+        _reset_branches(moved)
+
+
+def _by_owner(nodes) -> list:
+    """``nodes`` grouped by the hierarchy that owns them, in first-seen order:
+    [(owner, nodes)], owner None for nodes no hierarchy lists"""
+    groups, members = {}, {}
+    for node in nodes:
+        owner = node._hierarchy
+        if owner is not None:
+            # by identity: list membership would compare uuids node by node
+            if id(owner) not in members:
+                members[id(owner)] = {id(n) for n in owner.list}
+            if id(node) not in members[id(owner)]:
+                owner = None
+
+        key = None if owner is None else id(owner)
+        groups.setdefault(key, (owner, []))[1].append(node)
+    return list(groups.values())
+
+
+def _swap_rows(frames: _RigFrames, targets, axis0: int, axis1: int, negate: bool) -> None:
+    """TransformData.swapaxes on every target row, every frame at once
+
+    A swapped node's world becomes P * W and each direct child keeps its
+    world, whatever order the nodes would have been swapped in. A child that
+    is swapped too is put back first and then swapped, as a parent-first pass
+    does it: its channels are those of the single pose methods to round-off.
+    """
+    P                    = _axis_permutation(axis0, axis1, negate)
+    Pi                   = P.T  # a signed permutation is orthogonal, so the inverse is the transpose
+    swap                 = np.arange(3)
+    swap[[axis0, axis1]] = [axis1, axis0]
+
+    targets = np.unique(np.asarray(targets, dtype=int))
+    under = np.array(
+        sorted({child for t in targets.tolist() for child in frames.children_rows(t)}),
+        dtype=int,
+    )
+
+    rows   = np.union1d(targets, under)
+    at     = {r: m for m, r in enumerate(rows)}
+    t      = np.array([at[r] for r in targets], dtype=int)
+    k      = np.array([at[r] for r in under], dtype=int)
+    orders = frames.orders[rows]
+    xyz    = np.zeros(len(t), dtype=int)
+    ch     = frames.channels(rows)
+    world  = frames.world(rows)
+
+    moved       = world.copy()
+    moved[:, t] = P @ world[:, t]
+
+    # children first: each keeps its world under the swapped parent, solved
+    # as world_matrix's setter solves it, the parent's IS scale swapped too
+    if len(k):
+        up      = np.array([at[frames.parent_row(rows[i])] for i in k], dtype=int)
+        inverse = np.ones((frames.frames, len(k), 3), dtype=float)
+        on      = frames.compensate[rows[k]]
+        if on.any():
+            inverse[:, on] = ch["_scale"][:, up[on]][..., swap]
+
+        local = world[:, k] @ np.linalg.inv(moved[:, up])
+        kids  = {c: v[:, k] for c, v in ch.items()}
+        S, R, T = _solve_local(local, kids, orders[k], inverse)
+        ch["_scale"][:, k], ch["_rotate"][:, k], ch["_translate"][:, k] = S, R, T
+
+    # the swap: scale permutes exactly, RO and R are conjugated and JO left
+    # multiplied, which reproduces P * [RO][R][JO]
+    RO = _euler_matrices(ch["_rotate_axis"][:, t],  None)
+    R  = _euler_matrices(ch["_rotate"][:, t],       orders[t])
+    JO = _euler_matrices(ch["_joint_orient"][:, t], None)
+
+    ch["_scale"][:, t]        = ch["_scale"][:, t][..., swap]
+    ch["_rotate_axis"][:, t]  = _filtered(_matrices_to_euler(P @ RO @ Pi, xyz), xyz)
+    ch["_joint_orient"][:, t] = _filtered(_matrices_to_euler(P @ JO, xyz), xyz)
+    ch["_rotate"][:, t]       = _matrices_to_euler(P @ R @ Pi, orders[t])
+    ch["_rotate"]             = _filtered(ch["_rotate"], orders)
+
+    for channel in ("_scale", "_rotate", "_translate"):
+        frames.write(channel, rows, ch[channel])
+    frames.write("_rotate_axis", targets, ch["_rotate_axis"][:, t])
+    frames.write("_joint_orient", targets, ch["_joint_orient"][:, t])
+    frames.finish()
+
+
+def _orient_rows(frames: _RigFrames, rows, into_rotate: bool) -> None:
+    """set_joint_orient_to_rotate (``into_rotate``) or set_rotate_to_joint_orient
+    on every joint row, every frame at once"""
+    rows = np.array([r for r in rows if frames.nodes[r].node_type == "joint"], dtype=int)
+    if not len(rows):
+        return
+
+    count = len(rows)
+    ch    = frames.channels(rows)
+    chain = (
+        _euler_matrices(ch["_rotate_axis"], None)
+        @ _euler_matrices(ch["_rotate"], frames.orders[rows])
+        @ _euler_matrices(ch["_joint_orient"], None)
+    )
+    # through a quaternion, as TransformData.quaternion reads the chain
+    Q     = matrix_to_quaternion(chain.reshape(-1, 4, 4))
+    zeros = np.zeros_like(ch["_rotate"])
+
+    if into_rotate:
+        orders = frames.orders[rows]
+        euler  = quaternion_to_euler(Q, np.tile(orders, frames.frames))
+        rotate = _filtered(np.degrees(euler).reshape(-1, count, 3), orders)
+        frames.write("_joint_orient", rows, zeros)
+        frames.write("_rotate_axis",  rows, zeros)
+        frames.write("_rotate",       rows, rotate)
+    else:
+        xyz    = np.zeros(count, dtype=int)
+        euler  = quaternion_to_euler(Q, 0)
+        orient = _filtered(np.degrees(euler).reshape(-1, count, 3), xyz)
+        frames.write("_rotate",       rows, zeros)
+        frames.write("_rotate_axis",  rows, zeros)
+        frames.write("_joint_orient", rows, orient)
+
+    frames.finish()
+
+
+def _fold_orient_rows(frames: _RigFrames, rows) -> None:
+    """a joint becoming another type: joint_orient folded into rotate on
+    every frame that has one, every frame at once"""
+    rows   = np.asarray(rows, dtype=int)
+    orient = frames.read("_joint_orient", rows)
+    folded = np.any(orient != 0.0, axis=-1)
+    if not folded.any():
+        return
+
+    orders = frames.orders[rows]
+    rotate = frames.read("_rotate", rows)
+    RJ     = _euler_matrices(rotate, orders) @ _euler_matrices(orient, None)
+    rotate = np.where(folded[..., None], _matrices_to_euler(RJ, orders), rotate)
+
+    # only a curve with something folded into it was rebuilt
+    hit            = folded.any(axis=0)
+    rotate[:, hit] = _filtered(rotate[:, hit], orders[hit])
+
+    frames.write("_rotate", rows, rotate)
+    frames.write("_joint_orient", rows, np.zeros_like(orient))
+    frames.finish()
+
+
+def _solve_under(frames: _RigFrames, rows, worlds: np.ndarray, parent: int, gap: bool = False) -> tuple:
+    """set_parent in world space, every frame at once: ``rows`` now hang under
+    row ``parent`` (-1 for none), and the (scale, rotate, translate) that keep
+    their ``worlds`` (F, n, 4, 4) there are solved as world_matrix's setter
+    solves them, and with ``gap`` the keep test's gap (:func:`_solve_local`).
+    Nothing is written."""
+    rows = np.asarray(rows, dtype=int)
+    frames.set_parents(rows, parent)
+
+    target = worlds
+    if parent > -1:
+        # a true inverse: a scaled parent's world is not orthogonal
+        target = worlds @ np.linalg.inv(frames.world([parent]))
+
+    channels = frames.channels(rows)
+    return _solve_local(target, channels, frames.orders[rows], frames.inverse(rows), gap)
+
+
+def _to_the_world_in_turn(frames: _RigFrames, rows, parents: np.ndarray, worlds: np.ndarray) -> None:
+    """set_parent(None) in world space on ``rows`` one at a time, as the
+    single pose method does it, every frame at once: each row keeps the
+    world it has when its turn comes, which the rows before it may have
+    moved. ``parents`` is the parenting before the edit, ``worlds`` (F, n,
+    4, 4) the rows' worlds then.
+
+    A row's world at its turn is its chain up to w, the lowest ancestor
+    solved before it, which is a root by then: the locals from the row up
+    to c, w's child on the way, as they were (nothing between was solved
+    yet), c's local under w's new scale (c may compensate it), and w's new
+    local. Without such an ancestor it is the world it had. So nothing is
+    climbed twice, however the selection runs: one walk down the rig finds
+    every row's w, the solved ancestors on the way kept in the order they
+    are solved, and the products of the locals as they were, from each row
+    up to its c, come out of a union-find with path compression as the
+    walk leaves each c. Then the rows are solved in turn, each over every
+    frame at once.
+    """
+    rows  = [int(r) for r in rows]
+    first = {}
+    for turn, row in enumerate(rows):
+        first.setdefault(row, turn)
+
+    # the rig the rows hang in: their chains to the root, each walked once
+    held = set()
+    for row in first:
+        node = row
+        while node > -1 and node not in held:
+            held.add(node)
+            node = int(parents[node])
+    below = {}
+    for node in sorted(held):
+        below.setdefault(int(parents[node]), []).append(node)
+
+    # their locals as they are. A new parent scale changes only the IS a
+    # compensated child divides by, so the factors around it are kept for
+    # the children that need them once the walk below has named them
+    order = sorted(held)
+    place = {node: k for k, node in enumerate(order)}
+    S, RO, R, JO, IS, T = _factors(frames.channels(order), frames.orders[order], frames.inverse(order))
+    head  = S @ RO @ R @ JO
+    local = head @ IS @ T
+    del S, RO, R, JO, IS
+
+    # every row's w and c, walking down: the solved ancestors on the way, in
+    # the order they are solved, each one leaving out the ones above it that
+    # are solved after it (a row below them meets it first). turns[:top] and
+    # kept[:top] are that list; a node pushed on it is taken off as the walk
+    # leaves the node
+    anchor  = {}  # row -> (w, c)
+    asked   = {}  # c -> the rows whose product up to c is wanted
+    product = {}  # row -> the locals as they were from the row up to its c, c left out
+    turns   = []
+    kept    = []
+    top     = 0
+    depth   = {}
+    path    = []
+    link    = {}  # union-find: node -> the node its product runs up to
+    reach   = {}  # node -> the product of locals from it up to link[node], that one left out
+
+    stack   = [(root, None) for root in reversed(below.get(-1, []))]
+    while stack:
+        node, undo = stack.pop()
+        if undo is not None:
+            # the walk leaves the node: its children's chains now run up to
+            # it, so every product wanted up to it is complete
+            for child in below.get(node, []):
+                link[child]  = node
+                reach[child] = local[:, place[child]]
+            for row in asked.get(node, []):
+                if row != node:
+                    _compress(link, reach, row)
+                    product[row] = reach[row]
+            path.pop()
+            at, was, top = undo
+            if was is not None:
+                turns[at], kept[at] = was
+            continue
+
+        depth[node] = len(path)
+        path.append(node)
+        undo = (0, None, top)
+        if node in first:
+            turn = first[node]
+            at   = bisect.bisect_left(turns, turn, 0, top)
+            if at:
+                w            = kept[at - 1]
+                c            = path[depth[w] + 1]
+                anchor[node] = (w, c)
+                asked.setdefault(c, []).append(node)
+            if at < len(turns):
+                undo = (at, (turns[at], kept[at]), top)
+                turns[at], kept[at] = turn, node
+            else:
+                undo = (at, None, top)
+                turns.append(turn)
+                kept.append(node)
+            top = at + 1
+        stack.append((node, undo))
+        stack.extend((child, None) for child in reversed(below.get(node, [])))
+
+    # the factors of each compensated child of a solved node, the full
+    # arrays let go
+    around = {
+        c: (head[:, place[c]].copy(), T[:, place[c]].copy())
+        for _, c in anchor.values()
+        if frames.compensate[c]
+    }
+    del head, T
+
+    # the rows in turn, each solved over every frame at once
+    solved_local = {}
+    solved_scale = {}
+    for row in rows:
+        if row in solved_local:
+            # solved before: a root holding the local it was given
+            world = solved_local[row]
+        elif row in anchor:
+            w, c = anchor[row]
+            under = local[:, place[c]]
+            if c in around:
+                left, right = around[c]
+                under = left @ _diagonal(1.0 / solved_scale[w]) @ right
+            world = under if row == c else product[row] @ under
+            world = world @ solved_local[w]
+        else:
+            world = worlds[:, first[row]]
+
+        solved = _solve_under(frames, [row], world[:, None], -1)
+        _write_solved(frames, [row], solved)
+
+        # its local as a root: no IS, rotate_axis and joint_orient as they were
+        scale             = _diagonal(solved[0][:, 0])
+        axis              = _euler_matrices(frames.read("_rotate_axis", [row]), None)[:, 0]
+        rotate            = _euler_matrices(solved[1], frames.orders[[row]])[:, 0]
+        orient            = _euler_matrices(frames.read("_joint_orient", [row]), None)[:, 0]
+        solved_scale[row] = solved[0][:, 0]
+        solved_local[row] = scale @ axis @ rotate @ orient @ _translation(solved[2][:, 0])
+
+
+def _compress(link: dict, reach: dict, node) -> None:
+    """the union-find step of :func:`_to_the_world_in_turn`: points ``node``
+    and every node on its way at the top of its chain, the node no link
+    leaves, each one's ``reach`` then the product of the locals from it up
+    to there, that one left out. A later walk through any of them takes one
+    step, so however many rows ask, each chain is walked once."""
+    chain = []
+    while link.get(node, node) != node:
+        chain.append(node)
+        node = link[node]
+    for lower, upper in zip(reversed(chain[:-1]), reversed(chain[1:])):
+        reach[lower] = reach[lower] @ reach[upper]
+        link[lower]  = node
+
+
+def _write_solved(frames: _RigFrames, rows, solved: tuple) -> None:
+    for channel, values in zip(("_scale", "_rotate", "_translate"), solved):
+        frames.write(channel, rows, values)
+
+
+def _filter_rotate(frames: _RigFrames, rows, before: np.ndarray) -> None:
+    """puts the rotate curves of ``rows`` a solve rebuilt through euler_filter:
+    those that differ from ``before`` (F, n, 3), the curves as they were, on
+    some frame. A curve the solve kept on every frame keeps its keys"""
+    rows    = np.asarray(rows, dtype=int)
+    rotate  = frames.read("_rotate", rows)
+    rebuilt = (rotate != before).any(axis=(0, 2))
+    if rebuilt.any():
+        rows = rows[rebuilt]
+        frames.write("_rotate", rows, _filtered(rotate[:, rebuilt], frames.orders[rows]))
+
+
+def _in_own_axes(axes: np.ndarray, *changes: np.ndarray, parts: bool = False) -> tuple:
+    """for each of ``changes``, the largest entry of inv(axes) @ change, one
+    per (..., 3, 3) pair: a change of a row's world 3x3 in the row's own
+    axes, the factor it moves a point below the row by, per unit of the
+    point's distance from it
+
+    With ``parts`` the first change also gives the largest entry of its
+    turn and of the rest, the skew and the symmetric part of that matrix,
+    after the sizes: everything below the row takes the change on the right
+    of its world, so the skew part turns it and the rest is what a euler
+    split below can make more of (:func:`_split_gain`).
+
+    0 where nothing changes; inf where ``axes`` has no inverse and something
+    does. Worked entry by entry over the whole stack: a stack of 3x3
+    inverses and products costs far more than the arithmetic in it.
+    """
+    (a, b, c), (d, e, f), (g, h, i) = [[axes[..., r, k] for k in range(3)] for r in range(3)]
+    adjugate = (
+        (e * i - f * h, c * h - b * i, b * f - c * e),
+        (f * g - d * i, a * i - c * g, c * d - a * f),
+        (d * h - e * g, b * g - a * h, a * e - b * d),
+    )
+    det = a * adjugate[0][0] + b * adjugate[1][0] + c * adjugate[2][0]
+
+    def scaled(size, change):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            size = size / np.abs(det)
+        size = np.where(np.isfinite(size), size, np.inf)
+        return np.where((change == 0.0).all(axis=(-2, -1)), 0.0, size)
+
+    sizes, split = [], []
+    for n, change in enumerate(changes):
+        size    = np.zeros(det.shape)
+        entries = [[None] * 3 for _ in range(3)]
+        for r in range(3):
+            for k in range(3):
+                entry = adjugate[r][0] * change[..., 0, k] + adjugate[r][1] * change[..., 1, k]
+                entry = entry + adjugate[r][2] * change[..., 2, k]
+                size  = np.maximum(size, np.abs(entry))
+                if parts and not n:
+                    entries[r][k] = entry
+        sizes.append(scaled(size, change))
+        if parts and not n:
+            turn = np.zeros(det.shape)
+            rest = np.abs(entries[0][0])
+            for r, k in ((0, 1), (0, 2), (1, 2)):
+                turn = np.maximum(turn, 0.5 * np.abs(entries[r][k] - entries[k][r]))
+                rest = np.maximum(rest, 0.5 * np.abs(entries[r][k] + entries[k][r]))
+            rest  = np.maximum(rest, np.maximum(np.abs(entries[1][1]), np.abs(entries[2][2])))
+            split = [scaled(turn, change), scaled(rest, change)]
+    return tuple(sizes + split)
+
+
+def _branches(parents, tops) -> tuple:
+    """(inside, walk): which rows hang in the branches of ``tops``, those
+    rows included, and every row in an order that puts parents first"""
+    walk   = np.argsort(_chain_depths(parents), kind="stable").tolist()
+    inside = np.zeros(len(parents), dtype=bool)
+
+    inside[np.asarray(tops, dtype=int)] = True
+    for row in walk:
+        if not inside[row] and parents[row] > -1 and inside[parents[row]]:
+            inside[row] = True
+    return inside, walk
+
+
+def _branch_worlds(frames: _RigFrames, rows, parents, worlds: np.ndarray, inside, walk) -> np.ndarray:
+    """(F, m, 4, 4): the world of every row ``inside`` on each frame.
+    ``rows`` and ``worlds`` are the picked rows and their worlds as they
+    were, ``parents`` the parenting before the edit; the worlds of the rows
+    between are put together from their locals, every row once"""
+    known = {}
+    for k, row in enumerate(np.asarray(rows, dtype=int).tolist()):
+        if inside[row]:
+            known.setdefault(row, worlds[:, k])
+    order = [row for row in walk if inside[row] and row not in known]
+    if order:
+        local = _compose_local(frames.channels(order), frames.orders[order], frames.inverse(order))
+        for m, row in enumerate(order):
+            known[row] = local[:, m] @ known[int(parents[row])]
+    return np.stack(list(known.values()), axis=1)
+
+
+def _branch_bound(frames: _RigFrames, rows, parents, worlds: np.ndarray, inside, walk) -> np.ndarray:
+    """(F, 1): an upper bound of what :func:`_weigh` gives on
+    :func:`_branch_worlds`, from the translations and scales alone: a row
+    that is not picked sits from its parent no farther than its translation
+    times the stretch of its parent's world, and a world stretches no more
+    than its parent's times the row's largest scale, divided by the parent's
+    smallest one where the row compensates it; a rotation stretches
+    nothing. Every row once, a few numbers a frame each"""
+    rows  = np.asarray(rows, dtype=int)
+    held  = inside[rows]
+    known = set(rows[held].tolist())
+    order = [row for row in walk if inside[row] and row not in known]
+    norm  = {}  # row -> (F,) the stretch of its world
+    reach = {}  # row -> (F,) how far it can sit from the picked row above it
+    for k in np.flatnonzero(held).tolist():
+        norm[int(rows[k])]  = np.sqrt((worlds[:, k, :3, :3] ** 2).sum(axis=(-2, -1)))
+        reach[int(rows[k])] = np.zeros(worlds.shape[0])
+
+    up      = np.array([int(parents[row]) for row in order], dtype=int)
+    largest = np.abs(frames.read("_scale", order)).max(axis=-1)
+    length  = np.sqrt((frames.read("_translate", order) ** 2).sum(axis=-1))
+    divide  = np.ones_like(largest)
+    on      = np.asarray(frames.compensate[order], dtype=bool)
+    if on.any():
+        with np.errstate(divide="ignore"):
+            divide[:, on] = 1.0 / np.abs(frames.read("_scale", up[on])).min(axis=-1)
+    for m, row in enumerate(order):
+        above      = int(up[m])
+        reach[row] = reach[above] + length[:, m] * norm[above]
+        norm[row]  = norm[above] * largest[:, m] * divide[:, m]
+
+    places  = worlds[:, held, 3, :3]
+    spread  = (places.max(axis=1) - places.min(axis=1)).max(axis=-1)
+    far     = np.max(np.stack(list(reach.values()), axis=-1), axis=-1)
+    stretch = np.max(np.stack(list(norm.values()), axis=-1), axis=-1)
+    with np.errstate(invalid="ignore"):
+        bound = np.maximum(spread + 2.0 * far, stretch)[:, None]
+    return np.where(np.isfinite(bound), np.maximum(1.0, bound), np.inf)
+
+
+def _weigh(worlds: np.ndarray) -> np.ndarray:
+    """(F, 1): what a turn or a new scale above (F, m, 4, 4) worlds is
+    weighed by, at least 1: how far apart they sit on the widest axis, as a
+    point below moves by the change times its distance, or the largest
+    stretch of their 3x3s (the Frobenius norm) where that is more, as the
+    axes below turn by the change times their own scale"""
+    places  = worlds[..., 3, :3]
+    spread  = (places.max(axis=1) - places.min(axis=1)).max(axis=-1)
+    stretch = np.sqrt((worlds[..., :3, :3] ** 2).sum(axis=(-2, -1))).max(axis=1)
+    weight  = np.maximum(spread, stretch)[:, None]
+    return np.where(np.isfinite(weight), np.maximum(1.0, weight), np.inf)
+
+
+def _carried(frames: _RigFrames, rows, parents, moved, resized, gains=None) -> bool:
+    """whether a picked row hangs below a ``moved`` row, or below a
+    ``resized`` one through a compensated child of it, far enough for its
+    answer to differ: each row's answer is its parent's, or the link to its
+    parent, worked out once a row however many rows climb through it
+
+    ``moved`` and ``resized`` are each row's (F, n) weighed change, a turn
+    or a new scale. ``gains``, when given, is ((turn, rest), (on_turn,
+    on_rest), floor, (by_turn, by_rest)), each (F, n): ``moved`` split into
+    its turn and the rest, a new scale being all rest, what each picked row
+    makes of a unit of each (:func:`_cascades`), and of its split's
+    round-off, and how far its first pass split turns its world per unit of
+    each short of a step, past the turn passing as it is; each is taken at
+    its largest over the frames. What reaches a row is the largest change
+    above it, of each kind, and a picked row counts once the change passes
+    1e-11 alone, once its turn and its rest times their gains add up past
+    that, or, where its floor passes it, once any change reaches it at all.
+    A picked row on the way down passes on, as a turn, how far its split
+    turns its world by what reaches it: one at a time every row below it is
+    solved from a world turned by that much. A change that can carry the
+    row across a step counts the row itself.
+    """
+    moved   = moved.max(axis=0).tolist()
+    resized = resized.max(axis=0).tolist()
+    if not (max(moved) > 0.0 or max(resized) > 0.0):
+        return False
+    turn = rest = on_turn = on_rest = floor = by_turn = by_rest = [0.0] * len(moved)
+    if gains is not None:
+        (turn, rest), (on_turn, on_rest), floor, (by_turn, by_rest) = gains
+        turn, rest = turn.max(axis=0).tolist(), rest.max(axis=0).tolist()
+        on_turn, on_rest = on_turn.max(axis=0).tolist(), on_rest.max(axis=0).tolist()
+        by_turn, by_rest = by_turn.max(axis=0).tolist(), by_rest.max(axis=0).tolist()
+        floor = floor.max(axis=0).tolist()
+
+    def through(k, turned, other):
+        # how far picked row k's split turns its world as a turn and a rest
+        # reach it, past the turn itself
+        return (turned * by_turn[k] if turned > 0.0 else 0.0) + (other * by_rest[k] if other > 0.0 else 0.0)
+
+    at    = {int(r): k for k, r in enumerate(rows)}
+    below = {}
+    for row in rows.tolist():
+        path, node = [], int(row)
+        while node not in below:
+            above = int(parents[node])
+            if above < 0 or len(path) > len(parents):
+                below[node] = (0.0, 0.0, 0.0)
+                break
+            path.append(node)
+            node = above
+
+        reach = below[node]
+        for child in reversed(path):
+            k = at.get(int(parents[child]))
+            if k is not None:
+                grown = resized[k] if frames.compensate[child] else 0.0
+                reach = (
+                    max(reach[0], moved[k], grown),
+                    max(reach[1], turn[k], through(k, reach[1], reach[2])),
+                    max(reach[2], rest[k], grown),
+                )
+            below[child] = reach
+
+        k = at[int(row)]
+        whole, turned, other = below[int(row)]
+        gained = (turned * on_turn[k] if turned > 0.0 else 0.0) + (other * on_rest[k] if other > 0.0 else 0.0)
+        if whole > 1e-11 or gained > 1e-11 or (whole > 0.0 and floor[k] > 1e-11):
+            return True
+    return False
+
+
+def _split_input(target: np.ndarray, channels: dict, orders, inverse: np.ndarray) -> np.ndarray:
+    """(F, n, 3, 3): the rotations :func:`_solve_local` hands matrix_to_euler
+    to reach ``target`` (F, n, 4, 4), step for step to round-off: JO * IS
+    stripped from the right, the rows normalized, rotate_axis taken out"""
+    RO = _euler_matrices(channels["_rotate_axis"], None)
+    JO = _euler_matrices(channels["_joint_orient"], None)
+    B  = target @ _diagonal(inverse) @ np.swapaxes(JO, -1, -2)
+    _, rotation = _scales_and_rotations(
+        B[..., :3, :3], lambda: (RO @ _euler_matrices(channels["_rotate"], orders))[..., :3, :3]
+    )
+    return np.swapaxes(RO[..., :3, :3], -1, -2) @ rotation
+
+
+def _split_gain(matrices: np.ndarray, orders) -> tuple:
+    """(g, snap), each (F, n): how far matrix_to_euler can move the rotation
+    it reads off each of ``matrices`` (F, n, 3, 3) in ``orders``
+
+    The split normalizes each row and reads each angle off two entries with
+    atan2, which moves it by a change in them over their length. A turn of
+    a rotation moves the result by the turn alone; any other change by up
+    to ``g`` times itself, round-off included, 1 over the shortest row times
+    the shortest such pair: on a rotation near gimbal, the cosine of the
+    middle angle. Where the split snaps (that cosine at most float32's eps)
+    it reads the first angle off another pair and loses nothing; a matrix
+    within 1e-9 of the snap can land on either side of it, about the snap
+    apart, so ``snap`` is 1e-9 over its distance from there
+    (:func:`_gain`).
+    """
+    from cgmath.transforms._numba._euler import MAYA_EA
+
+    eps     = float(np.finfo(np.float32).eps)
+    lengths = np.sqrt((matrices ** 2).sum(axis=-1))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        N = matrices / lengths[..., None]
+
+    i, j, k = MAYA_EA[np.asarray(orders, dtype=int)].T
+    column = np.arange(len(i))
+
+    def pair(a, b, c, d):
+        return np.hypot(N[:, column, a, b], N[:, column, c, d])
+
+    # the first and last angles' pairs, the first's another once the split
+    # snaps; the middle one is read off a whole row, which is never short
+    yy    = pair(i, i, i, j)
+    least = np.where(yy > eps, np.minimum(pair(j, k, k, k), yy), pair(k, j, j, j))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        g    = np.maximum(1.0, 1.0 / (lengths.min(axis=-1) * least))
+        snap = 1e-9 / np.abs(yy - eps)
+    return np.where(np.isnan(g), np.inf, g), snap
+
+
+def _off_square(matrices: np.ndarray) -> np.ndarray:
+    """(F, n): how far each of ``matrices`` (F, n, 3, 3), a euler split's
+    input (:func:`_split_input`), is from square, at most 1: the largest
+    entry of M @ M.T less the identity. A turn of a square input turns what
+    the split reads off it by as much; one that is not square takes what
+    is not square along, so up to this much of the turn reaches the split
+    as a change that is not one (:func:`_gain`)"""
+    with np.errstate(invalid="ignore"):
+        off = np.abs(matrices @ np.swapaxes(matrices, -1, -2) - np.eye(3)).max(axis=(-2, -1))
+    return np.where(np.isnan(off), 1.0, np.minimum(off, 1.0))
+
+
+def _gain(g: np.ndarray, snap: np.ndarray, turn, other) -> np.ndarray:
+    """how far a split of gain ``g`` and ``snap`` (:func:`_split_gain`) can
+    move a row per unit of a change made of up to ``turn`` times as much of
+    a turn and ``other`` times as much of a change that is not one"""
+    with np.errstate(invalid="ignore", over="ignore"):
+        gain = np.maximum(turn + other * g, (turn + other) * snap)
+    return np.where(np.isnan(gain), np.inf, gain)
+
+
+def _keep_gain(gap: np.ndarray) -> np.ndarray:
+    """how far the matrix setter's keep test can move a row per unit of a
+    change in what it compares: ``gap``, the largest entry between the
+    row's channels' matrix and the one it is solved to
+
+    The setter keeps the channels while every entry of the two is within
+    1e-8 (:func:`_same_transforms`), a step about 1e-8 tall. A row whose
+    gap m sits within a change of 1e-8 can land either side of it, so it
+    weighs as 1e-8 over |m - 1e-8|, much as the split's snap does
+    (:func:`_split_gain`); a row far from the step weighs nothing.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        gain = 1e-8 / np.abs(gap - 1e-8)
+    return np.where(np.isnan(gain), np.inf, gain)
+
+
+def _under_gain(frames: _RigFrames, rows, local: np.ndarray, solved: tuple, kept: dict, above: int, reached) -> tuple:
+    """(gain, g, moved), how far the second pass of set_parent can move the
+    rows put under row ``above``: ``gain`` (F, n), 1 but for the
+    ``reached`` ones of ``rows``, per unit of a change in the world the
+    first pass gave a row, and ``g`` (F, n), 0 but for them, per unit of
+    the round-off of its split (:func:`_split_gain`); ``moved``, when the
+    first pass moves the parent itself, the two per unit of the change in
+    its world, (F,) each, the most any row put under it makes of that, else
+    None
+
+    The first pass leaves every row a root, ``local`` (F, n, 4, 4) its world
+    and ``solved`` its channels, ``kept`` its rotate_axis and joint_orient.
+    The new local is that world times the inverse of the parent's, so a
+    change of the world reaches it conjugated by the parent's: up to the
+    parent's condition number times as large, all but a turn's worth of it
+    no turn at all. A change of the scale alone the split takes out whole.
+    A parent the first pass moves reaches every row put under it, by the
+    change in its world times its condition number, none of which need be
+    a turn. The keep test weighs in too (:func:`_keep_gain`): a change of
+    a row's world moves what it compares by up to three times the change
+    times 1 or the largest entry of the row's IS, whichever is more, plus
+    the largest entry of the parent's inverse; a change of the parent's
+    world, by up to three times the change times the parent's condition
+    number and the largest entry of the row's new local, or 1.
+    """
+    rows  = np.asarray(rows, dtype=int)
+    count = frames.frames, len(rows)
+    gain  = np.ones(count)
+    g     = np.zeros(count)
+    at    = np.flatnonzero(rows == above)
+    moved = False
+    if len(at):
+        parent, scale = local[:, at[0]], solved[0][:, at[0]]
+        moved = bool(np.isin(at[0], reached))
+    else:
+        parent, scale = frames.world([above])[:, 0], frames.read("_scale", [above])[:, 0]
+    under = np.arange(len(rows)) if moved else np.asarray(reached, dtype=int)
+    under = under[rows[under] != above]
+    if not len(under):
+        return gain, g, None
+
+    sizes = np.linalg.svd(parent[:, :3, :3], compute_uv=False)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        uneven = sizes[:, 0] / sizes[:, -1] - 1.0
+    usable   = np.isfinite(uneven)[:, None]
+    parent   = np.where(usable[:, :, None], parent, np.eye(4))
+    turn     = 1.0 + uneven[:, None]
+
+    flip     = np.linalg.inv(parent)
+    target   = local[:, under] @ flip[:, None]
+    channels = {name: values[:, under] for name, values in kept.items()}
+    channels.update(_scale=solved[0][:, under], _rotate=solved[1][:, under], _translate=solved[2][:, under])
+    on             = np.asarray(frames.compensate[rows[under]], dtype=bool)
+    inverse        = np.ones(target.shape[:2] + (3,))
+    inverse[:, on] = scale[:, None]
+    orders         = frames.orders[rows[under]]
+    split, snap = _split_gain(_split_input(target, channels, orders, inverse), orders)
+
+    # the keep test: the channels the first pass solved, with IS, make that
+    # pass's world with its columns over the parent's scale, which moves
+    # with the row's world through the parent's inverse and the row's IS,
+    # and with the parent's world through the row's new local
+    composed = local[:, under].copy()
+    composed[..., :3, :3] /= inverse[..., None, :]
+    keep = _keep_gain(np.abs(composed - target).max(axis=(-2, -1)))
+    with np.errstate(divide="ignore", over="ignore"):
+        through = np.maximum(1.0, (1.0 / np.abs(inverse)).max(axis=-1))
+        keeps   = 3.0 * keep * (through + np.abs(flip[:, None, :3, :3]).max(axis=(-2, -1)))
+
+    own            = np.isin(under, reached)
+    gain[:, under] = np.where(
+        own, np.where(usable, np.maximum(_gain(split, snap, turn, turn - 1.0), keeps), np.inf), 1.0
+    )
+    g[:, under] = np.where(own, np.where(usable, split, np.inf), 0.0)
+    if not moved:
+        return gain, g, None
+    with np.errstate(invalid="ignore", over="ignore"):
+        carry = keep * 3.0 * turn * np.maximum(1.0, np.abs(target).max(axis=(-2, -1)))
+    whole = np.where(usable, np.maximum(_gain(split, snap, turn, turn), carry), np.inf).max(axis=1)
+    return gain, g, (whole, np.where(usable[:, 0], split.max(axis=1), np.inf))
+
+
+def _cascades(
+    frames: _RigFrames,
+    rows,
+    parents,
+    worlds: np.ndarray,
+    solved: tuple,
+    above:  int                  = -1,
+    gap:    Optional[np.ndarray] = None,
+) -> bool:
+    """whether solving ``rows`` to the world one at a time could move a row
+    below one of them before its turn, so a batch would not give the same
+    answer
+
+    A row solved to the world keeps its world matrix unless that matrix
+    holds a shear its channels can not, or the solve keeps the channels the
+    row has (within 1e-8 of its world, the matrix setter's keep test), and
+    then everything below it moves. A row whose scale changes resizes a
+    segment scale compensated child, and everything below that. ``parents``
+    is the parenting before the edit; a row below such a row counts whatever
+    the order, so this errs towards one at a time.
+
+    Only a row a later picked row carries comes out otherwise in a batch:
+    one in the branch of a picked row that another picked row hangs below. A
+    turn the channels leave out moves it by that turn, taken in the moving
+    row's own axes, times its distance from that row; a new scale over a
+    compensated child by the change in the same axes times its distance from
+    the child. Its axes turn by the same change times their own world scale.
+    Each is weighed by the spread of every row in the moving rows' branches,
+    or by the largest stretch of their worlds where that is more, and by the
+    gains below, and held to 1e-11, so the batch stays within 1e-9 of one at
+    a time however far the rig sits from the origin, however far out a row
+    that is not picked hangs, however small or large the scale above,
+    however near gimbal or its keep test's step a picked row it reaches
+    sits, and however unevenly the new parent stretches. A translation the
+    solve leaves out moves everything below by as much, and any counts: a
+    solve that does not keep copies the world's translation to the bit.
+
+    A picked row so reached is solved from a world the change has moved. The
+    change is a turn, its skew part in the moving row's own axes, and the
+    rest. The row's euler split passes the turn as it is, its world turning
+    by that alone (near gimbal its first and last angles can trade by the
+    turn over the middle angle's cosine), but for what the turn takes along
+    of a matrix far from square (:func:`_off_square`), and can make far more
+    of the rest, near gimbal or on a matrix far from square
+    (:func:`_split_gain`); either can carry the row across the matrix
+    setter's keep test, which then keeps its channels one way and solves
+    them the other (:func:`_keep_gain`). When the rows then go under row
+    ``above`` (-1 for none), what the first pass left them reaches their new
+    locals through the parent's world, and that pass's split and keep test
+    gain on it too (:func:`_under_gain`). Each picked row's gains over both
+    passes, at their largest over the frames, weigh the largest turn and the
+    largest rest that reach it from above; up to 10 of a gain spends a tenth
+    of the factor of 100 between 1e-11 and 1e-9, so the weight grows with a
+    tenth of the gain past that. A split that gains that much gains on
+    round-off as well, so two solves of a world a bit apart part by up to
+    the gain times eps whatever the change: any change counts once a tenth
+    of that does. What the row's first pass split makes of the rest, and of
+    what the turn takes along, short of the snap and the keep test's step,
+    turns its world one at a time, and so reaches the rows below it as a
+    turn. The gains are only worked out when the change alone does not
+    settle the call. ``gap`` is each row's keep test gap in the first pass's
+    solve (:func:`_solve_local`), (F, n), worked out again when not given.
+    """
+    rows         = np.asarray(rows, dtype=int)
+    count        = len(parents)
+    picked       = np.zeros(count, dtype=bool)
+    picked[rows] = True
+
+    # the picked rows some other picked row hangs below, each chain climbed
+    # once: whatever is above a row met before is marked already
+    lower = np.zeros(count, dtype=bool)
+    met   = np.zeros(count, dtype=bool)
+    for row in rows.tolist():
+        if met[row]:
+            continue
+        met[row] = True
+        node     = int(parents[row])
+        steps    = 0
+        while node > -1 and steps <= count:
+            lower[node] |= picked[node]
+            if met[node]:
+                break
+            met[node] = True
+            node      = int(parents[node])
+            steps += 1
+    if not lower[rows].any():
+        return False
+
+    before = frames.channels(rows)
+    after  = dict(before, _scale=solved[0], _rotate=solved[1], _translate=solved[2])
+    local  = _compose_local(after, frames.orders[rows], np.ones_like(solved[0]))
+    axes   = worlds[..., :3, :3]
+    scale  = before["_scale"]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(solved[0] == scale, 0.0, scale / solved[0] - 1.0)
+
+    turned, grown, skew, rest = _in_own_axes(axes, local[..., :3, :3] - axes, ratio[..., None] * axes, parts=True)
+    shifted = (local[..., 3, :3] != worlds[..., 3, :3]).any(axis=-1)
+    tops    = lower[rows] & ((turned > 0.0) | (grown > 0.0) | shifted).any(axis=0)
+    if not tops.any():
+        return False
+
+    def carried(weight, gains=None):
+        with np.errstate(invalid="ignore", over="ignore"):
+            moved   = np.where(shifted, np.inf, turned * weight)
+            resized = grown * weight
+            if gains is None:
+                return _carried(frames, rows, parents, moved, resized)
+            parts = np.where(shifted, np.inf, skew * weight), np.where(shifted, np.inf, rest * weight)
+            gain, floor, by = gains
+            return _carried(frames, rows, parents, moved, resized, (parts, gain, floor * weight, by))
+
+    def gains():
+        # each picked row the change can reach, below a moving row: solved
+        # from a world the change shears, then put under ``above``. A turn
+        # passes the split as it is and the rest by its gain; either can
+        # carry a row across the snap or the keep test
+        up      = np.asarray(parents[rows])
+        reached = np.flatnonzero((up > -1) & inside[np.maximum(up, 0)])
+        turn    = np.ones(turned.shape)
+        other   = np.ones(turned.shape)
+        g       = np.ones(turned.shape)
+        by_turn = np.zeros(turned.shape)
+        by_rest = np.zeros(turned.shape)
+        first   = {name: values[:, reached] for name, values in before.items()}
+        orders  = frames.orders[rows[reached]]
+        ones    = np.ones_like(first["_scale"])
+        split   = _split_input(worlds[:, reached], first, orders, ones)
+        g1, snap = _split_gain(split, orders)
+        gaps = gap
+        if gaps is None:
+            gaps = np.abs(_compose_local(first, orders, ones) - worlds[:, reached]).max(axis=(-2, -1))
+        else:
+            gaps = gaps[:, reached]
+        keep              = _keep_gain(gaps)
+        off               = _off_square(split)
+        turn[:, reached]  = np.maximum(_gain(g1, snap, 1.0, off), keep)
+        other[:, reached] = np.maximum(_gain(g1, snap, 0.0, 1.0), keep)
+        g[:, reached]     = g1
+
+        # short of the snap and the keep test's step, either of which counts
+        # the row itself before a change can carry it across, the first pass
+        # split turns the row's world by the turn that reaches it, which
+        # reaches the rows below anyway, and by what it makes of the rest
+        # and of what the turn takes along: one at a time the rows below it
+        # are solved from worlds turned so
+        none                = np.zeros_like(snap)
+        by_turn[:, reached] = _gain(g1, none, 0.0, off)
+        by_rest[:, reached] = _gain(g1, none, 0.0, 1.0)
+        if above > -1:
+            kept = {name: before[name] for name in ("_rotate_axis", "_joint_orient")}
+            gain2, g2, moved = _under_gain(frames, rows, local, solved, kept, above, reached)
+            g     = g * gain2 + g2
+            turn  = turn * gain2
+            other = other * gain2
+            if moved is not None:
+                # the parent's own change reaches every row put under it
+                k           = int(np.flatnonzero(rows == above)[0])
+                g[:, k]     = g[:, k] * moved[0] + moved[1]
+                turn[:, k]  = turn[:, k] * moved[0]
+                other[:, k] = other[:, k] * moved[0]
+        # 1e-11 is a hundredth of the 1e-9 the batch is held to: a gain of
+        # up to 10 spends a tenth of that room, past it the weight grows
+        # with the gain, round-off's included
+        return (turn / 10.0, other / 10.0), np.finfo(float).eps * g / 10.0, (by_turn, by_rest)
+
+    # weighed first by the picked rows in those branches, whose worlds are
+    # known: they sit no farther apart and stretch no more than the whole
+    # branches, so a row carried then is carried anyway, and most calls are
+    # settled, the change alone first
+    inside, walk = _branches(parents, rows[tops])
+    held   = inside[rows]
+    weight = _weigh(worlds[:, held])
+    if carried(weight):
+        return True
+    gained = gains()
+    if carried(weight, gained):
+        return True
+    if inside.sum() == len(set(rows[held].tolist())):
+        return False
+    # then by a bound of the whole branches, which settles the rest but for
+    # a turn or a new scale near the limit; the branches' worlds last
+    if not carried(_branch_bound(frames, rows, parents, worlds, inside, walk), gained):
+        return False
+    return carried(_weigh(_branch_worlds(frames, rows, parents, worlds, inside, walk)), gained)
+
+
+def _reorder_rows(frames: _RigFrames, rows, orders) -> None:
+    """set_rotate_order on every row, every frame at once: rotate is
+    re-expressed in the new order, so no world matrix moves"""
+    rows   = np.asarray(rows, dtype=int)
+    orders = np.asarray(orders, dtype=int)
+    change = orders != frames.orders[rows]
+    rows, orders = rows[change], orders[change]
+    if not len(rows):
+        return
+
+    # frame 0 the way Maya's xform -preserve picks it, then the filter
+    rotate = _reorder_like_maya(frames.read("_rotate", rows), frames.orders[rows], orders)
+    frames.write("_rotate", rows, _filtered(rotate, orders))
+
+    for i, order in zip(rows, orders):
+        frames.nodes[i]._rotate_order = int(order)
+    frames.orders[rows] = orders
+    frames._touched.update(rows.tolist())
+    frames.finish()
 
 
 def _frame_property(channel: str) -> property:
@@ -5815,6 +7427,29 @@ class _FrameAxis:
                 f"shares, such as rotate_order, is set on the clip itself"
             )
         object.__setattr__(self, name, value)
+
+    # the rig edits change what every frame shares, so they belong to the
+    # clip and cover every frame wherever they are called
+    _RIG_EDITS = frozenset(
+        (
+            "swapaxes",
+            "set_rotate_to_joint_orient",
+            "set_joint_orient_to_rotate",
+            "set_rotate_order",
+            "set_parent",
+            "set_node_type",
+            "node_type",
+        )
+    )
+
+    def __getattr__(self, name: str):
+        if name in _FrameAxis._RIG_EDITS:
+            raise AttributeError(
+                f"clip.frames has no {name}: a rig edit changes what every frame "
+                f"shares and covers every frame wherever it is called; use "
+                f"clip.{name}, or clip['node'].{name} for one node"
+            )
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     def __len__(self) -> int:
         return self._clip.frame_count
@@ -6314,14 +7949,23 @@ class ClipData(HierarchyData):
     -- names, uuids, parenting, rotate_order, segment_scale_compensate,
     radius, draw_style -- is structural and shared by every frame.
 
-    The rig level edits refuse to run once there is more than one frame:
-    ``swapaxes``, ``set_rotate_to_joint_orient``, ``set_joint_orient_to_rotate``
-    and ``set_parent`` in world space all rebuild rotate out of a matrix. A
-    clip would have to do that a frame at a time, and each frame would pick
-    its euler branch on its own, so every pose stays exact while the curves
-    come out with 180 and 360 degree steps in them. Do them on the rest pose
-    and build the clip afterwards. ``set_parent(world_space=False)`` writes no
-    pose, so it stays allowed.
+    The rig level edits -- ``swapaxes``, ``set_rotate_to_joint_orient``,
+    ``set_joint_orient_to_rotate``, ``set_parent`` in world space, a joint
+    becoming another type and ``set_rotate_order`` -- change what every
+    frame shares, so they cover every frame whether they are called on the
+    clip, a selection or one node, all solved at once, with the result the
+    single pose methods give frame by frame:
+
+        clip.set_rotate_order("zyx")             # every node, every frame
+        clip["hips"].swapaxes(0, 1)              # one node, every frame
+        clip.match("L_*").set_parent("root")     # each keeps its world
+
+    They rebuild channels out of matrices. Solved a frame at a time, each
+    frame would pick its euler branch on its own, and the curves would step
+    by 180 and 360 degrees while every pose stayed exact. So each rebuilt
+    euler curve -- rotate in the node's own rotate order, rotate_axis and
+    joint_orient in xyz -- goes through euler_filter, frame 0 kept as
+    computed, the way Maya's Euler Filter keeps the first key.
     """
 
     FRAMED_CHANNELS = (
@@ -6378,6 +8022,17 @@ class ClipData(HierarchyData):
             )
         self._columns = [node.uuid for node in self.list]
         self._bind(0)
+
+    # (the column list, each uuid's column in it)
+    _column_place_cache = None
+
+    def _column_place(self) -> dict:
+        """each uuid's block column, kept until the column list is replaced"""
+        cache = self._column_place_cache
+        if cache is None or cache[0] is not self._columns:
+            place = {uuid: j for j, uuid in enumerate(self._columns)}
+            cache = self._column_place_cache = (self._columns, place)
+        return cache[1]
 
     def _realign(self) -> None:
         """keeps the block columns lined up with the node list

@@ -4,6 +4,7 @@ import itertools
 import json as std_json
 import os
 import pickle
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -22,6 +23,7 @@ from cgmath.transforms import (
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData, TransformList
 from cgmath.hierarchy import _fbx_frame_rate, FBX
 from cgmath.hierarchy.hierarchy import _filtered, _rotation
+from cgmath._tests._maya_rotate_order import maya_rotate_order_cases
 
 if pygltflib is not None:
     from pygltflib import (
@@ -425,11 +427,10 @@ def joint_chain(count=4):
 
 
 def uuid_chain(count=4, root=False):
-    """a chain parented through set_parent, so get_children() sees children
+    """a chain parented through set_parent, so every link is a uuid
 
-    joint_chain() sets parent_node to a name, which get_children compares
-    against uuid, so nothing there ever has a child. The paths that restore
-    children need a rig that really has them.
+    joint_chain() sets parent_node to a name, which get_children resolves
+    too; this one covers the uuid links set_parent writes.
     """
     h = HierarchyData(
         [
@@ -451,7 +452,8 @@ def uuid_chain(count=4, root=False):
 
 
 class TestClipStructuralMutation(unittest.TestCase):
-    """rig level edits refuse an animated clip; the rest still work"""
+    """rig level edits run on every frame of an animated clip; the rest of
+    the structural edits still work"""
 
     def _varied_clip(self, rig, frames=3):
         clip   = ClipData(rig, frames=frames)
@@ -461,63 +463,58 @@ class TestClipStructuralMutation(unittest.TestCase):
         clip.frames.rotate = rotate
         return clip
 
-    # --- refused on an animated clip --- #
-    def test_swapaxes_refuses_an_animated_clip(self):
-        clip = self._varied_clip(uuid_chain(4))
-        with self.assertRaises(RuntimeError):
-            clip.swapaxes(0, 1, negate=True)
+    # --- every frame at once --- #
+    def test_every_rig_edit_runs_on_an_animated_clip(self):
+        # each one refused a clip of 2+ frames before
+        edits = {
+            "swapaxes": lambda c: c.swapaxes(0, 1, negate=True),
+            "set_rotate_to_joint_orient": lambda c: c.set_rotate_to_joint_orient(),
+            "set_joint_orient_to_rotate": lambda c: c.set_joint_orient_to_rotate(),
+            "set_parent": lambda c: c.set_parent("root"),
+            "node_type": lambda c: setattr(c, "node_type", "transform"),
+            "set_rotate_order": lambda c: c.set_rotate_order("zyx"),
+        }
+        for name, edit in edits.items():
+            with self.subTest(edit=name):
+                clip = self._varied_clip(uuid_chain(4, root=True))
+                edit(clip)
+                self.assertEqual(clip.frames.rotate.shape, (3, 5, 3))
 
-    def test_set_rotate_to_joint_orient_refuses_an_animated_clip(self):
-        clip = self._varied_clip(uuid_chain(4))
-        with self.assertRaises(RuntimeError):
-            clip.set_rotate_to_joint_orient()
+    def test_a_selection_and_a_single_node_run_too(self):
+        # every frame of the swapped node turns by the permutation, and its
+        # child stays where it was on every frame
+        P         = np.eye(4)
+        P[:3, :3] = [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]]
+        for edit in (
+            lambda c: c[1:3].swapaxes(0, 1),
+            lambda c: c.match("j1").swapaxes(0, 1),
+            lambda c: c["j1"].swapaxes(0, 1),
+        ):
+            clip   = self._varied_clip(uuid_chain(4))
+            before = clip.frames.world_matrix.copy()
+            edit(clip)
+            after = clip.frames.world_matrix
+            self.assertTrue(np.allclose(after[:, 1], P @ before[:, 1], atol=1e-9))
+            self.assertTrue(np.allclose(after[:, 0], before[:, 0], atol=1e-9))
+            self.assertTrue(np.allclose(after[:, 3], before[:, 3], atol=1e-9))
 
-    def test_set_joint_orient_to_rotate_refuses_an_animated_clip(self):
-        clip = self._varied_clip(uuid_chain(4))
-        with self.assertRaises(RuntimeError):
-            clip.set_joint_orient_to_rotate()
-
-    def test_node_type_refuses_an_animated_clip(self):
-        # joints with a joint orient would need rotate rebuilt per frame;
-        # nothing changes, not even the joint without one
-        clip = self._varied_clip(uuid_chain(4))
-        with self.assertRaises(RuntimeError):
-            clip.node_type = "transform"
-        self.assertEqual(clip.node_type, ["joint"] * 4)
-
-    def test_set_parent_in_world_space_refuses_an_animated_clip(self):
-        clip = self._varied_clip(uuid_chain(4, root=True))
-        with self.assertRaises(RuntimeError):
-            clip.set_parent("root")
-
-    def test_a_selection_and_a_single_node_refuse_too(self):
-        # every view form funnels into the TransformData methods, so one
-        # guard there covers the slice, the match and the bare node
-        clip = self._varied_clip(uuid_chain(4))
-
-        with self.assertRaises(RuntimeError):
-            clip[:2].swapaxes(0, 1)
-        with self.assertRaises(RuntimeError):
-            clip.match("j1").swapaxes(0, 1)
-        with self.assertRaises(RuntimeError):
-            clip["j1"].swapaxes(0, 1)
-        with self.assertRaises(RuntimeError):
-            clip["j2"].set_parent(None)
-
-    def test_the_refusal_leaves_the_clip_untouched(self):
+    def test_an_unknown_parent_leaves_the_clip_untouched(self):
         clip    = self._varied_clip(uuid_chain(4, root=True))
         before  = np.array(clip.frames.rotate)
         parents = [n.parent_node for n in clip]
 
-        with self.assertRaises(RuntimeError):
-            clip.set_parent("root")
+        with self.assertRaises(ValueError):
+            clip.set_parent("nowhere")
+        with self.assertRaises(ValueError):
+            clip["j2"].set_parent("nowhere")
+        with self.assertRaises(ValueError):
+            clip.swapaxes(0, 0)
 
         self.assertTrue(np.array_equal(clip.frames.rotate, before))
         self.assertEqual([n.parent_node for n in clip], parents)
 
-    # --- still allowed --- #
-    def test_a_single_frame_clip_still_allows_them(self):
-        # one frame has no curve to break
+    # --- still as they were --- #
+    def test_a_single_frame_clip_runs_them_too(self):
         clip   = ClipData(uuid_chain(4), frames=1)
         before = clip.world_matrix.copy()
 
@@ -527,15 +524,14 @@ class TestClipStructuralMutation(unittest.TestCase):
         self.assertTrue(np.allclose(clip.rotate, 0.0, atol=1e-9))
         self.assertFalse(np.allclose(clip.world_matrix, before))
 
-    def test_a_frameless_clip_still_allows_them(self):
+    def test_a_frameless_clip_runs_them_as_a_pose(self):
         clip = ClipData(uuid_chain(4))
         self.assertEqual(clip.frame_count, 0)
         clip.swapaxes(0, 1, negate=True)
         clip.set_joint_orient_to_rotate()
         self.assertTrue(np.allclose(clip.joint_orient, 0.0, atol=1e-9))
 
-    def test_a_plain_hierarchy_is_untouched(self):
-        # the guard reads frame_count, which only a ClipData has
+    def test_a_plain_hierarchy_still_runs_them(self):
         rig    = uuid_chain(4, root=True)
         before = rig.world_matrix.copy()
 
@@ -545,12 +541,21 @@ class TestClipStructuralMutation(unittest.TestCase):
 
         self.assertFalse(np.allclose(rig.world_matrix, before))
 
-    def test_a_transform_is_not_refused_by_the_orient_helpers(self):
-        # they are a no-op off a joint, so there is nothing to refuse
-        rig  = HierarchyData([TransformData(name="grp", node_type="transform")])
-        clip = ClipData(rig, frames=4)
+    def test_the_orient_helpers_leave_a_transform_alone(self):
+        # they act on joints only
+        rig = HierarchyData(
+            [
+                TransformData(
+                    name="grp", node_type="transform", joint_orient=[0.0, 30.0, 0.0]
+                )
+            ]
+        )
+        clip   = self._varied_clip(rig, frames=4)
+        before = {c: np.array(getattr(clip.frames, c)) for c in ("rotate", "joint_orient")}
         clip.set_rotate_to_joint_orient()
         clip.set_joint_orient_to_rotate()
+        for channel, values in before.items():
+            self.assertTrue(np.array_equal(getattr(clip.frames, channel), values))
 
     def test_set_parent_without_world_space_keeps_local_values(self):
         rig = joint_chain(3)
@@ -588,6 +593,1790 @@ class TestClipStructuralMutation(unittest.TestCase):
             clip.frame = frame
             for node in clip:
                 self.assertTrue(np.allclose(node.rotate, want[node.name]))
+
+
+def _per_frame(clip, edit):
+    """the reference: every frame of the clip as a pose of its own, edited by
+    the single pose methods"""
+    poses = []
+    for frame in range(clip.frame_count):
+        clip.frame = frame
+        pose       = TransformList(clip.list).copy()
+        edit(pose)
+        poses.append(pose)
+    clip.frame = 0
+    return poses
+
+
+def _one_at_a_time(view, parent, world_space=True):
+    """TransformList.set_parent as its docstring states it: every node to the
+    world, then each under ``parent``, one node at a time"""
+    for node in view:
+        node.set_parent(None, world_space=world_space)
+    if parent is not None:
+        for node in view:
+            if node != parent:
+                node.set_parent(parent, world_space=world_space)
+
+
+def _stacked(poses, channel):
+    return np.array([[getattr(node, channel) for node in pose] for pose in poses])
+
+
+class TestClipRigEditsEveryFrame(unittest.TestCase):
+    """a rig edit on a clip solves every frame at once. It must equal the
+    single pose methods run frame by frame: world matrices within 1e-9, and
+    every euler curve equal to the frame by frame one once that is put
+    through euler_filter too, for every rotate order"""
+
+    def _rig(self, order, count=8, seed=7, scaled=True):
+        rng   = np.random.default_rng(seed)
+        nodes = []
+        for i in range(count):
+            nodes.append(
+                TransformData(
+                    name=f"j{i}",
+                    node_type="joint",
+                    parent_node=None if i == 0 else f"j{rng.integers(0, i)}",
+                    translate=rng.normal(size=3),
+                    rotate=rng.uniform(-180.0, 180.0, size=3),
+                    scale=rng.uniform(0.6, 1.6, size=3) if scaled else None,
+                    rotate_axis=rng.uniform(-40.0, 40.0, size=3),
+                    joint_orient=rng.uniform(-90.0, 90.0, size=3),
+                    rotate_order=order,
+                    segment_scale_compensate=bool(rng.integers(0, 2)),
+                )
+            )
+        return HierarchyData(nodes)
+
+    def _animated(self, rig, frames=24, seed=3, scaled=True):
+        # every framed channel moves, so each frame solves through its own
+        # rotate_axis and joint_orient
+        rng  = np.random.default_rng(seed)
+        clip = ClipData(rig, frames=frames, start_frame=1001, fps=30.0)
+        t    = np.arange(frames)[:, None, None]
+        size = (1, len(clip), 3)
+
+        def wave(amplitude):
+            speed = rng.uniform(0.05, 0.25, size=size)
+            return amplitude * np.sin(t * speed + rng.uniform(0.0, 6.0, size=size))
+
+        clip.frames.rotate       = clip.frames.rotate + wave(60.0)
+        clip.frames.translate    = clip.frames.translate + wave(0.3)
+        clip.frames.joint_orient = clip.frames.joint_orient + wave(15.0)
+        clip.frames.rotate_axis  = clip.frames.rotate_axis + wave(10.0)
+        if scaled:
+            clip.frames.scale = clip.frames.scale * (1.0 + wave(0.2))
+        return clip
+
+    def _assert_matches(self, clip, poses):
+        first = poses[0]
+        self.assertEqual(clip.name, first.name)
+        self.assertEqual([n.parent_node for n in clip], [n.parent_node for n in first])
+        self.assertEqual(list(clip.rotate_order), [n.rotate_order for n in first])
+        self.assertEqual(clip.node_type, first.node_type)
+
+        world = np.array([[node.world_matrix for node in pose] for pose in poses])
+        self.assertLess(np.abs(clip.frames.world_matrix - world).max(), 1e-9)
+
+        orders = np.array([node.rotate_order for node in first])
+        xyz    = np.zeros(len(first), dtype=int)
+        for channel, axes in (
+            ("rotate", orders),
+            ("rotate_axis", xyz),
+            ("joint_orient", xyz),
+            ("scale", None),
+            ("translate", None),
+        ):
+            want = _stacked(poses, channel)
+            if axes is not None:
+                want = _filtered(want, axes)
+            error = np.abs(getattr(clip.frames, channel) - want).max()
+            self.assertLess(error, 1e-9, channel)
+
+    def _check(self, clip_edit, pose_edit, scaled=True):
+        for order in range(6):
+            with self.subTest(order=order):
+                clip  = self._animated(self._rig(order, scaled=scaled), scaled=scaled)
+                poses = _per_frame(clip, pose_edit)
+                clip_edit(clip)
+                self._assert_matches(clip, poses)
+
+    def test_swapaxes_on_the_whole_clip(self):
+        for axis0, axis1, negate in ((0, 1, True), (2, 0, False), (1, 2, True)):
+            with self.subTest(axes=(axis0, axis1, negate)):
+                self._check(
+                    lambda c: c.swapaxes(axis0, axis1, negate=negate),
+                    lambda p: [n.swapaxes(axis0, axis1, negate=negate) for n in p[:]],
+                )
+
+    def test_swapaxes_on_a_node_and_a_view(self):
+        self._check(lambda c: c["j3"].swapaxes(1, 2), lambda p: p["j3"].swapaxes(1, 2))
+        self._check(
+            lambda c: c[[5, 1, 3]].swapaxes(0, 2, negate=True),
+            lambda p: [n.swapaxes(0, 2, negate=True) for n in p[[5, 1, 3]]],
+        )
+
+    def test_set_rotate_to_joint_orient(self):
+        self._check(
+            lambda c: c.set_rotate_to_joint_orient(),
+            lambda p: [n.set_rotate_to_joint_orient() for n in p],
+        )
+        self._check(
+            lambda c: c["j2"].set_rotate_to_joint_orient(),
+            lambda p: p["j2"].set_rotate_to_joint_orient(),
+        )
+
+    def test_set_joint_orient_to_rotate(self):
+        self._check(
+            lambda c: c.set_joint_orient_to_rotate(),
+            lambda p: [n.set_joint_orient_to_rotate() for n in p],
+        )
+        self._check(
+            lambda c: c[2:5].set_joint_orient_to_rotate(),
+            lambda p: [n.set_joint_orient_to_rotate() for n in p[2:5]],
+        )
+
+    def test_set_parent_of_one_node_in_world_space(self):
+        self._check(lambda c: c["j4"].set_parent("j0"), lambda p: p["j4"].set_parent("j0"))
+        self._check(lambda c: c["j4"].set_parent(None), lambda p: p["j4"].set_parent(None))
+
+    def test_set_parent_of_a_selection_in_world_space(self):
+        # unscaled, every node keeps its world exactly, so the selection is
+        # solved in one batch per step; scaled, a sheared or resized node
+        # moves the ones below it, so they go one at a time. Either way the
+        # result is the single pose method's, which goes one at a time. A
+        # pose's own selection is solved the same way: only the clip's
+        # calls are counted
+        module = sys.modules[ClipData.__module__]
+        real   = module._cascades
+        seen   = []
+
+        def spy(frames, *args):
+            found = real(frames, *args)
+            if getattr(frames.owner, "_blocks", None):
+                seen.append(found)
+            return found
+
+        edits = {
+            "[1:] to the world": (
+                lambda h: h[1:].set_parent(None), lambda h: _one_at_a_time(h[1:], None)
+            ),
+            "[1:] under j0": (
+                lambda h: h[1:].set_parent("j0"), lambda h: _one_at_a_time(h[1:], "j0")
+            ),
+            "the whole rig under j0": (
+                lambda h: h.set_parent("j0"), lambda h: _one_at_a_time(h[:], "j0")
+            ),
+            "shuffled under j2": (
+                lambda h: h[[3, 1, 2, 0]].set_parent("j2"),
+                lambda h: _one_at_a_time(h[[3, 1, 2, 0]], "j2"),
+            ),
+        }
+        for scaled in (False, True):
+            seen.clear()
+            for name, (edit, reference) in edits.items():
+                with self.subTest(scaled=scaled, edit=name):
+                    with mock.patch.object(module, "_cascades", spy):
+                        self._check(edit, reference, scaled=scaled)
+
+            self.assertEqual(len(seen), 6 * len(edits))
+            if scaled:
+                self.assertIn(True, seen)
+            else:
+                self.assertNotIn(True, seen)
+
+    def test_set_parent_resolves_a_shared_name_as_one_node_at_a_time(self):
+        # "x" names two roots, the first of them in the selection: one node
+        # at a time, the first pass moves it behind the second, which the
+        # second pass then finds. Resolved once up front, the batch hung b
+        # under the first x, and only on a clip whose scale kept it batched
+        for scaled in (False, True):
+            for frames in (1, 3):
+                with self.subTest(scaled=scaled, frames=frames):
+                    nodes = [
+                        TransformData("x", node_type="joint", translate=(1, 0, 0)),
+                        TransformData("b", node_type="joint", parent_node="x"),
+                        TransformData("x", node_type="joint", translate=(0, 0, 3)),
+                        TransformData("c", node_type="joint", translate=(0, 2, 0)),
+                    ]
+                    if scaled:
+                        nodes[0].scale = (1.5, 0.7, 1.2)
+                    clip   = self._animated(HierarchyData(nodes), frames=frames, scaled=scaled)
+                    poses  = _per_frame(clip, lambda p: _one_at_a_time(p[[0, 1]], "x"))
+                    second = clip[2]
+                    clip[[0, 1]].set_parent("x")
+                    self._assert_matches(clip, poses)
+                    self.assertIs(clip["b"].get_parent(), second)
+                    self.assertIs(clip.list[-2].get_parent(), second)
+
+                    # the list method on a pose is the same
+                    pose = HierarchyData([n.copy() for n in nodes])
+                    pose[[0, 1]].set_parent("x")
+                    self.assertEqual(pose.name, poses[0].name)
+                    self.assertEqual(
+                        [n.parent_node for n in pose], [n.parent_node for n in poses[0]]
+                    )
+
+    def test_set_parent_of_a_selection_holding_only_the_parent(self):
+        # the second pass has nothing to move: it raised "length mismatch"
+        for frames in (1, 3):
+            with self.subTest(frames=frames):
+                clip  = self._animated(self._rig(2), frames=frames)
+                poses = _per_frame(clip, lambda p: _one_at_a_time(p[[0]], "j0"))
+                clip[[0]].set_parent("j0")
+                self._assert_matches(clip, poses)
+
+    def test_set_parent_down_a_chain_in_any_order(self):
+        # a scaled chain shears, so the selection goes one node at a time:
+        # each node's world is its chain up to the lowest node solved before
+        # it, under that one's new local. Leaf first, root first, a shuffle,
+        # an order that goes back up the chain between its far nodes, and one
+        # that goes up a chain between leaves hanging off its end, with and
+        # without compensation, to the world and under the root
+        module = sys.modules[ClipData.__module__]
+        real   = module._cascades
+        seen   = []
+
+        def spy(frames, *args):
+            found = real(frames, *args)
+            if getattr(frames.owner, "_blocks", None):
+                seen.append(found)
+            return found
+
+        def chain(order, compensate, leaves):
+            rng = np.random.default_rng(11)
+            return HierarchyData(
+                [
+                    TransformData(
+                        name=f"j{i}",
+                        node_type="joint",
+                        parent_node=None if i == 0 else f"j{min(i - 1, 5) if leaves else i - 1}",
+                        translate=rng.normal(size=3),
+                        rotate=rng.uniform(-180.0, 180.0, size=3),
+                        scale=rng.uniform(0.6, 1.6, size=3),
+                        rotate_axis=rng.uniform(-40.0, 40.0, size=3),
+                        joint_orient=rng.uniform(-90.0, 90.0, size=3),
+                        rotate_order=order,
+                        segment_scale_compensate=compensate(i, rng),
+                    )
+                    for i in range(10)
+                ]
+            )
+
+        picks = {
+            "leaf first":        (False, [9, 8, 7, 6, 5, 4, 3, 2, 1]),
+            "root first":        (False, [1, 2, 3, 4, 5, 6, 7, 8, 9]),
+            "shuffled":          (False, [4, 9, 1, 7, 2, 8, 3, 6, 5]),
+            "up between ends":   (False, [2, 9, 3, 8, 4, 7, 5, 6]),
+            "up between leaves": (True, [1, 6, 2, 7, 3, 8, 4, 9, 5]),
+        }
+        compensations = {
+            "none": lambda i, rng: False,
+            "some": lambda i, rng: bool(rng.integers(0, 2)),
+        }
+        for index, (name, (leaves, pick)) in enumerate(picks.items()):
+            for (kind, compensate), parent in itertools.product(compensations.items(), (None, "j0")):
+                with self.subTest(order=name, compensation=kind, parent=parent):
+                    seen.clear()
+                    clip  = self._animated(chain((2 * index + 1) % 6, compensate, leaves))
+                    poses = _per_frame(clip, lambda p: _one_at_a_time(p[pick], parent))
+                    with mock.patch.object(module, "_cascades", spy):
+                        clip[pick].set_parent(parent)
+                    self._assert_matches(clip, poses)
+                    self.assertEqual(seen, [True])
+
+    def test_set_parent_refuses_a_parent_below_the_node(self):
+        # one node at a time it recursed without end on a pose; the clip left
+        # a parent cycle behind and said nothing. A node's own set_parent onto
+        # itself is the smallest such loop: on a clip it rewrote the node's
+        # channels on every frame and left it its own parent
+        def held(h, frames):
+            channels = ("scale", "rotate", "translate")
+            if frames:
+                return {c: np.array(getattr(h.frames, c)) for c in channels}
+            return {c: np.array(getattr(h, c)) for c in channels}
+
+        for frames in (0, 1, 3):
+            for world_space in (True, False):
+                with self.subTest(frames=frames, world_space=world_space):
+                    rig    = self._rig(3)
+                    deep   = next(n for n in rig if len(n.get_root()) > 2)
+                    root   = deep.get_root()[0]
+                    h      = rig if not frames else self._animated(rig, frames=frames)
+                    root   = h[root.name]
+                    deep   = h[deep.name]
+                    before = (list(h.uuid), [n.parent_node for n in h], held(h, frames))
+                    with self.assertRaisesRegex(ValueError, "hangs below it"):
+                        root.set_parent(deep.name, world_space=world_space)
+                    with self.assertRaisesRegex(ValueError, "hangs below it"):
+                        TransformList([root]).set_parent(deep.name, world_space=world_space)
+                    for own in (deep.name, deep.uuid):
+                        with self.assertRaisesRegex(ValueError, "can not be its own parent"):
+                            deep.set_parent(own, world_space=world_space)
+                    self.assertEqual(list(h.uuid), before[0])
+                    self.assertEqual([n.parent_node for n in h], before[1])
+                    for channel, values in held(h, frames).items():
+                        np.testing.assert_array_equal(values, before[2][channel], channel)
+
+    def test_set_parent_refuses_a_name_whose_carriers_all_move_before_anything_moves(self):
+        # "x" names a root and a child of s. Once s and the root x go to the
+        # world, the root x lands behind s's branch, so the name finds the x
+        # below s: one node at a time loops, and the call raises before it
+        # moves anything. Naming the first x in the list as it stands raised
+        # only once the first pass had moved every node
+        for frames in (0, 1, 3):
+            for world_space in (True, False):
+                with self.subTest(frames=frames, world_space=world_space):
+                    rig = HierarchyData(
+                        [
+                            TransformData("x", node_type="joint", translate=(0, 0, 2)),
+                            TransformData(
+                                "s",
+                                node_type = "joint",
+                                translate = (1, 0, 0),
+                                rotate    = (10, 20, 30),
+                                scale     = (1, 2, 1),
+                            ),
+                            TransformData("x", node_type="joint", parent_node="s", translate=(0, 1, 0)),
+                        ]
+                    )
+                    h     = ClipData(rig, frames=frames) if frames else rig
+                    owner = h.frames if frames else h
+                    before = (
+                        list(h.uuid),
+                        [n.parent_node for n in h],
+                        {c: np.array(getattr(owner, c)) for c in ("scale", "rotate", "translate")},
+                    )
+                    with self.assertRaisesRegex(ValueError, "hangs below it"):
+                        TransformList([h.list[1], h.list[0]]).set_parent("x", world_space=world_space)
+                    self.assertEqual(list(h.uuid), before[0])
+                    self.assertEqual([n.parent_node for n in h], before[1])
+                    for channel, values in before[2].items():
+                        np.testing.assert_array_equal(getattr(owner, channel), values, channel)
+
+    def _rig_against_one_at_a_time(self, nodes, pick, parent, cascades=None, animated=True):
+        """``TransformList(pick).set_parent(parent)`` on a pose of ``nodes``
+        and on a three frame clip of them, each against one node at a time;
+        ``cascades``, when given, is what _cascades must answer on the clip.
+        ``animated`` False holds every frame of the clip at the pose"""
+        module = sys.modules[ClipData.__module__]
+        real   = module._cascades
+        seen   = []
+
+        def spy(frames, *args):
+            found = real(frames, *args)
+            if getattr(frames.owner, "_blocks", None):
+                seen.append(found)
+            return found
+
+        def links(h):
+            """each node's name and where its parent sits in the list: two
+            copies of a rig carry uuids of their own"""
+            at = {id(node): i for i, node in enumerate(h.list)}
+            return [(n.name, at.get(id(n.get_parent()), n.get_parent())) for n in h.list]
+
+        pose = HierarchyData([n.copy() for n in nodes])
+        want = HierarchyData([n.copy() for n in nodes])
+        _one_at_a_time([want.list[i] for i in pick], parent)
+        TransformList([pose.list[i] for i in pick]).set_parent(parent)
+        self.assertEqual(links(pose), links(want))
+        world = np.array([n.world_matrix for n in want])
+        self.assertLess(np.abs(np.array([n.world_matrix for n in pose]) - world).max(), 1e-9)
+
+        # the scales are left as the rig holds them: a wave on them would
+        # shear every node and take the clip one at a time whatever the case
+        clip  = HierarchyData([n.copy() for n in nodes])
+        clip  = self._animated(clip, frames=3, scaled=False) if animated else ClipData(clip, frames=3)
+        poses = _per_frame(clip, lambda p: _one_at_a_time([p.list[i] for i in pick], parent))
+        with mock.patch.object(module, "_cascades", spy):
+            TransformList([clip.list[i] for i in pick]).set_parent(parent)
+        self._assert_matches(clip, poses)
+        if cascades is not None:
+            self.assertEqual(seen, [cascades])
+
+    def test_set_parent_weighs_a_shear_by_how_far_the_nodes_below_sit(self):
+        # scales uniform to within e shear by e, which the channels drop. A
+        # node below moves by that times its distance: measured against the
+        # translation it was ignored up to 1e-10 of the distance from the
+        # origin, so the batch left the nodes below where one at a time
+        # moves them, 1.8e-4 off at e = 1e-8, a thousand units out, on poses
+        # too (they were exact one at a time). The smaller shears batch
+        # within 1e-9 only weighed by the spread and held to 1e-11
+        for e, far in (
+            (1e-10, 100.0),
+            (1e-9, 100.0),
+            (1e-8, 1000.0),
+            (1e-11, 1000.0),
+            (1e-12, 1000.0),
+            (3e-13, 10000.0),
+        ):
+            with self.subTest(e=e, far=far):
+                rng   = np.random.default_rng(int(far) + int(-np.log10(e)))
+                uuids = [hierarchy.generate_uuid() for _ in range(12)]
+                nodes = [
+                    TransformData(
+                        f"j{i}",
+                        uuid         = uuids[i],
+                        parent_node  = uuids[i - 1] if i else None,
+                        node_type    = "joint",
+                        translate    = rng.normal(size=3) * far,
+                        rotate       = rng.uniform(-180.0, 180.0, 3),
+                        scale        = (1.0, 1.0 + e, 1.0 - e),
+                        rotate_axis  = rng.uniform(-40.0, 40.0, 3),
+                        joint_orient = rng.uniform(-90.0, 90.0, 3),
+                        rotate_order = int(rng.integers(0, 6)),
+                    )
+                    for i in range(12)
+                ]
+                self._rig_against_one_at_a_time(nodes, range(1, 12), None, cascades=True)
+
+    def test_set_parent_of_compensated_children_of_resized_nodes(self):
+        # uniform scales shear nothing, but each node taken to the world
+        # takes on its parents' scale, which resizes its compensated child
+        # before the child's turn: _cascades has to see the new scale over
+        # the compensated child (2.5 off when it did not)
+        rng   = np.random.default_rng(3)
+        uuids = [hierarchy.generate_uuid() for _ in range(8)]
+        nodes = [
+            TransformData(
+                f"j{i}",
+                uuid=uuids[i],
+                parent_node=uuids[i - 1] if i else None,
+                node_type="joint",
+                translate=rng.normal(size=3),
+                rotate=rng.uniform(-90.0, 90.0, 3),
+                scale=(float(rng.uniform(0.5, 2.0)),) * 3,
+                segment_scale_compensate=i % 2 == 0,
+            )
+            for i in range(8)
+        ]
+        self._rig_against_one_at_a_time(nodes, range(1, 8), None, cascades=True)
+
+    def test_set_parent_of_every_other_node_down_a_sheared_chain(self):
+        # each picked node hangs below a picked one through a node that is
+        # not picked: a hit has to reach down the chain past the direct
+        # child (4.2 off when it reached the child alone)
+        rng   = np.random.default_rng(5)
+        uuids = [hierarchy.generate_uuid() for _ in range(12)]
+        nodes = [
+            TransformData(
+                f"j{i}",
+                uuid        = uuids[i],
+                parent_node = uuids[i - 1] if i else None,
+                node_type   = "joint",
+                translate   = rng.normal(size=3),
+                rotate      = rng.uniform(-90.0, 90.0, 3),
+                scale       = rng.uniform(0.6, 1.6, 3),
+            )
+            for i in range(12)
+        ]
+        self._rig_against_one_at_a_time(nodes, [1, 3, 5, 7, 9, 11], None, cascades=True)
+
+    def _chain(self, count, far, scale, seed, top=None, compensate=None):
+        """``count`` joints down a chain parented by uuid, about ``far``
+        units apart, scaled ``scale(i)``, compensated where ``compensate(i)``
+        says, every other channel random; below a transform ``top`` scales
+        uniformly, when given"""
+        rng   = np.random.default_rng(seed)
+        nodes = []
+        if top is not None:
+            nodes.append(
+                TransformData(
+                    "top", node_type="transform", uuid=hierarchy.generate_uuid(), scale=(top,) * 3
+                )
+            )
+        for i in range(count):
+            nodes.append(
+                TransformData(
+                    f"j{i}",
+                    uuid=hierarchy.generate_uuid(),
+                    parent_node=nodes[-1].uuid if nodes else None,
+                    node_type="joint",
+                    translate=rng.normal(size=3) * far,
+                    rotate=rng.uniform(-180.0, 180.0, 3),
+                    scale=scale(i),
+                    rotate_axis=rng.uniform(-40.0, 40.0, 3),
+                    joint_orient=rng.uniform(-90.0, 90.0, 3),
+                    rotate_order=int(rng.integers(0, 6)),
+                    segment_scale_compensate=bool(compensate and compensate(i)),
+                )
+            )
+        return nodes
+
+    def test_set_parent_holds_a_dropped_shear_well_inside_the_bound(self):
+        # a node a dropped shear moves sits at offset v from the node that
+        # drops it, and moves by v @ inv(W3) @ (L3 - W3): up to three times
+        # the largest entry times the reach. Turned so one column of that
+        # matrix sums to 2.9 times it, x placed along that column's signs
+        # 1000 units out, at e = 7e-13 the product is 6.0e-10 and x moves
+        # 1.8e-9 one node at a time: held to 1e-9 the batch would miss it
+        e, far = 7e-13, 1000.0
+        uuids = [hierarchy.generate_uuid() for _ in range(3)]
+        nodes = [
+            TransformData(
+                "p",
+                uuid      = uuids[0],
+                node_type = "transform",
+                rotate    = (0.0, 0.0, 30.0),
+                scale     = (1.0, 1.0 + e, 1.0 - e),
+            ),
+            TransformData(
+                "a",
+                uuid        = uuids[1],
+                parent_node = uuids[0],
+                node_type   = "joint",
+                rotate      = (-95.684, 53.929, -75.522),
+                translate   = (0.5, 0.2, 0.1),
+            ),
+            TransformData("x", uuid=uuids[2], parent_node=uuids[1], node_type="joint"),
+        ]
+        rig   = HierarchyData([n.copy() for n in nodes])
+        W     = np.array(rig["a"].world_matrix)
+        alone = rig["a"].copy()
+        HierarchyData([alone])
+        alone.world_matrix = W
+
+        M      = np.linalg.solve(W[:3, :3], np.array(alone.world_matrix)[:3, :3] - W[:3, :3])
+        column = np.abs(M).sum(axis=0).argmax()
+        self.assertGreater(np.abs(M[:, column]).sum(), 2.9 * np.abs(M).max())
+        nodes[2].translate = np.linalg.solve(W[:3, :3].T, far * np.sign(M[:, column]))
+        self.assertGreater(np.abs(M).sum(axis=0).max() * far, 1.5e-9)
+        self.assertLess(np.abs(M).max() * far, 0.7e-9)
+        self._rig_against_one_at_a_time(nodes, [1, 2], None, cascades=True, animated=False)
+
+    def test_set_parent_weighs_a_shear_in_the_nodes_own_axes(self):
+        # under a transform scaled s a shear of e in a node's own axes is e
+        # times s in the world's, while it moves the nodes below as far as
+        # ever: weighed in the world's axes, a chain of near uniform scales
+        # under a top node scaled 1e-3 or 1e-5 batched, 1.5e-9 and 4.5e-8
+        # off one node at a time, and a near uniform node alone under one
+        # scaled 1e-3 2.4e-9, on poses too (they were exact one at a time)
+        for top, e, far in ((1e-3, 1e-10, 1000.0), (1e-5, 3e-8, 10000.0)):
+            with self.subTest(top=top, e=e, far=far):
+                nodes = self._chain(11, far, lambda i: (1.0, 1.0 + e, 1.0 - e), 4, top=top)
+                self._rig_against_one_at_a_time(nodes, range(1, 12), None, cascades=True)
+
+        # a near uniform node alone under the scaled top, the rest picked
+        nodes = self._chain(11, 100.0, lambda i: (1.0, 1.0 + 3e-9, 1.0 - 3e-9) if i == 0 else None, 2, top=1e-3)
+        self._rig_against_one_at_a_time(nodes, range(2, 12), None, cascades=True)
+
+    def test_set_parent_weighs_a_shear_by_the_nodes_riding_on_a_picked_one(self):
+        # j2 is picked after j1, so one node at a time it moves with the
+        # shear j1's channels drop, and so does everything below it, picked
+        # or not: j5, which nobody picked, 1000 or 10,000 units below j4,
+        # or 100,000 units out under a j4 scaled 1e5, and j6 as far out
+        # under a j5 that compensates a j4 scaled 1e-5. Weighed by the
+        # spread of the picked nodes alone (2.2e-9 to 1.2e-8 off), or by a
+        # bound of the branches that leaves out a scale or a compensation,
+        # the batch left them where they were
+        def out(distance):
+            def place(nodes):
+                nodes[5].translate = (distance, 0.3 * distance, -0.2 * distance)
+
+            return place
+
+        def scaled(nodes):
+            nodes[4].scale     = (1e5,) * 3
+            nodes[5].translate = (1.0, 0.3, -0.2)
+
+        def compensated(nodes):
+            nodes[4].scale                    = (1e-5,) * 3
+            nodes[5].segment_scale_compensate = True
+            nodes[6].translate                = (1e5, 3e4, -2e4)
+
+        cases = {
+            "1000 units out": (3e-12, out(1000.0)),
+            "10,000 units out": (1e-12, out(10000.0)),
+            "under a scale of 1e5": (1e-13, scaled),
+            "compensating a scale of 1e-5": (1e-13, compensated),
+        }
+        for name, (e, place) in cases.items():
+            with self.subTest(name, e=e):
+                nodes = self._chain(7, 1.0, lambda i: (1.0, 1.0 + e, 1.0 - e) if i == 0 else None, 1)
+
+                place(nodes)
+                self._rig_against_one_at_a_time(nodes, [1, 2], None, cascades=True)
+
+        # j5 10,000 units out again, listed before its parent: the branches
+        # are walked parents first, so it counts whatever the list order.
+        # Walked in list order, it was missed and the batch left it 7.4e-9
+        # off one node at a time
+        with self.subTest("10,000 units out, listed before its parent", e=1e-12):
+            nodes = self._chain(7, 1.0, lambda i: (1.0, 1.0 + 1e-12, 1.0 - 1e-12) if i == 0 else None, 1)
+            out(10000.0)(nodes)
+            self._rig_against_one_at_a_time([nodes[5]] + nodes[:5] + nodes[6:], [2, 3], None, cascades=True)
+
+        # 1000 joints nobody picked below j6, 20 units apart in a line: the
+        # last 20,000 units out, while no local holds more than 20. The
+        # branches' worlds put together from the locals alone batched it,
+        # 3.7e-9 off one node at a time, once the stretch of the worlds
+        # weighed in too: a node scaled 1e5 above shows in its own local
+        with self.subTest("20,000 units out down a chain nobody picked", e=3e-13):
+            nodes = self._chain(7, 1.0, lambda i: (1.0, 1.0 + 3e-13, 1.0 - 3e-13) if i == 0 else None, 1)
+            for i in range(1000):
+                nodes.append(
+                    TransformData(
+                        f"far{i}",
+                        uuid        = hierarchy.generate_uuid(),
+                        parent_node = nodes[-1].uuid,
+                        node_type   = "joint",
+                        translate   = (20.0, 0.0, 0.0),
+                    )
+                )
+            self._rig_against_one_at_a_time(nodes, [1, 2], None, cascades=True, animated=False)
+
+    def test_set_parent_counts_a_node_the_keep_test_moves(self):
+        # the matrix setter keeps a node's channels when its new local is
+        # within 1e-8 of the one it has: under a root 3e-9 off the origin
+        # the hips keep theirs as they go to the world, which moves them,
+        # and everything below them, by 3e-9. Held to 1e-10 of its distance
+        # from the origin, that move batched for hips 100 and 1000 units up
+        # and left the chain below them up to 9e-9 off one node at a time
+        for d, up in ((3e-9, 100.0), (9e-9, 1000.0)):
+            with self.subTest(d=d, up=up):
+                rng   = np.random.default_rng(3)
+                nodes = [TransformData("root", node_type="transform", translate=(d, 0.0, 0.0))]
+                for i, name in enumerate(("hips", "spine", "chest", "neck", "head")):
+                    nodes.append(
+                        TransformData(
+                            name,
+                            node_type    = "joint",
+                            parent_node  = nodes[-1].name,
+                            translate    = (0.0, up if i == 0 else 10.0, 0.0),
+                            rotate       = rng.uniform(-60.0, 60.0, 3),
+                            joint_orient = rng.uniform(-30.0, 30.0, 3),
+                            rotate_order = int(rng.integers(0, 6)),
+                        )
+                    )
+                self._rig_against_one_at_a_time(nodes, range(1, 6), None, cascades=True, animated=False)
+
+    def test_set_parent_counts_the_keep_test_of_a_node_a_picked_one_carries(self):
+        # x, which is picked too, rides on a, which drops the shear p's scale
+        # leaves (e): one node at a time x is solved from its world moved by
+        # about e, the batch from the world it has. Where what the matrix
+        # setter's keep test compares for x sits just below 1e-8, the batch
+        # keeps x's channels and one node at a time solves them, a step about
+        # 1e-8 tall. Each sits within 1e-12 of the step here; weighed by the
+        # change alone, the batch left x and c off one node at a time, on
+        # poses too (they were exact one at a time):
+        # - going to the world, a's world turned so x's channels make x's
+        #   world to within that: 1.0e-8 with c 1 unit out, 4.9e-8 5 out;
+        # - then under q, a root scaled 100 that x compensates, x at the
+        #   world's origin: x's channels with IS 1/100 against x's world
+        #   over q's differ by x's translation times 0.99: 1.0e-6;
+        # - under q, which a carries and the first pass moves, scaled 1.01,
+        #   x a root that compensates it, where the two differ by x's
+        #   translation less q's over 1.01: 1.0e-8;
+        # - going to the world, a turn alone reaching x: 1.0e-8, as it is
+        #   with the keep test's gain left off a turn
+        from cgmath.transforms import matrix_to_euler
+
+        def angles(R, order=0):
+            M         = np.eye(4)
+            M[:3, :3] = R
+            return np.degrees(np.array(matrix_to_euler(M[None], order))[0])
+
+        def rotation(degrees, order=0):
+            return np.array(euler_to_matrix(np.radians([degrees]), order))[0][:3, :3]
+
+        def turned(u, axis=(0.3, -0.5, 0.81)):
+            # a turn of u radians about ``axis``
+            axis = np.asarray(axis, dtype=float) / np.linalg.norm(axis)
+            K    = np.array([[0.0, -axis[2], axis[1]], [axis[2], 0.0, -axis[0]], [-axis[1], axis[0], 0.0]])
+            return np.eye(3) + np.sin(u) * K + (1.0 - np.cos(u)) * K @ K
+
+        def under(rig, name, world):
+            # the local that puts node ``name`` at ``world`` (3,)
+            W = np.array(rig[name].get_parent().world_matrix)
+            return np.linalg.solve(W[:3, :3].T, np.asarray(world, dtype=float) - W[3, :3])
+
+        def just_below(nodes, gap, step=1e-8):
+            # u in [0, 3e-8] where gap(nodes(u)) sits just below ``step``
+            lo, hi = 0.0, 3e-8
+            for _ in range(200):
+                mid = 0.5 * (lo + hi)
+                if gap(nodes(mid)) < step:
+                    lo = mid
+                else:
+                    hi = mid
+                if hi - lo < 1e-30:
+                    break
+            built = nodes(lo)
+            self.assertLess(gap(built), step)
+            self.assertGreater(gap(built), step - 1e-12)
+            return built
+
+        def gap_of(name):
+            # how far node ``name``'s channels make its world
+            def gap(nodes):
+                node = HierarchyData([n.copy() for n in nodes])[name]
+                return float(np.abs(np.array(node.matrix) - np.array(node.world_matrix)).max())
+
+            return gap
+
+        def sheared(e, uuid):
+            return TransformData(
+                "p", uuid=uuid, node_type="transform", rotate=(10.0, 20.0, 30.0), scale=(1.0, 1.0 + e, 1.0 - e)
+            )
+
+        def to_the_world(far):
+            # a at the origin, its world a turn of u about an axis: x's world
+            # is its local turned by u
+            P = rotation((10.0, 20.0, 30.0))
+
+            def nodes(u):
+                ids  = [hierarchy.generate_uuid() for _ in range(4)]
+                turn = turned(u)
+                return [
+                    sheared(1e-12, ids[0]),
+                    TransformData("a", uuid=ids[1], parent_node=ids[0], node_type="joint", rotate=angles(turn @ P.T)),
+                    TransformData(
+                        "x",
+                        uuid        = ids[2],
+                        parent_node = ids[1],
+                        node_type   = "joint",
+                        rotate      = (37.0, -52.0, 118.0),
+                        translate   = (0.3, -0.2, 0.1),
+                    ),
+                    TransformData("c", uuid=ids[3], parent_node=ids[2], node_type="joint", translate=(far, 0.0, 0.0)),
+                ]
+
+            return nodes, gap_of("x")
+
+        def under_q(scale, e, carried):
+            # x at u along x from where its channels under q, with IS 1/scale,
+            # make its world over q's; q a root, or under a and turned square
+            def nodes(u):
+                ids = [hierarchy.generate_uuid() for _ in range(5)]
+                built = [
+                    sheared(e, ids[0]),
+                    TransformData(
+                        "a",
+                        uuid        = ids[1],
+                        parent_node = ids[0],
+                        node_type   = "joint",
+                        rotate      = (-95.7, 53.9, -75.5),
+                        translate   = (0.5, 0.2, 0.1),
+                    ),
+                    TransformData(
+                        "q",
+                        uuid        = ids[4],
+                        parent_node = ids[1] if carried else None,
+                        node_type   = "transform",
+                        scale       = (scale,) * 3,
+                    ),
+                    TransformData(
+                        "x",
+                        uuid=ids[2],
+                        parent_node=None if carried else ids[1],
+                        node_type="joint",
+                        rotate=(37.0, -52.0, 118.0),
+                        segment_scale_compensate=True,
+                    ),
+                    TransformData("c", uuid=ids[3], parent_node=ids[2], node_type="joint", translate=(1.0, 0.0, 0.0)),
+                ]
+                rig = HierarchyData(built)
+                if carried:
+                    A = np.array(rig["a"].world_matrix)
+                    U, _, Vt = np.linalg.svd(A[:3, :3])
+                    rig["q"].rotate    = angles((U @ Vt).T)
+                    rig["q"].translate = np.linalg.solve(A[:3, :3].T, np.array([0.1, 0.0, 0.0]))
+                q                  = np.array(rig["q"].world_matrix)[3, :3]
+                spot               = (np.array([u, 0.0, 0.0]) - q / scale) / (1.0 - 1.0 / scale)
+                rig["x"].translate = under(rig, "x", spot) if rig["x"].get_parent() else spot
+                return [n.copy() for n in rig]
+
+            def gap(nodes):
+                rig = HierarchyData([n.copy() for n in nodes])
+                rig["q" if carried else "x"].set_parent(None)
+                x, q = rig["x"], rig["q"]
+                world         = np.array(x.world_matrix)
+                x.parent_node = q.uuid
+                return float(np.abs(np.array(x.matrix) - world @ np.linalg.inv(np.array(q.world_matrix))).max())
+
+            return nodes, gap
+
+        def a_turn_alone():
+            # a kept at the origin under r, a root turned by about 7e-12
+            # radians, so one node at a time a's world goes back by a turn and
+            # nothing else; x below n, which nobody picks, turned by u
+            def nodes(u):
+                ids  = [hierarchy.generate_uuid() for _ in range(5)]
+                turn = turned(u)
+                return [
+                    TransformData("r", uuid=ids[0], node_type="transform", rotate=(3e-10, -2.25e-10, 1.5e-10)),
+                    TransformData("a", uuid=ids[1], parent_node=ids[0], node_type="joint"),
+                    TransformData("n", uuid=ids[2], parent_node=ids[1], node_type="transform", rotate=angles(turn)),
+                    TransformData(
+                        "x",
+                        uuid        = ids[3],
+                        parent_node = ids[2],
+                        node_type   = "joint",
+                        rotate      = (37.0, -52.0, 118.0),
+                        translate   = (0.3, -0.2, 0.1),
+                    ),
+                    TransformData("c", uuid=ids[4], parent_node=ids[3], node_type="joint", translate=(1.0, 0.0, 0.0)),
+                ]
+
+            return nodes, gap_of("x")
+
+        cases = {
+            "to the world, c 1 unit out":  (to_the_world(1.0), [1, 2], None),
+            "to the world, c 5 units out": (to_the_world(5.0), [1, 2], None),
+            "under q, x compensating it":  (under_q(100.0, 1e-12, False), [1, 3], "q"),
+            "under q, which a carries":    (under_q(1.01, 1e-13, True), [1, 2, 3], "q"),
+            "a turn alone, to the world":  (a_turn_alone(), [1, 3], None),
+        }
+        for name, ((nodes, gap), pick, parent) in cases.items():
+            with self.subTest(name):
+                built = just_below(nodes, gap)
+                self._rig_against_one_at_a_time(built, pick, parent, cascades=True, animated=False)
+
+        # y, picked, rides on x, picked too and 0.13 degrees off gimbal, and
+        # x on a, which goes back by s's stretch of 1e-13 across the axes. One
+        # node at a time x's split gains about 440 on that, which turns x's
+        # world, and so y's, by about 6e-11; y's keep test sits 2.2e-11 above
+        # its step. x's world is square (n2's stretch, put along the axes by
+        # n1 and n3, is one x's scale undoes), so what reaches y is a's change
+        # and x's own, tiny. Weighed by those alone and not by what x makes of
+        # a's, the batch left y and c 1.0e-8 off one node at a time, on poses
+        # too (they were exact one at a time)
+        def through_a_picked_node(u, e=1e-13, off=0.13, order=4):
+            ids = [hierarchy.generate_uuid() for _ in range(11)]
+            R0  = rotation((-47.37, 54.23, 14.79))
+            S1  = R0.T @ np.diag([1.0, 1.0 + e, 1.0 - e]) @ R0 - np.eye(3)
+            D   = np.diag([-0.8, -0.13, -0.04]) * e
+            w, V = np.linalg.eigh((D - S1) / e)
+            if np.linalg.det(V) < 0:
+                V[:, 2] *= -1.0
+            middle = np.radians([-36.98, 5.69, -23.59])
+            middle[MAYA_EA[order, 1]] = np.radians(90.0 - off)
+            G  = np.array(euler_to_matrix(middle[None], order))[0][:3, :3]
+            T  = turned(u, (-0.67, -1.06, -0.39))
+            Rm = rotation((-102.08, 70.37, -115.9))
+
+            def node(k, name, parent, node_type="transform", **channels):
+                up = None if parent is None else ids[parent]
+                return TransformData(name, uuid=ids[k], parent_node=up, node_type=node_type, **channels)
+
+            return [
+                node(0, "r", None, rotate=(-47.37, 54.23, 14.79)),
+                node(1, "s", 0, scale=(1.0, 1.0 + e, 1.0 - e)),
+                node(2, "t", 1, rotate=angles(R0.T)),
+                node(3, "a", 2, "joint"),
+                node(4, "n1", 3, rotate=angles(V.T)),
+                node(5, "n2", 4, scale=tuple(1.0 + w * e)),
+                node(6, "n3", 5, rotate=angles(V)),
+                node(7, "m", 6, rotate=(-102.08, 70.37, -115.9)),
+                node(
+                    8,
+                    "x",
+                    7,
+                    "joint",
+                    rotate       = angles(T @ Rm.T @ T.T @ G, order),
+                    joint_orient = angles(G.T @ T),
+                    rotate_order = order,
+                    scale        = tuple(1.0 / (1.0 + np.diag(D))),
+                ),
+                node(9, "y", 8, "joint", rotate=(-77.69, 53.48, 70.64), translate=(-0.06, 0.01, 0.46)),
+                node(10, "c", 9, "joint", translate=(1.0, 0.0, 0.0)),
+            ]
+
+        with self.subTest("through a picked node near gimbal"):
+            built = just_below(through_a_picked_node, gap_of("y"), 1e-8 + 2.2e-11)
+            self._rig_against_one_at_a_time(built, [3, 8, 9], None, cascades=True, animated=False)
+
+    def test_set_parent_weighs_a_new_scale_by_how_far_the_nodes_below_sit(self):
+        # a node taken to the world takes on its parents' scale, and its
+        # compensated child, dividing by it, resizes everything below the
+        # child. Uniform scales within 1e-5 of 1 and 1 + 1e-9 a thousand
+        # units out have to go one at a time; a parent scaled 1 + 5e-13
+        # over a node 10,000 units below batched, held to 1e-12 of the
+        # scale whatever the reach, 4.1e-9 off one node at a time
+        cases = {
+            "within 1e-5":   (8, 1.0, 1e-5),
+            "1e-9, far out": (8, 1000.0, 1e-9),
+        }
+        for name, (count, far, d) in cases.items():
+            with self.subTest(name):
+                rng   = np.random.default_rng(3)
+                sizes = 1.0 + d * rng.uniform(-1.0, 1.0, count)
+                nodes = self._chain(count, far, lambda i: (sizes[i],) * 3, 3, compensate=lambda i: i % 2 == 0)
+                self._rig_against_one_at_a_time(nodes, range(1, count), None, cascades=True)
+
+        with self.subTest("5e-13 above, 10,000 units below"):
+            nodes = self._chain(5, 1.0, lambda i: (1.3,) * 3 if i == 1 else None, 4, compensate=lambda i: i == 2)
+
+            nodes[0].scale     = (1.0 + 5e-13,) * 3
+            nodes[4].translate = (10000.0, 4000.0, -3000.0)
+            self._rig_against_one_at_a_time(nodes, [1, 4], None, cascades=True)
+
+    def test_set_parent_weighs_a_shear_by_the_world_scale_below(self):
+        # a dropped shear or a new scale turns the axes of every node below
+        # by the change times their own world scale, however close they sit:
+        # weighed by the spread of the positions alone, rigs scaled 1000 or
+        # 5000 a few units across batched, 2.6e-9 to 5.2e-9 off one node at a
+        # time, on poses too (they were exact one at a time)
+        def joints(nodes, names, apart, seed, **changes):
+            rng = np.random.default_rng(seed)
+            for name in names:
+                channels = dict(
+                    translate    = rng.normal(size=3) * apart,
+                    rotate       = rng.uniform(-180.0, 180.0, 3),
+                    rotate_axis  = rng.uniform(-40.0, 40.0, 3),
+                    joint_orient = rng.uniform(-90.0, 90.0, 3),
+                    rotate_order = int(rng.integers(0, 6)),
+                )
+                channels.update(changes.get(name, {}))
+                nodes.append(
+                    TransformData(
+                        name,
+                        uuid        = hierarchy.generate_uuid(),
+                        parent_node = nodes[-1].uuid,
+                        node_type   = "joint",
+                        **channels,
+                    )
+                )
+            return nodes
+
+        def sheared(s, e):
+            return TransformData(
+                "p",
+                uuid      = hierarchy.generate_uuid(),
+                node_type = "transform",
+                rotate    = (10.0, 20.0, 30.0),
+                scale     = (s, s * (1.0 + e), s * (1.0 - e)),
+            )
+
+        # a top scaled s, sheared by e: a > b > c a few world units apart
+        for s, e, apart in ((1000.0, 3e-12, 0.001), (5000.0, 1e-12, 0.0002)):
+            with self.subTest("sheared top", s=s, e=e):
+                nodes = joints([sheared(s, e)], "abc", apart, 5)
+                self._rig_against_one_at_a_time(nodes, [1, 2], None, cascades=True)
+
+        # a top scaled 1 + 3e-12 over a scaled to 1000: a to the world takes
+        # it on, and the compensated c resizes b, scaled 1000 too, before b's
+        # turn
+        with self.subTest("a new scale over a compensated child"):
+            nodes = joints(
+                [sheared(1.0 + 3e-12, 0.0)],
+                "acbd",
+                0.001,
+                6,
+                a = {"scale": (1000.0,) * 3},
+                c = {"segment_scale_compensate": True},
+                b = {"scale": (1000.0,) * 3, "translate": (0.6, -0.3, 0.2)},
+            )
+            self._rig_against_one_at_a_time(nodes, [1, 3], None, cascades=True)
+
+        # a top sheared by 3e-12 over a > b > c, c scaled 1000 and picked by
+        # nobody: only the bound of the branches and their worlds see it
+        with self.subTest("a node nobody picked scaled 1000"):
+            nodes = joints([sheared(1.0, 3e-12)], "abc", 0.001, 9, c={"scale": (1000.0,) * 3})
+            self._rig_against_one_at_a_time(nodes, [1, 2], None, cascades=True)
+
+        # a top scaled 1000 sheared by 3e-12 and d where a sits (an end or a
+        # twist joint), or a top sheared by 3e-12 and d at n, scaled 1000
+        # next to a
+        with self.subTest("a node where the shear's node sits"):
+            nodes = joints([sheared(1000.0, 3e-12)], "ad", 0.0, 7)
+            self._rig_against_one_at_a_time(nodes, [1, 2], None, cascades=True)
+        with self.subTest("a node at a scale of 1000 next to it"):
+            nodes = joints(
+                [sheared(1.0, 3e-12)],
+                "and",
+                0.5,
+                8,
+                n = {"scale": (1000.0,) * 3},
+                d = {"translate": (0.0, 0.0, 0.0)},
+            )
+            self._rig_against_one_at_a_time(nodes, [1, 3], None, cascades=True)
+
+    def test_set_parent_weighs_a_shear_by_how_far_the_split_moves_what_it_reaches(self):
+        # x, which is picked too, rides on a: one node at a time it is solved
+        # from its world sheared by what a's channels drop, and the euler
+        # split moves it by that over the cosine of its middle angle, or by
+        # more where the matrix is far from square. Put under a parent, what
+        # the first pass leaves reaches x's new local through the parent's
+        # world. Weighed by the change alone, the batch left x and c off one
+        # node at a time, on poses too (they were exact one at a time):
+        # - 0.001 degrees off gimbal, below a top sheared by 1e-12: 5.1e-8
+        #   in xyz, 6.4e-8 in zyx;
+        # - under a parent q scaled (100, 1, 0.01): 3.0e-8 and 2.4e-8, and
+        #   9.4e-5 in xyz with x square to q, whose new local the split then
+        #   holds whole, where a turn reaches it as a shear 1e4 times its size;
+        # - under y, which a carries, 0.003 degrees off gimbal there: 9.7e-9
+        #   and 7.8e-9;
+        # - 1e-5 degrees off gimbal under the top, sheared by 1e-14, c 100
+        #   units out: the round-off of the split alone, 7.6e-8 in zyx;
+        # - at the cosine where matrix_to_euler snaps, the batch on one side
+        #   and one node at a time on the other: 1.5e-6 and 4.6e-7;
+        # - 0.001 degrees off gimbal below c, which compensates a, under a
+        #   top scaled (1, 1 + 1e-12, 1 + 2e-12) that turns nothing: a's new
+        #   scale alone reaches x, 9.8e-9 and 2.1e-8
+        from cgmath.transforms import matrix_to_euler
+
+        def facing(node, world, order, middle, seed):
+            # turns the joint so the rotation its matrix setter splits, for
+            # its world or for its local under the 3x3 world, has the cosine
+            # ``middle`` in its middle angle, the other two random; none at
+            # all when ``middle`` is "square"
+            angles = np.radians(np.random.default_rng(seed).uniform(-170.0, 170.0, 3))
+            if middle == "square":
+                angles = np.zeros(3)
+            elif middle is not None:
+                angles[MAYA_EA[order, 1]] = np.arccos(middle)
+            orient = np.radians(np.asarray(node.joint_orient, dtype=float))
+            orient = np.array(euler_to_matrix(orient[None], 0))[0][:3, :3]
+            want   = np.array(euler_to_matrix(angles[None], order))[0][:3, :3] @ orient @ world
+            above  = np.array(node.get_parent().world_matrix)[:3, :3] if node.get_parent() else np.eye(3)
+            U, _, Vt = np.linalg.svd(want @ np.linalg.inv(above) @ orient.T)
+            turn              = np.eye(4)
+            turn[:3, :3]      = U @ Vt
+            node.rotate_order = order
+            node.rotate       = np.degrees(np.array(matrix_to_euler(turn[None], order))[0])
+
+        def rig(parent, e, order, middle, seed):
+            # p, turned and scaled (1, 1 + e, 1 - e), over a > x > c; x a
+            # root under y below a, or q apart, by the parent
+            uuids = [hierarchy.generate_uuid() for _ in range(5)]
+            nodes = [
+                TransformData(
+                    "p",
+                    uuid      = uuids[0],
+                    node_type = "transform",
+                    rotate    = (10.0, 20.0, 30.0),
+                    scale     = (1.0, 1.0 + e, 1.0 - e),
+                ),
+                TransformData(
+                    "a",
+                    uuid        = uuids[1],
+                    parent_node = uuids[0],
+                    node_type   = "joint",
+                    rotate      = (-95.7, 53.9, -75.5),
+                    translate   = (0.5, 0.2, 0.1),
+                ),
+            ]
+            x = TransformData("x", uuid=uuids[2], parent_node=uuids[1], node_type="joint", translate=(0.3, -0.4, 0.2))
+            if parent == "y":
+                nodes.append(
+                    TransformData(
+                        "y",
+                        uuid        = uuids[4],
+                        parent_node = uuids[1],
+                        node_type   = "joint",
+                        rotate      = (20.0, -35.0, 50.0),
+                        translate   = (0.2, 0.6, -0.3),
+                    )
+                )
+                x = TransformData(
+                    "x",
+                    uuid         = uuids[2],
+                    node_type    = "joint",
+                    translate    = (1.5, -0.4, 0.2),
+                    joint_orient = (30.0, -20.0, 45.0),
+                )
+            far = 100.0 if parent == "p" else 1.0
+            nodes += [x, TransformData("c", uuid=uuids[3], parent_node=uuids[2], node_type="joint", translate=(far, 0.0, 0.0))]
+            if parent == "q":
+                nodes.append(
+                    TransformData(
+                        "q",
+                        uuid      = uuids[4],
+                        node_type = "transform",
+                        rotate    = (40.0, -25.0, 70.0),
+                        scale     = (100.0, 1.0, 0.01),
+                        translate = (2.0, 1.0, -1.0),
+                    )
+                )
+            rig   = HierarchyData(nodes)
+            world = np.eye(3)
+            if parent in ("p", "y") or middle == "square":
+                world = np.array(rig[parent].world_matrix)[:3, :3]
+            if middle == "square":
+                world = world / np.linalg.norm(world, axis=1)[:, None]
+            facing(rig["x"], world, order, middle, seed)
+            return [n.copy() for n in rig]
+
+        snap = float(np.finfo(np.float32).eps)
+        cases = {
+            "0.001 degrees off gimbal": (None, 1e-12, np.sin(np.radians(1e-3)), ((0, 0), (5, 0))),
+            "under a parent scaled unevenly": ("q", 1e-12, None, ((0, 0), (5, 0))),
+            "square to a parent scaled unevenly": ("q", 1e-12, "square", ((0, 0),)),
+            "under a picked parent the first pass moves": ("y", 5e-13, np.sin(np.radians(3e-3)), ((0, 2), (5, 2))),
+            "the split's round-off": ("p", 1e-14, np.sin(np.radians(1e-5)), ((5, 0),)),
+            "where the split snaps": (None, 5e-13, snap * (1.0 - 2.5e-9), ((0, 0), (5, 2))),
+        }
+        for name, (parent, e, middle, runs) in cases.items():
+            for order, seed in runs:
+                with self.subTest(name, order=order):
+                    nodes = rig(parent, e, order, middle, seed)
+                    pick  = [1, 2, 3] if parent == "y" else [1, 2]
+                    self._rig_against_one_at_a_time(nodes, pick, parent, cascades=True, animated=False)
+
+        # the gain read off every frame: x clear of gimbal on the first of
+        # three, 0.001 degrees off it on the others
+        with self.subTest("near gimbal on a later frame"):
+            module = sys.modules[ClipData.__module__]
+            real   = module._cascades
+            seen   = []
+
+            def spy(frames, *args):
+                seen.append(real(frames, *args))
+                return seen[-1]
+
+            nodes = rig(None, 1e-12, 0, np.sin(np.radians(1e-3)), 0)
+            clear = rig(None, 1e-12, 0, None, 0)
+            clip  = ClipData(HierarchyData([n.copy() for n in nodes]), frames=3)
+            x     = clip.frames["x"]
+            turns = np.array(x.rotate)
+
+            turns[0, 0] = clear[2].rotate
+            x.rotate    = turns
+            poses       = _per_frame(clip, lambda p: _one_at_a_time([p.list[1], p.list[2]], None))
+            with mock.patch.object(module, "_cascades", spy):
+                TransformList([clip.list[1], clip.list[2]]).set_parent(None)
+            self._assert_matches(clip, poses)
+            self.assertEqual(seen, [True])
+
+        # x and x1 hang off n, which a carries and nobody picks: x1's climb
+        # marks n first, and x's stops there and reads what n has. Read as
+        # nothing, x 0.001 degrees off gimbal was not weighed, 5.1e-8 off
+        # in xyz and 6.4e-8 in zyx
+        for order in (0, 5):
+            with self.subTest("a node off gimbal beside another below one nobody picked", order=order):
+                nodes = rig(None, 1e-12, order, None, 0)
+                nodes.insert(
+                    2,
+                    TransformData(
+                        "n",
+                        uuid        = hierarchy.generate_uuid(),
+                        parent_node = nodes[1].uuid,
+                        node_type   = "joint",
+                        rotate      = (20.0, -35.0, 50.0),
+                        translate   = (0.2, 0.6, -0.3),
+                    ),
+                )
+                nodes.insert(
+                    3,
+                    TransformData(
+                        "x1",
+                        uuid        = hierarchy.generate_uuid(),
+                        parent_node = nodes[2].uuid,
+                        node_type   = "joint",
+                        rotate      = (5.0, 15.0, -25.0),
+                        translate   = (0.4, 0.1, 0.0),
+                    ),
+                )
+                nodes[4].parent_node = nodes[2].uuid
+                built                = HierarchyData([n.copy() for n in nodes])
+                facing(built["x"], np.eye(3), order, np.sin(np.radians(1e-3)), 0)
+                self._rig_against_one_at_a_time([n.copy() for n in built], [1, 3, 4], None, cascades=True, animated=False)
+
+        # x turned by a rotate_axis and a joint_orient, its rotate set so
+        # what its matrix setter splits going to the world is 1e-4 degrees
+        # off gimbal: weighed on rotate_axis @ that instead, it batched, up
+        # to 3.0e-7 off
+        def polar(M):
+            U, _, Vt = np.linalg.svd(M)
+            return U @ Vt
+
+        for order, seed in ((0, 1), (5, 1)):
+            with self.subTest("off gimbal through a rotate_axis and a joint_orient", order=order):
+                built = HierarchyData(rig(None, 1e-12, order, None, seed))
+                x     = built["x"]
+
+                x.rotate_axis  = (25.0, -40.0, 60.0)
+                x.joint_orient = (30.0, -20.0, 45.0)
+                angles = np.radians(np.random.default_rng(seed).uniform(-170.0, 170.0, 3))
+                angles[MAYA_EA[order, 1]] = np.radians(90.0 - 1e-4)
+                G  = np.array(euler_to_matrix(angles[None], order))[0][:3, :3]
+                JO = np.array(euler_to_matrix(np.radians([x.joint_orient]), 0))[0][:3, :3]
+                A  = polar(np.array(built["a"].world_matrix)[:3, :3])
+                R  = np.eye(4)
+
+                R[:3, :3] = G @ JO @ A.T @ JO.T
+                x.rotate  = np.degrees(np.array(matrix_to_euler(R[None], order))[0])
+                self._rig_against_one_at_a_time([n.copy() for n in built], [1, 2], None, cascades=True, animated=False)
+
+        # a turn passes the split as it is, however near gimbal: a, kept at
+        # the origin under a root turned by about 5e-14 radians, turns x,
+        # 0.57 degrees off gimbal, by that much, and c 100 units out by 100
+        # times it. Weighed by the split's gain like the rest of a change,
+        # it went one node at a time where the batch is within 1e-11
+        for order in (0, 5):
+            with self.subTest("a turn reaching a node near gimbal", order=order):
+                nodes              = rig(None, 0.0, order, None, 0)
+                nodes[0].rotate    = (2e-12, -1.5e-12, 1e-12)
+                nodes[0].scale     = (1.0, 1.0, 1.0)
+                nodes[1].translate = (0.0, 0.0, 0.0)
+                nodes[3].translate = (100.0, 0.0, 0.0)
+                built              = HierarchyData([n.copy() for n in nodes])
+                facing(built["x"], np.eye(3), order, np.sin(np.radians(0.57)), 0)
+                self._rig_against_one_at_a_time([n.copy() for n in built], [1, 2], None, cascades=False, animated=False)
+
+        # a turn of about 7e-12 radians reaching x 1e-12 short of where the
+        # split snaps carries it across: the snap weighs a turn as it weighs
+        # the rest. Weighed without the snap, by 1 and what the turn takes
+        # along of a split far from square alone, the batch was 2.3e-7 off
+        # one node at a time
+        with self.subTest("a turn reaching a node at the snap"):
+            nodes              = rig(None, 0.0, 0, None, 0)
+            nodes[0].rotate    = (3e-10, -2.25e-10, 1.5e-10)
+            nodes[0].scale     = (1.0, 1.0, 1.0)
+            nodes[1].translate = (0.0, 0.0, 0.0)
+            built              = HierarchyData([n.copy() for n in nodes])
+            facing(built["x"], np.eye(3), 0, snap - 1e-12, 0)
+            self._rig_against_one_at_a_time([n.copy() for n in built], [1, 2], None, cascades=True, animated=False)
+
+        # a turn of about 7e-14 radians reaching x under n, scaled (1, 100,
+        # 0.01): what x's split reads off is far from square, and the turn
+        # takes that along, a change that is not one, which the split gains
+        # on. Passed as it is, the batch was 2.3e-9 and 1.8e-9 off one node
+        # at a time
+        for rotate in ((-83.2745, 46.2769, -141.877), (-100.6545, 52.8268, -144.2076)):
+            with self.subTest("a turn reaching a split far from square", rotate=rotate):
+                t     = 3e-12
+                uuids = [hierarchy.generate_uuid() for _ in range(5)]
+                nodes = [
+                    TransformData("r", uuid=uuids[0], node_type="transform", rotate=(t, -0.75 * t, 0.5 * t)),
+                    TransformData(
+                        "a", uuid=uuids[1], parent_node=uuids[0], node_type="joint", rotate=(-95.7, 53.9, -75.5)
+                    ),
+                    TransformData(
+                        "n",
+                        uuid        = uuids[2],
+                        parent_node = uuids[1],
+                        node_type   = "transform",
+                        rotate      = (20.0, -35.0, 50.0),
+                        scale       = (1.0, 100.0, 0.01),
+                        translate   = (0.2, 0.6, -0.3),
+                    ),
+                    TransformData(
+                        "x",
+                        uuid         = uuids[3],
+                        parent_node  = uuids[2],
+                        node_type    = "joint",
+                        rotate       = rotate,
+                        translate    = (0.3, -0.4, 0.2),
+                        rotate_order = 5,
+                    ),
+                    TransformData("c", uuid=uuids[4], parent_node=uuids[3], node_type="joint", translate=(1.0, 0.0, 0.0)),
+                ]
+                self._rig_against_one_at_a_time(nodes, [1, 3], None, cascades=True, animated=False)
+
+        # a stretch with nothing on the diagonal: a, kept at the origin under
+        # a scale (1, 1 + 1e-12, 1 - 1e-12) turned 45 degrees about x, goes
+        # back by a change that is all off the diagonal and no turn, which
+        # x's split, 0.001 degrees off gimbal, gains on. Its rest read off
+        # the diagonal alone, the batch was 9.7e-8 off in xyz
+        for order in (0, 5):
+            with self.subTest("a stretch across the axes reaching a node near gimbal", order=order):
+                uuids = [hierarchy.generate_uuid() for _ in range(6)]
+                built = HierarchyData(
+                    [
+                        TransformData("r", uuid=uuids[0], node_type="transform", rotate=(45.0, 0.0, 0.0)),
+                        TransformData(
+                            "s",
+                            uuid        = uuids[1],
+                            parent_node = uuids[0],
+                            node_type   = "transform",
+                            scale       = (1.0, 1.0 + 1e-12, 1.0 - 1e-12),
+                        ),
+                        TransformData(
+                            "u", uuid=uuids[2], parent_node=uuids[1], node_type="transform", rotate=(-45.0, 0.0, 0.0)
+                        ),
+                        TransformData(
+                            "a", uuid=uuids[3], parent_node=uuids[2], node_type="joint", rotate=(-95.7, 53.9, -75.5)
+                        ),
+                        TransformData(
+                            "x", uuid=uuids[4], parent_node=uuids[3], node_type="joint", translate=(0.3, -0.4, 0.2)
+                        ),
+                        TransformData("c", uuid=uuids[5], parent_node=uuids[4], node_type="joint", translate=(1.0, 0.0, 0.0)),
+                    ]
+                )
+                facing(built["x"], np.eye(3), order, np.sin(np.radians(1e-3)), 0)
+                self._rig_against_one_at_a_time([n.copy() for n in built], [3, 4], None, cascades=True, animated=False)
+
+        # a, kept at the origin, goes back by exactly what is above it, a
+        # turn or a stretch, which reaches x, picked too
+        def kept_under(above, x, rest=()):
+            uuids = [hierarchy.generate_uuid() for _ in range(len(above) + 3)]
+            nodes = [
+                TransformData(f"t{k}", uuid=uuids[k], parent_node=uuids[k - 1] if k else None, node_type="transform", **channels)
+                for k, channels in enumerate(above)
+            ]
+            nodes += [
+                TransformData(
+                    "a", uuid=uuids[-3], parent_node=uuids[-4], node_type="joint", rotate=(-95.7, 53.9, -75.5)
+                ),
+                TransformData(
+                    "x", uuid=uuids[-2], parent_node=uuids[-3], node_type="joint", translate=(0.3, -0.4, 0.2), **x
+                ),
+                TransformData("c", uuid=uuids[-1], parent_node=uuids[-2], node_type="joint", translate=(1.0, 0.0, 0.0)),
+            ]
+            return HierarchyData(nodes + [node.copy() for node in rest])
+
+        # a stretch of 1e-12 along the axes is one across x's own, which
+        # carry a joint_orient, 0.001 degrees off gimbal: its rest read
+        # without the diagonal of the change, the batch was 8.1e-8 off in xyz
+        # (4.8e-8 in zyx)
+        for order in (0, 5):
+            with self.subTest("a stretch along the axes reaching a node near gimbal", order=order):
+                built = kept_under([{"scale": (1.0, 1.0 + 1e-12, 1.0 - 1e-12)}], {"joint_orient": (30.0, -20.0, 45.0)})
+                facing(built["x"], np.eye(3), order, np.sin(np.radians(1e-3)), 4)
+                self._rig_against_one_at_a_time([n.copy() for n in built], [1, 2], None, cascades=True, animated=False)
+
+        # then put under q, scaled (70, 1, 1 / 70): a turn of about 4.7e-12
+        # radians, or a stretch of 4e-12 across the axes, weighed by the
+        # first pass alone, batched 2.4e-9 and 1.4e-9 off
+        q = TransformData(
+            "q", node_type="transform", rotate=(40.0, -25.0, 70.0), scale=(70.0, 1.0, 1.0 / 70.0), translate=(2.0, 1.0, -1.0)
+        )
+        cases = {
+            "a turn": [{"rotate": (2e-10, -1.5e-10, 1e-10)}],
+            "a stretch": [
+                {"rotate": (45.0, 0.0, 0.0)},
+                {"scale": (1.0, 1.0 + 4e-12, 1.0 - 4e-12)},
+                {"rotate": (-45.0, 0.0, 0.0)},
+            ],
+        }
+        for name, above in cases.items():
+            with self.subTest(f"{name} reaching a node put under a parent scaled unevenly"):
+                built = kept_under(above, {"rotate": (37.0, -52.0, 118.0)}, [q])
+                pick  = [len(above), len(above) + 1]
+                self._rig_against_one_at_a_time([n.copy() for n in built], pick, "q", cascades=True, animated=False)
+
+        # a new scale over a compensated child, nothing sheared
+        for order in (0, 5):
+            with self.subTest("a new scale reaching it through a compensated child", order=order):
+                uuids = [hierarchy.generate_uuid() for _ in range(5)]
+                rig = HierarchyData(
+                    [
+                        TransformData(
+                            "top",
+                            uuid      = uuids[0],
+                            node_type = "transform",
+                            translate = (5.0, 1.0, 2.0),
+                            rotate    = (10.0, 20.0, 30.0),
+                            scale     = (1.0, 1.0 + 1e-12, 1.0 + 2e-12),
+                        ),
+                        TransformData("a", uuid=uuids[1], parent_node=uuids[0], node_type="joint", translate=(0.5, 0.2, 0.1)),
+                        TransformData(
+                            "c",
+                            uuid=uuids[2],
+                            parent_node=uuids[1],
+                            node_type="joint",
+                            translate=(0.3, 0.1, 0.0),
+                            rotate=(30.0, -20.0, 50.0),
+                            segment_scale_compensate=True,
+                        ),
+                        TransformData("x", uuid=uuids[3], parent_node=uuids[2], node_type="joint", translate=(0.3, -0.4, 0.2)),
+                        TransformData("d", uuid=uuids[4], parent_node=uuids[3], node_type="joint", translate=(1.0, 0.0, 0.0)),
+                    ]
+                )
+                facing(rig["x"], np.eye(3), order, np.sin(np.radians(1e-3)), 0)
+                self._rig_against_one_at_a_time([n.copy() for n in rig], [1, 3], None, cascades=True, animated=False)
+
+    def test_set_parent_onto_a_name_a_picked_branch_carries(self):
+        # "x" names a child of the picked s and a root: once s's branch moves
+        # behind the root x, the second pass finds the root. Resolved before
+        # the move, the cycle check named the x below s and refused it
+        nodes = [
+            TransformData("s", node_type="joint", translate=(1, 0, 0)),
+            TransformData("x", node_type="joint", parent_node="s", translate=(0, 1, 0)),
+            TransformData("x", node_type="joint", translate=(0, 0, 2)),
+            TransformData("b", node_type="joint", translate=(3, 0, 0)),
+        ]
+        self._rig_against_one_at_a_time(nodes, [0, 3], "x")
+
+    def test_set_parent_keeps_a_curve_it_does_not_rebuild(self):
+        # a root that goes to the world, and a node already under an identity
+        # parent, keep their world on every frame: their authored curves,
+        # stepping by whole turns, come back bit for bit. Filtering every
+        # picked node's curve rewrote them to [0, -10, 0, -10, -20]
+        steps = np.array([0.0, 350.0, 0.0, 350.0, 700.0])
+        edits = {
+            "the whole clip":   lambda h: h.set_parent(None),
+            "the root alone":   lambda h: h["a"].set_parent(None),
+            "a selection":      lambda h: h[[0, 1]].set_parent(None),
+            "already under it": lambda h: h["b"].set_parent("a"),
+        }
+        for name, edit in edits.items():
+            with self.subTest(edit=name):
+                rig = HierarchyData(
+                    [
+                        TransformData("a", node_type="joint"),
+                        TransformData("b", node_type="joint", parent_node="a", translate=(0, 1, 0)),
+                    ]
+                )
+                clip               = ClipData(rig, frames=5)
+                rotate             = np.zeros((5, 2, 3))
+                rotate[:, 0, 0]    = steps
+                rotate[:, 1, 2]    = steps
+                clip.frames.rotate = rotate
+                poses              = _per_frame(clip, edit)
+                edit(clip)
+                # one pose at a time, the root keeps its keys as they are
+                np.testing.assert_array_equal(_stacked(poses, "rotate")[:, 0], rotate[:, 0])
+                if name == "the whole clip" or name == "a selection":
+                    # b went to the world under a turning a: rebuilt, filtered
+                    np.testing.assert_array_equal(clip.frames.rotate[:, 0], rotate[:, 0])
+                else:
+                    np.testing.assert_array_equal(clip.frames.rotate, rotate)
+                world = np.array([[node.world_matrix for node in pose] for pose in poses])
+                self.assertLess(np.abs(clip.frames.world_matrix - world).max(), 1e-9)
+
+    def test_node_type(self):
+        self._check(
+            lambda c: setattr(c, "node_type", "transform"),
+            lambda p: [n.set_node_type("transform") for n in p],
+        )
+        self._check(
+            lambda c: c["j2"].set_node_type("locator"),
+            lambda p: p["j2"].set_node_type("locator"),
+        )
+
+    def test_set_rotate_order(self):
+        for target in range(6):
+            with self.subTest(target=target):
+                self._check(
+                    lambda c: c.set_rotate_order(target),
+                    lambda p: [n.set_rotate_order(target) for n in p],
+                )
+
+    def test_a_joint_folds_only_the_frames_holding_a_joint_orient(self):
+        # j1 holds no joint_orient on any frame and spins past 180, beside a
+        # joint that holds one: only j2's curve was rebuilt, so only it is
+        # filtered. Folding every frame filtered j1's authored curve too,
+        # 360 degrees off. An unfolded frame 0 out at 200 the same
+        for first in (0.0, 200.0):
+            with self.subTest(frame_0=first):
+                rig = HierarchyData(
+                    [
+                        TransformData("j0", node_type="joint"),
+                        TransformData("j1", node_type="joint", parent_node="j0"),
+                        TransformData("j2", node_type="joint", parent_node="j1"),
+                    ]
+                )
+                clip   = ClipData(rig, frames=10)
+                rotate = np.zeros((10, 3, 3))
+                rotate[:, 1, 0] = first + 40.0 * np.arange(10)
+                rotate[:, 2, 2] = 15.0 * np.arange(10)
+                orient = np.zeros((10, 3, 3))
+                orient[3:, 2, 1]         = 30.0
+                clip.frames.rotate       = rotate
+                clip.frames.joint_orient = orient
+
+                poses          = _per_frame(clip, lambda p: [n.set_node_type("transform") for n in p])
+                clip.node_type = "transform"
+                self._assert_matches(clip, poses)
+                np.testing.assert_array_equal(clip.frames["j1"].rotate[:, 0], rotate[:, 1])
+
+    def test_swapaxes_filters_rotate_axis(self):
+        # a rotate_axis curve crossing +-180: rebuilt from matrices it steps
+        # by 360 unless it is filtered as joint_orient is
+        rig  = HierarchyData([TransformData("j0", node_type="joint")])
+        clip = ClipData(rig, frames=12)
+        axis = np.zeros((12, 1, 3))
+        axis[:, 0, 0]           = 30.0 * np.arange(12)
+        clip.frames.rotate_axis = axis
+        poses = _per_frame(clip, lambda p: p["j0"].swapaxes(0, 1, negate=True))
+        clip["j0"].swapaxes(0, 1, negate=True)
+        self._assert_matches(clip, poses)
+        self.assertLess(np.abs(np.diff(clip.frames.rotate_axis, axis=0)).max(), 31.0)
+
+    def test_a_node_taken_out_of_its_clip_is_edited_as_a_pose(self):
+        # a node taken out with del or remove() still points at its clip,
+        # and every rig edit on it raised a KeyError naming its id
+        edits = {
+            "set_rotate_order": lambda n: n.set_rotate_order(5),
+            "swapaxes": lambda n: n.swapaxes(0, 1),
+            "set_joint_orient_to_rotate": lambda n: n.set_joint_orient_to_rotate(),
+            "set_rotate_to_joint_orient": lambda n: n.set_rotate_to_joint_orient(),
+            "set_node_type": lambda n: n.set_node_type("transform"),
+            "set_parent": lambda n: n.set_parent("j1"),
+            "list swapaxes": lambda n: TransformList([n]).swapaxes(0, 1),
+            "list set_rotate_order": lambda n: TransformList([n]).set_rotate_order(4),
+        }
+        for frames in (1, 3):
+            for take_out in ("del", "remove"):
+                for label, edit in edits.items():
+                    with self.subTest(frames=frames, take_out=take_out, edit=label):
+                        clip = self._animated(self._rig(2), frames=frames)
+                        node = clip["j5"]
+                        if take_out == "del":
+                            del clip[clip.index("j5")]
+                        else:
+                            clip.remove(node)
+                        self.assertIs(node._hierarchy, clip)
+                        blocks = {c: b.copy() for c, b in clip._blocks.items()}
+                        pose   = node.copy()
+
+                        edit(node)
+                        if label != "set_parent":
+                            edit(pose)
+                            np.testing.assert_allclose(node.rotate, pose.rotate, atol=1e-9)
+
+                        # the clip's own nodes are left as they were
+                        for channel, block in blocks.items():
+                            keep = [clip._columns.index(u) for u in clip.uuid]
+                            np.testing.assert_array_equal(
+                                clip._blocks[channel][:, keep], block[:, keep]
+                            )
+
+    def test_a_list_of_nodes_of_two_clips_and_a_taken_out_one(self):
+        # grouped by owner: the node a clip no longer lists goes alone, and
+        # nothing is half applied when it is met
+        first, second = self._animated(self._rig(1)), self._animated(self._rig(2))
+        gone = second["j6"]
+        second.remove(gone)
+        TransformList([first["j1"], gone, second["j2"]]).set_rotate_order(5)
+        self.assertEqual(
+            (first["j1"].rotate_order, gone.rotate_order, second["j2"].rotate_order), (5, 5, 5)
+        )
+
+    def test_a_one_node_edit_reads_the_node_not_the_clip(self):
+        # a rig edit of one node read every node of the clip -- its parent
+        # map, rotate orders, compensation, columns -- and cleared every
+        # node's cache, so a loop over the nodes cost the clip's size
+        # squared; now it reads the rows it edits
+        class Walked(list):
+            walks = 0
+
+            def __iter__(self):
+                self.walks += 1
+                return super().__iter__()
+
+        clip      = self._animated(self._rig(3, count=60))
+        clip.list = Walked(clip.list)
+        clip["j5"].set_rotate_order(4)  # the index, once
+        edits = {
+            "set_rotate_order": lambda n: n.set_rotate_order((n.rotate_order + 1) % 6),
+            "swapaxes": lambda n: n.swapaxes(0, 2),
+            "set_joint_orient_to_rotate": lambda n: n.set_joint_orient_to_rotate(),
+            "set_rotate_to_joint_orient": lambda n: n.set_rotate_to_joint_orient(),
+        }
+        for label, edit in edits.items():
+            with self.subTest(label):
+                clip.list.walks = 0
+                for name in ("j9", "j31", "j50"):
+                    edit(clip[name])
+                # clip[name] scans for the name; the edits walk nothing
+                self.assertLessEqual(clip.list.walks, 3, label)
+
+    def test_the_frame_axis_points_a_rig_edit_at_the_clip(self):
+        # rig edits change what every frame shares, so they are the clip's;
+        # on clip.frames they raised a bare AttributeError
+        clip = self._animated(self._rig(0))
+        for name in ("swapaxes", "set_rotate_to_joint_orient", "set_rotate_order", "set_parent"):
+            for axis in (clip.frames, clip.frames["j3"]):
+                with self.subTest(name), self.assertRaisesRegex(
+                    AttributeError, f"use clip.{name}"
+                ):
+                    getattr(axis, name)
+        with self.assertRaisesRegex(AttributeError, "has no attribute 'nothing'"):
+            clip.frames.nothing
+
+
+class TestClipSmoothSpin(unittest.TestCase):
+    """a joint spinning two whole turns: every rebuilt curve stays smooth,
+    where the frame by frame route steps by up to 360 degrees each time a
+    curve crosses +-180
+
+    The spin is about the first or last axis of the joint's rotate order and
+    never y, which rotate_to_joint_orient's xyz would hold in the middle, so
+    no result passes near gimbal lock, where any euler curve moves fast. A
+    swap above the spinning joint turns its rotate by a constant quarter
+    turn, which can; TestClipRigEditsEveryFrame covers those swaps.
+    """
+
+    AXIS = {0: 0, 1: 0, 2: 2, 3: 0, 4: 2, 5: 2}
+
+    def _spin(self, order, frames=120):
+        rng   = np.random.default_rng(order)
+        names = ["root", "a", "b", "c"]
+        nodes = [
+            TransformData(
+                name         = name,
+                node_type    = "joint",
+                parent_node  = None if i == 0 else names[i - 1],
+                translate    = [0.0, float(i > 0), 0.0],
+                rotate       = rng.uniform(-8.0, 8.0, size=3),
+                rotate_axis  = rng.uniform(-8.0, 8.0, size=3),
+                joint_orient = rng.uniform(-8.0, 8.0, size=3),
+                rotate_order = order,
+            )
+            for i, name in enumerate(names)
+        ]
+        clip                           = ClipData(HierarchyData(nodes), frames=frames)
+        rotate                         = clip.frames.rotate.copy()
+        rotate[:, 3]                   = 0.0
+        rotate[:, 3, self.AXIS[order]] = 3.0 + 6.0 * np.arange(frames)
+        clip.frames.rotate             = rotate
+        return clip
+
+    def test_no_step_over_ten_degrees(self):
+        edits = {
+            "swapaxes": (
+                lambda c: c["c"].swapaxes(0, 1, negate=True),
+                lambda p: p["c"].swapaxes(0, 1, negate=True),
+            ),
+            "swapaxes, a view": (
+                lambda c: c.match("c").swapaxes(2, 1),
+                lambda p: p["c"].swapaxes(2, 1),
+            ),
+            "set_rotate_to_joint_orient": (
+                lambda c: c.set_rotate_to_joint_orient(),
+                lambda p: [n.set_rotate_to_joint_orient() for n in p],
+            ),
+            "set_joint_orient_to_rotate": (
+                lambda c: c.set_joint_orient_to_rotate(),
+                lambda p: [n.set_joint_orient_to_rotate() for n in p],
+            ),
+            "set_parent": (
+                lambda c: c["c"].set_parent("root"),
+                lambda p: p["c"].set_parent("root"),
+            ),
+            "set_parent, a view": (
+                lambda c: c[1:].set_parent(None),
+                lambda p: p[1:].set_parent(None),
+            ),
+            "node_type": (
+                lambda c: setattr(c, "node_type", "transform"),
+                lambda p: [n.set_node_type("transform") for n in p],
+            ),
+            "set_rotate_order": (
+                lambda c: c.set_rotate_order((c[0].rotate_order + 3) % 6),
+                lambda p: [n.set_rotate_order((n.rotate_order + 3) % 6) for n in p],
+            ),
+        }
+        for order in range(6):
+            for name, (clip_edit, pose_edit) in edits.items():
+                with self.subTest(order=order, edit=name):
+                    clip  = self._spin(order)
+                    poses = _per_frame(clip, pose_edit)
+                    clip_edit(clip)
+
+                    channels = ("rotate", "joint_orient", "rotate_axis")
+                    smooth = max(
+                        np.abs(np.diff(getattr(clip.frames, c), axis=0)).max()
+                        for c in channels
+                    )
+                    stepped = max(
+                        np.abs(np.diff(_stacked(poses, c), axis=0)).max() for c in channels
+                    )
+                    self.assertLessEqual(smooth, 10.0)
+                    self.assertGreater(stepped, 170.0)
+
+                    world = np.array([[n.world_matrix for n in pose] for pose in poses])
+                    self.assertLess(np.abs(clip.frames.world_matrix - world).max(), 1e-9)
+
+
+class TestClipSetRotateOrder(unittest.TestCase):
+    """set_rotate_order over a clip: every frame re-expressed at once, frame 0
+    the way Maya's xform -rotateOrder -preserve picks it, the rest filtered,
+    no world matrix moved and joint_orient kept"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cases = maya_rotate_order_cases()
+
+    def _clip(self, count=271, frames=300, seed=5):
+        # node i takes one of the 30 pairs of orders and plays that pair's 40
+        # random and hand picked rotations over and over, from its own
+        # offset. The edge rotations stay out of a curve: played in a row,
+        # exact gimbal poses and jumps of exactly 180 degrees leave
+        # euler_filter ties that round-off settles, and they have tests of
+        # their own
+        cases = self.cases
+        pairs = sorted(set(zip(cases["before"].tolist(), cases["after"].tolist())))
+        rng   = np.random.default_rng(seed)
+        rows  = np.empty((frames, count), dtype=int)
+        nodes = []
+        for i in range(count):
+            before, after = pairs[i % len(pairs)]
+            pair       = (cases["before"] == before) & (cases["after"] == after)
+            ids        = np.flatnonzero(pair[:1200])
+            rows[:, i] = ids[(np.arange(frames) + i) % len(ids)]
+            nodes.append(
+                TransformData(
+                    name         = f"j{i}",
+                    node_type    = "joint",
+                    parent_node  = None if i == 0 else f"j{rng.integers(0, i)}",
+                    translate    = rng.normal(size=3),
+                    rotate_order = before,
+                )
+            )
+        clip                     = ClipData(HierarchyData(nodes), frames=frames)
+        clip.frames.rotate       = cases["rotate"][rows]
+        clip.frames.joint_orient = cases["joint_orient"][rows]
+        after                    = np.array([pairs[i % len(pairs)][1] for i in range(count)])
+        return clip, rows, after
+
+    def test_a_271_joint_300_frame_clip(self):
+        clip, rows, after = self._clip()
+        world  = clip.frames.world_matrix.copy()
+        orient = clip.frames.joint_orient.copy()
+        maya   = self.cases["maya"][rows]
+
+        clip.set_rotate_order(after)
+
+        self.assertTrue(np.array_equal(clip.rotate_order, after))
+        self.assertLess(np.abs(clip.frames.rotate[0] - maya[0]).max(),             1e-9)
+        self.assertLess(np.abs(clip.frames.rotate - _filtered(maya, after)).max(), 1e-9)
+        self.assertLess(np.abs(clip.frames.world_matrix - world).max(),            1e-12)
+        self.assertTrue(np.array_equal(clip.frames.joint_orient, orient))
+
+    def test_a_view_of_a_clip(self):
+        clip, rows, after = self._clip(count=60, frames=50)
+        world  = clip.frames.world_matrix.copy()
+        rotate = clip.frames.rotate.copy()
+        maya   = self.cases["maya"][rows]
+        picked = np.arange(0, 60, 3)
+
+        names  = ["xyz", "yzx", "zxy", "xzy", "yxz", "zyx"]
+        clip[picked].set_rotate_order([names[o] for o in after[picked]])
+
+        rest = np.setdiff1d(np.arange(60), picked)
+        self.assertTrue(np.array_equal(clip.frames.rotate[:, rest], rotate[:, rest]))
+        want = _filtered(maya[:, picked], after[picked])
+        self.assertLess(np.abs(clip.frames.rotate[:, picked] - want).max(), 1e-9)
+        self.assertLess(np.abs(clip.frames.world_matrix - world).max(), 1e-12)
+
+    def test_frame_0_takes_mayas_pick_on_every_recorded_joint(self):
+        # a clip of all 2550 recorded joints side by side, edge rotations
+        # included. The second frame holds the next joint's angles, read in
+        # this joint's order: some other pose, which only has to stay put
+        cases  = self.cases
+        joints = np.arange(len(cases["rotate"]))
+        rows   = np.stack([joints, np.roll(joints, -1)])
+        nodes = [
+            TransformData(f"j{i}", node_type="joint", rotate_order=int(order))
+            for i, order in enumerate(cases["before"])
+        ]
+        clip = ClipData(HierarchyData(nodes), frames=2)
+        clip.frames.rotate       = cases["rotate"][rows]
+        clip.frames.joint_orient = cases["joint_orient"][rows]
+        world  = clip.frames.world_matrix.copy()
+        orient = clip.frames.joint_orient.copy()
+
+        clip.set_rotate_order(cases["after"])
+
+        self.assertTrue(np.array_equal(clip.rotate_order, cases["after"]))
+        self.assertLess(np.abs(clip.frames.rotate[0] - cases["maya"]).max(), 1e-9)
+        self.assertTrue(np.array_equal(clip.frames.joint_orient, orient))
+
+        # the 8 joints that start and end 1e-7 from gimbal lose up to 3.1e-9
+        # of the pose in Maya too, as do 6 of the second frame's poses that
+        # land there; every other one keeps it to round-off
+        moved = np.abs(clip.frames.world_matrix - world).max(axis=(2, 3))
+        twice = cases["twice"]
+        self.assertLess(moved[0, ~twice].max(), 1e-12)
+        self.assertLess(moved[0, twice].max(),  1e-8)
+        self.assertLess(moved[1].max(),         1e-8)
+        self.assertLessEqual(int((moved[1] > 1e-12).sum()), 6)
 
 
 class TestClipEvaluator(unittest.TestCase):

@@ -61,6 +61,13 @@ channel reads the loaded frame; writing one writes it. Only `scale`,
 names, parenting, `rotate_order` and the display flags are structural
 and shared by every frame.
 
+**Rig edits cover every frame.** `swapaxes`, the orient helpers,
+`set_parent` in world space, a joint becoming another type and
+`set_rotate_order` rebuild channels out of matrices. On a clip they solve
+every frame at once, and every euler curve they rebuild goes through
+`euler_filter`, frame 0 kept, so the curves come out smooth rather than
+stepping by 180 and 360 degrees.
+
 **`a - b` is a retargeting operator.** The delta holds a per-joint frame
 offset fixed to the bone, not a local rotation difference, so it re-poses
 `b` at *any* pose — that is what lets a delta carry animation between
@@ -154,6 +161,21 @@ posed["hip"].rotate_x = 25.0
 
 result = posed.add_delta(tall.get_delta(rig, translate=False), translate=False)
 result.name                                 # ['root', 'hip', 'knee']
+```
+
+### Changing rotate order
+
+Assigning `rotate_order` changes the order alone, as Maya's `setAttr`
+does, so the joint turns. `set_rotate_order` keeps the pose, as Maya's
+`xform -rotateOrder <order> -preserve` does, and picks the euler solution
+Maya picks; on a clip every frame, the curves filtered.
+
+```python
+before = rig.world_matrix
+rig.set_rotate_order("zyx")            # or one order per node
+np.allclose(rig.world_matrix, before)  # True
+
+clip.set_rotate_order([0, 1, 2])       # every frame of the clip
 ```
 
 ---

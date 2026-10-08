@@ -17,6 +17,7 @@ overview see [`README.md`](README.md); for the rest of the library see
 | [`TransformData` — construction](#transformdata--construction) | the 15 constructor arguments |
 | [SRT channels](#srt-channels) | `scale` / `rotate` / `translate` and per-axis accessors |
 | [Joint channels](#joint-channels) | `rotate_order`, `rotate_axis`, `joint_orient`, `segment_scale_compensate` |
+| [Changing rotate order](#changing-rotate-order) | `set_rotate_order` keeps the pose; the raw `rotate_order` setter does not |
 | [Display + user channels](#display--user-channels) | `visibility`, `radius`, `draw_style`, `user_defined_attributes` |
 | [Matrices](#matrices) | `matrix`, `world_matrix`, the six factor matrices, `quaternion` |
 | [Cache invalidation](#cache-invalidation) | when `world_matrix` is recomputed |
@@ -33,7 +34,7 @@ overview see [`README.md`](README.md); for the rest of the library see
 | [Batched evaluation](#batched-evaluation) | `frames.matrix`, `frames.world_matrix`, the factor matrices, `parent_matrix`, `to_attributes()` |
 | [Solving every frame](#solving-every-frame) | `frames.world_matrix =`, `frames.matrix =`, `frames.quaternion`, `frames.match_*` |
 | [Clip deltas](#clip-deltas) | retargeting a whole clip |
-| [Clip guard rails](#clip-guard-rails) | the rig edits an animated clip refuses |
+| [Rig edits on a clip](#rig-edits-on-a-clip) | every frame at once, the curves filtered |
 | [Importers and exporters](#importers-and-exporters) | fbx, glb, auto-detect |
 | [Serialization](#serialization) | json / npz / pkl, dict, bytes |
 | [Gotchas](#gotchas) | the traps, in one table |
@@ -186,6 +187,61 @@ joint.segment_scale_compensate = False
 | `joint_orient` | `(3,)` degrees | read / write; applied **after** `rotate` |
 | `segment_scale_compensate` | `bool` | read / write; when `True`, the parent's scale is divided out |
 | `parent_scale_inverse` | `(3,)` | read only; the parent's scale, `(1, 1, 1)` at a root |
+
+### Changing rotate order
+
+Setting `rotate_order` changes the order alone, as Maya's `setAttr` does:
+`rotate` keeps its angles, which now read in the new order, so the joint
+turns and its children move with it. `set_rotate_order` keeps the pose, as
+`xform -rotateOrder <order> -preserve` does: only `rotate` changes,
+re-expressed in the new order, and no world matrix moves. `joint_orient`
+and `rotate_axis` are built in xyz whatever the order, so they stay. The
+order is `0..5` or its axes, `"zyx"`; the order a node already has changes
+nothing.
+
+```python
+wrist = TransformData("wrist", node_type="joint", rotate=(400.0, 30.0, -200.0))
+HierarchyData([wrist])
+before = wrist.world_matrix
+
+wrist.set_rotate_order("yzx")
+np.round(wrist.rotate, 4).tolist()          # [137.6136, -170.2335, 34.3339], as Maya
+assert wrist.rotate_order == 1
+assert np.allclose(wrist.world_matrix, before)
+
+wrist.rotate_order = 0                      # raw: the angles stay, the joint turns
+assert not np.allclose(wrist.world_matrix, before)
+```
+
+A rotation has two euler solutions in any order, plus whole turns on any
+axis. The one picked is Maya's: the new order's solution with every angle
+in [-180, 180), or the other one -- the first and last axes the new order
+applies turned by 180, the middle one 180 minus itself, not wrapped --
+when its angles sum to fewer degrees; the first on a tie. That matches
+Maya 2025 on all 2550 joints of `_tests/test_assets/maya_euler.npz`, but
+for an angle of exactly 180, which Maya writes as +180 or -180 as its own
+arithmetic falls: the same angle.
+
+A list, a rig or a clip takes one order for every node or one per node,
+and solves them all at once. On a clip the order is structural, shared by
+every frame, so every frame is re-expressed: frame 0 picks as above, and
+the curves then go through `euler_filter` in the new order, frame 0 kept,
+so they come out smooth.
+
+```python
+pair        = make_chain(("a", "b"))
+pair.rotate = [(10.0, 95.0, 0.0), (-170.0, 20.0, 45.0)]
+before      = pair.world_matrix
+pair.set_rotate_order(["zyx", 4])           # one per node: zyx, yxz
+pair.rotate_axes                            # ['zyx', 'yxz']
+assert np.allclose(pair.world_matrix, before)
+
+turn                 = ClipData(make_chain(("a",)), frames=36)
+turn.frames.rotate_x = np.linspace(0.0, 350.0, 36).reshape(36, 1)
+turn.set_rotate_order("yzx")
+turn.frames.rotate[[17, 18, 35], 0, 0].tolist()
+# [170.0, 180.0, 350.0] -- frame by frame, 180 and 350 would read -180 and -10
+```
 
 ---
 
@@ -391,7 +447,17 @@ assert rig["knee"].get_parent() is None
 ```
 
 `set_parent` also moves the node and its branch to the end of the list,
-so a parent always precedes its children.
+so a parent always precedes its children. A parent that hangs below the
+node would close a loop: it raises before anything moves.
+
+```python
+rig = make_chain()
+try:
+    rig["hip"].set_parent("knee")
+except ValueError as error:
+    message = str(error)    # 'hip' can not go under 'knee', which hangs below it
+assert "hangs below it" in message
+```
 
 ### Match another node in world space
 
@@ -668,13 +734,19 @@ len(rig.to_attributes())               # 4 dicts
 
 The node edits all have a list form.
 
+A selection is reparented the way one node at a time would do it --
+every node to the world, then each under the parent, a name resolved once
+the first pass has moved them -- in one pass over the rig, however many
+nodes it holds.
+
 ```python
 rig.match("knee", "ankle").set_parent("root")     # reparent a selection
 rig.add_prefix("c_")
 rig.add_suffix("_jnt")
 rig.set_rotate_to_joint_orient()
 rig.set_joint_orient_to_rotate()
-rig.swapaxes(0, 2)
+rig.swapaxes(0, 2)           # every node solved at once
+rig.set_rotate_order("zyx")  # one order for all, or one per node
 
 other = make_chain(("a", "b", "c", "d"), step=(0.0, 7.0, 0.0))
 rig.match_translate(other)         # pairs positionally, 1:1
@@ -1282,39 +1354,60 @@ assert np.allclose(bound.frames.rotate[0], clip.frames.rotate[0])
 
 ---
 
-## Clip guard rails
+## Rig edits on a clip
 
-Rig-level edits rebuild `rotate` out of a matrix. Doing that per frame
-lets each frame pick its own euler branch, which leaves the poses exact
-and the curves full of 180° and 360° steps. So on a clip holding more
-than one frame they refuse: `swapaxes`, `set_rotate_to_joint_orient`,
-`set_joint_orient_to_rotate`, `set_parent(world_space=True)`, and
-turning a joint with a `joint_orient` into another type (`node_type`,
-`set_node_type`).
+The rig-level edits rebuild channels out of matrices: `swapaxes`,
+`set_rotate_to_joint_orient`, `set_joint_orient_to_rotate`,
+`set_parent(world_space=True)`, a joint becoming another type
+(`node_type`, `set_node_type`) and `set_rotate_order`. On a clip every
+frame is solved at once, with the result the single-pose method gives
+frame by frame, on the whole clip, a selection or one node.
+
+Each changes what every frame shares -- the parenting, the rotate order,
+the node type, a joint's axes -- so it covers every frame whether it is
+called on the clip, a selection of it or one node, and the clip stays on
+the frame it was on. A channel write or a solve is the other kind: on
+the clip or its nodes (`clip["hip"].world_matrix = M`, `match_*`) it
+writes the frame the clip is on, and on `clip.frames` every frame.
+
+Solved a frame at a time, each frame would pick its own euler branch:
+the poses stay exact while the curves step by 180° and 360°. So every
+rebuilt euler curve -- `rotate` in the node's rotate order,
+`rotate_axis` and `joint_orient` in xyz -- goes through `euler_filter`,
+frame 0 kept as computed, the way Maya's Euler Filter keeps the first
+key.
 
 ```python
-animated               = ClipData(make_chain(), frames=3)
-animated.frames.rotate = np.array([[[0.0, 0.0, f * 11.0]] * 3 for f in range(3)])
+spin                        = ClipData(make_chain(), frames=60)
+spin.frames["hip"].rotate_x = np.linspace(3.0, 357.0, 60)  # one turn, crossing 180
+spin["knee"].set_parent("root")                 # every frame keeps its world
+spin.frames["knee"].rotate_x.ravel()[[0, 30, 59]].round(1).tolist()
+# [3.0, 183.0, 357.0] -- one smooth curve, no 360 degree step
 
-for call in (lambda: animated.swapaxes(0, 1),
-             lambda: animated.set_rotate_to_joint_orient(),
-             lambda: animated.set_joint_orient_to_rotate(),
-             lambda: animated.set_parent(None)):
-    try:
-        call()
-    except RuntimeError as error:
-        print(str(error)[:48])
+spin.set_rotate_order("zyx")
+assert np.abs(np.diff(spin.frames.rotate, axis=0)).max() < 10.0
 ```
 
-Do them on the rest pose and build the clip afterwards. What stays
-allowed: `set_parent(world_space=False)`, and everything on a clip of
-zero or one frame.
+A swap keeps every child where it was on every frame:
 
 ```python
-animated.set_parent(None, world_space=False)    # writes no pose -- fine
+spin                        = ClipData(make_chain(), frames=60)
+spin.frames["hip"].rotate_x = np.linspace(3.0, 357.0, 60)
+before                      = spin.frames.world_matrix.copy()
+spin["hip"].swapaxes(0, 1, negate=True)
+assert np.allclose(spin.frames.world_matrix[:, 2], before[:, 2])   # knee
+```
 
-single = ClipData(make_chain(), frames=1)
-single.swapaxes(0, 1)                           # one frame has no curve to break
+`set_parent(world_space=False)` writes no pose, so it moves nothing but
+the parenting.
+
+The frame axis has no rig edits of its own: `clip.frames.swapaxes`,
+`clip.frames["hip"].set_parent` and the rest raise, pointing at the clip
+form, which already covers every frame. A loop of one-node edits costs
+the nodes it edits, not the clip each time.
+
+```python
+spin.set_parent(None, world_space=False)
 ```
 
 Node reordering keeps each block column with its node, so a
@@ -1679,6 +1772,6 @@ rig["hip"].match("hip")                         # True
 | `by="index"` on mirrored limbs | both arms share a parent index, so left can pair to right | use `by="name"` when sibling order is not guaranteed |
 | `reset_cached_data()` | clears every non-annotated attribute — including the `_hierarchy` back-pointer, which detaches the nodes | re-append the nodes, or just write a channel to drop the world-matrix cache |
 | `ClipData(rig)` with no `frames=` | `frame_count == 0`; it is a plain hierarchy until frames are allocated | pass `frames=N`, or build with `from_poses` |
-| rig edits on an animated clip | `swapaxes`, the orient helpers and `set_parent(world_space=True)` raise `RuntimeError` | apply them to the rest pose, then build the clip |
+| `rotate_order = n` on a posed joint | the angles stay and read in the new order, so the joint turns, as Maya's `setAttr` does | `set_rotate_order(n)` keeps the pose |
 | `clip.frames[12]` | scrubs and hands back the **same** clip — two frames cannot be held at once | `clip.frames[12:13]` for an independent cut, or `copy()` |
 | `clip.frames[a:b] -= pose` (or `+=`, or `[:]`) | the slice is an independent cut bound to its own first frame, and `-=` on a clip solves its bound frame: the paste writes back frame `a` alone, with no error | `clip.frames -= pose` for every frame; for a range, `cut = clip.frames[a:b]`, `cut.frames -= pose`, `clip.frames[a:b] = cut` |

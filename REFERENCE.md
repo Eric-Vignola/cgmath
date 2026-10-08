@@ -336,7 +336,7 @@ rotate_axis_x
 rotate_axis_y                      
 rotate_axis_z                      
 rotate_matrix                      
-rotate_order                       
+rotate_order                       the rotate order, 0..5: xyz, yzx, zxy, xzy, yxz, zyx
 rotate_x                           
 rotate_y                           
 rotate_z                           
@@ -387,6 +387,8 @@ set_node_type(self, node_type: 'str') -> 'None'
     Sets the node type.
 set_parent(self, parent: 'Union[str, None]', world_space: 'bool' = True) -> 'None'
     reparents node to a given parent and resets internal SRTs
+set_rotate_order(self, order: 'Union[int, str]') -> 'None'
+    Changes the rotate order and keeps the pose.
 set_rotate_to_joint_orient(self) -> 'None'
     sets rotate and rotate_axis to 0 and applies all rotation to joint_orient
 swapaxes(self, axis0: 'int', axis1: 'int', negate: 'bool' = False) -> 'None'
@@ -427,7 +429,7 @@ rotate_axis_x
 rotate_axis_y                      
 rotate_axis_z                      
 rotate_matrix                      
-rotate_order                       
+rotate_order                       every node's rotate order, 0..5
 rotate_x                           
 rotate_y                           
 rotate_z                           
@@ -499,6 +501,8 @@ set_joint_orient_to_rotate(self) -> 'None'
     sets joint_orient to 0 and applies all rotation to rotate
 set_parent(self, parent: 'Union[str, None]', world_space: 'bool' = True) -> 'None'
     sets all the nodes under a given parent
+set_rotate_order(self, order) -> 'None'
+    Changes every node's rotate order and keeps the pose.
 set_rotate_to_joint_orient(self) -> 'None'
     sets rotate to 0 and applies all rotation to joint_orient
 swapaxes(self, axis0: 'int', axis1: 'int', negate: 'bool' = False) -> 'None'
