@@ -488,6 +488,29 @@ class TestAnimateBatched(unittest.TestCase):
                     got, expected, atol=1e-9, err_msg=f"frame {frame}"
                 )
 
+    def test_without_an_orbit_the_fit_sweeps_one_angle(self):
+        """a camera that holds still sees the cloud from one angle; sweeping
+        frame_count copies of that angle gave the same box frame_count times"""
+        from cgmath.render import scene as module
+
+        calls = []
+        real  = module._fit_camera_over_orbit
+
+        def spy(*args, **kwargs):
+            calls.append((args, kwargs))
+            return real(*args, **kwargs)
+
+        with patch.object(module, "_fit_camera_over_orbit", spy):
+            seen, _ = self.animate()
+
+        (args, kwargs), = calls
+        self.assertEqual(args[10], 1)
+
+        swept    = real(*args[:10], self.clip.frame_count, **kwargs)
+        expected = module._orbit_camera_col(swept, args[3], args[7], args[8])
+        for _, camera in seen:
+            np.testing.assert_array_equal(camera, expected)
+
     def test_the_scene_is_handed_back_undeformed(self):
         rest = [np.array(obj.mesh.points) for obj in self.skinned]
         self.animate()

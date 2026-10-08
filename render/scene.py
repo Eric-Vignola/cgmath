@@ -2666,6 +2666,9 @@ class Scene(HierarchyData):
         n_samples = (
             int(n_fit_samples) if n_fit_samples is not None else int(frame_count)
         )
+        if end_angle == start_angle:
+            # no orbit: every sample is the same angle, and so the same box
+            n_samples = 1
         chosen = _fit_camera_over_orbit(
             pts_centered,
             R_cam,
