@@ -692,9 +692,10 @@ frames directly when you want to build the motion yourself. `mp4` and
 Every `Data` subclass — meshes, UVs, skins, morphs, maps, rigs, clips —
 shares one persistence surface. The extension picks the writer; the file's
 first bytes pick the reader. All three formats hold the same tree,
-`to_dict()`: the class, then every field that differs from its default. A file
-loads as the class it names; one written by an older cgmath raises
-`LegacyFileError`.
+`to_dict()`: the class, then every field that differs from its default, each
+named as a caller sets it (a node's private `_translate` as `translate`; a
+load takes either name). A file loads as the class it names; one written by
+an older cgmath raises `LegacyFileError`.
 
 ```python
 cube.save(os.path.join(tmp, "cube.npz"))

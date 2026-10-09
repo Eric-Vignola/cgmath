@@ -104,6 +104,21 @@ left out and loads back as a fresh copy of the default. A `DataList` saves
 - **A file loads as the class it names.** `MeshData.load()` on a saved `UVData`
   gives a `UVData`. The named class must be the one called or derive from it;
   any other raises `TypeError`.
+- **A field is saved under the name a caller sets it by.** A private field
+  behind a public property of its own name is saved as the property:
+  `UVData._resolution` as `resolution`, a node's `_translate` as `translate`,
+  in every format and in the `"__dtypes__"` / `"__shapes__"` notes. A
+  `DataList`'s `LIST_FIELDS` follow the same rule. A load takes either name,
+  so a file that names the private field still loads, and a tree that names
+  one field both ways raises `ValueError`. A field with no such property
+  keeps its own name. A tree built by hand, with no `"__class__"`, as
+  `from_dict` takes one, sets a property's name through the property's
+  setter, which checks the value; a property with no setter, such as
+  `FFDData.cells`, and a `DataList`'s settings are read as the field.
+- **A file saved from this version on needs this cgmath or newer.** An older
+  cgmath expects the private names: it refuses an `FFDData` from such a file
+  with an `AttributeError`, and reads a `ClipData` as its nodes with none of
+  their frames (start frame 0, 24 fps), without raising.
 - **Older files are refused.** A file written by an older cgmath has no
   `"__class__"` and raises `LegacyFileError`, a `ValueError`.
 - **npz holds no pickles.** One `.npy` member per array or value, read with
@@ -166,8 +181,12 @@ and declare arrays with `Array` (from `cgmath.geometry._base`). A field named in
 `TRANSIENT_FIELDS` is never saved and `==` skips it: use it for caches and
 links, and rebuild them in `_post_load()`, which runs once a load or `copy()`
 has set every field. A `DataList` subclass names what it saves beside its items
-in `LIST_FIELDS`. Only cgmath modules are imported on demand, so a class of
-your own must be imported before a file that names it is loaded.
+in `LIST_FIELDS`. A private field behind a property of its own name is saved
+as the property; `SAVED_NAMES`, `{field: saved name}`, saves one under another
+name, such as a field behind a property named differently, and keeps a field
+mapped to itself, `{"_count": "_count"}`, under its own name, for a property
+`count` that does not read it. Only cgmath modules are imported on demand, so
+a class of your own must be imported before a file that names it is loaded.
 
 ```python
 import os

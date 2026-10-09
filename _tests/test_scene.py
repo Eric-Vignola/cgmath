@@ -3062,19 +3062,19 @@ class TestObjectSerialization(unittest.TestCase):
     def test_to_dict_recurses_into_mesh_uv(self):
         obj, _ = self._make_full_obj()
         d = obj.to_dict()
-        self.assertIsInstance(d["_mesh"], dict)
-        self.assertIsInstance(d["_uv"], dict)
+        self.assertIsInstance(d["mesh"], dict)
+        self.assertIsInstance(d["uv"], dict)
         # Inner dicts should hold the raw geometry so the file is
         # self-contained.
-        self.assertIn("points", d["_mesh"])
-        self.assertIn("indices", d["_mesh"])
+        self.assertIn("points", d["mesh"])
+        self.assertIn("indices", d["mesh"])
 
     def test_to_dict_keeps_a_uint8_texture(self):
         obj, tex = self._make_full_obj()
         d = obj.to_dict()
-        self.assertIsInstance(d["_texture"], np.ndarray)
-        self.assertEqual(d["_texture"].dtype, np.uint8)
-        np.testing.assert_array_equal(d["_texture"], tex)
+        self.assertIsInstance(d["texture"], np.ndarray)
+        self.assertEqual(d["texture"].dtype, np.uint8)
+        np.testing.assert_array_equal(d["texture"], tex)
 
     def test_to_dict_materializes_path_texture_as_uint8(self):
         if _PIL_Image is None:
@@ -3087,8 +3087,9 @@ class TestObjectSerialization(unittest.TestCase):
             d   = obj.to_dict()
         finally:
             os.unlink(path)
-        self.assertEqual(d["_texture"].dtype, np.uint8)
-        np.testing.assert_array_equal(d["_texture"], tex)
+        self.assertEqual(d["texture"].dtype, np.uint8)
+        self.assertEqual(d["__dtypes__"], {"texture": "uint8"})
+        np.testing.assert_array_equal(d["texture"], tex)
 
     def test_to_dict_drops_transient_caches(self):
         obj, _ = self._make_full_obj()

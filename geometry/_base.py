@@ -382,11 +382,17 @@ def _from_tagged(data: dict, expected=None):
     """
     The object a tagged tree describes, in the running load: a numbered tree
     is kept under its number, and a reference to it gives that object back.
+    A tree may name a field as its property or by its own name. One that
+    names no class is built by hand, and a property's name in it goes
+    through the property's setter, which checks the value, unless the
+    property has none; a list's settings, which no setter checks, are read
+    as the fields whether the tree names its class or not.
 
     Raises
     ------
     ValueError
-        A reference comes before the tree it refers to.
+        A reference comes before the tree it refers to, or the tree names
+        one field both ways.
     """
     loads = _RUNNING.loads
     built = loads[-1] if loads else {}
@@ -403,7 +409,21 @@ def _from_tagged(data: dict, expected=None):
     data = dict(data)
     data.pop(CLASS_KEY, None)
     number = data.pop(ID_KEY, None)
-    obj    = _resolve_class(tag, expected)._from_state(data)
+    cls    = _resolve_class(tag, expected)
+    if tag is not None:
+        # each field under its own name from here on, as _from_state reads it
+        data = cls._as_fields(data)
+    elif issubclass(cls, Data):
+        # a property's name stays, for _from_state to set through the
+        # property, but not beside the field's own name, and one with no
+        # setter, FFDData's cells, is read as the field
+        data = cls._as_fields(data, by_hand=True)
+    elif ITEMS_KEY in data:
+        # a list's settings have no setter to go through: each under its own
+        # name too. A dict of item dicts holds no setting to rename
+        data = cls._as_fields(data)
+
+    obj = cls._from_state(data)
     if number is not None:
         built[number] = obj
     return obj
@@ -1429,6 +1449,81 @@ def _strip_namespaces(items: list, namespace: Optional[str] = None) -> None:
         set_names(pairs)
 
 
+# ------------------------------- SAVED NAMES -------------------------------- #
+#
+# A file names a field the way a caller sets it: a private field behind a
+# public property of its own name, TransformData._translate behind .translate,
+# is saved as "translate". A load takes either spelling, so a file that saved
+# the field's own name, "_translate", still loads.
+
+
+def _saved_name_maps(cls, names, explicit: dict) -> tuple:
+    """
+    How ``cls`` saves ``names``, its fields or a list's LIST_FIELDS:
+    ``(saved, fields)``, the name each is saved under where that is not its
+    own, and the field each of those names stands for. The ``explicit``
+    names come first, and one mapped to itself keeps its own name. Then a
+    private ``_x`` is saved as ``x`` when the class has a property ``x`` and
+    neither a field nor another saved name is ``x``.
+
+    Raises
+    ------
+    TypeError
+        ``explicit`` names something that is not one of ``names``, or saves
+        it under a name another field or another explicit name has.
+    """
+    names = list(names)
+    saved = {}
+    kept  = set()  # explicitly saved under their own names
+    for name, public in explicit.items():
+        if name in names and public == name:
+            kept.add(name)
+            continue
+        if name not in names or public in names or public in saved.values():
+            raise TypeError(f"{cls.__name__}.SAVED_NAMES cannot save {name!r} as {public!r}")
+        saved[name] = public
+
+    taken = set(names) | set(saved.values())
+    for name in names:
+        public = name[1:]
+        if (
+            name not in saved
+            and name not in kept
+            and name.startswith("_")
+            and public[:1] not in ("", "_")
+            and public not in taken
+            and isinstance(getattr(cls, public, None), property)
+        ):
+            saved[name] = public
+            taken.add(public)
+    return saved, {public: name for name, public in saved.items()}
+
+
+def _by_field(data: dict, fields: dict, label, what: str, keep=()) -> dict:
+    """
+    ``data`` keyed by field: each key that is a saved name in ``fields`` (a
+    saved name to its field) back to the field's own name, in order, but
+    for those in ``keep``, and any other key as it is. ``data`` itself when
+    it holds no saved name.
+
+    Raises
+    ------
+    ValueError
+        ``data`` holds one field under both names, a name in ``keep`` too;
+        ``label(field)`` names it and ``what`` names ``data``.
+    """
+    if not fields or fields.keys().isdisjoint(data):
+        return data
+
+    out = {}
+    for key, value in data.items():
+        name = fields.get(key, key)
+        if name != key and name in data:
+            raise ValueError(f"{label(name)} is given twice in {what}, as {key!r} and {name!r}")
+        out[key if key in keep else name] = value
+    return out
+
+
 # ------------------------------ BASE DATACLASS ------------------------------ #
 def flatten_nested_lists(xs):
     if not _is_sequence(xs):
@@ -1502,6 +1597,12 @@ class Data:
 
     # fields never saved: caches and links rebuilt after a load
     TRANSIENT_FIELDS = ()
+
+    # fields saved under a name other than the one _saved_names gives them,
+    # as {field: saved name}: a field behind a property of another name, or
+    # one mapped to itself, kept under its own name beside an unrelated
+    # property of its public name
+    SAVED_NAMES = {}
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -1624,12 +1725,61 @@ class Data:
         return specs
 
     @classmethod
+    def _saved_names(cls) -> tuple:
+        """
+        ``(saved, fields)``: the name each field is saved under where that is
+        not its own, and the field each of those names stands for. A private
+        field behind a public property of its own name is saved as the
+        property, the one a caller sets (``_translate`` as ``translate``),
+        unless ``SAVED_NAMES`` says otherwise. Cached per class.
+        """
+        cached = cls.__dict__.get("_SAVED_NAMES_CACHE")
+        if cached is None:
+            names                  = [x.name for x in fields(cls)] if is_dataclass(cls) else []
+            cached                 = _saved_name_maps(cls, names, cls.SAVED_NAMES)
+            cls._SAVED_NAMES_CACHE = cached
+        return cached
+
+    @classmethod
+    def _setter_names(cls) -> frozenset:
+        """
+        The saved names a tree built by hand sets through a property: those
+        of a property with a setter, which checks the value. Any other, such
+        as FFDData's read-only cells, is read as its field. Cached per class.
+        """
+        cached = cls.__dict__.get("_SETTER_NAMES_CACHE")
+        if cached is None:
+            props = {name: getattr(cls, name, None) for name in cls._saved_names()[1]}
+            cached = frozenset(
+                name
+                for name, prop in props.items()
+                if isinstance(prop, property) and prop.fset is not None
+            )
+            cls._SETTER_NAMES_CACHE = cached
+        return cached
+
+    @classmethod
+    def _as_fields(cls, data: dict, what: str = "the data", by_hand: bool = False) -> dict:
+        """
+        ``data``, a tree or a mapping keyed by field, with each field under
+        its own name, whether it holds the saved name or the field's own.
+        ``by_hand``, for a tree that names no class, keeps the name of a
+        property with a setter, for the load to set the value through it.
+
+        Raises
+        ------
+        ValueError
+            ``data`` holds one field under both names.
+        """
+        keep = cls._setter_names() if by_hand else ()
+        return _by_field(data, cls._saved_names()[1], cls._field_label, what, keep)
+
+    @classmethod
     def _field_label(cls, name: str) -> str:
         """
-        How an error names a field: ``Class.field``. A private field behind a
-        public property of its own name is named by the property, the one a
-        caller sets, so ``_base_color`` reads ``Object.base_color``. Cached
-        per class.
+        How an error names a field: ``Class.field``, the field named as a file
+        saves it, so the private ``_base_color`` behind the property
+        ``base_color`` reads ``Object.base_color``. Cached per class.
         """
         labels = cls.__dict__.get("_FIELD_LABELS_CACHE")
         if labels is None:
@@ -1638,10 +1788,7 @@ class Data:
 
         label = labels.get(name)
         if label is None:
-            public = name[1:] if name.startswith("_") else name
-            if not isinstance(getattr(cls, public, None), property):
-                public = name
-            label = labels[name] = f"{cls.__name__}.{public}"
+            label = labels[name] = f"{cls.__name__}.{cls._saved_names()[0].get(name, name)}"
         return label
 
     @classmethod
@@ -1913,14 +2060,24 @@ class Data:
         one or derive from it, or this class when it names none. Fields the
         tree leaves out take fresh copies of their defaults. An object the
         tree saves once and refers to after is one object again.
+
+        A field is read under its property's name, as a file saves it, or
+        its own. A tree that names no class is one built by hand: a
+        property's name in it goes through the property's setter, which
+        checks the value, and is read as the field only when the property
+        has no setter. Either way a tree naming one field both ways raises
+        ValueError.
         """
         return _load(data, cls)
 
     @classmethod
     def _from_state(cls, data: dict) -> Any:
+        # the tree names each field by its own name, but for a property with
+        # a setter, which a tree built by hand sets by name; its notes may
+        # name a field either way
         obj    = cls.__new__(cls)
-        dtypes = data.pop(DTYPES_KEY, None) or {}
-        shapes = data.pop(SHAPES_KEY, None) or {}
+        dtypes = cls._as_fields(data.pop(DTYPES_KEY, None) or {})
+        shapes = cls._as_fields(data.pop(SHAPES_KEY, None) or {})
         hints  = cls._field_hints()
 
         specs  = cls._array_specs()
@@ -1962,7 +2119,7 @@ class Data:
                     value = np.array(value)  # the class default: this object's own copy
             setattr(obj, field.name, value)
 
-        # what a class saves beside its fields
+        # what a class saves beside its fields, and a property set by name
         for key, value in data.items():
             setattr(obj, key, value)
 
@@ -2011,13 +2168,15 @@ class Data:
         """
         The data as a tree: its class, then every field that differs from its
         default (one exactly equal to it is left out, and a load gives it a
-        fresh copy back). Pickle, npz and json all save this. A Data or
-        DataList the tree reaches twice is written once, and referred to after,
-        even in a field equal to its default.
+        fresh copy back), a private field behind a property of its own name
+        under the property's name. Pickle, npz and json all save this. A Data
+        or DataList the tree reaches twice is written once, and referred to
+        after, even in a field equal to its default.
         """
         cls    = type(self)
         data   = {CLASS_KEY: _class_tag(cls)}
         specs  = cls._array_specs()
+        names  = cls._saved_names()[0]
         dtypes = {}
         shapes = {}
 
@@ -2042,16 +2201,17 @@ class Data:
                     if _same_value(value, default):
                         continue
 
-                data[field.name] = _encode(value)
+                name       = names.get(field.name, field.name)
+                data[name] = _encode(value)
 
                 # json keeps no dtype: a field that may hold more than one notes it
                 spec = specs.get(field.name)
                 if spec is not None and len(spec.dtypes) > 1 and isinstance(value, np.ndarray):
-                    dtypes[field.name] = value.dtype.name
+                    dtypes[name] = value.dtype.name
 
                 # nor the shape of an empty array: [] could be (0,), (0, 3) or (0, 0)
                 if isinstance(value, np.ndarray) and value.size == 0 and value.ndim > 1:
-                    shapes[field.name] = list(value.shape)
+                    shapes[name] = list(value.shape)
 
         if dtypes:
             data[DTYPES_KEY] = dtypes
@@ -2075,9 +2235,42 @@ class DataList(MutableSequence):
     # attributes saved with the list, beside its items
     LIST_FIELDS = ()
 
+    # LIST_FIELDS saved under a name other than the one _saved_names gives
+    # them, as {attribute: saved name}; one mapped to itself keeps its name
+    SAVED_NAMES = {}
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         _register(cls)
+
+    @classmethod
+    def _saved_names(cls) -> tuple:
+        """
+        ``(saved, fields)``: the name each of ``LIST_FIELDS`` is saved under
+        where that is not its own, and the attribute each of those names
+        stands for, by the rule a Data's fields follow. Cached per class.
+        """
+        cached = cls.__dict__.get("_SAVED_NAMES_CACHE")
+        if cached is None:
+            cached                 = _saved_name_maps(cls, cls.LIST_FIELDS, cls.SAVED_NAMES)
+            cls._SAVED_NAMES_CACHE = cached
+        return cached
+
+    @classmethod
+    def _as_fields(cls, data: dict, what: str = "the data") -> dict:
+        """
+        ``data``, a tree, with each of ``LIST_FIELDS`` under its own name,
+        whether it holds the saved name or the attribute's own.
+
+        Raises
+        ------
+        ValueError
+            ``data`` holds one attribute under both names.
+        """
+        saved = cls._saved_names()[0]
+        return _by_field(
+            data, cls._saved_names()[1], lambda name: f"{cls.__name__}.{saved[name]}", what
+        )
 
     def __init__(self, iterable=None):
         self.list = []
@@ -2296,9 +2489,12 @@ class DataList(MutableSequence):
     def to_dict(self) -> dict:
         """
         The list as a tree: its class, its items' trees, and its LIST_FIELDS.
-        A Data or DataList the tree reaches twice is written once, and
-        referred to after.
+        One of those behind a property of its own name is saved as the
+        property, ``_start_frame`` as ``start_frame``. A Data or DataList the
+        tree reaches twice is written once, and referred to after.
         """
+        names = type(self)._saved_names()[0]
+
         # in the running save, or one this starts
         with _Saving(self) as save:
             shared = save.shared  # what the save reaches twice
@@ -2310,7 +2506,7 @@ class DataList(MutableSequence):
                 ],
             }
             for name in self.LIST_FIELDS:
-                data[name] = _encode(getattr(self, name))
+                data[names.get(name, name)] = _encode(getattr(self, name))
         return data
 
     def to_json(self) -> str:
@@ -2349,6 +2545,10 @@ class DataList(MutableSequence):
         The list a tree describes: the class it names, which must be this one
         or derive from it, each item rebuilt as the class it names. An object
         the tree saves once and refers to after is one object again.
+
+        One of LIST_FIELDS is read under its property's name, as a file saves
+        it, or its own, whether the tree names its class or not, and a tree
+        naming one both ways raises ValueError.
         """
         return _load(data, cls)
 

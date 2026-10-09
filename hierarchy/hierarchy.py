@@ -1130,7 +1130,21 @@ class TransformData(Data):
         return super().__eq__(other)
 
     def to_attributes(self, mapping: dict = MAYA_ATTRIBUTE_MAP) -> dict:
-        """returns a dict mapped against expected DCC node attributes"""
+        """returns a dict mapped against expected DCC node attributes
+
+        Each field ``mapping`` names goes under the attribute name it maps
+        to. ``mapping`` names a field as a file saves it, ``"translate"``, or
+        by its own name, ``"_translate"``. On an SDFSphere or SDFCylinder the
+        two spellings of a radius differ: ``"radius"`` is the primitive's
+        radius, as its file saves it, and only ``"_radius"`` names the joint
+        radius.
+
+        Raises
+        ------
+        ValueError
+            ``mapping`` names one field both ways.
+        """
+        mapping = type(self)._as_fields(mapping, "the mapping")
         return {
             mapping[key]: value if not isinstance(value, np.ndarray) else value.tolist()
             for key, value in self.__dict__.items()
@@ -3886,7 +3900,13 @@ class TransformList(DataList):
         return np.array([node.get_parent_matrix() for node in self])
 
     def to_attributes(self, mapping: dict = MAYA_ATTRIBUTE_MAP) -> List[dict]:
-        """returns every node's attributes as a list of dicts"""
+        """returns every node's attributes as a list of dicts
+
+        ``mapping`` is read as TransformData.to_attributes reads it: a field
+        named ``"translate"`` or ``"_translate"``. Where SDF primitives sit
+        among other nodes, on which ``"radius"`` is the joint radius too,
+        ``"_sdf_radius"`` names the primitives' radius.
+        """
         return [node.to_attributes(mapping) for node in self]
 
     def match_translate(
@@ -7875,28 +7895,40 @@ class _FrameAxis:
 
         What TransformData.to_attributes gives on each frame, gathered: a
         framed channel maps to one [x, y, z] per frame, anything else to
-        the single value every frame shares.
+        the single value every frame shares. ``mapping`` names a field as
+        each node's own to_attributes takes it, ``"translate"`` or
+        ``"_translate"``.
         """
-        # one (n, F, 3) list per framed channel, rather than a tolist per node
-        columns = self._columns
+        # one (n, F, 3) list per framed channel, rather than a tolist per node.
+        # A channel only needs its field's name here: each node's class reads
+        # the whole mapping below, and refuses one naming its field both ways
+        columns  = self._columns
+        field_of = self._clip.DATA_LIST_CLASS._saved_names()[1]
+        channels = {field_of.get(key, key) for key in mapping}
         framed = {
             channel: np.swapaxes(self._scoped(block, columns), 0, 1).tolist()
             for channel, block in self._clip._blocks.items()
-            if channel in mapping
+            if channel in channels
         }
 
-        out = []
+        # the mapping by field, as each node's class reads it
+        by_class = {}
+        out      = []
         for column, node in enumerate(self._nodes()):
+            kind = type(node)
+            if kind not in by_class:
+                by_class[kind] = kind._as_fields(mapping, "the mapping")
+            names      = by_class[kind]
             attributes = {}
             for key, value in node.__dict__.items():
-                if key not in mapping:
+                if key not in names:
                     continue
                 if key in framed:
-                    attributes[mapping[key]] = framed[key][column]
+                    attributes[names[key]] = framed[key][column]
                 elif isinstance(value, np.ndarray):
-                    attributes[mapping[key]] = value.tolist()
+                    attributes[names[key]] = value.tolist()
                 else:
-                    attributes[mapping[key]] = value
+                    attributes[names[key]] = value
             out.append(attributes)
         return out
 
@@ -7977,8 +8009,11 @@ class ClipData(HierarchyData):
     )
 
     # saved beside the nodes: the timebase, the loaded frame and one (F, N, 3)
-    # block per framed channel, keyed by channel
+    # block per framed channel, keyed by channel. A file names them as their
+    # properties, start_frame, fps and frame, and the blocks, which have none,
+    # "blocks", each keyed by its channel's property, "translate"
     LIST_FIELDS = ("_start_frame", "_fps", "_frame", "_blocks")
+    SAVED_NAMES = {"_blocks": "blocks"}
 
     def __init__(
         self,
@@ -8935,17 +8970,28 @@ class ClipData(HierarchyData):
 
         super().save_fbx(filename, zero_root=zero_root, as_ascii=as_ascii)
 
+    @classmethod
+    def _channel_name(cls, channel: str) -> str:
+        """a framed channel as a file and an error name it: its property's name"""
+        return cls.DATA_LIST_CLASS._saved_names()[0].get(channel, channel)
+
     def to_dict(self) -> dict:
         # the saved block columns follow the saved node order
         self._realign()
-        return super().to_dict()
+        tree   = super().to_dict()
+        blocks = tree.get("blocks")
+        if isinstance(blocks, dict):
+            tree["blocks"] = {self._channel_name(c): block for c, block in blocks.items()}
+        return tree
 
     @classmethod
     def _from_state(cls, data: dict) -> "ClipData":
-        # the blocks hold only numbers: one array each now, rather than a
-        # walk over every json row looking for objects to rebuild
+        # each channel back to its field's own name, "translate" to
+        # "_translate"; the blocks hold only numbers: one array each now,
+        # rather than a walk over every json row looking for objects to rebuild
         blocks = data.get("_blocks")
         if isinstance(blocks, dict):
+            blocks = cls.DATA_LIST_CLASS._as_fields(blocks, "the blocks")
             arrays = {}
             for channel, block in blocks.items():
                 try:
@@ -8969,17 +9015,19 @@ class ClipData(HierarchyData):
         """
         super()._post_load()
 
+        # a channel is named as a file names it: "translate"
         count  = len(self.list)
         blocks = {}
         for channel, block in (self._blocks or {}).items():
+            name = self._channel_name(channel)
             if channel not in self.FRAMED_CHANNELS:
-                raise ValueError(f"ClipData has no framed channel {channel!r}")
+                raise ValueError(f"ClipData has no framed channel {name!r}")
 
             try:
                 block = np.asarray(block, dtype=np.float64)
             except (TypeError, ValueError):
                 raise ValueError(
-                    f"ClipData block {channel} must have shape (F, {count}, 3), "
+                    f"ClipData block {name} must have shape (F, {count}, 3), "
                     f"got rows of different lengths"
                 ) from None
             if block.size == 0 and block.ndim:
@@ -8987,13 +9035,13 @@ class ClipData(HierarchyData):
                 block = block.reshape(len(block), 0, 3)
             if block.ndim != 3 or not len(block) or block.shape[1:] != (count, 3):
                 raise ValueError(
-                    f"ClipData block {channel} must have shape (F, {count}, 3) "
+                    f"ClipData block {name} must have shape (F, {count}, 3) "
                     f"with F at least 1, got {block.shape}"
                 )
             blocks[channel] = block
 
         if blocks and set(blocks) != set(self.FRAMED_CHANNELS):
-            missing = sorted(set(self.FRAMED_CHANNELS) - set(blocks))
+            missing = sorted(self._channel_name(x) for x in set(self.FRAMED_CHANNELS) - set(blocks))
             raise ValueError(f"ClipData is missing the blocks {missing}")
         if len({block.shape[0] for block in blocks.values()}) > 1:
             raise ValueError("ClipData blocks hold different frame counts")

@@ -214,6 +214,21 @@ s = cube.to_json()                    # human readable, columnar arrays
 assert isinstance(s, str)
 ```
 
+A private field behind a public property of its own name is saved under the
+property's name, the one a caller sets. A load takes the field's own name
+too, so a tree that names it still loads; one that names both raises
+`ValueError`.
+
+```python
+uv            = cube_uv.copy()
+uv.resolution = 64                    # kept in the private field _resolution
+tree          = uv.to_dict()
+print("resolution" in tree, "_resolution" in tree)  # True False
+
+tree["_resolution"] = tree.pop("resolution")        # the field's own name
+assert UVData.from_dict(tree).resolution.tolist() == [64, 64]
+```
+
 ### Files — `save` / `load` pick the format
 
 Extension drives the writer, the header byte drives the reader, so `load`
@@ -334,7 +349,8 @@ print(MeshList.DATA_LIST_CLASS.__name__, MeshList.UNIQUE_LIST)
 ```
 
 `DataList` saves and loads exactly like `Data`. Its tree is `"__class__"`,
-`"__items__"` (one tree per item) and the class's own `LIST_FIELDS`.
+`"__items__"` (one tree per item) and the class's own `LIST_FIELDS`, named by
+the same rule (a `ClipData` saves `_start_frame` as `start_frame`).
 
 ```python
 path = meshes.save(os.path.join(tmp, "meshes.npz"))
@@ -378,8 +394,8 @@ print(is_ndarray_annotation("np.ndarray"), is_ndarray_annotation("int"))
 `Array(dtype, *shape)` declares an array field: an int fixes a dimension, a
 name leaves it free. A wrong fixed dimension raises `ValueError`, and an empty
 value takes the declared trailing size. The error names the field the way it
-is set: a private `_field` behind a public property of the same name reads as
-the property, so `Object(base_color=(1, 2))` says
+is set, and saved: a private `_field` behind a public property of the same
+name reads as the property, so `Object(base_color=(1, 2))` says
 `Object.base_color must have shape (3,), got (2,)`.
 
 ```python

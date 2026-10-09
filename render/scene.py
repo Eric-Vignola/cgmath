@@ -1484,10 +1484,11 @@ class Object(TransformData):
         Raises:
             RuntimeError: If the texture is a path and PIL is not available.
         """
+        # the texture is saved as its property, "texture"
         data = super().to_dict()
         if isinstance(self._texture, str):
-            data["_texture"] = _load_texture_path_to_uint8(self._texture)
-            data.setdefault(DTYPES_KEY, {})["_texture"] = "uint8"
+            data["texture"] = _load_texture_path_to_uint8(self._texture)
+            data.setdefault(DTYPES_KEY, {})["texture"] = "uint8"
         return data
 
 

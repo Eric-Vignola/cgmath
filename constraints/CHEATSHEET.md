@@ -75,7 +75,7 @@ BACK  = [4, 5, 6, 7]  # -Z face
 | `translate` | property | `(M, 3)` | `matrix[:, 3, :3]` |
 | `rotate` | property | `(M, 3)` | euler **radians**, XYZ |
 | `scale` | property | `(M, 3)` | uniform, all three components equal |
-| `scale_offset` | property | `bool` | default `True`, saved as the field `_scale_offset`; setting it re-solves once something is attached |
+| `scale_offset` | property | `bool` | default `True`, kept in the field `_scale_offset` and saved as `scale_offset`; setting it re-solves once something is attached |
 
 ```python
 p = ProcrustesData(CUBE_POINTS)
@@ -534,7 +534,9 @@ through dicts, bytes and files. Cached results and the deformed cloud
 are **not** serialized — re-`update()` after loading.
 
 `to_dict()` names the class under `"__class__"` and leaves out a field
-equal to its default, so `_scale_offset` appears only when it is `False`.
+equal to its default, so `scale_offset` appears only when it is `False`. It
+is saved under the property's name; a tree naming the field, `_scale_offset`,
+still loads.
 
 ```python
 import os
@@ -550,7 +552,7 @@ print(np.allclose(restored.matrix, solve.matrix))
 
 no_scale = solve.copy()
 no_scale.scale_offset = False
-print(sorted(no_scale.to_dict()))  # ['__class__', '_scale_offset', 'clusters', 'points', 'transforms']
+print(sorted(no_scale.to_dict()))  # ['__class__', 'clusters', 'points', 'scale_offset', 'transforms']
 print(ProcrustesData.from_dict(no_scale.to_dict()).scale_offset)  # False
 ```
 

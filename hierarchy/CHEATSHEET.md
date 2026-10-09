@@ -261,11 +261,19 @@ joint.to_attributes()
 assert joint.to_attributes()["jointOrient"] == [0.0, 30.0, 0.0]
 ```
 
-Pass your own mapping to rename the keys.
+Pass your own mapping to rename the keys. It names a channel as a saved
+file does, by its property, `"translate"`; the private field's own name,
+`"_translate"`, works too, and a mapping holding both raises `ValueError`.
+On an `SDFSphere` or `SDFCylinder` the two spellings of a radius differ:
+`"radius"` is the primitive's radius, as its file saves it, and only
+`"_radius"` names the joint radius. On a rig that mixes them with other
+nodes, where `"radius"` is the joint radius too, name the primitive's radius
+`"_sdf_radius"`.
 
 ```python
-joint.to_attributes({"_translate": "t", "_rotate": "r"})
+joint.to_attributes({"translate": "t", "rotate": "r"})
 # {'r': [0.0, 0.0, 0.0], 't': [0.0, 0.0, 0.0]}
+assert joint.to_attributes({"_translate": "t"}) == joint.to_attributes({"translate": "t"})
 ```
 
 ---
@@ -1715,7 +1723,11 @@ assert TransformData.from_dict(rig["hip"].to_dict()).name == "hip"
 pkl, npz and json all save the one tree `to_dict` returns. A list's tree
 is `{"__class__": ..., "__items__": [...]}`, its nodes' trees in order (so
 duplicate names are safe). A node's tree holds its class and only the fields that
-differ from their default; a field left out loads back as the default.
+differ from their default; a field left out loads back as the default. A
+channel is saved under its property's name, `translate`, though the node
+keeps it in the private field `_translate`. A load takes either name, so a
+file that names `_translate` still loads; one naming both raises
+`ValueError`.
 
 ```python
 tree = rig.to_dict()
@@ -1723,17 +1735,18 @@ tree["__class__"]                               # 'cgmath.hierarchy.hierarchy.Hi
 sorted(tree["__items__"][0])                    # root: everything else is default
 # ['__class__', 'name', 'node_type', 'uuid']
 sorted(tree["__items__"][1])
-# ['__class__', '_translate', 'name', 'node_type', 'parent_node', 'uuid']
+# ['__class__', 'name', 'node_type', 'parent_node', 'translate', 'uuid']
 ```
 
-A `ClipData` saves its `LIST_FIELDS` beside the items: `_start_frame`,
-`_fps`, `_frame` (the loaded frame, which a load scrubs back to) and
-`_blocks`, one `(F, N, 3)` array per framed channel.
+A `ClipData` saves its timebase beside the items, named as its properties:
+`start_frame`, `fps`, `frame` (the loaded frame, which a load scrubs back
+to), and `blocks`, one `(F, N, 3)` array per framed channel, each keyed by
+the channel's property.
 
 ```python
 sorted(clip.to_dict())
-# ['__class__', '__items__', '_blocks', '_fps', '_frame', '_start_frame']
-clip.to_dict()["_blocks"]["_translate"].shape   # (4, 3, 3)
+# ['__class__', '__items__', 'blocks', 'fps', 'frame', 'start_frame']
+clip.to_dict()["blocks"]["translate"].shape     # (4, 3, 3)
 ```
 
 `copy()` is deep and owning; `==` compares values, and on a clip it also

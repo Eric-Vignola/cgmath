@@ -125,16 +125,18 @@ class TestExamplesFillEveryField(unittest.TestCase):
                 self.assertFalse(_same(getattr(built, name), getattr(default, name)))
 
     def test_every_field_is_saved(self):
-        """a field equal to its default is left out of the tree"""
+        """a field equal to its default is left out of the tree, where a field
+        behind a property of its own name is saved as the property"""
         for cls, builder in EXAMPLES.items():
             if cls is Scene:
                 continue
-            obj  = builder()
-            tree = obj.to_dict()
+            obj   = builder()
+            tree  = obj.to_dict()
+            saved = cls._saved_names()[0]
             for field in fields(obj):
                 if field.name not in cls.TRANSIENT_FIELDS:
                     with self.subTest(cls=cls.__name__, field=field.name):
-                        self.assertIn(field.name, tree)
+                        self.assertIn(saved.get(field.name, field.name), tree)
 
 
 if __name__ == "__main__":

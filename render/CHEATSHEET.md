@@ -409,11 +409,13 @@ preview.imshow()
 The mesh, UVs and skin nest as their own data, and a texture array keeps
 its dtype. A texture path is saved as its uint8 pixels and loads back as
 that array, not as the path. Render caches (the frame, the loaded
-texture, the baked wireframe) are not saved.
+texture, the baked wireframe) are not saved. Each setting is saved under
+its property's name, `mesh`, `base_color`, though the Object keeps it in a
+private field, `_mesh`; a tree naming the field still loads.
 
 ```python
 payload = cube.to_dict()
-print(payload["__class__"], payload["_mesh"]["__class__"])
+print(payload["__class__"], payload["mesh"]["__class__"])
 clone = Object.from_dict(payload)
 print(clone.name, clone.mesh.points.shape, clone.texture.dtype)
 

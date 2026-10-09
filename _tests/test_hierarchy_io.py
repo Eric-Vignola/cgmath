@@ -241,12 +241,12 @@ class TestTransformChannels(unittest.TestCase):
     def test_a_file_of_whole_numbers_still_loads_floats(self):
         # a json channel written as [0, 5, 0] used to load as an int64 array,
         # and the in place write that followed truncated 2.75 to 2
-        tree               = TransformData("a").to_dict()
-        tree["_translate"] = [0, 5, 0]
-        tree["_scale"]     = [1, 2, 1]
+        tree              = TransformData("a").to_dict()
+        tree["translate"] = [0, 5, 0]
+        tree["scale"]     = [1, 2, 1]
 
-        node               = TransformData.from_dict(tree)
-        node.translate_y   = 2.75
+        node              = TransformData.from_dict(tree)
+        node.translate_y  = 2.75
 
         self.assertEqual(node._translate.dtype, np.float64)
         self.assertEqual(node._scale.dtype,     np.float64)
@@ -262,8 +262,8 @@ class TestTransformChannels(unittest.TestCase):
         with self.assertRaises(ValueError):
             node._rotate = np.zeros(4)
 
-        tree            = node.to_dict()
-        tree["_rotate"] = [1.0, 2.0]
+        tree           = node.to_dict()
+        tree["rotate"] = [1.0, 2.0]
         with self.assertRaises(ValueError):
             TransformData.from_dict(tree)
 

@@ -415,6 +415,10 @@ class SDFSphere(TransformData):
     # under the radius property; TransformData's _radius is the joint radius
     _sdf_radius: float = 1.0
 
+    # a file names it as the property, "radius"; the joint radius, which no
+    # property here reads, keeps its own name
+    SAVED_NAMES = {"_sdf_radius": "radius"}
+
     # the DMCField the primitive was added to: a runtime link, never saved
     _field = None
 
@@ -593,6 +597,10 @@ class SDFCylinder(TransformData):
     _sdf_radius: float = 0.5
     _height:     float = 1.0
     _axis:       int = 1
+
+    # a file names them as the properties, "radius", "height" and "axis"; the
+    # joint radius, which no property here reads, keeps its own name
+    SAVED_NAMES = {"_sdf_radius": "radius"}
 
     # the DMCField the primitive was added to: a runtime link, never saved
     _field = None

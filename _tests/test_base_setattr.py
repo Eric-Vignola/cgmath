@@ -250,7 +250,7 @@ class TestDataStrictSetattr(unittest.TestCase):
         obj._cache = "ignored"
         data       = obj.to_dict()
         self.assertIn("name", data)
-        self.assertIn("_value", data)
+        self.assertIn("value", data)  # _value, saved as its property
         self.assertNotIn("_cache", data)
 
     def test_reset_cached_data_does_not_raise(self):

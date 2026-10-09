@@ -330,10 +330,10 @@ class TestClipFiles(unittest.TestCase):
         path = self.clip.save(os.path.join(self.tmp.name, "ragged.json"))
         with open(path, encoding="utf-8") as f:
             tree = std_json.load(f)
-        tree["_blocks"]["_translate"][0][0] = [0.0, 0.0]
+        tree["blocks"]["translate"][0][0] = [0.0, 0.0]
         with open(path, "w", encoding="utf-8") as f:
             std_json.dump(tree, f)
-        with self.assertRaisesRegex(ValueError, "ClipData block _translate must have shape"):
+        with self.assertRaisesRegex(ValueError, "ClipData block translate must have shape"):
             ClipData.load(path)
 
     def test_a_loaded_clip_writes_through_to_its_blocks(self):
@@ -379,24 +379,25 @@ class TestClipFiles(unittest.TestCase):
                 self.assertEqual(loaded, self.clip)
 
     def test_a_block_of_the_wrong_shape_is_refused(self):
+        # each error names the block as the file does
         bad = {
-            "a channel short": ("_scale", np.ones((3, 4, 2))),
-            "a node short":    ("_rotate", np.ones((3, 3, 3))),
-            "no frames":       ("_rotate", np.ones((0, 4, 3))),
-            "a frame short":   ("_scale", np.ones((2, 4, 3))),
-            "an unknown name": ("_shear", np.ones((3, 4, 3))),
+            "a channel short": ("scale", np.ones((3, 4, 2)), "block scale must have shape"),
+            "a node short":    ("rotate", np.ones((3, 3, 3)), "block rotate must have shape"),
+            "no frames":       ("rotate", np.ones((0, 4, 3)), "block rotate must have shape"),
+            "a frame short":   ("scale", np.ones((2, 4, 3)), "different frame counts"),
+            "an unknown name": ("shear", np.ones((3, 4, 3)), "no framed channel 'shear'"),
         }
-        for label, (channel, block) in bad.items():
+        for label, (channel, block, message) in bad.items():
             with self.subTest(label):
-                tree                     = self.clip.to_dict()
-                tree["_blocks"]          = dict(tree["_blocks"])
-                tree["_blocks"][channel] = block
-                with self.assertRaises(ValueError):
+                tree                    = self.clip.to_dict()
+                tree["blocks"]          = dict(tree["blocks"])
+                tree["blocks"][channel] = block
+                with self.assertRaisesRegex(ValueError, message):
                     ClipData.from_dict(tree)
 
-        tree            = self.clip.to_dict()
-        tree["_blocks"] = {"_scale": tree["_blocks"]["_scale"]}
-        with self.assertRaises(ValueError):
+        tree           = self.clip.to_dict()
+        tree["blocks"] = {"scale": tree["blocks"]["scale"]}
+        with self.assertRaisesRegex(ValueError, r"missing the blocks \['joint_orient', 'rotate'"):
             ClipData.from_dict(tree)
 
     def test_equality_includes_the_loaded_frame(self):
