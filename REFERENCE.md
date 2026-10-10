@@ -523,7 +523,7 @@ Functions:
 generate_uuid() -> 'str'
     generates a new unique uuid
 load(filename: 'str', mode: 'Optional[str]' = None) -> "'HierarchyData'"
-    The file's hierarchy: ``HierarchyData.load()``, which picks the reader
+    Whatever hierarchy the file holds, read as ``mode`` says or as the file
 load_fbx(filename: 'str', scale_factor: 'float' = 1.0) -> "'HierarchyData'"
     The fbx's node hierarchy, names as in the file: ``HierarchyData.load_fbx()``.
 load_glb(filename: 'str', scale_factor: 'float' = 100.0, pose_frame: 'Optional[int]' = None) -> "'HierarchyData'"
@@ -614,15 +614,19 @@ Methods:
 copy(self)
     returns a deep copy of self: the object a save and load gives back
 classmethod from_bytes(cls, data: bytes) -> Any
+    the object npz bytes hold, read as :meth:`from_dict` reads a tree
 classmethod from_dict(cls, data: dict) -> Any
-    The object a tree describes: the class it names, which must be this
+    The object a tree describes, which must be this class: a tree naming
 classmethod info(cls) -> str
     Returns this class's docstring as a string.
 classmethod load(cls, filename: str, mode: Optional[str] = None) -> Any
     Loads the data from a file: ``mode``, or the type the file reads as
 classmethod load_json(cls, filename: str) -> Any
+    the object a json file holds, read as :meth:`load` reads one
 classmethod load_npz(cls, filename: str) -> Any
+    the object an npz file holds, read as :meth:`load` reads one
 classmethod load_pickle(cls, filename: str) -> Any
+    the object a pickle holds, read as :meth:`load` reads one
 match(self, *args, exact: bool = True) -> bool
     returns True if name matches any arguments
 reset_cached_data(self)
@@ -667,8 +671,9 @@ copy(self)
 extend(self, iterable)
     S.extend(iterable) -- extend sequence by appending elements from the iterable
 classmethod from_bytes(cls, data: bytes) -> Any
+    the list npz bytes hold, read as :meth:`from_dict` reads a tree
 classmethod from_dict(cls, data: dict) -> Any
-    The list a tree describes: the class it names, which must be this one
+    The list a tree describes, which must be this class: a tree naming
 get(self, name: str, default: Any = None) -> Any
     the first item named ``name``, or ``default``
 index(self, value, start=0, stop=None)
@@ -678,8 +683,11 @@ insert(self, index, value)
 classmethod load(cls, filename: str, mode: Optional[str] = None) -> Any
     Loads the data from a file: ``mode``, or the type the file reads as
 classmethod load_json(cls, filename: str) -> Any
+    the list a json file holds, read as :meth:`load` reads one
 classmethod load_npz(cls, filename: str) -> Any
+    the list an npz file holds, read as :meth:`load` reads one
 classmethod load_pickle(cls, filename: str) -> Any
+    the list a pickle holds, read as :meth:`load` reads one
 match(self, *args, exclude: bool = False, exact: bool = True) -> Any
     returns a DataList object with matching names
 pop(self, index=-1)
@@ -1569,7 +1577,7 @@ Functions:
 
 ```text
 load(filename: 'str', mode: 'Optional[str]' = None) -> 'SkinList'
-    The file's skins: ``SkinList.load()``, which picks the reader from
+    The file's skins, read as ``mode`` says or as the file reads (fbx, glb,
 load_fbx(filename: 'str') -> 'SkinList'
     Every skinned mesh of an fbx, names as in the file: ``SkinList.load_fbx()``.
 load_glb(filename: 'str') -> 'SkinList'

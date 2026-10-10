@@ -704,8 +704,9 @@ and meshes read from the same file.
 
 `cgmath.hierarchy.load` / `load_fbx` / `load_glb` read a file's hierarchy
 (names as in the file), like the other modules' loaders. An fbx or glb
-gives a `HierarchyData`; a cgmath file gives the class it names, so a
-saved clip comes back a `ClipData`.
+gives a `HierarchyData`; a cgmath file gives whatever hierarchy it holds,
+so a saved clip comes back a `ClipData`, where `HierarchyData.load`
+refuses one.
 
 ### User attributes
 
@@ -774,7 +775,7 @@ detached = rig[1:].copy()
 assert isinstance(detached, HierarchyData)
 assert detached[0].get_parent() is None      # 'root' was left behind
 
-saved = TransformList.load(rig[1:].save(os.path.join(WORKDIR, "view.json")))
+saved = HierarchyData.load(rig[1:].save(os.path.join(WORKDIR, "view.json")))
 assert type(saved) is HierarchyData and saved[0].get_parent() is None
 ```
 
@@ -1826,18 +1827,29 @@ loaded                = ClipData.load(path)
 assert loaded == clip and loaded.frame_count == 4 and loaded.fps == 30.0
 ```
 
-A file names its class, and `load` returns that class. It must be the
-class `load` is called on or derive from it; any other raises `TypeError`.
-A file saved by an older cgmath names no class: it raises
-`LegacyFileError` (a `ValueError`) and no longer loads.
+A file names its class, and a class's `load` gives back that class: a
+file holding any other raises `TypeError`, a subclass too, so
+`HierarchyData.load` refuses a clip. `cgmath.hierarchy.load` gives back
+whatever hierarchy the file holds, and `Data.load` whatever class. A file
+saved by an older cgmath names no class: it raises `LegacyFileError` (a
+`ValueError`) and no longer loads.
 
 ```python
-assert type(HierarchyData.load(path)) is ClipData   # the file says clip
+from cgmath import hierarchy
+from cgmath.geometry import Data
+
+assert type(hierarchy.load(path)) is ClipData       # the file says clip
+assert type(Data.load(path)) is ClipData
+
+try:
+    HierarchyData.load(path)
+except TypeError as error:
+    print(error)                                # .../clip.json holds a ClipData; load it with ClipData.load() or Data.load()
 
 try:
     ClipData.load(os.path.join(WORKDIR, "rig.json"))
 except TypeError as error:
-    print(error)                                # the data holds a HierarchyData, not a ClipData
+    print(error)                                # .../rig.json holds a HierarchyData; load it with HierarchyData.load() or Data.load()
 ```
 
 The explicit pairs work too, on both the node and the list.

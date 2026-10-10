@@ -17,11 +17,15 @@ import json
 import os
 import pickle
 import pkgutil
+import re
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
 import zipfile
 from dataclasses import dataclass, fields
+from unittest import mock
 
 import numpy as np
 import cgmath
@@ -33,15 +37,20 @@ from cgmath.geometry._base import (
     CLASS_KEY,
     Data,
     DataList,
+    dict_to_bytes,
     dict_to_zip,
     DTYPES_KEY,
     ID_KEY,
     ITEMS_KEY,
     SHAPES_KEY,
 )
+from cgmath import hierarchy
+from cgmath.geometry import skin_weights
+from cgmath.geometry.mesh import MeshData, MeshList, UVData
 from cgmath.geometry.sdf import SDFCylinder, SDFSphere
+from cgmath.geometry.skin_weights import SkinData, SkinList
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData, generate_uuid
-from cgmath.render.scene import Object
+from cgmath.render.scene import Camera, Light, Object, Scene
 from cgmath.utils import pretty_json
 
 # the builder modules: each holds EXAMPLES = {class: builder}, and may hold
@@ -188,7 +197,8 @@ class TestEveryClass(unittest.TestCase):
                     path = os.path.join(self.tmp, f"{cls.__name__}.{ext}")
                     obj.save(path)
                     for mode in (ext, None):  # the format named, and sniffed
-                        back = cls.load(path, mode=mode)
+                        # through the class the file holds: a view's holds a HierarchyData
+                        back = type(reference).load(path, mode=mode)
                         assert_same(self, reference, back, f"{cls.__name__}.{ext}")
                     loads[ext] = back
 
@@ -226,6 +236,208 @@ class TestEveryClass(unittest.TestCase):
                 self.assertFalse(numbered(builder().to_dict()))
 
 
+class TestALoaderGivesBackItsClass(unittest.TestCase):
+    """
+    A class's loader gives back that class, never a subclass: a UVData's
+    points are (N, 2), where a MeshData's are (N, 3). Data's own loaders,
+    and a module's load(), give back whatever the file holds; what an
+    object holds, a list's items, may still derive from what declares it.
+    """
+
+    # (the class asked for, the subclass a file holds)
+    CASES = ((MeshData, UVData), (HierarchyData, ClipData), (TransformData, Object))
+
+    @classmethod
+    def setUpClass(cls):
+        cls.builders = examples()[0]
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+
+    def saved(self, cls):
+        """the example of ``cls``, and its file in each format"""
+        obj   = self.builders[cls]()
+        paths = {ext: obj.save(os.path.join(self.tmp, f"{cls.__name__}.{ext}")) for ext in FORMATS}
+        return obj, paths
+
+    def test_a_file_holding_a_subclass_is_refused(self):
+        for asked, held in self.CASES:
+            readers = {"pkl": asked.load_pickle, "npz": asked.load_npz, "json": asked.load_json}
+            for ext, path in self.saved(held)[1].items():
+                message = (
+                    f"^{re.escape(path)} holds a {held.__name__}; "
+                    rf"load it with {held.__name__}\.load\(\) or Data\.load\(\)$"
+                )
+                for load in (asked.load, readers[ext]):
+                    with self.subTest(asked=asked.__name__, ext=ext, load=load.__name__):
+                        with self.assertRaisesRegex(TypeError, message):
+                            load(path)
+
+    def test_a_tree_holding_a_subclass_is_refused(self):
+        for asked, held in self.CASES:
+            obj = self.builders[held]()
+            for method, value in (("from_dict", obj.to_dict()), ("from_bytes", obj.to_bytes())):
+                with self.subTest(asked=asked.__name__, method=method):
+                    message = (
+                        f"^the data holds a {held.__name__}; load it with "
+                        rf"{held.__name__}\.{method}\(\) or Data\.{method}\(\)$"
+                    )
+                    with self.assertRaisesRegex(TypeError, message):
+                        getattr(asked, method)(value)
+
+    def test_data_loads_whatever_a_file_holds(self):
+        for _, held in self.CASES:
+            obj, paths = self.saved(held)
+            for ext, path in paths.items():
+                with self.subTest(held=held.__name__, ext=ext):
+                    assert_same(self, obj, held.load(path))
+                    assert_same(self, obj, Data.load(path))
+            with self.subTest(held=held.__name__, ext="tree"):
+                assert_same(self, obj, Data.from_dict(obj.to_dict()))
+                assert_same(self, obj, Data.from_bytes(obj.to_bytes()))
+
+    def test_datalist_loads_whatever_list_a_file_holds(self):
+        clip, paths = self.saved(ClipData)
+        for ext, path in paths.items():
+            with self.subTest(ext=ext):
+                assert_same(self, clip, DataList.load(path))
+
+        path = self.saved(UVData)[1]["json"]
+        with self.assertRaisesRegex(TypeError, r"holds a UVData; load it with UVData\.load\(\) or Data\.load\(\)$"):
+            DataList.load(path)
+
+    def test_a_list_still_loads_items_deriving_from_its_item_class(self):
+        meshes, paths = self.saved(MeshList)
+        self.assertIn(UVData, [type(mesh) for mesh in meshes])
+        for ext, path in paths.items():
+            with self.subTest(ext=ext):
+                assert_same(self, meshes, MeshList.load(path))
+
+    def test_a_scene_still_rebuilds_its_objects_cameras_and_lights(self):
+        scene, paths = self.saved(Scene)
+        kinds = {node.name: type(node) for node in scene}
+        self.assertEqual({Object, Camera, Light, TransformData}, set(kinds.values()))
+        for ext, path in paths.items():
+            for load in (Scene.load, Data.load):
+                with self.subTest(ext=ext, load=load.__self__.__name__):
+                    back = load(path)
+                    self.assertEqual({node.name: type(node) for node in back}, kinds)
+                    assert_same(self, scene, back)
+        assert_same(self, scene, Scene.from_dict(scene.to_dict()))
+
+    def test_hierarchy_load_gives_back_whatever_hierarchy_a_file_holds(self):
+        for cls in (ClipData, HierarchyData, Scene):
+            obj, paths = self.saved(cls)
+            for ext, path in paths.items():
+                for mode in (ext, None):
+                    with self.subTest(cls=cls.__name__, ext=ext, mode=mode):
+                        assert_same(self, obj, hierarchy.load(path, mode))
+
+        # a lone node is no hierarchy
+        for ext, path in self.saved(TransformData)[1].items():
+            with self.subTest(cls="TransformData", ext=ext):
+                with self.assertRaisesRegex(TypeError, r"holds a TransformData; load it with TransformData\.load\(\)"):
+                    hierarchy.load(path)
+
+    def test_skin_weights_load_gives_back_whatever_skin_list_a_file_holds(self):
+        skins, paths = self.saved(SkinList)
+        for ext, path in paths.items():
+            with self.subTest(ext=ext):
+                assert_same(self, skins, skin_weights.load(path))
+
+        path = self.saved(SkinData)[1]["npz"]
+        with self.assertRaisesRegex(TypeError, r"holds a SkinData; load it with SkinData\.load\(\)"):
+            skin_weights.load(path)
+
+    def test_a_tree_naming_no_class_is_read_as_the_class_asked_for(self):
+        mesh = self.builders[MeshData]()
+        tree = mesh.to_dict()
+        del tree[CLASS_KEY]
+        assert_same(self, mesh, MeshData.from_dict(tree))
+
+    def test_a_tree_naming_its_class_by_a_package_s_name_is_that_class(self):
+        # cgmath.geometry and cgmath.hierarchy give their modules' classes
+        tags = {MeshData: "cgmath.geometry.MeshData", HierarchyData: "cgmath.hierarchy.HierarchyData"}
+        for cls, tag in tags.items():
+            obj  = self.builders[cls]()
+            tree = dict(obj.to_dict(), **{CLASS_KEY: tag})
+            for load in (cls.from_dict, Data.from_dict):
+                with self.subTest(tag=tag, load=f"{load.__self__.__name__}.from_dict"):
+                    assert_same(self, obj, load(tree))
+            with self.subTest(tag=tag, load=f"{cls.__name__}.from_bytes"):
+                assert_same(self, obj, cls.from_bytes(dict_to_bytes(tree)))
+
+            for ext in FORMATS:
+                path = os.path.join(self.tmp, f"{cls.__name__}.{ext}")
+                _write_tree(cls, tree, path)
+                for load in (cls.load, Data.load):
+                    with self.subTest(tag=tag, ext=ext, load=load.__self__.__name__):
+                        assert_same(self, obj, load(path))
+
+        # another class under a package's name is still another class
+        uv   = self.builders[UVData]()
+        tree = dict(uv.to_dict(), **{CLASS_KEY: "cgmath.geometry.UVData"})
+        assert_same(self, uv, Data.from_dict(tree))
+        with self.assertRaisesRegex(TypeError, r"^the data holds a UVData; load it with UVData\.from_dict\(\)"):
+            MeshData.from_dict(tree)
+        message = r"holds a UVData; load it with UVData\.load\(\) or Data\.load\(\)$"
+        for ext in FORMATS:
+            path = os.path.join(self.tmp, f"UVData.{ext}")
+            _write_tree(UVData, tree, path)
+            with self.subTest(tag="cgmath.geometry.UVData", ext=ext):
+                with self.assertRaisesRegex(TypeError, message):
+                    MeshData.load(path)
+
+    def test_a_script_s_class_loads_where_its_module_is_imported(self):
+        # a class a script defines saves as "__main__.Pin"; a script importing
+        # it from its module, "from pins import Pin", reads those files back
+        script = os.path.join(self.tmp, "pins.py")
+        with open(script, "w") as f:
+            f.write(_PIN_SCRIPT)
+        # the child sees what this process sees: cgmath, and a runner's venv
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(x for x in sys.path if x))
+        out = subprocess.run(
+            [sys.executable, script, self.tmp], capture_output=True, text=True, env=env, timeout=300
+        )
+        self.assertEqual(out.returncode, 0, out.stderr[-2000:])
+
+        with mock.patch.object(sys.modules["__main__"], "Pin", _Pin, create=True):
+            for ext in FORMATS:
+                path = os.path.join(self.tmp, f"pin.{ext}")
+                for load in (_Pin.load, Data.load):
+                    with self.subTest(ext=ext, load=load.__self__.__name__):
+                        back = load(path)
+                        self.assertIs(type(back), _Pin)
+                        self.assertEqual(back.count, 3)
+
+
+@dataclass(repr=False, eq=False)
+class _Pin(Data):
+    """the class _PIN_SCRIPT defines, as its module would"""
+
+    count: int = 0
+
+
+_PIN_SCRIPT = '''
+import os
+import sys
+from dataclasses import dataclass
+
+from cgmath.geometry import Data
+
+
+@dataclass(repr=False, eq=False)
+class Pin(Data):
+    count: int = 0
+
+
+for ext in ("pkl", "npz", "json"):
+    Pin(count=3).save(os.path.join(sys.argv[1], "pin." + ext))
+'''
+
+
 def _private_spelling(value):
     """
     A tree as cgmath wrote it before a file named fields as their
@@ -261,6 +473,19 @@ class _SavedTree:
 
     def __reduce__(self):
         return (_unpickle, (self.cls, _pickled(self.tree)))
+
+
+def _write_tree(cls, tree: dict, path: str) -> None:
+    """``tree`` as a file, the way cgmath writes one in the format ``path`` names"""
+    ext = os.path.splitext(path)[1]
+    if ext == ".npz":
+        dict_to_zip(tree, path)
+    elif ext == ".json":
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(pretty_json(_json_tree(tree)))
+    else:
+        with open(path, "wb") as f:
+            pickle.dump(_SavedTree(cls, tree), f)
 
 
 class _Labelled(DataList):
@@ -447,18 +672,6 @@ class TestPublicSavedNames(unittest.TestCase):
                         self.assertNotIn("_" + public, saved)
                     assert_same(self, obj, cls.load(path), f"{name}.{ext}")
 
-    def write_old_file(self, cls, tree: dict, path: str) -> None:
-        """``tree`` as a file, the way cgmath writes one in the format ``path`` names"""
-        ext = os.path.splitext(path)[1]
-        if ext == ".npz":
-            dict_to_zip(tree, path)
-        elif ext == ".json":
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(pretty_json(_json_tree(tree)))
-        else:
-            with open(path, "wb") as f:
-                pickle.dump(_SavedTree(cls, tree), f)
-
     def test_a_file_naming_the_private_fields_still_loads(self):
         # as cgmath wrote every file before: "_translate", "_blocks"
         for name, (cls, builder) in sorted(self.listed.items()):
@@ -472,7 +685,7 @@ class TestPublicSavedNames(unittest.TestCase):
             for ext in FORMATS:
                 with self.subTest(cls=name, file=ext):
                     path = os.path.join(self.tmp, f"{name}_old.{ext}")
-                    self.write_old_file(cls, old, path)
+                    _write_tree(cls, old, path)
                     assert_same(self, obj, cls.load(path), f"{name} from {ext}")
 
     @staticmethod
@@ -498,7 +711,7 @@ class TestPublicSavedNames(unittest.TestCase):
                 assert_same(self, obj, Object.load(path), f"flat.{ext}")
             with self.subTest(ext=ext, file="old"):
                 path = os.path.join(self.tmp, f"flat_old.{ext}")
-                self.write_old_file(Object, old, path)
+                _write_tree(Object, old, path)
                 assert_same(self, obj, Object.load(path), f"flat_old.{ext}")
 
     def test_a_tree_naming_a_field_both_ways_is_refused(self):

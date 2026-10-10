@@ -18,7 +18,7 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 
 import numpy as np
 from cgmath.formats._fbx_io import open_fbx
-from cgmath.geometry._base import Array, Data, DataList
+from cgmath.geometry._base import Array, Data, DataList, _load_derived
 from cgmath.geometry.utils import (
     balance_center_weights,
     blur,
@@ -1200,10 +1200,12 @@ def _read_skins_glb(filename: str, bind_matrices: bool = False) -> list:
 
 def load(filename: str, mode: Optional[str] = None) -> SkinList:
     """
-    The file's skins: ``SkinList.load()``, which picks the reader from
-    ``mode`` or from the file (fbx, glb, or cgmath's own npz / json / pickle).
+    The file's skins, read as ``mode`` says or as the file reads (fbx, glb,
+    or cgmath's own npz / json / pickle). An fbx or a glb gives a
+    :class:`SkinList`. A cgmath file gives whatever list it holds, a
+    SkinList or a class deriving from it; any other class raises TypeError.
     """
-    return SkinList.load(filename, mode)
+    return _load_derived(SkinList, filename, mode)
 
 
 def load_fbx(filename: str) -> SkinList:

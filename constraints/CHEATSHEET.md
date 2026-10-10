@@ -576,15 +576,16 @@ for ext in ("npz", "json", "pkl"):
     print(ext, back.valid, back.points.shape, back.transforms.shape, back.clusters.dtype)
 ```
 
-`load()` returns the class the file names. Loading it through another
-class raises `TypeError`; a file saved by an older cgmath raises
-`LegacyFileError`.
+A class's `load()` gives back that class, the one the file names.
+Loading the file through any other class, a subclass too, raises
+`TypeError` naming the class to use; `Data.load()` gives back whatever a
+file holds. A file saved by an older cgmath raises `LegacyFileError`.
 
 ```python
 try:
     MeshData.load(os.path.join(tmp, "rivet.npz"))
 except TypeError as err:
-    print(err)  # the data holds a ProcrustesData, not a MeshData
+    print(err)  # .../rivet.npz holds a ProcrustesData; load it with ProcrustesData.load() or Data.load()
 ```
 
 The explicit per-format methods work too.

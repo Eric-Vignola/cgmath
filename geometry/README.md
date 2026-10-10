@@ -101,9 +101,23 @@ left out and loads back as a fresh copy of the default. A `DataList` saves
 `"__class__"`, `"__items__"` (one tree per item) and its `LIST_FIELDS`.
 `copy()` is the same round trip, in memory.
 
-- **A file loads as the class it names.** `MeshData.load()` on a saved `UVData`
-  gives a `UVData`. The named class must be the one called or derive from it;
-  any other raises `TypeError`.
+- **A class's loader gives back that class.** `load`, `load_json`, `load_npz`,
+  `load_pickle`, `from_dict` and `from_bytes` called on a class need the file
+  or tree to hold exactly that class, under any name it is reached by: a
+  script's `"__main__.PinData"` loads through the `PinData` another script
+  imports from its module, and `"cgmath.geometry.MeshData"` is `MeshData`. Any
+  other raises `TypeError`, a subclass too: `MeshData.load()` on a saved
+  `UVData`, whose points are `(N, 2)` where a mesh's are `(N, 3)`, raises
+  "*file* holds a UVData; load it with UVData.load() or Data.load()". `Data`'s
+  own loaders give back whatever class the file holds, and `DataList`'s any
+  list. A module's `load` gives back whatever its file holds:
+  `cgmath.hierarchy.load` any `HierarchyData` or class deriving from it, a
+  `ClipData` for a saved clip; `skin_weights.load` any `SkinList`. Only the
+  whole file is held to its class: what it holds, a field's object or a list's
+  items, comes back as the classes they name, which may derive from the one
+  declared (a `MeshList`'s `UVData`, a `Scene`'s `Object`, `Camera` and
+  `Light` nodes). A tree built by hand, with no `"__class__"`, is read as the
+  class called.
 - **A field is saved under the name a caller sets it by.** A private field
   behind a public property of its own name is saved as the property:
   `UVData._resolution` as `resolution`, a node's `_translate` as `translate`,
@@ -470,7 +484,7 @@ or `name=`, except `MeshData.load_obj`, which merges every group into one mesh.
 
 | Entry point | Returns |
 |---|---|
-| `mesh.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | `list[(MeshData, UVList)]` |
+| `mesh.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | `list[(MeshData, UVList)]`, from assets only: a cgmath file loads through its class or `Data.load` |
 | `mesh.save_obj(path, data)` | writes that same list shape |
 | `MeshList.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | every mesh, a `MeshList` |
 | `MeshData.load_obj` / `load_glb` / `load_fbx`, `MeshData.save_obj` | one `MeshData` |
@@ -478,7 +492,7 @@ or `name=`, except `MeshData.load_obj`, which merges every group into one mesh.
 | `UVData.load_glb` / `load_fbx` | one `UVData` |
 | `skin_weights.load` / `load_fbx` / `load_glb`, `SkinList.load_*` | a `SkinList`, each skin named after its mesh |
 | `SkinData.load_fbx` / `load_glb` | one `SkinData` |
-| `cgmath.hierarchy.load` / `load_fbx` / `load_glb` | a `HierarchyData` from fbx and glb; a cgmath file loads as the class it names (a `ClipData` stays a clip) |
+| `cgmath.hierarchy.load` / `load_fbx` / `load_glb` | a `HierarchyData` from fbx and glb; a cgmath file gives whatever hierarchy it holds (a `ClipData` stays a clip) |
 | `from_prim` / `to_prim` on `MeshData`, `UVData`, `MapData`, `GeomSubsetData`, `MorphData`, `CompactSkinData` | USD |
 
 OBJ is pure python and always available. There is **no** `MeshData.load_usd`.

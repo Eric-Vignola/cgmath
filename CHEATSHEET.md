@@ -694,8 +694,9 @@ shares one persistence surface. The extension picks the writer; the file's
 first bytes pick the reader. All three formats hold the same tree,
 `to_dict()`: the class, then every field that differs from its default, each
 named as a caller sets it (a node's private `_translate` as `translate`; a
-load takes either name). A file loads as the class it names; one written by
-an older cgmath raises `LegacyFileError`.
+load takes either name). A class's loader gives back that class and refuses a
+file holding any other, a subclass too; `Data.load` gives back whatever a
+file holds. A file written by an older cgmath raises `LegacyFileError`.
 
 ```python
 cube.save(os.path.join(tmp, "cube.npz"))
@@ -718,13 +719,23 @@ except AttributeError as err:
 ```
 
 Rigs and clips save the same way, and add FBX of their own (section 23). A
-clip loads back as a clip, even through `HierarchyData.load`:
+clip loads back through `ClipData.load`, `Data.load` or
+`cgmath.hierarchy.load`, which gives back whatever hierarchy a file holds;
+`HierarchyData.load` refuses it:
 
 ```python
-clip.save(os.path.join(tmp, "clip.json"))
-reloaded = ClipData.load(os.path.join(tmp, "clip.json"))
+from cgmath import hierarchy
+from cgmath.geometry import Data
+
+path     = clip.save(os.path.join(tmp, "clip.json"))
+reloaded = ClipData.load(path)
 print(reloaded.name, len(reloaded.frames))
-print(type(HierarchyData.load(os.path.join(tmp, "clip.json"))).__name__)  # ClipData
+print(type(Data.load(path)).__name__, type(hierarchy.load(path)).__name__)  # ClipData ClipData
+
+try:
+    HierarchyData.load(path)
+except TypeError as err:
+    print(err)  # .../clip.json holds a ClipData; load it with ClipData.load() or Data.load()
 ```
 
 ---

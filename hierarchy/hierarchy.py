@@ -27,6 +27,7 @@ from cgmath.geometry._base import (
     _decode,
     _from_tagged,
     _holds_numbered,
+    _load_derived,
     _mask_to_indices,
     _reached_twice,
     _save_shares,
@@ -3971,8 +3972,11 @@ class TransformList(DataList):
     selection at once, and the pose algebra (:meth:`get_delta` /
     :meth:`add_delta`) is defined here so a delta can be taken over a
     selection. Because a delta has to own its nodes, ``get_delta`` returns a
-    :class:`HierarchyData` even when called on a view. So does loading a saved
-    or pickled view: it saves as its :meth:`copy`.
+    :class:`HierarchyData` even when called on a view. So does a saved or
+    pickled view: it saves as its :meth:`copy`, a :class:`HierarchyData`,
+    which ``pickle.loads``, ``HierarchyData.load()``, ``Data.load()`` or
+    ``cgmath.hierarchy.load()`` gives back; ``TransformList.load()`` refuses
+    its file.
     """
 
     DATA_LIST_CLASS = TransformData
@@ -10106,12 +10110,14 @@ class ClipData(HierarchyData):
 
 def load(filename: str, mode: Optional[str] = None) -> "HierarchyData":
     """
-    The file's hierarchy: ``HierarchyData.load()``, which picks the reader
-    from ``mode`` or from the file (fbx, glb, or cgmath's own npz / json /
-    pickle). A cgmath file loads as the class it names, a :class:`ClipData`
-    as a clip; an fbx or a glb gives the rig, a :class:`HierarchyData`.
+    Whatever hierarchy the file holds, read as ``mode`` says or as the file
+    reads (fbx, glb, or cgmath's own npz / json / pickle). An fbx or a glb
+    gives the rig, a :class:`HierarchyData`. A cgmath file gives the class
+    it holds, a :class:`HierarchyData` or one deriving from it: a saved
+    :class:`ClipData` comes back a clip, where ``HierarchyData.load()``
+    refuses one. Any other class, a lone node, raises TypeError.
     """
-    return HierarchyData.load(filename, mode)
+    return _load_derived(HierarchyData, filename, mode)
 
 
 def load_fbx(filename: str, scale_factor: float = 1.0) -> "HierarchyData":

@@ -65,15 +65,18 @@ class TestHierarchyFiles(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
-    def loaded(self, obj, name):
-        """``obj`` back from every file format, pickle and deepcopy"""
+    def loaded(self, obj, name, cls=None):
+        """
+        ``obj`` back from every file format, pickle and deepcopy; ``cls``,
+        the class the files hold, loads them, ``type(obj)`` unless given
+        """
         out = {
             "pickle":   pickle.loads(pickle.dumps(obj)),
             "deepcopy": copy.deepcopy(obj),
         }
         for mode in ("json", "npz", "pkl"):
             path      = obj.save(os.path.join(self.tmp.name, f"{name}.{mode}"))
-            out[mode] = type(obj).load(path)
+            out[mode] = (cls or type(obj)).load(path)
         return out
 
     def assertSameValue(self, a, b, where):
@@ -152,7 +155,7 @@ class TestHierarchyFiles(unittest.TestCase):
         # own nodes, a node whose parent it left out made a root
         source = rig()
         view   = source[1:]
-        for how, loaded in self.loaded(view, "view").items():
+        for how, loaded in self.loaded(view, "view", HierarchyData).items():
             with self.subTest(how):
                 self.assertIs(type(loaded), HierarchyData)
                 self.assertEqual(loaded.name, ["hip", "loc"])
@@ -161,6 +164,17 @@ class TestHierarchyFiles(unittest.TestCase):
                 self.assertIsNone(loaded["hip"].parent_uuid)
                 self.assertIs(loaded["loc"].get_parent(), loaded["hip"])
                 self.assertTrue(all(node._hierarchy is loaded for node in loaded))
+
+        # a file holds the hierarchy, which Data.load and hierarchy.load give
+        # back too, and TransformList's own load refuses
+        refused = r"holds a HierarchyData; load it with HierarchyData\.load\(\)"
+        for mode in ("json", "npz", "pkl"):
+            path = os.path.join(self.tmp.name, f"view.{mode}")
+            with self.subTest(mode=mode):
+                self.assertIs(type(Data.load(path)), HierarchyData)
+                self.assertIs(type(hierarchy.load(path)), HierarchyData)
+                with self.assertRaisesRegex(TypeError, refused):
+                    TransformList.load(path)
 
         # the view and its rig are left as they were
         self.assertIs(type(view), TransformList)

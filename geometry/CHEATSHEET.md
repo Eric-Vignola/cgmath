@@ -249,20 +249,26 @@ path = cube.save(os.path.join(tmp, "cube.dat"), mode="npz")
 assert MeshData.load(path) == cube
 ```
 
-A file loads as the class it names, which must be the class called or derive
-from it. A file without `"__class__"` was written by an older cgmath: it raises
+A class's loader gives back that class: a file holding any other raises
+`TypeError`, a subclass too, as a `UVData`'s points are `(N, 2)` where a
+`MeshData`'s are `(N, 3)`. `Data.load` gives back whatever the file holds. A
+file without `"__class__"` was written by an older cgmath: it raises
 `LegacyFileError` and no longer loads.
 
 ```python
 from cgmath.geometry import LegacyFileError
 
 path = cube_uv.save(os.path.join(tmp, "map1.npz"))
-print(type(MeshData.load(path)).__name__)  # UVData: a UVData is a MeshData
+try:
+    MeshData.load(path)
+except TypeError as err:
+    print(err)  # .../map1.npz holds a UVData; load it with UVData.load() or Data.load()
+print(type(Data.load(path)).__name__)  # UVData
 
 try:
     UVData.load(os.path.join(tmp, "cube.npz"))
 except TypeError as err:
-    print(err)  # the data holds a MeshData, not a UVData
+    print(err)  # .../cube.npz holds a MeshData; load it with MeshData.load() or Data.load()
 
 old = os.path.join(tmp, "old.json")
 with open(old, "w") as f:

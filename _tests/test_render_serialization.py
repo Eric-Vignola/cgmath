@@ -63,13 +63,16 @@ def _checker(n=8):
     return tex
 
 
-def _round_trip(data, suffix):
-    """``data`` saved as ``suffix`` and loaded back"""
+def _round_trip(data, suffix, cls=None):
+    """
+    ``data`` saved as ``suffix`` and loaded back by ``cls``, the class the
+    file holds, ``type(data)`` unless given
+    """
     handle, path = tempfile.mkstemp(suffix=suffix)
     os.close(handle)
     try:
         data.save(path)
-        return type(data).load(path)
+        return (cls or type(data)).load(path)
     finally:
         os.remove(path)
 
@@ -246,7 +249,7 @@ class TestSceneRoundTrip(RoundTripCase):
             scene[name].set_parent(group)
         view = scene[1:4]
 
-        loads             = {suffix: _round_trip(view, suffix) for suffix in FORMATS}
+        loads             = {suffix: _round_trip(view, suffix, HierarchyData) for suffix in FORMATS}
         loads["copy"]     = view.copy()
         loads["deepcopy"] = copy.deepcopy(view)
         for how, loaded in loads.items():

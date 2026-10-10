@@ -178,6 +178,41 @@ def _resolve_class(tag: Optional[str], expected=None):
     return found
 
 
+def _loaded_class(cls, tag, source: str, method: str, derived: bool = False):
+    """
+    The class ``cls.<method>()`` builds a whole tree naming ``tag`` as. A
+    class's loader gives back that class, never a subclass: ``MeshData``'s
+    refuses a ``UVData``, whose points are (N, 2), not (N, 3). Data's own
+    loaders give back whatever class the tree names, and DataList's any
+    list; with ``derived``, as a module's own load() asks, any class
+    deriving from ``cls``. A tree that names no class, one built by hand, is
+    read as ``cls``, and so is one naming ``cls`` under another name: a
+    script's ``__main__.Foo`` read by a script that imports ``Foo`` from its
+    module, or ``cgmath.geometry.MeshData``. Only the whole tree is held to
+    this: what it holds, a field's object or a list's items, may derive
+    from what declares it.
+
+    Raises
+    ------
+    TypeError
+        The tree names any other class; ``source`` names the file or data.
+    """
+    if tag is None or tag == _REF or tag == _class_tag(cls):
+        return cls
+
+    found = _resolve_class(tag)
+    asked = _class_tag(cls)
+    if _class_tag(found) == asked:
+        return cls  # this class, under another name: __main__'s, a package's
+    if asked == _class_tag(Data):
+        return found  # the factory: whatever the tree holds
+    if (derived or asked == _class_tag(DataList)) and _derives(found, cls):
+        return found
+
+    name = found.__name__
+    raise TypeError(f"{source} holds a {name}; load it with {name}.{method}() or Data.{method}()")
+
+
 # an object a tree reaches twice, a mesh two Objects share, is saved once: its
 # first tree carries ID_KEY, a number, and every later one is a reference to
 # that number, {"__class__": "~ref", "id": number}. A load builds the object
@@ -369,7 +404,11 @@ def _save_shares(obj) -> bool:
 
 
 def _load(data: dict, cls):
-    """the object a whole tree describes; its numbers are its own, whatever load is running"""
+    """
+    ``cls.from_dict()``: the object a whole tree describes, as the class
+    _loaded_class allows; its numbers are its own, whatever load is running.
+    """
+    cls   = _loaded_class(cls, data.get(CLASS_KEY), "the data", "from_dict")
     loads = _RUNNING.loads
     loads.append({})
     try:
@@ -508,8 +547,11 @@ def _pickled(value):
 
 
 def _unpickle(cls, tree: dict):
-    """unpickles a Data or DataList from its tree"""
-    return cls.from_dict(tree)
+    """
+    Unpickles a Data or DataList from its tree, as the class the tree names:
+    a hierarchy's view pickles as the hierarchy it saves as.
+    """
+    return _loaded_class(cls, tree.get(CLASS_KEY), "the pickle", "load", derived=True).from_dict(tree)
 
 
 # a plain dict that holds a "__class__" key of its own is saved as its pairs,
@@ -948,7 +990,8 @@ def _read_npz(filename: str) -> dict:
     return zip_to_dict(filename)
 
 
-def _read_pickle(cls, filename: str):
+def _read_pickle(cls, filename: str, derived: bool = False):
+    """``cls.load_pickle()``: the file's object, as the class _loaded_class allows"""
     filename = os.path.expanduser(filename)
     try:
         with open(filename, "rb") as f:
@@ -956,9 +999,20 @@ def _read_pickle(cls, filename: str):
     except LegacyFileError:
         raise LegacyFileError(_OLDER_FILE.format(filename)) from None
 
-    if not _derives(type(obj), cls):
+    if not (_derives(type(obj), Data) or _derives(type(obj), DataList)):
         raise TypeError(f"{filename} holds a {type(obj).__name__}, not a {cls.__name__}")
+    _loaded_class(cls, _class_tag(type(obj)), filename, "load", derived)
     return obj
+
+
+def _load_file(cls, filename: str, read, derived: bool = False):
+    """
+    ``cls.load_json()`` or ``load_npz()``: the tree ``read`` gives, as the
+    class _loaded_class allows, which builds it through its own from_dict().
+    """
+    filename = os.path.expanduser(filename)
+    tree     = read(filename)
+    return _loaded_class(cls, tree.get(CLASS_KEY), filename, "load", derived).from_dict(tree)
 
 
 def _save_file(obj, filename: str, mode: Optional[str] = None, compression=zipfile.ZIP_DEFLATED) -> str:
@@ -1280,13 +1334,34 @@ def _load_as(cls, filename: str, mode: Optional[str] = None) -> Any:
         The class has no reader for that type.
     """
     filename = os.path.expanduser(filename)
-    mode     = get_file_type(filename) if mode is None else mode.lower()
-    mode     = {"gltf": "glb", "pkl": "pickle"}.get(mode, mode)
+    mode     = _file_mode(filename, mode)
 
     reader   = getattr(cls, f"load_{mode}", None)
     if reader is None:
         raise ValueError(f"{cls.__name__} has no reader for {mode} files")
     return reader(filename)
+
+
+def _file_mode(filename: str, mode: Optional[str]) -> str:
+    """the reader ``mode`` names, or the one for the file's type: ``"pickle"``, ``"glb"`` ..."""
+    mode = get_file_type(filename) if mode is None else mode.lower()
+    return {"gltf": "glb", "pkl": "pickle"}.get(mode, mode)
+
+
+def _load_derived(cls, filename: str, mode: Optional[str] = None) -> Any:
+    """
+    A module's own ``load()``: ``cls.load()``, but a cgmath file gives back
+    whatever it holds that is ``cls`` or derives from it, a hierarchy's
+    file a ClipData; any other class raises TypeError. An asset goes to
+    ``cls.load_<mode>``.
+    """
+    filename = os.path.expanduser(filename)
+    mode     = _file_mode(filename, mode)
+    if mode == "pickle":
+        return _read_pickle(cls, filename, derived=True)
+    if mode in ("json", "npz"):
+        return _load_file(cls, filename, _read_json if mode == "json" else _read_npz, derived=True)
+    return _load_as(cls, filename, mode)
 
 
 # -------------------------------- NAMESPACES -------------------------------- #
@@ -2039,10 +2114,14 @@ class Data:
     @classmethod
     def from_dict(cls, data: dict) -> Any:
         """
-        The object a tree describes: the class it names, which must be this
-        one or derive from it, or this class when it names none. Fields the
-        tree leaves out take fresh copies of their defaults. An object the
-        tree saves once and refers to after is one object again.
+        The object a tree describes, which must be this class: a tree naming
+        any other raises TypeError, a subclass too, so ``MeshData`` refuses
+        a ``UVData``. ``Data.from_dict()`` itself gives back whatever class
+        the tree names. A tree that names no class is read as this one.
+        What the tree holds, a field's object or a list's items, comes back
+        as the class it names, which may derive from the one declared.
+        Fields the tree leaves out take fresh copies of their defaults. An
+        object the tree saves once and refers to after is one object again.
 
         A field is read under its property's name, as a file saves it, or
         its own. A tree that names no class is one built by hand: a
@@ -2114,19 +2193,24 @@ class Data:
 
     @classmethod
     def from_bytes(cls, data: bytes) -> Any:
-        return cls.from_dict(bytes_to_dict(data))
+        """the object npz bytes hold, read as :meth:`from_dict` reads a tree"""
+        tree = bytes_to_dict(data)
+        return _loaded_class(cls, tree.get(CLASS_KEY), "the data", "from_bytes").from_dict(tree)
 
     @classmethod
     def load_pickle(cls, filename: str) -> Any:
+        """the object a pickle holds, read as :meth:`load` reads one"""
         return _read_pickle(cls, filename)
 
     @classmethod
     def load_json(cls, filename: str) -> Any:
-        return cls.from_dict(_read_json(filename))
+        """the object a json file holds, read as :meth:`load` reads one"""
+        return _load_file(cls, filename, _read_json)
 
     @classmethod
     def load_npz(cls, filename: str) -> Any:
-        return cls.from_dict(_read_npz(filename))
+        """the object an npz file holds, read as :meth:`load` reads one"""
+        return _load_file(cls, filename, _read_npz)
 
     @classmethod
     def load(cls, filename: str, mode: Optional[str] = None) -> Any:
@@ -2135,6 +2219,13 @@ class Data:
         (:func:`get_file_type`). ``"pkl"`` / ``"json"`` / ``"npz"`` are
         cgmath's own; ``"glb"`` / ``"fbx"`` / ``"obj"`` / ``"usd"`` go to the
         class's ``load_<mode>``.
+
+        A cgmath file must hold this class: any other raises TypeError, a
+        subclass too, so ``MeshData.load()`` refuses a saved ``UVData``,
+        whose points are (N, 2), not (N, 3). ``Data.load()`` itself gives
+        back whatever class the file holds, a list too. What the file's
+        object holds, a field's object or a list's items, comes back as the
+        class it names, which may derive from the one declared.
         """
         return _load_as(cls, filename, mode)
 
@@ -2525,9 +2616,15 @@ class DataList(MutableSequence):
     @classmethod
     def from_dict(cls, data: dict) -> Any:
         """
-        The list a tree describes: the class it names, which must be this one
-        or derive from it, each item rebuilt as the class it names. An object
-        the tree saves once and refers to after is one object again.
+        The list a tree describes, which must be this class: a tree naming
+        any other raises TypeError, a subclass too, so ``HierarchyData``
+        refuses a ``ClipData``. ``DataList.from_dict()`` itself gives back
+        whatever list class the tree names, and ``Data.from_dict()`` any
+        class. A tree that names no class is read as this one. Each item
+        comes back as the class it names, which may derive from
+        ``DATA_LIST_CLASS``: a ``Scene``'s Object, Camera and Light nodes.
+        An object the tree saves once and refers to after is one object
+        again.
 
         One of LIST_FIELDS is read under its property's name, as a file saves
         it, or its own, whether the tree names its class or not, and a tree
@@ -2563,18 +2660,23 @@ class DataList(MutableSequence):
 
     @classmethod
     def from_bytes(cls, data: bytes) -> Any:
-        return cls.from_dict(bytes_to_dict(data))
+        """the list npz bytes hold, read as :meth:`from_dict` reads a tree"""
+        tree = bytes_to_dict(data)
+        return _loaded_class(cls, tree.get(CLASS_KEY), "the data", "from_bytes").from_dict(tree)
 
     @classmethod
     def load_json(cls, filename: str) -> Any:
-        return cls.from_dict(_read_json(filename))
+        """the list a json file holds, read as :meth:`load` reads one"""
+        return _load_file(cls, filename, _read_json)
 
     @classmethod
     def load_npz(cls, filename: str) -> Any:
-        return cls.from_dict(_read_npz(filename))
+        """the list an npz file holds, read as :meth:`load` reads one"""
+        return _load_file(cls, filename, _read_npz)
 
     @classmethod
     def load_pickle(cls, filename: str) -> Any:
+        """the list a pickle holds, read as :meth:`load` reads one"""
         return _read_pickle(cls, filename)
 
     @classmethod
@@ -2584,6 +2686,13 @@ class DataList(MutableSequence):
         (:func:`get_file_type`). ``"pkl"`` / ``"json"`` / ``"npz"`` are
         cgmath's own; ``"glb"`` / ``"fbx"`` / ``"obj"`` / ``"usd"`` go to the
         class's ``load_<mode>``.
+
+        A cgmath file must hold this class: any other raises TypeError, a
+        subclass too, so ``HierarchyData.load()`` refuses a saved
+        ``ClipData``. ``DataList.load()`` itself gives back whatever list
+        class the file holds, and ``Data.load()`` any class. Each item comes
+        back as the class it names, which may derive from
+        ``DATA_LIST_CLASS``: a ``Scene``'s Object, Camera and Light nodes.
         """
         return _load_as(cls, filename, mode)
 

@@ -4958,7 +4958,10 @@ def load(filename: str, mode: str | None = None) -> list:
     """
     The file's meshes with their UVs, as ``(MeshData, UVList)`` pairs:
     ``load_fbx`` / ``load_glb`` / ``load_obj`` / ``load_usd``, picked by
-    ``mode`` or by the file.
+    ``mode`` or by the file. Assets only: cgmath's own npz / json / pickle
+    raise ValueError here. Load one with the class it holds,
+    ``MeshData.load()`` for a mesh, ``UVData.load()`` for UVs, or with
+    ``Data.load()``, which gives back whatever class the file holds.
     """
     filename = os.path.expanduser(filename)
     mode     = get_file_type(filename) if mode is None else mode.lower()

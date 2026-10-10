@@ -624,12 +624,15 @@ class TestFiles(unittest.TestCase):
     def test_another_class_is_refused(self):
         path = os.path.join(self.tmp, "parent.json")
         ParentClass(foo=2).save(path)
-        with self.assertRaisesRegex(TypeError, "not a TestDataClass"):
+        with self.assertRaisesRegex(TypeError, "holds a ParentClass; load it with ParentClass.load"):
             TestDataClass.load(path)
 
-        # a subclass is fine
+        # a subclass too: Data's own load gives back whatever the file holds
         ChildClass(baz=True).save(path)
-        self.assertIs(type(ParentClass.load(path)), ChildClass)
+        with self.assertRaisesRegex(TypeError, "holds a ChildClass; load it with ChildClass.load"):
+            ParentClass.load(path)
+        self.assertIs(type(ChildClass.load(path)), ChildClass)
+        self.assertIs(type(Data.load(path)), ChildClass)
 
     def test_older_files_are_refused(self):
         json_path = os.path.join(self.tmp, "old.json")

@@ -6145,7 +6145,7 @@ class TestLegacyParentNode(unittest.TestCase):
     def test_a_clip(self):
         from cgmath.hierarchy import ClipData
 
-        clip = HierarchyData.load(os.path.join(self.ASSETS, "test_hierarchy.legacy_parent_node_clip.json"))
+        clip = ClipData.load(os.path.join(self.ASSETS, "test_hierarchy.legacy_parent_node_clip.json"))
         self.assertIs(type(clip), ClipData)
         self.assertEqual((clip.frame_count, clip.frame, clip.start_frame), (3, 1, 10))
         self.assertEqual([(n.name, n.parent_name) for n in clip], _LEGACY_PARENTS)
