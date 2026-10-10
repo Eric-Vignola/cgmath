@@ -5,6 +5,8 @@ These functions provide parallel, JIT-compiled alternatives to the
 pure NumPy implementations for improved performance on large datasets.
 """
 
+from __future__ import annotations
+
 import numpy as np
 from numba import njit, prange
 

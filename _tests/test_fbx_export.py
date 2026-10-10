@@ -6,7 +6,9 @@ These need the Autodesk FBX SDK (the `fbx` module), they are skipped without it.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import math
 import os
 import tempfile
@@ -32,6 +34,48 @@ def _joint(name, parent=None, **kwargs):
         parent_node = parent.uuid if parent is not None else None,
         **kwargs,
     )
+
+
+@contextlib.contextmanager
+def _no_fbx_warnings(test):
+    """
+    ``test.assertNoLogs("cgmath.formats.fbx", level="WARNING")`` done by hand,
+    as assertNoLogs is new in python 3.10: the logger's records at WARNING and
+    above are caught for the block, and the test fails if there are any.
+    """
+    logger           = logging.getLogger("cgmath.formats.fbx")
+    records          = []
+    handler          = logging.Handler(logging.WARNING)
+    handler.emit     = records.append
+    saved            = logger.handlers[:], logger.level, logger.propagate
+    logger.handlers  = [handler]
+    logger.propagate = False
+    logger.setLevel(logging.WARNING)
+    try:
+        yield
+    finally:
+        logger.handlers, logger.propagate = saved[0], saved[2]
+        logger.setLevel(saved[1])
+    test.assertEqual([], [record.getMessage() for record in records])
+
+
+class TestNoFbxWarnings(unittest.TestCase):
+    """the stand-in for assertNoLogs runs without the FBX SDK, on any python"""
+
+    def test_a_warning_fails_and_the_logger_is_restored(self):
+        logger = logging.getLogger("cgmath.formats.fbx")
+        self.addCleanup(logger.setLevel, logger.level)
+        logger.setLevel(logging.ERROR)  # a warning is caught all the same
+        before = logger.handlers[:], logging.ERROR, logger.propagate
+
+        with self.assertRaises(AssertionError) as caught:
+            with _no_fbx_warnings(self):
+                logger.warning("1 matrix skipped")
+        self.assertIn("1 matrix skipped", str(caught.exception))
+
+        with _no_fbx_warnings(self):
+            logger.info("not a warning")
+        self.assertEqual((logger.handlers, logger.level, logger.propagate), before)
 
 
 @unittest.skipIf(fbx is None, "the Autodesk FBX SDK is required")
@@ -210,7 +254,7 @@ class TestFbxExportSkeleton(unittest.TestCase):
         }
         root = _joint("root", user_defined_attributes=attrs)
 
-        with self.assertNoLogs("cgmath.formats.fbx", level="WARNING"):
+        with _no_fbx_warnings(self):
             self._export(HierarchyData([root]))
 
         expected = {
@@ -313,7 +357,7 @@ class TestFbxExportSkeleton(unittest.TestCase):
         }
         root = _joint("root", user_defined_attributes=attrs)
 
-        with self.assertNoLogs("cgmath.formats.fbx", level="WARNING"):
+        with _no_fbx_warnings(self):
             self._export(HierarchyData([root]))
 
         self.assertEqual(self._read()["|root"], {"pivot": "Vector"})
@@ -800,7 +844,7 @@ class TestFbxUserAttributes(unittest.TestCase):
 
         for as_ascii in (False, True):
             with self.subTest(as_ascii=as_ascii):
-                with self.assertNoLogs("cgmath.formats.fbx", level="WARNING"):
+                with _no_fbx_warnings(self):
                     HierarchyData([root]).save_fbx(self.path, as_ascii=as_ascii)
                 for name in attrs:
                     self.assertEqual(self.raw_string(name), "")

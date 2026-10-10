@@ -217,7 +217,8 @@ class TestDataHelperFunctions(unittest.TestCase):
         """Test is_ndarray_annotation() function"""
         self.assertTrue(is_ndarray_annotation(np.ndarray))
         self.assertTrue(is_ndarray_annotation(Optional[np.ndarray]))
-        self.assertTrue(is_ndarray_annotation(np.ndarray | None))
+        if sys.version_info >= (3, 10):  # X | None is a TypeError before 3.10
+            self.assertTrue(is_ndarray_annotation(np.ndarray | None))
         self.assertTrue(is_ndarray_annotation(Union[np.ndarray, None]))
 
         # unresolved annotations, as left by `from __future__ import annotations`
