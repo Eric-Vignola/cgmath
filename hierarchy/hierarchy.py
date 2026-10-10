@@ -9,7 +9,7 @@ import re
 import urllib.parse
 import uuid
 import warnings
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Union
@@ -648,21 +648,286 @@ def _prefixed(name: str, prefix: str) -> str:
 # among its own nodes: the index it keeps (HierarchyData._rig_index) and its
 # nodes' cached world matrices hold the count they were built at, so an edit
 # retires them in its own rig and nowhere else. Every count is drawn from
-# one sequence, so no two rigs, or two edits, ever share one
-_STRUCTURAL_FIELDS = frozenset(("parent_node", "name", "uuid"))
-_structure_ticks   = itertools.count(1)
+# one sequence, so no two rigs, or two edits, ever share one. A node added,
+# renamed or given another parent_node patches a current index instead,
+# and drops only the world matrices it moves (a node inserted ahead of the
+# end, only when a lookup fetched the index since the last such insert)
+_structure_ticks = itertools.count(1)
 
 
-def _structure_changed(owner, renamed: bool = False) -> None:
+def _structure_changed(owner, renamed: bool = False, keep_renames: bool = False) -> None:
     """an edit may have given some node of ``owner`` another parent or
     other children; a node no hierarchy owns has neither, so None counts
     nothing. ``renamed``: a rename, whose moved children _set_names has
-    seen to, retires the index alone"""
+    seen to, retires the index alone. ``keep_renames``: an edit a current
+    index would have been patched for at the cost of a few entries -- a
+    node appended, a parent_node written -- keeps a rename loop's claim to
+    build the index at its next rename (HierarchyData._renamed_by_pass), so
+    that a loop renaming and appending or reparenting builds it once"""
     if owner is not None:
+        carry                = keep_renames and owner._renamed_by_pass == owner._index_version
         tick                 = next(_structure_ticks)
         owner._index_version = tick
         if not renamed:
             owner._structure_version = tick
+        if carry:
+            owner._renamed_by_pass = tick
+
+
+def _worlds_moved(owner) -> None:
+    """an edit the index was patched for may have moved nodes it did not
+    look for: the cached world matrices of ``owner`` go, the index stays"""
+    # straight to the instance, as _index_patched writes: a loop of
+    # parent_node writes runs this once a node
+    owner.__dict__["_structure_version"] = next(_structure_ticks)
+
+
+def _no_index_stands(owner, version: int, added: int = 0) -> None:
+    """``owner`` could build no index at count ``version`` (a uuid, a name or
+    a parent_node that is not a string), and the edit just made, ``added``
+    nodes put in, took no such value away: no index can stand for it still.
+    The failed build is kept for the count the edit left, so that a loop of
+    renames, appends or parent_node writes does not try it again each time"""
+    cache = owner._rig_index_cache
+    if (
+        cache is not None
+        and cache[3] is None
+        and cache[0] == version
+        and cache[1] is owner.list
+        and cache[2] + added == len(owner.list)
+    ):
+        owner.__dict__["_rig_index_cache"] = (owner._index_version, cache[1], len(cache[1]), None)
+
+
+def _kept(owner) -> Optional["_RigIndex"]:
+    """the index ``owner`` keeps while it is current, for an edit to patch;
+    None when it keeps none, or none that is current"""
+    kept = getattr(owner, "_kept_index", None)
+    return None if kept is None else kept()
+
+
+def _parent_written(node, ref) -> None:
+    """``node``'s parent_node is about to become ``ref``
+
+    When its hierarchy keeps a current index the index is patched rather
+    than retired, and only what the new parent moves is dropped: nothing
+    when ``ref`` names the parent the old one named, the node's own cached
+    world matrix when nothing hangs below it, which is how a rig is built
+    node by node; a node with a branch retires the rig's cached world
+    matrices, rather than walking the branch. Without such an index the
+    structure count retires both, as any other edit does, and a rename
+    loop's claim to build the index at its next rename stands.
+    """
+    owner = node._hierarchy
+    if owner is None:
+        return
+
+    # owner._kept_index() and index.position(node), written out: a loop of
+    # parent_node writes runs this once a node
+    old   = node.parent_node
+    nodes = owner.list
+    cache = owner._rig_index_cache
+    index = at = None
+    if (
+        cache is not None
+        and cache[0] == owner._index_version
+        and cache[1] is nodes
+        and cache[2] == len(nodes)
+        and isinstance(ref, _INDEX_KEYS)
+    ):
+        index, uuid = cache[3], node.uuid
+        if index is not None and isinstance(uuid, _INDEX_KEYS):
+            at = index.uuids.get(uuid)
+            if at is not None and nodes[at] is not node:
+                at = None
+    if at is None:
+        # a rig no index can stand for stays one, unless the parent_node
+        # replaced is what kept it from one
+        version = owner._index_version
+        _structure_changed(owner, keep_renames=True)
+        if isinstance(old, _INDEX_KEYS):
+            _no_index_stands(owner, version)
+        return
+
+    # an index that does not have the node holding its parent_node -- one
+    # written past __setattr__ -- is out of date: retired
+    if not index.move_ref(at, old, ref):
+        _structure_changed(owner)
+        return
+
+    # the parent rows read from the index go; the list is as long as it was
+    owner.__dict__["_parent_rows_cache"] = None
+
+    # the positions of the parents named before and after, None for none or
+    # one the hierarchy does not hold
+    if index.locate(old) == index.locate(ref):
+        return
+    if index.has_children(node):
+        _worlds_moved(owner)
+    else:
+        # its world matrix alone, as the structure count drops it: a
+        # parent_node written never called _transform_changed, which a
+        # subclass extends (an SDF primitive marks its field dirty)
+        node.__dict__["_world_matrix"] = None
+
+
+def _rename_one(owner, node, value) -> bool:
+    """``node`` of ``owner`` renamed ``value`` through the index ``owner``
+    keeps, :func:`_rename_in_index` for one node; False, and nothing
+    written, when it keeps no current index or that index is out of step
+
+    The common cases are written out, as a loop of renames runs them once a
+    node: no node carries the new name and no child names it, and either no
+    other node carries the old name either, or no child names it. The name
+    table changes, and the children naming the old name, which named this
+    node, are pinned to its uuid. Anything else goes through
+    _rename_in_index.
+    """
+    # owner._kept_index(), written out
+    cache = owner._rig_index_cache
+    nodes = owner.list
+    if (
+        cache is None
+        or cache[0] != owner._index_version
+        or cache[1] is not nodes
+        or cache[2] != len(nodes)
+        or cache[3] is None
+    ):
+        return False
+
+    index = cache[3]
+    old, uuid = node.name, node.uuid
+    refs, names = index.refs, index.names
+    if (
+        not isinstance(value, _INDEX_KEYS)
+        or value in refs
+        or value in names
+        or (
+            old in refs
+            and (old is None or not isinstance(uuid, str) or old in index.shared or index.is_uuid(old))
+        )
+    ):
+        return _rename_in_index(owner, index, [(node, value)])
+
+    # a name other nodes carry too, which no child names, as a rig whose
+    # nodes are all named alike and parented by uuid: the name table alone
+    # changes, the next node of the name its first when this one was.
+    # index.rename, written out: a loop takes the first or the last
+    shared = index.shared
+    rows   = shared.get(old)
+    if rows is not None:
+        at = index.position(node)
+        if at is None:
+            return False
+        if rows[0] == at:
+            rows.popleft()
+            names[old] = rows[0]
+        elif rows[-1] == at:
+            rows.pop()
+        else:
+            k = bisect.bisect_left(rows, at)
+            if k == len(rows) or rows[k] != at:
+                return False
+            del rows[k]
+        if len(rows) == 1:
+            del shared[old]
+        names[value]   = at
+        index._holders = None
+        object.__setattr__(node, "name", value)
+        return True
+
+    # an index that does not have the node carrying its name, or its
+    # children naming it, was left behind by a write past __setattr__. A
+    # node whose uuid an earlier node carries pins its children to that
+    # uuid, as _set_names' pass does
+    at = names.get(old)
+    if at is None or nodes[at] is not node:
+        return False
+    rows = refs.get(old)
+    if rows is not None:
+        for row in rows:
+            if nodes[row].parent_node != old:
+                return False
+
+    # written past the rename and count in __setattr__: name and
+    # parent_node are plain fields, which Data.__setattr__ would hand to
+    # object.__setattr__ as well
+    del names[old]
+    names[value]   = at
+    index._holders = None
+    object.__setattr__(node, "name", value)
+
+    # its children by name keep it: pinned to its uuid, as _set_names pins
+    if rows is not None:
+        for row in rows:
+            object.__setattr__(nodes[row], "parent_node", uuid)
+        del refs[old]
+        held       = refs.get(uuid)
+        refs[uuid] = rows if held is None else sorted([*held, *rows])
+    return True
+
+
+def _rename_in_index(owner, index: "_RigIndex", changes: list) -> bool:
+    """TransformData._set_names for nodes of ``owner``, whose index is
+    current: ``changes`` are (node, new name) pairs, each name a change
+
+    The same rule as the pass over the hierarchy, read from the index: the
+    children naming an old or a new name come from its parent table, the
+    node each name finds from its name table, before the renames and after.
+    The index is patched, so it stays current. False, and nothing written,
+    when a node is not one the index holds or a name not one it can key on,
+    or when the index is out of step with the nodes, which a name or a
+    parent_node written past __setattr__ leaves it.
+    """
+    rows = []
+    for node, value in changes:
+        at = index.position(node)
+        if at is None or not isinstance(value, _INDEX_KEYS) or not index.holds_name(at, node.name):
+            return False
+        rows.append(at)
+
+    set_raw = Data.__setattr__  # past the rename and count in __setattr__
+    nodes   = index.nodes
+    refs    = index.refs
+    firsts  = index.names
+
+    # the old and new names a child names, by name rather than by uuid:
+    # those children are the only ones that can change parent
+    named = set()
+    for node, value in changes:
+        for name in (node.name, value):
+            if name is not None and name in refs and not index.is_uuid(name):
+                named.add(name)
+
+    linked = [(row, nodes[row], name) for name in named for row in refs[name]]
+    if any(child.parent_node != name for _, child, name in linked):
+        return False
+    before = {name: nodes[firsts[name]] for name in named if name in firsts}
+    for (node, value), at in zip(changes, rows):
+        index.rename(at, node.name, value)
+        set_raw(node, "name", value)
+
+    if not linked:
+        return True
+
+    # a link pinned keeps its parent
+    moved = {id(node) for node, _ in changes}
+    after = {name: nodes[firsts[name]] for name in named if name in firsts}
+    stale = []
+    for row, child, ref in linked:
+        parent = before.get(ref)
+        if parent is not None and id(parent) in moved:
+            set_raw(child, "parent_node", parent.uuid)
+            index.move_ref(row, ref, parent.uuid)
+        elif after.get(ref) is not parent:
+            stale.append(child)
+
+    # once every link is pinned, so that the walk finds the renamed nodes'
+    # children too
+    if stale:
+        owner._index_patched()
+        _reset_branches(stale)
+    return True
 
 
 def _structure_stamp(node) -> int:
@@ -1099,8 +1364,8 @@ class TransformData(Data):
 
         The branch is walked through the index the hierarchy keeps. When an
         edit has retired it since, one scan first tells whether the node has
-        children at all: a leaf written after every node added, or every
-        parent changed, would otherwise rebuild the index on each write.
+        children at all: a leaf written after every edit that retires it
+        would otherwise rebuild the index on each write.
         """
         hierarchy = self._hierarchy
         if hierarchy is not None:
@@ -1159,6 +1424,13 @@ class TransformData(Data):
 
         if self.parent_node is None:
             return None
+
+        # read from the index the hierarchy keeps while it is current, where
+        # the scans below cost the hierarchy's size, twice
+        if isinstance(self.parent_node, str):
+            index = _kept(self._hierarchy)
+            if index is not None:
+                return index.resolve(self.parent_node)
 
         # return the Node
         if self.parent_node in self._hierarchy:
@@ -1446,7 +1718,10 @@ class TransformData(Data):
         finding the nodes it moves would cost a walk of the rig per edit. The
         cache holds its rig's structure version instead, so one built before
         such an edit in its own rig is not trusted. An edit in another rig,
-        or on a node no rig owns, leaves it alone.
+        or on a node no rig owns, leaves it alone. An edit that patches the
+        rig's index finds the nodes it moves there, and drops those alone
+        when it can: a node added that no node names, a new parent_node on a
+        node with nothing below it, a rename.
         """
         # _structure_stamp, written out: this is every world read's first step
         owner = self._hierarchy
@@ -1702,7 +1977,7 @@ class TransformData(Data):
         # anything moves
         above = None
         if parent is not None:
-            above = self._hierarchy[self._hierarchy.index(parent)]
+            above = _held_node(self._hierarchy, parent)
             if above is self:
                 raise ValueError(f"{self.name!r} can not be its own parent")
             _refuse_a_cycle([self], above)
@@ -1787,11 +2062,25 @@ class TransformData(Data):
         3.1416``, converted to its type; anything else goes to Data, which
         raises on names the class does not declare. ``user_defined_attributes
         = None`` stores an empty dict."""
-        if not name.startswith("_"):
+        # a rename inside a hierarchy keeps the children that name this node:
+        # straight to the index the hierarchy keeps, while it is current. It
+        # comes first, as a loop of renames runs it once a node; name is a
+        # field, so no user attribute carries it
+        if name == "name":
+            owner = self._hierarchy
+            if owner is not None and value != self.name:
+                if not _rename_one(owner, self, value):
+                    self._set_names([(self, value)])
+                return
+
+        elif not name.startswith("_"):
             # a new parent_node or uuid can move a node of the rig to another
             # parent, so the rig's index of its children and its cached world
-            # matrices have to go. A rename is _set_names' to count
-            if name in _STRUCTURAL_FIELDS and name != "name":
+            # matrices have to go: a new uuid retires both, a new parent_node
+            # patches the index (_parent_written)
+            if name == "parent_node":
+                _parent_written(self, value)
+            elif name == "uuid":
                 _structure_changed(self._hierarchy)
 
             attrs = self.__dict__.get("user_defined_attributes")
@@ -1803,11 +2092,6 @@ class TransformData(Data):
         # no attributes is an empty dict, never None: every node holds its own
         if name == "user_defined_attributes" and value is None:
             value = {}
-
-        # a rename inside a hierarchy keeps the children that name this node
-        if name == "name" and self._hierarchy is not None and value != self.name:
-            self._set_names([(self, value)])
-            return
 
         try:
             super().__setattr__(name, value)
@@ -1835,11 +2119,22 @@ class TransformData(Data):
         another gives up, keep their own children. That is one pass over the
         hierarchy whatever the number of nodes renamed, where a node at a
         time would scan it once per node, and the branches to clear are
-        walked together.
+        walked together. While the hierarchy keeps a current index, the
+        children naming a name come from it instead, and it is patched
+        (:func:`_rename_in_index`): a rename costs the nodes it touches.
 
-        A rename retires the hierarchy's index, whose names it changes, but
-        not its cached world matrices: the children it would move are the
-        ones pinned or cleared here, so every other node keeps its parent.
+        A rename that finds no current index -- a rig just made, loaded or
+        copied, or one an edit has retired it in -- makes the pass and
+        retires the index, whose names it changes. The next rename builds
+        the index and patches it, as does every rename after, when nothing
+        came between but nodes appended and parent_nodes written, which
+        patch the index once there is one: a loop of renames over such a
+        rig, appending or reparenting on the way or not, costs one pass and
+        one build, then the nodes each edit touches.
+
+        A rename does not retire the rig's cached world matrices: the
+        children it would move are the ones pinned or cleared here, so every
+        other node keeps its parent.
         """
         set_raw = Data.__setattr__  # past the rename and count in __setattr__
         owners  = {}
@@ -1853,8 +2148,22 @@ class TransformData(Data):
 
         for hierarchy, renamed in owners.values():
             changes = [(n, value) for n, value in renamed.values() if value != n.name]
-            moved   = {id(n) for n, _ in changes}
-            names   = {name for n, value in changes for name in (n.name, value)}
+            if not changes:
+                continue
+
+            # the previous edit of the rig was a rename that made the pass,
+            # or nodes appended and parent_nodes written since one: a loop
+            # of renames, which builds the index once rather than making
+            # the pass each time. A lone rename makes the pass, a third of
+            # what a build costs
+            index = _kept(hierarchy)
+            if index is None and hierarchy._renamed_by_pass == hierarchy._index_version:
+                index = hierarchy._rig_index()
+            if index is not None and _rename_in_index(hierarchy, index, changes):
+                continue
+
+            moved = {id(n) for n, _ in changes}
+            names = {name for n, value in changes for name in (n.name, value)}
             names.discard(None)
 
             # one pass: the children naming an old or a new name, the only
@@ -1875,19 +2184,27 @@ class TransformData(Data):
                     found.setdefault(n.name, n)
                 return found
 
-            before = first_named() if linked else {}
+            # a rig no index can stand for (a uuid, a name or a parent_node
+            # that is not a string) stays one, unless a name renamed is what
+            # kept it from one: the build is not tried again at each rename
+            keyed   = all(isinstance(n.name, _INDEX_KEYS) for n, _ in changes)
+            version = hierarchy._index_version
+            before  = first_named() if linked else {}
             for n, value in changes:
                 set_raw(n, "name", value)
-            if changes:
-                _structure_changed(hierarchy, renamed=True)
+            _structure_changed(hierarchy, renamed=True)
+            if keyed:
+                _no_index_stands(hierarchy, version)
+            hierarchy._renamed_by_pass = hierarchy._index_version
 
             if not linked:
                 continue
 
             # a link pinned keeps its parent: written past __setattr__, it
-            # retires the index alone
-            after = first_named()
-            stale = []
+            # retires the index alone. It names a uuid where it named a name
+            after   = first_named()
+            stale   = []
+            version = hierarchy._index_version
             for child in linked:
                 parent = before.get(child.parent_node)
                 if parent is not None and id(parent) in moved:
@@ -1895,6 +2212,8 @@ class TransformData(Data):
                 elif after.get(child.parent_node) is not parent:
                     stale.append(child)
             _structure_changed(hierarchy, renamed=True)
+            _no_index_stands(hierarchy, version)
+            hierarchy._renamed_by_pass = hierarchy._index_version
 
             # once every link is pinned, so that the walk finds the renamed
             # nodes' children too
@@ -3110,6 +3429,51 @@ def _fbx_sample_take(stack, sampled, ticks, scale_factor: float, blocks) -> None
 _INDEX_KEYS = (str, type(None))
 
 
+# the rows of a key this many or more become a deque the first time one is
+# put in or taken out ahead of the end: a loop reparenting the children of
+# one parent takes each from the front, which in a list moves every later
+# row, the square of the children over the loop. A build keeps lists, the
+# most compact for the one row most keys hold
+_DEQUE_ROWS = 32
+
+
+def _insort_row(table: dict, key, row: int) -> None:
+    """puts ``row`` in order among the rows ``table`` holds for ``key``"""
+    rows = table.get(key)
+    if rows is None:
+        table[key] = [row]
+    elif rows[-1] < row:
+        rows.append(row)
+    else:
+        if len(rows) >= _DEQUE_ROWS and type(rows) is list:
+            rows = table[key] = deque(rows)
+        bisect.insort(rows, row)
+
+
+def _remove_row(table: dict, key, row: int) -> bool:
+    """takes ``row`` out of the rows ``table`` holds for ``key``; False, and
+    nothing changed, when it does not hold it there"""
+    rows = table.get(key)
+    if rows is None:
+        return False
+
+    # the first or the last, as a loop over the children takes them
+    if rows[0] == row:
+        at = 0
+    elif rows[-1] == row:
+        at = len(rows) - 1
+    else:
+        at = bisect.bisect_left(rows, row)
+        if at == len(rows) or rows[at] != row:
+            return False
+    if at < len(rows) - 1 and len(rows) >= _DEQUE_ROWS and type(rows) is list:
+        rows = table[key] = deque(rows)
+    del rows[at]
+    if not rows:
+        del table[key]
+    return True
+
+
 class _RigIndex:
     """One pass over a hierarchy's nodes, so that get_parent, get_children,
     index and unique_name read dicts rather than scanning the nodes
@@ -3127,20 +3491,39 @@ class _RigIndex:
       come in hierarchy order;
     * a node's index is the position of the first node with its uuid.
 
+    ``shared`` holds, for a name two or more nodes carry, every position
+    carrying it, in order, so that the first can be found again when one of
+    them is renamed. Each is a deque: a loop renaming the nodes of one name,
+    first to last or last to first, takes each position from an end. The
+    rows of ``refs`` are lists, a long one made a deque when a patch puts a
+    row in or takes one out ahead of its end (:func:`_remove_row`).
+
     :meth:`build` gives None for a hierarchy it cannot stand for: a class
     that answers these lookups its own way, or a node whose uuid, name or
     parent_node is not a string. Its callers ask the nodes instead.
+
+    The hierarchy patches its index in place for the edits that change a
+    few entries (:meth:`add`, :meth:`rename`, :meth:`move_ref`): a node
+    appended, renamed or given another parent_node costs a few dict writes,
+    not the pass over every node a build costs. A node inserted ahead of
+    the end moves every position after it up one (:meth:`_shift`), a pass
+    over every entry that costs a tenth to two fifths of a build, the more
+    the nearer the front: the hierarchy makes it only for an index a lookup
+    has fetched since the last one (``fetched``), and otherwise retires the
+    index, which the next lookup builds again.
     """
 
-    __slots__ = ("nodes", "uuids", "names", "refs", "_shapes", "_holders")
+    __slots__ = ("nodes", "uuids", "names", "shared", "refs", "fetched", "_shapes", "_holders")
 
-    def __init__(self, nodes: list, uuids: dict, names: dict, refs: dict):
+    def __init__(self, nodes: list, uuids: dict, names: dict, shared: dict, refs: dict):
         self.nodes    = nodes
         self.uuids    = uuids
         self.names    = names
+        self.shared   = shared
         self.refs     = refs
-        self._shapes  = {}    # text -> whether it is shaped like a uuid
-        self._holders = None  # name -> the uuids carrying it, on first use
+        self.fetched  = False  # a lookup read it since an insert last shifted it
+        self._shapes  = {}     # text -> whether it is shaped like a uuid
+        self._holders = None   # name -> the uuids carrying it, on first use
 
     @classmethod
     def build(cls, hierarchy) -> Optional["_RigIndex"]:
@@ -3153,7 +3536,7 @@ class _RigIndex:
             return None
 
         nodes = hierarchy.list
-        uuids, names, refs = {}, {}, {}
+        uuids, names, shared, refs = {}, {}, {}, {}
         for position, node in enumerate(nodes):
             uuid, name, ref = node.uuid, node.name, node.parent_node
             if not (
@@ -3163,23 +3546,158 @@ class _RigIndex:
             ):
                 return None
             uuids.setdefault(uuid, position)
-            names.setdefault(name, position)
+            first = names.setdefault(name, position)
+            if first != position:
+                rows = shared.get(name)
+                if rows is None:
+                    shared[name] = deque((first, position))
+                else:
+                    rows.append(position)
             refs.setdefault(ref, []).append(position)
 
-        return cls(nodes, uuids, names, refs)
+        return cls(nodes, uuids, names, shared, refs)
 
     def is_uuid(self, text: str) -> bool:
         """validate_uuid(text), worked out once per text"""
+        # a uuid's 32 hex digits do not fit in less: a node name, which a
+        # rename loop brings a new one of each time, costs no parse
+        if len(text) < 32:
+            return False
         shape = self._shapes.get(text)
         if shape is None:
             shape = self._shapes[text] = validate_uuid(text)
         return shape
 
-    def parent(self, node):
-        """``node.get_parent()`` for a ``parent_node`` that is a string"""
-        ref      = node.parent_node
+    def resolve(self, ref: str):
+        """the node a ``parent_node`` string names, the string when it names
+        none, as get_parent answers"""
         position = self.uuids.get(ref) if self.is_uuid(ref) else self.names.get(ref)
         return ref if position is None else self.nodes[position]
+
+    def locate(self, ref) -> Optional[int]:
+        """the position of the node a ``parent_node`` names, None when it
+        names none or is None"""
+        if ref is None:
+            return None
+        return self.uuids.get(ref) if self.is_uuid(ref) else self.names.get(ref)
+
+    def parent(self, node):
+        """``node.get_parent()`` for a ``parent_node`` that is a string"""
+        return self.resolve(node.parent_node)
+
+    def position(self, node) -> Optional[int]:
+        """``node``'s position, None when the index does not hold it there: a
+        node no longer listed, or one whose uuid an earlier node carries"""
+        uuid = node.uuid
+        if isinstance(uuid, _INDEX_KEYS):
+            position = self.uuids.get(uuid)
+            if position is not None and self.nodes[position] is node:
+                return position
+        return None
+
+    # --- patches, each for an edit just made to the list or to one node --- #
+    def add(self, at: int, node) -> bool:
+        """``node`` was just put at ``at`` in the list. False, and nothing
+        patched, when a uuid, name or parent_node is not a key it can hold"""
+        uuid, name, ref = node.uuid, node.name, node.parent_node
+        if not (
+            isinstance(uuid, _INDEX_KEYS)
+            and isinstance(name, _INDEX_KEYS)
+            and isinstance(ref, _INDEX_KEYS)
+        ):
+            return False
+
+        if at < len(self.nodes) - 1:
+            self._shift(at)
+        first = self.uuids.get(uuid)
+        if first is None or at < first:
+            self.uuids[uuid] = at
+        self._add_name(name, at)
+        _insort_row(self.refs, ref, at)
+        if self._holders is not None:
+            self._holders.setdefault(name, set()).add(uuid)
+        return True
+
+    def holds_name(self, at: int, name) -> bool:
+        """whether the index has the node at ``at`` carrying ``name``"""
+        if self.names.get(name) == at:
+            return True
+        # in order: a name every node of the rig carries is no scan, and a
+        # loop renaming them last to first finds each at the end
+        rows = self.shared.get(name)
+        if rows is None:
+            return False
+        if rows[-1] == at:
+            return True
+        k = bisect.bisect_left(rows, at)
+        return k < len(rows) and rows[k] == at
+
+    def rename(self, at: int, old, new) -> None:
+        """the node at ``at`` now carries ``new`` in place of ``old``, which
+        the index has it carrying (:meth:`holds_name`)"""
+        self._drop_name(old, at)
+        self._add_name(new, at)
+        self._holders = None
+
+    def move_ref(self, at: int, old, new) -> bool:
+        """the node at ``at`` now holds ``new`` as its parent_node; False, and
+        nothing patched, when the index does not have it holding ``old``"""
+        if not _remove_row(self.refs, old, at):
+            return False
+        _insort_row(self.refs, new, at)
+        return True
+
+    def _shift(self, at: int) -> None:
+        """every position from ``at`` on moves up one, for a node inserted"""
+        for table in (self.uuids, self.names):
+            for key, position in table.items():
+                if position >= at:
+                    table[key] = position + 1
+
+        # rows are in order: only their tail moves. Most hold one row, a
+        # node's single child, written without a loop
+        for table in (self.shared, self.refs):
+            for rows in table.values():
+                last = rows[-1]
+                if last >= at:
+                    if len(rows) == 1:
+                        rows[0] = last + 1
+                    else:
+                        for k in range(bisect.bisect_left(rows, at), len(rows)):
+                            rows[k] += 1
+
+    def _add_name(self, name, at: int) -> None:
+        first = self.names.get(name)
+        if first is None:
+            self.names[name] = at
+            return
+        rows = self.shared.get(name)
+        if rows is None:
+            self.shared[name] = deque((first, at) if first < at else (at, first))
+        elif rows[-1] < at:
+            rows.append(at)
+        else:
+            bisect.insort(rows, at)
+        if at < first:
+            self.names[name] = at
+
+    def _drop_name(self, name, at: int) -> None:
+        rows = self.shared.get(name)
+        if rows is None:
+            del self.names[name]
+            return
+
+        # the first or the last, as a loop renaming the nodes of one name
+        # takes them, from an end; a deque moves nothing for either
+        if rows[0] == at:
+            rows.popleft()
+        elif rows[-1] == at:
+            rows.pop()
+        else:
+            del rows[bisect.bisect_left(rows, at)]
+        self.names[name] = rows[0]
+        if len(rows) == 1:
+            del self.shared[name]
 
     def children(self, node) -> list:
         """``node.get_children()``, as a list"""
@@ -3193,9 +3711,20 @@ class _RigIndex:
             if named and not self.is_uuid(name):
                 first = self.names.get(name)
                 if first is not None and self.nodes[first] is node:
-                    rows = sorted(list(rows) + named)
+                    rows = sorted([*rows, *named])
 
         return [self.nodes[position] for position in rows]
+
+    def has_children(self, node) -> bool:
+        """``bool(self.children(node))``, without the list"""
+        uuid, name = node.uuid, node.name
+        refs = self.refs
+        if uuid in refs:
+            return True
+        if isinstance(name, str) and name != uuid and name in refs and not self.is_uuid(name):
+            first = self.names.get(name)
+            return first is not None and self.nodes[first] is node
+        return False
 
     def unique_name(self, node) -> bool:
         """``node.unique_name`` for a node of this hierarchy"""
@@ -5005,6 +5534,12 @@ class HierarchyData(TransformList):
     _index_version     = -1
     _structure_version = -1
 
+    # the index count a rename left when it found no current index and made
+    # the pass over the list (TransformData._set_names): the next rename, if
+    # nothing came between but nodes appended and parent_nodes written
+    # (_structure_changed's keep_renames), builds the index instead
+    _renamed_by_pass = None
+
     # (index version, list, length) the index was built at, and the index
     _rig_index_cache = None
 
@@ -5016,18 +5551,28 @@ class HierarchyData(TransformList):
         world matrices below the node, asks each node of the branch for its
         children: an index built for each walk would cost the hierarchy's
         size every write. It is kept until this rig's structure count moves:
-        a parent_node, name or uuid written on one of its nodes, or any edit
-        to its list through its methods. A ``list`` replaced, or grown
-        or shrunk in place, is caught as well; an assignment, sort or
-        reverse made on the raw ``list`` is not, and nothing in cgmath makes
-        one.
+        a uuid written on one of its nodes, or an edit to its list through
+        its methods that takes nodes out or reorders them. While it is
+        current, a node appended, renamed or given another parent_node
+        patches it in place instead; with none current, such an edit has
+        none to patch. A node inserted ahead of the end shifts it in place
+        when it was fetched here since the last such insert, and retires it
+        otherwise (:meth:`_added`). A rig built node by node, a world read
+        or written on the way, builds it at the first read, and a rig
+        renamed node by node at its second rename, appends and parent_node
+        writes between them or not (TransformData._set_names): from there on
+        each node costs the same. A ``list`` replaced, or grown or shrunk in
+        place, is caught as well; an assignment, sort or reverse made on the
+        raw ``list`` is not, and nothing in cgmath makes one.
         """
         if self._rig_index_is_current():
-            return self._rig_index_cache[3]
-
-        nodes                 = self.list
-        index                 = _RigIndex.build(self)
-        self._rig_index_cache = (self._index_version, nodes, len(nodes), index)
+            index = self._rig_index_cache[3]
+        else:
+            nodes                 = self.list
+            index                 = _RigIndex.build(self)
+            self._rig_index_cache = (self._index_version, nodes, len(nodes), index)
+        if index is not None:
+            index.fetched = True
         return index
 
     # (the index they were read from, each node's parent position)
@@ -5057,17 +5602,109 @@ class HierarchyData(TransformList):
             and cache[2] == len(self.list)
         )
 
+    def _kept_index(self) -> Optional[_RigIndex]:
+        """the index kept, while it is current, for an edit to patch in place
+        or a lookup to read; None when there is none"""
+        cache = self._rig_index_cache
+        if (
+            cache is not None
+            and cache[0] == self._index_version
+            and cache[1] is self.list
+            and cache[2] == len(self.list)
+        ):
+            return cache[3]
+        return None
+
+    def _index_patched(self) -> None:
+        """the index kept was just patched for an edit: it stands for the list
+        as it now is, and the parent rows read from it go"""
+        cache = self._rig_index_cache
+        # straight to the instance: these are written on every node added
+        self.__dict__["_rig_index_cache"]   = (cache[0], cache[1], len(self.list), cache[3])
+        self.__dict__["_parent_rows_cache"] = None
+
+    def _holds(self, uuid) -> bool:
+        # the index kept answers without a scan of the list
+        if isinstance(uuid, str) and "_held" not in self.__dict__:
+            index = self._kept_index()
+            if index is not None:
+                return uuid in index.uuids
+        return super()._holds(uuid)
+
+    def _added(self, index: Optional[_RigIndex], at: int, node: "TransformData") -> None:
+        """``node`` was just put at ``at``; ``index`` is the one kept before
+
+        The index is patched to hold the node, and the nodes it now parents
+        -- a uuid or a name that named no node before -- are the only ones
+        it can move: when there are none, every cached world matrix of the
+        rig stands. An index that went out of date on the way, or a node it
+        cannot hold, retires both, as any edit does; a node put at the end
+        keeps a rename loop's claim to build the index at its next rename,
+        as an append patches the index once there is one. A rig no index can
+        stand for stays one: the build that failed is not tried again.
+
+        A node inserted ahead of the end moves every later position up one,
+        a pass over the whole index (:meth:`_RigIndex._shift`). It is made
+        only when a lookup fetched the index since the last such insert:
+        inserts with nothing read between retire it instead, as every insert
+        did before the index was patched. The cached world matrices stand
+        then, as for a patch, unless a node names the one put in.
+        """
+        cache = self._rig_index_cache
+        ahead = at < len(self.list) - 1
+        if (
+            index is None
+            or cache[0] != self._index_version
+            or cache[1] is not self.list
+            or cache[2] + 1 != len(self.list)
+            or self.list[at] is not node
+        ):
+            # a rig no index can stand for stays one with a node more
+            version = self._index_version
+            _structure_changed(self, keep_renames=not ahead)
+            _no_index_stands(self, version, added=1)
+            return
+
+        # the nodes naming the new one's uuid or name are the ones it moves
+        uuid, name = node.uuid, node.name
+        if not (isinstance(uuid, _INDEX_KEYS) and isinstance(name, _INDEX_KEYS)):
+            _structure_changed(self, keep_renames=not ahead)
+            return
+        named = uuid in index.refs or name in index.refs
+        if ahead and not index.fetched:
+            _structure_changed(self, renamed=not named)
+            return
+        if not index.add(at, node):
+            _structure_changed(self, keep_renames=not ahead)
+            return
+        if ahead:
+            index.fetched = False
+
+        # the node's own cached world matrix holds the count of another rig,
+        # or 0 for none, never this rig's: it is not trusted here
+        self._index_patched()
+        if named:
+            _worlds_moved(self)
+
     def append(self, node: "TransformData") -> None:
         # validate + add first (raises before we claim the node), then
         # take ownership (detaching from any prior hierarchy)
+        index = self._kept_index()
         super().append(node)
         self._claim(node)
-        _structure_changed(self)
+        self._added(index, len(self.list) - 1, node)
 
     def insert(self, index: int, node: "TransformData") -> None:
+        kept  = self._kept_index()
+        count = len(self.list)
         super().insert(index=index, node=node)
         self._claim(node)
-        _structure_changed(self)
+
+        # where list.insert puts it
+        at = int(index)
+        if at < 0:
+            at = max(at + count, 0)
+        self._added(kept, min(at, count), node)
 
     def __setitem__(self, index, value) -> None:
         super().__setitem__(index, value)
@@ -6234,17 +6871,38 @@ def _clip_row(node) -> tuple:
     return None, None
 
 
+def _held_node(owner, query) -> "TransformData":
+    """``owner[owner.index(query)]``, the node given as a node, a uuid or a
+    name, read from the index ``owner`` keeps while it is current, where
+    the scan costs the hierarchy's size. ValueError when no node matches"""
+    index = _kept(owner)
+    if index is not None:
+        if isinstance(query, TransformData):
+            key, by_uuid = query.uuid, True
+        else:
+            key, by_uuid = query, isinstance(query, str) and index.is_uuid(query)
+        if isinstance(key, str):
+            position = (index.uuids if by_uuid else index.names).get(key)
+            if position is not None:
+                return index.nodes[position]
+    return owner[owner.index(query)]
+
+
 def _refuse_a_cycle(nodes, above) -> None:
     """raises ValueError when ``above``, once ``nodes`` are taken to the
     world, would hang below one of them: parenting that node under it
-    would close a loop"""
+    would close a loop. Nothing hangs below nodes without children, which
+    a rig built node by node parents: no climb"""
     chosen = {id(node) for node in nodes}
     if id(above) in chosen:
         return
 
     lookups = _Lookups()
-    seen    = set()
-    up      = lookups.parent(above)
+    if not any(lookups.children(node) for node in nodes):
+        return
+
+    seen = set()
+    up   = lookups.parent(above)
     while isinstance(up, TransformData) and id(up) not in seen:
         if id(up) in chosen:
             raise ValueError(
@@ -6269,9 +6927,15 @@ def _to_the_end(owner, nodes, ref=_KEEP_PARENT) -> list:
     so a link inside a moved branch whose name another node shares would
     follow that node once the branch lands behind it: those links are
     pinned to the uuid first. Returns the nodes moved, in their new order.
+
+    Branches already at the end, in that order -- a node added and then
+    parented, as a rig is built node by node -- leave the list as it is,
+    and the index the hierarchy keeps with it.
     """
-    listed = {id(node) for node in owner.list}
-    nodes  = [node for node in nodes if id(node) in listed]
+    index = _kept(owner)
+    if index is None or any(index.position(node) is None for node in nodes):
+        listed = {id(node) for node in owner.list}
+        nodes  = [node for node in nodes if id(node) in listed]
     if ref is not _KEEP_PARENT:
         for node in nodes:
             node.parent_node = ref
@@ -6282,6 +6946,10 @@ def _to_the_end(owner, nodes, ref=_KEEP_PARENT) -> list:
     roots = [node for _, node in sorted(last.values(), key=lambda pair: pair[0])]
     moved = _walk(roots, _Lookups())
     _pin_shared_names(owner, moved)
+
+    start = len(owner.list) - len(moved)
+    if start >= 0 and all(a is b for a, b in zip(owner.list[start:], moved)):
+        return moved
 
     gone          = {id(node) for node in moved}
     owner.list[:] = [node for node in owner.list if id(node) not in gone] + moved
@@ -6297,11 +6965,15 @@ def _pin_shared_names(owner, nodes) -> None:
     if not any(isinstance(ref, str) and not validate_uuid(ref) for ref in refs):
         return
 
-    counts  = Counter(n.name for n in owner.list)
+    # the names two or more nodes carry, from the index while it is current
+    index = _kept(owner)
+    shared = index.shared if index is not None else {
+        name for name, count in Counter(n.name for n in owner.list).items() if count > 1
+    }
     lookups = _Lookups()
     pinned  = []
     for node, ref in zip(nodes, refs):
-        if isinstance(ref, str) and counts[ref] > 1 and not validate_uuid(ref):
+        if isinstance(ref, str) and ref in shared and not validate_uuid(ref):
             parent = lookups.parent(node)
             if isinstance(parent, TransformData):
                 pinned.append((node, parent.uuid))

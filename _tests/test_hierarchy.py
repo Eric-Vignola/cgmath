@@ -2,10 +2,12 @@ import copy
 import itertools
 import os
 import pickle
+import random
 import sys
 import tempfile
 import unittest
 import uuid as uuid_module
+from collections import deque
 from unittest import mock
 
 import numpy as np
@@ -3415,9 +3417,323 @@ def _swap_twins(rig) -> None:
     rig[first], rig[second] = rig[second], rig[first]
 
 
+def _assert_index_is_a_build(case, rig, label) -> None:
+    """the index a rig keeps, patched in place or built, holds what a build
+    of the rig as it now stands holds"""
+    from cgmath.hierarchy.hierarchy import _RigIndex
+
+    kept = rig._kept_index()
+    if kept is None:
+        return
+    fresh = _RigIndex.build(rig)
+    case.assertIsNotNone(fresh, f"{label}: an index kept where a build gives none")
+    for table in ("uuids", "names", "shared", "refs"):
+        # a long row of refs a patch made a deque holds what a build's list does
+        case.assertEqual(
+            {key: value if isinstance(value, int) else list(value) for key, value in getattr(kept, table).items()},
+            {key: value if isinstance(value, int) else list(value) for key, value in getattr(fresh, table).items()},
+            f"{label}: index {table}",
+        )
+
+
+def _assert_lookups_are_a_scan(case, rig, label) -> None:
+    """the index the rig keeps is a build's, and every node's parent and
+    children, and the rig's indices, are the ones a scan finds"""
+    _assert_index_is_a_build(case, rig, label)
+    first = {}
+    for i, member in enumerate(rig.list):
+        first.setdefault(member.uuid, i)
+    case.assertEqual(rig.indices.tolist(), [first[n.uuid] for n in rig.list], label)
+    for member in rig.list:
+        truth = _parent_by_scan(member)
+        if isinstance(truth, TransformData):
+            case.assertIs(member.get_parent(), truth, f"{label}: parent of {member.name}")
+        else:
+            case.assertEqual(member.get_parent(), truth, f"{label}: parent of {member.name}")
+        case.assertEqual(
+            [id(n) for n in member.get_children()],
+            [id(n) for n in _children_by_scan(member)],
+            f"{label}: children of {member.name}",
+        )
+
+
+def _parent_by_scan(node):
+    """get_parent's rule, by a scan of every node of the hierarchy"""
+    rig, ref = node._hierarchy, node.parent_node
+    if rig is None or ref is None:
+        return None
+    field = "uuid" if validate_uuid(ref) else "name"
+    return next((n for n in rig.list if getattr(n, field) == ref), ref)
+
+
+def _worlds_by_scan(rig, made: dict) -> dict:
+    """id(node) -> its world matrix, worked out from each node's channels and
+    the parents a scan finds; None for a node whose parents lead back to one.
+    ``made`` keeps each local matrix worked out, by the values it is made of"""
+    parents = {id(n): _parent_by_scan(n) for n in rig.list}
+    worlds  = {}
+    for node in rig.list:
+        chain, seen, up = [], set(), node
+        while isinstance(up, TransformData) and id(up) not in worlds:
+            if id(up) in seen:
+                for member in chain:
+                    worlds[id(member)] = None
+                break
+            seen.add(id(up))
+            chain.append(up)
+            up = parents[id(up)]
+
+        for member in reversed(chain):
+            if id(member) in worlds:
+                continue
+            parent = parents[id(member)]
+            above  = worlds[id(parent)] if isinstance(parent, TransformData) else np.eye(4)
+            if above is None:
+                worlds[id(member)] = None
+                continue
+            compensated = member.segment_scale_compensate and isinstance(parent, TransformData)
+            key = tuple(
+                np.concatenate(
+                    [
+                        member.scale,
+                        member.rotate_axis,
+                        member.rotate,
+                        member.joint_orient,
+                        member.translate,
+                        parent.scale if compensated else (),
+                    ]
+                ).tolist()
+            ) + (member.rotate_order,)
+            local = made.get(key)
+            if local is None:
+                IS = np.eye(4)
+                if compensated:
+                    IS[:3, :3] /= parent.scale
+                local = made[key] = (
+                    member.scale_matrix
+                    @ member.rotate_axis_matrix
+                    @ member.rotate_matrix
+                    @ member.joint_orient_matrix
+                    @ IS
+                    @ member.translate_matrix
+                )
+            worlds[id(member)] = local @ above
+    return worlds
+
+
+# names the fuzz draws from: shared, namespaced, and one shaped like a uuid
+_FUZZ_NAMES = ("a", "b", "c", "ns:a", "ns:b", "0F0F0F0F-0000-4000-8000-0000000000AA")
+
+
+def _fuzz_rig_edits(case, seed: int, edits: int, size: int = 16) -> dict:
+    """``edits`` random edits of every kind on one rig, parented by uuid and
+    by name, names shared, captured and given up, parents the rig lacks and
+    loops: after each, every lookup the rig answers, through the index it
+    keeps patched or built again, equals a scan of the rig, and every world
+    matrix, most of them cached before the edit, the one its channels make.
+    Returns how often each edit ran"""
+    rng  = random.Random(seed)
+    made = itertools.count()
+    rig  = HierarchyData()
+
+    def name():
+        return rng.choice(_FUZZ_NAMES) if rng.random() < 0.5 else f"n{next(made)}"
+
+    def ref():
+        roll = rng.random()
+        if not len(rig) or roll < 0.15:
+            return None
+        if roll < 0.5:
+            return rng.choice(rig.list).uuid
+        if roll < 0.8:
+            return rng.choice(rig.list).name
+        return rng.choice(_FUZZ_NAMES) if roll < 0.9 else generate_uuid()
+
+    def node():
+        return TransformData(
+            name(),
+            parent_node=ref(),
+            translate=[rng.uniform(-1.0, 1.0) for _ in range(3)],
+            rotate=[rng.uniform(-90.0, 90.0) for _ in range(3)],
+            scale=[rng.uniform(0.7, 1.4) for _ in range(3)],
+            rotate_order=rng.randrange(6),
+            segment_scale_compensate=rng.random() < 0.3,
+        )
+
+    def pick():
+        return rng.choice(rig.list)
+
+    def swap():
+        i, j = rng.randrange(len(rig)), rng.randrange(len(rig))
+        rig[i], rig[j] = rig[j], rig[i]
+
+    def view():
+        return TransformList(rng.sample(rig.list, rng.randint(1, min(4, len(rig)))))
+
+    def rename_view():
+        rng.choice(
+            (lambda v: v.add_suffix("_L"), lambda v: v.add_prefix("ns:"), lambda v: v.strip_namespace())
+        )(view())
+
+    def renames():
+        # renames in a row, nothing read between: through the index the last
+        # edit left, or, after a uuid written retires it, by a pass and then
+        # an index built; unique names read now and then
+        if rng.random() < 0.5:
+            pick().uuid = generate_uuid()
+        for _ in range(rng.randint(2, 6)):
+            pick().name = name()
+            if rng.random() < 0.3:
+                rig.unique_name
+
+    def inserts():
+        # inserts ahead of the end in a row, nothing read between: the first
+        # shifts the index the last read fetched, the next ones retire it
+        for _ in range(rng.randint(2, 5)):
+            rig.insert(rng.randint(-len(rig), len(rig) - 1), node())
+
+    def loaded():
+        # a loader's loop, nothing read between: nodes appended, then named
+        # and parented, after a uuid written retires the index or a rename
+        # that makes the pass
+        if rng.random() < 0.5:
+            pick().uuid = generate_uuid()
+        if rng.random() < 0.5:
+            pick().name = name()
+        for _ in range(rng.randint(1, 4)):
+            added = node()
+            rig.append(added)
+            added.name        = name()
+            added.parent_node = ref()
+
+    def target():
+        roll = rng.random()
+        if roll < 0.2:
+            return None
+        return pick().uuid if roll < 0.6 else pick().name
+
+    def write_world():
+        angles   = np.radians([rng.uniform(-180.0, 180.0) for _ in range(3)])
+        W        = euler_to_matrix(angles[None], rng.randrange(6))[0]
+        W[3, :3] = [rng.uniform(-3.0, 3.0) for _ in range(3)]
+        pick().world_matrix = W
+
+    def read():
+        for _ in range(rng.randint(1, 6)):
+            pick().world_matrix
+
+    kinds = {
+        "append": (8, lambda: rig.append(node())),
+        "insert": (3, lambda: rig.insert(rng.randint(-len(rig) - 2, len(rig) + 2), node())),
+        "inserts in a row": (2, inserts),
+        "extend": (2, lambda: rig.extend([node() for _ in range(rng.randint(1, 5))])),
+        "pop": (2, lambda: rig.pop(rng.randrange(len(rig)))),
+        "del": (1, lambda: rig.__delitem__(rng.randrange(len(rig)))),
+        "remove": (1, lambda: rig.remove(pick())),
+        "setitem swap": (1, swap),
+        "reverse": (1, lambda: rig.reverse()),
+        "sort": (1, lambda: rig.sort()),
+        "rename": (8, lambda: setattr(pick(), "name", name())),
+        "rename a view": (3, rename_view),
+        "renames in a row": (3, renames),
+        "appended, named, parented": (2, loaded),
+        "uuid": (1, lambda: setattr(pick(), "uuid", generate_uuid())),
+        "parent_node": (8, lambda: setattr(pick(), "parent_node", ref())),
+        "set_parent local": (3, lambda: pick().set_parent(target(), world_space=False)),
+        "set_parent world": (3, lambda: pick().set_parent(target(), world_space=True)),
+        "view set_parent": (1, lambda: view().set_parent(target(), world_space=False)),
+        "channel": (5, lambda: setattr(pick(), "translate", [rng.uniform(-1, 1) for _ in range(3)])),
+        "world_matrix =": (5, write_world),
+        "read": (6, read),
+        "claimed elsewhere": (1, lambda: HierarchyData().append(pick())),
+    }
+    labels   = list(kinds)
+    weights  = [kinds[k][0] for k in labels]
+    ran      = dict.fromkeys(labels, 0)
+    matrices = {}
+
+    for _ in range(size):
+        rig.append(node())
+
+    for step in range(edits):
+        label = rng.choices(labels, weights)[0]
+        if not len(rig) or (len(rig) < size // 2 and label in ("pop", "del", "remove")):
+            label = "append"
+        elif len(rig) > 2 * size and label in ("append", "insert", "extend", "inserts in a row", "appended, named, parented"):
+            label = "pop"
+        ran[label] += 1
+
+        # a parent the node's own branch holds raises before anything moves;
+        # a world matrix read through a loop of parents raises on the way
+        try:
+            kinds[label][1]()
+        except (ValueError, RecursionError):
+            pass
+
+        what = f"edit {step} ({label})"
+        _assert_index_is_a_build(case, rig, what)
+        for member in rig.list:
+            parent = member.get_parent()
+            truth  = _parent_by_scan(member)
+            if isinstance(truth, TransformData):
+                case.assertIs(parent, truth, f"{what}: parent of {member.name}")
+            else:
+                case.assertEqual(parent, truth, f"{what}: parent of {member.name}")
+            case.assertEqual(
+                [id(n) for n in member.get_children()],
+                [id(n) for n in _children_by_scan(member)],
+                f"{what}: children of {member.name}",
+            )
+
+        first, last = {}, {}
+        for i, member in enumerate(rig.list):
+            first.setdefault(member.uuid, i)
+            last[member.uuid] = i
+        parents = [_parent_by_scan(n) for n in rig.list]
+        case.assertEqual(rig.indices.tolist(), [first[n.uuid] for n in rig.list], what)
+        case.assertEqual(
+            rig.get_parents().tolist(),
+            [first[p.uuid] if isinstance(p, TransformData) else -1 for p in parents],
+            what,
+        )
+
+        # the parent rows the rig keeps with its index, which a clip edit
+        # reads: a patch has to drop them
+        case.assertEqual(
+            rig._parent_rows().tolist(),
+            [last[p.uuid] if isinstance(p, TransformData) else -1 for p in parents],
+            what,
+        )
+        case.assertEqual(
+            rig.unique_name.tolist(),
+            [all(m.name != n.name or m.uuid == n.uuid for m in rig.list) for n in rig.list],
+            what,
+        )
+
+        # most worlds were cached before the edit: each read is the one the
+        # channels make, or none for a node whose parents lead back to it
+        worlds = _worlds_by_scan(rig, matrices)
+        for member in rig.list:
+            truth = worlds[id(member)]
+            if truth is None:
+                with case.assertRaises(RecursionError, msg=what):
+                    member.world_matrix
+                continue
+            world = member.world_matrix
+            if (np.abs(world - truth) > 1e-9 * (1.0 + np.abs(truth))).any():
+                np.testing.assert_allclose(
+                    world,
+                    truth,
+                    rtol    = 1e-9,
+                    atol    = 1e-9,
+                    err_msg = f"{what}: world of {member.name}",
+                )
+    return ran
+
+
 class TestRigIndex(unittest.TestCase):
     """get_children reads the index a hierarchy keeps; every edit that can
-    give a node other children has to retire it"""
+    give a node other children has to patch it or retire it"""
 
     EDITS = {
         "append": lambda rig: rig.append(
@@ -3489,16 +3805,17 @@ class TestRigIndex(unittest.TestCase):
                 err_msg = f"{label}: after a write on {rig[i].name}",
             )
 
-    def test_every_edit_retires_the_index(self):
+    def test_every_edit_patches_or_retires_the_index(self):
         for label, edit in self.EDITS.items():
             with self.subTest(label):
                 rig = _mixed_rig()
                 self._assert_current(rig, label + " (before)")
 
                 # the index built just ahead of the edit, which then has to
-                # retire it on its own
+                # patch it or retire it on its own
                 rig._rig_index()
                 edit(rig)
+                _assert_index_is_a_build(self, rig, label)
 
                 # an edit that moves a node to another parent leaves the
                 # cached world matrices it moved stale: that is not the map's
@@ -3598,7 +3915,15 @@ class TestRigIndex(unittest.TestCase):
         rig["spine"].get_branch()
         self.assertIs(rig._rig_index(), built)
 
+        # a rename, a node added and a parent changed patch it in place
         rig["neck"].name = "collar"
+        rig.append(TransformData("extra", parent_node="collar"))
+        rig["toe"].parent_node = rig["tip"].uuid
+        self.assertIs(rig._rig_index(), built)
+        _assert_index_is_a_build(self, rig, "patched")
+
+        # an edit that reorders the nodes retires it
+        rig.sort()
         self.assertIsNot(rig._rig_index(), built)
 
         # a strip that renames nothing keeps it
@@ -3606,7 +3931,7 @@ class TestRigIndex(unittest.TestCase):
         rig.strip_namespace()
         self.assertIs(rig._rig_index(), built)
 
-    def test_a_rename_through_a_view_retires_the_index(self):
+    def test_a_rename_through_a_view_reaches_the_index(self):
         # a view renames its nodes together, past __setattr__: the child that
         # names a node by the name the rename gives it finds it at once
         rig = HierarchyData(
@@ -3645,9 +3970,9 @@ class TestRigIndex(unittest.TestCase):
         self.assertLessEqual(rig.list.walks, 2)
 
     def test_a_leaf_written_after_each_node_added_leaves_the_index_unbuilt(self):
-        # every append retires the index: a write on the node just added
-        # learns from one scan that it has no children, where rebuilding the
-        # index would cost several scans on every write
+        # with no index kept, an append has none to patch: a write on the
+        # node just added learns from one scan that it has no children,
+        # where building the index would cost several scans on every write
         from cgmath.hierarchy.hierarchy import _RigIndex
 
         rig    = _mixed_rig()
@@ -3747,9 +4072,13 @@ class TestRigIndex(unittest.TestCase):
                 self.assertTrue(all(node._cached_world() is not None for node in chain))
                 self.assertEqual(leaf.world_matrix[3, 1], float(depth))
 
-        # an edit of its own rig: read again from the root down, by a loop,
-        # every node of the chain cached on the way
+        # a node added to its own rig, which no node names, moves none of it
         chain.append(TransformData("extra"))
+        self.assertTrue(all(node._cached_world() is not None for node in chain[:depth]))
+
+        # an edit of its own rig that can move them: read again from the
+        # root down, by a loop, every node of the chain cached on the way
+        chain.pop()
         self.assertIsNone(leaf._cached_world())
         self.assertEqual(leaf.world_matrix[3, 1], float(depth))
         self.assertTrue(all(node._cached_world() is not None for node in chain[:depth]))
@@ -3850,6 +4179,953 @@ class TestRigIndex(unittest.TestCase):
                 compared, matrices = cost(h, reparent_and_read)
                 self.assertLessEqual(matrices, depth + 1)
                 self.assertLess(compared, len(h) / 2)
+
+    @staticmethod
+    def _counted(edit) -> dict:
+        """index builds and local matrices computed while ``edit`` runs"""
+        from cgmath.hierarchy.hierarchy import _RigIndex
+
+        build, matrix = _RigIndex.build.__func__, TransformData.matrix
+        counts = {"builds": 0, "matrices": 0}
+
+        def counted_build(cls, hierarchy):
+            counts["builds"] += 1
+            return build(cls, hierarchy)
+
+        def counted_matrix(node):
+            counts["matrices"] += 1
+            return matrix.fget(node)
+
+        with mock.patch.object(_RigIndex, "build", classmethod(counted_build)), mock.patch.object(
+            TransformData, "matrix", property(counted_matrix, matrix.fset)
+        ):
+            edit()
+        return counts
+
+    def test_a_rig_built_node_by_node_costs_each_node_the_same(self):
+        # a node appended, parented to the one before and given a world
+        # matrix, one at a time on a rig in use: each append and each parent
+        # change retired the index, so each world written built it again and
+        # worked out the whole chain above the node. 300 joints took 1 s on
+        # one thread where 1.0.4 took 0.1 s. The index is patched instead and
+        # the chain above stays cached: no build, no pass over the list, the
+        # same few matrices a node however long the chain. An append moves no
+        # position of the index, and a parent is asked of a few nodes a node:
+        # set_parent's check for a loop climbs no chain above a node that has
+        # no children
+        from cgmath.hierarchy.hierarchy import _Lookups, _RigIndex
+
+        parents = {
+            "parent_node uuid": lambda node, above: setattr(node, "parent_node", above.uuid),
+            "parent_node name": lambda node, above: setattr(node, "parent_node", above.name),
+            "set_parent local": lambda node, above: node.set_parent(above.name, world_space=False),
+            "set_parent world": lambda node, above: node.set_parent(above),
+        }
+
+        def built(count, parent):
+            rig      = HierarchyData([TransformData("root", translate=(0.0, 1.0, 0.0))])
+            rig.list = _Walked(rig.list)
+            rig.world_matrix  # a rig in use: its index built, its worlds cached
+            rig.list.walks = 0
+
+            def edit():
+                above = rig.list[0]
+                for i in range(count):
+                    node = TransformData(f"j{i}", node_type="joint")
+                    rig.append(node)
+                    parent(node, above)
+                    W                 = np.eye(4)
+                    W[3, :3]          = (0.5, i + 2.0, 0.0)
+                    node.world_matrix = W
+                    above             = node
+
+            shift, index_parent, lookups_parent = _RigIndex._shift, _RigIndex.parent, _Lookups.parent
+            asked = {"shifts": 0, "parents": 0}
+
+            def counted_shift(index, at):
+                asked["shifts"] += 1
+                return shift(index, at)
+
+            def counted_index_parent(index, node):
+                asked["parents"] += 1
+                return index_parent(index, node)
+
+            def counted_lookups_parent(lookups, node):
+                asked["parents"] += 1
+                return lookups_parent(lookups, node)
+
+            with mock.patch.object(_RigIndex, "_shift", counted_shift), mock.patch.object(
+                _RigIndex, "parent", counted_index_parent
+            ), mock.patch.object(_Lookups, "parent", counted_lookups_parent):
+                counts = self._counted(edit)
+            counts.update(asked)
+            counts["walks"] = rig.list.walks
+            np.testing.assert_allclose(rig.list[-1].world_matrix[3, :3], [0.5, count + 1.0, 0.0])
+            self.assertEqual(len(rig.list[0].get_branch()), count + 1)
+            return counts
+
+        for label, parent in parents.items():
+            with self.subTest(label):
+                small, large = built(40, parent), built(160, parent)
+                self.assertEqual(small["builds"], large["builds"])
+                self.assertEqual(small["walks"], large["walks"])
+                self.assertLessEqual(large["matrices"], 4 * small["matrices"])
+                self.assertEqual((small["shifts"], large["shifts"]), (0, 0))
+                self.assertLessEqual(large["parents"], 4 * small["parents"] + 8)
+
+    def test_a_rig_renamed_node_by_node_costs_each_node_the_same(self):
+        # node.name = in a loop: each rename scanned the whole rig for the
+        # children naming the node, 0.25 s over 2,000 nodes where 1.0.4 took
+        # 0.001 s. The children come from the index, which is patched: on a
+        # rig in use no pass over the list, no build, and every cached world
+        # matrix stands. A rig with no index -- just made, flat, or one a pop
+        # retired it in -- makes one pass at the first rename and builds the
+        # index at the second, whatever its size
+        def renamed(count, by_name, state):
+            nodes = [TransformData(f"j{i}", translate=(0.0, 1.0, 0.0)) for i in range(count)]
+            rig   = HierarchyData(nodes)
+            if state != "flat":
+                for above, node in zip(nodes, nodes[1:]):
+                    node.parent_node = above.name if by_name else above.uuid
+            rig.list = _Walked(rig.list)
+            if state in ("in use", "flat", "popped"):
+                rig.world_matrix  # its worlds cached, the index built if any parent
+            if state == "popped":
+                rig.append(TransformData("extra"))
+                rig.pop()
+            rig.list.walks = 0
+
+            def edit():
+                for node in nodes:
+                    node.name = node.name + "_x"
+
+            counts          = self._counted(edit)
+            counts["walks"] = rig.list.walks
+            if state in ("in use", "flat"):
+                self.assertTrue(all(node._cached_world() is not None for node in nodes))
+            self.assertEqual(rig.name, [f"j{i}_x" for i in range(count)])
+            if state != "flat":
+                self.assertEqual([n.name for n in nodes[0].get_branch()], rig.name)
+                self.assertEqual(nodes[-1].world_matrix[3, 1], float(count))
+            return counts, rig
+
+        unread = {"builds": 1, "matrices": 0, "walks": 2}  # a pass, then a build
+        for state, want in (
+            ("in use", {"builds": 0, "matrices": 0, "walks": 0}),
+            ("made", unread),
+            ("flat", unread),
+            ("popped", unread),
+        ):
+            for by_name in (False, True):
+                with self.subTest(state, by_name=by_name):
+                    small, _ = renamed(40, by_name, state)
+                    large, rig = renamed(160, by_name, state)
+                    self.assertEqual(small, large)
+                    self.assertEqual(large, want)
+                    self.assertIsNotNone(rig._kept_index())
+                    _assert_index_is_a_build(self, rig, f"{state}, by_name={by_name}")
+
+    def test_a_rig_of_one_name_renamed_node_by_node_patches_the_index(self):
+        # every node named alike and parented by uuid, then renamed one at a
+        # time on a rig in use: no child names the shared name, so a rename
+        # changes the name table alone, the next node of the name its first.
+        # Each went through the batch rule, 7.9 times 1.0.4's loop at 2000
+        # nodes. First to last, last to first or from the middle out: no
+        # build, no pass over the list, no batch rule, every world cached
+        from cgmath.hierarchy import hierarchy as module
+
+        def renamed(count, order):
+            nodes = [TransformData("joint", translate=(0.0, 1.0, 0.0)) for _ in range(count)]
+            rig   = HierarchyData(nodes)
+            for above, node in zip(nodes, nodes[1:]):
+                node.parent_node = above.uuid
+            rig.list = _Walked(rig.list)
+            rig.world_matrix
+            built          = rig._rig_index()
+            rig.list.walks = 0
+
+            def edit():
+                for i in order(count):
+                    nodes[i].name = f"joint{i}"
+
+            with mock.patch.object(module, "_rename_in_index", wraps=module._rename_in_index) as batch:
+                counts = self._counted(edit)
+            counts["walks"] = rig.list.walks
+            counts["batch"] = batch.call_count
+
+            self.assertIs(rig._kept_index(), built)
+            _assert_index_is_a_build(self, rig, f"{count} nodes")
+            self.assertTrue(all(node._cached_world() is not None for node in nodes))
+            self.assertEqual(rig.name, [f"joint{i}" for i in range(count)])
+            self.assertEqual(rig.unique_name.tolist(), [True] * count)
+            self.assertEqual(nodes[-1].world_matrix[3, 1], float(count))
+            return counts
+
+        for label, order in (
+            ("first to last", lambda count: range(count)),
+            ("last to first", lambda count: range(count - 1, -1, -1)),
+            ("middle out", lambda count: sorted(range(count), key=lambda i: abs(i - count // 2))),
+        ):
+            with self.subTest(label):
+                small, large = renamed(40, order), renamed(160, order)
+                self.assertEqual(small, large)
+                self.assertEqual(large, {"builds": 0, "matrices": 0, "walks": 0, "batch": 0})
+
+    def test_parent_node_loops_on_a_rig_in_use_patch_the_index(self):
+        # a parent_node written on every node of a rig in use, nothing read
+        # between: each patches the index, no build, no pass over the list,
+        # and no node's children listed, only asked whether it has any; the
+        # worlds read after are the ones the channels make
+        from cgmath.hierarchy.hierarchy import _RigIndex
+
+        def chain(count, by_name=False):
+            nodes = [TransformData(f"j{i}", translate=(0.0, 1.0, 0.0)) for i in range(count)]
+            rig   = HierarchyData(nodes)
+            for above, node in zip(nodes, nodes[1:]):
+                node.parent_node = above.name if by_name else above.uuid
+            return rig
+
+        def star(count):
+            nodes = [TransformData(f"j{i}", translate=(0.0, 1.0, 0.0)) for i in range(count)]
+            rig   = HierarchyData(nodes)
+            for node in nodes[1:]:
+                node.parent_node = nodes[0].uuid
+            return rig
+
+        def flattened(nodes):
+            for node in nodes:
+                node.parent_node = None
+
+        def leaves_by_name_then_uuid(nodes):
+            for node in nodes[1:]:
+                node.parent_node = nodes[0].name
+            for node in nodes[1:]:
+                node.parent_node = nodes[0].uuid
+
+        def under_the_root(nodes):
+            for node in nodes[2:]:
+                node.parent_node = nodes[0].name
+
+        listed = _RigIndex.children
+        for label, make, loop in (
+            ("a chain flattened", chain, flattened),
+            ("a star's leaves by name, then by uuid", star, leaves_by_name_then_uuid),
+            ("a chain by name put under its root", lambda count: chain(count, True), under_the_root),
+        ):
+            counts = []
+            for count in (40, 160):
+                with self.subTest(label, count=count):
+                    rig      = make(count)
+                    rig.list = _Walked(rig.list)
+                    rig.world_matrix
+                    built          = rig._rig_index()
+                    nodes          = list(rig.list)
+                    rig.list.walks = 0
+                    asked          = []
+
+                    def counted_children(index, node):
+                        asked.append(node)
+                        return listed(index, node)
+
+                    with mock.patch.object(_RigIndex, "children", counted_children):
+                        spent = self._counted(lambda: loop(nodes))
+                    spent["walks"]    = rig.list.walks
+                    spent["children"] = len(asked)
+                    counts.append(spent)
+
+                    self.assertIs(rig._kept_index(), built)
+                    if loop is leaves_by_name_then_uuid:
+                        # a parent_node naming the parent it had drops nothing
+                        self.assertTrue(all(node._cached_world() is not None for node in nodes))
+                    _assert_lookups_are_a_scan(self, rig, f"{label}, {count}")
+                    np.testing.assert_allclose(rig.world_matrix, rig.copy().world_matrix, atol=1e-12)
+            self.assertEqual(counts, [{"builds": 0, "matrices": 0, "walks": 0, "children": 0}] * 2, label)
+
+    def test_a_long_row_taken_from_ahead_of_its_end_is_a_deque(self):
+        # the children of one parent reparented one at a time leave its row
+        # from the front: a list moved every later row each time, the square
+        # of the children over the loop (5 of the 9 ms such a loop took over
+        # a 2000 node star). A long row becomes a deque the first time a row
+        # is put in or taken out ahead of its end; a short one, or one taken
+        # from or put at its end, stays a list. Every patch keeps the rows in
+        # order, as a sorted list of them is
+        from cgmath.hierarchy.hierarchy import _DEQUE_ROWS, _insort_row, _remove_row
+
+        long = _DEQUE_ROWS
+        for label, rows, edit, kind in (
+            ("short, the first taken", list(range(long - 1)), lambda t: _remove_row(t, "k", 0), list),
+            ("long, the last taken", list(range(long)), lambda t: _remove_row(t, "k", long - 1), list),
+            ("long, one put at the end", list(range(long)), lambda t: _insort_row(t, "k", long), list),
+            ("long, the first taken", list(range(long)), lambda t: _remove_row(t, "k", 0), deque),
+            ("long, one from the middle", list(range(long)), lambda t: _remove_row(t, "k", 5), deque),
+            ("long, one put first", list(range(1, long + 1)), lambda t: _insort_row(t, "k", 0), deque),
+        ):
+            with self.subTest(label):
+                table = {"k": rows}
+                edit(table)
+                self.assertIs(type(table["k"]), kind)
+
+        rng   = random.Random(5)
+        table = {"k": list(range(0, 4 * long, 2))}
+        truth = list(table["k"])
+        for _ in range(400):
+            row = rng.randrange(4 * long)
+            if row in truth:
+                self.assertTrue(_remove_row(table, "k", row))
+                truth.remove(row)
+            else:
+                self.assertFalse(_remove_row(table, "k", row))
+                _insort_row(table, "k", row)
+                truth = sorted(truth + [row])
+            self.assertEqual(list(table.get("k", ())), truth)
+
+    def test_a_rename_after_an_edit_that_retires_the_index_makes_the_pass(self):
+        # a rename that follows another edit, rather than a rename, makes the
+        # pass over the list it made before: a build costs about three passes
+        from cgmath.hierarchy.hierarchy import _RigIndex
+
+        nodes = [TransformData(f"j{i}") for i in range(30)]
+        rig   = HierarchyData(nodes)
+        for above, node in zip(nodes, nodes[1:]):
+            node.parent_node = above.name
+        rig.world_matrix
+
+        build  = _RigIndex.build.__func__
+        builds = []
+
+        def counted(cls, hierarchy):
+            builds.append(1)
+            return build(cls, hierarchy)
+
+        with mock.patch.object(_RigIndex, "build", classmethod(counted)):
+            for node in nodes:
+                node.uuid = generate_uuid()  # retires the index
+                node.name = node.name + "_x"
+        self.assertEqual(builds, [])
+        self.assertEqual([n.name for n in nodes[0].get_branch()], [f"j{i}_x" for i in range(30)])
+        _assert_index_is_a_build(self, rig, "uuid, then rename")
+
+    def test_a_rig_named_and_parented_node_by_node_builds_the_index_once(self):
+        # renames with appends or parent_node writes between them, nothing
+        # read: each append or parent_node retired the index the rename
+        # before had left no current one of, so each rename made its pass
+        # over the rig, 3.7 and 150 times 1.0.4's loop at 2000 nodes. One
+        # pass, one build at the second rename, then each node patches it
+        def loaded(count):
+            # a loader's loop: a node appended, then named and parented
+            rig      = HierarchyData()
+            rig.list = _Walked(rig.list)
+
+            def edit():
+                above = None
+                for i in range(count):
+                    node = TransformData("tmp", translate=(0.0, 1.0, 0.0))
+                    rig.append(node)
+                    node.name = f"j{i}"
+                    if above is not None:
+                        node.parent_node = above.uuid
+                    above = node
+
+            return rig, edit
+
+        def reparented(by_name):
+            # every node of a rig just made renamed, then parented, the
+            # first made a root
+            def made(count):
+                nodes    = [TransformData(f"j{i}", translate=(0.0, 1.0, 0.0)) for i in range(count)]
+                rig      = HierarchyData(nodes)
+                rig.list = _Walked(rig.list)
+
+                def edit():
+                    for above, node in zip([None] + nodes, nodes):
+                        node.name = node.name + "_x"
+                        if above is None:
+                            node.parent_node = None
+                        else:
+                            node.parent_node = above.name if by_name else above.uuid
+
+                return rig, edit
+
+            return made
+
+        for label, make, names in (
+            ("appended, named, parented", loaded, "j{}"),
+            ("renamed, parented by uuid", reparented(False), "j{}_x"),
+            ("renamed, parented by name", reparented(True), "j{}_x"),
+        ):
+            with self.subTest(label):
+                counts = []
+                for count in (40, 160):
+                    rig, edit = make(count)
+                    rig.list.walks = 0
+                    spent          = self._counted(edit)
+                    spent["walks"] = rig.list.walks
+                    counts.append(spent)
+                    self.assertEqual(rig.name, [names.format(i) for i in range(count)])
+                    self.assertEqual(rig.list[0].get_branch().name, rig.name)
+                    self.assertEqual(rig.list[-1].world_matrix[3, 1], float(count))
+                    _assert_lookups_are_a_scan(self, rig, f"{label}, {count}")
+                self.assertEqual(counts[0],             counts[1])
+                self.assertEqual(counts[1]["builds"],   1)
+                self.assertEqual(counts[1]["matrices"], 0)
+
+    def test_inserts_ahead_shift_the_index_only_for_a_read_between(self):
+        # a node inserted ahead of the end moves every later position of the
+        # index up one, a pass over all of it. Inserts with nothing read
+        # between made that pass each time, 5 times 1.0.4's loop at 2000
+        # nodes: past the first, they retire the index, as before it was
+        # patched. With a world read between, the pass is made, cheaper than
+        # the build a retired index would cost the read
+        from cgmath.hierarchy.hierarchy import _RigIndex
+
+        def in_use(count):
+            nodes = [TransformData(f"j{i}", translate=(0.0, 1.0, 0.0)) for i in range(count)]
+            rig   = HierarchyData(nodes)
+            for above, node in zip(nodes, nodes[1:]):
+                node.parent_node = above.uuid
+            rig.world_matrix
+            return rig
+
+        def front(rig, count):
+            for i in range(count):
+                rig.insert(0, TransformData(f"k{i}"))
+
+        def under_the_middle(rig, count):
+            # each node put right after the middle one, under it, its world
+            # read: the chain above is cached, so one local matrix a node
+            for i in range(count):
+                at = len(rig) // 2
+                rig.insert(
+                    at + 1,
+                    TransformData(f"k{i}", parent_node=rig.list[at].uuid, translate=(1.0, 0.0, 0.0)),
+                )
+                rig.list[at + 1].world_matrix
+
+        def front_renamed(rig, count):
+            # each node put first, then named: an insert ahead is no edit a
+            # rename loop builds the index across, as its shift would cost
+            # more than the rename's pass
+            for i in range(count):
+                node = TransformData("tmp")
+                rig.insert(0, node)
+                node.name = f"k{i}"
+
+        def counted(loop, count):
+            rig    = in_use(count)
+            shift  = _RigIndex._shift
+            shifts = []
+
+            def counted_shift(index, at):
+                shifts.append(at)
+                return shift(index, at)
+
+            with mock.patch.object(_RigIndex, "_shift", counted_shift):
+                spent = self._counted(lambda: loop(rig, count))
+            spent["shifts"] = len(shifts)
+
+            _assert_lookups_are_a_scan(self, rig, f"{loop.__name__}, {count}")
+            np.testing.assert_allclose(rig.world_matrix, rig.copy().world_matrix, atol=1e-12)
+            return spent
+
+        for loop, want in (
+            (front, lambda count: {"builds": 0, "matrices": 0, "shifts": 1}),
+            (under_the_middle, lambda count: {"builds": 0, "matrices": count, "shifts": count}),
+            (front_renamed, lambda count: {"builds": 0, "matrices": 0, "shifts": 1}),
+        ):
+            for count in (40, 160):
+                with self.subTest(loop.__name__, count=count):
+                    self.assertEqual(counted(loop, count), want(count))
+
+    def test_an_insert_that_retires_the_index_drops_the_worlds_it_moves(self):
+        # the second of two inserts with nothing read between retires the
+        # index rather than shift it: the cached world matrices stand, unless
+        # a node names the one put in: by name, here a node of a name it now
+        # resolves to ahead of the first one, which takes that node's
+        # children, or by uuid, a child that named no node until now
+        ghost = generate_uuid()
+        for label, added, kept in (
+            ("named by none", lambda: TransformData("r", translate=(5.0, 0.0, 0.0)), True),
+            ("named", lambda: TransformData("p", translate=(5.0, 0.0, 0.0)), False),
+            ("named by uuid", lambda: TransformData("r", uuid=ghost, translate=(5.0, 0.0, 0.0)), False),
+        ):
+            with self.subTest(label):
+                rig = HierarchyData(
+                    [
+                        TransformData("p", translate=(9.0, 0.0, 0.0)),
+                        TransformData("z", translate=(0.0, 1.0, 0.0), parent_node="p"),
+                        TransformData("w", translate=(0.0, 1.0, 0.0), parent_node="z"),
+                        TransformData("x", translate=(0.0, 1.0, 0.0), parent_node=ghost),
+                    ]
+                )
+                rig.world_matrix
+                rig.insert(0, TransformData("q"))  # shifts the index the read fetched
+                self.assertIsNotNone(rig._kept_index())
+                node = added()
+                rig.insert(1, node)
+
+                self.assertIsNone(rig._kept_index())
+                self.assertEqual([n._cached_world() is not None for n in rig.list[2:]], [kept] * 4)
+                by_name, by_uuid = label == "named", label == "named by uuid"
+                self.assertIs(rig["z"].get_parent(), node if by_name else rig.list[2])
+                np.testing.assert_allclose(rig["w"].world_matrix[3, :3], [5.0 if by_name else 9.0, 2.0, 0.0])
+                if by_uuid:
+                    self.assertIs(rig["x"].get_parent(), node)
+                else:
+                    self.assertEqual(rig["x"].get_parent(), ghost)
+                np.testing.assert_allclose(rig["x"].world_matrix[3, :3], [5.0 if by_uuid else 0.0, 1.0, 0.0])
+                _assert_lookups_are_a_scan(self, rig, label)
+
+    def test_an_insert_at_or_past_either_end_patches_the_index(self):
+        # insert(-1) and insert(len - 1) put the node ahead of the last one,
+        # whose position the shift of the index moves too; a position past
+        # either end puts it where list.insert does, first or last
+        for label, where, order in (
+            ("insert(-1)", lambda rig: -1, "abcxk"),
+            ("insert(len - 1)", lambda rig: len(rig) - 1, "abcxk"),
+            ("insert(len)", len, "abckx"),
+            ("insert(len + 2)", lambda rig: len(rig) + 2, "abckx"),
+            ("insert(-len - 2)", lambda rig: -len(rig) - 2, "xabck"),
+        ):
+            with self.subTest(label):
+                rig = HierarchyData(
+                    [TransformData("a"), TransformData("b"), TransformData("c", parent_node="a")]
+                )
+                kid = TransformData("k", translate=(0.0, 1.0, 0.0))
+                rig.append(kid)
+                kid.parent_node = rig["c"].uuid
+                rig.world_matrix
+                built = rig._rig_index()
+                rig.insert(where(rig), TransformData("x", parent_node="b"))
+
+                self.assertIs(rig._kept_index(), built)
+                self.assertEqual(rig.name, list(order))
+                _assert_lookups_are_a_scan(self, rig, label)
+                self.assertIs(kid.get_parent(), rig["c"])
+                self.assertEqual(rig["b"].get_children().name, ["x"])
+
+    def test_set_parent_given_a_node_takes_that_node_not_its_name(self):
+        # a node handed to set_parent is found by its uuid, in the index or
+        # by a scan, never as the first node carrying its name
+        for kept in (False, True):
+            with self.subTest(kept=kept):
+                rig = HierarchyData(
+                    [
+                        TransformData("arm", translate=(5.0, 0.0, 0.0)),
+                        TransformData("arm", translate=(-5.0, 0.0, 0.0)),
+                        TransformData("hand"),
+                    ]
+                )
+                if kept:
+                    rig._rig_index()  # a flat rig's world reads build none
+                self.assertEqual(rig._kept_index() is not None, kept)
+                rig["hand"].set_parent(rig.list[1], world_space=False)
+                self.assertIs(rig["hand"].get_parent(), rig.list[1])
+                self.assertEqual(rig["hand"].world_matrix[3, 0], -5.0)
+                _assert_lookups_are_a_scan(self, rig, f"kept={kept}")
+
+    def test_a_name_or_a_parent_no_index_can_hold_retires_it(self):
+        # name = 7 or parent_node = 7 on a rig in use, or a node appended or
+        # inserted with a parent_node of 7: no build can stand for the rig
+        # then, so no patched index may either
+        def appended(rig, at=None):
+            node             = TransformData("d")
+            node.parent_node = 7  # past the constructor, which makes it a string
+            if at is None:
+                rig.append(node)
+            else:
+                rig.insert(at, node)
+
+        for label, edit in (
+            ("name", lambda rig: setattr(rig.list[1], "name", 7)),
+            ("parent_node", lambda rig: setattr(rig.list[1], "parent_node", 7)),
+            ("appended", appended),
+            ("inserted", lambda rig: appended(rig, 1)),
+        ):
+            with self.subTest(label):
+                rig = HierarchyData(
+                    [
+                        TransformData("a"),
+                        TransformData("b", parent_node="a"),
+                        TransformData("c", parent_node="b"),
+                    ]
+                )
+                rig.world_matrix
+                self.assertIsNotNone(rig._kept_index())
+                edit(rig)
+                self.assertIsNone(rig._kept_index())
+                self.assertIsNone(rig._rig_index())
+                _assert_lookups_are_a_scan(self, rig, label)
+
+    def test_a_rename_in_a_rig_no_index_can_stand_for(self):
+        # a node whose uuid is not a string: the rig keeps None for its
+        # index, and a rename finds the children by a scan
+        rig = HierarchyData(
+            [TransformData("a"), TransformData("b", parent_node="a"), TransformData("c", parent_node="b")]
+        )
+        rig.list[0].__dict__["uuid"] = 12345
+        self.assertIsNone(rig._rig_index())
+        rig.list[1].name = "z"
+        self.assertEqual(rig.name, ["a", "z", "c"])
+        self.assertIs(rig.list[2].get_parent(), rig.list[1])
+        self.assertIs(rig.list[1].get_parent(), rig.list[0])
+        _assert_lookups_are_a_scan(self, rig, "a uuid that is not a string")
+
+    def test_renames_in_a_rig_no_index_can_stand_for_try_one_build(self):
+        # a parent_node that is not a string, written past the constructor:
+        # no index can stand for the rig, and a rename makes its pass. Each
+        # rename tried a build first, which went as far as that node, 5.5
+        # times aba1ce5's loop at 2000 nodes. The build that failed is kept
+        # across the renames, appends and parent_node writes that can not
+        # change that, and tried again after one that can. Parented by name,
+        # each rename pins the child naming the node to its uuid on the way
+        def spoilt(count, asked, by_name=False):
+            nodes = [TransformData(f"j{i}", translate=(0.0, 1.0, 0.0)) for i in range(count)]
+            rig   = HierarchyData(nodes)
+            for above, node in zip(nodes, nodes[1:]):
+                node.parent_node = above.name if by_name else above.uuid
+            nodes[-1].parent_node = 7
+            if asked:
+                self.assertIsNone(rig._rig_index())  # a lookup asked first
+            return rig, nodes
+
+        def renamed(rig, nodes):
+            for node in nodes:
+                node.name = node.name + "_x"
+
+        def renamed_and_appended(rig, nodes):
+            for node in nodes:
+                node.name = node.name + "_x"
+                rig.append(TransformData(node.name + "_y", parent_node=node.uuid))
+
+        def renamed_and_reparented(rig, nodes):
+            for above, node in zip(nodes, nodes[1:-1]):
+                node.name        = node.name + "_x"
+                node.parent_node = above.name
+
+        for loop in (renamed, renamed_and_appended, renamed_and_reparented):
+            for asked, by_name in itertools.product((False, True), (False, True)):
+                with self.subTest(loop.__name__, asked=asked, by_name=by_name):
+                    spent = []
+                    for count in (40, 160):
+                        rig, nodes = spoilt(count, asked, by_name)
+                        spent.append(self._counted(lambda: loop(rig, nodes)))
+                        self.assertIsNone(rig._rig_index())
+                        _assert_lookups_are_a_scan(self, rig, f"{loop.__name__}, {count}")
+                        if by_name and loop is not renamed_and_reparented:
+                            self.assertEqual(nodes[1].parent_node, nodes[0].uuid)  # pinned
+                    self.assertEqual(spent[0], spent[1])
+                    self.assertLessEqual(spent[1]["builds"], 1 - asked)
+
+        # the value that kept the index out written again, as a string, or
+        # renamed so: the next lookup builds one, and it holds what a build does
+        def parent_node_fixed(rig, nodes):
+            nodes[-1].parent_node = nodes[-2].uuid
+
+        def name_fixed(rig, nodes):
+            nodes[-1].parent_node = nodes[-2].uuid
+            nodes[3].name         = 7  # past the constructor, which makes it a string
+            self.assertIsNone(rig._rig_index())
+            nodes[0].name = "first"  # takes no such value away: still none
+            self.assertIsNone(rig._rig_index())
+            nodes[3].name = "j3"
+
+        for fix in (parent_node_fixed, name_fixed):
+            with self.subTest(fix.__name__):
+                rig, nodes = spoilt(12, asked=True)
+                renamed(rig, nodes)
+                fix(rig, nodes)
+                self.assertIsNotNone(rig._rig_index())
+                _assert_lookups_are_a_scan(self, rig, fix.__name__)
+                self.assertEqual(nodes[-1].world_matrix[3, 1], 12.0)
+
+    def test_a_node_added_takes_the_children_naming_it(self):
+        # a child naming a node the rig lacked, by name or by uuid, hangs
+        # under the node once it is added, its cached world matrix dropped;
+        # one inserted ahead of a node of its name takes that node's children
+        ghost_uuid = generate_uuid()
+        for label, added, at in (
+            ("by name", lambda: TransformData("ghost", translate=(5.0, 0.0, 0.0)), None),
+            ("by uuid", lambda: TransformData("g", uuid=ghost_uuid, translate=(5.0, 0.0, 0.0)), None),
+            ("ahead", lambda: TransformData("p", translate=(5.0, 0.0, 0.0)), 0),
+        ):
+            with self.subTest(label):
+                rig = HierarchyData(
+                    [
+                        TransformData("p", translate=(9.0, 0.0, 0.0)),
+                        TransformData("x", translate=(0.0, 1.0, 0.0), parent_node="ghost"),
+                        TransformData("y", translate=(0.0, 1.0, 0.0), parent_node=ghost_uuid),
+                        TransformData("z", translate=(0.0, 1.0, 0.0), parent_node="p"),
+                        TransformData("w", translate=(0.0, 1.0, 0.0), parent_node="z"),
+                    ]
+                )
+                rig.world_matrix
+                built = rig._rig_index()
+                node  = added()
+                if at is None:
+                    rig.append(node)
+                else:
+                    rig.insert(at, node)
+
+                self.assertIs(rig._rig_index(), built)
+                _assert_index_is_a_build(self, rig, label)
+                np.testing.assert_allclose(rig.world_matrix, rig.copy().world_matrix, atol=1e-12)
+                if label == "ahead":
+                    self.assertIs(rig["z"].get_parent(), node)
+                    np.testing.assert_allclose(rig["w"].world_matrix[3, :3], [5.0, 2.0, 0.0])
+                else:
+                    child = rig["x" if label == "by name" else "y"]
+                    self.assertIs(child.get_parent(), node)
+                    np.testing.assert_allclose(child.world_matrix[3, :3], [5.0, 1.0, 0.0])
+
+    def test_a_node_the_rig_holds_is_not_added_again(self):
+        # the check that the uuid is new reads the index the rig keeps
+        rig = _mixed_rig()
+        rig.world_matrix
+        built = rig._rig_index()
+        neck  = rig["neck"]
+        for label, add in (
+            ("append", lambda node: rig.append(node)),
+            ("insert", lambda node: rig.insert(2, node)),
+        ):
+            for node in (neck, TransformData("other", uuid=neck.uuid)):
+                with self.subTest(label, node=node.name):
+                    listed = [id(n) for n in rig.list]
+                    with self.assertRaises(RuntimeError):
+                        add(node)
+                    self.assertEqual([id(n) for n in rig.list], listed)
+                    self.assertIs(rig._kept_index(), built)
+
+    def test_a_node_added_reads_its_world_in_this_rig(self):
+        # its world matrix cached in another rig is not trusted in this one,
+        # whose index is patched and whose own cached worlds stand
+        rig = _mixed_rig()
+        rig.world_matrix
+        other = HierarchyData([TransformData("lift", translate=(0.0, 50.0, 0.0))])
+        moved = TransformData("moved", parent_node="lift", translate=(1.0, 0.0, 0.0))
+        other.append(moved)
+        np.testing.assert_allclose(moved.world_matrix[3, :3], [1.0, 50.0, 0.0])
+
+        built = rig._rig_index()
+        rig.append(moved)
+        self.assertIs(rig._kept_index(), built)
+        self.assertTrue(all(n._cached_world() is not None for n in rig.list[:-1]))
+        np.testing.assert_allclose(moved.world_matrix[3, :3], [1.0, 0.0, 0.0])
+
+        moved.parent_node = rig["head"].uuid
+        self.assertIs(rig._kept_index(), built)
+        np.testing.assert_allclose(moved.world_matrix, moved.matrix @ rig["head"].world_matrix)
+
+    def test_a_structural_edit_leaves_a_primitive_field_clean(self):
+        # a node added or given another parent drops cached world matrices
+        # only, patched or not: _transform_changed, which a primitive
+        # extends to mark its field dirty, is a channel write's, as before
+        from cgmath.geometry.sdf import DMCField, SDFSphere
+
+        rig = HierarchyData([TransformData("root"), TransformData("arm", parent_node="root")])
+        rig.world_matrix
+        field = DMCField()
+        ball  = SDFSphere(radius=0.5, name="ball")
+        field.add(ball)
+        for label, edit in (
+            ("append", lambda: rig.append(ball)),
+            ("parent_node", lambda: setattr(ball, "parent_node", "arm")),
+            ("parent_node by uuid", lambda: setattr(ball, "parent_node", rig["root"].uuid)),
+        ):
+            with self.subTest(label):
+                self.assertIsNotNone(rig._kept_index())
+                field._dirty = False
+                edit()
+                self.assertFalse(field._dirty)
+        ball.translate = (1.0, 0.0, 0.0)
+        self.assertTrue(field._dirty)
+
+    def test_unique_names_follow_a_name_given_up_and_taken(self):
+        # one node renamed at a time, through the index: the names it keeps
+        # for unique_name go with each rename
+        rig = HierarchyData([TransformData(f"j{i}") for i in range(4)])
+        for above, node in zip(rig.list, rig.list[1:]):
+            node.parent_node = above.uuid
+        rig.world_matrix
+        built = rig._rig_index()
+        self.assertEqual(rig.unique_name.tolist(), [True] * 4)
+
+        def by_scan():
+            return [all(m.name != n.name or m.uuid == n.uuid for m in rig.list) for n in rig.list]
+
+        for label, node, name in (
+            ("j0 given up", 0, "fresh"),
+            ("j0 taken", 2, "j0"),
+            ("j0 shared", 1, "j0"),
+            ("j0 given up again", 2, "j2"),
+        ):
+            rig.list[node].name = name
+            self.assertEqual(rig.unique_name.tolist(), by_scan(), label)
+            self.assertIs(rig._kept_index(), built, label)
+
+    def test_a_name_shaped_like_a_uuid_names_no_node(self):
+        # a parent_node or a query shaped like a uuid, with or without its
+        # hyphens, names a node by uuid alone, read from the index or found
+        # by a scan: a node carrying it as a name is not its parent, and
+        # keeps no child naming it when renamed
+        for odd in (generate_uuid(), generate_uuid().replace("-", "")):
+            for kept in (False, True):
+                with self.subTest(len(odd), kept=kept):
+                    rig = HierarchyData(
+                        [
+                            TransformData("a"),
+                            TransformData(odd),
+                            TransformData("c"),
+                            TransformData("d", parent_node=odd),
+                        ]
+                    )
+                    if kept:
+                        rig._rig_index()
+                    self.assertEqual(rig._kept_index() is not None, kept)
+                    with self.assertRaises(ValueError):
+                        rig["c"].set_parent(odd)
+                    self.assertIsNone(rig["c"].parent_node)
+
+                    self.assertEqual(rig._kept_index() is not None, kept)
+                    rig.list[1].name = "plain"
+                    self.assertEqual(rig["d"].parent_node, odd)
+                    self.assertEqual(rig["d"].get_parent(), odd)
+                    _assert_index_is_a_build(self, rig, f"{len(odd)}, kept={kept}")
+
+        # a digit short of a uuid's 32 is a name like any other
+        short = generate_uuid().replace("-", "")[:31]
+        rig   = HierarchyData([TransformData(short), TransformData("d", parent_node=short)])
+        rig._rig_index()
+        self.assertIs(rig["d"].get_parent(), rig.list[0])
+        rig.list[0].name = "plain"
+        self.assertEqual(rig["d"].parent_node, rig.list[0].uuid)
+
+    def test_a_rename_reads_only_a_current_index(self):
+        # the index a rig keeps answers a rename only while it is current:
+        # after an edit that retired it, the list shrunk raw, or the list
+        # replaced past __setattr__, the children naming the node are the
+        # ones a scan finds, each kept under it
+        def retired(rig):
+            rig["toe"].uuid        = generate_uuid()
+            rig["toe"].parent_node = "head"
+
+        def shrunk(rig):
+            rig.list.pop()  # tip, which names head
+
+        def replaced(rig):
+            nodes                = list(rig.list)
+            late                 = TransformData("late", parent_node="head")
+            late._hierarchy      = rig
+            nodes[7]             = late  # in place of toe
+            rig.__dict__["list"] = nodes
+
+        for label, edit in (("retired", retired), ("shrunk raw", shrunk), ("replaced raw", replaced)):
+            with self.subTest(label):
+                rig = _mixed_rig()
+                rig._rig_index()
+                edit(rig)
+                head      = rig["head"]
+                kids      = _children_by_scan(head)
+                head.name = "skull"
+                self.assertEqual([id(n) for n in head.get_children()], [id(n) for n in kids])
+                self.assertTrue(all(kid.get_parent() is head for kid in kids))
+                _assert_index_is_a_build(self, rig, label)
+
+    def test_an_index_out_of_step_is_retired_not_patched(self):
+        # a name or a parent_node written past __setattr__, two nodes carrying
+        # one uuid, or a name the index can not key on: the edit answers as a
+        # scan does, and the next lookup builds an index where one can stand
+        def checked(rig, label, indexed=True):
+            _assert_index_is_a_build(self, rig, label)
+            self.assertEqual(rig._rig_index() is not None, indexed, label)
+            for node in rig.list:
+                self.assertEqual(
+                    [id(n) for n in node.get_children()],
+                    [id(n) for n in _children_by_scan(node)],
+                    f"{label}: children of {node.name}",
+                )
+
+        # b no longer names a, though the index has it naming a
+        rig = HierarchyData(
+            [TransformData("a"), TransformData("b", parent_node="a"), TransformData("c", parent_node="a")]
+        )
+        rig._rig_index()
+        rig["b"].__dict__["parent_node"] = None
+        rig["a"].name                    = "z"
+        self.assertIsNone(rig["b"].parent_node)
+        self.assertEqual(rig["c"].parent_node, rig["z"].uuid)
+        checked(rig, "a parent_node written past __setattr__")
+
+        # b carries a's name, though the index has a alone carrying it: c
+        # follows a, the first node of the name, whatever b is renamed
+        rig = HierarchyData(
+            [TransformData("a"), TransformData("b"), TransformData("c", parent_node="a")]
+        )
+        first, second = rig.list[0], rig.list[1]
+        rig._rig_index()
+        second.__dict__["name"] = "a"
+        second.name             = "z"
+        self.assertEqual(rig["c"].parent_node, "a")
+        self.assertIs(rig["c"].get_parent(), first)
+        checked(rig, "a name written past __setattr__")
+
+        # the index holds the first node of a uuid; the second is not it. Its
+        # children by name are pinned to the uuid, as the pass pins them
+        rig = HierarchyData(
+            [
+                TransformData("p"),
+                TransformData("q"),
+                TransformData("a", parent_node="p"),
+                TransformData("b", parent_node="p"),
+                TransformData("c", parent_node="b"),
+            ]
+        )
+        rig["b"].uuid = rig["a"].uuid
+        rig._rig_index()
+        rig["b"].parent_node = "q"
+        checked(rig, "a uuid two nodes carry, a parent_node")
+        rig._rig_index()
+        rig["b"].name = "z"
+        self.assertEqual(rig["c"].parent_node, rig["a"].uuid)
+        checked(rig, "a uuid two nodes carry, a rename")
+
+        # the same, the name renamed one an earlier node carries too, which
+        # no child names: the index holds the earlier node, not this one
+        rig              = HierarchyData([TransformData("a"), TransformData("a"), TransformData("b")])
+        rig.list[1].uuid = rig.list[0].uuid
+        rig._rig_index()
+        rig.list[1].name = "z"
+        self.assertEqual(rig.name, ["a", "z", "b"])
+        checked(rig, "a uuid two nodes carry, a shared name renamed")
+
+        # a name two nodes carry written past __setattr__ on a third, between
+        # them: the index does not have it carrying that name
+        rig = HierarchyData([TransformData("a"), TransformData("a"), TransformData("q"), TransformData("a")])
+        rig._rig_index()
+        rig.list[2].__dict__["name"] = "a"
+        rig.list[2].name             = "z"
+        self.assertEqual(rig.name, ["a", "a", "z", "a"])
+        checked(rig, "a shared name written past __setattr__")
+
+        # a name that is not a string: no index can stand for the rig
+        rig        = _mixed_rig()
+        seven      = TransformData("seven", parent_node="spine")
+        seven.name = 7  # past the constructor, which makes it a string
+        rig._rig_index()
+        rig.append(seven)
+        self.assertIsNone(rig._rig_index())
+        self.assertIn(7, [n.name for n in rig["spine"].get_children()])
+        checked(rig, "a name that is not a string", indexed=False)
+
+    def test_random_edits_match_a_scan(self):
+        # every kind of edit, at random: through the index the rig keeps,
+        # patched or built again, every lookup is the one a scan gives and
+        # every world matrix, most cached ahead of the edit, the one its
+        # channels make
+        ran = {}
+        for seed in (1, 2, 3):
+            for label, count in _fuzz_rig_edits(self, seed, 300).items():
+                ran[label] = ran.get(label, 0) + count
+        self.assertTrue(all(ran.values()), ran)
 
 
 SKELETON = os.path.join(

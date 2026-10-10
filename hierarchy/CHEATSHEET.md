@@ -369,16 +369,28 @@ The branch walk is `get_children`, which reads `parent_node` the way
 `get_parent` does: the parent's uuid, or its name, meaning the first node
 that carries it. A child parented either way is cleared with the branch.
 The hierarchy keeps an index of every node's children for the walk, so a
-write costs the size of its branch, not of the rig. Any edit to a
-`parent_node`, `name` or `uuid` of one of its nodes, or to the node list
-through the hierarchy's own methods, retires the index; an assignment, sort
-or reverse made on the raw `rig.list` is not seen, so go through
-`rig[i] = node` or `rig.sort()`. Such an edit, a rename aside, can give any
-node of the rig another parent, so a world matrix cached before it is not
-trusted after it: the next read computes it again, down from the nearest
-parent still cached, though the edit cleared no branch. A rename clears the
-branches it moves itself and leaves the rest cached; an edit in another
-rig, or on a node no rig holds, leaves every cache of this one standing.
+write costs the size of its branch, not of the rig. While the index is
+current, a node appended, a rename, or a new `parent_node` patches it in
+place; a new `uuid`, or an edit that takes nodes out of the list or
+reorders it through the hierarchy's own methods, retires it. A node
+inserted ahead of the end moves every later entry, a pass over the whole
+index: it is made when something read the index since the last such pass,
+and otherwise the insert retires it, so inserts with nothing read between
+cost what they did before there was an index to patch. A rig built one
+node at a time, a world matrix read or written on the way, builds the
+index at the first read; one renamed a node at a time, nodes appended or
+given a `parent_node` between the renames or not, builds it at the second
+rename. From there each node costs the same, whatever the size of the rig.
+An assignment, sort or reverse made on the raw `rig.list` is not seen, so
+go through `rig[i] = node` or `rig.sort()`. A rename clears the branches
+it moves itself, so every other cached world matrix stands. While the
+index is current, a node added that no node names leaves them all
+standing too, and a new `parent_node` on a node with nothing below it
+drops that node's cache alone. Any other edit of the rig can give any
+node another parent, so a world matrix cached before it is not trusted
+after it: the next read computes it again, down from the nearest parent
+still cached, though the edit cleared no branch. An edit in another rig,
+or on a node no rig holds, leaves every cache of this one standing.
 
 ```python
 rig = make_chain()
