@@ -4,4 +4,4 @@ The underlying matrix, quaternion, euler and vector math lives in
 :mod:`cgmath.transforms`.
 """
 
-__version__ = "1.0.4"
+__version__ = "2.0.0"
