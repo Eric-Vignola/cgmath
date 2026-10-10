@@ -1037,6 +1037,8 @@ except RuntimeError as error:
 ## `fbx` — FbxExporter
 
 Writes a `HierarchyData` skeleton out as an FBX. One skeleton per exporter.
+Each node is written after its parent, whatever order the list holds them
+in.
 
 | Member | Type | Notes |
 |---|---|---|
@@ -1053,9 +1055,11 @@ from cgmath.hierarchy import HierarchyData, TransformData
 
 skeleton = HierarchyData([
     TransformData("root", node_type="joint"),
-    TransformData("spine", parent_node="root", translate=(0, 10, 0), node_type="joint"),
-    TransformData("head", parent_node="spine", translate=(0, 10, 0), node_type="joint"),
+    TransformData("spine", translate=(0, 10, 0), node_type="joint"),
+    TransformData("head", translate=(0, 10, 0), node_type="joint"),
 ])
+skeleton["spine"].set_parent("root", world_space=False)
+skeleton["head"].set_parent("spine", world_space=False)
 
 skel_path = os.path.join(WORK, "skeleton.fbx")
 
@@ -1154,14 +1158,16 @@ except ValueError as error:
 ```
 
 `zero_root=True` resets the root joint's translate, rotate and scale before
-writing, so the file carries the skeleton at the origin:
+writing, so the file carries the skeleton at the origin. The root joint is
+the first joint the file writes as a root: one at the world, or a view's
+top joint, whose parent the view leaves out:
 
 ```python
 skeleton.save_fbx(os.path.join(WORK, "skeleton_zeroed.fbx"), zero_root=True)
 ```
 
-It takes a `HierarchyData`, or a pipeline skeleton component holding one as
-`.data`.
+It takes a `HierarchyData` or a view of one, or a pipeline skeleton
+component holding one as `.data`.
 
 ---
 

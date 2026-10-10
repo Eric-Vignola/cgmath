@@ -2732,6 +2732,7 @@ class FbxExporter:
         self._skeleton  = None
         self._meshes    = set()
         self._fbx_nodes = {}
+        self._roots     = []  # the skeleton's joints the file writes as roots
 
         self._manager   = None
         self._scene     = None
@@ -2786,6 +2787,10 @@ class FbxExporter:
     def add_skeleton(self, skeleton_component) -> None:
         """Add a skeleton component to the scene.
 
+        Each node is added after its parent, whatever order the component
+        lists them in; a node whose parent it leaves out hangs from the scene
+        root, a skeleton root.
+
         Raises ValueError, before anything is added, when a user defined string
         attr is not plain ASCII, the only text the FBX SDK takes, or a node's user
         defined attr specs do not go to json.
@@ -2802,17 +2807,26 @@ class FbxExporter:
 
         # nodes that can't be exported (constraints, ikHandles, etc.), skipped
         # along with what is under them, the same way Maya's own FBX plugin
-        # never writes them as scene nodes. parents come first.
+        # never writes them as scene nodes.
         # imported here, cgmath.hierarchy imports this module.
         from cgmath.hierarchy import SUPPORTED_NODE_TYPES
+        from cgmath.hierarchy.hierarchy import TransformList
 
         skipped_nodes = {}
         dropped       = set()
 
+        # every parent ahead of its children, whatever order the list holds
+        # them in -- a rig sorted, or built or loaded child first: a node's
+        # parent is made, or dropped, before the node is. Depth counts the
+        # parents the export holds, a node whose parent it leaves out a root,
+        # so the file's roots, as siblings, keep the list's order
+        members = list(skeleton_component)
+        items   = [members[i] for i in TransformList._owning_parent_first(members, within=True)]
+
         # every node's user defined attrs are worked out first, so one that
         # can't be written raises before anything is added
         kept = []
-        for item in skeleton_component:
+        for item in items:
             supported = item.node_type in SUPPORTED_NODE_TYPES
             if not supported or id(item.get_parent()) in dropped:
                 dropped.add(id(item))
@@ -2825,6 +2839,9 @@ class FbxExporter:
         # the fbx node of every item, keyed by item identity.
         # parents can't be found by name, names may be duplicated across branches.
         fbx_nodes = self._fbx_nodes = {}
+
+        # the joints hung from the scene root, the file's skeleton roots
+        roots = set()
 
         for item, (props, specs) in kept:
             node = fbx.FbxNode.Create(self.manager, item.name)
@@ -2840,21 +2857,23 @@ class FbxExporter:
                 self._ROTATE_ORDER_MAP[item.rotate_order],
             )
 
-            parent = item.get_parent()
-            if item.parent_node is None:
+            # a parent the export leaves out -- outside the view exported, or
+            # a parent_uuid no node carries -- makes the node a root, as a
+            # view's copy() does: never a node found by its name
+            parent_node = fbx_nodes.get(id(item.get_parent()))
+            rooted      = parent_node is None
+            if rooted:
                 parent_node = self.scene.GetRootNode()
-            elif id(parent) in fbx_nodes:
-                parent_node = fbx_nodes[id(parent)]
-            else:
-                parent_node = self.scene.FindNodeByName(parent.name)
 
             parent_node.AddChild(node)
 
             if item.node_type == "joint":
+                if rooted:
+                    roots.add(id(item))
                 node_attr = fbx.FbxSkeleton.Create(self.manager, "")
                 node_attr.SetSkeletonType(
                     fbx.FbxSkeleton.EType.eRoot
-                    if item.parent_node is None
+                    if rooted
                     else fbx.FbxSkeleton.EType.eLimbNode
                 )
                 inherit_type = (
@@ -2910,6 +2929,9 @@ class FbxExporter:
                 prop.Set(specs)
 
             node.SetNodeAttribute(node_attr)
+
+        # in the list's order, for zero_root to zero the first
+        self._roots = [item for item in members if id(item) in roots]
 
         if skipped_nodes:
             counts = ", ".join(f"{v} {k}" for k, v in sorted(skipped_nodes.items()))
@@ -3027,6 +3049,10 @@ class FbxExporter:
     def export(self, path: pathlib.Path, as_ascii=False, zero_root=False) -> None:
         """Export the scene to the given path, binary unless as_ascii is set.
 
+        zero_root writes the skeleton's first joint hung from the scene root,
+        in the order the skeleton lists them, with an identity transform;
+        ValueError when there is none.
+
         The FBX SDK's ASCII reader changes a long string holding a quote, line
         break, tab, semicolon, &-entity or run of spaces, and loses the whole
         scene for a brace, so in an ASCII file a user defined string, or an
@@ -3081,13 +3107,15 @@ class FbxExporter:
 
         # zero-out root translations and rotations
         if zero_root:
-            # a HierarchyData, or a pipeline component holding one as .data;
-            # meshes and locators can sit at the world too: the root joint
-            skeleton = self._skeleton
-            skeleton = skeleton if hasattr(skeleton, "get_roots") else skeleton.data
-            roots    = [x for x in skeleton.get_roots() if x.node_type == "joint"]
+            # the first joint the file writes as a root: one at the world, or
+            # one whose parent the export leaves out, a view's top node.
+            # meshes and locators can sit at the world too
+            roots = self._roots
             if not roots:
-                raise ValueError("zero_root needs a joint parented to the world")
+                raise ValueError(
+                    "zero_root needs a joint parented to the world, or whose "
+                    "parent the export leaves out"
+                )
             root_name = roots[0].name
 
             # by identity: names may repeat across branches

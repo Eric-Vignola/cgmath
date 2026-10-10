@@ -295,10 +295,14 @@ def skin_list() -> SkinList:
 # ----------------------------------- SDF ------------------------------------ #
 
 
+# the uuid of the group the primitives hang under in a scene
+_SDF_GROUP = "0C1D2E3F-4A5B-4C6D-8E7F-8A9B0C1D2E3F"
+
+
 def _place_in_scene(node, uuid: str) -> None:
     """what a primitive picks up in a scene: an id, a parent, user attributes"""
     node.uuid         = uuid
-    node.parent_node  = "sdf_grp"
+    node.parent_uuid  = _SDF_GROUP
     node.rotate_order = 2  # zxy
     node.rotate_axis  = [0.0, 0.0, 10.0]
     node.visibility   = False

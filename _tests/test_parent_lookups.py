@@ -2,9 +2,9 @@
 the rig per node, and the same answers each node's own method gives.
 
 The scale tests count string comparisons rather than time: a uuid, name or
-parent reference that counts how often it is compared tells a pass over
-the rig (a few per node) from a scan of the rig for every node (tens of
-thousands at 300 nodes), whatever else the machine is doing.
+parent_uuid that counts how often it is compared tells a pass over the rig
+(a few per node) from a scan of the rig for every node (tens of thousands
+at 300 nodes), whatever else the machine is doing.
 """
 
 import sys
@@ -34,10 +34,10 @@ class _Counted(str):
     __hash__ = str.__hash__
 
 
-def _counted_nodes(count: int, by_name: bool) -> list:
+def _counted_nodes(count: int) -> list:
     """a branching rig's nodes, not yet in a hierarchy, whose uuids, names
-    and parent references are counted strings, each reference its own
-    object so no lookup gets away with an identity check"""
+    and parent_uuids are counted strings, each parent_uuid its own object so
+    no lookup gets away with an identity check"""
     rng   = np.random.default_rng(3)
     nodes = []
     for i in range(count):
@@ -46,7 +46,7 @@ def _counted_nodes(count: int, by_name: bool) -> list:
         node.name = _Counted(f"j{i}")
         if i:
             parent           = nodes[int(rng.integers(max(0, i - 4), i))]
-            node.parent_node = _Counted(parent.name if by_name else parent.uuid)
+            node.parent_uuid = _Counted(str(parent.uuid))
         nodes.append(node)
     return nodes
 
@@ -64,38 +64,37 @@ class TestParentLookupsScale(unittest.TestCase):
         self.assertLess(_Counted.compared, 5 * self.COUNT, what)
 
     def test_building_a_hierarchy_checks_each_uuid_once(self):
-        for by_name in (False, True):
-            nodes = _counted_nodes(self.COUNT, by_name)
-            self.assertLinear(lambda: HierarchyData(nodes), "HierarchyData(nodes)")
+        # the joining rule included: each parent_uuid is looked up once
+        nodes = _counted_nodes(self.COUNT)
+        self.assertLinear(lambda: HierarchyData(nodes), "HierarchyData(nodes)")
+        self.assertEqual(sum(node.parent_uuid is not None for node in nodes), self.COUNT - 1)
 
     def test_parents_resolve_in_one_pass(self):
-        for by_name in (False, True):
-            rig = HierarchyData(_counted_nodes(self.COUNT, by_name))
-            self.assertLinear(lambda: rig._parent_indices(rig.list), "_parent_indices")
-            self.assertLinear(lambda: rig._parent_first(), "_parent_first")
-            self.assertLinear(
-                lambda: TransformList._owning_parent_first(rig[::3]),
-                "_owning_parent_first",
-            )
-            self.assertLinear(lambda: rig.get_roots(), "get_roots")
-            self.assertLinear(lambda: rig.get_parents(), "get_parents")
+        rig = HierarchyData(_counted_nodes(self.COUNT))
+        self.assertLinear(lambda: rig._parent_indices(rig.list), "_parent_indices")
+        self.assertLinear(lambda: rig._parent_first(), "_parent_first")
+        self.assertLinear(
+            lambda: TransformList._owning_parent_first(rig[::3]),
+            "_owning_parent_first",
+        )
+        self.assertLinear(lambda: rig.get_roots(), "get_roots")
+        self.assertLinear(lambda: rig.get_parents(), "get_parents")
 
     def test_children_and_branches_resolve_in_one_pass(self):
-        for by_name in (False, True):
-            rig = HierarchyData(_counted_nodes(self.COUNT, by_name))
-            self.assertLinear(lambda: rig.get_children(),   "get_children")
-            self.assertLinear(lambda: rig.get_branch(),     "get_branch")
-            self.assertLinear(lambda: rig[:1].get_branch(), "get_branch of the root")
+        rig = HierarchyData(_counted_nodes(self.COUNT))
+        self.assertLinear(lambda: rig.get_children(),   "get_children")
+        self.assertLinear(lambda: rig.get_branch(),     "get_branch")
+        self.assertLinear(lambda: rig[:1].get_branch(), "get_branch of the root")
 
     def test_a_name_pairing_resolves_parents_in_one_pass(self):
         # get_delta / add_delta by="name" pair the nodes, then parent each
         # pair within the pairing
-        rig   = HierarchyData(_counted_nodes(self.COUNT, False))
-        other = HierarchyData(_counted_nodes(self.COUNT, False))
+        rig   = HierarchyData(_counted_nodes(self.COUNT))
+        other = HierarchyData(_counted_nodes(self.COUNT))
         self.assertLinear(lambda: rig._pair_by_name(other), "_pair_by_name")
 
     def test_indices_and_unique_names_resolve_in_one_pass(self):
-        rig = HierarchyData(_counted_nodes(self.COUNT, False))
+        rig = HierarchyData(_counted_nodes(self.COUNT))
         self.assertLinear(lambda: rig.indices, "indices")
         self.assertLinear(lambda: rig.unique_name, "unique_name")
 
@@ -103,9 +102,10 @@ class TestParentLookupsScale(unittest.TestCase):
         # each node's own get_branch recurses once per level; the list level
         # walk must not, and must order the chain parent first
         count = sys.getrecursionlimit() + 500
+        uuids = [generate_uuid() for _ in range(count)]
         rig = HierarchyData(
             [
-                TransformData(f"j{i}", parent_node=None if i == 0 else f"j{i - 1}")
+                TransformData(f"j{i}", uuid=uuids[i], parent_uuid=uuids[i - 1] if i else None)
                 for i in range(count)
             ]
         )
@@ -122,26 +122,29 @@ class TestParentLookupsMatchTheNodes(unittest.TestCase):
     """the list-level lookups answer what each node's own method answers"""
 
     def _awkward(self) -> HierarchyData:
-        """uuid and name parents, a shared name, a uuid shaped name, and
-        parents the hierarchy does not hold, by uuid and by name"""
-        twin_b = TransformData("twin", uuid=generate_uuid())
-        odd    = TransformData(generate_uuid())  # named like a uuid
-        return HierarchyData(
+        """a shared name, a node named like a uuid, a child listed before its
+        parent, nodes that joined with a parent the hierarchy does not hold
+        (roots), and one whose parent_uuid was written so since"""
+        ids = {name: generate_uuid() for name in ("root", "twin", "twin_b", "odd", "a", "b")}
+        odd = TransformData(generate_uuid(), uuid=ids["odd"])  # named like a uuid
+        rig = HierarchyData(
             [
-                TransformData("f", parent_node="b"),  # a child listed first
-                TransformData("root"),
-                TransformData("twin"),
-                twin_b,
+                TransformData("f", parent_uuid=ids["b"]),  # a child listed first
+                TransformData("root", uuid=ids["root"]),
+                TransformData("twin", uuid=ids["twin"]),
+                TransformData("twin", uuid=ids["twin_b"]),
                 odd,
-                TransformData("a", parent_node="root"),
-                TransformData("b", parent_node="twin"),  # the first twin
-                TransformData("g", parent_node=twin_b.uuid),  # the second, by uuid
-                TransformData("c", parent_node=odd.name),  # matches no uuid
-                TransformData("d", parent_node=generate_uuid()),  # not held
-                TransformData("e", parent_node="nobody"),  # not held
-                TransformData("h", parent_node="a"),
+                TransformData("a", uuid=ids["a"], parent_uuid=ids["root"]),
+                TransformData("b", uuid=ids["b"], parent_uuid=ids["twin"]),  # the first twin
+                TransformData("g", parent_uuid=ids["twin_b"]),  # the second
+                TransformData("c", parent_uuid=odd.name),  # no node carries it: a root
+                TransformData("d", parent_uuid=generate_uuid()),  # not held: a root
+                TransformData("e"),
+                TransformData("h", parent_uuid=ids["a"]),
             ]
         )
+        rig["e"].parent_uuid = generate_uuid()  # a parent the rig does not hold
+        return rig
 
     def _views(self, rig):
         return [rig, rig[::-1], rig[[11, 0, 5, 3, 7]]]
@@ -182,10 +185,13 @@ class TestParentLookupsMatchTheNodes(unittest.TestCase):
         parents = dict(zip(rig.name, rig.get_parents()))
         self.assertEqual(rig.get_parents().dtype.kind, "i")
         self.assertEqual(parents["b"], 2)               # the first twin
-        self.assertEqual(parents["g"], 3)               # the second twin, by uuid
+        self.assertEqual(parents["g"], 3)               # the second twin
         self.assertEqual(parents["f"], rig.index("b"))  # listed before its parent
         for name in ("c", "d", "e", "root"):
             self.assertEqual(parents[name], -1, name)
+        self.assertIsNone(rig["c"].parent_uuid)
+        self.assertIsNone(rig["d"].parent_uuid)
+        self.assertIsInstance(rig["e"].get_parent(), str)
 
         view = rig[[11, 5]]
         np.testing.assert_array_equal(view.get_parents(), [5, 1])  # owning positions
@@ -226,11 +232,12 @@ class TestParentLookupsMatchTheNodes(unittest.TestCase):
             loose.unique_name
 
     def test_a_cyclic_parent_ends_every_walk(self):
+        ids = [generate_uuid() for _ in range(3)]
         rig = HierarchyData(
             [
-                TransformData("a", parent_node="b"),
-                TransformData("b", parent_node="a"),
-                TransformData("c", parent_node="a"),
+                TransformData("a", uuid=ids[0], parent_uuid=ids[1]),
+                TransformData("b", uuid=ids[1], parent_uuid=ids[0]),
+                TransformData("c", uuid=ids[2], parent_uuid=ids[0]),
             ]
         )
         self.assertEqual(rig.get_branch().name, ["a", "b", "c"])
@@ -254,8 +261,8 @@ class TestParentLookupsMatchTheNodes(unittest.TestCase):
         self.assertNotIn("_held", vars(rig))
 
 
-# a name shaped like a uuid: get_parent resolves a reference to it by uuid
-# only, so a child naming it is a root
+# a name shaped like a uuid: a parent_uuid is a uuid, never a name, so a
+# child given it as its parent_uuid is a root
 _UUID_SHAPED_NAME = "0F0F0F0F-0000-4000-8000-000000000001"
 
 
@@ -264,9 +271,9 @@ class TestClipParentLookups(unittest.TestCase):
     the rig; on an awkward rig they still match single poses frame by frame"""
 
     def _rig(self, seed: int, shared: bool) -> HierarchyData:
-        """uuid and name parents, a parent named like a uuid, parents the rig
-        does not hold, two levels of branching; with ``shared`` two nodes
-        share a name and the children naming it hang under the first"""
+        """a node named like a uuid, parents the rig does not hold, two
+        levels of branching; with ``shared`` two nodes share a name, and the
+        children of the first hang under it by its uuid"""
         rng = np.random.default_rng(seed)
         names = [
             "root", "spine", "twin", "twin" if shared else "twin2", _UUID_SHAPED_NAME,
@@ -274,8 +281,8 @@ class TestClipParentLookups(unittest.TestCase):
         ]
         uuids = [generate_uuid() for _ in names]
         parents = [
-            None, "root", uuids[1], "spine", "twin", uuids[4], "arm", "root",
-            uuids[7], "foot", "nowhere", generate_uuid(), "twin", _UUID_SHAPED_NAME,
+            None, uuids[0], uuids[1], uuids[1], uuids[2], uuids[4], uuids[5], uuids[0],
+            uuids[7], uuids[8], generate_uuid(), generate_uuid(), uuids[2], _UUID_SHAPED_NAME,
         ]
         return HierarchyData(
             [
@@ -283,7 +290,7 @@ class TestClipParentLookups(unittest.TestCase):
                     name=name,
                     node_type="joint",
                     uuid=uuid,
-                    parent_node=parent,
+                    parent_uuid=parent,
                     translate=rng.normal(size=3),
                     rotate=rng.uniform(-90.0, 90.0, size=3),
                     scale=rng.uniform(0.8, 1.25, size=3),
@@ -358,9 +365,10 @@ class TestClipParentLookups(unittest.TestCase):
 
     def test_building_a_clip_checks_each_uuid_once(self):
         count = 300
+        uuids = [generate_uuid() for _ in range(count)]
         rig = HierarchyData(
             [
-                TransformData(f"j{i}", parent_node=f"j{(i - 1) // 2}" if i else None)
+                TransformData(f"j{i}", uuid=uuids[i], parent_uuid=uuids[(i - 1) // 2] if i else None)
                 for i in range(count)
             ]
         )

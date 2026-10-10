@@ -682,22 +682,26 @@ t       = bar.points[:, 0]
 weights = np.stack([1.0 - t, t], axis=1)  # linear root -> tip falloff
 skin    = SkinData(weights=weights, influences=["root", "tip"])
 
-bind_rig = HierarchyData([
-    TransformData(name="root"),
-    TransformData(name="tip", parent_node="root", translate=(1.0, 0.0, 0.0)),
-])
+
+def root_and_tip(**tip):
+    """root -> tip, tip one unit along +x of root"""
+    rig = HierarchyData([
+        TransformData(name="root"),
+        TransformData(name="tip", translate=(1.0, 0.0, 0.0), **tip),
+    ])
+    rig["tip"].set_parent("root", world_space=False)
+    return rig
+
+
+bind_rig = root_and_tip()
 ```
 
 ### End to end with a rig
 
 ```python
-deformer = SkinDeformData(mesh=bar, skin=skin, bind_rig=bind_rig, name="bar")
+deformer  = SkinDeformData(mesh=bar, skin=skin, bind_rig=bind_rig, name="bar")
 
-posed_rig = HierarchyData([
-    TransformData(name="root"),
-    TransformData(name="tip", parent_node="root",
-                  translate=(1.0, 0.0, 0.0), rotate=(0.0, 0.0, 45.0)),
-])
+posed_rig = root_and_tip(rotate=(0.0, 0.0, 45.0))
 
 posed = deformer.apply(posed_rig, bar)      # MeshData target -> MeshData copy
 print(type(posed).__name__, np.abs(posed.points - bar.points).max() > 0)
@@ -812,11 +816,7 @@ feeding last frame's result back in compounds the deformation.
 
 ```python
 frames = np.stack([
-    np.asarray(HierarchyData([
-        TransformData(name="root"),
-        TransformData(name="tip", parent_node="root",
-                      translate=(1.0, 0.0, 0.0), rotate=(0.0, 0.0, float(a))),
-    ]).world_matrix)[cols]
+    np.asarray(root_and_tip(rotate=(0.0, 0.0, float(a))).world_matrix)[cols]
     for a in (0.0, 15.0, 30.0, 45.0)
 ])
 

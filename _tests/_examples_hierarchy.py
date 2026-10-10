@@ -122,7 +122,7 @@ def transform_data() -> TransformData:
         "VLR:hip_L",
         node_type="joint",
         uuid=_uuid("VLR:hip_L"),
-        parent_node=_uuid("VLR:pelvis"),
+        parent_uuid=_uuid("VLR:pelvis"),
         scale=[1.0, 1.25, 0.8],
         rotate=[12.5, -40.0, 3.75],
         translate=[9.5, -2.25, 0.125],
@@ -159,20 +159,20 @@ def rig() -> HierarchyData:
         "VLR:pelvis",
         node_type="joint",
         uuid=_uuid("VLR:pelvis"),
-        parent_node=root.uuid,
+        parent_uuid=root.uuid,
         rotate=[0.0, 0.0, -7.5],
         translate=[2.0, 0.0, 0.0],
         segment_scale_compensate=True,
         draw_style=2,
     )
     hip             = transform_data()
-    hip.parent_node = pelvis.uuid
+    hip.parent_uuid = pelvis.uuid
 
     aim = TransformData(
         "VLR:hip_L_aim",
         node_type   = "locator",
         uuid        = _uuid("VLR:hip_L_aim"),
-        parent_node = hip.uuid,
+        parent_uuid = hip.uuid,
         translate   = [0.0, 0.0, 25.0],
         visibility  = False,
     )

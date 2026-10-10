@@ -177,7 +177,7 @@ Every constructor argument:
 | `wireframe_color` | `(0, 0, 0)` | RGB `0-255` for the bake; int32 `(3,)` |
 | `wireframe_thickness` | `1` | Line width in texels for the bake |
 | `background` | `None` | Standalone-preview RGB/RGBA, float64 `(4,)` (RGB gets alpha 1) or `None`; ignored inside a user `Scene` |
-| `**transform_kwargs` | — | `translate` / `rotate` / `scale` / `visibility` / `parent_node` / ... |
+| `**transform_kwargs` | — | `translate` / `rotate` / `scale` / `visibility` / `parent_uuid` / ... |
 
 The colors and `resolution` take any sequence and are stored as numpy
 arrays of the dtype and size above. A value of another size raises
@@ -352,11 +352,12 @@ Parenting composes as expected:
 
 ```python
 group       = Object(name="group", translate=(0, 5, 0))
-child       = Object(name="child", mesh=mesh, parent_node="group")
+child       = Object(name="child", mesh=mesh)
 group_scene = Scene("parented")
 group_scene.append(group)
 group_scene.append(child)
-print(child.world_points[:, 1].min())        # lifted by the parent
+child.set_parent("group", world_space=False)  # keeps the group's uuid
+print(child.world_points[:, 1].min())         # lifted by the parent
 ```
 
 ### Topology ops
@@ -465,7 +466,7 @@ OpenGL/Maya convention: the camera looks down its own `-Z`, `+Y` is up,
 | `near_plane` | `0.0` | Reserved — no clipping pass yet |
 | `far_plane` | `inf` | Reserved — no clipping pass yet |
 | `aspect_ratio` | `None` | Reserved — the renderer uses `resolution` |
-| `**transform_kwargs` | — | `translate` / `rotate` / `parent_node` / ... |
+| `**transform_kwargs` | — | `translate` / `rotate` / `parent_uuid` / ... |
 
 ```python
 cam = Camera(name="cam", angle_of_view=28.0, translate=(0, 1, 5))
@@ -496,7 +497,9 @@ print(np.round(auto.world_matrix[3, :3], 3))  # 3/4 elevated front-right
 raises `ValueError`:
 
 ```python
-child_cam = Camera(name="child", parent_node="group")
+child_cam = Camera(name="child_cam")
+group_scene.append(child_cam)
+child_cam.set_parent("group", world_space=False)
 try:
     child_cam.autofit(cube.world_points, 64, 64)
 except ValueError as exc:
@@ -586,13 +589,13 @@ print(lit_scene.render(resolution=(64, 64), samples_per_pixel=1))
 Parent a light to a camera for a headlight that tracks the view:
 
 ```python
-head_cam = Camera(name="head_cam", translate=(0, 1, 4))
-headlight = Light(name="headlight", kind="point", intensity=30.0,
-                  parent_node="head_cam")
+head_cam   = Camera(name="head_cam", translate=(0, 1, 4))
+headlight  = Light(name="headlight", kind="point", intensity=30.0)
 head_scene = Scene("headlight")
 head_scene.append(Object(name="cube", mesh=mesh))
 head_scene.append(head_cam)
 head_scene.append(headlight)
+headlight.set_parent("head_cam", world_space=False)
 print(headlight.position)          # inherits the camera's position
 head_scene.render(resolution=(48, 48), samples_per_pixel=1)
 ```

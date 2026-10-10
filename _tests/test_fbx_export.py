@@ -17,7 +17,9 @@ import urllib.parse
 import uuid
 import warnings
 
-from cgmath.hierarchy import HierarchyData, TransformData
+import numpy as np
+
+from cgmath.hierarchy import HierarchyData, TransformData, TransformList
 
 try:
     import fbx
@@ -31,7 +33,7 @@ def _joint(name, parent=None, **kwargs):
         name        = name,
         node_type   = "joint",
         uuid        = str(uuid.uuid4()).upper(),
-        parent_node = parent.uuid if parent is not None else None,
+        parent_uuid = parent.uuid if parent is not None else None,
         **kwargs,
     )
 
@@ -193,6 +195,86 @@ class TestFbxExportSkeleton(unittest.TestCase):
             "|root|R|hand|tip",
         ]
         self.assertEqual(sorted(self._read()), expected)
+
+    def test_a_parent_left_out_makes_a_root(self):
+        # a view without the parent, a parent taken out with del: the node
+        # is a root of the file and a skeleton root, never hung from a node
+        # written before it that carries the parent's name. 938ae44 looked
+        # the parent up by name: the second view hung knee from the other
+        # hip, and the others raised AttributeError
+        def chain():
+            root = _joint("root")
+            hip  = _joint("hip", root)
+            knee = _joint("knee", hip)
+            return HierarchyData([root, hip, knee])
+
+        def skeleton_types():
+            return self._walk(lambda node: node.GetNodeAttribute().GetSkeletonType())
+
+        rig = chain()
+        rig.append(_joint("hip"))  # another hip, a root
+        for view, expected in (
+            (rig.match("knee"), ["|knee"]),
+            (TransformList([rig.list[3], rig["knee"]]), ["|hip", "|knee"]),
+        ):
+            with self.subTest(expected):
+                self._export(view)
+                self.assertEqual(sorted(self._read()), expected)
+                self.assertEqual(skeleton_types()["|knee"], fbx.FbxSkeleton.EType.eRoot)
+
+        rig = chain()
+        del rig[0]
+        self.assertIsInstance(rig["hip"].get_parent(), str)  # the uuid of no node
+        self._export(rig)
+        self.assertEqual(sorted(self._read()), ["|hip", "|hip|knee"])
+        types = skeleton_types()
+        self.assertEqual(types["|hip"], fbx.FbxSkeleton.EType.eRoot)
+        self.assertEqual(types["|hip|knee"], fbx.FbxSkeleton.EType.eLimbNode)
+
+    def test_a_rig_listed_child_first_keeps_its_hierarchy(self):
+        # each node is written after its parent, whatever order the list
+        # holds them in: a rig sorted, one built child first. Written in list
+        # order, a node listed ahead of its parent found no fbx node for it
+        # and hung from the scene root, a skeleton root at the world, with no
+        # error (938ae44 and 1.0.4 raised AttributeError there), and a node
+        # listed ahead of a skipped parent was written
+        def chain():
+            root = _joint("root", translate=(0, 1, 0))
+            hip  = _joint("hip", root, translate=(1, 0, 0))
+            knee = _joint("knee", hip, translate=(0, -2, 0))
+            return root, hip, knee
+
+        def skeleton_types():
+            return self._walk(lambda node: node.GetNodeAttribute().GetSkeletonType())
+
+        def sorted_rig():
+            rig = HierarchyData(chain())
+            rig.sort()  # hip, knee, root
+            return rig
+
+        limb = fbx.FbxSkeleton.EType.eLimbNode
+        for label, rig in (("sorted", sorted_rig()), ("built child first", HierarchyData(chain()[::-1]))):
+            with self.subTest(label):
+                self.assertEqual(rig.get_parents().tolist()[:2], [2, 0] if label == "sorted" else [1, 2])
+                worlds = {node.name: node.world_matrix[3, :3] for node in rig}
+                self._export(rig)
+                self.assertEqual(sorted(self._read()), ["|root", "|root|hip", "|root|hip|knee"])
+                types = skeleton_types()
+                self.assertEqual(types["|root"], fbx.FbxSkeleton.EType.eRoot)
+                self.assertEqual((types["|root|hip"], types["|root|hip|knee"]), (limb, limb))
+                for node in HierarchyData.load_fbx(self.path):
+                    np.testing.assert_allclose(node.world_matrix[3, :3], worlds[node.name], atol=1e-9)
+
+        # a child listed ahead of a constraint the export skips goes with it
+        root, hip, knee = chain()
+        con           = _joint("con", knee)
+        below         = _joint("below", con)
+        con.node_type = "parentConstraint"
+        with self.assertLogs("cgmath.formats.fbx", level="WARNING") as logs:
+            self._export(HierarchyData([below, con, knee, hip, root]))
+        self.assertIn("1 joint", logs.output[0])
+        self.assertIn("1 parentConstraint", logs.output[0])
+        self.assertEqual(sorted(self._read()), ["|root", "|root|hip", "|root|hip|knee"])
 
     def test_null_look_tells_a_locator_from_a_group(self):
         # the same way Maya's own FBX plugin writes them
@@ -529,7 +611,7 @@ class TestFbxUserAttributes(unittest.TestCase):
                 "name": name,
                 "node_type": node_type,
                 "uuid": str(uuid.uuid4()).upper(),
-                "parent_node": parent["uuid"] if parent else None,
+                "parent_uuid": parent["uuid"] if parent else None,
                 "user_defined_attributes": attrs,
             }
 

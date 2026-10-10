@@ -200,6 +200,21 @@ class TestAnimate(RenderCacheCase):
         obj.animate(clip, self.out("a"), **RES)
         self.assertEqual(self.renders(lambda: obj.animate(clip, self.out("b"), **RES)), 0)
 
+    def test_the_object_animated_stays_under_its_parent(self):
+        # the clip deforms a stand-in, a root of the preview scene: the Object
+        # keeps its mesh, its scene and its parent, where a preview scene it
+        # joined took it out of its scene and cleared its parent_uuid
+        scene = Scene("s")
+        group = Object(name="group")
+        obj   = Object.load_glb(self.glb)
+        scene.extend([group, obj])
+        obj.set_parent(group, world_space=False)
+        mesh = obj.mesh
+        obj.animate(self.clip(), self.out("a"), **RES)
+        self.assertIs(obj.mesh,         mesh)
+        self.assertIs(obj._hierarchy,   scene)
+        self.assertIs(obj.get_parent(), group)
+
 
 if __name__ == "__main__":
     unittest.main()

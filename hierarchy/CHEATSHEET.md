@@ -14,13 +14,14 @@ overview see [`README.md`](README.md); for the rest of the library see
 | Topic | |
 |---|---|
 | [Setup](#setup) | imports, the fixtures every block reuses |
-| [`TransformData` — construction](#transformdata--construction) | the 15 constructor arguments |
+| [`TransformData` — construction](#transformdata--construction) | the constructor arguments |
 | [SRT channels](#srt-channels) | `scale` / `rotate` / `translate` and per-axis accessors |
 | [Joint channels](#joint-channels) | `rotate_order`, `rotate_axis`, `joint_orient`, `segment_scale_compensate` |
 | [Changing rotate order](#changing-rotate-order) | `set_rotate_order` keeps the pose; the raw `rotate_order` setter does not |
 | [Display + user channels](#display--user-channels) | `visibility`, `radius`, `draw_style`, `user_defined_attributes` |
 | [Matrices](#matrices) | `matrix`, `world_matrix`, the six factor matrices, `quaternion` |
 | [Cache invalidation](#cache-invalidation) | when `world_matrix` is recomputed |
+| [Parenting: `parent_uuid`](#parenting-parent_uuid) | the parent's uuid, `parent_name`, `set_parent` by name, joining a rig, `parent_node`, older files |
 | [Node queries](#node-queries) | parent / children / branch / root / index |
 | [Node edits](#node-edits) | `set_parent`, `match_*`, `swapaxes`, orient helpers, node type, prefix / suffix, namespaces, user attributes |
 | [`TransformList` — views](#transformlist--views) | slicing, fancy indexing, `match` |
@@ -44,8 +45,9 @@ overview see [`README.md`](README.md); for the rest of the library see
 ## Setup
 
 No rig assets ship with this package, so build one inline. `set_parent`
-is used rather than a raw `parent_node` string: it stores the parent's
-**uuid**, a link no repeated name can move (see [Gotchas](#gotchas)).
+takes the parent by name and stores its **uuid** in `parent_uuid`, the one
+link a node keeps, which no rename moves (see
+[Parenting](#parenting-parent_uuid)).
 
 ```python
 import os
@@ -104,7 +106,7 @@ str(node)           # 'hero'
 | `name` | *required* | node name; drives `match()` and name lookup |
 | `node_type` | `"transform"` | `"transform"`, `"joint"`, `"locator"`; the orient helpers only act on `"joint"` |
 | `uuid` | `None` | identity; `HierarchyData.append` assigns one when missing |
-| `parent_node` | `None` | the **parent's uuid** (see [Gotchas](#gotchas)) |
+| `parent_uuid` | `None` | the **parent's uuid**, `None` for a root; a name raises `ValueError` (see [Parenting](#parenting-parent_uuid)) |
 | `scale` | `(1, 1, 1)` | |
 | `rotate` | `(0, 0, 0)` | degrees |
 | `translate` | `(0, 0, 0)` | |
@@ -116,6 +118,7 @@ str(node)           # 'hero'
 | `radius` | `1.0` | joint display radius |
 | `draw_style` | `0` | Maya `drawStyle` |
 | `user_defined_attributes` | `{}` | extra attributes carried through `save_fbx` and back by `load_fbx`, but for arrays, matrices, multis and other compounds; each node gets its own dict |
+| `parent_node` | `None` | `parent_uuid`'s deprecated name, with a `DeprecationWarning`; goes in 3.0.0 |
 
 ---
 
@@ -365,51 +368,155 @@ rig["hip"].translate = (0.0, 4.0, 0.0)             # a parent moves
 assert np.allclose(rig["knee"].world_matrix[3, :3], [0.0, 14.0, 0.0])
 ```
 
-The branch walk is `get_children`, which reads `parent_node` the way
-`get_parent` does: the parent's uuid, or its name, meaning the first node
-that carries it. A child parented either way is cleared with the branch.
-The hierarchy keeps an index of every node's children for the walk, so a
-write costs the size of its branch, not of the rig. While the index is
-current, a node appended, a rename, or a new `parent_node` patches it in
+The branch walk is `get_children`: the nodes whose `parent_uuid` is the
+node's uuid. The hierarchy keeps an index of every node's children for the
+walk, so a write costs the size of its branch, not of the rig. While the
+index is current, a node appended or a new `parent_uuid` patches it in
 place; a new `uuid`, or an edit that takes nodes out of the list or
 reorders it through the hierarchy's own methods, retires it. A node
 inserted ahead of the end moves every later entry, a pass over the whole
 index: it is made when something read the index since the last such pass,
 and otherwise the insert retires it, so inserts with nothing read between
-cost what they did before there was an index to patch. A rig built one
-node at a time, a world matrix read or written on the way, builds the
-index at the first read; one renamed a node at a time, nodes appended or
-given a `parent_node` between the renames or not, builds it at the second
-rename. From there each node costs the same, whatever the size of the rig.
-An assignment, sort or reverse made on the raw `rig.list` is not seen, so
-go through `rig[i] = node` or `rig.sort()`. A rename clears the branches
-it moves itself, so every other cached world matrix stands. While the
-index is current, a node added that no node names leaves them all
-standing too, and a new `parent_node` on a node with nothing below it
+cost what they did before there was an index to patch; the build an
+append makes is no such read. A rig built one node at a time, a world
+matrix read or written on the way, builds the index at the first read,
+and so does an append to a rig of 64 nodes or more that keeps none: from
+there each node costs the same, whatever the size of the rig. An
+assignment, sort or reverse made on the raw `rig.list` is not seen, so
+go through `rig[i] = node` or `rig.sort()`.
+
+A name links no node to another, so a rename moves nothing: the index
+and every cached world matrix stand, and the name table a lookup by name
+builds (`set_parent("hip")`) follows the rename. While the index is
+current, a node added that no node names leaves every cached world matrix
+standing too, and a new `parent_uuid` on a node with nothing below it
 drops that node's cache alone. Any other edit of the rig can give any
 node another parent, so a world matrix cached before it is not trusted
 after it: the next read computes it again, down from the nearest parent
 still cached, though the edit cleared no branch. An edit in another rig,
 or on a node no rig holds, leaves every cache of this one standing.
 
+The exception is a node put in with `rig[i] = node` while another rig
+owns it, or none does: listed here but not held, it is moved by what
+clears no branch and moves no count of this rig -- a channel written on
+it or above it, an edit of the rig holding it. So a world matrix cached
+below it holds that node's cached one too, and stands only while the node
+keeps it.
+
+```python
+rig    = HierarchyData([TransformData("slot"), TransformData("hand")])
+other  = make_chain(("base", "post"))  # post 10 above base
+rig[0] = other["post"]                 # listed here, held there
+rig["hand"].set_parent(other["post"], world_space=False)
+assert np.allclose(rig["hand"].world_matrix[3, :3], [0.0, 10.0, 0.0])
+other["base"].translate = (5.0, 0.0, 0.0)  # an edit of the other rig
+assert np.allclose(rig["hand"].world_matrix[3, :3], [5.0, 10.0, 0.0])
+```
+
 ```python
 rig = make_chain()
 rig["knee"].world_matrix                          # cached under hip
-rig["knee"].parent_node = rig["root"].uuid        # a raw write, no branch cleared
+rig["knee"].parent_uuid = rig["root"].uuid        # a raw write, no branch cleared
 assert np.allclose(rig["knee"].world_matrix[3, :3], [0.0, 10.0, 0.0])
 ```
 
 ```python
-named = HierarchyData(
-    [
-        TransformData("root"),
-        TransformData("tip", translate=(0.0, 1.0, 0.0), parent_node="root"),
-    ]
-)
-assert np.allclose(named["tip"].world_matrix[3, :3], [0.0, 1.0, 0.0])
+rig = make_chain()
+rig["knee"].world_matrix
+rig["hip"].name = "thigh"                         # moves nothing
+assert rig["knee"].parent_name == "thigh"
+rig["thigh"].translate = (5.0, 10.0, 0.0)         # its branch cleared, as ever
+assert np.allclose(rig["knee"].world_matrix[3, :3], [5.0, 20.0, 0.0])
+```
 
-named["root"].translate = (5.0, 0.0, 0.0)          # parented by name, still cleared
-assert np.allclose(named["tip"].world_matrix[3, :3], [5.0, 1.0, 0.0])
+---
+
+## Parenting: `parent_uuid`
+
+A node's parent is the node of its hierarchy carrying its `parent_uuid`,
+and `None` makes it a root. `parent_uuid` takes a uuid or `None` and
+nothing else: a name raises `ValueError`, which names `set_parent`, the
+way to parent by name. A `uuid.UUID` is kept as its text, as the `uuid`
+keyword keeps one. `parent_name` reads the parent's name, `None` at a
+root; it is read only, and no file saves it.
+
+```python
+rig = make_chain()
+assert rig["knee"].parent_uuid == rig["hip"].uuid
+rig["knee"].parent_name                          # 'hip'
+rig["root"].parent_name                          # None
+
+try:
+    rig["knee"].parent_uuid = "hip"
+except ValueError as error:
+    print(error)    # TransformData.parent_uuid takes a uuid or None, not 'hip'; set_parent('hip') parents by name
+```
+
+`set_parent` takes the parent as a node, its uuid, or a name, the first
+node of the hierarchy carrying it. Whichever way it is given, the node
+keeps the uuid: a rename after moves nothing.
+
+```python
+rig["knee"].set_parent("root", world_space=False)            # by name
+rig["knee"].set_parent(rig["hip"].uuid, world_space=False)   # by uuid
+rig["knee"].set_parent(rig["hip"], world_space=False)        # by node
+rig["hip"].name = "thigh"
+assert rig["knee"].parent_name == "thigh"
+```
+
+A node joining a hierarchy keeps its parent only when the hierarchy holds
+it. Appended, inserted, or put in place with `rig[i] = node` while no rig
+owns it, a node whose `parent_uuid` no node of the hierarchy carries
+becomes a root. The constructor, `extend` and a load check once every
+node is in, so a child may come before its parent: a rig's `copy()` and
+`copy.deepcopy` keep every parent whatever the order. A parent added later
+does not take a root back. A node's `copy()` keeps its `parent_uuid` until
+it joins a rig without that parent; a view's `copy()` and a clip of part
+of a rig make each node whose parent was left out a root.
+
+```python
+import copy
+from cgmath.hierarchy import generate_uuid
+
+ids  = {name: generate_uuid() for name in ("root", "hip")}
+kids = HierarchyData([
+    TransformData("hip", uuid=ids["hip"], parent_uuid=ids["root"]),   # ahead of its parent
+    TransformData("root", uuid=ids["root"]),
+])
+assert kids["hip"].parent_name == "root"
+assert copy.deepcopy(kids)["hip"].parent_name == "root"
+
+lone = rig["knee"].copy()                        # holds the uuid of thigh
+assert lone.parent_uuid == rig["thigh"].uuid
+HierarchyData([lone])                            # a rig with no thigh
+assert lone.parent_uuid is None
+```
+
+`parent_node`, `parent_uuid`'s name before cgmath 2.0.0, stays until
+3.0.0 as a deprecated alias: the property and the constructor keyword
+read and write `parent_uuid`, and a `to_attributes` mapping naming it maps
+`parent_uuid`, each with a `DeprecationWarning` filed under the caller,
+through an `Object`'s, a `Camera`'s or a `Light`'s constructor too. A name
+is refused the same way. A file saved before 2.0.0 names its parents under
+`"parent_node"` and still loads, a uuid as it is and a name as the first
+node of that name in the loaded rig (a name no node carries leaves a
+root); it saves back as `"parent_uuid"`.
+
+```python
+import warnings
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    assert rig["knee"].parent_node == rig["thigh"].uuid
+    assert rig["knee"].to_attributes({"parent_node": "parent"}) == {"parent": rig["thigh"].uuid}
+assert [w.category for w in caught] == [DeprecationWarning] * 2
+
+old = HierarchyData.from_dict({
+    "a": {"name": "root", "uuid": ids["root"]},
+    "b": {"name": "hip", "parent_node": "root"},  # by name, as an older file may
+})
+assert old["hip"].parent_uuid == ids["root"]
+assert "parent_uuid" in old.to_dict()["__items__"][1]
 ```
 
 ---
@@ -431,7 +538,8 @@ rig["root"].get_parent()            # None
 
 | Call | Returns |
 |---|---|
-| `get_parent()` | the parent `TransformData`, `None` at a root, or the raw uuid `str` when the parent is not in the hierarchy |
+| `get_parent()` | the parent `TransformData`, `None` at a root, or the `parent_uuid` itself when no node of the hierarchy carries it (the parent taken out with `del` or `remove()`) |
+| `parent_name` | the parent's name, `None` at a root; read only |
 | `get_parent_matrix()` | `(4, 4)`; `eye(4)` when the parent is absent or unresolved |
 | `get_children()` | `TransformList` of direct children |
 | `get_branch()` | `TransformList` of self + every descendant |
@@ -466,9 +574,11 @@ rig["knee"].set_parent(None)                   # to the world
 assert rig["knee"].get_parent() is None
 ```
 
-`set_parent` also moves the node and its branch to the end of the list,
-so a parent always precedes its children. A parent that hangs below the
-node would close a loop: it raises before anything moves.
+The parent is a node, its uuid or a name (the first node carrying it);
+the node keeps its uuid. `set_parent` also moves the node and its branch
+to the end of the list, so a parent always precedes its children. A
+parent that hangs below the node would close a loop: it raises before
+anything moves.
 
 ```python
 rig = make_chain()
@@ -840,9 +950,9 @@ assert len(built) == 0
 ```
 
 Construct from an iterable, or with `from_dict` from a dict of node dicts
-keyed by uuid (what the fbx and glb readers build). Uuids must be
-real ones — `generate_uuid()` mints them, `validate_uuid()` checks them,
-and anything that fails that check is treated as a name instead.
+keyed by uuid (what the fbx and glb readers build). A `parent_uuid` must be
+a real uuid — `generate_uuid()` mints them, `validate_uuid()` checks them,
+and anything that fails that check raises.
 
 ```python
 from cgmath.hierarchy import generate_uuid, validate_uuid
@@ -852,7 +962,7 @@ assert validate_uuid(root_id) and not validate_uuid("R")
 
 rig = HierarchyData([
     TransformData("root", uuid=root_id, node_type="joint"),
-    TransformData("hip", uuid=hip_id, parent_node=root_id, node_type="joint",
+    TransformData("hip", uuid=hip_id, parent_uuid=root_id, node_type="joint",
                   translate=(0.0, 10.0, 0.0)),
 ])
 assert rig["hip"].get_parent().name == "root"
@@ -860,7 +970,7 @@ assert rig["root"].get_children().name == ["hip"]
 
 rig = HierarchyData.from_dict({
     root_id: {"name": "root", "uuid": root_id},
-    hip_id: {"name": "hip", "uuid": hip_id, "parent_node": root_id,
+    hip_id: {"name": "hip", "uuid": hip_id, "parent_uuid": root_id,
              "translate": [0.0, 10.0, 0.0]},
 })
 assert np.allclose(rig["hip"].world_matrix[3, :3], [0.0, 10.0, 0.0])
@@ -1455,6 +1565,21 @@ auto = HierarchyData.load(path)                 # header sniffing: fbx / glb / e
 assert auto.name == back.name
 ```
 
+Each node is written after its parent, whatever order the list holds them
+in: a rig sorted, or built child first, writes the same tree. A node whose
+parent the list leaves out is a root of the file, and siblings, the roots
+among them, keep the list's order.
+
+```python
+by_name = make_chain()
+by_name.sort()                                  # hip, knee, root: children first
+by_name.save_fbx(path)
+assert HierarchyData.load_fbx(path).name == ["root", "hip", "knee"]
+
+by_name.match("knee", "root").save_fbx(path)    # knee's parent left out: a root
+assert HierarchyData.load_fbx(path).name == ["knee", "root"]
+```
+
 User attributes make the trip too: numbers, bools, enums, strings,
 stringArrays and `double3` or `float3` vectors come back as the specs they
 were, binary or `as_ascii=True`. Arrays such as `doubleArray`, matrices,
@@ -1607,11 +1732,18 @@ loader's, where:
 | `TransformList.save_fbx` | `(filename, zero_root=False, as_ascii=False)` — binary unless `as_ascii` |
 
 `zero_root=True` writes the root joint with an identity transform, so the
-file carries the skeleton at the origin. Meshes and locators at the world
-are left as they are; a skeleton with no root joint raises `ValueError`.
+file carries the skeleton at the origin. The root joint is the first joint
+the file writes as a root: one at the world, or the top joint of a view,
+whose parent the view leaves out, as its `copy()` roots it. Meshes and
+locators at the world are left as they are; a skeleton with no root joint
+raises `ValueError`.
 
 ```python
 make_chain().save_fbx(os.path.join(WORKDIR, "flat.fbx"), zero_root=True)
+
+make_chain().match("hip", "knee").save_fbx(os.path.join(WORKDIR, "legs.fbx"), zero_root=True)
+legs = HierarchyData.load_fbx(os.path.join(WORKDIR, "legs.fbx"))
+assert legs.name == ["hip", "knee"] and np.allclose(legs["hip"].translate, 0.0)
 ```
 
 `save_fbx` writes `rotate_axis` (and `joint_orient`) for joints only. A
@@ -1747,7 +1879,7 @@ tree["__class__"]                               # 'cgmath.hierarchy.hierarchy.Hi
 sorted(tree["__items__"][0])                    # root: everything else is default
 # ['__class__', 'name', 'node_type', 'uuid']
 sorted(tree["__items__"][1])
-# ['__class__', 'name', 'node_type', 'parent_node', 'translate', 'uuid']
+# ['__class__', 'name', 'node_type', 'parent_uuid', 'translate', 'uuid']
 ```
 
 A `ClipData` saves its timebase beside the items, named as its properties:
@@ -1787,7 +1919,9 @@ rig["hip"].match("hip")                         # True
 
 | Trap | What happens | Do this |
 |---|---|---|
-| `parent_node` holding a **name** | `get_parent()`, `get_children()` and `get_branch()` follow it to the **first** node of that name: another node of that name never gets the child, and one inserted ahead of the parent takes it over | parent with `set_parent(name)`, or set `parent_node` to the parent's `uuid` |
+| `parent_uuid = "hip"` | a name raises `ValueError`: `parent_uuid` holds a uuid or `None` | `set_parent("hip")`, which keeps the uuid |
+| a node appended with a `parent_uuid` the rig does not hold | it joins as a root (`parent_uuid = None`), and the parent appended after does not take it back | add the nodes together (`extend`, the constructor), or `set_parent` once both are in |
+| `parent_node` | `parent_uuid`'s deprecated name: it warns, and goes in 3.0.0 | `parent_uuid` |
 | `world_matrix` as a call | it is a **property** on every type here | `node.world_matrix`, not `node.world_matrix()` |
 | mutating a channel getter | `node.rotate[0] = 5` writes to a throwaway copy | read, edit, assign back |
 | `clip.frames.rotate += 5` | the block getter is read-only, so `+=` raises | `np.array(...)` then assign, or use `rotate_y += 5` |

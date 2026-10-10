@@ -158,7 +158,7 @@ class TestHierarchyFiles(unittest.TestCase):
                 self.assertEqual(loaded.name, ["hip", "loc"])
                 self.assertEqual(loaded.uuid, view.uuid)
                 self.assertIsNone(loaded["hip"].get_parent())
-                self.assertIsNone(loaded["hip"].parent_node)
+                self.assertIsNone(loaded["hip"].parent_uuid)
                 self.assertIs(loaded["loc"].get_parent(), loaded["hip"])
                 self.assertTrue(all(node._hierarchy is loaded for node in loaded))
 
@@ -215,7 +215,7 @@ class TestHierarchyFiles(unittest.TestCase):
             hip_id: {
                 "name": "hip",
                 "uuid": hip_id,
-                "parent_node": root_id,
+                "parent_uuid": root_id,
                 "translate": np.array([0, 10, 0]),
                 "segment_scale_compensate": True,
             },

@@ -25,6 +25,19 @@ from cgmath.hierarchy import _fbx_frame_rate, FBX
 from cgmath.hierarchy.hierarchy import _filtered, _rotation
 from cgmath._tests._maya_rotate_order import maya_rotate_order_cases
 
+
+def _parent_ids(names, parents) -> tuple:
+    """a new uuid for each of ``names``, and for each of ``parents`` -- a
+    name, or None for a root -- the uuid of the first node carrying that
+    name, None for a name no node carries: what a rig whose parents are
+    given by name is built with, each node holding its parent's uuid"""
+    ids   = [hierarchy.generate_uuid() for _ in names]
+    first = {}
+    for name, uuid in zip(names, ids):
+        first.setdefault(name, uuid)
+    return ids, [first.get(parent) for parent in parents]
+
+
 if pygltflib is not None:
     from pygltflib import (
         Accessor,
@@ -44,11 +57,13 @@ if pygltflib is not None:
 
 def chain(count=4):
     """a simple parent to child chain of joints"""
+    ids = [hierarchy.generate_uuid() for _ in range(count)]
     return HierarchyData(
         [
             TransformData(
                 name        = f"j{i}",
-                parent_node = None if i == 0 else f"j{i - 1}",
+                uuid        = ids[i],
+                parent_uuid = None if i == 0 else ids[i - 1],
                 translate   = [0.0, float(i), 0.0],
                 rotate      = [0.0, 0.0, float(i) * 3.0],
                 scale       = [1.0, 1.0, 1.0],
@@ -412,12 +427,14 @@ class TestClipFiles(unittest.TestCase):
 
 def joint_chain(count=4):
     """a chain of joints, which is what the orient helpers act on"""
+    ids = [hierarchy.generate_uuid() for _ in range(count)]
     return HierarchyData(
         [
             TransformData(
                 name         = f"j{i}",
                 node_type    = "joint",
-                parent_node  = None if i == 0 else f"j{i - 1}",
+                uuid         = ids[i],
+                parent_uuid  = None if i == 0 else ids[i - 1],
                 translate    = [0.0, float(i), 0.0],
                 rotate       = [float(i) * 7.0, float(i) * 5.0, float(i) * 3.0],
                 joint_orient = [0.0, float(i) * 2.0, 0.0],
@@ -428,10 +445,8 @@ def joint_chain(count=4):
 
 
 def uuid_chain(count=4, root=False):
-    """a chain parented through set_parent, so every link is a uuid
-
-    joint_chain() sets parent_node to a name, which get_children resolves
-    too; this one covers the uuid links set_parent writes.
+    """a chain parented through set_parent by name, which keeps each
+    parent's uuid; joint_chain() gives the uuids as it builds the nodes
     """
     h = HierarchyData(
         [
@@ -502,7 +517,7 @@ class TestClipStructuralMutation(unittest.TestCase):
     def test_an_unknown_parent_leaves_the_clip_untouched(self):
         clip    = self._varied_clip(uuid_chain(4, root=True))
         before  = np.array(clip.frames.rotate)
-        parents = [n.parent_node for n in clip]
+        parents = [n.parent_uuid for n in clip]
 
         with self.assertRaises(ValueError):
             clip.set_parent("nowhere")
@@ -512,7 +527,7 @@ class TestClipStructuralMutation(unittest.TestCase):
             clip.swapaxes(0, 0)
 
         self.assertTrue(np.array_equal(clip.frames.rotate, before))
-        self.assertEqual([n.parent_node for n in clip], parents)
+        self.assertEqual([n.parent_uuid for n in clip], parents)
 
     # --- still as they were --- #
     def test_a_single_frame_clip_runs_them_too(self):
@@ -632,13 +647,15 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
 
     def _rig(self, order, count=8, seed=7, scaled=True):
         rng   = np.random.default_rng(seed)
+        ids   = [hierarchy.generate_uuid() for _ in range(count)]
         nodes = []
         for i in range(count):
             nodes.append(
                 TransformData(
                     name=f"j{i}",
                     node_type="joint",
-                    parent_node=None if i == 0 else f"j{rng.integers(0, i)}",
+                    uuid=ids[i],
+                    parent_uuid=None if i == 0 else ids[rng.integers(0, i)],
                     translate=rng.normal(size=3),
                     rotate=rng.uniform(-180.0, 180.0, size=3),
                     scale=rng.uniform(0.6, 1.6, size=3) if scaled else None,
@@ -673,7 +690,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
     def _assert_matches(self, clip, poses):
         first = poses[0]
         self.assertEqual(clip.name, first.name)
-        self.assertEqual([n.parent_node for n in clip], [n.parent_node for n in first])
+        self.assertEqual([n.parent_uuid for n in clip], [n.parent_uuid for n in first])
         self.assertEqual(list(clip.rotate_order), [n.rotate_order for n in first])
         self.assertEqual(clip.node_type, first.node_type)
 
@@ -795,9 +812,10 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
         for scaled in (False, True):
             for frames in (1, 3):
                 with self.subTest(scaled=scaled, frames=frames):
+                    first = TransformData("x", node_type="joint", uuid=hierarchy.generate_uuid(), translate=(1, 0, 0))
                     nodes = [
-                        TransformData("x", node_type="joint", translate=(1, 0, 0)),
-                        TransformData("b", node_type="joint", parent_node="x"),
+                        first,
+                        TransformData("b", node_type="joint", parent_uuid=first.uuid),
                         TransformData("x", node_type="joint", translate=(0, 0, 3)),
                         TransformData("c", node_type="joint", translate=(0, 2, 0)),
                     ]
@@ -816,7 +834,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                     pose[[0, 1]].set_parent("x")
                     self.assertEqual(pose.name, poses[0].name)
                     self.assertEqual(
-                        [n.parent_node for n in pose], [n.parent_node for n in poses[0]]
+                        [n.parent_uuid for n in pose], [n.parent_uuid for n in poses[0]]
                     )
 
     def test_set_parent_of_a_selection_holding_only_the_parent(self):
@@ -847,12 +865,14 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
 
         def chain(order, compensate, leaves):
             rng = np.random.default_rng(11)
+            ids = [hierarchy.generate_uuid() for _ in range(10)]
             return HierarchyData(
                 [
                     TransformData(
                         name=f"j{i}",
                         node_type="joint",
-                        parent_node=None if i == 0 else f"j{min(i - 1, 5) if leaves else i - 1}",
+                        uuid=ids[i],
+                        parent_uuid=None if i == 0 else ids[min(i - 1, 5) if leaves else i - 1],
                         translate=rng.normal(size=3),
                         rotate=rng.uniform(-180.0, 180.0, size=3),
                         scale=rng.uniform(0.6, 1.6, size=3),
@@ -907,7 +927,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                     h      = rig if not frames else self._animated(rig, frames=frames)
                     root   = h[root.name]
                     deep   = h[deep.name]
-                    before = (list(h.uuid), [n.parent_node for n in h], held(h, frames))
+                    before = (list(h.uuid), [n.parent_uuid for n in h], held(h, frames))
                     with self.assertRaisesRegex(ValueError, "hangs below it"):
                         root.set_parent(deep.name, world_space=world_space)
                     with self.assertRaisesRegex(ValueError, "hangs below it"):
@@ -916,7 +936,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, "can not be its own parent"):
                             deep.set_parent(own, world_space=world_space)
                     self.assertEqual(list(h.uuid), before[0])
-                    self.assertEqual([n.parent_node for n in h], before[1])
+                    self.assertEqual([n.parent_uuid for n in h], before[1])
                     for channel, values in held(h, frames).items():
                         np.testing.assert_array_equal(values, before[2][channel], channel)
 
@@ -939,20 +959,21 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                                 rotate    = (10, 20, 30),
                                 scale     = (1, 2, 1),
                             ),
-                            TransformData("x", node_type="joint", parent_node="s", translate=(0, 1, 0)),
+                            TransformData("x", node_type="joint", translate=(0, 1, 0)),
                         ]
                     )
-                    h     = ClipData(rig, frames=frames) if frames else rig
-                    owner = h.frames if frames else h
+                    rig.list[2].parent_uuid = rig["s"].uuid
+                    h                       = ClipData(rig, frames=frames) if frames else rig
+                    owner                   = h.frames if frames else h
                     before = (
                         list(h.uuid),
-                        [n.parent_node for n in h],
+                        [n.parent_uuid for n in h],
                         {c: np.array(getattr(owner, c)) for c in ("scale", "rotate", "translate")},
                     )
                     with self.assertRaisesRegex(ValueError, "hangs below it"):
                         TransformList([h.list[1], h.list[0]]).set_parent("x", world_space=world_space)
                     self.assertEqual(list(h.uuid), before[0])
-                    self.assertEqual([n.parent_node for n in h], before[1])
+                    self.assertEqual([n.parent_uuid for n in h], before[1])
                     for channel, values in before[2].items():
                         np.testing.assert_array_equal(getattr(owner, channel), values, channel)
 
@@ -1019,7 +1040,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                     TransformData(
                         f"j{i}",
                         uuid         = uuids[i],
-                        parent_node  = uuids[i - 1] if i else None,
+                        parent_uuid  = uuids[i - 1] if i else None,
                         node_type    = "joint",
                         translate    = rng.normal(size=3) * far,
                         rotate       = rng.uniform(-180.0, 180.0, 3),
@@ -1043,7 +1064,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
             TransformData(
                 f"j{i}",
                 uuid=uuids[i],
-                parent_node=uuids[i - 1] if i else None,
+                parent_uuid=uuids[i - 1] if i else None,
                 node_type="joint",
                 translate=rng.normal(size=3),
                 rotate=rng.uniform(-90.0, 90.0, 3),
@@ -1064,7 +1085,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
             TransformData(
                 f"j{i}",
                 uuid        = uuids[i],
-                parent_node = uuids[i - 1] if i else None,
+                parent_uuid = uuids[i - 1] if i else None,
                 node_type   = "joint",
                 translate   = rng.normal(size=3),
                 rotate      = rng.uniform(-90.0, 90.0, 3),
@@ -1092,7 +1113,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                 TransformData(
                     f"j{i}",
                     uuid=hierarchy.generate_uuid(),
-                    parent_node=nodes[-1].uuid if nodes else None,
+                    parent_uuid=nodes[-1].uuid if nodes else None,
                     node_type="joint",
                     translate=rng.normal(size=3) * far,
                     rotate=rng.uniform(-180.0, 180.0, 3),
@@ -1125,12 +1146,12 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
             TransformData(
                 "a",
                 uuid        = uuids[1],
-                parent_node = uuids[0],
+                parent_uuid = uuids[0],
                 node_type   = "joint",
                 rotate      = (-95.684, 53.929, -75.522),
                 translate   = (0.5, 0.2, 0.1),
             ),
-            TransformData("x", uuid=uuids[2], parent_node=uuids[1], node_type="joint"),
+            TransformData("x", uuid=uuids[2], parent_uuid=uuids[1], node_type="joint"),
         ]
         rig   = HierarchyData([n.copy() for n in nodes])
         W     = np.array(rig["a"].world_matrix)
@@ -1220,7 +1241,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                     TransformData(
                         f"far{i}",
                         uuid        = hierarchy.generate_uuid(),
-                        parent_node = nodes[-1].uuid,
+                        parent_uuid = nodes[-1].uuid,
                         node_type   = "joint",
                         translate   = (20.0, 0.0, 0.0),
                     )
@@ -1237,13 +1258,18 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
         for d, up in ((3e-9, 100.0), (9e-9, 1000.0)):
             with self.subTest(d=d, up=up):
                 rng   = np.random.default_rng(3)
-                nodes = [TransformData("root", node_type="transform", translate=(d, 0.0, 0.0))]
+                nodes = [
+                    TransformData(
+                        "root", node_type="transform", uuid=hierarchy.generate_uuid(), translate=(d, 0.0, 0.0)
+                    )
+                ]
                 for i, name in enumerate(("hips", "spine", "chest", "neck", "head")):
                     nodes.append(
                         TransformData(
                             name,
                             node_type    = "joint",
-                            parent_node  = nodes[-1].name,
+                            uuid         = hierarchy.generate_uuid(),
+                            parent_uuid  = nodes[-1].uuid,
                             translate    = (0.0, up if i == 0 else 10.0, 0.0),
                             rotate       = rng.uniform(-60.0, 60.0, 3),
                             joint_orient = rng.uniform(-30.0, 30.0, 3),
@@ -1331,16 +1357,16 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                 turn = turned(u)
                 return [
                     sheared(1e-12, ids[0]),
-                    TransformData("a", uuid=ids[1], parent_node=ids[0], node_type="joint", rotate=angles(turn @ P.T)),
+                    TransformData("a", uuid=ids[1], parent_uuid=ids[0], node_type="joint", rotate=angles(turn @ P.T)),
                     TransformData(
                         "x",
                         uuid        = ids[2],
-                        parent_node = ids[1],
+                        parent_uuid = ids[1],
                         node_type   = "joint",
                         rotate      = (37.0, -52.0, 118.0),
                         translate   = (0.3, -0.2, 0.1),
                     ),
-                    TransformData("c", uuid=ids[3], parent_node=ids[2], node_type="joint", translate=(far, 0.0, 0.0)),
+                    TransformData("c", uuid=ids[3], parent_uuid=ids[2], node_type="joint", translate=(far, 0.0, 0.0)),
                 ]
 
             return nodes, gap_of("x")
@@ -1355,7 +1381,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                     TransformData(
                         "a",
                         uuid        = ids[1],
-                        parent_node = ids[0],
+                        parent_uuid = ids[0],
                         node_type   = "joint",
                         rotate      = (-95.7, 53.9, -75.5),
                         translate   = (0.5, 0.2, 0.1),
@@ -1363,19 +1389,19 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                     TransformData(
                         "q",
                         uuid        = ids[4],
-                        parent_node = ids[1] if carried else None,
+                        parent_uuid = ids[1] if carried else None,
                         node_type   = "transform",
                         scale       = (scale,) * 3,
                     ),
                     TransformData(
                         "x",
                         uuid=ids[2],
-                        parent_node=None if carried else ids[1],
+                        parent_uuid=None if carried else ids[1],
                         node_type="joint",
                         rotate=(37.0, -52.0, 118.0),
                         segment_scale_compensate=True,
                     ),
-                    TransformData("c", uuid=ids[3], parent_node=ids[2], node_type="joint", translate=(1.0, 0.0, 0.0)),
+                    TransformData("c", uuid=ids[3], parent_uuid=ids[2], node_type="joint", translate=(1.0, 0.0, 0.0)),
                 ]
                 rig = HierarchyData(built)
                 if carried:
@@ -1393,7 +1419,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                 rig["q" if carried else "x"].set_parent(None)
                 x, q = rig["x"], rig["q"]
                 world         = np.array(x.world_matrix)
-                x.parent_node = q.uuid
+                x.parent_uuid = q.uuid
                 return float(np.abs(np.array(x.matrix) - world @ np.linalg.inv(np.array(q.world_matrix))).max())
 
             return nodes, gap
@@ -1407,17 +1433,17 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                 turn = turned(u)
                 return [
                     TransformData("r", uuid=ids[0], node_type="transform", rotate=(3e-10, -2.25e-10, 1.5e-10)),
-                    TransformData("a", uuid=ids[1], parent_node=ids[0], node_type="joint"),
-                    TransformData("n", uuid=ids[2], parent_node=ids[1], node_type="transform", rotate=angles(turn)),
+                    TransformData("a", uuid=ids[1], parent_uuid=ids[0], node_type="joint"),
+                    TransformData("n", uuid=ids[2], parent_uuid=ids[1], node_type="transform", rotate=angles(turn)),
                     TransformData(
                         "x",
                         uuid        = ids[3],
-                        parent_node = ids[2],
+                        parent_uuid = ids[2],
                         node_type   = "joint",
                         rotate      = (37.0, -52.0, 118.0),
                         translate   = (0.3, -0.2, 0.1),
                     ),
-                    TransformData("c", uuid=ids[4], parent_node=ids[3], node_type="joint", translate=(1.0, 0.0, 0.0)),
+                    TransformData("c", uuid=ids[4], parent_uuid=ids[3], node_type="joint", translate=(1.0, 0.0, 0.0)),
                 ]
 
             return nodes, gap_of("x")
@@ -1459,7 +1485,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
 
             def node(k, name, parent, node_type="transform", **channels):
                 up = None if parent is None else ids[parent]
-                return TransformData(name, uuid=ids[k], parent_node=up, node_type=node_type, **channels)
+                return TransformData(name, uuid=ids[k], parent_uuid=up, node_type=node_type, **channels)
 
             return [
                 node(0, "r", None, rotate=(-47.37, 54.23, 14.79)),
@@ -1534,7 +1560,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                     TransformData(
                         name,
                         uuid        = hierarchy.generate_uuid(),
-                        parent_node = nodes[-1].uuid,
+                        parent_uuid = nodes[-1].uuid,
                         node_type   = "joint",
                         **channels,
                     )
@@ -1653,19 +1679,19 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                 TransformData(
                     "a",
                     uuid        = uuids[1],
-                    parent_node = uuids[0],
+                    parent_uuid = uuids[0],
                     node_type   = "joint",
                     rotate      = (-95.7, 53.9, -75.5),
                     translate   = (0.5, 0.2, 0.1),
                 ),
             ]
-            x = TransformData("x", uuid=uuids[2], parent_node=uuids[1], node_type="joint", translate=(0.3, -0.4, 0.2))
+            x = TransformData("x", uuid=uuids[2], parent_uuid=uuids[1], node_type="joint", translate=(0.3, -0.4, 0.2))
             if parent == "y":
                 nodes.append(
                     TransformData(
                         "y",
                         uuid        = uuids[4],
-                        parent_node = uuids[1],
+                        parent_uuid = uuids[1],
                         node_type   = "joint",
                         rotate      = (20.0, -35.0, 50.0),
                         translate   = (0.2, 0.6, -0.3),
@@ -1679,7 +1705,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                     joint_orient = (30.0, -20.0, 45.0),
                 )
             far = 100.0 if parent == "p" else 1.0
-            nodes += [x, TransformData("c", uuid=uuids[3], parent_node=uuids[2], node_type="joint", translate=(far, 0.0, 0.0))]
+            nodes += [x, TransformData("c", uuid=uuids[3], parent_uuid=uuids[2], node_type="joint", translate=(far, 0.0, 0.0))]
             if parent == "q":
                 nodes.append(
                     TransformData(
@@ -1753,7 +1779,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                     TransformData(
                         "n",
                         uuid        = hierarchy.generate_uuid(),
-                        parent_node = nodes[1].uuid,
+                        parent_uuid = nodes[1].uuid,
                         node_type   = "joint",
                         rotate      = (20.0, -35.0, 50.0),
                         translate   = (0.2, 0.6, -0.3),
@@ -1764,13 +1790,13 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                     TransformData(
                         "x1",
                         uuid        = hierarchy.generate_uuid(),
-                        parent_node = nodes[2].uuid,
+                        parent_uuid = nodes[2].uuid,
                         node_type   = "joint",
                         rotate      = (5.0, 15.0, -25.0),
                         translate   = (0.4, 0.1, 0.0),
                     ),
                 )
-                nodes[4].parent_node = nodes[2].uuid
+                nodes[4].parent_uuid = nodes[2].uuid
                 built                = HierarchyData([n.copy() for n in nodes])
                 facing(built["x"], np.eye(3), order, np.sin(np.radians(1e-3)), 0)
                 self._rig_against_one_at_a_time([n.copy() for n in built], [1, 3, 4], None, cascades=True, animated=False)
@@ -1843,12 +1869,12 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                 nodes = [
                     TransformData("r", uuid=uuids[0], node_type="transform", rotate=(t, -0.75 * t, 0.5 * t)),
                     TransformData(
-                        "a", uuid=uuids[1], parent_node=uuids[0], node_type="joint", rotate=(-95.7, 53.9, -75.5)
+                        "a", uuid=uuids[1], parent_uuid=uuids[0], node_type="joint", rotate=(-95.7, 53.9, -75.5)
                     ),
                     TransformData(
                         "n",
                         uuid        = uuids[2],
-                        parent_node = uuids[1],
+                        parent_uuid = uuids[1],
                         node_type   = "transform",
                         rotate      = (20.0, -35.0, 50.0),
                         scale       = (1.0, 100.0, 0.01),
@@ -1857,13 +1883,13 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                     TransformData(
                         "x",
                         uuid         = uuids[3],
-                        parent_node  = uuids[2],
+                        parent_uuid  = uuids[2],
                         node_type    = "joint",
                         rotate       = rotate,
                         translate    = (0.3, -0.4, 0.2),
                         rotate_order = 5,
                     ),
-                    TransformData("c", uuid=uuids[4], parent_node=uuids[3], node_type="joint", translate=(1.0, 0.0, 0.0)),
+                    TransformData("c", uuid=uuids[4], parent_uuid=uuids[3], node_type="joint", translate=(1.0, 0.0, 0.0)),
                 ]
                 self._rig_against_one_at_a_time(nodes, [1, 3], None, cascades=True, animated=False)
 
@@ -1881,20 +1907,20 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                         TransformData(
                             "s",
                             uuid        = uuids[1],
-                            parent_node = uuids[0],
+                            parent_uuid = uuids[0],
                             node_type   = "transform",
                             scale       = (1.0, 1.0 + 1e-12, 1.0 - 1e-12),
                         ),
                         TransformData(
-                            "u", uuid=uuids[2], parent_node=uuids[1], node_type="transform", rotate=(-45.0, 0.0, 0.0)
+                            "u", uuid=uuids[2], parent_uuid=uuids[1], node_type="transform", rotate=(-45.0, 0.0, 0.0)
                         ),
                         TransformData(
-                            "a", uuid=uuids[3], parent_node=uuids[2], node_type="joint", rotate=(-95.7, 53.9, -75.5)
+                            "a", uuid=uuids[3], parent_uuid=uuids[2], node_type="joint", rotate=(-95.7, 53.9, -75.5)
                         ),
                         TransformData(
-                            "x", uuid=uuids[4], parent_node=uuids[3], node_type="joint", translate=(0.3, -0.4, 0.2)
+                            "x", uuid=uuids[4], parent_uuid=uuids[3], node_type="joint", translate=(0.3, -0.4, 0.2)
                         ),
-                        TransformData("c", uuid=uuids[5], parent_node=uuids[4], node_type="joint", translate=(1.0, 0.0, 0.0)),
+                        TransformData("c", uuid=uuids[5], parent_uuid=uuids[4], node_type="joint", translate=(1.0, 0.0, 0.0)),
                     ]
                 )
                 facing(built["x"], np.eye(3), order, np.sin(np.radians(1e-3)), 0)
@@ -1905,17 +1931,17 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
         def kept_under(above, x, rest=()):
             uuids = [hierarchy.generate_uuid() for _ in range(len(above) + 3)]
             nodes = [
-                TransformData(f"t{k}", uuid=uuids[k], parent_node=uuids[k - 1] if k else None, node_type="transform", **channels)
+                TransformData(f"t{k}", uuid=uuids[k], parent_uuid=uuids[k - 1] if k else None, node_type="transform", **channels)
                 for k, channels in enumerate(above)
             ]
             nodes += [
                 TransformData(
-                    "a", uuid=uuids[-3], parent_node=uuids[-4], node_type="joint", rotate=(-95.7, 53.9, -75.5)
+                    "a", uuid=uuids[-3], parent_uuid=uuids[-4], node_type="joint", rotate=(-95.7, 53.9, -75.5)
                 ),
                 TransformData(
-                    "x", uuid=uuids[-2], parent_node=uuids[-3], node_type="joint", translate=(0.3, -0.4, 0.2), **x
+                    "x", uuid=uuids[-2], parent_uuid=uuids[-3], node_type="joint", translate=(0.3, -0.4, 0.2), **x
                 ),
-                TransformData("c", uuid=uuids[-1], parent_node=uuids[-2], node_type="joint", translate=(1.0, 0.0, 0.0)),
+                TransformData("c", uuid=uuids[-1], parent_uuid=uuids[-2], node_type="joint", translate=(1.0, 0.0, 0.0)),
             ]
             return HierarchyData(nodes + [node.copy() for node in rest])
 
@@ -1963,18 +1989,18 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                             rotate    = (10.0, 20.0, 30.0),
                             scale     = (1.0, 1.0 + 1e-12, 1.0 + 2e-12),
                         ),
-                        TransformData("a", uuid=uuids[1], parent_node=uuids[0], node_type="joint", translate=(0.5, 0.2, 0.1)),
+                        TransformData("a", uuid=uuids[1], parent_uuid=uuids[0], node_type="joint", translate=(0.5, 0.2, 0.1)),
                         TransformData(
                             "c",
                             uuid=uuids[2],
-                            parent_node=uuids[1],
+                            parent_uuid=uuids[1],
                             node_type="joint",
                             translate=(0.3, 0.1, 0.0),
                             rotate=(30.0, -20.0, 50.0),
                             segment_scale_compensate=True,
                         ),
-                        TransformData("x", uuid=uuids[3], parent_node=uuids[2], node_type="joint", translate=(0.3, -0.4, 0.2)),
-                        TransformData("d", uuid=uuids[4], parent_node=uuids[3], node_type="joint", translate=(1.0, 0.0, 0.0)),
+                        TransformData("x", uuid=uuids[3], parent_uuid=uuids[2], node_type="joint", translate=(0.3, -0.4, 0.2)),
+                        TransformData("d", uuid=uuids[4], parent_uuid=uuids[3], node_type="joint", translate=(1.0, 0.0, 0.0)),
                     ]
                 )
                 facing(rig["x"], np.eye(3), order, np.sin(np.radians(1e-3)), 0)
@@ -1984,9 +2010,10 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
         # "x" names a child of the picked s and a root: once s's branch moves
         # behind the root x, the second pass finds the root. Resolved before
         # the move, the cycle check named the x below s and refused it
+        s = TransformData("s", node_type="joint", uuid=hierarchy.generate_uuid(), translate=(1, 0, 0))
         nodes = [
-            TransformData("s", node_type="joint", translate=(1, 0, 0)),
-            TransformData("x", node_type="joint", parent_node="s", translate=(0, 1, 0)),
+            s,
+            TransformData("x", node_type="joint", parent_uuid=s.uuid, translate=(0, 1, 0)),
             TransformData("x", node_type="joint", translate=(0, 0, 2)),
             TransformData("b", node_type="joint", translate=(3, 0, 0)),
         ]
@@ -2009,15 +2036,16 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                 rig = HierarchyData(
                     [
                         TransformData("a", node_type="joint"),
-                        TransformData("b", node_type="joint", parent_node="a", translate=(0, 1, 0)),
+                        TransformData("b", node_type="joint", translate=(0, 1, 0)),
                     ]
                 )
-                clip               = ClipData(rig, frames=5)
-                rotate             = np.zeros((5, 2, 3))
-                rotate[:, 0, 0]    = steps
-                rotate[:, 1, 2]    = steps
-                clip.frames.rotate = rotate
-                poses              = _per_frame(clip, edit)
+                rig["b"].parent_uuid = rig["a"].uuid
+                clip                 = ClipData(rig, frames=5)
+                rotate               = np.zeros((5, 2, 3))
+                rotate[:, 0, 0]      = steps
+                rotate[:, 1, 2]      = steps
+                clip.frames.rotate   = rotate
+                poses                = _per_frame(clip, edit)
                 edit(clip)
                 # one pose at a time, the root keeps its keys as they are
                 np.testing.assert_array_equal(_stacked(poses, "rotate")[:, 0], rotate[:, 0])
@@ -2057,10 +2085,12 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                 rig = HierarchyData(
                     [
                         TransformData("j0", node_type="joint"),
-                        TransformData("j1", node_type="joint", parent_node="j0"),
-                        TransformData("j2", node_type="joint", parent_node="j1"),
+                        TransformData("j1", node_type="joint"),
+                        TransformData("j2", node_type="joint"),
                     ]
                 )
+                rig["j1"].parent_uuid = rig["j0"].uuid
+                rig["j2"].parent_uuid = rig["j1"].uuid
                 clip   = ClipData(rig, frames=10)
                 rotate = np.zeros((10, 3, 3))
                 rotate[:, 1, 0] = first + 40.0 * np.arange(10)
@@ -2198,11 +2228,13 @@ class TestClipSmoothSpin(unittest.TestCase):
     def _spin(self, order, frames=120):
         rng   = np.random.default_rng(order)
         names = ["root", "a", "b", "c"]
+        ids   = [hierarchy.generate_uuid() for _ in names]
         nodes = [
             TransformData(
                 name         = name,
                 node_type    = "joint",
-                parent_node  = None if i == 0 else names[i - 1],
+                uuid         = ids[i],
+                parent_uuid  = None if i == 0 else ids[i - 1],
                 translate    = [0.0, float(i > 0), 0.0],
                 rotate       = rng.uniform(-8.0, 8.0, size=3),
                 rotate_axis  = rng.uniform(-8.0, 8.0, size=3),
@@ -2295,6 +2327,7 @@ class TestClipSetRotateOrder(unittest.TestCase):
         pairs = sorted(set(zip(cases["before"].tolist(), cases["after"].tolist())))
         rng   = np.random.default_rng(seed)
         rows  = np.empty((frames, count), dtype=int)
+        uuids = [hierarchy.generate_uuid() for _ in range(count)]
         nodes = []
         for i in range(count):
             before, after = pairs[i % len(pairs)]
@@ -2305,7 +2338,8 @@ class TestClipSetRotateOrder(unittest.TestCase):
                 TransformData(
                     name         = f"j{i}",
                     node_type    = "joint",
-                    parent_node  = None if i == 0 else f"j{rng.integers(0, i)}",
+                    uuid         = uuids[i],
+                    parent_uuid  = None if i == 0 else uuids[rng.integers(0, i)],
                     translate    = rng.normal(size=3),
                     rotate_order = before,
                 )
@@ -2388,16 +2422,18 @@ class TestClipEvaluator(unittest.TestCase):
         # rotate_order, mixed segment_scale_compensate, non zero joint_orient
         # and rotate_axis, non unit scale, deep and shallow chains
         rng   = np.random.default_rng(7)
+        ids   = [hierarchy.generate_uuid() for _ in range(count)]
         nodes = []
         for i in range(count):
             parent = None
             if i:
-                parent = f"j{rng.integers(0, i)}"
+                parent = ids[rng.integers(0, i)]
             nodes.append(
                 TransformData(
                     name=f"j{i}",
                     node_type="joint",
-                    parent_node=parent,
+                    uuid=ids[i],
+                    parent_uuid=parent,
                     translate=rng.normal(size=3),
                     rotate=rng.uniform(-180.0, 180.0, size=3),
                     scale=rng.uniform(0.5, 2.0, size=3),
@@ -2451,13 +2487,13 @@ class TestClipEvaluator(unittest.TestCase):
                 TransformData(
                     name="b",
                     node_type="joint",
-                    parent_node="a",
                     translate=[1.0, 1.0, 1.0],
                     segment_scale_compensate=True,
                 ),
             ]
         )
-        on = ClipData(rig, frames=2).frames.world_matrix
+        rig["b"].parent_uuid = rig["a"].uuid
+        on                   = ClipData(rig, frames=2).frames.world_matrix
 
         rig["b"].segment_scale_compensate = False
         off                               = ClipData(rig, frames=2).frames.world_matrix
@@ -2482,12 +2518,14 @@ class TestClipDeltas(unittest.TestCase):
 
     def _rig(self, count=5, seed=5):
         rng = np.random.default_rng(seed)
+        ids = [hierarchy.generate_uuid() for _ in range(count)]
         return HierarchyData(
             [
                 TransformData(
                     name         = f"j{i}",
                     node_type    = "joint",
-                    parent_node  = None if i == 0 else f"j{i - 1}",
+                    uuid         = ids[i],
+                    parent_uuid  = None if i == 0 else ids[i - 1],
                     translate    = rng.normal(size=3),
                     rotate       = rng.uniform(-90.0, 90.0, size=3),
                     joint_orient = rng.uniform(-30.0, 30.0, size=3),
@@ -2590,16 +2628,6 @@ class TestClipDeltas(unittest.TestCase):
         )
 
 
-def _parent_by_uuid(rig):
-    """points every parent_node at the parent's uuid, the form every file
-    reader writes"""
-    for node in rig:
-        parent = node.get_parent()
-        if isinstance(parent, TransformData):
-            node.parent_node = parent.uuid
-    return rig
-
-
 CHANNELS = ("rotate", "translate", "scale", "joint_orient", "rotate_axis")
 
 
@@ -2613,16 +2641,18 @@ class _DeltaRigs:
     """random rigs and clips for the clip pose algebra tests, and the frame
     by frame reference they are held to"""
 
-    by_uuid = False  # parent_node holds names; a subclass points it at uuids
-
     def _rig(self, names, parents, seed, scale=False):
+        """``names``, each node under the first node of the name ``parents``
+        gives, by its uuid"""
         rng = np.random.default_rng(seed)
-        rig = HierarchyData(
+        ids, ups = _parent_ids(names, parents)
+        return HierarchyData(
             [
                 TransformData(
                     name         = name,
                     node_type    = "joint",
-                    parent_node  = parent,
+                    uuid         = uuid,
+                    parent_uuid  = up,
                     translate    = rng.normal(size=3),
                     rotate       = rng.uniform(-90.0, 90.0, size=3),
                     joint_orient = rng.uniform(-30.0, 30.0, size=3),
@@ -2633,10 +2663,9 @@ class _DeltaRigs:
                     segment_scale_compensate=bool(rng.integers(0, 2)),
                     scale=rng.uniform(0.8, 1.25, size=3) if scale else None,
                 )
-                for name, parent in zip(names, parents)
+                for name, uuid, up in zip(names, ids, ups)
             ]
         )
-        return _parent_by_uuid(rig) if self.by_uuid else rig
 
     def _chain(self, count, seed, **kwargs):
         names = [f"j{i}" for i in range(count)]
@@ -2695,7 +2724,7 @@ class _DeltaRigs:
         self.assertIsInstance(fast, ClipData)
         self.assertEqual(fast.name, slow.name)
         self.assertEqual(fast.uuid, slow.uuid)
-        self.assertEqual([n.parent_node for n in fast], [n.parent_node for n in slow])
+        self.assertEqual([n.parent_uuid for n in fast], [n.parent_uuid for n in slow])
         self.assertEqual(fast.frame_count, slow.frame_count)
         self.assertEqual(fast.start_frame, slow.start_frame)
         self.assertEqual(fast.fps, slow.fps)
@@ -2867,14 +2896,14 @@ class TestClipDeltaVectorised(_DeltaRigs, unittest.TestCase):
         )
 
     def test_get_delta_on_a_clip_missing_a_parent_makes_its_child_a_root(self):
-        # a clip of part of a rig: j1 names a parent the clip lacks. The
-        # delta, like a copy of a selection, makes such a node a root
+        # a clip of part of a rig: j1's parent is not in it. Its nodes join
+        # the clip, which makes such a node a root, and the delta keeps it one
         clip = self._animated(ClipData(self._chain(5, seed=5)[1:]))
         pose = self._chain(5, seed=17)[1:]
-        self.assertIsInstance(clip["j1"].get_parent(), str)
+        self.assertIsNone(clip["j1"].parent_uuid)
 
         delta = clip.get_delta(pose)
-        self.assertIsNone(delta["j1"].parent_node)
+        self.assertIsNone(delta["j1"].parent_uuid)
         self._assert_same(delta, self._per_frame("get_delta", clip, pose))
 
     def test_get_delta_against_a_view_of_the_clip_reads_its_bound_frame(self):
@@ -2958,34 +2987,28 @@ class TestClipDeltaVectorised(_DeltaRigs, unittest.TestCase):
             self.assertTrue(np.array_equal(getattr(deltas.frames, channel), values))
 
 
-class TestClipDeltaVectorisedByUuid(TestClipDeltaVectorised):
-    """the same, parented by uuid as a file reader writes a rig"""
-
-    by_uuid = True
-
-
 class TestDeltaSolveOrder(unittest.TestCase):
     """a paired node under an unpaired one must still solve after its paired
     ancestors, or the ancestor moves afterwards and drags it off target"""
 
-    by_uuid        = False  # parent_node holds names; a subclass points it at uuids
     children_first = False  # a subclass lists every rig children first
 
     def _rig(self, names, parents, seed):
         rng = np.random.default_rng(seed)
+        ids, ups = _parent_ids(names, parents)
         nodes = [
             TransformData(
                 name         = name,
                 node_type    = "joint",
-                parent_node  = parent,
+                uuid         = uuid,
+                parent_uuid  = up,
                 translate    = rng.normal(size=3),
                 rotate       = rng.uniform(-90.0, 90.0, size=3),
                 joint_orient = rng.uniform(-30.0, 30.0, size=3),
             )
-            for name, parent in zip(names, parents)
+            for name, uuid, up in zip(names, ids, ups)
         ]
-        rig = HierarchyData(nodes[::-1] if self.children_first else nodes)
-        return _parent_by_uuid(rig) if self.by_uuid else rig
+        return HierarchyData(nodes[::-1] if self.children_first else nodes)
 
     def setUp(self):
         super().setUp()
@@ -3051,12 +3074,6 @@ class TestDeltaSolveOrder(unittest.TestCase):
 
     def test_clip_by_index_lands_every_node_on_target(self):
         self._assert_clip_lands(self.full_pose, self.full_delta, by="index")
-
-
-class TestDeltaSolveOrderByUuid(TestDeltaSolveOrder):
-    """the same, parented by uuid as a file reader writes a rig"""
-
-    by_uuid = True
 
 
 class TestDeltaSolveOrderChildrenFirst(TestDeltaSolveOrder):
@@ -3465,12 +3482,6 @@ class TestClipAlgebraEveryFrame(_DeltaRigs, unittest.TestCase):
         self.assertEqual((sub.call_count, add.call_count), (0, 0))
 
 
-class TestClipAlgebraEveryFrameByUuid(TestClipAlgebraEveryFrame):
-    """the same, parented by uuid as a file reader writes a rig"""
-
-    by_uuid = True
-
-
 class TestClipAlgebraEulerFilter(unittest.TestCase):
     """every rotate the clip algebra rebuilds from matrices goes through
     euler_filter per node, frame 0 kept as solved: one frame at a time,
@@ -3479,17 +3490,19 @@ class TestClipAlgebraEulerFilter(unittest.TestCase):
     def _rest(self, extra=False):
         # nothing in the orientation chain, so a delta's rotate is the clip's
         # own rotation read back through matrix_to_euler
+        ids = [hierarchy.generate_uuid() for _ in range(3)]
         nodes = [
             TransformData(
                 name        = f"j{i}",
                 node_type   = "joint",
-                parent_node = None if i == 0 else f"j{i - 1}",
+                uuid        = ids[i],
+                parent_uuid = None if i == 0 else ids[i - 1],
                 translate   = [0.0, 1.0 if i else 0.0, 0.0],
             )
             for i in range(3)
         ]
         if extra:
-            nodes.append(TransformData(name="extra", parent_node="j0", translate=[1.0, 0.0, 0.0]))
+            nodes.append(TransformData(name="extra", parent_uuid=ids[0], translate=[1.0, 0.0, 0.0]))
         return HierarchyData(nodes)
 
     def _sweep(self, first, extra=False):
@@ -3655,7 +3668,7 @@ class TestPoseOperandWorld(_DeltaRigs, unittest.TestCase):
                 TransformData(
                     name=f"n{i}",
                     uuid=uuids[i],
-                    parent_node=None if p is None else uuids[p],
+                    parent_uuid=None if p is None else uuids[p],
                     rotate=rng.uniform(-90.0, 90.0, size=3),
                     translate=rng.normal(size=3),
                     scale=rng.uniform(0.5, 2.0, size=3),
@@ -3679,7 +3692,7 @@ class TestPoseOperandWorld(_DeltaRigs, unittest.TestCase):
         b = self._scaled(4, seed=4)
         loose = TransformData(
             name        = "loose",
-            parent_node = "j0",
+            parent_uuid = a["j0"].uuid,
             rotate      = [10.0, 20.0, 30.0],
             translate   = [1.0, 2.0, 3.0],
             scale       = [1.0, 2.0, 3.0],
@@ -3721,7 +3734,7 @@ class TestClipBranchResets(unittest.TestCase):
     on a single pose copy of that frame, its world matrices then computed
     from scratch"""
 
-    def _rig(self, by_name, count=14, seed=3):
+    def _rig(self, count=14, seed=3):
         rng   = np.random.default_rng(seed)
         uuids = [hierarchy.generate_uuid() for _ in range(count)]
         nodes = []
@@ -3729,13 +3742,13 @@ class TestClipBranchResets(unittest.TestCase):
             parent = None
             if i:
                 p      = int(rng.integers(max(0, i - 4), i))
-                parent = f"j{p}" if by_name else uuids[p]
+                parent = uuids[p]
             nodes.append(
                 TransformData(
                     name=f"j{i}",
                     node_type="joint",
                     uuid=uuids[i],
-                    parent_node=parent,
+                    parent_uuid=parent,
                     translate=rng.normal(size=3),
                     rotate=rng.uniform(-90.0, 90.0, size=3),
                     scale=rng.uniform(0.7, 1.4, size=3),
@@ -3788,49 +3801,47 @@ class TestClipBranchResets(unittest.TestCase):
     }
 
     def test_a_write_on_every_frame_matches_the_single_pose_write(self):
-        for by_name in (False, True):
-            for label, write in self.WRITES.items():
-                with self.subTest(label, by_name=by_name):
-                    clip  = self._clip(self._rig(by_name))
-                    other = self._clip(self._rig(by_name), seed=9)
-                    for frame in range(clip.frame_count):
-                        clip.frame  = frame
-                        other.frame = frame
-                        pose        = self._pose(clip)
+        for label, write in self.WRITES.items():
+            with self.subTest(label):
+                clip  = self._clip(self._rig())
+                other = self._clip(self._rig(), seed=9)
+                for frame in range(clip.frame_count):
+                    clip.frame  = frame
+                    other.frame = frame
+                    pose        = self._pose(clip)
 
-                        clip.world_matrix  # every node's world matrix cached
-                        write(clip, frame, other)
-                        write(pose, frame, other)
-                        self._assert_like(clip, pose, f"{label} frame {frame}")
+                    clip.world_matrix  # every node's world matrix cached
+                    write(clip, frame, other)
+                    write(pose, frame, other)
+                    self._assert_like(clip, pose, f"{label} frame {frame}")
 
     def test_a_solve_on_every_frame_lands_on_its_target(self):
         # each node solves against its parent's world matrix: a parent whose
         # write missed a child's cache would leave that child off target. The
         # two rigs share every structural value, so each frame is reachable
-        for by_name in (False, True):
-            for label in ("world_matrix", "match_matrix"):
-                with self.subTest(label, by_name=by_name):
-                    clip   = self._clip(self._rig(by_name))
-                    other  = self._clip(self._rig(by_name), seed=9)
-                    target = other.frames.world_matrix
-                    for frame in range(clip.frame_count):
-                        clip.frame  = frame
-                        other.frame = frame
-                        pose        = self._pose(clip)
+        for label in ("world_matrix", "match_matrix"):
+            with self.subTest(label):
+                clip   = self._clip(self._rig())
+                other  = self._clip(self._rig(), seed=9)
+                target = other.frames.world_matrix
+                for frame in range(clip.frame_count):
+                    clip.frame  = frame
+                    other.frame = frame
+                    pose        = self._pose(clip)
 
-                        clip.world_matrix
-                        if label == "world_matrix":
-                            clip.world_matrix = target[frame]
-                            pose.world_matrix = target[frame]
-                        else:
-                            clip.match_matrix(other)
-                            pose.match_matrix(TransformList._owned_copy(other))
+                    clip.world_matrix
+                    if label == "world_matrix":
+                        clip.world_matrix = target[frame]
+                        pose.world_matrix = target[frame]
+                    else:
+                        clip.match_matrix(other)
+                        pose.match_matrix(TransformList._owned_copy(other))
 
-                        np.testing.assert_allclose(
-                            clip.world_matrix, target[frame], atol=1e-9,
-                            err_msg=f"{label} frame {frame}",
-                        )
-                        self._assert_like(clip, pose, f"{label} frame {frame}")
+                    np.testing.assert_allclose(
+                        clip.world_matrix, target[frame], atol=1e-9,
+                        err_msg=f"{label} frame {frame}",
+                    )
+                    self._assert_like(clip, pose, f"{label} frame {frame}")
 
     def test_a_write_scans_the_clip_a_few_times_not_once_per_node(self):
         # finding a node's children used to scan the whole clip, once for
@@ -3846,7 +3857,7 @@ class TestClipBranchResets(unittest.TestCase):
                 self.walks += 1
                 return super().__iter__()
 
-        rig       = self._rig(by_name=False, count=40)
+        rig       = self._rig(count=40)
         clip      = ClipData(rig, frames=3)
         clip.list = Walked(clip.list)
         other     = self._clip(rig, seed=9)
@@ -3879,38 +3890,37 @@ class TestClipBranchResets(unittest.TestCase):
         "pop": lambda h: h.pop(3),
         # raw structural writes: nothing clears a branch, the world matrices
         # cached before them must not be trusted after
-        "parent_node to the world": lambda h: setattr(h["j6"], "parent_node", None),
-        "parent_node by uuid": lambda h: setattr(h["j7"], "parent_node", h["j1"].uuid),
+        "parent_uuid to the world": lambda h: setattr(h["j6"], "parent_uuid", None),
+        "parent_uuid of another node": lambda h: setattr(h["j7"], "parent_uuid", h["j1"].uuid),
         "del": lambda h: h.__delitem__(3),
     }
 
     def test_a_structural_edit_matches_the_single_pose_edit(self):
-        for by_name in (False, True):
-            for label, edit in self.EDITS.items():
-                with self.subTest(label, by_name=by_name):
-                    clip  = self._clip(self._rig(by_name))
-                    poses = []
-                    for frame in range(clip.frame_count):
-                        clip.frame = frame
-                        poses.append(self._pose(clip))
-                        edit(poses[-1])
+        for label, edit in self.EDITS.items():
+            with self.subTest(label):
+                clip  = self._clip(self._rig())
+                poses = []
+                for frame in range(clip.frame_count):
+                    clip.frame = frame
+                    poses.append(self._pose(clip))
+                    edit(poses[-1])
 
-                    # made on the last frame with every cache filled, the
-                    # clip's index too, then read before any scrub could
-                    # clear them
-                    clip.world_matrix
-                    clip.get_branch()
-                    edit(clip)
-                    self._assert_like(clip, poses[-1], f"{label} bound frame")
+                # made on the last frame with every cache filled, the
+                # clip's index too, then read before any scrub could
+                # clear them
+                clip.world_matrix
+                clip.get_branch()
+                edit(clip)
+                self._assert_like(clip, poses[-1], f"{label} bound frame")
 
-                    framed = clip.frames.world_matrix
-                    for frame, pose in enumerate(poses):
-                        clip.frame = frame
-                        self._assert_like(clip, pose, f"{label} frame {frame}")
-                        np.testing.assert_allclose(
-                            framed[frame], pose.copy().world_matrix, atol=1e-9,
-                            err_msg=f"{label} frames.world_matrix {frame}",
-                        )
+                framed = clip.frames.world_matrix
+                for frame, pose in enumerate(poses):
+                    clip.frame = frame
+                    self._assert_like(clip, pose, f"{label} frame {frame}")
+                    np.testing.assert_allclose(
+                        framed[frame], pose.copy().world_matrix, atol=1e-9,
+                        err_msg=f"{label} frames.world_matrix {frame}",
+                    )
 
 
 class TestClipFramedSolve(unittest.TestCase):
@@ -3923,19 +3933,21 @@ class TestClipFramedSolve(unittest.TestCase):
     def _rig(self, seed, count=9):
         # a branching tree with everything that makes a solve non trivial:
         # rotate_axis, joint_orient, every rotate order, non-uniform scale and
-        # mixed segment scale compensation; parented by name and by uuid
+        # mixed segment scale compensation
         rng   = np.random.default_rng(seed)
+        ids   = [hierarchy.generate_uuid() for _ in range(count)]
         nodes = []
         for i in range(count):
             parent = None
             if i:
                 p      = int(rng.integers(0, i))
-                parent = f"j{p}" if i % 2 else nodes[p].uuid
+                parent = ids[p]
             nodes.append(
                 TransformData(
                     name=f"j{i}",
                     node_type="joint",
-                    parent_node=parent,
+                    uuid=ids[i],
+                    parent_uuid=parent,
                     translate=rng.normal(size=3),
                     rotate=rng.uniform(-60.0, 60.0, size=3),
                     scale=rng.uniform(0.8, 1.25, size=3),
@@ -4350,7 +4362,7 @@ class TestClipFramedSolve(unittest.TestCase):
                 TransformData(
                     name         = f"j{i}",
                     node_type    = "joint",
-                    parent_node  = nodes[-1].uuid if nodes else None,
+                    parent_uuid  = nodes[-1].uuid if nodes else None,
                     uuid         = hierarchy.generate_uuid(),
                     translate    = rng.normal(size=3),
                     rotate       = rng.uniform(-60.0, 60.0, size=3),
@@ -4389,7 +4401,7 @@ class TestClipFramedSolve(unittest.TestCase):
                 TransformData(
                     name         = f"j{i}",
                     node_type    = "joint",
-                    parent_node  = nodes[-1].uuid if nodes else None,
+                    parent_uuid  = nodes[-1].uuid if nodes else None,
                     uuid         = hierarchy.generate_uuid(),
                     translate    = rng.normal(size=3),
                     rotate       = rotate,
@@ -4431,7 +4443,7 @@ class TestClipFramedSolve(unittest.TestCase):
                 TransformData(
                     name         = f"j{i}",
                     node_type    = "joint",
-                    parent_node  = nodes[-1].uuid if nodes else None,
+                    parent_uuid  = nodes[-1].uuid if nodes else None,
                     uuid         = hierarchy.generate_uuid(),
                     translate    = rng.normal(size=3),
                     rotate       = rng.uniform(-60.0, 60.0, size=3),
@@ -4795,9 +4807,9 @@ class TestClipFramedReads(unittest.TestCase):
     )
     FRAMED = ("scale", "rotate", "translate", "rotateAxis", "jointOrient")
 
-    def _rig(self, count=14, seed=7, by_name=True):
+    def _rig(self, count=14, seed=7):
         # every feature a factor reads: rotate orders, segment scale
-        # compensation both ways, a branching tree, parented by name or uuid
+        # compensation both ways, a branching tree
         rng   = np.random.default_rng(seed)
         uuids = [hierarchy.generate_uuid() for _ in range(count)]
         names = [f"j{i}" for i in range(count)]
@@ -4806,13 +4818,13 @@ class TestClipFramedReads(unittest.TestCase):
             parent = None
             if i:
                 p      = int(rng.integers(0, i))
-                parent = names[p] if by_name else uuids[p]
+                parent = uuids[p]
             nodes.append(
                 TransformData(
                     name=names[i],
                     uuid=uuids[i],
                     node_type="joint",
-                    parent_node=parent,
+                    parent_uuid=parent,
                     translate=rng.normal(size=3),
                     rotate=rng.uniform(-180.0, 180.0, size=3),
                     scale=rng.uniform(0.5, 2.0, size=3),
@@ -4838,8 +4850,7 @@ class TestClipFramedReads(unittest.TestCase):
         return clip
 
     def _clips(self):
-        for by_name in (True, False):
-            yield ("name" if by_name else "uuid"), self._animated(self._rig(by_name=by_name))
+        yield "uuid", self._animated(self._rig())
 
     def _per_frame(self, clip, read):
         """the reference: ``read(node)`` on every node of a single pose copy
@@ -4892,12 +4903,21 @@ class TestClipFramedReads(unittest.TestCase):
                 self.assertTrue(np.array_equal(matrix[:, i], identity))
 
     def test_a_parent_outside_the_clip_reads_as_a_root(self):
-        # a clip of part of a rig: the first node's parent is left behind,
-        # which get_parent_matrix answers with identity and a scale of one
-        rig     = self._rig(by_name=False)
-        clip    = self._animated(HierarchyData([node.copy() for node in rig][3:]))
-        orphans = [i for i, node in enumerate(clip) if isinstance(node.get_parent(), str)]
+        # a clip of part of a rig: the first nodes' parents are left behind.
+        # They join it as roots; a parent_uuid written back since names a
+        # node the clip lacks, which get_parent_matrix answers with identity
+        # and a scale of one
+        rig   = self._rig()
+        nodes = [node.copy() for node in rig][3:]
+        lost  = {node.uuid: node.parent_uuid for node in nodes}
+        clip  = self._animated(HierarchyData(nodes))
+        orphans = [
+            i for i, node in enumerate(clip) if node.parent_uuid is None and lost[node.uuid] is not None
+        ]
         self.assertTrue(orphans)
+        for i in orphans:
+            clip[i].parent_uuid = lost[clip[i].uuid]
+            self.assertIsInstance(clip[i].get_parent(), str)
 
         world    = clip.frames.parent_matrix
         scale    = clip.frames.parent_scale_inverse
@@ -5061,7 +5081,7 @@ class TestClipFramedReads(unittest.TestCase):
         for label, reorder in self.REORDERS.items():
             for scope in (None, ["j5", "j9", "j2"]):
                 with self.subTest(label, scope=scope):
-                    clip = self._animated(self._rig(by_name=False))
+                    clip = self._animated(self._rig())
                     held = clip.frames if scope is None else clip.frames[scope]
                     reorder(clip)
 
@@ -5077,7 +5097,7 @@ class TestClipFramedReads(unittest.TestCase):
                         self.assertEqual([n.name for n in held._nodes()], scope)
 
     def test_a_held_scoped_axis_writes_its_own_nodes(self):
-        clip = self._animated(self._rig(by_name=False))
+        clip = self._animated(self._rig())
         held = clip.frames["j5"]
         clip.sort(key=lambda node: -int(node.name[1:]))
         before = np.array(clip.frames.rotate)
@@ -5144,7 +5164,7 @@ class TestClipPoseWrites(unittest.TestCase):
                 TransformData(
                     name=f"{prefix}{i}",
                     node_type="joint",
-                    parent_node=nodes[int(rng.integers(0, i))].uuid if i else None,
+                    parent_uuid=nodes[int(rng.integers(0, i))].uuid if i else None,
                     translate=rng.normal(size=3),
                     rotate=rng.uniform(-90.0, 90.0, size=3),
                     scale=rng.uniform(0.5, 2.0, size=3),

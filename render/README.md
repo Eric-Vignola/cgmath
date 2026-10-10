@@ -89,7 +89,7 @@ quickly without rigging anything.
 ## The mental model — a scene graph
 
 Three node types, all inheriting `TransformData`
-(`translate / rotate / scale / parent_node`, row-major matrices, Maya
+(`translate / rotate / scale / parent_uuid`, row-major matrices, Maya
 rotate orders). Parent a Light to a Camera and you get a real headlight.
 Parent an Object to another Object for free instancing-with-offsets.
 
@@ -392,11 +392,12 @@ preview.to_image()  # PIL Image
 preview.imshow()                 # OpenCV window
 ```
 
-These work because Object wraps itself in a one-Object preview Scene
-under the hood and runs the same pipeline. **Gotcha**: that preview Scene
-`append`s the Object, which *moves* it — an Object that was already in a
-Scene is removed from it. Call `render()` / `imshow()` / `to_image()` on
-standalone Objects, and `scene.render()` on ones you've parented.
+These work because Object puts a stand-in for itself, a shallow copy
+over the same mesh and texture, in a one-Object preview Scene under the
+hood and runs the same pipeline. The Object stays where it is, in its
+Scene and under its parent, but the preview renders it as a root: a
+parent's transform is not applied. Call `scene.render()` to see a parented
+Object in place.
 
 ---
 
@@ -625,8 +626,7 @@ scene.turntable("seq/anim.png", n_frames=4)               # auto-injects → seq
 ```
 
 `Object.turntable()` is the same one-call convenience as
-`Object.render()` — same preview Scene, same caveat about the Object
-being moved into it.
+`Object.render()` — same preview Scene, same stand-in rendered as a root.
 
 ---
 
@@ -771,12 +771,13 @@ custom.render().save("custom_rig.png")
 
 ```python
 cam       = Camera(name="cam", translate=(0, 1, 5))
-headlight = Light(name="headlight", kind="point", intensity=26.0, parent_node=cam)
+headlight = Light(name="headlight", kind="point", intensity=26.0)
 
 hl = Scene("hl", resolution=(320, 240))
 hl.append(Object(name="cube", mesh=cube, uv=cube_uv))
 hl.append(cam)
 hl.append(headlight)
+headlight.set_parent(cam, world_space=False)   # by node, name or uuid
 hl.render().save("headlight.png")
 ```
 

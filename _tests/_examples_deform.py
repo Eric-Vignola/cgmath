@@ -117,18 +117,13 @@ def ffd() -> FFDData:
 
 def skin_deform() -> SkinDeformData:
     """dual quaternion, bound, its matrices from a bind rig, joints reordered"""
-    rig = HierarchyData(
-        [
-            TransformData(name="A:root", translate=(0.0, 0.0, 0.0)),
-            TransformData(name="A:spine", parent_node="A:root", translate=(0.5, 0.0, 0.0)),
-            TransformData(
-                name        = "A:tip",
-                parent_node = "A:spine",
-                translate   = (0.5, 0.0, 0.0),
-                rotate      = (0.0, 0.0, 15.0),
-            ),
-        ]
-    )
+    root  = TransformData(name="A:root", translate=(0.0, 0.0, 0.0))
+    spine = TransformData(name="A:spine", translate=(0.5, 0.0, 0.0))
+    tip   = TransformData(name="A:tip", translate=(0.5, 0.0, 0.0), rotate=(0.0, 0.0, 15.0))
+    rig   = HierarchyData([root, spine, tip])
+
+    spine.parent_uuid = root.uuid
+    tip.parent_uuid   = spine.uuid
 
     mesh = _grid(name="A:body")
     x    = mesh.points[:, 0]

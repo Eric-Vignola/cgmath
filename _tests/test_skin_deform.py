@@ -19,7 +19,7 @@ from cgmath.geometry.utils._numba._skin_deform import (
     dqs_compact_fast,
     lbs_compact_fast,
 )
-from cgmath.hierarchy import ClipData, HierarchyData, TransformData
+from cgmath.hierarchy import ClipData, HierarchyData, TransformData, generate_uuid
 from cgmath.transforms import matrix_point_multiply
 
 
@@ -119,8 +119,7 @@ def branching_clip(joints: int = 12, frames: int = 9, seed: int = 23):
     channel of it.
 
     Every joint has a random joint orient, rotate axis, rotate order and
-    scale, half of them compensate segment scale, and half name their
-    parent while the other half give its uuid.
+    scale, and half of them compensate segment scale.
     """
     rng   = np.random.default_rng(seed)
     nodes = []
@@ -128,11 +127,12 @@ def branching_clip(joints: int = 12, frames: int = 9, seed: int = 23):
         parent = None
         if i:
             p      = i - 1 if rng.random() < 0.7 else int(rng.integers(0, i))
-            parent = nodes[p].name if i % 2 else nodes[p].uuid
+            parent = nodes[p].uuid
         nodes.append(
             TransformData(
                 name=f"j{i:02d}",
-                parent_node=parent,
+                uuid=generate_uuid(),
+                parent_uuid=parent,
                 translate=rng.normal(size=3),
                 rotate=rng.uniform(-60.0, 60.0, 3),
                 scale=rng.uniform(0.8, 1.25, 3),
@@ -440,13 +440,15 @@ class TestMapping(unittest.TestCase):
 
 
 class TestRig(unittest.TestCase):
-    def _rig(self, offset=(0.0, 0.0, 0.0)) -> HierarchyData:
-        return HierarchyData(
+    def _rig(self, offset=(0.0, 0.0, 0.0), rotate=None) -> HierarchyData:
+        rig = HierarchyData(
             [
-                TransformData(name="a", translate=offset),
-                TransformData(name="b", parent_node="a", translate=(10.0, 0.0, 0.0)),
+                TransformData(name="a", translate=offset, rotate=rotate),
+                TransformData(name="b", translate=(10.0, 0.0, 0.0)),
             ]
         )
+        rig["b"].parent_uuid = rig["a"].uuid
+        return rig
 
     def test_pose_indices_follows_the_joint_list(self):
         d = deformer(np.zeros((1, 3)), two_joint_skin(1), joints=["b", "a"])
@@ -488,13 +490,8 @@ class TestRig(unittest.TestCase):
         )
         d = SkinDeformData(mesh=points, skin=skin, bind_rig=bind)
 
-        posed = HierarchyData(
-            [
-                TransformData(name="a", rotate=(0.0, 0.0, 30.0)),
-                TransformData(name="b", parent_node="a", translate=(10.0, 0.0, 0.0)),
-            ]
-        )
-        got = d.apply(posed)
+        posed = self._rig(rotate=(0.0, 0.0, 30.0))
+        got   = d.apply(posed)
 
         # ground truth built here, not via _skin_matrices: p @ inv(bind) @ posed
         cols = d.pose_indices(posed)
@@ -1434,7 +1431,7 @@ class TestClipPoses(unittest.TestCase):
         reorders = {
             "sort":             lambda c: c.sort(key=lambda node: node.name[::-1]),
             "reverse":          lambda c: c.reverse(),
-            "set_parent local": lambda c: c["j05"].set_parent("j09", world_space=False),
+            "set_parent local": lambda c: c["j05"].set_parent("j08", world_space=False),
             "a node added":     lambda c: c.append(TransformData("extra", translate=(1, 0, 0))),
             "a node taken out": lambda c: c.remove(c[unbound[0]]),
         }

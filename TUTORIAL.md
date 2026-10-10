@@ -264,8 +264,9 @@ A `TransformData` is one transform node with Maya's channel set: name,
 uuid, parent, SRT, `rotate_order`, `joint_orient`,
 `segment_scale_compensate`. A `HierarchyData` owns a set of them.
 
-Parenting is by **uuid**, and `parent_node` holds that uuid. Do not hand
-it a name — use `set_parent()`, which resolves the name for you.
+Parenting is by **uuid**: `parent_uuid` holds the parent's uuid, and a
+name handed to it raises. `set_parent()` takes the name, finds the node and
+keeps its uuid; `parent_name` reads the name back.
 
 ```python
 from cgmath.hierarchy import HierarchyData, TransformData

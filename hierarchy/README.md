@@ -27,10 +27,14 @@ question, and a rig answers every selection question.
 
 ## Concepts you need before using it
 
-**Identity is the uuid, not the name.** `parent_node` holds the
-**parent's uuid**. `HierarchyData.append` mints one for any node that
-arrives without it. Names are for humans, `match()` and lookup — they
-may repeat, and `unique_name` tells you when they do.
+**Identity is the uuid, not the name.** `parent_uuid` holds the
+**parent's uuid**, or `None` for a root, and nothing else: parent by name
+with `set_parent("hip")`, which keeps the uuid, and read the name back as
+`parent_name`. `HierarchyData.append` mints a uuid for any node that
+arrives without one. Names are for humans, `match()` and lookup — they
+may repeat, and `unique_name` tells you when they do. A node joining a
+hierarchy without its parent becomes a root there. `parent_node`, the
+name before 2.0.0, is a deprecated alias until 3.0.0.
 
 **Ownership is exclusive.** A node's `_hierarchy` back-pointer names the
 one `HierarchyData` that holds it. `append` / `insert` claim it (pulling

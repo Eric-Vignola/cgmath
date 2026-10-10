@@ -203,13 +203,12 @@ rig["hip"].rotate_z = 90.0                 # the branch follows
 print(rig["knee"].world_matrix[3, :3].round(6))     # [-10. 10. 0.]
 ```
 
-`set_parent(name)` stores the parent's **uuid**. A name passed straight to
-`parent_node=` works as well — `get_parent()` and `get_children()` both
-follow it to the first node of that name — but only a uuid holds when names
-repeat.
+`set_parent(name)` stores the parent's **uuid** in `parent_uuid`, which
+takes a uuid or `None` and nothing else; `parent_name` reads the name back.
 
 ```python
-print(rig["hip"].parent_node == rig["root"].uuid)   # True
+print(rig["hip"].parent_uuid == rig["root"].uuid)   # True
+print(rig["hip"].parent_name)                       # root
 print([n.name for n in rig["root"].get_branch()])   # ['root', 'hip', 'knee']
 print([n.name for n in rig["hip"].get_children()])  # ['knee']
 print(rig.match("*e*").name)                        # fnmatch selection
@@ -410,13 +409,14 @@ from cgmath.geometry.deform import SkinDeformData
 
 bind_rig = HierarchyData([
     TransformData("root", node_type="joint"),
-    TransformData("tip", parent_node="root", translate=(0, 1, 0), node_type="joint"),
+    TransformData("tip", translate=(0, 1, 0), node_type="joint"),
 ])
+bind_rig["tip"].set_parent("root", world_space=False)
 posed_rig = HierarchyData([
     TransformData("root", node_type="joint"),
-    TransformData("tip", parent_node="root", translate=(0, 1, 0),
-                  rotate=(0, 0, 45), node_type="joint"),
+    TransformData("tip", translate=(0, 1, 0), rotate=(0, 0, 45), node_type="joint"),
 ])
+posed_rig["tip"].set_parent("root", world_space=False)
 
 deformer = SkinDeformData(mesh=cube, skin=skin, bind_rig=bind_rig)
 bent     = deformer.apply(posed_rig, cube)

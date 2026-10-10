@@ -118,9 +118,11 @@ from cgmath.hierarchy import HierarchyData, TransformData
 
 skeleton = HierarchyData([
     TransformData("root", node_type="joint"),
-    TransformData("spine", parent_node="root", translate=(0, 10, 0), node_type="joint"),
-    TransformData("head", parent_node="spine", translate=(0, 10, 0), node_type="joint"),
+    TransformData("spine", translate=(0, 10, 0), node_type="joint"),
+    TransformData("head", translate=(0, 10, 0), node_type="joint"),
 ])
+skeleton["spine"].set_parent("root", world_space=False)
+skeleton["head"].set_parent("spine", world_space=False)
 
 import os, tempfile
 

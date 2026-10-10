@@ -1436,17 +1436,8 @@ def _strip_namespaces(items: list, namespace: Optional[str] = None) -> None:
             f"one item, nothing renamed: {'; '.join(clashes[:10])}{more}"
         )
 
-    # the names go through their type's _set_names, all of a type at once: a
-    # hierarchy renames its nodes in one pass rather than one per node
-    names = {}
     for obj, field, new in changes:
-        if field == "name":
-            names.setdefault(type(obj)._set_names, []).append((obj, new))
-        else:
-            setattr(obj, field, new)
-
-    for set_names, pairs in names.items():
-        set_names(pairs)
+        setattr(obj, field, new)
 
 
 # ------------------------------- SAVED NAMES -------------------------------- #
@@ -2002,14 +1993,6 @@ class Data:
         """data the item owns whose names are stripped with its own"""
         return []
 
-    @staticmethod
-    def _set_names(pairs) -> None:
-        """sets the name of each ``(item, name)`` of ``pairs``. A type whose
-        names link its items together, a hierarchy's nodes, sets them all at
-        once"""
-        for item, name in pairs:
-            item.name = name
-
     def match(self, *args, exact: bool = True) -> bool:
         """returns True if name matches any arguments"""
         if not hasattr(self, "name"):
@@ -2424,12 +2407,12 @@ class DataList(MutableSequence):
         """
         A deep copy, as copy.deepcopy makes one: each item copied, and what
         the copied structure reaches twice (an item also held elsewhere)
-        copied once.
+        copied once. The copies are added together, as extend adds them: a
+        hierarchy checks its nodes' parents once every node is in.
         """
         new            = type(self)()
         memo[id(self)] = new
-        for item in self.list:
-            new.append(copy.deepcopy(item, memo))
+        new.extend([copy.deepcopy(item, memo) for item in self.list])
         for name in self.LIST_FIELDS:
             setattr(new, name, copy.deepcopy(getattr(self, name), memo))
         return new

@@ -964,6 +964,55 @@ class TestObjectRenderShim(unittest.TestCase):
         _         = obj.render(resolution=(32, 32))
         np.testing.assert_array_equal(obj.world_matrix, wm_before)
 
+    def test_a_preview_leaves_the_object_under_its_parent(self):
+        # render() and turntable() render a stand-in, a root of the preview
+        # scene, as the Object itself rendered: the parent's transform is not
+        # applied. The Object stays in its scene, under its parent, where a
+        # preview scene it joined took it out (938ae44) and cleared its
+        # parent_uuid
+        scene = Scene("s")
+        group = Object(name="group", translate=(5.0, 0.0, 0.0))
+        obj   = Object(name="cube", mesh=self.mesh, uv=self.uv, translate=(0.0, 1.0, 0.0))
+        scene.extend([group, obj])
+        obj.set_parent(group, world_space=False)
+        alone = Object(name="cube", mesh=self.mesh, uv=self.uv, translate=(0.0, 1.0, 0.0))
+
+        frame = obj.render(resolution=(32, 32))
+        np.testing.assert_array_equal(frame.array, alone.render(resolution=(32, 32)).array)
+        if Image is not None:
+            with tempfile.TemporaryDirectory() as tmp:
+                spin = os.path.join(tmp, "spin.{frame:03d}.png")
+                obj.turntable(output=spin, n_frames=2, resolution=(16, 16))
+        self.assertEqual(scene.name, ["group", "cube"])
+        self.assertIs(obj._hierarchy, scene)
+        self.assertIs(obj.get_parent(), group)
+        np.testing.assert_allclose(obj.world_matrix[3, :3], [5.0, 1.0, 0.0])
+        self.assertIs(obj.frame, frame)
+        self.assertIsNone(alone._hierarchy)  # no preview scene owns it either
+
+    @unittest.skipIf(Image is None, "PIL is not installed")
+    def test_a_preview_keeps_the_texture_it_loads(self):
+        # the stand-in starts from the Object's loaded texture and hands the
+        # one it loads back: a texture path is read once over two previews
+        import cgmath.render.scene as scene_module
+
+        loads = []
+
+        def counted(texture):
+            loads.append(texture)
+            return load(texture)
+
+        load = scene_module._load_texture
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "diff.png")
+            Image.fromarray(np.full((8, 8, 3), 200, dtype=np.uint8)).save(path)
+            obj = Object(name="cube", mesh=self.mesh, uv=self.uv, texture=path)
+            with patch.object(scene_module, "_load_texture", counted):
+                obj.render(resolution=(16, 16))
+                self.assertIsNotNone(obj._loaded_texture)
+                obj.render(resolution=(16, 16), background=(1.0, 0.0, 0.0))
+        self.assertEqual(loads, [path])
+
     @unittest.skipIf(Image is None, "PIL is not installed")
     def test_object_turntable_writes_frames(self):
         """Object.turntable() should produce an image sequence."""
@@ -1411,28 +1460,31 @@ class TestSceneRenderConfig(unittest.TestCase):
         f = scene.render(resolution=(40, 30), default_light=True)
         self.assertEqual(f.shape, (30, 40, 4))
 
-    def test_render_leaves_a_parent_named_like_a_default_light_alone(self):
-        # the default rig goes in for the render and comes out after it: a
-        # node that names a parent "key" must neither hang from that light
-        # meanwhile nor lose the name when the light is popped
+    def test_render_leaves_the_scene_parenting_alone(self):
+        # the default rig goes in for the render and comes out after it,
+        # named key / fill / rim: a node parented by uuid keeps its parent
+        # meanwhile and after, whatever the lights are named
         import cgmath.render.raytracer as raytracer
 
         scene = Scene("s", resolution=(16, 12))
-        scene.append(Object(name="cube", mesh=self.mesh, parent_node="key"))
+        scene.append(Object(name="key", mesh=self.mesh))
+        scene.append(Object(name="cube", mesh=self.mesh))
+        scene["cube"].set_parent("key", world_space=False)
         parents = []
         real    = raytracer.render
 
         def spy(scene, **kwargs):
             # what the cube hangs from while the lights are in the scene
-            parents.append(type(scene["cube"].get_parent()).__name__)
+            parents.append((scene["cube"].parent_name, type(scene["cube"].get_parent()).__name__))
+            parents.append(sorted(light.name for light in scene.lights))
             return real(scene=scene, **kwargs)
 
         with patch.object(raytracer, "render", spy):
             scene.render(default_light=True)
 
-        self.assertEqual(parents, ["str"])
-        self.assertEqual(scene["cube"].parent_node, "key")
-        self.assertEqual(len(scene), 1)
+        self.assertEqual(parents, [("key", "Object"), ["fill", "key", "rim"]])
+        self.assertEqual(scene["cube"].parent_uuid, scene.list[0].uuid)
+        self.assertEqual(len(scene), 2)
 
     @unittest.skipIf(Image is None, "PIL is not installed")
     def test_turntable_uses_scene_attrs(self):

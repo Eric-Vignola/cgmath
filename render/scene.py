@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import atexit
 import base64
+import contextlib
+import copy
 import hashlib
 import io
 import json
@@ -102,6 +104,10 @@ except ImportError:
 
 
 # -- Object --------------------------------------------------------------------
+
+# the caches an Object builds from its texture, mesh and skin, which the
+# stand-in a preview renders shares with it (Object._previewed)
+_PREVIEW_CACHES = ("_loaded_texture", "_wired_texture_cache", "_bind_mesh")
 
 
 @dataclass(repr=False, eq=False)
@@ -1207,6 +1213,40 @@ class Object(TransformData):
 
     # -- one-call preview / turntable shims ----------------------------
 
+    @contextlib.contextmanager
+    def _previewed(self):
+        """the one-Object Scene a preview renders: :meth:`render`'s,
+        :meth:`turntable`'s and :meth:`animate`'s
+
+        It holds a stand-in, a shallow copy over this Object's mesh, skin,
+        texture and channels, as a root. This Object stays in its own
+        hierarchy, under its own parent: appended to the preview scene it
+        would leave its rig, and joining the scene without its parent would
+        clear its parent_uuid. The stand-in starts from the texture this
+        Object loaded, the wireframe it baked and the bind pose it built,
+        and hands back those it makes that this Object lacks. An Object with
+        no uuid takes one, as it did when it was appended itself: the stand-in
+        carries it, so that a turntable's kept frames are found again.
+        """
+        if self.uuid is None:
+            self.uuid = generate_uuid()
+        stand_in = copy.copy(self)
+        for name in _PREVIEW_CACHES:
+            setattr(stand_in, name, getattr(self, name))
+        scene = Scene(f"preview:{self.name}")
+        scene.append(stand_in)
+        # Forward this Object's preview background (if any) to the
+        # one-Object Scene, so obj.to_image(), each turntable frame and the
+        # encoder dispatch (mp4 bg flatten) see the user-chosen colour.
+        if self._background is not None:
+            scene.background = self._background
+        try:
+            yield scene
+        finally:
+            for name in _PREVIEW_CACHES:
+                if getattr(self, name) is None:
+                    setattr(self, name, getattr(stand_in, name))
+
     def render(
         self,
         output:            Optional[str]             = None,
@@ -1240,26 +1280,21 @@ class Object(TransformData):
             The rendered :class:`Frame` (saved to ``output`` if given).
 
         Note:
-            If this Object is parented to a HierarchyData, only its OWN
-            world_matrix snapshot is used in the preview scene -- the
-            parent transform is NOT applied.
+            The preview scene holds a stand-in for this Object, a root:
+            its OWN matrix is rendered, and a parent's transform is NOT
+            applied. This Object stays where it is, under its parent.
         """
         if resolution is None:
             resolution = self.resolution
         if samples_per_pixel is None:
             samples_per_pixel = self.samples_per_pixel
-        scene = Scene(f"preview:{self.name}")
-        scene.append(self)
-        # Forward this Object's preview background (if any) to the
-        # one-Object Scene so obj.to_image() respects it.
-        if self._background is not None:
-            scene.background = self._background
         # Lighting is auto-injected by Scene.render()'s default-rig path
         # (sized to the scene's union AABB), so a one-Object preview
         # here gets the same 3-point rig as scene.to_image().
         if samples_per_pixel is not None:
             render_kwargs.setdefault("samples_per_pixel", samples_per_pixel)
-        frame = scene.render(resolution=resolution, **render_kwargs)
+        with self._previewed() as scene:
+            frame = scene.render(resolution=resolution, **render_kwargs)
         if output is not None:
             frame.save(output)
         # Cache the rendered Frame so callers can :meth:`imshow` it later
@@ -1374,34 +1409,28 @@ class Object(TransformData):
             frame paths (``list[str]``) for image sequences.
 
         Note:
-            If this Object is parented to a HierarchyData, only its OWN
-            world_matrix snapshot is used in the preview scene -- the
-            parent transform is NOT applied.
+            As with :meth:`render`, the preview scene holds a stand-in for
+            this Object, a root: its OWN matrix is rendered, and a parent's
+            transform is NOT applied. This Object stays under its parent.
         """
         if resolution is None:
             resolution = self.resolution
         if samples_per_pixel is None:
             samples_per_pixel = self.samples_per_pixel
-        scene = Scene(f"preview:{self.name}")
-        scene.append(self)
-        # Forward this Object's preview background (if any) so per-frame
-        # turntable renders + the encoder dispatch (mp4 bg flatten) see
-        # the user-chosen colour.
-        if self._background is not None:
-            scene.background = self._background
         # Lighting is auto-injected by Scene.render() per frame (sized
         # to the scene's union AABB) -- same rig as Object.render().
         if samples_per_pixel is not None:
             render_kwargs.setdefault("samples_per_pixel", samples_per_pixel)
-        # the preview scene is new every call; the frames belong to this Object
-        scene._render_cache_owner = self
-        return scene.turntable(
-            output_pattern = output,
-            n_frames       = n_frames,
-            resolution     = resolution,
-            fps            = fps,
-            **render_kwargs,
-        )
+        with self._previewed() as scene:
+            # the preview scene is new every call; the frames belong to this Object
+            scene._render_cache_owner = self
+            return scene.turntable(
+                output_pattern = output,
+                n_frames       = n_frames,
+                resolution     = resolution,
+                fps            = fps,
+                **render_kwargs,
+            )
 
     def animate(
         self,
@@ -1435,8 +1464,10 @@ class Object(TransformData):
             ValueError: If this Object has no skin to animate.
 
         Note:
-            As with :meth:`turntable`, only this Object's OWN world_matrix is
-            used in the preview scene -- a parent transform is NOT applied.
+            As with :meth:`turntable`, the preview scene holds a stand-in
+            for this Object, a root: its OWN matrix is rendered, and a
+            parent's transform is NOT applied. The stand-in is what the clip
+            deforms: this Object keeps its mesh and stays under its parent.
         """
         if self._skin is None:
             raise ValueError(
@@ -1447,22 +1478,18 @@ class Object(TransformData):
             resolution = self.resolution
         if samples_per_pixel is None:
             samples_per_pixel = self.samples_per_pixel
-
-        scene = Scene(f"preview:{self.name}")
-        scene.append(self)
-        if self._background is not None:
-            scene.background = self._background
         if samples_per_pixel is not None:
             animate_kwargs.setdefault("samples_per_pixel", samples_per_pixel)
 
-        scene._render_cache_owner = self
-        return scene.animate(
-            clip,
-            output_pattern = output,
-            resolution     = resolution,
-            fps            = fps,
-            **animate_kwargs,
-        )
+        with self._previewed() as scene:
+            scene._render_cache_owner = self
+            return scene.animate(
+                clip,
+                output_pattern = output,
+                resolution     = resolution,
+                fps            = fps,
+                **animate_kwargs,
+            )
 
     def clear_render_cache(self) -> None:
         """
@@ -2322,13 +2349,6 @@ class Scene(HierarchyData):
             pts = self.union_points()
             if pts.size > 0:
                 auto_lights = _default_lighting_rig_for(pts)
-
-            # named by a fresh uuid rather than key / fill / rim: a node that
-            # names its parent "key" would hang from the light during the
-            # render, and lose that parent_node when the pop below orphans
-            # the light's children. A uuid-shaped name never matches by name
-            for light in auto_lights:
-                light.name = generate_uuid()
 
         try:
             for light in auto_lights:

@@ -762,8 +762,9 @@ class TestFbxExporter(FbxFixtures):
 
         rig = HierarchyData([
             TransformData("root", node_type="joint", translate=(5, 0, 0), rotate=(0, 30, 0)),
-            TransformData("spine", parent_node="root", translate=(0, 10, 0), node_type="joint"),
+            TransformData("spine", translate=(0, 10, 0), node_type="joint"),
         ])
+        rig["spine"].set_parent("root", world_space=False)
         with balanced(self):
             rig.save_fbx(self.out, zero_root=True)
 
@@ -785,10 +786,10 @@ class TestFbxExporter(FbxFixtures):
         np.testing.assert_allclose(back.get("body_geo").translate, [1, 2, 3], atol=1e-9)
 
     def test_zero_root_with_a_name_used_twice(self):
-        from cgmath.hierarchy import HierarchyData, TransformData
+        from cgmath.hierarchy import HierarchyData, TransformData, generate_uuid
 
-        group  = TransformData("grp")
-        nested = TransformData("root", parent_node=group.uuid, translate=(1, 2, 3))
+        group  = TransformData("grp", uuid=generate_uuid())
+        nested = TransformData("root", parent_uuid=group.uuid, translate=(1, 2, 3))
         joint  = TransformData("root", node_type="joint", translate=(5, 0, 7))
         HierarchyData([group, nested, joint]).save_fbx(self.out, zero_root=True)
 
@@ -796,6 +797,77 @@ class TestFbxExporter(FbxFixtures):
         roots = {x.node_type: x for x in back if x.name == "root"}
         np.testing.assert_allclose(roots["joint"].translate, [0, 0, 0], atol=1e-9)
         np.testing.assert_allclose(roots["transform"].translate, [1, 2, 3], atol=1e-9)
+
+    def test_zero_root_on_a_view(self):
+        # the view's top node, its parent left out, is the file's root, as
+        # a view's copy() roots it: zero_root zeroes it. The root was looked
+        # for at the world of the whole rig, which a view of knee and ankle
+        # holds none of: it raised ValueError
+        from cgmath.hierarchy import HierarchyData, TransformData
+
+        rig = HierarchyData(
+            [TransformData(name, node_type="joint", translate=(1, 0, 0)) for name in ("hip", "knee", "ankle")]
+        )
+        rig["knee"].set_parent("hip", world_space=False)
+        rig["ankle"].set_parent("knee", world_space=False)
+        rig.match("knee", "ankle").save_fbx(self.out, zero_root=True)
+
+        back = hierarchy_mod.HierarchyData.load_fbx(self.out)
+        self.assertEqual([(x.name, x.parent_name) for x in back], [("knee", None), ("ankle", "knee")])
+        np.testing.assert_allclose(back.get("knee").translate, [0, 0, 0], atol=1e-9)
+        np.testing.assert_allclose(back.get("ankle").translate, [1, 0, 0], atol=1e-9)
+
+    def test_zero_root_on_a_view_writes_its_roots_in_list_order(self):
+        # ankle, two levels down the rig, and prop, a root joint: each is a
+        # root of the file, written in the view's order, and zero_root zeroes
+        # the first. Written by depth in the whole rig, prop came first while
+        # ankle was zeroed
+        from cgmath.hierarchy import HierarchyData, TransformData, TransformList
+
+        rig = HierarchyData(
+            [TransformData(name, node_type="joint", translate=(1, 0, 0)) for name in ("hip", "knee", "ankle", "prop")]
+        )
+        rig["knee"].set_parent("hip", world_space=False)
+        rig["ankle"].set_parent("knee", world_space=False)
+        TransformList([rig["ankle"], rig["prop"]]).save_fbx(self.out, zero_root=True)
+
+        back = hierarchy_mod.HierarchyData.load_fbx(self.out)
+        self.assertEqual([(x.name, x.parent_name) for x in back], [("ankle", None), ("prop", None)])
+        np.testing.assert_allclose(back.get("ankle").translate, [0, 0, 0], atol=1e-9)
+        np.testing.assert_allclose(back.get("prop").translate, [1, 0, 0], atol=1e-9)
+
+    def test_zero_root_with_user_attributes(self):
+        # the user attributes, written as properties of each node, leave the
+        # roots zero_root reads alone: the root is found and zeroed, the
+        # attributes kept
+        from cgmath.hierarchy import HierarchyData, TransformData
+
+        rig = HierarchyData([
+            TransformData("root", node_type="joint", translate=(5, 0, 0)),
+            TransformData("spine", node_type="joint", translate=(0, 10, 0)),
+        ])
+        rig["spine"].set_parent("root", world_space=False)
+        rig["root"].add_user_attribute("weight", 0.5)
+        rig["spine"].add_user_attribute("mode", 1, attribute_type="enum", enum_names="a:b:c")
+        rig.save_fbx(self.out, zero_root=True)
+
+        back = hierarchy_mod.HierarchyData.load_fbx(self.out)
+        np.testing.assert_allclose(back.get("root").translate, [0, 0, 0], atol=1e-9)
+        np.testing.assert_allclose(back.get("spine").translate, [0, 10, 0], atol=1e-9)
+        self.assertEqual(back.get("root").weight, 0.5)
+
+    def test_zero_root_on_a_rig_listed_child_first(self):
+        # the joint zeroed is the file's root, not the first joint listed
+        from cgmath.hierarchy import HierarchyData, TransformData, generate_uuid
+
+        root  = TransformData("root", node_type="joint", translate=(5, 0, 0), uuid=generate_uuid())
+        spine = TransformData("spine", node_type="joint", translate=(0, 10, 0), parent_uuid=root.uuid)
+        HierarchyData([spine, root]).save_fbx(self.out, zero_root=True)
+
+        back = hierarchy_mod.HierarchyData.load_fbx(self.out)
+        self.assertEqual([(x.name, x.parent_name) for x in back], [("root", None), ("spine", "root")])
+        np.testing.assert_allclose(back.get("root").translate, [0, 0, 0], atol=1e-9)
+        np.testing.assert_allclose(back.get("spine").translate, [0, 10, 0], atol=1e-9)
 
     def test_zero_root_without_a_root_joint(self):
         from cgmath.hierarchy import HierarchyData, TransformData

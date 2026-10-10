@@ -287,6 +287,8 @@ Methods:
 ```text
 append(self, node: "'TransformData'") -> 'None'
     S.append(value) -- append value to the end of the sequence
+extend(self, iterable) -> 'None'
+    appends every node in turn, as append() would, joining them together
 insert(self, index: 'int', node: "'TransformData'") -> 'None'
     S.insert(index, value) -- insert value before index
 pop(self, index=-1)
@@ -297,10 +299,10 @@ sort(self, key=None, reverse=False) -> 'None'
 
 #### `TransformData(Data)`
 
-TransformData(name: 'str', node_type: 'Optional[str]' = 'transform', uuid: 'Optional[str]' = None, parent_node: 'Optional[str]' = None, scale: 'Optional[np.ndarray]' = None, rotate: 'Optional[np.ndarray]' = None, translate: 'Optional[np.ndarray]' = None, rotate_order: 'Optional[int]' = None, rotate_axis: 'Optional[np.ndarray]' = None, joint_orient: 'Optional[np.ndarray]' = None, visibility: 'Optional[bool]' = None, segment_scale_compensate: 'Optional[bool]' = None, radius: 'Optional[float]' = None, draw_style: 'Optional[int]' = None, user_defined_attributes: 'Optional[dict]' = None)
+TransformData(name: 'str', node_type: 'Optional[str]' = 'transform', uuid: 'Optional[str]' = None, parent_uuid: 'Optional[str]' = None, scale: 'Optional[np.ndarray]' = None, rotate: 'Optional[np.ndarray]' = None, translate: 'Optional[np.ndarray]' = None, rotate_order: 'Optional[int]' = None, rotate_axis: 'Optional[np.ndarray]' = None, joint_orient: 'Optional[np.ndarray]' = None, visibility: 'Optional[bool]' = None, segment_scale_compensate: 'Optional[bool]' = None, radius: 'Optional[float]' = None, draw_style: 'Optional[int]' = None, user_defined_attributes: 'Optional[dict]' = None, parent_node: 'Optional[str]' = None)
 
 ```text
-TransformData(name: 'str', node_type: 'Optional[str]' = 'transform', uuid: 'Optional[str]' = None, parent_node: 'Optional[str]' = None, scale: 'Optional[np.ndarray]' = None, rotate: 'Optional[np.ndarray]' = None, translate: 'Optional[np.ndarray]' = None, rotate_order: 'Optional[int]' = None, rotate_axis: 'Optional[np.ndarray]' = None, joint_orient: 'Optional[np.ndarray]' = None, visibility: 'Optional[bool]' = None, segment_scale_compensate: 'Optional[bool]' = None, radius: 'Optional[float]' = None, draw_style: 'Optional[int]' = None, user_defined_attributes: 'Optional[dict]' = None)
+TransformData(name: 'str', node_type: 'Optional[str]' = 'transform', uuid: 'Optional[str]' = None, parent_uuid: 'Optional[str]' = None, scale: 'Optional[np.ndarray]' = None, rotate: 'Optional[np.ndarray]' = None, translate: 'Optional[np.ndarray]' = None, rotate_order: 'Optional[int]' = None, rotate_axis: 'Optional[np.ndarray]' = None, joint_orient: 'Optional[np.ndarray]' = None, visibility: 'Optional[bool]' = None, segment_scale_compensate: 'Optional[bool]' = None, radius: 'Optional[float]' = None, draw_style: 'Optional[int]' = None, user_defined_attributes: 'Optional[dict]' = None, parent_node: 'Optional[str]' = None)
 ```
 
 Fields:
@@ -309,7 +311,7 @@ Fields:
 name: str = None
 node_type: Optional[str] = 'transform'
 uuid: Optional[str] = None
-parent_node: Optional[str] = None
+parent_uuid: Optional[str] = None
 user_defined_attributes: dict
 ```
 
@@ -324,6 +326,8 @@ joint_orient_x
 joint_orient_y                     
 joint_orient_z                     
 matrix                             computes the local transform matrix
+parent_name                        the name of the node's parent, None for a root; read only
+parent_node                        deprecated, goes in cgmath 3.0.0: parent_uuid, by its old name
 parent_scale_inverse               
 parent_scale_inverse_matrix        
 quaternion                         rotation as a quaterion
@@ -368,9 +372,9 @@ add_user_attribute(self, name: 'str', value: 'Any', attribute_type: 'Optional[st
 get_branch(self) -> "'TransformList'"
     returns a recursive NodeList from of all decendents
 get_children(self) -> "'TransformList'"
-    returns the node's children
-get_parent(self) -> "Union['TransformData', None]"
-    returns this TransformData's parent TransformData
+    returns the node's children, the nodes whose parent_uuid is its uuid
+get_parent(self) -> "Union['TransformData', str, None]"
+    returns this TransformData's parent TransformData, by its parent_uuid
 get_parent_matrix(self) -> 'np.ndarray'
     returns the parent's worldspace matrix
 get_root(self) -> "'TransformList'"
@@ -385,7 +389,7 @@ set_joint_orient_to_rotate(self) -> 'None'
     sets joint_orient and rotate_axis to 0 and applies all rotation to rotate
 set_node_type(self, node_type: 'str') -> 'None'
     Sets the node type.
-set_parent(self, parent: 'Union[str, None]', world_space: 'bool' = True) -> 'None'
+set_parent(self, parent: "Union['TransformData', str, None]", world_space: 'bool' = True) -> 'None'
     reparents node to a given parent and resets internal SRTs
 set_rotate_order(self, order: 'Union[int, str]') -> 'None'
     Changes the rotate order and keeps the pose.
@@ -499,7 +503,7 @@ save_fbx(self, filename, zero_root=False, as_ascii=False)
     saves the data to a .fbx file, binary unless as_ascii is set
 set_joint_orient_to_rotate(self) -> 'None'
     sets joint_orient to 0 and applies all rotation to rotate
-set_parent(self, parent: 'Union[str, None]', world_space: 'bool' = True) -> 'None'
+set_parent(self, parent: "Union['TransformData', str, None]", world_space: 'bool' = True) -> 'None'
     sets all the nodes under a given parent
 set_rotate_order(self, order) -> 'None'
     Changes every node's rotate order and keeps the pose.

@@ -164,13 +164,14 @@ skin = SkinData(weights=np.stack([1.0 - x, x], axis=1), influences=["root", "tip
 
 bind_rig = HierarchyData([
     TransformData(name="root"),
-    TransformData(name="tip", parent_node="root", translate=(1.0, 0.0, 0.0)),
+    TransformData(name="tip", translate=(1.0, 0.0, 0.0)),
 ])
 posed_rig = HierarchyData([
     TransformData(name="root"),
-    TransformData(name="tip", parent_node="root",
-                  translate=(1.0, 0.0, 0.0), rotate=(0.0, 0.0, 45.0)),
+    TransformData(name="tip", translate=(1.0, 0.0, 0.0), rotate=(0.0, 0.0, 45.0)),
 ])
+for rig in (bind_rig, posed_rig):
+    rig["tip"].set_parent("root", world_space=False)   # keeps the root's uuid
 
 deformer = SkinDeformData(mesh=mesh, skin=skin, bind_rig=bind_rig)
 bent     = deformer.apply(posed_rig, mesh)

@@ -333,7 +333,7 @@ class TestSDFFieldFollowsTransforms(unittest.TestCase):
         rig   = HierarchyData([group])
         field = DMCField(resolution=8)
         for primitive in self.primitives:
-            primitive.parent_node = group.uuid
+            primitive.parent_uuid = group.uuid
             rig.append(primitive)
             field.add(primitive)
 
