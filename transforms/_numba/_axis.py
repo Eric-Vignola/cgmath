@@ -4,7 +4,7 @@ import numpy as np
 from numba import njit, prange
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _axis_angle_to_quaternion(axis, angle):
     """Computes a list of quaternions qi,qj,qk,qw from lists of axes and angles"""
     quat = np.empty((axis.shape[0], 4), dtype=axis.dtype)
@@ -26,7 +26,7 @@ def _axis_angle_to_quaternion(axis, angle):
     return quat
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _axis_angle_to_matrix(axis, angle):
     """Computes a list of orthogonal 4x4 matrices from lists of axes and angles"""
 

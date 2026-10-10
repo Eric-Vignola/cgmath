@@ -1,8 +1,10 @@
 import sys
 import unittest
+from unittest import mock
 
 import numba
 import numpy as np
+from cgmath.transforms import _numba
 from cgmath.transforms import (
     euler_filter,
     euler_random,
@@ -352,7 +354,8 @@ class TestEulerFilterKernel(unittest.TestCase):
 
     def testSolvesEveryFrameAtOnce(self):
         """no python work per frame: the python calls one euler_filter makes
-        do not grow with the frame count"""
+        do not grow with the frame count, on one thread or on every thread
+        (fetching the single-threaded kernel is a call of its own)"""
         def calls(euler, axes):
             count = [0]
 
@@ -370,7 +373,9 @@ class TestEulerFilterKernel(unittest.TestCase):
 
         short, orders = decomposed(8, 20, 30.0)
         long, _ = decomposed(800, 20, 30.0)
-        self.assertEqual(calls(short, orders), calls(long, orders))
+        for threshold in (0, sys.maxsize):
+            with mock.patch.object(_numba, "SINGLE_THREAD_BELOW", threshold):
+                self.assertEqual(calls(short, orders), calls(long, orders), threshold)
 
     def testLeavesItsInputAlone(self):
         """the kernel filters in place, on a copy of its own"""

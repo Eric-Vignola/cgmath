@@ -15,7 +15,7 @@ EA_MAYA = np.array(
 )  # euler angle to maya
 
 
-@njit(fastmath=True, cache=True)
+@njit(cache=True)
 def _get_euler_order(axis):
     o_ = EULER_ORDER[axis]
     f  = o_ & 1
@@ -34,7 +34,7 @@ def _get_euler_order(axis):
     return i, j, k, h, n, s, f
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _euler_to_matrix(euler, axes):
     """Converts Maya euler angles to 4x4 matrices"""
     matrix = np.empty((euler.shape[0], 4, 4), dtype=euler.dtype)
@@ -100,7 +100,7 @@ def _euler_to_matrix(euler, axes):
     return matrix
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _euler_to_quaternion(euler, axes):
     """Converts list of Maya euler angles to quaternions qi,qj,qk,qw"""
     quat = np.empty((euler.shape[0], 4), dtype=euler.dtype)

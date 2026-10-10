@@ -4,31 +4,31 @@ import numpy as np
 from numba import njit, prange
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _vector_arc(vector0, vector1):
     angle = np.empty(vector0.shape[0], dtype=vector0.dtype)
 
     for i in prange(vector0.shape[0]):
-        vector0_ = np.empty(3, dtype=vector0.dtype)
-        vector1_ = np.empty(3, dtype=vector0.dtype)
+        # a zero vector stays zero, a right angle from anything, as in
+        # _vector_slerp. scratch arrays from np.empty handed it whatever
+        # vector was last normalised in them, a different one on one thread
+        # and on many
+        X0, Y0, Z0 = 0.0, 0.0, 0.0
+        X1, Y1, Z1 = 0.0, 0.0, 0.0
 
         m = (vector0[i, 0] ** 2 + vector0[i, 1] ** 2 + vector0[i, 2] ** 2) ** 0.5
         if m > 0.0:
-            vector0_[0] = vector0[i, 0] / m
-            vector0_[1] = vector0[i, 1] / m
-            vector0_[2] = vector0[i, 2] / m
+            X0 = vector0[i, 0] / m
+            Y0 = vector0[i, 1] / m
+            Z0 = vector0[i, 2] / m
 
         m = (vector1[i, 0] ** 2 + vector1[i, 1] ** 2 + vector1[i, 2] ** 2) ** 0.5
         if m > 0.0:
-            vector1_[0] = vector1[i, 0] / m
-            vector1_[1] = vector1[i, 1] / m
-            vector1_[2] = vector1[i, 2] / m
+            X1 = vector1[i, 0] / m
+            Y1 = vector1[i, 1] / m
+            Z1 = vector1[i, 2] / m
 
-        dot = (
-            (vector0_[0] * vector1_[0])
-            + (vector0_[1] * vector1_[1])
-            + (vector0_[2] * vector1_[2])
-        )
+        dot = (X0 * X1) + (Y0 * Y1) + (Z0 * Z1)
         if dot > 1.0:
             dot = 1.0
         elif dot < -1.0:
@@ -39,7 +39,7 @@ def _vector_arc(vector0, vector1):
     return angle
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _vector_slerp(vector0, vector1, weight):
     v = np.empty((vector0.shape[0], 3), dtype=vector0.dtype)
 
@@ -78,7 +78,7 @@ def _vector_slerp(vector0, vector1, weight):
     return v
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _vector_lerp(vector0, vector1, weight):
     v = np.empty((vector0.shape[0], vector0.shape[1]), dtype=vector0.dtype)
 
@@ -92,7 +92,7 @@ def _vector_lerp(vector0, vector1, weight):
 # NOTE: no explicit signature. Levelled inputs may arrive as read-only
 # broadcast views, which an eager ``float64[:,:]`` signature rejects; lazy
 # compilation specialises per layout instead, as every other kernel here does.
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _vector_cross(vector0, vector1):
     vector = np.zeros((vector0.shape[0], 3), dtype=vector0.dtype)
 
@@ -104,7 +104,7 @@ def _vector_cross(vector0, vector1):
     return vector
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _vector_dot(vector0, vector1):
     dot = np.empty(vector0.shape[0], dtype=vector0.dtype)
 
@@ -116,7 +116,7 @@ def _vector_dot(vector0, vector1):
     return dot
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _vector_magnitude(vector):
     mag = np.empty(vector.shape[0], dtype=vector.dtype)
     for i in prange(vector.shape[0]):
@@ -129,7 +129,7 @@ def _vector_magnitude(vector):
     return mag
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _vector_normalize(vector):
     vector_ = np.empty(vector.shape, dtype=vector.dtype)
 
@@ -146,14 +146,11 @@ def _vector_normalize(vector):
     return vector_
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _vector_to_matrix(vector0, vector1, aim_axis, up_axis):
     matrix = np.empty((vector0.shape[0], 4, 4), dtype=vector0.dtype)
 
     for i in prange(vector0.shape[0]):
-        vector0_ = np.empty(3, dtype=vector0.dtype)
-        vector1_ = np.empty(3, dtype=vector0.dtype)
-
         ii   = aim_axis[i]
         jj   = up_axis[i]
         kk   = (min(ii, jj) - max(ii, jj) + min(ii, jj)) % 3
@@ -166,9 +163,10 @@ def _vector_to_matrix(vector0, vector1, aim_axis, up_axis):
         elif ii == 2 and jj == 1:
             flip = 1
 
-        for j in range(3):
-            vector0_[j] = vector0[i, j]
-            vector1_[j] = vector1[i, j]
+        # the vectors in scalars: a scratch array made here is allocated
+        # once an element on one thread, where the threaded loop hoists it
+        X0, Y0, Z0 = vector0[i, 0], vector0[i, 1], vector0[i, 2]
+        X1, Y1, Z1 = vector1[i, 0], vector1[i, 1], vector1[i, 2]
 
         # init matrix output
         matrix[i, 0, 0] = 1.0
@@ -191,20 +189,20 @@ def _vector_to_matrix(vector0, vector1, aim_axis, up_axis):
         matrix[i, 3, 2] = 0.0
         matrix[i, 3, 3] = 1.0
 
-        x  = vector0_[1] * vector1_[2] - vector0_[2] * vector1_[1]
-        y  = vector0_[2] * vector1_[0] - vector0_[0] * vector1_[2]
-        z  = vector0_[0] * vector1_[1] - vector0_[1] * vector1_[0]
+        x  = Y0 * Z1 - Z0 * Y1
+        y  = Z0 * X1 - X0 * Z1
+        z  = X0 * Y1 - Y0 * X1
 
-        na = (vector0_[0] ** 2 + vector0_[1] ** 2 + vector0_[2] ** 2) ** 0.5
+        na = (X0**2 + Y0**2 + Z0**2) ** 0.5
         nc = (x**2 + y**2 + z**2) ** 0.5
 
         if na > 0.0 and nc > 0.0:
             matrix[i, kk, 0] = x / nc
-            matrix[i, ii, 0] = vector0_[0] / na
+            matrix[i, ii, 0] = X0 / na
             matrix[i, kk, 1] = y / nc
-            matrix[i, ii, 1] = vector0_[1] / na
+            matrix[i, ii, 1] = Y0 / na
             matrix[i, kk, 2] = z / nc
-            matrix[i, ii, 2] = vector0_[2] / na
+            matrix[i, ii, 2] = Z0 / na
 
             matrix[i, jj, 0] = (
                 matrix[i, kk, 1] * matrix[i, ii, 2]
@@ -227,40 +225,39 @@ def _vector_to_matrix(vector0, vector1, aim_axis, up_axis):
     return matrix
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _vector_arc_to_quaternion(vector0, vector1):
     """Computes a list of quaternions qi,qj,qk,qw representing the arc between lists of vectors"""
 
     quat = np.empty((vector0.shape[0], 4), dtype=vector0.dtype)
 
     for i in prange(vector0.shape[0]):
-        v0 = np.empty(3, dtype=vector0.dtype)
-        v1 = np.empty(3, dtype=vector0.dtype)
-        h  = np.empty(3, dtype=vector0.dtype)
+        # the unit vectors and their half vector in scalars, as in
+        # _vector_arc: a scratch array made here is allocated once an
+        # element on one thread, where the threaded loop hoists it
+        mag = (vector0[i, 0] ** 2 + vector0[i, 1] ** 2 + vector0[i, 2] ** 2) ** 0.5
+        X0  = vector0[i, 0] / mag
+        Y0  = vector0[i, 1] / mag
+        Z0  = vector0[i, 2] / mag
 
-        mag   = (vector0[i, 0] ** 2 + vector0[i, 1] ** 2 + vector0[i, 2] ** 2) ** 0.5
-        v0[0] = vector0[i, 0] / mag
-        v0[1] = vector0[i, 1] / mag
-        v0[2] = vector0[i, 2] / mag
+        mag = (vector1[i, 0] ** 2 + vector1[i, 1] ** 2 + vector1[i, 2] ** 2) ** 0.5
+        X1  = vector1[i, 0] / mag
+        Y1  = vector1[i, 1] / mag
+        Z1  = vector1[i, 2] / mag
 
-        mag   = (vector1[i, 0] ** 2 + vector1[i, 1] ** 2 + vector1[i, 2] ** 2) ** 0.5
-        v1[0] = vector1[i, 0] / mag
-        v1[1] = vector1[i, 1] / mag
-        v1[2] = vector1[i, 2] / mag
+        HX  = X0 + X1
+        HY  = Y0 + Y1
+        HZ  = Z0 + Z1
 
-        h[0]  = v0[0] + v1[0]
-        h[1]  = v0[1] + v1[1]
-        h[2]  = v0[2] + v1[2]
+        mag = (HX**2 + HY**2 + HZ**2) ** 0.5
 
-        mag   = (h[0] ** 2 + h[1] ** 2 + h[2] ** 2) ** 0.5
+        HX  = HX / mag
+        HY  = HY / mag
+        HZ  = HZ / mag
 
-        h[0]  = h[0] / mag
-        h[1]  = h[1] / mag
-        h[2]  = h[2] / mag
-
-        quat[i, 0] = v0[1] * h[2] - v0[2] * h[1]
-        quat[i, 1] = v0[2] * h[0] - v0[0] * h[2]
-        quat[i, 2] = v0[0] * h[1] - v0[1] * h[0]
-        quat[i, 3] = v0[0] * h[0] + v0[1] * h[1] + v0[2] * h[2]
+        quat[i, 0] = Y0 * HZ - Z0 * HY
+        quat[i, 1] = Z0 * HX - X0 * HZ
+        quat[i, 2] = X0 * HY - Y0 * HX
+        quat[i, 3] = X0 * HX + Y0 * HY + Z0 * HZ
 
     return quat

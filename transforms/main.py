@@ -56,6 +56,7 @@ from __future__ import annotations
 import typing
 
 import numpy as np
+from cgmath.transforms._numba import sized as _sized
 from cgmath.transforms.utils import _match_depth, _set_dimension
 
 
@@ -111,7 +112,7 @@ def quaternion_slerp(quat0, quat1, weight=0.5, shortest=True):
     # place would negate quaternions the caller still holds
     quat1 = np.where(sign[..., None], -quat1, quat1)
 
-    return _quaternion_slerp(quat0, quat1, weight)
+    return _sized(_quaternion_slerp, len(quat0))(quat0, quat1, weight)
 
 
 def quaternion_dot(quat0, quat1):
@@ -129,7 +130,7 @@ def quaternion_dot(quat0, quat1):
     quat1 = _set_dimension(quat1, 2)
     quat0, quat1 = _match_depth(quat0, quat1)
 
-    return _vector_dot(quat0, quat1)
+    return _sized(_vector_dot, len(quat0))(quat0, quat1)
 
 
 def quaternion_conjugate(quat):
@@ -137,7 +138,7 @@ def quaternion_conjugate(quat):
     from cgmath.transforms._numba._quaternion import _quaternion_conjugate
 
     quat = _set_dimension(quat, 2)
-    return _quaternion_conjugate(quat)
+    return _sized(_quaternion_conjugate, len(quat))(quat)
 
 
 def quaternion_inverse(quat):
@@ -145,7 +146,7 @@ def quaternion_inverse(quat):
     from cgmath.transforms._numba._quaternion import _quaternion_inverse
 
     quat = _set_dimension(quat, 2)
-    return _quaternion_inverse(quat)
+    return _sized(_quaternion_inverse, len(quat))(quat)
 
 
 def quaternion_negate(quat):
@@ -153,7 +154,7 @@ def quaternion_negate(quat):
     from cgmath.transforms._numba._quaternion import _quaternion_negate
 
     quat = _set_dimension(quat, 2)
-    return _quaternion_negate(quat)
+    return _sized(_quaternion_negate, len(quat))(quat)
 
 
 def quaternion_multiply(quat0, quat1):
@@ -167,7 +168,7 @@ def quaternion_multiply(quat0, quat1):
     quat1 = _set_dimension(quat1, 2)
     quat0, quat1 = _match_depth(quat0, quat1)
 
-    return _quaternion_multiply(quat0, quat1)
+    return _sized(_quaternion_multiply, len(quat0))(quat0, quat1)
 
 
 def quaternion_add(quat0, quat1):
@@ -178,7 +179,7 @@ def quaternion_add(quat0, quat1):
     quat1 = _set_dimension(quat1, 2)
     quat0, quat1 = _match_depth(quat0, quat1)
 
-    return _quaternion_add(quat0, quat1)
+    return _sized(_quaternion_add, len(quat0))(quat0, quat1)
 
 
 def quaternion_sub(quat0, quat1):
@@ -189,7 +190,7 @@ def quaternion_sub(quat0, quat1):
     quat1 = _set_dimension(quat1, 2)
     quat0, quat1 = _match_depth(quat0, quat1)
 
-    return _quaternion_sub(quat0, quat1)
+    return _sized(_quaternion_sub, len(quat0))(quat0, quat1)
 
 
 def quaternion_to_matrix(quat):
@@ -200,7 +201,7 @@ def quaternion_to_matrix(quat):
     from cgmath.transforms._numba._quaternion import _quaternion_to_matrix
 
     quat = _set_dimension(quat, 2)
-    return _quaternion_to_matrix(quat)
+    return _sized(_quaternion_to_matrix, len(quat))(quat)
 
 
 def quaternion_normalize(quat):
@@ -211,7 +212,7 @@ def quaternion_normalize(quat):
     from cgmath.transforms._numba._vector import _vector_normalize
 
     quat = _set_dimension(quat, 2)
-    return _vector_normalize(quat)
+    return _sized(_vector_normalize, len(quat))(quat)
 
 
 def quaternion_to_euler(quat, axes=XYZ):
@@ -233,7 +234,8 @@ def quaternion_to_euler(quat, axes=XYZ):
     axes = _set_dimension(axes, 1, dtype=np.int32)
     quat, axes = _match_depth(quat, axes)
 
-    return _matrix_to_euler(_quaternion_to_matrix(quat), axes)
+    matrix = _sized(_quaternion_to_matrix, len(quat))(quat)
+    return _sized(_matrix_to_euler, len(quat))(matrix, axes)
 
 
 def quaternion_random(n, seed=None):
@@ -245,7 +247,7 @@ def quaternion_random(n, seed=None):
 
     np.random.seed(seed)
     eu = np.radians(360 - np.random.random((n, 3)) * 720)
-    return _euler_to_quaternion(eu, np.zeros(n, dtype="int32"))
+    return _sized(_euler_to_quaternion, n)(eu, np.zeros(n, dtype="int32"))
 
 
 def quaternion_log(quat):
@@ -257,7 +259,7 @@ def quaternion_log(quat):
     from cgmath.transforms._numba._quaternion import _quaternion_log
 
     quat = _set_dimension(quat, 2)
-    return _quaternion_log(quat)
+    return _sized(_quaternion_log, len(quat))(quat)
 
 
 def quaternion_exp(rotation_vector):
@@ -268,7 +270,7 @@ def quaternion_exp(rotation_vector):
     from cgmath.transforms._numba._quaternion import _quaternion_exp
 
     rotation_vector = _set_dimension(rotation_vector, 2)
-    return _quaternion_exp(rotation_vector)
+    return _sized(_quaternion_exp, len(rotation_vector))(rotation_vector)
 
 
 def quaternion_nlerp(quat0, quat1, weight=0.5, shortest=True):
@@ -301,7 +303,7 @@ def quaternion_nlerp(quat0, quat1, weight=0.5, shortest=True):
     # see quaternion_slerp: never write into the caller's array
     quat1 = np.where(sign[..., None], -quat1, quat1)
 
-    return _quaternion_nlerp(quat0, quat1, weight)
+    return _sized(_quaternion_nlerp, len(quat0))(quat0, quat1, weight)
 
 
 def quaternion_intermediate(quat_prev, quat_cur, quat_next):
@@ -324,18 +326,21 @@ def quaternion_intermediate(quat_prev, quat_cur, quat_next):
     quat_next = _set_dimension(quat_next, 2)
     quat_prev, quat_cur, quat_next = _match_depth(quat_prev, quat_cur, quat_next)
 
-    cur_inv  = _quaternion_conjugate(quat_cur)  # unit quats: conjugate == inverse
-    rel_next = _quaternion_multiply(cur_inv, quat_next)
-    rel_prev = _quaternion_multiply(cur_inv, quat_prev)
+    count    = len(quat_cur)
+    multiply = _sized(_quaternion_multiply, count)
+    log      = _sized(_quaternion_log, count)
+
+    # unit quats: conjugate == inverse
+    cur_inv  = _sized(_quaternion_conjugate, count)(quat_cur)
+    rel_next = multiply(cur_inv, quat_next)
+    rel_prev = multiply(cur_inv, quat_prev)
 
     # shortest-arc canonicalisation so the log takes the intended branch
     rel_next[rel_next[:, 3] < 0.0] = -rel_next[rel_next[:, 3] < 0.0]
     rel_prev[rel_prev[:, 3] < 0.0] = -rel_prev[rel_prev[:, 3] < 0.0]
 
-    inner = _quaternion_exp(
-        -(_quaternion_log(rel_next) + _quaternion_log(rel_prev)) / 4.0
-    )
-    return _quaternion_multiply(quat_cur, inner)
+    inner = _sized(_quaternion_exp, count)(-(log(rel_next) + log(rel_prev)) / 4.0)
+    return multiply(quat_cur, inner)
 
 
 def quaternion_squad(quat0, control0, control1, quat1, weight=0.5):
@@ -380,7 +385,7 @@ def matrix_identity(count):
     """Build a stack of identity 4x4 matrices.  Backed by ``_matrix_identity``."""
     from cgmath.transforms._numba._matrix import _matrix_identity
 
-    return _matrix_identity(count)
+    return _sized(_matrix_identity, count)(count)
 
 
 def matrix_to_euler(matrix, axes=XYZ):
@@ -394,7 +399,7 @@ def matrix_to_euler(matrix, axes=XYZ):
     axes   = _set_dimension(axes, 1, dtype=np.int32)
     matrix, axes = _match_depth(matrix, axes)
 
-    return _matrix_to_euler(matrix, axes)
+    return _sized(_matrix_to_euler, len(matrix))(matrix, axes)
 
 
 def matrix_to_quaternion(matrix):
@@ -405,7 +410,7 @@ def matrix_to_quaternion(matrix):
     from cgmath.transforms._numba._matrix import _matrix_to_quaternion
 
     matrix = _set_dimension(matrix, 3, reshape_matrix=True)
-    return _matrix_to_quaternion(matrix)
+    return _sized(_matrix_to_quaternion, len(matrix))(matrix)
 
 
 def matrix_normalize(matrix):
@@ -416,7 +421,7 @@ def matrix_normalize(matrix):
     from cgmath.transforms._numba._matrix import _matrix_normalize
 
     matrix = _set_dimension(matrix, 3, reshape_matrix=True)
-    return _matrix_normalize(matrix)
+    return _sized(_matrix_normalize, len(matrix))(matrix)
 
 
 def matrix_inverse(matrix):
@@ -424,7 +429,7 @@ def matrix_inverse(matrix):
     from cgmath.transforms._numba._matrix import _matrix_inverse
 
     matrix = _set_dimension(matrix, 3, reshape_matrix=True)
-    return _matrix_inverse(matrix)
+    return _sized(_matrix_inverse, len(matrix))(matrix)
 
 
 def matrix_transpose(matrix):
@@ -432,7 +437,7 @@ def matrix_transpose(matrix):
     from cgmath.transforms._numba._matrix import _matrix_transpose
 
     matrix = _set_dimension(matrix, 3, reshape_matrix=True)
-    return _matrix_transpose(matrix)
+    return _sized(_matrix_transpose, len(matrix))(matrix)
 
 
 def matrix_point_multiply(point, matrix):
@@ -453,7 +458,7 @@ def matrix_point_multiply(point, matrix):
     matrix = _set_dimension(matrix, 3, reshape_matrix=True)
     point, matrix = _match_depth(point, matrix)
 
-    return _matrix_point_multiply(point[:, :3], matrix)
+    return _sized(_matrix_point_multiply, len(point))(point[:, :3], matrix)
 
 
 def matrix_multiply(matrix0, matrix1):
@@ -467,7 +472,7 @@ def matrix_multiply(matrix0, matrix1):
     matrix1 = _set_dimension(matrix1, 3, reshape_matrix=True)
     matrix0, matrix1 = _match_depth(matrix0, matrix1)
 
-    return _matrix_multiply(matrix0, matrix1)
+    return _sized(_matrix_multiply, len(matrix0))(matrix0, matrix1)
 
 
 def matrix_slerp(matrix0, matrix1, weight=0.5, shortest=True):
@@ -487,8 +492,10 @@ def matrix_slerp(matrix0, matrix1, weight=0.5, shortest=True):
     weight  = _set_dimension(weight, 1)
     matrix0, matrix1, weight = _match_depth(matrix0, matrix1, weight)
 
-    q0  = _matrix_to_quaternion(matrix0)
-    q1  = _matrix_to_quaternion(matrix1)
+    count         = len(matrix0)
+    to_quaternion = _sized(_matrix_to_quaternion, count)
+    q0            = to_quaternion(matrix0)
+    q1            = to_quaternion(matrix1)
 
     dot = np.einsum("...i,...i", q0, q1)
     if shortest:
@@ -497,8 +504,8 @@ def matrix_slerp(matrix0, matrix1, weight=0.5, shortest=True):
         sign = dot >= 0.0
     q1[sign] = -q1[sign]
 
-    q = _quaternion_slerp(q0, q1, weight)
-    return _quaternion_to_matrix(q)
+    q = _sized(_quaternion_slerp, count)(q0, q1, weight)
+    return _sized(_quaternion_to_matrix, count)(q)
 
 
 def matrix_interpolate(matrix0, matrix1, weight=0.5, shortest=True):
@@ -533,8 +540,11 @@ def matrix_interpolate(matrix0, matrix1, weight=0.5, shortest=True):
     matrix1[:, 1, :3] /= scale1[:, 1][:, None]
     matrix1[:, 2, :3] /= scale1[:, 2][:, None]
 
-    q0  = _matrix_to_quaternion(matrix0)
-    q1  = _matrix_to_quaternion(matrix1)
+    count         = len(matrix0)
+    to_quaternion = _sized(_matrix_to_quaternion, count)
+    lerp          = _sized(_vector_lerp, count)
+    q0            = to_quaternion(matrix0)
+    q1            = to_quaternion(matrix1)
 
     dot = np.einsum("...i,...i", q0, q1)
     if shortest:
@@ -543,14 +553,15 @@ def matrix_interpolate(matrix0, matrix1, weight=0.5, shortest=True):
         sign = dot >= 0.0
     q1[sign] = -q1[sign]
 
-    matrix   = _quaternion_to_matrix(_quaternion_slerp(q0, q1, weight))
+    q        = _sized(_quaternion_slerp, count)(q0, q1, weight)
+    matrix   = _sized(_quaternion_to_matrix, count)(q)
 
-    scale = _vector_lerp(scale0, scale1, weight)
+    scale = lerp(scale0, scale1, weight)
     matrix[:, 0, :3] *= scale[:, 0][:, None]
     matrix[:, 1, :3] *= scale[:, 1][:, None]
     matrix[:, 2, :3] *= scale[:, 2][:, None]
 
-    matrix[:, 3, :3] = _vector_lerp(matrix0[:, 3, :3], matrix1[:, 3, :3], weight)
+    matrix[:, 3, :3] = lerp(matrix0[:, 3, :3], matrix1[:, 3, :3], weight)
 
     return matrix
 
@@ -566,7 +577,8 @@ def matrix_local(matrix, parent_matrix):
     parent_matrix = _set_dimension(parent_matrix, 3, reshape_matrix=True)
     matrix, parent_matrix = _match_depth(matrix, parent_matrix)
 
-    return _matrix_multiply(matrix, _matrix_inverse(parent_matrix))
+    inverse = _sized(_matrix_inverse, len(matrix))(parent_matrix)
+    return _sized(_matrix_multiply, len(matrix))(matrix, inverse)
 
 
 def matrix_random(n, seed=None, random_position=False):
@@ -578,7 +590,7 @@ def matrix_random(n, seed=None, random_position=False):
 
     np.random.seed(seed)
     euler = np.radians(360 - np.random.random((n, 3)) * 720)
-    M     = _euler_to_matrix(euler, np.zeros(euler.shape[0], dtype=np.int32))
+    M     = _sized(_euler_to_matrix, n)(euler, np.zeros(n, dtype=np.int32))
     if random_position:
         M[:, 3, :3] = 1 - np.random.random((n, 3)) * 2
     return M
@@ -713,7 +725,7 @@ def euler_to_matrix(euler, axes=XYZ):
     axes  = _set_dimension(axes, 1, dtype=np.int32)
     euler, axes = _match_depth(euler, axes)
 
-    return _euler_to_matrix(euler, axes)
+    return _sized(_euler_to_matrix, len(euler))(euler, axes)
 
 
 def euler_to_quaternion(euler, axes=XYZ):
@@ -727,7 +739,7 @@ def euler_to_quaternion(euler, axes=XYZ):
     axes  = _set_dimension(axes, 1, dtype=np.int32)
     euler, axes = _match_depth(euler, axes)
 
-    return _euler_to_quaternion(euler, axes)
+    return _sized(_euler_to_quaternion, len(euler))(euler, axes)
 
 
 def euler_slerp(euler0, euler1, weight=0.5, axes0=XYZ, axes1=XYZ, axes=XYZ):
@@ -754,11 +766,14 @@ def euler_slerp(euler0, euler1, weight=0.5, axes0=XYZ, axes1=XYZ, axes=XYZ):
         euler0, euler1, weight, axes0, axes1, axes
     )
 
-    q0 = _euler_to_quaternion(euler0, axes0)
-    q1 = _euler_to_quaternion(euler1, axes1)
-    q  = _quaternion_slerp(q0, q1, weight)
+    count         = len(euler0)
+    to_quaternion = _sized(_euler_to_quaternion, count)
+    q0            = to_quaternion(euler0, axes0)
+    q1            = to_quaternion(euler1, axes1)
+    q             = _sized(_quaternion_slerp, count)(q0, q1, weight)
+    matrix        = _sized(_quaternion_to_matrix, count)(q)
 
-    return _matrix_to_euler(_quaternion_to_matrix(q), axes)
+    return _sized(_matrix_to_euler, count)(matrix, axes)
 
 
 def euler_reorder(euler, from_axes, to_axes):
@@ -776,8 +791,8 @@ def euler_reorder(euler, from_axes, to_axes):
     to_axes   = _set_dimension(to_axes, 1, dtype=np.int32)
     euler, from_axes, to_axes = _match_depth(euler, from_axes, to_axes)
 
-    M = _euler_to_matrix(euler, from_axes)
-    return _matrix_to_euler(M, to_axes)
+    M = _sized(_euler_to_matrix, len(euler))(euler, from_axes)
+    return _sized(_matrix_to_euler, len(euler))(M, to_axes)
 
 
 def euler_filter(euler, axes):
@@ -840,7 +855,10 @@ def euler_filter(euler, axes):
     # or more in a frame. the kernel solves every curve at once and filters
     # in place, so it gets a copy the caller never sees
     out = np.array(curves, dtype=np.float64, order="C", copy=True)
-    _euler_filter(out, middle)
+
+    # the threads share out the curves; a curve's frames run in order, so a
+    # single curve is one thread's work however long it is, and runs on one
+    _sized(_euler_filter, frames * count if count > 1 else 1)(out, middle)
 
     return out.reshape(shape)
 
@@ -864,7 +882,7 @@ def axis_angle_to_quaternion(axis, angle=0.0):
     angle = _set_dimension(angle, 1)
     axis, angle = _match_depth(axis, angle)
 
-    return _axis_angle_to_quaternion(axis, angle)
+    return _sized(_axis_angle_to_quaternion, len(axis))(axis, angle)
 
 
 def axis_angle_to_matrix(axis, angle=0.0):
@@ -878,7 +896,7 @@ def axis_angle_to_matrix(axis, angle=0.0):
     angle = _set_dimension(angle, 1)
     axis, angle = _match_depth(axis, angle)
 
-    return _axis_angle_to_matrix(axis, angle)
+    return _sized(_axis_angle_to_matrix, len(axis))(axis, angle)
 
 
 def axis_angle_to_euler(axis, angle=0.0, axes=XYZ):
@@ -894,8 +912,8 @@ def axis_angle_to_euler(axis, angle=0.0, axes=XYZ):
     axes  = _set_dimension(axes, 1, dtype=np.int32)
     axis, angle, axes = _match_depth(axis, angle, axes)
 
-    M = _axis_angle_to_matrix(axis, angle)
-    return _matrix_to_euler(M, axes)
+    M = _sized(_axis_angle_to_matrix, len(axis))(axis, angle)
+    return _sized(_matrix_to_euler, len(axis))(M, axes)
 
 
 # ===========================================================================
@@ -918,7 +936,8 @@ def vector_to_matrix(vector0, vector1, aim_axis=X, up_axis=Y):
         vector0, vector1, aim_axis, up_axis
     )
 
-    return _vector_to_matrix(vector0, vector1, aim_axis, up_axis)
+    to_matrix = _sized(_vector_to_matrix, len(vector0))
+    return to_matrix(vector0, vector1, aim_axis, up_axis)
 
 
 def vector_to_quaternion(vector0, vector1, aim_axis=X, up_axis=Y):
@@ -937,8 +956,9 @@ def vector_to_quaternion(vector0, vector1, aim_axis=X, up_axis=Y):
         vector0, vector1, aim_axis, up_axis
     )
 
-    M = _vector_to_matrix(vector0, vector1, aim_axis, up_axis)
-    return _matrix_to_quaternion(M)
+    to_matrix = _sized(_vector_to_matrix, len(vector0))
+    M         = to_matrix(vector0, vector1, aim_axis, up_axis)
+    return _sized(_matrix_to_quaternion, len(vector0))(M)
 
 
 def vector_to_euler(vector0, vector1, aim_axis=X, up_axis=Y, axes=XYZ):
@@ -958,9 +978,9 @@ def vector_to_euler(vector0, vector1, aim_axis=X, up_axis=Y, axes=XYZ):
         vector0, vector1, aim_axis, up_axis, axes
     )
 
-    return _matrix_to_euler(
-        _vector_to_matrix(vector0, vector1, aim_axis, up_axis), axes
-    )
+    to_matrix = _sized(_vector_to_matrix, len(vector0))
+    M         = to_matrix(vector0, vector1, aim_axis, up_axis)
+    return _sized(_matrix_to_euler, len(vector0))(M, axes)
 
 
 def vector_cross(vector0, vector1):
@@ -971,7 +991,7 @@ def vector_cross(vector0, vector1):
     vector1 = _set_dimension(vector1, 2)
     vector0, vector1 = _match_depth(vector0, vector1)
 
-    return _vector_cross(vector0, vector1)
+    return _sized(_vector_cross, len(vector0))(vector0, vector1)
 
 
 def vector_dot(vector0, vector1):
@@ -982,7 +1002,7 @@ def vector_dot(vector0, vector1):
     vector1 = _set_dimension(vector1, 2)
     vector0, vector1 = _match_depth(vector0, vector1)
 
-    return _vector_dot(vector0, vector1)
+    return _sized(_vector_dot, len(vector0))(vector0, vector1)
 
 
 def vector_magnitude(vector):
@@ -990,7 +1010,7 @@ def vector_magnitude(vector):
     from cgmath.transforms._numba._vector import _vector_magnitude
 
     vector = _set_dimension(vector, 2)
-    return _vector_magnitude(vector)
+    return _sized(_vector_magnitude, len(vector))(vector)
 
 
 def vector_normalize(vector):
@@ -998,7 +1018,7 @@ def vector_normalize(vector):
     from cgmath.transforms._numba._vector import _vector_normalize
 
     vector = _set_dimension(vector, 2)
-    return _vector_normalize(vector)
+    return _sized(_vector_normalize, len(vector))(vector)
 
 
 def vector_slerp(vector0, vector1, weight=0.5):
@@ -1013,7 +1033,7 @@ def vector_slerp(vector0, vector1, weight=0.5):
     weight  = _set_dimension(weight,  1)
     vector0, vector1, weight = _match_depth(vector0, vector1, weight)
 
-    return _vector_slerp(vector0, vector1, weight)
+    return _sized(_vector_slerp, len(vector0))(vector0, vector1, weight)
 
 
 def vector_lerp(vector0, vector1, weight=0.5):
@@ -1028,7 +1048,8 @@ def vector_lerp(vector0, vector1, weight=0.5):
     weight  = _set_dimension(weight,  1)
     vector0, vector1, weight = _match_depth(vector0, vector1, weight)
 
-    return np.nan_to_num(_vector_lerp(vector0, vector1, weight))
+    lerp = _sized(_vector_lerp, len(vector0))
+    return np.nan_to_num(lerp(vector0, vector1, weight))
 
 
 def vector_arc_to_quaternion(vector0, vector1):
@@ -1042,7 +1063,7 @@ def vector_arc_to_quaternion(vector0, vector1):
     vector1 = _set_dimension(vector1, 2)
     vector0, vector1 = _match_depth(vector0, vector1)
 
-    return _vector_arc_to_quaternion(vector0, vector1)
+    return _sized(_vector_arc_to_quaternion, len(vector0))(vector0, vector1)
 
 
 def vector_arc_to_matrix(vector0, vector1):
@@ -1057,7 +1078,8 @@ def vector_arc_to_matrix(vector0, vector1):
     vector1 = _set_dimension(vector1, 2)
     vector0, vector1 = _match_depth(vector0, vector1)
 
-    return _quaternion_to_matrix(_vector_arc_to_quaternion(vector0, vector1))
+    quat = _sized(_vector_arc_to_quaternion, len(vector0))(vector0, vector1)
+    return _sized(_quaternion_to_matrix, len(vector0))(quat)
 
 
 def vector_arc_to_euler(vector0, vector1, axes=XYZ):
@@ -1075,9 +1097,9 @@ def vector_arc_to_euler(vector0, vector1, axes=XYZ):
     axes    = _set_dimension(axes, 1, dtype=np.int32)
     vector0, vector1, axes = _match_depth(vector0, vector1, axes)
 
-    return _matrix_to_euler(
-        _quaternion_to_matrix(_vector_arc_to_quaternion(vector0, vector1)), axes
-    )
+    quat   = _sized(_vector_arc_to_quaternion, len(vector0))(vector0, vector1)
+    matrix = _sized(_quaternion_to_matrix, len(vector0))(quat)
+    return _sized(_matrix_to_euler, len(vector0))(matrix, axes)
 
 
 def vector_angle(vector0, vector1):
@@ -1091,7 +1113,7 @@ def vector_angle(vector0, vector1):
     vector1 = _set_dimension(vector1, 2)
     vector0, vector1 = _match_depth(vector0, vector1)
 
-    return _vector_arc(vector0, vector1)
+    return _sized(_vector_arc, len(vector0))(vector0, vector1)
 
 
 def vector_random(n, seed=None, normalize=False):
@@ -1105,7 +1127,7 @@ def vector_random(n, seed=None, normalize=False):
     if seed is not None:
         np.random.seed(seed)
     if normalize:
-        return _vector_normalize(1 - np.random.random((n, 3)) * 2)
+        return _sized(_vector_normalize, n)(1 - np.random.random((n, 3)) * 2)
     return 1 - np.random.random((n, 3)) * 2
 
 

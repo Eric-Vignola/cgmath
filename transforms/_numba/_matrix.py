@@ -5,7 +5,7 @@ from numba import njit, prange
 from cgmath.transforms._numba._euler import _get_euler_order, EA_MAYA, EPSILON
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _matrix_identity(count):
     matrix = np.zeros((count, 4, 4), dtype=np.float64)
     for i in prange(count):
@@ -29,7 +29,7 @@ def _matrix_identity(count):
     return matrix
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _matrix_to_quaternion(matrix):
     """Converts 4x4 matrix to quaternions qi,qj,qk,qw"""
     quat = np.zeros((matrix.shape[0], 4), dtype=matrix.dtype)
@@ -68,7 +68,7 @@ def _matrix_to_quaternion(matrix):
     return quat
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _matrix_inverse(matrix):
     """Numba prange equivalent of `matrix_inverse`.
 
@@ -119,7 +119,7 @@ def _matrix_inverse(matrix):
     return m_
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _matrix_transpose(matrix):
     """Assumes matrix is 4x4 orthogonal"""
 
@@ -149,7 +149,7 @@ def _matrix_transpose(matrix):
     return m_
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _matrix_normalize(matrix):
     """Normalizes the rotation component of a transform matrix"""
     m_ = np.zeros(matrix.shape, dtype=matrix.dtype)
@@ -183,7 +183,7 @@ def _matrix_normalize(matrix):
     return m_
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _matrix_multiply(matrix0, matrix1):
     m = np.zeros((matrix0.shape[0], 4, 4), dtype=matrix0.dtype)
 
@@ -291,7 +291,7 @@ def _matrix_multiply(matrix0, matrix1):
     return m
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _matrix_point_multiply(point, matrix):
     p = np.zeros((point.shape[0], 3), dtype=point.dtype)
 
@@ -318,7 +318,7 @@ def _matrix_point_multiply(point, matrix):
     return p
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _matrix_to_euler(matrix, axes):
     """Converts list of 4x4 matrices to Maya euler angles."""
     euler = np.empty((matrix.shape[0], 3), dtype=matrix.dtype)

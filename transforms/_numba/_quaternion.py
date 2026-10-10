@@ -6,7 +6,7 @@ from numba import njit, prange
 EPSILON = np.finfo(np.float32).eps
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _quaternion_slerp(quat0, quat1, weight):
     """Calculates spherical interpolation between two lists quaternions"""
     quat = np.empty((quat0.shape[0], 4), dtype=quat0.dtype)
@@ -49,7 +49,7 @@ def _quaternion_slerp(quat0, quat1, weight):
     return quat
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _quaternion_multiply(quat0, quat1):
     """Multiplies 2 lists of quaternions"""
     quat = np.empty((quat0.shape[0], 4), dtype=quat0.dtype)
@@ -83,7 +83,7 @@ def _quaternion_multiply(quat0, quat1):
     return quat
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _quaternion_add(quat0, quat1):
     """Adds 2 lists of quaternions"""
     quat = np.empty((quat0.shape[0], 4), dtype=quat0.dtype)
@@ -97,7 +97,7 @@ def _quaternion_add(quat0, quat1):
     return quat
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _quaternion_sub(quat0, quat1):
     """Subtracts 2 lists of quaternions"""
     quat = np.empty((quat0.shape[0], 4), dtype=quat0.dtype)
@@ -111,7 +111,7 @@ def _quaternion_sub(quat0, quat1):
     return quat
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _quaternion_to_matrix(quat):
     # Init Matrix
     matrix = np.empty((quat.shape[0], 4, 4), dtype=quat.dtype)
@@ -153,7 +153,7 @@ def _quaternion_to_matrix(quat):
     return matrix
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _quaternion_conjugate(quat):
     """Conjugates a list of quaternions"""
     quat_ = np.empty((quat.shape[0], 4), dtype=quat.dtype)
@@ -167,7 +167,7 @@ def _quaternion_conjugate(quat):
     return quat_
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _quaternion_inverse(quat):
     """Inverses a list of quaternions"""
     quat_ = np.empty((quat.shape[0], 4), dtype=quat.dtype)
@@ -185,7 +185,7 @@ def _quaternion_inverse(quat):
     return quat_
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _quaternion_negate(quat):
     """Negates a list of quaternions"""
     quat_ = np.empty((quat.shape[0], 4), dtype=quat.dtype)
@@ -199,7 +199,7 @@ def _quaternion_negate(quat):
     return quat_
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _quaternion_log(quat):
     """Logarithm of unit quaternions -> (N, 3) rotation vectors (axis * angle).
 
@@ -226,7 +226,7 @@ def _quaternion_log(quat):
     return out
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _quaternion_exp(rvec):
     """Exponential of rotation vectors (N, 3) -> unit quaternions (N, 4).
 
@@ -253,7 +253,7 @@ def _quaternion_exp(rvec):
     return out
 
 
-@njit(fastmath=True, parallel=True, cache=True)
+@njit(parallel=True, cache=True)
 def _quaternion_nlerp(quat0, quat1, weight):
     """Normalised linear interpolation between two lists of quaternions.
 

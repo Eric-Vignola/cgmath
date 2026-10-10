@@ -784,3 +784,12 @@ A length-0 input raises for the same reason, rather than being skipped.
 
 - **Kernels are Numba JIT.** The first call to each compiles; import stays cheap
   because the kernel imports are deferred to call time.
+
+- **A small call runs on one thread.** Below 1000 elements a function runs a
+  single-threaded copy of its kernel; from there on, every one of Numba's
+  threads (`NUMBA_NUM_THREADS`). Waking the threads costs more than a few
+  hundred elements of work, and far more when other processes keep the cores
+  busy, so a loop over one matrix at a time stays cheap. `euler_filter` counts
+  frames x curves, and runs a single curve on one thread however long it is:
+  its threads share out curves, not frames. The answer is the same to the bit
+  either way.
