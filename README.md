@@ -97,7 +97,10 @@ cgmath/
 ├── render/                scene.py raytracer.py camera.py frame.py texture.py
 ├── formats/               fbx.py, glb.py, usd/prim.py, usd/stage.py
 ├── rbf/                   _kernels.py + _numba/   (__init__.py is a docstring, on purpose)
-└── constraints/           procrustes.py
+├── constraints/           procrustes.py
+│
+└── _tests/                the test suite + test_assets/, the fixtures it reads;
+                           transforms/_tests/ holds the transforms suite
 ```
 
 The batched matrix / quaternion / euler / axis / vector functions that all
@@ -331,6 +334,28 @@ Inside a DCC that ships its own USD (Maya, Houdini), leave `usd` out: a
 second `pxr` on `sys.path` conflicts with the one the host has loaded.
 
 The Autodesk FBX SDK (FBX read and write) is not on PyPI; install it by hand.
+
+
+## Tests
+
+Both test suites ship in the wheel, `cgmath._tests` with the fixtures it
+reads and `cgmath.transforms._tests`, so an installed copy tests itself as a
+checkout does. `run_tests()` with no target runs both suites; a module, a
+class, one test or a filename glob narrows it, found in whichever suite
+holds it:
+
+```python
+from cgmath.utils import run_tests
+
+result = run_tests("test_exports", verbosity=0)   # one module of the transforms suite
+assert result.wasSuccessful()
+```
+
+From a shell, `python -m cgmath.utils` runs everything and exits 0 when it
+all passes. A test that needs an optional dependency the install lacks,
+such as the FBX SDK, `pxr`, Pillow or pygltflib, is skipped, so a plain
+`pip install cgmath` passes too, with more tests skipped than under
+`cgmath[all]`.
 
 
 ## Author

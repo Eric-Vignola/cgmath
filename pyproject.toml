@@ -81,12 +81,18 @@ Documentation = "https://github.com/Eric-Vignola/cgmath/blob/main/REFERENCE.md"
 
 [tool.setuptools]
 # The root maps to the package name; every subpackage is then addressed
-# relative to it. Both test suites -- `_tests` with its 25 binary fixtures,
-# and `transforms/_tests` -- are deliberately absent from the installed
-# library.
+# relative to it. Both test suites ship, `_tests` and `transforms/_tests`, so
+# `cgmath.utils.run_tests()` runs on an installed copy as it does on a
+# checkout. The 28 fixtures they read sit in `_tests/test_assets`, a folder
+# with no `__init__.py`: it is listed as a package all the same, which is how
+# setuptools wants a data folder named (it warns otherwise), and its files
+# ship as package data below. The repository's `tools/` and the markdown
+# pages stay out of the wheel.
 package-dir = { "cgmath" = "." }
 packages    = [
     "cgmath",
+    "cgmath._tests",
+    "cgmath._tests.test_assets",
     "cgmath.constraints",
     "cgmath.formats",
     "cgmath.formats.usd",
@@ -101,4 +107,8 @@ packages    = [
     "cgmath.render._numba",
     "cgmath.transforms",
     "cgmath.transforms._numba",
+    "cgmath.transforms._tests",
 ]
+
+[tool.setuptools.package-data]
+"cgmath._tests.test_assets" = ["*"]
