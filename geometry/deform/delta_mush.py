@@ -127,6 +127,16 @@ class DeltaMushData(Data):
     _ddm_weights   = None  # (N, K) precomputed neighbour weights
     _points        = None
 
+    # the private state an instance holds beside its fields: the caches above
+    _STATE = (
+        "_smooth_points",
+        "_local_deltas",
+        "_world_deltas",
+        "_ddm_offsets",
+        "_ddm_weights",
+        "_points",
+    )
+
     # --------------------------- construction -------------------------------- #
 
     def __init__(

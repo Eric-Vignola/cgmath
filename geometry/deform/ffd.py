@@ -90,6 +90,9 @@ class FFDData(Data):
     _weights     = None  # (N,) from _source and the outside settings
     _points      = None
 
+    # the private state an instance holds beside its fields: the caches above
+    _STATE = ("_source_mesh", "_weights", "_points")
+
     # --------------------------- construction -------------------------------- #
 
     def __init__(self, lattice, divisions: tuple[int, int, int] | None = None):

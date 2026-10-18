@@ -222,6 +222,16 @@ class Object(TransformData):
     # caught even when our own SRT hasn't changed.
     _render_transform_state = None
 
+    # the private state an Object holds beside its fields and a node's: the
+    # render caches above
+    _STATE = (
+        "_loaded_texture",
+        "_wired_texture_cache",
+        "_bind_mesh",
+        "_frame",
+        "_render_transform_state",
+    )
+
     def __init__(
         self,
         name:                str                                             = "object",
@@ -1787,6 +1797,18 @@ class Scene(HierarchyData):
         "return_depth",
         "angle_of_view",
         "fit_padding",
+    )
+
+    # the private state a Scene holds beside its list and a rig's: the storage
+    # behind scene_name, resolution and background, the cached render and the
+    # inputs it was rendered from, and the Object a preview scene renders for
+    _STATE = (
+        "_scene_name",
+        "_resolution",
+        "_background",
+        "_frame",
+        "_render_signature",
+        "_render_cache_owner",
     )
 
     def __init__(

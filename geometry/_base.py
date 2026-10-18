@@ -1590,6 +1590,97 @@ def _by_field(data: dict, fields: dict, label, what: str, keep=()) -> dict:
     return out
 
 
+# ------------------------------- STRICT WRITES ------------------------------- #
+def _class_attribute(cls, name: str):
+    """what attribute lookup finds for ``name`` on ``cls``, unbound, or _NO_DEFAULT"""
+    for base in cls.__mro__:
+        found = vars(base).get(name, _NO_DEFAULT)
+        if found is not _NO_DEFAULT:
+            return found
+    return _NO_DEFAULT
+
+
+def _writable_names(cls, own) -> frozenset:
+    """
+    The names an instance of ``cls`` takes a write to: ``own`` (a Data's
+    fields; a list's ``list``, ``LIST_FIELDS`` and annotations), each
+    property, as attribute lookup finds it, with a setter (any descriptor
+    with a ``__set__``), and the private state every class up the MRO
+    declares in its own ``_STATE``. Python's own descriptors are not among
+    them: the ``__dict__``, ``__class__`` and ``__weakref__`` every class has
+    have a ``__set__``, and a write of one would swap the instance's whole
+    state.
+
+    Raises
+    ------
+    TypeError
+        A ``_STATE`` is a str, a tuple of one name missing its comma, which
+        would declare each of its letters.
+    """
+    names = set(own)
+    seen  = set()
+    for base in cls.__mro__:
+        state = vars(base).get("_STATE", ())
+        if isinstance(state, str):
+            raise TypeError(
+                f"{base.__name__}._STATE is a str, not a tuple of names: ({state!r},)"
+            )
+        names.update(state)
+        for name, raw in list(vars(base).items()):
+            if name in seen:
+                continue
+            seen.add(name)
+            if isinstance(raw, property):
+                if raw.fset is not None:
+                    names.add(name)
+            elif hasattr(type(raw), "__set__"):
+                # a dunder here is Python's, __dict__, __class__, __weakref__
+                if not (name.startswith("__") and name.endswith("__")):
+                    names.add(name)
+    return frozenset(names)
+
+
+def _refusal(cls, name: str) -> AttributeError:
+    """
+    The AttributeError a write of ``name`` raises on an instance of ``cls``
+    that does not declare it: a method, a class setting or a read-only
+    property named for what it is, a dunder as Python's, an unknown public
+    name with the public names the class takes, which a typo was meant to be.
+    """
+    what = cls.__name__
+    raw  = _class_attribute(cls, name)
+    if inspect.isfunction(raw):
+        return AttributeError(f"{name!r} is a method of {what}, not a setting")
+    if isinstance(raw, classmethod):
+        return AttributeError(f"{name!r} is a class method of {what}, not a setting")
+    if isinstance(raw, staticmethod):
+        return AttributeError(f"{name!r} is a static method of {what}, not a setting")
+    if isinstance(raw, property):
+        return AttributeError(f"{name!r} is a read-only property of {what}")
+    if name.startswith("__") and name.endswith("__"):
+        # __dict__, __class__: one would swap the instance's whole state
+        return AttributeError(
+            f"{name!r} is Python's, not an attribute an instance of {what} takes"
+        )
+    if name.startswith("_"):
+        if raw is not _NO_DEFAULT:
+            text = f"{name!r} is a class attribute of {what}, not one an instance holds"
+        else:
+            text = f"{what!r} has no attribute {name!r}"
+        return AttributeError(
+            f"{text}; private attributes must be declared on the class, in its _STATE"
+        )
+    if raw is not _NO_DEFAULT:
+        return AttributeError(
+            f"{name!r} is a class setting of {what}, set on the class, not on an instance"
+        )
+    allowed = sorted(x for x in cls._writable() if not x.startswith("_"))
+    return AttributeError(
+        f"{what!r} has no attribute {name!r}; public attributes must be declared on the "
+        f"class (typo? expected one of: {allowed!r})"
+    )
+
+
 # ------------------------------ BASE DATACLASS ------------------------------ #
 def flatten_nested_lists(xs):
     if not _is_sequence(xs):
@@ -1670,38 +1761,37 @@ class Data:
     # property of its public name
     SAVED_NAMES = {}
 
+    # the private attributes an instance holds beside its fields -- caches,
+    # links rebuilt after a load -- each class naming its own, merged up the
+    # MRO: an instance takes a write to nothing else
+    _STATE = ()
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         _register(cls)
 
     def __setattr__(self, name: str, value) -> None:
-        """Strict attribute setter -- rejects writes to undeclared
-        public attributes so typos raise instead of silently creating
-        new instance state.
+        """Strict attribute setter: an instance holds only what its class
+        declares, so a typo raises instead of silently creating new state,
+        ``obj.ambiant = 0.5`` where the attribute is ``ambient``.
 
-        Catches mistakes like ``obj.ambiant = 0.5`` (when the real
-        attribute is ``obj.ambient``) by raising :class:`AttributeError`
-        instead of letting Python create a stray instance attribute.
+        A write is taken by:
 
-        Allowed targets:
+          - a dataclass field anywhere in the MRO, private storage behind a
+            property included (``_translate`` behind ``translate``), and
+            required fields without defaults, which ``vars(cls)`` misses;
+          - a property with a setter, anywhere in the MRO, or any other
+            descriptor with a ``__set__``;
+          - the private state a class up the MRO declares in its ``_STATE``.
 
-          - Names starting with ``_`` (private / cache attrs).
-          - Names declared as dataclass fields anywhere in the MRO --
-            including required fields without defaults (those don't
-            appear in ``vars(cls)`` so a plain ``hasattr`` check would
-            miss them).
-          - Names already discoverable on the class via the MRO -- this
-            covers ``@property`` descriptors, methods, and class-level
-            constants like :attr:`EQUALITY_TEST_IGNORE`.
-
-        Anything else raises :class:`AttributeError`.
-
-        Note:
-            Dataclass fields with defaults appear as class attributes
-            (default value lives on the class), so ``hasattr`` finds
-            them.  Required fields (no default) do NOT appear in
-            ``vars(cls)`` and require the explicit ``fields()`` check.
-            See ``test_base_setattr.test_required_field_assignment``.
+        Anything else raises :class:`AttributeError`, private names and
+        dunders too (``__dict__``, ``__class__``): an unknown name lists the
+        public names the class takes, and a method, a class setting
+        (:attr:`EQUALITY_TEST_IGNORE`) or a read-only property is named for
+        what it is. The names are worked out once per class
+        (:meth:`_writable`); a name not among them is looked for once more
+        on the class as it is now before it is refused, so a property or
+        ``_STATE`` given to a class after its first write is taken.
         """
         cls   = type(self)
         specs = cls.__dict__.get("_ARRAY_SPECS_CACHE")
@@ -1716,14 +1806,27 @@ class Data:
             super().__setattr__(name, value)
             return
 
-        if name.startswith("_") or hasattr(cls, name) or name in cls._dataclass_field_names():
+        writable = cls.__dict__.get("_WRITABLE_CACHE")
+        if writable is None:
+            writable = cls._writable()
+        if name in writable or name in cls._writable(fresh=True):
             super().__setattr__(name, value)
             return
-        raise AttributeError(
-            f"{type(self).__name__!r} has no attribute {name!r}; "
-            f"public attributes must be declared on the class "
-            f"(typo? expected one of: {self._allowed_public_attrs()!r})"
-        )
+        raise _refusal(cls, name)
+
+    @classmethod
+    def _writable(cls, fresh: bool = False) -> frozenset:
+        """
+        Every name an instance takes a write to: the fields, each property
+        with a setter, and the ``_STATE`` the classes up the MRO declare.
+        Cached per class; ``fresh`` works it out again, for the class as it
+        is now.
+        """
+        cached = None if fresh else cls.__dict__.get("_WRITABLE_CACHE")
+        if cached is None:
+            cached              = _writable_names(cls, cls._dataclass_field_names())
+            cls._WRITABLE_CACHE = cached
+        return cached
 
     @classmethod
     def _dataclass_field_names(cls) -> frozenset:
@@ -1859,37 +1962,13 @@ class Data:
 
     @classmethod
     def _allowed_public_attrs(cls) -> list:
-        """Public attribute names declared anywhere on this class's
-        MRO.  Used for friendlier error messages from
-        :meth:`__setattr__`.  Skips dunder, private, function, and
-        ``classmethod`` / ``staticmethod`` names; properties, plain
-        class-level data attributes, and dataclass field names (even
-        those without defaults) are kept.
+        """The public names an instance takes a write to, sorted: its
+        public fields, required ones without defaults included, and its
+        properties with a setter. The list :meth:`__setattr__` gives a
+        typo; methods, class settings and read-only properties take no
+        write, so are not in it.
         """
-        seen = set()
-        out  = []
-        for base in cls.__mro__:
-            for attr_name, raw_value in vars(base).items():
-                if attr_name.startswith("_") or attr_name in seen:
-                    continue
-                # ``inspect.isfunction`` catches plain methods; the
-                # isinstance check catches ``classmethod`` /
-                # ``staticmethod`` descriptors (which ``callable()``
-                # would NOT flag when read from ``vars()``).
-                if inspect.isfunction(raw_value) or isinstance(
-                    raw_value, (classmethod, staticmethod)
-                ):
-                    continue
-                seen.add(attr_name)
-                out.append(attr_name)
-        # Add dataclass field names that have no class-level default
-        # (those are absent from ``vars(cls)`` entirely).
-        for field_name in cls._dataclass_field_names():
-            if field_name.startswith("_") or field_name in seen:
-                continue
-            seen.add(field_name)
-            out.append(field_name)
-        return sorted(out)
+        return sorted(x for x in cls._writable() if not x.startswith("_"))
 
     def __post_init__(self):
         """hack to fix limitations in the dataclass type system: an array
@@ -2181,8 +2260,15 @@ class Data:
                     value = np.array(value)  # the class default: this object's own copy
             setattr(obj, field.name, value)
 
-        # what a class saves beside its fields, and a property set by name
+        # what a class saves beside its fields, and a property set by name,
+        # both public: private state -- a cache, a link, a _STATE name -- is
+        # rebuilt after a load, never read from one
         for key, value in data.items():
+            if key.startswith("_"):
+                raise AttributeError(
+                    f"the data names {key!r}, which is no field of {cls.__name__}: "
+                    f"a file holds no private state"
+                )
             setattr(obj, key, value)
 
         obj._post_load()
@@ -2313,9 +2399,47 @@ class DataList(MutableSequence):
     # them, as {attribute: saved name}; one mapped to itself keeps its name
     SAVED_NAMES = {}
 
+    # the private attributes a list holds beside its items and LIST_FIELDS
+    # -- caches, links -- each class naming its own, merged up the MRO, as
+    # a Data's _STATE
+    _STATE = ()
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         _register(cls)
+
+    def __setattr__(self, name: str, value) -> None:
+        """
+        A list holds only what its class declares, as a Data does: its
+        ``list``, its ``LIST_FIELDS``, a name a class up the MRO annotates,
+        a property with a setter, and the ``_STATE`` the classes declare.
+        Anything else raises AttributeError, private names too.
+        """
+        cls      = type(self)
+        writable = cls.__dict__.get("_WRITABLE_CACHE")
+        if writable is None:
+            writable = cls._writable()
+        if name in writable or name in cls._writable(fresh=True):
+            object.__setattr__(self, name, value)
+            return
+        raise _refusal(cls, name)
+
+    @classmethod
+    def _writable(cls, fresh: bool = False) -> frozenset:
+        """
+        Every name a list takes a write to: ``list``, ``LIST_FIELDS``, each
+        name a class up the MRO annotates, each property with a setter, and
+        the ``_STATE`` the classes declare. Cached per class; ``fresh``
+        works it out again, for the class as it is now.
+        """
+        cached = None if fresh else cls.__dict__.get("_WRITABLE_CACHE")
+        if cached is None:
+            own = {"list", *cls.LIST_FIELDS}
+            for base in cls.__mro__:
+                own.update(vars(base).get("__annotations__", {}))
+            cached              = _writable_names(cls, own)
+            cls._WRITABLE_CACHE = cached
+        return cached
 
     @classmethod
     def _saved_names(cls) -> tuple:

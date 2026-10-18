@@ -112,6 +112,9 @@ class PatchRelaxData(Data):
     _rest_vectors = None  # (N, 3) weighted baseline offsets
     _points       = None
 
+    # the private state an instance holds beside its fields: the caches above
+    _STATE = ("_rest_decals", "_weights", "_rest_vectors", "_points")
+
     # --------------------------- construction -------------------------------- #
 
     def __init__(

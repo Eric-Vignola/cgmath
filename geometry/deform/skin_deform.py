@@ -200,6 +200,9 @@ class SkinDeformData(Data):
     _skin   = None  # the SkinData bind() compacts; not saved
     _points = None
 
+    # the private state an instance holds beside its fields: the caches above
+    _STATE = ("_skin", "_points")
+
     def _namespace_parts(self) -> list:
         """the SkinData the deformer was built from: its influences name the same joints"""
         return [self._skin]

@@ -308,19 +308,33 @@ print(MeshData.info())                # the class docstring
 
 ### Strict attribute setting
 
-`Data.__setattr__` rejects undeclared public attributes, so a typo raises
-instead of silently creating dead state.
+An instance takes a write only to what its class declares: a field, a
+property with a setter, or the private state the class lists in `_STATE`
+(its caches). Anything else raises `AttributeError`, so a typo fails
+instead of silently creating dead state, and so does a private name the
+class does not declare, or a write over a method, a class setting or a
+read-only property, which the error names for what it is.
 
 ```python
-mesh          = cube.copy()
-mesh.name     = "ok"  # declared field
-mesh._scratch = 123   # private names always allowed
+mesh      = cube.copy()
+mesh.name = "ok"  # a declared field
 
 try:
     mesh.pointz = mesh.points         # typo
 except AttributeError as err:
     print(type(err).__name__)
+
+for name in ("_scratch", "copy", "load", "EQUALITY_TEST_IGNORE", "namespace"):
+    try:
+        setattr(mesh, name, 123)
+    except AttributeError as err:
+        print(err)  # "'copy' is a method of MeshData, not a setting", ...
+
+print(MeshData._STATE[:3])  # the caches MeshData holds: ('_f2v', '_v2f', '_f2e')
 ```
+
+A `DataList` holds the same rule: its `list`, its `LIST_FIELDS`, a name its
+class annotates, a property with a setter and its `_STATE`.
 
 ### `DataList` — the list flavour
 

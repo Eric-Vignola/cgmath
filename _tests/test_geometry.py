@@ -441,11 +441,12 @@ class TestMesh(unittest.TestCase):
                 # confirm obj3 has no cached data
                 self.assertTrue(obj3._e2v is None)
 
-            # add custom private data
-            obj1._custom_data = "test"
+            # private data the class does not declare is refused, so none
+            # can reach a file
+            with self.assertRaisesRegex(AttributeError, "_STATE"):
+                obj1._custom_data = "test"
             obj1.save(f)
             obj2 = MeshData.load(f)
-            self.assertFalse(hasattr(obj2, "_custom_data"))
             self.assertTrue(obj1 == obj2)
 
             # save the file using the ascii format
@@ -2876,12 +2877,16 @@ class TestBSpline(unittest.TestCase):
         self.assertTrue(obj1 == obj2)
 
     def test_serialize(self):
+        # force generate cached data, which no file holds
         obj1 = self.open_curve.copy()
         self.assertTrue(obj1._kv is None)
+        _ = obj1.kv
+        self.assertFalse(obj1._kv is None)
 
-        # add custom private data
-        obj1._custom_data = "test"
-
+        # private data the class does not declare is refused, so none can
+        # reach a file
+        with self.assertRaisesRegex(AttributeError, "_STATE"):
+            obj1._custom_data = "test"
 
         # write to file
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2893,11 +2898,11 @@ class TestBSpline(unittest.TestCase):
             # load obj2 from file
             obj2 = BSplineData.load(f)
 
+            # confirm obj2 has no cached data, before == builds it
+            self.assertTrue(obj2._kv is None)
+
             # confirm they're identical
             self.assertTrue(obj1 == obj2)
-
-            # confirm obj2 has no private data
-            self.assertFalse(hasattr(obj2, "_custom_data"))
 
             # do the same via pickle, put obj1 inside a list
             with open(f, 'wb') as io:
@@ -2906,17 +2911,18 @@ class TestBSpline(unittest.TestCase):
             with open(f, 'rb') as io:
                 obj3 = pickle.load(io)[0]
 
+                # confirm obj3 has no cached data
+                self.assertTrue(obj3._kv is None)
+
                 # confirm they're identical
                 self.assertTrue(obj1 == obj3)
-
-                # confirm obj3 has no cached data
-                self.assertFalse(hasattr(obj3, "_custom_data"))
 
             # save the file using the ascii format
             obj1.save(f, mode='json')
             obj2 = BSplineData.load(f)
 
-            # confirm they're identical
+            # confirm they're identical, obj2 cold
+            self.assertTrue(obj2._kv is None)
             self.assertTrue(obj1 == obj2)
 
             # test string output
@@ -2926,7 +2932,8 @@ class TestBSpline(unittest.TestCase):
             obj1.save(f, mode='npz')
             obj3 = BSplineData.load(f)
 
-            # confirm they're identical
+            # confirm they're identical, obj3 cold
+            self.assertTrue(obj3._kv is None)
             self.assertTrue(obj1 == obj3)
 
 
@@ -6239,11 +6246,17 @@ class TestBSplinePatchData(unittest.TestCase):
 
     def test_serialization(self):
         for patch in [self.open_open, self.closed_open, self.open_closed, self.closed_closed]:
+            # cached data built, which no copy or file holds: each comes
+            # back cold, checked before == builds it
             obj1 = patch.copy()
+            self.assertTrue(obj1._kv_u is None)
+            _ = obj1.kv_u
+            self.assertFalse(obj1._kv_u is None)
 
             # to_bytes / from_bytes round-trip
             b    = obj1.to_bytes()
             obj2 = BSplinePatchData.from_bytes(b)
+            self.assertTrue(obj2._kv_u is None)
             self.assertTrue(obj1 == obj2)
 
             with tempfile.TemporaryDirectory() as tmp:
@@ -6251,23 +6264,33 @@ class TestBSplinePatchData(unittest.TestCase):
                 f = os.path.join(tmp, "test.pkl")
                 obj1.save(f)
                 obj3 = BSplinePatchData.load(f)
+                self.assertTrue(obj3._kv_u is None)
                 self.assertTrue(obj1 == obj3)
 
                 # json round-trip
                 obj1.save(f, mode='json')
                 obj4 = BSplinePatchData.load(f)
+                self.assertTrue(obj4._kv_u is None)
                 self.assertTrue(obj1 == obj4)
 
                 # npz round-trip
                 obj1.save(f, mode='npz')
                 obj5 = BSplinePatchData.load(f)
+                self.assertTrue(obj5._kv_u is None)
                 self.assertTrue(obj1 == obj5)
 
-            # private data excluded
-            obj1._custom_data = "test"
-            b                 = obj1.to_bytes()
-            obj6              = BSplinePatchData.from_bytes(b)
-            self.assertFalse(hasattr(obj6, "_custom_data"))
+                # and a pickle
+                with open(f, 'wb') as io:
+                    pickle.dump([obj1], io)
+                with open(f, 'rb') as io:
+                    obj6 = pickle.load(io)[0]
+                self.assertTrue(obj6._kv_u is None)
+                self.assertTrue(obj1 == obj6)
+
+            # private data the class does not declare is refused, so none
+            # can reach the bytes
+            with self.assertRaisesRegex(AttributeError, "_STATE"):
+                obj1._custom_data = "test"
 
     # -------------------------------------------------------------- #
     #  Properties                                                      #

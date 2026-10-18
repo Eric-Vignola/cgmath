@@ -88,6 +88,9 @@ class WrapData(Data):
     # re-solved against the saved pseudo-inverse.
     _target_dirty = True  # True when only the right-hand side needs re-solving
 
+    # the private state an instance holds beside its fields: the caches above
+    _STATE = ("_system_matrix", "_distance_matrix", "_weights", "_target_matrix", "_target_dirty")
+
     name:        str = "wrap_data1"         # identifier for this wrap instance
     kernel_name: str = "thin_plate_spline"  # active RBF kernel name
 

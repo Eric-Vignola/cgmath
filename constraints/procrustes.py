@@ -22,6 +22,9 @@ class ProcrustesData(Data):
     _matrix    = None  # output matrices
     _points    = None  # the updated points
 
+    # the private state an instance holds beside its fields: the caches above
+    _STATE = ("_scale", "_rotate", "_translate", "_matrix", "_points")
+
     @property
     def scale_offset(self) -> bool:
         return self._scale_offset

@@ -24,12 +24,15 @@ from cgmath.geometry import Data, DataList, ImmutableArray as numpy_array
 from cgmath.geometry._base import (
     ITEMS_KEY,
     Array,
+    _class_attribute,
     _decode,
     _from_tagged,
     _holds_numbered,
     _load_derived,
     _mask_to_indices,
+    _NO_DEFAULT,
     _reached_twice,
+    _refusal,
     _save_shares,
 )
 from cgmath.transforms import (
@@ -597,11 +600,6 @@ def _user_writes(attrs: dict, name: str, value, owner: str) -> list:
     return writes
 
 
-def _declares(cls: type, name: str) -> bool:
-    """whether ``cls`` or one of its parents annotates ``name`` at class level"""
-    return any(name in vars(c).get("__annotations__", {}) for c in cls.__mro__)
-
-
 def _has_user_attr(node: "TransformData", name: str) -> bool:
     """whether ``node`` has a user attribute ``name`` a built-in does not hide"""
     attrs = node.user_defined_attributes
@@ -1015,6 +1013,9 @@ class TransformData(Data):
     _world_matrix  = None  # cached world matrix
     _world_version = None  # its rig's structure count it was cached at, and its link
     _listers       = ()    # weak references to the rigs that may list it, not owning it
+
+    # the private state a node holds beside its fields: the caches above
+    _STATE = ("_hierarchy", "_world_matrix", "_world_version", "_listers")
 
     def __init__(
         self,
@@ -2248,7 +2249,8 @@ class TransformData(Data):
         try:
             super().__setattr__(name, value)
         except AttributeError as error:
-            if self._is_builtin_attr(name):
+            # a user attribute is public, and never a name the class has
+            if name.startswith("_") or self._is_builtin_attr(name):
                 raise
             raise AttributeError(
                 f"{error}; add_user_attribute() creates a user attribute"
@@ -4722,6 +4724,10 @@ class TransformList(DataList):
 
     DATA_LIST_CLASS = TransformData
 
+    # the private state a view holds beside its list: the uuids extend()
+    # keeps while it adds (_holds)
+    _STATE = ("_held",)
+
     # TODO scale_factor is prolly not the best name, think of a better way to handle unit conversions
     @classmethod
     def load_glb(
@@ -5202,11 +5208,24 @@ class TransformList(DataList):
     def __setattr__(self, name: str, value) -> None:
         """sets a user defined attribute on every node of the view that has it,
         as ``h.heroHeight = 1.8``: every value is converted before any is
-        written. A name no node has raises instead of landing on the list,
-        unless the class declares it."""
-        own = name.startswith("_") or name == "list" or name in self.__dict__
-        if own or hasattr(type(self), name) or _declares(type(self), name):
-            super().__setattr__(name, value)
+        written. A name the class declares is set on the list, as
+        DataList.__setattr__ sets it; any other the class has -- a method, a
+        class setting, a read-only property -- or a private one raises, and
+        so does a name no node has, instead of landing on the list."""
+        cls      = type(self)
+        writable = cls.__dict__.get("_WRITABLE_CACHE")
+        if writable is None:
+            writable = cls._writable()
+        if name in writable:
+            object.__setattr__(self, name, value)
+            return
+
+        # a user attribute is public, and never a name the class has; such a
+        # name is looked for once more on the class as it is now
+        if name.startswith("_") or _class_attribute(cls, name) is not _NO_DEFAULT:
+            if name not in cls._writable(fresh=True):
+                raise _refusal(cls, name)
+            object.__setattr__(self, name, value)
             return
 
         nodes = [n for n in self.__dict__.get("list", []) if _has_user_attr(n, name)]
@@ -6444,6 +6463,20 @@ class HierarchyData(TransformList):
     a child may come before its parent. An item assignment, which claims
     nothing, holds a node no hierarchy owns to the same rule.
     """
+
+    # the private state a rig holds beside its list: its structure counts,
+    # the index and parent rows kept with them, and the bookkeeping append,
+    # get_parent, extend and an item assignment keep between calls
+    _STATE = (
+        "_index_version",
+        "_structure_version",
+        "_rig_index_cache",
+        "_parent_rows_cache",
+        "_append_builds",
+        "_lookup_scans",
+        "_joining",
+        "_uuid_counts",
+    )
 
     def _claim(self, node: "TransformData") -> None:
         """Take ownership of ``node`` for this hierarchy.
@@ -9944,6 +9977,10 @@ class ClipData(HierarchyData):
     # property, "translate". A clip with no rest pose saves no "rest_pose"
     LIST_FIELDS = ("_start_frame", "_fps", "_frame", "_blocks", "_rest_pose")
     SAVED_NAMES = {"_blocks": "blocks"}
+
+    # the private state a clip holds beside its list, its LIST_FIELDS and a
+    # rig's: the uuid each block column stands for, and each uuid's column
+    _STATE = ("_columns", "_column_place_cache")
 
     def __init__(
         self,

@@ -104,6 +104,9 @@ class TypedDataClass(Data):
     payload: Optional[dict] = None
     child:   Optional[Data] = None
 
+    # a cache it holds beside its fields
+    _STATE = ("_cache",)
+
 
 class TypedDataList(DataList):
     """Test data list saving a setting of its own"""
@@ -987,9 +990,14 @@ class TestFiles(unittest.TestCase):
             std_json.dump(tree, f)
 
         # the class as a later version declares it, without first, in the
-        # module in its place, where a pickle finds it
+        # module in its place, where a pickle finds it. It no longer sets
+        # first either: a list takes no attribute its class does not declare
+        def __init__(self, iterable=None):
+            DataList.__init__(self, iterable)
+            self.second = None
+
         listspace = {"__module__": _OrderedList.__module__, "__qualname__": _OrderedList.__qualname__}
-        listspace.update(LIST_FIELDS=("second",))
+        listspace.update(LIST_FIELDS=("second",), __init__=__init__)
         later  = type("_OrderedList", (_OrderedList,), listspace)
         module = sys.modules[_OrderedList.__module__]
         self.addCleanup(_register, _OrderedList)
@@ -1002,7 +1010,7 @@ class TestFiles(unittest.TestCase):
                 self.assertIs(type(back), later)
                 self.assertEqual(back[0].foo, 1)
                 self.assertEqual(back.second.foo, 5)
-                self.assertIsNone(back.first)  # as __init__ sets it
+                self.assertNotIn("first", vars(back))  # left out
 
     def test_a_dict_or_list_that_holds_itself_is_refused(self):
         # a save walks dicts and lists for the objects they hold: one that

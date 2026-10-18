@@ -407,6 +407,20 @@ class MeshData(Data):
     _bvh_bilinear = None  # BVH over per-face vertex AABBs (for bilinear raycast)
     _bvh_bezier   = None  # BVH over PN-Quad bicubic Bezier control-point AABBs
 
+    # the private state an instance holds beside its fields: the caches above
+    _STATE = (
+        "_f2v", "_v2f", "_f2e", "_v2e", "_e2f", "_e2v",
+        "_ue2f", "_ue2v", "_f2ue", "_v2ue", "_unique_edge_pairs", "_unique_edges",
+        "_non_manifold_vertices", "_lamina_faces",
+        "_border_vertices", "_border_edges", "_border_faces", "_overlap_vertices",
+        "_face_normals", "_face_vertex_angles",
+        "_edge_lengths", "_edge_normals",
+        "_triangles", "_quads", "_ngons", "_degenerate_faces", "_valence", "_valid",
+        "_v2ev", "_v2fv", "_e2ve", "_e2fe", "_f2vf", "_f2ef",
+        "_shell_points", "_shell_faces", "_shell_edges",
+        "_bvh_bilinear", "_bvh_bezier",
+    )
+
     def _compute_edges(self):
         # compute e2v and e2f
         self._ue2v, self._ue2f = compute_e2v_e2f(self.indices, self.counts)
@@ -3722,6 +3736,10 @@ class UVData(MeshData):
     _pixel_counts   = None
     _pixel_overlaps = None
     _pixel_ratios   = None
+
+    # the private state an instance holds beside its fields and MeshData's:
+    # the caches above
+    _STATE = ("_buffer", "_renderer", "_pixel_counts", "_pixel_overlaps", "_pixel_ratios")
 
     def union(self, *args):
         """combines faces of given Mesh objects to self (this is not a boolean)"""

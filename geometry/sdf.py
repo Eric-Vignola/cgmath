@@ -421,6 +421,7 @@ class SDFSphere(TransformData):
 
     # the DMCField the primitive was added to: a runtime link, never saved
     _field = None
+    _STATE = ("_field",)
 
     def __init__(
         self,
@@ -509,6 +510,7 @@ class SDFBox(TransformData):
 
     # the DMCField the primitive was added to: a runtime link, never saved
     _field = None
+    _STATE = ("_field",)
 
     def __init__(
         self,
@@ -604,6 +606,7 @@ class SDFCylinder(TransformData):
 
     # the DMCField the primitive was added to: a runtime link, never saved
     _field = None
+    _STATE = ("_field",)
 
     def __init__(
         self,

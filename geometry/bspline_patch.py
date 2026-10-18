@@ -179,6 +179,28 @@ class BSplinePatchData(Data):
     _cp_params_u        = None
     _cp_params_v        = None
 
+    # the private state an instance holds beside its fields: the caches above
+    _STATE = (
+        "_kv_u",
+        "_kv_v",
+        "_geometry_u",
+        "_geometry_v",
+        "_count_u",
+        "_count_v",
+        "_max_param_u",
+        "_max_param_v",
+        "_spl",
+        "_cv_f64",
+        "_arc_length_table_u",
+        "_u_table_u",
+        "_total_length_u",
+        "_arc_length_table_v",
+        "_u_table_v",
+        "_total_length_v",
+        "_cp_params_u",
+        "_cp_params_v",
+    )
+
     __repr__ = Data.__repr__
 
     def __eq__(self, other):

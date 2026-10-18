@@ -119,6 +119,25 @@ class BSplineData(Data):
     _hi               = None  # end of the parameter range
     _scale            = None  # parameter units per native unit
 
+    # the private state an instance holds beside its fields: the caches above
+    _STATE = (
+        "_kv",
+        "_geometry",
+        "_count",
+        "_max_param",
+        "_spl",
+        "_der",
+        "_cv_f64",
+        "_arc_length_table",
+        "_u_table",
+        "_total_length",
+        "_cp_params",
+        "_offset",
+        "_lo",
+        "_hi",
+        "_scale",
+    )
+
     __repr__ = Data.__repr__
 
     def __setattr__(self, name, value):

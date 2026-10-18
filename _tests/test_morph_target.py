@@ -408,9 +408,11 @@ class TestMorphData(unittest.TestCase):
 
     def test_serialize(self):
 
-        # add custom private data
-        obj1              = self.shape.copy()
-        obj1._custom_data = "test"
+        # private data the class does not declare is refused, so none can
+        # reach a file
+        obj1 = self.shape.copy()
+        with self.assertRaisesRegex(AttributeError, "_STATE"):
+            obj1._custom_data = "test"
 
         # write to file
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -425,9 +427,6 @@ class TestMorphData(unittest.TestCase):
             # confirm they're identical
             self.assertTrue(obj1 == obj2)
 
-            # confirm obj2 has no private data
-            self.assertFalse(hasattr(obj2, "_custom_data"))
-
             # do the same via pickle, put obj1 inside a list
             with open(f, "wb") as io:
                 pickle.dump([obj1], io)
@@ -437,9 +436,6 @@ class TestMorphData(unittest.TestCase):
 
                 # confirm they're identical
                 self.assertTrue(obj1 == obj3)
-
-                # confirm obj3 has no cached data
-                self.assertFalse(hasattr(obj3, "_custom_data"))
 
             # test json and npz
             obj1.save(f, mode='json')

@@ -708,8 +708,9 @@ for ext in ("npz", "json", "pkl"):
 print(sorted(cube.to_dict()))                  # '__class__', fields not at their default -- no caches
 ```
 
-Caches are never persisted and `name` is excluded from equality. Public
-attributes are strict, so a typo fails loudly:
+Caches are never persisted and `name` is excluded from equality.
+Attributes are strict, private ones too: an instance takes only what its
+class declares, so a typo fails loudly:
 
 ```python
 try:

@@ -724,6 +724,11 @@ hero.heroHeight = 2
 assert hero.heroHeight == [2.0, None]
 ```
 
+A name the class has -- a method such as `copy`, a read-only property such
+as `parent_name` -- is never a user attribute: assigning to it raises, on a
+node and on a list, as assigning a private name the class does not declare
+does.
+
 A list gives one value per node, `None` where a node has none, and a write
 goes to every node that has the attribute. A compound attribute reads as an
 array when its children are all numbers, and an enum takes a field name or

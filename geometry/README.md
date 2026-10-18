@@ -70,18 +70,24 @@ serialization. The declared fields *are* the object: `to_dict`, `from_dict`,
 else.
 
 - **Caches are never persisted.** A `MeshData` memoises a dozen topology
-  matrices on private `_`-prefixed attributes. They are excluded from every
-  format, so a reloaded object starts cold and recomputes lazily.
-  `reset_cached_data()` clears them by hand.
+  matrices on private `_`-prefixed attributes, the ones its `_STATE` names.
+  They are excluded from every format, so a reloaded object starts cold and
+  recomputes lazily. `reset_cached_data()` clears them by hand.
 - **`name` is excluded from equality.** Every type lists it in
   `EQUALITY_TEST_IGNORE`, so two identically shaped meshes with different names
   compare equal.
 - **`save` / `load` are format-agnostic.** The extension picks the writer
   (`.pkl`, `.json`, `.npz`), the file's first bytes pick the reader — `load`
   never needs a hint. `mode=` overrides both.
-- **Public attributes are strict.** `Data.__setattr__` raises `AttributeError`
-  for any public name that is not a declared field, property or method, so
-  `mesh.pointz = ...` fails loudly instead of creating dead state.
+- **Attributes are strict.** An instance takes a write only to a declared
+  field, a property with a setter, or private state its class declares in
+  `_STATE` (each class naming its own caches, merged up the MRO).
+  `Data.__setattr__` raises `AttributeError` for anything else, so
+  `mesh.pointz = ...` and `mesh._scratch = ...` fail loudly instead of
+  creating dead state, and so does a write over a method (`mesh.copy = ...`),
+  a class setting (`EQUALITY_TEST_IGNORE`) or a read-only property, which the
+  error names for what it is. A `DataList` holds the same rule: its `list`,
+  `LIST_FIELDS`, annotated names, settable properties and `_STATE`.
 - **`ImmutableArray`** is a hashable `ndarray` subclass that exists only so a
   numpy array can be a dataclass *default* (`MeshData.matrix`). `__post_init__`
   converts it back, so instances never hold one.
@@ -194,13 +200,18 @@ Your own type follows the same rules. Subclass `Data` under
 and declare arrays with `Array` (from `cgmath.geometry._base`). A field named in
 `TRANSIENT_FIELDS` is never saved and `==` skips it: use it for caches and
 links, and rebuild them in `_post_load()`, which runs once a load or `copy()`
-has set every field. A `DataList` subclass names what it saves beside its items
-in `LIST_FIELDS`. A private field behind a property of its own name is saved
-as the property; `SAVED_NAMES`, `{field: saved name}`, saves one under another
-name, such as a field behind a property named differently, and keeps a field
-mapped to itself, `{"_count": "_count"}`, under its own name, for a property
-`count` that does not read it. Only cgmath modules are imported on demand, so
-a class of your own must be imported before a file that names it is loaded.
+has set every field. An instance takes a write to nothing its class does not
+declare: a cache kept on a private attribute rather than a field is named in
+the class's `_STATE`, a tuple, `_STATE = ("_index",)`, each class listing its
+own and a subclass adding to its parents'. A `DataList` subclass names what it
+saves beside its items in `LIST_FIELDS`, and its private state in `_STATE` too;
+a name it annotates takes a write as well. A private field behind a property of
+its own name is saved as the property; `SAVED_NAMES`, `{field: saved name}`,
+saves one under another name, such as a field behind a property named
+differently, and keeps a field mapped to itself, `{"_count": "_count"}`, under
+its own name, for a property `count` that does not read it. Only cgmath modules
+are imported on demand, so a class of your own must be imported before a file
+that names it is loaded.
 
 ```python
 import os
