@@ -250,6 +250,7 @@ fps
 frame                              
 frame_count                        
 frames                             
+rest_pose                          the pose the clip's file holds outside its take, or None
 start_frame                        
 ```
 
@@ -270,6 +271,8 @@ classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, animat
     builds a clip from a glb's animation
 save_fbx(self, filename, zero_root=False, as_ascii=False)
     saves the bound frame to a .fbx file, binary unless as_ascii is set
+strip_namespace(self, namespace: 'Optional[str]' = None) -> 'None'
+    ``strip_namespace()`` on every node and the rest pose's, all or nothing.
 to_dict(self) -> 'dict'
     The list as a tree. A view saves as the hierarchy :meth:`copy`
 ```

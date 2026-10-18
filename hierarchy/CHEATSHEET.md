@@ -1612,11 +1612,13 @@ back = HierarchyData.load_fbx(os.path.join(WORKDIR, "arrays.fbx"))
 assert "weights" not in back["hip"].user_defined_attributes
 ```
 
-Reading the same file as an animation gives a clip.
+Reading the same file as an animation gives a clip, and with it the
+file's static pose, `clip.rest_pose`.
 
 ```python
 clip = ClipData.load_fbx(path)
 assert isinstance(clip, ClipData) and clip.frame_count == 1
+assert clip.rest_pose.name == clip.name == HierarchyData.load_fbx(path).name
 ```
 
 `ClipData.load_fbx` reads each translate, rotate and scale curve's keys
@@ -1857,6 +1859,16 @@ own: a `start_frame` passed alone no longer moves the end, which stays
 the take's last frame (cgmath 2 kept the take's length instead), and one
 past that frame raises `ValueError` naming it.
 
+`clip.rest_pose` is the pose the file holds outside its take, the nodes'
+own values: a `HierarchyData` with the clip's names and node order, taken
+from the same read and loaded as `HierarchyData.load_fbx` loads the file,
+in the same unit and axes. For an Unreal animation it is the skeleton's
+bind pose, which frame 0 can be far from. It is saved with the clip, a
+`copy()` or a cut of frames (`clip.frames[10:20]`) holds a copy of it, and
+`strip_namespace()` on the clip strips it too. A clip the constructor,
+`from_poses`, `load_glb` or the pose algebra (`get_delta`, `add_delta`)
+builds holds `None`.
+
 ---
 
 ## Serialization
@@ -1947,7 +1959,9 @@ sorted(tree["__items__"][1])
 A `ClipData` saves its timebase beside the items, named as its properties:
 `start_frame`, `fps`, `frame` (the loaded frame, which a load scrubs back
 to), and `blocks`, one `(F, N, 3)` array per framed channel, each keyed by
-the channel's property.
+the channel's property. A clip holding a `rest_pose` saves it as well,
+under `rest_pose`, as a hierarchy's tree; one holding none saves no such
+entry.
 
 ```python
 sorted(clip.to_dict())
@@ -1955,10 +1969,17 @@ sorted(clip.to_dict())
 clip.to_dict()["blocks"]["translate"].shape     # (4, 3, 3)
 ```
 
-`copy()` is deep and owning; `==` compares values, and on a clip it also
-compares the timebase, the loaded frame and every block.
+`copy()` is deep and owning, and its nodes keep their uuids. `==` on a
+hierarchy compares its nodes by uuid, not their channels. On a clip it
+also compares the timebase, the loaded frame and every block by value,
+and the rest pose as a hierarchy compares: whether there is one, and its
+nodes' uuids.
 
 ```python
+moved               = rig.copy()
+moved["hip"].rotate = (0.0, 90.0, 0.0)
+assert moved == rig                             # the same nodes, by uuid
+
 twin = clip.copy()
 assert twin == clip
 twin.frame = 2
@@ -1966,6 +1987,13 @@ assert twin != clip                             # another frame is loaded
 twin.frame = clip.frame
 twin.frames.rotate = np.full((4, 3, 3), 45.0)
 assert twin != clip
+
+twin           = clip.copy()
+twin.rest_pose = moved
+assert twin != clip                             # a rest pose, against none
+other                         = twin.copy()
+other.rest_pose["hip"].rotate = (0.0, 0.0, 45.0)
+assert other == twin                            # its nodes, by uuid
 ```
 
 Two more helpers from the base class:

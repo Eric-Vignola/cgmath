@@ -426,6 +426,144 @@ class TestClipFiles(unittest.TestCase):
         self.assertNotEqual(other, self.clip)
 
 
+class TestClipRestPose(unittest.TestCase):
+    """clip.rest_pose: saved when set, copied with the clip and its cuts,
+    stripped with it, None wherever new animation is built"""
+
+    def setUp(self):
+        super().setUp()
+        self.clip                  = ClipData(chain(4), frames=3, start_frame=1001, fps=30.0)
+        self.clip.frames.translate = np.arange(3 * 4 * 3, dtype=float).reshape(3, 4, 3)
+        self.clip.frame            = 1
+
+        self.rest           = chain(4)
+        self.rest.rotate    = [[5.0, 0.0, 0.0]] * 4
+        self.clip.rest_pose = self.rest
+
+        self.rest["j3"].user_defined_attributes = {"note": {"dataType": "string", "value": "kept"}}
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_a_clip_saves_its_rest_pose(self):
+        tree = self.clip.to_dict()
+        self.assertIn("rest_pose", tree)
+        self.assertEqual(tree["rest_pose"]["__class__"], "cgmath.hierarchy.hierarchy.HierarchyData")
+
+        loaded = {"pickle": pickle.loads(pickle.dumps(self.clip)), "tree": ClipData.from_dict(tree)}
+        for mode in ("json", "npz", "pkl"):
+            loaded[mode] = ClipData.load(self.clip.save(os.path.join(self.tmp.name, f"clip.{mode}")))
+        for how, clip in loaded.items():
+            with self.subTest(how):
+                self.assertEqual(clip, self.clip)
+                self.assertIs(type(clip.rest_pose), HierarchyData)
+                self.assertEqual(clip.rest_pose, self.rest)
+                self.assertEqual(clip.rest_pose.name, self.rest.name)
+                self.assertEqual(clip.rest_pose["j3"].user_defined_attributes["note"]["value"], "kept")
+                self.assertTrue(np.array_equal(clip.rest_pose.rotate, self.rest.rotate))
+                self.assertTrue(np.array_equal(clip.rest_pose.world_matrix, self.rest.world_matrix))
+
+    def test_a_clip_with_none_saves_as_it_did_before(self):
+        """no "rest_pose" entry, so a file without one loads to None"""
+        self.clip.rest_pose = None
+        self.assertEqual(
+            sorted(self.clip.to_dict()),
+            ["__class__", "__items__", "blocks", "fps", "frame", "start_frame"],
+        )
+        path = self.clip.save(os.path.join(self.tmp.name, "bare.json"))
+        self.assertIsNone(ClipData.load(path).rest_pose)
+
+    def test_a_copy_and_a_cut_hold_a_copy_of_it(self):
+        made = {
+            "copy":     self.clip.copy(),
+            "deepcopy": copy.deepcopy(self.clip),
+            "shallow":  copy.copy(self.clip),
+            "cut":      self.clip.frames[1:3],
+            "reversed": self.clip.frames[::-1],
+        }
+        for how, clip in made.items():
+            with self.subTest(how):
+                self.assertEqual(clip.rest_pose, self.rest)
+                self.assertIsNot(clip.rest_pose, self.rest)
+                self.assertTrue(np.array_equal(clip.rest_pose.rotate, self.rest.rotate))
+                self.assertTrue(np.array_equal(clip.rest_pose.translate, self.rest.translate))
+                clip.rest_pose["j1"].rotate = [0.0, 45.0, 0.0]
+                self.assertTrue(np.array_equal(self.rest["j1"].rotate, [5.0, 0.0, 0.0]))
+
+    def test_new_animation_holds_none(self):
+        """the constructor, from_poses and the pose algebra build animation
+        that the rest pose does not describe"""
+        rig   = chain(4)
+        delta = self.clip.get_delta(rig)
+        built = {
+            "constructor": ClipData(self.clip, frames=2),
+            "from_poses":  ClipData.from_poses([rig, rig]),
+            "get_delta":   delta,
+            "minus":       self.clip.frames - rig,
+            "add_delta":   rig.add_delta(delta.frames),
+            "clip add":    self.clip.add_delta(delta),
+        }
+        for how, clip in built.items():
+            with self.subTest(how):
+                self.assertIsInstance(clip, ClipData)
+                self.assertIsNone(clip.rest_pose)
+
+        # in place, the clip keeps its own
+        self.clip.frames -= rig
+        self.assertIs(self.clip.rest_pose, self.rest)
+
+    def test_strip_namespace_strips_the_rest_pose_too(self):
+        for clip_like in (self.clip, self.rest):
+            for node in clip_like:
+                node.name = f"ns:{node.name}"
+
+        self.clip.strip_namespace()
+
+        self.assertEqual(self.clip.name, ["j0", "j1", "j2", "j3"])
+        self.assertEqual(self.rest.name, ["j0", "j1", "j2", "j3"])
+
+    def test_strip_namespace_is_all_or_nothing_across_both(self):
+        """a clash in either leaves both as they were"""
+        for clash_in in ("rest", "clip"):
+            with self.subTest(clash_in=clash_in):
+                clip = self.clip.copy()
+                for node in list(clip) + list(clip.rest_pose):
+                    node.name = f"ns:{node.name}"
+                held               = clip.rest_pose if clash_in == "rest" else clip
+                held["ns:j2"].name = "j1"  # ns:j1 would become a second j1
+                names              = (list(clip.name), list(clip.rest_pose.name))
+
+                with self.assertRaisesRegex(ValueError, "more than one item"):
+                    clip.strip_namespace()
+
+                self.assertEqual((clip.name, clip.rest_pose.name), names)
+
+    def test_equality_includes_the_rest_pose(self):
+        """as a hierarchy compares: by its nodes, one of another uuid differs"""
+        other = self.clip.copy()
+        self.assertEqual(other, self.clip)
+
+        other.rest_pose = chain(4)
+        self.assertNotEqual(other, self.clip)
+
+        other.rest_pose = None
+        self.assertNotEqual(other, self.clip)
+
+    def test_only_one_pose_is_a_rest_pose(self):
+        """a HierarchyData or None; not a clip, a view or a list"""
+        for value in (self.clip.copy(), self.rest.match("j1"), list(self.rest), "rest"):
+            with self.subTest(value=type(value).__name__):
+                with self.assertRaisesRegex(TypeError, "rest_pose is a HierarchyData or None"):
+                    self.clip.rest_pose = value
+                self.assertIs(self.clip.rest_pose, self.rest)
+
+        # nor from a file
+        tree              = self.clip.to_dict()
+        tree["rest_pose"] = self.clip.copy().to_dict()
+        with self.assertRaisesRegex(TypeError, "rest_pose is a HierarchyData or None, not a ClipData"):
+            ClipData.from_dict(tree)
+
+
 def joint_chain(count=4):
     """a chain of joints, which is what the orient helpers act on"""
     ids = [hierarchy.generate_uuid() for _ in range(count)]
@@ -6561,6 +6699,59 @@ class TestClipLoadFbx(unittest.TestCase):
         self.assertTrue(np.array_equal(clip.get_parents(), rig.get_parents()))
         self.assertTrue(np.allclose(clip.frames.translate[0], rig.translate))
 
+    def test_the_rest_pose_is_the_static_pose_of_the_same_read(self):
+        """the nodes' own values, not frame 0: HierarchyData.load_fbx's rig,
+        channel for channel, with the clip's names, order and uuids, from the
+        one read the clip does, in cm, or by the caller's factor"""
+        keys = {
+            "joint1": {"tx": [(0.0, 5.0), (1.0, 9.0)]},
+            "joint2": {"rz": [(0.0, 30.0), (1.0, 60.0)]},
+        }
+        real = hierarchy.hierarchy.open_fbx
+        for unit, options, factor in (("m", {}, 100.0), ("cm", {}, 1.0), ("m", {"scale_factor": 3.0}, 3.0)):
+            with self.subTest(unit=unit, **options):
+                path = self.authored(
+                    name   = f"rest_{unit}_{factor}.fbx",
+                    joints = ("joint1", "joint2"),
+                    keys   = keys,
+                    unit   = unit,
+                )
+                reads = []
+
+                def counted(*args, **kwargs):
+                    reads.append(args[0])
+                    return real(*args, **kwargs)
+
+                with mock.patch.object(hierarchy.hierarchy, "open_fbx", counted):
+                    clip = ClipData.load_fbx(path, fps=4.0, **options)
+                rig  = HierarchyData.load_fbx(path, **options)
+                rest = clip.rest_pose
+
+                self.assertEqual(reads, [path])
+                self.assertIs(type(rest), HierarchyData)
+                self.assertEqual((rest.name, rest.uuid), (clip.name, clip.uuid))
+                self.assertEqual(rest.name, rig.name)
+                for channel in ("translate", "rotate", "scale", "joint_orient", "rotate_axis"):
+                    self.assertTrue(np.array_equal(getattr(rest, channel), getattr(rig, channel)), channel)
+                self.assertTrue(np.allclose(rest["joint1"].translate, [0.0, factor, 0.0]))
+                self.assertTrue(np.allclose(rest["joint2"].rotate, 0.0))
+
+                # the premise: frame 0 is the take's, off the static pose
+                self.assertTrue(np.allclose(clip.frames.translate[0, 0], [5.0 * factor, factor, 0.0]))
+                self.assertTrue(np.allclose(clip.frames.rotate[0, 1], [0.0, 0.0, 30.0]))
+
+    def test_a_file_with_no_take_rests_on_its_one_frame(self):
+        path = self.authored(joints=("joint1", "joint2"), stacks=0)
+
+        clip = ClipData.load_fbx(path)
+        rig  = HierarchyData.load_fbx(path)
+
+        self.assertEqual(clip.frame_count, 1)
+        self.assertEqual(clip.rest_pose.name, rig.name)
+        self.assertTrue(np.array_equal(clip.rest_pose.world_matrix, rig.world_matrix))
+        self.assertTrue(np.array_equal(clip.frames.world_matrix[0], rig.world_matrix))
+        self.assertIsNot(clip.rest_pose.list[0], clip.list[0])
+
     def test_bad_arguments_refuse(self):
         path = self.authored(keys={"joint1": {"tx": [(0.0, 0.0), (1.0, 1.0)]}})
 
@@ -6790,6 +6981,19 @@ class TestFbxLoadsInMayaAxes(unittest.TestCase):
                 clip = ClipData.load_fbx(still)
                 self.assertEqual(clip.frame_count, 1)
                 self.assertWorlds(self.rig_worlds(clip), self.truth(still))
+
+    def test_the_rest_pose_is_where_the_sdk_puts_the_static_pose(self):
+        """turned as the rig is: the sdk's static worlds after ConvertScene,
+        and the file's own with axis_system=None"""
+        for label, axes in self.right_handed():
+            with self.subTest(axes=label):
+                path = self.authored(axes, name=f"{label}.fbx")
+
+                maya = ClipData.load_fbx(path).rest_pose
+                file = ClipData.load_fbx(path, axis_system=None).rest_pose
+
+                self.assertWorlds(self.rig_worlds(maya), self.truth(path))
+                self.assertWorlds(self.rig_worlds(file), self.truth(path, convert=False))
 
     @staticmethod
     def stored_axes(path):

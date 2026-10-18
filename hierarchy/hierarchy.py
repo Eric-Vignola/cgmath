@@ -9179,6 +9179,15 @@ class _FrameAxis:
         return out
 
 
+def _check_rest_pose(value) -> None:
+    """refuses a clip's rest pose that is not None or one pose: a
+    :class:`HierarchyData`, not a view and not a clip"""
+    if value is not None and (not isinstance(value, HierarchyData) or isinstance(value, ClipData)):
+        raise TypeError(
+            f"a clip's rest_pose is a HierarchyData or None, not a {type(value).__name__}"
+        )
+
+
 class ClipData(HierarchyData):
     """A HierarchyData holding F poses rather than one.
 
@@ -9254,11 +9263,12 @@ class ClipData(HierarchyData):
         "_joint_orient",
     )
 
-    # saved beside the nodes: the timebase, the loaded frame and one (F, N, 3)
-    # block per framed channel, keyed by channel. A file names them as their
-    # properties, start_frame, fps and frame, and the blocks, which have none,
-    # "blocks", each keyed by its channel's property, "translate"
-    LIST_FIELDS = ("_start_frame", "_fps", "_frame", "_blocks")
+    # saved beside the nodes: the timebase, the loaded frame, one (F, N, 3)
+    # block per framed channel, keyed by channel, and the rest pose. A file
+    # names them as their properties, start_frame, fps, frame and rest_pose,
+    # and the blocks, which have none, "blocks", each keyed by its channel's
+    # property, "translate". A clip with no rest pose saves no "rest_pose"
+    LIST_FIELDS = ("_start_frame", "_fps", "_frame", "_blocks", "_rest_pose")
     SAVED_NAMES = {"_blocks": "blocks"}
 
     def __init__(
@@ -9273,6 +9283,7 @@ class ClipData(HierarchyData):
         self._frame       = 0
         self._start_frame = int(start_frame)
         self._fps         = float(fps)
+        self._rest_pose   = None
 
         # a clip owns its nodes: adopting the caller's rig would empty it
         nodes = [] if iterable is None else [node.copy() for node in iterable]
@@ -9411,6 +9422,31 @@ class ClipData(HierarchyData):
                 "clip.frames[:] = other or clip.frames.rotate = values"
             )
 
+    # --- rest pose --- #
+    @property
+    def rest_pose(self) -> Optional[HierarchyData]:
+        """the pose the clip's file holds outside its take, or None
+
+        A :class:`HierarchyData`, which :meth:`load_fbx` sets: the nodes'
+        own values, with the clip's names and node order and loaded as
+        :meth:`HierarchyData.load_fbx` loads the file, from the same read.
+        For an Unreal animation that is the skeleton's bind pose. It is
+        saved with the clip, and a copy or a cut of frames
+        (``clip.frames[10:20]``) holds a copy of it. It is None on a clip
+        the constructor, :meth:`from_poses` or :meth:`load_glb` builds, on
+        one the pose algebra builds (:meth:`get_delta`, :meth:`add_delta`),
+        which holds new animation, and on a saved clip that held none.
+        ``strip_namespace()`` on the clip strips its names too; any other
+        edit of the clip leaves it as it is. A :class:`HierarchyData` set
+        here is held as it is, not copied.
+        """
+        return self._rest_pose
+
+    @rest_pose.setter
+    def rest_pose(self, value: Optional[HierarchyData]) -> None:
+        _check_rest_pose(value)
+        self._rest_pose = value
+
     # --- construction --- #
     @classmethod
     def from_poses(cls, poses, start_frame: int = 0, fps: float = 24.0) -> "ClipData":
@@ -9455,6 +9491,7 @@ class ClipData(HierarchyData):
         clip._frame       = 0
         clip._start_frame = int(start_frame)
         clip._fps         = float(fps)
+        clip._rest_pose   = None
         clip.list         = hierarchy.list
         hierarchy.list    = []
         for node in clip.list:
@@ -9469,9 +9506,11 @@ class ClipData(HierarchyData):
         What an owned copy of a selection does, so what the single pose
         algebra starts from: a delta taken off a clip of part of a rig makes
         such a node a root. A copy's nodes join it as any node joins a
-        hierarchy, so the copy is one already.
+        hierarchy, so the copy is one already. It holds no rest pose: what
+        the algebra builds on it is new animation, which the file's rest
+        pose does not describe.
         """
-        return self.copy()
+        return self._copy_frames()
 
     # --- pose algebra --- #
     @staticmethod
@@ -9876,7 +9915,8 @@ class ClipData(HierarchyData):
 
         The cut always copies. A plain stride would give a numpy view but a
         negative one would not, and a result that sometimes writes back
-        through to the parent is worse than one that never does.
+        through to the parent is worse than one that never does. The cut
+        holds a copy of the rest pose, which every frame of the file shares.
         """
         self._realign()
         first = span.indices(self.frame_count)[0]
@@ -9884,12 +9924,19 @@ class ClipData(HierarchyData):
         new = self.__class__(
             self.list, start_frame=self._start_frame + first, fps=self._fps
         )
-        new._blocks  = {c: np.array(b[span]) for c, b in self._blocks.items()}
-        new._columns = list(self._columns)
+        new._blocks    = {c: np.array(b[span]) for c, b in self._blocks.items()}
+        new._columns   = list(self._columns)
+        new._rest_pose = self._rest_pose_copy()
         new._bind(0)
         return new
 
     def copy(self) -> "ClipData":
+        new            = self._copy_frames()
+        new._rest_pose = self._rest_pose_copy()
+        return new
+
+    def _copy_frames(self) -> "ClipData":
+        """a copy of the nodes, the timebase and every frame, with no rest pose"""
         self._realign()
         new         = self.__class__(self.list, start_frame=self._start_frame, fps=self._fps)
         new._blocks = {c: b.copy() for c, b in self._blocks.items()}
@@ -9899,6 +9946,11 @@ class ClipData(HierarchyData):
         new._columns = list(self._columns)
         new._bind(self._frame)
         return new
+
+    def _rest_pose_copy(self) -> Optional[HierarchyData]:
+        """a copy of the rest pose, for a copy or a cut of the clip; None when
+        the clip holds none"""
+        return None if self._rest_pose is None else self._rest_pose.copy()
 
     def __deepcopy__(self, memo):
         # the blocks, columns and bound frame come only through copy()
@@ -10043,6 +10095,14 @@ class ClipData(HierarchyData):
         Y-up loads as it is, a left handed one raises ValueError, and
         ``axis_system=None`` keeps the file's own axes.
 
+        The clip's :attr:`rest_pose` is the file's static pose, the nodes'
+        own values outside the take (the world matrices
+        ``FbxNode.EvaluateGlobalTransform`` gives with no time), taken from
+        the same read: a :class:`HierarchyData` with the clip's names and
+        node order, loaded as :meth:`HierarchyData.load_fbx` loads the file,
+        in the same unit and axes. For an Unreal animation it is the
+        skeleton's bind pose, which frame 0 can be far from.
+
         The three local channels are sampled separately rather than
         decomposed out of ``EvaluateLocalTransform``: that matrix has already
         folded in joint orient, rotate axis and the inherit type, so pulling
@@ -10168,14 +10228,21 @@ class ClipData(HierarchyData):
             scale_factor = _fbx_scale_factor(scene, scale_factor)
             hierarchy_data, nodes = _walk_fbx(scene, scale_factor)
 
+            # the rest pose, the file's static pose from this same read, as
+            # HierarchyData.load_fbx loads it: turned on a copy of the dicts,
+            # since the clip's rig is built from them in the file's own axes
+            rest = copy.deepcopy(hierarchy_data)
+            if turn is not None:
+                _fbx_turn_walk(rest, turn)
+            rest = HierarchyData.from_dict(rest)
+
             criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimStack.ClassId)
             count    = scene.GetSrcObjectCount(criteria)
 
             if not count:
-                if turn is not None:
-                    _fbx_turn_walk(hierarchy_data, turn)
-                rig = HierarchyData.from_dict(hierarchy_data)
-                return cls(rig, frames=1, start_frame=start_frame or 0, fps=fps or 24.0)
+                clip            = cls(rest, frames=1, start_frame=start_frame or 0, fps=fps or 24.0)
+                clip._rest_pose = rest
+                return clip
 
             # the file's own axes, turned once every frame is sampled
             rig = HierarchyData.from_dict(hierarchy_data)
@@ -10263,6 +10330,7 @@ class ClipData(HierarchyData):
         clip.frames.rotate    = rotate
         clip.frames.translate = translate
         clip.frame            = 0
+        clip._rest_pose       = rest
         return clip
 
     def save_fbx(self, filename, zero_root=False, as_ascii=False):
@@ -10294,6 +10362,9 @@ class ClipData(HierarchyData):
         blocks = tree.get("blocks")
         if isinstance(blocks, dict):
             tree["blocks"] = {self._channel_name(c): block for c, block in blocks.items()}
+        # a clip with no rest pose saves as one did before it had any
+        if tree.get("rest_pose", ...) is None:
+            del tree["rest_pose"]
         return tree
 
     @classmethod
@@ -10324,8 +10395,11 @@ class ClipData(HierarchyData):
         ValueError
             The blocks are not one (F, N, 3) array per framed channel, all
             of the same F, N the node count.
+        TypeError
+            The rest pose is not a :class:`HierarchyData`, or is a clip.
         """
         super()._post_load()
+        _check_rest_pose(self._rest_pose)
 
         # a channel is named as a file names it: "translate"
         count  = len(self.list)
@@ -10365,8 +10439,28 @@ class ClipData(HierarchyData):
         self._frame       = int(self._frame) if blocks else 0
         self._bind(self._frame)
 
+    def strip_namespace(self, namespace: Optional[str] = None) -> None:
+        """
+        ``strip_namespace()`` on every node and the rest pose's, all or nothing.
+
+        When either would give one name to two nodes, ValueError lists them
+        and neither is renamed.
+        """
+        rest = self._rest_pose
+        if rest is None:
+            return super().strip_namespace(namespace)
+
+        names = [(node, node.name) for node in rest.list]
+        rest.strip_namespace(namespace)
+        try:
+            super().strip_namespace(namespace)
+        except BaseException:
+            for node, name in names:
+                node.name = name
+            raise
+
     def __eq__(self, other) -> bool:
-        """the same nodes, timebase, loaded frame and blocks"""
+        """the same nodes, timebase, loaded frame, blocks and rest pose"""
         if not isinstance(other, ClipData):
             return False
 
