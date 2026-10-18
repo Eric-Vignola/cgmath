@@ -7744,9 +7744,27 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         ("tilt", "uneven", "joint"),
         ("tiltkid", "tilt", "joint"),
         ("tiltloc", "tilt", "locator"),
+        ("tiltpin", "tiltloc", "locator"),
+        ("bend", "tilt", None),
+        ("bendkid", "bend", "joint"),
+        ("bendpin", "bendkid", "locator"),
+        ("bendcomp", "bend", "joint"),
+        ("swell", "tilt", None),
+        ("swellkid", "swell", "joint"),
+        ("swellpin", "swellkid", "locator"),
+        ("tiltfree", "tilt", "joint"),
+        ("freepin", "tiltfree", "locator"),
+        ("ptilt", "uneven", "joint"),
+        ("ptkid", "ptilt", "locator"),
         ("nudge", "lodgrp", "transform"),
         ("ntilt", "nudge", "joint"),
+        ("ramp", "lodgrp", "transform"),
+        ("rtilt", "ramp", "joint"),
+        ("rkid", "rtilt", "joint"),
     )
+
+    # the uneven scale of "ramp", keyed: even on frame 0 and from frame 5
+    RAMP = ((1, 2, 2, 2, 2, 1, 1, 1, 1), (1, 0.5, 0.5, 0.5, 0.5, 1, 1, 1, 1))
 
     # the post rotation under which the sdk places a view's children where
     # Maya's importer does (probe_views.py), rotation active, as Maya reads
@@ -7788,10 +7806,19 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         rotation inactive, as the sdk makes one, each holding a node.
         ``sheared`` adds a joint that does not compensate, turned under the
         uneven group, which no node can hold, spinning 50 degrees a frame,
-        and a joint that compensates it and a locator under it; and under
-        the LOD group a group scaled a hair unevenly, (1, 1.0001, 1),
-        holding a joint turned in it. ``unit`` names the file's
-        ``FbxSystemUnit``, cm when None"""
+        and under it a joint that compensates it, a locator turned and
+        scaled (2, 1, 3) holding a locator, a node with no attribute,
+        turned and moved, holding a joint scaled (1, 1.5, 2) with a post
+        rotation holding a locator and a joint that compensates it, a node
+        with no attribute, turned and scaled 2, holding a joint holding a
+        locator, and a joint with a post rotation holding a locator, those
+        three joints not compensating their parent's scale; a twin of that
+        joint with a pre and a post rotation, spinning 10 degrees a frame,
+        holding a locator; and under the LOD group a group scaled a hair
+        unevenly, (1, 1.0001, 1), holding a joint turned in it, and a group
+        turned 30 degrees whose scale is keyed uneven on frames 1 to 4 alone
+        (:attr:`RAMP`), holding a joint turned in it and a joint under that.
+        ``unit`` names the file's ``FbxSystemUnit``, cm when None"""
         path    = os.path.join(self.tmp.name, name)
         manager = FBX.FbxManager.Create()
         manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
@@ -7879,9 +7906,26 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         if sheared:
             node("tilt", "uneven", "joint", (0.5, 0, 0), (0, 0, 45), compensate=False)
             node("tiltkid", "tilt", "joint", (0, 1, 0), (0, 0, 30))
-            node("tiltloc", "tilt", "locator", (0.3, 0.6, 0.9))
+            node("tiltloc", "tilt", "locator", (0.3, 0.6, 0.9), (0, 0, 45), (2, 1, 3))
+            node("tiltpin", "tiltloc", "locator", (0.2, 0.4, 0.5), (15, 0, 0))
+            node("bend", "tilt", None, (0.2, 0.7, -0.4), (0, 30, 20))
+            node("bendkid", "bend", "joint", (0.6, 0.1, 0.3), (10, 0, 0), (1, 1.5, 2), post=(0, 20, 15),
+                 compensate=False)
+            node("bendpin", "bendkid", "locator", (0.4, -0.2, 0.3))
+            node("bendcomp", "bend", "joint", (-0.3, 0.5, 0.2), (0, 0, 25))
+            node("swell", "tilt", None, (0.1, 0.2, 0.3), (0, 10, 40), (2, 2, 2))
+            node("swellkid", "swell", "joint", (0.3, 0.1, 0.2), (0, 0, 15), compensate=False)
+            node("swellpin", "swellkid", "locator", (0.4, -0.2, 0.3))
+            node("tiltfree", "tilt", "joint", (0.3, 0.2, 0.1), (0, 0, 35), post=(0, 0, 20), compensate=False)
+            node("freepin", "tiltfree", "locator", (0.5, 0.5, 0))
+            node("ptilt", "uneven", "joint", (-0.5, 0.2, 0), (0, 0, 45), pre=(10, 0, 0), post=(0, 20, 0),
+                 compensate=False)
+            node("ptkid", "ptilt", "locator", (0.3, 0.6, 0.9))
             node("nudge", "lodgrp", "transform", (0, 0, 2), s=(1, 1.0001, 1))
             node("ntilt", "nudge", "joint", (0.5, 0, 0), (0, 0, 45), compensate=False)
+            node("ramp", "lodgrp", "transform", (0, -1, 0), (0, 0, 30))
+            node("rtilt", "ramp", "joint", (0.5, 0, 0), (0, 0, 45), compensate=False)
+            node("rkid", "rtilt", "joint", (0, 1, 0), (0, 0, 30))
         node("rootloc", None, "locator", (1, 0, 0), (0, 30, 0), pre=(10, 0, 0), post=(0, 0, 25))
         node("mirror", None, "transform", (1, 2, 3), (0, 0, 20), (-1, 1, 1))
         node("mfree", "mirror", "joint", (0, 5, 0), (10, 20, 30), pre=(5, 0, 0), compensate=False)
@@ -7912,7 +7956,10 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
                 ("uneven", "LclRotation", "Z", 30.0, 90.0),
                 ("mirror", "LclRotation", "Z", 20.0, 60.0),
                 ("pj", "LclRotation", "Z", 30.0, 60.0),
-            ) + ((("tilt", "LclRotation", "Z", 45.0, 445.0),) if sheared else ()):
+            ) + (
+                (("tilt", "LclRotation", "Z", 45.0, 445.0), ("ptilt", "LclRotation", "Z", 45.0, 125.0))
+                if sheared else ()
+            ):
                 curve = getattr(made[name], prop).GetCurve(layer, axis, True)
                 curve.KeyModifyBegin()
                 for frame in range(self.FRAMES):
@@ -7920,6 +7967,16 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
                     time.SetSecondDouble(frame / 24.0)
                     key = curve.KeyAdd(time)[0]
                     curve.KeySetValue(key, first + (end - first) * frame / (self.FRAMES - 1))
+                    curve.KeySetInterpolation(key, linear)
+                curve.KeyModifyEnd()
+            for axis, values in zip("YZ", self.RAMP if sheared else ()):
+                curve = made["ramp"].LclScaling.GetCurve(layer, axis, True)
+                curve.KeyModifyBegin()
+                for frame, value in enumerate(values):
+                    time = FBX.FbxTime()
+                    time.SetSecondDouble(frame / 24.0)
+                    key = curve.KeyAdd(time)[0]
+                    curve.KeySetValue(key, float(value))
                     curve.KeySetInterpolation(key, linear)
                 curve.KeyModifyEnd()
 
@@ -8154,10 +8211,22 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         locator, unturned, take it in their scale. One turned under it
         would need shear: its position and the length of each of its axes
         are the file's, which way they point is not, and the nodes under it
-        take the shear it drops, so a joint compensating it and a locator
-        under it are at the file's positions, on the rig and on every frame
-        of the clip; its rotate, spinning 50 degrees a frame, is solved again
-        and filtered. A sliver of uneven scale, 1e-4, is split the same way"""
+        take the shear it drops, so a joint compensating it, a locator and
+        a joint under it, a joint under a dropped node turned under it and
+        one under a dropped node scaled 2, and the locators under those,
+        are at the file's positions, on the rig and on every frame of the
+        clip; the locator, the joint under it and the joint under the turned
+        node, which do not compensate, the joints with a post rotation,
+        hold the file's own rotate and scale, the locator's own z axis the
+        file's length, and the locator and the joint under the turned node
+        are scaled unevenly, so the locators under them are where the file
+        puts them only with each one's own scale in what it hands on; its
+        rotate, spinning 50 degrees a frame, is solved again and filtered.
+        A twin with a pre and a post rotation (a joint orient and a rotate
+        axis) splits as the matrix setter splits the file's world, and the
+        locator under it is at the file's position; under a group uneven on
+        frames 1 to 4 alone, the nodes are at the file's positions on every
+        frame. A sliver of uneven scale, 1e-4, is split the same way"""
         path = self.authored(sheared=True)
 
         rig  = HierarchyData.load_fbx(path, axis_system=None, node_types=("joint", "locator"))
@@ -8177,10 +8246,55 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         clip   = ClipData.load_fbx(path, axis_system=None, node_types=("joint", "locator"))
         frames = self.truth(path, self.FRAMES, convert=False)
         worlds = self.clip_worlds(clip)
-        for name in ("tilt", "tiltkid", "tiltloc"):
+        for name in (
+            "tilt", "tiltkid", "tiltloc", "tiltpin", "bendkid", "bendpin", "bendcomp", "swellkid", "swellpin",
+            "tiltfree", "freepin", "ptilt", "ptkid", "rtilt", "rkid",
+        ):
             with self.subTest(name):
                 self.assertTrue(np.allclose(rig[name].world_matrix[3], want[name][3], rtol=0.0, atol=1e-9))
                 self.assertTrue(np.allclose(worlds[name][:, 3], frames[name][:, 3], rtol=0.0, atol=1e-9))
+
+        # a joint that compensates the sheared one takes the shear in its
+        # channels, its axes the file's length
+        for name in ("tiltkid", "bendcomp"):
+            with self.subTest(name):
+                lengths = np.linalg.norm(frames[name][:, :3, :3], axis=-1)
+                self.assertTrue(np.allclose(np.linalg.norm(worlds[name][:, :3, :3], axis=-1), lengths, rtol=0.0, atol=1e-9))
+                lengths = np.linalg.norm(want[name][:3, :3], axis=-1)
+                self.assertTrue(np.allclose(np.linalg.norm(rig[name].world_matrix[:3, :3], axis=-1), lengths, rtol=0.0, atol=1e-9))
+
+        # a node that does not compensate keeps its own channels under the
+        # sheared joint, the shear in its translate alone: a locator, a
+        # joint under it and one under a dropped node turned under it
+        for name, rotate, scale in (
+            ("tiltloc", (0.0, 0.0, 45.0), (2.0, 1.0, 3.0)),
+            ("tiltfree", (0.0, 0.0, 35.0), (1.0, 1.0, 1.0)),
+            ("bendkid", (10.0, 0.0, 0.0), (1.0, 1.5, 2.0)),
+        ):
+            column = clip.index(name)
+            for channel, value in (("rotate", rotate), ("scale", scale)):
+                with self.subTest(name, channel=channel):
+                    self.assertTrue(np.array_equal(getattr(rig[name], channel), value))
+                    self.assertTrue(np.array_equal(getattr(clip.frames, channel)[:, column], np.tile(value, (self.FRAMES, 1))))
+        length = np.linalg.norm(frames["tiltloc"][:, 2, :3], axis=-1)
+        self.assertTrue(np.allclose(np.linalg.norm(worlds["tiltloc"][:, 2, :3], axis=-1), length, rtol=0.0, atol=1e-12))
+        self.assertTrue(np.allclose(np.linalg.norm(rig["tiltloc"].world_matrix[2, :3]), np.linalg.norm(want["tiltloc"][2, :3])))
+        self.assertGreater(np.abs(worlds["tiltloc"] - frames["tiltloc"]).max(), 0.01)
+
+        # the twin's split is the matrix setter's, its rotate axis and joint
+        # orient kept: its world written through the setter comes back as read
+        split                       = HierarchyData.load_fbx(path, axis_system=None, node_types=("joint", "locator"))
+        split["ptilt"].world_matrix = want["ptilt"]
+        self.assertTrue(np.allclose(split["ptilt"].world_matrix, rig["ptilt"].world_matrix, rtol=0.0, atol=1e-9))
+        self.assertGreater(np.abs(rig["ptilt"].world_matrix - want["ptilt"]).max(), 0.01)
+        self.assertFalse(np.allclose(rig["ptilt"].rotate_axis, 0.0) or np.allclose(rig["ptilt"].joint_orient, 0.0))
+
+        # the ramp's scale is even on frame 0 and from frame 5: the joint
+        # under it sheared on frames 1 to 4 alone, held there as the file's
+        ramp = np.array(self.RAMP)
+        self.assertTrue(np.all((ramp[:, 1:5] != 1.0).all(axis=0)) and np.all(ramp[:, [0, 5, 6, 7, 8]] == 1.0))
+        self.assertTrue(np.allclose(worlds["rtilt"][[0, 5, 6, 7, 8]], frames["rtilt"][[0, 5, 6, 7, 8]], rtol=0.0, atol=1e-9))
+        self.assertGreater(np.abs(worlds["rtilt"][1:5] - frames["rtilt"][1:5]).max(), 0.01)
 
         spin = clip.frames.rotate[:, clip.index("tilt")]
         self.assertLess(np.abs(np.diff(spin, axis=0)).max(), 90.0)

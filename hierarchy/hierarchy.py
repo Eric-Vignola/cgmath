@@ -3158,10 +3158,17 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
       rotation in place of U, and the scale and the rotate are split out
       of the rest as the matrix setter splits them, shear dropped. What it
       drops, the block it should hold times the inverse of the one it
-      holds (:func:`_fbx_fold_shear`), goes on the kept nodes under it as
-      a dropped node's matrix does, so they stay where the file puts them,
-      under a scale under 1e-12 too; on a frame it is scaled exactly 0
-      along an axis the shear has no inverse and stays out of them.
+      holds (:func:`_fbx_fold_shear`), goes on the kept nodes under it, so
+      they stay where the file puts them, under a scale under 1e-12 too: a
+      joint that compensates its parent's scale takes it in its block as a
+      dropped node's matrix, split again; any other node keeps the
+      channels it holds without it, takes it in its translate alone, and
+      hands on what it should hold times the inverse of what it holds
+      (:func:`_fbx_hand_on`). On a frame the node is scaled exactly 0
+      along an axis the shear has no inverse and stays out of them. The
+      split keeps the length of each row of the block, so a node's axes
+      are the file's length where its kept parent's world scales evenly;
+      elsewhere which way they point and how long they are is the split's.
 
     A scale under 1e-12 in size is read as 1e-12, as Maya's evaluation holds
     it (:func:`_fbx_maya_scale`), wherever the fold multiplies or divides by
@@ -3276,9 +3283,15 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
         up       = parent[i]
         ancestor = tree.above[column]
         D        = chain.get(up) if up >= 0 and kept[up] < 0 else None
-        lost     = sheared.get(ancestor)
-        if lost is not None:
-            D = lost if D is None else D @ lost
+
+        # the shear the kept parent's split dropped: a compensating joint
+        # takes it in its block, split again; any other node keeps the
+        # channels it holds without it, takes it in its translate alone and
+        # hands it on, so its rotate and scale stay the file's
+        lost = sheared.get(ancestor)
+        if lost is not None and tree.compensate[i]:
+            D, lost = (lost if D is None else D @ lost), None
+        moved = D if lost is None else (lost if D is None else D @ lost)
         block = None if D is None else D[:, :3, :3]
 
         # a compensating joint divides its fbx parent's scale out, which the
@@ -3299,17 +3312,19 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
                 block = (eye if block is None else block) / divided[:, i, :, None] * held[:, None, :]
 
         level = block is None or bool(np.all(block == eye))
-        if not (pivoted[i] or D is not None or not level or (turned[i] and not tree.joint[i])):
+        if not (pivoted[i] or moved is not None or not level or (turned[i] and not tree.joint[i])):
             continue
 
         Q = orientations(i)
         t = offset(i, Q, scale)
-        if D is not None:
-            t = np.einsum("fi,fij->fj", t, D[:, :3, :3]) + D[:, 3, :3]
+        if moved is not None:
+            t = np.einsum("fi,fij->fj", t, moved[:, :3, :3]) + moved[:, 3, :3]
         out_translate[:, column] = t
         changed[column]          = True
 
         if level and (tree.joint[i] or not turned[i]):
+            if lost is not None:
+                _fbx_hand_on(sheared, column, scale[:, i, :, None] * Q @ moved[:, :3, :3], scale[:, i], Q)
             continue
 
         U, s, uneven = _fbx_fold_split(np.broadcast_to(eye, (frames, 3, 3)) if block is None else block)
@@ -3339,7 +3354,14 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
             out_scale[:, column]  = sized
             out_rotate[:, column] = _filtered(solved[:, None], [order])[:, 0]
 
-        if uneven.any():
+        if lost is not None:
+            # the rotation the node holds, rotate axis and joint orient in
+            holds = _eulers_to_matrices(out_rotate[:, column], order)[:, :3, :3]
+            if tree.joint[i]:
+                RA    = _eulers_to_matrices(tree.axis[i], 0)[:3, :3]
+                holds = RA @ holds @ _eulers_to_matrices(out_orient[:, column], 0)[:, :3, :3]
+            _fbx_hand_on(sheared, column, scale[:, i, :, None] * Q @ moved[:, :3, :3], out_scale[:, column], holds)
+        elif uneven.any():
             # the rotation the node holds, its joint orient left out
             holds = _eulers_to_matrices(out_rotate[uneven, column], order)[:, :3, :3]
             if tree.joint[i]:
@@ -3349,6 +3371,18 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
                 sheared[column] = lost
 
     return out_translate, out_rotate, out_scale, out_orient, changed
+
+
+def _fbx_hand_on(sheared: dict, column: int, whole, sized, holds) -> None:
+    """puts in ``sheared[column]`` what a kept node under a sheared one hands
+    on to the nodes under it, on every frame, where any frame hands on any:
+    ``whole`` (F, 3, 3), the block it should hold under its kept parent,
+    times the inverse of the one its channels hold, ``sized`` (F, 3) times
+    the rotation ``holds`` (F, 3, 3) (:func:`_fbx_fold_shear`)"""
+    frames = len(whole)
+    lost   = _fbx_fold_shear(whole, sized, holds, frames, np.ones(frames, dtype=bool))
+    if lost is not None:
+        sheared[column] = lost
 
 
 # the least size Maya's evaluation gives a scale: one under it, 0 among them,
@@ -5232,31 +5266,37 @@ class TransformList(DataList):
         the scale of each joint under it that compensates its parent's scale
         (segment scale compensate), which a joint compensating a dropped
         parent divides out instead. An uneven one under a node turned in it
-        would take shear, which no node holds: that node's position and the
-        length of each of its axes are the file's, its axes squared, its
-        rotate solved again from the matrix, a joint's too, and the shear it
-        drops is folded into the kept nodes under it the way a dropped
-        node's transform is, so they stay where the file puts them, under
-        a scale under 1e-12 too, but on a frame it is scaled exactly 0
-        along an axis, which leaves the shear no inverse. A scale under
-        1e-12 in size on a dropped node is read as 1e-12, as Maya's
-        evaluation holds a scale: a joint that compensates a dropped node
-        scaled to 0 keeps its axes and sits on that node's position, and a
-        node that does not collapses onto it, its axes 1e-12 long, the
-        1e-12 in its scale, where Maya 2025 puts them; the sdk's own
+        would take shear, which no node holds: that node's position is the
+        file's, its axes squared, its rotate solved again from the matrix,
+        a joint's too, and the length of each of its axes is the file's
+        where its kept parent's world scales evenly, as under a joint that
+        compensates the scale. The shear it drops goes on the kept nodes
+        under it, so they stay where the file puts them, under a scale
+        under 1e-12 too: a joint that compensates its scale takes it in its
+        channels, split again, and any other node keeps the rotate and
+        scale it holds without it, the file's where nothing else moves it,
+        takes the shear in its translate alone and hands it on. Their
+        positions are the file's, but on a frame the node is scaled exactly
+        0 along an axis, which leaves the shear no inverse; their axes are
+        the split's, or their own under the parent the read gives them. A
+        scale under 1e-12 in size on a dropped node is read as 1e-12, as
+        Maya's evaluation holds a scale: a joint that compensates a dropped
+        node scaled to 0 keeps its axes and sits on that node's position,
+        and a node that does not collapses onto it, its axes 1e-12 long,
+        the 1e-12 in its scale, where Maya 2025 puts them; the sdk's own
         evaluation gives NaN there. A kept node's own scale keeps the
         file's value, 0 included, which cgmath's evaluation divides by as
         it is: ``world_matrix`` is NaN on a joint that compensates a kept
         node scaled to 0 and on every node under it, its channels finite,
-        where Maya keeps that joint's axes. A joint that compensates a
-        kept node, kept or dropped, divides out that node's own scale, as
+        where Maya keeps that joint's axes. A joint that compensates a kept
+        node, kept or dropped, divides out that node's own scale, as
         ``world_matrix`` multiplies by it, and a kept one keeps the scale
-        of a node dropped above that kept node, as Maya does: a joint
-        under a locator scaled 5e-13 under a dropped node scaled 2 takes
-        that 2 in its scale. So the joints and nodes kept under a node
-        scaled under 1e-12 sit where Maya puts them, down to about 1e-154,
-        under which the read overflows; along an axis it is scaled exactly
-        0, those under a joint the read drops collapse onto it: Maya holds
+        of a node dropped above that kept node, as Maya does: a joint under
+        a locator scaled 5e-13 under a dropped node scaled 2 takes that 2
+        in its scale. So the joints and nodes kept under a node scaled
+        under 1e-12 sit where Maya puts them, down to about 1e-154, under
+        which the read overflows; along an axis it is scaled exactly 0,
+        those under a joint the read drops collapse onto it: Maya holds
         1e-12 there, which a kept node does not. Under a kept node scaled
         under 1e-12 the translates that place the nodes below it can
         reach the inverse of that scale, which ``world_matrix`` multiplies

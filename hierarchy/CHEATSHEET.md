@@ -1979,28 +1979,33 @@ dropped, and a kept node goes under its nearest kept ancestor. What the
 dropped nodes between them hold is folded into its channels, on every
 frame of a clip, so its world matrix stays the file's: a joint takes
 their turn in its joint orient and their move in its translate, keeping
-its rotate curves; any other node has its rotate solved again. A uniform
-scale among them goes on the node's scale, and on each joint under it
-that compensates its parent's scale; an uneven one under a node turned
-in it would need shear, which no node holds: that node keeps the file's
-position and axis lengths, and the nodes under it take the shear it
-drops, so they stay where the file puts them, under a scale under 1e-12
-too; on a frame it is scaled exactly 0 along an axis the shear has no
-inverse and stays out of them. A scale under 1e-12 on a dropped node is
-read as 1e-12, as Maya holds a scale: a joint that compensates a
-dropped node scaled to 0 keeps its axes and sits on that node's
-position, and a node that does not collapses onto it, as in Maya. A
-kept node keeps its own scale, 0 included, and `world_matrix` divides
-by it as it is: a joint compensating a kept node scaled to 0, and what
-sits under it, come back with a NaN `world_matrix`, their channels
-finite, where Maya keeps that joint's axes. A joint compensating a kept
-node, kept or dropped, divides out that node's own scale, and a kept
-one keeps the scale of a node dropped above the kept node, as Maya
-does: a joint under a locator scaled 5e-13 under a dropped node scaled
-2 takes that 2 in its scale. A read that drops the joints under a kept
-node scaled exactly 0 collapses the nodes it keeps below them onto that
-node along each axis scaled 0, where Maya, holding 1e-12, keeps them
-apart; under a scale that is tiny but not 0, down to about 1e-154, they
+its rotate curves, but on a frame where an uneven scale among them
+under a turn solves its rotate again; any other node has its rotate
+solved again. A uniform scale among them goes on the node's scale, and
+on each joint under it that compensates its parent's scale; an uneven
+one under a node turned in it would need shear, which no node holds:
+that node keeps the file's position, and its axis lengths where its
+kept parent's world scales evenly, and the nodes under it take the
+shear it drops, so they stay where the file puts them, under a scale
+under 1e-12 too: a joint that compensates it in its channels, any
+other node in its translate alone, keeping its own rotate and scale.
+Their axes can point and stretch away from the file's, and on a frame
+the node is scaled exactly 0 along an axis the shear has no inverse
+and stays out of them. A scale under 1e-12 on a dropped node is read
+as 1e-12, as Maya holds a scale: a joint that compensates a dropped
+node scaled to 0 keeps its axes and sits on that node's position, and
+a node that does not collapses onto it, as in Maya. A kept node keeps
+its own scale, 0 included, and `world_matrix` divides by it as it is:
+a joint compensating a kept node scaled to 0, and what sits under it,
+come back with a NaN `world_matrix`, their channels finite, where Maya
+keeps that joint's axes. A joint compensating a kept node, kept or
+dropped, divides out that node's own scale, and a kept one keeps the
+scale of a node dropped above the kept node, as Maya does: a joint
+under a locator scaled 5e-13 under a dropped node scaled 2 takes that
+2 in its scale. A read that drops the joints under a kept node scaled
+exactly 0 collapses the nodes it keeps below them onto that node along
+each axis scaled 0, where Maya, holding 1e-12, keeps them apart;
+under a scale that is tiny but not 0, down to about 1e-154, they
 sit where Maya puts them. Under a kept node scaled under 1e-12 the
 translates that place the nodes below it can reach the inverse of
 that scale, which `world_matrix` multiplies back but Maya, holding
@@ -2051,9 +2056,14 @@ the samplers onto a uniform grid at `fps` and runs the result through
 fbx already stores euler curves, and rewriting their branches would
 change the animation. A rotation an animation layer blends by layer is
 rebuilt from quaternions frame by frame, by the SDK as here, so that
-curve, and only that one, goes through `euler_filter` in the node's
-rotate order, frame 0 as the SDK gives it. A file with no animation
-gives a one-frame clip rather than an error.
+curve goes through `euler_filter` in the node's rotate order, frame 0 as
+the SDK gives it, and so does every rotation the read solves again: the
+rotate of a root that is no joint, turned to Maya's axes; the rotate of
+any other node that is no joint, for a node the read drops above it or
+for its own pre and post rotation; a joint orient, for a node dropped
+above it; and the whole rotate curve of a joint an uneven dropped scale
+re-solves on some frames, as `ClipData.load_fbx` says. A file with no
+animation gives a one-frame clip rather than an error.
 
 `ClipData.load_fbx` defaults to the first take that was actually keyed,
 not to index 0, because a file can hold takes with no curves at all.
