@@ -2243,7 +2243,7 @@ pack_islands(uv_data, resolution=1024, padding=2, rotations=4)
 
 topology transfer of per-vertex data.
 
-> A resampler class interfacing mesh-dependent data types (morph targets and skin weights).
+> A resampler class for mesh-dependent data: morphs, skins, meshes, maps and UVs.
 
 #### `MeshDataResampler`
 
@@ -2277,6 +2277,8 @@ resample_morph_target(self, target_data: 'MorphData | MeshData', mode: 'Resample
     Resamples a morph target data.
 resample_skin_weights(self, skin_data: 'SkinData | CompactSkinData', mode: 'ResampleMode' = <ResampleMode.SPATIAL: <class 'cgmath.geometry.resample.SpatialSkinTransferOptions'>>, method: 'SampleMethod | str' = <SampleMethod.BILINEAR: 'bilinear'>, options: 'Any' = None) -> 'SkinData | CompactSkinData'
     Resamples a skin data.
+resample_uv(self, uv_data: 'UVData | None' = None, method: 'SampleMethod | str' = <SampleMethod.BILINEAR: 'bilinear'>, raycast: 'bool' = False, forward_only: 'bool' = False, twosided: 'bool' = True, use_mesh_normals: 'bool' = True, angle_weighted: 'bool' = True, area_weighted: 'bool' = True) -> 'UVData'
+    Builds a dst UV set from a src UV set, projected in world space.
 ```
 
 #### `ResampleMode(Enum)`

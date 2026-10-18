@@ -32,7 +32,7 @@ Concepts, conventions and the file map live in [`README.md`](README.md).
 | [`sdf` — signed distance fields, functional API](#sdf--signed-distance-fields-functional-api) | `make_grid`, `eval_*`, CSG, `dual_marching_cubes` |
 | [`sdf` — signed distance fields, OOP API](#sdf--signed-distance-fields-oop-api) | `SDFSphere` / `SDFBox` / `SDFCylinder`, `DMCField` |
 | [`_cdt` — constrained Delaunay triangulation](#_cdt--constrained-delaunay-triangulation) | the n-gon triangulator behind `get_triangulate_rules` |
-| [`resample` — `MeshDataResampler`](#resample--meshdataresampler) | modes, cached sample data, mesh / morph / skin / map transfer |
+| [`resample` — `MeshDataResampler`](#resample--meshdataresampler) | modes, cached sample data, mesh / morph / skin / map transfer, UVs from another mesh |
 | [Robust skin weight transfer](#robust-skin-weight-transfer) | bilinear weight inpainting, and when to reach for it |
 
 ---
@@ -2875,6 +2875,34 @@ print(type(out_map).__name__, out_map.name, out_map.values.shape)
 subset     = GeomSubsetData.from_skin_data(mask, mesh_data=src_grid, name="cheek", component_type="f")
 out_subset = resampler.resample_map(subset)
 print(type(out_subset).__name__, out_subset.indices.size, dst_grid.face_count)
+```
+
+### `resample_uv` — a UV set built from the source's
+
+`resample_uv()` builds the destination's UV set from `src_uv` (or `uv_data=`),
+projecting the destination onto the source in world space: the closest point,
+or with `raycast=True` a ray along each destination normal, stored or computed,
+where a miss takes the closest point. It makes one UV per destination vertex
+and source shell, so a seam between two shells along destination edges splits
+the result instead of stretching faces across it; a cut inside one shell does
+not split. `resample_mesh(mode=ResampleMode.UV)` goes back, exactly here, where
+the one shell has no seam. Beside a seam that cuts through a destination face,
+a vertex can come back on the seam: up to about half a face away beside one
+seam, and up to about half a face diagonal where seams cross inside a face.
+
+```python
+built = MeshDataResampler(src_grid, dst_grid, src_uv=src_uv).resample_uv()
+print(built.name, built.point_count, dst_grid.point_count)  # map1 49 49: one shell
+assert np.allclose(built.points, dst_uv.points)             # dst's own planar map
+
+cast = resampler.resample_uv(uv_data=src_uv, raycast=True)  # along dst's normals
+assert np.allclose(cast.points, built.points)
+
+blank        = dst_grid.copy()
+blank.points = np.zeros_like(blank.points)  # UV mode never reads them
+round_trip   = MeshDataResampler(src_grid, blank, src_uv=src_uv, dst_uv=built)
+back         = round_trip.resample_mesh(mode=ResampleMode.UV)
+assert np.allclose(back.points, dst_grid.points)
 ```
 
 ---

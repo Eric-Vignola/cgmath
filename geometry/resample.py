@@ -1,5 +1,5 @@
 """
-A resampler class interfacing mesh-dependent data types (morph targets and skin weights).
+A resampler class for mesh-dependent data: morphs, skins, meshes, maps and UVs.
 
 Usage example:
 ```python
@@ -26,6 +26,10 @@ dst_target_data.to_prim(dst_target_prim)
 src_skin_data = MorphData.from_prim(src_skin_prim)
 dst_skin_data = resampler.resample_skin_weights(src_skin_data, mode=ResampleMode.UV)
 dst_skin_data.to_prim(dst_skin_prim)
+
+# build a UV set for the destination from the source UVs, projected in world
+# space (closest point, or a ray along each destination vertex normal)
+dst_uv_data = resampler.resample_uv(raycast=True)
 ```
 """
 
@@ -36,9 +40,11 @@ from enum import Enum
 from typing import Any
 
 import numpy as np
+from cgmath.geometry._saddle_surface import raycast as raycast_patches
+from cgmath.geometry._saddle_surface import sample as sample_patches
 from cgmath.geometry._saddle_surface import SampleData
 from cgmath.geometry.map import GeomSubsetData, MapData
-from cgmath.geometry.mesh import MeshData, SampleMethod, UVData
+from cgmath.geometry.mesh import _require_no_ngons, MeshData, SampleMethod, UVData
 from cgmath.geometry.morph_target import MorphData
 from cgmath.geometry.robust_skinweights_transfer_bilinear import (
     robust_skinweights_transfer_bilinear,
@@ -49,6 +55,7 @@ from cgmath.geometry.utils.main import (
     bezier_evaluate,
     bezier_vectors,
     bilinear_vectors,
+    compute_samples,
 )
 
 
@@ -85,6 +92,7 @@ class MeshDataResampler:
         * Mesh
         * Geom Subset
         * Mesh Map
+        * UV Set (spatial projection only, see resample_uv)
     """
 
     def __init__(
@@ -99,7 +107,8 @@ class MeshDataResampler:
         Args:
             src_mesh: Source mesh data object.
             dst_mesh: Destination mesh data object.
-            src_uv: Source UV data object, only required in uv resample mode.
+            src_uv: Source UV data object, required in uv resample mode and
+                by resample_uv() when it is not given a UV set.
             dst_uv: Destination UV data object, only required in uv resample mode.
         """
         # shared vars
@@ -170,6 +179,148 @@ class MeshDataResampler:
             else:
                 raise ValueError(f"Unsupported resample mode: {mode}")
         return self._sample_cache[cache_key]
+
+    def _get_ray_directions(
+        self,
+        use_mesh_normals: bool,
+        angle_weighted:   bool,
+        area_weighted:    bool,
+    ) -> np.ndarray:
+        """Returns one unit direction per destination vertex.
+
+        Reads the stored dst_mesh.normals when asked to and they exist, else
+        computes them with get_vertex_normals(). Never writes normals onto the
+        mesh.
+
+        Raises:
+            ValueError: The stored normals fit neither the vertex count nor
+                the face-vertex count, and carry no normal_indices.
+        """
+        dst     = self.dst_mesh
+        normals = dst.normals if use_mesh_normals else None
+
+        if normals is None:
+            directions = dst.get_vertex_normals(
+                angle_weighted = angle_weighted,
+                area_weighted  = area_weighted,
+            )
+        else:
+            normals = np.asarray(normals, dtype=np.float64)
+            if dst.normal_indices is not None:
+                corner_normals = normals[dst.normal_indices]
+            elif normals.shape[0] == dst.point_count:
+                corner_normals = None
+            elif normals.shape[0] == dst.indices.size:
+                corner_normals = normals  # face-varying, not indexed
+            else:
+                raise ValueError(
+                    f"dst_mesh.normals holds {normals.shape[0]} normals, which "
+                    f"matches neither its {dst.point_count} vertices nor its "
+                    f"{dst.indices.size} face-vertices, and it has no "
+                    "normal_indices. Pass use_mesh_normals=False to compute them."
+                )
+
+            if corner_normals is None:
+                directions = normals.copy()
+            else:
+                directions = np.zeros((dst.point_count, 3))
+                np.add.at(directions, dst.indices, corner_normals)
+
+        lengths               = np.linalg.norm(directions, axis=1, keepdims=True)
+        lengths[lengths == 0] = 1.0
+        return directions / lengths
+
+    def _project_onto_faces(
+        self,
+        points:          np.ndarray,
+        faces:           np.ndarray,
+        surface_normals: np.ndarray | None = None,
+        directions:      np.ndarray | None = None,
+        forward_only:    bool              = False,
+        twosided:        bool              = True,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Projects points onto the given source faces.
+
+        Takes the closest point when directions is None. Otherwise casts a ray
+        per point, and a ray that misses takes the closest point instead.
+
+        Args:
+            surface_normals: None projects onto the flat faces (BILINEAR). The
+                source's vertex normals, as MeshData.sample() computes them,
+                project onto its PN-quad patches (BEZIER). The caller computes
+                them once and passes them to every call.
+
+        Returns:
+            (projections, weights, face indices): world space points on the
+            source surface, (n, 4) corner weights, and source face indices,
+            numbered over the whole source mesh.
+        """
+        src   = self.src_mesh
+        faces = np.asarray(faces)
+        whole = faces.size == src.face_count  # unique ids, so every face
+        if whole:
+            faces = np.arange(src.face_count)
+
+        # src.geometry is as wide as its widest face; a subset holds no n-gon
+        geometry = src.geometry if whole else src.geometry[faces][:, :4]
+
+        # the closest point on a subset reads only the vertices its faces
+        # hold: the sampler scans every vertex it is given, so the whole
+        # source in every call would make a map of many shells cost shells x
+        # source size in resample_uv
+        face_points, face_geometry, face_normals = src.points, geometry, surface_normals
+        if not whole:
+            held = geometry >= 0
+            used, inverse = np.unique(geometry[held], return_inverse=True)
+            face_geometry       = np.full(geometry.shape, -1, dtype=geometry.dtype)
+            face_geometry[held] = inverse.reshape(-1)
+            face_points         = src.points[used]
+            if surface_normals is not None:
+                face_normals = surface_normals[used]
+
+        def closest(query: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+            # the vertex match looks only at the vertices these faces hold,
+            # so a subset answers from its own faces
+            result = sample_patches(
+                query, face_points, face_geometry, surface_normals=face_normals
+            )
+            return result.projections, result.weights, faces[result.indices]
+
+        if directions is None:
+            return closest(points)
+
+        if whole:
+            # the mesh method reuses the source's cached BVH
+            method = SampleMethod.BILINEAR
+            if surface_normals is not None:
+                method = SampleMethod.BEZIER
+            hits = src.raycast(
+                points,
+                directions,
+                method       = method,
+                forward_only = forward_only,
+                twosided     = twosided,
+            )
+        else:
+            hits = raycast_patches(
+                src.points,
+                src.points,
+                geometry,
+                points,
+                directions,
+                surface_normals = surface_normals,
+                forward_only    = forward_only,
+                twosided        = twosided,
+            )
+
+        projections = np.array(hits.projections, dtype=np.float64)
+        weights     = np.array(hits.weights, dtype=np.float64)
+        indices     = np.where(hits.hit, faces[np.maximum(hits.indices, 0)], -1)
+
+        missed = ~hits.hit
+        if np.any(missed):
+            projections[missed], weights[missed], indices[missed] = closest(points[missed])
+        return projections, weights, indices
 
     # --- resample methods
 
@@ -390,4 +541,167 @@ class MeshDataResampler:
             )
         return GeomSubsetData.from_skin_data(
             new_skin_data, mesh_data=self._dst_mesh, name=name, component_type=typ
+        )
+
+    def resample_uv(
+        self,
+        uv_data:          UVData       | None = None,
+        method:           SampleMethod | str  = SampleMethod.BILINEAR,
+        raycast:          bool                = False,
+        forward_only:     bool                = False,
+        twosided:         bool                = True,
+        use_mesh_normals: bool                = True,
+        angle_weighted:   bool                = True,
+        area_weighted:    bool                = True,
+    ) -> UVData:
+        """Builds a dst UV set from a src UV set, projected in world space.
+
+        Every destination face takes the source UV shell under its centroid,
+        on the flat source faces whatever the method, and all its corners are
+        read from that shell. A seam between two source UV shells that runs
+        along destination edges therefore splits the result there, instead of
+        stretching faces across the atlas. Such a seam cutting through a
+        destination face clamps that face's far corners to the shell border.
+        A cut inside one shell is not split: faces across it stretch.
+
+        Args:
+            uv_data: Source UV set, on the source topology. Defaults to src_uv.
+            method: Surface fitting method -- BILINEAR or BEZIER.
+            raycast: If True, cast a ray from each destination vertex along its
+                normal instead of taking the closest point. A ray that misses
+                the source takes the closest point.
+            forward_only: Raycast only. If False, also cast backward and keep
+                the closer hit.
+            twosided: Raycast only. If False, back-face hits are rejected.
+            use_mesh_normals: Raycast only. If True and dst_mesh stores
+                normals, rays follow them, face-varying normals summed per
+                vertex. Otherwise normals come from get_vertex_normals().
+            angle_weighted: get_vertex_normals() option, for computed normals.
+            area_weighted: get_vertex_normals() option, for computed normals.
+
+        Returns:
+            A new UV set, named after the source one, with one UV per
+            destination vertex and source shell. Neither mesh is modified.
+
+        Raises:
+            RuntimeError: No UV set was given and src_uv is None.
+            ValueError: The UV set's faces do not match src_mesh, or it has
+                no face with UVs, or, with raycast=True, dst_mesh.normals fits
+                neither its vertices nor its face-vertices and has no
+                normal_indices (pass use_mesh_normals=False).
+            NotImplementedError: A source face with UVs is an n-gon. N-gons
+                without UVs are never sampled.
+        """
+        method = SampleMethod(method)
+        src_uv = self.src_uv if uv_data is None else uv_data
+        if src_uv is None:
+            raise RuntimeError("UV data not supplied.")
+
+        src = self.src_mesh
+        dst = self.dst_mesh
+        if src_uv.counts.size != src.face_count or np.any(
+            (src_uv.counts > 0) & (src_uv.counts != src.counts)
+        ):
+            raise ValueError("uv_data does not belong to src_mesh: their faces differ.")
+
+        uv_faces = np.flatnonzero(src_uv.counts > 0)
+        if uv_faces.size == 0:
+            raise ValueError("uv_data has no faces with UVs.")
+        _require_no_ngons("resample_uv", src.counts[uv_faces])
+
+        # one UV shell id per source face, -1 on a face without UVs
+        shell_of_face = np.full(src.face_count, -1, dtype=np.int64)
+        for shell, faces in enumerate(src_uv.shell_faces):
+            shell_of_face[faces] = shell
+        shell_of_face[src_uv.counts == 0] = -1
+
+        geometry  = dst.geometry
+        valid     = geometry >= 0
+        corners   = np.where(valid, geometry, 0)
+        centroids = (dst.points[corners] * valid[..., None]).sum(axis=1) / dst.counts[:, None]
+
+        vertex_directions = None
+        face_directions   = None
+        if raycast:
+            vertex_directions = self._get_ray_directions(
+                use_mesh_normals, angle_weighted, area_weighted
+            )
+            face_directions       = (vertex_directions[corners] * valid[..., None]).sum(axis=1)
+            lengths               = np.linalg.norm(face_directions, axis=1, keepdims=True)
+            lengths[lengths == 0] = 1.0
+            face_directions /= lengths
+
+        # BEZIER's patches follow the source's vertex normals: computed once
+        # here, not once per projection below
+        surface_normals = None
+        if method == SampleMethod.BEZIER:
+            surface_normals = src.get_vertex_normals(
+                angle_weighted=True, area_weighted=False
+            )
+
+        projections, weights, hit_faces = self._project_onto_faces(
+            dst.points,
+            uv_faces,
+            surface_normals,
+            directions   = vertex_directions,
+            forward_only = forward_only,
+            twosided     = twosided,
+        )
+        # a face's shell is read off the flat faces, whatever the method: a
+        # face's PN-quad patch can bulge away from its centroid and leave a
+        # neighbour's patch, in another shell, closer
+        _, _, centroid_faces = self._project_onto_faces(
+            centroids,
+            uv_faces,
+            None,
+            directions   = face_directions,
+            forward_only = forward_only,
+            twosided     = twosided,
+        )
+
+        corner_shell = np.repeat(shell_of_face[centroid_faces], dst.counts)
+        corner_faces = hit_faces[dst.indices]
+        uvs = compute_samples(
+            src_uv.points, weights[dst.indices], src_uv.geometry[corner_faces]
+        )
+
+        # a corner whose vertex landed in another shell sits on or past a
+        # seam: read it from its face's shell, at the nearest point there.
+        # The stray corners and the source faces are sorted by shell once,
+        # so each shell's pass reads only its own runs, and one
+        # compute_samples() reads them all: no pass scans the whole mesh
+        stray = np.flatnonzero(shell_of_face[corner_faces] != corner_shell)
+        if stray.size:
+            stray = stray[np.argsort(corner_shell[stray], kind="stable")]
+            shells, starts = np.unique(corner_shell[stray], return_index=True)
+            ends          = np.append(starts[1:], stray.size)
+            face_order    = np.argsort(shell_of_face, kind="stable")
+            sorted_shells = shell_of_face[face_order]
+            face_starts   = np.searchsorted(sorted_shells, shells, side="left")
+            face_ends     = np.searchsorted(sorted_shells, shells, side="right")
+            stray_weights = np.empty((stray.size, weights.shape[1]))
+            stray_faces   = np.empty(stray.size, dtype=np.int64)
+            for start, end, face_start, face_end in zip(starts, ends, face_starts, face_ends):
+                _, shell_weights, shell_faces = self._project_onto_faces(
+                    projections[dst.indices[stray[start:end]]],
+                    face_order[face_start:face_end],
+                    surface_normals,
+                )
+                stray_weights[start:end] = shell_weights
+                stray_faces[start:end]   = shell_faces
+            uvs[stray] = compute_samples(
+                src_uv.points, stray_weights, src_uv.geometry[stray_faces]
+            )
+
+        # weld: one UV vertex per (destination vertex, shell)
+        keys = np.stack([dst.indices, corner_shell], axis=1)
+        _, first, uv_indices = np.unique(
+            keys, axis=0, return_index=True, return_inverse=True
+        )
+
+        return UVData(
+            name    = src_uv.name,
+            indices = uv_indices.reshape(-1).astype(np.int32),
+            counts  = np.array(dst.counts, dtype=np.int32),
+            points  = uvs[first],
         )

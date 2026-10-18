@@ -947,7 +947,7 @@ normally calls it.
 | `bilinear_vectors(points, geometry, uv)` | `(dS/du, dS/dv)` on a bilinear patch | `geometry/mesh.py`, `resample.py`, `_saddle_surface.py` |
 | `bilinear_integrate(points, geometry, samples=10, method="gauss", tolerance=1e-4)` | per-face area; `gauss` / `quadrature` / `adaptive` | `geometry/_saddle_surface.py` |
 | `bilinear_sample(p, points, geometry, centroids, radiuses, centroid_distance_tolerance, iteration_count=100, iteration_tolerance=1e-8, uv_border_tolerance=1e-5, normals=None)` | closest point → `(proj, dist, weights, uv, face)` | `geometry/_saddle_surface.py` |
-| `compute_samples(values, weights, geometry)` | apply sampler weights to any per-vertex attribute | `geometry/_saddle_surface.py` |
+| `compute_samples(values, weights, geometry)` | apply sampler weights to any per-vertex attribute | `geometry/_saddle_surface.py`, `geometry/resample.py` |
 | `bezier_evaluate(points, normals, geometry, uv)` | PN-Quad bicubic position (`main` only) | `geometry/resample.py` |
 | `bezier_vectors(points, normals, geometry, uv)` | PN-Quad bicubic tangents (`main` only) | `geometry/resample.py` |
 

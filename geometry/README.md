@@ -461,6 +461,36 @@ for robust when the two meshes genuinely differ.
 Each `ResampleMode` *value* is literally that mode's options dataclass
 (`ResampleMode.SPATIAL.value is SpatialSkinTransferOptions`).
 
+**UVs go both ways.** `resample_uv()` builds a destination UV set from
+`src_uv` by projecting the destination onto the source in world space;
+`resample_mesh(mode=ResampleMode.UV)` goes back, placing every destination
+vertex where its UV sits on the source surface, and never reads the
+destination's points. The way back rebuilds the destination only where the
+source's seams follow destination edges: beside a seam that cuts through a
+destination face, a vertex can come back on the seam: up to about half a face
+away beside one seam, and up to about half a face diagonal where seams cross
+inside a face.
+
+<!-- notest -- teaser; `src`, `dst` and `src_uv` are whatever meshes and UVs you have, CHEATSHEET.md runs one -->
+
+```python
+resampler = MeshDataResampler(src, dst, src_uv=src_uv)
+dst_uv    = resampler.resample_uv()              # closest point
+dst_uv    = resampler.resample_uv(raycast=True)  # along dst normals
+dst_uv    = resampler.resample_uv(raycast=True, use_mesh_normals=False, area_weighted=False)
+```
+
+A UV is one per destination vertex *and source shell*, not one per vertex:
+each destination face reads all its corners from the shell under its centroid,
+so a seam between two source shells that runs along destination edges splits
+the result there instead of stretching faces across the atlas. Such a seam
+cutting through a destination face clamps that face's far corners to the shell
+border. A cut inside one shell is not split: faces across it stretch. With
+`raycast=True`, rays follow `dst.normals` when stored (face-varying ones summed
+per vertex), else `get_vertex_normals()`; neither mesh is modified, and a ray
+that misses takes the closest point. A source face with UVs must be a triangle
+or a quad.
+
 ---
 
 ## Conventions

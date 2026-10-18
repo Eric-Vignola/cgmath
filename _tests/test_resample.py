@@ -1,12 +1,15 @@
 import os
 import pickle
 import unittest
+from unittest import mock
 
 import numpy as np
 from cgmath.geometry import MeshData, MorphList, SkinData, UVList
+from cgmath.geometry._saddle_surface import sample as sample_patches
 from cgmath.geometry.map import GeomSubsetData, MapData
-from cgmath.geometry.mesh import cv2, SampleMethod, skimage
+from cgmath.geometry.mesh import cv2, SampleMethod, skimage, UVData
 from cgmath.geometry.resample import MeshDataResampler, ResampleMode
+from cgmath.geometry.utils.main import compute_samples
 
 EPSILON = np.finfo(np.float32).eps
 
@@ -401,3 +404,709 @@ class TestHierarchy(unittest.TestCase):
         )
         self.assertEqual(bezier.point_count, bilinear.point_count)
         self.assertFalse(np.allclose(bilinear.points, bezier.points))
+
+    def test_resample_uv_on_fixture_meshes(self):
+        """resample_uv() runs on the production fixture and keeps dst topology."""
+        resampler = MeshDataResampler(
+            self.src_mesh_data,
+            self.dst_mesh_data,
+            src_uv = self.src_uv_data[0],
+        )
+        for raycast in (False, True):
+            with self.subTest(raycast=raycast):
+                uv = resampler.resample_uv(raycast=raycast)
+                self.assertTrue(np.array_equal(uv.counts, self.dst_mesh_data.counts))
+                self.assertEqual(uv.indices.size, self.dst_mesh_data.indices.size)
+                self.assertTrue(np.all(np.isfinite(uv.points)))
+                self.assertEqual(uv.name, self.src_uv_data[0].name)
+
+    def test_resample_uv_of_the_fixture_onto_itself(self):
+        """The fixture onto itself gives back every UV but those on a cut inside a shell."""
+        mesh, src_uv = self.src_mesh_data, self.src_uv_data[0]
+        shell = np.zeros(mesh.face_count, dtype=np.int64)
+        for k, faces in enumerate(src_uv.shell_faces):
+            shell[faces] = k
+
+        # a vertex with two UVs in one shell sits on a cut, which never splits
+        key   = mesh.indices * len(src_uv.shell_faces) + np.repeat(shell, mesh.counts)
+        pairs = np.unique(np.stack([key, src_uv.indices], axis=1), axis=0)
+        keys, n = np.unique(pairs[:, 0], return_counts=True)
+        kept = ~np.isin(key, keys[n > 1])
+        want = src_uv.points[src_uv.indices]
+
+        resampler = MeshDataResampler(mesh, mesh, src_uv=src_uv)
+        for method in SampleMethod:
+            for raycast in (False, True):
+                with self.subTest(method=method, raycast=raycast):
+                    uv    = resampler.resample_uv(method=method, raycast=raycast)
+                    error = np.abs(uv.points[uv.indices] - want).max(axis=1)
+                    self.assertLess(error[kept].max(), 1e-9)
+
+
+# --- synthetic meshes for resample_uv: two UV shells with a known answer
+
+
+def _grid(n, lift=0.0, low=0.0, high=1.0):
+    """n x n quad grid over x, z in [low, high], curved in y: y = 0.2 sin(pi x)."""
+    xs = np.linspace(low, high, n + 1)
+    x, z = np.meshgrid(xs, xs, indexing="ij")
+    x, z = x.ravel(), z.ravel()
+    pts = np.stack([x, 0.2 * np.sin(np.pi * x) + lift, z], axis=1)
+    i, j = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    v     = (i * (n + 1) + j).ravel()
+    quads = np.stack([v, v + n + 1, v + n + 2, v + 1], axis=1)
+    return MeshData(indices=quads.ravel(), counts=np.full(n * n, 4), points=pts)
+
+
+def _split_uvs(mesh):
+    """Two UV shells split at x = 0.5: uv = (x, z) left of it, (x + 1, z) right."""
+    right = np.repeat(mesh.points[mesh.geometry, 0].mean(axis=1) >= 0.5, 4)
+    ids   = mesh.indices + right * mesh.point_count
+    pts   = np.concatenate([mesh.points[:, [0, 2]], mesh.points[:, [0, 2]] + [1.0, 0.0]])
+    used, inverse = np.unique(ids, return_inverse=True)
+    return UVData(indices=inverse, counts=mesh.counts.copy(), points=pts[used])
+
+
+def _left_shell_only(mesh):
+    """_split_uvs with the faces of the right shell left without UVs."""
+    full   = _split_uvs(mesh)
+    left   = mesh.points[mesh.geometry, 0].mean(axis=1) < 0.5
+    counts = np.where(left, full.counts, 0).astype(np.int32)
+    keep   = np.repeat(left, full.counts)
+    return UVData(indices=full.indices[keep], counts=counts, points=full.points)
+
+
+def _with_hexagon(mesh, face):
+    """An n x n _grid with quad ``face`` and the next one in z merged into a hexagon."""
+    n     = int(round(np.sqrt(mesh.face_count)))
+    faces = [list(quad) for quad in mesh.indices.reshape(-1, 4)]
+    v     = faces[face][0]
+    # the two quads share the edge (v + 1, v + n + 2): drop it
+    faces[face : face + 2] = [[v, v + n + 1, v + n + 2, v + n + 3, v + 2, v + 1]]
+    return MeshData(
+        indices = np.concatenate(faces),
+        counts  = np.array([len(f) for f in faces]),
+        points  = mesh.points.copy(),
+    )
+
+
+def _centroids(mesh):
+    """Each face's centroid over its own corners, triangles included."""
+    valid   = mesh.geometry >= 0
+    corners = np.where(valid, mesh.geometry, 0)
+    return (mesh.points[corners] * valid[..., None]).sum(axis=1) / mesh.counts[:, None]
+
+
+def _block_uvs(mesh, cuts):
+    """UV shells cut at every x and z in ``cuts``: uv = (x, z), moved 1.5 per shell."""
+    centroids = _centroids(mesh)
+    shell     = np.searchsorted(cuts, centroids[:, 0]) + (len(cuts) + 1) * np.searchsorted(cuts, centroids[:, 2])
+    ids       = mesh.indices + np.repeat(shell, mesh.counts) * mesh.point_count
+    pts       = np.concatenate([mesh.points[:, [0, 2]] + [1.5 * k, 0.0] for k in range((len(cuts) + 1) ** 2)])
+    used, inverse = np.unique(ids, return_inverse=True)
+    return UVData(indices=inverse, counts=mesh.counts.copy(), points=pts[used])
+
+
+def _face_shells(mesh):
+    """A UV shell per face: uv = (x, z), face k's moved 2 k along u."""
+    ids = mesh.indices + np.repeat(np.arange(mesh.face_count), mesh.counts) * mesh.point_count
+    used, inverse = np.unique(ids, return_inverse=True)
+    pts = mesh.points[used % mesh.point_count][:, [0, 2]] + (used // mesh.point_count)[:, None] * [2.0, 0.0]
+    return UVData(indices=inverse.reshape(-1), counts=mesh.counts.copy(), points=pts)
+
+
+def _mixed(n, **kwargs):
+    """_grid(n, ...) with every other quad split into two triangles."""
+    quads = _grid(n, **kwargs)
+    faces = []
+    for k, quad in enumerate(quads.indices.reshape(-1, 4)):
+        if k % 2:
+            faces += [quad[[0, 1, 2]], quad[[0, 2, 3]]]
+        else:
+            faces.append(quad)
+    return MeshData(
+        indices = np.concatenate(faces),
+        counts  = np.array([len(f) for f in faces]),
+        points  = quads.points.copy(),
+    )
+
+
+def _box(n, thickness):
+    """A 2 x 2 x thickness box, n x n quads per side, one UV shell per side."""
+    sides = [(0, 1, 2, -1.0), (0, 1, 2, 1.0), (0, 2, 1, -1.0), (0, 2, 1, 1.0), (1, 2, 0, -1.0), (1, 2, 0, 1.0)]
+    points, quads, uvs = [], [], []
+    for side, (a, b, c, sign) in enumerate(sides):
+        g = np.linspace(-1.0, 1.0, n + 1)
+        u, v = np.meshgrid(g, g, indexing="ij")
+        p = np.zeros((n + 1, n + 1, 3))
+        p[..., a], p[..., b], p[..., c] = u, v, sign
+        i, j = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+        w = (i * (n + 1) + j).ravel()
+        q = np.stack([w, w + n + 1, w + n + 2, w + 1], axis=1)
+        quads.append((q[:, ::-1] if sign < 0 else q) + sum(len(x) for x in points))
+        points.append(p.reshape(-1, 3) * [1.0, 1.0, thickness / 2])
+        uvs.append(np.stack([(u.ravel() + 1) / 2 + 1.2 * side, (v.ravel() + 1) / 2], axis=1))
+    points = np.concatenate(points)
+    quads  = np.concatenate(quads)
+    welded, inverse = np.unique(np.round(points, 9), axis=0, return_inverse=True)
+    mesh = MeshData(indices=inverse.reshape(-1)[quads].ravel(), counts=np.full(len(quads), 4), points=welded)
+    uv   = UVData(indices=quads.ravel(), counts=np.full(len(quads), 4), points=np.concatenate(uvs))
+    return mesh, uv
+
+
+def _expected_uvs(dst):
+    """Per face-vertex UVs: each corner in the shell under its face's centroid."""
+    side = np.repeat(_centroids(dst)[:, 0] >= 0.5, dst.counts)
+    return dst.points[dst.indices][:, [0, 2]] + side[:, None] * [1.0, 0.0]
+
+
+def _torn_faces(uv):
+    """Faces whose corners span the 1.0 gap between the two shells."""
+    valid = uv.geometry >= 0
+    u     = uv.points[uv.geometry][..., 0]
+    span  = np.where(valid, u, -np.inf).max(axis=1) - np.where(valid, u, np.inf).min(axis=1)
+    return int(np.sum(span > 0.6))
+
+
+class TestResampleUV(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.src    = _grid(10)
+        self.src_uv = _split_uvs(self.src)
+
+    def resample_uv(self, dst, **kwargs):
+        return MeshDataResampler(self.src, dst, src_uv=self.src_uv).resample_uv(**kwargs)
+
+    def test_seam_on_destination_edges(self):
+        """The source seam runs along dst edges: split there, nothing stretched."""
+        dst = _grid(8)
+        for raycast in (False, True):
+            for method in SampleMethod:
+                with self.subTest(raycast=raycast, method=method):
+                    uv = self.resample_uv(dst, raycast=raycast, method=method)
+                    self.assertEqual(_torn_faces(uv), 0)
+                    self.assertEqual(uv.point_count, 81 + 9)  # one seam column doubled
+                    error = np.abs(uv.points[uv.indices] - _expected_uvs(dst)).max()
+                    self.assertLess(error, 1e-3)
+
+    def test_seam_through_destination_faces(self):
+        """The seam cuts dst faces: their far corners clamp, none tears."""
+        dst = _grid(7)
+        for raycast in (False, True):
+            with self.subTest(raycast=raycast):
+                uv = self.resample_uv(dst, raycast=raycast)
+                self.assertEqual(_torn_faces(uv), 0)
+
+    def test_one_uv_per_vertex_would_tear(self):
+        """Guards the fixture: a seamless transfer tears it, so the tests above bite."""
+        dst      = _grid(8)
+        samples  = self.src.sample(dst)
+        uvs      = compute_samples(self.src_uv.points, samples.weights, self.src_uv.geometry[samples.indices])
+        seamless = UVData(indices=dst.indices.copy(), counts=dst.counts.copy(), points=uvs)
+        self.assertGreater(_torn_faces(seamless), 0)
+
+    def test_destination_with_triangles(self):
+        """Triangles and quads: each face reads the shell under the centroid of its own corners."""
+        dst = _mixed(8)  # 64 triangles, 32 quads
+        for raycast in (False, True):
+            with self.subTest(raycast=raycast):
+                uv = self.resample_uv(dst, raycast=raycast)
+                self.assertTrue(np.array_equal(uv.counts, dst.counts))
+                self.assertEqual(uv.point_count, 81 + 9)
+                self.assertEqual(_torn_faces(uv), 0)
+                self.assertLess(np.abs(uv.points[uv.indices] - _expected_uvs(dst)).max(), 1e-3)
+
+    def test_raycast_follows_stored_normals(self):
+        """Straight-down stored normals hit the vertices under a lifted copy."""
+        dst         = _grid(10, lift=0.1)
+        dst.normals = np.tile([0.0, -1.0, 0.0], (dst.point_count, 1))
+        stored      = dst.normals.copy()
+
+        uv    = self.resample_uv(dst, raycast=True, forward_only=True)
+        error = np.abs(uv.points[uv.indices] - _expected_uvs(dst)).max()
+        self.assertLess(error, 1e-6)
+        self.assertTrue(np.array_equal(dst.normals, stored))
+
+        computed       = self.resample_uv(dst, raycast=True, use_mesh_normals=False)
+        computed_error = np.abs(computed.points[computed.indices] - _expected_uvs(dst)).max()
+        self.assertGreater(computed_error, 10 * error + 1e-3)
+
+    def test_forward_only_false_hits_behind(self):
+        """Stored normals pointing away from src: only the backward cast hits."""
+        dst         = _grid(10, lift=0.1)
+        dst.normals = np.tile([0.0, 1.0, 0.0], (dst.point_count, 1))
+        closest     = self.resample_uv(dst)
+
+        both = self.resample_uv(dst, raycast=True)
+        self.assertLess(np.abs(both.points[both.indices] - _expected_uvs(dst)).max(), 1e-6)
+        ahead = self.resample_uv(dst, raycast=True, forward_only=True)  # every ray misses
+        self.assertTrue(np.allclose(ahead.points, closest.points))
+        self.assertGreater(np.abs(ahead.points - both.points).max(), 1e-2)
+
+    def test_twosided_false_rejects_back_faces(self):
+        """Straight-down rays meet src's back faces: twosided=False misses them all."""
+        dst         = _grid(10, lift=0.1)
+        dst.normals = np.tile([0.0, -1.0, 0.0], (dst.point_count, 1))
+        closest     = self.resample_uv(dst)
+
+        front = self.resample_uv(dst, raycast=True, forward_only=True)
+        back  = self.resample_uv(dst, raycast=True, forward_only=True, twosided=False)
+        self.assertTrue(np.allclose(back.points, closest.points))
+        self.assertGreater(np.abs(front.points - back.points).max(), 1e-2)
+
+    def test_twosided_false_reaches_the_centroid_rays(self):
+        """Tilted rays that meet only back faces: twosided=False misses them all, centroids too."""
+        dst         = _grid(8, lift=0.1)
+        dst.normals = np.tile(np.array([-1.0, -1.0, 0.0]) / np.sqrt(2.0), (dst.point_count, 1))
+        closest     = self.resample_uv(dst)
+        back        = self.resample_uv(dst, raycast=True, twosided=False)
+        self.assertTrue(np.array_equal(back.indices, closest.indices))
+        self.assertTrue(np.allclose(back.points, closest.points, rtol=0, atol=1e-9))
+
+    def test_reversed_normals_build_the_same_uv_set(self):
+        """forward_only=False: n and -n are one line, so one UV set, the hits', seam-cut faces too."""
+        dst  = _grid(7, lift=-0.08, low=0.02, high=0.96)  # under src, the seam through column 3
+        tilt = np.array([0.3, 1.0, 0.4]) / np.linalg.norm([0.3, 1.0, 0.4])
+
+        # each corner reads its vertex's hit, clamped to the shell its face's centroid ray hits
+        hit      = self.src.raycast(dst.points, tilt).projections[dst.indices]
+        centroid = self.src.raycast(dst.points[dst.geometry].mean(axis=1), tilt).projections
+        right    = np.repeat(centroid[:, 0] >= 0.5, 4)
+        u        = np.clip(hit[:, 0], 0.5 * right, 0.5 + 0.5 * right) + right
+        expected = np.stack([u, hit[:, 2]], axis=1)
+        self.assertEqual(int(np.sum((hit[:, 0] >= 0.5) != right)), 14)  # corners past the seam
+
+        for method, tolerance in ((SampleMethod.BILINEAR, 1e-9), (SampleMethod.BEZIER, 2e-3)):
+            with self.subTest(method=method):
+                built = []
+                for sign in (1.0, -1.0):  # rays hit forward, then backward
+                    dst.normals = np.tile(sign * tilt, (dst.point_count, 1))
+                    built.append(self.resample_uv(dst, raycast=True, method=method))
+                    error = np.abs(built[-1].points[built[-1].indices] - expected).max()
+                    self.assertLess(error, tolerance)
+                self.assertTrue(np.array_equal(built[0].indices, built[1].indices))
+                self.assertTrue(np.allclose(built[0].points, built[1].points, rtol=0, atol=1e-9))
+
+    def test_faces_pick_their_shell_along_the_centroid_ray(self):
+        """Tilted rays: a face takes the shell its centroid's ray hits, not the closest one's."""
+        dst         = _grid(8, lift=0.1)
+        tilt        = np.array([-1.0, -1.0, 0.0]) / np.sqrt(2.0)
+        dst.normals = np.tile(tilt, (dst.point_count, 1))
+        uv          = self.resample_uv(dst, raycast=True, forward_only=True)
+
+        centroids   = dst.points[dst.geometry].mean(axis=1)
+        hit         = self.src.raycast(centroids, tilt).projections[:, 0] >= 0.5
+        closest     = self.src.sample(centroids).projections[:, 0] >= 0.5
+        self.assertEqual(int(np.sum(hit != closest)), 8)  # column 4 moves left
+
+        u = uv.points[uv.geometry][..., 0]
+        self.assertTrue(np.all(np.where(hit[:, None], u >= 1.5 - 1e-6, u <= 0.5 + 1e-6)))
+
+    def test_a_zero_stored_normal_leaves_its_faces_to_their_other_corners(self):
+        """Tilted rays, a few zero normals on the seam: their faces still follow the others' rays."""
+        dst               = _grid(8, lift=0.1)
+        tilt              = np.array([-1.0, -1.0, 0.0]) / np.sqrt(2.0)
+        dst.normals       = np.tile(tilt, (dst.point_count, 1))
+        zero              = np.isclose(dst.points[:, 0], 0.5) & (np.arange(dst.point_count) % 2 == 0)
+        dst.normals[zero] = 0.0
+        uv                = self.resample_uv(dst, raycast=True, forward_only=True)
+
+        hit = self.src.raycast(dst.points[dst.geometry].mean(axis=1), tilt).projections[:, 0] >= 0.5
+        u   = uv.points[uv.geometry][..., 0]
+        self.assertEqual(int(zero.sum()), 5)
+        self.assertTrue(np.all(np.where(hit[:, None], u >= 1.5 - 1e-6, u <= 0.5 + 1e-6)))
+
+    def test_triangle_centroid_ray_ignores_padding(self):
+        """A triangle's centroid ray sums its own 3 corners' normals, not vertex 0's."""
+        dst            = _mixed(8, lift=0.3)
+        dst.normals    = np.tile([0.0, -1.0, 0.0], (dst.point_count, 1))
+        dst.normals[0] = [-1.0, 0.0, 0.0]  # the padding of a triangle's 4th corner reads vertex 0
+        uv             = self.resample_uv(dst, raycast=True, forward_only=True)
+        error          = np.abs(uv.points[uv.indices] - _expected_uvs(dst))
+        self.assertLess(error[dst.indices != 0].max(), 1e-6)
+
+    def test_bezier_differs_from_bilinear(self):
+        """method reaches the projection: BEZIER and BILINEAR give different UVs."""
+        dst = _grid(8)
+        for raycast in (False, True):
+            with self.subTest(raycast=raycast):
+                bilinear = self.resample_uv(dst, raycast=raycast, method=SampleMethod.BILINEAR)
+                bezier   = self.resample_uv(dst, raycast=raycast, method=SampleMethod.BEZIER)
+                self.assertGreater(np.abs(bilinear.points - bezier.points).max(), 1e-5)
+
+    def test_method_given_as_a_string(self):
+        """method='bezier' is SampleMethod.BEZIER, not a silent BILINEAR; an unknown name raises."""
+        dst = _grid(8)
+        for raycast in (False, True):
+            with self.subTest(raycast=raycast):
+                named    = self.resample_uv(dst, raycast=raycast, method="bezier")
+                bezier   = self.resample_uv(dst, raycast=raycast, method=SampleMethod.BEZIER)
+                bilinear = self.resample_uv(dst, raycast=raycast, method=SampleMethod.BILINEAR)
+                named, bezier, bilinear = (uv.points[uv.indices] for uv in (named, bezier, bilinear))
+                self.assertTrue(np.allclose(named, bezier, rtol=0, atol=1e-9))
+                self.assertGreater(np.abs(named - bilinear).max(), 1e-5)
+        with self.assertRaises(ValueError):
+            self.resample_uv(dst, method="nearest")
+
+    def test_a_mesh_onto_itself_gives_back_its_uvs(self):
+        """A thin box onto itself, one shell per side: every UV comes back, BEZIER too."""
+        src, src_uv = _box(4, 0.1)
+        for method in SampleMethod:
+            for raycast in (False, True):
+                with self.subTest(method=method, raycast=raycast):
+                    uv    = MeshDataResampler(src, src, src_uv=src_uv).resample_uv(method=method, raycast=raycast)
+                    error = np.abs(uv.points[uv.indices] - src_uv.points[src_uv.indices]).max()
+                    self.assertLess(error, 1e-9)
+
+    def test_a_shell_per_face_reads_each_shell_on_its_own(self):
+        """A shell per face onto itself: every UV back, each shell sampled on its own vertices, all strays read at once."""
+        src    = _grid(12)
+        src_uv = _face_shells(src)
+        given  = []
+
+        def sample(query, face_points, face_geometry, **kwargs):
+            given.append((len(face_points), np.unique(face_geometry[face_geometry >= 0]).size))
+            return sample_patches(query, face_points, face_geometry, **kwargs)
+
+        resampler = MeshDataResampler(src, src, src_uv=src_uv)
+        with mock.patch("cgmath.geometry.resample.sample_patches", side_effect=sample), mock.patch(
+            "cgmath.geometry.resample.compute_samples", side_effect=compute_samples
+        ) as reads:
+            uv = resampler.resample_uv()
+        self.assertLess(np.abs(uv.points[uv.indices] - src_uv.points[src_uv.indices]).max(), 1e-9)
+        # the whole mesh twice, vertices and centroids, then a shell per pass
+        self.assertGreater(len(given), 100)
+        self.assertTrue(all(points == held for points, held in given))
+        # the corners, then every stray corner in one go
+        self.assertEqual(reads.call_count, 2)
+
+    def test_bezier_surface_normals_computed_once(self):
+        """BEZIER reads the source's vertex normals once a call, not once per shell."""
+        src, src_uv = _box(4, 1.0)
+        dst = src.copy()
+        dst.points *= 0.9
+        resampler = MeshDataResampler(src, dst, src_uv=src_uv)
+        with mock.patch.object(
+            MeshData, "get_vertex_normals", autospec=True, side_effect=MeshData.get_vertex_normals
+        ) as counted:
+            resampler.resample_uv(method=SampleMethod.BEZIER)
+        on_src = [call for call in counted.call_args_list if call.args[0] is src]
+        self.assertEqual(len(on_src), 1)
+
+    def test_closest_bezier_matches_mesh_sample(self):
+        """Closest point, BEZIER, one shell: the UVs are what MeshData.sample(BEZIER) reads."""
+        src = _grid(10)
+        src.points += np.random.default_rng(4).normal(scale=0.02, size=src.points.shape)
+        planar   = UVData(indices=src.indices.copy(), counts=src.counts.copy(), points=src.points[:, [0, 2]])
+        dst      = _grid(7, lift=0.03, low=0.05, high=0.95)
+        uv       = MeshDataResampler(src, dst, src_uv=planar).resample_uv(method=SampleMethod.BEZIER)
+        samples  = src.sample(dst, method=SampleMethod.BEZIER)
+        expected = compute_samples(planar.points, samples.weights, planar.geometry[samples.indices])
+        self.assertLess(np.abs(uv.points[uv.indices] - expected[dst.indices]).max(), 1e-9)
+
+    def test_bezier_reads_a_stray_corner_off_its_shells_patches(self):
+        """BEZIER: a corner past a seam reads its face's shell at the nearest point of its PN-quad patches."""
+        src, src_uv = _box(4, 1.0)
+        dst = src.copy()
+        dst.points *= 0.9
+        uv = MeshDataResampler(src, dst, src_uv=src_uv).resample_uv(method=SampleMethod.BEZIER)
+
+        shell = np.zeros(src.face_count, dtype=np.int64)
+        for k, faces in enumerate(src_uv.shell_faces):
+            shell[faces] = k
+        hits    = src.sample(dst, method=SampleMethod.BEZIER)
+        wanted  = np.repeat(shell[src.sample(_centroids(dst)).indices], dst.counts)
+        stray   = np.flatnonzero(shell[hits.indices[dst.indices]] != wanted)
+        normals = src.get_vertex_normals(angle_weighted=True, area_weighted=False)
+        self.assertGreater(stray.size, 0)
+        for corner in stray:
+            faces = src_uv.shell_faces[wanted[corner]]
+            point = hits.projections[dst.indices[corner]][None]
+            near  = sample_patches(point, src.points, src.geometry[faces], surface_normals=normals)
+            want  = compute_samples(src_uv.points, near.weights, src_uv.geometry[faces][near.indices])
+            self.assertLess(np.abs(uv.points[uv.indices[corner]] - want[0]).max(), 1e-9)
+
+    def test_face_varying_normals(self):
+        """Indexed and unindexed face-varying normals are summed per vertex."""
+        dst      = _grid(10, lift=0.1)
+        down     = np.array([0.0, -1.0, 0.0])
+        expected = _expected_uvs(dst)
+
+        layouts = {
+            "unindexed": (np.tile(down, (dst.indices.size, 1)), None),
+            "indexed":   (down[None, :].copy(), np.zeros(dst.indices.size, dtype=np.int32)),
+        }
+        for name, (normals, normal_indices) in layouts.items():
+            with self.subTest(layout=name):
+                dst.normals        = normals
+                dst.normal_indices = normal_indices
+                uv                 = self.resample_uv(dst, raycast=True, forward_only=True)
+                self.assertLess(np.abs(uv.points[uv.indices] - expected).max(), 1e-6)
+
+    def test_varying_face_varying_normals_are_summed(self):
+        """Each vertex's ray is the sum of its corners' normals, through normal_indices."""
+        dst       = _grid(6)
+        resampler = MeshDataResampler(self.src, dst, src_uv=self.src_uv)
+        rng       = np.random.default_rng(1)
+        for indexed in (False, True):
+            with self.subTest(indexed=indexed):
+                if indexed:
+                    normals            = rng.normal(size=(7, 3))
+                    dst.normals        = normals
+                    dst.normal_indices = rng.integers(0, 7, dst.indices.size).astype(np.int32)
+                    corner_normals     = normals[dst.normal_indices]
+                else:
+                    corner_normals     = rng.normal(size=(dst.indices.size, 3))
+                    dst.normals        = corner_normals
+                    dst.normal_indices = None
+                summed = np.zeros((dst.point_count, 3))
+                np.add.at(summed, dst.indices, corner_normals)
+                summed /= np.linalg.norm(summed, axis=1, keepdims=True)
+                actual = resampler._get_ray_directions(True, True, True)
+                self.assertTrue(np.allclose(actual, summed))
+
+    def test_normal_indices_win_over_a_vertex_count_match(self):
+        """As many indexed normals as vertices: normal_indices still maps them to the corners."""
+        dst                = _grid(6)
+        rng                = np.random.default_rng(2)
+        dst.normals        = rng.normal(size=(dst.point_count, 3))
+        dst.normal_indices = rng.integers(0, dst.point_count, dst.indices.size).astype(np.int32)
+        summed             = np.zeros((dst.point_count, 3))
+        np.add.at(summed, dst.indices, dst.normals[dst.normal_indices])
+        summed /= np.linalg.norm(summed, axis=1, keepdims=True)
+        resampler = MeshDataResampler(self.src, dst, src_uv=self.src_uv)
+        self.assertTrue(np.allclose(resampler._get_ray_directions(True, True, True), summed))
+
+    def test_raycast_without_stored_normals_leaves_mesh_alone(self):
+        """No stored normals: computed ones are used and never written back."""
+        dst = _grid(8, lift=0.05)
+        self.assertIsNone(dst.normals)
+        for angle_weighted in (True, False):
+            for area_weighted in (True, False):
+                with self.subTest(angle_weighted=angle_weighted, area_weighted=area_weighted):
+                    uv = self.resample_uv(
+                        dst,
+                        raycast        = True,
+                        angle_weighted = angle_weighted,
+                        area_weighted  = area_weighted,
+                    )
+                    self.assertEqual(_torn_faces(uv), 0)
+                    self.assertIsNone(dst.normals)
+                    self.assertIsNone(dst.normal_indices)
+
+    def test_ray_directions_match_get_vertex_normals(self):
+        """Computed directions are get_vertex_normals() with the given weighting."""
+        dst = _grid(6)
+        dst.points += np.random.default_rng(3).normal(scale=0.02, size=dst.points.shape)
+        resampler  = MeshDataResampler(self.src, dst, src_uv=self.src_uv)
+        directions = []
+        for angle_weighted in (True, False):
+            for area_weighted in (True, False):
+                expected = dst.get_vertex_normals(angle_weighted=angle_weighted, area_weighted=area_weighted)
+                expected = expected / np.linalg.norm(expected, axis=1, keepdims=True)
+                actual   = resampler._get_ray_directions(False, angle_weighted, area_weighted)
+                self.assertTrue(np.allclose(actual, expected))
+                directions.append(actual)
+        for i in range(4):  # the jitter makes every weighting count
+            for j in range(i):
+                self.assertGreater(np.abs(directions[i] - directions[j]).max(), 1e-3)
+
+    def test_computed_normals_default_to_angle_and_area_weighting(self):
+        """No stored normals: the default rays are get_vertex_normals()' own defaults."""
+        dst = _grid(8, lift=0.05)
+        dst.points += np.random.default_rng(3).normal(scale=0.02, size=dst.points.shape)
+        resampler = MeshDataResampler(self.src, dst, src_uv=self.src_uv)
+        default   = resampler.resample_uv(raycast=True)
+        default   = default.points[default.indices]
+        for angle_weighted in (True, False):
+            for area_weighted in (True, False):
+                with self.subTest(angle_weighted=angle_weighted, area_weighted=area_weighted):
+                    uv = resampler.resample_uv(
+                        raycast        = True,
+                        angle_weighted = angle_weighted,
+                        area_weighted  = area_weighted,
+                    )
+                    error = np.abs(uv.points[uv.indices] - default).max()
+                    if angle_weighted and area_weighted:
+                        self.assertLess(error, 1e-12)
+                    else:
+                        self.assertGreater(error, 1e-4)
+
+    def test_mismatched_stored_normals_raise(self):
+        dst         = _grid(8)
+        dst.normals = np.tile([0.0, 1.0, 0.0], (5, 1))
+        with self.assertRaises(ValueError) as context:
+            self.resample_uv(dst, raycast=True)
+        self.assertIn("use_mesh_normals=False", str(context.exception))
+
+    def test_missed_rays_fall_back_to_closest_point(self):
+        """dst overhangs src: rays past the edge miss and clamp to the shell border."""
+        dst         = _grid(12, lift=0.1, low=-0.3, high=1.3)
+        dst.normals = np.tile([0.0, -1.0, 0.0], (dst.point_count, 1))
+        uv          = self.resample_uv(dst, raycast=True, forward_only=True)
+        u, v = uv.points[:, 0], uv.points[:, 1]
+        eps = 1e-6
+
+        self.assertTrue(np.all(np.isfinite(uv.points)))
+        self.assertTrue(np.all((v >= -eps) & (v <= 1 + eps)))
+        self.assertTrue(np.all(((u >= -eps) & (u <= 0.5 + eps)) | ((u >= 1.5 - eps) & (u <= 2 + eps))))
+        self.assertTrue(np.any(np.isclose(u, 0.0)) and np.any(np.isclose(u, 2.0)))
+
+    def test_faces_without_uvs_are_skipped(self):
+        """Only the left shell has UVs: everything reads it, the right side clamps to its border."""
+        dst         = _grid(8, lift=0.1)
+        dst.normals = np.tile([0.0, -1.0, 0.0], (dst.point_count, 1))
+        resampler   = MeshDataResampler(self.src, dst, src_uv=_left_shell_only(self.src))
+        right       = np.repeat(dst.points[dst.geometry, 0].mean(axis=1) > 0.5, 4)
+        x           = dst.points[dst.indices, 0]
+        for raycast in (False, True):
+            with self.subTest(raycast=raycast):
+                uv = resampler.resample_uv(raycast=raycast, forward_only=True)
+                u  = uv.points[uv.indices][:, 0]
+                self.assertEqual(uv.point_count, dst.point_count)
+                self.assertTrue(np.all((u >= -1e-6) & (u <= 0.5 + 1e-6)))
+                self.assertTrue(np.allclose(u[right], 0.5))
+                if raycast:  # straight down: the left side reads its own x
+                    self.assertLess(np.abs(u[~right] - x[~right]).max(), 1e-6)
+
+    def test_subset_raycast_passes_its_options(self):
+        """UVs on the left shell only: the faces clear of the seam read as with the whole set."""
+        up           = _grid(8, lift=0.1)
+        up.normals   = np.tile([0.0, 1.0, 0.0], (up.point_count, 1))
+        down         = _grid(8, lift=0.1)
+        down.normals = np.tile([0.0, -1.0, 0.0], (down.point_count, 1))
+        cases = {
+            "forward_only=False": (up, dict(forward_only=False)),
+            "twosided=False":     (down, dict(forward_only=True, twosided=False)),
+            "BEZIER":             (down, dict(forward_only=True, method=SampleMethod.BEZIER)),
+        }
+        left_only = _left_shell_only(self.src)
+        for name, (dst, options) in cases.items():
+            with self.subTest(case=name):
+                part  = MeshDataResampler(self.src, dst, src_uv=left_only).resample_uv(raycast=True, **options)
+                whole = self.resample_uv(dst, raycast=True, **options)
+                clear = np.repeat(dst.points[dst.geometry, 0].max(axis=1) <= 0.4 + 1e-9, 4)
+                error = np.abs(part.points[part.indices] - whole.points[whole.indices])[clear].max()
+                self.assertLess(error, 1e-9)
+
+    def test_ngon_source_faces(self):
+        """An n-gon with UVs raises in both modes; one without UVs is never sampled."""
+        src    = _with_hexagon(_grid(10), 44)
+        planar = UVData(indices=src.indices.copy(), counts=src.counts.copy(), points=src.points[:, [0, 2]])
+        ngon   = src.counts > 4
+        uvless = UVData(
+            indices = src.indices[np.repeat(~ngon, src.counts)],
+            counts  = np.where(ngon, 0, src.counts),
+            points  = planar.points,
+        )
+        dst = _grid(8)
+        for raycast in (False, True):
+            for method in SampleMethod:
+                with self.subTest(raycast=raycast, method=method):
+                    resampler = MeshDataResampler(src, dst)
+                    with self.assertRaisesRegex(NotImplementedError, r"resample_uv\(\) does not support n-gon"):
+                        resampler.resample_uv(uv_data=planar, raycast=raycast, method=method)
+                    uv    = resampler.resample_uv(uv_data=uvless, raycast=raycast, method=method)
+                    error = np.abs(uv.points[uv.indices] - dst.points[dst.indices][:, [0, 2]]).max()
+                    self.assertLess(error, 1e-3)
+
+    def test_uv_data_argument_overrides_src_uv(self):
+        dst       = _grid(8)
+        resampler = MeshDataResampler(self.src, dst)
+        with self.assertRaises(RuntimeError):
+            resampler.resample_uv()
+        uv = resampler.resample_uv(uv_data=self.src_uv)
+        self.assertEqual(_torn_faces(uv), 0)
+
+    def test_foreign_uv_data_raise(self):
+        dst       = _grid(8)
+        resampler = MeshDataResampler(self.src, dst)
+        with self.assertRaisesRegex(ValueError, "their faces differ"):
+            resampler.resample_uv(uv_data=_split_uvs(_grid(4)))
+
+        counts = self.src_uv.counts.copy()
+        counts[0], counts[1] = 3, 5  # as many faces, two of other sizes
+        other_sizes = UVData(indices=self.src_uv.indices, counts=counts, points=self.src_uv.points)
+        with self.assertRaisesRegex(ValueError, "their faces differ"):
+            resampler.resample_uv(uv_data=other_sizes)
+
+        counts[1] = 4  # one face smaller, none larger
+        smaller   = UVData(indices=self.src_uv.indices[1:], counts=counts, points=self.src_uv.points)
+        with self.assertRaisesRegex(ValueError, "their faces differ"):
+            resampler.resample_uv(uv_data=smaller)
+
+        counts[0] = 5  # one face larger, none smaller
+        indices   = np.concatenate([self.src_uv.indices[:4], [0], self.src_uv.indices[4:]])
+        larger    = UVData(indices=indices, counts=counts, points=self.src_uv.points)
+        with self.assertRaisesRegex(ValueError, "their faces differ"):
+            resampler.resample_uv(uv_data=larger)
+
+    def test_uv_set_without_uvs_raise(self):
+        empty = UVData(
+            indices = np.zeros(0, dtype=np.int32),
+            counts  = np.zeros(self.src.face_count, dtype=np.int32),
+            points  = np.zeros((0, 2)),
+        )
+        with self.assertRaisesRegex(ValueError, "no faces with UVs"):
+            MeshDataResampler(self.src, _grid(8)).resample_uv(uv_data=empty)
+
+    def test_round_trip_through_resample_mesh(self):
+        """resample_uv() then resample_mesh(UV) rebuilds dst from its UVs alone."""
+        dst             = _grid(8)
+        dst_uv          = self.resample_uv(dst)
+        blank           = dst.copy()
+        blank.points[:] = 0.0
+
+        resampler = MeshDataResampler(self.src, blank, src_uv=self.src_uv, dst_uv=dst_uv)
+        back      = resampler.resample_mesh(mode=ResampleMode.UV)
+        self.assertLess(np.linalg.norm(back.points - dst.points, axis=1).max(), 0.002)
+
+    def test_round_trip_beside_a_seam_through_faces(self):
+        """The seam cuts dst faces: the way back is exact but beside it, where a vertex can land on the seam."""
+        dst             = _grid(7, low=0.02)  # faces 0.14 wide; column 3, x 0.44 to 0.58, reads the right shell
+        dst_uv          = self.resample_uv(dst)
+        blank           = dst.copy()
+        blank.points[:] = 0.0
+
+        resampler = MeshDataResampler(self.src, blank, src_uv=self.src_uv, dst_uv=dst_uv)
+        back      = resampler.resample_mesh(mode=ResampleMode.UV)
+        error     = np.linalg.norm(back.points - dst.points, axis=1)
+        beside    = np.isclose(dst.points[:, 0], 0.44)
+        on_seam   = np.isclose(back.points[:, 0], 0.5)
+        self.assertLess(error[~beside].max(), 0.002)
+        self.assertTrue(np.all(on_seam[beside] | (error[beside] < 0.002)))
+        self.assertLess(error.max(), 0.07 + 0.002)  # half a face at most
+
+    def test_round_trip_where_seams_cross_inside_a_face(self):
+        """Seams cross inside dst faces: a vertex comes back past half a face, within half its diagonal."""
+        src_uv          = _block_uvs(self.src, [0.3, 0.7])  # 9 shells, their corners inside dst faces
+        dst             = _grid(8)                          # faces 0.125 wide
+        dst_uv          = MeshDataResampler(self.src, dst, src_uv=src_uv).resample_uv()
+        blank           = dst.copy()
+        blank.points[:] = 0.0
+
+        resampler = MeshDataResampler(self.src, blank, src_uv=src_uv, dst_uv=dst_uv)
+        back      = resampler.resample_mesh(mode=ResampleMode.UV)
+        error     = np.linalg.norm(back.points - dst.points, axis=1).max()
+        self.assertGreater(error, 0.125 / 2)
+        self.assertLess(error, 0.125 * np.sqrt(2.0) / 2)
+
+    def test_resample_mesh_uv_accuracy(self):
+        """resample_mesh(UV) places every dst vertex where its UV sits on src."""
+        for n in (7, 8):
+            truth = _grid(n)
+            x, z = truth.points[:, 0], truth.points[:, 2]
+            dst_uv = UVData(
+                indices = truth.indices.copy(),
+                counts  = truth.counts.copy(),
+                points  = np.stack([x + (x > 0.5 + 1e-9), z], axis=1),
+            )
+            blank           = truth.copy()
+            blank.points[:] = 0.0  # UV mode must not read dst positions
+
+            resampler = MeshDataResampler(self.src, blank, src_uv=self.src_uv, dst_uv=dst_uv)
+            for method, tolerance in ((SampleMethod.BILINEAR, 0.003), (SampleMethod.BEZIER, 0.001)):
+                with self.subTest(n=n, method=method):
+                    back  = resampler.resample_mesh(mode=ResampleMode.UV, method=method)
+                    error = np.linalg.norm(back.points - truth.points, axis=1).max()
+                    self.assertLess(error, tolerance)
