@@ -484,6 +484,23 @@ print(euler_slerp(e0, e1, 0.5).shape)                            # (4, 3), all X
 print(euler_slerp(e0, e1, 0.5, axes0=XYZ, axes1=ZXY, axes=YZX).shape)
 ```
 
+It takes the shorter arc, as `quaternion_slerp` does and as Maya's pairBlend
+does in its quaternion mode. `shortest=False` goes the long way round:
+
+```python
+import numpy as np
+from cgmath.transforms import euler_slerp
+
+e0 = np.radians([[0.0, 0.0, 0.0]])
+e1 = np.radians([[350.0, 0.0, 0.0]])
+
+print(np.degrees(euler_slerp(e0, e1, 0.5)))                  # [[-5, 0, 0]]
+print(np.degrees(euler_slerp(e0, e1, 0.5, shortest=False)))  # [[175, 0, 0]]
+
+assert np.allclose(np.degrees(euler_slerp(e0, e1, 0.5)), [[-5.0, 0.0, 0.0]])
+assert np.allclose(np.degrees(euler_slerp(e0, e1, 0.5, shortest=False)), [[175.0, 0.0, 0.0]])
+```
+
 ### Filter
 
 Removes 180 / 360 degree branch jumps from euler curves sampled over time.

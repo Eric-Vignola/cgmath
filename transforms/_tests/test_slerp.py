@@ -31,6 +31,7 @@ from cgmath.transforms import (
     matrix_slerp,
     quaternion_slerp,
     quaternion_squad,
+    quaternion_to_euler,
     quaternion_to_matrix,
     vector_slerp,
 )
@@ -415,6 +416,133 @@ class TestBuiltOnTheQuaternionSlerp(unittest.TestCase):
         )
 
 
+def _euler_grid():
+    """euler pairs of a grid, in every rotate order for the two and the
+    result: each grid angle paired with the grid rolled by one and by two
+    places, and with itself a half turn and a whole turn about X away
+    (both arcs as long, and one rotation, where axes0 == axes1), every
+    (axes0, axes1, axes) in turn"""
+    grid   = np.radians([-330.0, -190.0, -90.0, 0.0, 45.0, 180.0, 350.0])
+    angles = np.stack(np.meshgrid(grid, grid, grid, indexing="ij"), -1).reshape(-1, 3)
+    euler0 = np.concatenate([angles] * 4)
+    euler1 = np.concatenate(
+        [
+            np.roll(angles, 1, axis=0),
+            np.roll(angles, 2, axis=0),
+            angles + [np.pi, 0.0, 0.0],
+            angles + [2.0 * np.pi, 0.0, 0.0],
+        ]
+    )
+    orders = np.array(np.meshgrid(*[range(6)] * 3, indexing="ij")).reshape(3, -1).T
+    count  = len(euler0)
+    euler0 = np.tile(euler0, (len(orders), 1))
+    euler1 = np.tile(euler1, (len(orders), 1))
+    orders = np.repeat(orders, count, axis=0).astype(np.int32)
+    return euler0, euler1, orders[:, 0], orders[:, 1], orders[:, 2]
+
+
+def _as_converted(euler0, euler1, weight, axes0, axes1, axes):
+    """euler_slerp before it picked an arc, on today's kernel: the two
+    quaternions as converted from the angles, along whichever arc their
+    signs gave. 2.0.0 took the same arcs, with its bits from before the
+    precision fix"""
+    quat0  = euler_to_quaternion(euler0, axes0)
+    quat1  = euler_to_quaternion(euler1, axes1)
+    weight = np.broadcast_to(np.asarray(weight, dtype=np.float64), (len(quat0),))
+    return quaternion_to_euler(_quaternion_slerp(quat0, quat1, weight.copy()), axes)
+
+
+class TestEulerSlerpArc(unittest.TestCase):
+    """euler_slerp takes the shorter arc, as quaternion_slerp does: before
+    3.0.0 it slerped the quaternions as converted from the angles, and
+    (0, 0, 0) to (350, 0, 0) degrees went the 350 degree way round"""
+
+    def assertSameBits(self, got, want, where):
+        nan = np.isnan(want)
+        np.testing.assert_array_equal(np.isnan(got), nan, err_msg=where)
+        np.testing.assert_array_equal(
+            got[~nan].view(np.uint64), want[~nan].view(np.uint64), err_msg=where
+        )
+
+    def test_the_shorter_arc(self):
+        zero = np.zeros((1, 3))
+        cases = (
+            # (euler0, euler1, the shorter arc's, the longer arc's), degrees
+            (zero, [[350.0, 0.0, 0.0]], [[-5.0, 0.0, 0.0]], [[175.0, 0.0, 0.0]]),
+            (zero, [[10.0, 0.0, 0.0]], [[5.0, 0.0, 0.0]], [[-175.0, 0.0, 0.0]]),
+            (zero, [[0.0, 0.0, -350.0]], [[0.0, 0.0, 5.0]], [[0.0, 0.0, -175.0]]),
+        )
+        for euler0, euler1, shorter, longer in cases:
+            euler0 = np.radians(euler0)
+            euler1 = np.radians(euler1)
+            got    = np.degrees(euler_slerp(euler0, euler1, 0.5))
+            np.testing.assert_allclose(got, shorter, rtol=0, atol=1e-12)
+            got = np.degrees(euler_slerp(euler0, euler1, 0.5, shortest=False))
+            np.testing.assert_allclose(got, longer, rtol=0, atol=1e-12)
+
+        # Maya 2025's pairBlend, rotInterpolation quaternion, at weight 0.5
+        euler0 = np.radians([[10.0, 20.0, 30.0]])
+        euler1 = np.radians([[200.0, -150.0, 170.0]])
+        maya   = [[10.397823958316941, -5.816739662881113, 11.53819611942565]]
+        got    = np.degrees(euler_slerp(euler0, euler1, 0.5))
+        np.testing.assert_allclose(got, maya, rtol=0, atol=1e-12)
+
+    def test_one_rotation_stays_along_either_arc(self):
+        # a whole turn apart: the shorter arc has no length, the longer one
+        # no axis to turn about. Small angles only, with 2 pi added in
+        # radians (every angle under 7.5 rad here): elsewhere, sometimes
+        # even within a turn, the angles' own rounding can leave the two
+        # quaternions further than about 2^-50 from opposite, and the
+        # longer arc then turns a whole turn
+        rng    = np.random.default_rng(25)
+        euler0 = rng.uniform(-1.2, 1.2, (600, 3))
+        euler1 = euler0 + 2.0 * np.pi * np.tile(np.eye(3), (200, 1))
+        want   = euler_to_matrix(euler0, 0)
+        for shortest in (True, False):
+            for weight in WEIGHTS:
+                got = euler_slerp(euler0, euler1, weight, shortest=shortest)
+                got = euler_to_matrix(got, 0)
+                self.assertLess(_matrix_angle(got, want).max(), 2e-14, (shortest, weight))
+
+    def test_every_rotate_order_matches_quaternion_slerp(self):
+        euler0, euler1, axes0, axes1, axes = _euler_grid()
+        quat0 = euler_to_quaternion(euler0, axes0)
+        quat1 = euler_to_quaternion(euler1, axes1)
+        dot   = np.einsum("ij,ij->i", quat0, quat1)
+        self.assertGreater((dot < 0.0).mean(), 0.3)
+        self.assertGreater((dot > 0.0).mean(), 0.3)
+        self.assertGreater((dot == 0.0).sum(), 5000)
+        rng = np.random.default_rng(26)
+        for weight in WEIGHTS + (rng.random(len(euler0)),):
+            for shortest in (True, False):
+                got = euler_slerp(euler0, euler1, weight, axes0, axes1, axes, shortest)
+                want = quaternion_to_euler(
+                    quaternion_slerp(quat0, quat1, weight, shortest), axes
+                )
+                self.assertSameBits(got, want, (np.ravel(weight)[:1], shortest))
+
+    def test_each_arc_keeps_the_answers_it_gave_before(self):
+        # where the quaternions as converted took the shorter arc, it is
+        # still the default's, and where they took the longer one, that is
+        # shortest=False's, bit for bit; at weights 0 and 1 the arc gives
+        # the ends either way, as before
+        euler0, euler1, axes0, axes1, axes = _euler_grid()
+        rng   = np.random.default_rng(27)
+        quat0 = euler_to_quaternion(euler0, axes0)
+        quat1 = euler_to_quaternion(euler1, axes1)
+        took  = np.einsum("ij,ij->i", quat0, quat1) < 0.0
+        for weight in WEIGHTS + (rng.random(len(euler0)),):
+            before  = _as_converted(euler0, euler1, weight, axes0, axes1, axes)
+            shorter = euler_slerp(euler0, euler1, weight, axes0, axes1, axes)
+            longer  = euler_slerp(euler0, euler1, weight, axes0, axes1, axes, False)
+            where   = np.ravel(weight)[:1]
+            self.assertSameBits(shorter[~took], before[~took], where)
+            self.assertSameBits(longer[took], before[took], where)
+            if np.ndim(weight) == 0 and weight in (0.0, 1.0):
+                self.assertSameBits(shorter, before, where)
+                self.assertSameBits(longer, before, where)
+
+
 def _assert_rows_close(test, got, want, tol):
     """each row of ``got`` within ``tol`` of the length of ``want``'s"""
     off = np.linalg.norm(got - want, axis=1) / np.linalg.norm(want, axis=1)
@@ -706,6 +834,19 @@ class TestTwins(unittest.TestCase):
         rng = np.random.default_rng(18)
         q0, q1, v0, v1, e0, e1, w = _fixture(rng, THRESHOLD + 1)
         m0, m1 = quaternion_to_matrix(q0), quaternion_to_matrix(q1)
+
+        # euler pairs anywhere, along both arcs, in every rotate order, a nan
+        # and an inf among them: the ones near gimbal above are a degree apart
+        f0, f1, a0, a1, a = (array[::293][: THRESHOLD + 1] for array in _euler_grid())
+        f0[::7]      = rng.uniform(-2.0 * np.pi, 2.0 * np.pi, f0[::7].shape)
+        f0[1::19, 0] = np.nan
+        f1[2::19, 1] = np.inf
+
+        def wide(k, shortest):
+            return transforms.euler_slerp(
+                f0[:k], f1[:k], w[:k], a0[:k], a1[:k], a[:k], shortest
+            )
+
         calls = {
             "quaternion_slerp": lambda k: transforms.quaternion_slerp(
                 q0[:k], q1[:k], w[:k]
@@ -720,7 +861,9 @@ class TestTwins(unittest.TestCase):
             "matrix_interpolate": lambda k: transforms.matrix_interpolate(
                 m0[:k] * 2.0, m1[:k], w[:k]
             ),
-            "euler_slerp":  lambda k: transforms.euler_slerp(e0[:k], e1[:k], w[:k]),
+            "euler_slerp": lambda k: transforms.euler_slerp(e0[:k], e1[:k], w[:k]),
+            "euler_slerp anywhere": lambda k: wide(k, True),
+            "euler_slerp anywhere longer": lambda k: wide(k, False),
             "vector_slerp": lambda k: transforms.vector_slerp(v0[:k], v1[:k], w[:k]),
         }
         for name, call in calls.items():

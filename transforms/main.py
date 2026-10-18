@@ -787,11 +787,52 @@ def euler_to_quaternion(euler, axes=XYZ):
     return _sized(_euler_to_quaternion, len(euler))(euler, axes)
 
 
-def euler_slerp(euler0, euler1, weight=0.5, axes0=XYZ, axes1=XYZ, axes=XYZ):
+def euler_slerp(
+    euler0, euler1, weight=0.5, axes0=XYZ, axes1=XYZ, axes=XYZ, shortest=True
+):
     """Spherical interpolation between two lists of euler angles.
 
     Backed by ``_euler_to_quaternion`` -> ``_quaternion_slerp`` ->
     ``_quaternion_to_matrix`` -> ``_matrix_to_euler``.
+
+    Turns along the shorter arc between the two rotations, as
+    :func:`quaternion_slerp` does, and as Maya's pairBlend does in its
+    quaternion mode: ``(0, 0, 0)`` to ``(350, 0, 0)`` degrees half way is
+    ``(-5, 0, 0)``, and ``shortest=False`` gives the other arc's
+    ``(175, 0, 0)``.
+
+    A half turn apart, both arcs are as long, and the sign of the two
+    quaternions' dot product picks one, as in :func:`quaternion_slerp`.
+    Where it is 0 or rounds above, the default turns the way ``euler1``'s
+    quaternion as converted says, and ``shortest=False`` the other way.
+    Where it rounds below 0, as on about 15 to 32% of a 5 degree grid's
+    half turns, depending on how the half turn was added, the two swap:
+    ``(-170, 30, 60)`` to ``(10, 30, 60)`` degrees half way is
+    ``(100, 30, 60)``, and ``(-80, 30, 60)`` with ``shortest=False``.
+
+    Args:
+        euler0: ``(N, 3)`` radians, in ``axes0``. weight=0 endpoint.
+        euler1: ``(N, 3)`` radians, in ``axes1``. weight=1 endpoint.
+        weight: scalar or ``(N,)`` blend weights in ``[0, 1]``.
+        axes0: rotate order of ``euler0``, one or one per row.
+        axes1: rotate order of ``euler1``, one or one per row.
+        axes: rotate order of the result, one or one per row.
+        shortest: take the shorter arc when ``True`` (default). ``False``
+            takes the other one. Between two angles of one rotation, such
+            as a whole turn apart, it runs between two quaternions
+            opposite to within rounding. Where they come out opposite to
+            within about 2^-50 it has no axis to turn about and the
+            result stays at ``euler0``'s rotation; otherwise it turns a
+            whole turn about an axis the rounding picks, a half turn off
+            half way: ``(152.81, 0, 0)`` to ``(512.81, 0, 0)`` degrees
+            gives ``(-27.19, 0, 0)``. Which of the two happens depends on
+            how the angles themselves round, sometimes even within a turn
+            of zero, so do not rely on ``shortest=False`` between two
+            angles of one rotation. The default stays at the rotation at
+            any angle.
+
+    Returns:
+        ``(N, 3)`` euler angles (radians), in ``axes``.
     """
     from cgmath.transforms._numba._euler import _euler_to_quaternion
     from cgmath.transforms._numba._matrix import _matrix_to_euler
@@ -815,8 +856,21 @@ def euler_slerp(euler0, euler1, weight=0.5, axes0=XYZ, axes1=XYZ, axes=XYZ):
     to_quaternion = _sized(_euler_to_quaternion, count)
     q0            = to_quaternion(euler0, axes0)
     q1            = to_quaternion(euler1, axes1)
-    q             = _sized(_quaternion_slerp, count)(q0, q1, weight)
-    matrix        = _sized(_quaternion_to_matrix, count)(q)
+
+    # the two as converted take whichever arc their signs give: (0, 0, 0) to
+    # (350, 0, 0) degrees went the 350 degree way round. The arc is picked
+    # as quaternion_slerp picks it. Converted from angles, both are unit and
+    # their dot product never needs taking again; a nan has no arc to pick.
+    # q1 is the conversion's own array, negated in place
+    dot = np.einsum("...i,...i", q0, q1)
+    if shortest:
+        sign = dot < 0.0
+    else:
+        sign = dot >= 0.0
+    np.negative(q1, out=q1, where=sign[..., None])
+
+    q      = _sized(_quaternion_slerp, count)(q0, q1, weight)
+    matrix = _sized(_quaternion_to_matrix, count)(q)
 
     return _sized(_matrix_to_euler, count)(matrix, axes)
 

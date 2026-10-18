@@ -65,7 +65,7 @@ euler_random(n, seed=None)
     Generate ``n`` random euler angles in radians.
 euler_reorder(euler, from_axes, to_axes)
     Convert euler angles from one rotate order to another.
-euler_slerp(euler0, euler1, weight=0.5, axes0=0, axes1=0, axes=0)
+euler_slerp(euler0, euler1, weight=0.5, axes0=0, axes1=0, axes=0, shortest=True)
     Spherical interpolation between two lists of euler angles.
 euler_to_matrix(euler, axes=0)
     Convert euler angles to 4x4 transform matrices.
