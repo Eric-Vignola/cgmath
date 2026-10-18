@@ -82,17 +82,17 @@ Maya's `is`, `inverseScale`, is a Python keyword and has none.
 `parent_scale_inverse` is the parent's scale, whatever the parent: what
 Maya's `inverseScale` holds where Maya wires it from the parent joint.
 `cmds.joint` wires it under a joint, and so does an absolute
-`cmds.parent` that leaves the joint right under one; one that does not
-puts a transform between them, unwired. Under a joint, a joint made with
-`cmds.createNode` and `parent=` is unwired, holding (1, 1, 1), and one
-moved there with `cmds.parent` and `relative=True` holds what it held,
-unwired or still wired from the joint it left. Under a transform Maya
-never wires it from that transform: a joint drawn there holds (1, 1, 1),
-and one moved there with `cmds.parent` holds the scale of the parent
-joint it left, unwired under a transform Maya inserts, or with
-`relative=True` still wired from that joint. So a joint with
-`segment_scale_compensate` on that Maya did not wire from its parent
-joint divides by a scale Maya's does not.
+`cmds.parent` that leaves the joint right under one; under a joint, one
+that does not puts a transform between them, unwired. Under a joint, a
+joint made with `cmds.createNode` and `parent=` is unwired, holding
+(1, 1, 1), and one moved there with `cmds.parent` and `relative=True`
+holds what it held, unwired or still wired from the joint it left. Under
+a transform Maya never wires it from that transform: a joint drawn there
+holds (1, 1, 1), and one moved there with `cmds.parent` holds the scale
+of the parent joint it left, unwired, under that transform or under one
+Maya inserts below it, or with `relative=True` still wired from that
+joint. So a joint with `segment_scale_compensate` on that Maya did not
+wire from its parent joint can divide by a scale Maya's does not.
 `add_user_attribute` refuses a short name; a file's user attribute that
 carries one loads, hidden, with one warning a name.
 

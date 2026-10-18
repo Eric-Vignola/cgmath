@@ -819,11 +819,14 @@ class TestTheFourMatrices(unittest.TestCase):
         under a joint, holds (1, 1, 1): compensating there, it has Maya's
         matrices with segment_scale_compensate off. One moved under a
         transform with cmds.parent holds, unwired, the scale of the joint it
-        left, which Maya's m divides by: neither setting gives Maya's m
-        there. With relative=True a joint lands right under a transform or
-        a joint, still wired from the joint it left; an absolute cmds.parent
-        wires it where it leaves it right under a joint, and elsewhere puts
-        a transform between them, unwired. Needs mayapy"""
+        left, which Maya's m divides by: knee, moved under group, scaled
+        unlike hip, lands under a transform Maya inserts, where neither
+        setting gives Maya's m, and wrist, moved right under sleeve, scaled
+        as elbow, the joint it left, has Maya's matrices either way. With
+        relative=True a joint lands right under a transform or a joint,
+        still wired from the joint it left; an absolute cmds.parent wires it
+        where it leaves it right under a joint, and under a joint elsewhere
+        puts a transform between them, unwired. Needs mayapy"""
         try:
             import maya.cmds as cmds
 
@@ -921,8 +924,9 @@ class TestTheFourMatrices(unittest.TestCase):
                 )
 
         # an absolute cmds.parent wires it where it leaves a joint right under
-        # a joint, as under ankle, a root joint unscaled, and elsewhere puts a
-        # transform between them, unwired, as under hip, scaled
+        # a joint, as under ankle, a root joint unscaled, and under a joint
+        # elsewhere puts a transform between them, unwired, as under hip,
+        # scaled
         for name in ("ankle", "loose"):
             cmds.select(clear=True)
             cmds.joint(name=name)
@@ -936,6 +940,42 @@ class TestTheFourMatrices(unittest.TestCase):
         self.assertEqual(cmds.nodeType(above[0]), "transform")
         self.assertEqual(cmds.listRelatives(above[0], parent=True), ["hip"])
         self.assertIsNone(cmds.listConnections("loose.is", source=True, destination=False))
+
+        # and under a transform it can leave the joint right under it,
+        # unwired, holding the scale of the joint it left: wrist, drawn under
+        # elbow, moved under sleeve, both scaled (5, 6, 7), where cgmath's
+        # parent_scale_inverse is sleeve's scale, what Maya's inverseScale
+        # holds, and its m and wm, compensating or not, are Maya's
+        cmds.select(clear=True)
+        cmds.joint(name="elbow")
+        cmds.joint(name="wrist", position=(1.0, 2.0, 3.0))
+        cmds.setAttr("elbow.s", 5.0, 6.0, 7.0)
+        cmds.createNode("transform", name="sleeve")
+        cmds.setAttr("sleeve.s", 5.0, 6.0, 7.0)
+        cmds.parent("wrist", "sleeve")
+        self.assertEqual(cmds.listRelatives("wrist", parent=True), ["sleeve"])
+        self.assertIsNone(cmds.listConnections("wrist.is", source=True, destination=False))
+        self.assertEqual(cmds.getAttr("wrist.is")[0], (5.0, 6.0, 7.0))
+        sleeve = HierarchyData([TransformData("sleeve", scale=(5.0, 6.0, 7.0))])
+        wrist = TransformData(
+            "wrist",
+            node_type    = "joint",
+            translate    = cmds.getAttr("wrist.t")[0],
+            rotate       = cmds.getAttr("wrist.r")[0],
+            scale        = cmds.getAttr("wrist.s")[0],
+            joint_orient = cmds.getAttr("wrist.jo")[0],
+            parent_uuid  = sleeve["sleeve"].uuid,
+        )
+        sleeve.append(wrist)
+        self.assertEqual(sleeve["wrist"].parent_scale_inverse.tolist(), [5.0, 6.0, 7.0])
+        for compensate in (True, False):
+            cmds.setAttr("wrist.ssc", compensate)
+            sleeve["wrist"].ssc = compensate
+            for short in ("m", "wm"):
+                with self.subTest(compensate=compensate, short=short):
+                    maya = np.array(cmds.getAttr("wrist." + short + ("[0]" if short != "m" else "")))
+                    mine = getattr(sleeve["wrist"], short)
+                    self.assertLessEqual(float(np.abs(mine - maya.reshape(4, 4)).max()), 1e-12)
 
 
 def _spec(value: float) -> dict:
