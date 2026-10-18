@@ -485,9 +485,10 @@ def _inverse(matrices: np.ndarray, what: str, names) -> np.ndarray:
 
 class _HiddenUserAttrs(threading.local):
     """for each load of nodes running in this thread, the user attributes it
-    read that a built-in name hides, each name to the nodes carrying it, for
-    one warning a name once the outermost is done; and the copies running,
-    which warn of nothing, the copy of a node a load warned of already"""
+    read that a built-in name hides, each attribute's name to the (uuid,
+    name) of the nodes carrying it, for one warning a name once the
+    outermost is done; and the copies running, which warn of nothing, the
+    copy of a node a load warned of already"""
 
     def __init__(self):
         self.loads  = []
@@ -499,7 +500,9 @@ _HIDDEN = _HiddenUserAttrs()
 
 class _NodesLoad:
     """a load of nodes, a hierarchy or a list: the user attributes a built-in
-    name hides that its nodes carry warn once a name, at its end"""
+    name hides that its nodes carry warn once a name, at its end; one inside
+    another hands them on, a node the outer load counted already, by its
+    uuid, counting once, as a clip's rest pose holds the clip's nodes again"""
 
     def __enter__(self) -> None:
         _HIDDEN.loads.append({})
@@ -507,7 +510,7 @@ class _NodesLoad:
     def __exit__(self, kind, error, trace) -> None:
         found = _HIDDEN.loads.pop()
         if found and kind is None:
-            _hidden_found(found)
+            _hidden_found(found, nested=True)
 
 
 class _Copying:
@@ -526,19 +529,25 @@ def _hidden_noted(node: "TransformData") -> "TransformData":
     for a node loaded on its own; not for a copy"""
     attrs = node.__dict__.get("user_defined_attributes")
     if attrs and not _TAKEN_NAMES.isdisjoint(attrs) and not _HIDDEN.copies:
-        _hidden_found({name: [node.name] for name in attrs if name in _TAKEN_NAMES})
+        _hidden_found({name: [(node.uuid, node.name)] for name in attrs if name in _TAKEN_NAMES})
     return node
 
 
-def _hidden_found(found: dict) -> None:
-    """``found``, the nodes a load read with a user attribute a built-in
-    name hides, by name: handed to the load of nodes running it is part of,
-    or warned of, one warning a name, filed under the first caller outside
-    cgmath"""
+def _hidden_found(found: dict, nested: bool = False) -> None:
+    """``found``, the (uuid, name) of the nodes a load read with a user
+    attribute a built-in name hides, by attribute: handed to the load of
+    nodes running it is part of, or warned of, one warning a name, filed
+    under the first caller outside cgmath. ``nested``, the nodes of a load
+    of nodes inside that one: a node whose uuid it counted for that name
+    already is not counted again"""
     loads = _HIDDEN.loads
     if loads:
         for name, nodes in found.items():
-            loads[-1].setdefault(name, []).extend(nodes)
+            counted = loads[-1].setdefault(name, [])
+            if nested and counted:
+                seen  = {uuid for uuid, _ in counted if uuid is not None}
+                nodes = [node for node in nodes if node[0] not in seen]
+            counted.extend(nodes)
         return
 
     level, frame = 2, sys._getframe(1)
@@ -551,7 +560,7 @@ def _hidden_found(found: dict) -> None:
         other = len(nodes) - 1
         more  = f" and {other} other node{'s' * (other > 1)}" if other else ""
         warnings.warn(
-            f"user attribute {name!r} of {nodes[0]!r}{more} loaded into "
+            f"user attribute {name!r} of {nodes[0][1]!r}{more} loaded into "
             f"user_defined_attributes[{name!r}]: node.{name} is {what}, which hides it",
             stacklevel=level,
         )
@@ -5221,10 +5230,13 @@ class TransformList(DataList):
         # a bind is a world matrix, solved under the node's parent, which a
         # view's nodes, owned by no rig, can't find: they are posed in a rig
         # that owns them, and the view holds copies, owned by none as a read
-        # gives them
+        # gives them. One load of nodes, posed inside it: a bind that can't
+        # be solved under its parent's, one a zero scale flattens, raises,
+        # and the nodes warn of nothing
         owns = issubclass(cls, HierarchyData)
-        rig  = (cls if owns else HierarchyData).from_dict(hierarchy_data)
-        _fbx_pose_binds(rig, binds, turn)
+        with _NodesLoad():
+            rig = (cls if owns else HierarchyData).from_dict(hierarchy_data)
+            _fbx_pose_binds(rig, binds, turn)
         return rig if owns else cls(node.copy() for node in rig)
 
     def save_fbx(self, filename, zero_root=False, as_ascii=False):
@@ -7293,35 +7305,36 @@ class HierarchyData(TransformList):
             # a dict of item dicts, as the asset readers build them
             items, data = list(data.values()), {}
 
-        pending = _LEGACY_PARENTS.loads
-        pending.append([])
-        try:
-            # a loop, not a comprehension, which would cost each nested
-            # object one more frame; one load of nodes, which warns of a
-            # user attribute a built-in name hides once a name
-            nodes = []
-            with _NodesLoad():
+        # one load of nodes, a clip's rest pose with them, which warns of a
+        # user attribute a built-in name hides once a name, once it is done
+        with _NodesLoad():
+            pending = _LEGACY_PARENTS.loads
+            pending.append([])
+            try:
+                # a loop, not a comprehension, which would cost each nested
+                # object one more frame
+                nodes = []
                 for item in items:
                     nodes.append(_from_tagged(item, cls.DATA_LIST_CLASS))
-        finally:
-            named = pending.pop()
+            finally:
+                named = pending.pop()
 
-        obj = cls()
-        obj.extend(nodes)
-        if named:
-            _parent_by_name(obj, named)
+            obj = cls()
+            obj.extend(nodes)
+            if named:
+                _parent_by_name(obj, named)
 
-        # in the order the tree holds them, as DataList._from_state reads
-        # them. A part the class no longer declares is left out, but an
-        # object first saved there is built still: a later part may refer
-        # to it
-        for name, value in data.items():
-            if name in cls.LIST_FIELDS:
-                setattr(obj, name, _decode(value))
-            elif _holds_numbered(value):
-                _decode(value)
+            # in the order the tree holds them, as DataList._from_state reads
+            # them. A part the class no longer declares is left out, but an
+            # object first saved there is built still: a later part may refer
+            # to it
+            for name, value in data.items():
+                if name in cls.LIST_FIELDS:
+                    setattr(obj, name, _decode(value))
+                elif _holds_numbered(value):
+                    _decode(value)
 
-        obj._post_load()
+            obj._post_load()
         return obj
 
 
@@ -11375,8 +11388,13 @@ class ClipData(HierarchyData):
         _fbx_check_axis_system(axis_system)
         kinds = _fbx_check_node_types(node_types)
 
-        # everything read from the scene dies with it: copy out inside the block
-        with open_fbx(filename, FBX) as scene:
+        # everything read from the scene dies with it: copy out inside the
+        # block. One load of nodes, the whole read: the rest pose and the rig
+        # the clip is built from, the same nodes twice, warn of a user
+        # attribute a built-in name hides once a name, once the file is
+        # read, and a read that raises, a take out of range or a frame past
+        # or before the take's, warns of nothing
+        with _NodesLoad(), open_fbx(filename, FBX) as scene:
             turn         = _fbx_axis_turn(scene, axis_system, filename)
             scale_factor = _fbx_scale_factor(scene, scale_factor)
             hierarchy_data, nodes, tree = _walk_fbx(scene, scale_factor, kinds)
@@ -11387,18 +11405,19 @@ class ClipData(HierarchyData):
             rest = copy.deepcopy(hierarchy_data)
             if turn is not None:
                 _fbx_turn_walk(rest, turn)
-            rest = HierarchyData.from_dict(rest)
 
             criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimStack.ClassId)
             count    = scene.GetSrcObjectCount(criteria)
+
+            # the rest pose and, with a take, the rig the clip is built from,
+            # in the file's own axes, turned once every frame is sampled
+            rest = HierarchyData.from_dict(rest)
+            rig  = HierarchyData.from_dict(hierarchy_data) if count else None
 
             if not count:
                 clip            = cls(rest, frames=1, start_frame=start_frame or 0, fps=fps or 24.0)
                 clip._rest_pose = rest
                 return clip
-
-            # the file's own axes, turned once every frame is sampled
-            rig = HierarchyData.from_dict(hierarchy_data)
 
             # typed: the binding can hand back a live wrapper of an earlier
             # scene's object for one that sits where it did
