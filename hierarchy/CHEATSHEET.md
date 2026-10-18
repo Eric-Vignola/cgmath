@@ -1728,9 +1728,9 @@ loader's, where:
 | Loader | Signature |
 |---|---|
 | `TransformList.load` | `(filename, mode=None)` — `mode` in `"gltf" / "glb" / "fbx" / "json" / "npz" / "pkl"` |
-| `TransformList.load_fbx` | `(filename, scale_factor=None, axis_system="maya_y_up", pose="node")` |
+| `TransformList.load_fbx` | `(filename, scale_factor=None, axis_system="maya_y_up", pose="node", node_types=None)` |
 | `TransformList.load_glb` | `(filename, scale_factor=100.0, pose_frame=None)` |
-| `ClipData.load_fbx` | `(filename, scale_factor=None, take=None, fps=None, start_frame=None, end_frame=None, axis_system="maya_y_up")` |
+| `ClipData.load_fbx` | `(filename, scale_factor=None, take=None, fps=None, start_frame=None, end_frame=None, axis_system="maya_y_up", node_types=None)` |
 | `ClipData.load_glb` | `(filename, scale_factor=100.0, animation=0, fps=24.0, start_frame=0)` |
 | `TransformList.save_fbx` | `(filename, zero_root=False, as_ascii=False)` — binary unless `as_ascii` |
 
@@ -1796,8 +1796,9 @@ number is the caller's own factor, and the file's unit is not read.
 A file whose unit the SDK's `FbxSystemUnit.ConvertScene` or Maya's
 unit-converting export wrote, as a 1/s scale on the scene root's
 children over values left in the old unit, is not converted: a metres
-one loads at world scale 0.01 under a kept root and 100 times too large
-under a dropped one, meshes included.
+one's nodes load where the file puts them but at world scale 0.01,
+whether the read keeps the node holding that scale or folds it into the
+nodes under it (`node_types` below), and its meshes 100 times too large.
 The FBX mesh readers (`geometry.mesh.load_fbx`, `MeshData.load_fbx`,
 `MeshList.load_fbx`) and `render.Object.load_fbx`, points and skin bind
 matrices alike, take the same `scale_factor`, and the `axis_system`
@@ -1842,6 +1843,50 @@ list one node the first wins, with a warning naming the node when a
 later one is more than 1e-6 off it. A file with no bind pose listing a
 node the read keeps raises `ValueError`. `pose="node"`, the default,
 reads the node values.
+
+`node_types` keeps the kinds of node it names, `"joint"`, `"locator"`,
+`"transform"` (a group) and `"mesh"` (read as a transform), and `None`,
+the default, all four: `node_types=("joint",)` reads a skeleton without
+its meshes and groups. A node of another kind (a camera, a light, an LOD
+group), one with no node attribute and the scene root are always
+dropped, and a kept node goes under its nearest kept ancestor. What the
+dropped nodes between them hold is folded into its channels, on every
+frame of a clip, so its world matrix stays the file's: a joint takes
+their turn in its joint orient and their move in its translate, keeping
+its rotate curves; any other node has its rotate solved again. A uniform
+scale among them goes on the node's scale, and on each joint under it
+that compensates its parent's scale; an uneven one under a node turned
+in it would need shear, which no node holds: that node keeps the file's
+position and axis lengths, and the nodes under it take the shear it
+drops, so they stay where the file puts them. A zero scale is not
+divided out, as Maya's importer leaves it, so what sits under a node
+scaled to 0 collapses onto it. A node's own pivots and offsets go into
+its translate, and the pre and post rotation of a node that is no joint
+into its rotate, so a group whose pivot Maya centred on its children
+loads where Maya shows it. A light's post rotation, FBX's view axis, is
+left out, as Maya places its children; a camera's turns its children by
+what it adds to the view axis Maya's exporter writes, (0, -90, 0), which
+Maya's importer keeps as the camera's rotate axis. Under `pose="bind"`
+a dropped node a bind pose lists is folded in at its bind, so each node
+kept sits where the full bind read puts it. A file whose dropped nodes,
+pivots and offsets hold the identity reads as it holds its nodes, to the
+bit.
+
+```python
+grouped = HierarchyData([
+    TransformData("grp", translate=(10.0, 20.0, 30.0), rotate=(0.0, 0.0, 45.0)),
+    TransformData("hip", node_type="joint", translate=(0.0, 5.0, 0.0)),
+    TransformData("knee", node_type="joint", translate=(0.0, -4.0, 0.0)),
+])
+grouped["hip"].set_parent("grp", world_space=False)
+grouped["knee"].set_parent("hip", world_space=False)
+grouped.save_fbx(os.path.join(WORKDIR, "grouped.fbx"))
+
+joints = HierarchyData.load_fbx(os.path.join(WORKDIR, "grouped.fbx"), node_types=("joint",))
+assert joints.name == ["hip", "knee"] and joints["hip"].parent_uuid is None
+assert np.allclose(joints["hip"].joint_orient, (0.0, 0.0, 45.0))   # the group's turn
+assert np.allclose(joints["knee"].world_matrix, grouped["knee"].world_matrix)
+```
 
 For `load_glb`, `scale_factor` converts units (glTF is metres, so `100.0`
 gives centimetres); `pose_frame` reads one frame of the file's animation

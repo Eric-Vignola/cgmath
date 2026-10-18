@@ -7689,6 +7689,819 @@ class TestFbxBindComposition(unittest.TestCase):
 
 
 @unittest.skipIf(FBX is None, "fbx sdk is not installed")
+class TestFbxFoldsWhatItDrops(unittest.TestCase):
+    """the fbx loaders keep the kinds node_types names and fold what the
+    read can't hold into the nodes they keep: a dropped node's transform
+    (one of a kind left out, one with no attribute, a camera, an LOD group)
+    into the kept nodes under it, and the pivots, offsets and a node's pre
+    and post rotation its channels can't hold, every frame for a clip. The
+    fixture is authored straight through the sdk, Maya's inheritance on
+    every node (a joint compensates its parent's scale, any other node
+    inherits it); the truth is the sdk's own evaluation, but for a camera's
+    or a light's post rotation, which Maya places their children by as
+    :attr:`VIEW_POST` says"""
+
+    FRAMES = 9
+
+    # every node of the fixture, in the order the walk meets it, with its
+    # fbx parent and its kind (None: no node attribute)
+    TREE = (
+        ("grp", None, "transform"),
+        ("bare", "grp", None),
+        ("hip", "bare", "joint"),
+        ("knee", "hip", "joint"),
+        ("ankle", "knee", "joint"),
+        ("loc", "hip", "locator"),
+        ("kidloc", "hip", "locator"),
+        ("box", "grp", "mesh"),
+        ("prop", "box", "joint"),
+        ("cam", None, "camera"),
+        ("camkid", "cam", "transform"),
+        ("lamp", None, "light"),
+        ("lampkid", "lamp", "locator"),
+        ("lodgrp", None, "lod"),
+        ("uneven", "lodgrp", "transform"),
+        ("j2", "uneven", "joint"),
+        ("free", "uneven", "joint"),
+        ("flat", "uneven", "locator"),
+        ("rootloc", None, "locator"),
+        ("mirror", None, "transform"),
+        ("mfree", "mirror", "joint"),
+        ("mknee", "mfree", "joint"),
+        ("pj", None, "joint"),
+        ("pjkid", "pj", "joint"),
+        ("big", None, "joint"),
+        ("mid", "big", "joint"),
+        ("midloc", "mid", "locator"),
+        ("cam0", None, "camera"),
+        ("cam0kid", "cam0", "transform"),
+        ("cam1", None, "camera"),
+        ("cam1kid", "cam1", "transform"),
+    )
+
+    # what ``sheared`` adds, under the uneven group, after "flat"
+    SHEARED = (
+        ("tilt", "uneven", "joint"),
+        ("tiltkid", "tilt", "joint"),
+        ("tiltloc", "tilt", "locator"),
+        ("nudge", "lodgrp", "transform"),
+        ("ntilt", "nudge", "joint"),
+    )
+
+    # the post rotation under which the sdk places a view's children where
+    # Maya's importer does (probe_views.py), rotation active, as Maya reads
+    # a camera's post rotation either way: none on a light, whatever its
+    # own, and on a camera what its own turns beyond fbx's view axis,
+    # (0, -90, 0), as Maya's rotate axis holds it: none for "cam", whose
+    # post rotation is that view axis, Maya's own export, and the inverse
+    # of Maya's (0, -90, 0) rotate axis for "cam0" and "cam1", which have
+    # none, "cam1" with rotation inactive, as the sdk writes a camera
+    VIEW_POST = {"cam": (0, 0, 0), "lamp": (0, 0, 0), "cam0": (0, 90, 0), "cam1": (0, 90, 0)}
+
+    KEPT  = ("joint", "locator", "transform", "mesh")
+
+    CASES = (None, ("joint",), ("joint", "locator"), ("transform",), ("mesh", "joint"), ("locator", "transform"))
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def authored(self, axes=None, name="fold.fbx", animated=True, sheared=False, unit=None):
+        """the TREE: a group in zxy, scaled 2, with every pivot, offset and a
+        pre and post rotation, keyed; under it an attribute-less node, keyed,
+        with pivots and an offset, and a pre and post rotation the sdk
+        ignores (rotation inactive, in xyz, the one order the sdk then
+        honours), holding a joint chain whose hip has a pre rotation and whose knee is
+        scaled, a locator with pivots, offsets and a pre and post rotation
+        under the hip, a keyed one with a post rotation and no pivot beside
+        it, and a mesh with pivots, keyed in scale, holding a joint; a
+        camera and a light, each with fbx's post rotation, holding a node;
+        an LOD group holding a group scaled unevenly and keyed, holding a
+        joint that compensates its scale, one that does not and a locator; a
+        locator at the root with a pre and post rotation and no pivot; a
+        group mirrored (scale -1, 1, 1), keyed, holding a joint that does not
+        compensate it, with a pre rotation, and a joint under that; a keyed
+        joint with a rotate and a scale pivot holding a joint; a joint
+        scaled 2 holding one at the identity that compensates it, holding a
+        locator; a camera with no post rotation, and one with none and
+        rotation inactive, as the sdk makes one, each holding a node.
+        ``sheared`` adds a joint that does not compensate, turned under the
+        uneven group, which no node can hold, spinning 50 degrees a frame,
+        and a joint that compensates it and a locator under it; and under
+        the LOD group a group scaled a hair unevenly, (1, 1.0001, 1),
+        holding a joint turned in it. ``unit`` names the file's
+        ``FbxSystemUnit``, cm when None"""
+        path    = os.path.join(self.tmp.name, name)
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        if axes is not None:
+            scene.GetGlobalSettings().SetAxisSystem(axes)
+        if unit is not None:
+            scene.GetGlobalSettings().SetSystemUnit(getattr(FBX.FbxSystemUnit, unit))
+        scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames24)
+        source = FBX.FbxNode.EPivotSet.eSourcePivot
+        made   = {None: scene.GetRootNode()}
+
+        def node(name, parent, kind, t=(0, 0, 0), r=(0, 0, 0), s=(1, 1, 1), order=0, pre=None, post=None,
+                 pivots=None, compensate=None, active=True):
+            out = FBX.FbxNode.Create(scene, name)
+            if kind == "joint":
+                out.SetNodeAttribute(FBX.FbxSkeleton.Create(scene, name))
+            elif kind in ("transform", "locator"):
+                attr = FBX.FbxNull.Create(scene, name)
+                look = FBX.FbxNull.ELook.eCross if kind == "locator" else FBX.FbxNull.ELook.eNone
+                attr.Look.Set(look.value)
+                out.SetNodeAttribute(attr)
+            elif kind == "mesh":
+                mesh = FBX.FbxMesh.Create(scene, name)
+                mesh.InitControlPoints(3)
+                for i, point in enumerate(((0, 0, 0), (1, 0, 0), (0, 1, 0))):
+                    mesh.SetControlPointAt(FBX.FbxVector4(*point, 1.0), i)
+                mesh.BeginPolygon()
+                for i in range(3):
+                    mesh.AddPolygon(i)
+                mesh.EndPolygon()
+                out.SetNodeAttribute(mesh)
+            elif kind == "camera":
+                out.SetNodeAttribute(FBX.FbxCamera.Create(scene, name))
+            elif kind == "light":
+                out.SetNodeAttribute(FBX.FbxLight.Create(scene, name))
+            elif kind == "lod":
+                out.SetNodeAttribute(FBX.FbxLODGroup.Create(scene, name))
+            out.LclTranslation.Set(FBX.FbxDouble3(*t))
+            out.LclRotation.Set(FBX.FbxDouble3(*r))
+            out.LclScaling.Set(FBX.FbxDouble3(*s))
+            # the sdk honours a rotate order only with rotation active, which
+            # Maya writes on every node
+            out.SetRotationActive(active)
+            out.SetRotationOrder(source, list(FBX.EFbxRotationOrder)[order])
+            if pre is not None:
+                out.SetPreRotation(source, FBX.FbxVector4(*pre, 1.0))
+            if post is not None:
+                out.SetPostRotation(source, FBX.FbxVector4(*post, 1.0))
+            if pivots is not None:
+                rp, sp, ro, so = pivots
+                out.SetRotationPivot(source, FBX.FbxVector4(*rp, 1.0))
+                out.SetScalingPivot(source, FBX.FbxVector4(*sp, 1.0))
+                out.SetRotationOffset(source, FBX.FbxVector4(*ro, 1.0))
+                out.SetScalingOffset(source, FBX.FbxVector4(*so, 1.0))
+            inherit = FBX.FbxTransform.EInheritType
+            if compensate is None:
+                compensate = kind == "joint"
+            out.SetTransformationInheritType(inherit.eInheritRrs if compensate else inherit.eInheritRSrs)
+            made[parent].AddChild(out)
+            made[name] = out
+            return out
+
+        pivots = ((1, 2, 0), (0, 1, 3), (0.5, 0, -1), (0, 0.25, 0.5))
+        node("grp", None, "transform", (10, 20, 30), (15, -25, 40), (2, 2, 2), 4, (5, 10, -20), (0, 30, 12), pivots)
+        node("bare", "grp", None, (1, -2, 3), (0, 0, 35), pre=(30, 0, 0), post=(0, 0, 10), active=False,
+             pivots=((0, 1, 0), (0, 1, 0), (0.5, 0, 0), (0, 0, 0)))
+        node("hip", "bare", "joint", (0, 5, 0), (10, 20, 30), order=1, pre=(5, -15, 25))
+        node("knee", "hip", "joint", (0, -4, 0.5), (-30, 5, 0), (1.5, 1, 1))
+        node("ankle", "knee", "joint", (0, -4, 0), (0, 10, 0))
+        node("loc", "hip", "locator", (1, 1, 1), (0, 45, 0), order=2, pre=(0, 10, 0), post=(20, 0, 0),
+             pivots=((0, 1, 0), (1, 0, 0), (0, 0, 0.5), (0.25, 0, 0)))
+        node("kidloc", "hip", "locator", (0, 1, 0), (20, 0, 0), post=(0, 40, 0))
+        node("box", "grp", "mesh", (2, 0, 0), (0, 0, 30), (1, 3, 1), pivots=((1, 0, 0), (1, 0, 0), (0, 0, 0), (0, 0, 0)))
+        node("prop", "box", "joint", (0, 1, 0), (0, 20, 0))
+        node("cam", None, "camera", (0, 0, 10), (0, 30, 0), post=(0, -90, 0))
+        node("camkid", "cam", "transform", (0, 0, -5))
+        node("lamp", None, "light", (4, 5, 0), (0, 0, 60), post=(-90, 0, 0))
+        node("lampkid", "lamp", "locator", (0, 2, 0))
+        node("lodgrp", None, "lod", (-3, 0, 0), (0, 90, 0))
+        node("uneven", "lodgrp", "transform", (0, 1, 0), (0, 0, 30), (1, 2, 0.5))
+        node("j2", "uneven", "joint", (1, 0, 0), (0, 0, 20))
+        node("free", "uneven", "joint", (0, 1, 0), compensate=False)
+        node("flat", "uneven", "locator", (0, 0, 1))
+        if sheared:
+            node("tilt", "uneven", "joint", (0.5, 0, 0), (0, 0, 45), compensate=False)
+            node("tiltkid", "tilt", "joint", (0, 1, 0), (0, 0, 30))
+            node("tiltloc", "tilt", "locator", (0.3, 0.6, 0.9))
+            node("nudge", "lodgrp", "transform", (0, 0, 2), s=(1, 1.0001, 1))
+            node("ntilt", "nudge", "joint", (0.5, 0, 0), (0, 0, 45), compensate=False)
+        node("rootloc", None, "locator", (1, 0, 0), (0, 30, 0), pre=(10, 0, 0), post=(0, 0, 25))
+        node("mirror", None, "transform", (1, 2, 3), (0, 0, 20), (-1, 1, 1))
+        node("mfree", "mirror", "joint", (0, 5, 0), (10, 20, 30), pre=(5, 0, 0), compensate=False)
+        node("mknee", "mfree", "joint", (0, -4, 0), (-30, 0, 0))
+        node("pj", None, "joint", (6, 5, 0), (10, 20, 30), pivots=((0, 1, 0), (0, 1, 0), (0, 0, 0), (0, 0, 0)))
+        node("pjkid", "pj", "joint", (0, -4, 0), (-30, 0, 0))
+        node("big", None, "joint", (-6, 5, 0), s=(2, 2, 2))
+        node("mid", "big", "joint")
+        node("midloc", "mid", "locator", (1, 0, 0))
+        node("cam0", None, "camera", (3, 0, 0), (15, 25, 35), post=(0, 0, 0))
+        node("cam0kid", "cam0", "transform", (1, 2, 3))
+        node("cam1", None, "camera", (-3, 0, 10), (0, 30, 0), active=False)
+        node("cam1kid", "cam1", "transform", (0, 0, -8))
+
+        if animated:
+            stack = FBX.FbxAnimStack.Create(scene, "Take 001")
+            layer = FBX.FbxAnimLayer.Create(scene, "Base Layer")
+            stack.AddMember(layer)
+            linear = FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear
+            for name, prop, axis, first, end in (
+                ("grp", "LclRotation", "Y", -25.0, 155.0),
+                ("grp", "LclTranslation", "X", 10.0, 18.0),
+                ("bare", "LclRotation", "X", 0.0, 80.0),
+                ("hip", "LclRotation", "Z", 30.0, 70.0),
+                ("loc", "LclRotation", "Y", 45.0, 445.0),  # 50 degrees a frame
+                ("kidloc", "LclRotation", "X", 20.0, 60.0),
+                ("box", "LclScaling", "X", 1.0, 2.0),
+                ("uneven", "LclRotation", "Z", 30.0, 90.0),
+                ("mirror", "LclRotation", "Z", 20.0, 60.0),
+                ("pj", "LclRotation", "Z", 30.0, 60.0),
+            ) + ((("tilt", "LclRotation", "Z", 45.0, 445.0),) if sheared else ()):
+                curve = getattr(made[name], prop).GetCurve(layer, axis, True)
+                curve.KeyModifyBegin()
+                for frame in range(self.FRAMES):
+                    time = FBX.FbxTime()
+                    time.SetSecondDouble(frame / 24.0)
+                    key = curve.KeyAdd(time)[0]
+                    curve.KeySetValue(key, first + (end - first) * frame / (self.FRAMES - 1))
+                    curve.KeySetInterpolation(key, linear)
+                curve.KeyModifyEnd()
+
+        exporter = FBX.FbxExporter.Create(manager, "")
+        if not exporter.Initialize(path, -1, manager.GetIOSettings()):
+            raise RuntimeError(f"cannot write {path}")
+        exporter.Export(scene)
+        exporter.Destroy()
+        manager.Destroy()
+        return path
+
+    @classmethod
+    def truth(cls, path, frames=None, convert=True, view_post=False, factor=1.0):
+        """{name: world} of every node but the scene root, as the sdk
+        evaluates it after ConvertScene to Maya's Y-up (the file's own axes
+        when ``convert`` is False), each view's post rotation the one
+        :attr:`VIEW_POST` names unless ``view_post`` keeps the file's, its
+        translation times ``factor``; the static values when ``frames`` is
+        None, else {name: (F, 4, 4)}"""
+        manager = FBX.FbxManager.Create()
+        try:
+            manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+            importer = FBX.FbxImporter.Create(manager, "")
+            importer.Initialize(path, -1, manager.GetIOSettings())
+            scene = FBX.FbxScene.Create(manager, "")
+            importer.Import(scene)
+            importer.Destroy()
+            if convert:
+                FBX.FbxAxisSystem.MayaYUp.ConvertScene(scene)
+
+            views = (FBX.FbxNodeAttribute.EType.eCamera, FBX.FbxNodeAttribute.EType.eLight)
+            nodes, stack = {}, [scene.GetRootNode()]
+            while stack:
+                node = stack.pop()
+                attr = node.GetNodeAttribute()
+                if attr and attr.GetAttributeType() in views and not view_post:
+                    post = FBX.FbxVector4(*cls.VIEW_POST[node.GetName()], 1)
+                    node.SetPostRotation(FBX.FbxNode.EPivotSet.eSourcePivot, post)
+                    node.SetRotationActive(True)
+                if node.GetParent() is not None:
+                    nodes[node.GetName()] = node
+                stack.extend(node.GetChild(i) for i in range(node.GetChildCount()))
+            scene.GetAnimationEvaluator().Reset()
+
+            def m4(matrix):
+                out        = np.array([[matrix.Get(r, c) for c in range(4)] for r in range(4)])
+                out[3, :3] = out[3, :3] * factor
+                return out
+
+            if frames is None:
+                return {name: m4(node.EvaluateGlobalTransform()) for name, node in nodes.items()}
+            out  = {}
+            time = FBX.FbxTime()
+            for name, node in nodes.items():
+                worlds = []
+                for frame in range(frames):
+                    time.SetSecondDouble(frame / 24.0)
+                    worlds.append(m4(node.EvaluateGlobalTransform(time)))
+                out[name] = np.array(worlds)
+            return out
+        finally:
+            manager.Destroy()
+
+    def assertWorlds(self, got, want, atol=1e-9):
+        for name, world in got.items():
+            self.assertTrue(
+                np.allclose(world, want[name], rtol=0.0, atol=atol),
+                f"{name}: {np.abs(np.asarray(world) - want[name]).max():.2e} off",
+            )
+
+    @staticmethod
+    def rig_worlds(rig):
+        return {node.name: np.asarray(node.world_matrix) for node in rig}
+
+    @staticmethod
+    def clip_worlds(clip):
+        stack = clip.frames.world_matrix
+        return {node.name: stack[:, i] for i, node in enumerate(clip)}
+
+    def expected(self, kinds, sheared=False):
+        """[(name, parent name)] a read keeping ``kinds`` gives: the nodes of
+        those kinds, each under its nearest kept ancestor"""
+        tree = self.TREE
+        if sheared:
+            at   = [name for name, _, _ in tree].index("flat") + 1
+            tree = tree[:at] + self.SHEARED + tree[at:]
+        kinds = self.KEPT if kinds is None else kinds
+        kind  = {name: of for name, _, of in tree}
+        up    = {name: parent for name, parent, _ in tree}
+        out   = []
+        for name, parent, of in tree:
+            if of not in kinds:
+                continue
+            while parent is not None and kind[parent] not in kinds:
+                parent = up[parent]
+            out.append((name, parent))
+        return out
+
+    def test_node_types_keeps_the_kinds_it_names(self):
+        """each kept node under its nearest kept ancestor, in the walk's
+        order, through every loader; a mesh reads as a transform"""
+        path = self.authored()
+        for kinds in self.CASES:
+            with self.subTest(node_types=kinds):
+                want = self.expected(kinds)
+                for loader in (HierarchyData.load_fbx, hierarchy.load_fbx, ClipData.load_fbx, TransformList.load_fbx):
+                    got = loader(path, node_types=kinds)
+                    if isinstance(got, HierarchyData):
+                        self.assertEqual([(n.name, n.parent_name) for n in got], want)
+                    else:
+                        self.assertEqual([n.name for n in got], [name for name, _ in want])
+
+                rig   = HierarchyData.load_fbx(path, node_types=kinds)
+                types = {"joint": "joint", "locator": "locator", "transform": "transform", "mesh": "transform"}
+                tree  = {name: of for name, _, of in self.TREE}
+                self.assertEqual([n.node_type for n in rig], [types[tree[n.name]] for n in rig])
+
+        # the sheared nodes go where the walk meets them, under the uneven group
+        sheared = self.authored(name="sheared.fbx", sheared=True)
+        want    = self.expected(("joint", "locator"), sheared=True)
+        got     = HierarchyData.load_fbx(sheared, node_types=("joint", "locator"))
+        self.assertEqual([(n.name, n.parent_name) for n in got], want)
+
+        # a list or a set names the kinds as a tuple does
+        self.assertEqual(
+            [n.name for n in HierarchyData.load_fbx(path, node_types=["joint"])],
+            [n.name for n in HierarchyData.load_fbx(path, node_types={"joint"})],
+        )
+
+    def test_every_kept_node_is_where_the_sdk_puts_it(self):
+        """the rig, the clip's rest pose and every frame of the clip, in
+        Maya's Y-up and in the file's own axes, a Y-up file and a Z-up one,
+        whatever the read drops"""
+        for label, axes in (("Y-up", None), ("Z-up", FBX.FbxAxisSystem.MayaZUp)):
+            path = self.authored(axes, name=f"{label}.fbx")
+            for convert, system in ((True, "maya_y_up"), (False, None)):
+                rest   = self.truth(path, convert=convert)
+                frames = self.truth(path, self.FRAMES, convert=convert)
+                for kinds in self.CASES:
+                    with self.subTest(axes=label, axis_system=system, node_types=kinds):
+                        rig  = HierarchyData.load_fbx(path, axis_system=system, node_types=kinds)
+                        clip = ClipData.load_fbx(path, axis_system=system, node_types=kinds)
+
+                        self.assertEqual(clip.frame_count, self.FRAMES)
+                        self.assertWorlds(self.rig_worlds(rig),            rest)
+                        self.assertWorlds(self.rig_worlds(clip.rest_pose), rest)
+                        self.assertWorlds(self.clip_worlds(clip),          frames)
+
+    def test_a_joint_takes_what_is_dropped_above_it_in_its_joint_orient(self):
+        """a joints-only read: the hip, under the dropped group and the
+        attribute-less node, both keyed, keeps its rotate curves as
+        authored and takes them in a joint orient that moves every frame,
+        filtered along the frames; the group's uniform scale goes on its
+        scale, and on the scale of every joint that compensates it"""
+        path = self.authored()
+
+        clip = ClipData.load_fbx(path, axis_system=None, node_types=("joint",))
+
+        hip     = clip.index("hip")
+        frames  = np.arange(self.FRAMES)
+        rotates = np.column_stack([np.full(self.FRAMES, 10.0), np.full(self.FRAMES, 20.0), 30.0 + 40.0 * frames / 8])
+        self.assertTrue(np.allclose(clip.frames.rotate[:, hip], rotates, rtol=0.0, atol=1e-12))
+        orient = clip.frames.joint_orient[:, hip]
+        self.assertGreater(np.abs(np.diff(orient, axis=0)).max(), 1.0)
+        self.assertLess(np.abs(np.diff(orient, axis=0)).max(), 90.0)
+        self.assertTrue(np.allclose(clip.frames.scale[:, hip], 2.0, rtol=0.0, atol=1e-12))
+        self.assertTrue(np.allclose(clip.frames.scale[:, clip.index("knee")], [3.0, 2.0, 2.0], rtol=0.0, atol=1e-12))
+        self.assertTrue(np.allclose(clip.frames.scale[:, clip.index("ankle")], 2.0, rtol=0.0, atol=1e-12))
+
+        # the rig at the static values, the same way
+        rig = HierarchyData.load_fbx(path, axis_system=None, node_types=("joint",))
+        self.assertTrue(np.allclose(rig["hip"].rotate, [10.0, 20.0, 30.0], rtol=0.0, atol=1e-12))
+        self.assertTrue(np.allclose(rig["hip"].scale, 2.0, rtol=0.0, atol=1e-12))
+        self.assertFalse(np.allclose(rig["hip"].joint_orient, [5.0, -15.0, 25.0], atol=1.0))
+
+    def test_a_node_that_is_no_joint_takes_its_pre_and_post_rotation_in_its_rotate(self):
+        """a locator with a pre and post rotation and no pivot, at the root
+        and under a kept joint, nothing dropped above either, is where the
+        sdk puts it, its rotate no longer its Lcl value, on the rig and every
+        frame of the clip. It, the group and the pivoted locator hold no
+        rotate axis and no joint orient, which save_fbx does not write for
+        them: a save and a load bring every node back where it was. On a
+        clip the rotate is solved again every frame, through euler_filter"""
+        path   = self.authored()
+
+        rig    = HierarchyData.load_fbx(path, axis_system=None)
+        clip   = ClipData.load_fbx(path, axis_system=None)
+
+        rest   = self.truth(path, convert=False)
+        frames = self.truth(path, self.FRAMES, convert=False)
+        for name, lcl in (("rootloc", (0, 30, 0)), ("kidloc", (20, 0, 0))):
+            with self.subTest(name):
+                self.assertWorlds({name: rig[name].world_matrix}, rest)
+                self.assertWorlds({name: self.clip_worlds(clip)[name]}, frames)
+                self.assertFalse(np.allclose(rig[name].rotate, lcl, atol=1.0))
+
+        rig = HierarchyData.load_fbx(path)
+        for name in ("grp", "loc", "rootloc", "kidloc"):
+            self.assertTrue(np.array_equal(rig[name].rotate_axis, np.zeros(3)), name)
+            self.assertTrue(np.array_equal(rig[name].joint_orient, np.zeros(3)), name)
+        again = os.path.join(self.tmp.name, "again.fbx")
+        rig.save_fbx(again)
+        self.assertWorlds(self.rig_worlds(HierarchyData.load_fbx(again)), self.rig_worlds(rig))
+
+        # the locator's rotate, 50 degrees a frame, solved again every frame
+        # and filtered: no step of a whole turn where the eulers wrap
+        clip  = ClipData.load_fbx(path)
+        loc   = clip.frames.rotate[:, clip.index("loc")]
+        steps = np.abs(np.diff(loc, axis=0)).max()
+        self.assertTrue(np.array_equal(clip.frames.rotate_axis[:, clip.index("loc")], np.zeros((self.FRAMES, 3))))
+        self.assertLess(steps, 90.0)
+        self.assertGreater(np.ptp(loc, axis=0).max(), 180.0)
+
+    def test_pivots_and_offsets_go_into_translate(self):
+        """the mesh, under a group the read keeps, keeps its rotate and its
+        scale curve as the file holds them; its pivot moves its translate,
+        on every frame its scale moves"""
+        path = self.authored()
+
+        clip = ClipData.load_fbx(path, axis_system=None)
+
+        box  = clip.index("box")
+        self.assertTrue(np.array_equal(clip.frames.rotate[:, box], np.tile([0.0, 0.0, 30.0], (self.FRAMES, 1))))
+        self.assertTrue(np.array_equal(clip.frames.scale[:, box, 0], 1.0 + np.arange(self.FRAMES) / 8))
+        moved = clip.frames.translate[:, box]
+        self.assertGreater(np.abs(moved - [2.0, 0.0, 0.0]).max(), 0.1)
+        self.assertGreater(np.abs(np.diff(moved, axis=0)).max(), 0.01)
+
+    def test_a_scale_the_read_drops_is_held_or_divided_out(self):
+        """under the dropped group scaled unevenly, a joint that compensates
+        it divides it out, keeping its own scale; one that does not, and a
+        locator, unturned, take it in their scale. One turned under it
+        would need shear: its position and the length of each of its axes
+        are the file's, which way they point is not, and the nodes under it
+        take the shear it drops, so a joint compensating it and a locator
+        under it are at the file's positions, on the rig and on every frame
+        of the clip; its rotate, spinning 50 degrees a frame, is solved again
+        and filtered. A sliver of uneven scale, 1e-4, is split the same way"""
+        path = self.authored(sheared=True)
+
+        rig  = HierarchyData.load_fbx(path, axis_system=None, node_types=("joint", "locator"))
+
+        self.assertTrue(np.allclose(rig["j2"].scale, 1.0, rtol=0.0, atol=1e-12))
+        self.assertTrue(np.allclose(rig["free"].scale, [1.0, 2.0, 0.5], rtol=0.0, atol=1e-12))
+        self.assertTrue(np.allclose(rig["flat"].scale, [1.0, 2.0, 0.5], rtol=0.0, atol=1e-12))
+        want = self.truth(path, convert=False)
+        self.assertWorlds({n: rig[n].world_matrix for n in ("j2", "free", "flat")}, want)
+
+        tilt = rig["tilt"].world_matrix
+        self.assertTrue(np.allclose(tilt[3], want["tilt"][3], rtol=0.0, atol=1e-9))
+        lengths = np.linalg.norm(tilt[:3, :3], axis=1)
+        self.assertTrue(np.allclose(lengths, np.linalg.norm(want["tilt"][:3, :3], axis=1), rtol=0.0, atol=1e-9))
+        self.assertGreater(np.abs(tilt - want["tilt"]).max(), 0.01)
+
+        clip   = ClipData.load_fbx(path, axis_system=None, node_types=("joint", "locator"))
+        frames = self.truth(path, self.FRAMES, convert=False)
+        worlds = self.clip_worlds(clip)
+        for name in ("tilt", "tiltkid", "tiltloc"):
+            with self.subTest(name):
+                self.assertTrue(np.allclose(rig[name].world_matrix[3], want[name][3], rtol=0.0, atol=1e-9))
+                self.assertTrue(np.allclose(worlds[name][:, 3], frames[name][:, 3], rtol=0.0, atol=1e-9))
+
+        spin = clip.frames.rotate[:, clip.index("tilt")]
+        self.assertLess(np.abs(np.diff(spin, axis=0)).max(), 90.0)
+        self.assertGreater(np.ptp(spin, axis=0).max(), 180.0)
+
+        nudged = rig["ntilt"].world_matrix
+        self.assertTrue(np.allclose(nudged[3], want["ntilt"][3], rtol=0.0, atol=1e-12))
+        lengths = np.linalg.norm(nudged[:3, :3], axis=1)
+        self.assertTrue(np.allclose(lengths, np.linalg.norm(want["ntilt"][:3, :3], axis=1), rtol=0.0, atol=1e-12))
+
+    def test_a_child_of_a_camera_or_a_light_is_placed_as_maya_places_it(self):
+        """fbx's view axis, the post rotation Maya writes on a camera,
+        (0, -90, 0), and on a light, which Maya's importer places their
+        children without; a camera with no post rotation, the sdk's default,
+        holds (0, -90, 0) as its rotate axis in Maya, its children turned by
+        it, rotation active or not (probe_views.py). The sdk puts each child
+        elsewhere"""
+        path = self.authored(animated=False)
+
+        rig  = HierarchyData.load_fbx(path, axis_system=None, node_types=("transform", "locator"))
+
+        def lcl(translate, rotate):
+            out        = euler_to_matrix(np.radians([rotate]), np.zeros(1, dtype=int))[0]
+            out[3, :3] = translate
+            return out
+
+        sdk = self.truth(path, convert=False, view_post=True)
+        for kid, own, view in (
+            ("camkid", lcl((0, 0, -5), (0, 0, 0)), lcl((0, 0, 10), (0, 30, 0))),
+            ("lampkid", lcl((0, 2, 0), (0, 0, 0)), lcl((4, 5, 0), (0, 0, 60))),
+            ("cam0kid", lcl((1, 2, 3), (0, 0, 0)) @ lcl((0, 0, 0), (0, -90, 0)), lcl((3, 0, 0), (15, 25, 35))),
+            ("cam1kid", lcl((0, 0, -8), (0, 0, 0)) @ lcl((0, 0, 0), (0, -90, 0)), lcl((-3, 0, 10), (0, 30, 0))),
+        ):
+            self.assertTrue(np.allclose(rig[kid].world_matrix, own @ view, rtol=0.0, atol=1e-12), kid)
+            self.assertGreater(np.abs(sdk[kid] - own @ view).max(), 1.0, kid)
+
+            # a view only turns its child: the child's scale stays the file's, to the bit
+            self.assertTrue(np.array_equal(rig[kid].scale, np.ones(3)), kid)
+
+        # Maya's own camera, post rotation (0, -90, 0), adds nothing to the
+        # view axis: the read folds no rotate axis for it, to the bit
+        with hierarchy.hierarchy.open_fbx(path, FBX) as scene:
+            _, _, tree = hierarchy.hierarchy._walk_fbx(scene, 1.0)
+            axes = {node.GetName(): tree.axis[k].copy() for k, node in enumerate(tree.nodes)}
+        self.assertTrue(np.array_equal(axes["cam"], np.zeros(3)))
+        self.assertFalse(np.allclose(axes["cam0"], 0.0, atol=1.0))
+
+    def test_a_file_whose_dropped_nodes_and_pivots_move_nothing_reads_as_it_holds_it(self):
+        """an attribute-less group at the identity, a mesh whose pivots
+        cancel, and nodes under them: every channel the file's own, to the
+        bit"""
+        manager = FBX.FbxManager.Create()
+        scene   = FBX.FbxScene.Create(manager, "scene")
+        source  = FBX.FbxNode.EPivotSet.eSourcePivot
+        group   = FBX.FbxNode.Create(scene, "group")
+        scene.GetRootNode().AddChild(group)
+        values = {}
+        parent = group
+        for name, attr, t, r in (
+            ("hip", FBX.FbxSkeleton.Create, (0.1, 2.3, 4.5), (10.7, -20.1, 30.3)),
+            ("knee", FBX.FbxSkeleton.Create, (0.7, -4.1, 0.3), (-33.3, 5.1, 0.9)),
+            ("cube", FBX.FbxMesh.Create, (5.524, 0.3, -1.7), (0.0, 0.0, 0.0)),
+        ):
+            made = FBX.FbxNode.Create(scene, name)
+            made.SetNodeAttribute(attr(scene, name))
+            made.LclTranslation.Set(FBX.FbxDouble3(*t))
+            made.LclRotation.Set(FBX.FbxDouble3(*r))
+            if name == "cube":
+                made.SetRotationPivot(source, FBX.FbxVector4(-15.524, 4.558, -3.685, 1.0))
+                made.SetScalingPivot(source, FBX.FbxVector4(-15.524, 4.558, -3.685, 1.0))
+            parent.AddChild(made)
+            parent       = made if name == "hip" else parent
+            values[name] = (t, r)
+        path     = os.path.join(self.tmp.name, "still.fbx")
+        exporter = FBX.FbxExporter.Create(manager, "")
+        exporter.Initialize(path, -1, manager.GetIOSettings())
+        exporter.Export(scene)
+        exporter.Destroy()
+        manager.Destroy()
+
+        for loaded in (HierarchyData.load_fbx(path, axis_system=None), ClipData.load_fbx(path, axis_system=None)):
+            for name, (t, r) in values.items():
+                with self.subTest(type(loaded).__name__, node=name):
+                    self.assertTrue(np.array_equal(loaded[name].translate, t))
+                    self.assertTrue(np.array_equal(loaded[name].rotate, r))
+                    self.assertTrue(np.array_equal(loaded[name].scale, np.ones(3)))
+
+    def test_a_bind_read_keeps_the_kinds_named(self):
+        """pose="bind" with node_types: the bound joints at their binds, the
+        nodes under them as a full read puts them"""
+        fixture     = TestFbxBindPose("test_an_unknown_pose_is_refused")
+        fixture.tmp = self.tmp
+        path, _ = fixture.authored()
+
+        full = HierarchyData.load_fbx(path, pose="bind")
+        bare = HierarchyData.load_fbx(path, pose="bind", node_types=("joint",))
+
+        self.assertEqual([n.name for n in bare], [n.name for n in full if n.node_type == "joint"])
+        for node in bare:
+            self.assertTrue(np.allclose(node.world_matrix, full[node.name].world_matrix, rtol=0.0, atol=1e-9), node.name)
+
+    def test_pivots_and_offsets_load_in_cm(self):
+        """the fixture saved in meters: every pivot and offset is a length,
+        converted with the translations, so each kept node of the rig, the
+        rest pose and the clip is where the sdk puts it, times 100"""
+        path   = self.authored(name="meters.fbx", unit="m")
+
+        rest   = self.truth(path, factor=100.0)
+        frames = self.truth(path, self.FRAMES, factor=100.0)
+        for kinds in (None, ("joint",), ("locator", "transform")):
+            with self.subTest(node_types=kinds):
+                rig  = HierarchyData.load_fbx(path, node_types=kinds)
+                clip = ClipData.load_fbx(path, node_types=kinds)
+
+                self.assertWorlds(self.rig_worlds(rig),            rest)
+                self.assertWorlds(self.rig_worlds(clip.rest_pose), rest)
+                self.assertWorlds(self.clip_worlds(clip),          frames)
+
+    def zeroed(self, keyed, joint=False):
+        """an attribute-less node scaled 0, static, or an LOD group keyed to
+        0 on frame 1 of 3, holding two joints that compensate their parent's
+        scale, as Maya writes a joint under a joint, a locator under them;
+        ``joint`` makes the node scaled 0 a joint the read keeps"""
+        path    = os.path.join(self.tmp.name, f"zero_{'keyed' if keyed else 'static'}_{joint}.fbx")
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames24)
+        hide = FBX.FbxNode.Create(scene, "hide")
+        if keyed:
+            hide.SetNodeAttribute(FBX.FbxLODGroup.Create(scene, "hide"))
+        elif joint:
+            hide.SetNodeAttribute(FBX.FbxSkeleton.Create(scene, "hide"))
+        hide.LclTranslation.Set(FBX.FbxDouble3(0, 1, 0))
+        hide.LclScaling.Set(FBX.FbxDouble3(*((1, 1, 1) if keyed else (0, 0, 0))))
+        scene.GetRootNode().AddChild(hide)
+        parent = hide
+        for name in ("j0", "j1"):
+            joint = FBX.FbxNode.Create(scene, name)
+            joint.SetNodeAttribute(FBX.FbxSkeleton.Create(scene, name))
+            joint.LclTranslation.Set(FBX.FbxDouble3(0, 2, 0))
+            joint.LclRotation.Set(FBX.FbxDouble3(0, 0, 20))
+            joint.SetTransformationInheritType(FBX.FbxTransform.EInheritType.eInheritRrs)
+            parent.AddChild(joint)
+            parent = joint
+        loc  = FBX.FbxNode.Create(scene, "loc")
+        attr = FBX.FbxNull.Create(scene, "loc")
+        attr.Look.Set(FBX.FbxNull.ELook.eCross.value)
+        loc.SetNodeAttribute(attr)
+        loc.LclTranslation.Set(FBX.FbxDouble3(0.5, 0, 0))
+        parent.AddChild(loc)
+        if keyed:
+            stack = FBX.FbxAnimStack.Create(scene, "Take 001")
+            layer = FBX.FbxAnimLayer.Create(scene, "Base Layer")
+            stack.AddMember(layer)
+            for axis in "XYZ":
+                curve = hide.LclScaling.GetCurve(layer, axis, True)
+                curve.KeyModifyBegin()
+                for frame, value in enumerate((1.0, 0.0, 1.0)):
+                    time = FBX.FbxTime()
+                    time.SetSecondDouble(frame / 24.0)
+                    key = curve.KeyAdd(time)[0]
+                    curve.KeySetValue(key, value)
+                    curve.KeySetInterpolation(key, FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear)
+                curve.KeyModifyEnd()
+        exporter = FBX.FbxExporter.Create(manager, "")
+        exporter.Initialize(path, -1, manager.GetIOSettings())
+        exporter.Export(scene)
+        exporter.Destroy()
+        manager.Destroy()
+        return path
+
+    def test_a_zero_scale_collapses_what_sits_under_it(self):
+        """a dropped node scaled 0 above joints that compensate their
+        parent's scale, the way Maya hides a prop: every loader reads the
+        file, default arguments, every channel finite, and a node the fold
+        places sits where Maya's importer puts it, at the dropped node's
+        position, its axes 0, on the frames the scale is 0; on the others
+        where the sdk puts it. A zero scale is not divided out, as Maya's
+        importer leaves it, where the sdk's evaluation gives NaN; under a
+        kept joint scaled 0 every node keeps the file's values"""
+        from cgmath.geometry import skin_weights
+
+        collapsed    = np.zeros((4, 4))
+        collapsed[3] = (0.0, 1.0, 0.0, 1.0)
+        for keyed in (False, True):
+            path = self.zeroed(keyed)
+            with self.subTest(keyed=keyed):
+                rig  = HierarchyData.load_fbx(path)
+                clip = ClipData.load_fbx(path)
+                skin_weights.load_fbx(path)
+                bare = ClipData.load_fbx(path, node_types=("locator",))
+                for channels in (rig, clip.frames, bare.frames, clip.rest_pose):
+                    for channel in ("translate", "rotate", "scale", "joint_orient"):
+                        self.assertTrue(np.isfinite(np.asarray(getattr(channels, channel))).all(), channel)
+
+                zero   = [1] if keyed else [0]
+                worlds = self.clip_worlds(clip)
+                self.assertTrue(np.allclose(worlds["j0"][zero], collapsed, rtol=0.0, atol=1e-12))
+                self.assertTrue(np.allclose(bare.frames.world_matrix[zero, 0], collapsed, rtol=0.0, atol=1e-12))
+                if keyed:
+                    want = self.truth(path, 3)
+                    for name, world in worlds.items():
+                        self.assertWorlds({name: world[[0, 2]]}, {name: want[name][[0, 2]]})
+                    self.assertWorlds({"loc": bare.frames.world_matrix[[0, 2], 0]}, {"loc": want["loc"][[0, 2]]})
+                else:
+                    self.assertTrue(np.allclose(rig["j0"].world_matrix, collapsed, rtol=0.0, atol=1e-12))
+
+        # a joint scaled 0 the read keeps: every node keeps the file's values,
+        # the joints compensating it among them, and a locator read alone
+        # under it collapses onto it
+        path = self.zeroed(False, joint=True)
+        for loaded in (HierarchyData.load_fbx(path), ClipData.load_fbx(path)):
+            for name, scale in (("hide", 0.0), ("j0", 1.0), ("j1", 1.0)):
+                with self.subTest(type(loaded).__name__, node=name):
+                    self.assertTrue(np.array_equal(loaded[name].scale, np.full(3, scale)))
+                    self.assertTrue(np.array_equal(loaded[name].rotate, [0.0, 0.0, 0.0 if name == "hide" else 20.0]))
+        bare = HierarchyData.load_fbx(path, node_types=("locator",))
+        self.assertTrue(np.allclose(bare["loc"].world_matrix, collapsed, rtol=0.0, atol=1e-12))
+
+    def test_the_split_of_a_block(self):
+        """a rotation is one, its scale exactly 1, a rotation times one
+        scale splits into those, an uneven block takes its nearest rotation,
+        and one that is not finite passes through as NaN rather than raising"""
+        degrees      = np.random.default_rng(7).uniform(-180.0, 180.0, (64, 3))
+        turns        = euler_to_matrix(np.radians(degrees), np.zeros(64, dtype=int))[:, :3, :3]
+        broken       = np.full((3, 3), np.nan)
+        broken[0, 0] = np.inf
+        block        = np.concatenate([turns, 2.5 * turns[:1], [broken, np.diag([1.0, 2.0, 0.5])]])
+
+        U, s, uneven = hierarchy.hierarchy._fbx_fold_split(block)
+
+        self.assertTrue(np.array_equal(s[:64], np.ones(64)))
+        self.assertTrue(np.array_equal(U[:64], turns))
+        self.assertAlmostEqual(s[64], 2.5, places=14)
+        self.assertTrue(np.allclose(U[64], turns[0], rtol=0.0, atol=1e-15))
+        self.assertTrue(np.isnan(U[65]).all())
+        self.assertTrue(np.allclose(U[66], np.eye(3), rtol=0.0, atol=1e-15))
+        self.assertEqual(uneven.tolist(), [False] * 65 + [True, True])
+
+    def binddrop(self, attributed):
+        """a group (``attributed``) or a node with no attribute at the
+        identity, a bind pose listing it at T(0, 5, 0) R(0, 0, 45), holding
+        a joint chain no pose lists and a joint it lists at its bind under
+        that; returns (path, the dropped node's bind)"""
+        path    = os.path.join(self.tmp.name, f"binddrop_{attributed}.fbx")
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        group = FBX.FbxNode.Create(scene, "grpP")
+        if attributed:
+            group.SetNodeAttribute(FBX.FbxNull.Create(scene, "grpP"))
+        scene.GetRootNode().AddChild(group)
+        made = {}
+        for name, parent, t in (("jU", group, (0, 1, 0)), ("jU2", None, (0, 1, 0)), ("jV", group, (1, 0, 0))):
+            joint = FBX.FbxNode.Create(scene, name)
+            joint.SetNodeAttribute(FBX.FbxSkeleton.Create(scene, name))
+            joint.LclTranslation.Set(FBX.FbxDouble3(*t))
+            (made["jU"] if parent is None else parent).AddChild(joint)
+            made[name] = joint
+
+        turn        = euler_to_matrix(np.radians([[0.0, 0.0, 45.0]]), np.zeros(1, dtype=int))[0]
+        bind        = turn.copy()
+        bind[3, :3] = (0.0, 5.0, 0.0)
+        pose        = FBX.FbxPose.Create(scene, "bindPose1")
+        pose.SetIsBindPose(True)
+        pose.Add(group, TestFbxBindPose.fbx_matrix(bind))
+        jV        = np.eye(4)
+        jV[3, :3] = (1.0, 0.0, 0.0)
+        pose.Add(made["jV"], TestFbxBindPose.fbx_matrix(jV @ bind))
+        scene.AddPose(pose)
+        exporter = FBX.FbxExporter.Create(manager, "")
+        exporter.Initialize(path, -1, manager.GetIOSettings())
+        exporter.Export(scene)
+        exporter.Destroy()
+        manager.Destroy()
+        return path, bind
+
+    def test_a_dropped_node_a_bind_pose_lists_is_folded_in_at_its_bind(self):
+        """pose="bind", rig's rule: a node the pose lists takes its bind,
+        every other keeps its own values under its parent, whatever the read
+        drops. A group the pose lists, dropped by a joints-only read, puts
+        the joints under it where the full bind read does; a node with no
+        attribute, which every read drops, puts them at their own values
+        under its bind"""
+        path, bind = self.binddrop(True)
+        full = HierarchyData.load_fbx(path, pose="bind")
+        bare = HierarchyData.load_fbx(path, pose="bind", node_types=("joint",))
+        self.assertEqual([n.name for n in bare], ["jU", "jU2", "jV"])
+        for node in bare:
+            want = full[node.name].world_matrix
+            self.assertTrue(np.allclose(node.world_matrix, want, rtol=0.0, atol=1e-9), node.name)
+
+        path, bind = self.binddrop(False)
+        for kinds in (None, ("joint",)):
+            with self.subTest(node_types=kinds):
+                rig = HierarchyData.load_fbx(path, pose="bind", node_types=kinds)
+                for name, height in (("jU", 1.0), ("jU2", 2.0)):
+                    own       = np.eye(4)
+                    own[3, 1] = height
+                    self.assertTrue(np.allclose(rig[name].world_matrix, own @ bind, rtol=0.0, atol=1e-9), name)
+
+    def test_node_types_is_checked(self):
+        path    = self.authored(animated=False)
+        loaders = (HierarchyData.load_fbx, hierarchy.load_fbx, ClipData.load_fbx)
+        for value, error, text in (
+            ("joint", TypeError, "a tuple of names"),
+            (3, TypeError, "a tuple of names"),
+            (("bone",), ValueError, "not 'bone'"),
+            (("joint", None), ValueError, "not None"),
+            (("Joint",), ValueError, "not 'Joint'"),
+            ((), ValueError, "keeps no node"),
+        ):
+            for loader in loaders:
+                with self.subTest(value=value, loader=loader.__qualname__):
+                    with self.assertRaises(error) as caught:
+                        loader(path, node_types=value)
+                    self.assertIn(text, str(caught.exception))
+
+
+@unittest.skipIf(FBX is None, "fbx sdk is not installed")
 class TestClipLoadFbxSampling(unittest.TestCase):
     """load_fbx reads each curve's keys once and evaluates every frame at
     once. These hold it to the sdk's own evaluation, asked one frame at a
@@ -7919,9 +8732,10 @@ class TestClipLoadFbxSampling(unittest.TestCase):
 
                 return counting
 
-        def counted_walk(scene, scale_factor):
-            data, nodes = walk(scene, scale_factor)
-            return data, {uuid: Counted(node) for uuid, node in nodes.items()}
+        def counted_walk(*args):
+            data, nodes, tree = walk(*args)
+            tree.nodes = [Counted(node) for node in tree.nodes]
+            return data, {uuid: Counted(node) for uuid, node in nodes.items()}, tree
 
         with mock.patch.object(hierarchy.hierarchy, "_walk_fbx", counted_walk):
             clip = ClipData.load_fbx(path, **kwargs)

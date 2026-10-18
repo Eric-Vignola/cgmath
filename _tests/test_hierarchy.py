@@ -1694,8 +1694,9 @@ class TestLoadFbxDroppedNodes(unittest.TestCase):
             self.assertEqual(list(loaded.name), ["A", "C"])
             self.assertEqual(loaded["C"].get_parent().name, "A")
 
-            # A's own 100 still applies; only B's is lost with B
-            self.assertAlmostEqual(loaded["C"].world_matrix[3, 1], 200.0, places=6)
+            # A's 100 and B's, which C takes in its own translate as B goes
+            self.assertAlmostEqual(loaded["C"].world_matrix[3, 1], 300.0, places=6)
+            self.assertAlmostEqual(loaded["C"].translate[1], 200.0, places=6)
 
     def test_the_scene_root_still_produces_world_parented_roots(self):
         """the fbx root carries no attribute, so it is a dropped node too"""

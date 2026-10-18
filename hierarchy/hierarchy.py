@@ -2561,114 +2561,530 @@ def _fbx_inferred_attr(prop, name: str, node) -> dict:
 _FBX_ROTATE_ORDERS = {0: 0, 2: 1, 4: 2, 1: 3, 3: 4, 5: 5}
 
 
-def _walk_fbx(scene, scale_factor: float):
-    """walks an open fbx scene's joints into TransformData dicts
+# the names node_types takes, the kinds of node the fbx loaders can keep: an
+# eSkeleton is a joint, an eMarker or a null drawn as a cross a locator, any
+# other null a transform (a group), and an eMesh a mesh, read as a transform
+_FBX_NODE_TYPES = ("joint", "locator", "transform", "mesh")
 
-    Hands back the ``FbxNode`` behind each uuid alongside the dicts, because
-    an animated read has to sample those same objects and fbx lets two nodes
-    share a name, so pairing them up afterwards by name would be ambiguous.
+
+def _fbx_check_node_types(node_types) -> Optional[frozenset]:
+    """the kinds ``node_types`` keeps (:data:`_FBX_NODE_TYPES`), None for
+    every one of them; refuses anything else"""
+    if node_types is None:
+        return None
+    if isinstance(node_types, str) or not isinstance(node_types, Iterable):
+        raise TypeError(
+            f"node_types takes a tuple of names, such as ('joint',), or None, not {node_types!r}"
+        )
+
+    names = tuple(node_types)
+    for name in names:
+        if not (isinstance(name, str) and name in _FBX_NODE_TYPES):
+            known = ", ".join(repr(x) for x in _FBX_NODE_TYPES)
+            raise ValueError(f"node_types names {known}, not {name!r}")
+    if not names:
+        raise ValueError("node_types keeps no node; None keeps every kind")
+    return frozenset(names)
+
+
+class _FbxTree:
+    """what :func:`_fbx_fold` reads of a scene: the nodes :func:`_walk_fbx`
+    keeps and every node above one of them, the scene root included, in the
+    order the walk met them, so a parent comes before its children
+
+    Per node, (n,) or (n, 3) arrays: ``parent``, its parent's position, -1
+    for the scene root; ``kept``, its column among the walk's dicts, -1 for
+    a node the walk drops; ``joint``, whether it is a joint, and
+    ``compensate``, whether it is a joint that divides its parent's scale
+    out (``eInheritRrs``, segment scale compensate); ``orders``, its rotate
+    order as rotate_order; its own ``translate`` (times the scale factor),
+    ``rotate`` and ``scale``; ``pre``, its pre rotation, and ``axis``, the
+    inverse of its post rotation, as euler angles in xyz, 0 where the sdk
+    applies none (rotation inactive) and on a light, whose post rotation is
+    fbx's view axis; on a camera, rotation active or not, what its post
+    rotation turns beyond fbx's view axis, (0, -90, 0), which Maya's camera
+    holds as its rotate axis (:data:`_FBX_CAMERA_AXIS`); and ``pivots``
+    (n, 4, 3), its rotate pivot, scale pivot, rotate offset and scale
+    offset, times the scale factor. ``nodes`` holds each one's ``FbxNode``,
+    ``columns`` the position of each kept column's node and ``above`` each
+    kept column's nearest kept ancestor's column, -1 for a root.
+    """
+
+    __slots__ = (
+        "nodes",
+        "parent",
+        "kept",
+        "columns",
+        "above",
+        "joint",
+        "compensate",
+        "orders",
+        "translate",
+        "rotate",
+        "scale",
+        "pre",
+        "axis",
+        "pivots",
+    )
+
+
+# the post rotation Maya's exporter writes on a camera, (0, -90, 0), fbx's
+# view axis, as a row vector matrix: Maya's importer keeps what a camera's
+# post rotation P turns beyond it as the camera's rotate axis, this @ P^-1,
+# which a camera's children follow (probe_views.py: post (0, 0, 0) gives a
+# rotate axis of (0, -90, 0), (0, -90, 20) one of (-20, 0, 0))
+_FBX_CAMERA_AXIS = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]])
+
+
+def _walk_fbx(scene, scale_factor: float, node_types: Optional[frozenset] = None):
+    """walks an open fbx scene's nodes into TransformData dicts
+
+    Keeps the joints, locators, groups and meshes (a mesh read as a
+    transform), or the kinds ``node_types`` names
+    (:func:`_fbx_check_node_types`), and drops every other node: one of
+    another kind, one with no node attribute, and the scene root. A kept
+    node's parent is its nearest kept ancestor. What the nodes dropped
+    between them hold, and the pivots, offsets and the pre and post rotation
+    of a node that is no joint, which its channels can't hold, are folded
+    into its channels (:func:`_fbx_fold`), so its world matrix is the
+    file's.
+
+    Hands back the dicts, the ``FbxNode`` behind each uuid, because an
+    animated read has to sample those same objects and fbx lets two nodes
+    share a name, so pairing them up afterwards by name would be ambiguous,
+    and the :class:`_FbxTree` the fold read, which a clip folds again on
+    every frame.
 
     The nodes live only as long as the ``open_fbx`` block the scene came from.
     """
-    skeleton       = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eSkeleton")
-    marker         = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eMarker")
-    null           = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eNull")
-    cross          = _fbx_enum(FBX.FbxNull,          "ELook",        "eCross")
-    source_pivot   = _fbx_enum(FBX.FbxNode,          "EPivotSet",    "eSourcePivot")
-    inherit_rrs    = _fbx_enum(FBX.FbxTransform,     "EInheritType", "eInheritRrs")
+    skeleton     = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eSkeleton")
+    marker       = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eMarker")
+    null         = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eNull")
+    mesh         = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eMesh")
+    camera       = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eCamera")
+    light        = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eLight")
+    cross        = _fbx_enum(FBX.FbxNull,          "ELook",        "eCross")
+    source_pivot = _fbx_enum(FBX.FbxNode,          "EPivotSet",    "eSourcePivot")
+    inherit_rrs  = _fbx_enum(FBX.FbxTransform,     "EInheritType", "eInheritRrs")
 
-    hierarchy_data = {}
-    nodes          = {}
-
-    # traverse the scene and build a dict compatible with TransformData
-    def traverse(node, parent_uuid=None):
-        unique_id = generate_uuid()
-        kept      = False
-
-        attr = node.GetNodeAttribute()
+    # every node, parents first, in the order the walk has always met them:
+    # a node, then each of its children's branches in turn
+    found, parents, kinds, views = [], [], [], []
+    stack = [(scene.GetRootNode(), -1)]
+    while stack:
+        node, parent = stack.pop()
+        attr = node.GetNodeAttribute() if parent >= 0 else None
+        kind = None
+        view = None
         if attr:
-            # TODO: for now lets consider meshes as transforms
-            # supported node types for now are joints, locators and transforms
             attr_type = attr.GetAttributeType()
-            if attr_type in (
-                skeleton,
-                marker,
-                null,
-                _fbx_enum(FBX.FbxNodeAttribute, "EType", "eMesh"),
-            ):
-                # basics
-                data         = {}
-                data["name"] = node.GetName()
-                data["uuid"] = unique_id
-                if parent_uuid is not None:
-                    data["parent_uuid"] = parent_uuid
+            if attr_type == skeleton:
+                kind = "joint"
+            elif attr_type == marker:
+                kind = "locator"
+            # a null drawn as a cross is a locator, a bare one is a group,
+            # which is how Maya's own FBX plugin tells them apart
+            elif attr_type == null:
+                kind = "locator" if attr.Look.Get() == cross else "transform"
+            elif attr_type == mesh:
+                kind = "mesh"
+            elif attr_type == camera:
+                view = "camera"
+            elif attr_type == light:
+                view = "light"
 
-                # rotate_order, which newer bindings hand back as an enum
-                rotate_order         = node.GetRotationOrder(source_pivot)
-                rotate_order         = getattr(rotate_order, "value", rotate_order)
-                data["rotate_order"] = _FBX_ROTATE_ORDERS[rotate_order]
+        found.append(node)
+        parents.append(parent)
+        kinds.append(kind)
+        views.append(view)
+        here = len(found) - 1
+        stack.extend((node.GetChild(i), here) for i in reversed(range(node.GetChildCount())))
 
-                # get SRT
-                data["scale"]  = np.array(tuple(x for x in node.LclScaling.Get()))
-                data["rotate"] = np.array(tuple(x for x in node.LclRotation.Get()))
-                data["translate"] = (
-                    np.array(tuple(x for x in node.LclTranslation.Get())) * scale_factor
-                )
+    keeps = [kind is not None and (node_types is None or kind in node_types) for kind in kinds]
 
-                # if joint, get joint_orient
-                if attr_type == skeleton:
-                    data["node_type"] = "joint"
+    # the tree: the kept nodes and every node above one, renumbered
+    needed = list(keeps)
+    for index in reversed(range(len(found))):
+        if needed[index] and parents[index] >= 0:
+            needed[parents[index]] = True
+    place = np.cumsum(needed) - 1
+    rows  = [index for index in range(len(found)) if needed[index]]
 
-                    # fbx ignores pre and post rotation entirely unless
-                    # rotationActive is on
-                    if node.GetRotationActive():
-                        data["joint_orient"] = np.array(
-                            tuple(x for x in node.GetPreRotation(source_pivot))
-                        )[:3]
+    tree            = _FbxTree()
+    tree.nodes      = [found[index] for index in rows]
+    tree.parent     = np.array([place[parents[i]] if parents[i] >= 0 else -1 for i in rows], dtype=np.intp)
+    tree.kept       = np.full(len(rows), -1, dtype=np.intp)
+    tree.joint      = np.array([kinds[i] == "joint" for i in rows], dtype=bool)
+    tree.compensate = np.zeros(len(rows), dtype=bool)
+    tree.orders     = np.zeros(len(rows), dtype=np.intp)
+    tree.translate  = np.zeros((len(rows), 3))
+    tree.rotate     = np.zeros((len(rows), 3))
+    tree.scale      = np.ones((len(rows), 3))
+    tree.pre        = np.zeros((len(rows), 3))
+    tree.axis       = np.zeros((len(rows), 3))
+    tree.pivots     = np.zeros((len(rows), 4, 3))
 
-                        # and it composes post rotation as its inverse
-                        post = FBX.FbxAMatrix()
-                        post.SetR(node.GetPostRotation(source_pivot))
-                        data["rotate_axis"] = np.array(
-                            tuple(x for x in post.Inverse().GetR())
-                        )[:3]
+    hierarchy_data  = {}
+    nodes           = {}
+    uuids           = {}  # a tree position's uuid, for the kept nodes
+    above           = []
 
-                    data["segment_scale_compensate"] = (
-                        node.GetTransformationInheritType() == inherit_rrs
-                    )
-                elif attr_type == marker:
-                    data["node_type"] = "locator"
-                # a null drawn as a cross is a locator, a bare one is a group,
-                # which is how Maya's own FBX plugin tells them apart
-                elif attr_type == null and attr.Look.Get() == cross:
-                    data["node_type"] = "locator"
-                else:
-                    data["node_type"] = "transform"
+    for position, index in enumerate(rows):
+        node = found[index]
 
-                attrs = _fbx_user_attributes(node)
-                if attrs:
-                    data["user_defined_attributes"] = attrs
+        # rotate_order, which newer bindings hand back as an enum
+        rotate_order          = node.GetRotationOrder(source_pivot)
+        rotate_order          = getattr(rotate_order, "value", rotate_order)
+        tree.orders[position] = _FBX_ROTATE_ORDERS[rotate_order]
 
-                hierarchy_data[unique_id] = data
-                nodes[unique_id]          = node
-                kept                      = True
+        # get SRT
+        tree.scale[position]     = tuple(node.LclScaling.Get())[:3]
+        tree.rotate[position]    = tuple(node.LclRotation.Get())[:3]
+        tree.translate[position] = np.array(tuple(node.LclTranslation.Get())[:3]) * scale_factor
 
-        # a node we skipped has no uuid to hand down, so its children take
-        # the nearest ancestor we did keep rather than falling to the world
-        child_uuid = unique_id if kept else parent_uuid
-        for i in range(node.GetChildCount()):
-            traverse(node.GetChild(i), parent_uuid=child_uuid)
+        # pivots and offsets turn and scale the node about other points than
+        # its origin, rotation active or not
+        for k, pivot in enumerate(
+            (
+                node.GetRotationPivot(source_pivot),
+                node.GetScalingPivot(source_pivot),
+                node.GetRotationOffset(source_pivot),
+                node.GetScalingOffset(source_pivot),
+            )
+        ):
+            tree.pivots[position, k] = np.array(tuple(pivot)[:3]) * scale_factor
 
-    traverse(scene.GetRootNode())
+        # fbx ignores pre and post rotation entirely unless rotationActive is on
+        active = node.GetRotationActive()
+        if active:
+            tree.pre[position] = tuple(node.GetPreRotation(source_pivot))[:3]
 
-    # remove the root node and any invalid parent nodes
-    uuids = list(hierarchy_data.keys())
-    for node in hierarchy_data.values():
-        # use .get(): a root-level node may carry no parent_uuid key
-        if node.get("parent_uuid") not in uuids:
-            node.pop("parent_uuid", None)
+        # and it composes post rotation as its inverse. A light's is fbx's
+        # view axis, which Maya places its children without; a camera's turns
+        # them by what it adds to that view axis, rotation active or not, as
+        # Maya's importer reads it
+        if (active and not views[index]) or views[index] == "camera":
+            post = FBX.FbxAMatrix()
+            post.SetR(node.GetPostRotation(source_pivot))
+            axis = tuple(post.Inverse().GetR())[:3]
+            if views[index] == "camera":
+                turn = _FBX_CAMERA_AXIS @ _eulers_to_matrices(axis, 0)[:3, :3]
+                axis = 0.0 if np.abs(turn - np.eye(3)).max() <= _FBX_FOLD_BAND else _matrices_to_eulers(turn, 0)
+            tree.axis[position] = axis
 
-    return hierarchy_data, nodes
+        if kinds[index] == "joint":
+            tree.compensate[position] = node.GetTransformationInheritType() == inherit_rrs
+
+        if not keeps[index]:
+            continue
+
+        # a node the walk drops has no uuid to hand down, so its children take
+        # the nearest ancestor it kept rather than falling to the world
+        up = parents[index]
+        while up >= 0 and not keeps[up]:
+            up = parents[up]
+        above.append(tree.kept[place[up]] if up >= 0 else -1)
+
+        # basics
+        unique_id    = generate_uuid()
+        data         = {}
+        data["name"] = node.GetName()
+        data["uuid"] = unique_id
+        if up >= 0:
+            data["parent_uuid"] = uuids[place[up]]
+
+        data["rotate_order"] = int(tree.orders[position])
+        data["scale"]        = tree.scale[position].copy()
+        data["rotate"]       = tree.rotate[position].copy()
+        data["translate"]    = tree.translate[position].copy()
+
+        # if joint, get joint_orient
+        if kinds[index] == "joint":
+            data["node_type"] = "joint"
+            if node.GetRotationActive():
+                data["joint_orient"] = tree.pre[position].copy()
+                data["rotate_axis"]  = tree.axis[position].copy()
+            data["segment_scale_compensate"] = bool(tree.compensate[position])
+        elif kinds[index] == "locator":
+            data["node_type"] = "locator"
+        else:
+            data["node_type"] = "transform"
+
+        attrs = _fbx_user_attributes(node)
+        if attrs:
+            data["user_defined_attributes"] = attrs
+
+        tree.kept[position]       = len(hierarchy_data)
+        uuids[position]           = unique_id
+        hierarchy_data[unique_id] = data
+        nodes[unique_id]          = node
+
+    tree.columns = np.flatnonzero(tree.kept >= 0)
+    tree.above   = np.array(above, dtype=np.intp)
+
+    # what the file holds that the dicts can't: folded in, on the static values
+    translate, rotate, scale, joint_orient, changed = _fbx_fold(
+        tree, tree.translate[None], tree.rotate[None], tree.scale[None]
+    )
+    for column, data in enumerate(hierarchy_data.values()):
+        if not changed[column]:
+            continue
+        data["translate"] = translate[0, column]
+        data["rotate"]    = rotate[0, column]
+        data["scale"]     = scale[0, column]
+        if data["node_type"] == "joint":
+            data["joint_orient"] = joint_orient[0, column]
+
+    return hierarchy_data, nodes, tree
+
+
+# a 3x3 block this close to a rotation, or to a rotation times one scale, as
+# a fraction of its size, is one: the products of rotations a fold forms are
+# a few ulps off one
+_FBX_FOLD_BAND = 1e-12
+
+
+def _fbx_fold_split(block: np.ndarray) -> tuple:
+    """(F, 3, 3) blocks as ``(U, s, uneven)``: where a block is a rotation U
+    times one positive scale s, those, s exactly 1 for a rotation; anywhere
+    else (``uneven`` (F,)) the rotation nearest the block and s 1, and NaN
+    for a block holding a value that is not finite, which has no nearest
+    rotation (a file can carry one)"""
+    finite = np.isfinite(block).all(axis=(-2, -1))
+    with np.errstate(invalid="ignore"):
+        gram  = block @ np.swapaxes(block, -1, -2)
+        size  = np.trace(gram, axis1=-2, axis2=-1) / 3.0
+        eye   = np.eye(3)
+        turns = _det3(block) > 0.0
+        even  = turns & (np.abs(gram - size[:, None, None] * eye).max(axis=(-2, -1)) <= _FBX_FOLD_BAND * size)
+        exact = turns & (np.abs(gram - eye).max(axis=(-2, -1)) <= _FBX_FOLD_BAND)
+
+    s     = np.where(exact, 1.0, np.sqrt(np.where(even, size, 1.0)))
+    U     = block / s[:, None, None]
+    solve = ~even & finite
+    if solve.any():
+        # the rotation nearest an uneven block, a mirror in it left to the scale
+        w, _, vt = np.linalg.svd(block[solve])
+        w[..., 2] *= np.sign(_det3(w @ vt))[:, None]
+        U[solve] = w @ vt
+    U[~finite] = np.nan
+    return U, s, ~even
+
+
+def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
+    """the kept nodes' channels, (F, k, 3) each, from those of every node of
+    ``tree`` as the file holds them, (F, n, 3) each, every frame at once:
+    ``(translate, rotate, scale, joint_orient, changed)``, ``changed`` (k,)
+    saying which kept nodes the fold moved off the file's values
+
+    Row vectors. The sdk composes a node's local matrix as Sp^-1 S Sp Soff
+    Rp^-1 RA R JO Rp Roff T: Sp and Rp the scale and rotate pivots, Soff and
+    Roff the offsets, RA the inverse of the post rotation and JO the pre
+    rotation, both only with rotation active, and a joint that compensates
+    its parent's scale divides it out of its 3x3 block. The pivots and
+    offsets come to a translation, translate + Roff + Rp + (Soff + Sp - Rp -
+    Sp S) Q with Q = RA R JO, which a kept node takes in its translate, on
+    every frame. A kept node's local matrix under its nearest kept ancestor
+    is its own times those of the nodes dropped between, D: its translate
+    becomes t D + d, d D's translation, and E, the 3x3 block D leaves (the
+    compensated scale the fbx parent and the kept parent divide out traded),
+    goes on the rotation:
+
+    - a joint keeps its scale, rotate axis and rotate, and takes E in its
+      joint orient, JO E, the way the turn to Maya's axes goes on a joint
+      root, so its rotate curves stay as authored;
+    - any other node, which the walk gives no rotate axis or joint orient,
+      takes RA R JO E in its rotate, solved again in its rotate order;
+    - E a rotation U times one scale s puts s on the node's scale; a block
+      no node can hold under a turn, scales uneven, takes its nearest
+      rotation in place of U, and the scale and the rotate are split out of
+      the rest as the matrix setter splits them, shear dropped. What it
+      drops, the block it should hold times the inverse of the one it
+      holds (:func:`_fbx_fold_shear`), goes on the kept nodes under it as a
+      dropped node's matrix does, so they stay where the file puts them.
+
+    A compensating joint divides out its parent's scale but for a zero in
+    it (:func:`_fbx_divisor`), as Maya's importer leaves it, so what sits
+    under a node scaled to 0 collapses onto it. A rotation solved again goes
+    through euler_filter along the frames, frame 0 as solved. A kept node
+    nothing moves keeps the file's values to the bit, and so does every
+    node of a file whose dropped nodes, pivots and offsets hold the
+    identity. The kept nodes go parents first, so a compensating joint
+    divides out its kept parent's scale as the fold leaves it.
+    """
+    frames  = len(translate)
+    kept    = tree.kept
+    parent  = tree.parent
+    columns = tree.columns
+    count   = len(columns)
+    eye     = np.eye(3)
+
+    out_translate = translate[:, columns].copy()
+    out_rotate    = rotate[:, columns].copy()
+    out_scale     = scale[:, columns].copy()
+    out_orient    = np.repeat(tree.pre[columns][None], frames, axis=0)
+    changed       = np.zeros(count, dtype=bool)
+
+    pivoted = np.any(tree.pivots != 0.0, axis=(1, 2))
+    turned  = np.any(tree.pre != 0.0, axis=1) | np.any(tree.axis != 0.0, axis=1)
+
+    # the scale a node's own block divides out: its parent's, when it
+    # compensates, but for a zero one, which Maya's importer leaves in, so
+    # what sits under a node scaled to 0 collapses onto it there
+    divided          = np.ones((frames, len(kept), 3))
+    rows             = np.flatnonzero(tree.compensate & (parent >= 0))
+    divided[:, rows] = _fbx_divisor(scale[:, parent[rows]])
+
+    # a dropped node that holds the identity on every frame moves nothing
+    still = (
+        (kept < 0)
+        & ~pivoted
+        & ~turned
+        & np.all(translate == 0.0, axis=(0, 2))
+        & np.all(rotate == 0.0, axis=(0, 2))
+        & np.all(scale == 1.0, axis=(0, 2))
+        & np.all(divided == 1.0, axis=(0, 2))
+    )
+
+    def orientations(i: int) -> np.ndarray:
+        """(F, 3, 3) RA R JO of node i"""
+        R = _eulers_to_matrices(rotate[:, i], tree.orders[i])[:, :3, :3]
+        if not turned[i]:
+            return R
+        RA, JO = _eulers_to_matrices(np.array([tree.axis[i], tree.pre[i]]), 0)[:, :3, :3]
+        return RA @ R @ JO
+
+    def offset(i: int, Q: np.ndarray) -> np.ndarray:
+        """(F, 3) node i's translate with its pivots and offsets in it"""
+        if not pivoted[i]:
+            return translate[:, i]
+        rp, sp, ro, so = tree.pivots[i]
+        moved = (so + sp - rp) - sp * scale[:, i]
+        return translate[:, i] + ((ro + rp) + np.einsum("fi,fij->fj", moved, Q))
+
+    def local(i: int) -> np.ndarray:
+        """(F, 4, 4) node i's local matrix, its parent's scale divided out"""
+        Q                 = orientations(i)
+        matrix            = np.zeros((frames, 4, 4))
+        matrix[:, :3, :3] = scale[:, i, :, None] * Q / divided[:, i, None, :]
+        matrix[:, 3, :3]  = offset(i, Q)
+        matrix[:, 3, 3]   = 1.0
+        return matrix
+
+    # each dropped node's matrix times those of the dropped nodes above it,
+    # up to the nearest kept one: None for the identity
+    chain = {}
+    for i in np.flatnonzero(kept < 0).tolist():
+        up    = parent[i]
+        upper = chain.get(up) if up >= 0 and kept[up] < 0 else None
+        if still[i]:
+            chain[i] = upper
+        else:
+            chain[i] = local(i) if upper is None else local(i) @ upper
+
+    # the shear a kept node's split drops, per column, (F, 4, 4), on the
+    # frames it drops any: the kept nodes under it take it as they take a
+    # dropped node's matrix, so they stay where the file puts them
+    sheared = {}
+
+    for column, i in enumerate(columns.tolist()):
+        up       = parent[i]
+        ancestor = tree.above[column]
+        D        = chain.get(up) if up >= 0 and kept[up] < 0 else None
+        lost     = sheared.get(ancestor)
+        if lost is not None:
+            D = lost if D is None else D @ lost
+        block = None if D is None else D[:, :3, :3]
+
+        # a compensating joint divides its fbx parent's scale out, which the
+        # dicts trade for its kept parent's, as the fold leaves it
+        if tree.compensate[i]:
+            held = _fbx_divisor(out_scale[:, ancestor]) if ancestor >= 0 else np.ones((frames, 3))
+            if block is not None or not np.array_equal(divided[:, i], held):
+                block = (eye if block is None else block) / divided[:, i, :, None] * held[:, None, :]
+
+        level = block is None or bool(np.all(block == eye))
+        if not (pivoted[i] or D is not None or not level or (turned[i] and not tree.joint[i])):
+            continue
+
+        Q = orientations(i)
+        t = offset(i, Q)
+        if D is not None:
+            t = np.einsum("fi,fij->fj", t, D[:, :3, :3]) + D[:, 3, :3]
+        out_translate[:, column] = t
+        changed[column]          = True
+
+        if level and (tree.joint[i] or not turned[i]):
+            continue
+
+        U, s, uneven = _fbx_fold_split(np.broadcast_to(eye, (frames, 3, 3)) if block is None else block)
+        order = tree.orders[i]
+        if uneven.any():
+            whole = (scale[uneven, i, :, None] * Q[uneven]) @ block[uneven]
+        if tree.joint[i]:
+            # the joint orient takes the turn, the scale its size
+            JO                    = _eulers_to_matrices(tree.pre[i], 0)[:3, :3] @ U
+            out_orient[:, column] = _filtered(_matrices_to_eulers(JO, 0)[:, None], [0])[:, 0]
+            out_scale[:, column]  = scale[:, i] * s[:, None]
+            if uneven.any():
+                RA      = _eulers_to_matrices(tree.axis[i], 0)[:3, :3]
+                current = RA @ _eulers_to_matrices(rotate[uneven, i], order)[:, :3, :3]
+                whole   = whole @ np.swapaxes(JO[uneven], -1, -2)
+                sized, turn = _scales_and_rotations(whole, current)
+                out_scale[uneven, column]  = sized
+                out_rotate[uneven, column] = _matrices_to_eulers(RA.T @ turn, order)
+                out_rotate[:, column]      = _filtered(out_rotate[:, column][:, None], [order])[:, 0]
+        else:
+            # the rotate takes the pre and post rotation and the turn
+            solved = _matrices_to_eulers(Q @ U, order)
+            sized  = scale[:, i] * s[:, None]
+            if uneven.any():
+                sized[uneven], turn = _scales_and_rotations(whole, Q[uneven])
+                solved[uneven] = _matrices_to_eulers(turn, order)
+            out_scale[:, column]  = sized
+            out_rotate[:, column] = _filtered(solved[:, None], [order])[:, 0]
+
+        if uneven.any():
+            # the rotation the node holds, its joint orient left out
+            holds = _eulers_to_matrices(out_rotate[uneven, column], order)[:, :3, :3]
+            if tree.joint[i]:
+                holds = RA @ holds
+            lost = _fbx_fold_shear(whole, out_scale[uneven, column], holds, frames, uneven)
+            if lost is not None:
+                sheared[column] = lost
+
+    return out_translate, out_rotate, out_scale, out_orient, changed
+
+
+def _fbx_divisor(scale: np.ndarray) -> np.ndarray:
+    """the scale a joint compensating ``scale`` divides out: that scale, but
+    for a zero, which divides nothing, as Maya's importer leaves it"""
+    return np.where(scale == 0.0, 1.0, scale)
+
+
+def _fbx_fold_shear(whole, sized, turn, frames: int, uneven) -> Optional[np.ndarray]:
+    """(F, 4, 4) the shear a split dropped, ``whole @ inv(sized turn)`` on
+    the ``uneven`` frames, the identity on the others; None where every
+    frame drops none, within :data:`_FBX_FOLD_BAND`
+
+    ``whole`` (u, 3, 3) is the block the node should hold, its joint orient
+    taken out, and ``sized`` and ``turn`` the scale and the rotation its
+    channels hold; a frame where a scale is 0, or a value is not finite,
+    has no inverse and keeps the identity.
+    """
+    eye = np.eye(3)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lost = whole @ np.swapaxes(turn, -1, -2) / sized[:, None, :]
+    size = np.abs(sized).max(axis=-1, keepdims=True)
+    ok   = np.isfinite(lost).all(axis=(-2, -1)) & np.all(np.abs(sized) > 1e-12 * size, axis=-1)
+    ok &= np.abs(lost - eye).max(axis=(-2, -1)) > _FBX_FOLD_BAND
+    if not ok.any():
+        return None
+
+    out               = np.repeat(np.eye(4)[None], frames, axis=0)
+    rows              = np.flatnonzero(uneven)[ok]
+    out[rows, :3, :3] = lost[ok]
+    return out
 
 
 def _fbx_has_curves(stack) -> bool:
@@ -2819,40 +3235,41 @@ def _fbx_check_pose(pose) -> None:
 _FBX_BIND_AGREE = 1e-6
 
 
-def _fbx_bind_matrices(scene, nodes: dict, scale_factor: float, filename) -> dict:
-    """``{uuid: (matrix, local)}`` of each node :func:`_walk_fbx` kept
-    (``nodes``, its uuid to ``FbxNode``) that a bind pose lists: the pose's
-    (4, 4) matrix, row vectors, its translation times ``scale_factor``, and
-    whether the pose holds it local to the parent rather than as the world
+def _fbx_bind_matrices(scene, tree: _FbxTree, scale_factor: float, filename) -> dict:
+    """``{position: (matrix, local)}`` of each node of ``tree`` (the nodes
+    :func:`_walk_fbx` kept and every node above one) that a bind pose
+    lists: the pose's (4, 4) matrix, row vectors, its translation times
+    ``scale_factor``, and whether the pose holds it local to the parent
+    rather than as the world
 
     A bind pose is an ``FbxPose`` whose ``IsBindPose()`` is true. When two
     list one node the first wins, and a later one more than
     :data:`_FBX_BIND_AGREE` off it, in the loaded unit, warns, naming the
     node. Raises ValueError when no bind pose lists a node the read keeps.
     """
-    kept  = {node.GetUniqueID(): uuid for uuid, node in nodes.items()}
-    found = {}  # uuid: (matrix, local, the pose's name)
+    positions = {node.GetUniqueID(): position for position, node in enumerate(tree.nodes)}
+    found     = {}  # position: (matrix, local, the pose's name)
     for index in range(scene.GetPoseCount()):
         pose = typed(scene.GetPose(index), FBX.FbxPose, FBX)
         if not pose.IsBindPose():
             continue
 
         for k in range(pose.GetCount()):
-            node = typed(pose.GetNode(k), FBX.FbxNode, FBX)
-            uuid = None if node is None else kept.get(node.GetUniqueID())
-            if uuid is None:
+            node     = typed(pose.GetNode(k), FBX.FbxNode, FBX)
+            position = None if node is None else positions.get(node.GetUniqueID())
+            if position is None:
                 continue
 
             source = pose.GetMatrix(k)
             matrix = np.array([[source.Get(r, c) for c in range(4)] for r in range(4)])
             matrix[3, :3] *= scale_factor
             local = bool(pose.IsLocalMatrix(k))
-            if uuid not in found:
-                found[uuid] = (matrix, local, pose.GetName())
+            if position not in found:
+                found[position] = (matrix, local, pose.GetName())
                 continue
 
             # a local matrix and a world one can't be held side by side
-            first, held, name = found[uuid]
+            first, held, name = found[position]
             gap = float(np.abs(matrix - first).max())
             if local == held and gap > _FBX_BIND_AGREE:
                 warnings.warn(
@@ -2860,12 +3277,86 @@ def _fbx_bind_matrices(scene, nodes: dict, scale_factor: float, filename) -> dic
                     f"{node.GetName()!r} by {gap:.3g}; the first, {name!r}, is read"
                 )
 
-    if not found:
+    if not any(tree.kept[position] >= 0 for position in found):
         raise ValueError(
             f"{filename!r} holds no bind pose that lists a node the read keeps; "
             "pose='node' reads the nodes' own values"
         )
-    return {uuid: (matrix, local) for uuid, (matrix, local, _) in found.items()}
+    return {position: (matrix, local) for position, (matrix, local, _) in found.items()}
+
+
+def _fbx_kept_binds(tree: _FbxTree, listed: dict, uuids: list) -> dict:
+    """``{uuid: (matrix, local)}`` of the kept nodes for
+    :func:`_fbx_pose_binds`, from ``listed``, what :func:`_fbx_bind_matrices`
+    read, ``uuids`` the kept nodes' uuids by column
+
+    A kept node a bind pose lists takes its bind, as before. A dropped node
+    one lists is folded in at its bind, the way it would be read if it were
+    kept: a kept node no pose lists that sits under it, with no kept node a
+    pose lists between them, takes the world the whole tree gives it, every
+    node of it kept, each node a pose lists at its bind and every other at
+    its own values under its parent (a joint compensating its parent's
+    scale as the bind leaves that scale). The other kept nodes are left to
+    that same rule as :func:`_fbx_pose_binds` applies it. The matrices are
+    in the file's axes.
+    """
+    kept = tree.kept
+    out  = {uuids[kept[p]]: entry for p, entry in listed.items() if kept[p] >= 0}
+
+    # the kept nodes a listed dropped node moves: under one, with no kept
+    # node a pose lists between them
+    over = np.zeros(len(kept), dtype=bool)
+    for p, up in enumerate(tree.parent.tolist()):
+        if up >= 0:
+            over[p] = (up in listed and kept[up] < 0) or (bool(over[up]) and up not in listed)
+    moved = [p for p in np.flatnonzero(over & (kept >= 0)).tolist() if p not in listed]
+    if not moved:
+        return out
+
+    # the whole tree, every node of it kept, so the fold folds into each one
+    # only what its own channels can't hold
+    whole = _FbxTree()
+    for name in _FbxTree.__slots__:
+        setattr(whole, name, getattr(tree, name))
+    whole.kept    = np.arange(len(kept), dtype=np.intp)
+    whole.columns = whole.kept
+    whole.above   = tree.parent
+    translate, rotate, scale, joint_orient, _ = _fbx_fold(
+        whole, tree.translate[None], tree.rotate[None], tree.scale[None]
+    )
+
+    ids  = [generate_uuid() for _ in range(len(kept))]
+    data = {}
+    for p, up in enumerate(tree.parent.tolist()):
+        node = {
+            "name":         f"node{p}",
+            "uuid":         ids[p],
+            "rotate_order": int(tree.orders[p]),
+            "translate":    translate[0, p],
+            "rotate":       rotate[0, p],
+            "scale":        scale[0, p],
+            "node_type":    "joint" if tree.joint[p] else "transform",
+        }
+        if up >= 0:
+            node["parent_uuid"] = ids[up]
+        if tree.joint[p]:
+            node["joint_orient"]             = joint_orient[0, p]
+            node["rotate_axis"]              = tree.axis[p].copy()
+            node["segment_scale_compensate"] = bool(tree.compensate[p])
+        data[ids[p]] = node
+
+    # only the binds above a moved node say where it goes
+    needed = set()
+    for p in moved:
+        while p >= 0 and p not in needed:
+            needed.add(p)
+            p = int(tree.parent[p])
+    rig = HierarchyData.from_dict(data)
+    _fbx_pose_binds(rig, {ids[p]: entry for p, entry in listed.items() if p in needed}, None)
+
+    for p in moved:
+        out[uuids[kept[p]]] = (np.asarray(rig[f"node{p}"].world_matrix), False)
+    return out
 
 
 def _fbx_pose_binds(rig, binds: dict, turn) -> None:
@@ -4348,6 +4839,7 @@ class TransformList(DataList):
         scale_factor: Optional[float] = None,
         axis_system:  Optional[str]   = "maya_y_up",
         pose:         str             = "node",
+        node_types:   Optional[tuple] = None,
     ):
         """primitive fbx joint loader
 
@@ -4360,9 +4852,10 @@ class TransformList(DataList):
         A file whose unit the sdk's ``FbxSystemUnit.ConvertScene`` or Maya's
         unit converting export wrote, as a 1/s scale on the scene root's
         children over values left in the old unit, is not converted: a
-        meters one loads at world scale 0.01 under a root the read keeps and
-        100 times too large under one it drops, its meshes 100 times too
-        large.
+        meters one's nodes load where the file puts them but at world scale
+        0.01, whether the read keeps the node holding that scale or folds it
+        into the nodes under it (``node_types`` below), and its meshes load
+        100 times too large.
 
         ``axis_system`` "maya_y_up", the default, loads the scene in Maya's
         Y-up axes as ``FbxAxisSystem.MayaYUp.ConvertScene`` converts it:
@@ -4404,6 +4897,59 @@ class TransformList(DataList):
         one's channels under its parent all the same, so a ``HierarchyData``
         of them reads at the bind ``HierarchyData.load_fbx`` gives.
 
+        ``node_types`` None, the default, keeps the kinds of node the read
+        has always kept: joints, locators (an ``eMarker``, or a null drawn as
+        a cross), groups (any other null) and meshes, a mesh read as a
+        transform. A tuple of those names, "joint", "locator", "transform"
+        and "mesh", keeps those kinds alone: ``("joint",)`` reads a skeleton
+        without its meshes and groups. A node of a kind left out, one of a
+        kind the read can't keep (a camera, a light, an LOD group), one with
+        no node attribute and the scene root are dropped, and each node kept
+        goes under its nearest kept ancestor. A string, or anything that is
+        no collection of names, raises TypeError; an unknown name, or no
+        name at all, raises ValueError.
+
+        Every kept node's world matrix is the file's all the same: what the
+        nodes dropped between it and its kept parent hold is folded into its
+        channels, on every frame for a clip, the way the turn above goes on
+        a root. A joint takes their turn in its joint orient and their move
+        in its translate, keeping its rotate (but for the uneven scale
+        below); any other node has its rotate solved again in its rotate
+        order. A uniform scale among them goes on the node's scale, and on
+        the scale of each joint under it that compensates its parent's scale
+        (segment scale compensate), which a joint compensating a dropped
+        parent divides out instead. An uneven one under a node turned in it
+        would take shear, which no node holds: that node's position and the
+        length of each of its axes are the file's, its axes squared, its
+        rotate solved again from the matrix, a joint's too, and the shear it
+        drops is folded into the kept nodes under it the way a dropped
+        node's transform is, so they stay where the file puts them. A zero
+        scale is not divided out, as Maya's importer leaves it, so what sits
+        under a dropped node scaled to 0 collapses onto that node's position,
+        its axes 0, a joint compensating it among them; the sdk's own
+        evaluation gives NaN there, and so does ``world_matrix`` on a joint
+        that compensates a kept node scaled to 0. Folded in the same way is
+        what a node's own channels can't hold: its rotate and scale pivots
+        and offsets, in its translate, rotation active or not, and, on a
+        node that is no joint, its pre and post rotation, which the sdk
+        reads only with rotation active, in its rotate (a joint holds them
+        as its joint orient and rotate axis). A Maya group whose pivot is
+        centred on its children loads where Maya shows it. A light's post
+        rotation is fbx's view axis, which Maya places its children without,
+        and so does the read. A camera's turns its children by what it adds
+        to fbx's view axis, (0, -90, 0), the post rotation Maya's exporter
+        writes, which Maya's importer keeps as the camera's rotate axis,
+        rotation active or not: nothing on Maya's own camera, (0, -90, 0) on
+        one with no post rotation. The sdk's own evaluation puts those
+        children elsewhere. A node nothing moves keeps the file's values to
+        the bit, so a file whose dropped nodes, pivots and offsets hold the
+        identity, as Unreal's and Maya's skeleton exports do, reads as it
+        did. Under ``pose="bind"`` a node the read drops follows the bind
+        rule above as a kept one would: it is folded in at its bind when a
+        bind pose lists it, so the nodes under it follow that bind, and at
+        its own values otherwise. A bind read that keeps fewer kinds puts
+        each node it keeps where a full bind read puts it.
+
         User defined attributes come back as the specs save_fbx wrote; those
         of a file from Maya's own FBX plugin, the way its importer reads them.
         One whose name, string or enum field is not UTF-8, which the fbx
@@ -4415,12 +4961,17 @@ class TransformList(DataList):
             raise ImportError("fbx module not found")
         _fbx_check_axis_system(axis_system)
         _fbx_check_pose(pose)
+        kinds = _fbx_check_node_types(node_types)
 
         with open_fbx(filename, FBX) as scene:
             turn   = _fbx_axis_turn(scene, axis_system, filename)
             factor = _fbx_scale_factor(scene, scale_factor)
-            hierarchy_data, nodes = _walk_fbx(scene, factor)
-            binds = _fbx_bind_matrices(scene, nodes, factor, filename) if pose == "bind" else None
+            hierarchy_data, _, tree = _walk_fbx(scene, factor, kinds)
+            listed = _fbx_bind_matrices(scene, tree, factor, filename) if pose == "bind" else None
+
+        # each kept node's bind, a dropped node a bind pose lists folded in
+        # at its bind, in the file's axes
+        binds = None if listed is None else _fbx_kept_binds(tree, listed, list(hierarchy_data))
 
         if turn is not None:
             _fbx_turn_walk(hierarchy_data, turn)
@@ -10191,6 +10742,7 @@ class ClipData(HierarchyData):
         start_frame:  Optional[int]   = None,
         end_frame:    Optional[int]   = None,
         axis_system:  Optional[str]   = "maya_y_up",
+        node_types:   Optional[tuple] = None,
     ) -> "ClipData":
         """builds a clip from an fbx's animation take
 
@@ -10218,6 +10770,19 @@ class ClipData(HierarchyData):
         Y-up loads as it is, a left handed one raises ValueError, and
         ``axis_system=None`` keeps the file's own axes.
 
+        ``node_types`` keeps the kinds of node :meth:`HierarchyData.load_fbx`
+        keeps, and what that read folds into the nodes it keeps, the nodes
+        it drops and the pivots, offsets and pre and post rotations a node's
+        channels can't hold, is folded in on every frame: the dropped nodes
+        are sampled with the kept ones, every frame at once. A joint under a
+        dropped node the take moves keeps its rotate curves as authored and
+        takes that node in a joint orient that moves with it, but on a frame
+        the dropped nodes scale it unevenly under a turn, where its rotate
+        is solved again from the matrix and its whole rotate curve then goes
+        through euler_filter; any other node has its rotate solved again on
+        every frame; a node whose pivot its rotate or scale moves takes it in
+        its translate on every frame.
+
         The clip's :attr:`rest_pose` is the file's static pose, the nodes'
         own values outside the take (the world matrices
         ``FbxNode.EvaluateGlobalTransform`` gives with no time), taken from
@@ -10238,7 +10803,12 @@ class ClipData(HierarchyData):
         quaternions frame by frame, by the sdk as here, so that curve goes
         through euler_filter in the node's rotate order, frame 0 as the sdk
         gives it. So does the rotate of a root that is not a joint, solved
-        again for Maya's axes (``axis_system``).
+        again for Maya's axes (``axis_system``), the rotate of any node that
+        is no joint, solved again for a dropped node above it or its own
+        pre and post rotation, a joint's orient, solved again for a dropped
+        node above it, in xyz, and the rotate of a joint a dropped node
+        above it scales unevenly under a turn, solved again on those frames
+        (``node_types``).
 
         Every frame is sampled at once: each curve's keys are read once and
         evaluated on the frame grid the way the sdk evaluates them, the same
@@ -10344,12 +10914,13 @@ class ClipData(HierarchyData):
         if FBX is None:
             raise ImportError("fbx module not found")
         _fbx_check_axis_system(axis_system)
+        kinds = _fbx_check_node_types(node_types)
 
         # everything read from the scene dies with it: copy out inside the block
         with open_fbx(filename, FBX) as scene:
             turn         = _fbx_axis_turn(scene, axis_system, filename)
             scale_factor = _fbx_scale_factor(scene, scale_factor)
-            hierarchy_data, nodes = _walk_fbx(scene, scale_factor)
+            hierarchy_data, nodes, tree = _walk_fbx(scene, scale_factor, kinds)
 
             # the rest pose, the file's static pose from this same read, as
             # HierarchyData.load_fbx loads it: turned on a copy of the dicts,
@@ -10425,35 +10996,56 @@ class ClipData(HierarchyData):
                     )
                 raise ValueError(f"end_frame {stop} is before start_frame {start}")
 
-            clip      = cls(rig, frames=stop - start + 1, start_frame=start, fps=fps)
-            column    = {uuid: index for index, uuid in enumerate(clip.uuid)}
-            sampled   = [(nodes[uuid], column[uuid]) for uuid in nodes if uuid in column]
+            clip         = cls(rig, frames=stop - start + 1, start_frame=start, fps=fps)
+            column       = {uuid: index for index, uuid in enumerate(clip.uuid)}
+            scale        = np.array(clip.frames.scale)
+            rotate       = np.array(clip.frames.rotate)
+            translate    = np.array(clip.frames.translate)
+            joint_orient = np.array(clip.frames.joint_orient)
 
-            scale     = np.array(clip.frames.scale)
-            rotate    = np.array(clip.frames.rotate)
-            translate = np.array(clip.frames.translate)
+            # every node of the tree, the kept ones through the objects the
+            # walk handed back and the dropped ones above them, sampled as the
+            # file holds them, then folded every frame at once, as the walk
+            # folds their static values
+            uuids = list(hierarchy_data)
+            sampled = [
+                (nodes[uuids[kept]] if kept >= 0 else tree.nodes[position], position)
+                for position, kept in enumerate(tree.kept.tolist())
+            ]
+            held = [
+                np.repeat(values[None], clip.frame_count, axis=0)
+                for values in (tree.translate, tree.rotate, tree.scale)
+            ]
 
             # the frame grid in the sdk's ticks, every frame sampled at once
             ticks = _fbx_ticks((start + np.arange(clip.frame_count)) / fps, per_second)
-            _fbx_sample_take(stack, sampled, ticks, scale_factor, (translate, rotate, scale))
+            _fbx_sample_take(stack, sampled, ticks, scale_factor, held)
+
+        # a joint's orient as the fold leaves it, every frame: a node a
+        # dropped node above moves only at its static values took the fold
+        # in the rig the clip was built from
+        folded = _fbx_fold(tree, *held)
+        put    = np.array([column[uuid] for uuid in uuids], dtype=np.intp)
+        joints = tree.joint[tree.columns]
+        translate[:, put], rotate[:, put], scale[:, put] = folded[:3]
+        joint_orient[:, put[joints]] = folded[3][:, joints]
 
         if turn is not None:
-            roots        = [index for index, node in enumerate(clip) if node.parent_uuid is None]
-            joints       = [clip[index].node_type == "joint" for index in roots]
-            orders       = [clip[index].rotate_order for index in roots]
-            joint_orient = np.array(clip.frames.joint_orient)
+            roots  = [index for index, node in enumerate(clip) if node.parent_uuid is None]
+            joints = [clip[index].node_type == "joint" for index in roots]
+            orders = [clip[index].rotate_order for index in roots]
 
             turned = _fbx_turn_roots(
                 turn, joints, orders, translate[:, roots], rotate[:, roots], joint_orient[:, roots]
             )
             translate[:, roots], rotate[:, roots], joint_orient[:, roots] = turned
-            clip.frames.joint_orient = joint_orient
 
-        clip.frames.scale     = scale
-        clip.frames.rotate    = rotate
-        clip.frames.translate = translate
-        clip.frame            = 0
-        clip._rest_pose       = rest
+        clip.frames.joint_orient = joint_orient
+        clip.frames.scale        = scale
+        clip.frames.rotate       = rotate
+        clip.frames.translate    = translate
+        clip.frame               = 0
+        clip._rest_pose          = rest
         return clip
 
     def save_fbx(self, filename, zero_root=False, as_ascii=False):
@@ -10615,9 +11207,10 @@ def load_fbx(
     scale_factor: Optional[float] = None,
     axis_system:  Optional[str]   = "maya_y_up",
     pose:         str             = "node",
+    node_types:   Optional[tuple] = None,
 ) -> "HierarchyData":
     """The fbx's node hierarchy, names as in the file: ``HierarchyData.load_fbx()``."""
-    return HierarchyData.load_fbx(filename, scale_factor, axis_system, pose)
+    return HierarchyData.load_fbx(filename, scale_factor, axis_system, pose, node_types)
 
 
 def load_glb(
