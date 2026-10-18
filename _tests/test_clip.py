@@ -8228,6 +8228,98 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         self.assertTrue(np.array_equal(axes["cam"], np.zeros(3)))
         self.assertFalse(np.allclose(axes["cam0"], 0.0, atol=1.0))
 
+    # (name, kind, pre, post, rotation active, the rotate axis Maya's
+    # importer gives the view where it reads the post rotation): a camera's
+    # what its post rotation turns beyond fbx's view axis (0, -90, 0), as
+    # probe view_rules.py reads Maya's rotateAxis; a light's none
+    VIEWS = (
+        ("cTurned", "camera", (20, 5, 0), (0, -90, 20), False, (-20, 0, 0)),
+        ("cTurnedOn", "camera", (20, 5, 0), (0, -90, 20), True, (-20, 0, 0)),
+        ("cBare", "camera", (10, 0, 0), (0, 0, 0), False, (0, -90, 0)),
+        ("cOdd", "camera", (0, 0, 0), (10, 20, 30), False, (177.27316955680365, -67.73125550470313, 154.49444973901745)),
+        ("lamp", "light", (10, 0, 0), (-90, 0, 0), False, (0, 0, 0)),
+    )
+
+    def viewed(self, axes, name):
+        """each of :attr:`VIEWS` at the root and under a group, turned and
+        moved, each holding a locator; and a locator at the root"""
+        path    = os.path.join(self.tmp.name, name)
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        if axes is not None:
+            scene.GetGlobalSettings().SetAxisSystem(axes)
+        source = FBX.FbxNode.EPivotSet.eSourcePivot
+        top    = scene.GetRootNode()
+
+        def null(name, parent, look, t=(0, 0, 0), r=(0, 0, 0)):
+            node = FBX.FbxNode.Create(scene, name)
+            attr = FBX.FbxNull.Create(scene, name)
+            attr.Look.Set(look.value)
+            node.SetNodeAttribute(attr)
+            node.LclTranslation.Set(FBX.FbxDouble3(*t))
+            node.LclRotation.Set(FBX.FbxDouble3(*r))
+            parent.AddChild(node)
+            return node
+
+        null("anchor", top, FBX.FbxNull.ELook.eCross)
+        holder = null("holder", top, FBX.FbxNull.ELook.eNone, (1, -2, 0.5), (10, -20, 30))
+        for k, (view, kind, pre, post, active, _) in enumerate(self.VIEWS):
+            for parent, suffix in ((top, ""), (holder, "_held")):
+                node = FBX.FbxNode.Create(scene, view + suffix)
+                node.SetNodeAttribute((FBX.FbxCamera if kind == "camera" else FBX.FbxLight).Create(scene, view + suffix))
+                node.LclTranslation.Set(FBX.FbxDouble3(k, 2, 3))
+                node.LclRotation.Set(FBX.FbxDouble3(15, 25, 35))
+                node.SetRotationActive(active)
+                node.SetPreRotation(source, FBX.FbxVector4(*pre, 1.0))
+                node.SetPostRotation(source, FBX.FbxVector4(*post, 1.0))
+                parent.AddChild(node)
+                null(view + suffix + "_kid", node, FBX.FbxNull.ELook.eCross, (0.5, 1.0, -2.0))
+        exporter = FBX.FbxExporter.Create(manager, "")
+        exporter.Initialize(path, -1, manager.GetIOSettings())
+        exporter.Export(scene)
+        exporter.Destroy()
+        manager.Destroy()
+        return path
+
+    def test_a_view_reads_its_pre_and_post_rotation_as_maya_does(self):
+        """Maya's importer reads a camera's and a light's pre and post
+        rotation whether its rotation is active or not: the view's children
+        turn by its rotate axis (a camera's what its post rotation adds to
+        fbx's view axis, :attr:`VIEWS`) and its pre rotation. But a root of
+        a file whose up axis is x or z with its rotation inactive: the sdk's
+        ConvertScene, which turns that file into Maya's Y-up, drops both, so
+        such a camera turns its children by (0, -90, 0), fbx's view axis,
+        and its pre rotation is gone (view_rules.py: each child within
+        7.1e-15 of Maya's FBXImport, Y-up, Z-up, 3ds Max's and an X-up
+        file). The read puts each child there, in the file's axes and,
+        turned, in Maya's, in a Y-up, a Z-up and an X-up file"""
+
+        def lcl(translate=(0, 0, 0), rotate=(0, 0, 0)):
+            out        = euler_to_matrix(np.radians([rotate]), np.zeros(1, dtype=int))[0]
+            out[3, :3] = translate
+            return out
+
+        system = FBX.FbxAxisSystem
+        x_up   = system(system.EUpVector.eXAxis, system.EFrontVector.eParityOdd, system.ECoordSystem.eRightHanded)
+        for label, axes in (("Y-up", None), ("Z-up", system.MayaZUp), ("X-up", x_up)):
+            path = self.viewed(axes, f"views_{label}.fbx")
+            own  = HierarchyData.load_fbx(path, axis_system=None)
+            maya = HierarchyData.load_fbx(path)
+            turn = np.asarray(maya["anchor"].world_matrix)
+            for k, (view, kind, pre, post, active, axis) in enumerate(self.VIEWS):
+                for suffix, parent in (("", np.eye(4)), ("_held", lcl((1, -2, 0.5), (10, -20, 30)))):
+                    with self.subTest(axes=label, view=view + suffix):
+                        # a root of the Z-up or X-up file with its rotation inactive
+                        turns, first = axis, pre
+                        if label != "Y-up" and not active and not suffix:
+                            turns, first = ((0, -90, 0) if kind == "camera" else (0, 0, 0)), (0, 0, 0)
+                        place = lcl(rotate=turns) @ lcl(rotate=(15, 25, 35)) @ lcl((k, 2, 3), first) @ parent
+                        want  = lcl((0.5, 1.0, -2.0)) @ place
+                        kid   = view + suffix + "_kid"
+                        self.assertTrue(np.allclose(own[kid].world_matrix, want, rtol=0.0, atol=1e-9), kid)
+                        self.assertTrue(np.allclose(maya[kid].world_matrix, want @ turn, rtol=0.0, atol=1e-9), kid)
+
     def test_a_file_whose_dropped_nodes_and_pivots_move_nothing_reads_as_it_holds_it(self):
         """an attribute-less group at the identity, a mesh whose pivots
         cancel, and nodes under them: every channel the file's own, to the

@@ -2844,13 +2844,17 @@ class _FbxTree:
     ``rotate`` and ``scale``; ``pre``, its pre rotation, and ``axis``, the
     inverse of its post rotation, as euler angles in xyz, 0 where the sdk
     applies none (rotation inactive) and on a light, whose post rotation is
-    fbx's view axis; on a camera, rotation active or not, what its post
-    rotation turns beyond fbx's view axis, (0, -90, 0), which Maya's camera
-    holds as its rotate axis (:data:`_FBX_CAMERA_AXIS`); and ``pivots``
-    (n, 4, 3), its rotate pivot, scale pivot, rotate offset and scale
-    offset, times the scale factor. ``nodes`` holds each one's ``FbxNode``,
-    ``columns`` the position of each kept column's node and ``above`` each
-    kept column's nearest kept ancestor's column, -1 for a root.
+    fbx's view axis; on a camera, what its post rotation turns beyond fbx's
+    view axis, (0, -90, 0), which Maya's camera holds as its rotate axis
+    (:data:`_FBX_CAMERA_AXIS`), all of it where Maya reads no post rotation.
+    A camera's or a light's pre rotation, and a camera's post rotation,
+    are read as Maya's importer reads them, rotation active or not, but for
+    a root with its rotation inactive in a file whose up axis is x or z,
+    which reads neither; and ``pivots`` (n, 4, 3), its rotate pivot, scale
+    pivot, rotate offset and scale offset, times the scale factor. ``nodes``
+    holds each one's ``FbxNode``, ``columns`` the position of each kept
+    column's node and ``above`` each kept column's nearest kept ancestor's
+    column, -1 for a root.
     """
 
     __slots__ = (
@@ -2909,6 +2913,15 @@ def _walk_fbx(scene, scale_factor: float, node_types: Optional[frozenset] = None
     cross        = _fbx_enum(FBX.FbxNull,          "ELook",        "eCross")
     source_pivot = _fbx_enum(FBX.FbxNode,          "EPivotSet",    "eSourcePivot")
     inherit_rrs  = _fbx_enum(FBX.FbxTransform,     "EInheritType", "eInheritRrs")
+
+    # Maya's importer reads a camera's or a light's pre rotation, and a
+    # camera's post rotation, whether its rotation is active or not, but
+    # on a root of a file whose up axis is x or z: it turns that file
+    # into its Y-up with the sdk's ConvertScene, which drops a root's pre
+    # and post rotation where its rotation is inactive (view_rules.py,
+    # convert_views.py)
+    up, _ = scene.GetGlobalSettings().GetAxisSystem().GetUpVector()
+    converts = int(getattr(up, "value", up)) != 2
 
     # every node, parents first, in the order the walk has always met them:
     # a node, then each of its children's branches in turn
@@ -2997,18 +3010,20 @@ def _walk_fbx(scene, scale_factor: float, node_types: Optional[frozenset] = None
         ):
             tree.pivots[position, k] = np.array(tuple(pivot)[:3]) * scale_factor
 
-        # fbx ignores pre and post rotation entirely unless rotationActive is on
-        active = node.GetRotationActive()
+        # fbx ignores pre and post rotation entirely unless rotationActive is
+        # on, and so does Maya's importer, but on a view
+        active = node.GetRotationActive() or (views[index] is not None and not (converts and parents[index] == 0))
         if active:
             tree.pre[position] = tuple(node.GetPreRotation(source_pivot))[:3]
 
         # and it composes post rotation as its inverse. A light's is fbx's
         # view axis, which Maya places its children without; a camera's turns
-        # them by what it adds to that view axis, rotation active or not, as
-        # Maya's importer reads it
+        # them by what it adds to that view axis, as Maya's importer reads it,
+        # all of it where it reads no post rotation
         if (active and not views[index]) or views[index] == "camera":
             post = FBX.FbxAMatrix()
-            post.SetR(node.GetPostRotation(source_pivot))
+            if active:
+                post.SetR(node.GetPostRotation(source_pivot))
             axis = tuple(post.Inverse().GetR())[:3]
             if views[index] == "camera":
                 turn = _FBX_CAMERA_AXIS @ _eulers_to_matrices(axis, 0)[:3, :3]
@@ -5254,17 +5269,23 @@ class TransformList(DataList):
         rotation is fbx's view axis, which Maya places its children without,
         and so does the read. A camera's turns its children by what it adds
         to fbx's view axis, (0, -90, 0), the post rotation Maya's exporter
-        writes, which Maya's importer keeps as the camera's rotate axis,
-        rotation active or not: nothing on Maya's own camera, (0, -90, 0) on
-        one with no post rotation. The sdk's own evaluation puts those
-        children elsewhere. A node nothing moves keeps the file's values to
-        the bit, so a file whose dropped nodes, pivots and offsets hold the
-        identity, as Unreal's and Maya's skeleton exports do, reads as it
-        did. Under ``pose="bind"`` a node the read drops follows the bind
-        rule above as a kept one would: it is folded in at its bind when a
-        bind pose lists it, so the nodes under it follow that bind, and at
-        its own values otherwise. A bind read that keeps fewer kinds puts
-        each node it keeps where a full bind read puts it.
+        writes, which Maya's importer keeps as the camera's rotate axis:
+        nothing on Maya's own camera, (0, -90, 0) on one with no post
+        rotation. Maya's importer reads a camera's or a light's pre rotation,
+        and a camera's post rotation, whether its rotation is active or not,
+        and so does the read, but on a root of a file whose up axis is x or z
+        with its rotation inactive: the sdk's ConvertScene, which turns that
+        file into Maya's Y-up for Maya's importer, drops them, so such a
+        camera turns its children by (0, -90, 0) whatever its post rotation.
+        The sdk's own evaluation puts those children elsewhere. A node
+        nothing moves keeps the file's values to the bit, so a file whose
+        dropped nodes, pivots and offsets hold the identity, as Unreal's and
+        Maya's skeleton exports do, reads as it did. Under ``pose="bind"`` a
+        node the read drops follows the bind rule above as a kept one would:
+        it is folded in at its bind when a bind pose lists it, so the nodes
+        under it follow that bind, and at its own values otherwise. A bind
+        read that keeps fewer kinds puts each node it keeps where a full bind
+        read puts it.
 
         User defined attributes come back as the specs save_fbx wrote; those
         of a file from Maya's own FBX plugin, the way its importer reads them.

@@ -2012,11 +2012,14 @@ rotate, so a group whose pivot Maya centred on its children loads
 where Maya shows it. A light's post rotation, FBX's view axis, is
 left out, as Maya places its children; a camera's turns its children by
 what it adds to the view axis Maya's exporter writes, (0, -90, 0), which
-Maya's importer keeps as the camera's rotate axis. Under `pose="bind"`
-a dropped node a bind pose lists is folded in at its bind, so each node
-kept sits where the full bind read puts it. A file whose dropped nodes,
-pivots and offsets hold the identity reads as it holds its nodes, to the
-bit.
+Maya's importer keeps as the camera's rotate axis. Maya reads a camera's
+or a light's pre rotation, and a camera's post rotation, whether its
+rotation is active or not, and so does the read, but on a root of an
+X- or Z-up file with its rotation inactive, where the axis conversion
+drops them. Under `pose="bind"` a dropped node a bind pose lists is
+folded in at its bind, so each node kept sits where the full bind
+read puts it. A file whose dropped nodes, pivots and offsets hold the
+identity reads as it holds its nodes, to the bit.
 
 ```python
 grouped = HierarchyData([
