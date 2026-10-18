@@ -8299,51 +8299,70 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
                 self.assertWorlds(self.rig_worlds(clip.rest_pose), rest)
                 self.assertWorlds(self.clip_worlds(clip),          frames)
 
-    def zeroed(self, keyed, joint=False):
-        """an attribute-less node scaled 0, static, or an LOD group keyed to
-        0 on frame 1 of 3, holding two joints that compensate their parent's
-        scale, as Maya writes a joint under a joint, a locator under them;
-        ``joint`` makes the node scaled 0 a joint the read keeps"""
-        path    = os.path.join(self.tmp.name, f"zero_{'keyed' if keyed else 'static'}_{joint}.fbx")
+    def zeroed(self, keyed, top=None, scale=(0, 0, 0), compensates=True):
+        """``top`` at (0, 1, 0) turned 25 degrees about z, scaled ``scale``,
+        static, or keyed to it on frame 1 of 3, holding a joint, a joint
+        that compensates its parent's scale and a locator under them: ``top``
+        None a node with no attribute, "lod" an LOD group, "group" a group
+        and "joint" a joint; the first joint compensates ``top`` when
+        ``compensates``. The joints are Maya's kind (``eLimbNode``), which
+        Maya's importer reads as joints, compensating as the file says, the
+        way probe maya_zero.py imports this same file (an ``eRoot`` one, the
+        sdk's default, comes into Maya as a plain transform)"""
+        label   = "".join(str(v) for v in scale)
+        path    = os.path.join(self.tmp.name, f"zero_{top}_{label}_{keyed}_{compensates}.fbx")
         manager = FBX.FbxManager.Create()
         manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
         scene = FBX.FbxScene.Create(manager, "scene")
         scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames24)
+        inherit = FBX.FbxTransform.EInheritType
+
+        def skeleton(name):
+            attr = FBX.FbxSkeleton.Create(scene, name)
+            attr.SetSkeletonType(FBX.FbxSkeleton.EType.eLimbNode)
+            return attr
+
         hide = FBX.FbxNode.Create(scene, "hide")
-        if keyed:
+        if top == "lod":
             hide.SetNodeAttribute(FBX.FbxLODGroup.Create(scene, "hide"))
-        elif joint:
-            hide.SetNodeAttribute(FBX.FbxSkeleton.Create(scene, "hide"))
+        elif top == "group":
+            group = FBX.FbxNull.Create(scene, "hide")
+            group.Look.Set(FBX.FbxNull.ELook.eNone.value)
+            hide.SetNodeAttribute(group)
+        elif top == "joint":
+            hide.SetNodeAttribute(skeleton("hide"))
         hide.LclTranslation.Set(FBX.FbxDouble3(0, 1, 0))
-        hide.LclScaling.Set(FBX.FbxDouble3(*((1, 1, 1) if keyed else (0, 0, 0))))
+        hide.LclRotation.Set(FBX.FbxDouble3(0, 0, 25))
+        hide.LclScaling.Set(FBX.FbxDouble3(*((1, 1, 1) if keyed else scale)))
+        hide.SetTransformationInheritType(inherit.eInheritRSrs)
         scene.GetRootNode().AddChild(hide)
         parent = hide
-        for name in ("j0", "j1"):
-            joint = FBX.FbxNode.Create(scene, name)
-            joint.SetNodeAttribute(FBX.FbxSkeleton.Create(scene, name))
-            joint.LclTranslation.Set(FBX.FbxDouble3(0, 2, 0))
-            joint.LclRotation.Set(FBX.FbxDouble3(0, 0, 20))
-            joint.SetTransformationInheritType(FBX.FbxTransform.EInheritType.eInheritRrs)
-            parent.AddChild(joint)
-            parent = joint
-        loc  = FBX.FbxNode.Create(scene, "loc")
-        attr = FBX.FbxNull.Create(scene, "loc")
-        attr.Look.Set(FBX.FbxNull.ELook.eCross.value)
-        loc.SetNodeAttribute(attr)
-        loc.LclTranslation.Set(FBX.FbxDouble3(0.5, 0, 0))
-        parent.AddChild(loc)
+        for name, kind, rrs in (("j0", "joint", compensates), ("j1", "joint", True), ("loc", "locator", False)):
+            node = FBX.FbxNode.Create(scene, name)
+            if kind == "joint":
+                node.SetNodeAttribute(skeleton(name))
+                node.LclTranslation.Set(FBX.FbxDouble3(0, 2, 0))
+                node.LclRotation.Set(FBX.FbxDouble3(0, 0, 20))
+            else:
+                attr = FBX.FbxNull.Create(scene, name)
+                attr.Look.Set(FBX.FbxNull.ELook.eCross.value)
+                node.SetNodeAttribute(attr)
+                node.LclTranslation.Set(FBX.FbxDouble3(0.5, 0, 0))
+            node.SetTransformationInheritType(inherit.eInheritRrs if rrs else inherit.eInheritRSrs)
+            parent.AddChild(node)
+            parent = node
         if keyed:
             stack = FBX.FbxAnimStack.Create(scene, "Take 001")
             layer = FBX.FbxAnimLayer.Create(scene, "Base Layer")
             stack.AddMember(layer)
-            for axis in "XYZ":
+            for axis, value in zip("XYZ", scale):
                 curve = hide.LclScaling.GetCurve(layer, axis, True)
                 curve.KeyModifyBegin()
-                for frame, value in enumerate((1.0, 0.0, 1.0)):
+                for frame, v in enumerate((1.0, float(value), 1.0)):
                     time = FBX.FbxTime()
                     time.SetSecondDouble(frame / 24.0)
                     key = curve.KeyAdd(time)[0]
-                    curve.KeySetValue(key, value)
+                    curve.KeySetValue(key, v)
                     curve.KeySetInterpolation(key, FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear)
                 curve.KeyModifyEnd()
         exporter = FBX.FbxExporter.Create(manager, "")
@@ -8353,53 +8372,393 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         manager.Destroy()
         return path
 
-    def test_a_zero_scale_collapses_what_sits_under_it(self):
-        """a dropped node scaled 0 above joints that compensate their
-        parent's scale, the way Maya hides a prop: every loader reads the
-        file, default arguments, every channel finite, and a node the fold
-        places sits where Maya's importer puts it, at the dropped node's
-        position, its axes 0, on the frames the scale is 0; on the others
-        where the sdk puts it. A zero scale is not divided out, as Maya's
-        importer leaves it, where the sdk's evaluation gives NaN; under a
-        kept joint scaled 0 every node keeps the file's values"""
+    @staticmethod
+    def maya_local(translate, rotate, size=(1.0, 1.0, 1.0), divide=(1.0, 1.0, 1.0)):
+        """(4, 4) a local matrix as Maya composes one, ``rotate`` in xyz
+        degrees, its rows scaled by ``size`` and its columns divided by
+        ``divide``, the parent scale a compensating joint divides out"""
+        out         = euler_to_matrix(np.radians([rotate]), np.zeros(1, dtype=int))[0]
+        out[:3, :3] = np.asarray(size, dtype=float)[:, None] * out[:3, :3] / np.asarray(divide, dtype=float)
+        out[3, :3]  = translate
+        return out
+
+    @classmethod
+    def maya_zeroed(cls, scale, compensates=True):
+        """{name: world} of :meth:`zeroed`'s nodes, ``top`` scaled ``scale``,
+        as Maya evaluates them: a scale under 1e-12 in size held as 1e-12,
+        and a compensating joint's block divided by its parent's scale held
+        so (maya_zero_rule.py)"""
+        lcl  = cls.maya_local
+        held = np.where(np.abs(scale) < 1e-12, 1e-12, np.asarray(scale, dtype=float))
+        hide = lcl((0, 1, 0), (0, 0, 25), held)
+        j0   = lcl((0, 2, 0), (0, 0, 20), divide=held if compensates else (1, 1, 1)) @ hide
+        j1   = lcl((0, 2, 0), (0, 0, 20)) @ j0
+        loc  = lcl((0.5, 0, 0), (0, 0, 0)) @ j1
+        return {"hide": hide, "j0": j0, "j1": j1, "loc": loc}
+
+    def test_a_scale_of_0_is_read_as_maya_reads_it(self):
+        """Maya holds a scale under 1e-12 in size as 1e-12, so a joint that
+        compensates a node scaled to 0 keeps its axes and sits on that
+        node's position, and a node that does not collapses onto it. A
+        dropped node scaled to 0, (1, 0, 1) or (1, -1e-13, 1), which Maya
+        holds as (1, 1e-12, 1), with no attribute or an LOD group, static or
+        keyed to it on frame 1, above joints that compensate their parent's
+        scale, the way Maya hides a prop: every loader reads the file,
+        default arguments, every channel finite, and every kept node is
+        where Maya's FBXImport puts it (maya_zero.py: to 2.2e-16), whatever
+        node_types keeps; on the other frames where the sdk puts it. The
+        sdk's own evaluation gives NaN there"""
         from cgmath.geometry import skin_weights
 
-        collapsed    = np.zeros((4, 4))
-        collapsed[3] = (0.0, 1.0, 0.0, 1.0)
-        for keyed in (False, True):
-            path = self.zeroed(keyed)
-            with self.subTest(keyed=keyed):
-                rig  = HierarchyData.load_fbx(path)
-                clip = ClipData.load_fbx(path)
-                skin_weights.load_fbx(path)
-                bare = ClipData.load_fbx(path, node_types=("locator",))
-                for channels in (rig, clip.frames, bare.frames, clip.rest_pose):
-                    for channel in ("translate", "rotate", "scale", "joint_orient"):
-                        self.assertTrue(np.isfinite(np.asarray(getattr(channels, channel))).all(), channel)
+        for top, keyed, scale in (
+            (None, False, (0, 0, 0)),
+            (None, False, (1, 0, 1)),
+            (None, False, (1, -1e-13, 1)),
+            ("lod", True, (0, 0, 0)),
+            ("lod", True, (1, 0, 1)),
+            ("lod", True, (1, -1e-13, 1)),
+        ):
+            path = self.zeroed(keyed, top, scale)
+            want = self.maya_zeroed(scale)
+            zero = 1 if keyed else 0
+            sdk  = self.truth(path, 3) if keyed else None
+            for kinds in (None, ("joint",), ("locator",)):
+                with self.subTest(top=top, keyed=keyed, scale=scale, node_types=kinds):
+                    rig  = HierarchyData.load_fbx(path, node_types=kinds)
+                    clip = ClipData.load_fbx(path, node_types=kinds)
+                    for channels in (rig, clip.frames, clip.rest_pose):
+                        for channel in ("translate", "rotate", "scale", "joint_orient"):
+                            self.assertTrue(np.isfinite(np.asarray(getattr(channels, channel))).all(), channel)
 
-                zero   = [1] if keyed else [0]
+                    worlds = self.clip_worlds(clip)
+                    self.assertWorlds({n: w[zero] for n, w in worlds.items()}, want)
+                    if keyed:
+                        self.assertWorlds({n: w[[0, 2]] for n, w in worlds.items()}, {n: sdk[n][[0, 2]] for n in worlds})
+                    else:
+                        self.assertWorlds(self.rig_worlds(rig), want)
+            skin_weights.load_fbx(path)
+
+        # j0 compensates its parent's 0: it keeps its axes and sits on
+        # hide's position, which collapses j0's own translate
+        want = self.maya_zeroed((0, 0, 0))
+        self.assertTrue(np.allclose(want["j0"][3, :3], [0.0, 1.0, 0.0], rtol=0.0, atol=1e-11))
+        self.assertTrue(np.allclose(np.linalg.norm(want["j0"][:3, :3], axis=1), 1.0, rtol=0.0, atol=1e-12))
+
+    def test_a_node_under_a_dropped_scale_of_0_collapses_onto_it(self):
+        """a group keyed to 0 on frame 1 over a joint that does not
+        compensate it, a joint that compensates that one, and a locator:
+        the joint takes the group's scale as Maya holds it, 1e-12, so the
+        joint under it divides out 1e-12, not 0, and a joints-only read puts
+        every joint where the full read and Maya put them, collapsed onto
+        the group's position, worlds finite. Keyed to (1, -1e-13, 1), the
+        group is held as Maya holds it, (1, 1e-12, 1), positive: every
+        channel of the read is that of (1, 1e-12, 1), to the bit, the
+        joint's scale positive, no mirror folded into it"""
+        path = self.zeroed(True, "group", compensates=False)
+        want = self.maya_zeroed((0, 0, 0), compensates=False)
+        full = self.clip_worlds(ClipData.load_fbx(path))
+        for kinds in (("joint",), ("joint", "locator")):
+            with self.subTest(node_types=kinds):
+                clip   = ClipData.load_fbx(path, node_types=kinds)
                 worlds = self.clip_worlds(clip)
-                self.assertTrue(np.allclose(worlds["j0"][zero], collapsed, rtol=0.0, atol=1e-12))
-                self.assertTrue(np.allclose(bare.frames.world_matrix[zero, 0], collapsed, rtol=0.0, atol=1e-12))
-                if keyed:
-                    want = self.truth(path, 3)
-                    for name, world in worlds.items():
-                        self.assertWorlds({name: world[[0, 2]]}, {name: want[name][[0, 2]]})
-                    self.assertWorlds({"loc": bare.frames.world_matrix[[0, 2], 0]}, {"loc": want["loc"][[0, 2]]})
-                else:
-                    self.assertTrue(np.allclose(rig["j0"].world_matrix, collapsed, rtol=0.0, atol=1e-12))
+                self.assertWorlds({n: w[1] for n, w in worlds.items()}, want)
+                self.assertWorlds(worlds, full)
+                self.assertTrue(np.array_equal(clip.frames.scale[1, clip.index("j0")], np.full(3, 1e-12)))
+        self.assertTrue(np.allclose(want["loc"][:3, :3], 0.0, rtol=0.0, atol=1e-11))
+        self.assertTrue(np.allclose(want["loc"][3, :3], [0.0, 1.0, 0.0], rtol=0.0, atol=1e-11))
 
-        # a joint scaled 0 the read keeps: every node keeps the file's values,
-        # the joints compensating it among them, and a locator read alone
-        # under it collapses onto it
-        path = self.zeroed(False, joint=True)
+        tiny = self.zeroed(True, "group", (1, -1e-13, 1), compensates=False)
+        held = self.zeroed(True, "group", (1, 1e-12, 1), compensates=False)
+        for kinds in (("joint",), ("joint", "locator")):
+            with self.subTest(node_types=kinds, scale=(1, -1e-13, 1)):
+                got  = ClipData.load_fbx(tiny, node_types=kinds)
+                same = ClipData.load_fbx(held, node_types=kinds)
+                for channel in ("translate", "rotate", "scale", "joint_orient"):
+                    self.assertTrue(np.array_equal(getattr(got.frames, channel), getattr(same.frames, channel)), channel)
+                self.assertTrue(np.all(got.frames.scale[1, got.index("j0")] > 0.0))
+                self.assertWorlds({n: w[1, 3] for n, w in self.clip_worlds(got).items()},
+                                  {n: w[3] for n, w in self.maya_zeroed((1, -1e-13, 1), compensates=False).items()})
+
+    def test_a_kept_node_scaled_0_keeps_the_files_values(self):
+        """a joint scaled 0 the read keeps holds 0, every node under it the
+        file's values; a locator read alone under it is where Maya puts it.
+        A joint compensating the kept 0 has a NaN world_matrix (channels
+        finite): cgmath's evaluation divides by the 0 itself, where Maya
+        holds it as 1e-12 and keeps the joint's axes"""
+        path = self.zeroed(False, "joint")
         for loaded in (HierarchyData.load_fbx(path), ClipData.load_fbx(path)):
-            for name, scale in (("hide", 0.0), ("j0", 1.0), ("j1", 1.0)):
+            for name, scale, rotate in (("hide", 0.0, 25.0), ("j0", 1.0, 20.0), ("j1", 1.0, 20.0)):
                 with self.subTest(type(loaded).__name__, node=name):
                     self.assertTrue(np.array_equal(loaded[name].scale, np.full(3, scale)))
-                    self.assertTrue(np.array_equal(loaded[name].rotate, [0.0, 0.0, 0.0 if name == "hide" else 20.0]))
+                    self.assertTrue(np.array_equal(loaded[name].rotate, [0.0, 0.0, rotate]))
+        with np.errstate(all="ignore"):
+            self.assertTrue(np.isnan(HierarchyData.load_fbx(path)["j0"].world_matrix).any())
         bare = HierarchyData.load_fbx(path, node_types=("locator",))
-        self.assertTrue(np.allclose(bare["loc"].world_matrix, collapsed, rtol=0.0, atol=1e-12))
+        self.assertWorlds(self.rig_worlds(bare), self.maya_zeroed((0, 0, 0)))
+
+    # the scale of :meth:`kept_tiny`'s top, keyed a frame each: two Maya
+    # holds as 1e-12, one uniform and one uneven, then two exactly 0
+    TINY = ((1, 1, 1), (5e-13, 5e-13, 5e-13), (-1e-13, 1, 1), (1, 0, 1), (0, 0, 0))
+
+    def kept_tiny(self, kind):
+        """a locator or a group (``kind`` "locator" or "transform"), "top",
+        at (2, 0, 0) turned 25 degrees about z, scaled 5e-13 and keyed to
+        :attr:`TINY` on frames 0 to 4, holding a joint that compensates it,
+        "jD", a locator under that, "lD", and a joint compensating "jD",
+        "jE", holding a locator, "lE". The joints are Maya's kind
+        (``eLimbNode``), as in :meth:`zeroed`"""
+        nodes = (
+            ("top", None, kind, (2, 0, 0), (0, 0, 25)),
+            ("jD", "top", "joint", (0, 2, 0), (0, 0, 20)),
+            ("lD", "jD", "locator", (0.5, 0, 0), (0, 0, 0)),
+            ("jE", "jD", "joint", (0, 1, 0), (0, 10, 0)),
+            ("lE", "jE", "locator", (0.5, 0.5, 0), (0, 0, 0)),
+        )
+        return self.keyed(f"tiny_{kind}.fbx", nodes, {"top": (5e-13, 5e-13, 5e-13)}, "top", self.TINY)
+
+    def keyed(self, file, nodes, scales, animated, sizes):
+        """the path of a file named ``file`` holding ``nodes``, (name,
+        parent, kind, translate, rotate in xyz degrees) each, a kind
+        "joint" (Maya's kind, ``eLimbNode``, which compensates its
+        parent's scale), "locator", "transform" (a group), "lod" (an LOD
+        group) or None (no node attribute), each scaled as ``scales``
+        {name: scale} says, 1 if it names none, the scale of the node
+        named ``animated`` keyed to ``sizes`` on frames 0 on, at 24 fps"""
+        path    = os.path.join(self.tmp.name, file)
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames24)
+        inherit = FBX.FbxTransform.EInheritType
+        made    = {None: scene.GetRootNode()}
+        for name, parent, of, t, r in nodes:
+            node = FBX.FbxNode.Create(scene, name)
+            if of == "joint":
+                attr = FBX.FbxSkeleton.Create(scene, name)
+                attr.SetSkeletonType(FBX.FbxSkeleton.EType.eLimbNode)
+                node.SetNodeAttribute(attr)
+            elif of in ("locator", "transform"):
+                attr = FBX.FbxNull.Create(scene, name)
+                attr.Look.Set((FBX.FbxNull.ELook.eCross if of == "locator" else FBX.FbxNull.ELook.eNone).value)
+                node.SetNodeAttribute(attr)
+            elif of == "lod":
+                node.SetNodeAttribute(FBX.FbxLODGroup.Create(scene, name))
+            node.LclTranslation.Set(FBX.FbxDouble3(*t))
+            node.LclRotation.Set(FBX.FbxDouble3(*r))
+            node.LclScaling.Set(FBX.FbxDouble3(*scales.get(name, (1, 1, 1))))
+            node.SetTransformationInheritType(inherit.eInheritRrs if of == "joint" else inherit.eInheritRSrs)
+            made[parent].AddChild(node)
+            made[name] = node
+        stack = FBX.FbxAnimStack.Create(scene, "Take 001")
+        layer = FBX.FbxAnimLayer.Create(scene, "Base Layer")
+        stack.AddMember(layer)
+        for axis, values in zip("XYZ", zip(*sizes)):
+            curve = made[animated].LclScaling.GetCurve(layer, axis, True)
+            curve.KeyModifyBegin()
+            for frame, value in enumerate(values):
+                time = FBX.FbxTime()
+                time.SetSecondDouble(frame / 24.0)
+                key = curve.KeyAdd(time)[0]
+                curve.KeySetValue(key, float(value))
+                curve.KeySetInterpolation(key, FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear)
+            curve.KeyModifyEnd()
+        exporter = FBX.FbxExporter.Create(manager, "")
+        exporter.Initialize(path, -1, manager.GetIOSettings())
+        exporter.Export(scene)
+        exporter.Destroy()
+        manager.Destroy()
+        return path
+
+    @classmethod
+    def maya_tiny(cls, scale, held=True):
+        """{name: world} of :meth:`kept_tiny`'s nodes, "top" scaled
+        ``scale``, as Maya evaluates them when ``held``, a scale under 1e-12
+        in size held as 1e-12 (kept_tiny_maya.py); else as the read gives a
+        kept "top", its own scale, which "jD" divides out, a 0 dividing
+        nothing"""
+        lcl    = cls.maya_local
+        size   = np.asarray(scale, dtype=float)
+        divide = np.where(size == 0.0, 1.0, size)
+        if held:
+            size = divide = np.where(np.abs(size) < 1e-12, 1e-12, size)
+        top = lcl((2, 0, 0), (0, 0, 25), size)
+        jD  = lcl((0, 2, 0), (0, 0, 20), divide=divide) @ top
+        jE  = lcl((0, 1, 0), (0, 10, 0)) @ jD
+        return {"top": top, "jD": jD, "lD": lcl((0.5, 0, 0), (0, 0, 0)) @ jD, "jE": jE, "lE": lcl((0.5, 0.5, 0), (0, 0, 0)) @ jE}
+
+    def test_a_dropped_joint_divides_out_the_scale_of_the_kept_node_above_it(self):
+        """a locator or a group the read keeps, scaled under 1e-12 or
+        exactly 0, over joints it drops, the first compensating it: that
+        joint divides out the kept node's own scale, which world_matrix
+        multiplies by, not the 1e-12 Maya holds, so under a scale of 5e-13
+        or (-1e-13, 1, 1) the locators are where Maya's FBXImport puts them
+        (kept_tiny_maya.py) and where the full read puts them, on the rig
+        and the clip. Along an axis scaled exactly 0 they collapse onto the
+        kept node, a 0 dividing nothing, their axes no longer than the
+        file's. Read locators only, the group is dropped too and its 1e-12
+        held: they are where Maya puts them on every frame"""
+        for kind in ("locator", "transform"):
+            path = self.kept_tiny(kind)
+            with np.errstate(all="ignore"):
+                full = self.clip_worlds(ClipData.load_fbx(path))
+            for kinds in (("locator",), ("locator", "transform")):
+                with self.subTest(top=kind, node_types=kinds):
+                    rig    = HierarchyData.load_fbx(path, node_types=kinds)
+                    clip   = ClipData.load_fbx(path, node_types=kinds)
+                    worlds = self.clip_worlds(clip)
+                    kept   = kind in kinds
+                    self.assertEqual(clip.frame_count, len(self.TINY))
+                    self.assertEqual([n.name for n in rig], (["top"] if kept else []) + ["lD", "lE"])
+                    self.assertWorlds({n: rig[n].world_matrix for n in ("lD", "lE")}, self.maya_tiny((5e-13,) * 3))
+                    for frame, scale in enumerate(self.TINY):
+                        maya = self.maya_tiny(scale)
+                        for name in ("lD", "lE"):
+                            world = worlds[name][frame]
+                            label = f"{name} on frame {frame}"
+                            if not kept or frame < 2:
+                                self.assertTrue(np.allclose(world, maya[name], rtol=0.0, atol=1e-9), label)
+                            elif 0 in scale:
+                                own = self.maya_tiny(scale, held=False)[name]
+                                self.assertTrue(np.allclose(world[3], own[3], rtol=0.0, atol=1e-9), label)
+                                self.assertGreater(np.abs(world[3] - maya[name][3]).max(), 0.01, label)
+                                self.assertTrue(np.all(np.linalg.norm(world[:3, :3], axis=1) <= 1.0 + 1e-9), label)
+                            else:
+                                self.assertTrue(np.allclose(world[3], maya[name][3], rtol=0.0, atol=1e-9), label)
+                            if 0 not in scale:
+                                self.assertTrue(np.allclose(world[3], full[name][frame][3], rtol=0.0, atol=1e-9), label)
+
+    # the scale of :meth:`kept_held`'s "K", keyed a frame each: 1, then
+    # four Maya holds as 1e-12, along every axis or one
+    HELD = ((1, 1, 1), (5e-13, 5e-13, 5e-13), (5e-13, 1, 1), (1e-13, 1e-13, 1e-13), (1e-13, 2, 1))
+
+    def kept_held(self, top, size=2):
+        """a node the read drops, "G" (``top`` None, a node with no
+        attribute, or "lod", an LOD group), at (1, 2, 0) turned 30 degrees
+        about z and scaled ``size``, holding a locator, "K", at (0, 1, 0)
+        turned 20 degrees, scaled (5e-13, 1, 1) and keyed to :attr:`HELD`
+        on frames 0 to 4, holding a joint that compensates it, "jF", a joint
+        compensating that, "jG", holding a locator, "lG", and a group, "N",
+        at (0.5, 0, 0) turned 15 degrees about y, holding a joint that
+        compensates it, "jN"; the joints Maya's kind"""
+        nodes = (
+            ("G", None, top, (1, 2, 0), (0, 0, 30)),
+            ("K", "G", "locator", (0, 1, 0), (0, 0, 20)),
+            ("jF", "K", "joint", (1, 0, 0), (0, 0, 25)),
+            ("jG", "jF", "joint", (0, 1, 0), (10, 0, 0)),
+            ("lG", "jG", "locator", (0.5, 0, 0), (0, 0, 0)),
+            ("N", "K", "transform", (0.5, 0, 0), (0, 15, 0)),
+            ("jN", "N", "joint", (1, 0, 0), (0, 0, 25)),
+        )
+        scales = {"G": (size, size, size), "K": (5e-13, 1, 1)}
+        return self.keyed(f"held_{top}_{size}.fbx", nodes, scales, "K", self.HELD)
+
+    @classmethod
+    def maya_held(cls, scale, size=2):
+        """{name: world} of :meth:`kept_held`'s nodes, "K" scaled ``scale``
+        and "G" ``size``, as Maya evaluates them (held_split_maya.py): "K"
+        held as 1e-12 along an axis under it, which "jF" divides out, so
+        "jF" keeps the scale of "G"; "jN" divides out the scale of "N"
+        alone, so it keeps K's held 1e-12"""
+        lcl  = cls.maya_local
+        held = np.where(np.abs(scale) < 1e-12, 1e-12, np.asarray(scale, dtype=float))
+        G    = lcl((1, 2, 0), (0, 0, 30), (size, size, size))
+        K    = lcl((0, 1, 0), (0, 0, 20), held) @ G
+        jF   = lcl((1, 0, 0), (0, 0, 25), divide=held) @ K
+        jG   = lcl((0, 1, 0), (10, 0, 0)) @ jF
+        N    = lcl((0.5, 0, 0), (0, 15, 0)) @ K
+        return {
+            "K":  K,
+            "jF": jF,
+            "jG": jG,
+            "lG": lcl((0.5, 0, 0), (0, 0, 0)) @ jG,
+            "N":  N,
+            "jN": lcl((1, 0, 0), (0, 0, 25)) @ N,
+        }
+
+    def test_a_kept_joint_divides_out_the_scale_of_the_kept_node_above_it(self):
+        """a locator the read keeps, scaled under 1e-12 but not 0, along
+        every axis or one, under a dropped node scaled 2, a node with no
+        attribute or an LOD group, holding a joint the read keeps that
+        compensates it: the joint divides out the locator's own scale, as
+        world_matrix does, traded for the locator's scale out of the fold,
+        so it keeps the dropped node's 2 in its scale, as in Maya, where the
+        locator's held 1e-12 cancels; the joint and the nodes under it are
+        where Maya's FBXImport puts them, read whole or locators and joints,
+        on the rig and on every frame. A joint that compensates a group under
+        the locator sits where Maya puts it; with the group dropped it takes
+        the locator's scale as Maya holds it, its axes Maya's to 1e-9 of
+        their 1e-12 length where the locator is scaled evenly (unevenly,
+        which no joint can hold after its turn, they are the split's)"""
+        for top in (None, "lod"):
+            path = self.kept_held(top)
+            for kinds in (None, ("locator", "joint")):
+                with self.subTest(top=top, node_types=kinds):
+                    rig    = HierarchyData.load_fbx(path, node_types=kinds)
+                    clip   = ClipData.load_fbx(path, node_types=kinds)
+                    worlds = self.clip_worlds(clip)
+                    kept   = ["K", "jF", "jG", "lG"] + (["N"] if kinds is None else []) + ["jN"]
+                    self.assertEqual([n.name for n in rig], kept)
+                    self.assertTrue(np.allclose(rig["jF"].scale, 2.0, rtol=0.0, atol=1e-12))
+                    self.assertTrue(np.allclose(clip.frames.scale[:, clip.index("jF")], 2.0, rtol=0.0, atol=1e-12))
+                    for frame, scale in [(None, (5e-13, 1, 1))] + list(enumerate(self.HELD)):
+                        got  = self.rig_worlds(rig) if frame is None else {n: w[frame] for n, w in worlds.items()}
+                        want = self.maya_held(scale)
+                        with self.subTest(frame=frame):
+                            self.assertWorlds({n: w for n, w in got.items() if n != "jN"}, want)
+                            self.assertWorlds({"jN": got["jN"][3]}, {"jN": want["jN"][3]})
+
+        # "N" dropped, under "K" scaled evenly, where the joint's axes are
+        # held; "G" unscaled, where the fold puts nothing on K's scale
+        clip = ClipData.load_fbx(self.kept_held(None, 1), node_types=("locator", "joint"))
+        axes = clip.frames.world_matrix[:, clip.index("jN"), :3, :3]
+        for frame in (1, 3):
+            want = self.maya_held(self.HELD[frame], 1)["jN"][:3, :3]
+            with self.subTest(frame=frame):
+                self.assertTrue(np.allclose(np.linalg.norm(want, axis=-1), 1e-12, rtol=1e-9, atol=0.0))
+                self.assertTrue(np.allclose(axes[frame], want, rtol=1e-9, atol=1e-21))
+
+    # the scale of :meth:`split_tiny`'s "K", keyed a frame each: 1, then
+    # three under 1e-12 of its largest along x, two of them Maya holds as
+    # 1e-12
+    SPLIT = ((1, 1, 1), (5e-13, 1, 1), (-1e-13, 1, 1), (1e-12, 1, 1))
+
+    def split_tiny(self):
+        """a node with no attribute, "U", at (1, 2, 3) turned (20, 30, 40)
+        and scaled (1, 2, 0.5), holding a locator turned 30 degrees about z
+        in it, "K", which needs shear, at (0, 0.5, 0.5), scaled (5e-13, 1,
+        1) and keyed to :attr:`SPLIT` on frames 0 to 3, holding a locator,
+        "lA", and a joint that compensates it, "jF", Maya's kind, holding "lF",
+        a locator"""
+        nodes = (
+            ("U", None, None, (1, 2, 3), (20, 30, 40)),
+            ("K", "U", "locator", (0, 0.5, 0.5), (0, 0, 30)),
+            ("lA", "K", "locator", (0.3, 0.4, 0.2), (0, 0, 0)),
+            ("jF", "K", "joint", (0, 1, 0), (20, 0, 0)),
+            ("lF", "jF", "locator", (0.3, 0, 0), (0, 0, 0)),
+        )
+        return self.keyed("split_tiny.fbx", nodes, {"U": (1, 2, 0.5), "K": (5e-13, 1, 1)}, "K", self.SPLIT)
+
+    def test_a_split_scaled_under_1e_12_hands_its_shear_down(self):
+        """a locator the read keeps, which needs shear under a dropped node
+        scaled (1, 2, 0.5) and turned, scaled along x 5e-13, -1e-13 and
+        1e-12, under 1e-12 of its largest scale: its split hands the shear
+        it drops down all the same, so the locator under it, and the one
+        under a joint that compensates it, which divides that scale out
+        again, are where the sdk puts them, and Maya's FBXImport, read whole
+        or locators only, on the rig and on every frame"""
+        path   = self.split_tiny()
+        want   = self.truth(path)
+        frames = self.truth(path, len(self.SPLIT))
+        for kinds in (None, ("locator",)):
+            with self.subTest(node_types=kinds):
+                rig    = HierarchyData.load_fbx(path, node_types=kinds)
+                worlds = self.clip_worlds(ClipData.load_fbx(path, node_types=kinds))
+                self.assertEqual([n.name for n in rig], ["K", "lA"] + (["jF"] if kinds is None else []) + ["lF"])
+                for name, world in worlds.items():
+                    with self.subTest(name):
+                        self.assertTrue(np.allclose(rig[name].world_matrix[3], want[name][3], rtol=0.0, atol=1e-9))
+                        self.assertTrue(np.allclose(world[:, 3], frames[name][:, 3], rtol=0.0, atol=1e-9))
+                self.assertGreater(np.abs(worlds["K"] - frames["K"]).max(), 0.01)
 
     def test_the_split_of_a_block(self):
         """a rotation is one, its scale exactly 1, a rotation times one

@@ -1984,12 +1984,32 @@ scale among them goes on the node's scale, and on each joint under it
 that compensates its parent's scale; an uneven one under a node turned
 in it would need shear, which no node holds: that node keeps the file's
 position and axis lengths, and the nodes under it take the shear it
-drops, so they stay where the file puts them. A zero scale is not
-divided out, as Maya's importer leaves it, so what sits under a node
-scaled to 0 collapses onto it. A node's own pivots and offsets go into
-its translate, and the pre and post rotation of a node that is no joint
-into its rotate, so a group whose pivot Maya centred on its children
-loads where Maya shows it. A light's post rotation, FBX's view axis, is
+drops, so they stay where the file puts them, under a scale under 1e-12
+too; on a frame it is scaled exactly 0 along an axis the shear has no
+inverse and stays out of them. A scale under 1e-12 on a dropped node is
+read as 1e-12, as Maya holds a scale: a joint that compensates a
+dropped node scaled to 0 keeps its axes and sits on that node's
+position, and a node that does not collapses onto it, as in Maya. A
+kept node keeps its own scale, 0 included, and `world_matrix` divides
+by it as it is: a joint compensating a kept node scaled to 0, and what
+sits under it, come back with a NaN `world_matrix`, their channels
+finite, where Maya keeps that joint's axes. A joint compensating a kept
+node, kept or dropped, divides out that node's own scale, and a kept
+one keeps the scale of a node dropped above the kept node, as Maya
+does: a joint under a locator scaled 5e-13 under a dropped node scaled
+2 takes that 2 in its scale. A read that drops the joints under a kept
+node scaled exactly 0 collapses the nodes it keeps below them onto that
+node along each axis scaled 0, where Maya, holding 1e-12, keeps them
+apart; under a scale that is tiny but not 0, down to about 1e-154, they
+sit where Maya puts them. Under a kept node scaled under 1e-12 the
+translates that place the nodes below it can reach the inverse of
+that scale, which `world_matrix` multiplies back but Maya, holding
+1e-12, does not: such a frame written with `save_fbx` imports into
+Maya away from where Maya imports the file (1.34 off with a translate
+of 1.6e12). A node's own pivots and offsets go into its translate,
+and the pre and post rotation of a node that is no joint into its
+rotate, so a group whose pivot Maya centred on its children loads
+where Maya shows it. A light's post rotation, FBX's view axis, is
 left out, as Maya places its children; a camera's turns its children by
 what it adds to the view axis Maya's exporter writes, (0, -90, 0), which
 Maya's importer keeps as the camera's rotate axis. Under `pose="bind"`

@@ -3140,17 +3140,34 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
       takes RA R JO E in its rotate, solved again in its rotate order;
     - E a rotation U times one scale s puts s on the node's scale; a block
       no node can hold under a turn, scales uneven, takes its nearest
-      rotation in place of U, and the scale and the rotate are split out of
-      the rest as the matrix setter splits them, shear dropped. What it
+      rotation in place of U, and the scale and the rotate are split out
+      of the rest as the matrix setter splits them, shear dropped. What it
       drops, the block it should hold times the inverse of the one it
-      holds (:func:`_fbx_fold_shear`), goes on the kept nodes under it as a
-      dropped node's matrix does, so they stay where the file puts them.
+      holds (:func:`_fbx_fold_shear`), goes on the kept nodes under it as
+      a dropped node's matrix does, so they stay where the file puts them,
+      under a scale under 1e-12 too; on a frame it is scaled exactly 0
+      along an axis the shear has no inverse and stays out of them.
 
-    A compensating joint divides out its parent's scale but for a zero in
-    it (:func:`_fbx_divisor`), as Maya's importer leaves it, so what sits
-    under a node scaled to 0 collapses onto it. A rotation solved again goes
-    through euler_filter along the frames, frame 0 as solved. A kept node
-    nothing moves keeps the file's values to the bit, and so does every
+    A scale under 1e-12 in size is read as 1e-12, as Maya's evaluation holds
+    it (:func:`_fbx_maya_scale`), wherever the fold multiplies or divides by
+    one Maya holds: a dropped node's own, and the scale of a dropped parent
+    that a compensating joint divides out, with the kept parent's it is then
+    traded for. So a joint that compensates a dropped node scaled to 0 keeps
+    its axes and sits on that node's position, and a node that does not
+    collapses onto it, its axes 1e-12 long, as Maya places them; the sdk's
+    own evaluation gives NaN there. A kept node's own scale keeps the file's
+    value, 0 included, and a joint compensating it, dropped or kept, divides
+    out that value, which world_matrix multiplies by, 0 dividing nothing; a
+    kept one is traded for the kept node's scale out of the fold as it is,
+    so what the fold put on that scale, a dropped node's above it, stays in
+    the joint, as in Maya, where the kept node's held scale cancels. So the
+    joints and nodes under a kept node scaled under 1e-12 sit where Maya
+    puts them, down to about 1e-154, under which the fold's products
+    overflow; along an axis it is scaled exactly 0, those under a dropped
+    joint collapse onto it (Maya holds 1e-12 there, which the kept node does
+    not) and a kept joint's world_matrix is NaN. A rotation solved again
+    goes through euler_filter along the frames, frame 0 as solved. A kept
+    node nothing moves keeps the file's values to the bit, and so does every
     node of a file whose dropped nodes, pivots and offsets hold the
     identity. The kept nodes go parents first, so a compensating joint
     divides out its kept parent's scale as the fold leaves it.
@@ -3172,11 +3189,19 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
     turned  = np.any(tree.pre != 0.0, axis=1) | np.any(tree.axis != 0.0, axis=1)
 
     # the scale a node's own block divides out: its parent's, when it
-    # compensates, but for a zero one, which Maya's importer leaves in, so
-    # what sits under a node scaled to 0 collapses onto it there
-    divided          = np.ones((frames, len(kept), 3))
-    rows             = np.flatnonzero(tree.compensate & (parent >= 0))
-    divided[:, rows] = _fbx_divisor(scale[:, parent[rows]])
+    # compensates, held as Maya holds a scale, so a joint compensating a
+    # node scaled to 0 divides out 1e-12 and keeps its axes, as in Maya. One
+    # under a kept node, kept or dropped, divides out that node's own scale,
+    # which the kept node keeps and world_matrix multiplies by, 0 dividing
+    # nothing: the 1e-12 would cancel Maya's held scale, which no kept node
+    # holds
+    divided           = np.ones((frames, len(kept), 3))
+    rows              = np.flatnonzero(tree.compensate & (parent >= 0))
+    divided[:, rows]  = _fbx_maya_scale(scale[:, parent[rows]])
+    under             = rows[kept[parent[rows]] >= 0]
+    own               = scale[:, parent[under]]
+    divided[:, under] = np.where(own == 0.0, 1.0, own)
+    maya_scale        = _fbx_maya_scale(scale)
 
     # a dropped node that holds the identity on every frame moves nothing
     still = (
@@ -3197,20 +3222,22 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
         RA, JO = _eulers_to_matrices(np.array([tree.axis[i], tree.pre[i]]), 0)[:, :3, :3]
         return RA @ R @ JO
 
-    def offset(i: int, Q: np.ndarray) -> np.ndarray:
-        """(F, 3) node i's translate with its pivots and offsets in it"""
+    def offset(i: int, Q: np.ndarray, sizes: np.ndarray) -> np.ndarray:
+        """(F, 3) node i's translate with its pivots and offsets in it, for
+        its scale ``sizes``"""
         if not pivoted[i]:
             return translate[:, i]
         rp, sp, ro, so = tree.pivots[i]
-        moved = (so + sp - rp) - sp * scale[:, i]
+        moved = (so + sp - rp) - sp * sizes[:, i]
         return translate[:, i] + ((ro + rp) + np.einsum("fi,fij->fj", moved, Q))
 
     def local(i: int) -> np.ndarray:
-        """(F, 4, 4) node i's local matrix, its parent's scale divided out"""
+        """(F, 4, 4) dropped node i's local matrix, its parent's scale
+        divided out, its scales as Maya holds them"""
         Q                 = orientations(i)
         matrix            = np.zeros((frames, 4, 4))
-        matrix[:, :3, :3] = scale[:, i, :, None] * Q / divided[:, i, None, :]
-        matrix[:, 3, :3]  = offset(i, Q)
+        matrix[:, :3, :3] = maya_scale[:, i, :, None] * Q / divided[:, i, None, :]
+        matrix[:, 3, :3]  = offset(i, Q, maya_scale)
         matrix[:, 3, 3]   = 1.0
         return matrix
 
@@ -3240,9 +3267,19 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
         block = None if D is None else D[:, :3, :3]
 
         # a compensating joint divides its fbx parent's scale out, which the
-        # dicts trade for its kept parent's, as the fold leaves it
+        # dicts trade for its kept parent's, as the fold leaves it. Where the
+        # fbx parent is that kept parent, as it is, 0 as 1: the joint divides
+        # out the parent's own scale, as world_matrix multiplies by it, and
+        # what the fold put on that scale, a dropped node's above it, stays
+        # in the joint, as in Maya, where the parent's held scale cancels;
+        # under a dropped fbx parent, as Maya holds it
         if tree.compensate[i]:
-            held = _fbx_divisor(out_scale[:, ancestor]) if ancestor >= 0 else np.ones((frames, 3))
+            if ancestor < 0:
+                held = np.ones((frames, 3))
+            elif kept[up] >= 0:
+                held = np.where(out_scale[:, ancestor] == 0.0, 1.0, out_scale[:, ancestor])
+            else:
+                held = _fbx_maya_scale(out_scale[:, ancestor])
             if block is not None or not np.array_equal(divided[:, i], held):
                 block = (eye if block is None else block) / divided[:, i, :, None] * held[:, None, :]
 
@@ -3251,7 +3288,7 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
             continue
 
         Q = orientations(i)
-        t = offset(i, Q)
+        t = offset(i, Q, scale)
         if D is not None:
             t = np.einsum("fi,fij->fj", t, D[:, :3, :3]) + D[:, 3, :3]
         out_translate[:, column] = t
@@ -3299,10 +3336,18 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
     return out_translate, out_rotate, out_scale, out_orient, changed
 
 
-def _fbx_divisor(scale: np.ndarray) -> np.ndarray:
-    """the scale a joint compensating ``scale`` divides out: that scale, but
-    for a zero, which divides nothing, as Maya's importer leaves it"""
-    return np.where(scale == 0.0, 1.0, scale)
+# the least size Maya's evaluation gives a scale: one under it, 0 among them,
+# is held as this, positive, so a matrix always has an inverse and a joint
+# compensating a node scaled to 0 keeps its axes (maya_zero_clamp.py: 0,
+# -0, 1e-13, -1e-13 and 5e-13 are held as 1e-12; 1e-12, -1e-12 and 2e-12 as
+# they are)
+_FBX_LEAST_SCALE = 1e-12
+
+
+def _fbx_maya_scale(scale: np.ndarray) -> np.ndarray:
+    """``scale`` as Maya's evaluation holds it: a value under
+    :data:`_FBX_LEAST_SCALE` in size as that, positive"""
+    return np.where(np.abs(scale) < _FBX_LEAST_SCALE, _FBX_LEAST_SCALE, scale)
 
 
 def _fbx_fold_shear(whole, sized, turn, frames: int, uneven) -> Optional[np.ndarray]:
@@ -3313,13 +3358,15 @@ def _fbx_fold_shear(whole, sized, turn, frames: int, uneven) -> Optional[np.ndar
     ``whole`` (u, 3, 3) is the block the node should hold, its joint orient
     taken out, and ``sized`` and ``turn`` the scale and the rotation its
     channels hold; a frame where a scale is 0, or a value is not finite,
-    has no inverse and keeps the identity.
+    has no inverse, what it would drop not finite, and keeps the
+    identity. A scale however small has one, and keeps its shear: a
+    joint under the node that compensates it divides that scale out
+    again.
     """
     eye = np.eye(3)
     with np.errstate(divide="ignore", invalid="ignore"):
         lost = whole @ np.swapaxes(turn, -1, -2) / sized[:, None, :]
-    size = np.abs(sized).max(axis=-1, keepdims=True)
-    ok   = np.isfinite(lost).all(axis=(-2, -1)) & np.all(np.abs(sized) > 1e-12 * size, axis=-1)
+    ok = np.isfinite(lost).all(axis=(-2, -1))
     ok &= np.abs(lost - eye).max(axis=(-2, -1)) > _FBX_FOLD_BAND
     if not ok.any():
         return None
@@ -5170,12 +5217,34 @@ class TransformList(DataList):
         length of each of its axes are the file's, its axes squared, its
         rotate solved again from the matrix, a joint's too, and the shear it
         drops is folded into the kept nodes under it the way a dropped
-        node's transform is, so they stay where the file puts them. A zero
-        scale is not divided out, as Maya's importer leaves it, so what sits
-        under a dropped node scaled to 0 collapses onto that node's position,
-        its axes 0, a joint compensating it among them; the sdk's own
-        evaluation gives NaN there, and so does ``world_matrix`` on a joint
-        that compensates a kept node scaled to 0. Folded in the same way is
+        node's transform is, so they stay where the file puts them, under
+        a scale under 1e-12 too, but on a frame it is scaled exactly 0
+        along an axis, which leaves the shear no inverse. A scale under
+        1e-12 in size on a dropped node is read as 1e-12, as Maya's
+        evaluation holds a scale: a joint that compensates a dropped node
+        scaled to 0 keeps its axes and sits on that node's position, and a
+        node that does not collapses onto it, its axes 1e-12 long, the
+        1e-12 in its scale, where Maya 2025 puts them; the sdk's own
+        evaluation gives NaN there. A kept node's own scale keeps the
+        file's value, 0 included, which cgmath's evaluation divides by as
+        it is: ``world_matrix`` is NaN on a joint that compensates a kept
+        node scaled to 0 and on every node under it, its channels finite,
+        where Maya keeps that joint's axes. A joint that compensates a
+        kept node, kept or dropped, divides out that node's own scale, as
+        ``world_matrix`` multiplies by it, and a kept one keeps the scale
+        of a node dropped above that kept node, as Maya does: a joint
+        under a locator scaled 5e-13 under a dropped node scaled 2 takes
+        that 2 in its scale. So the joints and nodes kept under a node
+        scaled under 1e-12 sit where Maya puts them, down to about 1e-154,
+        under which the read overflows; along an axis it is scaled exactly
+        0, those under a joint the read drops collapse onto it: Maya holds
+        1e-12 there, which a kept node does not. Under a kept node scaled
+        under 1e-12 the translates that place the nodes below it can
+        reach the inverse of that scale, which ``world_matrix`` multiplies
+        back but Maya, holding 1e-12, does not: such a frame written with
+        ``save_fbx`` imports into Maya away from where Maya imports the
+        file (a locator under a kept locator split under (1, 1, -1e-13):
+        its translate 1.6e12, 1.34 off). Folded in the same way is
         what a node's own channels can't hold: its rotate and scale pivots
         and offsets, in its translate, rotation active or not, and, on a
         node that is no joint, its pre and post rotation, which the sdk
