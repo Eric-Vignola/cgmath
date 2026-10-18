@@ -375,6 +375,188 @@ def _component_property(channel: str, axis: str) -> property:
     return property(getter, setter, doc=f"vectorized {name}")
 
 
+# Maya's short attribute names, as cmds.attributeQuery(<long>, node=<joint>,
+# shortName=True) gives them in Maya 2025, to the name each stands for. A
+# short name reads and writes its long name itself, so it does whatever the
+# class does with it: its conversions and errors, a clip's frame, an SDF
+# primitive's radius. Never saved: a file keeps the long names. Maya's
+# inverseScale is "is", a Python keyword, so it has none here
+_SHORT_NAMES = {
+    "t":    "translate",
+    "tx":   "translate_x",
+    "ty":   "translate_y",
+    "tz":   "translate_z",
+    "r":    "rotate",
+    "rx":   "rotate_x",
+    "ry":   "rotate_y",
+    "rz":   "rotate_z",
+    "s":    "scale",
+    "sx":   "scale_x",
+    "sy":   "scale_y",
+    "sz":   "scale_z",
+    "jo":   "joint_orient",
+    "jox":  "joint_orient_x",
+    "joy":  "joint_orient_y",
+    "joz":  "joint_orient_z",
+    "ra":   "rotate_axis",
+    "rax":  "rotate_axis_x",
+    "ray":  "rotate_axis_y",
+    "raz":  "rotate_axis_z",
+    "ro":   "rotate_order",
+    "ssc":  "segment_scale_compensate",
+    "v":    "visibility",
+    "radi": "radius",
+    "ds":   "draw_style",
+    "m":    "matrix",
+    "wm":   "world_matrix",
+    "pm":   "parent_matrix",
+    "im":   "inverse_matrix",
+    "wim":  "world_inverse_matrix",
+    "pim":  "parent_inverse_matrix",
+}
+
+# the names that became built in with the short names, the four matrices
+# that came with them included: a file's user attribute carrying one loads
+# all the same, hidden by the built-in, and is warned of
+_TAKEN_NAMES = frozenset(_SHORT_NAMES) | {
+    "parent_matrix",
+    "inverse_matrix",
+    "world_inverse_matrix",
+    "parent_inverse_matrix",
+}
+
+
+def _short_name(short: str, long: str, writable: bool) -> property:
+    """Maya's short name ``short`` for the property ``long``: reads and,
+    when ``writable``, writes ``long`` itself, by name, so a subclass's own
+    ``long`` is the one it reads"""
+
+    def getter(self):
+        return getattr(self, long)
+
+    def setter(self, value) -> None:
+        setattr(self, long, value)
+
+    getter.__name__ = setter.__name__ = short
+    getter.__doc__  = f"Maya's short name for {long}"
+    return property(getter, setter if writable else None)
+
+
+def _add_short_names(cls) -> None:
+    """gives ``cls`` the short name of every long name it has as a
+    property, read only where the long name is"""
+    for short, long in _SHORT_NAMES.items():
+        held = getattr(cls, long, None)
+        if isinstance(held, property):
+            alias = _short_name(short, long, held.fset is not None)
+            setattr(cls, short, alias)
+            # named as a class body names it, for the error a write to a read
+            # only one raises; python 3.9's property has no __set_name__
+            named = getattr(alias, "__set_name__", None)
+            if named is not None:
+                named(cls, short)
+
+
+def _inverse(matrices: np.ndarray, what: str, names) -> np.ndarray:
+    """the inverse of each (4, 4) of ``matrices``, (4, 4), (n, 4, 4) or
+    (F, n, 4, 4), ``what`` matrices of the n nodes ``names()`` names
+
+    A true inverse, as Maya's: matrix_inverse takes the rows for a scale
+    times a rotation, which a non-uniform scale under a rotation shears.
+
+    Raises
+    ------
+    numpy.linalg.LinAlgError
+        A matrix has no inverse, a zero scale: the first such is named.
+    """
+    try:
+        return np.linalg.inv(matrices)
+    except np.linalg.LinAlgError:
+        flat     = np.asarray(matrices).reshape(-1, 4, 4)
+        singular = np.flatnonzero(np.linalg.det(flat) == 0.0)
+        if not len(singular):
+            raise
+        place = np.unravel_index(int(singular[0]), np.shape(matrices)[:-2] or (1,))
+        frame = f" on frame {place[0]}" if len(place) == 2 else ""
+        raise np.linalg.LinAlgError(
+            f"the {what} of {names()[place[-1]]!r}{frame} has no inverse: a zero scale flattens it"
+        ) from None
+
+
+class _HiddenUserAttrs(threading.local):
+    """for each load of nodes running in this thread, the user attributes it
+    read that a built-in name hides, each name to the nodes carrying it, for
+    one warning a name once the outermost is done; and the copies running,
+    which warn of nothing, the copy of a node a load warned of already"""
+
+    def __init__(self):
+        self.loads  = []
+        self.copies = 0
+
+
+_HIDDEN = _HiddenUserAttrs()
+
+
+class _NodesLoad:
+    """a load of nodes, a hierarchy or a list: the user attributes a built-in
+    name hides that its nodes carry warn once a name, at its end"""
+
+    def __enter__(self) -> None:
+        _HIDDEN.loads.append({})
+
+    def __exit__(self, kind, error, trace) -> None:
+        found = _HIDDEN.loads.pop()
+        if found and kind is None:
+            _hidden_found(found)
+
+
+class _Copying:
+    """a copy: its load warns of no user attribute a built-in name hides"""
+
+    def __enter__(self) -> None:
+        _HIDDEN.copies += 1
+
+    def __exit__(self, kind, error, trace) -> None:
+        _HIDDEN.copies -= 1
+
+
+def _hidden_noted(node: "TransformData") -> "TransformData":
+    """``node``, just loaded, its user attributes a built-in name hides
+    noted for the warning: for the load of nodes running to give, or now
+    for a node loaded on its own; not for a copy"""
+    attrs = node.__dict__.get("user_defined_attributes")
+    if attrs and not _TAKEN_NAMES.isdisjoint(attrs) and not _HIDDEN.copies:
+        _hidden_found({name: [node.name] for name in attrs if name in _TAKEN_NAMES})
+    return node
+
+
+def _hidden_found(found: dict) -> None:
+    """``found``, the nodes a load read with a user attribute a built-in
+    name hides, by name: handed to the load of nodes running it is part of,
+    or warned of, one warning a name, filed under the first caller outside
+    cgmath"""
+    loads = _HIDDEN.loads
+    if loads:
+        for name, nodes in found.items():
+            loads[-1].setdefault(name, []).extend(nodes)
+        return
+
+    level, frame = 2, sys._getframe(1)
+    while frame is not None and not _outside_cgmath(frame.f_code.co_filename):
+        frame = frame.f_back
+        level += 1
+    for name, nodes in found.items():
+        long  = _SHORT_NAMES.get(name)
+        what  = f"Maya's short name for {long}" if long else "a built-in"
+        other = len(nodes) - 1
+        more  = f" and {other} other node{'s' * (other > 1)}" if other else ""
+        warnings.warn(
+            f"user attribute {name!r} of {nodes[0]!r}{more} loaded into "
+            f"user_defined_attributes[{name!r}]: node.{name} is {what}, which hides it",
+            stacklevel=level,
+        )
+
+
 def generate_uuid() -> str:
     """generates a new unique uuid"""
     value = str(uuid.uuid4()).upper()
@@ -2012,6 +2194,41 @@ class TransformData(Data):
             # reset the branch cached world_matrix
             self._reset_branch_world_matrices()
 
+    # --- Maya's parent and inverse matrices, read only --- #
+    @property
+    def parent_matrix(self) -> np.ndarray:
+        """the parent's world matrix, Maya's parentMatrix; read only
+
+        get_parent_matrix() as a property: identity for a root, and for a
+        node whose parent its hierarchy does not hold.
+        """
+        return self.get_parent_matrix()
+
+    @property
+    def inverse_matrix(self) -> np.ndarray:
+        """the inverse of matrix, Maya's inverseMatrix; read only
+
+        A true inverse. A zero scale has none: numpy.linalg.LinAlgError
+        names the node (Maya holds a zero scale at 1e-12, and inverts that).
+        """
+        return _inverse(self.matrix, "matrix", lambda: [self.name])
+
+    @property
+    def world_inverse_matrix(self) -> np.ndarray:
+        """the inverse of world_matrix, Maya's worldInverseMatrix; read only
+
+        A true inverse, as inverse_matrix.
+        """
+        return _inverse(self.world_matrix, "world_matrix", lambda: [self.name])
+
+    @property
+    def parent_inverse_matrix(self) -> np.ndarray:
+        """the inverse of parent_matrix, Maya's parentInverseMatrix; read only
+
+        Identity for a root. A true inverse, as inverse_matrix.
+        """
+        return _inverse(self.parent_matrix, "parent_matrix", lambda: [self.name])
+
     # --- hierarchy queries --- #
 
     def get_root(self) -> "TransformList":
@@ -2262,9 +2479,10 @@ class TransformData(Data):
         # a name. A uuid is read as parent_uuid; a name is left to the
         # hierarchy loading the node (HierarchyData._from_state), which gives
         # it the uuid of the first node of that name, and a node loaded on
-        # its own has no hierarchy to look in: a root
+        # its own has no hierarchy to look in: a root. A user attribute a
+        # built-in name hides is warned of (_hidden_noted)
         if "parent_node" not in data:
-            return super()._from_state(data)
+            return _hidden_noted(super()._from_state(data))
 
         legacy = data.pop("parent_node")
         if "parent_uuid" in data:
@@ -2280,7 +2498,15 @@ class TransformData(Data):
         pending = _LEGACY_PARENTS.loads
         if named and pending:
             pending[-1].append((node, legacy))
-        return node
+        return _hidden_noted(node)
+
+    def copy(self) -> "TransformData":
+        """returns a deep copy of self: the object a save and load gives back
+
+        But for the load's warnings: the node's own load gave them.
+        """
+        with _Copying():
+            return super().copy()
 
     def __dir__(self):
         attrs = self.__dict__.get("user_defined_attributes") or {}
@@ -2291,8 +2517,10 @@ class TransformData(Data):
         if not isinstance(name, str) or not name.isidentifier() or name.startswith("_"):
             raise ValueError(f"{name!r} is not a valid user attribute name")
         if self._is_builtin_attr(name):
+            long = _SHORT_NAMES.get(name)
+            hint = f", Maya's short name for {long}" if long else ""
             raise ValueError(
-                f"{name!r} is a built-in attribute of {type(self).__name__}"
+                f"{name!r} is a built-in attribute of {type(self).__name__}{hint}"
             )
         if name in self.user_defined_attributes:
             raise ValueError(f"{self.name} already has a user attribute {name!r}")
@@ -2318,15 +2546,19 @@ class TransformData(Data):
         each and ``"k==2"`` is field k at index 2. String and array
         attributes are never keyable, as in Maya.
 
-        Raises ValueError when the name exists, is built in or is not a valid
-        attribute name, and TypeError or ValueError when the value does not
-        fit the type.
+        Raises ValueError when the name exists, is built in (Maya's short
+        names, ``tx`` or ``wm``, included) or is not a valid attribute name,
+        and TypeError or ValueError when the value does not fit the type.
         """
         self._check_new_user_attr(name)
         spec = _new_user_attr(
             value, attribute_type, keyable, enum_names, f"{self.name}.{name}"
         )
         self.user_defined_attributes[name] = spec
+
+
+# Maya's short names, t for translate to wm for world_matrix
+_add_short_names(TransformData)
 
 
 def _fbx_user_attributes(node) -> dict:
@@ -5784,6 +6016,43 @@ class TransformList(DataList):
             values.append(node.translate_matrix)
         return np.array(values)
 
+    # --- Maya's parent and inverse matrices, read only --- #
+    # each owning rig evaluated once, every node of it a read needs together,
+    # as a clip's frames are (_pose_matrices), and every inverse in one call;
+    # on a clip, of the frame it is bound to. A node whose parents loop
+    # raises the RecursionError its world_matrix raises
+    @property
+    def parent_matrix(self) -> np.ndarray:
+        """every node's parent world matrix, Maya's parentMatrix; read only
+
+        (N, 4, 4), identity for a root.
+        """
+        return _pose_matrices(self, strict=True)[2]
+
+    @property
+    def inverse_matrix(self) -> np.ndarray:
+        """every node's inverse local matrix, Maya's inverseMatrix; read only
+
+        (N, 4, 4), a true inverse, as TransformData.inverse_matrix.
+        """
+        return _inverse(_pose_matrices(self, worlds=False)[0], "matrix", lambda: self.name)
+
+    @property
+    def world_inverse_matrix(self) -> np.ndarray:
+        """every node's inverse world matrix, Maya's worldInverseMatrix; read only
+
+        (N, 4, 4), a true inverse.
+        """
+        return _inverse(_pose_matrices(self, strict=True)[1], "world_matrix", lambda: self.name)
+
+    @property
+    def parent_inverse_matrix(self) -> np.ndarray:
+        """every node's inverse parent matrix, Maya's parentInverseMatrix; read only
+
+        (N, 4, 4), identity for a root, a true inverse.
+        """
+        return _inverse(_pose_matrices(self, strict=True)[2], "parent_matrix", lambda: self.name)
+
     # --- per axis channel components --- #
     scale_x  = _component_property("scale",        "x")
     scale_y  = _component_property("scale",        "y")
@@ -5871,12 +6140,14 @@ class TransformList(DataList):
         nodes hold, a mesh two Objects instance, is one object in the copy
         too, as in any copy().
 
-        Subclasses already own their nodes and keep their own class.
+        Subclasses already own their nodes and keep their own class. A copy
+        warns of nothing its load would: the original's load did.
         """
         if type(self) is TransformList:
             return self._owned_copy()
 
-        return super().copy()
+        with _Copying():
+            return super().copy()
 
     def __copy__(self):
         """
@@ -6413,6 +6684,13 @@ class TransformList(DataList):
             return [part for node in self for part in node._saved_parts()]
         return super()._saved_parts()
 
+    @classmethod
+    def _from_state(cls, data: dict) -> "TransformList":
+        # one load of nodes: a user attribute a built-in name hides warns
+        # once a name, not once a node
+        with _NodesLoad():
+            return super()._from_state(data)
+
     def match(
         self, *args, exclude: bool = False, exact: bool = True
     ) -> "TransformList":
@@ -6427,6 +6705,10 @@ class TransformList(DataList):
                 new.append(shape)
 
         return new
+
+
+# Maya's short names, vectorised as their long names are
+_add_short_names(TransformList)
 
 
 # the nodes a rig holds from which an append with no current index builds
@@ -7015,10 +7297,12 @@ class HierarchyData(TransformList):
         pending.append([])
         try:
             # a loop, not a comprehension, which would cost each nested
-            # object one more frame
+            # object one more frame; one load of nodes, which warns of a
+            # user attribute a built-in name hides once a name
             nodes = []
-            for item in items:
-                nodes.append(_from_tagged(item, cls.DATA_LIST_CLASS))
+            with _NodesLoad():
+                for item in items:
+                    nodes.append(_from_tagged(item, cls.DATA_LIST_CLASS))
         finally:
             named = pending.pop()
 
@@ -7837,6 +8121,157 @@ def _evaluate_world(local: np.ndarray, parents: np.ndarray) -> np.ndarray:
         else:
             world[:, i] = local[:, i] @ world[:, parent]
     return world
+
+
+def _looped(parents: np.ndarray) -> np.ndarray:
+    """whether each entry of a parent array, ``parents[i]`` the position of
+    i's parent, negative for none, reaches a loop going up: one on a loop,
+    or below one
+
+    Every entry at once, by pointer doubling: each pass links an entry to
+    what its link linked to, twice as far up, so an entry k steps below a
+    root links to none after k.bit_length() passes, and one on or below a
+    loop never does. n entries take log2(n) passes at most, rounded up.
+    """
+    up = np.asarray(parents, dtype=int)
+    up = np.where(up < 0, -1, up)
+    for _ in range(max(len(up) - 1, 0).bit_length()):
+        linked = up > -1
+        if not linked.any():
+            break
+        up = np.where(linked, up[np.maximum(up, 0)], -1)
+    return up > -1
+
+
+def _pose_members(picked: list, owner, worlds: bool) -> Optional[tuple]:
+    """``(members, parents)``: the nodes a pose read of ``picked``, nodes of
+    ``owner``'s rig, evaluates, and each one's parent as a position among
+    them, -1 for none. Each of ``picked`` and, with ``worlds``, every node
+    above it, whose world matrices its own is made of, or without, its
+    parent, whose scale it divides by when it compensates, a parent whose
+    own parent is not read. A parent is the node get_parent gives, placed
+    by the node itself, never by its uuid: of two nodes of one uuid, the
+    first the rig lists; above another rig's node the rig lists, that rig's
+
+    None, for the whole rig (:func:`_rig_members`), when ``picked`` hold
+    half its nodes or more, where the walk up costs about what it saves,
+    and when the rig has no index to walk up by.
+    """
+    lookups = _Lookups()
+    index   = lookups.index_of(owner)
+    if index is None or 2 * len(picked) >= len(index.nodes):
+        return None
+
+    # with worlds, a node met has every node above it met too: the walk up
+    # stops at the first one met, a loop's included
+    members, above, position = [], [], {}
+    for node in picked:
+        while isinstance(node, TransformData) and id(node) not in position:
+            position[id(node)] = len(members)
+            members.append(node)
+            node = lookups.parent(node)
+            above.append(node if isinstance(node, TransformData) else None)
+            if not worlds:
+                break
+    if not worlds:
+        for node in above[:]:
+            if node is not None and id(node) not in position:
+                position[id(node)] = len(members)
+                members.append(node)
+                above.append(None)
+
+    parents = [-1 if node is None else position.get(id(node), -1) for node in above]
+    return members, np.array(parents, dtype=int)
+
+
+def _rig_members(picked: list, owner) -> tuple:
+    """``(members, parents)`` for a pose read of ``picked``, nodes of
+    ``owner``'s rig, evaluating the whole rig: every node it lists, each of
+    ``picked`` it no longer lists, and every node above them it does not
+    list, another rig's above that rig's node it lists; and each one's
+    parent as a position among them, -1 for none
+
+    A parent is the node get_parent gives, placed by the node itself, as
+    :func:`_pose_members` places it; TransformList._parent_indices places
+    one by its uuid, the last node carrying it.
+    """
+    lookups  = _Lookups()
+    members  = [] if owner is None else list(owner.list)
+    position = {id(node): i for i, node in enumerate(members)}
+    for node in picked:
+        if id(node) not in position:
+            position[id(node)] = len(members)
+            members.append(node)
+
+    # members grows as it is read: a parent it does not hold joins it
+    parents = []
+    for node in members:
+        parent = lookups.parent(node)
+        if not isinstance(parent, TransformData):
+            parents.append(-1)
+            continue
+        at = position.get(id(parent))
+        if at is None:
+            at = position[id(parent)] = len(members)
+            members.append(parent)
+        parents.append(at)
+    return members, np.array(parents, dtype=int)
+
+
+def _pose_matrices(nodes, worlds: bool = True, strict: bool = False) -> tuple:
+    """``(local, world, parent)``: the ``(n, 4, 4)`` local, world and parent
+    world matrices of ``nodes`` at the pose they hold, a clip's nodes at its
+    frame; ``world`` and ``parent`` None without ``worlds``
+
+    Each owning hierarchy is evaluated once, every node of it the read
+    needs together, through the evaluators a clip's frames go through, so
+    the matrices are the ones ``matrix``, ``world_matrix`` and
+    ``get_parent_matrix()`` read node by node. Each node sits on the parent
+    its ``get_parent`` gives, so a selection reads what it reads node by
+    node: one under half its rig evaluates the part of the rig its matrices
+    are made of (:func:`_pose_members`), a larger one the whole rig
+    (:func:`_rig_members`). A node no hierarchy owns is a root, as
+    ``get_parent`` has it, a parent the hierarchy does not hold is none,
+    another rig's node a rig lists brings the nodes above it in that rig,
+    and a node its owner no longer lists sits on the parent its
+    ``get_parent`` gives, as any node does. With ``strict``, a node whose
+    parents loop raises RecursionError, as its world_matrix does; without,
+    as a clip's frames evaluate, its matrices are not worked out.
+    """
+    nodes  = list(nodes)
+    count  = len(nodes)
+    local  = np.empty((count, 4, 4), dtype=float)
+    world  = np.empty((count, 4, 4), dtype=float) if worlds else None
+    parent = np.empty((count, 4, 4), dtype=float) if worlds else None
+    owners = {}
+    for i, node in enumerate(nodes):
+        owners.setdefault(id(node._hierarchy), []).append(i)
+
+    for rows in owners.values():
+        owner  = nodes[rows[0]]._hierarchy
+        picked = [nodes[i] for i in rows]
+        found  = None if owner is None else _pose_members(picked, owner, worlds)
+        members, parents = _rig_members(picked, owner) if found is None else found
+
+        position    = {id(node): j for j, node in enumerate(members)}
+        at          = np.array([position[id(node)] for node in picked], dtype=int)
+        evaluated   = _evaluate_local(_PoseFrame(members), parents)
+        local[rows] = evaluated[0, at]
+        if worlds and strict:
+            # a node whose parents loop has no world matrix: its own read
+            # raises the RecursionError naming the loop
+            looped = _looped(parents)[at]
+            if looped.any():
+                picked[int(np.flatnonzero(looped)[0])].world_matrix
+        if worlds:
+            evaluated   = _evaluate_world(evaluated, parents)[0]
+            above       = parents[at]
+            world[rows] = evaluated[at]
+            parent[rows] = np.where(
+                (above > -1)[:, None, None], evaluated[np.maximum(above, 0)], np.eye(4)
+            )
+
+    return local, world, parent
 
 
 # --- rig edits, every frame at once --------------------------------------- #
@@ -9841,6 +10276,26 @@ class _FrameAxis:
         """every frame's parent world matrices, the same as parent_matrix"""
         return self.parent_matrix
 
+    @property
+    def inverse_matrix(self) -> np.ndarray:
+        """every frame's inverse local matrices, (F, N, 4, 4), in one call"""
+        return _inverse(self.matrix, "matrix", self._names)
+
+    @property
+    def world_inverse_matrix(self) -> np.ndarray:
+        """every frame's inverse world matrices, (F, N, 4, 4), in one call"""
+        return _inverse(self.world_matrix, "world_matrix", self._names)
+
+    @property
+    def parent_inverse_matrix(self) -> np.ndarray:
+        """every frame's inverse parent world matrices, (F, N, 4, 4):
+        identity for a root; in one call"""
+        return _inverse(self.parent_matrix, "parent_matrix", self._names)
+
+    def _names(self) -> list:
+        """the names of the nodes this axis covers, in column order"""
+        return [node.name for node in self._nodes()]
+
     def to_attributes(self, mapping: dict = MAYA_ATTRIBUTE_MAP) -> List[dict]:
         """every node's attributes as a list of dicts, covering every frame
 
@@ -9884,6 +10339,11 @@ class _FrameAxis:
                     attributes[names[key]] = value
             out.append(attributes)
         return out
+
+
+# Maya's short names of what the axis has, every frame as their long names:
+# no ro, ssc, v, radi or ds, which every frame shares
+_add_short_names(_FrameAxis)
 
 
 def _check_rest_pose(value) -> None:
@@ -10226,47 +10686,9 @@ class ClipData(HierarchyData):
     # --- pose algebra --- #
     @staticmethod
     def _pose_world(nodes) -> np.ndarray:
-        """``(n, 4, 4)`` world matrices of ``nodes`` at the pose they hold
-
-        Each owning hierarchy is evaluated once, every node of it together,
-        through the evaluators a clip's frames go through, so the matrices
-        are the ones ``world_matrix`` reads node by node. A node is placed in
-        its owner's whole rig, so a selection reads the world matrices it
-        reads node by node; a node no hierarchy owns is a root, as
-        ``get_parent`` has it, and a node its owner no longer lists reads its
-        own ``world_matrix``.
-        """
-        nodes  = list(nodes)
-        world  = np.empty((len(nodes), 4, 4), dtype=float)
-        owners = {}
-        for i, node in enumerate(nodes):
-            owners.setdefault(id(node._hierarchy), []).append(i)
-
-        for rows in owners.values():
-            owner   = nodes[rows[0]]._hierarchy
-            members = [nodes[i] for i in rows] if owner is None else list(owner.list)
-
-            # a node its owner does not list cannot be placed in its rig; it
-            # answers for itself, as it does node by node
-            position = {id(node): j for j, node in enumerate(members)}
-            listed   = [i for i in rows if id(nodes[i]) in position]
-            for i in rows:
-                if id(nodes[i]) not in position:
-                    world[i] = nodes[i].world_matrix
-            if not listed:
-                continue
-
-            if owner is None:
-                parents = np.full(len(members), -1, dtype=int)
-            else:
-                parents = TransformList._parent_indices(members)
-
-            local     = _evaluate_local(_PoseFrame(members), parents)
-            evaluated = _evaluate_world(local, parents)[0]
-            for i in listed:
-                world[i] = evaluated[position[id(nodes[i])]]
-
-        return world
+        """``(n, 4, 4)`` world matrices of ``nodes`` at the pose they hold,
+        each owning hierarchy evaluated once (:func:`_pose_matrices`)"""
+        return _pose_matrices(nodes)[1]
 
     def _operand(self, other, nodes, world: bool = True) -> dict:
         """every frame of ``nodes``, taken from ``other``

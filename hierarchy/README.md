@@ -56,7 +56,45 @@ inverse scale (identity unless `segment_scale_compensate` is on).
 
 **`world_matrix` is a property on every type** — `node.world_matrix`,
 `rig.world_matrix`. It is cached per node, and any channel write clears
-the cache of that node and its whole branch.
+the cache of that node and its whole branch. Maya's parent and inverse
+matrices are properties too, read only and worked out at each read:
+`parent_matrix`, `inverse_matrix`, `world_inverse_matrix` and
+`parent_inverse_matrix`.
+
+**Maya's short names work too.** `node.tx` is `node.translate_x`,
+`rig.wm` is `rig.world_matrix`, `clip.frames.r` is `clip.frames.rotate`:
+each short name reads and writes its long name itself, its conversions,
+errors and clip frames included, and a file keeps the long names. They
+are the names Maya 2025 gives a joint's attributes:
+
+| Short | Long |
+|---|---|
+| `t` `tx` `ty` `tz` | `translate` `translate_x` `translate_y` `translate_z` |
+| `r` `rx` `ry` `rz` | `rotate` `rotate_x` `rotate_y` `rotate_z` |
+| `s` `sx` `sy` `sz` | `scale` `scale_x` `scale_y` `scale_z` |
+| `jo` `jox` `joy` `joz` | `joint_orient` `joint_orient_x` `joint_orient_y` `joint_orient_z` |
+| `ra` `rax` `ray` `raz` | `rotate_axis` `rotate_axis_x` `rotate_axis_y` `rotate_axis_z` |
+| `ro` `ssc` `v` `radi` `ds` | `rotate_order` `segment_scale_compensate` `visibility` `radius` `draw_style` |
+| `m` `wm` | `matrix` `world_matrix` |
+| `pm` `im` `wim` `pim` | `parent_matrix` `inverse_matrix` `world_inverse_matrix` `parent_inverse_matrix`, read only |
+
+Maya's `is`, `inverseScale`, is a Python keyword and has none.
+`parent_scale_inverse` is the parent's scale, whatever the parent: what
+Maya's `inverseScale` holds where Maya wires it from the parent joint.
+`cmds.joint` wires it under a joint, and so does an absolute
+`cmds.parent` that leaves the joint right under one; one that does not
+puts a transform between them, unwired. Under a joint, a joint made with
+`cmds.createNode` and `parent=` is unwired, holding (1, 1, 1), and one
+moved there with `cmds.parent` and `relative=True` holds what it held,
+unwired or still wired from the joint it left. Under a transform Maya
+never wires it from that transform: a joint drawn there holds (1, 1, 1),
+and one moved there with `cmds.parent` holds the scale of the parent
+joint it left, unwired under a transform Maya inserts, or with
+`relative=True` still wired from that joint. So a joint with
+`segment_scale_compensate` on that Maya did not wire from its parent
+joint divides by a scale Maya's does not.
+`add_user_attribute` refuses a short name; a file's user attribute that
+carries one loads, hidden, with one warning a name.
 
 **A clip's nodes are its playback head.** Each framed channel is bound
 to one row of a dense `(F, N, 3)` block. Scrubbing rebinds; reading a

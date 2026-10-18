@@ -322,19 +322,38 @@ Properties:
 
 ```text
 draw_style                         
+ds                                 Maya's short name for draw_style
+im                                 Maya's short name for inverse_matrix
 index                              return's the node's index in the assigned hierarchy
+inverse_matrix                     the inverse of matrix, Maya's inverseMatrix; read only
+jo                                 Maya's short name for joint_orient
 joint_orient                       
 joint_orient_matrix                
 joint_orient_x                     
 joint_orient_y                     
 joint_orient_z                     
+jox                                Maya's short name for joint_orient_x
+joy                                Maya's short name for joint_orient_y
+joz                                Maya's short name for joint_orient_z
+m                                  Maya's short name for matrix
 matrix                             computes the local transform matrix
+parent_inverse_matrix              the inverse of parent_matrix, Maya's parentInverseMatrix; read only
+parent_matrix                      the parent's world matrix, Maya's parentMatrix; read only
 parent_name                        the name of the node's parent, None for a root; read only
 parent_node                        deprecated, goes in cgmath 3.0.0: parent_uuid, by its old name
 parent_scale_inverse               
 parent_scale_inverse_matrix        
+pim                                Maya's short name for parent_inverse_matrix
+pm                                 Maya's short name for parent_matrix
 quaternion                         rotation as a quaterion
+r                                  Maya's short name for rotate
+ra                                 Maya's short name for rotate_axis
+radi                               Maya's short name for radius
 radius                             
+rax                                Maya's short name for rotate_axis_x
+ray                                Maya's short name for rotate_axis_y
+raz                                Maya's short name for rotate_axis_z
+ro                                 Maya's short name for rotate_order
 rotate                             
 rotate_axes                        returns the rotate order as a string
 rotate_axis                        
@@ -347,19 +366,35 @@ rotate_order                       the rotate order, 0..5: xyz, yzx, zxy, xzy, y
 rotate_x                           
 rotate_y                           
 rotate_z                           
+rx                                 Maya's short name for rotate_x
+ry                                 Maya's short name for rotate_y
+rz                                 Maya's short name for rotate_z
+s                                  Maya's short name for scale
 scale                              
 scale_matrix                       
 scale_x                            
 scale_y                            
 scale_z                            
 segment_scale_compensate           
+ssc                                Maya's short name for segment_scale_compensate
+sx                                 Maya's short name for scale_x
+sy                                 Maya's short name for scale_y
+sz                                 Maya's short name for scale_z
+t                                  Maya's short name for translate
 translate                          
 translate_matrix                   
 translate_x                        
 translate_y                        
 translate_z                        
+tx                                 Maya's short name for translate_x
+ty                                 Maya's short name for translate_y
+tz                                 Maya's short name for translate_z
 unique_name                        returns True if no other node has this name
+v                                  Maya's short name for visibility
 visibility                         
+wim                                Maya's short name for world_inverse_matrix
+wm                                 Maya's short name for world_matrix
+world_inverse_matrix               the inverse of world_matrix, Maya's worldInverseMatrix; read only
 world_matrix                       compute a world matrix
 ```
 
@@ -372,6 +407,8 @@ add_suffix(self, suffix: 'str') -> 'None'
     adds a suffix to the node's name
 add_user_attribute(self, name: 'str', value: 'Any', attribute_type: 'Optional[str]' = None, keyable: 'bool' = True, enum_names: 'Optional[str]' = None) -> 'None'
     creates a user defined attribute, then read and set as ``node.name``
+copy(self) -> "'TransformData'"
+    returns a deep copy of self: the object a save and load gives back
 get_branch(self) -> "'TransformList'"
     returns a recursive NodeList from of all decendents
 get_children(self) -> "'TransformList'"
@@ -416,18 +453,37 @@ Properties:
 
 ```text
 draw_style                         
+ds                                 Maya's short name for draw_style
+im                                 Maya's short name for inverse_matrix
 indices                            returns each node's index in its owning hierarchy
+inverse_matrix                     every node's inverse local matrix, Maya's inverseMatrix; read only
+jo                                 Maya's short name for joint_orient
 joint_orient                       
 joint_orient_matrix                
 joint_orient_x                     
 joint_orient_y                     
 joint_orient_z                     
+jox                                Maya's short name for joint_orient_x
+joy                                Maya's short name for joint_orient_y
+joz                                Maya's short name for joint_orient_z
+m                                  Maya's short name for matrix
 matrix                             
 node_type                          
+parent_inverse_matrix              every node's inverse parent matrix, Maya's parentInverseMatrix; read only
+parent_matrix                      every node's parent world matrix, Maya's parentMatrix; read only
 parent_scale_inverse               
 parent_scale_inverse_matrix        
+pim                                Maya's short name for parent_inverse_matrix
+pm                                 Maya's short name for parent_matrix
 quaternion                         
+r                                  Maya's short name for rotate
+ra                                 Maya's short name for rotate_axis
+radi                               Maya's short name for radius
 radius                             
+rax                                Maya's short name for rotate_axis_x
+ray                                Maya's short name for rotate_axis_y
+raz                                Maya's short name for rotate_axis_z
+ro                                 Maya's short name for rotate_order
 rotate                             
 rotate_axes                        returns each node's rotate order as a string
 rotate_axis                        
@@ -440,20 +496,36 @@ rotate_order                       every node's rotate order, 0..5
 rotate_x                           
 rotate_y                           
 rotate_z                           
+rx                                 Maya's short name for rotate_x
+ry                                 Maya's short name for rotate_y
+rz                                 Maya's short name for rotate_z
+s                                  Maya's short name for scale
 scale                              
 scale_matrix                       
 scale_x                            
 scale_y                            
 scale_z                            
 segment_scale_compensate           
+ssc                                Maya's short name for segment_scale_compensate
+sx                                 Maya's short name for scale_x
+sy                                 Maya's short name for scale_y
+sz                                 Maya's short name for scale_z
+t                                  Maya's short name for translate
 translate                          
 translate_matrix                   
 translate_x                        
 translate_y                        
 translate_z                        
+tx                                 Maya's short name for translate_x
+ty                                 Maya's short name for translate_y
+tz                                 Maya's short name for translate_z
 unique_name                        whether each node's name is its own in its owning hierarchy
 uuid                               returns a list of all node uuids
+v                                  Maya's short name for visibility
 visibility                         
+wim                                Maya's short name for world_inverse_matrix
+wm                                 Maya's short name for world_matrix
+world_inverse_matrix               every node's inverse world matrix, Maya's worldInverseMatrix; read only
 world_matrix                       
 ```
 

@@ -19,7 +19,8 @@ overview see [`README.md`](README.md); for the rest of the library see
 | [Joint channels](#joint-channels) | `rotate_order`, `rotate_axis`, `joint_orient`, `segment_scale_compensate` |
 | [Changing rotate order](#changing-rotate-order) | `set_rotate_order` keeps the pose; the raw `rotate_order` setter does not |
 | [Display + user channels](#display--user-channels) | `visibility`, `radius`, `draw_style`, `user_defined_attributes` |
-| [Matrices](#matrices) | `matrix`, `world_matrix`, the six factor matrices, `quaternion` |
+| [Matrices](#matrices) | `matrix`, `world_matrix`, the six factor matrices, `quaternion`, the parent and inverse matrices |
+| [Maya's short names](#mayas-short-names) | `t` `tx` … `wm` `pm` `im` `wim` `pim`, read and written as their long names |
 | [Cache invalidation](#cache-invalidation) | when `world_matrix` is recomputed |
 | [Parenting: `parent_uuid`](#parenting-parent_uuid) | the parent's uuid, `parent_name`, `set_parent` by name, joining a rig, `parent_node`, older files |
 | [Node queries](#node-queries) | parent / children / branch / root / index |
@@ -309,6 +310,34 @@ n.get_parent_matrix()        # (4, 4) the parent's world, eye(4) at a root
 | `matrix` | yes | yes | the local product above |
 | `world_matrix` | yes | yes | `matrix · parent_world` |
 | `quaternion` | yes | yes | `RO · R · JO` as `(i, j, k, w)` |
+| `parent_matrix` | yes | — | `parent_world`, identity at a root: `get_parent_matrix()`, Maya's `parentMatrix` |
+| `inverse_matrix` | yes | — | the inverse of `matrix`, Maya's `inverseMatrix` |
+| `world_inverse_matrix` | yes | — | the inverse of `world_matrix`, Maya's `worldInverseMatrix` |
+| `parent_inverse_matrix` | yes | — | the inverse of `parent_matrix`, Maya's `parentInverseMatrix` |
+
+The four last are true inverses, `np.linalg.inv`, as Maya's are: a
+non-uniform scale under a rotation shears a matrix, which
+`transforms.matrix_inverse`, an inverse for a scale times a rotation, gets
+wrong. A list or a rig reads them for every node at once, each owning rig
+evaluated once and every node inverted in one call, and `clip.frames` for
+every frame in one call. A zero scale leaves no inverse:
+`numpy.linalg.LinAlgError` names the node, and on `clip.frames` the frame.
+Maya holds a zero scale at 1e-12 and inverts that, into numbers of 1e12.
+
+```python
+leg  = make_chain(("hip", "knee"))
+shin = leg["knee"]
+assert np.array_equal(shin.parent_matrix, leg["hip"].world_matrix)
+assert np.array_equal(leg["hip"].parent_matrix, np.eye(4))      # a root
+assert np.allclose(shin.world_inverse_matrix @ shin.world_matrix, np.eye(4))
+leg.inverse_matrix.shape                    # (2, 4, 4)
+
+leg["hip"].scale_y = 0.0
+try:
+    leg.world_inverse_matrix
+except np.linalg.LinAlgError as error:
+    print(error)                            # the world_matrix of 'hip' has no inverse: a zero scale flattens it
+```
 
 `world_matrix` and `matrix` are **properties**, not calls — on both
 `TransformData` and `TransformList`.
@@ -351,6 +380,93 @@ assert np.allclose(knee.scale, [1.0, 1.0, -1.0])         # the mirror lands on z
 
 rig["hip"].quaternion = [0.0, 0.0, 0.0, 1.0]       # identity orientation
 assert np.allclose(rig["hip"].rotate, 0.0, atol=1e-9)
+```
+
+---
+
+## Maya's short names
+
+Each channel and matrix also answers to the short name Maya gives it:
+`node.tx` is `node.translate_x`, `rig.wm` is `rig.world_matrix`. A short
+name is a property that reads and writes its long name itself, so it
+converts and raises as the long name does, takes one value or one per node
+on a list, writes a clip's bound frame on a clip and every frame on
+`clip.frames`. They are Maya 2025's, as
+`cmds.attributeQuery(<long>, node=<joint>, shortName=True)` gives them;
+`inverseScale`'s, `is`, is a Python keyword, so it has none. A file keeps
+the long names: a short name is never saved.
+
+```python
+leg     = make_chain(("hip", "knee"))
+shin    = leg["knee"]
+shin.ry = 30.0              # shin.rotate_y
+shin.jo = (0.0, 0.0, 90.0)  # shin.joint_orient
+assert shin.r.tolist() == [0.0, 30.0, 0.0]
+assert np.array_equal(shin.wm, shin.world_matrix)
+
+leg.tx = [1.0, 2.0]                         # one per node, as leg.translate_x
+assert leg.translate_x.tolist() == [1.0, 2.0]
+assert "tx" in dir(shin)                    # and tab completion
+
+try:
+    shin.t = (1.0, 2.0)
+except ValueError as error:
+    print(error)                            # TransformData.translate must have shape (3,), got (2,)
+
+steps           = ClipData(leg, frames=3)
+steps.frames.rz = np.linspace(0.0, 90.0, 3).reshape(3, 1)   # every frame, as frames.rotate_z
+steps.frames.wim.shape                      # (3, 2, 4, 4)
+```
+
+| Short | Long | Maya's long name | Writes |
+|---|---|---|---|
+| `t` `tx` `ty` `tz` | `translate` `translate_x` `translate_y` `translate_z` | `translate` `translateX` … | yes |
+| `r` `rx` `ry` `rz` | `rotate` `rotate_x` `rotate_y` `rotate_z` | `rotate` `rotateX` … | yes |
+| `s` `sx` `sy` `sz` | `scale` `scale_x` `scale_y` `scale_z` | `scale` `scaleX` … | yes |
+| `jo` `jox` `joy` `joz` | `joint_orient` `joint_orient_x` … | `jointOrient` `jointOrientX` … | yes |
+| `ra` `rax` `ray` `raz` | `rotate_axis` `rotate_axis_x` … | `rotateAxis` `rotateAxisX` … | yes |
+| `ro` | `rotate_order` | `rotateOrder` | yes |
+| `ssc` | `segment_scale_compensate` | `segmentScaleCompensate` | yes |
+| `v` | `visibility` | `visibility` | yes |
+| `radi` | `radius` | `radius` | yes |
+| `ds` | `draw_style` | `drawStyle` | yes |
+| `m` | `matrix` | `matrix` | yes |
+| `wm` | `world_matrix` | `worldMatrix` | yes |
+| `pm` | `parent_matrix` | `parentMatrix` | read only |
+| `im` | `inverse_matrix` | `inverseMatrix` | read only |
+| `wim` | `world_inverse_matrix` | `worldInverseMatrix` | read only |
+| `pim` | `parent_inverse_matrix` | `parentInverseMatrix` | read only |
+
+Every one is on a node, a list, a rig and a clip. `clip.frames` has those
+of what it has, the framed channels and the matrices, but not `ro`, `ssc`,
+`v`, `radi` or `ds`: every frame shares those, and reading or writing one
+there raises as its long name does. On an `SDFSphere` or `SDFCylinder`,
+`radi` is the primitive's `radius`, as it is the class's.
+
+`add_user_attribute` refuses every short name, and the four new matrices'
+long names, as it refuses a long name. A file whose user attribute carries
+one anyway -- an fbx from another tool, a tree written by hand -- loads it
+into `user_defined_attributes` with one warning a name, however many nodes
+carry it, and `node.tx` stays `translate_x`; a save keeps the attribute.
+
+```python
+import warnings
+
+try:
+    shin.add_user_attribute("tx", 1.0)
+except ValueError as error:
+    print(error)                            # 'tx' is a built-in attribute of TransformData, Maya's short name for translate_x
+
+spec = {"attributeType": "double", "value": 7.0, "keyable": True}
+tree = HierarchyData([TransformData("a", user_defined_attributes={"tx": spec})]).to_dict()
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    found = HierarchyData.from_dict(tree)
+print(caught[0].message)
+# user attribute 'tx' of 'a' loaded into user_defined_attributes['tx']: node.tx is
+# Maya's short name for translate_x, which hides it
+assert found[0].tx == found[0].translate_x == 0.0
+assert found[0].user_defined_attributes["tx"]["value"] == 7.0
 ```
 
 ---
@@ -733,7 +849,9 @@ A list gives one value per node, `None` where a node has none, and a write
 goes to every node that has the attribute. A compound attribute reads as an
 array when its children are all numbers, and an enum takes a field name or
 its number. Assigning to a name no node has raises; `add_user_attribute`
-creates one.
+creates one. It refuses a name a built-in has, Maya's short names
+included, `tx` or `wm`: see [Maya's short names](#mayas-short-names) for a
+file that carries one.
 
 ---
 
@@ -1322,15 +1440,18 @@ once, each equal bit for bit to the node's own read on every frame:
 | `parent_scale_inverse` | `(F, N, 3)`: the parent's scale, ones for a root, whatever `segment_scale_compensate` says |
 | `parent_scale_inverse_matrix` | `(F, N, 4, 4)`: identity for a node that does not compensate |
 | `parent_matrix`, `get_parent_matrix()` | `(F, N, 4, 4)`: identity for a root, or a parent the clip does not hold |
+| `inverse_matrix`, `world_inverse_matrix`, `parent_inverse_matrix` | `(F, N, 4, 4)`: every frame inverted in one call |
 | `to_attributes()` | one dict per node: a framed channel as one `[x, y, z]` per frame, anything else as its one value |
 
 ```python
 parents = clip.frames.parent_matrix
 rotates = clip.frames.rotate_matrix
+inverse = clip.frames.world_inverse_matrix
 for frame in range(clip.frame_count):
     clip.frame = frame
     assert np.array_equal(parents[frame], clip.get_parent_matrix())
     assert np.array_equal(rotates[frame], clip.rotate_matrix)
+    assert np.array_equal(inverse[frame], [node.world_inverse_matrix for node in clip])
 
 knee = clip.frames["knee"].to_attributes()[0]
 len(knee["rotate"])                             # 5 -- one [x, y, z] per frame
@@ -2087,5 +2208,8 @@ rig["hip"].match("hip")                         # True
 | `reset_cached_data()` | clears every non-annotated attribute — including the `_hierarchy` back-pointer, which detaches the nodes | re-append the nodes, or just write a channel to drop the world-matrix cache |
 | `ClipData(rig)` with no `frames=` | `frame_count == 0`; it is a plain hierarchy until frames are allocated | pass `frames=N`, or build with `from_poses` |
 | `rotate_order = n` on a posed joint | the angles stay and read in the new order, so the joint turns, as Maya's `setAttr` does | `set_rotate_order(n)` keeps the pose |
+| a file's user attribute named `tx` (or any short name) | it loads, with one warning a name, but `node.tx` is `translate_x`, which hides it | read it as `node.user_defined_attributes["tx"]["value"]` |
+| `node.is` | Maya's short name for `inverseScale` is a Python keyword: a `SyntaxError` | `node.parent_scale_inverse`, the parent's scale: what Maya's `inverseScale` holds where Maya wires it from the parent joint |
+| a compensating joint Maya did not wire from its parent joint: under a transform, or under a joint after `cmds.createNode` with `parent=` or `cmds.parent` with `relative=True` | `parent_scale_inverse` is the parent's scale, and `matrix` divides by it; Maya wires `inverseScale` from a joint's scale alone, as `cmds.joint` does under a joint and an absolute `cmds.parent` that leaves the joint right under one: a joint made with `cmds.createNode`, or drawn under a transform, holds `(1, 1, 1)`, one moved with `cmds.parent` the scale of the parent joint it left, unwired under a transform Maya inserts, or with `relative=True` still wired from that joint, and Maya's `m` and `wm` divide by what it holds | `segment_scale_compensate = False` on that joint gives Maya's matrices where Maya's `getAttr <joint>.is` reads `(1, 1, 1)` |
 | `clip.frames[12]` | scrubs and hands back the **same** clip — two frames cannot be held at once | `clip.frames[12:13]` for an independent cut, or `copy()` |
 | `clip.frames[a:b] -= pose` (or `+=`, or `[:]`) | the slice is an independent cut bound to its own first frame, and `-=` on a clip solves its bound frame: the paste writes back frame `a` alone, with no error | `clip.frames -= pose` for every frame; for a range, `cut = clip.frames[a:b]`, `cut.frames -= pose`, `clip.frames[a:b] = cut` |

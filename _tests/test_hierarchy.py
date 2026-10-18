@@ -2718,17 +2718,18 @@ class TestUserAttributes(unittest.TestCase):
             rig.qualty = 1.5
 
     def test_list_writes_are_all_or_nothing(self):
-        # a double takes 2.5, a bool does not
+        # a double takes 2.5, a bool does not. Not "v", which is Maya's
+        # short name for visibility now, a built-in that hides it
         a = TransformData(
-            name="a", user_defined_attributes={"v": {"attributeType": "double", "value": 1.0}}
+            name="a", user_defined_attributes={"amount": {"attributeType": "double", "value": 1.0}}
         )
         b = TransformData(
-            name="b", user_defined_attributes={"v": {"attributeType": "bool", "value": False}}
+            name="b", user_defined_attributes={"amount": {"attributeType": "bool", "value": False}}
         )
         rig = HierarchyData([a, b])
         with self.assertRaises(ValueError):
-            rig.v = 2.5
-        self.assertEqual(rig.v, [1.0, False])
+            rig.amount = 2.5
+        self.assertEqual(rig.amount, [1.0, False])
 
     def test_a_view_writes_only_its_nodes(self):
         rig = HierarchyData([self.node(), TransformData(name="hip")])
