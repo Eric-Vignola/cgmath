@@ -7,6 +7,7 @@ import pickle
 import sys
 import tempfile
 import unittest
+import warnings
 from unittest import mock
 
 import numpy as np
@@ -7212,6 +7213,479 @@ class TestFbxLoadsInMayaAxes(unittest.TestCase):
                     with self.assertRaises(ValueError) as caught:
                         loader(path, axis_system=value)
                     self.assertIn("'maya_y_up' or None", str(caught.exception))
+
+
+@unittest.skipIf(FBX is None, "fbx sdk is not installed")
+class TestFbxBindPose(unittest.TestCase):
+    """HierarchyData.load_fbx(pose="bind") reads a skinned file's bind poses,
+    the FbxPose objects whose IsBindPose() is true. Each fixture's bind pose
+    lists its nodes at the worlds the sdk evaluates as they are authored;
+    then the nodes are posed off it and the file is written, an export from
+    a scene posed after its bind. The truth is those worlds, in cm and in
+    Maya's axes"""
+
+    # Maya's Z-up, Unreal's too, to Maya's Y-up: (x, y, z) to (x, z, -y)
+    TURN = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
+
+    # (label, axis system, unit, the cm one of its units holds)
+    FILES = (
+        ("Y-up cm", "MayaYUp", None, 1.0),
+        ("Z-up cm", "MayaZUp", None, 1.0),
+        ("Z-up m", "MayaZUp", "m", 100.0),
+    )
+
+    CHANNELS = ("translate", "rotate", "scale", "joint_orient", "rotate_axis")
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    @staticmethod
+    def m4(matrix):
+        return np.array([[matrix.Get(r, c) for c in range(4)] for r in range(4)])
+
+    @staticmethod
+    def fbx_matrix(rows):
+        matrix = FBX.FbxMatrix()
+        for r in range(4):
+            matrix.SetRow(r, FBX.FbxVector4(*[float(x) for x in rows[r]]))
+        return matrix
+
+    @staticmethod
+    def turned(degrees):
+        """a turn of ``degrees`` about x, which ``turned(d) @ world`` puts on a
+        node in its own axes, its position kept"""
+        out         = np.eye(4)
+        out[:3, :3] = euler_to_matrix(np.radians([[degrees, 0.0, 0.0]]), np.zeros(1, dtype=int))[0, :3, :3]
+        return out
+
+    def authored(
+        self,
+        name       = "bind.fbx",
+        axes       = "MayaYUp",
+        unit       = None,
+        listed     = ("hip", "knee"),
+        posed      = True,
+        later      = None,
+        other_pose = False,
+        root       = False,
+    ):
+        """a group holding a joint chain, hip > knee > ankle, the hip in zxy
+        with a pre-rotation (its joint orient), and a locator under the knee,
+        rotation active on each. A bind pose, bindPose1, lists ``listed`` at
+        their worlds as authored, and with ``root`` the scene root first, a
+        node the read drops, as an Unreal export's bind poses list it; with
+        ``posed`` the group, hip and knee are then moved off it before the
+        file is written. ``later`` (name, degrees) writes bindPose2 after it,
+        listing that node turned that far about x off its bind;
+        ``other_pose`` writes a pose that is no bind pose, restPose, listing
+        the hip at the knee's bind. Returns (path, {name: world as authored,
+        in the file's axes and unit})"""
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        scene.GetGlobalSettings().SetAxisSystem(getattr(FBX.FbxAxisSystem, axes))
+        if unit is not None:
+            scene.GetGlobalSettings().SetSystemUnit(getattr(FBX.FbxSystemUnit, unit))
+        source = FBX.FbxNode.EPivotSet.eSourcePivot
+
+        def null(name, look):
+            attr = FBX.FbxNull.Create(scene, name)
+            attr.Look.Set(look.value)
+            return attr
+
+        def node(name, attr, parent, translate, rotate, order=0, pre=None):
+            made = FBX.FbxNode.Create(scene, name)
+            made.SetNodeAttribute(attr)
+            made.LclTranslation.Set(FBX.FbxDouble3(*translate))
+            made.LclRotation.Set(FBX.FbxDouble3(*rotate))
+            made.SetRotationActive(True)
+            made.SetRotationOrder(source, list(FBX.EFbxRotationOrder)[order])
+            if pre is not None:
+                made.SetPreRotation(source, FBX.FbxVector4(*pre, 1.0))
+            parent.AddChild(made)
+            return made
+
+        bone  = FBX.FbxSkeleton.Create
+        group = node("grp", null("a", FBX.FbxNull.ELook.eNone), scene.GetRootNode(), (5.0, 0.0, 2.0), (0.0, 30.0, 0.0))
+        hip   = node("hip", bone(scene, "b"), group, (1.0, 2.0, 3.0), (10.0, 20.0, 30.0), 4, pre=(5.0, -15.0, 25.0))
+        knee  = node("knee", bone(scene, "c"), hip, (0.0, -4.0, 0.5), (-30.0, 5.0, 0.0))
+        ankle = node("ankle", bone(scene, "d"), knee, (0.0, -4.0, 0.0), (0.0, 0.0, 10.0))
+        loc   = node("loc", null("e", FBX.FbxNull.ELook.eCross), knee, (1.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+        nodes = {"grp": group, "hip": hip, "knee": knee, "ankle": ankle, "loc": loc}
+        bind  = {key: self.m4(made.EvaluateGlobalTransform()) for key, made in nodes.items()}
+
+        if listed:
+            pose = FBX.FbxPose.Create(scene, "bindPose1")
+            pose.SetIsBindPose(True)
+            if root:
+                pose.Add(scene.GetRootNode(), self.fbx_matrix(np.eye(4)))
+            for key in listed:
+                pose.Add(nodes[key], self.fbx_matrix(bind[key]))
+            scene.AddPose(pose)
+        if later is not None:
+            key, degrees = later
+            pose = FBX.FbxPose.Create(scene, "bindPose2")
+            pose.SetIsBindPose(True)
+            pose.Add(nodes[key], self.fbx_matrix(self.turned(degrees) @ bind[key]))
+            scene.AddPose(pose)
+        if other_pose:
+            pose = FBX.FbxPose.Create(scene, "restPose")
+            pose.SetIsBindPose(False)
+            pose.Add(hip, self.fbx_matrix(bind["knee"]))
+            scene.AddPose(pose)
+
+        if posed:
+            group.LclTranslation.Set(FBX.FbxDouble3(7.0, -1.0, 4.0))
+            hip.LclRotation.Set(FBX.FbxDouble3(40.0, -10.0, 55.0))
+            knee.LclTranslation.Set(FBX.FbxDouble3(0.0, -4.5, 0.5))
+            knee.LclRotation.Set(FBX.FbxDouble3(-75.0, 5.0, 20.0))
+
+        path     = os.path.join(self.tmp.name, name)
+        exporter = FBX.FbxExporter.Create(manager, "")
+        if not exporter.Initialize(path, -1, manager.GetIOSettings()):
+            raise RuntimeError(f"cannot write {path}")
+        exporter.Export(scene)
+        exporter.Destroy()
+        manager.Destroy()
+        return path, bind
+
+    def file_worlds(self, path):
+        """{name: world} of every node the file holds, its own axes and unit"""
+        manager = FBX.FbxManager.Create()
+        try:
+            manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+            importer = FBX.FbxImporter.Create(manager, "")
+            importer.Initialize(path, -1, manager.GetIOSettings())
+            scene = FBX.FbxScene.Create(manager, "")
+            importer.Import(scene)
+            importer.Destroy()
+            out, stack = {}, [scene.GetRootNode()]
+            while stack:
+                node = stack.pop()
+                if node.GetNodeAttribute():
+                    out[node.GetName()] = self.m4(node.EvaluateGlobalTransform())
+                stack.extend(node.GetChild(i) for i in range(node.GetChildCount()))
+            return out
+        finally:
+            manager.Destroy()
+
+    @staticmethod
+    def file_poses(path):
+        """{pose name: the names of the nodes it lists} of the file's poses,
+        and the scene root's name"""
+        manager = FBX.FbxManager.Create()
+        try:
+            manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+            importer = FBX.FbxImporter.Create(manager, "")
+            importer.Initialize(path, -1, manager.GetIOSettings())
+            scene = FBX.FbxScene.Create(manager, "")
+            importer.Import(scene)
+            importer.Destroy()
+            poses = {}
+            for i in range(scene.GetPoseCount()):
+                pose                  = scene.GetPose(i)
+                poses[pose.GetName()] = [pose.GetNodeName(k).GetCurrentName() for k in range(pose.GetCount())]
+            return poses, scene.GetRootNode().GetName()
+        finally:
+            manager.Destroy()
+
+    def loaded(self, worlds, factor, axes):
+        """``worlds`` as the read gives them: in cm, then in Maya's Y-up"""
+        turn = np.eye(4)
+        if axes == "MayaZUp":
+            turn[:3, :3] = self.TURN
+        out = {}
+        for name, world in worlds.items():
+            world = np.array(world, dtype=float)
+            world[3, :3] *= factor
+            out[name] = world @ turn
+        return out
+
+    def assertWorlds(self, rig, want):
+        got = {node.name: np.asarray(node.world_matrix) for node in rig}
+        self.assertEqual(sorted(got), sorted(want))
+        for name in want:
+            self.assertTrue(
+                np.allclose(got[name], want[name], rtol=0.0, atol=1e-9),
+                f"{name}: {np.abs(got[name] - want[name]).max():.2e} off",
+            )
+
+    def test_every_node_a_bind_pose_lists_takes_its_bind_matrix(self):
+        """the hip and knee at their bind, the ankle and locator, which no pose
+        lists, on their own values under the knee's bind, the group, which
+        none lists either, where the file holds it; in cm and Maya's axes"""
+        for label, axes, unit, factor in self.FILES:
+            with self.subTest(file=label):
+                path, bind = self.authored(f"{label}.fbx", axes, unit)
+                node = self.file_worlds(path)
+                want = dict(node, **{key: bind[key] for key in ("hip", "knee", "ankle", "loc")})
+
+                self.assertWorlds(HierarchyData.load_fbx(path, pose="bind"), self.loaded(want, factor, axes))
+                self.assertWorlds(hierarchy.load_fbx(path, pose="bind"), self.loaded(want, factor, axes))
+
+                # the premise: the file's node values are off the bind, and
+                # the ankle's own values put it elsewhere under the knee's
+                for key in ("hip", "knee", "ankle"):
+                    self.assertGreater(float(np.abs(node[key] - bind[key]).max()), 1.0, key)
+
+    def test_the_default_is_the_node_pose(self):
+        for label, axes, unit, factor in self.FILES:
+            with self.subTest(file=label):
+                path, _ = self.authored(f"{label}.fbx", axes, unit)
+                want = self.loaded(self.file_worlds(path), factor, axes)
+
+                self.assertWorlds(HierarchyData.load_fbx(path), want)
+                self.assertWorlds(HierarchyData.load_fbx(path, pose="node"), want)
+                self.assertWorlds(hierarchy.load_fbx(path), want)
+
+    def test_a_transform_list_holds_the_bind_under_its_parents(self):
+        """TransformList.load_fbx gives nodes no rig owns, as under "node", and
+        their channels are the ones HierarchyData.load_fbx solves under each
+        parent, so a HierarchyData of them reads at the bind"""
+        for label, axes, unit, _ in self.FILES:
+            with self.subTest(file=label):
+                path, _ = self.authored(f"{label}.fbx", axes, unit)
+                want = HierarchyData.load_fbx(path, pose="bind")
+                view = TransformList.load_fbx(path, pose="bind")
+
+                self.assertIs(type(view), TransformList)
+                self.assertEqual([node.get_parent() is None for node in view], [True] * len(view))
+                self.assertEqual(
+                    [node.parent_uuid is None for node in view],
+                    [node.parent_uuid is None for node in TransformList.load_fbx(path)],
+                )
+
+                rig = HierarchyData(view)
+                self.assertEqual(rig.name, want.name)
+                self.assertEqual([node.parent_name for node in rig], [node.parent_name for node in want])
+                for channel in self.CHANNELS:
+                    self.assertTrue(np.array_equal(getattr(rig, channel), getattr(want, channel)), channel)
+                self.assertWorlds(rig, {node.name: np.asarray(node.world_matrix) for node in want})
+
+    def test_the_bind_moves_only_what_it_must(self):
+        """a node no bind pose lists keeps every channel; one it lists keeps
+        its joint orient, rotate axis and rotate order, its rotate solved in
+        that order (the hip's zxy)"""
+        path, _ = self.authored(axes="MayaZUp", unit="m")
+
+        node = HierarchyData.load_fbx(path)
+        bind = HierarchyData.load_fbx(path, pose="bind")
+
+        self.assertEqual(bind.name, node.name)
+        for key in ("grp", "ankle", "loc"):
+            for channel in self.CHANNELS:
+                self.assertTrue(np.array_equal(getattr(bind[key], channel), getattr(node[key], channel)), f"{key}.{channel}")
+        for key in ("hip", "knee"):
+            for channel in ("joint_orient", "rotate_axis"):
+                self.assertTrue(np.array_equal(getattr(bind[key], channel), getattr(node[key], channel)), f"{key}.{channel}")
+            self.assertFalse(np.allclose(bind[key].rotate, node[key].rotate))
+        self.assertTrue(np.array_equal(bind.rotate_order, node.rotate_order))
+        self.assertEqual(bind["hip"].rotate_order, 2)  # Maya's zxy
+        self.assertFalse(np.allclose(bind["hip"].joint_orient, 0.0))
+
+    def test_a_group_a_bind_pose_lists_takes_its_bind_too(self):
+        """any node the read keeps, not only a joint"""
+        for label, axes, unit, factor in self.FILES:
+            with self.subTest(file=label):
+                path, bind = self.authored(f"{label}.fbx", axes, unit, listed=("grp", "hip", "knee"))
+
+                self.assertWorlds(HierarchyData.load_fbx(path, pose="bind"), self.loaded(bind, factor, axes))
+
+    def test_a_file_at_its_bind_reads_the_same_either_way(self):
+        """a node its bind leaves where it is keeps its own numbers"""
+        for label, axes, unit, _ in self.FILES:
+            with self.subTest(file=label):
+                path, _ = self.authored(f"{label}.fbx", axes, unit, listed=("grp", "hip", "knee", "ankle"), posed=False)
+
+                node = HierarchyData.load_fbx(path)
+                bind = HierarchyData.load_fbx(path, pose="bind")
+
+                for channel in self.CHANNELS:
+                    self.assertTrue(np.array_equal(getattr(bind, channel), getattr(node, channel)), channel)
+
+    def test_the_first_bind_pose_wins_and_a_later_one_off_it_warns(self):
+        """a later pose 30 degrees off warns, naming the node and both poses,
+        and so does one 2e-4 degrees off, its matrix a few times the 1e-6
+        band off; one 1e-6 degrees off agrees"""
+        path, bind = self.authored("off.fbx", later=("knee", 30.0))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            rig = HierarchyData.load_fbx(path, pose="bind")
+
+        messages = [str(warning.message) for warning in caught]
+        self.assertEqual(len(messages), 1, messages)
+        for word in ("'knee'", "'bindPose1'", "'bindPose2'", "the first, 'bindPose1', is read"):
+            self.assertIn(word, messages[0])
+        self.assertTrue(np.allclose(rig["knee"].world_matrix, bind["knee"], rtol=0.0, atol=1e-9))
+
+        for degrees, warned in ((2e-4, 1), (1e-6, 0)):
+            with self.subTest(degrees=degrees):
+                path, bind = self.authored(f"{degrees}.fbx", later=("knee", degrees))
+
+                # the premise: the gap the band is measured on
+                gap = float(np.abs(self.turned(degrees) @ bind["knee"] - bind["knee"]).max())
+                self.assertTrue(1e-6 < gap < 5e-6 if warned else gap < 1e-7, gap)
+
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    rig = HierarchyData.load_fbx(path, pose="bind")
+
+                messages = [str(warning.message) for warning in caught]
+                self.assertEqual(len(messages), warned, messages)
+                if warned:
+                    self.assertIn("'knee'", messages[0])
+                self.assertTrue(np.allclose(rig["knee"].world_matrix, bind["knee"], rtol=0.0, atol=1e-9))
+
+    def test_a_node_only_a_later_bind_pose_lists_takes_that_bind(self):
+        """every node any bind pose lists takes a bind: bindPose2 lists the
+        ankle, which bindPose1 does not, 25 degrees off where its own values
+        put it under the knee's bind, and the ankle reads there, warning
+        nothing"""
+        for label, axes, unit, factor in self.FILES:
+            with self.subTest(file=label):
+                path, bind = self.authored(f"{label}.fbx", axes, unit, later=("ankle", 25.0))
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    rig = HierarchyData.load_fbx(path, pose="bind")
+
+                self.assertEqual([str(warning.message) for warning in caught], [])
+                want          = dict(self.file_worlds(path), **{key: bind[key] for key in ("hip", "knee", "loc")})
+                want["ankle"] = self.turned(25.0) @ bind["ankle"]
+                self.assertWorlds(rig, self.loaded(want, factor, axes))
+
+                # the premise: bindPose1 leaves the ankle out
+                poses, _ = self.file_poses(path)
+                self.assertEqual(poses, {"bindPose1": ["hip", "knee"], "bindPose2": ["ankle"]})
+
+    def test_a_node_the_read_drops_is_passed_over(self):
+        """a bind pose listing the scene root, which the read keeps no node
+        for, as an Unreal export's bind poses do, reads as one that leaves it
+        out, warning nothing"""
+        for label, axes, unit, factor in self.FILES:
+            with self.subTest(file=label):
+                path, bind = self.authored(f"{label}.fbx", axes, unit, root=True)
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    rig = HierarchyData.load_fbx(path, pose="bind")
+
+                self.assertEqual([str(warning.message) for warning in caught], [])
+                want = dict(self.file_worlds(path), **{key: bind[key] for key in ("hip", "knee", "ankle", "loc")})
+                self.assertWorlds(rig, self.loaded(want, factor, axes))
+
+                # the premise: the file's bind pose lists the scene root
+                poses, top = self.file_poses(path)
+                self.assertEqual(poses, {"bindPose1": [top, "hip", "knee"]})
+                self.assertNotIn(top, rig.name)
+
+    def test_a_pose_that_is_no_bind_pose_is_not_read(self):
+        """its hip, at the knee's bind, neither moves the hip nor warns"""
+        path, bind = self.authored(other_pose=True)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            rig = HierarchyData.load_fbx(path, pose="bind")
+
+        self.assertEqual([str(warning.message) for warning in caught], [])
+        self.assertTrue(np.allclose(rig["hip"].world_matrix, bind["hip"], rtol=0.0, atol=1e-9))
+
+    def test_a_file_with_no_bind_pose_raises(self):
+        for label, options in (("no pose", {}), ("another pose alone", {"other_pose": True})):
+            with self.subTest(label):
+                path, _ = self.authored(f"{label}.fbx", listed=(), **options)
+
+                with self.assertRaises(ValueError) as caught:
+                    HierarchyData.load_fbx(path, pose="bind")
+                self.assertIn("holds no bind pose that lists a node the read keeps", str(caught.exception))
+                self.assertIn("pose='node'", str(caught.exception))
+                self.assertEqual(len(HierarchyData.load_fbx(path)), 5)
+
+    def test_an_unknown_pose_is_refused(self):
+        path, _ = self.authored()
+
+        for value in ("Bind", "rest", None, True, 1):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as caught:
+                    HierarchyData.load_fbx(path, pose=value)
+                self.assertIn("'node' or 'bind'", str(caught.exception))
+
+
+class TestFbxBindComposition(unittest.TestCase):
+    """the write behind pose="bind", on the matrices handed to it: parents
+    first, a local matrix composed with the parent's world. No file carries
+    a local bind matrix (the sdk's writer drops the flag), so this is where
+    that case is held"""
+
+    TURN = TestFbxBindPose.TURN
+
+    @staticmethod
+    def rig():
+        """a hip and a knee, the child listed first, so the write has to
+        order them"""
+        hip, knee = hierarchy.generate_uuid(), hierarchy.generate_uuid()
+        return HierarchyData(
+            [
+                TransformData(
+                    "knee",
+                    node_type   = "joint",
+                    uuid        = knee,
+                    parent_uuid = hip,
+                    translate   = [0.0, -4.0, 0.5],
+                    rotate      = [-30.0, 5.0, 0.0],
+                ),
+                TransformData(
+                    "hip",
+                    node_type    = "joint",
+                    uuid         = hip,
+                    translate    = [1.0, 2.0, 3.0],
+                    rotate       = [10.0, 20.0, 30.0],
+                    joint_orient = [5.0, -15.0, 25.0],
+                    rotate_order = 2,
+                ),
+            ]
+        )
+
+    @staticmethod
+    def matrix(degrees, translate):
+        out        = euler_to_matrix(np.radians([degrees]), np.zeros(1, dtype=int))[0]
+        out[3, :3] = translate
+        return out
+
+    def test_world_matrices_go_on_parents_first(self):
+        turn         = np.eye(4)
+        turn[:3, :3] = self.TURN
+        for label, given, applied in (("turned", self.TURN, turn), ("as is", None, np.eye(4))):
+            with self.subTest(label):
+                rig   = self.rig()
+                hip   = self.matrix([40.0, -10.0, 55.0], [2.0, 3.0, 4.0])
+                knee  = self.matrix([0.0, 0.0, 70.0], [2.0, -1.0, 5.0])
+                binds = {rig["hip"].uuid: (hip, False), rig["knee"].uuid: (knee, False)}
+
+                hierarchy.hierarchy._fbx_pose_binds(rig, binds, given)
+
+                self.assertTrue(np.allclose(rig["hip"].world_matrix, hip @ applied, rtol=0.0, atol=1e-12))
+                self.assertTrue(np.allclose(rig["knee"].world_matrix, knee @ applied, rtol=0.0, atol=1e-12))
+                self.assertTrue(np.array_equal(rig["hip"].joint_orient, [5.0, -15.0, 25.0]))
+                self.assertEqual(rig["hip"].rotate_order, 2)
+
+    def test_a_local_matrix_composes_with_the_parent(self):
+        rig   = self.rig()
+        hip   = self.matrix([40.0, -10.0, 55.0], [2.0, 3.0, 4.0])
+        knee  = self.matrix([0.0, 0.0, 70.0], [0.0, -4.0, 0.0])
+        binds = {rig["hip"].uuid: (hip, False), rig["knee"].uuid: (knee, True)}
+
+        hierarchy.hierarchy._fbx_pose_binds(rig, binds, self.TURN)
+
+        self.assertTrue(np.allclose(rig["knee"].world_matrix, knee @ rig["hip"].world_matrix, rtol=0.0, atol=1e-12))
+        self.assertTrue(np.allclose(rig["knee"].matrix, knee, rtol=0.0, atol=1e-12))
+
+        # a root's local matrix is its world, turned as every world is
+        rig          = self.rig()
+        turn         = np.eye(4)
+        turn[:3, :3] = self.TURN
+        hierarchy.hierarchy._fbx_pose_binds(rig, {rig["hip"].uuid: (hip, True)}, self.TURN)
+        self.assertTrue(np.allclose(rig["hip"].world_matrix, hip @ turn, rtol=0.0, atol=1e-12))
 
 
 @unittest.skipIf(FBX is None, "fbx sdk is not installed")

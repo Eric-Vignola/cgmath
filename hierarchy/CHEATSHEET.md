@@ -1728,7 +1728,7 @@ loader's, where:
 | Loader | Signature |
 |---|---|
 | `TransformList.load` | `(filename, mode=None)` — `mode` in `"gltf" / "glb" / "fbx" / "json" / "npz" / "pkl"` |
-| `TransformList.load_fbx` | `(filename, scale_factor=None, axis_system="maya_y_up")` |
+| `TransformList.load_fbx` | `(filename, scale_factor=None, axis_system="maya_y_up", pose="node")` |
 | `TransformList.load_glb` | `(filename, scale_factor=100.0, pose_frame=None)` |
 | `ClipData.load_fbx` | `(filename, scale_factor=None, take=None, fps=None, start_frame=None, end_frame=None, axis_system="maya_y_up")` |
 | `ClipData.load_glb` | `(filename, scale_factor=100.0, animation=0, fps=24.0, start_frame=0)` |
@@ -1827,6 +1827,21 @@ raises `ValueError`, since a rotation can't turn it into Maya's axes.
 the `load_fbx` defaults and takes no `axis_system`, so a left-handed file
 reads through `load_fbx(..., axis_system=None)` alone. Which way the
 character faces stays as the file has it.
+
+`HierarchyData.load_fbx(..., pose="bind")` reads a skinned file's bind
+pose rather than its node values, which hold whatever pose the scene was
+in at export. Every node the read keeps that a bind pose (an `FbxPose`
+whose `IsBindPose()` is true) lists takes that pose's matrix as its world
+matrix, in cm and Maya's axes as above; a node no bind pose lists keeps
+its own values under its parent, so it follows the parent's bind. The
+worlds are written parents first, each solved into scale, rotate (in the
+node's rotate order) and translate, the joint orient and rotate axis
+kept, and a node its bind leaves where it is keeps its own numbers: a
+file at its bind pose reads the same either way. When two bind poses
+list one node the first wins, with a warning naming the node when a
+later one is more than 1e-6 off it. A file with no bind pose listing a
+node the read keeps raises `ValueError`. `pose="node"`, the default,
+reads the node values.
 
 For `load_glb`, `scale_factor` converts units (glTF is metres, so `100.0`
 gives centimetres); `pose_frame` reads one frame of the file's animation

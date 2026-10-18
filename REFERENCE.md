@@ -490,7 +490,7 @@ index(self, obj, start=0, stop=None) -> 'int'
     The position of a node, given as the node, its uuid or its name,
 insert(self, index: 'int', node: "'TransformData'") -> 'None'
     S.insert(index, value) -- insert value before index
-classmethod load_fbx(cls, filename: 'str', scale_factor: 'Optional[float]' = None, axis_system: 'Optional[str]' = 'maya_y_up')
+classmethod load_fbx(cls, filename: 'str', scale_factor: 'Optional[float]' = None, axis_system: 'Optional[str]' = 'maya_y_up', pose: 'str' = 'node')
     primitive fbx joint loader
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, pose_frame: 'None | int' = None)
     primitive glb joint loader that supports style2 and momentum glbs
@@ -527,7 +527,7 @@ generate_uuid() -> 'str'
     generates a new unique uuid
 load(filename: 'str', mode: 'Optional[str]' = None) -> "'HierarchyData'"
     Whatever hierarchy the file holds, read as ``mode`` says or as the file
-load_fbx(filename: 'str', scale_factor: 'Optional[float]' = None, axis_system: 'Optional[str]' = 'maya_y_up') -> "'HierarchyData'"
+load_fbx(filename: 'str', scale_factor: 'Optional[float]' = None, axis_system: 'Optional[str]' = 'maya_y_up', pose: 'str' = 'node') -> "'HierarchyData'"
     The fbx's node hierarchy, names as in the file: ``HierarchyData.load_fbx()``.
 load_glb(filename: 'str', scale_factor: 'float' = 100.0, pose_frame: 'Optional[int]' = None) -> "'HierarchyData'"
     The glb's joint hierarchy, names as in the file: ``HierarchyData.load_glb()``.

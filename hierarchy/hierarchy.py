@@ -2808,6 +2808,94 @@ def _fbx_turn_walk(hierarchy_data: dict, turn) -> None:
             data["joint_orient"] = joint_orient[0, i]
 
 
+def _fbx_check_pose(pose) -> None:
+    """refuses a ``pose`` HierarchyData.load_fbx doesn't know"""
+    if not (isinstance(pose, str) and pose in ("node", "bind")):
+        raise ValueError(f"pose must be 'node' or 'bind', got {pose!r}")
+
+
+# two bind poses that list one node agree on it when their matrices are this
+# close: one export writes both from one scene state
+_FBX_BIND_AGREE = 1e-6
+
+
+def _fbx_bind_matrices(scene, nodes: dict, scale_factor: float, filename) -> dict:
+    """``{uuid: (matrix, local)}`` of each node :func:`_walk_fbx` kept
+    (``nodes``, its uuid to ``FbxNode``) that a bind pose lists: the pose's
+    (4, 4) matrix, row vectors, its translation times ``scale_factor``, and
+    whether the pose holds it local to the parent rather than as the world
+
+    A bind pose is an ``FbxPose`` whose ``IsBindPose()`` is true. When two
+    list one node the first wins, and a later one more than
+    :data:`_FBX_BIND_AGREE` off it, in the loaded unit, warns, naming the
+    node. Raises ValueError when no bind pose lists a node the read keeps.
+    """
+    kept  = {node.GetUniqueID(): uuid for uuid, node in nodes.items()}
+    found = {}  # uuid: (matrix, local, the pose's name)
+    for index in range(scene.GetPoseCount()):
+        pose = typed(scene.GetPose(index), FBX.FbxPose, FBX)
+        if not pose.IsBindPose():
+            continue
+
+        for k in range(pose.GetCount()):
+            node = typed(pose.GetNode(k), FBX.FbxNode, FBX)
+            uuid = None if node is None else kept.get(node.GetUniqueID())
+            if uuid is None:
+                continue
+
+            source = pose.GetMatrix(k)
+            matrix = np.array([[source.Get(r, c) for c in range(4)] for r in range(4)])
+            matrix[3, :3] *= scale_factor
+            local = bool(pose.IsLocalMatrix(k))
+            if uuid not in found:
+                found[uuid] = (matrix, local, pose.GetName())
+                continue
+
+            # a local matrix and a world one can't be held side by side
+            first, held, name = found[uuid]
+            gap = float(np.abs(matrix - first).max())
+            if local == held and gap > _FBX_BIND_AGREE:
+                warnings.warn(
+                    f"{filename!r}: bind poses {name!r} and {pose.GetName()!r} disagree on "
+                    f"{node.GetName()!r} by {gap:.3g}; the first, {name!r}, is read"
+                )
+
+    if not found:
+        raise ValueError(
+            f"{filename!r} holds no bind pose that lists a node the read keeps; "
+            "pose='node' reads the nodes' own values"
+        )
+    return {uuid: (matrix, local) for uuid, (matrix, local, _) in found.items()}
+
+
+def _fbx_pose_binds(rig, binds: dict, turn) -> None:
+    """puts each node of ``rig`` that ``binds`` lists (:func:`_fbx_bind_matrices`)
+    at its bind matrix, in place
+
+    The matrix is the node's world in the file, times ``turn``, as the read
+    turns every world; one the pose holds local to the parent is composed
+    with the parent's world, as the read gives it, or with ``turn`` on a
+    root. The world matrices are written parents first, so a node no bind
+    pose lists keeps its own values under its parent's bind. Each write
+    solves scale, rotate (in the node's rotate order) and translate, the
+    rotate axis and joint orient kept; a node the matrix leaves where it
+    is keeps its own values.
+    """
+    K = np.eye(4)
+    if turn is not None:
+        K[:3, :3] = turn
+
+    for index in rig._parent_first():
+        node  = rig.list[index]
+        entry = binds.get(node.uuid)
+        if entry is None:
+            continue
+
+        matrix, local = entry
+        parent            = node.get_parent() if local else None
+        node.world_matrix = matrix @ (K if parent is None else parent.world_matrix)
+
+
 def _fbx_frame_rate(mode) -> float:
     """frames per second for a time mode, or 0.0 if the sdk cannot say"""
     rate = float(FBX.FbxTime.GetFrameRate(mode))
@@ -4259,6 +4347,7 @@ class TransformList(DataList):
         filename:     str,
         scale_factor: Optional[float] = None,
         axis_system:  Optional[str]   = "maya_y_up",
+        pose:         str             = "node",
     ):
         """primitive fbx joint loader
 
@@ -4294,6 +4383,27 @@ class TransformList(DataList):
         it into Maya's axes. ``axis_system=None`` keeps the file's own axes.
         Which way the character faces is left as the file has it.
 
+        ``pose`` "node", the default, reads the nodes' own values. "bind"
+        reads the skin bind pose a skinned file stores, which the node
+        values can differ from: they hold whatever pose the scene was in at
+        export. Every node the read keeps that a bind pose (an ``FbxPose``
+        whose ``IsBindPose()`` is true) lists takes that pose's matrix as its
+        world matrix, in the unit and the axes above; a node no bind pose
+        lists keeps its own values under its parent, so it follows the
+        parent's bind. The world matrices are written parents first, each
+        solved into scale, rotate (in the node's rotate order) and
+        translate, the joint orient and rotate axis kept, and a node its
+        bind leaves where it is keeps its own values: a file at its bind
+        pose reads the same either way. A pose's matrices are world
+        matrices, but for one the pose holds local to the parent
+        (``IsLocalMatrix``), which is composed with the parent's world as
+        the read gives it. When two bind poses list one node the first wins,
+        and a later one more than 1e-6 off it warns, naming the node. A file
+        with no bind pose listing a node the read keeps raises ValueError.
+        ``TransformList.load_fbx``, whose nodes no rig owns, solves each
+        one's channels under its parent all the same, so a ``HierarchyData``
+        of them reads at the bind ``HierarchyData.load_fbx`` gives.
+
         User defined attributes come back as the specs save_fbx wrote; those
         of a file from Maya's own FBX plugin, the way its importer reads them.
         One whose name, string or enum field is not UTF-8, which the fbx
@@ -4304,16 +4414,29 @@ class TransformList(DataList):
         if FBX is None:
             raise ImportError("fbx module not found")
         _fbx_check_axis_system(axis_system)
+        _fbx_check_pose(pose)
 
         with open_fbx(filename, FBX) as scene:
-            turn = _fbx_axis_turn(scene, axis_system, filename)
-            hierarchy_data, _ = _walk_fbx(scene, _fbx_scale_factor(scene, scale_factor))
+            turn   = _fbx_axis_turn(scene, axis_system, filename)
+            factor = _fbx_scale_factor(scene, scale_factor)
+            hierarchy_data, nodes = _walk_fbx(scene, factor)
+            binds = _fbx_bind_matrices(scene, nodes, factor, filename) if pose == "bind" else None
 
         if turn is not None:
             _fbx_turn_walk(hierarchy_data, turn)
 
         # build the TransformList
-        return cls.from_dict(hierarchy_data)
+        if binds is None:
+            return cls.from_dict(hierarchy_data)
+
+        # a bind is a world matrix, solved under the node's parent, which a
+        # view's nodes, owned by no rig, can't find: they are posed in a rig
+        # that owns them, and the view holds copies, owned by none as a read
+        # gives them
+        owns = issubclass(cls, HierarchyData)
+        rig  = (cls if owns else HierarchyData).from_dict(hierarchy_data)
+        _fbx_pose_binds(rig, binds, turn)
+        return rig if owns else cls(node.copy() for node in rig)
 
     def save_fbx(self, filename, zero_root=False, as_ascii=False):
         """saves the data to a .fbx file, binary unless as_ascii is set
@@ -10491,9 +10614,10 @@ def load_fbx(
     filename:     str,
     scale_factor: Optional[float] = None,
     axis_system:  Optional[str]   = "maya_y_up",
+    pose:         str             = "node",
 ) -> "HierarchyData":
     """The fbx's node hierarchy, names as in the file: ``HierarchyData.load_fbx()``."""
-    return HierarchyData.load_fbx(filename, scale_factor, axis_system)
+    return HierarchyData.load_fbx(filename, scale_factor, axis_system, pose)
 
 
 def load_glb(
