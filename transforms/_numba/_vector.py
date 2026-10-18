@@ -1,7 +1,46 @@
-from math import acos, sin
+from math import acos, atan2, cos, sin, sqrt
 
 import numpy as np
 from numba import njit, prange
+
+ROUNDING = 2.0**-50
+"""A perpendicular this short is rounding: the two directions it was taken
+from are opposite to within a few ulps, and give it no direction."""
+
+SQUARES_LOW = 2.0**-968
+"""A sum of squares from this up kept every bit: below it, the squares of
+the smaller components can have lost bits as subnormals."""
+
+SQUARES_HIGH = np.finfo(np.float64).max
+"""A sum of squares above this overflowed, or had an inf or a nan in it."""
+
+
+@njit(cache=True, error_model="numpy")
+def _unit3(x, y, z):
+    """The length of ``(x, y, z)`` and the three scaled to unit length.
+
+    A vector under about 1e-146 or over about 1e154 long is first divided
+    by its largest component, so that the squares neither lose bits nor
+    overflow. A zero vector has a length of 0 and comes back as it is; a
+    nan or an inf in it makes all four nan.
+    """
+    squares = x * x + y * y + z * z
+    if not (SQUARES_LOW <= squares <= SQUARES_HIGH):
+        m = max(max(abs(x), abs(y)), abs(z))
+        if m == 0.0 and squares == 0.0:
+            return 0.0, x, y, z
+
+        x       = x / m
+        y       = y / m
+        z       = z / m
+        squares = x * x + y * y + z * z
+        n       = sqrt(squares)
+        r       = 1.0 / n
+        return m * n, x * r, y * r, z * r
+
+    n = sqrt(squares)
+    r = 1.0 / n
+    return n, x * r, y * r, z * r
 
 
 @njit(parallel=True, cache=True)
@@ -9,10 +48,9 @@ def _vector_arc(vector0, vector1):
     angle = np.empty(vector0.shape[0], dtype=vector0.dtype)
 
     for i in prange(vector0.shape[0]):
-        # a zero vector stays zero, a right angle from anything, as in
-        # _vector_slerp. scratch arrays from np.empty handed it whatever
-        # vector was last normalised in them, a different one on one thread
-        # and on many
+        # a zero vector stays zero, a right angle from anything. scratch
+        # arrays from np.empty handed it whatever vector was last normalised
+        # in them, a different one on one thread and on many
         X0, Y0, Z0 = 0.0, 0.0, 0.0
         X1, Y1, Z1 = 0.0, 0.0, 0.0
 
@@ -41,39 +79,151 @@ def _vector_arc(vector0, vector1):
 
 @njit(parallel=True, cache=True)
 def _vector_slerp(vector0, vector1, weight):
+    """Spherical interpolation between two lists of vectors.
+
+    ``(vector0 * sin((1 - weight) * angle) + vector1 * sin(weight * angle))
+    / sin(angle)``, ``angle`` the one between the two, on the vectors as
+    given: whatever their lengths, the direction goes from ``vector0``'s to
+    ``vector1``'s along the great arc between them, and between two of one
+    length it turns at a steady rate and keeps the length.
+
+    The arc is found as in ``_quaternion_slerp``, from the difference and
+    the sum of the two directions, which keep every digit of nearly
+    parallel and nearly opposite vectors, and ``sin(angle)`` with them. The
+    sum is taken from the shorter vector: its length along ``vector0``'s
+    direction turned by ``weight * angle``, plus what is left of the
+    longer one's term, ``(|vector1| - |vector0|) * sin(weight * angle) /
+    sin(angle)`` along ``vector1``'s direction, or the same of ``vector0``
+    with ``1 - weight``. That is the formula's vector, with nothing in it
+    to cancel: not its two terms as the vectors near opposite, nor the
+    longer length against itself.
+
+    A weight of 0 or 1 returns ``vector0`` or ``vector1`` exactly. Parallel
+    vectors lerp, the formula's limit. Vectors of different lengths
+    nearly opposite grow as ``1 / (pi - angle)``, as the formula does.
+    Vectors opposite to within rounding have no plane to turn in, and the
+    formula no answer: the direction turns toward the world axis along
+    ``vector0``'s smallest component, the first of a tie, and the length
+    goes linearly from one's to the other's -- between two of one length,
+    the formula's limit. A zero vector has no direction: the result is
+    ``vector0 + weight * (vector1 - vector0)``. Between the ends, a nan or
+    an inf component gives nans.
+    """
     v = np.empty((vector0.shape[0], 3), dtype=vector0.dtype)
 
     for i in prange(vector0.shape[0]):
-        X0, Y0, Z0 = 0.0, 0.0, 0.0
-        X1, Y1, Z1 = 0.0, 0.0, 0.0
+        t = weight[i]
 
-        m = (vector0[i, 0] ** 2.0 + vector0[i, 1] ** 2.0 + vector0[i, 2] ** 2) ** 0.5
-        if m > 0.0:
-            X0 = vector0[i, 0] / m
-            Y0 = vector0[i, 1] / m
-            Z0 = vector0[i, 2] / m
+        m0, X0, Y0, Z0 = _unit3(vector0[i, 0], vector0[i, 1], vector0[i, 2])
+        m1, X1, Y1, Z1 = _unit3(vector1[i, 0], vector1[i, 1], vector1[i, 2])
 
-        m = (vector1[i, 0] ** 2.0 + vector1[i, 1] ** 2.0 + vector1[i, 2] ** 2.0) ** 0.5
-        if m > 0.0:
-            X1 = vector1[i, 0] / m
-            Y1 = vector1[i, 1] / m
-            Z1 = vector1[i, 2] / m
-
-        dot    = (X0 * X1) + (Y0 * Y1) + (Z0 * Z1)
-        angle  = acos(dot)
-        sangle = sin(angle)
-
-        if sangle > 0.0:
-            w0 = sin((1.0 - weight[i]) * angle)
-            w1 = sin(weight[i] * angle)
-
-            v[i, 0] = (vector0[i, 0] * w0 + vector1[i, 0] * w1) / sangle
-            v[i, 1] = (vector0[i, 1] * w0 + vector1[i, 1] * w1) / sangle
-            v[i, 2] = (vector0[i, 2] * w0 + vector1[i, 2] * w1) / sangle
-        else:
+        if t == 0.0:
             v[i, 0] = vector0[i, 0]
             v[i, 1] = vector0[i, 1]
             v[i, 2] = vector0[i, 2]
+
+        elif t == 1.0:
+            v[i, 0] = vector1[i, 0]
+            v[i, 1] = vector1[i, 1]
+            v[i, 2] = vector1[i, 2]
+
+        elif m0 == 0.0 or m1 == 0.0:
+            v[i, 0] = vector0[i, 0] + t * (vector1[i, 0] - vector0[i, 0])
+            v[i, 1] = vector0[i, 1] + t * (vector1[i, 1] - vector0[i, 1])
+            v[i, 2] = vector0[i, 2] + t * (vector1[i, 2] - vector0[i, 2])
+
+        else:
+            # the angle between the two from their difference and their sum
+            dx    = X1 - X0
+            dy    = Y1 - Y0
+            dz    = Z1 - Z0
+            sx    = X1 + X0
+            sy    = Y1 + Y0
+            sz    = Z1 + Z0
+            dn    = sqrt(dx * dx + dy * dy + dz * dz)
+            sn    = sqrt(sx * sx + sy * sy + sz * sz)
+            angle = 2.0 * atan2(dn, sn)
+
+            # the second direction's part perpendicular to the first, from
+            # the shorter of the two
+            near = dn <= sn
+            if near:
+                dot = X0 * dx + Y0 * dy + Z0 * dz
+                px  = dx - dot * X0
+                py  = dy - dot * Y0
+                pz  = dz - dot * Z0
+            else:
+                dot = X0 * sx + Y0 * sy + Z0 * sz
+                px  = sx - dot * X0
+                py  = sy - dot * Y0
+                pz  = sz - dot * Z0
+            pn = sqrt(px * px + py * py + pz * pz)
+
+            opposite = not near and pn <= ROUNDING
+            if opposite:
+                # the world axis along the smallest component, less its
+                # part along the first direction
+                ex, ey, ez = 0.0, 0.0, 0.0
+                if abs(X0) <= abs(Y0) and abs(X0) <= abs(Z0):
+                    ex = 1.0
+                elif abs(Y0) <= abs(Z0):
+                    ey = 1.0
+                else:
+                    ez = 1.0
+                dot = X0 * ex + Y0 * ey + Z0 * ez
+                px  = ex - dot * X0
+                py  = ey - dot * Y0
+                pz  = ez - dot * Z0
+                pn  = sqrt(px * px + py * py + pz * pz)
+
+            if pn > 0.0:
+                a = cos(t * angle)
+                b = sin(t * angle) / pn
+            else:
+                a = 1.0
+                b = 0.0
+
+            # the first direction turned by t * angle: unit to an ulp
+            # already, the normalisation is a guard
+            x = a * X0 + b * px
+            y = a * Y0 + b * py
+            z = a * Z0 + b * pz
+            r = 1.0 / sqrt(x * x + y * y + z * z)
+
+            if opposite:
+                # no plane, and no answer from the formula: the length
+                # lerps
+                r       = r * (m0 + t * (m1 - m0))
+                v[i, 0] = x * r
+                v[i, 1] = y * r
+                v[i, 2] = z * r
+
+            else:
+                # sin(angle), from the difference and the sum: 0 between
+                # parallel vectors, where the formula's limit is the lerp
+                sine = 2.0 * dn * sn / (dn * dn + sn * sn)
+
+                # the formula from the shorter of the two: its length
+                # along the turned direction, plus the rest of the
+                # other's term, with nothing to cancel
+                if m0 <= m1:
+                    share = t
+                    if sine > 0.0:
+                        share = sin(t * angle) / sine
+                    share   = share * (m1 - m0)
+                    r       = r * m0
+                    v[i, 0] = x * r + share * X1
+                    v[i, 1] = y * r + share * Y1
+                    v[i, 2] = z * r + share * Z1
+                else:
+                    share = 1.0 - t
+                    if sine > 0.0:
+                        share = sin((1.0 - t) * angle) / sine
+                    share   = share * (m0 - m1)
+                    r       = r * m1
+                    v[i, 0] = x * r + share * X0
+                    v[i, 1] = y * r + share * Y0
+                    v[i, 2] = z * r + share * Z0
 
     return v
 

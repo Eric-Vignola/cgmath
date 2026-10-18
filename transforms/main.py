@@ -73,6 +73,15 @@ X = 0
 Y = 1
 Z = 2
 
+# a dot product from _TINY to _HUGE kept its sign: outside, its products
+# can have underflowed or overflowed. Of two quaternions whose largest
+# components multiply to _ROUNDED or more, the products that underflowed
+# moved it by under 2^-113 of that: under _TINY it is then a tie to within
+# rounding, its sign as good as any taken again
+_TINY    = np.finfo(np.float64).tiny
+_HUGE    = np.finfo(np.float64).max
+_ROUNDED = 2.0**-960
+
 
 # ===========================================================================
 # QUATERNION
@@ -85,11 +94,25 @@ def quaternion_slerp(quat0, quat1, weight=0.5, shortest=True):
     Mirrors the legacy ``quaternion.slerp``.
     Backed by ``_quaternion_slerp``.
 
+    The arc's angle comes from the difference and the sum of the two
+    quaternions, not the ``acos`` of their dot product, so nearly parallel
+    ones keep their precision. Both are normalised first, 1e-300 to 1e300
+    long. A weight of 0 or 1 returns ``quat0`` or ``quat1`` exactly
+    (``quat1`` negated where the arc asked for needs it), any other weight
+    a unit quaternion. A zero quaternion has no rotation to normalise, nor
+    an arc to pick: between the ends the result is
+    ``quat0 + weight * (quat1 - quat0)``. Between the ends, a nan or an inf
+    component gives nans; at weight 0 or 1 the end comes back as given,
+    even when the other quaternion holds it.
+
     Args:
         quat0: ``(qi, qj, qk, qw)`` or stack ``(N, 4)``. weight=0 endpoint.
         quat1: ``(qi, qj, qk, qw)`` or stack ``(N, 4)``. weight=1 endpoint.
         weight: scalar or ``(N,)`` blend weights in ``[0, 1]``.
-        shortest: take the shortest arc when ``True`` (default).
+        shortest: take the shortest arc when ``True`` (default). ``False``
+            takes the other one, which between two quaternions of one
+            rotation has no axis to turn about: the result stays at
+            ``quat0``.
 
     Returns:
         ``(N, 4)`` interpolated quaternions.
@@ -103,6 +126,28 @@ def quaternion_slerp(quat0, quat1, weight=0.5, shortest=True):
     quat0, quat1, weight = _match_depth(quat0, quat1, weight)
 
     dot = np.einsum("...i,...i", quat0, quat1)
+
+    # quaternions whose lengths multiply to under about 1e-308 or over about
+    # 1e308 can leave the dot product underflowed or overflowed, its sign
+    # lost: where it is not finite, or under _TINY from two whose largest
+    # components multiply to under _ROUNDED, it is taken again from the two
+    # divided by their largest components. Under _TINY from longer ones it
+    # is kept: both arcs are as long to within rounding, and taken again
+    # its sign would be the rounding of another sum. A zero quaternion, a
+    # nan or an inf has no arc to pick: its dot product comes back nan, and
+    # quat1 stays as given
+    size = np.abs(dot)
+    if size.size and not (size.min() >= _TINY and size.max() <= _HUGE):
+        odd  = ~((size >= _TINY) & (size <= _HUGE))
+        big0 = np.abs(quat0[odd]).max(axis=-1)
+        big1 = np.abs(quat1[odd]).max(axis=-1)
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            a     = quat0[odd] / big0[:, None]
+            b     = quat1[odd] / big1[:, None]
+            again = np.einsum("...i,...i", a, b)
+            kept  = np.isfinite(dot[odd]) & (big0 * big1 >= _ROUNDED)
+        dot[odd] = np.where(kept, dot[odd], again)
+
     if shortest:
         sign = dot < 0.0
     else:
@@ -1024,7 +1069,42 @@ def vector_normalize(vector):
 def vector_slerp(vector0, vector1, weight=0.5):
     """Spherical interpolation between two lists of vectors.
 
-    Backed by ``_vector_slerp``.
+    ``(vector0 * sin((1 - weight) * angle) + vector1 * sin(weight * angle))
+    / sin(angle)``, ``angle`` the one between the two, on the vectors as
+    given. The direction goes from ``vector0``'s to ``vector1``'s along the
+    great arc between them. Between two of one length it turns at a steady
+    rate and keeps the length; between two of different lengths it does
+    neither: ``(0, 0, -5)`` to ``(10, 0, 0)`` half way is
+    ``(7.07, 0, -3.54)``. Backed by ``_vector_slerp``.
+
+    * A weight of 0 or 1 returns ``vector0`` or ``vector1`` exactly.
+    * Parallel vectors lerp, the formula's limit, and nearly parallel ones
+      turn by an angle as precise as their own.
+    * Nearly opposite vectors of one length turn along their arc. Of
+      different lengths they grow as ``1 / (pi - angle)``, as the formula
+      does: ``(1, 0, 0)`` to ``(-2, 1e-6, 0)`` half way is
+      ``(-2e6, 2, 0)``.
+    * Opposite vectors have no plane to turn in, and the formula no
+      answer: the direction turns toward the world axis along
+      ``vector0``'s smallest component, the first of a tie -- through +Y
+      from +X or -X, through +X from +-Y and +-Z -- and the length goes
+      linearly from one's to the other's, the formula's limit between two
+      of one length. Nearly opposite ones turn in their own plane, so the
+      result jumps as a pair passes through opposite, as any choice of
+      plane would.
+    * A zero vector has no direction: the result is
+      ``vector0 + weight * (vector1 - vector0)``.
+    * Vectors 1e-300 to 1e300 long. Between the ends, a nan or an inf
+      component gives nans; at weight 0 or 1 the end comes back as given,
+      even when the other vector holds it.
+
+    Args:
+        vector0: ``(x, y, z)`` or stack ``(N, 3)``. weight=0 endpoint.
+        vector1: ``(x, y, z)`` or stack ``(N, 3)``. weight=1 endpoint.
+        weight: scalar or ``(N,)`` blend weights in ``[0, 1]``.
+
+    Returns:
+        ``(N, 3)`` interpolated vectors.
     """
     from cgmath.transforms._numba._vector import _vector_slerp
 

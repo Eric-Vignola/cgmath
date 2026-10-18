@@ -1,50 +1,149 @@
-from math import acos, atan2, cos, sin
+from math import atan2, cos, sin, sqrt
 
 import numpy as np
 from numba import njit, prange
 
-EPSILON = np.finfo(np.float32).eps
+EPSILON  = np.finfo(np.float32).eps
+
+ROUNDING = 2.0**-50
+"""A perpendicular this short is rounding: the two unit quaternions it was
+taken from are opposite to within a few ulps, and give it no direction."""
+
+SQUARES_LOW = 2.0**-968
+"""A sum of squares from this up kept every bit: below it, the squares of
+the smaller components can have lost bits as subnormals."""
+
+SQUARES_HIGH = np.finfo(np.float64).max
+"""A sum of squares above this overflowed, or had an inf or a nan in it."""
+
+
+@njit(cache=True, error_model="numpy")
+def _unit4(x, y, z, w):
+    """The length of ``(x, y, z, w)`` and the four scaled to unit length.
+
+    A quaternion under about 1e-146 or over about 1e154 long is first
+    divided by its largest component, so that the squares neither lose
+    bits nor overflow. A zero quaternion has a length of 0 and comes back
+    as it is; a nan or an inf in it makes all five nan.
+    """
+    squares = x * x + y * y + z * z + w * w
+    if not (SQUARES_LOW <= squares <= SQUARES_HIGH):
+        m = max(max(abs(x), abs(y)), max(abs(z), abs(w)))
+        if m == 0.0 and squares == 0.0:
+            return 0.0, x, y, z, w
+
+        x       = x / m
+        y       = y / m
+        z       = z / m
+        w       = w / m
+        squares = x * x + y * y + z * z + w * w
+        n       = sqrt(squares)
+        r       = 1.0 / n
+        return m * n, x * r, y * r, z * r, w * r
+
+    n = sqrt(squares)
+    r = 1.0 / n
+    return n, x * r, y * r, z * r, w * r
 
 
 @njit(parallel=True, cache=True)
 def _quaternion_slerp(quat0, quat1, weight):
-    """Calculates spherical interpolation between two lists quaternions"""
+    """Spherical linear interpolation between two lists of quaternions.
+
+    Turns ``quat0`` toward ``quat1`` along the great arc between them, as
+    given: picking the shorter arc, by negating ``quat1``, is the caller's.
+
+    The arc's angle is ``2 * atan2(|q1 - q0|, |q1 + q0|)``, and ``q0`` turns
+    toward ``q1``'s part perpendicular to it, taken from the difference of
+    the two within a right angle and from their sum past one: the
+    difference keeps every digit of nearly parallel quaternions, the sum of
+    nearly opposite ones. The ``acos`` of their dot product, divided by
+    ``sqrt(1 - dot ** 2)``, lost half the digits of a small angle.
+
+    Both quaternions are normalised first, so the angle is the one between
+    their rotations whatever their lengths, 1e-300 to 1e300. A weight of 0
+    or 1 returns ``quat0`` or ``quat1`` exactly, any other weight a unit
+    quaternion. Quaternions opposite to within rounding -- one rotation,
+    asked to go the long way round -- give no axis to turn about: the
+    result stays at ``quat0``. A zero quaternion has no rotation to
+    normalise: the result is ``quat0 + weight * (quat1 - quat0)``. Between
+    the ends, a nan or an inf component gives nans.
+    """
     quat = np.empty((quat0.shape[0], 4), dtype=quat0.dtype)
 
     for i in prange(quat0.shape[0]):
-        cosHalfTheta = (
-            quat0[i, 3] * quat1[i, 3]
-            + quat0[i, 0] * quat1[i, 0]
-            + quat0[i, 1] * quat1[i, 1]
-            + quat0[i, 2] * quat1[i, 2]
-        )
+        t = weight[i]
 
-        if abs(cosHalfTheta) >= 1.0:
-            quat[i, 0], quat[i, 1], quat[i, 2], quat[i, 3] = (
-                quat0[i, 0],
-                quat0[i, 1],
-                quat0[i, 2],
-                quat0[i, 3],
-            )
+        n0, x0, y0, z0, w0 = _unit4(quat0[i, 0], quat0[i, 1], quat0[i, 2], quat0[i, 3])
+        n1, x1, y1, z1, w1 = _unit4(quat1[i, 0], quat1[i, 1], quat1[i, 2], quat1[i, 3])
+
+        if t == 0.0:
+            quat[i, 0] = quat0[i, 0]
+            quat[i, 1] = quat0[i, 1]
+            quat[i, 2] = quat0[i, 2]
+            quat[i, 3] = quat0[i, 3]
+
+        elif t == 1.0:
+            quat[i, 0] = quat1[i, 0]
+            quat[i, 1] = quat1[i, 1]
+            quat[i, 2] = quat1[i, 2]
+            quat[i, 3] = quat1[i, 3]
+
+        elif n0 == 0.0 or n1 == 0.0:
+            # a zero quaternion: no rotation to turn from or to
+            quat[i, 0] = quat0[i, 0] + t * (quat1[i, 0] - quat0[i, 0])
+            quat[i, 1] = quat0[i, 1] + t * (quat1[i, 1] - quat0[i, 1])
+            quat[i, 2] = quat0[i, 2] + t * (quat1[i, 2] - quat0[i, 2])
+            quat[i, 3] = quat0[i, 3] + t * (quat1[i, 3] - quat0[i, 3])
 
         else:
-            halfTheta    = acos(cosHalfTheta)
-            sinHalfTheta = (1.0 - cosHalfTheta * cosHalfTheta) ** 0.5
+            # the angle between the two from their difference and their sum
+            dx    = x1 - x0
+            dy    = y1 - y0
+            dz    = z1 - z0
+            dw    = w1 - w0
+            sx    = x1 + x0
+            sy    = y1 + y0
+            sz    = z1 + z0
+            sw    = w1 + w0
+            dn    = sqrt(dx * dx + dy * dy + dz * dz + dw * dw)
+            sn    = sqrt(sx * sx + sy * sy + sz * sz + sw * sw)
+            angle = 2.0 * atan2(dn, sn)
 
-            if abs(sinHalfTheta) < EPSILON:
-                quat[i, 0] = quat0[i, 0] * 0.5 + quat1[i, 0] * 0.5
-                quat[i, 1] = quat0[i, 1] * 0.5 + quat1[i, 1] * 0.5
-                quat[i, 2] = quat0[i, 2] * 0.5 + quat1[i, 2] * 0.5
-                quat[i, 3] = quat0[i, 3] * 0.5 + quat1[i, 3] * 0.5
-
+            # q1's part perpendicular to q0, from the shorter of the two
+            near = dn <= sn
+            if near:
+                dot = x0 * dx + y0 * dy + z0 * dz + w0 * dw
+                px  = dx - dot * x0
+                py  = dy - dot * y0
+                pz  = dz - dot * z0
+                pw  = dw - dot * w0
             else:
-                ratioA = sin((1 - weight[i]) * halfTheta) / sinHalfTheta
-                ratioB = sin(weight[i] * halfTheta) / sinHalfTheta
+                dot = x0 * sx + y0 * sy + z0 * sz + w0 * sw
+                px  = sx - dot * x0
+                py  = sy - dot * y0
+                pz  = sz - dot * z0
+                pw  = sw - dot * w0
+            pn = sqrt(px * px + py * py + pz * pz + pw * pw)
 
-                quat[i, 0] = quat0[i, 0] * ratioA + quat1[i, 0] * ratioB
-                quat[i, 1] = quat0[i, 1] * ratioA + quat1[i, 1] * ratioB
-                quat[i, 2] = quat0[i, 2] * ratioA + quat1[i, 2] * ratioB
-                quat[i, 3] = quat0[i, 3] * ratioA + quat1[i, 3] * ratioB
+            if pn > 0.0 and (near or pn > ROUNDING):
+                a = cos(t * angle)
+                b = sin(t * angle) / pn
+            else:
+                a = 1.0
+                b = 0.0
+
+            # unit to an ulp already: the normalisation is a guard
+            x = a * x0 + b * px
+            y = a * y0 + b * py
+            z = a * z0 + b * pz
+            w = a * w0 + b * pw
+            r = 1.0 / sqrt(x * x + y * y + z * z + w * w)
+
+            quat[i, 0] = x * r
+            quat[i, 1] = y * r
+            quat[i, 2] = z * r
+            quat[i, 3] = w * r
 
     return quat
 

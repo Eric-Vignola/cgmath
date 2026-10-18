@@ -361,6 +361,8 @@ q1 = quaternion_random(1, seed=2)
 print(quaternion_slerp(q0, q1, 0.25))
 print(quaternion_slerp(q0, q1, [0.0, 0.5, 1.0]).shape)  # (3, 4)
 print(quaternion_slerp(q0, q1, 0.5, shortest=False))    # long way round
+
+assert (quaternion_slerp(q0, q1, 0.0) == q0).all()      # weight 0 gives quat0 back exactly; weight 1 quat1, negated where the shorter arc needs it
 ```
 
 ---
@@ -625,6 +627,28 @@ import numpy as np
 from cgmath.transforms import vector_lerp
 
 print(vector_lerp([0.0, 0.0, 0.0], [np.nan, 1.0, 1.0], 0.5))         # [[0, 0.5, 0.5]]
+```
+
+`vector_slerp` is `(v0 * sin((1 - w) * angle) + v1 * sin(w * angle)) /
+sin(angle)` on the vectors as given. Between two of one length the
+direction turns at a steady rate and the length stays; between two of
+different lengths, neither. Parallel vectors lerp. Opposite ones have no
+plane to turn in: they turn toward the world axis along the first one's
+smallest component (+Y from +X or -X, +X from +-Y and +-Z) as the length
+lerps. A zero vector lerps:
+
+```python
+import numpy as np
+from cgmath.transforms import vector_slerp
+
+print(vector_slerp([0.0, 0.0, -5.0], [10.0, 0.0, 0.0], 0.5))  # [[7.07, 0, -3.54]]
+print(vector_slerp([1.0, 0.0, 0.0], [3.0, 0.0, 0.0], 0.5))    # [[2, 0, 0]]
+print(vector_slerp([1.0, 0.0, 0.0], [-3.0, 0.0, 0.0], 0.5))   # [[0, 2, 0]]
+print(vector_slerp([0.0, 0.0, 0.0], [0.0, 0.0, 4.0], 0.25))   # [[0, 0, 1]]
+
+assert np.allclose(vector_slerp([2.0, 0.0, 0.0], [0.0, 2.0, 0.0], 0.5), [[2**0.5, 2**0.5, 0.0]])
+assert np.allclose(vector_slerp([1.0, 0.0, 0.0], [-3.0, 0.0, 0.0], 0.5), [[0.0, 2.0, 0.0]])
+assert np.allclose(vector_slerp([0.0, 1.0, 0.0], [0.0, -1.0, 0.0], 0.5), [[1.0, 0.0, 0.0]])
 ```
 
 ### Shortest arc between two directions
