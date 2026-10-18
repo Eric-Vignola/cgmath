@@ -405,6 +405,39 @@ class TestOrthographic(unittest.TestCase):
             self.assertLess(hit_depth.std(), 0.6)
 
 
+class TestScaledObject(unittest.TestCase):
+    """A scaled Object renders as its mesh scaled in world space would."""
+
+    def test_scaled_object_depth_matches_a_scaled_mesh(self):
+        """Rays cast in object space are not unit length: the depth is still the world one."""
+        mesh, uv = _make_textured_cube()
+        for scale in (2.0, 0.5):
+            with self.subTest(scale=scale):
+                world        = mesh.copy()
+                world.points = mesh.points * scale
+                depths       = []
+                for obj in (
+                    Object(name="c", mesh=mesh, uv=uv, scale=[scale] * 3),
+                    Object(name="c", mesh=world, uv=uv),
+                ):
+                    scene = Scene("s")
+                    scene.append(obj)
+                    cam = Camera(name="cam", translate=[0.0, 0.0, 5.0])
+                    cam.look_at((0.0, 0.0, 0.0))
+                    scene.append(cam)
+                    _, depth = render(
+                        scene         = scene,
+                        resolution    = (32, 24),
+                        default_light = False,
+                        return_depth  = True,
+                    )
+                    depths.append(depth)
+                hit = ~np.isnan(depths[1])
+                self.assertGreater(int(hit.sum()), 10)
+                self.assertTrue(np.array_equal(np.isnan(depths[0]), ~hit))
+                self.assertTrue(np.allclose(depths[0][hit], depths[1][hit], rtol=0, atol=1e-9))
+
+
 @unittest.skipIf(Image is None, "PIL is not installed")
 class TestTurntable(unittest.TestCase):
     """Scene.turntable() short loop."""

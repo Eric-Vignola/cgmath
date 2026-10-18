@@ -146,8 +146,14 @@ def raycast(
     patches for higher accuracy on smooth meshes. Otherwise falls back to
     bilinear patches.
 
-    Casts rays against a mesh and returns intersection data.
-    If forward_only=False, also casts backward and keeps the closer hit.
+    Casts rays against a mesh and returns intersection data. Directions
+    need not be unit length: a distance is measured along the unit ray,
+    and a projection is the point hit.
+    If forward_only=False, also casts backward and keeps the closer hit:
+    a backward hit's distance is its length along -direction, positive
+    like a forward one, and its projection is the point hit. Its occluded
+    flag stays relative to the direction given, so a ray and its reverse
+    report opposite flags for the one hit.
     When twosided=False, back-face hits are rejected at the Numba level.
 
     When ``bvh`` is supplied (a pre-built ``BVHData`` from
@@ -193,6 +199,8 @@ def raycast(
         t[closer]            = t_bwd[closer]
         uv[closer]           = uv_bwd[closer]
         face_indices[closer] = face_bwd[closer]
+    else:
+        closer = np.zeros(n, dtype=bool)
 
     # compute bilinear weights from UV
     u             = uv[:, 0]
@@ -212,8 +220,12 @@ def raycast(
             weights[i, 2] += weights[i, 3]
             weights[i, 3] = 0.0
 
-    # compute projections
-    projections = origins + t[:, None] * directions
+    # compute projections: the kernels cast unit rays, so t is a distance
+    # along the unit direction, and a backward hit's runs along -direction.
+    # A zero direction misses: its NaN is reset to the origin below
+    with np.errstate(invalid="ignore", divide="ignore"):
+        unit = directions / np.linalg.norm(directions, axis=1, keepdims=True)
+    projections = origins + np.where(closer, -t, t)[:, None] * unit
 
     # gather hit face geometry
     safe_indices            = np.where(hit_mask, face_indices, 0)

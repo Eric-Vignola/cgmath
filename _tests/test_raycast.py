@@ -262,6 +262,29 @@ class TestRaycast(unittest.TestCase):
         self.assertTrue(allclose(result.distances[0], 0.5))
         self.assertGreaterEqual(result.indices[0], 0)
 
+    def test_projection_is_the_point_hit(self):
+        """A projection is the point hit, backward or forward, whatever the direction's length"""
+        # from z=0.2 the +Z face is 0.3 behind a -Z ray, the -Z face 0.7
+        # ahead, and the +Z face 0.3 ahead of a +Z ray: every ray below hits
+        # the +Z face at z=0.5, the first two backward
+        origins    = np.tile([0.1, 0.05, 0.2], (4, 1))
+        directions = np.array([[0.0, 0.0, -1.0], [0.0, 0.0, -2.0], [0.0, 0.0, 2.0], [0.0, 0.0, 0.5]])
+
+        for forward_only, rays in ((False, slice(None)), (True, slice(2, None))):
+            with self.subTest(forward_only=forward_only):
+                result = raycast(
+                    self.cube_points,
+                    self.cube_points,
+                    self.cube_geometry,
+                    origins[rays],
+                    directions[rays],
+                    forward_only=forward_only,
+                )
+                self.assertTrue(np.all(result.indices == 0))
+                self.assertTrue(allclose(result.distances, 0.3))
+                self.assertTrue(allclose(result.projections, [0.1, 0.05, 0.5]))
+                self.assertTrue(allclose(result.projections, result.compute(self.cube_points)))
+
     # -------------------- twosided -------------------- #
 
     def test_twosided_true_hits_from_both_sides(self):
@@ -614,6 +637,34 @@ class TestMeshDataRaycast(unittest.TestCase):
 
         result = self.cube.raycast(origins, directions, forward_only=False)
         self.assertFalse(np.isnan(result.distances[0]))
+
+    def test_a_reversed_ray_hits_the_same_point(self):
+        """forward_only=False: a ray and its reverse are one line, one hit, the point hit"""
+        rng        = np.random.default_rng(0)
+        origins    = rng.uniform(-0.3, 0.3, (20, 3))
+        directions = rng.normal(size=(20, 3))  # 0.24 to 2.36 long
+        unit       = directions / np.linalg.norm(directions, axis=1, keepdims=True)
+        for method in ("bilinear", "bezier"):
+            with self.subTest(method=method):
+                ahead = self.cube.raycast(
+                    origins, directions, method=method, forward_only=False
+                )
+                behind = self.cube.raycast(
+                    origins, -directions, method=method, forward_only=False
+                )
+                self.assertTrue(np.all(ahead.hit) and np.all(behind.hit))
+                self.assertTrue(np.array_equal(ahead.indices, behind.indices))
+                self.assertTrue(np.allclose(ahead.distances, behind.distances))
+                self.assertTrue(np.allclose(ahead.projections, behind.projections))
+                # occluded stays relative to the direction given
+                self.assertTrue(np.array_equal(ahead.occluded, ~behind.occluded))
+                # the projection sits on the ray's line, its distance from
+                # the origin, whatever the direction's length
+                offset = ahead.projections - origins
+                self.assertTrue(np.allclose(np.linalg.norm(offset, axis=1), ahead.distances))
+                self.assertTrue(np.allclose(np.cross(offset, unit), 0.0))
+                if method == "bilinear":  # and on the face hit
+                    self.assertTrue(np.allclose(ahead.projections, ahead.compute(self.cube.points)))
 
     def test_twosided_parameter(self):
         """twosided parameter is passed through"""

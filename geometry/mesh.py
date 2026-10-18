@@ -2510,11 +2510,17 @@ class MeshData(Data):
         Args:
             origins: ray origins or MeshData whose vertices are used as origins.
             directions: ray directions. If None and origins is MeshData, uses
-                        origin vertex normals.
+                        origin vertex normals. Any length: a distance is
+                        measured along the unit ray, and a projection is
+                        the point hit.
             method: SampleMethod.BILINEAR (flat patches) or SampleMethod.BEZIER
                     (PN Quad bicubic Bezier patches using vertex normals for
                     higher accuracy on smooth meshes).
-            forward_only: if False, also cast backward and keep the closer hit.
+            forward_only: if False, also cast backward and keep the closer hit;
+                          a backward hit's projection is the point hit, and
+                          its distance is positive like a forward one's. Its
+                          occluded flag stays relative to the direction
+                          given: a ray and its reverse report opposite flags.
             twosided: when False, back-face hits are rejected.
 
         Implementation note: for meshes larger than 64 faces, a per-method
