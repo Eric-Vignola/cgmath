@@ -6083,12 +6083,15 @@ class TestClipLoadFbx(unittest.TestCase):
         time_mode   = "eFrames24",
         stacks      = 1,
         keyed_stack = 0,
+        layer_keys  = None,
     ):
         """a chain of joints, keys given as {joint: {channel: [(sec, value)]}}
 
         Only ``keyed_stack`` is keyed, so selecting any other take has to show
         up as a node that no longer moves. Every stack still gets the same
         time span, which is what makes an unkeyed one look plausible.
+        ``layer_keys``, keys of the same kind, go on a second layer of the
+        keyed stack.
         """
         manager = FBX.FbxManager.Create()
         manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
@@ -6115,21 +6118,28 @@ class TestClipLoadFbx(unittest.TestCase):
             stack.AddMember(layer)
 
             if index == keyed_stack:
-                for joint, curves in (keys or {}).items():
-                    for channel, pairs in curves.items():
-                        prop, axis = self.CHANNELS[channel]
-                        curve = getattr(nodes[joint], prop).GetCurve(layer, axis, True)
-                        curve.KeyModifyBegin()
-                        for seconds, value in pairs:
-                            time = FBX.FbxTime()
-                            time.SetSecondDouble(float(seconds))
-                            key = curve.KeyAdd(time)[0]
-                            curve.KeySetValue(key, float(value))
-                            curve.KeySetInterpolation(
-                                key,
-                                FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear,
-                            )
-                        curve.KeyModifyEnd()
+                keyed = [(layer, keys)]
+                if layer_keys:
+                    second = FBX.FbxAnimLayer.Create(scene, "Layer 2")
+                    stack.AddMember(second)
+                    keyed.append((second, layer_keys))
+
+                for target, pairs_of in keyed:
+                    for joint, curves in (pairs_of or {}).items():
+                        for channel, pairs in curves.items():
+                            prop, axis = self.CHANNELS[channel]
+                            curve = getattr(nodes[joint], prop).GetCurve(target, axis, True)
+                            curve.KeyModifyBegin()
+                            for seconds, value in pairs:
+                                time = FBX.FbxTime()
+                                time.SetSecondDouble(float(seconds))
+                                key = curve.KeyAdd(time)[0]
+                                curve.KeySetValue(key, float(value))
+                                curve.KeySetInterpolation(
+                                    key,
+                                    FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear,
+                                )
+                            curve.KeyModifyEnd()
 
             first, last = FBX.FbxTime(), FBX.FbxTime()
             first.SetSecondDouble(float(span[0]))
@@ -6201,6 +6211,100 @@ class TestClipLoadFbx(unittest.TestCase):
         self.assertAlmostEqual(
             float(np.array(clip.frames.translate)[-1, 0, 0]), 10.0, places=4
         )
+
+    def test_the_default_range_reaches_a_key_past_the_stored_span(self):
+        """Unreal stores the take's span a frame short of its last key"""
+        path = self.authored(
+            keys = {"joint1": {"tx": [(0.0, 0.0), (1.0, 24.0)]}},
+            span = (0.0, 23.0 / 24.0),
+        )
+
+        clip = ClipData.load_fbx(path)
+
+        self.assertEqual((clip.start_frame, clip.end_frame), (0, 24))
+        self.assertAlmostEqual(
+            float(np.array(clip.frames.translate)[-1, 0, 0]), 24.0, places=4
+        )
+
+    def test_the_default_range_keeps_a_stored_span_wider_than_the_keys(self):
+        """a Maya export can hold frames either side of its keys"""
+        path = self.authored(
+            keys = {"joint1": {"tx": [(0.25, 6.0), (0.75, 18.0)]}},
+            span = (0.0, 1.0),
+        )
+
+        clip = ClipData.load_fbx(path)
+
+        self.assertEqual((clip.start_frame, clip.end_frame), (0, 24))
+
+    def test_a_key_before_the_stored_span_starts_the_range(self):
+        path = self.authored(
+            keys = {"joint1": {"tx": [(-0.25, -6.0), (1.0, 24.0)]}},
+            span = (0.0, 1.0),
+        )
+
+        clip = ClipData.load_fbx(path)
+
+        self.assertEqual((clip.start_frame, clip.end_frame), (-6, 24))
+        self.assertAlmostEqual(
+            float(np.array(clip.frames.translate)[0, 0, 0]), -6.0, places=4
+        )
+
+    def test_a_first_key_between_two_frames_starts_on_the_frame_before(self):
+        """the start rounds down as the end rounds up, so the first key is
+        inside the grid: a key at 5.6 frames before a span starting on 6, and
+        one at -5.6 before a span starting on 0, which rounds down to -6, not
+        toward zero"""
+        for key, span, start in ((5.6, 6.0, 5), (-5.6, 0.0, -6)):
+            with self.subTest(key=key):
+                path = self.authored(
+                    name = f"first_key_{key}.fbx",
+                    keys = {"joint1": {"tx": [(key / 24.0, 0.0), (1.0, 24.0)]}},
+                    span = (span / 24.0, 1.0),
+                )
+
+                clip = ClipData.load_fbx(path)
+
+                self.assertEqual((clip.start_frame, clip.end_frame), (start, 24))
+
+    def test_a_key_on_a_later_layer_counts_too(self):
+        path = self.authored(
+            keys       = {"joint1": {"tx": [(0.0, 0.0), (0.5, 12.0)]}},
+            layer_keys = {"joint1": {"ty": [(0.0, 0.0), (1.5, 1.0)]}},
+            span       = (0.0, 0.5),
+        )
+
+        clip = ClipData.load_fbx(path)
+
+        self.assertEqual((clip.start_frame, clip.end_frame), (0, 36))
+
+    def test_a_span_of_whole_frames_counts_its_own_frames(self):
+        """float noise in the span's seconds read frames 60-121 at 24 fps as
+        63 frames and frames 1-14 as 15, the last a copy of the one before"""
+        for first, last in ((60, 121), (1, 14)):
+            with self.subTest(first=first, last=last):
+                path = self.authored(
+                    name = f"span_{first}_{last}.fbx",
+                    keys = {"joint1": {"tx": [(first / 24.0, 0.0), (last / 24.0, 1.0)]}},
+                    span = (first / 24.0, last / 24.0),
+                )
+
+                clip = ClipData.load_fbx(path)
+
+                self.assertEqual((clip.start_frame, clip.end_frame), (first, last))
+                self.assertEqual(clip.frame_count, last - first + 1)
+
+    def test_a_time_a_hair_off_a_whole_frame_is_that_frame(self):
+        """two ticks either side of frames 0 and 24 add no frame"""
+        tick = 2.0 / hierarchy.hierarchy._fbx_ticks_per_second()
+        path = self.authored(
+            keys = {"joint1": {"tx": [(-tick, 0.0), (1.0 + tick, 24.0)]}},
+            span = (0.0, 1.0),
+        )
+
+        clip = ClipData.load_fbx(path)
+
+        self.assertEqual((clip.start_frame, clip.end_frame), (0, 24))
 
     def test_a_drop_frame_scene_still_gets_a_frame_rate(self):
         """the sdk reports 0.0 for this mode, which would divide by zero"""
@@ -6286,6 +6390,35 @@ class TestClipLoadFbx(unittest.TestCase):
                 np.array(full.frames.translate)[6:13],
             )
         )
+
+    def test_each_end_left_out_defaults_on_its_own(self):
+        """a start_frame passed alone keeps the take's last frame as the end,
+        not the take's length after it (frame 34 here)"""
+        path  = self.authored(keys={"joint1": {"tx": [(0.0, 0.0), (1.0, 24.0)]}})
+
+        late  = ClipData.load_fbx(path, start_frame=10)
+        early = ClipData.load_fbx(path, end_frame=12)
+        full  = ClipData.load_fbx(path)
+
+        self.assertEqual((late.start_frame, late.end_frame), (10, 24))
+        self.assertEqual((early.start_frame, early.end_frame), (0, 12))
+        translate = np.array(full.frames.translate)
+        self.assertTrue(np.allclose(np.array(late.frames.translate), translate[10:]))
+        self.assertTrue(np.allclose(np.array(early.frames.translate), translate[:13]))
+
+    def test_an_end_passed_alone_past_the_take_names_the_take_frame(self):
+        """the other end is the take's, not one the caller passed"""
+        path = self.authored(keys={"joint1": {"tx": [(0.0, 0.0), (1.0, 24.0)]}})
+
+        with self.assertRaises(ValueError) as caught:
+            ClipData.load_fbx(path, start_frame=30)
+        self.assertIn("start_frame 30 is past the take's last frame 24", str(caught.exception))
+        self.assertIn("pass end_frame too", str(caught.exception))
+
+        with self.assertRaises(ValueError) as caught:
+            ClipData.load_fbx(path, end_frame=-3)
+        self.assertIn("end_frame -3 is before the take's first frame 0", str(caught.exception))
+        self.assertIn("pass start_frame too", str(caught.exception))
 
     def test_take_selects_the_stack(self):
         """only the first stack is keyed, so a later take must not move"""
@@ -7814,6 +7947,31 @@ class TestClipLoadFbxSampling(unittest.TestCase):
             with self.subTest(trial=trial):
                 got = self.sampled(ClipData.load_fbx(target, fps=24.0))
                 self.assertTrue(np.array_equal(got, clean[target], equal_nan=True))
+
+
+class TestFbxWholeFrames(unittest.TestCase):
+    """fbx times to frames, a time a hair off a whole frame put on it"""
+
+    PER_SECOND = 141120000  # the sdk's ticks per second; any count works
+
+    def frames(self, ticks, fps=24.0):
+        return hierarchy.hierarchy._fbx_whole_frames(ticks, fps, self.PER_SECOND).tolist()
+
+    def test_a_whole_frame_comes_back_whole(self):
+        frame = self.PER_SECOND // 24
+        self.assertEqual(self.frames([60 * frame, 121 * frame]), [60.0, 121.0])
+
+    def test_float_noise_is_put_on_the_frame(self):
+        # a tick is 1.7e-7 of a frame at 24 fps
+        frame = self.PER_SECOND // 24
+        self.assertEqual(self.frames([-2, 24 * frame + 2]), [0.0, 24.0])
+
+    def test_a_time_further_off_stays_where_it_is(self):
+        frame  = self.PER_SECOND // 24
+        got    = self.frames([12 * frame + 12, 24 * frame - frame // 4])
+        wanted = [12.0 + 12 / frame, 23.75]
+        self.assertTrue(np.allclose(got, wanted, rtol=0.0, atol=1e-12))
+        self.assertNotEqual(got[0], 12.0)
 
 
 @unittest.skipIf(FBX is None, "fbx sdk is not installed")

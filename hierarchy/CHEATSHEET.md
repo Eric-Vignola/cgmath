@@ -1807,6 +1807,16 @@ gives a one-frame clip rather than an error.
 `ClipData.load_fbx` defaults to the first take that was actually keyed,
 not to index 0, because a file can hold takes with no curves at all.
 
+Its frames default to the take's stored span and every key of the take
+together, out to whole frames: an Unreal take, whose span stops a frame
+short of its last key, keeps that key, and a span wider than its keys
+keeps its frames. A time within 1e-6 of a frame of a whole frame is that
+frame, so a span of frames 60-121 reads 62 frames. `start_frame` and
+`end_frame` override either end, and each end left out defaults on its
+own: a `start_frame` passed alone no longer moves the end, which stays
+the take's last frame (cgmath 2 kept the take's length instead), and one
+past that frame raises `ValueError` naming it.
+
 ---
 
 ## Serialization

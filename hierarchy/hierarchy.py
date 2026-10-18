@@ -2717,6 +2717,48 @@ def _fbx_ticks_per_second() -> int:
     return int(second.Get())
 
 
+# a time this close to a whole frame, in frames, is that frame: the float
+# noise in a take's span or in a key's time adds no frame to a clip
+_FBX_FRAME_SNAP = 1e-6
+
+
+def _fbx_whole_frames(ticks, fps: float, per_second: int) -> np.ndarray:
+    """fbx times, in ticks, as frames at ``fps``, each within
+    :data:`_FBX_FRAME_SNAP` of a whole frame put on it"""
+    frames  = np.asarray(ticks, dtype=np.float64) * float(fps) / float(per_second)
+    nearest = np.round(frames)
+    return np.where(np.abs(frames - nearest) <= _FBX_FRAME_SNAP, nearest, frames)
+
+
+def _fbx_key_ticks(stack) -> Optional[tuple]:
+    """the first and the last key time, in ticks, over every curve on every
+    layer of a take, None for a take that holds no key
+
+    A curve keeps its keys in time order, so its first and last keys are its
+    ends.
+    """
+    layers      = FBX.FbxCriteria.ObjectType(FBX.FbxAnimLayer.ClassId)
+    curve_nodes = FBX.FbxCriteria.ObjectType(FBX.FbxAnimCurveNode.ClassId)
+
+    first, last = None, None
+    for i in range(stack.GetSrcObjectCount(layers)):
+        layer = typed(stack.GetSrcObject(layers, i), FBX.FbxAnimLayer, FBX)
+        for j in range(layer.GetSrcObjectCount(curve_nodes)):
+            curve_node = typed(layer.GetSrcObject(curve_nodes, j), FBX.FbxAnimCurveNode, FBX)
+            for channel in range(curve_node.GetChannelsCount()):
+                for k in range(curve_node.GetCurveCount(channel)):
+                    curve = typed(curve_node.GetCurve(channel, k), FBX.FbxAnimCurve, FBX)
+                    count = curve.KeyGetCount() if curve is not None else 0
+                    if not count:
+                        continue
+                    lo    = int(curve.KeyGetTime(0).Get())
+                    hi    = int(curve.KeyGetTime(count - 1).Get())
+                    first = lo if first is None else min(first, lo)
+                    last  = hi if last is None else max(last, hi)
+
+    return None if first is None else (first, last)
+
+
 def _fbx_ticks(seconds, per_second: int) -> np.ndarray:
     """times in seconds as fbx ticks, rounded the way ``FbxTime.SetSecondDouble``
     rounds them
@@ -9911,8 +9953,20 @@ class ClipData(HierarchyData):
         an index to override, including onto an empty take.
 
         ``start_frame`` and ``end_frame`` are frame numbers on the file's own
-        timeline and default to the take's range. A file with no animation
-        gives a one frame clip rather than an error.
+        timeline, at the clip's frame rate. Each one left out covers both the
+        take's stored span and every key of every curve on every layer of the
+        take: ``start_frame`` is the earlier of the span's start and the first
+        key, ``end_frame`` the later of the span's end and the last key, out
+        to the whole frame where either falls between two. Unreal stores the
+        span a frame short of its last key, and a Maya export can store one
+        wider than its keys; the clip keeps both. A time within 1e-6 of a
+        frame of a whole frame is that frame, so float noise in a span or a
+        key adds no frame. A take with no key covers its stored span. Each
+        end defaults on its own: a ``start_frame`` passed alone ends the clip
+        on the take's last frame, not the take's length after it, and one past
+        that frame raises ValueError naming it; an ``end_frame`` passed alone
+        before the take's first frame raises the same way. A file with no
+        animation gives a one frame clip rather than an error.
         """
         if fps is not None and fps <= 0.0:
             raise ValueError(f"fps must be positive, got {fps}")
@@ -9956,20 +10010,35 @@ class ClipData(HierarchyData):
                         "load_fbx(..., fps=...)"
                     )
 
-            span  = stack.GetLocalTimeSpan()
-            first = span.GetStart().GetSecondDouble()
-            last  = span.GetStop().GetSecondDouble()
+            # the stored span and every key of the take: Unreal stores the
+            # span a frame short of its last key, and a Maya export can store
+            # one wider than its keys
+            per_second = _fbx_ticks_per_second()
+            span       = stack.GetLocalTimeSpan()
+            bounds     = [int(span.GetStart().Get()), int(span.GetStop().Get())]
+            keys       = _fbx_key_ticks(stack)
+            if keys is not None:
+                bounds = [min(bounds[0], keys[0]), max(bounds[1], keys[1])]
+            first, last = _fbx_whole_frames(bounds, fps, per_second).tolist()
 
-            # ceil, so the tail of the take is inside the grid rather than half a
-            # frame past its end
-            start = round(first * fps) if start_frame is None else int(start_frame)
-            stop = (
-                start + int(np.ceil((last - first) * fps))
-                if end_frame is None
-                else int(end_frame)
-            )
+            # out to whole frames, so both ends are inside the grid rather
+            # than part of a frame past it
+            start = int(np.floor(first)) if start_frame is None else int(start_frame)
+            stop  = int(np.ceil(last)) if end_frame is None else int(end_frame)
 
+            # each end defaults on its own, so one passed alone can fall past
+            # the take's other end: the error names the end the take gave
             if stop < start:
+                if end_frame is None:
+                    raise ValueError(
+                        f"start_frame {start} is past the take's last frame {stop}; "
+                        "pass end_frame too"
+                    )
+                if start_frame is None:
+                    raise ValueError(
+                        f"end_frame {stop} is before the take's first frame {start}; "
+                        "pass start_frame too"
+                    )
                 raise ValueError(f"end_frame {stop} is before start_frame {start}")
 
             clip      = cls(rig, frames=stop - start + 1, start_frame=start, fps=fps)
@@ -9981,9 +10050,7 @@ class ClipData(HierarchyData):
             translate = np.array(clip.frames.translate)
 
             # the frame grid in the sdk's ticks, every frame sampled at once
-            ticks = _fbx_ticks(
-                (start + np.arange(clip.frame_count)) / fps, _fbx_ticks_per_second()
-            )
+            ticks = _fbx_ticks((start + np.arange(clip.frame_count)) / fps, per_second)
             _fbx_sample_take(stack, sampled, ticks, scale_factor, (translate, rotate, scale))
 
         clip.frames.scale     = scale
