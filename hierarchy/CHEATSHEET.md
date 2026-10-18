@@ -1967,8 +1967,8 @@ kept, and a node its bind leaves where it is keeps its own numbers: a
 file at its bind pose reads the same either way. When two bind poses
 list one node the first wins, with a warning naming the node when a
 later one is more than 1e-6 off it. A file with no bind pose listing a
-node the read keeps raises `ValueError`. `pose="node"`, the default,
-reads the node values.
+node the read keeps, or one above a kept node, raises `ValueError`.
+`pose="node"`, the default, reads the node values.
 
 `node_types` keeps the kinds of node it names, `"joint"`, `"locator"`,
 `"transform"` (a group) and `"mesh"` (read as a transform), and `None`,

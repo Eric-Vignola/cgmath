@@ -3550,7 +3550,9 @@ def _fbx_bind_matrices(scene, tree: _FbxTree, scale_factor: float, filename) -> 
     A bind pose is an ``FbxPose`` whose ``IsBindPose()`` is true. When two
     list one node the first wins, and a later one more than
     :data:`_FBX_BIND_AGREE` off it, in the loaded unit, warns, naming the
-    node. Raises ValueError when no bind pose lists a node the read keeps.
+    node. Raises ValueError when no bind pose lists a node of ``tree``: a
+    pose that lists a node above the kept ones, and none of them, puts them
+    at its bind (:func:`_fbx_kept_binds`).
     """
     positions = {node.GetUniqueID(): position for position, node in enumerate(tree.nodes)}
     found     = {}  # position: (matrix, local, the pose's name)
@@ -3582,9 +3584,9 @@ def _fbx_bind_matrices(scene, tree: _FbxTree, scale_factor: float, filename) -> 
                     f"{node.GetName()!r} by {gap:.3g}; the first, {name!r}, is read"
                 )
 
-    if not any(tree.kept[position] >= 0 for position in found):
+    if not found:
         raise ValueError(
-            f"{filename!r} holds no bind pose that lists a node the read keeps; "
+            f"{filename!r} holds no bind pose that lists a node the read keeps or one above it; "
             "pose='node' reads the nodes' own values"
         )
     return {position: (matrix, local) for position, (matrix, local, _) in found.items()}
@@ -5201,7 +5203,9 @@ class TransformList(DataList):
         (``IsLocalMatrix``), which is composed with the parent's world as
         the read gives it. When two bind poses list one node the first wins,
         and a later one more than 1e-6 off it warns, naming the node. A file
-        with no bind pose listing a node the read keeps raises ValueError.
+        with no bind pose listing a node the read keeps, or one above a kept
+        node (which the read drops, ``node_types`` below), raises
+        ValueError.
         ``TransformList.load_fbx``, whose nodes no rig owns, solves each
         one's channels under its parent all the same, so a ``HierarchyData``
         of them reads at the bind ``HierarchyData.load_fbx`` gives.

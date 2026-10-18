@@ -7597,7 +7597,7 @@ class TestFbxBindPose(unittest.TestCase):
 
                 with self.assertRaises(ValueError) as caught:
                     HierarchyData.load_fbx(path, pose="bind")
-                self.assertIn("holds no bind pose that lists a node the read keeps", str(caught.exception))
+                self.assertIn("holds no bind pose that lists a node the read keeps or one above it", str(caught.exception))
                 self.assertIn("pose='node'", str(caught.exception))
                 self.assertEqual(len(HierarchyData.load_fbx(path)), 5)
 
@@ -8872,36 +8872,62 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         self.assertTrue(np.allclose(U[66], np.eye(3), rtol=0.0, atol=1e-15))
         self.assertEqual(uneven.tolist(), [False] * 65 + [True, True])
 
-    def binddrop(self, attributed):
+    def binddrop(self, attributed, rich=False, listed=("grpP", "jV")):
         """a group (``attributed``) or a node with no attribute at the
         identity, a bind pose listing it at T(0, 5, 0) R(0, 0, 45), holding
-        a joint chain no pose lists and a joint it lists at its bind under
-        that; returns (path, the dropped node's bind)"""
-        path    = os.path.join(self.tmp.name, f"binddrop_{attributed}.fbx")
+        a joint chain no pose lists, jU > jU2, and a joint it lists at its
+        bind, jV, holding a locator no pose lists, att. ``rich`` gives jU
+        what a Maya joint carries, a pre and a post rotation (its joint
+        orient and rotate axis), the rotate order zxy, a rotate about a
+        rotate pivot and compensation of its parent's scale, and the group's
+        bind a scale of 2; ``listed`` names the nodes the pose lists. Returns
+        (path, the group's bind)"""
+        path    = os.path.join(self.tmp.name, f"binddrop_{attributed}_{rich}_{'_'.join(listed)}.fbx")
         manager = FBX.FbxManager.Create()
         manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
-        scene = FBX.FbxScene.Create(manager, "scene")
-        group = FBX.FbxNode.Create(scene, "grpP")
+        scene  = FBX.FbxScene.Create(manager, "scene")
+        source = FBX.FbxNode.EPivotSet.eSourcePivot
+        group  = FBX.FbxNode.Create(scene, "grpP")
         if attributed:
-            group.SetNodeAttribute(FBX.FbxNull.Create(scene, "grpP"))
+            null = FBX.FbxNull.Create(scene, "grpP")
+            null.Look.Set(FBX.FbxNull.ELook.eNone.value)
+            group.SetNodeAttribute(null)
         scene.GetRootNode().AddChild(group)
-        made = {}
-        for name, parent, t in (("jU", group, (0, 1, 0)), ("jU2", None, (0, 1, 0)), ("jV", group, (1, 0, 0))):
+        made = {"grpP": group}
+        for name, parent, t in (("jU", "grpP", (0, 1, 0)), ("jU2", "jU", (0, 1, 0)), ("jV", "grpP", (1, 0, 0))):
             joint = FBX.FbxNode.Create(scene, name)
             joint.SetNodeAttribute(FBX.FbxSkeleton.Create(scene, name))
             joint.LclTranslation.Set(FBX.FbxDouble3(*t))
-            (made["jU"] if parent is None else parent).AddChild(joint)
+            made[parent].AddChild(joint)
             made[name] = joint
+        att  = FBX.FbxNode.Create(scene, "att")
+        attr = FBX.FbxNull.Create(scene, "att")
+        attr.Look.Set(FBX.FbxNull.ELook.eCross.value)
+        att.SetNodeAttribute(attr)
+        att.LclTranslation.Set(FBX.FbxDouble3(0.5, 0.25, 0))
+        made["jV"].AddChild(att)
+        if rich:
+            jU = made["jU"]
+            jU.SetRotationActive(True)
+            jU.SetPreRotation(source, FBX.FbxVector4(0, 0, 30, 1.0))
+            jU.SetPostRotation(source, FBX.FbxVector4(10, 0, 0, 1.0))
+            jU.SetRotationOrder(source, FBX.EFbxRotationOrder.eEulerZXY)
+            jU.LclRotation.Set(FBX.FbxDouble3(5, 15, 20))
+            jU.SetRotationPivot(source, FBX.FbxVector4(0, 0.5, 0, 1.0))
+            jU.SetTransformationInheritType(FBX.FbxTransform.EInheritType.eInheritRrs)
 
         turn        = euler_to_matrix(np.radians([[0.0, 0.0, 45.0]]), np.zeros(1, dtype=int))[0]
         bind        = turn.copy()
         bind[3, :3] = (0.0, 5.0, 0.0)
-        pose        = FBX.FbxPose.Create(scene, "bindPose1")
-        pose.SetIsBindPose(True)
-        pose.Add(group, TestFbxBindPose.fbx_matrix(bind))
+        if rich:
+            bind[:3, :3] *= 2.0
         jV        = np.eye(4)
         jV[3, :3] = (1.0, 0.0, 0.0)
-        pose.Add(made["jV"], TestFbxBindPose.fbx_matrix(jV @ bind))
+        pose      = FBX.FbxPose.Create(scene, "bindPose1")
+        pose.SetIsBindPose(True)
+        for name, matrix in (("grpP", bind), ("jV", jV @ bind), ("jU", jV @ bind)):
+            if name in listed:
+                pose.Add(made[name], TestFbxBindPose.fbx_matrix(matrix))
         scene.AddPose(pose)
         exporter = FBX.FbxExporter.Create(manager, "")
         exporter.Initialize(path, -1, manager.GetIOSettings())
@@ -8917,13 +8943,46 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         the joints under it where the full bind read does; a node with no
         attribute, which every read drops, puts them at their own values
         under its bind"""
-        path, bind = self.binddrop(True)
+        for rich in (False, True):
+            path, bind = self.binddrop(True, rich)
+            full = HierarchyData.load_fbx(path, pose="bind")
+            for kinds, names in ((("joint",), ["jU", "jU2", "jV"]), (("locator",), ["att"])):
+                with self.subTest(rich=rich, node_types=kinds):
+                    bare = HierarchyData.load_fbx(path, pose="bind", node_types=kinds)
+                    self.assertEqual([n.name for n in bare], names)
+                    for node in bare:
+                        want = full[node.name].world_matrix
+                        self.assertTrue(np.allclose(node.world_matrix, want, rtol=0.0, atol=1e-9), node.name)
+
+        # what the rich jU carries moves it: the full bind read is where the
+        # rig rule puts it, its own values under the group's bind, the scale
+        # 2 it compensates divided out, so a read that left any of it out
+        # would part from it
+        path, bind = self.binddrop(True, rich=True)
         full = HierarchyData.load_fbx(path, pose="bind")
-        bare = HierarchyData.load_fbx(path, pose="bind", node_types=("joint",))
-        self.assertEqual([n.name for n in bare], ["jU", "jU2", "jV"])
-        for node in bare:
-            want = full[node.name].world_matrix
-            self.assertTrue(np.allclose(node.world_matrix, want, rtol=0.0, atol=1e-9), node.name)
+        own  = HierarchyData.load_fbx(path, axis_system=None)["jU"]
+        self.assertTrue(np.allclose(np.linalg.norm(full["jU"].world_matrix[:3, :3], axis=1), 1.0, rtol=0.0, atol=1e-12))
+        self.assertTrue(
+            np.allclose(full["jU"].world_matrix[:3, :3], own.matrix[:3, :3] @ (bind[:3, :3] / 2.0), rtol=0.0, atol=1e-12)
+        )
+        self.assertTrue(np.allclose(full["jU"].world_matrix[3], own.matrix[3] @ bind, rtol=0.0, atol=1e-12))
+        self.assertFalse(np.allclose(own.joint_orient, 0.0) or np.allclose(own.rotate_axis, 0.0))
+
+        # a pose listing only the dropped group puts every node at its own
+        # values under the group's bind; one listing no node of the read,
+        # nor one above it, raises
+        path, bind = self.binddrop(True, listed=("grpP",))
+        for kinds in (None, ("joint",), ("locator",)):
+            with self.subTest(listed="grpP", node_types=kinds):
+                rig  = HierarchyData.load_fbx(path, pose="bind", node_types=kinds)
+                file = HierarchyData.load_fbx(path, node_types=kinds, axis_system=None)
+                for node in rig:
+                    self.assertTrue(np.allclose(node.world_matrix, file[node.name].world_matrix @ bind, rtol=0.0, atol=1e-9))
+        path, _ = self.binddrop(True, listed=("jU",))
+        self.assertEqual(len(HierarchyData.load_fbx(path, pose="bind", node_types=("joint",))), 3)
+        with self.assertRaises(ValueError) as caught:
+            HierarchyData.load_fbx(path, pose="bind", node_types=("locator",))
+        self.assertIn("lists a node the read keeps or one above it", str(caught.exception))
 
         path, bind = self.binddrop(False)
         for kinds in (None, ("joint",)):
