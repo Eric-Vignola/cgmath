@@ -1726,9 +1726,9 @@ loader's, where:
 | Loader | Signature |
 |---|---|
 | `TransformList.load` | `(filename, mode=None)` — `mode` in `"gltf" / "glb" / "fbx" / "json" / "npz" / "pkl"` |
-| `TransformList.load_fbx` | `(filename, scale_factor=1.0)` |
+| `TransformList.load_fbx` | `(filename, scale_factor=None)` |
 | `TransformList.load_glb` | `(filename, scale_factor=100.0, pose_frame=None)` |
-| `ClipData.load_fbx` | `(filename, scale_factor=1.0, take=None, fps=None, start_frame=None, end_frame=None)` |
+| `ClipData.load_fbx` | `(filename, scale_factor=None, take=None, fps=None, start_frame=None, end_frame=None)` |
 | `ClipData.load_glb` | `(filename, scale_factor=100.0, animation=0, fps=24.0, start_frame=0)` |
 | `TransformList.save_fbx` | `(filename, zero_root=False, as_ascii=False)` — binary unless `as_ascii` |
 
@@ -1785,6 +1785,21 @@ except ValueError as error:
 
 animated.frames[3:4].save_fbx(os.path.join(WORKDIR, "frame3.fbx"))
 ```
+
+For `load_fbx`, `scale_factor=None` converts the file's unit to
+centimetres: translations, static and keyed, are multiplied by the
+centimetres one of the file's units holds (100.0 for a file in metres,
+1.0 for one in cm); rotations and scales keep the file's values. A
+number is the caller's own factor, and the file's unit is not read.
+A file whose unit the SDK's `FbxSystemUnit.ConvertScene` or Maya's
+unit-converting export wrote, as a 1/s scale on the scene root's
+children over values left in the old unit, is not converted: a metres
+one loads at world scale 0.01 under a kept root and 100 times too large
+under a dropped one, meshes included.
+The FBX mesh readers (`geometry.mesh.load_fbx`, `MeshData.load_fbx`,
+`MeshList.load_fbx`) and `render.Object.load_fbx`, points and skin bind
+matrices alike, take the same `scale_factor` with the same default, so
+a mesh posed by a rig or a clip read from the same file lines up.
 
 For `load_glb`, `scale_factor` converts units (glTF is metres, so `100.0`
 gives centimetres); `pose_frame` reads one frame of the file's animation

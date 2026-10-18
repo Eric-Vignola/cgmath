@@ -264,7 +264,7 @@ classmethod from_poses(cls, poses, start_frame: 'int' = 0, fps: 'float' = 24.0) 
     builds a clip from a sequence of HierarchyData poses
 get_delta(self, other, by: 'str' = 'index', translate: 'bool' = True) -> "'ClipData'"
     The delta of every frame against ``other``, as a clip.
-classmethod load_fbx(cls, filename: 'str', scale_factor: 'float' = 1.0, take: 'Optional[int]' = None, fps: 'Optional[float]' = None, start_frame: 'Optional[int]' = None, end_frame: 'Optional[int]' = None) -> "'ClipData'"
+classmethod load_fbx(cls, filename: 'str', scale_factor: 'Optional[float]' = None, take: 'Optional[int]' = None, fps: 'Optional[float]' = None, start_frame: 'Optional[int]' = None, end_frame: 'Optional[int]' = None) -> "'ClipData'"
     builds a clip from an fbx's animation take
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, animation: 'int' = 0, fps: 'float' = 24.0, start_frame: 'int' = 0) -> "'ClipData'"
     builds a clip from a glb's animation
@@ -487,7 +487,7 @@ index(self, obj, start=0, stop=None) -> 'int'
     The position of a node, given as the node, its uuid or its name,
 insert(self, index: 'int', node: "'TransformData'") -> 'None'
     S.insert(index, value) -- insert value before index
-classmethod load_fbx(cls, filename: 'str', scale_factor: 'float' = 1.0)
+classmethod load_fbx(cls, filename: 'str', scale_factor: 'Optional[float]' = None)
     primitive fbx joint loader
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, pose_frame: 'None | int' = None)
     primitive glb joint loader that supports style2 and momentum glbs
@@ -524,7 +524,7 @@ generate_uuid() -> 'str'
     generates a new unique uuid
 load(filename: 'str', mode: 'Optional[str]' = None) -> "'HierarchyData'"
     Whatever hierarchy the file holds, read as ``mode`` says or as the file
-load_fbx(filename: 'str', scale_factor: 'float' = 1.0) -> "'HierarchyData'"
+load_fbx(filename: 'str', scale_factor: 'Optional[float]' = None) -> "'HierarchyData'"
     The fbx's node hierarchy, names as in the file: ``HierarchyData.load_fbx()``.
 load_glb(filename: 'str', scale_factor: 'float' = 100.0, pose_frame: 'Optional[int]' = None) -> "'HierarchyData'"
     The glb's joint hierarchy, names as in the file: ``HierarchyData.load_glb()``.
@@ -979,7 +979,7 @@ grow_vertex_edge_indices(self, indices: 'np.ndarray', n: 'int' = 1) -> 'np.ndarr
     grows vertex edge indices by n steps
 grow_vertex_face_indices(self, indices: 'np.ndarray', n: 'int' = 1) -> 'np.ndarray'
     grows vertex face indices by n steps
-classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None) -> "'MeshData'"
+classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None, scale_factor: 'float | None' = None) -> "'MeshData'"
     returns a single MeshData from an fbx file (first mesh if name is None)
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, name: 'str | None' = None) -> "'MeshData'"
     returns a single MeshData from a glb (first mesh if name is None)
@@ -1049,7 +1049,7 @@ Methods:
 ```text
 fix_symmetry(self, pivot: 'float' = 0.0, axis: 'int' = 0, side: 'float' = 1.0, combined: 'bool' = True, tolerance: 'Union[None, float]' = None) -> 'np.ndarray'
     attempts a symmetry fix on each element or combined.
-classmethod load_fbx(cls, filename: 'str') -> "'MeshList'"
+classmethod load_fbx(cls, filename: 'str', scale_factor: 'float | None' = None) -> "'MeshList'"
     loads all meshes from an fbx file into a MeshList
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0) -> "'MeshList'"
     loads all meshes from a glb file into a MeshList
@@ -1240,7 +1240,7 @@ Functions:
 ```text
 load(filename: 'str', mode: 'str | None' = None) -> 'list'
     The file's meshes with their UVs, as ``(MeshData, UVList)`` pairs:
-load_fbx(filename: 'str') -> 'list'
+load_fbx(filename: 'str', scale_factor: 'float | None' = None) -> 'list'
     loads fbx file and returns list of (MeshData, UVList) tuples
 load_glb(filename: 'str', scale_factor: 'float' = 100.0) -> 'list'
     loads glb file and returns list of (MeshData, UVList) tuples
@@ -2559,7 +2559,7 @@ get_loaded_texture(self) -> 'Optional[np.ndarray]'
     Returns the texture as a contiguous ``(H, W, 3) float32`` array,
 imshow(self) -> 'None'
     Show the rendered frame in a window via OpenCV.
-classmethod load_fbx(cls, filename: 'str', index: 'int' = 0, extract_texture: 'bool' = True, load_skin: 'bool' = True, **object_kwargs) -> "'Object'"
+classmethod load_fbx(cls, filename: 'str', index: 'int' = 0, extract_texture: 'bool' = True, load_skin: 'bool' = True, scale_factor: 'Optional[float]' = None, **object_kwargs) -> "'Object'"
     Load a mesh from an FBX file as an :class:`Object`.
 classmethod load_glb(cls, filename: 'str', index: 'int' = 0, scale_factor: 'float' = 100.0, extract_texture: 'bool' = True, load_skin: 'bool' = True, **object_kwargs) -> "'Object'"
     Load a mesh from a GLB file as an :class:`Object`.

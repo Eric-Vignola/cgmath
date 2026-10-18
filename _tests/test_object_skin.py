@@ -27,8 +27,9 @@ import warnings
 
 import numpy as np
 from cgmath.geometry.deform import SkinDeformData
+from cgmath.geometry.mesh import MeshData, MeshList, load_fbx as mesh_load_fbx
 from cgmath.render.scene import Object, Scene
-from cgmath.hierarchy import HierarchyData
+from cgmath.hierarchy import ClipData, HierarchyData
 
 try:
     import pygltflib
@@ -777,9 +778,124 @@ class TestFbxBindPose(FbxCase):
         )
 
 
+@unittest.skipIf(fbx is None, "Autodesk FBX Python SDK is not installed")
+class TestFbxPosesInTheRigsUnitAndAxes(FbxCase):
+    """the mesh and its inverse binds load the way HierarchyData.load_fbx and
+    ClipData.load_fbx load the rig, in cm by default, so a rig or a clip read
+    from the same file poses the mesh where the file has it
+
+    At the file's bind pose the rig leaves the bind mesh where it is. Posed
+    off it, the mesh is the file's own posed mesh, read raw
+    (``scale_factor=1.0``), converted the same way.
+    """
+
+    def skinned(self, name, unit=None, knee=20.0, moved_body=False):
+        """a hip and a knee bound to a quad with the knee at 20 degrees;
+        ``knee`` is the knee's rotate in the file's node pose, off the bind
+        for any other value. ``moved_body`` moves and turns the mesh's own
+        node, its bind matrix with it. ``unit`` names the file's
+        FbxSystemUnit, cm when None"""
+
+        def populate(scene):
+            if unit is not None:
+                scene.GetGlobalSettings().SetSystemUnit(getattr(fbx.FbxSystemUnit, unit))
+
+            hip  = add_joint(scene, "hip")
+            shin = add_joint(scene, "knee", parent=hip)
+            hip.LclTranslation.Set(fbx.FbxDouble3(0.0, 1.0, 0.5))
+            hip.LclRotation.Set(fbx.FbxDouble3(0.0, 0.0, 10.0))
+            shin.LclTranslation.Set(fbx.FbxDouble3(0.0, -0.5, 0.1))
+            shin.LclRotation.Set(fbx.FbxDouble3(20.0, 0.0, 0.0))
+
+            corners = ((-0.2, 1.2, 0.0), (0.2, 1.2, 0.0), (0.2, 0.4, 0.1), (-0.2, 0.4, 0.1))
+            mesh    = fbx.FbxMesh.Create(scene, "body_geoShape")
+            mesh.InitControlPoints(len(corners))
+            for index, corner in enumerate(corners):
+                mesh.SetControlPointAt(fbx.FbxVector4(*corner, 1.0), index)
+            mesh.BeginPolygon()
+            for index in range(len(corners)):
+                mesh.AddPolygon(index)
+            mesh.EndPolygon()
+            normals = mesh.CreateElementNormal()
+            normals.SetMappingMode(fbx.FbxLayerElement.EMappingMode.eByPolygonVertex)
+            normals.SetReferenceMode(fbx.FbxLayerElement.EReferenceMode.eDirect)
+            for _ in corners:
+                normals.GetDirectArray().Add(fbx.FbxVector4(0.0, 0.6, 0.8, 0.0))
+
+            body = fbx.FbxNode.Create(scene, "body_geo")
+            body.SetNodeAttribute(mesh)
+            if moved_body:
+                body.LclTranslation.Set(fbx.FbxDouble3(0.3, 0.0, -0.2))
+                body.LclRotation.Set(fbx.FbxDouble3(0.0, 15.0, 0.0))
+            scene.GetRootNode().AddChild(body)
+
+            weights = [(hip, {0: 1.0, 1: 1.0, 2: 0.5, 3: 0.5}), (shin, {2: 0.5, 3: 0.5})]
+            skin    = bind(scene, mesh, weights)
+            for index in range(skin.GetClusterCount()):
+                cluster = skin.GetCluster(index)
+                cluster.SetTransformMatrix(body.EvaluateGlobalTransform())
+                cluster.SetTransformLinkMatrix(cluster.GetLink().EvaluateGlobalTransform())
+            shin.LclRotation.Set(fbx.FbxDouble3(knee, 0.0, 0.0))
+
+        return self.write(name, populate)
+
+    @staticmethod
+    def points(obj):
+        return np.array(obj.mesh.points, dtype=float)
+
+    def test_at_its_bind_pose_the_rig_leaves_the_mesh_where_it_is(self):
+        """a meters file posed by its own rig at rest moved the mesh 99 units
+        when the mesh stayed in meters and the rig loaded in cm"""
+        for unit in ("m", "Inch", "cm"):
+            with self.subTest(unit=unit):
+                path = self.skinned(f"bind_{unit}.fbx", unit=unit)
+                obj  = Object.load_fbx(path)
+                bind = self.points(obj)
+                for loader in (HierarchyData.load_fbx, ClipData.load_fbx):
+                    obj.pose(loader(path))
+                    np.testing.assert_allclose(self.points(obj), bind, rtol=0.0, atol=1e-9)
+                    obj.restore_bind_pose()
+
+    def test_the_mesh_loads_in_centimeters(self):
+        """the points scale with the file's unit; the normals do not"""
+        for unit, cm in (("m", 100.0), ("Inch", 2.54), ("cm", 1.0)):
+            with self.subTest(unit=unit):
+                path = self.skinned(f"unit_{unit}.fbx", unit=unit)
+                raw  = MeshData.load_fbx(path, scale_factor=1.0)
+                read = (
+                    MeshData.load_fbx(path),
+                    MeshList.load_fbx(path)[0],
+                    mesh_load_fbx(path)[0][0],
+                    Object.load_fbx(path).mesh,
+                )
+                for mesh in read:
+                    np.testing.assert_allclose(mesh.points, np.asarray(raw.points) * cm, rtol=1e-12)
+                    np.testing.assert_array_equal(mesh.normals, raw.normals)
+
+                # a number is the caller's own factor on the list reader too
+                np.testing.assert_array_equal(MeshList.load_fbx(path, scale_factor=1.0)[0].points, raw.points)
+
+    def test_posed_off_its_bind_the_mesh_is_the_files_posed_mesh_in_centimeters(self):
+        for unit, cm in (("m", 100.0), ("Inch", 2.54)):
+            with self.subTest(unit=unit):
+                path  = self.skinned(f"posed_{unit}.fbx", unit=unit, knee=50.0, moved_body=True)
+                posed = Object.load_fbx(path).pose(HierarchyData.load_fbx(path))
+                raw   = Object.load_fbx(path, scale_factor=1.0)
+                bind  = self.points(raw)
+                raw.pose(HierarchyData.load_fbx(path, scale_factor=1.0))
+
+                self.assertGreater(float(np.abs(self.points(raw) - bind).max()), 0.1)
+                np.testing.assert_allclose(self.points(posed), self.points(raw) * cm, rtol=0.0, atol=1e-9)
+
+                # a number is the caller's own factor, on the rig and the mesh alike
+                three = Object.load_fbx(path, scale_factor=3.0)
+                three.pose(HierarchyData.load_fbx(path, scale_factor=3.0))
+                np.testing.assert_allclose(self.points(three), self.points(raw) * 3.0, rtol=0.0, atol=1e-9)
+
+
 @unittest.skipIf(not HAVE_GLB, "pygltflib / trimesh are not installed")
 class TestGlbBindPose(GlbCase):
-    """same rule for glb, plus the unit conversion the fbx path does not need
+    """same rule for glb, with the unit conversion the fbx path also does
 
     ``MeshData.load_glb`` scales the points it reads while the file's binds
     stay in the file's own units, so the two only line up once the binds are

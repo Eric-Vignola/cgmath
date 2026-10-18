@@ -388,15 +388,20 @@ class Object(TransformData):
     def load_fbx(
         cls,
         filename:        str,
-        index:           int  = 0,
-        extract_texture: bool = True,
-        load_skin:       bool = True,
+        index:           int             = 0,
+        extract_texture: bool            = True,
+        load_skin:       bool            = True,
+        scale_factor:    Optional[float] = None,
         **object_kwargs,
     ) -> "Object":
         """Load a mesh from an FBX file as an :class:`Object`.
 
         Convenience wrapper around :func:`cgmath.geometry.mesh.load_fbx`.
-        See :meth:`load_obj` for parameter semantics.
+        See :meth:`load_obj` for parameter semantics. The mesh and its skin's
+        bind matrices load the way ``HierarchyData.load_fbx`` and
+        ``ClipData.load_fbx`` load the rig, so :meth:`pose` with a rig or a
+        clip read from the same file, with the same ``scale_factor``, puts
+        the mesh where the file has it.
 
         Args:
             filename: Path to the ``.fbx`` file (``~`` and env vars OK).
@@ -414,6 +419,12 @@ class Object(TransformData):
                 weights and bind pose and attach a :class:`SkinDeformData`
                 to :attr:`skin`, ready for :meth:`pose`.  A mesh with no
                 skin simply yields ``None``.
+            scale_factor: None (default) converts the file's unit to
+                centimeters, the points and the bind matrices alike, as
+                the rig loaders do; a number is the caller's own factor
+                and the file's unit is not read.  A file whose unit sits
+                as a scale on the scene root's children is not converted,
+                as ``HierarchyData.load_fbx`` says.
             **object_kwargs: Forwarded to :class:`Object`.
 
         Returns:
@@ -423,7 +434,7 @@ class Object(TransformData):
         Raises:
             ImportError: If the Autodesk FBX Python SDK is not installed.
         """
-        data = _load_fbx(filename)
+        data = _load_fbx(filename, scale_factor)
         if not data:
             raise ValueError(f"{filename}: contains no meshes")
         if not -len(data) <= index < len(data):
@@ -435,7 +446,7 @@ class Object(TransformData):
         object_kwargs.setdefault("name", mesh.name or "object")
 
         if load_skin and object_kwargs.get("skin") is None:
-            object_kwargs["skin"] = _fbx_skin(filename, mesh)
+            object_kwargs["skin"] = _fbx_skin(filename, mesh, scale_factor)
 
         obj = cls(mesh=mesh, uv=uv, **object_kwargs)
         if extract_texture and obj.texture is None:
@@ -3268,7 +3279,11 @@ def _bound_deformer(
     return deformer
 
 
-def _fbx_skin(file_path: str, mesh: MeshData) -> Optional[SkinDeformData]:
+def _fbx_skin(
+    file_path:    str,
+    mesh:         MeshData,
+    scale_factor: Optional[float] = None,
+) -> Optional[SkinDeformData]:
     """The :class:`SkinDeformData` for *mesh*, or ``None`` if it has no skin.
 
     Matched BY NAME, which is the opposite of what :func:`_glb_skins` does,
@@ -3278,9 +3293,12 @@ def _fbx_skin(file_path: str, mesh: MeshData) -> Optional[SkinDeformData]:
     deformer, while the mesh reader yields every mesh.  One static prop in
     the file is enough to shift the lists out of step, so a positional pair
     would quietly bind a mesh to some other mesh's weights.
+
+    The bind matrices are read with the *scale_factor* the mesh was read with,
+    so the two stay in one unit.
     """
     try:
-        entries = _read_skins_fbx(file_path, bind_matrices=True)
+        entries = _read_skins_fbx(file_path, bind_matrices=True, scale_factor=scale_factor)
     except Exception as exc:
         warnings.warn(f"{file_path}: could not read skin weights ({exc})", stacklevel=2)
         return None

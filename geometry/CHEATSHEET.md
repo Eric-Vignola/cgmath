@@ -1034,7 +1034,7 @@ from cgmath.geometry.mesh import load, load_fbx, load_glb, load_usd
 
 load("hero.fbx")                            # list[(MeshData, UVList)], reader by file
 load_glb("hero.glb", scale_factor=100.0)
-load_fbx("hero.fbx")
+load_fbx("hero.fbx")                        # in cm, as hierarchy.load_fbx reads the rig
 load_usd("hero.usd")
 
 MeshData.load_glb("hero.glb", name="body")  # one mesh; name=None -> first
@@ -1043,6 +1043,15 @@ MeshList.load_glb("hero.glb")               # every mesh
 UVData.load_fbx("hero.fbx", channel=0)
 UVList.load_glb("hero.glb", name="body")    # one mesh's UV channels
 ```
+
+The FBX mesh readers load the way `HierarchyData.load_fbx` loads the rig:
+`scale_factor=None`, the default, converts the file's unit to centimetres
+(the points, never the normals or the UVs), and a number is the caller's
+own factor. A mesh and a rig read from one file therefore line up. A
+file whose unit sits as a scale on the scene root's children, as the
+SDK's and Maya's unit conversions write it, is not converted, as
+`HierarchyData.load_fbx` says: a metres one's points load 100 times too
+large.
 
 USD prims round-trip through `from_prim` / `to_prim` on `MeshData`, `UVData`,
 `MapData`, `GeomSubsetData`, `MorphData` and `CompactSkinData`.

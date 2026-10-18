@@ -6084,6 +6084,7 @@ class TestClipLoadFbx(unittest.TestCase):
         stacks      = 1,
         keyed_stack = 0,
         layer_keys  = None,
+        unit        = None,
     ):
         """a chain of joints, keys given as {joint: {channel: [(sec, value)]}}
 
@@ -6091,12 +6092,15 @@ class TestClipLoadFbx(unittest.TestCase):
         up as a node that no longer moves. Every stack still gets the same
         time span, which is what makes an unkeyed one look plausible.
         ``layer_keys``, keys of the same kind, go on a second layer of the
-        keyed stack.
+        keyed stack. ``unit`` names the file's ``FbxSystemUnit``, cm when
+        None; the values are written as given, in that unit.
         """
         manager = FBX.FbxManager.Create()
         manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
         scene = FBX.FbxScene.Create(manager, "scene")
         scene.GetGlobalSettings().SetTimeMode(getattr(FBX.FbxTime.EMode, time_mode))
+        if unit is not None:
+            scene.GetGlobalSettings().SetSystemUnit(getattr(FBX.FbxSystemUnit, unit))
 
         nodes  = {}
         parent = scene.GetRootNode()
@@ -6346,6 +6350,53 @@ class TestClipLoadFbx(unittest.TestCase):
         self.assertAlmostEqual(
             float(np.array(clip.frames.translate)[-1, 0, 0]), 500.0, places=3
         )
+
+    def test_the_file_unit_loads_in_centimeters(self):
+        """by default: translations, static and keyed, and nothing else"""
+        keys = {
+            "joint1": {
+                "tx": [(0.0, 0.0), (1.0, 2.0)],
+                "rz": [(0.0, 0.0), (1.0, 90.0)],
+                "sy": [(0.0, 1.0), (1.0, 3.0)],
+            }
+        }
+        for unit, cm in (("m", 100.0), ("Inch", 2.54), ("mm", 0.1), ("cm", 1.0)):
+            with self.subTest(unit=unit):
+                path = self.authored(
+                    name   = f"{unit}.fbx",
+                    joints = ("joint1", "joint2"),
+                    keys   = keys,
+                    unit   = unit,
+                )
+
+                clip = ClipData.load_fbx(path, fps=2.0)
+                rig  = HierarchyData.load_fbx(path)
+
+                translate = np.array(clip.frames.translate)
+                self.assertTrue(np.allclose(translate[:, 0, 0], [0.0, cm, 2.0 * cm]))
+                self.assertTrue(np.allclose(translate[:, 0, 1], cm))  # held by the curve node
+                self.assertTrue(np.allclose(translate[:, 1], [0.0, cm, 0.0]))
+                self.assertTrue(np.allclose(np.array(clip.frames.rotate)[:, 0, 2], [0.0, 45.0, 90.0]))
+                self.assertTrue(np.allclose(np.array(clip.frames.scale)[:, 0, 1], [1.0, 2.0, 3.0]))
+                self.assertTrue(np.allclose(rig["joint2"].translate, [0.0, cm, 0.0]))
+                self.assertTrue(np.allclose(rig["joint1"].scale, 1.0))
+                self.assertTrue(np.allclose(hierarchy.load_fbx(path)["joint2"].translate, [0.0, cm, 0.0]))
+
+    def test_a_number_is_the_callers_own_factor(self):
+        """the file's unit is not read: a meters file at 1.0 stays in meters"""
+        path = self.authored(
+            joints = ("joint1", "joint2"),
+            keys   = {"joint1": {"tx": [(0.0, 0.0), (1.0, 2.0)]}},
+            unit   = "m",
+        )
+
+        clip   = ClipData.load_fbx(path, fps=2.0, scale_factor=1.0)
+        rig    = HierarchyData.load_fbx(path, scale_factor=3.0)
+        module = hierarchy.load_fbx(path, scale_factor=3.0)
+
+        self.assertTrue(np.allclose(np.array(clip.frames.translate)[:, 0, 0], [0.0, 1.0, 2.0]))
+        self.assertTrue(np.allclose(rig["joint2"].translate, [0.0, 3.0, 0.0]))
+        self.assertTrue(np.allclose(module["joint2"].translate, [0.0, 3.0, 0.0]))
 
     def test_the_scene_time_mode_sets_the_frame_rate(self):
         for mode, rate, frames in (

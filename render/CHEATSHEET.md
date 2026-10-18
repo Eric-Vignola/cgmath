@@ -257,12 +257,17 @@ shapes are shown:
 ```python
 Object.load_glb("hero.glb", index=0, scale_factor=100.0,
                 extract_texture=True, load_skin=True)
-Object.load_fbx("hero.fbx", index=0, extract_texture=True, load_skin=True)
+Object.load_fbx("hero.fbx", index=0, extract_texture=True, load_skin=True,
+                scale_factor=None)
 ```
 
 `load_glb` pulls the PBR base-color map of the mesh's own material into
 `texture` automatically (`extract_texture=True`) and attaches skin weights
 when present (`load_skin=True`). An explicit `texture=` kwarg always wins.
+`load_fbx` reads the mesh and its skin's bind matrices in centimetres
+(`scale_factor=None` converts the file's unit, a number is the caller's
+own factor), the way `HierarchyData.load_fbx` and `ClipData.load_fbx`
+read the rig, so `pose()` with a rig from the same file lines up.
 
 Pull a texture onto an existing Object after the fact. Both return
 `True`/`False` rather than raising when the slot is empty:

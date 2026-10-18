@@ -2898,9 +2898,18 @@ class MeshData(Data):
     # ----------------------------------- FBX ------------------------------------ #
 
     @classmethod
-    def load_fbx(cls, filename: str, name: str | None = None) -> "MeshData":
-        """returns a single MeshData from an fbx file (first mesh if name is None)"""
-        data = load_fbx(filename)
+    def load_fbx(
+        cls,
+        filename:     str,
+        name:         str   | None = None,
+        scale_factor: float | None = None,
+    ) -> "MeshData":
+        """returns a single MeshData from an fbx file (first mesh if name is None)
+
+        In centimeters by default, as a rig read from the same file:
+        ``scale_factor`` as in :func:`load_fbx`.
+        """
+        data = load_fbx(filename, scale_factor)
         if not data:
             raise RuntimeError("No meshes found in FBX file")
         if name is None:
@@ -4698,9 +4707,13 @@ class MeshList(DataList):
     DATA_LIST_CLASS = MeshData
 
     @classmethod
-    def load_fbx(cls, filename: str) -> "MeshList":
-        """loads all meshes from an fbx file into a MeshList"""
-        return cls([mesh_data for mesh_data, _ in load_fbx(filename)])
+    def load_fbx(cls, filename: str, scale_factor: float | None = None) -> "MeshList":
+        """loads all meshes from an fbx file into a MeshList
+
+        In centimeters by default, as a rig read from the same file:
+        ``scale_factor`` as in :func:`load_fbx`.
+        """
+        return cls([mesh_data for mesh_data, _ in load_fbx(filename, scale_factor)])
 
     @classmethod
     def load_glb(cls, filename: str, scale_factor: float = 100.0) -> "MeshList":
@@ -5334,21 +5347,38 @@ def _extract_fbx_normals(
     return normals, normal_indices
 
 
-def load_fbx(filename: str) -> list:
-    """loads fbx file and returns list of (MeshData, UVList) tuples"""
+def load_fbx(filename: str, scale_factor: float | None = None) -> list:
+    """loads fbx file and returns list of (MeshData, UVList) tuples
+
+    ``scale_factor`` None, the default, converts the file's unit to
+    centimeters, as ``HierarchyData.load_fbx`` and ``ClipData.load_fbx`` do,
+    so a mesh lines up with a rig read from the same file: the points are
+    multiplied by the centimeters one unit of the file holds, 1.0 for a file
+    in cm, 100.0 for one in meters. A number is the caller's own factor, and
+    the file's unit is not read. Normals and UVs keep the file's values. A
+    file whose unit sits as a scale on the scene root's children, as the
+    sdk's and Maya's unit conversions write it, is not converted, as
+    ``HierarchyData.load_fbx`` says: a meters one's points come back 100
+    times too large.
+    """
 
     if fbx is None:
         raise ImportError("Autodesk FBX Python SDK is not installed")
 
+    # imported here rather than at module scope: cgmath.hierarchy imports
+    # formats.glb, which imports cgmath.geometry
+    from cgmath.hierarchy import _fbx_scale_factor
+
     # everything read from the scene dies with it: copy out inside the block
     with open_fbx(filename, fbx) as scene:
+        factor     = _fbx_scale_factor(scene, scale_factor)
         mesh_nodes = []
         _walk_fbx_mesh_nodes(scene.GetRootNode(), mesh_nodes)
 
         data = []
         for node in mesh_nodes:
             mesh   = node.GetNodeAttribute()
-            points = _fbx_control_points(mesh)
+            points = _fbx_control_points(mesh) * factor
             indices, counts = _fbx_polygon_streams(mesh)
             normals, normal_indices = _extract_fbx_normals(mesh, counts)
 

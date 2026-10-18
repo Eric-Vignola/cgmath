@@ -1011,7 +1011,11 @@ def _fbx_matrix(matrix) -> np.ndarray:
     )
 
 
-def _read_skins_fbx(filename: str, bind_matrices: bool = False) -> list:
+def _read_skins_fbx(
+    filename:      str,
+    bind_matrices: bool            = False,
+    scale_factor:  Optional[float] = None,
+) -> list:
     """an fbx's skins as ``(SkinData, inverse bind matrices or None)`` pairs
 
     Each ``SkinData`` is named after its mesh. Influences carry the names
@@ -1029,6 +1033,15 @@ def _read_skins_fbx(filename: str, bind_matrices: bool = False) -> list:
     file carries the take's pose rather than the pose the mesh was bound in,
     so these are the only trustworthy source for it. ``render`` reads them;
     the public loaders return a ``SkinList``.
+
+    The matrices are in the unit ``cgmath.geometry.mesh.load_fbx`` reads the
+    points in, given the same ``scale_factor``: None, the default, the file's
+    unit in centimeters, a number the caller's own factor. A rig read with it
+    too (``HierarchyData.load_fbx``) then poses the mesh where the file has
+    it. Points read ``s`` times larger pose under joint worlds ``[[R, 0],
+    [t s, 1]]``, and the inverse bind ``[[A, 0], [b, 1]]`` that keeps them
+    where the file has them is ``[[A, 0], [b s, 1]]``: only its translation
+    row scales. The weights are unitless.
     """
     if fbx is None:
         raise ImportError("Autodesk FBX Python SDK is not installed")
@@ -1038,12 +1051,13 @@ def _read_skins_fbx(filename: str, bind_matrices: bool = False) -> list:
     # the cycle while cgmath.geometry is still loading.
     # cgmath.geometry.mesh is lazy for symmetry, not necessity.
     from cgmath.geometry.mesh import _walk_fbx_mesh_nodes
-    from cgmath.hierarchy import _fbx_enum, _walk_fbx
+    from cgmath.hierarchy import _fbx_enum, _fbx_scale_factor, _walk_fbx
 
     filename = os.path.expanduser(filename)
 
     # everything read from the scene dies with it: copy out inside the block
     with open_fbx(filename, fbx) as scene:
+        factor = _fbx_scale_factor(scene, scale_factor)
         hierarchy_data, nodes = _walk_fbx(scene, 1.0)
 
         named = {
@@ -1102,7 +1116,10 @@ def _read_skins_fbx(filename: str, bind_matrices: bool = False) -> list:
 
             weights, influences = _dense_weights(mesh.GetControlPointsCount(), columns)
             skin  = SkinData(weights=weights, influences=influences, name=node.GetName())
-            bound = np.asarray([binds[x] for x in influences]) if bind_matrices else None
+            bound = None
+            if bind_matrices:
+                bound = np.asarray([binds[x] for x in influences])
+                bound[:, 3, :3] *= factor
             data.append((skin, bound))
 
     return data

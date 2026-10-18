@@ -2688,6 +2688,15 @@ def _fbx_has_curves(stack) -> bool:
     return False
 
 
+def _fbx_scale_factor(scene, scale_factor: Optional[float]) -> float:
+    """what a loader multiplies a scene's lengths by: ``scale_factor`` when
+    the caller gives one, otherwise the file's unit in centimeters, 1.0 for
+    a file in cm and 100.0 for one in meters"""
+    if scale_factor is not None:
+        return float(scale_factor)
+    return float(scene.GetGlobalSettings().GetSystemUnit().GetScaleFactor())
+
+
 def _fbx_frame_rate(mode) -> float:
     """frames per second for a time mode, or 0.0 if the sdk cannot say"""
     rate = float(FBX.FbxTime.GetFrameRate(mode))
@@ -4133,10 +4142,22 @@ class TransformList(DataList):
 
         return hierarchy_data
 
-    # TODO scale_factor is prolly not the best name, think of a better way to handle unit conversions
     @classmethod
-    def load_fbx(cls, filename: str, scale_factor: float = 1.0):
+    def load_fbx(cls, filename: str, scale_factor: Optional[float] = None):
         """primitive fbx joint loader
+
+        ``scale_factor`` None, the default, converts the file's unit to
+        centimeters: translations are multiplied by the centimeters one unit
+        of the file holds (``GetSystemUnit().GetScaleFactor()``), 1.0 for a
+        file in cm, 100.0 for one in meters. A number is the caller's own
+        factor, and the file's unit is not read. Only lengths are converted;
+        rotations, scales and user defined attributes keep the file's values.
+        A file whose unit the sdk's ``FbxSystemUnit.ConvertScene`` or Maya's
+        unit converting export wrote, as a 1/s scale on the scene root's
+        children over values left in the old unit, is not converted: a
+        meters one loads at world scale 0.01 under a root the read keeps and
+        100 times too large under one it drops, its meshes 100 times too
+        large.
 
         User defined attributes come back as the specs save_fbx wrote; those
         of a file from Maya's own FBX plugin, the way its importer reads them.
@@ -4149,7 +4170,7 @@ class TransformList(DataList):
             raise ImportError("fbx module not found")
 
         with open_fbx(filename, FBX) as scene:
-            hierarchy_data, _ = _walk_fbx(scene, scale_factor)
+            hierarchy_data, _ = _walk_fbx(scene, _fbx_scale_factor(scene, scale_factor))
 
         # build the TransformList
         return cls.from_dict(hierarchy_data)
@@ -9849,13 +9870,20 @@ class ClipData(HierarchyData):
     def load_fbx(
         cls,
         filename:     str,
-        scale_factor: float           = 1.0,
+        scale_factor: Optional[float] = None,
         take:         Optional[int]   = None,
         fps:          Optional[float] = None,
         start_frame:  Optional[int]   = None,
         end_frame:    Optional[int]   = None,
     ) -> "ClipData":
         """builds a clip from an fbx's animation take
+
+        ``scale_factor`` None, the default, converts the file's unit to
+        centimeters, a number is the caller's own factor, as in
+        :meth:`HierarchyData.load_fbx`: the static translations and the
+        translation curves are multiplied by it, rotations and scales are
+        not. A file whose unit sits as a scale on the scene root's children
+        is not converted, as :meth:`HierarchyData.load_fbx` says.
 
         The three local channels are sampled separately rather than
         decomposed out of ``EvaluateLocalTransform``: that matrix has already
@@ -9976,6 +10004,7 @@ class ClipData(HierarchyData):
 
         # everything read from the scene dies with it: copy out inside the block
         with open_fbx(filename, FBX) as scene:
+            scale_factor = _fbx_scale_factor(scene, scale_factor)
             hierarchy_data, nodes = _walk_fbx(scene, scale_factor)
 
             rig = HierarchyData.from_dict(hierarchy_data)
@@ -10187,7 +10216,7 @@ def load(filename: str, mode: Optional[str] = None) -> "HierarchyData":
     return _load_derived(HierarchyData, filename, mode)
 
 
-def load_fbx(filename: str, scale_factor: float = 1.0) -> "HierarchyData":
+def load_fbx(filename: str, scale_factor: Optional[float] = None) -> "HierarchyData":
     """The fbx's node hierarchy, names as in the file: ``HierarchyData.load_fbx()``."""
     return HierarchyData.load_fbx(filename, scale_factor)
 
