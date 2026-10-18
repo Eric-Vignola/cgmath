@@ -87,7 +87,7 @@ POSES = (
         joint_orient=(5, 15, -25),
         rotate_axis=(7, -8, 9),
         rotate_order=3,
-        segment_scale_compensate = True,
+        segment_scale_compensate=True,
     )),
     ("knee", "hip", dict(
         translate    = (0, 7, -2),
@@ -102,7 +102,7 @@ POSES = (
         translate=(1, -3, 2),
         rotate=(0, 0, 33),
         rotate_order=1,
-        segment_scale_compensate = True,
+        segment_scale_compensate=True,
         radius=2.5,
         draw_style=2,
     )),
@@ -126,7 +126,7 @@ def _rig(**user_attributes) -> HierarchyData:
                 node_type="joint",
                 uuid=_uuid(name),
                 parent_uuid=None if parent is None else _uuid(parent),
-                user_defined_attributes = user_attributes.get(name),
+                user_defined_attributes=user_attributes.get(name),
                 **pose,
             )
         )
