@@ -2697,6 +2697,117 @@ def _fbx_scale_factor(scene, scale_factor: Optional[float]) -> float:
     return float(scene.GetGlobalSettings().GetSystemUnit().GetScaleFactor())
 
 
+def _fbx_check_axis_system(axis_system) -> None:
+    """refuses an ``axis_system`` the fbx loaders don't know"""
+    if not (axis_system is None or (isinstance(axis_system, str) and axis_system == "maya_y_up")):
+        raise ValueError(f"axis_system must be 'maya_y_up' or None, got {axis_system!r}")
+
+
+def _fbx_axis_turn(scene, axis_system, filename, sdk=None) -> Optional[np.ndarray]:
+    """the (3, 3) rotation from a scene's axes to ``axis_system``'s, its rows
+    the file's x, y and z in Maya's Y-up; None when there is nothing to turn:
+    ``axis_system`` None, or a file already in Maya's Y-up
+
+    Derived from the file's ``FbxAxisSystem``: its up vector goes to Maya's
+    y, its front vector to z, and the third axis, up x front in a right
+    handed system, to x. That is the turn ``FbxAxisSystem.MayaYUp
+    .ConvertScene`` gives a scene, measured on all 24 right handed axis
+    systems a file can hold. Maya's FBX importer gives the same turn to the
+    16 whose up axis is x or z, and none to the 8 whose up axis is y, either
+    way up: it leaves those in their own axes. A left handed one raises
+    ValueError: no rotation takes it to Maya's axes, only a mirror would.
+    ``sdk`` is the fbx module the scene was read with, this module's by
+    default.
+    """
+    if axis_system is None:
+        return None
+
+    sdk  = FBX if sdk is None else sdk
+    axes = scene.GetGlobalSettings().GetAxisSystem()
+    if axes.GetCoorSystem() == _fbx_enum(sdk.FbxAxisSystem, "ECoordSystem", "eLeftHanded"):
+        # load() reads an fbx with load_fbx's defaults and takes no
+        # axis_system, so the remedy names the call that does
+        raise ValueError(
+            f"{filename!r} is in a left handed axis system, which no rotation turns "
+            "into Maya's Y-up (it takes a mirror); load it with "
+            "load_fbx(filename, axis_system=None) to keep the file's own axes"
+        )
+
+    # the up vector is x, y or z (1, 2, 3), the front vector the first or the
+    # second of the other two (parity even 1, odd 2), each with its sign
+    up, up_sign = axes.GetUpVector()
+    front, front_sign = axes.GetFrontVector()
+    up_axis    = int(getattr(up, "value", up)) - 1
+    others     = [axis for axis in range(3) if axis != up_axis]
+    front_axis = others[int(getattr(front, "value", front)) - 1]
+
+    upward              = np.zeros(3)
+    forward             = np.zeros(3)
+    upward[up_axis]     = 1.0 if up_sign > 0 else -1.0
+    forward[front_axis] = 1.0 if front_sign > 0 else -1.0
+
+    turn = np.array([np.cross(upward, forward), upward, forward]).T
+    return None if np.array_equal(turn, np.eye(3)) else turn
+
+
+def _fbx_turn_roots(turn, joints, orders, translate, rotate, joint_orient) -> tuple:
+    """(F, r, 3) channels of a scene's roots with ``turn`` put on them, every
+    frame at once: each root's world matrix becomes its world times ``turn``
+
+    ``joints`` (r,) says which roots are joints and ``orders`` (r,) gives each
+    one's rotate order. A joint takes the turn in its joint orient, JO turn,
+    and keeps its rotate, so its curves are not solved again; any other root,
+    which the walk reads without a joint orient, has its rotate solved again
+    for R turn in its own rotate order, through euler_filter along the
+    frames, frame 0 as solved. Every root's translate turns with it. Hands
+    back new (translate, rotate, joint_orient).
+    """
+    joints       = np.asarray(joints, dtype=bool)
+    orders       = np.asarray(orders, dtype=np.intp)
+    frames       = len(translate)
+    translate    = np.asarray(translate, dtype=float) @ turn
+    rotate       = np.array(rotate, dtype=float)
+    joint_orient = np.array(joint_orient, dtype=float)
+
+    # joint orient is xyz, a rotate in the node's own order
+    for chosen, block, axes in (
+        (joints, joint_orient, np.zeros(len(orders), dtype=np.intp)),
+        (~joints, rotate, orders),
+    ):
+        if not chosen.any():
+            continue
+
+        order               = np.tile(axes[chosen], frames)
+        matrices            = euler_to_matrix(np.radians(block[:, chosen].reshape(-1, 3)), order)
+        matrices[:, :3, :3] = matrices[:, :3, :3] @ turn
+        solved              = np.degrees(matrix_to_euler(matrices, order)).reshape(frames, -1, 3)
+        block[:, chosen]    = _filtered(solved, axes[chosen])
+
+    return translate, rotate, joint_orient
+
+
+def _fbx_turn_walk(hierarchy_data: dict, turn) -> None:
+    """puts ``turn`` on the roots of the dicts :func:`_walk_fbx` read, in
+    place: :func:`_fbx_turn_roots` on their static values"""
+    roots = [data for data in hierarchy_data.values() if "parent_uuid" not in data]
+    if not roots:
+        return
+
+    joints = [data["node_type"] == "joint" for data in roots]
+    orders = [data["rotate_order"] for data in roots]
+    channels = [
+        np.array([[data.get(channel, np.zeros(3)) for data in roots]], dtype=float)
+        for channel in ("translate", "rotate", "joint_orient")
+    ]
+    translate, rotate, joint_orient = _fbx_turn_roots(turn, joints, orders, *channels)
+
+    for i, data in enumerate(roots):
+        data["translate"] = translate[0, i]
+        data["rotate"]    = rotate[0, i]
+        if joints[i]:
+            data["joint_orient"] = joint_orient[0, i]
+
+
 def _fbx_frame_rate(mode) -> float:
     """frames per second for a time mode, or 0.0 if the sdk cannot say"""
     rate = float(FBX.FbxTime.GetFrameRate(mode))
@@ -4143,7 +4254,12 @@ class TransformList(DataList):
         return hierarchy_data
 
     @classmethod
-    def load_fbx(cls, filename: str, scale_factor: Optional[float] = None):
+    def load_fbx(
+        cls,
+        filename:     str,
+        scale_factor: Optional[float] = None,
+        axis_system:  Optional[str]   = "maya_y_up",
+    ):
         """primitive fbx joint loader
 
         ``scale_factor`` None, the default, converts the file's unit to
@@ -4159,6 +4275,25 @@ class TransformList(DataList):
         100 times too large under one it drops, its meshes 100 times too
         large.
 
+        ``axis_system`` "maya_y_up", the default, loads the scene in Maya's
+        Y-up axes as ``FbxAxisSystem.MayaYUp.ConvertScene`` converts it:
+        every node's world matrix is the file's times the turn from the
+        file's axis system to Maya's. Maya's FBX importer puts a file whose
+        up axis is x or z, an Unreal file among them, in the same place. It
+        leaves a file whose up axis is y, pointing up or down, in its own
+        axes, so a y-up file whose front is not +z, or a -y-up one, loads here
+        turned 90 or 180 degrees from where Maya shows it. The turn
+        comes from the file's ``FbxAxisSystem`` (its up vector, front vector
+        and handedness) and goes on each root the read keeps, the way
+        ConvertScene puts it on the scene root's children: a joint root takes
+        it in its joint orient and its translate, keeping its rotate, any
+        other root has its rotate solved again in its rotate order and its
+        translate turned. An Unreal file, Z-up, turns (x, y, z) to (x, z, -y).
+        A file already in Maya's Y-up, such as one save_fbx wrote, loads as
+        it is. A left handed file raises ValueError, since no rotation turns
+        it into Maya's axes. ``axis_system=None`` keeps the file's own axes.
+        Which way the character faces is left as the file has it.
+
         User defined attributes come back as the specs save_fbx wrote; those
         of a file from Maya's own FBX plugin, the way its importer reads them.
         One whose name, string or enum field is not UTF-8, which the fbx
@@ -4168,9 +4303,14 @@ class TransformList(DataList):
         """
         if FBX is None:
             raise ImportError("fbx module not found")
+        _fbx_check_axis_system(axis_system)
 
         with open_fbx(filename, FBX) as scene:
+            turn = _fbx_axis_turn(scene, axis_system, filename)
             hierarchy_data, _ = _walk_fbx(scene, _fbx_scale_factor(scene, scale_factor))
+
+        if turn is not None:
+            _fbx_turn_walk(hierarchy_data, turn)
 
         # build the TransformList
         return cls.from_dict(hierarchy_data)
@@ -9875,6 +10015,7 @@ class ClipData(HierarchyData):
         fps:          Optional[float] = None,
         start_frame:  Optional[int]   = None,
         end_frame:    Optional[int]   = None,
+        axis_system:  Optional[str]   = "maya_y_up",
     ) -> "ClipData":
         """builds a clip from an fbx's animation take
 
@@ -9884,6 +10025,23 @@ class ClipData(HierarchyData):
         translation curves are multiplied by it, rotations and scales are
         not. A file whose unit sits as a scale on the scene root's children
         is not converted, as :meth:`HierarchyData.load_fbx` says.
+
+        ``axis_system`` "maya_y_up", the default, loads the take in Maya's
+        Y-up axes, as :meth:`HierarchyData.load_fbx` loads the rig: every
+        node's world matrix, on every frame, is the file's times the turn
+        from the file's axis system to Maya's, the one ConvertScene gives,
+        root travel included. Maya's FBX importer agrees on a file whose up
+        axis is x or z and leaves one whose up axis is y in its own axes, as
+        :meth:`HierarchyData.load_fbx` says. Neither agrees on a root an
+        additive layer moves: ConvertScene leaves that layer's translate in
+        the file's axes and Maya's importer parts from both, where the clip
+        keeps the file's world turned. A joint root takes the turn in
+        its joint orient and its translate curves, keeping its rotate curves
+        as authored; any other root has its rotate solved again on every
+        frame in its rotate order, through euler_filter along the frames,
+        frame 0 as solved, and its translate turned. A file already in Maya's
+        Y-up loads as it is, a left handed one raises ValueError, and
+        ``axis_system=None`` keeps the file's own axes.
 
         The three local channels are sampled separately rather than
         decomposed out of ``EvaluateLocalTransform``: that matrix has already
@@ -9896,7 +10054,8 @@ class ClipData(HierarchyData):
         rotation an animation layer blends by layer is rebuilt from
         quaternions frame by frame, by the sdk as here, so that curve goes
         through euler_filter in the node's rotate order, frame 0 as the sdk
-        gives it.
+        gives it. So does the rotate of a root that is not a joint, solved
+        again for Maya's axes (``axis_system``).
 
         Every frame is sampled at once: each curve's keys are read once and
         evaluated on the frame grid the way the sdk evaluates them, the same
@@ -10001,19 +10160,25 @@ class ClipData(HierarchyData):
 
         if FBX is None:
             raise ImportError("fbx module not found")
+        _fbx_check_axis_system(axis_system)
 
         # everything read from the scene dies with it: copy out inside the block
         with open_fbx(filename, FBX) as scene:
+            turn         = _fbx_axis_turn(scene, axis_system, filename)
             scale_factor = _fbx_scale_factor(scene, scale_factor)
             hierarchy_data, nodes = _walk_fbx(scene, scale_factor)
-
-            rig = HierarchyData.from_dict(hierarchy_data)
 
             criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimStack.ClassId)
             count    = scene.GetSrcObjectCount(criteria)
 
             if not count:
+                if turn is not None:
+                    _fbx_turn_walk(hierarchy_data, turn)
+                rig = HierarchyData.from_dict(hierarchy_data)
                 return cls(rig, frames=1, start_frame=start_frame or 0, fps=fps or 24.0)
+
+            # the file's own axes, turned once every frame is sampled
+            rig = HierarchyData.from_dict(hierarchy_data)
 
             # typed: the binding can hand back a live wrapper of an earlier
             # scene's object for one that sits where it did
@@ -10081,6 +10246,18 @@ class ClipData(HierarchyData):
             # the frame grid in the sdk's ticks, every frame sampled at once
             ticks = _fbx_ticks((start + np.arange(clip.frame_count)) / fps, per_second)
             _fbx_sample_take(stack, sampled, ticks, scale_factor, (translate, rotate, scale))
+
+        if turn is not None:
+            roots        = [index for index, node in enumerate(clip) if node.parent_uuid is None]
+            joints       = [clip[index].node_type == "joint" for index in roots]
+            orders       = [clip[index].rotate_order for index in roots]
+            joint_orient = np.array(clip.frames.joint_orient)
+
+            turned = _fbx_turn_roots(
+                turn, joints, orders, translate[:, roots], rotate[:, roots], joint_orient[:, roots]
+            )
+            translate[:, roots], rotate[:, roots], joint_orient[:, roots] = turned
+            clip.frames.joint_orient = joint_orient
 
         clip.frames.scale     = scale
         clip.frames.rotate    = rotate
@@ -10216,9 +10393,13 @@ def load(filename: str, mode: Optional[str] = None) -> "HierarchyData":
     return _load_derived(HierarchyData, filename, mode)
 
 
-def load_fbx(filename: str, scale_factor: Optional[float] = None) -> "HierarchyData":
+def load_fbx(
+    filename:     str,
+    scale_factor: Optional[float] = None,
+    axis_system:  Optional[str]   = "maya_y_up",
+) -> "HierarchyData":
     """The fbx's node hierarchy, names as in the file: ``HierarchyData.load_fbx()``."""
-    return HierarchyData.load_fbx(filename, scale_factor)
+    return HierarchyData.load_fbx(filename, scale_factor, axis_system)
 
 
 def load_glb(

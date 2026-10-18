@@ -341,7 +341,7 @@ index.
 <!-- notest: no .glb / .fbx rig ships with this package; §10 writes one first -->
 ```python
 rig  = HierarchyData.load_glb("hero.glb")  # metres -> centimetres by default
-rig  = HierarchyData.load_fbx("hero.fbx")
+rig  = HierarchyData.load_fbx("hero.fbx")  # in cm and Maya's Y-up by default
 rig  = HierarchyData.load("hero.fbx")      # header sniffing
 clip = ClipData.load_fbx("walk.fbx")
 ```

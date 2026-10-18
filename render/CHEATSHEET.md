@@ -258,7 +258,7 @@ shapes are shown:
 Object.load_glb("hero.glb", index=0, scale_factor=100.0,
                 extract_texture=True, load_skin=True)
 Object.load_fbx("hero.fbx", index=0, extract_texture=True, load_skin=True,
-                scale_factor=None)
+                scale_factor=None, axis_system="maya_y_up")
 ```
 
 `load_glb` pulls the PBR base-color map of the mesh's own material into
@@ -266,8 +266,9 @@ Object.load_fbx("hero.fbx", index=0, extract_texture=True, load_skin=True,
 when present (`load_skin=True`). An explicit `texture=` kwarg always wins.
 `load_fbx` reads the mesh and its skin's bind matrices in centimetres
 (`scale_factor=None` converts the file's unit, a number is the caller's
-own factor), the way `HierarchyData.load_fbx` and `ClipData.load_fbx`
-read the rig, so `pose()` with a rig from the same file lines up.
+own factor) and in Maya's Y-up (`axis_system=None` keeps the file's
+axes), the way `HierarchyData.load_fbx` and `ClipData.load_fbx` read
+the rig, so `pose()` with a rig from the same file lines up.
 
 Pull a texture onto an existing Object after the fact. Both return
 `True`/`False` rather than raising when the slot is empty:

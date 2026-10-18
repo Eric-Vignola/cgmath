@@ -1726,9 +1726,9 @@ loader's, where:
 | Loader | Signature |
 |---|---|
 | `TransformList.load` | `(filename, mode=None)` — `mode` in `"gltf" / "glb" / "fbx" / "json" / "npz" / "pkl"` |
-| `TransformList.load_fbx` | `(filename, scale_factor=None)` |
+| `TransformList.load_fbx` | `(filename, scale_factor=None, axis_system="maya_y_up")` |
 | `TransformList.load_glb` | `(filename, scale_factor=100.0, pose_frame=None)` |
-| `ClipData.load_fbx` | `(filename, scale_factor=None, take=None, fps=None, start_frame=None, end_frame=None)` |
+| `ClipData.load_fbx` | `(filename, scale_factor=None, take=None, fps=None, start_frame=None, end_frame=None, axis_system="maya_y_up")` |
 | `ClipData.load_glb` | `(filename, scale_factor=100.0, animation=0, fps=24.0, start_frame=0)` |
 | `TransformList.save_fbx` | `(filename, zero_root=False, as_ascii=False)` — binary unless `as_ascii` |
 
@@ -1798,8 +1798,33 @@ one loads at world scale 0.01 under a kept root and 100 times too large
 under a dropped one, meshes included.
 The FBX mesh readers (`geometry.mesh.load_fbx`, `MeshData.load_fbx`,
 `MeshList.load_fbx`) and `render.Object.load_fbx`, points and skin bind
-matrices alike, take the same `scale_factor` with the same default, so
-a mesh posed by a rig or a clip read from the same file lines up.
+matrices alike, take the same `scale_factor`, and the `axis_system`
+below, with the same defaults, so a mesh posed by a rig or a clip read
+from the same file lines up.
+
+`axis_system="maya_y_up"`, the default, loads an FBX in Maya's Y-up
+axes the way `FbxAxisSystem.MayaYUp.ConvertScene` converts it: every
+node's world matrix, on every frame of a clip, is the file's times the
+turn from the file's axis system (its up vector, front vector and
+handedness) to Maya's. Maya's FBX importer puts a file whose up axis is
+X or Z, an Unreal file among them, in the same place. It leaves a file
+whose up axis is Y, pointing up or down, in its own axes, so a Y-up file
+whose front is not +Z, or a -Y-up one, loads turned 90 or 180 degrees
+from where Maya shows it. An Unreal file, Z-up, turns (x, y, z) to
+(x, z, -y), root travel with it. On a root an additive layer moves, a
+clip still keeps the file's world turned, where ConvertScene leaves that
+layer's translate in the file's axes and Maya's importer parts from
+both. The turn goes on the roots: a joint
+root takes it in its joint orient and translate and keeps its rotate
+curves; any other root's rotate is solved again, through `euler_filter`
+on a clip. The mesh readers turn the points and normals, and
+`Object.load_fbx` the skin's bind matrices with them. A file already in
+Maya's Y-up, as `save_fbx` writes, loads as it is; a left-handed one
+raises `ValueError`, since a rotation can't turn it into Maya's axes.
+`axis_system=None` keeps the file's own axes. `load()` reads an FBX with
+the `load_fbx` defaults and takes no `axis_system`, so a left-handed file
+reads through `load_fbx(..., axis_system=None)` alone. Which way the
+character faces stays as the file has it.
 
 For `load_glb`, `scale_factor` converts units (glTF is metres, so `100.0`
 gives centimetres); `pose_frame` reads one frame of the file's animation

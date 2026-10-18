@@ -11,6 +11,8 @@ import it from :mod:`transforms`.
 from cgmath.hierarchy.hierarchy import *  # noqa: F401,F403
 from cgmath.hierarchy.hierarchy import (  # noqa: F401
     FBX,
+    _fbx_axis_turn,
+    _fbx_check_axis_system,
     _fbx_enum,
     _fbx_frame_rate,
     _fbx_scale_factor,

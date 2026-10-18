@@ -2903,13 +2903,14 @@ class MeshData(Data):
         filename:     str,
         name:         str   | None = None,
         scale_factor: float | None = None,
+        axis_system:  str   | None = "maya_y_up",
     ) -> "MeshData":
         """returns a single MeshData from an fbx file (first mesh if name is None)
 
-        In centimeters by default, as a rig read from the same file:
-        ``scale_factor`` as in :func:`load_fbx`.
+        In centimeters and Maya's Y-up by default, as a rig read from the same
+        file: ``scale_factor`` and ``axis_system`` as in :func:`load_fbx`.
         """
-        data = load_fbx(filename, scale_factor)
+        data = load_fbx(filename, scale_factor, axis_system)
         if not data:
             raise RuntimeError("No meshes found in FBX file")
         if name is None:
@@ -4707,13 +4708,20 @@ class MeshList(DataList):
     DATA_LIST_CLASS = MeshData
 
     @classmethod
-    def load_fbx(cls, filename: str, scale_factor: float | None = None) -> "MeshList":
+    def load_fbx(
+        cls,
+        filename:     str,
+        scale_factor: float | None = None,
+        axis_system:  str   | None = "maya_y_up",
+    ) -> "MeshList":
         """loads all meshes from an fbx file into a MeshList
 
-        In centimeters by default, as a rig read from the same file:
-        ``scale_factor`` as in :func:`load_fbx`.
+        In centimeters and Maya's Y-up by default, as a rig read from the same
+        file: ``scale_factor`` and ``axis_system`` as in :func:`load_fbx`.
         """
-        return cls([mesh_data for mesh_data, _ in load_fbx(filename, scale_factor)])
+        return cls(
+            [mesh_data for mesh_data, _ in load_fbx(filename, scale_factor, axis_system)]
+        )
 
     @classmethod
     def load_glb(cls, filename: str, scale_factor: float = 100.0) -> "MeshList":
@@ -4798,7 +4806,8 @@ class UVList(MeshList):
     @classmethod
     def load_fbx(cls, filename: str, name: str | None = None) -> "UVList":
         """loads all UV channels for one mesh from an fbx file (first mesh if name is None)"""
-        return _one_uv_list(load_fbx(filename), name, "FBX")
+        # UVs have no unit and no axes: the file as it is, a left handed one too
+        return _one_uv_list(load_fbx(filename, scale_factor=1.0, axis_system=None), name, "FBX")
 
     @classmethod
     def load_glb(cls, filename: str, name: str | None = None) -> "UVList":
@@ -5347,7 +5356,11 @@ def _extract_fbx_normals(
     return normals, normal_indices
 
 
-def load_fbx(filename: str, scale_factor: float | None = None) -> list:
+def load_fbx(
+    filename:     str,
+    scale_factor: float | None = None,
+    axis_system:  str   | None = "maya_y_up",
+) -> list:
     """loads fbx file and returns list of (MeshData, UVList) tuples
 
     ``scale_factor`` None, the default, converts the file's unit to
@@ -5360,6 +5373,14 @@ def load_fbx(filename: str, scale_factor: float | None = None) -> list:
     sdk's and Maya's unit conversions write it, is not converted, as
     ``HierarchyData.load_fbx`` says: a meters one's points come back 100
     times too large.
+
+    ``axis_system`` "maya_y_up", the default, turns the points and the
+    normals from the file's axis system into Maya's Y-up, by the turn the
+    rig loaders put on a rig's roots, so an Unreal file, Z-up, turns
+    (x, y, z) to (x, z, -y). The points stay in the mesh's own space, its
+    node's transform left out as before, and turn as a root node would. A
+    file already in Maya's Y-up loads as it is, a left handed one raises
+    ValueError, and ``axis_system=None`` keeps the file's own axes.
     """
 
     if fbx is None:
@@ -5367,11 +5388,14 @@ def load_fbx(filename: str, scale_factor: float | None = None) -> list:
 
     # imported here rather than at module scope: cgmath.hierarchy imports
     # formats.glb, which imports cgmath.geometry
-    from cgmath.hierarchy import _fbx_scale_factor
+    from cgmath.hierarchy import _fbx_axis_turn, _fbx_check_axis_system, _fbx_scale_factor
+
+    _fbx_check_axis_system(axis_system)
 
     # everything read from the scene dies with it: copy out inside the block
     with open_fbx(filename, fbx) as scene:
         factor     = _fbx_scale_factor(scene, scale_factor)
+        turn       = _fbx_axis_turn(scene, axis_system, filename, fbx)
         mesh_nodes = []
         _walk_fbx_mesh_nodes(scene.GetRootNode(), mesh_nodes)
 
@@ -5381,6 +5405,10 @@ def load_fbx(filename: str, scale_factor: float | None = None) -> list:
             points = _fbx_control_points(mesh) * factor
             indices, counts = _fbx_polygon_streams(mesh)
             normals, normal_indices = _extract_fbx_normals(mesh, counts)
+            if turn is not None:
+                points = points @ turn
+                if normals is not None:
+                    normals = normals @ turn
 
             mesh_data = MeshData(
                 points         = points,

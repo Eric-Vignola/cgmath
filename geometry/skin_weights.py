@@ -1015,6 +1015,7 @@ def _read_skins_fbx(
     filename:      str,
     bind_matrices: bool            = False,
     scale_factor:  Optional[float] = None,
+    axis_system:   Optional[str]   = "maya_y_up",
 ) -> list:
     """an fbx's skins as ``(SkinData, inverse bind matrices or None)`` pairs
 
@@ -1042,6 +1043,13 @@ def _read_skins_fbx(
     [t s, 1]]``, and the inverse bind ``[[A, 0], [b, 1]]`` that keeps them
     where the file has them is ``[[A, 0], [b s, 1]]``: only its translation
     row scales. The weights are unitless.
+
+    They are in the axes the mesh reader turns the points into, given the
+    same ``axis_system``: a point ``p`` becomes ``p C`` and a rig loaded the
+    same way has joint worlds ``W K``, ``K`` the turn ``C`` as a 4x4, so the
+    inverse bind becomes ``K^-1 B`` (its first three rows ``C^T`` times the
+    file's) and the posed mesh is the file's, turned. Only the matrices
+    turn, so a left handed file raises only when they are asked for.
     """
     if fbx is None:
         raise ImportError("Autodesk FBX Python SDK is not installed")
@@ -1051,13 +1059,21 @@ def _read_skins_fbx(
     # the cycle while cgmath.geometry is still loading.
     # cgmath.geometry.mesh is lazy for symmetry, not necessity.
     from cgmath.geometry.mesh import _walk_fbx_mesh_nodes
-    from cgmath.hierarchy import _fbx_enum, _fbx_scale_factor, _walk_fbx
+    from cgmath.hierarchy import (
+        _fbx_axis_turn,
+        _fbx_check_axis_system,
+        _fbx_enum,
+        _fbx_scale_factor,
+        _walk_fbx,
+    )
 
+    _fbx_check_axis_system(axis_system)
     filename = os.path.expanduser(filename)
 
     # everything read from the scene dies with it: copy out inside the block
     with open_fbx(filename, fbx) as scene:
         factor = _fbx_scale_factor(scene, scale_factor)
+        turn   = _fbx_axis_turn(scene, axis_system, filename, fbx) if bind_matrices else None
         hierarchy_data, nodes = _walk_fbx(scene, 1.0)
 
         named = {
@@ -1120,6 +1136,8 @@ def _read_skins_fbx(
             if bind_matrices:
                 bound = np.asarray([binds[x] for x in influences])
                 bound[:, 3, :3] *= factor
+                if turn is not None:
+                    bound[:, :3] = turn.T @ bound[:, :3]
             data.append((skin, bound))
 
     return data

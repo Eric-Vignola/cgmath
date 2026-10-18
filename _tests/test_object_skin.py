@@ -27,7 +27,8 @@ import warnings
 
 import numpy as np
 from cgmath.geometry.deform import SkinDeformData
-from cgmath.geometry.mesh import MeshData, MeshList, load_fbx as mesh_load_fbx
+from cgmath.geometry.mesh import MeshData, MeshList, UVList, load as mesh_load, load_fbx as mesh_load_fbx
+from cgmath.geometry.skin_weights import SkinList
 from cgmath.render.scene import Object, Scene
 from cgmath.hierarchy import ClipData, HierarchyData
 
@@ -781,24 +782,31 @@ class TestFbxBindPose(FbxCase):
 @unittest.skipIf(fbx is None, "Autodesk FBX Python SDK is not installed")
 class TestFbxPosesInTheRigsUnitAndAxes(FbxCase):
     """the mesh and its inverse binds load the way HierarchyData.load_fbx and
-    ClipData.load_fbx load the rig, in cm by default, so a rig or a clip read
-    from the same file poses the mesh where the file has it
+    ClipData.load_fbx load the rig, in cm and Maya's Y-up by default, so a rig
+    or a clip read from the same file poses the mesh where the file has it
 
     At the file's bind pose the rig leaves the bind mesh where it is. Posed
     off it, the mesh is the file's own posed mesh, read raw
-    (``scale_factor=1.0``), converted the same way.
+    (``scale_factor=1.0, axis_system=None``), converted the same way.
     """
 
-    def skinned(self, name, unit=None, knee=20.0, moved_body=False):
+    # Unreal's Z-up into Maya's Y-up: (x, y, z) -> (x, z, -y)
+    TURN = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
+    RAW  = {"scale_factor": 1.0, "axis_system": None}
+
+    def skinned(self, name, unit=None, axes=None, knee=20.0, moved_body=False):
         """a hip and a knee bound to a quad with the knee at 20 degrees;
         ``knee`` is the knee's rotate in the file's node pose, off the bind
         for any other value. ``moved_body`` moves and turns the mesh's own
         node, its bind matrix with it. ``unit`` names the file's
-        FbxSystemUnit, cm when None"""
+        FbxSystemUnit and ``axes`` is its FbxAxisSystem, cm and Maya's Y-up
+        when None"""
 
         def populate(scene):
             if unit is not None:
                 scene.GetGlobalSettings().SetSystemUnit(getattr(fbx.FbxSystemUnit, unit))
+            if axes is not None:
+                scene.GetGlobalSettings().SetAxisSystem(axes)
 
             hip  = add_joint(scene, "hip")
             shin = add_joint(scene, "knee", parent=hip)
@@ -843,12 +851,25 @@ class TestFbxPosesInTheRigsUnitAndAxes(FbxCase):
     def points(obj):
         return np.array(obj.mesh.points, dtype=float)
 
+    def cases(self):
+        """(label, unit, axis system, cm per unit, turn) of the files these
+        tests read"""
+        zup = fbx.FbxAxisSystem.MayaZUp
+        return (
+            ("m", "m", None, 100.0, np.eye(3)),
+            ("Inch", "Inch", None, 2.54, np.eye(3)),
+            ("cm", "cm", None, 1.0, np.eye(3)),
+            ("cm Z-up", "cm", zup, 1.0, self.TURN),
+            ("m Z-up", "m", zup, 100.0, self.TURN),
+        )
+
     def test_at_its_bind_pose_the_rig_leaves_the_mesh_where_it_is(self):
         """a meters file posed by its own rig at rest moved the mesh 99 units
-        when the mesh stayed in meters and the rig loaded in cm"""
-        for unit in ("m", "Inch", "cm"):
-            with self.subTest(unit=unit):
-                path = self.skinned(f"bind_{unit}.fbx", unit=unit)
+        when the mesh stayed in meters and the rig loaded in cm, and a Z-up
+        file 1.2 units on a mesh 0.8 across when the rig alone turned"""
+        for label, unit, axes, _, _ in self.cases():
+            with self.subTest(file=label):
+                path = self.skinned(f"bind {label}.fbx", unit=unit, axes=axes)
                 obj  = Object.load_fbx(path)
                 bind = self.points(obj)
                 for loader in (HierarchyData.load_fbx, ClipData.load_fbx):
@@ -856,12 +877,13 @@ class TestFbxPosesInTheRigsUnitAndAxes(FbxCase):
                     np.testing.assert_allclose(self.points(obj), bind, rtol=0.0, atol=1e-9)
                     obj.restore_bind_pose()
 
-    def test_the_mesh_loads_in_centimeters(self):
-        """the points scale with the file's unit; the normals do not"""
-        for unit, cm in (("m", 100.0), ("Inch", 2.54), ("cm", 1.0)):
-            with self.subTest(unit=unit):
-                path = self.skinned(f"unit_{unit}.fbx", unit=unit)
-                raw  = MeshData.load_fbx(path, scale_factor=1.0)
+    def test_the_mesh_loads_in_centimeters_and_maya_axes(self):
+        """the points scale with the file's unit and turn with its axes; the
+        normals only turn"""
+        for label, unit, axes, cm, turn in self.cases():
+            with self.subTest(file=label):
+                path = self.skinned(f"mesh {label}.fbx", unit=unit, axes=axes)
+                raw  = MeshData.load_fbx(path, **self.RAW)
                 read = (
                     MeshData.load_fbx(path),
                     MeshList.load_fbx(path)[0],
@@ -869,28 +891,68 @@ class TestFbxPosesInTheRigsUnitAndAxes(FbxCase):
                     Object.load_fbx(path).mesh,
                 )
                 for mesh in read:
-                    np.testing.assert_allclose(mesh.points, np.asarray(raw.points) * cm, rtol=1e-12)
-                    np.testing.assert_array_equal(mesh.normals, raw.normals)
+                    want = np.asarray(raw.points) * cm @ turn
+                    np.testing.assert_allclose(mesh.points, want, rtol=0.0, atol=1e-12)
+                    want = np.asarray(raw.normals) @ turn
+                    np.testing.assert_allclose(mesh.normals, want, rtol=0.0, atol=1e-12)
 
                 # a number is the caller's own factor on the list reader too
-                np.testing.assert_array_equal(MeshList.load_fbx(path, scale_factor=1.0)[0].points, raw.points)
+                np.testing.assert_array_equal(MeshList.load_fbx(path, **self.RAW)[0].points, raw.points)
 
-    def test_posed_off_its_bind_the_mesh_is_the_files_posed_mesh_in_centimeters(self):
-        for unit, cm in (("m", 100.0), ("Inch", 2.54)):
-            with self.subTest(unit=unit):
-                path  = self.skinned(f"posed_{unit}.fbx", unit=unit, knee=50.0, moved_body=True)
+    def test_posed_off_its_bind_the_mesh_is_the_files_posed_mesh_converted(self):
+        for label, unit, axes, cm, turn in self.cases():
+            with self.subTest(file=label):
+                path  = self.skinned(f"posed {label}.fbx", unit=unit, axes=axes, knee=50.0, moved_body=True)
                 posed = Object.load_fbx(path).pose(HierarchyData.load_fbx(path))
-                raw   = Object.load_fbx(path, scale_factor=1.0)
+                raw   = Object.load_fbx(path, **self.RAW)
                 bind  = self.points(raw)
-                raw.pose(HierarchyData.load_fbx(path, scale_factor=1.0))
+                raw.pose(HierarchyData.load_fbx(path, **self.RAW))
 
                 self.assertGreater(float(np.abs(self.points(raw) - bind).max()), 0.1)
-                np.testing.assert_allclose(self.points(posed), self.points(raw) * cm, rtol=0.0, atol=1e-9)
+                want = self.points(raw) * cm @ turn
+                np.testing.assert_allclose(self.points(posed), want, rtol=0.0, atol=1e-9)
 
                 # a number is the caller's own factor, on the rig and the mesh alike
                 three = Object.load_fbx(path, scale_factor=3.0)
                 three.pose(HierarchyData.load_fbx(path, scale_factor=3.0))
-                np.testing.assert_allclose(self.points(three), self.points(raw) * 3.0, rtol=0.0, atol=1e-9)
+                want = self.points(raw) * 3.0 @ turn
+                np.testing.assert_allclose(self.points(three), want, rtol=0.0, atol=1e-9)
+
+    def test_a_left_handed_file_raises_unless_its_axes_are_kept(self):
+        """no rotation turns it into Maya's axes; the weights and the UVs have
+        no axes, so their readers load it as it is. Through load(), which
+        takes no axis_system, the error names the load_fbx call that reads
+        the file"""
+        system = fbx.FbxAxisSystem
+        left   = system(system.EUpVector.eYAxis, system.EFrontVector.eParityOdd, system.ECoordSystem.eLeftHanded)
+        path   = self.skinned("left.fbx", axes=left)
+
+        for label, loader, reader in (
+            ("MeshData.load_fbx", MeshData.load_fbx, MeshData.load_fbx),
+            ("MeshList.load_fbx", MeshList.load_fbx, MeshList.load_fbx),
+            ("mesh.load_fbx", mesh_load_fbx, mesh_load_fbx),
+            ("Object.load_fbx", Object.load_fbx, Object.load_fbx),
+            ("MeshData.load", MeshData.load, MeshData.load_fbx),
+            ("mesh.load", mesh_load, mesh_load_fbx),
+        ):
+            with self.subTest(loader=label):
+                with self.assertRaises(ValueError) as caught:
+                    loader(path)
+                self.assertIn("load_fbx(filename, axis_system=None)", str(caught.exception))
+                self.assertIsNotNone(reader(path, axis_system=None))
+
+        self.assertIsNotNone(Object.load_fbx(path, axis_system=None).skin)
+        self.assertEqual([skin.name for skin in SkinList.load_fbx(path)], ["body_geo"])
+        self.assertEqual(len(UVList.load_fbx(path)), 0)
+
+    def test_an_unknown_axis_system_is_refused(self):
+        path = self.skinned("axes.fbx")
+
+        for loader in (MeshData.load_fbx, MeshList.load_fbx, mesh_load_fbx, Object.load_fbx):
+            with self.subTest(loader=loader.__qualname__):
+                with self.assertRaises(ValueError) as caught:
+                    loader(path, axis_system="maya_z_up")
+                self.assertIn("'maya_y_up' or None", str(caught.exception))
 
 
 @unittest.skipIf(not HAVE_GLB, "pygltflib / trimesh are not installed")

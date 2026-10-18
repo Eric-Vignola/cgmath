@@ -17,6 +17,7 @@ from cgmath.transforms import (
     euler_filter,
     euler_to_matrix,
     euler_to_quaternion,
+    matrix_to_euler,
     quaternion_slerp,
     quaternion_to_matrix,
 )
@@ -6572,6 +6573,441 @@ class TestClipLoadFbx(unittest.TestCase):
 
         with self.assertRaises(IndexError):
             ClipData.load_fbx(path, take=9)
+
+
+@unittest.skipIf(FBX is None, "fbx sdk is not installed")
+class TestFbxLoadsInMayaAxes(unittest.TestCase):
+    """the fbx loaders load in Maya's Y-up, by default: every node's world
+    matrix, on every frame, is the one the sdk gives after
+    FbxAxisSystem.MayaYUp.ConvertScene, the conversion Maya's FBX importer
+    runs on a file whose up axis is x or z (it leaves one whose up axis is y
+    as it is). The fixtures are authored straight through the sdk, in the
+    axis system each test names; the truth is the sdk's own evaluation"""
+
+    FRAMES = 9
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    @staticmethod
+    def axes(up, parity, handed="eRightHanded"):
+        system = FBX.FbxAxisSystem
+        return system(
+            getattr(system.EUpVector, up),
+            getattr(system.EFrontVector, parity),
+            getattr(system.ECoordSystem, handed),
+        )
+
+    def right_handed(self):
+        """(label, axis system) of every right handed system the binding
+        can build, Unreal's Z-up among them, Maya's own Y-up left out"""
+        out = [("MayaZUp", FBX.FbxAxisSystem.MayaZUp)]
+        ups, fronts = ("eXAxis", "eYAxis", "eZAxis"), ("eParityEven", "eParityOdd")
+        for up, parity in itertools.product(ups, fronts):
+            if (up, parity) != ("eYAxis", "eParityOdd"):
+                out.append((f"{up} {parity}", self.axes(up, parity)))
+        return out
+
+    def authored(self, axes, name="axes.fbx", animated=True, flip=(), additive=()):
+        """a joint chain under a joint root, a scaled group root and a
+        locator root holding a joint, keyed over FRAMES frames at 24 fps (a
+        joint under a group scaled unevenly is left out: the sdk's default
+        inheritance places it otherwise than cgmath, in any axes). ``flip``
+        names global settings signs to negate after ``axes`` is set, such as
+        "UpAxisSign": the binding builds no axis system pointing down.
+        ``additive`` lists (node, property, axis, per frame) a second layer,
+        additive, keys over the same frames"""
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        scene.GetGlobalSettings().SetAxisSystem(axes)
+        for sign in flip:
+            stored = FBX.FbxPropertyInteger1(scene.GetGlobalSettings().FindProperty(sign))
+            stored.Set(-stored.Get())
+        scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames24)
+        source = FBX.FbxNode.EPivotSet.eSourcePivot
+
+        def null(name, look):
+            attr = FBX.FbxNull.Create(scene, name)
+            attr.Look.Set(look.value)
+            return attr
+
+        def node(name, attr, parent, translate, rotate, order=0, pre=None):
+            made = FBX.FbxNode.Create(scene, name)
+            made.SetNodeAttribute(attr)
+            made.LclTranslation.Set(FBX.FbxDouble3(*translate))
+            made.LclRotation.Set(FBX.FbxDouble3(*rotate))
+            # the sdk honours a rotate order only with rotation active, which
+            # Maya writes on every node
+            made.SetRotationActive(True)
+            made.SetRotationOrder(source, list(FBX.EFbxRotationOrder)[order])
+            if pre is not None:
+                made.SetPreRotation(source, FBX.FbxVector4(*pre, 1.0))
+            parent.AddChild(made)
+            return made
+
+        # the group in zxy and the locator in zyx (the sdk's orders 4 and 5)
+        top   = scene.GetRootNode()
+        bone  = FBX.FbxSkeleton.Create
+        hip   = node("hip", bone(scene, "a"), top, (1.0, 2.0, 3.0), (10.0, 20.0, 30.0), pre=(5.0, -15.0, 25.0))
+        knee  = node("knee", bone(scene, "b"), hip, (0.0, -4.0, 0.5), (-30.0, 5.0, 0.0))
+        group = node("group", null("c", FBX.FbxNull.ELook.eNone), top, (-2.0, 1.0, 4.0), (35.0, -10.0, 50.0), 4)
+        loc   = node("loc", null("e", FBX.FbxNull.ELook.eCross), top, (3.0, -1.0, 2.0), (0.0, 80.0, 0.0), 5)
+        node("prop", bone(scene, "d"), loc, (0.5, 0.5, 0.0), (0.0, 0.0, 15.0))
+        group.LclScaling.Set(FBX.FbxDouble3(1.0, 2.0, 0.5))
+
+        if animated:
+            stack = FBX.FbxAnimStack.Create(scene, "Take 001")
+            layer = FBX.FbxAnimLayer.Create(scene, "Base Layer")
+            stack.AddMember(layer)
+            last   = self.FRAMES - 1
+            linear = FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear
+            keys = (
+                (hip.LclTranslation, "X", 1.0, 7.0),
+                (hip.LclTranslation, "Y", 2.0, 102.0),
+                (hip.LclTranslation, "Z", 3.0, 53.0),
+                (hip.LclRotation, "X", 10.0, 70.0),
+                (knee.LclRotation, "Z", 0.0, -45.0),
+                (group.LclTranslation, "X", -2.0, 6.0),
+                (group.LclRotation, "Z", 50.0, 450.0),  # 50 degrees a frame
+                (group.LclRotation, "X", 35.0, 75.0),
+                (loc.LclRotation, "Y", 80.0, 100.0),
+            )
+            for prop_of, axis, first, end in keys:
+                curve = prop_of.GetCurve(layer, axis, True)
+                curve.KeyModifyBegin()
+                for frame in range(self.FRAMES):
+                    time = FBX.FbxTime()
+                    time.SetSecondDouble(frame / 24.0)
+                    key = curve.KeyAdd(time)[0]
+                    curve.KeySetValue(key, first + (end - first) * frame / last)
+                    curve.KeySetInterpolation(key, linear)
+                curve.KeyModifyEnd()
+
+            if additive:
+                extra = FBX.FbxAnimLayer.Create(scene, "Additive")
+                extra.BlendMode.Set(0.0)  # additive
+                stack.AddMember(extra)
+                named = {"hip": hip, "knee": knee, "group": group, "loc": loc}
+                for node_name, prop_name, axis, per_frame in additive:
+                    curve = getattr(named[node_name], prop_name).GetCurve(extra, axis, True)
+                    curve.KeyModifyBegin()
+                    for frame in range(self.FRAMES):
+                        time = FBX.FbxTime()
+                        time.SetSecondDouble(frame / 24.0)
+                        key = curve.KeyAdd(time)[0]
+                        curve.KeySetValue(key, per_frame * frame)
+                        curve.KeySetInterpolation(key, linear)
+                    curve.KeyModifyEnd()
+
+        path     = os.path.join(self.tmp.name, name)
+        exporter = FBX.FbxExporter.Create(manager, "")
+        if not exporter.Initialize(path, -1, manager.GetIOSettings()):
+            raise RuntimeError(f"cannot write {path}")
+        exporter.Export(scene)
+        exporter.Destroy()
+        manager.Destroy()
+        return path
+
+    def truth(self, path, frames=None, convert=True):
+        """{name: world} of every node after ConvertScene to Maya's Y-up (in
+        the file's own axes when ``convert`` is False), the static values
+        when ``frames`` is None, else {name: (F, 4, 4)}"""
+        manager = FBX.FbxManager.Create()
+        try:
+            manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+            importer = FBX.FbxImporter.Create(manager, "")
+            importer.Initialize(path, -1, manager.GetIOSettings())
+            scene = FBX.FbxScene.Create(manager, "")
+            importer.Import(scene)
+            importer.Destroy()
+            if convert:
+                FBX.FbxAxisSystem.MayaYUp.ConvertScene(scene)
+
+            nodes, stack = {}, [scene.GetRootNode()]
+            while stack:
+                node = stack.pop()
+                if node.GetNodeAttribute():
+                    nodes[node.GetName()] = node
+                stack.extend(node.GetChild(i) for i in range(node.GetChildCount()))
+
+            def m4(matrix):
+                return np.array([[matrix.Get(r, c) for c in range(4)] for r in range(4)])
+
+            if frames is None:
+                return {name: m4(node.EvaluateGlobalTransform()) for name, node in nodes.items()}
+            out = {}
+            for name, node in nodes.items():
+                worlds = []
+                for frame in range(frames):
+                    time = FBX.FbxTime()
+                    time.SetSecondDouble(frame / 24.0)
+                    worlds.append(m4(node.EvaluateGlobalTransform(time)))
+                out[name] = np.array(worlds)
+            return out
+        finally:
+            manager.Destroy()
+
+    def assertWorlds(self, got, want):
+        self.assertEqual(sorted(got), sorted(want))
+        for name in want:
+            self.assertTrue(
+                np.allclose(got[name], want[name], rtol=0.0, atol=1e-9),
+                f"{name}: {np.abs(np.asarray(got[name]) - want[name]).max():.2e} off",
+            )
+
+    @staticmethod
+    def rig_worlds(rig):
+        return {node.name: np.asarray(node.world_matrix) for node in rig}
+
+    @staticmethod
+    def clip_worlds(clip):
+        stack = clip.frames.world_matrix
+        return {node.name: stack[:, i] for i, node in enumerate(clip)}
+
+    def test_every_frame_is_where_the_sdk_puts_it_in_maya_axes(self):
+        for label, axes in self.right_handed():
+            with self.subTest(axes=label):
+                path = self.authored(axes, name=f"{label}.fbx")
+
+                clip = ClipData.load_fbx(path)
+
+                self.assertEqual(clip.frame_count, self.FRAMES)
+                self.assertWorlds(self.clip_worlds(clip), self.truth(path, self.FRAMES))
+
+    def test_the_rig_is_where_the_sdk_puts_it_in_maya_axes(self):
+        for label, axes in self.right_handed():
+            with self.subTest(axes=label):
+                path  = self.authored(axes, name=f"{label}.fbx")
+                still = self.authored(axes, name=f"{label}_still.fbx", animated=False)
+                truth = self.truth(path)
+
+                self.assertWorlds(self.rig_worlds(HierarchyData.load_fbx(path)), truth)
+                self.assertWorlds(self.rig_worlds(hierarchy.load_fbx(path)), truth)
+                # a file with no take gives a one frame clip, turned the same
+                clip = ClipData.load_fbx(still)
+                self.assertEqual(clip.frame_count, 1)
+                self.assertWorlds(self.rig_worlds(clip), self.truth(still))
+
+    @staticmethod
+    def stored_axes(path):
+        """(up vector sign, coordinate system) of the axis system a file holds"""
+        manager = FBX.FbxManager.Create()
+        try:
+            manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+            importer = FBX.FbxImporter.Create(manager, "")
+            importer.Initialize(path, -1, manager.GetIOSettings())
+            scene = FBX.FbxScene.Create(manager, "")
+            importer.Import(scene)
+            importer.Destroy()
+            axes = scene.GetGlobalSettings().GetAxisSystem()
+            return axes.GetUpVector()[1], axes.GetCoorSystem()
+        finally:
+            manager.Destroy()
+
+    def test_a_file_whose_up_points_down_is_where_the_sdk_puts_it(self):
+        """the 12 right handed systems whose up vector points down: the up's
+        sign negated with the third axis's or with the front's, which keeps
+        the system right handed, from each up axis and parity; the clip on
+        every frame and the rig"""
+        right   = FBX.FbxAxisSystem.ECoordSystem.eRightHanded
+        systems = itertools.product(("eXAxis", "eYAxis", "eZAxis"), ("eParityEven", "eParityOdd"))
+        for (up, parity), other in itertools.product(systems, ("CoordAxisSign", "FrontAxisSign")):
+            label = f"-{up} {parity} {other}"
+            with self.subTest(axes=label):
+                path = self.authored(self.axes(up, parity), name=f"{label}.fbx", flip=("UpAxisSign", other))
+
+                # what the file holds: its up vector down, still right handed
+                self.assertEqual(self.stored_axes(path), (-1, right))
+
+                self.assertWorlds(self.clip_worlds(ClipData.load_fbx(path)), self.truth(path, self.FRAMES))
+                self.assertWorlds(self.rig_worlds(HierarchyData.load_fbx(path)), self.truth(path))
+
+    def test_the_turn_goes_on_the_roots_alone(self):
+        """Unreal's Z-up: (x, y, z) turns to (x, z, -y)"""
+        path = self.authored(FBX.FbxAxisSystem.MayaZUp)
+        turn = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
+
+        for loader in (HierarchyData.load_fbx, ClipData.load_fbx):
+            with self.subTest(loader=loader.__qualname__):
+                maya = loader(path)
+                file = loader(path, axis_system=None)
+                for name in ("knee", "prop"):
+                    for channel in ("translate", "rotate", "scale", "joint_orient", "rotate_axis"):
+                        same = np.array_equal(getattr(maya[name], channel), getattr(file[name], channel))
+                        self.assertTrue(same, f"{name}.{channel}")
+
+                for name in ("hip", "group", "loc"):
+                    self.assertTrue(np.allclose(maya[name].translate, np.asarray(file[name].translate) @ turn))
+                    self.assertTrue(np.array_equal(maya[name].scale, file[name].scale))
+
+                # a joint root keeps its rotate and takes the turn in its joint orient
+                self.assertTrue(np.array_equal(maya["hip"].rotate, file["hip"].rotate))
+                self.assertFalse(np.allclose(maya["hip"].joint_orient, file["hip"].joint_orient))
+                self.assertFalse(np.allclose(maya["group"].rotate, file["group"].rotate))
+                self.assertTrue(np.array_equal(maya["group"].joint_orient, [0.0, 0.0, 0.0]))
+
+    def test_root_travel_turns_with_the_root(self):
+        """the hip moves +100 along the file's y and +50 along its z: in
+        Maya's axes that is +50 along y and -100 along z"""
+        path  = self.authored(FBX.FbxAxisSystem.MayaZUp)
+
+        clip  = ClipData.load_fbx(path)
+        file  = ClipData.load_fbx(path, axis_system=None)
+
+        hip   = clip.index("hip")
+        moved = np.array(clip.frames.translate)[-1, hip] - np.array(clip.frames.translate)[0, hip]
+        self.assertTrue(np.allclose(moved, [6.0, 50.0, -100.0]))
+        rotate = np.array(clip.frames.rotate)[:, hip]
+        self.assertTrue(np.array_equal(rotate, np.array(file.frames.rotate)[:, hip]))
+
+    def test_a_root_an_additive_layer_moves_keeps_the_files_world_turned(self):
+        """a joint root, or a group root, whose translate an additive layer
+        moves along the file's y and z (the group's turned about y as well):
+        every node, on every frame, is the sdk's world in the file's own
+        axes times the turn. ConvertScene is not the truth here: it leaves
+        the additive layer's translate in the file's axes, and Maya's
+        importer parts from both"""
+        turn         = np.eye(4)
+        turn[:3, :3] = [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]]
+        cases = {
+            "joint root":        (("hip", "LclTranslation", "Y", 3.0), ("hip", "LclTranslation", "Z", -2.0)),
+            "group root":        (("group", "LclTranslation", "Y", 3.0), ("group", "LclTranslation", "Z", -2.0)),
+            "group root turned": (("group", "LclTranslation", "Y", 3.0), ("group", "LclRotation", "Y", 5.0)),
+        }
+        for label, additive in cases.items():
+            with self.subTest(case=label):
+                path = self.authored(FBX.FbxAxisSystem.MayaZUp, name=f"{label}.fbx", additive=additive)
+                file = self.truth(path, self.FRAMES, convert=False)
+                want = {name: worlds @ turn for name, worlds in file.items()}
+
+                clip = ClipData.load_fbx(path)
+
+                self.assertEqual(clip.frame_count, self.FRAMES)
+                self.assertWorlds(self.clip_worlds(clip), want)
+
+                # the premise: ConvertScene puts the moved root elsewhere
+                moved     = additive[0][0]
+                converted = self.truth(path, self.FRAMES)[moved]
+                self.assertGreater(float(np.abs(converted - want[moved]).max()), 1.0)
+
+    def test_a_group_root_rotate_is_solved_again_and_filtered(self):
+        """its curve turns 50 degrees a frame: solved again frame by frame it
+        would step by whole turns, so it goes through euler_filter, frame 0
+        as solved"""
+        path   = self.authored(FBX.FbxAxisSystem.MayaZUp)
+
+        clip   = ClipData.load_fbx(path)
+        rig    = HierarchyData.load_fbx(path)
+
+        group  = clip.index("group")
+        rotate = np.array(clip.frames.rotate)[:, group]
+        self.assertLess(float(np.abs(np.diff(rotate, axis=0)).max()), 90.0)
+        self.assertGreater(float(np.ptp(rotate, axis=0).max()), 300.0)
+
+        # the filter is what keeps it whole: the solve alone stays within a turn
+        order  = np.full(len(rotate), clip["group"].rotate_order)
+        solved = np.degrees(matrix_to_euler(euler_to_matrix(np.radians(rotate), order), order))
+        self.assertGreater(float(np.abs(rotate - solved).max()), 180.0)
+
+        # frame 0 is the solve itself: the same as the static rig's, whose
+        # values the take starts from
+        self.assertTrue(np.allclose(rotate[0], rig["group"].rotate, rtol=0.0, atol=1e-9))
+        self.assertEqual(rig["group"].rotate_order, clip["group"].rotate_order)
+
+    def test_a_group_root_is_filtered_in_its_own_rotate_order(self):
+        """a yzx group root whose z turns 0 to 170 over 13 frames: its rotate
+        solved again needs the filter's flip, which keeps the rotation only in
+        the node's own order (filtered in xyz the frames land 1.97 off). The
+        fixture's other roots never need the flip"""
+        frames  = 13
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        scene.GetGlobalSettings().SetAxisSystem(FBX.FbxAxisSystem.MayaZUp)
+        scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames24)
+
+        attr = FBX.FbxNull.Create(scene, "c")
+        attr.Look.Set(FBX.FbxNull.ELook.eNone.value)
+        group = FBX.FbxNode.Create(scene, "group")
+        group.SetNodeAttribute(attr)
+        group.SetRotationActive(True)
+        group.SetRotationOrder(FBX.FbxNode.EPivotSet.eSourcePivot, FBX.EFbxRotationOrder.eEulerYZX)
+        scene.GetRootNode().AddChild(group)
+
+        stack = FBX.FbxAnimStack.Create(scene, "Take 001")
+        layer = FBX.FbxAnimLayer.Create(scene, "Base Layer")
+        stack.AddMember(layer)
+        curve = group.LclRotation.GetCurve(layer, "Z", True)
+        curve.KeyModifyBegin()
+        for frame in range(frames):
+            time = FBX.FbxTime()
+            time.SetSecondDouble(frame / 24.0)
+            key = curve.KeyAdd(time)[0]
+            curve.KeySetValue(key, 170.0 * frame / (frames - 1))
+            curve.KeySetInterpolation(key, FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear)
+        curve.KeyModifyEnd()
+
+        path     = os.path.join(self.tmp.name, "yzx.fbx")
+        exporter = FBX.FbxExporter.Create(manager, "")
+        if not exporter.Initialize(path, -1, manager.GetIOSettings()):
+            raise RuntimeError(f"cannot write {path}")
+        exporter.Export(scene)
+        exporter.Destroy()
+        manager.Destroy()
+
+        clip = ClipData.load_fbx(path)
+
+        self.assertEqual(clip["group"].rotate_order, 1)  # Maya's yzx
+        self.assertWorlds(self.clip_worlds(clip), self.truth(path, frames))
+
+    def test_a_file_in_maya_axes_loads_as_it_is(self):
+        path = self.authored(self.axes("eYAxis", "eParityOdd"))
+
+        for loader in (HierarchyData.load_fbx, ClipData.load_fbx):
+            with self.subTest(loader=loader.__qualname__):
+                maya = loader(path)
+                file = loader(path, axis_system=None)
+                for channel in ("translate", "rotate", "scale", "joint_orient", "rotate_axis"):
+                    self.assertTrue(np.array_equal(getattr(maya, channel), getattr(file, channel)))
+
+        clip = ClipData.load_fbx(path)
+        file = ClipData.load_fbx(path, axis_system=None)
+        for channel in ("translate", "rotate", "scale", "joint_orient", "rotate_axis"):
+            self.assertTrue(np.array_equal(getattr(clip.frames, channel), getattr(file.frames, channel)))
+
+    def test_a_left_handed_file_raises_unless_its_axes_are_kept(self):
+        """through load_fbx or load(), which takes no axis_system: the error
+        names the load_fbx call that reads the file"""
+        path = self.authored(self.axes("eYAxis", "eParityOdd", "eLeftHanded"))
+
+        for label, loader, reader in (
+            ("HierarchyData.load_fbx", HierarchyData.load_fbx, HierarchyData.load_fbx),
+            ("ClipData.load_fbx", ClipData.load_fbx, ClipData.load_fbx),
+            ("hierarchy.load_fbx", hierarchy.load_fbx, hierarchy.load_fbx),
+            ("HierarchyData.load", HierarchyData.load, HierarchyData.load_fbx),
+            ("ClipData.load", ClipData.load, ClipData.load_fbx),
+            ("hierarchy.load", hierarchy.load, hierarchy.load_fbx),
+        ):
+            with self.subTest(loader=label):
+                with self.assertRaises(ValueError) as caught:
+                    loader(path)
+                self.assertIn("load_fbx(filename, axis_system=None)", str(caught.exception))
+
+                kept = reader(path, axis_system=None)
+                self.assertEqual(sorted(kept.name), ["group", "hip", "knee", "loc", "prop"])
+
+    def test_an_unknown_axis_system_is_refused(self):
+        path = self.authored(FBX.FbxAxisSystem.MayaZUp)
+
+        for value in ("maya_z_up", "MayaYUp", 1, FBX.FbxAxisSystem.MayaYUp):
+            with self.subTest(value=value):
+                for loader in (HierarchyData.load_fbx, ClipData.load_fbx):
+                    with self.assertRaises(ValueError) as caught:
+                        loader(path, axis_system=value)
+                    self.assertIn("'maya_y_up' or None", str(caught.exception))
 
 
 @unittest.skipIf(FBX is None, "fbx sdk is not installed")

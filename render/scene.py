@@ -392,6 +392,7 @@ class Object(TransformData):
         extract_texture: bool            = True,
         load_skin:       bool            = True,
         scale_factor:    Optional[float] = None,
+        axis_system:     Optional[str]   = "maya_y_up",
         **object_kwargs,
     ) -> "Object":
         """Load a mesh from an FBX file as an :class:`Object`.
@@ -400,8 +401,8 @@ class Object(TransformData):
         See :meth:`load_obj` for parameter semantics. The mesh and its skin's
         bind matrices load the way ``HierarchyData.load_fbx`` and
         ``ClipData.load_fbx`` load the rig, so :meth:`pose` with a rig or a
-        clip read from the same file, with the same ``scale_factor``, puts
-        the mesh where the file has it.
+        clip read from the same file, with the same ``scale_factor`` and
+        ``axis_system``, puts the mesh where the file has it.
 
         Args:
             filename: Path to the ``.fbx`` file (``~`` and env vars OK).
@@ -425,6 +426,11 @@ class Object(TransformData):
                 and the file's unit is not read.  A file whose unit sits
                 as a scale on the scene root's children is not converted,
                 as ``HierarchyData.load_fbx`` says.
+            axis_system: "maya_y_up" (default) turns the points, the
+                normals and the bind matrices from the file's axis
+                system into Maya's Y-up, as the rig loaders turn the
+                rig; ``None`` keeps the file's own axes.  A left
+                handed file raises ``ValueError`` unless it is ``None``.
             **object_kwargs: Forwarded to :class:`Object`.
 
         Returns:
@@ -434,7 +440,7 @@ class Object(TransformData):
         Raises:
             ImportError: If the Autodesk FBX Python SDK is not installed.
         """
-        data = _load_fbx(filename, scale_factor)
+        data = _load_fbx(filename, scale_factor, axis_system)
         if not data:
             raise ValueError(f"{filename}: contains no meshes")
         if not -len(data) <= index < len(data):
@@ -446,7 +452,7 @@ class Object(TransformData):
         object_kwargs.setdefault("name", mesh.name or "object")
 
         if load_skin and object_kwargs.get("skin") is None:
-            object_kwargs["skin"] = _fbx_skin(filename, mesh, scale_factor)
+            object_kwargs["skin"] = _fbx_skin(filename, mesh, scale_factor, axis_system)
 
         obj = cls(mesh=mesh, uv=uv, **object_kwargs)
         if extract_texture and obj.texture is None:
@@ -3283,6 +3289,7 @@ def _fbx_skin(
     file_path:    str,
     mesh:         MeshData,
     scale_factor: Optional[float] = None,
+    axis_system:  Optional[str]   = "maya_y_up",
 ) -> Optional[SkinDeformData]:
     """The :class:`SkinDeformData` for *mesh*, or ``None`` if it has no skin.
 
@@ -3294,11 +3301,13 @@ def _fbx_skin(
     the file is enough to shift the lists out of step, so a positional pair
     would quietly bind a mesh to some other mesh's weights.
 
-    The bind matrices are read with the *scale_factor* the mesh was read with,
-    so the two stay in one unit.
+    The bind matrices are read with the *scale_factor* and the *axis_system*
+    the mesh was read with, so the two stay in one unit and one set of axes.
     """
     try:
-        entries = _read_skins_fbx(file_path, bind_matrices=True, scale_factor=scale_factor)
+        entries = _read_skins_fbx(
+            file_path, bind_matrices=True, scale_factor=scale_factor, axis_system=axis_system
+        )
     except Exception as exc:
         warnings.warn(f"{file_path}: could not read skin weights ({exc})", stacklevel=2)
         return None
