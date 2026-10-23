@@ -608,7 +608,7 @@ Functions:
 ```text
 generate_uuid() -> 'str'
     generates a new unique uuid
-load(filename: 'str', mode: 'Optional[str]' = None) -> "'HierarchyData'"
+load(filename: 'str', mode: 'Optional[str]' = None, **kwargs) -> "'HierarchyData'"
     Whatever hierarchy the file holds, read as ``mode`` says or as the file
 load_fbx(filename: 'str', scale_factor: 'Optional[float]' = None, axis_system: 'Optional[str]' = 'maya_y_up', pose: 'str' = 'node', node_types: 'Optional[tuple]' = None) -> "'HierarchyData'"
     The fbx's node hierarchy, names as in the file: ``HierarchyData.load_fbx()``.
@@ -707,7 +707,7 @@ classmethod from_dict(cls, data: dict) -> Any
     The object a tree describes, which must be this class: a tree naming
 classmethod info(cls) -> str
     Returns this class's docstring as a string.
-classmethod load(cls, filename: str, mode: Optional[str] = None) -> Any
+classmethod load(cls, filename: str, mode: Optional[str] = None, **kwargs) -> Any
     Loads the data from a file: ``mode``, or the type the file reads as
 classmethod load_json(cls, filename: str) -> Any
     the object a json file holds, read as :meth:`load` reads one
@@ -719,8 +719,8 @@ match(self, *args, exact: bool = True) -> bool
     returns True if name matches any arguments
 reset_cached_data(self)
     resets cached data: every attribute that is not an annotated field
-save(self, filename: str, mode: Optional[str] = None) -> str
-    saves the data as ``mode`` (pkl, npz or json), or as the extension says
+save(self, filename: str, mode: Optional[str] = None, **kwargs) -> str
+    Saves the data as ``mode``, or as the file's extension says, through
 save_json(self, filename: str) -> str
 save_npz(self, filename: str, compression=8) -> str
 save_pickle(self, filename: str) -> str
@@ -768,7 +768,7 @@ index(self, value, start=0, stop=None)
     The position of the first item named ``value``, searched from
 insert(self, index, value)
     S.insert(index, value) -- insert value before index
-classmethod load(cls, filename: str, mode: Optional[str] = None) -> Any
+classmethod load(cls, filename: str, mode: Optional[str] = None, **kwargs) -> Any
     Loads the data from a file: ``mode``, or the type the file reads as
 classmethod load_json(cls, filename: str) -> Any
     the list a json file holds, read as :meth:`load` reads one
@@ -782,8 +782,8 @@ pop(self, index=-1) -> ~_Item
     S.pop([index]) -> item -- remove and return item at index (default last).
 reset_cached_data(self)
     resets cached data
-save(self, filename: str, mode: Optional[str] = None) -> str
-    saves the list as ``mode`` (pkl, npz or json), or as the extension says
+save(self, filename: str, mode: Optional[str] = None, **kwargs) -> str
+    Saves the list as ``mode``, or as the file's extension says, through
 save_json(self, filename: str) -> str
 save_npz(self, filename: str, compression=8) -> str
 save_pickle(self, filename: str) -> str
@@ -1073,6 +1073,8 @@ classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, name: 
     returns a single MeshData from a glb (first mesh if name is None)
 classmethod load_obj(cls, filename: 'str') -> "'MeshData'"
     a basic obj file reader to MeshData
+classmethod load_usd(cls, filename: 'str', name: 'str | None' = None) -> "'MeshData'"
+    returns a single MeshData from a usd file (the first mesh prim if name is None)
 merge(self)
     merges overlapping points
 quadrangulate(self, rules: 'np.ndarray | None' = None) -> 'None'
@@ -1085,8 +1087,8 @@ rules_to_vertices(self, rules)
     returns the vertices a set of subset rules keeps
 sample(self, obj: "Union['MeshData', np.ndarray]", method: 'SampleMethod | str' = <SampleMethod.BILINEAR: 'bilinear'>, iteration_count: 'int' = 100, iteration_tolerance: 'float' = 1e-08)
     a humble saddle surface sampler
-save_obj(self, filename: 'str') -> 'None'
-    writes a valid obj file from MeshData
+save_obj(self, filename: 'str') -> 'str'
+    Writes the mesh as an obj file: its points, its faces and, when it
 set_normals(self, hard_edge_angle: 'float | None' = None, hard_edges: 'np.ndarray | None' = None, angle_weighted: 'bool' = True, area_weighted: 'bool' = True) -> 'None'
     Compute and store face-varying shading normals, on triangles, quads
 shrink_edge_face_indices(self, indices: 'np.ndarray', n: 'int' = 1) -> 'np.ndarray'
@@ -1263,6 +1265,8 @@ classmethod load_glb(cls, filename: 'str', name: 'str | None' = None, channel: '
     returns a single UV channel from a glb (first mesh / channel 0 by default)
 classmethod load_obj(cls, filename: 'str', name: 'str | None' = None, channel: 'int' = 0) -> "'UVData'"
     returns a single UV channel from an obj (first mesh / channel 0 by default)
+classmethod load_usd(cls, filename: 'str', name: 'str | None' = None, channel: 'int' = 0) -> "'UVData'"
+    returns a single UV channel from a usd file (first mesh prim / channel 0 by default)
 normalize(self, bbx_min=(0.0, 0.0), bbx_max=(1.0, 1.0), tolerance=1e-06)
     brings UV maps within frame range (default 0-1)
 pack(self, resolution=1024, padding=2, rotations=4)
@@ -1326,7 +1330,7 @@ triangulate(self, rules: 'Union[np.ndarray, TriangulateRules]') -> 'None'
 Functions:
 
 ```text
-load(filename: 'str', mode: 'str | None' = None) -> 'list'
+load(filename: 'str', mode: 'str | None' = None, **kwargs) -> 'list'
     The file's meshes with their UVs, as ``(MeshData, UVList)`` pairs:
 load_fbx(filename: 'str', scale_factor: 'float | None' = None) -> 'list'
     loads fbx file and returns list of (MeshData, UVList) tuples
@@ -1664,7 +1668,7 @@ transfer_influences(self, src_influences: 'list', dst_influences: 'list', weight
 Functions:
 
 ```text
-load(filename: 'str', mode: 'Optional[str]' = None) -> 'SkinList'
+load(filename: 'str', mode: 'Optional[str]' = None, **kwargs) -> 'SkinList'
     The file's skins, read as ``mode`` says or as the file reads (fbx, glb,
 load_fbx(filename: 'str') -> 'SkinList'
     Every skinned mesh of an fbx, names as in the file: ``SkinList.load_fbx()``.
@@ -2665,6 +2669,8 @@ render(self, output: 'Optional[str]' = None, resolution: 'Optional[Tuple[int, in
     Quick standalone preview render of this Object.
 restore_bind_pose(self) -> "'Object'"
     Put :attr:`mesh` back to the undeformed bind pose.
+save_obj(self, filename: 'str') -> 'str'
+    Write the Object's mesh as an OBJ file, where the Object puts it.
 to_dict(self) -> 'dict'
     The tree :meth:`Data.to_dict` builds, with a texture given as a
 to_image(self) -> "'Image'"
@@ -2874,6 +2880,7 @@ get_binary(self, name='runtime_rig_retargeting.zip')
 inject_payload(self, path: str, name='runtime_rig_retargeting.zip')
     injects the zipped payload from disk into the glb
 load(self, fname: str)
+    reads a gltf or glb by its first bytes, under any name
 save(self, fname: str)
 set_binary(self, data, name='runtime_rig_retargeting.zip')
 ```

@@ -1243,14 +1243,15 @@ def _read_skins_glb(filename: str, bind_matrices: bool = False) -> list:
 # ---------------------- file loaders ---------------------------------------- #
 
 
-def load(filename: str, mode: Optional[str] = None) -> SkinList:
+def load(filename: str, mode: Optional[str] = None, **kwargs) -> SkinList:
     """
     The file's skins, read as ``mode`` says or as the file reads (fbx, glb,
     or cgmath's own npz / json / pickle). An fbx or a glb gives a
-    :class:`SkinList`. A cgmath file gives whatever list it holds, a
-    SkinList or a class deriving from it; any other class raises TypeError.
+    :class:`SkinList`, ``kwargs`` going to its reader. A cgmath file takes
+    none; it gives whatever list it holds, a SkinList or a class deriving
+    from it; any other class raises TypeError.
     """
-    return _load_derived(SkinList, filename, mode)
+    return _load_derived(SkinList, filename, mode, kwargs)
 
 
 def load_fbx(filename: str) -> SkinList:

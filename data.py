@@ -2,9 +2,10 @@
 The base every cgmath data type is built on, and the files they save as.
 
 :class:`Data` and :class:`DataList`, the ``Array`` declarations of their array
-fields, and the pkl / npz / json files they save and load. Nothing here is
-about geometry: ``import cgmath.data`` loads no ``cgmath.geometry``, numba or
-scipy.
+fields, and the pkl / npz / json files they save and load. ``load()`` and
+``save()`` also route an asset, an fbx, glb, obj or usd file, to the class's
+own ``load_<format>`` / ``save_<format>``. Nothing here is about geometry:
+``import cgmath.data`` loads no ``cgmath.geometry``, numba or scipy.
 
 Up to cgmath 2.x this module was ``cgmath.geometry._base``. A file saved then
 names a plain ``Data`` or ``DataList`` there, and a pickle names its functions
@@ -29,6 +30,7 @@ import zipfile
 from collections.abc import Iterable, Iterator, MutableSequence
 from dataclasses import dataclass, fields, is_dataclass, MISSING
 from enum import Enum
+from json import JSONDecodeError
 from typing import (
     Annotated,
     Any,
@@ -998,19 +1000,56 @@ def _json_dict(data: dict) -> dict:
     return data
 
 
+def _article(fmt: str) -> str:
+    """the article before a format's name: an fbx, an npz, an obj; a glb, a json, a pickle, a usd"""
+    return "an" if fmt in ("fbx", "npz", "obj") else "a"
+
+
+def _misnamed(filename: str, fmt: str) -> ValueError:
+    """
+    the error for a file named as ``fmt`` that does not start as one, a
+    pickle under a .json name: no file of an older cgmath, nor a broken zip,
+    and ``mode=`` reads it
+    """
+    return ValueError(
+        f"{filename} does not start as {_article(fmt)} {fmt} file does; "
+        'load() reads it with mode= naming its type, mode="pkl" for a pickle'
+    )
+
+
 def _read_json(filename: str) -> dict:
     filename = os.path.expanduser(filename)
     try:
         with open(filename, "r", encoding="utf-8") as f:
-            return _tagged(json.load(f, object_hook=_json_dict), filename)
-    except UnicodeDecodeError:
-        # cgmath writes utf-8; an older one wrote the locale's encoding
-        raise LegacyFileError(_OLDER_FILE.format(filename)) from None
+            tree = json.load(f, object_hook=_json_dict)
+    except (UnicodeDecodeError, JSONDecodeError) as error:
+        # json in utf-16, as Windows PowerShell 5.1's Out-File and > write
+        # it: no mode= reads it, so the error says what it is
+        if _utf16_json(filename):
+            raise ValueError(
+                f"{filename} is a json file in utf-16, as Windows PowerShell 5.1's "
+                "Out-File and > write one; cgmath reads a json file in utf-8, "
+                "without a byte order mark, as save() writes one"
+            ) from None
+        # its first bytes decide: an older cgmath's json in the locale's
+        # codepage starts as json, a pickle under a .json name does not
+        if _header_format(filename) != "json":
+            raise _misnamed(filename, "json") from None
+        if isinstance(error, UnicodeDecodeError):
+            raise LegacyFileError(_OLDER_FILE.format(filename)) from None
+        raise
+    return _tagged(tree, filename)
 
 
 def _read_npz(filename: str) -> dict:
     filename = os.path.expanduser(filename)
-    with zipfile.ZipFile(filename, "r") as zipf:
+    try:
+        zipf = zipfile.ZipFile(filename, "r")
+    except zipfile.BadZipFile:
+        if _header_format(filename) != "npz":
+            raise _misnamed(filename, "npz") from None
+        raise
+    with zipf:
         if CLASS_KEY + ".npy" not in zipf.namelist():
             raise LegacyFileError(_OLDER_FILE.format(filename))
     return zip_to_dict(filename)
@@ -1056,23 +1095,21 @@ def _load_file(cls, filename: str, read, derived: bool = False):
     return _loaded_class(cls, tree.get(CLASS_KEY), filename, "load", derived).from_dict(tree)
 
 
-def _save_file(obj, filename: str, mode: Optional[str] = None, compression=zipfile.ZIP_DEFLATED) -> str:
-    """writes ``obj`` as ``mode``, or as the file's extension says"""
+def _save_file(obj, filename: str, mode: str, compression=zipfile.ZIP_DEFLATED) -> str:
+    """
+    writes ``obj`` as ``mode``, one of cgmath's own: ``"pkl"``, ``"json"``
+    or ``"npz"``, for ``save_pickle`` / ``save_json`` / ``save_npz``, which
+    ``save()`` routes to
+    """
     filename = os.path.expanduser(filename)
-    if mode is None:
-        mode = os.path.splitext(filename)[1].lstrip(".")
-    mode = {"pickle": "pkl"}.get(mode.lower(), mode.lower())
-
     if mode == "pkl":
         _write_whole(filename, lambda f: pickle.dump(obj, f))
     elif mode == "json":
         # utf-8 and LF whatever the platform: the same file everywhere
         text = obj.to_json().encode("utf-8")
         _write_whole(filename, lambda f: f.write(text))
-    elif mode == "npz":
+    else:  # npz
         dict_to_zip(obj.to_dict(), filename, compression=compression)
-    else:
-        raise ValueError(f"cannot save {mode!r} files: use .pkl, .npz or .json")
     return filename
 
 
@@ -1331,6 +1368,66 @@ def _close(a, b) -> bool:
         return False
 
 
+# utf-16's byte order marks, and none, each with the byte order it names
+_UTF16 = (
+    (b"\xff\xfe", "utf-16-le"),
+    (b"\xfe\xff", "utf-16-be"),
+    (b"", "utf-16-le"),
+    (b"", "utf-16-be"),
+)
+
+
+def _utf16_json(filename: str) -> bool:
+    """
+    whether a file starts a json in utf-16, with its byte order mark or
+    without: the blanks before one, however many, are read past to the
+    character that starts it, the blanks bytes.lstrip() reads past before
+    a json in utf-8
+    """
+    with open(filename, "rb") as file:
+        for mark, codec in _UTF16:
+            file.seek(0)
+            if file.read(len(mark)) != mark:
+                continue
+            while True:
+                # an even count of bytes, so no character is cut in two
+                chunk = file.read(4096)
+                if not chunk:
+                    break
+                text = chunk.decode(codec, "replace").lstrip(" \t\n\r\x0b\x0c")
+                if text:
+                    if text[0] in "{[":
+                        return True
+                    break
+    return False
+
+
+def _header_format(filename: str) -> Optional[str]:
+    """the format a file's first bytes name: a numpy zip, a binary glTF, an FBX, json; None for any other"""
+    with open(filename, "rb") as file:
+        header = file.read(18)
+        # a json an editor saved with utf-8's byte order mark is still one, and
+        # json's own error names the mark; the blanks before one, however
+        # many, are read past to the byte that starts it
+        start = header.removeprefix(b"\xef\xbb\xbf").lstrip()
+        while not start:
+            more = file.read(4096)
+            if not more:
+                break
+            start = more.lstrip()
+
+    if header[:4] == b"PK\x03\x04":
+        return "npz"
+    if header[:4] == b"glTF":
+        return "glb"
+    if b" FBX " in header:
+        return "fbx"
+    # one in utf-16 too, which the json reader refuses saying so
+    if start[:1] in (b"{", b"[") or _utf16_json(filename):
+        return "json"
+    return None
+
+
 def get_file_type(filename: str) -> str:
     """
     The file's type: ``"npz"``, ``"json"`` or ``"pkl"`` for cgmath's own
@@ -1338,7 +1435,17 @@ def get_file_type(filename: str) -> str:
 
     ``.gltf``, ``.usd``, ``.usda``, ``.usdc`` and ``.usdz`` go by their
     extension; then the header decides (a binary glTF, an FBX, a numpy zip,
-    json), then ``.obj``; anything else is taken as a pickle.
+    json, in utf-16 too, which the json reader refuses saying so), then the
+    extension: ``.obj``, ``.pkl`` or ``.pickle``. Any other
+    file gives back its extension, lower case and without its dot (``"stl"``,
+    ``""`` for none). ``load()`` refuses one no cgmath class reads, naming
+    the ones the class reads, unless the class has a reader of its own for it
+    (a ``load_stl``). A file under a name cgmath reads goes to that reader
+    whatever it holds: under a ``.json`` or ``.npz`` name, one that does not
+    start as one, a pickle saved there, is refused naming ``mode=``; the glb,
+    fbx and usd readers raise their own errors; the obj reader reads text and
+    finds no mesh in a pickle, so ``MeshData.load`` gives an empty mesh.
+    Nothing else is read as a pickle.
     """
     # by extension first: a .gltf is json, a .usdz is a zip like an npz
     ext = os.path.splitext(filename)[1].lower()
@@ -1347,62 +1454,214 @@ def get_file_type(filename: str) -> str:
     if ext in (".usd", ".usda", ".usdc", ".usdz"):
         return "usd"
 
-    with open(filename, "rb") as file:
-        header = file.read(18)
-
-    if header[:4] == b"PK\x03\x04":
-        return "npz"
-    if header[:4] == b"glTF":
-        return "glb"
-    if b" FBX " in header:
-        return "fbx"
-    if header.lstrip()[:1] in (b"{", b"["):
-        return "json"
+    found = _header_format(filename)
+    if found is not None:
+        return found
     if ext == ".obj":
         return "obj"
-    return "pkl"
+    if ext in (".pkl", ".pickle"):
+        return "pkl"
+    return ext[1:]
 
 
-def _load_as(cls, filename: str, mode: Optional[str] = None) -> Any:
+# ------------------------------- FILE ROUTES -------------------------------- #
+
+# the formats cgmath's classes route a file to: ``load("x.fbx")`` calls the
+# class's ``load_fbx``, ``save("x.obj")`` the object's ``save_obj``, whatever
+# arguments each takes, and a class's own ``load_<format>`` for any other
+# format is reached the same way. cgmath's own three name the class they
+# hold; an asset names none
+_OWN_FORMATS = ("json", "npz", "pickle")
+_FORMATS     = ("fbx", "glb", "json", "npz", "obj", "pickle", "usd")
+
+# the format a ``mode`` or an extension names, when it is not the format's own
+_FORMAT_NAMES = {
+    "gltf": "glb",
+    "pkl":  "pickle",
+    "usda": "usd",
+    "usdc": "usd",
+    "usdz": "usd",
+}
+
+# the modules whose classes read assets, imported when the factory names them
+_READER_MODULES = (
+    "cgmath.geometry.mesh",
+    "cgmath.geometry.skin_weights",
+    "cgmath.hierarchy",
+    "cgmath.render.scene",
+)
+
+
+class _NoRoute:
     """
-    ``cls.load()``: the reader for ``mode``, or for the file's type
-    (:func:`get_file_type`). Assets go to the class's own ``load_glb`` /
-    ``load_fbx`` / ``load_obj`` / ``load_usd``.
-
-    Raises
-    ------
-    ValueError
-        The class has no reader for that type.
+    A route a class refuses where the one it would inherit reads or writes
+    the wrong thing: ``save_obj = _NoRoute("...")`` on UVData, whose points
+    are 2D. ``load()`` and ``save()`` raise ValueError with the reason,
+    naming the routes the class has; a direct call raises TypeError.
     """
-    filename = os.path.expanduser(filename)
-    mode     = _file_mode(filename, mode)
 
-    reader   = getattr(cls, f"load_{mode}", None)
-    if reader is None:
-        raise ValueError(f"{cls.__name__} has no reader for {mode} files")
-    return reader(filename)
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        self.label  = "route"
+
+    def __set_name__(self, owner, name: str) -> None:
+        self.label = f"{owner.__name__}.{name}"
+
+    def __get__(self, obj, owner=None) -> "_NoRoute":
+        return self
+
+    def __call__(self, *args, **kwargs):
+        raise TypeError(f"{self.label}: {self.reason}")
+
+
+def _route_of(owner, verb: str, fmt: str) -> Any:
+    """
+    the ``<verb>_<fmt>`` method ``owner`` (a class, or an object for a save)
+    has, or None: looked up on the class, so an object's own attributes (a
+    node's user defined ones) are never taken for a route
+    """
+    name  = f"{verb}_{fmt}"
+    found = getattr(owner if isinstance(owner, type) else type(owner), name, None)
+    if found is None or isinstance(found, _NoRoute):
+        return None
+    return getattr(owner, name)
+
+
+def _routes(cls, verb: str) -> tuple:
+    """the formats ``cls`` has a ``load_<fmt>`` / ``save_<fmt>`` route for: cgmath's, and any of its own"""
+    named = {name[len(verb) + 1:] for name in dir(cls) if name.startswith(f"{verb}_")}
+    return tuple(fmt for fmt in sorted(named | set(_FORMATS)) if _route_of(cls, verb, fmt) is not None)
+
+
+def _no_route(cls, verb: str, fmt: str, filename: str) -> ValueError:
+    """the error for a format ``cls`` has no route for, naming the ones it has"""
+    refused = getattr(cls, f"{verb}_{fmt}", None)
+    why     = f" ({refused.reason})" if isinstance(refused, _NoRoute) else ""
+    noun    = "reader" if verb == "load" else "writer"
+    kind    = f"{fmt} files" if fmt else "a file without an extension"
+    return ValueError(
+        f"{cls.__name__} has no {noun} for {kind}{why}: {filename}; "
+        f"it {verb}s {', '.join(_routes(cls, verb)) or 'none'}"
+    )
+
+
+def _call_route(route, label: str, filename: str, kwargs: dict) -> Any:
+    """
+    ``route(filename, **kwargs)``, its arguments checked first against its
+    own signature: one it does not take raises TypeError naming the route
+    and the ones it does, before anything is read or written
+    """
+    signature = inspect.signature(route)
+    try:
+        signature.bind(filename, **kwargs)
+    except TypeError as error:
+        takes = [
+            ("**" if p.kind is p.VAR_KEYWORD else "") + p.name
+            for p in list(signature.parameters.values())[1:]
+            if p.kind is not p.VAR_POSITIONAL
+        ]
+        raise TypeError(f"{label}: {error}; it takes {', '.join(takes) or 'no argument'}") from None
+    return route(filename, **kwargs)
+
+
+def _format_name(name: str) -> str:
+    """the format a ``mode`` or an extension names: ``"pkl"`` and ``".PKL"`` are ``"pickle"``"""
+    name = name.lower().lstrip(".")
+    return _FORMAT_NAMES.get(name, name)
 
 
 def _file_mode(filename: str, mode: Optional[str]) -> str:
     """the reader ``mode`` names, or the one for the file's type: ``"pickle"``, ``"glb"`` ..."""
-    mode = get_file_type(filename) if mode is None else mode.lower()
-    return {"gltf": "glb", "pkl": "pickle"}.get(mode, mode)
+    return _format_name(get_file_type(filename) if mode is None else mode)
 
 
-def _load_derived(cls, filename: str, mode: Optional[str] = None) -> Any:
+def _save_mode(filename: str, mode: Optional[str]) -> str:
+    """the writer ``mode`` names, or the one the file's extension names"""
+    return _format_name(os.path.splitext(filename)[1] if mode is None else mode)
+
+
+def _readers_of(fmt: str) -> list:
+    """every cgmath class that reads ``fmt`` files itself, by name"""
+    # the error path only: the modules with readers, whatever the caller imported
+    for module in _READER_MODULES:
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            pass
+    return sorted({
+        cls.__name__
+        for tag, cls in _CLASSES.items()
+        if tag.startswith("cgmath.") and "._tests" not in tag
+        and cls not in (Data, DataList) and _route_of(cls, "load", fmt) is not None
+    })
+
+
+def _load_as(cls, filename: str, mode: Optional[str] = None, kwargs: Optional[dict] = None) -> Any:
+    """
+    ``cls.load()``: the class's ``load_<format>`` for ``mode``, or for the
+    file's type (:func:`get_file_type`), given ``kwargs``. An asset's reader
+    must give back ``cls`` itself, as cgmath's own files do.
+
+    Raises
+    ------
+    ValueError
+        The class has no reader for that format; ``Data.load()`` /
+        ``DataList.load()`` for an asset, which names no class.
+    TypeError
+        The reader takes no such argument, or gave back another class.
+    """
+    filename = os.path.expanduser(filename)
+    fmt      = _file_mode(filename, mode)
+    route    = _route_of(cls, "load", fmt)
+    if route is None:
+        if cls in (Data, DataList) and fmt in _FORMATS:
+            readers = ", ".join(_readers_of(fmt)) or "none is imported"
+            raise ValueError(
+                f"{cls.__name__}.load() reads cgmath's own files, which name the class "
+                f"they hold; {filename} is {_article(fmt)} {fmt} file, which names none: read "
+                f"it with the class wanted ({readers})"
+            )
+        raise _no_route(cls, "load", fmt, filename)
+
+    data = _call_route(route, f"{cls.__name__}.load_{fmt}", filename, kwargs or {})
+    if fmt not in _OWN_FORMATS and type(data) is not cls:
+        raise TypeError(
+            f"{cls.__name__}.load_{fmt} gave a {type(data).__name__}: a class's readers "
+            f"give back that class only; {cls.__name__} needs a load_{fmt} of its own"
+        )
+    return data
+
+
+def _save_as(obj, filename: str, mode: Optional[str] = None, kwargs: Optional[dict] = None) -> str:
+    """
+    ``obj.save()``: the object's ``save_<format>`` for ``mode``, or for the
+    file's extension, given ``kwargs``; the file written
+    """
+    filename = os.path.expanduser(filename)
+    fmt      = _save_mode(filename, mode)
+    route    = _route_of(obj, "save", fmt)
+    if route is None:
+        raise _no_route(type(obj), "save", fmt, filename)
+    written = _call_route(route, f"{type(obj).__name__}.save_{fmt}", filename, kwargs or {})
+    return written if isinstance(written, str) else filename
+
+
+def _load_derived(cls, filename: str, mode: Optional[str] = None, kwargs: Optional[dict] = None) -> Any:
     """
     A module's own ``load()``: ``cls.load()``, but a cgmath file gives back
     whatever it holds that is ``cls`` or derives from it, a hierarchy's
     file a ClipData; any other class raises TypeError. An asset goes to
-    ``cls.load_<mode>``.
+    ``cls.load_<format>``, given ``kwargs``.
     """
     filename = os.path.expanduser(filename)
-    mode     = _file_mode(filename, mode)
-    if mode == "pickle":
+    fmt      = _file_mode(filename, mode)
+    if fmt in _OWN_FORMATS and kwargs:
+        raise TypeError(f"{_article(fmt)} {fmt} file takes no argument but its name: got {', '.join(kwargs)}")
+    if fmt == "pickle":
         return _read_pickle(cls, filename, derived=True)
-    if mode in ("json", "npz"):
-        return _load_file(cls, filename, _read_json if mode == "json" else _read_npz, derived=True)
-    return _load_as(cls, filename, mode)
+    if fmt in ("json", "npz"):
+        return _load_file(cls, filename, _read_json if fmt == "json" else _read_npz, derived=True)
+    return _load_as(cls, filename, fmt, kwargs)
 
 
 # -------------------------------- NAMESPACES -------------------------------- #
@@ -2227,9 +2486,21 @@ class Data:
     def save_npz(self, filename: str, compression=zipfile.ZIP_DEFLATED) -> str:
         return _save_file(self, filename, "npz", compression)
 
-    def save(self, filename: str, mode: Optional[str] = None) -> str:
-        """saves the data as ``mode`` (pkl, npz or json), or as the extension says"""
-        return _save_file(self, filename, mode)
+    def save(self, filename: str, mode: Optional[str] = None, **kwargs) -> str:
+        """
+        Saves the data as ``mode``, or as the file's extension says, through
+        the class's ``save_<format>``. ``"npz"`` / ``"json"`` / ``"pkl"``
+        (``.pickle`` too) are cgmath's own and keep everything. An asset,
+        ``"obj"`` or ``"fbx"``, keeps only what its writer writes, and only a
+        class with that writer saves one: ``MeshData.save_obj`` writes the
+        points, the faces and the normals, not the matrix or the holes. An
+        extension no writer has raises ValueError naming the ones the class
+        has. ``kwargs`` go to the writer by keyword, and one it does not take
+        raises TypeError before anything is written:
+        ``save("x.npz", compression=zipfile.ZIP_STORED)``,
+        ``save("rig.fbx", as_ascii=True)``. Returns the file's path.
+        """
+        return _save_as(self, filename, mode, kwargs)
 
     @classmethod
     def from_dict(cls, data: dict) -> Any:
@@ -2340,25 +2611,35 @@ class Data:
         return _load_file(cls, filename, _read_npz)
 
     @classmethod
-    def load(cls, filename: str, mode: Optional[str] = None) -> Any:
+    def load(cls, filename: str, mode: Optional[str] = None, **kwargs) -> Any:
         """
         Loads the data from a file: ``mode``, or the type the file reads as
-        (:func:`get_file_type`). ``"pkl"`` / ``"json"`` / ``"npz"`` are
-        cgmath's own; ``"glb"`` / ``"fbx"`` / ``"obj"`` / ``"usd"`` go to the
-        class's ``load_<mode>``.
+        (:func:`get_file_type`), through the class's ``load_<format>``.
+        ``"pkl"`` / ``"json"`` / ``"npz"`` are cgmath's own; ``"glb"``
+        (``.gltf`` too), ``"fbx"``, ``"obj"`` and ``"usd"`` (``.usda``,
+        ``.usdc``, ``.usdz``) are assets, read by the class's own reader,
+        which gives back that class and what its file holds of it; a
+        ``load_<format>`` a class adds for another format is reached the
+        same way. A type the class has no reader for, an unknown extension
+        too, raises ValueError naming the ones it has. ``kwargs`` go to the
+        reader by keyword, and one it does not take raises TypeError before
+        the file is read: ``MeshData.load("a.fbx", name="body")`` is
+        ``MeshData.load_fbx("a.fbx", name="body")``. A reader argument named
+        ``filename`` or ``mode`` cannot be reached this way.
 
         A cgmath file must hold this class: any other raises TypeError, a
         subclass too, so ``MeshData.load()`` refuses a saved ``UVData``,
         whose points are (N, 2), not (N, 3). ``Data.load()`` itself gives
-        back whatever class the file holds, a list too. What the file's
-        object holds, a field's object or a list's items, comes back as the
-        class it names, which may derive from the one declared.
+        back whatever class the file holds, a list too, and refuses an
+        asset, which names no class, naming the classes that read it. What
+        the file's object holds, a field's object or a list's items, comes
+        back as the class it names, which may derive from the one declared.
 
         A file saved by cgmath 2.x, when this module was
         ``cgmath.geometry._base``, loads too, a pickle as well, which a bare
         ``pickle.load`` no longer reads.
         """
-        return _load_as(cls, filename, mode)
+        return _load_as(cls, filename, mode, kwargs)
 
     def _saved_parts(self) -> list:
         """the values this object's tree is built from, walked by a save for what it reaches twice"""
@@ -2900,9 +3181,15 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
     def save_pickle(self, filename: str) -> str:
         return _save_file(self, filename, "pkl")
 
-    def save(self, filename: str, mode: Optional[str] = None) -> str:
-        """saves the list as ``mode`` (pkl, npz or json), or as the extension says"""
-        return _save_file(self, filename, mode)
+    def save(self, filename: str, mode: Optional[str] = None, **kwargs) -> str:
+        """
+        Saves the list as ``mode``, or as the file's extension says, through
+        the class's ``save_<format>``, as :meth:`Data.save` does: cgmath's own
+        npz / json / pkl keep everything, an asset only what its writer
+        writes, and ``kwargs`` go to the writer, ``save("rig.fbx",
+        as_ascii=True)``. Returns the file's path.
+        """
+        return _save_as(self, filename, mode, kwargs)
 
     @classmethod
     def from_dict(cls, data: dict) -> Any:
@@ -2971,25 +3258,28 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
         return _read_pickle(cls, filename)
 
     @classmethod
-    def load(cls, filename: str, mode: Optional[str] = None) -> Any:
+    def load(cls, filename: str, mode: Optional[str] = None, **kwargs) -> Any:
         """
         Loads the data from a file: ``mode``, or the type the file reads as
-        (:func:`get_file_type`). ``"pkl"`` / ``"json"`` / ``"npz"`` are
-        cgmath's own; ``"glb"`` / ``"fbx"`` / ``"obj"`` / ``"usd"`` go to the
-        class's ``load_<mode>``.
+        (:func:`get_file_type`), through the class's ``load_<format>``, as
+        :meth:`Data.load` does: an asset goes to the class's own reader, a
+        type it has none for raises ValueError naming the ones it has, and
+        ``kwargs`` go to the reader by keyword, ``HierarchyData.load("rig.fbx",
+        pose="bind")``.
 
         A cgmath file must hold this class: any other raises TypeError, a
         subclass too, so ``HierarchyData.load()`` refuses a saved
         ``ClipData``. ``DataList.load()`` itself gives back whatever list
-        class the file holds, and ``Data.load()`` any class. Each item comes
-        back as the class it names, which may derive from
-        ``DATA_LIST_CLASS``: a ``Scene``'s Object, Camera and Light nodes.
+        class the file holds, and ``Data.load()`` any class; both refuse an
+        asset, which names no class. Each item comes back as the class it
+        names, which may derive from ``DATA_LIST_CLASS``: a ``Scene``'s
+        Object, Camera and Light nodes.
 
         A file saved by cgmath 2.x, when this module was
         ``cgmath.geometry._base``, loads too, a pickle as well, which a bare
         ``pickle.load`` no longer reads.
         """
-        return _load_as(cls, filename, mode)
+        return _load_as(cls, filename, mode, kwargs)
 
 
 _register(Data)

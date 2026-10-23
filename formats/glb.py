@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import re
 import zipfile
@@ -25,6 +26,8 @@ try:
     )
 except ImportError:
     pygltflib = None
+
+from cgmath.data import _header_format
 
 # trimesh
 try:
@@ -197,6 +200,41 @@ def _null_index_locations(gltf):
     return found
 
 
+def _read_gltf(fname):
+    """pygltflib's reading of a gltf or glb by its first bytes, under any
+    name, a glb under a .gltf name too (pygltflib reads any name but .glb
+    and .bin as json): json when they start a json, else binary, so a file
+    that is neither, a web page or a Git LFS pointer, is no glb"""
+    if _header_format(fname) == "json":
+        return GLTF2.load_json(fname)
+    return GLTF2.load_binary(fname)
+
+
+def _trimesh_scene(fname):
+    """
+    trimesh's reading of a gltf or glb by its first bytes, under any name
+    (trimesh reads by the extension): gltf when they start a json, else
+    glb, so a file that is neither is no glb. A gltf trimesh cannot read,
+    cut short or saved with utf-8's byte order mark (or in utf-16 with no
+    charset_normalizer, which trimesh reads another encoding with), raises
+    json's own error, where trimesh looks for a "model.gltf" in it, as in a
+    zip, and says that file is missing
+    """
+    file_type = "gltf" if _header_format(fname) == "json" else "glb"
+    try:
+        return trimesh.load(fname, file_type=file_type)
+    except Exception:
+        if file_type == "gltf":
+            # read again only once trimesh has failed: a gltf json reads, a
+            # buffer beside it missing, keeps trimesh's error
+            try:
+                with open(fname, encoding="utf-8") as file:
+                    json.load(file)
+            except ValueError as error:  # JSONDecodeError, UnicodeDecodeError
+                raise error from None
+        raise
+
+
 def load_gltf(fname):
     """reads a gltf or glb, repairing null skin joints if that is what stops it
 
@@ -211,7 +249,7 @@ def load_gltf(fname):
 
     refused = None
     try:
-        gltf = GLTF2().load(fname)
+        gltf = _read_gltf(fname)
     except TypeError as exc:
         gltf, refused = None, exc
 
@@ -420,8 +458,13 @@ class GlbData:
         self.load(fname)
 
     def load(self, fname: str):
+        """reads a gltf or glb by its first bytes, under any name
+
+        pygltflib and trimesh go by the extension, so each is told which the
+        file is, as load_gltf and mesh.load_glb tell them
+        """
         fname     = os.path.expanduser(fname)
-        self.gltf = GLTF2().load(fname)
+        self.gltf = _read_gltf(fname)
 
         if trimesh is not None:
             # imported here, not at module scope: cgmath.hierarchy imports this
@@ -429,7 +472,7 @@ class GlbData:
             # level import is a cycle, and geometry would load with every rig
             from cgmath.geometry import MeshData, MeshList
 
-            scene     = trimesh.load(fname)
+            scene     = _trimesh_scene(fname)
             mesh_list = []
             for name, data in scene.geometry.items():
                 points  = np.array(data.vertices) * 100.0

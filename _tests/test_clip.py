@@ -8309,24 +8309,24 @@ class TestFbxLoadsInMayaAxes(unittest.TestCase):
             self.assertTrue(np.array_equal(getattr(clip.frames, channel), getattr(file.frames, channel)))
 
     def test_a_left_handed_file_raises_unless_its_axes_are_kept(self):
-        """through load_fbx or load(), which takes no axis_system: the error
-        names the load_fbx call that reads the file"""
+        """through load_fbx or load(), which passes axis_system on to it: the
+        error names the load_fbx call that reads the file"""
         path = self.authored(self.axes("eYAxis", "eParityOdd", "eLeftHanded"))
 
-        for label, loader, reader in (
-            ("HierarchyData.load_fbx", HierarchyData.load_fbx, HierarchyData.load_fbx),
-            ("ClipData.load_fbx", ClipData.load_fbx, ClipData.load_fbx),
-            ("hierarchy.load_fbx", hierarchy.load_fbx, hierarchy.load_fbx),
-            ("HierarchyData.load", HierarchyData.load, HierarchyData.load_fbx),
-            ("ClipData.load", ClipData.load, ClipData.load_fbx),
-            ("hierarchy.load", hierarchy.load, hierarchy.load_fbx),
+        for label, loader in (
+            ("HierarchyData.load_fbx", HierarchyData.load_fbx),
+            ("ClipData.load_fbx", ClipData.load_fbx),
+            ("hierarchy.load_fbx", hierarchy.load_fbx),
+            ("HierarchyData.load", HierarchyData.load),
+            ("ClipData.load", ClipData.load),
+            ("hierarchy.load", hierarchy.load),
         ):
             with self.subTest(loader=label):
                 with self.assertRaises(ValueError) as caught:
                     loader(path)
                 self.assertIn("load_fbx(filename, axis_system=None)", str(caught.exception))
 
-                kept = reader(path, axis_system=None)
+                kept = loader(path, axis_system=None)
                 self.assertEqual(sorted(kept.name), ["group", "hip", "knee", "loc", "prop"])
 
     def test_an_unknown_axis_system_is_refused(self):

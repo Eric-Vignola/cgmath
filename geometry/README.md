@@ -75,9 +75,21 @@ else.
 - **`name` is excluded from equality.** Every type lists it in
   `EQUALITY_TEST_IGNORE`, so two identically shaped meshes with different names
   compare equal.
-- **`save` / `load` are format-agnostic.** The extension picks the writer
-  (`.pkl`, `.json`, `.npz`), the file's first bytes pick the reader — `load`
-  never needs a hint. `mode=` overrides both.
+- **`save` / `load` pick the format.** The extension picks the writer:
+  `.npz`, `.json`, `.pkl` / `.pickle`, and an asset's, `.obj` or `.fbx`, for a
+  class that writes one. A `.gltf` and a usd name (`.usd` / `.usda` / `.usdc`
+  / `.usdz`) go by their extension, to the glb and usd readers; under any
+  other name, npz, json, glb and fbx files read by their first bytes, obj and
+  pickle files by their extension (`.obj`, `.pkl` / `.pickle`). The glb
+  readers go by the first bytes under any name, `.gltf` and `.glb` too: a glb
+  under a `.gltf` name reads, and `mode="glb"` reads a gltf, which starts as
+  a json does, under any other; a file that starts as neither, a web page or
+  a Git LFS pointer saved under a `.glb` name, reads as a glb, so the reader
+  says it is no glb, and a gltf trimesh cannot read, cut short or saved with
+  utf-8's byte order mark, raises json's own error. Any other name needs
+  `mode=`, which overrides both. A json in utf-16, as Windows PowerShell
+  5.1's `Out-File` and `>` write one, or with utf-8's byte order mark is
+  refused, saying so.
 - **Attributes are strict.** An instance takes a write only to a declared
   field, a property with a setter, or private state its class declares in
   `_STATE` (each class naming its own caches, merged up the MRO).
@@ -525,20 +537,35 @@ and trimesh renames duplicate glb meshes `part`, `part_1`). A list type's
 `load_<format>` gives every item in the file; a data type's gives one, the first
 or `name=`, except `MeshData.load_obj`, which merges every group into one mesh.
 
+A class's `load()` and an object's `save()` route a file to the class's own
+`load_<format>` / `save_<format>`: the type the file reads as, or the save's
+extension, or `mode=`, names it (`.gltf` is glb, `.usda` / `.usdc` / `.usdz`
+usd, `.pkl` / `.pickle` pickle). Arguments after `mode` go to that route by
+keyword, checked against its signature before the file is read or written, so
+`MeshData.load("hero.fbx", name="body")` is `MeshData.load_fbx("hero.fbx",
+name="body")` and a misspelt one raises `TypeError` naming the ones it takes. A
+format the class has no route for, an unknown extension too, raises
+`ValueError` naming the routes it has. `Data.load` and `DataList.load` read
+cgmath's own files only, which name their class: an asset raises, naming the
+classes that read it. An asset keeps only what its writer writes: npz, json and
+pkl keep everything.
+
 | Entry point | Returns |
 |---|---|
 | `mesh.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | `list[(MeshData, UVList)]`, from assets only: a cgmath file loads through its class or `Data.load` |
 | `mesh.save_obj(path, data)` | writes that same list shape |
 | `MeshList.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | every mesh, a `MeshList` |
-| `MeshData.load_obj` / `load_glb` / `load_fbx`, `MeshData.save_obj` | one `MeshData` |
-| `UVList.load_glb` / `load_fbx` | one mesh's UV channels |
-| `UVData.load_glb` / `load_fbx` | one `UVData` |
+| `MeshData.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | one `MeshData` |
+| `MeshData.save("x.obj")` / `save_obj` | the points, the faces and the normals (`vn`) the mesh has; not its matrix, holes or UVs |
+| `UVList.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | one mesh's UV channels |
+| `UVData.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | one `UVData`; no obj writer (its points are 2D) |
 | `skin_weights.load` / `load_fbx` / `load_glb`, `SkinList.load_*` | a `SkinList`, each skin named after its mesh |
 | `SkinData.load_fbx` / `load_glb` | one `SkinData` |
 | `cgmath.hierarchy.load` / `load_fbx` / `load_glb` | a `HierarchyData` from fbx and glb; a cgmath file gives whatever hierarchy it holds (a `ClipData` stays a clip) |
 | `from_prim` / `to_prim` on `MeshData`, `UVData`, `MapData`, `GeomSubsetData`, `MorphData`, `CompactSkinData` | USD |
 
-OBJ is pure python and always available. There is **no** `MeshData.load_usd`.
+OBJ is pure python and always available. `cgmath.render.scene.Object.save_obj`
+writes an Object's mesh where the Object puts it, with its UVs and normals.
 
 ### Namespaces
 

@@ -51,6 +51,7 @@ from typing import List, Optional, Tuple, Union
 
 import numpy as np
 from cgmath.data import (
+    _NoRoute,
     _strip_namespace,
     Array,
     ArraySpec,
@@ -60,7 +61,9 @@ from cgmath.data import (
 from cgmath.formats._fbx_io import FbxReadError, open_fbx, typed
 from cgmath.geometry.deform import SkinDeformData
 from cgmath.geometry.mesh import (
+    _corner_normals,
     _load_fbx,
+    _write_obj,
     load_glb as _load_glb,
     load_obj as _load_obj,
     MeshData,
@@ -489,6 +492,76 @@ class Object(TransformData):
         if extract_texture and obj.texture is None:
             obj.extract_texture_from_fbx(filename, mesh_index=index)
         return obj
+
+    # -- file IO: write an Object to disk ------------------------------
+
+    def save_obj(self, filename: str) -> str:
+        """Write the Object's mesh as an OBJ file, where the Object puts it.
+
+        The points, and the mesh's normals when it has them, go through
+        :attr:`world_matrix`, as the renderer places them: the normals by
+        its inverse transpose, each keeping its length. The UVs, when the
+        Object has a :attr:`uv`, are ``vt`` lines, and each face corner
+        names its point, its UV and its normal. One group, named after the
+        Object without a ``Shape`` suffix, which the readers put back.
+        :meth:`load_obj`, :meth:`Scene.load_obj`, :meth:`MeshData.load_obj`
+        and Maya's OBJ import read it.
+
+        An OBJ keeps only that: the texture, the skin, the shading settings
+        and the mesh's own ``matrix`` and holes are not written, and the
+        transform is in the points, so the Object read back sits at the
+        origin. Save an npz, json or pkl to keep everything.
+
+        Args:
+            filename: Path to the ``.obj`` file (``~`` OK).
+
+        Returns:
+            The file's path.
+
+        Raises:
+            ValueError: The Object has no mesh, its uv's faces are not its
+                mesh's, the mesh's normals do not fit it (as
+                :meth:`MeshData.save_obj` says), or a world matrix that
+                cannot be inverted would turn them; before anything is
+                written.
+        """
+        mesh = self.mesh
+        if mesh is None:
+            raise ValueError(f"Object {self.name!r} has no mesh to write")
+        uv = self.uv
+        if uv is not None and not np.array_equal(uv.counts, mesh.counts):
+            raise ValueError(
+                f"Object {self.name!r}: its uv's {uv.face_count} faces are not its "
+                f"mesh's {mesh.face_count}"
+            )
+
+        matrix = np.asarray(self.world_matrix, dtype=np.float64)
+        points = np.asarray(mesh.points, dtype=np.float64) @ matrix[:3, :3] + matrix[3, :3]
+        normals, normal_ids = _corner_normals(mesh)
+        if normals is not None:
+            try:
+                turn = np.linalg.inv(matrix[:3, :3]).T
+            except np.linalg.LinAlgError:
+                raise ValueError(
+                    f"Object {self.name!r}: its world matrix cannot be inverted, "
+                    "which turns its normals"
+                ) from None
+            turned  = normals @ turn
+            before  = np.linalg.norm(normals, axis=1, keepdims=True)
+            after   = np.linalg.norm(turned, axis=1, keepdims=True)
+            normals = turned * np.divide(before, after, out=np.zeros_like(after), where=after > 0)
+
+        return _write_obj(
+            filename,
+            self.name,
+            points,
+            mesh.counts,
+            mesh.indices,
+            uvs        = None if uv is None else uv.points,
+            uv_ids     = None if uv is None else uv.indices,
+            normals    = normals,
+            normal_ids = normal_ids,
+        )
 
     def extract_texture_from_glb(
         self,
@@ -1880,6 +1953,13 @@ class Scene(HierarchyData):
         self.fit_padding: Optional[float] = fit_padding
 
     # -- file IO: build a Scene from disk -----------------------------
+
+    # HierarchyData's fbx reader and writer know joints only: a Scene read
+    # through them would hold no Object, and one written would lose its meshes
+    load_fbx = _NoRoute(
+        "HierarchyData's fbx reader gives joints, not Objects: Object.load_fbx reads one mesh"
+    )
+    save_fbx = _NoRoute("HierarchyData's fbx writer writes joints only: a Scene's meshes would be lost")
 
     @classmethod
     def load_obj(cls, filename: str, name: Optional[str] = None) -> "Scene":

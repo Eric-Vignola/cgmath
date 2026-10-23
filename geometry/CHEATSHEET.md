@@ -234,22 +234,76 @@ assert UVData.from_dict(tree).resolution.tolist() == [64, 64]
 
 ### Files — `save` / `load` pick the format
 
-Extension drives the writer, the header byte drives the reader, so `load`
-never needs to be told what it is opening. All three formats hold the
-`to_dict()` tree: npz has no pickled objects (it is read with
-`allow_pickle=False`), json is utf-8 with NaN and the infinities as bare
-tokens, and a pickle holds its arrays as raw bytes, so it reads under another
-numpy version. A save that fails part way leaves the file as it was. `tmp` is
-the scratch directory from [Setup](#setup).
+The extension picks the writer. The reader goes by the file: an npz or a json
+file by its first bytes, under any name but a `.gltf` or a usd one, a pickle
+by its `.pkl` or `.pickle` extension, so a pickle under any other name needs
+`mode=`, which names the format whatever the name: under a `.json` or `.npz`
+name, the json or npz reader raises `ValueError` saying it does not start as
+one. A json in utf-16, as Windows PowerShell 5.1's `Out-File` and `>` write
+one, raises `ValueError` saying so, and one with utf-8's byte order mark
+json's own error naming the mark. All three formats hold the `to_dict()`
+tree: npz has no pickled objects (it is read with `allow_pickle=False`), json
+is utf-8 with NaN and the infinities as bare tokens, and a pickle holds its
+arrays as raw bytes, so it reads under another numpy version. A save that
+fails part way leaves the file as it was. `tmp` is the scratch directory from
+[Setup](#setup).
 
 ```python
 for ext in ("pkl", "json", "npz"):
     path = cube.save(os.path.join(tmp, f"cube.{ext}"))
     assert MeshData.load(path) == cube
 
-# explicit mode overrides the extension
+# explicit mode overrides the extension: an npz reads by its first bytes,
+# a pickle under another name by mode= again
 path = cube.save(os.path.join(tmp, "cube.dat"), mode="npz")
 assert MeshData.load(path) == cube
+path = cube.save(os.path.join(tmp, "cube.bin"), mode="pkl")
+assert MeshData.load(path, mode="pkl") == cube
+path = cube.save(os.path.join(tmp, "pickled.json"), mode="pkl")
+try:
+    MeshData.load(path)
+except ValueError as err:
+    print(err)  # .../pickled.json does not start as a json file does; load() reads it with mode= ...
+assert MeshData.load(path, mode="pkl") == cube
+```
+
+An asset goes the same way to the class's own reader or writer,
+`load_<format>` / `save_<format>`: an fbx and a glb read by their first
+bytes, a glb under a `.gltf` name too, as the glb readers read a glb or a
+gltf by its first bytes under any name, `.glb` too; a gltf, which starts as
+a json does, reads by its `.gltf` name or with `mode="glb"`. An obj and a
+usd (`.usd`, `.usda`, `.usdc`, `.usdz`) go by the extension, and a save,
+`.obj` or `.fbx`, goes by its extension too. Arguments after `mode` go to it
+by keyword, and one it does not take raises `TypeError` before the file is
+read or written. An asset keeps only what its writer writes: an obj the
+points, the faces and the normals. A format the class has no route for, an
+unknown extension too, raises `ValueError` naming the routes it has;
+`Data.load` refuses an asset, which names no class.
+
+```python
+path = cube.save(os.path.join(tmp, "cube.obj"))  # MeshData.save_obj
+assert MeshData.load(path) == cube               # MeshData.load_obj
+
+for bad in ("cube.stl", "cube"):
+    try:
+        cube.save(os.path.join(tmp, bad))
+    except ValueError as err:
+        print(err)  # MeshData has no writer for stl files: .../cube.stl; it saves json, npz, obj, pickle
+try:
+    Data.load(path)
+except ValueError as err:
+    print(err)  # ...: read it with the class wanted (MeshData, MeshList, Object, Scene, UVData, UVList)
+try:
+    MeshData.load(path, nme="cube")
+except TypeError as err:
+    print(err)  # MeshData.load_obj: got an unexpected keyword argument 'nme'; it takes no argument
+```
+
+<!-- notest -->
+```python
+MeshData.load("hero.fbx", name="body")       # MeshData.load_fbx("hero.fbx", name="body")
+HierarchyData.load("hero.fbx", pose="bind")  # TransformList.load_fbx, a HierarchyData
+rig.save("rig.fbx", as_ascii=True)           # HierarchyData.save_fbx
 ```
 
 A class's loader gives back that class: a file holding any other raises
@@ -421,7 +475,7 @@ assert np.allclose(back["nested"]["ids"], [0, 1, 2, 3])
 
 assert bytes_to_dict(dict_to_bytes(payload))["points"].shape == (3, 3)
 
-print(get_file_type(path))                           # 'npz' | 'json' | 'pkl'
+print(get_file_type(path))                           # 'npz' | 'json' | 'pkl' | an asset's | the extension
 print(list(flatten_nested_lists([1, [2, [3, 4]]])))  # [1, 2, 3, 4]
 print(get_annotations(MeshData)["points"])           # resolved type hints
 print(is_ndarray_annotation("np.ndarray"), is_ndarray_annotation("int"))
@@ -1054,6 +1108,11 @@ assert mesh2 == cube and uvs2[0] == cube_uv
 # single-object form
 cube.save_obj(path)
 assert MeshData.load_obj(path) == cube
+
+# the normals a mesh has go along, a vn line each, every face corner naming its own
+shaded = cube.copy()
+shaded.set_normals(hard_edge_angle=30.0)
+assert MeshData.load(shaded.save(path)) == shaded
 ```
 
 GLB / FBX / USD need their optional SDKs and a real asset on disk.

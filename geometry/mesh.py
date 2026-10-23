@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import io
+import locale
 import os
 import re
 import warnings
@@ -52,8 +54,18 @@ except ImportError:
     fbx = None
 
 
-from cgmath.data import Array, Data, DataList, get_file_type, ImmutableArray as numpy_array
+from cgmath.data import (
+    _call_route,
+    _file_mode,
+    _NoRoute,
+    _write_whole,
+    Array,
+    Data,
+    DataList,
+    ImmutableArray as numpy_array,
+)
 from cgmath.formats._fbx_io import open_fbx
+from cgmath.formats.glb import _trimesh_scene
 from cgmath.geometry._saddle_surface import integrate, sample
 from cgmath.geometry.utils import (
     average_points,
@@ -2819,7 +2831,7 @@ class MeshData(Data):
         vert_counts = []
         name        = None
 
-        with open(filename, "r") as f:
+        with _open_obj(filename) as f:
             for line in f.readlines():
                 if line.startswith("g "):
                     tokens = line.split()
@@ -2869,31 +2881,35 @@ class MeshData(Data):
 
         return mesh
 
-    def save_obj(self, filename: str) -> None:
-        """writes a valid obj file from MeshData"""
-        filename = os.path.expanduser(filename)
+    def save_obj(self, filename: str) -> str:
+        """
+        Writes the mesh as an obj file: its points, its faces and, when it
+        has them, its normals as ``vn`` lines, each face corner naming its
+        own, through ``normal_indices`` or, without them, its vertex's (one
+        normal a vertex) or its own (one a corner). The group is the mesh's
+        name without its ``Shape`` suffix, which :meth:`load_obj` puts back.
 
-        name = self.name
-        if name is not None:
-            if bool(re.search("Shape[0-9]*$", self.name)):
-                name = "".join(name.rpartition("Shape")[::2])
+        An obj keeps only that: the matrix, the holes and a UV set (a
+        UVData of its own, which :func:`save_obj` writes beside the mesh)
+        are not written; save an npz, json or pkl to keep everything. Read
+        back, normals one a vertex come back face-varying, ``normal_indices``
+        the mesh's own ``indices``. Returns the file's path.
 
-        with open(filename, "w") as f:
-            f.write("# OBJ file\n")
-            # f.write("g default\n")
-            if name is not None:
-                f.write(f"g {name}\n")
-            f.write("s 1\n")
-
-            for p in self.points:
-                f.write(f"v {p[0]} {p[1]} {p[2]}\n")
-
-            for i, c in enumerate(self.counts):
-                vals = [str(x) for x in (self.geometry[i, :c] + 1).tolist()]
-                vals = " ".join(vals)
-                f.write(f"f {vals}\n")
-
-            f.write("\n")
+        Raises:
+            ValueError: The normals fit neither the vertices nor the face
+                corners, or ``normal_indices`` does not fit them, before
+                anything is written.
+        """
+        normals, normal_ids = _corner_normals(self)
+        return _write_obj(
+            filename,
+            self.name,
+            self.points,
+            self.counts,
+            self.indices,
+            normals    = normals,
+            normal_ids = normal_ids,
+        )
 
     # ----------------------------------- GLB ------------------------------------ #
 
@@ -2940,6 +2956,19 @@ class MeshData(Data):
                 return mesh_data
         available = [m.name for m, _ in data]
         raise ValueError(f"Mesh '{name}' not found; available: {available}")
+
+    @classmethod
+    def load_usd(cls, filename: str, name: str | None = None) -> "MeshData":
+        """returns a single MeshData from a usd file (the first mesh prim if name is None)"""
+        meshes = MeshList.load_usd(filename)
+        if not meshes:
+            raise RuntimeError("No mesh prims found in usd file")
+        if name is None:
+            return meshes[0]
+        mesh = meshes.get(name)
+        if mesh is None:
+            raise ValueError(f"Mesh '{name}' not found; available: {meshes.name}")
+        return mesh
 
     # ------------------------------ USD interface ------------------------------- #
 
@@ -4628,6 +4657,13 @@ class UVData(MeshData):
 
         return True
 
+    # MeshData's obj writer writes 3D points: a UV set is written beside its
+    # mesh by save_obj(), or saved as npz / json / pkl
+    save_obj = _NoRoute(
+        "MeshData's obj writer writes 3D points, a UVData's are 2D: "
+        "cgmath.geometry.mesh.save_obj writes a UV set beside its mesh"
+    )
+
     # ----------------------------------- GLB ------------------------------------ #
 
     @classmethod
@@ -4643,6 +4679,13 @@ class UVData(MeshData):
     ) -> "UVData":
         """returns a single UV channel from an obj (first mesh / channel 0 by default)"""
         return _one_uv_channel(UVList.load_obj(filename, name=name), channel)
+
+    @classmethod
+    def load_usd(
+        cls, filename: str, name: str | None = None, channel: int = 0
+    ) -> "UVData":
+        """returns a single UV channel from a usd file (first mesh prim / channel 0 by default)"""
+        return _one_uv_channel(UVList.load_usd(filename, name=name), channel)
 
     # ----------------------------------- FBX ------------------------------------ #
 
@@ -4987,23 +5030,23 @@ def _one_uv_channel(uv_list: "UVList", channel: int) -> "UVData":
     return uv_list[channel]
 
 
-def load(filename: str, mode: str | None = None) -> list:
+def load(filename: str, mode: str | None = None, **kwargs) -> list:
     """
     The file's meshes with their UVs, as ``(MeshData, UVList)`` pairs:
     ``load_fbx`` / ``load_glb`` / ``load_obj`` / ``load_usd``, picked by
-    ``mode`` or by the file. Assets only: cgmath's own npz / json / pickle
-    raise ValueError here. Load one with the class it holds,
+    ``mode`` or by the file, given ``kwargs``, which one it does not take
+    refuses before the file is read. Assets only: cgmath's own npz / json /
+    pickle raise ValueError here. Load one with the class it holds,
     ``MeshData.load()`` for a mesh, ``UVData.load()`` for UVs, or with
     ``Data.load()``, which gives back whatever class the file holds.
     """
     filename = os.path.expanduser(filename)
-    mode     = get_file_type(filename) if mode is None else mode.lower()
-    mode     = "glb" if mode == "gltf" else mode
+    mode     = _file_mode(filename, mode)
 
     readers  = {"fbx": load_fbx, "glb": load_glb, "obj": load_obj, "usd": load_usd}
     if mode not in readers:
-        raise ValueError(f"mesh.load reads fbx, glb, obj and usd files, not {mode}")
-    return readers[mode](filename)
+        raise ValueError(f"mesh.load reads fbx, glb, obj and usd files, not {mode or 'one without an extension'}: {filename}")
+    return _call_route(readers[mode], f"mesh.load_{mode}", filename, kwargs)
 
 
 def load_usd(filename: str) -> list:
@@ -5031,9 +5074,14 @@ def load_glb(filename: str, scale_factor: float = 100.0) -> list:
         raise ImportError("trimesh is not installed")
 
     file_path = os.path.expanduser(filename)
-    scene     = trimesh.load(file_path)
 
-    data = []
+    # trimesh picks its reader by the extension; the first bytes name it
+    # instead, under any name, a glb under a .gltf name too: gltf when they
+    # start a json, else glb, so a file that is neither is no glb, and a
+    # gltf trimesh cannot read gets json's own error
+    scene = _trimesh_scene(file_path)
+
+    data  = []
     for name, geometry in scene.geometry.items():
         points  = np.array(geometry.vertices, dtype=np.float64) * scale_factor
         indices = np.array(geometry.faces, dtype=np.int32)
@@ -5091,7 +5139,7 @@ def load_obj(filename: str) -> list:
         groups.append(g)
         return g
 
-    with open(file_path, "r") as f:
+    with _open_obj(file_path) as f:
         for line in f.readlines():
             if line.startswith("g "):
                 tokens = line.split()
@@ -5188,11 +5236,113 @@ def load_obj(filename: str) -> list:
     return data
 
 
+def _open_obj(filename: str) -> io.StringIO:
+    """
+    The obj file's text, read as utf-8, which cgmath writes, else as the
+    locale's codepage, which cgmath wrote before (cp1252 on Windows), else
+    as latin-1, which takes any byte; its line endings read as ``\\n``.
+    """
+    with open(filename, "rb") as f:
+        data = f.read()
+    for encoding in ("utf-8", locale.getpreferredencoding(False)):
+        try:
+            return io.StringIO(data.decode(encoding), newline=None)
+        except (UnicodeDecodeError, LookupError):
+            pass
+    return io.StringIO(data.decode("latin-1"), newline=None)
+
+
+def _obj_group(name: str | None) -> str | None:
+    """the obj group a mesh's name writes as: without its ``Shape`` suffix, which the readers put back"""
+    if name is not None and re.search("Shape[0-9]*$", name):
+        return "".join(name.rpartition("Shape")[::2])
+    return name
+
+
+def _corner_normals(mesh: "MeshData") -> tuple:
+    """
+    ``(normals, ids)``: the mesh's normals and the one each face corner
+    names, through ``normal_indices``, else its vertex's (one normal a
+    vertex) or its own (one a corner); ``(None, None)`` without normals.
+    ValueError for normals that fit none of these.
+    """
+    if mesh.normals is None:
+        return None, None
+
+    normals = np.asarray(mesh.normals, dtype=np.float64)
+    indices = np.asarray(mesh.indices)
+    label   = f"mesh {mesh.name!r}" if mesh.name else "the mesh"
+    if mesh.normal_indices is not None:
+        ids = np.asarray(mesh.normal_indices)
+        if ids.size != indices.size:
+            raise ValueError(
+                f"{label} has {ids.size} normal_indices for its {indices.size} face corners"
+            )
+    elif normals.shape[0] == mesh.point_count:
+        ids = indices
+    elif normals.shape[0] == indices.size:
+        ids = np.arange(indices.size)
+    else:
+        raise ValueError(
+            f"{label} holds {normals.shape[0]} normals, which fit neither its "
+            f"{mesh.point_count} vertices nor its {indices.size} face corners, "
+            "and has no normal_indices"
+        )
+    if ids.size and (ids.min() < 0 or ids.max() >= normals.shape[0]):
+        raise ValueError(f"{label}'s normal_indices name normals it does not hold ({normals.shape[0]})")
+    return normals, ids
+
+
+def _write_obj(
+    filename:   str,
+    name:       str        | None,
+    points:     np.ndarray,
+    counts:     np.ndarray,
+    indices:    np.ndarray,
+    uvs:        np.ndarray | None = None,
+    uv_ids:     np.ndarray | None = None,
+    normals:    np.ndarray | None = None,
+    normal_ids: np.ndarray | None = None,
+) -> str:
+    """
+    One mesh as an obj file, written whole, utf-8 and LF: its group, its
+    points, the UVs and normals given, and its faces, each corner naming its
+    point, UV and normal; the file's path
+    """
+    filename = os.path.expanduser(filename)
+    group    = _obj_group(name)
+    lines    = ["# OBJ file"] + ([f"g {group}"] if group is not None else []) + ["s 1"]
+    lines += [f"v {x} {y} {z}" for x, y, z in np.asarray(points, dtype=np.float64).tolist()]
+    if uvs is not None:
+        lines += [f"vt {u} {v}" for u, v in np.asarray(uvs, dtype=np.float64)[:, :2].tolist()]
+    if normals is not None:
+        lines += [f"vn {x} {y} {z}" for x, y, z in np.asarray(normals, dtype=np.float64).tolist()]
+
+    corners = [str(i) for i in (np.asarray(indices) + 1).tolist()]
+    if uv_ids is not None and normal_ids is not None:
+        corners = [
+            f"{v}/{t}/{n}"
+            for v, t, n in zip(corners, (np.asarray(uv_ids) + 1).tolist(), (np.asarray(normal_ids) + 1).tolist())
+        ]
+    elif uv_ids is not None:
+        corners = [f"{v}/{t}" for v, t in zip(corners, (np.asarray(uv_ids) + 1).tolist())]
+    elif normal_ids is not None:
+        corners = [f"{v}//{n}" for v, n in zip(corners, (np.asarray(normal_ids) + 1).tolist())]
+
+    counts = np.asarray(counts).tolist()
+    starts = np.concatenate([[0], np.cumsum(counts)[:-1]]).astype(int).tolist() if counts else []
+    lines += ["f " + " ".join(corners[start:start + count]) for start, count in zip(starts, counts)]
+
+    text = ("\n".join(lines) + "\n\n").encode("utf-8")
+    _write_whole(filename, lambda f: f.write(text))
+    return filename
+
+
 def save_obj(file_path: str, data: list) -> None:
     """writes a valid obj file from a list of (MeshData, UVList) tuples"""
 
     file_path = os.path.expanduser(file_path)
-    with open(file_path, "w") as f:
+    with open(file_path, "w", encoding="utf-8") as f:
         f.write("# OBJ file\n")
 
         mesh_offset = 0

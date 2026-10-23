@@ -3899,7 +3899,7 @@ class TestBSplineFit(unittest.TestCase):
             f = os.path.join(temp_dir, "curve")
             for mode in ("pkl", "json", "npz"):
                 curve.save(f, mode=mode)
-                loaded = BSplineData.load(f)
+                loaded = BSplineData.load(f, mode)  # a name without an extension names no format
                 self.assertTrue(curve == loaded, mode)
                 self.assertTrue(np.allclose(loaded.kv, curve.kv), mode)
 

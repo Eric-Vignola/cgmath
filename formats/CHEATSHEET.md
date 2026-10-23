@@ -527,7 +527,8 @@ print(get_binary(doc2, name="notes.txt"))
 
 ## `glb` — GlbData
 
-The object wrapper. Loads on construction; `pygltflib` is required,
+The object wrapper. Loads on construction, a gltf or a glb by its first
+bytes under any name, as the glb readers do; `pygltflib` is required,
 `trimesh` is optional.
 
 ```python

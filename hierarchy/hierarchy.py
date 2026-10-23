@@ -3669,8 +3669,8 @@ def _fbx_axis_turn(scene, axis_system, filename, sdk=None) -> Optional[np.ndarra
 
     up_axis, up_sign, front_axis, front_sign, right = _fbx_scene_axes(scene, sdk)
     if not right:
-        # load() reads an fbx with load_fbx's defaults and takes no
-        # axis_system, so the remedy names the call that does
+        # the remedy names load_fbx; load(), which passes axis_system on to
+        # it, reads the file that way too
         raise ValueError(
             f"{filename!r} is in a left handed axis system, which no rotation turns "
             "into Maya's Y-up (it takes a mirror); load it with "
@@ -12764,7 +12764,7 @@ class ClipData(HierarchyData):
                 "save_fbx writes one pose but this clip holds "
                 f"{self.frame_count} frames; cut the frame out first, "
                 f"clip.frames[{self.frame}:{self.frame + 1}].save_fbx(...), "
-                "or use save() to keep the whole clip"
+                "or save it as npz, json or pkl to keep the whole clip"
             )
 
         super().save_fbx(filename, zero_root=zero_root, as_ascii=as_ascii)
@@ -12899,16 +12899,18 @@ class ClipData(HierarchyData):
 # ------------------------------- FILE LOADERS ------------------------------- #
 
 
-def load(filename: str, mode: Optional[str] = None) -> "HierarchyData":
+def load(filename: str, mode: Optional[str] = None, **kwargs) -> "HierarchyData":
     """
     Whatever hierarchy the file holds, read as ``mode`` says or as the file
     reads (fbx, glb, or cgmath's own npz / json / pickle). An fbx or a glb
-    gives the rig, a :class:`HierarchyData`. A cgmath file gives the class
-    it holds, a :class:`HierarchyData` or one deriving from it: a saved
+    gives the rig, a :class:`HierarchyData`, ``kwargs`` going to
+    ``HierarchyData.load_fbx`` / ``load_glb``: ``load("rig.fbx",
+    pose="bind")``. A cgmath file takes none; it gives the class it holds,
+    a :class:`HierarchyData` or one deriving from it: a saved
     :class:`ClipData` comes back a clip, where ``HierarchyData.load()``
     refuses one. Any other class, a lone node, raises TypeError.
     """
-    return _load_derived(HierarchyData, filename, mode)
+    return _load_derived(HierarchyData, filename, mode, kwargs)
 
 
 def load_fbx(

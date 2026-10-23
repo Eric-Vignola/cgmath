@@ -439,6 +439,19 @@ from_path.save(os.path.join(tmp, "from_path.npz"))
 print(type(Object.load(os.path.join(tmp, "from_path.npz")).texture))  # ndarray
 ```
 
+An OBJ holds the mesh alone, where the Object puts it. `save_obj`, or
+`save("x.obj")`, writes the points, and the mesh's normals when it has them,
+through `world_matrix` (the normals by its inverse transpose), the UVs as `vt`
+lines, and nothing else: no texture, skin or setting. Read back, the Object
+sits at the origin, its transform in the points. Maya's OBJ import reads the
+file, the normals as locked user normals.
+
+```python
+placed = Object(name="placed", mesh=mesh, uv=uv, translate=(0.0, 2.0, 0.0), scale=(2.0, 1.0, 1.0))
+again  = Object.load(placed.save(os.path.join(tmp, "placed.obj")))
+print(again.mesh.points.max(axis=0), again.uv is not None, again.translate)
+```
+
 ### Skinning & animation
 
 `skin` / `pose` / `restore_bind_pose` / `animate` drive a

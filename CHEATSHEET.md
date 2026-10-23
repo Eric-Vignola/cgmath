@@ -690,13 +690,24 @@ frames directly when you want to build the motion yourself. `mp4` and
 ## 22. Save and load anything
 
 Every `Data` subclass — meshes, UVs, skins, morphs, maps, rigs, clips —
-shares one persistence surface. The extension picks the writer; the file's
-first bytes pick the reader. All three formats hold the same tree,
-`to_dict()`: the class, then every field that differs from its default, each
-named as a caller sets it (a node's private `_translate` as `translate`; a
-load takes either name). A class's loader gives back that class and refuses a
-file holding any other, a subclass too; `Data.load` gives back whatever a
-file holds. A file written by an older cgmath raises `LegacyFileError`.
+shares one persistence surface. The extension picks the writer. The reader
+goes by the first bytes for an npz, a json, a glb and an fbx, and the glb
+readers tell a glb from a gltf by them under any name (a gltf, which starts
+as a json does, reads by its `.gltf` name or with `mode="glb"`); it goes by
+the extension for an obj, a pickle (`.pkl` or `.pickle`, under any other
+name `mode="pkl"`) and a usd (`.usd`, `.usda`, `.usdc`, `.usdz`). cgmath's
+own three, npz, json and pickle, hold the same tree, `to_dict()`: the class,
+then every field that differs from its default, each named as a caller sets
+it (a node's private `_translate` as `translate`; a load takes either name).
+A class's loader gives back that class and refuses a file holding any other,
+a subclass too; `Data.load` gives back whatever a file holds. A file written
+by an older cgmath raises `LegacyFileError`. An asset, an obj, fbx, glb or
+usd file, goes the same way to the class's own `load_<format>` /
+`save_<format>`, its arguments by keyword (`MeshData.load("hero.fbx",
+name="body")`, `rig.save("rig.fbx", as_ascii=True)`), and keeps only what its
+writer writes; a format the class has no route for, an unknown extension too,
+raises `ValueError` naming the ones it has, and `Data.load` refuses an asset,
+which names no class.
 
 ```python
 cube.save(os.path.join(tmp, "cube.npz"))
@@ -767,7 +778,7 @@ print(HierarchyData.load_fbx(os.path.join(tmp, "rig2.fbx")).name)
 | Want | Call |
 |---|---|
 | Meshes + UVs | `cgmath.geometry.mesh.load_obj / load_glb / load_fbx / load_usd` -> `[(MeshData, UVList), ...]` |
-| One mesh | `MeshData.load_obj / load_glb / load_fbx` |
+| One mesh | `MeshData.load_obj / load_glb / load_fbx / load_usd`, or `MeshData.load(path, **kwargs)` |
 | Skin weights | `cgmath.geometry.skin_weights.load_fbx / load_glb` |
 | Animation curves | `cgmath.formats.fbx.SceneData(path)` — the constructor loads; there is no `from_file` |
 | Raw glTF | `cgmath.formats.glb.load_model(path)` -> `Model(name, nodes, ordered_node_indexes, meshes, animations, skins)` |
@@ -778,6 +789,10 @@ OBJ is pure python and always available:
 cube.save_obj(os.path.join(tmp, "cube.obj"))
 print(MeshData.load_obj(os.path.join(tmp, "cube.obj")).point_count)
 ```
+
+`MeshData.save_obj` writes the normals a mesh has; a render `Object`'s
+`save_obj` writes its mesh where the Object puts it, with its UVs and normals,
+which Maya's OBJ import reads.
 
 Full surface: [`formats/CHEATSHEET.md`](formats/CHEATSHEET.md).
 

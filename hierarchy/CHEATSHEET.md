@@ -1938,7 +1938,7 @@ loader's, where:
 
 | Loader | Signature |
 |---|---|
-| `TransformList.load` | `(filename, mode=None)` — `mode` in `"gltf" / "glb" / "fbx" / "json" / "npz" / "pkl"` |
+| `TransformList.load` | `(filename, mode=None, **kwargs)` — `mode` in `"gltf" / "glb" / "fbx" / "json" / "npz" / "pkl" / "pickle"`; `kwargs` go to `load_fbx` / `load_glb` by keyword |
 | `TransformList.load_fbx` | `(filename, scale_factor=None, axis_system="maya_y_up", pose="node", node_types=None)` |
 | `TransformList.load_glb` | `(filename, scale_factor=100.0, pose_frame=None)` |
 | `ClipData.load_fbx` | `(filename, scale_factor=None, take=None, fps=None, start_frame=None, end_frame=None, axis_system="maya_y_up", node_types=None)` |
@@ -2121,10 +2121,10 @@ and `render.Object.load_fbx`, a mesh with no node above it, turns its
 points, normals and skin bind matrices. A file already in Maya's Y-up,
 as `save_fbx` writes a default read, loads as it is; a left-handed one
 raises `ValueError`, since a rotation can't turn it into Maya's axes.
-`axis_system=None` keeps the file's own axes. `load()` reads an FBX with
-the `load_fbx` defaults and takes no `axis_system`, so a left-handed
-file reads through `load_fbx(..., axis_system=None)` alone. Which way
-the character faces stays as the file has it.
+`axis_system=None` keeps the file's own axes. `load()` passes
+`axis_system` on to `load_fbx` as it does any argument, so a left-handed
+file reads through `HierarchyData.load(path, axis_system=None)` too.
+Which way the character faces stays as the file has it.
 
 A rig and a clip record the axis system and the unit their values are
 in, `axis_system` and `unit`, saved with them. The FBX loaders record
@@ -2347,6 +2347,20 @@ file holding any other raises `TypeError`, a subclass too, so
 whatever hierarchy the file holds, and `Data.load` whatever class. A file
 saved by an older cgmath names no class: it raises `LegacyFileError` (a
 `ValueError`) and no longer loads.
+
+An fbx or a glb goes the same way to the class's own `load_fbx` /
+`load_glb` / `save_fbx`, the arguments after `mode` with it, by keyword: one
+it does not take raises `TypeError` before the file is read or written. An
+fbx keeps what `save_fbx` writes, one pose; a clip of more than one frame
+saves as npz, json or pkl. `Data.load` refuses an fbx, which names no class.
+
+<!-- notest -->
+```python
+rig.save("rig.fbx", as_ascii=True)             # rig.save_fbx("rig.fbx", as_ascii=True)
+HierarchyData.load("rig.fbx", pose="bind")     # HierarchyData.load_fbx(..., pose="bind")
+cgmath.hierarchy.load("rig.fbx", pose="bind")  # the same rig
+ClipData.load("walk.fbx", take=0, fps=30.0)    # ClipData.load_fbx(..., take=0, fps=30.0)
+```
 
 ```python
 from cgmath import hierarchy
