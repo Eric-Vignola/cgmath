@@ -6768,6 +6768,883 @@ class TestClipLoadFbx(unittest.TestCase):
 
 
 @unittest.skipIf(FBX is None, "fbx sdk is not installed")
+class TestFbxUnitHeldAsAScale(unittest.TestCase):
+    """a file the sdk's FbxSystemUnit.ConvertScene or Maya's unit converting
+    export (FBXExportConvertUnitString) wrote in another unit, s cm a unit,
+    holds that unit as a scale of 1/s on each child of the scene root and
+    on every node that does not inherit its parent's scale, over values left
+    in cm, its roots' translates and the curves of each take's first layer
+    converted: every loader reads it as the cm file it came from. The cm
+    file is authored through the sdk, Maya's inheritance on every joint
+    that compensates its parent's scale"""
+
+    FPS    = 30.0
+    FRAMES = 11
+    UNITS  = (("m", 100.0), ("Inch", 2.54))
+
+    # every node of the fixture: (name, parent, kind, translate, rotate,
+    # scale, compensates its parent's scale); a kind None has no attribute
+    TREE = (
+        ("grp", None, None, (10, 20, 30), (0, 30, 0), (1, 1, 1), False),
+        ("hip", "grp", "joint", (1, 90, 2), (10, 20, 30), (1, 1, 1), False),
+        ("knee", "hip", "joint", (0, -40, 5), (-30, 5, 0), (1, 1, 1), True),
+        ("shin", "knee", "joint", (0, -38, 0), (5, 0, 0), (2, 2, 2), True),
+        ("foot", "shin", "joint", (0, -5, 0), (0, 10, 0), (1, 3, 1), True),
+        ("toe", "foot", "joint", (0, -4, 10), (0, 0, 10), (1, 1, 1), False),
+        ("body", "grp", "mesh", (0, 100, 0), (0, 0, 0), (1, 1, 1), False),
+        ("top", None, "joint", (0, 0, 5), (0, 0, 0), (1, 1, 1), True),
+        ("top2", "top", "joint", (0, 7, 0), (0, 0, 15), (2, 2, 2), True),
+        ("prop", None, "mesh", (0, 0, -20), (0, 45, 0), (1, 1, 1), False),
+        ("big", None, "group", (0, -4, 0), (0, 0, 0), (2, 1, 2), False),
+        ("lone", "big", "joint", (1, 0, 0), (0, 0, 0), (1, 1, 1), False),
+    )
+
+    # the attribute-less group's pivots: rotate pivot, scale pivot, rotate
+    # offset, scale offset
+    PIVOTS = ((5, 0, 0), (0, 3, 0), (1, 0, 0), (0, 0, 2))
+
+    # the nodes under the root the export found scaled other than 1
+    BIG = ("big", "lone")
+
+    # outside(): a joint root, and a group root scaled 2 holding a joint
+    # chain as Maya builds one, its first joint inheriting the group's scale
+    # and the others compensating their parent's, and two cubes
+    OUTSIDE = (
+        ("top", None, "joint", (0, 0, 5), (0, 0, 0), (1, 1, 1), True),
+        ("big", None, "group", (-10, 2, 3), (0, 0, 15), (2, 2, 2), False),
+        ("lone", "big", "joint", (1, 1, 1), (0, 0, 10), (1, 1, 1), False),
+        ("lone2", "lone", "joint", (0, 6, 0), (20, 0, 0), (1, 1.5, 1), True),
+        ("lone3", "lone2", "joint", (0, 5, 0), (0, 0, -30), (1, 1, 1), True),
+        ("pad", "big", "mesh", (3, 2, 0), (0, 30, 0), (1, 1, 1), False),
+        ("slab", "big", "mesh", (-3, 1, 4), (10, 0, 0), (1, 1, 1), False),
+    )
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def path(self, name):
+        return os.path.join(self.tmp.name, name)
+
+    @staticmethod
+    def save(manager, scene, path):
+        exporter = FBX.FbxExporter.Create(manager, "")
+        if not exporter.Initialize(path, -1, manager.GetIOSettings()):
+            raise RuntimeError(f"cannot write {path}")
+        exporter.Export(scene)
+        exporter.Destroy()
+        return path
+
+    @staticmethod
+    def open(path):
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        importer = FBX.FbxImporter.Create(manager, "")
+        importer.Initialize(path, -1, manager.GetIOSettings())
+        scene = FBX.FbxScene.Create(manager, "")
+        importer.Import(scene)
+        importer.Destroy()
+        return manager, scene
+
+    @staticmethod
+    def keys(prop, layer, axis, values):
+        """``values`` on frames 0, 5 and 10, linear, at 30 fps; or on every
+        frame from 0, where there are more"""
+        curve = prop.GetCurve(layer, axis, True)
+        curve.KeyModifyBegin()
+        frames = (0, 5, 10) if len(values) == 3 else range(len(values))
+        for frame, value in zip(frames, values):
+            time = FBX.FbxTime()
+            time.SetSecondDouble(frame / 30.0)
+            key = curve.KeyAdd(time)[0]
+            curve.KeySetValue(key, float(value))
+            curve.KeySetInterpolation(key, FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear)
+        curve.KeyModifyEnd()
+
+    @staticmethod
+    def make(scene, tree):
+        """{name: node} of ``tree``, rows as TREE's, under the scene root; a
+        mesh is a 10 cm cube"""
+        inherit = FBX.FbxTransform.EInheritType
+        made    = {None: scene.GetRootNode()}
+        for node, parent, kind, t, r, s, compensates in tree:
+            out = FBX.FbxNode.Create(scene, node)
+            if kind == "joint":
+                attr = FBX.FbxSkeleton.Create(scene, node)
+                attr.SetSkeletonType(FBX.FbxSkeleton.EType.eLimbNode)
+                out.SetNodeAttribute(attr)
+            elif kind == "group":
+                attr = FBX.FbxNull.Create(scene, node)
+                attr.Look.Set(FBX.FbxNull.ELook.eNone.value)
+                out.SetNodeAttribute(attr)
+            elif kind == "mesh":
+                mesh    = FBX.FbxMesh.Create(scene, node)
+                corners = [(x, y, z) for x in (-5, 5) for y in (-5, 5) for z in (-5, 5)]
+                mesh.InitControlPoints(len(corners))
+                for i, corner in enumerate(corners):
+                    mesh.SetControlPointAt(FBX.FbxVector4(*corner, 1.0), i)
+                for face in ((0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)):
+                    mesh.BeginPolygon()
+                    for i in face:
+                        mesh.AddPolygon(i)
+                    mesh.EndPolygon()
+                out.SetNodeAttribute(mesh)
+            out.LclTranslation.Set(FBX.FbxDouble3(*t))
+            out.LclRotation.Set(FBX.FbxDouble3(*r))
+            out.LclScaling.Set(FBX.FbxDouble3(*s))
+            out.SetRotationActive(True)
+            out.SetTransformationInheritType(inherit.eInheritRrs if compensates else inherit.eInheritRSrs)
+            made[parent].AddChild(out)
+            made[node] = out
+        return made
+
+    @staticmethod
+    def skin(scene, made, mesh, joints):
+        """the cube ``mesh`` skinned to the two ``joints``, its first four
+        corners to the first, bound where they stand"""
+        skin = FBX.FbxSkin.Create(scene, f"{mesh}_skin")
+        for joint, corners in zip(joints, (range(4), range(4, 8))):
+            cluster = FBX.FbxCluster.Create(scene, f"cl_{joint}")
+            cluster.SetLink(made[joint])
+            cluster.SetLinkMode(FBX.FbxCluster.ELinkMode.eNormalize)
+            for corner in corners:
+                cluster.AddControlPointIndex(corner, 1.0)
+            cluster.SetTransformMatrix(made[mesh].EvaluateGlobalTransform())
+            cluster.SetTransformLinkMatrix(made[joint].EvaluateGlobalTransform())
+            skin.AddCluster(cluster)
+        made[mesh].GetNodeAttribute().AddDeformer(skin)
+
+    def source(self, name="cm.fbx", axes=None, muted=False):
+        """the TREE in cm: an attribute-less group root with every pivot and
+        offset, keyed in translate and in scale along its scale pivot's
+        axis, holding a joint chain whose root inherits its parent's scale,
+        as Unreal's joints do, and whose other joints compensate it, scaled
+        1, 2 and (1, 3, 1), the last holding a joint that does not, and a
+        10 cm cube skinned to the hip and the knee; a joint root keyed in
+        translate and scale, holding a joint keyed in scale; a cube at the
+        root skinned to that joint root and to the joint under the last
+        root; and a group root scaled (2, 1, 2) holding a joint. Keyed on
+        an additive layer too: the hip's and the group's translate, the top
+        joint's translate and scale, and the scale of the joint under it.
+        The knee is turned off its bind pose after the bind. Translations
+        keyed in multiples of 25 cm, which a meters file holds exactly in
+        single precision. ``muted`` mutes the base layer, which the export
+        converts all the same"""
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        if axes is not None:
+            scene.GetGlobalSettings().SetAxisSystem(axes)
+        scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames30)
+        source = FBX.FbxNode.EPivotSet.eSourcePivot
+        made   = self.make(scene, self.TREE)
+        grp    = made["grp"]
+        for setter, pivot in zip(
+            (grp.SetRotationPivot, grp.SetScalingPivot, grp.SetRotationOffset, grp.SetScalingOffset), self.PIVOTS
+        ):
+            setter(source, FBX.FbxVector4(*pivot, 1.0))
+
+        stack = FBX.FbxAnimStack.Create(scene, "Take 001")
+        base  = FBX.FbxAnimLayer.Create(scene, "Base Layer")
+        add   = FBX.FbxAnimLayer.Create(scene, "add")
+        stack.AddMember(base)
+        stack.AddMember(add)
+        base.Mute.Set(muted)
+        self.keys(made["grp"].LclTranslation, base, "X", (25, 50, 75))
+        self.keys(made["grp"].LclScaling,     base, "Y", (1, 0.75, 0.5))
+        self.keys(made["hip"].LclRotation,    base, "Z", (30, 60, 90))
+        self.keys(made["hip"].LclTranslation, add,  "Y", (0, 25, 50))
+        self.keys(made["knee"].LclScaling,    base, "Y", (1, 1.5, 2))
+        self.keys(made["top"].LclTranslation, base, "Y", (0, 25, 50))
+        self.keys(made["top"].LclTranslation, add,  "X", (0, -25, 25))
+        self.keys(made["top"].LclScaling,     base, "X", (1, 1.25, 1.5))
+        self.keys(made["top"].LclScaling,     add,  "Y", (1, 1.5, 2))
+        self.keys(made["top2"].LclScaling,    base, "X", (2, 2.5, 3))
+        self.keys(made["top2"].LclScaling,    add,  "Z", (2, 3, 4))
+        self.keys(made["grp"].LclTranslation, add,  "Z", (0, 25, -25))
+        first, last = FBX.FbxTime(), FBX.FbxTime()
+        first.SetSecondDouble(0.0)
+        last.SetSecondDouble((self.FRAMES - 1) / self.FPS)
+        stack.SetLocalTimeSpan(FBX.FbxTimeSpan(first, last))
+
+        # the cube under the group skinned to the hip and the knee, bound
+        # where they stand, which a bind pose lists; the knee then turned.
+        # The cube at the root skinned to the top joint and to the joint
+        # under the root the export finds scaled other than 1, which reads
+        # as no unit
+        for mesh, joints in (("body", ("hip", "knee")), ("prop", ("top", "lone"))):
+            self.skin(scene, made, mesh, joints)
+        pose = FBX.FbxPose.Create(scene, "bindPose")
+        pose.SetIsBindPose(True)
+        for node in ("body", "hip", "knee", "shin"):
+            pose.Add(made[node], FBX.FbxMatrix(made[node].EvaluateGlobalTransform()))
+        scene.AddPose(pose)
+        made["knee"].LclRotation.Set(FBX.FbxDouble3(-50.0, 5.0, 0.0))
+
+        path = self.save(manager, scene, self.path(name))
+        manager.Destroy()
+        return path
+
+    # the additive layer's translate z on the OUTSIDE group, keyed by
+    # outside(layered=True) on frames 0, 5 and 10
+    ADDED = (0, 25, -25)
+
+    def outside(self, name="outside.fbx", chain=False, layered=False):
+        """the OUTSIDE tree in cm: a joint root, a unit root once converted;
+        a group root scaled 2, which the export finds scaled other than 1,
+        holding a joint, a joint under it that compensates its parent's
+        scale, scaled (1, 1.5, 1), and another under that, a cube skinned to
+        the joint root and to the first joint, and an unskinned cube. Both
+        joints the cube is skinned to are turned off the bind, which a bind
+        pose lists. ``chain`` adds a cube under the group skinned to the two
+        compensating joints, which the bind pose lists too, as Maya's export
+        lists every skin influence. ``layered`` keys the group's translate x
+        on a base layer and its translate z on an additive one, ADDED, at
+        30 fps"""
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        tree  = self.OUTSIDE + ((("cap", "big", "mesh", (0, 9, 2), (0, 0, 0), (1, 1, 1), False),) if chain else ())
+        made  = self.make(scene, tree)
+        self.skin(scene, made, "pad", ("top", "lone"))
+        listed = ("pad", "top", "lone")
+        if chain:
+            self.skin(scene, made, "cap", ("lone2", "lone3"))
+            listed += ("cap", "lone2", "lone3")
+        pose = FBX.FbxPose.Create(scene, "bindPose")
+        pose.SetIsBindPose(True)
+        for node in listed:
+            pose.Add(made[node], FBX.FbxMatrix(made[node].EvaluateGlobalTransform()))
+        scene.AddPose(pose)
+        if layered:
+            scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames30)
+            stack = FBX.FbxAnimStack.Create(scene, "Take 001")
+            base  = FBX.FbxAnimLayer.Create(scene, "Base Layer")
+            add   = FBX.FbxAnimLayer.Create(scene, "add")
+            stack.AddMember(base)
+            stack.AddMember(add)
+            self.keys(made["big"].LclTranslation, base, "X", (-10, 15, 40))
+            self.keys(made["big"].LclTranslation, add, "Z", self.ADDED)
+            first, last = FBX.FbxTime(), FBX.FbxTime()
+            first.SetSecondDouble(0.0)
+            last.SetSecondDouble((self.FRAMES - 1) / self.FPS)
+            stack.SetLocalTimeSpan(FBX.FbxTimeSpan(first, last))
+        made["top"].LclRotation.Set(FBX.FbxDouble3(0.0, 0.0, 40.0))
+        made["lone"].LclRotation.Set(FBX.FbxDouble3(0.0, 25.0, 20.0))
+        path = self.save(manager, scene, self.path(name))
+        manager.Destroy()
+        return path
+
+    def converted(self, path, unit):
+        """``path`` written in ``unit`` by the sdk's ConvertScene"""
+        manager, scene = self.open(path)
+        try:
+            getattr(FBX.FbxSystemUnit, unit).ConvertScene(scene)
+            stem = os.path.splitext(os.path.basename(path))[0]
+            return self.save(manager, scene, self.path(f"{stem}_{unit}.fbx"))
+        finally:
+            manager.Destroy()
+
+    @staticmethod
+    def rig_worlds(rig):
+        return {node.name: np.asarray(node.world_matrix) for node in rig}
+
+    @staticmethod
+    def clip_worlds(clip):
+        stack = np.asarray(clip.frames.world_matrix)
+        return {node.name: stack[:, i] for i, node in enumerate(clip)}
+
+    def assertWorlds(self, got, want, atol, skip=()):
+        self.assertEqual(sorted(got), sorted(want))
+        for name in got:
+            if name in skip:
+                continue
+            gap = float(np.abs(np.asarray(got[name]) - np.asarray(want[name])).max())
+            self.assertLessEqual(gap, atol, f"{name}: {gap:.2e} off")
+
+    def test_the_export_holds_the_unit_as_a_scale(self):
+        """the premise, as the sdk writes it: 1/s on each root, a joint that
+        compensates its parent's scale times 1/s, curves and all on the
+        first layer, the values under the roots left in cm"""
+        path = self.source()
+        for unit, s in self.UNITS:
+            with self.subTest(unit=unit):
+                manager, scene = self.open(self.converted(path, unit))
+                try:
+                    nodes, stack = {}, [scene.GetRootNode()]
+                    while stack:
+                        node                  = stack.pop()
+                        nodes[node.GetName()] = node
+                        stack.extend(node.GetChild(i) for i in range(node.GetChildCount()))
+                    scale = {name: np.array(tuple(nodes[name].LclScaling.Get())[:3]) for name in nodes}
+                    for name, factor in (("grp", 1), ("top", 1), ("prop", 1), ("big", (2, 1, 2)), ("knee", 1),
+                                         ("shin", 2), ("foot", (1, 3, 1)), ("top2", 2), ("hip", s), ("toe", s)):
+                        self.assertTrue(np.allclose(scale[name], np.multiply(factor, 1.0 / s), rtol=1e-12), name)
+                    self.assertTrue(np.allclose(tuple(nodes["hip"].LclTranslation.Get())[:3], (1, 90, 2)))
+                    self.assertTrue(np.allclose(tuple(nodes["top"].LclTranslation.Get())[:3], (0, 0, 5 / s)))
+                finally:
+                    manager.Destroy()
+
+    def test_a_converted_file_loads_as_its_cm_file(self):
+        """the rig at its node pose and its bind pose, a joints only read, the
+        clip on every frame and its rest pose, in a Y-up and a Z-up file, in
+        Maya's axes and the file's own: every node's full world matrix, its
+        scale included, the cm file's, but under the root the export found
+        scaled other than 1 (test_a_root_scaled_other_than_1_loads_where_the_file_puts_it).
+        The scale on the roots and on the joints that compensate their
+        parent's is the cm file's, 1 on a root; the clip within the single
+        precision a converted key is stored in"""
+        for label, axes in (("Y-up", None), ("Z-up", FBX.FbxAxisSystem.MayaZUp)):
+            path = self.source(f"cm {label}.fbx", axes)
+            for unit, s in self.UNITS:
+                meters = self.converted(path, unit)
+                for system in ("maya_y_up", None):
+                    with self.subTest(axes=label, unit=unit, axis_system=system):
+                        for pose in ("node", "bind"):
+                            got  = HierarchyData.load_fbx(meters, axis_system=system, pose=pose)
+                            want = HierarchyData.load_fbx(path, axis_system=system, pose=pose)
+                            self.assertWorlds(self.rig_worlds(got), self.rig_worlds(want), 1e-9, self.BIG)
+                            for name in ("hip", "knee", "shin", "foot", "top", "top2", "prop"):
+                                same = np.allclose(got[name].scale, want[name].scale, rtol=0, atol=1e-12)
+                                self.assertTrue(same, name)
+                        self.assertTrue(np.array_equal(HierarchyData.load_fbx(meters)["top"].scale, np.ones(3)))
+
+                        got  = HierarchyData.load_fbx(meters, axis_system=system, node_types=("joint",))
+                        want = HierarchyData.load_fbx(path, axis_system=system, node_types=("joint",))
+                        self.assertWorlds(self.rig_worlds(got), self.rig_worlds(want), 1e-9, self.BIG)
+
+                        clip = ClipData.load_fbx(meters, axis_system=system)
+                        cm   = ClipData.load_fbx(path, axis_system=system)
+                        self.assertEqual(clip.frame_count, self.FRAMES)
+                        rest = self.rig_worlds(clip.rest_pose)
+                        self.assertWorlds(rest, self.rig_worlds(cm.rest_pose), 1e-9, self.BIG)
+                        self.assertWorlds(self.clip_worlds(clip), self.clip_worlds(cm), 1e-5, self.BIG)
+                        # the scale keys of the first layer, converted, in
+                        # single precision
+                        for name in ("knee", "top", "top2"):
+                            got, want = clip.frames[name].scale, cm.frames[name].scale
+                            self.assertTrue(np.allclose(got, want, rtol=1e-7, atol=0), name)
+
+        # the base layer muted: the additive one, which the export leaves
+        # in cm, is the first the clip reads, its scale on the top joint and
+        # the joint under it as the file holds it, not divided by the unit
+        path = self.source("muted.fbx", muted=True)
+        for unit, _ in self.UNITS:
+            with self.subTest(muted=True, unit=unit):
+                clip = ClipData.load_fbx(self.converted(path, unit))
+                cm   = ClipData.load_fbx(path)
+                self.assertWorlds(self.clip_worlds(clip), self.clip_worlds(cm), 1e-9, self.BIG)
+                self.assertGreater(float(np.ptp(np.asarray(cm.frames["top"].translate)[:, 0, 0])), 25.0)
+                self.assertGreater(float(np.ptp(np.asarray(cm.frames["top"].scale)[:, 0, 1])), 0.5)
+                for name in ("top", "top2"):
+                    self.assertTrue(np.array_equal(clip.frames[name].scale, cm.frames[name].scale), name)
+
+    def test_the_meshes_and_skins_of_a_converted_file_load_as_its_cm_file(self):
+        """the points in cm, a 10 cm cube 10 cm across, not 1000; the inverse
+        binds; and the skinned cube posed by the rig of the same file"""
+        from cgmath.geometry.mesh import MeshData, MeshList, load_fbx as mesh_load_fbx
+        from cgmath.geometry.skin_weights import SkinList, _read_skins_fbx
+        from cgmath.render.scene import Object
+
+        path = self.source()
+        for unit, s in self.UNITS:
+            meters = self.converted(path, unit)
+            for system in ("maya_y_up", None):
+                with self.subTest(unit=unit, axis_system=system):
+                    want = {mesh.name: np.asarray(mesh.points) for mesh, _ in mesh_load_fbx(path, axis_system=system)}
+                    for read in (
+                        {mesh.name: mesh.points for mesh, _ in mesh_load_fbx(meters, axis_system=system)},
+                        {mesh.name: mesh.points for mesh in MeshList.load_fbx(meters, axis_system=system)},
+                        {"body": MeshData.load_fbx(meters, name="body", axis_system=system).points},
+                    ):
+                        for name, points in read.items():
+                            self.assertTrue(np.allclose(points, want[name], rtol=0, atol=1e-12), name)
+                            self.assertAlmostEqual(float(np.ptp(np.asarray(points), axis=0).max()), 10.0, places=9)
+
+                    got = {skin.name: bound for skin, bound in _read_skins_fbx(meters, True, axis_system=system)}
+                    cm  = {skin.name: bound for skin, bound in _read_skins_fbx(path, True, axis_system=system)}
+                    self.assertTrue(np.allclose(got["body"], cm["body"], rtol=0, atol=1e-12))
+                    for skin, twin in zip(SkinList.load_fbx(meters), SkinList.load_fbx(path)):
+                        self.assertTrue(np.array_equal(skin.weights, twin.weights))
+
+                    # the knee is off its bind: the posed cube moves. The
+                    # cube at the root, inside the unit, is skinned to a
+                    # joint outside it too, which the file's rig places
+                    # scaled 1/s: the posed cube is the cm file's all the same
+                    for index, name in enumerate(("body", "prop")):
+                        posed = []
+                        for file in (meters, path):
+                            mesh = Object.load_fbx(file, index=index, extract_texture=False, axis_system=system)
+                            bind = np.array(mesh.mesh.points, copy=True)
+                            mesh.pose(HierarchyData.load_fbx(file, axis_system=system))
+                            posed.append(np.asarray(mesh.mesh.points))
+                            if name == "body":
+                                self.assertGreater(float(np.abs(posed[-1] - bind).max()), 1.0)
+                        self.assertEqual(mesh.mesh.name, name)
+                        self.assertTrue(np.allclose(posed[0], posed[1], rtol=0, atol=1e-9), name)
+
+    def test_a_root_scaled_other_than_1_loads_where_the_file_puts_it(self):
+        """the export scaled the group root's (2, 1, 2) by 1/s too, which
+        reads as no unit, though one of its axes is 1/s: the group and its
+        joint load where the file puts them, at the positions of the cm
+        file, scaled 1/s, as a file only labelled in the unit would. Under
+        the OUTSIDE group root, scaled 2, every node loads where the sdk
+        puts it, the lengths times s; a joint that compensates its parent's
+        scale under a joint the export did not scale, as the second joint
+        of a Maya skeleton does, is scaled 1/s once more, 1/s^2, at its cm
+        position, and so is the joint under it, off its cm position. Under
+        pose="bind" every node a bind pose lists is at the cm file's bind,
+        scaled 1/s, those two joints too once it lists them"""
+        path = self.source()
+        for unit, s in self.UNITS:
+            with self.subTest(unit=unit):
+                got  = self.rig_worlds(HierarchyData.load_fbx(self.converted(path, unit)))
+                want = self.rig_worlds(HierarchyData.load_fbx(path))
+                for name in self.BIG:
+                    self.assertTrue(np.allclose(got[name][3], want[name][3], rtol=0, atol=1e-9), name)
+                    self.assertTrue(np.allclose(got[name][:3, :3] * s, want[name][:3, :3], rtol=0, atol=1e-9), name)
+
+        path = self.outside()
+        want = self.rig_worlds(HierarchyData.load_fbx(path))
+        for unit, s in self.UNITS:
+            with self.subTest(fixture="outside", unit=unit):
+                meters = self.converted(path, unit)
+                got    = self.rig_worlds(HierarchyData.load_fbx(meters))
+                sdk    = self.sdk_frames(meters, s)
+                for name in ("big", "lone", "lone2", "lone3", "pad", "slab"):
+                    self.assertTrue(np.allclose(got[name], sdk[name][0], rtol=0, atol=1e-9), name)
+                for name, power in (("big", 1), ("lone", 1), ("pad", 1), ("lone2", 2), ("lone3", 2)):
+                    self.assertTrue(np.allclose(got[name][:3, :3] * s ** power, want[name][:3, :3], rtol=0, atol=1e-9), name)
+                for name in ("big", "lone", "lone2", "pad", "slab"):
+                    self.assertTrue(np.allclose(got[name][3], want[name][3], rtol=0, atol=1e-9), name)
+                self.assertGreater(float(np.abs(got["lone3"][3] - want["lone3"][3]).max()), 1.0)
+
+        # under pose="bind" each node a bind pose lists takes its bind, which
+        # the export converts as a world matrix: where the cm file has it,
+        # scaled 1/s like the rest, and so are the nodes under it. A joint
+        # that compensates its parent's scale no bind pose lists stays at
+        # 1/s^2 there, at its cm position, the joint under it off; listed,
+        # as Maya's export lists a skin's joints, the two are at their bind
+        for chain in (False, True):
+            path = self.outside(f"outside bind {chain}.fbx", chain=chain)
+            want = self.rig_worlds(HierarchyData.load_fbx(path, pose="bind"))
+            for unit, s in self.UNITS:
+                with self.subTest(fixture="outside", pose="bind", chain=chain, unit=unit):
+                    got   = self.rig_worlds(HierarchyData.load_fbx(self.converted(path, unit), pose="bind"))
+                    right = ("big", "lone", "pad", "slab") + (("lone2", "lone3", "cap") if chain else ())
+                    self.assertTrue(np.allclose(got["top"], want["top"], rtol=0, atol=1e-9))
+                    for name in right:
+                        self.assertTrue(np.allclose(got[name][3], want[name][3], rtol=0, atol=1e-9), name)
+                        self.assertTrue(np.allclose(got[name][:3, :3] * s, want[name][:3, :3], rtol=0, atol=1e-9), name)
+                    if not chain:
+                        self.assertTrue(np.allclose(got["lone2"][3], want["lone2"][3], rtol=0, atol=1e-9))
+                        twice = np.allclose(got["lone2"][:3, :3] * s ** 2, want["lone2"][:3, :3], rtol=0, atol=1e-9)
+                        self.assertTrue(twice)
+                        self.assertGreater(float(np.abs(got["lone3"][3] - want["lone3"][3]).max()), 1.0)
+
+    def test_a_root_scaled_other_than_1_is_off_by_what_a_later_layer_adds(self):
+        """the export converts the translate curves of a take's first layer
+        alone, on the OUTSIDE group root, scaled 2, as on a unit root, and
+        leaves the later layers' in cm; the clip reads that root as no unit
+        and multiplies its translate after the blend, the later layer's cm
+        values with the first's. So every frame is where the sdk puts it,
+        the lengths times s, and the group and every node under it are off
+        the cm file's clip by s - 1 times what the additive layer adds, as
+        the docs say; the rest pose's positions are the cm file's"""
+        path = self.outside("layered.fbx", layered=True)
+        cm   = ClipData.load_fbx(path)
+        want = self.clip_worlds(cm)
+
+        # what the additive layer adds on every frame: its curve, and on the
+        # channels it holds no curve for the value the sdk wrote there, the
+        # group's own, as Maya's export writes it
+        manager, scene = self.open(path)
+        try:
+            stack = scene.GetSrcObject(FBX.FbxCriteria.ObjectType(FBX.FbxAnimStack.ClassId), 0)
+            layer = stack.GetSrcObject(FBX.FbxCriteria.ObjectType(FBX.FbxAnimLayer.ClassId), 1)
+            node  = scene.GetRootNode().FindChild("big").LclTranslation.GetCurveNode(layer)
+            added = np.zeros((self.FRAMES, 3))
+            time  = FBX.FbxTime()
+            for axis in range(3):
+                for frame in range(self.FRAMES):
+                    time.SetSecondDouble(frame / self.FPS)
+                    if node.GetCurveCount(axis):
+                        added[frame, axis] = node.GetCurve(axis).Evaluate(time)[0]
+                    else:
+                        added[frame, axis] = node.GetChannelValue(axis, 0.0)
+        finally:
+            manager.Destroy()
+        self.assertTrue(np.allclose(added[:, 2], np.interp(np.arange(self.FRAMES), (0, 5, 10), self.ADDED)))
+        self.assertTrue(np.array_equal(added[:, :2], np.tile((-10.0, 2.0), (self.FRAMES, 1))))
+        for unit, s in self.UNITS:
+            with self.subTest(unit=unit):
+                meters = self.converted(path, unit)
+                clip   = ClipData.load_fbx(meters)
+                got    = self.clip_worlds(clip)
+                self.assertEqual(clip.frame_count, self.FRAMES)
+                # the joint root holds the unit, read as the cm file's
+                self.assertWorlds(got, self.sdk_frames(meters, s), 1e-5, ("top",))
+                for name in ("big", "lone", "lone2", "pad", "slab"):
+                    off = got[name][:, 3, :3] - want[name][:, 3, :3]
+                    self.assertTrue(np.allclose(off, (s - 1) * added, rtol=0, atol=1e-5), name)
+                self.assertGreater(float(np.abs(got["big"][:, 3, :3] - want["big"][:, 3, :3]).max()), 1.0)
+                rest = self.rig_worlds(clip.rest_pose)
+                ref  = self.rig_worlds(cm.rest_pose)
+                for name in ("big", "lone", "lone2", "pad", "slab"):
+                    self.assertTrue(np.allclose(rest[name][3], ref[name][3], rtol=0, atol=1e-9), name)
+
+    def test_a_mesh_skinned_to_a_joint_scaled_twice_is_right_at_its_bind(self):
+        """a cube under the OUTSIDE group skinned to its two compensating
+        joints, which the export scales by 1/s once more, the bind pose
+        listing them as Maya's export lists a skin's joints: posed by the rig
+        read at the bind, pose="bind", it is the cm file's; posed by the rig
+        of the nodes' own values, pose="node", it is off the cm file's"""
+        from cgmath.geometry.mesh import load_fbx as mesh_load_fbx
+        from cgmath.render.scene import Object
+
+        def posed(file, pose):
+            names = [mesh.name for mesh, _ in mesh_load_fbx(file)]
+            cap   = Object.load_fbx(file, index=names.index("cap"), extract_texture=False)
+            cap.pose(HierarchyData.load_fbx(file, pose=pose))
+            return np.asarray(cap.mesh.points)
+
+        path = self.outside("chain.fbx", chain=True)
+        want = {pose: posed(path, pose) for pose in ("node", "bind")}
+        # the joints are turned off the bind: the cube moves
+        self.assertGreater(float(np.abs(want["node"] - want["bind"]).max()), 1.0)
+        for unit, _ in self.UNITS:
+            with self.subTest(unit=unit):
+                meters = self.converted(path, unit)
+                self.assertTrue(np.allclose(posed(meters, "bind"), want["bind"], rtol=0, atol=1e-9))
+                self.assertGreater(float(np.abs(posed(meters, "node") - want["node"]).max()), 1.0)
+
+    def test_a_mesh_under_a_root_scaled_other_than_1_is_right_once_posed(self):
+        """a mesh under a root the export found scaled other than 1, outside
+        every unit root of a file that holds one (OUTSIDE): its points load
+        s times the cm file's and its node scaled 1/s, so an unskinned cube
+        placed by its node, and a cube skinned to a joint inside the unit
+        and to one outside it, posed by the file's rig, are the cm file's"""
+        from cgmath.geometry.mesh import load_fbx as mesh_load_fbx
+        from cgmath.render.scene import Object
+
+        def read(file):
+            points = {mesh.name: np.asarray(mesh.points) for mesh, _ in mesh_load_fbx(file)}
+            rig    = HierarchyData.load_fbx(file)
+            pad    = Object.load_fbx(file, index=list(points).index("pad"), extract_texture=False)
+            pad.pose(rig)
+            slab = np.c_[points["slab"], np.ones(len(points["slab"]))] @ np.asarray(rig["slab"].world_matrix)
+            return points, np.asarray(pad.mesh.points), slab[:, :3], rig
+
+        path = self.outside()
+        points, pad, slab, rig = read(path)
+        # the cube is skinned to two joints turned off the bind: it moves off
+        # where its node puts it
+        bind = np.c_[points["pad"], np.ones(len(points["pad"]))] @ np.asarray(rig["pad"].world_matrix)
+        self.assertGreater(float(np.abs(pad - bind[:, :3]).max()), 1.0)
+        for unit, s in self.UNITS:
+            with self.subTest(unit=unit):
+                got = read(self.converted(path, unit))
+                # the file holds a unit root, the joint the cube is skinned to
+                self.assertTrue(np.array_equal(got[3]["top"].scale, np.ones(3)))
+                for name in ("pad", "slab"):
+                    self.assertTrue(np.allclose(got[0][name], points[name] * s, rtol=1e-12, atol=0), name)
+                self.assertTrue(np.allclose(got[1], pad, rtol=0, atol=1e-9))
+                self.assertTrue(np.allclose(got[2], slab, rtol=0, atol=1e-9))
+
+    def test_a_number_reads_no_unit(self):
+        """a number is the caller's own factor: 1.0 reads the converted file
+        as the sdk holds it, the root scaled 1/s and the lengths in the
+        file's numbers, and s puts the nodes where the file puts them,
+        scaled 1/s, as the read did before it knew the unit as a scale"""
+        path = self.source()
+        for unit, s in self.UNITS:
+            with self.subTest(unit=unit):
+                meters = self.converted(path, unit)
+                raw    = HierarchyData.load_fbx(meters, scale_factor=1.0)
+                self.assertTrue(np.allclose(raw["top"].scale, 1.0 / s, rtol=1e-12))
+                self.assertTrue(np.allclose(raw["top"].translate, (0, 0, 5 / s), rtol=1e-12))
+                self.assertTrue(np.allclose(raw["knee"].translate, (0, -40, 5), rtol=1e-12))
+
+                got  = self.rig_worlds(HierarchyData.load_fbx(meters, scale_factor=s))
+                want = self.rig_worlds(HierarchyData.load_fbx(path))
+                for name in ("hip", "knee", "body", "top", "top2", "prop"):
+                    self.assertTrue(np.allclose(got[name][3], want[name][3], rtol=0, atol=1e-9), name)
+                self.assertTrue(np.allclose(np.linalg.norm(got["top"][:3, :3], axis=1), 1.0 / s, rtol=1e-12))
+
+    def plain(self, name, root_scale=(1, 1, 1)):
+        """a meters file whose numbers are in meters, no unit scale on its
+        roots: a joint root, scaled ``root_scale``, holding a joint, and a
+        group root holding a joint, each root keyed on a base and an
+        additive layer, the child joint on the additive layer, every frame
+        keyed, so the sdk interpolates nothing in single precision"""
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        scene.GetGlobalSettings().SetSystemUnit(FBX.FbxSystemUnit.m)
+        scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames30)
+        made = {None: scene.GetRootNode()}
+        for node, parent, kind, t, r, s in (
+            ("hip", None, "joint", (0.01, 0.9, 0.02), (10, 20, 30), root_scale),
+            ("knee", "hip", "joint", (0, -0.4, 0.05), (-30, 5, 0), (1, 1, 1)),
+            ("grp", None, "group", (-0.2, 0.1, 0.4), (35, -10, 50), (1, 1, 1)),
+            ("arm", "grp", "joint", (0.05, 0.05, 0), (0, 0, 15), (1, 1, 1)),
+        ):
+            out = FBX.FbxNode.Create(scene, node)
+            if kind == "joint":
+                out.SetNodeAttribute(FBX.FbxSkeleton.Create(scene, node))
+            else:
+                attr = FBX.FbxNull.Create(scene, node)
+                attr.Look.Set(FBX.FbxNull.ELook.eNone.value)
+                out.SetNodeAttribute(attr)
+            out.LclTranslation.Set(FBX.FbxDouble3(*t))
+            out.LclRotation.Set(FBX.FbxDouble3(*r))
+            out.LclScaling.Set(FBX.FbxDouble3(*s))
+            made[parent].AddChild(out)
+            made[node] = out
+        stack = FBX.FbxAnimStack.Create(scene, "Take 001")
+        base  = FBX.FbxAnimLayer.Create(scene, "Base Layer")
+        add   = FBX.FbxAnimLayer.Create(scene, "add")
+        stack.AddMember(base)
+        stack.AddMember(add)
+        frames = np.arange(self.FRAMES)
+        self.keys(made["hip"].LclTranslation,  base, "X", 0.02 * frames)
+        self.keys(made["hip"].LclTranslation,  add,  "Y", 0.01 * frames)
+        self.keys(made["grp"].LclTranslation,  add,  "Z", -0.03 * frames)
+        self.keys(made["knee"].LclTranslation, add,  "X", 0.005 * frames)
+        first, last = FBX.FbxTime(), FBX.FbxTime()
+        first.SetSecondDouble(0.0)
+        last.SetSecondDouble((self.FRAMES - 1) / self.FPS)
+        stack.SetLocalTimeSpan(FBX.FbxTimeSpan(first, last))
+        path = self.save(manager, scene, self.path(name))
+        manager.Destroy()
+        return path
+
+    def sdk_frames(self, path, factor):
+        """{name: (F, 4, 4)} the sdk's worlds of every frame, the translation
+        row times ``factor``"""
+        manager, scene = self.open(path)
+        try:
+            nodes, stack = {}, [scene.GetRootNode()]
+            while stack:
+                node = stack.pop()
+                if node.GetNodeAttribute():
+                    nodes[node.GetName()] = node
+                stack.extend(node.GetChild(i) for i in range(node.GetChildCount()))
+            out, time = {}, FBX.FbxTime()
+            for name, node in nodes.items():
+                worlds = []
+                for frame in range(self.FRAMES):
+                    time.SetSecondDouble(frame / self.FPS)
+                    matrix = node.EvaluateGlobalTransform(time)
+                    world  = np.array([[matrix.Get(r, c) for c in range(4)] for r in range(4)])
+                    world[3, :3] *= factor
+                    worlds.append(world)
+                out[name] = np.array(worlds)
+            return out
+        finally:
+            manager.Destroy()
+
+    def test_a_file_only_labelled_in_a_unit_is_multiplied_and_its_layers_stay_exact(self):
+        """no root holds the unit: every length is multiplied by 100, the
+        additive layers' as the base's, every frame the sdk's world with its
+        translation times 100, and so is a file whose root is scaled 0.5"""
+        for scale in ((1, 1, 1), (0.5, 0.5, 0.5)):
+            with self.subTest(root_scale=scale):
+                path = self.plain(f"plain {scale[0]}.fbx", scale)
+                clip = ClipData.load_fbx(path, axis_system=None)
+                self.assertWorlds(self.clip_worlds(clip), self.sdk_frames(path, 100.0), 1e-12)
+                self.assertTrue(np.allclose(clip.rest_pose["knee"].translate, (0, -40, 5), rtol=1e-12))
+                self.assertTrue(np.array_equal(clip.rest_pose["hip"].scale, scale))
+
+    def test_a_root_scaled_exactly_1_over_s_is_read_as_the_unit(self):
+        """the one risk: a meters file whose numbers are in meters and whose
+        root is authored at exactly 0.01 reads as a converted one, the root
+        scaled 1 and the lengths under it as the file holds them; a number
+        for scale_factor multiplies them all, as before. A root 1 percent
+        or 1e-6 off 0.01, outside the band, reads as a file only labelled
+        in meters"""
+        path = self.plain("risk.fbx", (0.01, 0.01, 0.01))
+        rig  = HierarchyData.load_fbx(path, axis_system=None)
+        self.assertTrue(np.array_equal(rig["hip"].scale, np.ones(3)))
+        self.assertTrue(np.allclose(rig["hip"].translate, (1, 90, 2), rtol=1e-12))
+        self.assertTrue(np.allclose(rig["knee"].translate, (0, -0.4, 0.05), rtol=1e-12))
+        self.assertTrue(np.allclose(rig["arm"].translate, (5, 5, 0), rtol=1e-12))
+
+        number = HierarchyData.load_fbx(path, axis_system=None, scale_factor=100.0)
+        self.assertTrue(np.allclose(number["hip"].scale, 0.01, rtol=1e-12))
+        self.assertTrue(np.allclose(number["knee"].translate, (0, -40, 5), rtol=1e-12))
+
+        for scale in (0.0101, 0.01000001):
+            with self.subTest(root_scale=scale):
+                near = HierarchyData.load_fbx(self.plain(f"near {scale}.fbx", (scale,) * 3), axis_system=None)
+                self.assertTrue(np.array_equal(near["hip"].scale, (scale,) * 3))
+                self.assertTrue(np.allclose(near["hip"].translate, (1, 90, 2), rtol=1e-12))
+                self.assertTrue(np.allclose(near["knee"].translate, (0, -40, 5), rtol=1e-12))
+
+    def test_an_unreal_take_converted_to_meters_loads_as_its_cm_file(self):
+        """check_fbx.py item 2 on an authored stand-in for Luna's run: a Z-up
+        cm file at 30 fps whose root joint is a child of the scene root,
+        keyed on frames 0 to 46 with the take's span stopping at 45, the root
+        travelling 750 cm along x, every joint turning and keyed in scale at
+        1, as Unreal writes them; its meters copy, written by the sdk, loads
+        on both loaders to the cm file's full world matrices, scale included:
+        world scale 1, where it read 0.01"""
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        scene.GetGlobalSettings().SetAxisSystem(FBX.FbxAxisSystem.MayaZUp)
+        scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames30)
+        stack = FBX.FbxAnimStack.Create(scene, "Take 001")
+        layer = FBX.FbxAnimLayer.Create(scene, "Base Layer")
+        stack.AddMember(layer)
+        linear = FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear
+        parent = scene.GetRootNode()
+        for index, (name, t) in enumerate((("root", (0, 0, 0)), ("pelvis", (-1.2, 0, 98)), ("spine", (0, 0, 12)),
+                                           ("head", (0, 2, 30)))):
+            attr = FBX.FbxSkeleton.Create(scene, name)
+            attr.SetSkeletonType(FBX.FbxSkeleton.EType.eLimbNode)
+            node = FBX.FbxNode.Create(scene, name)
+            node.SetNodeAttribute(attr)
+            node.LclTranslation.Set(FBX.FbxDouble3(*t))
+            parent.AddChild(node)
+            parent = node
+            for prop, axis, values in (
+                (node.LclRotation, "Z", lambda f: 10.0 * index + 3.0 * f),
+                (node.LclRotation, "X", lambda f: -5.0 * f / (index + 1)),
+                (node.LclScaling, "X", lambda f: 1.0),
+            ) + (((node.LclTranslation, "X", lambda f: 750.0 * f / 46.0),) if name == "root" else ()):
+                curve = prop.GetCurve(layer, axis, True)
+                curve.KeyModifyBegin()
+                for frame in range(47):
+                    time = FBX.FbxTime()
+                    time.SetSecondDouble(frame / 30.0)
+                    key = curve.KeyAdd(time)[0]
+                    curve.KeySetValue(key, float(values(frame)))
+                    curve.KeySetInterpolation(key, linear)
+                curve.KeyModifyEnd()
+        first, last = FBX.FbxTime(), FBX.FbxTime()
+        first.SetSecondDouble(0.0)
+        last.SetSecondDouble(45 / 30.0)
+        stack.SetLocalTimeSpan(FBX.FbxTimeSpan(first, last))
+        path = self.save(manager, scene, self.path("run.fbx"))
+        manager.Destroy()
+        meters = self.converted(path, "m")
+
+        got, want = HierarchyData.load_fbx(meters), HierarchyData.load_fbx(path)
+        self.assertWorlds(self.rig_worlds(got), self.rig_worlds(want), 1e-9)
+        clip, cm = ClipData.load_fbx(meters), ClipData.load_fbx(path)
+        self.assertEqual((clip.start_frame, clip.frame_count), (0, 47))
+        # the root's travel in single precision meters
+        self.assertWorlds(self.clip_worlds(clip), self.clip_worlds(cm), 1e-4)
+        rows = np.linalg.norm(np.asarray(clip.frames.world_matrix)[..., :3, :3], axis=-1)
+        self.assertTrue(np.allclose(rows, 1.0, rtol=0, atol=1e-7))
+
+    def test_a_file_maya_exports_in_meters_loads_as_its_cm_export(self):
+        """Maya's FBXExportConvertUnitString writes the unit as the sdk does:
+        a scene of a moved group with its pivot moved, keyed, over a scaled
+        joint and segment scale compensated joints scaled 1 and (1, 3, 1),
+        a joint under a mesh, a joint root keyed in translate on the base
+        layer and on an additive animLayer and its compensating child keyed
+        in scale, two skinned cubes moved off their bind; the meters and
+        inches exports load as the cm one, rig, bind pose, clip and meshes.
+        Needs mayapy with the fbxmaya plug-in"""
+        try:
+            import maya.cmds as cmds
+            import maya.mel as mel
+
+            cmds.loadPlugin("fbxmaya", quiet=True)
+        except Exception:  # not running in Maya, or no fbx plug-in
+            self.skipTest("needs Maya and its fbxmaya plug-in")
+        from cgmath.geometry.mesh import load_fbx as mesh_load_fbx
+        from cgmath.render.scene import Object
+
+        self.addCleanup(cmds.file, new=True, force=True)
+        cmds.file(new=True, force=True)
+        cmds.currentUnit(time="ntsc")
+        for name, parent, kind, attrs in (
+            ("grp", None, "transform", {"translate": (4, 1, -2), "rotate": (0, 20, 0)}),
+            ("a", "grp", "joint", {"translate": (1, 2, 3), "jointOrient": (10, 0, 5), "scale": (2, 2, 2)}),
+            ("b", "a", "joint", {"translate": (0, 5, 0), "scale": (1, 3, 1), "rotate": (0, 0, 10)}),
+            ("c", "b", "joint", {"translate": (0, 4, 0), "rotate": (10, 0, 0)}),
+            ("d", "c", "joint", {"translate": (0, 3, 0), "rotate": (0, 15, 0)}),
+            ("m2", None, "mesh", {"translate": (-5, 0, 0), "rotate": (0, 0, 25)}),
+            ("mj", "m2", "joint", {"translate": (0, 2, 0), "rotate": (5, 5, 5)}),
+            ("mj2", "mj", "joint", {"translate": (0, 2, 0)}),
+            ("r", None, "joint", {"translate": (0, 0, 5)}),
+            ("r2", "r", "joint", {"translate": (0, 7, 0), "rotate": (0, 0, 15), "scale": (2, 2, 2)}),
+        ):
+            if kind == "mesh":
+                cmds.polyCube(name=name, constructionHistory=False, width=10, height=10, depth=10)
+            else:
+                cmds.createNode(kind, name=name, **({"parent": parent} if parent else {}))
+                if kind == "joint" and parent and cmds.nodeType(parent) == "joint":
+                    cmds.connectAttr(f"{parent}.scale", f"{name}.inverseScale")
+            if parent and kind == "mesh":
+                cmds.parent(name, parent)
+            for attr, value in attrs.items():
+                cmds.setAttr(f"{name}.{attr}", *value, type="double3")
+        cmds.setAttr("d.segmentScaleCompensate", 0)
+        cmds.xform("grp", rotatePivot=(2, 0, 0), scalePivot=(0, 1, 0), objectSpace=True)
+        for index, influences in enumerate((("a", "b", "mj"), ("b", "c"))):
+            cube = cmds.polyCube(name=f"skin{index + 1}", constructionHistory=False, width=10, height=10, depth=10)[0]
+            cmds.skinCluster(list(influences), cube, toSelectedBones=True)
+        for frame, value in ((0, 0.0), (30, 50.0)):
+            cmds.setKeyframe("r",   attribute="translateY", time=frame, value=value)
+            cmds.setKeyframe("grp", attribute="translateX", time=frame, value=4.0 + value / 2)
+            cmds.setKeyframe("r2",  attribute="scaleX",     time=frame, value=2.0 + value / 50)
+            cmds.setKeyframe("grp", attribute="scaleZ",     time=frame, value=1.0 + value / 200)
+        layer = cmds.animLayer("unitLayer")
+        cmds.animLayer(layer, edit=True, attribute=["r.translateY"])
+        for frame, value in ((0, 0.0), (30, 3.0)):
+            cmds.setKeyframe("r", attribute="translateY", time=frame, value=value, animLayer=layer)
+        cmds.setAttr("b.rotate", 25, 0, -5, type="double3")
+        cmds.setAttr("c.rotate", -30, 10, 0, type="double3")
+        cmds.playbackOptions(minTime=0, maxTime=30)
+        cmds.currentTime(0)
+
+        paths = {}
+        for unit in ("cm", "m", "In"):
+            paths[unit] = self.path(f"maya_{unit}.fbx").replace("\\", "/")
+            mel.eval("FBXResetExport")
+            mel.eval("FBXExportSkins -v true")
+            mel.eval("FBXExportBakeComplexAnimation -v false")
+            mel.eval(f"FBXExportConvertUnitString {unit}")
+            mel.eval(f'FBXExport -f "{paths[unit]}"')
+
+        cm = paths["cm"]
+        for unit in ("m", "In"):
+            with self.subTest(unit=unit):
+                path = paths[unit]
+                for pose in ("node", "bind"):
+                    got, want = HierarchyData.load_fbx(path, pose=pose), HierarchyData.load_fbx(cm, pose=pose)
+                    self.assertWorlds(self.rig_worlds(got), self.rig_worlds(want), 1e-9)
+                for root in ("grp", "m2", "r", "skin1"):
+                    self.assertTrue(np.array_equal(HierarchyData.load_fbx(path)[root].scale, [1, 1, 1]), root)
+                got  = HierarchyData.load_fbx(path, node_types=("joint",))
+                want = HierarchyData.load_fbx(cm, node_types=("joint",))
+                self.assertWorlds(self.rig_worlds(got), self.rig_worlds(want), 1e-9)
+
+                clip, cm_clip = ClipData.load_fbx(path), ClipData.load_fbx(cm)
+                self.assertWorlds(self.rig_worlds(clip.rest_pose), self.rig_worlds(cm_clip.rest_pose), 1e-9)
+                self.assertWorlds(self.clip_worlds(clip), self.clip_worlds(cm_clip), 1e-5)
+
+                points = {mesh.name: np.asarray(mesh.points) for mesh, _ in mesh_load_fbx(path)}
+                want   = {mesh.name: np.asarray(mesh.points) for mesh, _ in mesh_load_fbx(cm)}
+                for name in want:
+                    self.assertTrue(np.allclose(points[name], want[name], rtol=0, atol=1e-12), name)
+                    self.assertAlmostEqual(float(np.ptp(points[name], axis=0).max()), 10.0, places=9)
+                for index in range(1, 3):
+                    posed = []
+                    for file in (path, cm):
+                        names = [mesh.name for mesh, _ in mesh_load_fbx(file)]
+                        skin  = Object.load_fbx(file, index=names.index(f"skin{index}"), extract_texture=False)
+                        skin.pose(HierarchyData.load_fbx(file))
+                        posed.append(np.asarray(skin.mesh.points))
+                    self.assertTrue(np.allclose(posed[0], posed[1], rtol=0, atol=1e-9), f"skin{index}")
+
+
+@unittest.skipIf(FBX is None, "fbx sdk is not installed")
 class TestFbxLoadsInMayaAxes(unittest.TestCase):
     """the fbx loaders load in Maya's Y-up, by default: every node's world
     matrix, on every frame, is the one the sdk gives after
@@ -8347,7 +9224,7 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         # Maya's own camera, post rotation (0, -90, 0), adds nothing to the
         # view axis: the read folds no rotate axis for it, to the bit
         with hierarchy.hierarchy.open_fbx(path, FBX) as scene:
-            _, _, tree = hierarchy.hierarchy._walk_fbx(scene, 1.0)
+            _, _, tree = hierarchy.hierarchy._walk_fbx(scene, hierarchy.hierarchy._FbxUnits(1.0))
             axes = {node.GetName(): tree.axis[k].copy() for k, node in enumerate(tree.nodes)}
         self.assertTrue(np.array_equal(axes["cam"], np.zeros(3)))
         self.assertFalse(np.allclose(axes["cam0"], 0.0, atol=1.0))
@@ -8525,6 +9402,57 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
                 self.assertWorlds(self.rig_worlds(rig),            rest)
                 self.assertWorlds(self.rig_worlds(clip.rest_pose), rest)
                 self.assertWorlds(self.clip_worlds(clip),          frames)
+
+    def test_the_fixture_in_another_unit_loads_as_its_cm_file(self):
+        """the sheared fixture written in meters and in inches by the sdk's
+        ConvertScene, which holds the unit as a scale of 1/s on each root
+        and on each joint that compensates its parent's scale
+        (TestFbxUnitHeldAsAScale): every kept node under a root authored at
+        scale 1, the views, the LOD group, the root locator and the pivoted
+        joint, loads on the rig, the rest pose and every frame of the clip
+        where the cm file's does, whatever the read drops. The roots scaled
+        other than 1, which the export scales by 1/s too, read as no unit"""
+        path  = self.authored(name="cm.fbx", sheared=True)
+        up    = {name: parent for name, parent, _ in self.TREE + self.SHEARED}
+        roots = {"cam", "lamp", "lodgrp", "rootloc", "pj", "cam0", "cam1"}
+
+        def under(name):
+            while up[name] is not None:
+                name = up[name]
+            return name in roots
+
+        for unit in ("m", "Inch"):
+            manager = FBX.FbxManager.Create()
+            try:
+                manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+                importer = FBX.FbxImporter.Create(manager, "")
+                importer.Initialize(path, -1, manager.GetIOSettings())
+                scene = FBX.FbxScene.Create(manager, "")
+                importer.Import(scene)
+                importer.Destroy()
+                getattr(FBX.FbxSystemUnit, unit).ConvertScene(scene)
+                converted = os.path.join(self.tmp.name, f"{unit}.fbx")
+                exporter  = FBX.FbxExporter.Create(manager, "")
+                exporter.Initialize(converted, -1, manager.GetIOSettings())
+                exporter.Export(scene)
+                exporter.Destroy()
+            finally:
+                manager.Destroy()
+
+            for kinds in self.CASES:
+                with self.subTest(unit=unit, node_types=kinds):
+                    rig  = HierarchyData.load_fbx(converted, node_types=kinds)
+                    clip = ClipData.load_fbx(converted, node_types=kinds)
+                    want = HierarchyData.load_fbx(path, node_types=kinds)
+                    cm   = ClipData.load_fbx(path, node_types=kinds)
+                    kept = {name for name in self.rig_worlds(want) if under(name)}
+                    self.assertTrue(kept)
+                    for got, truth in (
+                        (self.rig_worlds(rig), self.rig_worlds(want)),
+                        (self.rig_worlds(clip.rest_pose), self.rig_worlds(cm.rest_pose)),
+                        (self.clip_worlds(clip), self.clip_worlds(cm)),
+                    ):
+                        self.assertWorlds({name: got[name] for name in kept}, truth)
 
     def zeroed(self, keyed, top=None, scale=(0, 0, 0), compensates=True):
         """``top`` at (0, 1, 0) turned 25 degrees about z, scaled ``scale``,
@@ -9908,8 +10836,14 @@ class TestClipLoadFbxSampling(unittest.TestCase):
         blocks       = [np.zeros((5, 1, 3)), np.zeros((5, 1, 3)), np.ones((5, 1, 3))]
         blocks[0][:] = (0.1, 0.2, 0.3)
 
-        zeros = np.zeros(1, dtype=np.intp)
-        hierarchy.hierarchy._fbx_sample_take(stack, [(node, 0)], ticks, 1.0, blocks, zeros, zeros)
+        # one column, in xyz, its lengths and scale read as they are
+        tree            = hierarchy.hierarchy._FbxTree()
+        tree.orders     = np.zeros(1, dtype=np.intp)
+        tree.blend      = np.zeros(1, dtype=np.intp)
+        tree.lengths    = np.ones(1)
+        tree.unit_scale = np.ones((1, 3))
+        tree.unit_roots = np.zeros(1, dtype=bool)
+        hierarchy.hierarchy._fbx_sample_take(stack, [(node, 0)], ticks, tree, blocks)
 
         want = []
         for tick in ticks.tolist():

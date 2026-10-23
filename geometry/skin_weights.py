@@ -1043,7 +1043,12 @@ def _read_skins_fbx(
     it. Points read ``s`` times larger pose under joint worlds ``[[R, 0],
     [t s, 1]]``, and the inverse bind ``[[A, 0], [b, 1]]`` that keeps them
     where the file has them is ``[[A, 0], [b s, 1]]``: only its translation
-    row scales. The weights are unitless.
+    row scales. The weights are unitless. A mesh or a joint at or under a
+    child of the scene root that holds the file's unit as a scale
+    (``HierarchyData.load_fbx``) holds cm already and reads at 1, so where
+    the mesh reads ``m`` times larger and the joint ``j`` times, one of them
+    inside such a root and the other outside, the inverse bind is
+    ``[[A j / m, 0], [b j, 1]]``.
 
     They are in the axes the mesh reader turns the points into, given the
     same ``axis_system``: a point ``p`` becomes ``p C`` and a rig loaded the
@@ -1064,7 +1069,7 @@ def _read_skins_fbx(
         _fbx_axis_turn,
         _fbx_check_axis_system,
         _fbx_enum,
-        _fbx_scale_factor,
+        _fbx_units,
         _walk_fbx,
     )
 
@@ -1073,9 +1078,9 @@ def _read_skins_fbx(
 
     # everything read from the scene dies with it: copy out inside the block
     with open_fbx(filename, fbx) as scene:
-        factor = _fbx_scale_factor(scene, scale_factor)
-        turn   = _fbx_axis_turn(scene, axis_system, filename, fbx) if bind_matrices else None
-        hierarchy_data, nodes, _ = _walk_fbx(scene, 1.0)
+        units = _fbx_units(scene, scale_factor, fbx)
+        turn  = _fbx_axis_turn(scene, axis_system, filename, fbx) if bind_matrices else None
+        hierarchy_data, nodes, _ = _walk_fbx(scene, units)
 
         named = {
             node.GetUniqueID(): hierarchy_data[unique_id]["name"]
@@ -1125,7 +1130,10 @@ def _read_skins_fbx(
                         # joint reached twice onto its first column
                         binds.setdefault(
                             joint,
-                            _fbx_matrix(mesh_bind) @ np.linalg.inv(_fbx_matrix(link_bind)),
+                            (
+                                _fbx_matrix(mesh_bind) @ np.linalg.inv(_fbx_matrix(link_bind)),
+                                units.space(link),
+                            ),
                         )
 
             if not columns:
@@ -1135,8 +1143,13 @@ def _read_skins_fbx(
             skin  = SkinData(weights=weights, influences=influences, name=node.GetName())
             bound = None
             if bind_matrices:
-                bound = np.asarray([binds[x] for x in influences])
-                bound[:, 3, :3] *= factor
+                # from the mesh's own space to the joint's, each in cm
+                bound  = np.asarray([binds[x][0] for x in influences])
+                spaces = np.asarray([binds[x][1] for x in influences])
+                own    = units.space(node)
+                if np.any(spaces != own):
+                    bound[:, :3, :3] *= (spaces / own)[:, None, None]
+                bound[:, 3, :3] *= spaces[:, None]
                 if turn is not None:
                     bound[:, :3] = turn.T @ bound[:, :3]
             data.append((skin, bound))

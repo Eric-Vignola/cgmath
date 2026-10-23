@@ -5393,10 +5393,22 @@ def load_fbx(
     multiplied by the centimeters one unit of the file holds, 1.0 for a file
     in cm, 100.0 for one in meters. A number is the caller's own factor, and
     the file's unit is not read. Normals and UVs keep the file's values. A
-    file whose unit sits as a scale on the scene root's children, as the
-    sdk's and Maya's unit conversions write it, is not converted, as
-    ``HierarchyData.load_fbx`` says: a meters one's points come back 100
-    times too large.
+    mesh at or under a child of the scene root that holds the file's unit as
+    a scale, as the sdk's and Maya's unit conversions write it
+    (``HierarchyData.load_fbx``), holds its points in cm already, and they
+    are read as they are: such a file's meshes load as the cm file's. A
+    mesh at or under a root the export found scaled other than 1, which it
+    scales by 1/s all the same (s the cm one unit of the file holds), is
+    under no such root: its points load s times larger and its node, in
+    the rig loaders, scaled 1/s, so it is right once posed, but on the
+    frames of a clip where a later layer of a take keys that root's
+    translate. A mesh on or under a node the export scales by 1/s once
+    more there, or skinned to one (from the second joint of a Maya
+    skeleton down, its first joint under such a root), is off once posed
+    by a rig of the nodes' own values (``pose="node"``) or by a clip, and
+    right posed at the bind by a ``pose="bind"`` rig when a bind pose
+    lists those nodes, as Maya's export lists a skin's joints;
+    ``HierarchyData.load_fbx`` says which.
 
     ``axis_system`` "maya_y_up", the default, turns the points and the
     normals from the file's axis system into Maya's Y-up, by the turn the
@@ -5412,13 +5424,13 @@ def load_fbx(
 
     # imported here rather than at module scope: cgmath.hierarchy imports
     # formats.glb, which imports cgmath.geometry
-    from cgmath.hierarchy import _fbx_axis_turn, _fbx_check_axis_system, _fbx_scale_factor
+    from cgmath.hierarchy import _fbx_axis_turn, _fbx_check_axis_system, _fbx_units
 
     _fbx_check_axis_system(axis_system)
 
     # everything read from the scene dies with it: copy out inside the block
     with open_fbx(filename, fbx) as scene:
-        factor     = _fbx_scale_factor(scene, scale_factor)
+        units      = _fbx_units(scene, scale_factor, fbx)
         turn       = _fbx_axis_turn(scene, axis_system, filename, fbx)
         mesh_nodes = []
         _walk_fbx_mesh_nodes(scene.GetRootNode(), mesh_nodes)
@@ -5426,7 +5438,7 @@ def load_fbx(
         data = []
         for node in mesh_nodes:
             mesh   = node.GetNodeAttribute()
-            points = _fbx_control_points(mesh) * factor
+            points = _fbx_control_points(mesh) * units.space(node)
             indices, counts = _fbx_polygon_streams(mesh)
             normals, normal_indices = _extract_fbx_normals(mesh, counts)
             if turn is not None:

@@ -16,6 +16,7 @@ from cgmath.hierarchy.hierarchy import (  # noqa: F401
     _fbx_enum,
     _fbx_frame_rate,
     _fbx_scale_factor,
+    _fbx_units,
     _glb_columns,
     _rotation,
     _walk_fbx,

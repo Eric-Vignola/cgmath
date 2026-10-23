@@ -2862,6 +2862,16 @@ class _FbxTree:
     scale factor. ``nodes`` holds each one's ``FbxNode``, ``columns`` the
     position of each kept column's node and ``above`` each kept column's
     nearest kept ancestor's column, -1 for a root.
+
+    The scale factor is the node's own (:class:`_FbxUnits`): ``lengths``
+    (n,) holds what its translate, curves included, is multiplied by, the
+    file's unit in cm, but 1 under a unit root, and ``unit_scale`` (n, 3)
+    what its scale, curves included, is divided by, the unit root's own
+    scale on that root and on each node under it that does not inherit its
+    parent's scale, 1 elsewhere; ``unit_roots`` (n,) says which nodes are
+    unit roots, whose curves only a take's first layer converts
+    (:func:`_fbx_sample_take`). ``translate``, ``scale`` and ``pivots``
+    hold them applied, a unit root's pivots as :func:`_walk_fbx` reads them.
     """
 
     __slots__ = (
@@ -2880,6 +2890,9 @@ class _FbxTree:
         "pre",
         "axis",
         "pivots",
+        "lengths",
+        "unit_scale",
+        "unit_roots",
     )
 
 
@@ -2893,9 +2906,9 @@ _FBX_CAMERA_AXIS = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]]
 
 def _walk_fbx(
     scene,
-    scale_factor: float,
-    node_types:   Optional[frozenset] = None,
-    turned:       bool                = False,
+    units:      "_FbxUnits",
+    node_types: Optional[frozenset] = None,
+    turned:     bool                = False,
 ):
     """walks an open fbx scene's nodes into TransformData dicts
 
@@ -2909,7 +2922,14 @@ def _walk_fbx(
     into its channels (:func:`_fbx_fold`), so its world matrix is the
     file's. ``turned`` says the read turns the file into Maya's axes
     (:func:`_fbx_axis_turn`), which only the orders a take's layers blend
-    in follow (``blend``, :class:`_FbxTree`).
+    in follow (``blend``, :class:`_FbxTree`). ``units`` (:func:`_fbx_units`)
+    says what each node's lengths are multiplied by and its scale divided
+    by. A unit root's pivots are read through the scale it holds, 1/s of
+    the one it loads with: the rotate pivot and both offsets are in the
+    file's unit, the scale pivot in the root's own space, in cm, and the
+    scale offset takes what the scale pivot, applied on either side of that
+    scale, moves, ``so s + sp (s - 1)``, so its local matrix is the file's
+    with the unit taken out.
 
     Hands back the dicts, the ``FbxNode`` behind each uuid, because an
     animated read has to sample those same objects and fbx lets two nodes
@@ -2995,14 +3015,29 @@ def _walk_fbx(
     tree.pre        = np.zeros((len(rows), 3))
     tree.axis       = np.zeros((len(rows), 3))
     tree.pivots     = np.zeros((len(rows), 4, 3))
+    tree.lengths    = np.full(len(rows), units.factor)
+    tree.unit_scale = np.ones((len(rows), 3))
+    tree.unit_roots = np.zeros(len(rows), dtype=bool)
 
-    hierarchy_data  = {}
-    nodes           = {}
-    uuids           = {}  # a tree position's uuid, for the kept nodes
-    above           = []
+    # the nodes inside a unit root hold cm already: the lengths under them
+    # are read as they are, and the scale of each that holds the unit is
+    # divided by the root's
+    ids    = [node.GetUniqueID() for node in found] if units.inner else None
+    inside = [uid in units.inner for uid in ids] if units.inner else None
+
+    hierarchy_data = {}
+    nodes          = {}
+    uuids          = {}  # a tree position's uuid, for the kept nodes
+    above          = []
 
     for position, index in enumerate(rows):
         node = found[index]
+        if inside is not None:
+            if parents[index] >= 0 and inside[parents[index]]:
+                tree.lengths[position] = 1.0
+            if ids[index] in units.reset:
+                tree.unit_scale[position] = units.reset[ids[index]]
+        length = tree.lengths[position]
 
         # fbx ignores the rotate order and the pre and post rotation entirely
         # unless rotationActive is on: the sdk turns such a node in xyz.
@@ -3028,9 +3063,9 @@ def _walk_fbx(
         tree.blend[position] = 0 if turned and not active and parents[index] == 0 else stored
 
         # get SRT
-        tree.scale[position]     = tuple(node.LclScaling.Get())[:3]
+        tree.scale[position]     = np.array(tuple(node.LclScaling.Get())[:3]) / tree.unit_scale[position]
         tree.rotate[position]    = tuple(node.LclRotation.Get())[:3]
-        tree.translate[position] = np.array(tuple(node.LclTranslation.Get())[:3]) * scale_factor
+        tree.translate[position] = np.array(tuple(node.LclTranslation.Get())[:3]) * length
 
         # pivots and offsets turn and scale the node about other points than
         # its origin, rotation active or not
@@ -3042,7 +3077,16 @@ def _walk_fbx(
                 node.GetScalingOffset(source_pivot),
             )
         ):
-            tree.pivots[position, k] = np.array(tuple(pivot)[:3]) * scale_factor
+            tree.pivots[position, k] = np.array(tuple(pivot)[:3]) * length
+
+        # a unit root's scale pivot is in its own space, in cm, and applied
+        # on either side of the 1/s scale the file holds: its scale offset
+        # takes what that moves (_walk_fbx)
+        if inside is not None and ids[index] in units.roots:
+            tree.unit_roots[position] = True
+            sp                        = np.array(tuple(node.GetScalingPivot(source_pivot))[:3])
+            tree.pivots[position, 1]  = sp
+            tree.pivots[position, 3]  = tree.pivots[position, 3] + sp * (length - 1.0)
 
         # the pre rotation where the read takes it, as above
         if active:
@@ -3484,6 +3528,99 @@ def _fbx_scale_factor(scene, scale_factor: Optional[float]) -> float:
     return float(scene.GetGlobalSettings().GetSystemUnit().GetScaleFactor())
 
 
+# a child of the scene root scaled evenly within this fraction of 1/s, s the
+# file's unit in cm, holds that unit (_fbx_units)
+_FBX_UNIT_BAND = 1e-9
+
+
+class _FbxUnits:
+    """what a read multiplies a scene's lengths by (:func:`_fbx_units`):
+    ``factor``, the file's unit in cm or the caller's number; ``inner``,
+    the unique ids of the nodes whose own space holds cm already, each unit
+    root and every node under one; ``roots``, the unit roots'; and
+    ``reset``, ``{unique id: (3,) scale}``, the nodes whose scale holds the
+    unit, each unit root and every node under one that does not inherit its
+    parent's scale, with what that scale is divided by, the root's own
+    scale"""
+
+    __slots__ = ("factor", "inner", "roots", "reset")
+
+    def __init__(self, factor: float, inner=frozenset(), roots=frozenset(), reset=None):
+        self.factor = float(factor)
+        self.inner  = inner
+        self.roots  = roots
+        self.reset  = {} if reset is None else reset
+
+    def space(self, node) -> float:
+        """what the lengths ``node``'s own space holds, its children's
+        translates and a mesh's points, are multiplied by: 1 inside a unit
+        root, the factor elsewhere"""
+        return 1.0 if self.inner and node.GetUniqueID() in self.inner else self.factor
+
+
+def _fbx_units(scene, scale_factor: Optional[float], sdk=None) -> _FbxUnits:
+    """the :class:`_FbxUnits` a loader reads ``scene`` with, for the
+    ``scale_factor`` it was given (:func:`_fbx_scale_factor`)
+
+    The sdk's ``FbxSystemUnit.ConvertScene`` and Maya's unit converting
+    export (``FBXExportConvertUnitString``) write a scene in another unit
+    without converting its values: they multiply by 1/s, s the cm one unit
+    of the new file holds, the scale of each child of the scene root and of
+    every node that does not inherit its parent's scale (``eInheritRrs``, a
+    joint's segment scale compensate), the curves of each take's first
+    layer with it. They convert each child of the scene root's translate
+    and pivots, its translate curves on that first layer, and every matrix
+    of the bind poses and the skin clusters as a world matrix, and leave
+    every other value as it was, in cm for a Maya scene: the meshes'
+    points, the translates under the roots, the curves of every later
+    layer. (probe_sdk_convert.py, probe_maya_convert.py and
+    probe_layers_convert.py, under the sdk and Maya 2025.)
+
+    So with ``scale_factor`` None a child of the scene root whose scale is
+    1/s on all three axes, within :data:`_FBX_UNIT_BAND` of it, holds the
+    file's unit, a unit root: its own translate is in the file's unit, every
+    length under it already in cm, and its scale, and that of each node
+    under it that does not inherit its parent's scale, is divided by the
+    root's own, so the root's is 1. A file only labelled in a unit, its
+    values in that unit, holds no unit root and has every length multiplied
+    by s; so does a root the export found scaled other than 1, and a number
+    given for ``scale_factor`` reads none at all. The one risk: a root whose
+    own scale is exactly 1/s is read as the unit, and every node under it
+    that does not inherit its parent's scale as holding it too. ``sdk`` is
+    the fbx module the scene was read with, this module's by default.
+    """
+    factor = _fbx_scale_factor(scene, scale_factor)
+    if scale_factor is not None or factor == 1.0:
+        return _FbxUnits(factor)
+
+    sdk   = FBX if sdk is None else sdk
+    rrs   = _fbx_enum(sdk.FbxTransform, "EInheritType", "eInheritRrs")
+    inner = set()
+    roots = set()
+    reset = {}
+    top   = scene.GetRootNode()
+    for index in range(top.GetChildCount()):
+        root  = top.GetChild(index)
+        scale = np.array(tuple(root.LclScaling.Get())[:3], dtype=float)
+        if not np.all(np.abs(scale * factor - 1.0) <= _FBX_UNIT_BAND):
+            continue
+
+        # fbx lets two nodes share a name, and the binding's == holds for
+        # any two: a node is known by its unique id
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            uid  = node.GetUniqueID()
+            inner.add(uid)
+            if node.GetTransformationInheritType() == rrs:
+                reset[uid] = scale
+            stack.extend(node.GetChild(i) for i in range(node.GetChildCount()))
+        roots.add(root.GetUniqueID())
+        reset[root.GetUniqueID()] = scale
+
+    return _FbxUnits(factor, frozenset(inner), frozenset(roots), reset)
+
+
 def _fbx_check_axis_system(axis_system) -> None:
     """refuses an ``axis_system`` the fbx loaders don't know"""
     if not (axis_system is None or (isinstance(axis_system, str) and axis_system == "maya_y_up")):
@@ -3606,12 +3743,16 @@ def _fbx_check_pose(pose) -> None:
 _FBX_BIND_AGREE = 1e-6
 
 
-def _fbx_bind_matrices(scene, tree: _FbxTree, scale_factor: float, filename) -> dict:
+def _fbx_bind_matrices(scene, tree: _FbxTree, units: _FbxUnits, filename) -> dict:
     """``{position: (matrix, local)}`` of each node of ``tree`` (the nodes
     :func:`_walk_fbx` kept and every node above one) that a bind pose
-    lists: the pose's (4, 4) matrix, row vectors, its translation times
-    ``scale_factor``, and whether the pose holds it local to the parent
+    lists: the pose's (4, 4) matrix, row vectors, in cm (``units``,
+    :func:`_fbx_units`), and whether the pose holds it local to the parent
     rather than as the world
+
+    A matrix's translation is multiplied by the unit, and on a node inside
+    a unit root its 3x3 too: the export scales every matrix of a pose by
+    1/s, the world of a node it scaled by 1/s with it.
 
     A bind pose is an ``FbxPose`` whose ``IsBindPose()`` is true. When two
     list one node the first wins, and a later one more than
@@ -3621,6 +3762,7 @@ def _fbx_bind_matrices(scene, tree: _FbxTree, scale_factor: float, filename) -> 
     at its bind (:func:`_fbx_kept_binds`).
     """
     positions = {node.GetUniqueID(): position for position, node in enumerate(tree.nodes)}
+    inner     = np.array([uid in units.inner for uid in positions], dtype=bool)
     found     = {}  # position: (matrix, local, the pose's name)
     for index in range(scene.GetPoseCount()):
         pose = typed(scene.GetPose(index), FBX.FbxPose, FBX)
@@ -3635,8 +3777,11 @@ def _fbx_bind_matrices(scene, tree: _FbxTree, scale_factor: float, filename) -> 
 
             source = pose.GetMatrix(k)
             matrix = np.array([[source.Get(r, c) for c in range(4)] for r in range(4)])
-            matrix[3, :3] *= scale_factor
-            local = bool(pose.IsLocalMatrix(k))
+            local  = bool(pose.IsLocalMatrix(k))
+            if inner[position]:
+                matrix[:, :3] *= units.factor
+            else:
+                matrix[3, :3] *= units.factor
             if position not in found:
                 found[position] = (matrix, local, pose.GetName())
                 continue
@@ -4536,12 +4681,21 @@ def _fbx_blend(
     return np.where(owned[None], out, below)
 
 
-def _fbx_sample_take(stack, sampled, ticks, scale_factor: float, blocks, orders, blend) -> None:
-    """the current take's local channels of ``sampled`` ((node, column) pairs)
-    on the ``ticks`` grid, written into ``blocks`` (translate, rotate, scale,
-    each frames x nodes x 3); ``orders`` holds each column's rotate order as
-    the read turns it (rotate_order) and ``blend`` the fbx rotate order the
-    sdk blends its rotation by layer in (:class:`_FbxTree`)
+def _fbx_sample_take(stack, sampled, ticks, tree: _FbxTree, blocks) -> None:
+    """the current take's local channels of ``sampled`` ((node, column) pairs,
+    a column a position of ``tree``) on the ``ticks`` grid, written into
+    ``blocks`` (translate, rotate, scale, each frames x nodes x 3), the
+    translate times the column's ``lengths`` and the scale divided by its
+    ``unit_scale``, as the walk reads the static values; ``tree.orders``
+    holds each column's rotate order as the read turns it (rotate_order) and
+    ``tree.blend`` the fbx rotate order the sdk blends its rotation by layer
+    in (:class:`_FbxTree`)
+
+    A unit conversion (:func:`_fbx_units`) converts the curves of each
+    take's first layer alone, muted or not, and leaves every later layer's
+    as they were: on a unit root, the translate and the scale of that layer
+    alone are converted, before the layers are blended, and on a node under
+    one that does not inherit its parent's scale, the scale of that layer.
 
     The curves of every node are evaluated together, every frame at once,
     and the take's animation layers blended over them as the sdk blends
@@ -4567,6 +4721,7 @@ def _fbx_sample_take(stack, sampled, ticks, scale_factor: float, blocks, orders,
     criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimLayer.ClassId)
     layers   = [stack.GetSrcObject(criteria, i) for i in range(stack.GetSrcObjectCount(criteria))]
     layers   = [typed(layer, FBX.FbxAnimLayer, FBX) for layer in layers]
+    first    = layers[0].GetUniqueID() if layers else None
     layers   = [layer for layer in layers if not layer.Mute.Get()]
     while layers and not layers[0].GetMemberCount():
         layers.pop(0)
@@ -4576,12 +4731,25 @@ def _fbx_sample_take(stack, sampled, ticks, scale_factor: float, blocks, orders,
     per_second = _fbx_ticks_per_second()
     columns    = np.array([index for _, index in sampled], dtype=np.intp)
     weights    = [_fbx_layer_weight(layer, ticks, per_second) for layer in layers[1:]]
-    blend      = blend[columns]
+    blend      = tree.blend[columns]
+    orders     = tree.orders
 
-    channels   = (("LclTranslation", scale_factor), ("LclRotation", 1.0), ("LclScaling", 1.0))
-    for channel, (name, factor) in enumerate(channels):
+    # the lengths: a unit root's translate is multiplied on the take's first
+    # layer before the blend, every other node's on the blend after it; the
+    # scale that holds the unit is divided on that first layer
+    roots     = tree.unit_roots[columns]
+    converted = layers[0].GetUniqueID() == first
+    after     = np.where(roots, 1.0, tree.lengths[columns])
+    lengths   = np.where(roots, tree.lengths[columns], 1.0)[None, :, None]
+    sizes     = tree.unit_scale[columns][None]
+
+    for channel, name in enumerate(("LclTranslation", "LclRotation", "LclScaling")):
         props = [getattr(node, name) for node, _ in sampled]
         keyed, _, blended = _fbx_layer_channel(layers[0], props, ticks, per_second)
+        if converted and channel == 0 and roots.any():
+            blended = blended * lengths
+        elif converted and channel == 2 and np.any(sizes != 1.0):
+            blended = blended / sizes
         rebuilt = np.zeros(len(sampled), dtype=bool)
         for layer, weight in zip(layers[1:], weights):
             present, owned, values = _fbx_layer_channel(layer, props, ticks, per_second)
@@ -4601,8 +4769,14 @@ def _fbx_sample_take(stack, sampled, ticks, scale_factor: float, blocks, orders,
 
         if rebuilt.any():
             blended[:, rebuilt] = _filtered(blended[:, rebuilt], orders[columns[rebuilt]])
-        if keyed.any():
-            blocks[channel][:, columns[keyed]] = blended[:, keyed] * factor
+        if not keyed.any():
+            continue
+
+        rows = columns[keyed]
+        if channel == 0:
+            blocks[0][:, rows] = blended[:, keyed] * after[keyed][None, :, None]
+        else:
+            blocks[channel][:, rows] = blended[:, keyed]
 
 
 # a uuid, name or parent_uuid the rig index can key on
@@ -5227,18 +5401,51 @@ class TransformList(DataList):
         """primitive fbx joint loader
 
         ``scale_factor`` None, the default, converts the file's unit to
-        centimeters: translations are multiplied by the centimeters one unit
-        of the file holds (``GetSystemUnit().GetScaleFactor()``), 1.0 for a
-        file in cm, 100.0 for one in meters. A number is the caller's own
-        factor, and the file's unit is not read. Only lengths are converted;
-        rotations, scales and user defined attributes keep the file's values.
-        A file whose unit the sdk's ``FbxSystemUnit.ConvertScene`` or Maya's
-        unit converting export wrote, as a 1/s scale on the scene root's
-        children over values left in the old unit, is not converted: a
-        meters one's nodes load where the file puts them but at world scale
-        0.01, whether the read keeps the node holding that scale or folds it
-        into the nodes under it (``node_types`` below), and its meshes load
-        100 times too large.
+        centimeters: translations are multiplied by the centimeters one unit of
+        the file holds (``GetSystemUnit().GetScaleFactor()``), s, 1.0 for a
+        file in cm, 100.0 for one in meters. Only lengths are converted;
+        rotations, scales and user defined attributes keep the file's values,
+        but for a unit held as a scale. The sdk's
+        ``FbxSystemUnit.ConvertScene`` and Maya's unit converting export
+        (``FBXExportConvertUnitString``) write a scene in another unit by
+        scaling each child of the scene root by 1/s, and each node that does
+        not inherit its parent's scale (a joint's segment scale compensate) by
+        1/s as well, over values left in the unit they were in, cm for a Maya
+        scene. A child of the scene root scaled 1/s on all three axes, within
+        1e-9 relative, is read as that unit, whether the read keeps it or drops
+        it (``node_types`` below): its scale is reset to 1 and divided out of
+        each node under it that does not inherit its parent's scale, and the
+        lengths under it are read as they are, on the rig, on every frame of a
+        clip, in the bind pose and by the mesh and skin readers. So such a file
+        loads as the cm file it was written from. A file only labelled in a
+        unit, its values in that unit, has every length multiplied as above,
+        and so does a root the export found scaled other than 1: its nodes load
+        as the sdk places them, where the cm file has them, scaled 1/s, and the
+        points of a mesh at or under it s times larger, right once posed. But
+        such a root's translate keyed on a later layer of a take, which the
+        export leaves in cm, is multiplied by s with the rest: on a clip the
+        root and every node under it are off by s - 1 times what that layer
+        adds to the translate. And a node there that compensates its parent's
+        scale under a parent that is neither the root nor compensating, as the
+        second joint of a Maya skeleton does when its first joint sits under
+        such a root, is scaled 1/s once more by the export, and every node
+        under it with it. Read by their own values (``pose`` "node", and a
+        clip on every frame and its rest pose), that node loads at its cm
+        position scaled 1/s^2, the nodes under it off their cm positions, and
+        a mesh on or under it, or skinned to it, is off once posed. Under
+        ``pose`` "bind" a node a bind pose lists takes its bind matrix, which
+        the export converts as a world matrix: it loads where the cm file has
+        it, scaled 1/s like the rest, and so do the nodes under it and the
+        meshes on them or skinned to them, posed at the bind; a compensating
+        node no bind pose lists, under a parent other than the root, still
+        loads scaled 1/s^2, the nodes under it off. Maya's export lists every
+        skin influence and the nodes above it. Maya's importer scales every
+        root by s whatever its scale, and every compensating node, which
+        brings all of these back but puts a file only labelled in meters at
+        scale 100. The one risk: a root authored at exactly 1/s in a file
+        labelled in that unit is read as the unit. A number is the caller's
+        own factor, and neither the file's unit nor a unit held as a scale is
+        read.
 
         ``axis_system`` "maya_y_up", the default, loads the scene in Maya's
         Y-up axes as ``FbxAxisSystem.MayaYUp.ConvertScene`` converts it:
@@ -5391,10 +5598,10 @@ class TransformList(DataList):
         kinds = _fbx_check_node_types(node_types)
 
         with open_fbx(filename, FBX) as scene:
-            turn   = _fbx_axis_turn(scene, axis_system, filename)
-            factor = _fbx_scale_factor(scene, scale_factor)
-            hierarchy_data, _, tree = _walk_fbx(scene, factor, kinds, turn is not None)
-            listed = _fbx_bind_matrices(scene, tree, factor, filename) if pose == "bind" else None
+            turn  = _fbx_axis_turn(scene, axis_system, filename)
+            units = _fbx_units(scene, scale_factor)
+            hierarchy_data, _, tree = _walk_fbx(scene, units, kinds, turn is not None)
+            listed = _fbx_bind_matrices(scene, tree, units, filename) if pose == "bind" else None
 
         # each kept node's bind, a dropped node a bind pose lists folded in
         # at its bind, in the file's axes
@@ -11410,8 +11617,19 @@ class ClipData(HierarchyData):
         centimeters, a number is the caller's own factor, as in
         :meth:`HierarchyData.load_fbx`: the static translations and the
         translation curves are multiplied by it, rotations and scales are
-        not. A file whose unit sits as a scale on the scene root's children
-        is not converted, as :meth:`HierarchyData.load_fbx` says.
+        not, and a file that holds its unit as a scale on the scene root's
+        children loads as the cm file it was written from, on every frame.
+        The export converts the curves of each take's first layer alone, so
+        on a root that holds the unit only that layer's translate is
+        multiplied, and only that layer's scale divided by the unit on the
+        root and on each node under it that does not inherit its parent's
+        scale, before the layers are blended; the later layers' curves are
+        read as they are. A root the export found scaled other than 1 holds
+        no unit: its translate is multiplied after the blend, the later
+        layers' cm values with the first layer's, so the root and every node
+        under it are off by s - 1 times what a later layer adds to that
+        translate, s the cm one unit of the file holds, as
+        :meth:`HierarchyData.load_fbx` says.
 
         ``axis_system`` "maya_y_up", the default, loads the take in Maya's
         Y-up axes, as :meth:`HierarchyData.load_fbx` loads the rig: every
@@ -11600,9 +11818,9 @@ class ClipData(HierarchyData):
         # read, and a read that raises, a take out of range or a frame past
         # or before the take's, warns of nothing
         with _NodesLoad(), open_fbx(filename, FBX) as scene:
-            turn         = _fbx_axis_turn(scene, axis_system, filename)
-            scale_factor = _fbx_scale_factor(scene, scale_factor)
-            hierarchy_data, nodes, tree = _walk_fbx(scene, scale_factor, kinds, turn is not None)
+            turn  = _fbx_axis_turn(scene, axis_system, filename)
+            units = _fbx_units(scene, scale_factor)
+            hierarchy_data, nodes, tree = _walk_fbx(scene, units, kinds, turn is not None)
 
             # the rest pose, the file's static pose from this same read, as
             # HierarchyData.load_fbx loads it: turned on a copy of the dicts,
@@ -11702,7 +11920,7 @@ class ClipData(HierarchyData):
 
             # the frame grid in the sdk's ticks, every frame sampled at once
             ticks = _fbx_ticks((start + np.arange(clip.frame_count)) / fps, per_second)
-            _fbx_sample_take(stack, sampled, ticks, scale_factor, held, tree.orders, tree.blend)
+            _fbx_sample_take(stack, sampled, ticks, tree, held)
 
         # a joint's orient as the fold leaves it, every frame: a node a
         # dropped node above moves only at its static values took the fold

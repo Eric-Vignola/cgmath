@@ -433,9 +433,21 @@ class Object(TransformData):
             scale_factor: None (default) converts the file's unit to
                 centimeters, the points and the bind matrices alike, as
                 the rig loaders do; a number is the caller's own factor
-                and the file's unit is not read.  A file whose unit sits
-                as a scale on the scene root's children is not converted,
-                as ``HierarchyData.load_fbx`` says.
+                and the file's unit is not read.  A file that holds its
+                unit as a scale on the scene root's children loads as the
+                cm file it was written from, as ``HierarchyData.load_fbx``
+                says, but for a mesh at or under a root the export found
+                scaled other than 1, which it scales by 1/s all the same
+                (s the cm one unit holds): its points load s times larger
+                and its node, in the rig loaders, scaled 1/s, so it is
+                right once posed, but on the frames of a clip where a
+                later layer of a take keys that root's translate. On or
+                under a node the export scales by 1/s once more, or
+                skinned to one, from the second joint of a Maya skeleton
+                down, it is off once posed by a rig of the nodes' own
+                values (``pose="node"``) or by a clip, and right posed at
+                the bind by a ``pose="bind"`` rig when a bind pose lists
+                those nodes, as ``HierarchyData.load_fbx`` says.
             axis_system: "maya_y_up" (default) turns the points, the
                 normals and the bind matrices from the file's axis
                 system into Maya's Y-up, as the rig loaders turn the

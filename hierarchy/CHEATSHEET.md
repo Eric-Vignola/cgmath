@@ -1931,12 +1931,43 @@ centimetres: translations, static and keyed, are multiplied by the
 centimetres one of the file's units holds (100.0 for a file in metres,
 1.0 for one in cm); rotations and scales keep the file's values. A
 number is the caller's own factor, and the file's unit is not read.
-A file whose unit the SDK's `FbxSystemUnit.ConvertScene` or Maya's
-unit-converting export wrote, as a 1/s scale on the scene root's
-children over values left in the old unit, is not converted: a metres
-one's nodes load where the file puts them but at world scale 0.01,
-whether the read keeps the node holding that scale or folds it into the
-nodes under it (`node_types` below), and its meshes 100 times too large.
+The SDK's `FbxSystemUnit.ConvertScene` and Maya's unit-converting export
+(`FBXExportConvertUnitString`) write a scene in another unit, s cm a
+unit, as a scale of 1/s on each child of the scene root, and on each
+node that does not inherit its parent's scale (a joint's segment scale
+compensate), over values left in cm. A child of the scene root scaled
+1/s on all three axes is read as that unit, kept or dropped: its scale
+is reset to 1 and divided out of the compensating joints under it, and
+the lengths under it are read as they are, so such a file loads as the
+cm file it came from, rig, every frame of a clip, bind pose, meshes and
+skins alike. A file only labelled in metres, its numbers in metres, is
+multiplied as above. The one risk: a root authored at exactly 1/s in
+such a file reads as the unit. A root the export found scaled other
+than 1, which it scales by 1/s all the same, holds no unit: the nodes
+at and under it load as the SDK places them, their lengths multiplied
+as above, which is where the cm file has them, scaled 1/s, and the
+points of a mesh there s times larger, so the mesh is right once posed.
+But such a root's translate keyed on a later layer of a take, which the
+export leaves in cm, is multiplied by s with the rest: on a clip the
+root and everything under it are off by s - 1 times what that layer
+adds to the translate (Maya's metres export of a group scaled 2 keyed
+on an additive animLayer: up to 2178 cm off). And a node there that
+compensates its parent's scale under a parent that is neither the root
+nor compensating, as the second joint of a Maya skeleton does when its
+first joint sits under such a root, is scaled 1/s once more by the
+export, and every node under it with it. Read by their own values
+(`pose="node"`, the default, and a clip on every frame and its rest
+pose), that node loads at its cm position scaled 1/s^2, the nodes under
+it off their cm positions, and a mesh on or under it, or skinned to it,
+is off once posed. Under `pose="bind"` a node a bind pose lists takes
+its bind matrix, which the export converts as a world matrix: it loads
+where the cm file has it, scaled 1/s like the rest, and so do the nodes
+under it and the meshes on them or skinned to them, posed at the bind;
+a compensating node no bind pose lists, under a parent other than the
+root, still loads scaled 1/s^2, the nodes under it off. Maya's export
+lists every skin influence and the nodes above it. Maya's importer,
+which scales every root and every compensating node by s, puts all of
+these right.
 The FBX mesh readers (`geometry.mesh.load_fbx`, `MeshData.load_fbx`,
 `MeshList.load_fbx`) and `render.Object.load_fbx`, points and skin bind
 matrices alike, take the same `scale_factor`, and the `axis_system`
