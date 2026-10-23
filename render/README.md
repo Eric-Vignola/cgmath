@@ -80,6 +80,10 @@ When you don't supply a Camera or Light, the renderer fills them in for you:
 - **Default background**: `(0, 0, 0, 0)` — **transparent** black, so a
   straight `.png` save is already a cutout. Pass any RGB (auto-promoted
   to opaque RGBA) or a full RGBA tuple to change it.
+- **Every core**: a frame renders in bands of pixel rows side by side.
+  `threads=1` (on `render()`, `scene.render()`, turntables and
+  animations) keeps it in the calling thread; the pixels and the depth
+  are the same bytes either way.
 
 You can override any of these — but the defaults exist so you can iterate
 quickly without rigging anything.
@@ -676,7 +680,7 @@ scene.turntable("spin.mp4", n_frames=12)          # renders 12: another turntabl
 
 | Reads back | Renders again |
 |---|---|
-| a new output path or extension, `fps`, `background` | any other argument |
+| a new output path or extension, `fps`, `background`, `threads` | any other argument |
 | | any render setting, and anything that clears the frame cache |
 | the same clip values | a different clip |
 

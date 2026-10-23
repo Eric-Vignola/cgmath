@@ -1092,9 +1092,10 @@ Give a path with no `{frame}` placeholder and one is injected as
 
 `turntable()` and `animate()`, on a Scene or an Object, keep their raw
 frames in a scratch folder. The same frames asked for again are read
-back, not rendered: only `fps`, `background` and the output path may
-differ. Anything else, or anything that clears the frame cache, renders
-again. The folder goes with its owner, and all of it at exit.
+back, not rendered: only `fps`, `background`, `threads` and the output
+path may differ (`threads` changes how a frame renders, not the frame).
+Anything else, or anything that clears the frame cache, renders again.
+The folder goes with its owner, and all of it at exit.
 
 ```python
 spin  = os.path.join(tmp, "tt5", "a.{frame:04d}.png")
@@ -1157,6 +1158,7 @@ The full signature:
 | `base_color` | `(0.7, 0.7, 0.7)` | Used when there is no texture |
 | `scene` | `None` | `list[dict]` or a `Scene` |
 | `default_light` | `True` | Add a camera-parented headlight when the scene has no light |
+| `threads` | `None` | CPU threads for the frame: `None` = numba's thread count (every core), `1` = the calling thread only, capped at `NUMBA_NUM_THREADS` and the cores; the same bytes whatever the value |
 
 Lights as plain dicts:
 
@@ -1200,6 +1202,20 @@ frame = render(
     ambient=0.15,
 )
 print(frame.has_depth, frame.array[..., 3].min())    # opaque background
+```
+
+Every core, or one thread. A frame renders in bands of pixel rows side by
+side; `threads=1` keeps it in the calling thread. The pixels and the depth
+are the same bytes either way. `Scene.render`, `Object.render`, turntables
+and `animate` pass `threads=` on to `render()`.
+
+```python
+every_core = render(mesh, uv, checker, resolution=(96, 64), samples_per_pixel=4,
+                    return_depth=True)
+one_thread = render(mesh, uv, checker, resolution=(96, 64), samples_per_pixel=4,
+                    return_depth=True, threads=1)
+print(every_core.array.tobytes() == one_thread.array.tobytes(),
+      every_core.depth.tobytes() == one_thread.depth.tobytes())    # True True
 ```
 
 Errors are eager and specific:

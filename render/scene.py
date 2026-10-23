@@ -1321,7 +1321,8 @@ class Object(TransformData):
             samples_per_pixel: MSAA sample count for this preview render.
                 When ``None`` (default), falls back to
                 :attr:`samples_per_pixel` (which itself defaults to ``2``).
-            **render_kwargs: Forwarded to :func:`render`.
+            **render_kwargs: Forwarded to :func:`render`, ``threads=``
+                (how many CPU threads a frame uses) among them.
 
         Returns:
             The rendered :class:`Frame` (saved to ``output`` if given).
@@ -1449,7 +1450,8 @@ class Object(TransformData):
                 When ``None`` (default), falls back to
                 :attr:`samples_per_pixel`.
             fps: Frames per second for video / gif outputs.  Default 30.
-            **render_kwargs: Forwarded to :func:`render`.
+            **render_kwargs: Forwarded to :func:`render`, ``threads=``
+                (how many CPU threads a frame uses) among them.
 
         Returns:
             Single output path (``str``) for video / gif, or a list of
@@ -1502,7 +1504,8 @@ class Object(TransformData):
                 :attr:`samples_per_pixel`.
             fps: Frames per second.  Defaults to the clip's own ``fps``.
             **animate_kwargs: Forwarded to :meth:`Scene.animate` (``fit``,
-                ``end_angle``, ``verbose``, ...).
+                ``end_angle``, ``verbose``, ...); ``threads=`` reaches
+                :func:`render`.
 
         Returns:
             A single output path for video / gif, or the list of frame paths.
@@ -2361,7 +2364,9 @@ class Scene(HierarchyData):
 
         Persistent render-config attributes set on this Scene
         (:attr:`resolution`, :attr:`samples_per_pixel`, etc.) are merged
-        into ``kwargs`` here.  Per-call kwargs always win.
+        into ``kwargs`` here.  Per-call kwargs always win.  ``threads=``
+        is forwarded to :func:`render` too: how many CPU threads the
+        frame uses.
 
         Default lighting:
           When the Scene has no :class:`Light` children and
@@ -2583,7 +2588,8 @@ class Scene(HierarchyData):
             n_fit_samples: How many orbit angles to sample when fitting.
                 Defaults to the frame count.  Irrelevant without an orbit.
             verbose: Print a line per frame.
-            **render_kwargs: Forwarded to :func:`render`.
+            **render_kwargs: Forwarded to :func:`render`, ``threads=``
+                (how many CPU threads a frame uses) among them.
 
         Returns:
             A single output path for video / gif, or the list of frame paths.
@@ -2614,7 +2620,8 @@ class Scene(HierarchyData):
             (
                 "animate", world, [np.asarray(c) for c in columns],
                 [obj.uuid for obj in skinned], fit, rotation_axis, start_angle,
-                end_angle, camera_name, n_pose_samples, n_fit_samples, render_kwargs,
+                end_angle, camera_name, n_pose_samples, n_fit_samples,
+                _key_render_kwargs(render_kwargs),
             ),
         )
         frames = _cached_sequence(owner, key)
@@ -2874,7 +2881,8 @@ class Scene(HierarchyData):
                 union AABB.  ``None`` (default) uses ``n_frames`` -- exact
                 coverage, still cheap.  Set lower for very high frame counts.
             verbose: When True, print a progress line per frame.
-            **render_kwargs: Forwarded to :func:`render`.
+            **render_kwargs: Forwarded to :func:`render`, ``threads=``
+                (how many CPU threads a frame uses) among them.
 
         Returns:
             A single output path (``str``) for video / gif outputs, or a
@@ -2896,7 +2904,7 @@ class Scene(HierarchyData):
             self,
             (
                 "turntable", int(n_frames), rotation_axis, start_angle, end_angle,
-                fit, camera_name, n_fit_samples, render_kwargs,
+                fit, camera_name, n_fit_samples, _key_render_kwargs(render_kwargs),
             ),
         )
         frames = _cached_sequence(owner, key)
@@ -3455,6 +3463,19 @@ def _sequence_mesh_token(node):
         return id(mesh)
     points = np.ascontiguousarray(mesh.points, dtype=np.float64)
     return (id(node._skin), points.shape, hashlib.sha1(points.tobytes()).hexdigest())
+
+
+def _key_render_kwargs(render_kwargs: dict) -> dict:
+    """
+    *render_kwargs* as a sequence key holds them: ``threads`` sets how many
+    CPU threads render a frame, not the frame, so a turntable rendered on
+    one thread replays one rendered on every core. A bad ``threads`` raises
+    here, kept frames or not
+    """
+    from cgmath.render._tiles import check_threads
+
+    check_threads(render_kwargs.get("threads"))
+    return {k: v for k, v in render_kwargs.items() if k != "threads"}
 
 
 def _sequence_key(scene: "Scene", settings) -> str:

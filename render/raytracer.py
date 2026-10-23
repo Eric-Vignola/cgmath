@@ -32,6 +32,10 @@ Internally:
   3. Z-merge across entries per sub-pixel sample, then MSAA resolve to
      final image.
 
+The frame goes through these steps in bands of whole pixel rows, side by
+side on a thread pool (:mod:`cgmath.render._tiles`; ``threads=`` sets how
+many CPU threads), byte for byte the frame the steps make all at once.
+
 Texture wrap mode defaults to ``"repeat"``.  Background is RGBA in [0, 1]
 and defaults to ``(0, 0, 0, 0)`` (transparent black) -- the rendered image
 is composited over the background using premultiplied Porter-Duff "over",
@@ -47,6 +51,7 @@ from typing import List, Optional, Tuple, Union
 
 import numpy as np
 from cgmath.geometry.mesh import MeshData, SampleMethod, UVData
+from cgmath.render import _tiles
 from cgmath.render.camera import (
     _autofit_camera_for_points,
     _default_camera_for_points,
@@ -72,6 +77,11 @@ __all__ = [
     "_derive_ortho_height",
 ]
 
+# True: render() takes the whole frame at once (_render_scene and
+# _compose_scene_output), the reference the bands of _tiles match byte for
+# byte; tests and benchmarks switch it with unittest.mock.patch.
+_WHOLE_FRAME = False
+
 
 # -- Public API ----------------------------------------------------------------
 
@@ -96,6 +106,7 @@ def render(
     base_color:        Tuple[float, float, float]           = (0.7, 0.7, 0.7),
     scene:             Optional[Union[List[dict], "Scene"]] = None,
     default_light:     bool                                 = True,
+    threads:           Optional[int]                        = None,
 ) -> Frame:
     """Render a textured mesh / scene to a :class:`Frame`.
 
@@ -143,6 +154,25 @@ def render(
         scene: ``list[dict]`` (legacy) or :class:`Scene` instance.
         default_light: When True (default) and the scene has no Light, a
             "headlight" point light parented to the camera is added.
+        threads: How many CPU threads this render may use.  The frame
+            renders in bands of whole pixel rows, side by side on a
+            thread pool; ``threads`` is the bands running at once times
+            the numba threads each casts its rays with.  ``None``
+            (default) is numba's thread count, every logical core unless
+            ``NUMBA_NUM_THREADS`` or ``numba.set_num_threads`` says fewer.
+            ``1`` renders everything in the calling thread.  An int
+            above ``NUMBA_NUM_THREADS`` or the logical cores is capped
+            there.  The image and depth are byte-identical whatever the
+            value, and the caller's floating-point policy
+            (``np.errstate``, ``np.seterr``) holds in every band.  A band
+            holds up to 65536 samples (one row, when a row holds more), so
+            a render works in the memory of the bands in flight, not of
+            every sample of the frame.
+            numpy's own OpenBLAS threads are not governed by it.  numpy's
+            OpenBLAS can crash or deadlock when matmuls run in several
+            threads at once: the render makes its own one at a time, but
+            your code doing matmuls in other threads during a render can
+            still hit that.
 
     Returns:
         A :class:`Frame` whose :attr:`~Frame.array` is ALWAYS
@@ -152,7 +182,24 @@ def render(
         populated; otherwise it is ``None``.  ``Frame`` supports
         ``np.asarray(frame)``, ``frame[y, x]``, ``arr, depth = frame``
         (legacy unpack), and ``frame.save(path)``.
+
+    Raises:
+        ValueError: A bad ``threads``, before any work.  A background
+            that is not RGBA in [0, 1], an unknown ``sample_method``, a
+            light without its position or direction.
+        numpy.linalg.LinAlgError: A singular world matrix (an Object
+            scaled to 0).  numpy 2 makes it a ValueError; numpy 1.24,
+            Maya 2025's, does not.
+        NotImplementedError: A mesh with n-gon faces (triangulate first).
+        KeyboardInterrupt: Ctrl-C, once the bands in flight finish.
+
+        A mesh with no faces is no error: it renders as nothing.
+
+        With several bad inputs at once, the first of these raises: the
+        background; each entry's own checks, in scene order (a singular
+        world matrix, n-gon faces, ``sample_method``); the lights.
     """
+    _tiles.check_threads(threads)
 
     # ---- normalize scene input -> entries + camera + lights ----
     scene_entries, scene_camera, scene_lights = _build_scene_entries_dispatch(
@@ -220,10 +267,36 @@ def render(
             height,
         )
 
-    # ---- generate camera rays once, shared across all meshes ----
+    if is_orthographic and ortho_height is None:
+        ortho_height = _derive_ortho_height(union_points, cam) * 1.05
+
+    # ---- assemble light list ----
+    lights = _build_light_list(
+        scene_lights        = scene_lights,
+        point_light_arg     = point_light,
+        default_light       = default_light,
+        camera_world_matrix = cam,
+    )
+
+    # ---- bands of pixel rows, side by side (cgmath.render._tiles) ----
+    if not _WHOLE_FRAME:
+        return _tiles.render_bands(
+            scene_entries   = scene_entries,
+            camera_matrix   = cam,
+            is_orthographic = is_orthographic,
+            ortho_height    = float(ortho_height) if is_orthographic else None,
+            angle_of_view   = float(angle_of_view),
+            width           = width,
+            height          = height,
+            n_axis          = n_axis,
+            lights          = lights,
+            background      = background,
+            return_depth    = return_depth,
+            threads         = threads,
+        )
+
+    # ---- whole frame (_WHOLE_FRAME): camera rays shared by all meshes ----
     if is_orthographic:
-        if ortho_height is None:
-            ortho_height = _derive_ortho_height(union_points, cam) * 1.05
         origins, directions = _generate_camera_rays_orthographic(
             cam, float(ortho_height), width, height, n_axis
         )
@@ -233,14 +306,6 @@ def render(
         )
     n_total_samples = origins.shape[0]
     n_pixels        = width * height
-
-    # ---- assemble light list ----
-    lights = _build_light_list(
-        scene_lights        = scene_lights,
-        point_light_arg     = point_light,
-        default_light       = default_light,
-        camera_world_matrix = cam,
-    )
 
     # ---- per-mesh shading + z-merge ----
     z_color, z_hit, z_depth = _render_scene(
