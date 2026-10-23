@@ -948,9 +948,7 @@ _SPARSE_WEIGHTS = "__sparse_weights__"
 # ---------------------- SkinList -------------------------------------------- #
 
 
-class SkinList(DataList):
-    DATA_LIST_CLASS = SkinData
-
+class SkinList(DataList[SkinData]):
     @classmethod
     def load_fbx(cls, filename: str) -> "SkinList":
         """

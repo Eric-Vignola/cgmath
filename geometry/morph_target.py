@@ -337,9 +337,7 @@ class MorphData(Data):
         bls_api.CreatePointIndicesAttr().Set(self.indices)
 
 
-class MorphList(DataList):
-    DATA_LIST_CLASS = MorphData
-
+class MorphList(DataList[MorphData]):
     # --------- vectorized properties and methods --------- #
     @property
     def size(self) -> np.ndarray:

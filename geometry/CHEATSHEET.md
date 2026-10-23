@@ -352,7 +352,11 @@ class annotates, a property with a setter and its `_STATE`.
 
 `MeshList`, `UVList`, `MorphList` and `SkinList` all derive from `DataList`.
 It is a `MutableSequence` that also indexes by name and by numpy-style
-selections, and carries the same serialization surface as `Data`.
+selections, and carries the same serialization surface as `Data`. Each names
+the class it holds in brackets, `class MeshList(DataList[MeshData])`: that is
+its `DATA_LIST_CLASS`, and what an editor completes `meshes[0].` with. On a
+`UVList` jedi reads `MeshList`'s brackets before its own, and offers
+`MeshData`'s members.
 
 ```python
 from cgmath.geometry import MeshList

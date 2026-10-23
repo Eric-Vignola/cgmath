@@ -26,10 +26,22 @@ import sys
 import tempfile
 import threading
 import zipfile
-from collections.abc import Iterable, MutableSequence
+from collections.abc import Iterable, Iterator, MutableSequence
 from dataclasses import dataclass, fields, is_dataclass, MISSING
 from enum import Enum
-from typing import Annotated, Any, get_type_hints, List, Optional, Union
+from typing import (
+    Annotated,
+    Any,
+    Generic,
+    get_args,
+    get_origin,
+    get_type_hints,
+    List,
+    Optional,
+    overload,
+    TypeVar,
+    Union,
+)
 
 import numpy as np
 from cgmath.utils import json, pretty_json
@@ -2421,7 +2433,90 @@ class Data:
         return dict_to_bytes(self.to_dict())
 
 
-class DataList(MutableSequence):
+# the class a list holds, named in brackets: class MeshList(DataList[MeshData])
+_Item = TypeVar("_Item")
+
+# a list's own class: a slice of a MeshList is a MeshList
+_List = TypeVar("_List", bound="DataList")
+
+
+def _subscripted_item(cls) -> Optional[type]:
+    """
+    The class ``cls`` names in brackets among its own bases, ``MeshData``
+    for ``class MeshList(DataList[MeshData])``, or None when it names none:
+    a base's brackets are that base's, not this class's.
+
+    The item is the class in the place of the item's own type parameter:
+    DataList's, or the one a list still generic passed it, which that list
+    records as its ``_ITEM_PARAMETER``. Under
+    ``class Pair(DataList[T], Generic[K, T])``, ``Pair[str, MeshData]``
+    names MeshData. A list that has named its class has none: brackets on it
+    fill a parameter of its own, as any other generic base's do.
+
+    Raises
+    ------
+    TypeError
+        The brackets hold no class (a str, a Union, Any, None, list[int]),
+        two bases name two, two leave two item parameters open, or one names
+        the class while another leaves its place open.
+    """
+    found = None  # the class the brackets name
+    free  = None  # the item parameter they leave open
+    for base in cls.__dict__.get("__orig_bases__", ()):
+        origin = get_origin(base)
+        if not isinstance(origin, type):
+            continue  # a base without brackets
+        param = _Item if origin is DataList else vars(origin).get("_ITEM_PARAMETER")
+        if param is None:
+            continue
+        item = get_args(base)[origin.__parameters__.index(param)]
+        if isinstance(item, TypeVar):
+            # a list still generic: its own subclasses name the class, in
+            # the place of this parameter
+            if free is not None and free is not item:
+                raise TypeError(f"{cls.__name__} leaves two item parameters, {free} and {item}")
+            free = item
+            continue
+        # Any is a class since python 3.11, and list[int] one to isinstance
+        # before it: its origin gives it away
+        if item is Any or item is type(None) or get_origin(item) is not None or not isinstance(item, type):
+            raise TypeError(
+                f"{cls.__name__}: {origin.__name__}[{item!r}] names no class; "
+                f"a list holds one class, named in the brackets itself"
+            )
+        if found is not None and found is not item:
+            raise TypeError(
+                f"{cls.__name__} names two item classes, {found.__name__} and {item.__name__}"
+            )
+        found = item
+    if free is not None:
+        if found is not None:
+            raise TypeError(
+                f"{cls.__name__} names its item class, {found.__name__}, and leaves it open, {free}"
+            )
+        cls._ITEM_PARAMETER = free
+    return found
+
+
+# Generic before MutableSequence: collections.abc's own brackets would answer
+# DataList[...] first, and take any number of classes on any list class
+class DataList(Generic[_Item], MutableSequence[_Item]):
+    """
+    A list of Data objects of one class.
+
+    A list class names the class in brackets,
+    ``class MeshList(DataList[MeshData])``. ``DATA_LIST_CLASS`` is that
+    class, which ``append`` and a load check each item against, and an
+    editor completes ``meshes[0].`` and ``for mesh in meshes`` with its
+    members. A list class naming none holds its base's; one holding a
+    narrower class than its base names it beside the base:
+    ``class UVList(MeshList, DataList[UVData])``.
+
+    The brackets name the class only where a class is declared:
+    ``DataList[MeshData]()`` is a plain ``DataList``, as ``list[int]()`` is
+    a plain ``list``.
+    """
+
     DATA_LIST_CLASS = Data
     UNIQUE_LIST     = False
 
@@ -2438,7 +2533,36 @@ class DataList(MutableSequence):
     _STATE = ()
 
     def __init_subclass__(cls, **kwargs):
+        """
+        Sets ``DATA_LIST_CLASS`` to the class the brackets name, and registers
+        the class for files.
+
+        Raises
+        ------
+        TypeError
+            The class also sets ``DATA_LIST_CLASS``, to another class or while
+            its brackets leave the item's place open, or its brackets name no
+            class or two (see ``_subscripted_item``).
+        """
         super().__init_subclass__(**kwargs)
+        item = _subscripted_item(cls)
+        if "_ITEM_PARAMETER" in cls.__dict__ and "DATA_LIST_CLASS" in cls.__dict__:
+            # the old spelling names the class as the brackets do: a subclass's
+            # brackets would put another in its place
+            declared = cls.__dict__["DATA_LIST_CLASS"]
+            raise TypeError(
+                f"{cls.__name__} names its item class, {getattr(declared, '__name__', declared)}, "
+                f"and leaves it open, {cls._ITEM_PARAMETER}"
+            )
+        if item is not None:
+            declared = cls.__dict__.get("DATA_LIST_CLASS", item)
+            if declared is not item:
+                raise TypeError(
+                    f"{cls.__name__} holds {item.__name__}, as its brackets say, and "
+                    f"{getattr(declared, '__name__', declared)}, as its DATA_LIST_CLASS "
+                    f"says: name the class once, in the brackets"
+                )
+            cls.DATA_LIST_CLASS = item
         _register(cls)
 
     def __setattr__(self, name: str, value) -> None:
@@ -2520,7 +2644,11 @@ class DataList(MutableSequence):
     def insert(self, index, value):
         return self.list.insert(index, value)
 
-    def pop(self, index=-1):
+    def __iter__(self) -> Iterator[_Item]:
+        """the items, in order, from the list that holds them"""
+        return iter(self.list)
+
+    def pop(self, index=-1) -> _Item:
         if index < 0:
             index += len(self.list)
         if index < 0 or index >= len(self.list):
@@ -2555,6 +2683,12 @@ class DataList(MutableSequence):
 
     def __ge__(self, other):
         return self.list.__ge__(other)
+
+    @overload
+    def __getitem__(self, query: Union[int, str]) -> _Item: ...
+
+    @overload
+    def __getitem__(self: _List, query: Union[slice, List[int], np.ndarray]) -> _List: ...
 
     def __getitem__(self, query: Union[str, int, slice, List[int], np.ndarray]):
         # if query is a string, return the morph target with that name

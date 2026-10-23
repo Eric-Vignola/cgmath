@@ -294,7 +294,7 @@ extend(self, iterable) -> 'None'
     appends every node in turn, as append() would, joining them together
 insert(self, index: 'int', node: "'TransformData'") -> 'None'
     S.insert(index, value) -- insert value before index
-pop(self, index=-1)
+pop(self, index=-1) -> 'TransformData'
     S.pop([index]) -> item -- remove and return item at index (default last).
 sort(self, key=None, reverse=False) -> 'None'
     sorts the nodes in place, by name unless ``key`` says otherwise
@@ -723,9 +723,9 @@ to_json(self) -> str
     formats the data as human readable json
 ```
 
-#### `DataList(MutableSequence)`
+#### `DataList(Generic, MutableSequence)`
 
-All the operations on a read-write sequence.
+A list of Data objects of one class.
 
 ```text
 DataList(iterable=None)
@@ -767,7 +767,7 @@ classmethod load_pickle(cls, filename: str) -> Any
     the list a pickle holds, read as :meth:`load` reads one
 match(self, *args, exclude: bool = False, exact: bool = True) -> Any
     returns a DataList object with matching names
-pop(self, index=-1)
+pop(self, index=-1) -> ~_Item
     S.pop([index]) -> item -- remove and return item at index (default last).
 reset_cached_data(self)
     resets cached data
@@ -1115,7 +1115,7 @@ vertices_to_faces(self, verts: 'np.ndarray') -> 'np.ndarray'
 
 #### `MeshList(DataList)`
 
-All the operations on a read-write sequence.
+A list of Data objects of one class.
 
 ```text
 MeshList(iterable=None)
@@ -1268,9 +1268,9 @@ union(self, *args)
     combines faces of given Mesh objects to self (this is not a boolean)
 ```
 
-#### `UVList(MeshList)`
+#### `UVList(MeshList, DataList)`
 
-All the operations on a read-write sequence.
+A list of Data objects of one class.
 
 ```text
 UVList(iterable=None)
@@ -1465,7 +1465,7 @@ to_prim(self, prim) -> 'None'
 
 #### `MorphList(DataList)`
 
-All the operations on a read-write sequence.
+A list of Data objects of one class.
 
 ```text
 MorphList(iterable=None)
@@ -1633,7 +1633,7 @@ transfer_influences(self, src_influences: 'list', dst_influences: 'list', weight
 
 #### `SkinList(DataList)`
 
-All the operations on a read-write sequence.
+A list of Data objects of one class.
 
 ```text
 SkinList(iterable=None)

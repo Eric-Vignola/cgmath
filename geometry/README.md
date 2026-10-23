@@ -94,8 +94,12 @@ else.
 `DataList` is the list counterpart (`MeshList`, `UVList`, `MorphList`,
 `SkinList`): a `MutableSequence` that also indexes by name (`meshes["boxA"]`),
 by index array, by boolean mask and by slice, filters with `match()` (fnmatch),
-sorts by `name`, type-checks `append` against `DATA_LIST_CLASS`, and carries the
-same save/load surface.
+sorts by `name`, type-checks `append` against the class it holds, and carries
+the same save/load surface. A list class names that class in brackets,
+`class MeshList(DataList[MeshData])`, which sets its `DATA_LIST_CLASS` and lets
+an editor complete `meshes[0].` and `for mesh in meshes:` with `MeshData`'s
+members. A list holding a narrower class than its base names it beside the
+base, `class UVList(MeshList, DataList[UVData])`.
 
 ### Saving and loading
 
@@ -202,9 +206,10 @@ links, and rebuild them in `_post_load()`, which runs once a load or `copy()`
 has set every field. An instance takes a write to nothing its class does not
 declare: a cache kept on a private attribute rather than a field is named in
 the class's `_STATE`, a tuple, `_STATE = ("_index",)`, each class listing its
-own and a subclass adding to its parents'. A `DataList` subclass names what it
-saves beside its items in `LIST_FIELDS`, and its private state in `_STATE` too;
-a name it annotates takes a write as well. A private field behind a property of
+own and a subclass adding to its parents'. A `DataList` subclass names the
+class it holds in brackets, `class PinList(DataList[PinData])`, what it saves
+beside its items in `LIST_FIELDS`, and its private state in `_STATE` too; a
+name it annotates takes a write as well. A private field behind a property of
 its own name is saved as the property; `SAVED_NAMES`, `{field: saved name}`,
 saves one under another name, such as a field behind a property named
 differently, and keeps a field mapped to itself, `{"_count": "_count"}`, under
@@ -243,8 +248,7 @@ class PinData(Data):
         self.lookup = {int(i): row for row, i in enumerate(self.indices)}
 
 
-class PinList(DataList):
-    DATA_LIST_CLASS = PinData
+class PinList(DataList[PinData]):
     LIST_FIELDS = ("label",)
 
     def __init__(self, iterable=None, label=""):

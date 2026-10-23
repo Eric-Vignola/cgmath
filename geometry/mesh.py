@@ -4728,9 +4728,7 @@ class UVData(MeshData):
         attr.Set(self.indices)
 
 
-class MeshList(DataList):
-    DATA_LIST_CLASS = MeshData
-
+class MeshList(DataList[MeshData]):
     @classmethod
     def load_fbx(cls, filename: str, scale_factor: float | None = None) -> "MeshList":
         """loads all meshes from an fbx file into a MeshList
@@ -4817,9 +4815,7 @@ class MeshList(DataList):
         return np.array(result)
 
 
-class UVList(MeshList):
-    DATA_LIST_CLASS = UVData
-
+class UVList(MeshList, DataList[UVData]):
     @classmethod
     def load_fbx(cls, filename: str, name: str | None = None) -> "UVList":
         """loads all UV channels for one mesh from an fbx file (first mesh if name is None)"""

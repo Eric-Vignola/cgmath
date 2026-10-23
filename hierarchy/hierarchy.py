@@ -15,7 +15,7 @@ import weakref
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional, overload, Union
 
 import numpy as np
 from cgmath.data import (
@@ -5251,7 +5251,7 @@ def _reset_branches(nodes) -> None:
         node._transform_changed()
 
 
-class TransformList(DataList):
+class TransformList(DataList[TransformData]):
     """Non-owning ordered view over ``TransformData`` nodes.
 
     A ``TransformList`` is a *selection* of nodes (e.g. the result of
@@ -5274,8 +5274,6 @@ class TransformList(DataList):
     ``cgmath.hierarchy.load()`` gives back; ``TransformList.load()`` refuses
     its file.
     """
-
-    DATA_LIST_CLASS = TransformData
 
     # the private state a view holds beside its list: the uuids extend()
     # keeps while it adds (_holds)
@@ -6902,6 +6900,12 @@ class TransformList(DataList):
         return new.__iadd__(self, by=by, translate=translate)
 
     # --- overloaded methods --- #
+    @overload
+    def __getitem__(self, query: Union[int, str]) -> TransformData: ...
+
+    @overload
+    def __getitem__(self, query: Union[slice, List[int], np.ndarray]) -> TransformList: ...
+
     def __getitem__(self, query):
         """Index access that never transfers node ownership.
 
@@ -7648,7 +7652,7 @@ class HierarchyData(TransformList):
         finally:
             _structure_changed(self)
 
-    def pop(self, index=-1):
+    def pop(self, index=-1) -> TransformData:
         # retrieves a node and removes pointer
         if index < 0:
             index += len(self.list)
