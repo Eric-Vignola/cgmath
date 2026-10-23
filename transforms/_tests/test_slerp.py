@@ -219,21 +219,36 @@ class TestQuaternionSlerp(unittest.TestCase):
 
     def test_a_tie_keeps_quat1_as_given(self):
         # a half turn about X apart: a dot product of exactly 0, both arcs
-        # as long. Taken again from the two divided by their largest
-        # components, (10, 45, 75) and (190, 45, 75) degrees give -1.1e-16,
-        # the rounding of another sum. The half turn goes the way quat1 as
-        # given says, as in 1.0.4 and 2.0.0, along either arc, and for the
-        # two scaled by 2^-400 or 2^400
+        # as long. Which of the grid's 5832 pairs tie depends on how numpy's
+        # einsum sums the four products and on how the libm rounds sin and
+        # cos, and another platform may do either another way. With this
+        # machine's sin and cos, 690 to 1577 tie in the 15 orders of plain
+        # sums, 1053 with aarch64's fused lanes, 1069 with another fused
+        # sum, and none in a fused sequential loop, which leaves the test
+        # nothing to test; with correctly rounded ones, 569 to 1274, 845,
+        # 867 and none. So the ties are taken as the wrapper's own einsum
+        # gives them. Taken again from the two divided by their largest
+        # components, 6 to 126 of them come out under 0, the rounding of
+        # another sum ((10, 45, 75) and (190, 45, 75) degrees give
+        # -1.1e-16, summed (0 + 2) + (1 + 3)): a slerp that took the dot
+        # product again would turn those the other way. The half turn goes
+        # the way quat1 as given says, as in 1.0.4 and 2.0.0, along either
+        # arc, and for the two scaled by 2^-400 or 2^400
         grid   = np.arange(0.0, 90.0, 5.0)
         euler0 = np.stack(np.meshgrid(grid, grid, grid, indexing="ij"), -1).reshape(-1, 3)
         euler1 = euler0 + [180.0, 0.0, 0.0]
         quat0  = euler_to_quaternion(np.radians(euler0))
         quat1  = euler_to_quaternion(np.radians(euler1))
-        tie    = np.einsum("ij,ij->i", quat0, quat1) == 0.0
-        self.assertTrue(tie[np.all(euler0 == [10.0, 45.0, 75.0], axis=1)].any())
-        self.assertGreater(tie.sum(), 1000)
+        tie    = np.einsum("...i,...i", quat0, quat1) == 0.0
+        if not tie.any():
+            self.skipTest("this numpy's einsum leaves the half turns no exact tie")
+        self.assertGreater(tie.sum(), 100)
         quat0 = quat0[tie]
         quat1 = quat1[tie]
+        big0  = np.abs(quat0).max(axis=-1)
+        big1  = np.abs(quat1).max(axis=-1)
+        again = np.einsum("...i,...i", quat0 / big0[:, None], quat1 / big1[:, None])
+        self.assertGreater((again < 0.0).sum(), 0)
         for scale in (1.0, 2.0**-400, 2.0**400):
             scaled0 = quat0 * scale
             scaled1 = quat1 * scale
@@ -508,10 +523,20 @@ class TestEulerSlerpArc(unittest.TestCase):
         euler0, euler1, axes0, axes1, axes = _euler_grid()
         quat0 = euler_to_quaternion(euler0, axes0)
         quat1 = euler_to_quaternion(euler1, axes1)
-        dot   = np.einsum("ij,ij->i", quat0, quat1)
+        dot   = np.einsum("...i,...i", quat0, quat1)
         self.assertGreater((dot < 0.0).mean(), 0.3)
         self.assertGreater((dot > 0.0).mean(), 0.3)
-        self.assertGreater((dot == 0.0).sum(), 5000)
+        # 49062 half turns, their dot products within 2^-50 of 0 in each of
+        # the 15 orders of plain sums and the fused sums below, with this
+        # machine's sin and cos and with correctly rounded ones. How many
+        # tie exactly depends on both, so the test does not count them:
+        # with this machine's sin and cos, 4674 to 6984 in the plain
+        # orders, 4974 with aarch64's fused lanes, 5418 with another fused
+        # sum, 174 in a fused sequential loop; with correctly rounded ones,
+        # 1410 to 2772, 2268, 2322 and 48. Below, each goes the arc
+        # quaternion_slerp gives it, bit for bit, whichever way this numpy
+        # sums
+        self.assertGreater((np.abs(dot) < 2.0**-50).sum(), 40000)
         rng = np.random.default_rng(26)
         for weight in WEIGHTS + (rng.random(len(euler0)),):
             for shortest in (True, False):
@@ -525,12 +550,13 @@ class TestEulerSlerpArc(unittest.TestCase):
         # where the quaternions as converted took the shorter arc, it is
         # still the default's, and where they took the longer one, that is
         # shortest=False's, bit for bit; at weights 0 and 1 the arc gives
-        # the ends either way, as before
+        # the ends either way, as before. The arc each took is read from
+        # the dot product summed as euler_slerp sums its own
         euler0, euler1, axes0, axes1, axes = _euler_grid()
         rng   = np.random.default_rng(27)
         quat0 = euler_to_quaternion(euler0, axes0)
         quat1 = euler_to_quaternion(euler1, axes1)
-        took  = np.einsum("ij,ij->i", quat0, quat1) < 0.0
+        took  = np.einsum("...i,...i", quat0, quat1) < 0.0
         for weight in WEIGHTS + (rng.random(len(euler0)),):
             before  = _as_converted(euler0, euler1, weight, axes0, axes1, axes)
             shorter = euler_slerp(euler0, euler1, weight, axes0, axes1, axes)
