@@ -2840,21 +2840,28 @@ class _FbxTree:
     a node the walk drops; ``joint``, whether it is a joint, and
     ``compensate``, whether it is a joint that divides its parent's scale
     out (``eInheritRrs``, segment scale compensate); ``orders``, its rotate
-    order as rotate_order; its own ``translate`` (times the scale factor),
+    order as rotate_order, the one it turns in: xyz where the read takes no
+    pre rotation (below), as the sdk turns a node whose rotation is
+    inactive; ``blend``, the fbx rotate order the sdk blends a rotation by
+    layer in (:func:`_fbx_blend`): the stored one, rotation active or not,
+    but xyz at a root of the file, kept or dropped, that the read turns in
+    xyz where it turns the file into Maya's axes, as the sdk's ConvertScene
+    turns such a root's rotation on in xyz (a node kept under a dropped
+    root is none); its own ``translate`` (times the scale factor),
     ``rotate`` and ``scale``; ``pre``, its pre rotation, and ``axis``, the
     inverse of its post rotation, as euler angles in xyz, 0 where the sdk
     applies none (rotation inactive) and on a light, whose post rotation is
     fbx's view axis; on a camera, what its post rotation turns beyond fbx's
     view axis, (0, -90, 0), which Maya's camera holds as its rotate axis
     (:data:`_FBX_CAMERA_AXIS`), all of it where Maya reads no post rotation.
-    A camera's or a light's pre rotation, and a camera's post rotation,
-    are read as Maya's importer reads them, rotation active or not, but for
-    a root with its rotation inactive in a file whose up axis is x or z,
-    which reads neither; and ``pivots`` (n, 4, 3), its rotate pivot, scale
-    pivot, rotate offset and scale offset, times the scale factor. ``nodes``
-    holds each one's ``FbxNode``, ``columns`` the position of each kept
-    column's node and ``above`` each kept column's nearest kept ancestor's
-    column, -1 for a root.
+    A camera's or a light's pre rotation and rotate order, and a camera's
+    post rotation, are read as Maya's importer reads them, rotation active
+    or not, but for a root with its rotation inactive in a file whose up
+    axis is x or z, which reads none of them; and ``pivots`` (n, 4, 3), its
+    rotate pivot, scale pivot, rotate offset and scale offset, times the
+    scale factor. ``nodes`` holds each one's ``FbxNode``, ``columns`` the
+    position of each kept column's node and ``above`` each kept column's
+    nearest kept ancestor's column, -1 for a root.
     """
 
     __slots__ = (
@@ -2866,6 +2873,7 @@ class _FbxTree:
         "joint",
         "compensate",
         "orders",
+        "blend",
         "translate",
         "rotate",
         "scale",
@@ -2883,7 +2891,12 @@ class _FbxTree:
 _FBX_CAMERA_AXIS = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]])
 
 
-def _walk_fbx(scene, scale_factor: float, node_types: Optional[frozenset] = None):
+def _walk_fbx(
+    scene,
+    scale_factor: float,
+    node_types:   Optional[frozenset] = None,
+    turned:       bool                = False,
+):
     """walks an open fbx scene's nodes into TransformData dicts
 
     Keeps the joints, locators, groups and meshes (a mesh read as a
@@ -2894,7 +2907,9 @@ def _walk_fbx(scene, scale_factor: float, node_types: Optional[frozenset] = None
     between them hold, and the pivots, offsets and the pre and post rotation
     of a node that is no joint, which its channels can't hold, are folded
     into its channels (:func:`_fbx_fold`), so its world matrix is the
-    file's.
+    file's. ``turned`` says the read turns the file into Maya's axes
+    (:func:`_fbx_axis_turn`), which only the orders a take's layers blend
+    in follow (``blend``, :class:`_FbxTree`).
 
     Hands back the dicts, the ``FbxNode`` behind each uuid, because an
     animated read has to sample those same objects and fbx lets two nodes
@@ -2914,12 +2929,12 @@ def _walk_fbx(scene, scale_factor: float, node_types: Optional[frozenset] = None
     source_pivot = _fbx_enum(FBX.FbxNode,          "EPivotSet",    "eSourcePivot")
     inherit_rrs  = _fbx_enum(FBX.FbxTransform,     "EInheritType", "eInheritRrs")
 
-    # Maya's importer reads a camera's or a light's pre rotation, and a
-    # camera's post rotation, whether its rotation is active or not, but
-    # on a root of a file whose up axis is x or z: it turns that file
-    # into its Y-up with the sdk's ConvertScene, which drops a root's pre
-    # and post rotation where its rotation is inactive (view_rules.py,
-    # convert_views.py)
+    # Maya's importer reads a camera's or a light's pre rotation and rotate
+    # order, and a camera's post rotation, whether its rotation is active or
+    # not, but on a root of a file whose up axis is x or z: it turns that
+    # file into its Y-up with the sdk's ConvertScene, which drops a root's
+    # pre and post rotation where its rotation is inactive, and turns that
+    # root in xyz (view_rules.py, convert_views.py)
     up, _ = scene.GetGlobalSettings().GetAxisSystem().GetUpVector()
     converts = int(getattr(up, "value", up)) != 2
 
@@ -2973,6 +2988,7 @@ def _walk_fbx(scene, scale_factor: float, node_types: Optional[frozenset] = None
     tree.joint      = np.array([kinds[i] == "joint" for i in rows], dtype=bool)
     tree.compensate = np.zeros(len(rows), dtype=bool)
     tree.orders     = np.zeros(len(rows), dtype=np.intp)
+    tree.blend      = np.zeros(len(rows), dtype=np.intp)
     tree.translate  = np.zeros((len(rows), 3))
     tree.rotate     = np.zeros((len(rows), 3))
     tree.scale      = np.ones((len(rows), 3))
@@ -2988,10 +3004,28 @@ def _walk_fbx(scene, scale_factor: float, node_types: Optional[frozenset] = None
     for position, index in enumerate(rows):
         node = found[index]
 
+        # fbx ignores the rotate order and the pre and post rotation entirely
+        # unless rotationActive is on: the sdk turns such a node in xyz.
+        # Maya's importer reads a view's order and pre rotation as if it were
+        # on, and so does the read. On any other node it drops the pre and
+        # post rotation too, but turns the node by neither order: it keeps
+        # the stored order on the xyz angles of that order's turn
+        # (probe_rotactive_rule.py), where the read keeps the sdk's xyz
+        active = node.GetRotationActive() or (views[index] is not None and not (converts and parents[index] == 0))
+
         # rotate_order, which newer bindings hand back as an enum
-        rotate_order          = node.GetRotationOrder(source_pivot)
-        rotate_order          = getattr(rotate_order, "value", rotate_order)
-        tree.orders[position] = _FBX_ROTATE_ORDERS[rotate_order]
+        stored                = node.GetRotationOrder(source_pivot)
+        stored                = int(getattr(stored, "value", stored))
+        tree.orders[position] = _FBX_ROTATE_ORDERS[stored if active else 0]
+
+        # the sdk blends a rotation by layer in the stored order, rotation
+        # active or not; but where the read turns the file into Maya's axes
+        # it stands for ConvertScene, which turns on, in xyz, the rotation of
+        # a root of the file whose rotation is inactive, kept or dropped (a
+        # node kept under a dropped root is none), in every axis system but
+        # Maya's Y-up, and the sdk then blends that root as an xyz node
+        # (probe_axes.py). A view whose order the read keeps blends in it
+        tree.blend[position] = 0 if turned and not active and parents[index] == 0 else stored
 
         # get SRT
         tree.scale[position]     = tuple(node.LclScaling.Get())[:3]
@@ -3010,13 +3044,11 @@ def _walk_fbx(scene, scale_factor: float, node_types: Optional[frozenset] = None
         ):
             tree.pivots[position, k] = np.array(tuple(pivot)[:3]) * scale_factor
 
-        # fbx ignores pre and post rotation entirely unless rotationActive is
-        # on, and so does Maya's importer, but on a view
-        active = node.GetRotationActive() or (views[index] is not None and not (converts and parents[index] == 0))
+        # the pre rotation where the read takes it, as above
         if active:
             tree.pre[position] = tuple(node.GetPreRotation(source_pivot))[:3]
 
-        # and it composes post rotation as its inverse. A light's is fbx's
+        # fbx composes the post rotation as its inverse. A light's is fbx's
         # view axis, which Maya places its children without; a camera's turns
         # them by what it adds to that view axis, as Maya's importer reads it,
         # all of it where it reads no post rotation
@@ -4443,7 +4475,9 @@ def _fbx_blend(
     passthrough below ** (1 - weight) x values ** weight, every term
     unsigned, as the sdk takes them. Rotation by layer (the default) blends
     quaternions built as the sdk builds them for each node's fbx rotate
-    order (``orders``, see :func:`_fbx_turns`), which blend as an xyz node's
+    order (``orders``, see :func:`_fbx_turns`), its stored one, rotation
+    active or not, but xyz at a root whose rotation ConvertScene turns on
+    in xyz (:class:`_FbxTree`'s ``blend``), which blend as an xyz node's
     for an even order and as a zyx node's for an odd one, an additive layer
     then turning on the other side of what is below
     (:func:`_fbx_euler_axes`): additive turns by the layer's rotation scaled
@@ -4502,10 +4536,12 @@ def _fbx_blend(
     return np.where(owned[None], out, below)
 
 
-def _fbx_sample_take(stack, sampled, ticks, scale_factor: float, blocks) -> None:
+def _fbx_sample_take(stack, sampled, ticks, scale_factor: float, blocks, orders, blend) -> None:
     """the current take's local channels of ``sampled`` ((node, column) pairs)
     on the ``ticks`` grid, written into ``blocks`` (translate, rotate, scale,
-    each frames x nodes x 3)
+    each frames x nodes x 3); ``orders`` holds each column's rotate order as
+    the read turns it (rotate_order) and ``blend`` the fbx rotate order the
+    sdk blends its rotation by layer in (:class:`_FbxTree`)
 
     The curves of every node are evaluated together, every frame at once,
     and the take's animation layers blended over them as the sdk blends
@@ -4518,10 +4554,15 @@ def _fbx_sample_take(stack, sampled, ticks, scale_factor: float, blocks) -> None
     already hold, the same value the sdk hands back.
 
     A rotation blended by layer is rebuilt from quaternions, each frame on
-    its own, as the sdk rebuilds it, so its curve goes through
-    euler_filter in the node's rotate order, frame 0 as the sdk gives it,
-    where the sdk's curve can step by a whole turn or flip near gimbal. A
-    curve no such layer touches keeps the branches the file holds.
+    its own, as the sdk rebuilds it, in the node's stored rotate order
+    whether its rotation is active or not, but in xyz at a root whose
+    rotation is inactive in a file the read turns into Maya's axes, whose
+    rotation ConvertScene turns on in xyz (``blend``), so its curve goes
+    through euler_filter in the order the read turns the node in
+    (``orders``: xyz where the rotation is inactive, as the sdk turns it),
+    frame 0 as the sdk gives it, where the sdk's curve can step by a whole
+    turn or flip near gimbal. A curve no such layer touches keeps the
+    branches the file holds.
     """
     criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimLayer.ClassId)
     layers   = [stack.GetSrcObject(criteria, i) for i in range(stack.GetSrcObjectCount(criteria))]
@@ -4535,9 +4576,7 @@ def _fbx_sample_take(stack, sampled, ticks, scale_factor: float, blocks) -> None
     per_second = _fbx_ticks_per_second()
     columns    = np.array([index for _, index in sampled], dtype=np.intp)
     weights    = [_fbx_layer_weight(layer, ticks, per_second) for layer in layers[1:]]
-    source     = _fbx_enum(FBX.FbxNode, "EPivotSet", "eSourcePivot")
-    orders     = [node.GetRotationOrder(source) for node, _ in sampled]
-    orders     = np.array([int(getattr(order, "value", order)) for order in orders])
+    blend      = blend[columns]
 
     channels   = (("LclTranslation", scale_factor), ("LclRotation", 1.0), ("LclScaling", 1.0))
     for channel, (name, factor) in enumerate(channels):
@@ -4553,7 +4592,7 @@ def _fbx_sample_take(stack, sampled, ticks, scale_factor: float, blocks) -> None
                     blended[:, present],
                     values[:, present],
                     weight,
-                    orders[present],
+                    blend[present],
                     owned[present],
                 )
                 keyed |= present
@@ -4561,8 +4600,7 @@ def _fbx_sample_take(stack, sampled, ticks, scale_factor: float, blocks) -> None
                     rebuilt |= present
 
         if rebuilt.any():
-            rotate_orders       = np.array([_FBX_ROTATE_ORDERS[order] for order in orders.tolist()])
-            blended[:, rebuilt] = _filtered(blended[:, rebuilt], rotate_orders[rebuilt])
+            blended[:, rebuilt] = _filtered(blended[:, rebuilt], orders[columns[rebuilt]])
         if keyed.any():
             blocks[channel][:, columns[keyed]] = blended[:, keyed] * factor
 
@@ -5308,19 +5346,27 @@ class TransformList(DataList):
         and offsets, in its translate, rotation active or not, and, on a
         node that is no joint, its pre and post rotation, which the sdk
         reads only with rotation active, in its rotate (a joint holds them
-        as its joint orient and rotate axis). A Maya group whose pivot is
+        as its joint orient and rotate axis). A node whose rotation is
+        inactive turns in xyz, as the sdk turns it, its rotate_order 0
+        whatever order the file stores, and its pre and post rotation left
+        out. Maya's importer turns such a node by neither order, keeping the
+        stored order on the xyz angles of that order's turn, but on a root
+        of a file whose up axis is x or z, whose rotation the sdk's
+        ConvertScene turns on in xyz; Maya's exporter writes every node with
+        rotation active, as save_fbx does. A Maya group whose pivot is
         centred on its children loads where Maya shows it. A light's post
         rotation is fbx's view axis, which Maya places its children without,
         and so does the read. A camera's turns its children by what it adds
         to fbx's view axis, (0, -90, 0), the post rotation Maya's exporter
         writes, which Maya's importer keeps as the camera's rotate axis:
         nothing on Maya's own camera, (0, -90, 0) on one with no post
-        rotation. Maya's importer reads a camera's or a light's pre rotation,
-        and a camera's post rotation, whether its rotation is active or not,
-        and so does the read, but on a root of a file whose up axis is x or z
-        with its rotation inactive: the sdk's ConvertScene, which turns that
-        file into Maya's Y-up for Maya's importer, drops them, so such a
-        camera turns its children by (0, -90, 0) whatever its post rotation.
+        rotation. Maya's importer reads a camera's or a light's pre rotation
+        and rotate order, and a camera's post rotation, whether its rotation
+        is active or not, and so does the read, but on a root of a file whose
+        up axis is x or z with its rotation inactive: the sdk's ConvertScene,
+        which turns that file into Maya's Y-up for Maya's importer, drops
+        them and turns that root in xyz, so such a camera turns its children
+        by (0, -90, 0) whatever its post rotation.
         The sdk's own evaluation puts those children elsewhere. A node
         nothing moves keeps the file's values to the bit, so a file whose
         dropped nodes, pivots and offsets hold the identity, as Unreal's and
@@ -5347,7 +5393,7 @@ class TransformList(DataList):
         with open_fbx(filename, FBX) as scene:
             turn   = _fbx_axis_turn(scene, axis_system, filename)
             factor = _fbx_scale_factor(scene, scale_factor)
-            hierarchy_data, _, tree = _walk_fbx(scene, factor, kinds)
+            hierarchy_data, _, tree = _walk_fbx(scene, factor, kinds, turn is not None)
             listed = _fbx_bind_matrices(scene, tree, factor, filename) if pose == "bind" else None
 
         # each kept node's bind, a dropped node a bind pose lists folded in
@@ -5386,7 +5432,15 @@ class TransformList(DataList):
         rotate_axis and joint_orient are written for joints only. A
         transform or locator holding a rotate_axis (a matrix write or
         set_parent() keeps it) loses it in the file; fold it into rotate
-        first by writing node.matrix back with rotate_axis zeroed.
+        first by writing node.matrix back with rotate_axis zeroed. Every
+        node is written with rotation active, as Maya's exporter writes it:
+        fbx turns a node without it in xyz, whatever its rotate order. A
+        file an earlier save_fbx wrote holds a group or a locator with its
+        rotation inactive, so one in another order than xyz now loads where
+        the sdk puts it, in xyz, rotate_order 0, not where it was saved (a
+        zxy group 0.49 off, a joint under it 1.26): load it with the version
+        that wrote it, save() it, then load that and save_fbx it with this
+        one.
 
         User defined numbers (double, float, doubleAngle, doubleLinear, long,
         short, byte, char), bools, enums, strings, stringArrays and double3 or
@@ -11445,15 +11499,20 @@ class ClipData(HierarchyData):
         the clip, where:
 
         - a rotation is blended by layer on a node whose rotate order is not
-          xyz: the sdk hands the x, y and z angles to its euler code as they
-          are, so an even order (yzx, zxy) blends as an xyz node does and an
-          odd one (xzy, yxz, zyx) as the sdk blends a zyx node, whose additive
-          layer turns on the other side of what is below: M(below) @ M(layer),
-          both matrices of zyx angles, where Maya gives M(layer) @ M(below) in
-          the node's own order. Maya blends every node in its own order the
-          way it blends xyz. Additive layers agree only on xyz (but for the
-          sign cases below), passthrough layers on xyz and zyx; the others
-          are up to 2.0 apart as matrices;
+          xyz, as the file stores it, rotation active or not, though a node
+          whose rotation is inactive loads with rotate_order 0 (a root of the
+          file whose rotation is inactive, kept or dropped, blends as an xyz
+          node in a file the clip turns into Maya's axes, as ConvertScene
+          turns its rotation on in xyz; a node kept under a dropped root is no
+          root of the file): the sdk hands the x, y and z angles to its euler
+          code as they are, so an even order (yzx, zxy) blends as an xyz node
+          does and an odd one (xzy, yxz, zyx) as the sdk blends a zyx node,
+          whose additive layer turns on the other side of what is below:
+          M(below) @ M(layer), both matrices of zyx angles, where Maya gives
+          M(layer) @ M(below) in the node's own order. Maya blends every node
+          in its own order the way it blends xyz. Additive layers agree only
+          on xyz (but for the sign cases below), passthrough layers on xyz and
+          zyx; the others are up to 2.0 apart as matrices;
         - an additive layer blends a rotation by layer at a weight other than
           0 or 100, and the quaternion Maya builds from the layer's angles
           (qz qy qx of the half angles on an xyz node) has the other sign
@@ -11531,7 +11590,7 @@ class ClipData(HierarchyData):
         with _NodesLoad(), open_fbx(filename, FBX) as scene:
             turn         = _fbx_axis_turn(scene, axis_system, filename)
             scale_factor = _fbx_scale_factor(scene, scale_factor)
-            hierarchy_data, nodes, tree = _walk_fbx(scene, scale_factor, kinds)
+            hierarchy_data, nodes, tree = _walk_fbx(scene, scale_factor, kinds, turn is not None)
 
             # the rest pose, the file's static pose from this same read, as
             # HierarchyData.load_fbx loads it: turned on a copy of the dicts,
@@ -11631,7 +11690,7 @@ class ClipData(HierarchyData):
 
             # the frame grid in the sdk's ticks, every frame sampled at once
             ticks = _fbx_ticks((start + np.arange(clip.frame_count)) / fps, per_second)
-            _fbx_sample_take(stack, sampled, ticks, scale_factor, held)
+            _fbx_sample_take(stack, sampled, ticks, scale_factor, held, tree.orders, tree.blend)
 
         # a joint's orient as the fold leaves it, every frame: a node a
         # dropped node above moves only at its static values took the fold

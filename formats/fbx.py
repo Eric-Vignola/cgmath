@@ -2857,6 +2857,10 @@ class FbxExporter:
                 self._ROTATE_ORDER_MAP[item.rotate_order],
             )
 
+            # rotation active on every node, as Maya's exporter writes it: fbx
+            # ignores the rotate order of a node without it, turning it in xyz
+            node.SetRotationActive(True)
+
             # a parent the export leaves out -- outside the view exported, or
             # a parent_uuid no node carries -- makes the node a root, as a
             # view's copy() does: never a node found by its name
@@ -2882,8 +2886,7 @@ class FbxExporter:
                     else fbx.FbxTransform.EInheritType.eInheritRSrs
                 )
                 node.SetTransformationInheritType(inherit_type)
-                # turn on rotationActive or pre/post are ignored
-                node.SetRotationActive(True)
+                # pre and post rotation, which fbx reads with rotation active
                 node.SetPreRotation(
                     fbx.FbxNode.EPivotSet.eSourcePivot,
                     fbx.FbxVector4(*item.joint_orient, 1.0),

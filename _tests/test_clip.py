@@ -8352,11 +8352,18 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         ("cBare", "camera", (10, 0, 0), (0, 0, 0), False, (0, -90, 0)),
         ("cOdd", "camera", (0, 0, 0), (10, 20, 30), False, (177.27316955680365, -67.73125550470313, 154.49444973901745)),
         ("lamp", "light", (10, 0, 0), (-90, 0, 0), False, (0, 0, 0)),
+        ("cZxy", "camera", (20, 5, 0), (0, -90, 20), False, (-20, 0, 0)),
+        ("lZxy", "light", (10, 0, 0), (-90, 0, 0), False, (0, 0, 0)),
     )
+
+    # the rotate order of a view of VIEWS that is not in xyz, in Maya's
+    # numbering (zxy); the sdk's is 4
+    VIEW_ORDERS = {"cZxy": 2, "lZxy": 2}
 
     def viewed(self, axes, name):
         """each of :attr:`VIEWS` at the root and under a group, turned and
-        moved, each holding a locator; and a locator at the root"""
+        moved, in its :attr:`VIEW_ORDERS` order or xyz, each holding a
+        locator; and a locator at the root"""
         path    = os.path.join(self.tmp.name, name)
         manager = FBX.FbxManager.Create()
         manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
@@ -8385,6 +8392,7 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
                 node.LclTranslation.Set(FBX.FbxDouble3(k, 2, 3))
                 node.LclRotation.Set(FBX.FbxDouble3(15, 25, 35))
                 node.SetRotationActive(active)
+                node.SetRotationOrder(source, list(FBX.EFbxRotationOrder)[4 if view in self.VIEW_ORDERS else 0])
                 node.SetPreRotation(source, FBX.FbxVector4(*pre, 1.0))
                 node.SetPostRotation(source, FBX.FbxVector4(*post, 1.0))
                 parent.AddChild(node)
@@ -8398,19 +8406,21 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
 
     def test_a_view_reads_its_pre_and_post_rotation_as_maya_does(self):
         """Maya's importer reads a camera's and a light's pre and post
-        rotation whether its rotation is active or not: the view's children
-        turn by its rotate axis (a camera's what its post rotation adds to
-        fbx's view axis, :attr:`VIEWS`) and its pre rotation. But a root of
-        a file whose up axis is x or z with its rotation inactive: the sdk's
-        ConvertScene, which turns that file into Maya's Y-up, drops both, so
-        such a camera turns its children by (0, -90, 0), fbx's view axis,
-        and its pre rotation is gone (view_rules.py: each child within
-        7.1e-15 of Maya's FBXImport, Y-up, Z-up, 3ds Max's and an X-up
-        file). The read puts each child there, in the file's axes and,
-        turned, in Maya's, in a Y-up, a Z-up and an X-up file"""
+        rotation, and its rotate order, whether its rotation is active or
+        not: the view's children turn by its rotate axis (a camera's what
+        its post rotation adds to fbx's view axis, :attr:`VIEWS`), its
+        rotate in its order (:attr:`VIEW_ORDERS`) and its pre rotation. But a
+        root of a file whose up axis is x or z with its rotation inactive:
+        the sdk's ConvertScene, which turns that file into Maya's Y-up,
+        drops both and turns it in xyz, so such a camera turns its children
+        by (0, -90, 0), fbx's view axis, its pre rotation is gone and its
+        rotate turns in xyz (view_rules.py and probe_test_views_maya.py: each
+        child within 7.1e-15 of Maya's FBXImport, Y-up, Z-up, 3ds Max's and
+        an X-up file). The read puts each child there, in the file's axes
+        and, turned, in Maya's, in a Y-up, a Z-up and an X-up file"""
 
-        def lcl(translate=(0, 0, 0), rotate=(0, 0, 0)):
-            out        = euler_to_matrix(np.radians([rotate]), np.zeros(1, dtype=int))[0]
+        def lcl(translate=(0, 0, 0), rotate=(0, 0, 0), order=0):
+            out        = euler_to_matrix(np.radians([rotate]), np.full(1, order))[0]
             out[3, :3] = translate
             return out
 
@@ -8425,10 +8435,11 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
                 for suffix, parent in (("", np.eye(4)), ("_held", lcl((1, -2, 0.5), (10, -20, 30)))):
                     with self.subTest(axes=label, view=view + suffix):
                         # a root of the Z-up or X-up file with its rotation inactive
-                        turns, first = axis, pre
+                        turns, first, order = axis, pre, self.VIEW_ORDERS.get(view, 0)
                         if label != "Y-up" and not active and not suffix:
-                            turns, first = ((0, -90, 0) if kind == "camera" else (0, 0, 0)), (0, 0, 0)
-                        place = lcl(rotate=turns) @ lcl(rotate=(15, 25, 35)) @ lcl((k, 2, 3), first) @ parent
+                            turns, first, order = ((0, -90, 0) if kind == "camera" else (0, 0, 0)), (0, 0, 0), 0
+                        spin  = lcl(rotate=(15, 25, 35), order=order)
+                        place = lcl(rotate=turns) @ spin @ lcl((k, 2, 3), first) @ parent
                         want  = lcl((0.5, 1.0, -2.0)) @ place
                         kid   = view + suffix + "_kid"
                         self.assertTrue(np.allclose(own[kid].world_matrix, want, rtol=0.0, atol=1e-9), kid)
@@ -9126,6 +9137,376 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
 
 
 @unittest.skipIf(FBX is None, "fbx sdk is not installed")
+class TestFbxRotationInactive(unittest.TestCase):
+    """a node whose rotation is inactive: the sdk ignores its rotate order,
+    as it ignores its pre and post rotation, and turns it in xyz, and so
+    does the read, rig and clip. A view keeps its order where Maya's
+    importer reads its pre rotation (TestFbxFoldsWhatItDrops.VIEWS). Maya's
+    importer turns any other such node by neither order: it keeps the
+    stored order on the xyz angles of that order's turn
+    (probe_rotactive_rule.py), so it is no truth here; the truth is the
+    sdk's own evaluation"""
+
+    FRAMES = 9
+
+    # the sdk's worlds, read as TestFbxLoadsInMayaAxes reads them
+    truth        = TestFbxLoadsInMayaAxes.truth
+    assertWorlds = TestFbxLoadsInMayaAxes.assertWorlds
+    rig_worlds   = staticmethod(TestFbxLoadsInMayaAxes.rig_worlds)
+    clip_worlds  = staticmethod(TestFbxLoadsInMayaAxes.clip_worlds)
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def authored(self, axes, name, animated=True):
+        """in ``axes`` (Maya's Y-up for None): a group root, a joint root
+        holding a joint, and a locator root, their rotation inactive, in zxy,
+        xzy and zyx (the sdk's orders 4, 1 and 5), each root with a pre and a
+        post rotation the sdk ignores; an attribute-less node the read drops,
+        rotation inactive, in yxz, holding a locator; a group root in zxy
+        with rotation active; "gimbal", a group root in zxy with rotation
+        inactive, holding a locator; and "anchor", a locator at the root at
+        the identity. Keyed over FRAMES frames at 24 fps, the group and the
+        joint under the joint root on an additive layer too, rotation
+        blended by layer, and "gimbal"'s rotate y 0 to 180 under an
+        additive 10 degrees of x"""
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        if axes is not None:
+            scene.GetGlobalSettings().SetAxisSystem(axes)
+        scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames24)
+        source = FBX.FbxNode.EPivotSet.eSourcePivot
+        top    = scene.GetRootNode()
+
+        def node(name, kind, parent, translate, rotate, order=0, active=False, pre=None, post=None):
+            made = FBX.FbxNode.Create(scene, name)
+            if kind == "joint":
+                made.SetNodeAttribute(FBX.FbxSkeleton.Create(scene, name))
+            elif kind is not None:
+                attr = FBX.FbxNull.Create(scene, name)
+                look = FBX.FbxNull.ELook.eCross if kind == "locator" else FBX.FbxNull.ELook.eNone
+                attr.Look.Set(look.value)
+                made.SetNodeAttribute(attr)
+            made.LclTranslation.Set(FBX.FbxDouble3(*translate))
+            made.LclRotation.Set(FBX.FbxDouble3(*rotate))
+            made.SetRotationActive(active)
+            made.SetRotationOrder(source, list(FBX.EFbxRotationOrder)[order])
+            if pre is not None:
+                made.SetPreRotation(source, FBX.FbxVector4(*pre, 1.0))
+            if post is not None:
+                made.SetPostRotation(source, FBX.FbxVector4(*post, 1.0))
+            parent.AddChild(made)
+            return made
+
+        node("anchor", "locator", top, (0, 0, 0), (0, 0, 0))
+        grp  = node("grp", "transform", top, (1, 2, 3), (35, -10, 50), 4, pre=(0, 0, 30), post=(10, 0, 0))
+        hip  = node("hip", "joint", top, (1, 2, 3), (35, -10, 50), 4, pre=(0, 0, 30), post=(10, 0, 0))
+        knee = node("knee", "joint", hip, (0, 3, 0), (10, 20, 30), 1)
+        loc  = node("loc", "locator", top, (0, 0, 2), (40, 25, -70), 5, pre=(10, 0, 0), post=(0, 20, 0))
+        bare = node("bare", None, top, (2, 0, 1), (20, 60, -30), 3)
+        node("pin", "locator", bare, (1, 0, 0), (0, 0, 0))
+        node("on", "transform", top, (0, 1, 0), (35, -10, 50), 4, active=True)
+        gimbal = node("gimbal", "transform", top, (-1, 0, 2), (0, 0, 0), 4)
+        node("tip", "locator", gimbal, (0, 2, 1), (0, 0, 0))
+
+        if animated:
+            stack = FBX.FbxAnimStack.Create(scene, "Take 001")
+            base  = FBX.FbxAnimLayer.Create(scene, "Base Layer")
+            extra = FBX.FbxAnimLayer.Create(scene, "Additive")
+            extra.BlendMode.Set(0.0)  # additive, rotation blended by layer
+            stack.AddMember(base)
+            stack.AddMember(extra)
+            linear = FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear
+            frames = np.arange(self.FRAMES)
+
+            def keyed(made, layer, axis, values):
+                curve = made.LclRotation.GetCurve(layer, axis, True)
+                curve.KeyModifyBegin()
+                for frame, value in enumerate(values.tolist()):
+                    time = FBX.FbxTime()
+                    time.SetSecondDouble(frame / 24.0)
+                    key = curve.KeyAdd(time)[0]
+                    curve.KeySetValue(key, value)
+                    curve.KeySetInterpolation(key, linear)
+                curve.KeyModifyEnd()
+
+            for made in (grp, hip, knee, loc, bare):
+                rest = tuple(made.LclRotation.Get())
+                for i, axis in enumerate("XYZ"):
+                    keyed(made, base, axis, rest[i] + (7 + 3 * i) * frames)
+            for made in (grp, knee):
+                keyed(made, extra, "X", -3.0 * frames)
+                keyed(made, extra, "Y", 4.0 * frames)
+            keyed(gimbal, base, "Y", 22.5 * frames)
+            keyed(gimbal, extra, "X", np.full(self.FRAMES, 10.0))
+
+        path     = os.path.join(self.tmp.name, name)
+        exporter = FBX.FbxExporter.Create(manager, "")
+        if not exporter.Initialize(path, -1, manager.GetIOSettings()):
+            raise RuntimeError(f"cannot write {path}")
+        exporter.Export(scene)
+        exporter.Destroy()
+        manager.Destroy()
+        return path
+
+    def test_a_node_whose_rotation_is_inactive_turns_in_xyz(self):
+        """every node, on the rig and every frame of the clip, is where the
+        sdk puts it, in a Y-up file and, turned to Maya's axes, a Z-up one:
+        the nodes whose rotation is inactive load in xyz, each with the
+        file's rotate where nothing moves it and no joint orient, and the
+        node whose rotation is active keeps its zxy. The read took the
+        stored order of each before: up to 1.0 off on the rig and 1.9 on
+        the clip (probe_test_fixture_gaps.py)"""
+        inactive = ("grp", "hip", "knee", "loc", "gimbal")
+        for label, axes in (("Y-up", None), ("Z-up", FBX.FbxAxisSystem.MayaZUp)):
+            with self.subTest(axes=label):
+                path   = self.authored(axes, f"inactive_{label}.fbx")
+                still  = self.authored(axes, f"inactive_{label}_still.fbx", animated=False)
+                rig    = HierarchyData.load_fbx(still)
+                clip   = ClipData.load_fbx(path)
+                turn   = np.asarray(rig["anchor"].world_matrix)
+
+                rest   = {name: world @ turn for name, world in self.truth(still, convert=False).items()}
+                frames = {name: world @ turn for name, world in self.truth(path, self.FRAMES, convert=False).items()}
+                self.assertWorlds(self.rig_worlds(rig), rest)
+                self.assertWorlds(self.clip_worlds(clip), frames)
+
+                for loaded in (rig, clip):
+                    self.assertEqual([loaded[name].rotate_order for name in inactive], [0] * len(inactive))
+                    self.assertEqual(loaded["on"].rotate_order, 2)
+                # a node nothing moves keeps the file's rotate, to the bit, and
+                # a joint no joint orient: a root does in the file's own axes,
+                # the turn to Maya's going in a joint root's joint orient
+                kept = {"knee": (10, 20, 30)}
+                if axes is None:
+                    kept.update({"grp": (35, -10, 50), "hip": (35, -10, 50), "loc": (40, 25, -70)})
+                for name, rotate in kept.items():
+                    self.assertTrue(np.array_equal(rig[name].rotate, np.array(rotate, dtype=float)), name)
+                    if rig[name].node_type == "joint":
+                        self.assertTrue(np.array_equal(rig[name].joint_orient, np.zeros(3)), name)
+
+    def test_a_rotation_blended_by_layer_turns_as_the_sdk_turns_it(self):
+        """the sdk blends a rotation by layer in the node's stored order,
+        rotation active or not, then turns a node whose rotation is inactive
+        in xyz: "gimbal", in zxy, keyed in y from 0 to 180 under an additive
+        10 degrees of x, comes back from the sdk's blend across gimbal, a
+        half turn off in x and z from frame 5. The read blends as the sdk
+        does and filters the curve in xyz, the order the node turns in: the
+        curve runs on, (10, 22.5 a frame, 0), every frame where the sdk puts
+        it. Blended in xyz, the xzy joint under the additive layer was 1.6
+        off (the zxy group, an even order, blends as an xyz node either
+        way); filtered in zxy, "gimbal" was 1.85 off from frame 5, its y
+        stepping 157.5 (probe_test_fixture_gaps.py, probe_flip.py)"""
+        path   = self.authored(None, "gimbal.fbx")
+        clip   = ClipData.load_fbx(path)
+        truth  = self.truth(path, self.FRAMES, convert=False)
+        worlds = self.clip_worlds(clip)
+        for name in ("gimbal", "tip", "grp", "knee"):
+            self.assertWorlds({name: worlds[name]}, {name: truth[name]})
+
+        curve      = clip.frames.rotate[:, clip.index("gimbal")]
+        want       = np.zeros((self.FRAMES, 3))
+        want[:, 0] = 10.0
+        want[:, 1] = 22.5 * np.arange(self.FRAMES)
+        self.assertTrue(np.allclose(curve, want, rtol=0.0, atol=1e-9), np.round(curve, 3))
+
+    def layered_roots(self, axes, name, translated=False):
+        """in ``axes``: three roots whose rotation is inactive, a group in
+        zyx, a locator in yxz and a joint in xzy (the sdk's odd orders 5, 3
+        and 1), "on", a group in zyx with rotation active, and "bare", an
+        attribute-less node the read drops, rotation inactive, in zyx, each
+        holding a locator, the one under "bare" in yxz with rotation
+        inactive; the roots and that locator keyed on all three axes over
+        FRAMES frames at 24 fps, under an additive layer that turns them,
+        rotation blended by layer. ``translated`` has that layer move the
+        roots too, 3 a frame along the file's y and -2 along its z, and adds
+        "anchor", a locator at the root at the identity"""
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        scene.GetGlobalSettings().SetAxisSystem(axes)
+        scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames24)
+        source = FBX.FbxNode.EPivotSet.eSourcePivot
+        stack  = FBX.FbxAnimStack.Create(scene, "Take 001")
+        base   = FBX.FbxAnimLayer.Create(scene, "Base Layer")
+        extra  = FBX.FbxAnimLayer.Create(scene, "Additive")
+        extra.BlendMode.Set(0.0)  # additive, rotation blended by layer
+        stack.AddMember(base)
+        stack.AddMember(extra)
+        linear = FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear
+        frames = np.arange(self.FRAMES)
+
+        def keyed(prop, layer, axis, values):
+            curve = prop.GetCurve(layer, axis, True)
+            curve.KeyModifyBegin()
+            for frame, value in enumerate(values.tolist()):
+                time = FBX.FbxTime()
+                time.SetSecondDouble(frame / 24.0)
+                key = curve.KeyAdd(time)[0]
+                curve.KeySetValue(key, value)
+                curve.KeySetInterpolation(key, linear)
+            curve.KeyModifyEnd()
+
+        def node(name, kind, parent, translate):
+            made = FBX.FbxNode.Create(scene, name)
+            if kind == "joint":
+                made.SetNodeAttribute(FBX.FbxSkeleton.Create(scene, name))
+            elif kind is not None:
+                attr = FBX.FbxNull.Create(scene, name)
+                look = FBX.FbxNull.ELook.eCross if kind == "locator" else FBX.FbxNull.ELook.eNone
+                attr.Look.Set(look.value)
+                made.SetNodeAttribute(attr)
+            made.LclTranslation.Set(FBX.FbxDouble3(*translate))
+            parent.AddChild(made)
+            return made
+
+        roots = (
+            ("zyx", "transform", 5, False),
+            ("yxz", "locator", 3, False),
+            ("xzy", "joint", 1, False),
+            ("on", "transform", 5, True),
+            ("bare", None, 5, False),
+        )
+        for index, (label, kind, order, active) in enumerate(roots):
+            made = node(label, kind, scene.GetRootNode(), (index, 1, -1))
+            made.SetRotationActive(active)
+            made.SetRotationOrder(source, list(FBX.EFbxRotationOrder)[order])
+            kid     = node(f"{label}_kid", "locator", made, (0.5, 1.5, -1))
+            layered = [made]
+            if label == "bare":
+                # no root of the file, though the read keeps no node above it:
+                # the sdk blends it in its stored order, ConvertScene or not
+                kid.SetRotationActive(False)
+                kid.SetRotationOrder(source, list(FBX.EFbxRotationOrder)[3])
+                layered.append(kid)
+            for each in layered:
+                for axis, (rest, step) in zip("XYZ", ((30, 6), (-40, 10), (50, 14))):
+                    keyed(each.LclRotation, base, axis, rest + step * frames)
+                keyed(each.LclRotation, extra, "X", np.full(self.FRAMES, 20.0))
+                keyed(each.LclRotation, extra, "Y", -3.0 * frames)
+            if translated:
+                keyed(made.LclTranslation, extra, "Y", 3.0 * frames)
+                keyed(made.LclTranslation, extra, "Z", -2.0 * frames)
+        if translated:
+            node("anchor", "locator", scene.GetRootNode(), (0, 0, 0))
+
+        path     = os.path.join(self.tmp.name, name)
+        exporter = FBX.FbxExporter.Create(manager, "")
+        if not exporter.Initialize(path, -1, manager.GetIOSettings()):
+            raise RuntimeError(f"cannot write {path}")
+        exporter.Export(scene)
+        exporter.Destroy()
+        manager.Destroy()
+        return path
+
+    def test_a_root_a_layer_turns_blends_as_convertscene_leaves_it(self):
+        """ConvertScene, which the read stands for where it turns a file
+        into Maya's axes, turns the rotation of a root whose rotation is
+        inactive on in xyz, in every axis system but Maya's Y-up, and the
+        sdk then blends that root's layered rotation as an xyz node's, not
+        in the order the file stores, whether the read keeps that root or
+        drops it; a node the read keeps under a root it drops is no root of
+        the file, and the sdk blends it in its stored order: every node, on
+        every frame, is where the sdk puts it after ConvertScene in a Z-up,
+        an X-up and a Y-up file whose front is x, the locator under "bare",
+        layered in yxz, among them, and so is every locator of the Z-up file
+        read with node_types=("locator",), which drops every root but the
+        yxz locator; with axis_system=None, every node is where the sdk puts
+        it in the file's own axes, blended in the stored order. The read
+        turned such a root and blended it in the stored order before: up to
+        1.90 off in every file, the locators under them 2.53, "bare"'s
+        included; blended in that order alone, 0.90 off in the three turned
+        files, the locators 1.35; in xyz at the roots the read keeps alone,
+        the locator under "bare" 1.35, and with node_types=("locator",)
+        those under the group and the joint too; and in xyz at a node the
+        read keeps under a root it drops, as at a root of the clip, the
+        locator under "bare" 0.65 in the three turned files and with
+        node_types=("locator",) (probe_layered_fixture.py; probe_axes.py,
+        1.70 and 2.82 on its fixture in each of the 23 axis systems;
+        probe_dropped_root.py, 2.82 on its; probe_under_dropped.py, 0.90 on
+        its)"""
+        axes = TestFbxLoadsInMayaAxes.axes
+        for index, (label, system, axis_system, node_types) in enumerate(
+            (
+                ("Z-up", FBX.FbxAxisSystem.MayaZUp, "maya_y_up", None),
+                ("X-up", axes("eXAxis", "eParityOdd"), "maya_y_up", None),
+                ("Y-up, front x", axes("eYAxis", "eParityEven"), "maya_y_up", None),
+                ("Z-up, its own axes", FBX.FbxAxisSystem.MayaZUp, None, None),
+                ("Z-up, locators only", FBX.FbxAxisSystem.MayaZUp, "maya_y_up", ("locator",)),
+            )
+        ):
+            with self.subTest(axes=label):
+                path   = self.layered_roots(system, f"roots{index}.fbx")
+                clip   = ClipData.load_fbx(path, axis_system=axis_system, node_types=node_types)
+                truth  = self.truth(path, self.FRAMES, convert=axis_system is not None)
+                worlds = self.clip_worlds(clip)
+                kept   = sorted(truth)
+                if node_types is not None:
+                    kept = ["yxz"] + [name for name in kept if name.endswith("_kid")]
+                self.assertEqual(sorted(worlds), sorted(kept))
+                self.assertWorlds(worlds, {name: truth[name] for name in kept})
+                if node_types is None:
+                    orders = [clip[name].rotate_order for name in ("zyx", "yxz", "xzy", "on", "bare_kid")]
+                    self.assertEqual(orders, [0, 0, 0, 5, 0])
+
+    def test_a_root_a_layer_translates_and_turns_keeps_the_files_translate(self):
+        """a root an additive layer translates keeps its translate in the
+        file's world turned, where ConvertScene leaves the layer's translate
+        in the file's axes (TestFbxLoadsInMayaAxes.test_a_root_an_additive_
+        layer_moves_keeps_the_files_world_turned), but a root whose rotation
+        is inactive still blends its layered rotation as ConvertScene's xyz
+        node, as Maya's importer does a group's or a locator's: on the
+        layered roots, moved by the layer as well, in a Z-up, an X-up and a
+        Y-up file whose front is x, every root's world translate is the
+        file's world turned on every frame, ConvertScene's 16 to 40 off it,
+        and every node's 3x3 the sdk's after ConvertScene, which the file's
+        world turned is 0.90 off on the zyx group, the yxz locator and the
+        xzy joint (1.70 on probe_translate_turn_rot.py's fixture, where the
+        zyx group is within 2.3e-3 of Maya's FBXImport in a Z-up file and
+        1.5e-3 in an X-up one). The read turned such a root and blended it
+        in the stored order before: its 3x3 up to 1.89 off; blended in that
+        order alone, 0.90; in xyz at the roots the read keeps alone, the
+        locator under "bare" 0.68; and in xyz at a node the read keeps under
+        a root it drops, that locator 0.65 (probe_layered_fixture.py)"""
+        axes = TestFbxLoadsInMayaAxes.axes
+        for index, (label, system) in enumerate(
+            (
+                ("Z-up", FBX.FbxAxisSystem.MayaZUp),
+                ("X-up", axes("eXAxis", "eParityOdd")),
+                ("Y-up, front x", axes("eYAxis", "eParityEven")),
+            )
+        ):
+            with self.subTest(axes=label):
+                path      = self.layered_roots(system, f"moved{index}.fbx", translated=True)
+                clip      = ClipData.load_fbx(path)
+                worlds    = self.clip_worlds(clip)
+                converted = self.truth(path, self.FRAMES)
+                turn      = worlds["anchor"][0]
+                file      = self.truth(path, self.FRAMES, convert=False)
+                turned    = {name: world @ turn for name, world in file.items()}
+                self.assertEqual(sorted(worlds), sorted(converted))
+
+                # the translate the file's, turned, where ConvertScene's is elsewhere
+                for name in ("zyx", "yxz", "xzy", "on"):
+                    got, want = worlds[name][:, 3, :3], turned[name][:, 3, :3]
+                    off = np.abs(got - want).max()
+                    self.assertTrue(np.allclose(got, want, rtol=0.0, atol=1e-9), f"{name}'s translate: {off:.2e} off")
+                    self.assertGreater(float(np.abs(converted[name][:, 3, :3] - want).max()), 1.0, name)
+
+                # the 3x3 ConvertScene's, which the file's world turned is not on the inactive roots
+                for name, world in worlds.items():
+                    got, want = world[:, :3, :3], converted[name][:, :3, :3]
+                    off = np.abs(got - want).max()
+                    self.assertTrue(np.allclose(got, want, rtol=0.0, atol=1e-9), f"{name}'s 3x3: {off:.2e} off")
+                for name in ("zyx", "yxz", "xzy"):
+                    off = np.abs(turned[name][:, :3, :3] - converted[name][:, :3, :3]).max()
+                    self.assertGreater(float(off), 0.5, name)
+
+
+@unittest.skipIf(FBX is None, "fbx sdk is not installed")
 class TestClipLoadFbxSampling(unittest.TestCase):
     """load_fbx reads each curve's keys once and evaluates every frame at
     once. These hold it to the sdk's own evaluation, asked one frame at a
@@ -9517,7 +9898,8 @@ class TestClipLoadFbxSampling(unittest.TestCase):
         blocks       = [np.zeros((5, 1, 3)), np.zeros((5, 1, 3)), np.ones((5, 1, 3))]
         blocks[0][:] = (0.1, 0.2, 0.3)
 
-        hierarchy.hierarchy._fbx_sample_take(stack, [(node, 0)], ticks, 1.0, blocks)
+        zeros = np.zeros(1, dtype=np.intp)
+        hierarchy.hierarchy._fbx_sample_take(stack, [(node, 0)], ticks, 1.0, blocks, zeros, zeros)
 
         want = []
         for tick in ticks.tolist():

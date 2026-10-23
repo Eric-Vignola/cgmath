@@ -301,6 +301,38 @@ class TestFbxExportSkeleton(unittest.TestCase):
             [("root", "joint"), ("group", "transform"), ("loc", "locator")],
         )
 
+    def test_every_node_is_written_with_rotation_active(self):
+        """as Maya's exporter writes it: fbx turns a node whose rotation is
+        inactive in xyz, whatever its rotate order, and so do the sdk and the
+        read. A group, a locator and a joint in zxy, xzy and zyx come back
+        where the rig puts them, through the sdk and the read; written with
+        only the joint's rotation active, the sdk put the group 0.49 off and
+        the joint 1.26, Maya's FBXImport the joint 1.3
+        (probe_save_orders_test_rig.py)"""
+        group = _joint("group", rotate=(35.0, -10.0, 50.0), translate=(1.0, 2.0, 3.0), rotate_order=2)
+        loc   = _joint("loc", group, rotate=(10.0, 20.0, 30.0), translate=(0.0, 1.0, 0.0), rotate_order=3)
+        hip   = _joint("hip", loc, rotate=(40.0, 25.0, -70.0), translate=(0.0, 3.0, 0.0), rotate_order=5)
+
+        group.node_type = "transform"
+        loc.node_type   = "locator"
+
+        rig = HierarchyData([group, loc, hip])
+        self._export(rig)
+
+        def _placed(node):
+            world = node.EvaluateGlobalTransform()
+            return node.GetRotationActive(), np.array([[world.Get(r, c) for c in range(4)] for r in range(4)])
+
+        placed = self._walk(_placed)
+        loaded = HierarchyData.load_fbx(self.path)
+        for path, name in (("|group", "group"), ("|group|loc", "loc"), ("|group|loc|hip", "hip")):
+            active, world = placed[path]
+            want = np.asarray(rig[name].world_matrix)
+            self.assertTrue(active, name)
+            self.assertTrue(np.allclose(world, want, rtol=0.0, atol=1e-9), name)
+            self.assertTrue(np.allclose(loaded[name].world_matrix, want, rtol=0.0, atol=1e-9), name)
+            self.assertEqual(loaded[name].rotate_order, rig[name].rotate_order, name)
+
     def test_unsupported_node_types_are_skipped(self):
         # a constraint can't be exported, it is skipped along with what is under it
         weight = {"w0": {"attributeType": "double", "value": 1.0, "keyable": True}}

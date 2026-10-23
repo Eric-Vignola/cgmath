@@ -1803,15 +1803,20 @@ Maya's own evaluation of a take differs from the SDK's, and so from the
 loader's, where:
 
 - a rotation is blended by layer on a node whose rotate order is not
-  xyz: the SDK hands the x, y and z angles to its euler code as they
-  are, so an even order (yzx, zxy) blends as an xyz node does and an odd
-  one (xzy, yxz, zyx) as the SDK blends a zyx node, whose additive layer
-  turns on the other side of what is below: M(below) @ M(layer), both
-  matrices of zyx angles, where Maya gives M(layer) @ M(below) in the
-  node's own order. Maya blends every node in its own order the way it
-  blends xyz. Additive layers agree only on xyz (but for the sign cases
-  below), passthrough layers on xyz and zyx; the others are up to 2.0
-  apart as matrices;
+  xyz, as the file stores it, rotation active or not, though a node
+  whose rotation is inactive loads with `rotate_order` 0 (a root of the
+  file whose rotation is inactive, kept or dropped, blends as an xyz
+  node in a file the loader turns into Maya's axes, as ConvertScene
+  turns its rotation on in xyz; a node kept under a dropped root is no
+  root of the file): the SDK hands the x, y and z angles to its euler
+  code as they are, so an even order (yzx, zxy) blends as an xyz node
+  does and an odd one (xzy, yxz, zyx) as the SDK blends a zyx node,
+  whose additive layer turns on the other side of what is below:
+  M(below) @ M(layer), both matrices of zyx angles, where Maya gives
+  M(layer) @ M(below) in the node's own order. Maya blends every node in
+  its own order the way it blends xyz. Additive layers agree only on xyz
+  (but for the sign cases below), passthrough layers on xyz and zyx; the
+  others are up to 2.0 apart as matrices;
 - an additive layer blends a rotation by layer at a weight other than 0
   or 100, and the quaternion Maya builds from the layer's angles (qz qy
   qx of the half angles on an xyz node) has the other sign from the one
@@ -1880,7 +1885,14 @@ transform or locator holding a `rotate_axis` loses it in the file, so it
 reloads off by that rotation. A matrix write, `set_parent()`,
 `match_translate()` and `match_matrix()` all keep a node's `rotate_axis`.
 Fold it into `rotate` before saving: read `matrix`, zero `rotate_axis`,
-write `matrix` back.
+write `matrix` back. Every node is written with rotation active, as
+Maya's exporter writes it: FBX turns a node without it in xyz, whatever
+its rotate order. A file an earlier `save_fbx` wrote holds a group or a
+locator with its rotation inactive, so one in another order than xyz
+now loads where the SDK puts it, in xyz, `rotate_order` 0, not where it
+was saved (a zxy group 0.49 off, a joint under it 1.26): load it with
+the version that wrote it, `save()` it, then load that and `save_fbx`
+it with this one.
 
 ```python
 held = HierarchyData([
@@ -2014,14 +2026,19 @@ Maya away from where Maya imports the file (1.34 off with a translate
 of 1.6e12). A node's own pivots and offsets go into its translate,
 and the pre and post rotation of a node that is no joint into its
 rotate, so a group whose pivot Maya centred on its children loads
-where Maya shows it. A light's post rotation, FBX's view axis, is
+where Maya shows it. A node whose rotation is inactive turns in xyz, as
+the SDK turns it, its `rotate_order` 0 whatever order the file stores;
+Maya's importer turns such a node by neither order, keeping the stored
+order on the xyz angles of that order's turn, but on a root of an X- or
+Z-up file. A light's post rotation, FBX's view axis, is
 left out, as Maya places its children; a camera's turns its children by
 what it adds to the view axis Maya's exporter writes, (0, -90, 0), which
 Maya's importer keeps as the camera's rotate axis. Maya reads a camera's
-or a light's pre rotation, and a camera's post rotation, whether its
-rotation is active or not, and so does the read, but on a root of an
-X- or Z-up file with its rotation inactive, where the axis conversion
-drops them. Under `pose="bind"` a dropped node a bind pose lists is
+or a light's pre rotation and rotate order, and a camera's post
+rotation, whether its rotation is active or not, and so does the read,
+but on a root of an X- or Z-up file with its rotation inactive, where
+the axis conversion drops them and turns the root in xyz. Under
+`pose="bind"` a dropped node a bind pose lists is
 folded in at its bind, so each node kept sits where the full bind
 read puts it. A file whose dropped nodes, pivots and offsets hold the
 identity reads as it holds its nodes, to the bit.

@@ -1099,6 +1099,9 @@ Each `TransformData` maps onto FBX like this:
 | `"locator"` | `FbxMarker` | — |
 | anything else | — | `RuntimeError` |
 
+Every node is written with rotation active, as Maya's exporter writes it:
+FBX turns a node without it in xyz, whatever its `rotate_order`.
+
 `user_defined_attributes` become real FBX properties, typed the way Maya's
 own FBX plug-in types them, and `load_fbx` reads them back as the same
 specs, binary or ASCII. A number, `bool`, `enum` or `string` is one
