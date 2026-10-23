@@ -1016,7 +1016,7 @@ def _read_skins_fbx(
     filename:      str,
     bind_matrices: bool            = False,
     scale_factor:  Optional[float] = None,
-    axis_system:   Optional[str]   = "maya_y_up",
+    axis_system:   Optional[str]   = None,
 ) -> list:
     """an fbx's skins as ``(SkinData, inverse bind matrices or None)`` pairs
 
@@ -1050,12 +1050,16 @@ def _read_skins_fbx(
     inside such a root and the other outside, the inverse bind is
     ``[[A j / m, 0], [b j, 1]]``.
 
-    They are in the axes the mesh reader turns the points into, given the
-    same ``axis_system``: a point ``p`` becomes ``p C`` and a rig loaded the
-    same way has joint worlds ``W K``, ``K`` the turn ``C`` as a 4x4, so the
-    inverse bind becomes ``K^-1 B`` (its first three rows ``C^T`` times the
-    file's) and the posed mesh is the file's, turned. Only the matrices
-    turn, so a left handed file raises only when they are asked for.
+    They take the mesh's points from its own object space, where
+    ``cgmath.geometry.mesh.load_fbx`` reads them, as the file keeps them.
+    ``axis_system`` None, the default, leaves them so: a rig read in Maya's
+    Y-up, ``HierarchyData.load_fbx``'s default, has joint worlds ``W K``,
+    ``K`` the turn its roots take as a 4x4, so ``p B W K`` is the file's
+    posed point, turned. "maya_y_up" is for points turned as
+    ``render.Object.load_fbx`` turns them, ``p C``: the inverse bind becomes
+    ``K^-1 B`` (its first three rows ``C^T`` times the file's), and ``p C
+    K^-1 B W K`` is the same point. Only the matrices turn, so a left handed
+    file raises only when they are asked for turned.
     """
     if fbx is None:
         raise ImportError("Autodesk FBX Python SDK is not installed")

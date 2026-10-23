@@ -60,7 +60,7 @@ from cgmath.geometry._base import (
 )
 from cgmath.geometry.deform import SkinDeformData
 from cgmath.geometry.mesh import (
-    load_fbx as _load_fbx,
+    _load_fbx,
     load_glb as _load_glb,
     load_obj as _load_obj,
     MeshData,
@@ -408,11 +408,17 @@ class Object(TransformData):
         """Load a mesh from an FBX file as an :class:`Object`.
 
         Convenience wrapper around :func:`cgmath.geometry.mesh.load_fbx`.
-        See :meth:`load_obj` for parameter semantics. The mesh and its skin's
-        bind matrices load the way ``HierarchyData.load_fbx`` and
-        ``ClipData.load_fbx`` load the rig, so :meth:`pose` with a rig or a
-        clip read from the same file, with the same ``scale_factor`` and
-        ``axis_system``, puts the mesh where the file has it.
+        See :meth:`load_obj` for parameter semantics. The Object is the
+        mesh alone, with no node above it: the mesh reader leaves the
+        mesh's node out, and with it the turn ``HierarchyData.load_fbx``
+        and ``ClipData.load_fbx`` put on a rig's roots to load a file in
+        Maya's Y-up, so the Object takes that turn on its points, normals
+        and skin bind matrices instead (``axis_system``). It shows the
+        mesh's own points turned into Maya's Y-up, where the file puts a
+        mesh whose node has no transform and nothing above it, and
+        :meth:`pose` with a rig or a clip read from the same file, with the
+        same ``scale_factor`` and ``axis_system``, puts a skinned mesh
+        where the file has it.
 
         Args:
             filename: Path to the ``.fbx`` file (``~`` and env vars OK).
@@ -450,9 +456,11 @@ class Object(TransformData):
                 those nodes, as ``HierarchyData.load_fbx`` says.
             axis_system: "maya_y_up" (default) turns the points, the
                 normals and the bind matrices from the file's axis
-                system into Maya's Y-up, as the rig loaders turn the
-                rig; ``None`` keeps the file's own axes.  A left
-                handed file raises ``ValueError`` unless it is ``None``.
+                system into Maya's Y-up, by the turn the rig loaders
+                put on a rig's roots; ``None`` keeps the file's own
+                axes.  A left handed file raises ``ValueError`` unless
+                it is ``None``.  The mesh readers take no
+                ``axis_system``: they keep the mesh's own space.
             **object_kwargs: Forwarded to :class:`Object`.
 
         Returns:

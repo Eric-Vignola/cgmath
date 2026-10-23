@@ -1054,7 +1054,7 @@ grow_vertex_edge_indices(self, indices: 'np.ndarray', n: 'int' = 1) -> 'np.ndarr
     grows vertex edge indices by n steps
 grow_vertex_face_indices(self, indices: 'np.ndarray', n: 'int' = 1) -> 'np.ndarray'
     grows vertex face indices by n steps
-classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None, scale_factor: 'float | None' = None, axis_system: 'str | None' = 'maya_y_up') -> "'MeshData'"
+classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None, scale_factor: 'float | None' = None) -> "'MeshData'"
     returns a single MeshData from an fbx file (first mesh if name is None)
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, name: 'str | None' = None) -> "'MeshData'"
     returns a single MeshData from a glb (first mesh if name is None)
@@ -1124,7 +1124,7 @@ Methods:
 ```text
 fix_symmetry(self, pivot: 'float' = 0.0, axis: 'int' = 0, side: 'float' = 1.0, combined: 'bool' = True, tolerance: 'Union[None, float]' = None) -> 'np.ndarray'
     attempts a symmetry fix on each element or combined.
-classmethod load_fbx(cls, filename: 'str', scale_factor: 'float | None' = None, axis_system: 'str | None' = 'maya_y_up') -> "'MeshList'"
+classmethod load_fbx(cls, filename: 'str', scale_factor: 'float | None' = None) -> "'MeshList'"
     loads all meshes from an fbx file into a MeshList
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0) -> "'MeshList'"
     loads all meshes from a glb file into a MeshList
@@ -1315,7 +1315,7 @@ Functions:
 ```text
 load(filename: 'str', mode: 'str | None' = None) -> 'list'
     The file's meshes with their UVs, as ``(MeshData, UVList)`` pairs:
-load_fbx(filename: 'str', scale_factor: 'float | None' = None, axis_system: 'str | None' = 'maya_y_up') -> 'list'
+load_fbx(filename: 'str', scale_factor: 'float | None' = None) -> 'list'
     loads fbx file and returns list of (MeshData, UVList) tuples
 load_glb(filename: 'str', scale_factor: 'float' = 100.0) -> 'list'
     loads glb file and returns list of (MeshData, UVList) tuples

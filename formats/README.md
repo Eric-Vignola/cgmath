@@ -251,7 +251,7 @@ in `geometry`:
 
 | Want | Call |
 |---|---|
-| Meshes + UVs from FBX | `cgmath.geometry.mesh.load_fbx(path)` → `[(MeshData, UVList), ...]`, in cm and Maya's Y-up as the rig loads |
+| Meshes + UVs from FBX | `cgmath.geometry.mesh.load_fbx(path)` → `[(MeshData, UVList), ...]`, in cm, each mesh in its own space (its node's world from the rig places it) |
 | Meshes + UVs from GLB | `cgmath.geometry.mesh.load_glb(path, scale_factor=100.0)` |
 | Meshes, any format | `cgmath.geometry.mesh.load(path)` / `MeshList.load(path)` |
 | One named mesh | `MeshData.load_fbx(path, name=...)` / `MeshData.load_glb(path, name=...)` |

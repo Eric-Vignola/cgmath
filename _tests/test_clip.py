@@ -7150,23 +7150,24 @@ class TestFbxUnitHeldAsAScale(unittest.TestCase):
         path = self.source()
         for unit, s in self.UNITS:
             meters = self.converted(path, unit)
+            with self.subTest(unit=unit):
+                want = {mesh.name: np.asarray(mesh.points) for mesh, _ in mesh_load_fbx(path)}
+                for read in (
+                    {mesh.name: mesh.points for mesh, _ in mesh_load_fbx(meters)},
+                    {mesh.name: mesh.points for mesh in MeshList.load_fbx(meters)},
+                    {"body": MeshData.load_fbx(meters, name="body").points},
+                ):
+                    for name, points in read.items():
+                        self.assertTrue(np.allclose(points, want[name], rtol=0, atol=1e-12), name)
+                        self.assertAlmostEqual(float(np.ptp(np.asarray(points), axis=0).max()), 10.0, places=9)
+                for skin, twin in zip(SkinList.load_fbx(meters), SkinList.load_fbx(path)):
+                    self.assertTrue(np.array_equal(skin.weights, twin.weights))
+
             for system in ("maya_y_up", None):
                 with self.subTest(unit=unit, axis_system=system):
-                    want = {mesh.name: np.asarray(mesh.points) for mesh, _ in mesh_load_fbx(path, axis_system=system)}
-                    for read in (
-                        {mesh.name: mesh.points for mesh, _ in mesh_load_fbx(meters, axis_system=system)},
-                        {mesh.name: mesh.points for mesh in MeshList.load_fbx(meters, axis_system=system)},
-                        {"body": MeshData.load_fbx(meters, name="body", axis_system=system).points},
-                    ):
-                        for name, points in read.items():
-                            self.assertTrue(np.allclose(points, want[name], rtol=0, atol=1e-12), name)
-                            self.assertAlmostEqual(float(np.ptp(np.asarray(points), axis=0).max()), 10.0, places=9)
-
                     got = {skin.name: bound for skin, bound in _read_skins_fbx(meters, True, axis_system=system)}
                     cm  = {skin.name: bound for skin, bound in _read_skins_fbx(path, True, axis_system=system)}
                     self.assertTrue(np.allclose(got["body"], cm["body"], rtol=0, atol=1e-12))
-                    for skin, twin in zip(SkinList.load_fbx(meters), SkinList.load_fbx(path)):
-                        self.assertTrue(np.array_equal(skin.weights, twin.weights))
 
                     # the knee is off its bind: the posed cube moves. The
                     # cube at the root, inside the unit, is skinned to a

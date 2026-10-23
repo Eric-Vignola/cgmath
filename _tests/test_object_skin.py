@@ -28,7 +28,8 @@ import warnings
 import numpy as np
 from cgmath.geometry.deform import SkinDeformData
 from cgmath.geometry.mesh import MeshData, MeshList, UVList, load as mesh_load, load_fbx as mesh_load_fbx
-from cgmath.geometry.skin_weights import SkinList
+from cgmath.geometry.skin_weights import SkinList, _read_skins_fbx
+from cgmath.formats._fbx_io import open_fbx
 from cgmath.render.scene import Object, Scene
 from cgmath.hierarchy import ClipData, HierarchyData
 
@@ -781,9 +782,11 @@ class TestFbxBindPose(FbxCase):
 
 @unittest.skipIf(fbx is None, "Autodesk FBX Python SDK is not installed")
 class TestFbxPosesInTheRigsUnitAndAxes(FbxCase):
-    """the mesh and its inverse binds load the way HierarchyData.load_fbx and
-    ClipData.load_fbx load the rig, in cm and Maya's Y-up by default, so a rig
-    or a clip read from the same file poses the mesh where the file has it
+    """Object.load_fbx reads the mesh and its inverse binds in the rig
+    loaders' unit, cm by default, and turned into Maya's Y-up as they turn a
+    rig's roots, the Object having no node to carry the turn, so a rig or a
+    clip read from the same file poses the mesh where the file has it; the
+    mesh readers read the same unit and leave the axes alone
 
     At the file's bind pose the rig leaves the bind mesh where it is. Posed
     off it, the mesh is the file's own posed mesh, read raw
@@ -877,27 +880,28 @@ class TestFbxPosesInTheRigsUnitAndAxes(FbxCase):
                     np.testing.assert_allclose(self.points(obj), bind, rtol=0.0, atol=1e-9)
                     obj.restore_bind_pose()
 
-    def test_the_mesh_loads_in_centimeters_and_maya_axes(self):
-        """the points scale with the file's unit and turn with its axes; the
-        normals only turn"""
+    def test_the_mesh_loads_in_centimeters_and_the_object_in_maya_axes(self):
+        """the points scale with the file's unit; the mesh readers keep the
+        file's axes, and the Object turns its points and normals"""
         for label, unit, axes, cm, turn in self.cases():
             with self.subTest(file=label):
                 path = self.skinned(f"mesh {label}.fbx", unit=unit, axes=axes)
-                raw  = MeshData.load_fbx(path, **self.RAW)
+                raw  = MeshData.load_fbx(path, scale_factor=1.0)
                 read = (
-                    MeshData.load_fbx(path),
-                    MeshList.load_fbx(path)[0],
-                    mesh_load_fbx(path)[0][0],
-                    Object.load_fbx(path).mesh,
+                    (MeshData.load_fbx(path), np.eye(3)),
+                    (MeshList.load_fbx(path)[0], np.eye(3)),
+                    (mesh_load_fbx(path)[0][0], np.eye(3)),
+                    (Object.load_fbx(path).mesh, turn),
                 )
-                for mesh in read:
-                    want = np.asarray(raw.points) * cm @ turn
+                for mesh, axes_turn in read:
+                    want = np.asarray(raw.points) * cm @ axes_turn
                     np.testing.assert_allclose(mesh.points, want, rtol=0.0, atol=1e-12)
-                    want = np.asarray(raw.normals) @ turn
+                    want = np.asarray(raw.normals) @ axes_turn
                     np.testing.assert_allclose(mesh.normals, want, rtol=0.0, atol=1e-12)
 
                 # a number is the caller's own factor on the list reader too
-                np.testing.assert_array_equal(MeshList.load_fbx(path, **self.RAW)[0].points, raw.points)
+                np.testing.assert_array_equal(MeshList.load_fbx(path, scale_factor=1.0)[0].points, raw.points)
+                np.testing.assert_array_equal(Object.load_fbx(path, **self.RAW).mesh.points, raw.points)
 
     def test_posed_off_its_bind_the_mesh_is_the_files_posed_mesh_converted(self):
         for label, unit, axes, cm, turn in self.cases():
@@ -918,41 +922,325 @@ class TestFbxPosesInTheRigsUnitAndAxes(FbxCase):
                 want = self.points(raw) * 3.0 @ turn
                 np.testing.assert_allclose(self.points(three), want, rtol=0.0, atol=1e-9)
 
-    def test_a_left_handed_file_raises_unless_its_axes_are_kept(self):
-        """no rotation turns it into Maya's axes; the weights and the UVs have
-        no axes, so their readers load it as it is. Through load(), which
-        takes no axis_system, the error names the load_fbx call that reads
-        the file"""
+    def test_a_left_handed_file_raises_on_the_object_unless_its_axes_are_kept(self):
+        """no rotation turns it into Maya's axes, so the Object, which turns
+        its points, raises; the mesh, weight and UV readers keep each mesh's
+        own space and load it as it is, load() too"""
         system = fbx.FbxAxisSystem
         left   = system(system.EUpVector.eYAxis, system.EFrontVector.eParityOdd, system.ECoordSystem.eLeftHanded)
         path   = self.skinned("left.fbx", axes=left)
+        raw    = MeshData.load_fbx(path)
 
-        for label, loader, reader in (
-            ("MeshData.load_fbx", MeshData.load_fbx, MeshData.load_fbx),
-            ("MeshList.load_fbx", MeshList.load_fbx, MeshList.load_fbx),
-            ("mesh.load_fbx", mesh_load_fbx, mesh_load_fbx),
-            ("Object.load_fbx", Object.load_fbx, Object.load_fbx),
-            ("MeshData.load", MeshData.load, MeshData.load_fbx),
-            ("mesh.load", mesh_load, mesh_load_fbx),
+        with self.assertRaises(ValueError) as caught:
+            Object.load_fbx(path)
+        self.assertIn("load_fbx(filename, axis_system=None)", str(caught.exception))
+        kept = Object.load_fbx(path, axis_system=None)
+        self.assertIsNotNone(kept.skin)
+        np.testing.assert_array_equal(kept.mesh.points, raw.points)
+
+        for label, loader in (
+            ("MeshList.load_fbx", lambda x: MeshList.load_fbx(x)[0]),
+            ("mesh.load_fbx", lambda x: mesh_load_fbx(x)[0][0]),
+            ("MeshData.load", MeshData.load),
+            ("mesh.load", lambda x: mesh_load(x)[0][0]),
         ):
             with self.subTest(loader=label):
-                with self.assertRaises(ValueError) as caught:
-                    loader(path)
-                self.assertIn("load_fbx(filename, axis_system=None)", str(caught.exception))
-                self.assertIsNotNone(reader(path, axis_system=None))
+                np.testing.assert_array_equal(loader(path).points, raw.points)
 
-        self.assertIsNotNone(Object.load_fbx(path, axis_system=None).skin)
         self.assertEqual([skin.name for skin in SkinList.load_fbx(path)], ["body_geo"])
         self.assertEqual(len(UVList.load_fbx(path)), 0)
 
     def test_an_unknown_axis_system_is_refused(self):
+        """by the Object; the mesh readers take none"""
         path = self.skinned("axes.fbx")
 
-        for loader in (MeshData.load_fbx, MeshList.load_fbx, mesh_load_fbx, Object.load_fbx):
+        with self.assertRaises(ValueError) as caught:
+            Object.load_fbx(path, axis_system="maya_z_up")
+        self.assertIn("'maya_y_up' or None", str(caught.exception))
+
+        for loader in (MeshData.load_fbx, MeshList.load_fbx, mesh_load_fbx):
             with self.subTest(loader=loader.__qualname__):
-                with self.assertRaises(ValueError) as caught:
-                    loader(path, axis_system="maya_z_up")
-                self.assertIn("'maya_y_up' or None", str(caught.exception))
+                with self.assertRaises(TypeError):
+                    loader(path, axis_system="maya_y_up")
+
+
+def _rows(matrix):
+    """an FbxAMatrix as a row-vector 4x4, the translation in row 3"""
+    return np.array([[matrix.Get(row, col) for col in range(4)] for row in range(4)])
+
+
+def _find(scene, name):
+    """the scene's node called ``name``"""
+    stack = [scene.GetRootNode()]
+    while stack:
+        node = stack.pop()
+        if node.GetName() == name:
+            return node
+        stack.extend(node.GetChild(i) for i in range(node.GetChildCount()))
+    raise KeyError(name)
+
+
+def _control_points(mesh):
+    """an FbxMesh's control points, (N, 3)"""
+    return np.array([list(mesh.GetControlPointAt(i))[:3] for i in range(mesh.GetControlPointsCount())])
+
+
+@unittest.skipIf(fbx is None, "Autodesk FBX Python SDK is not installed")
+class TestFbxMeshesInTheirOwnSpace(FbxCase):
+    """the FBX mesh readers keep each mesh in its own object space, as the
+    file, the sdk and Maya keep it, so under its node's world from a rig read
+    from the same file a mesh is where the sdk puts it
+
+    The rig loaders turn a Z-up file into Maya's Y-up on its roots, and a
+    mesh takes that turn through its node. Mesh readers that turned the
+    points too put every mesh under its node turned twice: 2-unreal.fbx's
+    LODs 216 to 229 cm off. render's Object.load_fbx, a mesh with no node
+    above it, takes the turn on its points instead.
+
+    Each file holds a rigid mesh at the top, moved, turned and scaled
+    (``prop``), one under a moved group (``sub``), one under a moved node
+    with no attribute, which the rig read drops and folds into the mesh's
+    node (``held``), one at the top with no transform (``flat``), and a mesh
+    skinned to a hip and a knee, its node moved and turned and the knee
+    posed 30 degrees off its bind (``body``). The truth is the sdk's own: a
+    mesh node's EvaluateGlobalTransform after FbxAxisSystem.MayaYUp
+    .ConvertScene, and the linear blend of a skin's clusters in the file's
+    axes, turned, both times the cm one unit of the file holds.
+
+    The same file written in meters and in inches by the sdk's
+    FbxSystemUnit.ConvertScene holds the unit as a scale of 1/s on the
+    scene root's children over points left in cm: a mesh under such a root
+    reads its points as they are, and ``prop``, which the export found
+    scaled other than 1, holds no unit, its points read s times larger.
+    Under its node's world every mesh is where the sdk puts it, at true
+    size.
+    """
+
+    # Maya's Z-up into its Y-up: (x, y, z) -> (x, z, -y)
+    TURN   = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
+    MESHES = ("prop", "sub", "held", "flat", "body")
+
+    # a cube off its own origin, so a turn moves every corner
+    CORNERS = np.array(
+        [
+            (-1.0, -1.0, -1.0), (1.0, -1.0, -1.0), (1.0, 1.0, -1.0), (-1.0, 1.0, -1.0),
+            (-1.0, -1.0, 1.0), (1.0, -1.0, 1.0), (1.0, 1.0, 1.0), (-1.0, 1.0, 1.0),
+        ]
+    ) + (0.5, 1.0, 1.5)
+    FACES = ((0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (2, 3, 7, 6), (1, 2, 6, 5), (0, 4, 7, 3))
+    NORMALS = (
+        (0.0, 0.0, -1.0), (0.0, 0.0, 1.0), (0.0, -1.0, 0.0),
+        (0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (-1.0, 0.0, 0.0),
+    )
+
+    def cases(self):
+        """(label, FbxSystemUnit name, axis system, cm per unit, turn, the
+        FbxSystemUnit name ConvertScene writes the file in or None)"""
+        system = fbx.FbxAxisSystem
+        return (
+            ("cm Y-up", "cm", system.MayaYUp, 1.0, np.eye(3), None),
+            ("cm Z-up", "cm", system.MayaZUp, 1.0, self.TURN, None),
+            ("m Z-up", "m", system.MayaZUp, 100.0, self.TURN, None),
+            ("cm Z-up in m", "cm", system.MayaZUp, 100.0, self.TURN, "m"),
+            ("cm Y-up in Inch", "cm", system.MayaYUp, 2.54, np.eye(3), "Inch"),
+        )
+
+    @staticmethod
+    def factor(name, cm, convert):
+        """what the readers multiply ``name``'s control points by: the unit,
+        but in a converted file, whose meshes keep their points in cm under
+        a root that holds the unit, all but ``prop``"""
+        return cm if convert is None or name == "prop" else 1.0
+
+    def scene_file(self, name, unit, axes, convert=None):
+        """the file the class docstring describes, in ``unit`` and ``axes``,
+        written in ``convert`` by the sdk's ConvertScene when it is given"""
+
+        def place(
+            scene,
+            node_name,
+            attribute,
+            parent,
+            translate = (0.0, 0.0, 0.0),
+            rotate    = (0.0, 0.0, 0.0),
+            scale     = (1.0, 1.0, 1.0),
+        ):
+            node = fbx.FbxNode.Create(scene, node_name)
+            if attribute is not None:
+                node.SetNodeAttribute(attribute)
+            node.LclTranslation.Set(fbx.FbxDouble3(*translate))
+            node.LclRotation.Set(fbx.FbxDouble3(*rotate))
+            node.LclScaling.Set(fbx.FbxDouble3(*scale))
+            parent.AddChild(node)
+            return node
+
+        def cube(scene, node_name, parent, *transform):
+            mesh = fbx.FbxMesh.Create(scene, f"{node_name}Shape")
+            mesh.InitControlPoints(len(self.CORNERS))
+            for index, corner in enumerate(self.CORNERS):
+                mesh.SetControlPointAt(fbx.FbxVector4(*corner, 1.0), index)
+            for face in self.FACES:
+                mesh.BeginPolygon()
+                for index in face:
+                    mesh.AddPolygon(index)
+                mesh.EndPolygon()
+            normals = mesh.CreateElementNormal()
+            normals.SetMappingMode(fbx.FbxLayerElement.EMappingMode.eByPolygonVertex)
+            normals.SetReferenceMode(fbx.FbxLayerElement.EReferenceMode.eDirect)
+            for normal, face in zip(self.NORMALS, self.FACES):
+                for _ in face:
+                    normals.GetDirectArray().Add(fbx.FbxVector4(*normal, 0.0))
+            return place(scene, node_name, mesh, parent, *transform), mesh
+
+        def populate(scene):
+            settings = scene.GetGlobalSettings()
+            settings.SetSystemUnit(getattr(fbx.FbxSystemUnit, unit))
+            settings.SetAxisSystem(axes)
+            top = scene.GetRootNode()
+
+            cube(scene, "prop", top, (10.0, 2.0, 5.0), (15.0, 30.0, -20.0), (1.0, 2.0, 1.5))
+            null  = fbx.FbxNull.Create(scene, "grpAttr")
+            group = place(scene, "grp", null, top, (0.0, 0.0, 10.0), (0.0, 0.0, 45.0))
+            cube(scene, "sub", group, (2.0, 0.0, 0.0), (10.0, 0.0, 0.0))
+            bare = place(scene, "bare", None, top, (4.0, -3.0, 2.0), (20.0, 0.0, 35.0))
+            cube(scene, "held", bare, (1.0, 1.0, 0.0), (0.0, 15.0, 0.0))
+            cube(scene, "flat", top)
+
+            hip  = add_joint(scene, "hip")
+            knee = add_joint(scene, "knee", parent=hip)
+            hip.LclTranslation.Set(fbx.FbxDouble3(0.0, 1.0, 0.5))
+            hip.LclRotation.Set(fbx.FbxDouble3(0.0, 0.0, 10.0))
+            knee.LclTranslation.Set(fbx.FbxDouble3(0.0, -0.5, 0.1))
+            knee.LclRotation.Set(fbx.FbxDouble3(20.0, 0.0, 0.0))
+            body, mesh = cube(scene, "body", top, (0.3, 0.0, -0.2), (0.0, 15.0, 0.0))
+            weights = [
+                (hip, {0: 1.0, 1: 1.0, 2: 0.5, 3: 0.5, 4: 1.0, 5: 0.25}),
+                (knee, {2: 0.5, 3: 0.5, 5: 0.75, 6: 1.0, 7: 1.0}),
+            ]
+            skin = bind(scene, mesh, weights)
+            for index in range(skin.GetClusterCount()):
+                cluster = skin.GetCluster(index)
+                cluster.SetTransformMatrix(body.EvaluateGlobalTransform())
+                cluster.SetTransformLinkMatrix(cluster.GetLink().EvaluateGlobalTransform())
+            knee.LclRotation.Set(fbx.FbxDouble3(50.0, 0.0, 0.0))
+            if convert is not None:
+                getattr(fbx.FbxSystemUnit, convert).ConvertScene(scene)
+
+        return self.write(name, populate)
+
+    def sdk_points(self, path, cm):
+        """{mesh: (its control points, the sdk's world points times ``cm``)},
+        after FbxAxisSystem.MayaYUp.ConvertScene"""
+        out = {}
+        with open_fbx(path, fbx) as scene:
+            fbx.FbxAxisSystem.MayaYUp.ConvertScene(scene)
+            for name in self.MESHES:
+                node      = _find(scene, name)
+                points    = _control_points(node.GetNodeAttribute())
+                world     = _rows(node.EvaluateGlobalTransform())
+                out[name] = (points, (points @ world[:3, :3] + world[3, :3]) * cm)
+        return out
+
+    def sdk_blend(self, path, cm, turn):
+        """the body as the sdk's linear blend of its clusters puts it, in the
+        file's axes, then turned and times ``cm``"""
+        with open_fbx(path, fbx) as scene:
+            mesh   = _find(scene, "body").GetNodeAttribute()
+            points = np.c_[_control_points(mesh), np.ones(mesh.GetControlPointsCount())]
+            skin   = mesh.GetDeformer(0, fbx.FbxDeformer.EDeformerType.eSkin)
+            blend  = np.zeros_like(points)
+            for index in range(skin.GetClusterCount()):
+                cluster = skin.GetCluster(index)
+                link_bind, mesh_bind = fbx.FbxAMatrix(), fbx.FbxAMatrix()
+                cluster.GetTransformLinkMatrix(link_bind)
+                cluster.GetTransformMatrix(mesh_bind)
+                link     = _rows(cluster.GetLink().EvaluateGlobalTransform())
+                skinning = _rows(mesh_bind) @ np.linalg.inv(_rows(link_bind)) @ link
+                for vertex, weight in zip(cluster.GetControlPointIndices(), cluster.GetControlPointWeights()):
+                    blend[vertex] += weight * (points[vertex] @ skinning)
+        return blend[:, :3] @ turn * cm
+
+    def test_the_points_are_the_files_own_in_centimeters(self):
+        """every reader gives each mesh's control points times the unit, as
+        they are under a root that holds the unit, and the file's own
+        normals"""
+        for label, unit, axes, cm, _, convert in self.cases():
+            with self.subTest(file=label):
+                path  = self.scene_file(f"points {label}.fbx", unit, axes, convert)
+                truth = self.sdk_points(path, cm)
+                read  = {mesh.name: mesh for mesh in MeshList.load_fbx(path)}
+                pairs = {mesh.name: mesh for mesh, _ in mesh_load_fbx(path)}
+                self.assertEqual(sorted(read), sorted(self.MESHES))
+
+                normals = np.repeat(self.NORMALS, [len(face) for face in self.FACES], axis=0)
+                for name in self.MESHES:
+                    for mesh in (read[name], pairs[name], MeshData.load_fbx(path, name=name)):
+                        np.testing.assert_array_equal(mesh.points, truth[name][0] * self.factor(name, cm, convert))
+                        np.testing.assert_array_equal(np.asarray(mesh.normals)[mesh.normal_indices], normals)
+
+    def test_under_its_nodes_world_a_mesh_is_where_the_sdk_puts_it(self):
+        """each mesh's node, from HierarchyData.load_fbx and ClipData.load_fbx
+        of the same file, places its points where the sdk does; points turned
+        as well land elsewhere in a Z-up file"""
+        for label, unit, axes, cm, turn, convert in self.cases():
+            with self.subTest(file=label):
+                path  = self.scene_file(f"worlds {label}.fbx", unit, axes, convert)
+                truth = self.sdk_points(path, cm)
+                read  = {mesh.name: np.asarray(mesh.points) for mesh in MeshList.load_fbx(path)}
+
+                for loader in (HierarchyData.load_fbx, ClipData.load_fbx):
+                    rig = loader(path)
+                    for name in self.MESHES:
+                        world = np.asarray(rig[name].world_matrix)
+                        got   = read[name] @ world[:3, :3] + world[3, :3]
+                        np.testing.assert_allclose(got, truth[name][1], rtol=0.0, atol=1e-12)
+
+                        if turn is not self.TURN:
+                            continue
+                        twice = read[name] @ turn @ world[:3, :3] + world[3, :3]
+                        self.assertGreater(float(np.abs(twice - truth[name][1]).max()), 1.0)
+
+    def test_a_skinned_mesh_posed_by_the_rig_is_the_sdks_blend(self):
+        """the reader's points and _read_skins_fbx's inverse binds, both in the
+        mesh's own space, deformed by the rig or the clip of the same file; and
+        the Object, whose points and binds turn together"""
+        for label, unit, axes, cm, turn, convert in self.cases():
+            with self.subTest(file=label):
+                path  = self.scene_file(f"skin {label}.fbx", unit, axes, convert)
+                want  = self.sdk_blend(path, cm, turn)
+                mesh  = MeshData.load_fbx(path, name="body")
+                skins = {skin.name: (skin, binds) for skin, binds in _read_skins_fbx(path, bind_matrices=True)}
+
+                deformer = SkinDeformData(mesh, skins["body"][0], inverse_bind_matrices=skins["body"][1])
+                index    = [x.name for x in MeshList.load_fbx(path)].index("body")
+                obj      = Object.load_fbx(path, index=index, extract_texture=False)
+                for loader in (HierarchyData.load_fbx, ClipData.load_fbx):
+                    rig = loader(path)
+                    np.testing.assert_allclose(deformer.apply(rig), want, rtol=0.0, atol=1e-12)
+                    np.testing.assert_allclose(obj.pose(rig).mesh.points, want, rtol=0.0, atol=1e-12)
+                    obj.restore_bind_pose()
+
+                # the knee is off its bind, so the blend moved the mesh
+                world = np.asarray(HierarchyData.load_fbx(path)["body"].world_matrix)
+                rest  = np.asarray(mesh.points) @ world[:3, :3] + world[3, :3]
+                self.assertGreater(float(np.abs(want - rest).max()), 0.1 * self.factor("body", cm, convert))
+
+    def test_the_object_turns_a_mesh_with_no_node(self):
+        """Object.load_fbx shows each mesh's own points and normals turned,
+        which is where the sdk puts a mesh whose node has no transform and
+        nothing above it"""
+        for label, unit, axes, cm, turn, convert in self.cases():
+            with self.subTest(file=label):
+                path  = self.scene_file(f"object {label}.fbx", unit, axes, convert)
+                truth = self.sdk_points(path, cm)
+
+                for index, mesh in enumerate(MeshList.load_fbx(path)):
+                    obj = Object.load_fbx(path, index=index, extract_texture=False, load_skin=False)
+                    self.assertEqual(obj.name, mesh.name)
+                    np.testing.assert_array_equal(obj.mesh.points, np.asarray(mesh.points) @ turn)
+                    np.testing.assert_array_equal(obj.mesh.normals, np.asarray(mesh.normals) @ turn)
+                    if mesh.name == "flat":
+                        np.testing.assert_allclose(obj.mesh.points, truth["flat"][1], rtol=0.0, atol=1e-12)
 
 
 @unittest.skipIf(not HAVE_GLB, "pygltflib / trimesh are not installed")

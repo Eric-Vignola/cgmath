@@ -57,11 +57,6 @@ def _make_fake_fbx_module() -> types.SimpleNamespace:
         EReferenceMode = reference,
     )
 
-    # the mesh reader turns a scene out of a right handed axis system into
-    # Maya's Y-up and refuses a left handed one
-    handed             = types.SimpleNamespace(eRightHanded="RightHanded", eLeftHanded="LeftHanded")
-    fake.FbxAxisSystem = types.SimpleNamespace(ECoordSystem=handed)
-
     # ---- class ids (used as opaque identity tokens) ------------------------
     fake.FbxFileTexture    = types.SimpleNamespace(ClassId="FbxFileTexture")
     fake.FbxLayeredTexture = types.SimpleNamespace(ClassId="FbxLayeredTexture")
@@ -101,13 +96,10 @@ def _wire_importer(
     scene.GetRootNode.return_value                              = root_node
     manager.GetIOSettings.return_value                          = ios
 
-    # a scene in cm and Maya's Y-up: up +y (2, +1), front +z (odd parity 2, +1)
-    settings                                                        = scene.GetGlobalSettings.return_value
-    axes                                                            = settings.GetAxisSystem.return_value
-    settings.GetSystemUnit.return_value.GetScaleFactor.return_value = 1.0
-    axes.GetCoorSystem.return_value                                 = fake_fbx.FbxAxisSystem.ECoordSystem.eRightHanded
-    axes.GetUpVector.return_value                                   = (2, 1)
-    axes.GetFrontVector.return_value                                = (2, 1)
+    # a scene in cm; the mesh reader reads no axis system, so the fake has
+    # none: a reader that turned the points would fail here
+    unit                             = scene.GetGlobalSettings.return_value.GetSystemUnit.return_value
+    unit.GetScaleFactor.return_value = 1.0
 
     fake_fbx.FbxManager.Create.return_value    = manager
     fake_fbx.FbxIOSettings.Create.return_value = ios

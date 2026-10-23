@@ -266,9 +266,14 @@ Object.load_fbx("hero.fbx", index=0, extract_texture=True, load_skin=True,
 when present (`load_skin=True`). An explicit `texture=` kwarg always wins.
 `load_fbx` reads the mesh and its skin's bind matrices in centimetres
 (`scale_factor=None` converts the file's unit, a number is the caller's
-own factor) and in Maya's Y-up (`axis_system=None` keeps the file's
-axes), the way `HierarchyData.load_fbx` and `ClipData.load_fbx` read
-the rig, so `pose()` with a rig from the same file lines up.
+own factor). The Object is the mesh alone, with no node above it, so it
+takes the turn `HierarchyData.load_fbx` and `ClipData.load_fbx` put on a
+rig's roots: its points, normals and bind matrices turn into Maya's
+Y-up (`axis_system=None` keeps the file's axes; a left-handed file
+raises `ValueError` without it). It shows the mesh's own points turned,
+and `pose()` with a rig from the same file puts a skinned mesh where the
+file has it. The mesh readers in `geometry.mesh` take no `axis_system`:
+they keep each mesh in its own space.
 
 Pull a texture onto an existing Object after the fact. Both return
 `True`/`False` rather than raising when the slot is empty:

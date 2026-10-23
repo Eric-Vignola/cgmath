@@ -1970,9 +1970,9 @@ which scales every root and every compensating node by s, puts all of
 these right.
 The FBX mesh readers (`geometry.mesh.load_fbx`, `MeshData.load_fbx`,
 `MeshList.load_fbx`) and `render.Object.load_fbx`, points and skin bind
-matrices alike, take the same `scale_factor`, and the `axis_system`
-below, with the same defaults, so a mesh posed by a rig or a clip read
-from the same file lines up.
+matrices alike, take the same `scale_factor`, with the same default, so
+a mesh under its node's world, or posed by a rig or a clip read from the
+same file, sits where the file puts it.
 
 `axis_system="maya_y_up"`, the default, loads an FBX in Maya's Y-up
 axes the way `FbxAxisSystem.MayaYUp.ConvertScene` converts it: every
@@ -2000,9 +2000,11 @@ locator's (a zyx group root the layer also turns: 1.70 off the file's
 world turned, within 2.3e-3 of Maya's FBXImport). The turn goes on the
 roots: a joint root takes it in its joint orient and translate and keeps
 its rotate curves; any other root's rotate is solved again, through
-`euler_filter` on a clip. The mesh readers turn the points and normals,
-and `Object.load_fbx` the skin's bind matrices with them. A file already
-in Maya's Y-up, as `save_fbx` writes, loads as it is; a left-handed one
+`euler_filter` on a clip. A mesh takes the turn through its node: the
+mesh readers keep each mesh in its own space and take no `axis_system`,
+and `render.Object.load_fbx`, a mesh with no node above it, turns its
+points, normals and skin bind matrices. A file already in Maya's Y-up,
+as `save_fbx` writes, loads as it is; a left-handed one
 raises `ValueError`, since a rotation can't turn it into Maya's axes.
 `axis_system=None` keeps the file's own axes. `load()` reads an FBX with
 the `load_fbx` defaults and takes no `axis_system`, so a left-handed file

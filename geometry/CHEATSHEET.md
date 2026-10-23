@@ -1048,7 +1048,7 @@ from cgmath.geometry.mesh import load, load_fbx, load_glb, load_usd
 
 load("hero.fbx")                            # list[(MeshData, UVList)], reader by file
 load_glb("hero.glb", scale_factor=100.0)
-load_fbx("hero.fbx")                        # in cm and Maya's Y-up, as the rig loads
+load_fbx("hero.fbx")                        # in cm, each mesh in its own space
 load_usd("hero.usd")
 
 MeshData.load_glb("hero.glb", name="body")  # one mesh; name=None -> first
@@ -1058,30 +1058,45 @@ UVData.load_fbx("hero.fbx", channel=0)
 UVList.load_glb("hero.glb", name="body")    # one mesh's UV channels
 ```
 
-The FBX mesh readers load the way `HierarchyData.load_fbx` loads the rig:
-`scale_factor=None`, the default, converts the file's unit to centimetres
+The FBX mesh readers keep each mesh in its own object space, as the
+file, the FBX SDK and Maya keep it: the points, normals and UVs leave out
+the mesh's node, and with it the turn `HierarchyData.load_fbx` puts on a
+rig's roots to load a file in Maya's Y-up. `scale_factor=None`, the
+default, converts the file's unit to centimetres as the rig loaders do
 (the points, never the normals or the UVs), and a number is the caller's
-own factor; `axis_system="maya_y_up"`, the default, turns the points and
-the normals from the file's axes into Maya's Y-up (an Unreal file's
-(x, y, z) to (x, z, -y)), and `axis_system=None` keeps the file's own. A
-mesh and a rig read from one file therefore line up. A left-handed file
-raises `ValueError` unless `axis_system=None`, which `load()` can't pass:
-it reads an FBX with the `load_fbx` defaults. The UV readers read it as
-it is. A file that holds its unit as a scale on the scene root's
-children, as the SDK's and Maya's unit conversions write it, keeps the
-points under such a root in cm, and they are read as they are, as
-`HierarchyData.load_fbx` says: its meshes load as the cm file's. A mesh
-at or under a root the export found scaled other than 1, which it
-scales by 1/s all the same (s the cm one unit holds), is under no such
-root: its points load s times larger and its node scaled 1/s, so it is
-right once posed, but on the frames of a clip where a later layer of a
-take keys that root's translate. A mesh on or under a node the export
-scales by 1/s once more there, or skinned to one (from the second joint
-of a Maya skeleton down, its first joint under such a root), is off
-once posed by a rig of the nodes' own values (`pose="node"`) or by a
-clip, and right posed at the bind by a `pose="bind"` rig when a bind
-pose lists those nodes, as Maya's export lists a skin's joints;
-`HierarchyData.load_fbx` says which.
+own factor. Under the world matrix of its node in a rig read from the
+same file, which keeps a mesh's node as a transform named after it, a
+mesh sits where the file puts it, in cm and Maya's Y-up:
+
+<!-- notest -->
+```python
+from cgmath.hierarchy import HierarchyData
+
+rig   = HierarchyData.load_fbx("hero.fbx")
+body  = MeshData.load_fbx("hero.fbx", name="body")
+W     = rig["body"].world_matrix
+world = body.points @ W[:3, :3] + W[3, :3]  # where the file puts the mesh
+```
+
+The readers take no `axis_system` and read any file as it is, a
+left-handed one too. `render.Object.load_fbx`, a mesh with no node to
+carry the turn, turns its points itself. A node's geometric transform,
+which Maya bakes into the points, is not read. A file that holds its
+unit as a scale on the scene root's children, as the SDK's and Maya's
+unit conversions write it, keeps the points under such a root in cm,
+and they are read as they are, as `HierarchyData.load_fbx` says: its
+meshes load as the cm file's. A mesh at or under a root the export
+found scaled other than 1, which it scales by 1/s all the same (s the
+cm one unit holds), is under no such root: its points load s times
+larger and its node scaled 1/s, so it is right once posed, but on the
+frames of a clip where a later layer of a take keys that root's
+translate. A mesh on or under a node the export scales by 1/s once more
+there, or skinned to one (from the second joint of a Maya skeleton
+down, its first joint under such a root), is off once posed by a rig of
+the nodes' own values (`pose="node"`) or by a clip, and right posed at
+the bind by a `pose="bind"` rig when a bind pose lists those nodes, as
+Maya's export lists a skin's joints; `HierarchyData.load_fbx` says
+which.
 
 USD prims round-trip through `from_prim` / `to_prim` on `MeshData`, `UVData`,
 `MapData`, `GeomSubsetData`, `MorphData` and `CompactSkinData`.

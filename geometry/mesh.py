@@ -2924,14 +2924,13 @@ class MeshData(Data):
         filename:     str,
         name:         str   | None = None,
         scale_factor: float | None = None,
-        axis_system:  str   | None = "maya_y_up",
     ) -> "MeshData":
         """returns a single MeshData from an fbx file (first mesh if name is None)
 
-        In centimeters and Maya's Y-up by default, as a rig read from the same
-        file: ``scale_factor`` and ``axis_system`` as in :func:`load_fbx`.
+        In the mesh's own object space, in centimeters by default:
+        ``scale_factor`` as in :func:`load_fbx`.
         """
-        data = load_fbx(filename, scale_factor, axis_system)
+        data = load_fbx(filename, scale_factor)
         if not data:
             raise RuntimeError("No meshes found in FBX file")
         if name is None:
@@ -4733,20 +4732,13 @@ class MeshList(DataList):
     DATA_LIST_CLASS = MeshData
 
     @classmethod
-    def load_fbx(
-        cls,
-        filename:     str,
-        scale_factor: float | None = None,
-        axis_system:  str   | None = "maya_y_up",
-    ) -> "MeshList":
+    def load_fbx(cls, filename: str, scale_factor: float | None = None) -> "MeshList":
         """loads all meshes from an fbx file into a MeshList
 
-        In centimeters and Maya's Y-up by default, as a rig read from the same
-        file: ``scale_factor`` and ``axis_system`` as in :func:`load_fbx`.
+        Each in its own object space, in centimeters by default:
+        ``scale_factor`` as in :func:`load_fbx`.
         """
-        return cls(
-            [mesh_data for mesh_data, _ in load_fbx(filename, scale_factor, axis_system)]
-        )
+        return cls([mesh_data for mesh_data, _ in load_fbx(filename, scale_factor)])
 
     @classmethod
     def load_glb(cls, filename: str, scale_factor: float = 100.0) -> "MeshList":
@@ -4831,8 +4823,7 @@ class UVList(MeshList):
     @classmethod
     def load_fbx(cls, filename: str, name: str | None = None) -> "UVList":
         """loads all UV channels for one mesh from an fbx file (first mesh if name is None)"""
-        # UVs have no unit and no axes: the file as it is, a left handed one too
-        return _one_uv_list(load_fbx(filename, scale_factor=1.0, axis_system=None), name, "FBX")
+        return _one_uv_list(load_fbx(filename), name, "FBX")
 
     @classmethod
     def load_glb(cls, filename: str, name: str | None = None) -> "UVList":
@@ -5380,43 +5371,61 @@ def _extract_fbx_normals(
     return normals, normal_indices
 
 
-def load_fbx(
-    filename:     str,
-    scale_factor: float | None = None,
-    axis_system:  str   | None = "maya_y_up",
-) -> list:
+def load_fbx(filename: str, scale_factor: float | None = None) -> list:
     """loads fbx file and returns list of (MeshData, UVList) tuples
 
-    ``scale_factor`` None, the default, converts the file's unit to
-    centimeters, as ``HierarchyData.load_fbx`` and ``ClipData.load_fbx`` do,
-    so a mesh lines up with a rig read from the same file: the points are
-    multiplied by the centimeters one unit of the file holds, 1.0 for a file
-    in cm, 100.0 for one in meters. A number is the caller's own factor, and
-    the file's unit is not read. Normals and UVs keep the file's values. A
-    mesh at or under a child of the scene root that holds the file's unit as
-    a scale, as the sdk's and Maya's unit conversions write it
-    (``HierarchyData.load_fbx``), holds its points in cm already, and they
-    are read as they are: such a file's meshes load as the cm file's. A
-    mesh at or under a root the export found scaled other than 1, which it
-    scales by 1/s all the same (s the cm one unit of the file holds), is
-    under no such root: its points load s times larger and its node, in
-    the rig loaders, scaled 1/s, so it is right once posed, but on the
-    frames of a clip where a later layer of a take keys that root's
-    translate. A mesh on or under a node the export scales by 1/s once
-    more there, or skinned to one (from the second joint of a Maya
-    skeleton down, its first joint under such a root), is off once posed
-    by a rig of the nodes' own values (``pose="node"``) or by a clip, and
-    right posed at the bind by a ``pose="bind"`` rig when a bind pose
-    lists those nodes, as Maya's export lists a skin's joints;
-    ``HierarchyData.load_fbx`` says which.
+    Each mesh's points, normals and UVs are in its own object space, as the
+    file, the fbx sdk and Maya keep them: its node's transform is left out,
+    and so is the turn ``HierarchyData.load_fbx`` and ``ClipData.load_fbx``
+    put on a rig's roots to load a file in Maya's Y-up, which reaches a mesh
+    through its node. Under the world matrix ``W`` of its node in a rig read
+    from the same file, which keeps a mesh's node as a transform named after
+    it, ``points @ W[:3, :3] + W[3, :3]`` is where the file puts the mesh, in
+    centimeters and Maya's Y-up. Any file reads as it is, a left handed one
+    too. ``render.Object.load_fbx``, whose Object has no node to carry the
+    turn, turns its points itself. A node's geometric transform, which
+    moves its mesh alone and which Maya's importer bakes into the points,
+    is not read: such a mesh's points come back without it.
 
-    ``axis_system`` "maya_y_up", the default, turns the points and the
-    normals from the file's axis system into Maya's Y-up, by the turn the
-    rig loaders put on a rig's roots, so an Unreal file, Z-up, turns
-    (x, y, z) to (x, z, -y). The points stay in the mesh's own space, its
-    node's transform left out as before, and turn as a root node would. A
-    file already in Maya's Y-up loads as it is, a left handed one raises
-    ValueError, and ``axis_system=None`` keeps the file's own axes.
+    ``scale_factor`` None, the default, converts the file's unit to
+    centimeters, as ``HierarchyData.load_fbx`` and ``ClipData.load_fbx`` do:
+    the points are multiplied by the centimeters one unit of the file holds,
+    1.0 for a file in cm, 100.0 for one in meters. A number is the caller's
+    own factor, and the file's unit is not read. Normals and UVs keep the
+    file's values. A mesh at or under a child of the scene root that holds
+    the file's unit as a scale, as the sdk's and Maya's unit conversions
+    write it (``HierarchyData.load_fbx``), holds its points in cm already,
+    and they are read as they are: such a file's meshes load as the cm
+    file's. A mesh at or under a root the export found scaled other than 1,
+    which it scales by 1/s all the same (s the cm one unit of the file
+    holds), is under no such root: its points load s times larger and its
+    node, in the rig loaders, scaled 1/s, so it is right once posed, but on
+    the frames of a clip where a later layer of a take keys that root's
+    translate. A mesh on or under a node the export scales by 1/s once more
+    there, or skinned to one (from the second joint of a Maya skeleton down,
+    its first joint under such a root), is off once posed by a rig of the
+    nodes' own values (``pose="node"``) or by a clip, and right posed at the
+    bind by a ``pose="bind"`` rig when a bind pose lists those nodes, as
+    Maya's export lists a skin's joints; ``HierarchyData.load_fbx`` says
+    which.
+    """
+    return _load_fbx(filename, scale_factor)
+
+
+def _load_fbx(
+    filename:     str,
+    scale_factor: float | None = None,
+    axis_system:  str   | None = None,
+) -> list:
+    """:func:`load_fbx`'s read, and ``render.Object.load_fbx``'s
+
+    ``axis_system`` None, the default, leaves each mesh in its own space, as
+    :func:`load_fbx` reads it. "maya_y_up" turns the points and the normals
+    by the turn the rig loaders put on a rig's roots (``_fbx_axis_turn``), an
+    Unreal file's (x, y, z) to (x, z, -y): the mesh as Maya's Y-up holds it
+    under a node with nothing above it and no transform of its own, which is
+    what an Object shows. A file already in Maya's Y-up reads as it is; a
+    left handed one raises ValueError.
     """
 
     if fbx is None:
