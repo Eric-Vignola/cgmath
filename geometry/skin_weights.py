@@ -322,6 +322,7 @@ class SkinData(Data):
             raise ValueError("Invalid SkinData objects cannot be added.")
         self.conform(self, other)
         self.weights = np.concatenate([self.weights, other.weights])
+        return self
 
     def __add__(self, other):
         """concatenates two skin data objects"""

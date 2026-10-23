@@ -237,6 +237,51 @@ class TestMorphList(unittest.TestCase):
         # mse
         self.assertTrue(np.allclose(list1.mse, [151.94444444,  11.94444444,  11.94444444]))
 
+    def test_operators_take_any_sequence(self):
+        # shape by shape against a MorphList, a python list, a tuple or an
+        # array of the same length, the same answer each way, the operands
+        # left as they were; a list or a tuple on the left too, item first
+        shapes = [self.jawOpen.copy(), self.eyesClosed.copy(), self.jawClosed.copy()]
+        before = self.list.copy(), MorphList(shapes).copy()
+        ops    = {"+": lambda a, b: a + b, "-": lambda a, b: a - b, "*": lambda a, b: a * b}
+        for name, op in ops.items():
+            for others in (shapes, [2, 3, 4]):
+                expected = MorphList([op(x.copy(), y) for x, y in zip(self.list, others)])
+                first    = MorphList(others) if others is shapes else np.array(others)
+                for other in (first, list(others), tuple(others)):
+                    with self.subTest(op=name, other=type(other).__name__, of=type(others[0]).__name__):
+                        obj = self.list.copy()
+                        if name == "+":
+                            obj += other
+                        elif name == "-":
+                            obj -= other
+                        else:
+                            obj *= other
+                        self.assertIsInstance(obj, MorphList)
+                        self.assertTrue(obj == expected)
+                        self.assertTrue(op(self.list.copy(), other) == expected)
+                        self.assertTrue((self.list, MorphList(shapes)) == before)
+
+                # on the left: each item op the shape it pairs with, names too
+                expected = MorphList([op(y, x.copy()) for x, y in zip(self.list, others)])
+                for other in (list(others), tuple(others)):
+                    with self.subTest(op=name, left=type(other).__name__, of=type(others[0]).__name__):
+                        obj = op(other, self.list)
+                        self.assertIsInstance(obj, MorphList)
+                        self.assertTrue(obj == expected)
+                        self.assertEqual([x.name for x in obj], [x.name for x in expected])
+                        self.assertTrue((self.list, MorphList(shapes)) == before)
+
+            # a sequence of another length is refused, on either side
+            for args in ((self.list.copy(), shapes[:2]), (shapes[:2], self.list.copy())):
+                with self.assertRaises(RuntimeError):
+                    op(*args)
+
+        # 0 + a shape is the shape itself: the sum holds none of the operand's shapes
+        obj = [0, 0, 0] + self.list
+        self.assertTrue(obj == self.list)
+        self.assertFalse(any(x is y for x in obj for y in self.list))
+
     def test_pow_list(self):
         """Test power operations for MorphList"""
         # Test in-place power

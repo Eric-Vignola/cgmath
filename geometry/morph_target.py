@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import operator
 from dataclasses import dataclass
 from typing import Optional
 
@@ -371,15 +372,28 @@ class MorphList(DataList):
 
     # -------------------------- shape math operations --------------------------- #
 
+    def _sequence_first(self, other, op) -> MorphList:
+        """
+        ``other op self`` with a python list or tuple ``other`` on the left:
+        each of its items op the shape it pairs with, the item first, as the
+        item operation does it. On copies of the shapes, as ``0 + shape``
+        gives the shape itself.
+        """
+        other = list(other)
+        if len(self.list) != len(other):
+            raise RuntimeError("Lists must have the same length.")
+        return type(self)([op(y, x) for x, y in zip(self.copy().list, other)])
+
     def __iadd__(self, other):
         """inplace add of morph targets"""
 
         if isinstance(other, MorphList) or _is_sequence(other):
-            if len(self.list) != len(other.list):
+            other = list(other)
+            if len(self.list) != len(other):
                 raise RuntimeError("Lists must have the same length.")
 
             for i in range(len(self.list)):
-                self.list[i] += other.list[i]
+                self.list[i] += other[i]
 
         # assume arithmetic addition or addition of MorphData
         else:
@@ -395,17 +409,20 @@ class MorphList(DataList):
     def __radd__(self, other):
         if other == 0:
             return self
+        if _is_sequence(other):
+            return self._sequence_first(other, operator.add)
         return self.__add__(other)
 
     def __isub__(self, other):
         """subtraction add of morph targets"""
 
         if isinstance(other, MorphList) or _is_sequence(other):
-            if len(self.list) != len(other.list):
+            other = list(other)
+            if len(self.list) != len(other):
                 raise RuntimeError("Lists must have the same length.")
 
             for i in range(len(self.list)):
-                self.list[i] -= other.list[i]
+                self.list[i] -= other[i]
 
         # assume arithmetic subtraction or subtraction of MorphData
         else:
@@ -421,17 +438,20 @@ class MorphList(DataList):
     def __rsub__(self, other):
         if other == 0:
             return self * -1
+        if _is_sequence(other):
+            return self._sequence_first(other, operator.sub)
         return self.__sub__(other)
 
     def __imul__(self, other):
         """inplace multiplication of morph targets"""
 
         if isinstance(other, MorphList) or _is_sequence(other):
-            if len(self.list) != len(other.list):
+            other = list(other)
+            if len(self.list) != len(other):
                 raise RuntimeError("Lists must have the same length.")
 
             for i in range(len(self.list)):
-                self.list[i] *= other.list[i]
+                self.list[i] *= other[i]
 
         # assume arithmetic multiplication or multiplication of MorphData
         else:
@@ -445,6 +465,8 @@ class MorphList(DataList):
         return new.__imul__(other)
 
     def __rmul__(self, other):
+        if _is_sequence(other):
+            return self._sequence_first(other, operator.mul)
         return self.__mul__(other)
 
     def __itruediv__(self, other):

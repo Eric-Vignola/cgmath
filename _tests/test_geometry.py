@@ -4920,6 +4920,39 @@ class TestUVList(unittest.TestCase):
         obj2 = obj1.match("*2")
         self.assertTrue(obj2[0] == self.map2)
 
+    def test_fix_symmetry(self):
+        # two quads side by side, symmetrical about u = 0.5, the default pivot
+        # of uvs, each map but for one corner on the -u side
+        def strip(v, offset):
+            points = np.array(
+                [[0.1, v], [0.5, v], [0.9, v], [0.1, v + 0.4], [0.5, v + 0.4], [0.9, v + 0.4]]
+            )
+            points[0, 0] += offset
+            return UVData(
+                name    = f"map{v}",
+                points  = points,
+                indices = np.array([0, 1, 4, 3, 1, 2, 5, 4]),
+                counts  = np.array([4, 4]),
+            )
+
+        good = UVList([strip(0.0, 0.0), strip(0.5, 0.0)])
+        for combined in (True, False):
+            with self.subTest(combined=combined):
+                obj = UVList([strip(0.0, 0.01), strip(0.5, -0.02)])
+                self.assertFalse(any(x.symmetrical(pivot=0.5) for x in obj))
+                fixed = obj.fix_symmetry(combined=combined)
+                self.assertTrue(np.array_equal(fixed, [True, True]))
+                self.assertTrue(obj == good)
+                self.assertTrue(all(x.symmetrical(pivot=0.5) for x in obj))
+
+        # about another pivot too
+        obj  = UVList([strip(0.0, 0.01)])
+        good = strip(0.0, 0.0)
+        for x in (obj[0], good):
+            x.points[:, 0] -= 0.25
+        self.assertTrue(np.array_equal(obj.fix_symmetry(pivot=0.25), [True]))
+        self.assertTrue(obj[0] == good)
+
 
 
 

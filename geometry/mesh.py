@@ -4868,7 +4868,6 @@ class UVList(MeshList):
         tolerance: Union[None, float] = None,
     ) -> np.ndarray:
         return super().fix_symmetry(
-            self,
             pivot     = pivot,
             axis      = axis,
             side      = side,

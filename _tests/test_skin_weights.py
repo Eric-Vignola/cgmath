@@ -202,6 +202,16 @@ class TestSkinData(unittest.TestCase):
 
         self.assertTrue(allclose(combined.weights, expected_weights))
 
+    def test_iadd(self):
+        # += keeps the skin it adds to, as the sum + gives
+        skin     = self.plane1.copy()
+        original = skin
+        skin += self.plane3.copy()
+        self.assertIs(skin, original)
+        self.assertTrue(skin == self.plane1 + self.plane3)
+        self.assertTrue(skin.influences == ["joint1", "joint2", "joint3", "joint4"])
+        self.assertEqual(skin.weights.shape, (8, 4))
+
     def test_fnmatch(self):
         # test fnmatch
         skin_cube = self.skin_cube.copy()
