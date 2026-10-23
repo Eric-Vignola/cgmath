@@ -11,6 +11,7 @@ a class setting or a read-only property, which names it for what it is.
 import contextlib
 import gc
 import inspect
+import itertools
 import json
 import os
 import re
@@ -29,6 +30,7 @@ from cgmath.geometry import _base
 from cgmath.geometry._base import Data, DataList
 from cgmath.geometry.mesh import MeshData, MeshList
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData
+from cgmath.hierarchy import hierarchy as hierarchy_mod
 from cgmath._tests.test_roundtrip import data_classes, examples
 
 
@@ -868,16 +870,44 @@ class TestAnAcceptedWriteWorksNoNamesOut(unittest.TestCase):
         class settings of its own, as on a class one base deeper holding
         none. A loop over the class makes no call for the profile above to
         see, and a copy of its dict made in C, tuple(cls.__dict__), no line
-        either."""
+        either.
+
+        A rig's list write keeps the structure count it draws, from the one
+        sequence every rig edit in the process draws from
+        (hierarchy._structure_ticks). Up to 256 that is an int Python keeps
+        ready, past it a new one, 28 B more. The sequence is restarted past
+        256 for the test, so every count either class draws is a new int,
+        however many edits ran before it in the process."""
         bases = (TransformData, MeshData, HierarchyData, ClipData, MeshList)
-        _, small = _accepted(*(_grown(b, depth=1, width=0) for b in bases))
-        _, big = _accepted(*(_grown(b) for b in bases))
-        for (obj, name, value), (grown, _, grown_value) in zip(small, big):
-            with self.subTest(cls=type(obj).__name__, name=name):
-                self.assertEqual(
-                    _cost(lambda: setattr(grown, name, grown_value)),
-                    _cost(lambda: setattr(obj, name, value)),
-                )
+        with mock.patch.object(hierarchy_mod, "_structure_ticks", itertools.count(1 << 20)):
+            _, small = _accepted(*(_grown(b, depth=1, width=0) for b in bases))
+            _, big = _accepted(*(_grown(b) for b in bases))
+            for (obj, name, value), (grown, _, grown_value) in zip(small, big):
+                with self.subTest(cls=type(obj).__name__, name=name):
+                    self.assertEqual(
+                        _cost(lambda: setattr(grown, name, grown_value)),
+                        _cost(lambda: setattr(obj, name, value)),
+                    )
+
+    def test_the_cost_holds_wherever_the_structure_count_stands(self):
+        """The test above, run with the structure count the edits before it
+        left at each of 192 to 256, so that the counts it draws pass 256 at
+        any point of it: the starts it fails at are listed. Unpinned, a
+        count that passed 256 between the bigger class's list writes and
+        the smaller one's had the rig's list write hold 120 B on one and
+        148 B on the other (Python 3.11)."""
+        name    = "test_an_accepted_write_costs_no_more_on_a_bigger_class"
+        failing = []
+        first   = None
+        for start in range(192, 257):
+            result = unittest.TestResult()
+            with mock.patch.object(hierarchy_mod, "_structure_ticks", itertools.count(start)):
+                type(self)(name).run(result)
+            for test, message in result.failures + result.errors:
+                first = first or f"{test}: {message.strip().splitlines()[-1]}"
+            if result.failures or result.errors:
+                failing.append(start)
+        self.assertEqual(failing, [], first)
 
 
 # -- every class cgmath defines --------------------------------------------
