@@ -469,7 +469,7 @@ class TestClipRestPose(unittest.TestCase):
         self.clip.rest_pose = None
         self.assertEqual(
             sorted(self.clip.to_dict()),
-            ["__class__", "__items__", "blocks", "fps", "frame", "start_frame"],
+            ["__class__", "__items__", "axis_system", "blocks", "fps", "frame", "start_frame", "unit"],
         )
         path = self.clip.save(os.path.join(self.tmp.name, "bare.json"))
         self.assertIsNone(ClipData.load(path).rest_pose)

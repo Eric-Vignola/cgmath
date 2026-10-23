@@ -2004,12 +2004,64 @@ its rotate curves; any other root's rotate is solved again, through
 mesh readers keep each mesh in its own space and take no `axis_system`,
 and `render.Object.load_fbx`, a mesh with no node above it, turns its
 points, normals and skin bind matrices. A file already in Maya's Y-up,
-as `save_fbx` writes, loads as it is; a left-handed one
+as `save_fbx` writes a default read, loads as it is; a left-handed one
 raises `ValueError`, since a rotation can't turn it into Maya's axes.
 `axis_system=None` keeps the file's own axes. `load()` reads an FBX with
 the `load_fbx` defaults and takes no `axis_system`, so a left-handed file
 reads through `load_fbx(..., axis_system=None)` alone. Which way the
 character faces stays as the file has it.
+
+A rig and a clip record the axis system and the unit their values are
+in, `axis_system` and `unit`, saved with them. The FBX loaders record
+what they produced: `"maya_y_up"` and `1.0` (cm) with their defaults; the
+file's own axes in words with `axis_system=None`, `"z up, -y front, right
+handed"` for an Unreal file, its up and front axes, either one negated,
+and its hand; and with a number for `scale_factor` the file's unit in cm
+over that number (a cm file read with `0.01` records `100.0`, metres).
+Hand-built data, and a file saved before there was a record, hold
+`"maya_y_up"` and `1.0`. Setting either relabels the values and moves
+none of them, a clip's rest pose with the clip. A rig, clip, copy, cut
+or delta built from another takes its record, and a view reads its rig's
+(a view taken from `TransformList.load_fbx`'s, that load's, until a rig
+owns its nodes). Values of two records have no one label, so where they
+would meet `ValueError` is raised: a view over rigs that record two, a
+load's view holding nodes no rig owns beside a rig's of another record,
+nodes of a rig joining one that records another (an empty rig takes
+theirs), the pose algebra between two, matching or pasting the values of
+nodes of another (`match_translate`, `match_rotate`, `match_matrix`, and
+a pose or frames pasted into `clip.frames`; values pass as they are),
+`ClipData.from_poses` of poses of two, and a clip's rest pose of
+another. `save_fbx` labels the file with the record, the unit set
+explicitly, and writes the values as they are, so a save loads with the
+defaults, and imports into Maya, where the file the values were read
+from does, in whatever axes and unit they were read. Where the read and
+Maya part, as on a Y-up file whose front is not +Z read with the
+defaults, the save parts too (`save_fbx`'s docstring lists the cases). A
+save in another unit than cm holds its lengths in that unit, as a file
+authored in it does, which Maya's importer brings in with its top nodes
+scaled by the unit (100 for metres) at the positions the values say. A
+mesh holds no record: its points are in its node's object space, the
+same in any axes, in the unit its reader's `scale_factor` gives, the
+unit a rig read with the same `scale_factor` records. `save_fbx` writes
+no geometry; a mesh's node, read as a transform, is written as a group.
+
+```python
+rig = make_chain()
+assert (rig.axis_system, rig.unit) == ("maya_y_up", 1.0)      # hand-built: Maya's Y-up, cm
+
+rig.axis_system = "z up, -y front, right handed"  # Unreal's axes: relabels, moves nothing
+rig.unit        = 100.0                           # metres
+rig.save_fbx(os.path.join(WORKDIR, "zup_m.fbx"))
+
+kept = HierarchyData.load_fbx(os.path.join(WORKDIR, "zup_m.fbx"), axis_system=None, scale_factor=1.0)
+assert (kept.axis_system, kept.unit) == ("z up, -y front, right handed", 100.0)
+assert np.allclose(kept.world_matrix, rig.world_matrix)        # the values as they were saved
+
+maya = HierarchyData.load_fbx(os.path.join(WORKDIR, "zup_m.fbx"))   # the defaults
+assert (maya.axis_system, maya.unit) == ("maya_y_up", 1.0)
+turn = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])   # Z-up to Maya's Y-up
+assert np.allclose(maya.world_matrix[:, 3, :3], rig.world_matrix[:, 3, :3] @ turn * 100.0)
+```
 
 `HierarchyData.load_fbx(..., pose="bind")` reads a skinned file's bind
 pose rather than its node values, which hold whatever pose the scene was
@@ -2236,21 +2288,23 @@ sorted(tree["__items__"][1])
 # ['__class__', 'name', 'node_type', 'parent_uuid', 'translate', 'uuid']
 ```
 
-A `ClipData` saves its timebase beside the items, named as its properties:
-`start_frame`, `fps`, `frame` (the loaded frame, which a load scrubs back
-to), and `blocks`, one `(F, N, 3)` array per framed channel, each keyed by
-the channel's property. A clip holding a `rest_pose` saves it as well,
-under `rest_pose`, as a hierarchy's tree; one holding none saves no such
-entry.
+A `HierarchyData` saves beside the items the record of the axes and the
+unit its values are in, `axis_system` and `unit`. A `ClipData` saves its
+record and its timebase, named as its properties: `start_frame`, `fps`,
+`frame` (the loaded frame, which a load scrubs back to), and `blocks`, one
+`(F, N, 3)` array per framed channel, each keyed by the channel's
+property. A clip holding a `rest_pose` saves it as well, under
+`rest_pose`, as a hierarchy's tree; one holding none saves no such entry.
 
 ```python
 sorted(clip.to_dict())
-# ['__class__', '__items__', 'blocks', 'fps', 'frame', 'start_frame']
+# ['__class__', '__items__', 'axis_system', 'blocks', 'fps', 'frame', 'start_frame', 'unit']
 clip.to_dict()["blocks"]["translate"].shape     # (4, 3, 3)
 ```
 
 `copy()` is deep and owning, and its nodes keep their uuids. `==` on a
-hierarchy compares its nodes by uuid, not their channels. On a clip it
+hierarchy compares its nodes by uuid, not their channels, and its
+`axis_system` and `unit`. On a clip it
 also compares the timebase, the loaded frame and every block by value,
 and the rest pose as a hierarchy compares: whether there is one, and its
 nodes' uuids.

@@ -1095,7 +1095,14 @@ world = body.points @ W[:3, :3] + W[3, :3]  # where the file puts the mesh
 ```
 
 The readers take no `axis_system` and read any file as it is, a
-left-handed one too. `render.Object.load_fbx`, a mesh with no node to
+left-handed one too. A mesh holds no record of the axes and the unit its
+points are in, as a rig does (`HierarchyData.axis_system`, `unit`): its
+own space is the same in any axes, and its unit is the one its reader's
+`scale_factor` gives, the unit a rig read with the same `scale_factor`
+records, so under its node's world from that rig, read in whatever axes,
+it is where the rig's record says. `save_fbx` writes no geometry: a
+mesh's node, which the rig loaders read as a transform, is written as a
+group. `render.Object.load_fbx`, a mesh with no node to
 carry the turn, turns its points itself. A node's geometric transform,
 which Maya bakes into the points, is not read. A file that holds its
 unit as a scale on the scene root's children, as the SDK's and Maya's

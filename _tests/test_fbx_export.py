@@ -198,10 +198,12 @@ class TestFbxExportSkeleton(unittest.TestCase):
 
     def test_a_parent_left_out_makes_a_root(self):
         # a view without the parent, a parent taken out with del: the node
-        # is a root of the file and a skeleton root, never hung from a node
-        # written before it that carries the parent's name. 938ae44 looked
-        # the parent up by name: the second view hung knee from the other
-        # hip, and the others raised AttributeError
+        # is a root of the file, never hung from a node written before it
+        # that carries the parent's name. 938ae44 looked the parent up by
+        # name: the second view hung knee from the other hip, and the others
+        # raised AttributeError. Every joint is a limb node, as Maya writes
+        # them: Maya's importer reads a root (eRoot) with no child as a
+        # plain transform
         def chain():
             root = _joint("root")
             hip  = _joint("hip", root)
@@ -220,7 +222,7 @@ class TestFbxExportSkeleton(unittest.TestCase):
             with self.subTest(expected):
                 self._export(view)
                 self.assertEqual(sorted(self._read()), expected)
-                self.assertEqual(skeleton_types()["|knee"], fbx.FbxSkeleton.EType.eRoot)
+                self.assertEqual(skeleton_types()["|knee"], fbx.FbxSkeleton.EType.eLimbNode)
 
         rig = chain()
         del rig[0]
@@ -228,7 +230,7 @@ class TestFbxExportSkeleton(unittest.TestCase):
         self._export(rig)
         self.assertEqual(sorted(self._read()), ["|hip", "|hip|knee"])
         types = skeleton_types()
-        self.assertEqual(types["|hip"], fbx.FbxSkeleton.EType.eRoot)
+        self.assertEqual(types["|hip"], fbx.FbxSkeleton.EType.eLimbNode)
         self.assertEqual(types["|hip|knee"], fbx.FbxSkeleton.EType.eLimbNode)
 
     def test_a_rig_listed_child_first_keeps_its_hierarchy(self):
@@ -260,7 +262,7 @@ class TestFbxExportSkeleton(unittest.TestCase):
                 self._export(rig)
                 self.assertEqual(sorted(self._read()), ["|root", "|root|hip", "|root|hip|knee"])
                 types = skeleton_types()
-                self.assertEqual(types["|root"], fbx.FbxSkeleton.EType.eRoot)
+                self.assertEqual(types["|root"], limb)
                 self.assertEqual((types["|root|hip"], types["|root|hip|knee"]), (limb, limb))
                 for node in HierarchyData.load_fbx(self.path):
                     np.testing.assert_allclose(node.world_matrix[3, :3], worlds[node.name], atol=1e-9)

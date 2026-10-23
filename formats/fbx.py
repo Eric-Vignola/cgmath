@@ -2759,15 +2759,48 @@ class FbxExporter:
 
     @property
     def scene(self):
-        """fbx.FbxScene: the fbx scene to export"""
+        """fbx.FbxScene: the fbx scene to export, labelled with its skeleton's axes and unit
+
+        :meth:`add_skeleton` labels it with what the skeleton records; until
+        then it is labelled Maya's Y-up and cm."""
         self._check_open()
 
         if self._scene is None:
             self._scene = fbx.FbxScene.Create(self.manager, "")
-
-            # maya coordinate system
-            self._scene.GetGlobalSettings().SetAxisSystem(fbx.FbxAxisSystem.MayaYUp)
+            self._label("maya_y_up", 1.0)
         return self._scene
+
+    def _label(self, axis_system: str, unit: float) -> None:
+        """labels the scene with ``axis_system`` and ``unit``, a rig's record
+        (``HierarchyData.axis_system`` and ``unit``): the six properties
+        that hold the axis system, the up and front axes with their signs
+        and the third axis, its sign giving the hand, and the system unit,
+        the cm one unit holds. The binding builds no axis system pointing
+        down, so the properties are set one by one."""
+        # imported here, cgmath.hierarchy imports this module
+        from cgmath.hierarchy.hierarchy import _axis_record_axes
+
+        up, up_sign, front, front_sign, right = _axis_record_axes(axis_system)
+        third = 3 - up - front
+
+        # up x front is the third axis of a right handed system, its negative
+        # of a left handed one
+        upward         = np.zeros(3)
+        forward        = np.zeros(3)
+        upward[up]     = up_sign
+        forward[front] = front_sign
+        third_sign     = int(np.cross(upward, forward)[third]) * (1 if right else -1)
+        settings       = self.scene.GetGlobalSettings()
+        for name, value in (
+            ("UpAxis", up),
+            ("UpAxisSign", up_sign),
+            ("FrontAxis", front),
+            ("FrontAxisSign", front_sign),
+            ("CoordAxis", third),
+            ("CoordAxisSign", third_sign),
+        ):
+            fbx.FbxPropertyInteger1(settings.FindProperty(name)).Set(int(value))
+        settings.SetSystemUnit(fbx.FbxSystemUnit(float(unit)))
 
     def close(self) -> None:
         """frees the manager, and with it the scene and every node added"""
@@ -2789,11 +2822,22 @@ class FbxExporter:
 
         Each node is added after its parent, whatever order the component
         lists them in; a node whose parent it leaves out hangs from the scene
-        root, a skeleton root.
+        root, a root of the file. Every joint is written as a limb node
+        (``eLimbNode``), as Maya's own exporter writes every joint: Maya's
+        importer brings a root skeleton node (``eRoot``) with no child in as
+        a plain transform, without its joint orient.
+
+        The scene is labelled with the axis system and unit the component's
+        values are in, as it records them (``HierarchyData.axis_system`` and
+        ``unit``; a view's are its rig's, a list's of nodes their rig's): the
+        values are written as they are, under that label.
 
         Raises ValueError, before anything is added, when a user defined string
         attr is not plain ASCII, the only text the FBX SDK takes, or a node's user
-        defined attr specs do not go to json.
+        defined attr specs do not go to json, or when the component's nodes
+        come from rigs that record other axes or units, or it is
+        ``TransformList.load_fbx``'s view, or one taken from it, holding
+        nodes no rig owns beside nodes of a rig that records another.
 
         Notes:
             Only a single skeleton is supported.
@@ -2823,6 +2867,12 @@ class FbxExporter:
         members = list(skeleton_component)
         items   = [members[i] for i in TransformList._owning_parent_first(members, within=True)]
 
+        # what the values are in, the label the file takes
+        held = skeleton_component
+        if not isinstance(held, TransformList):
+            held = TransformList(members)
+        record = held._records()
+
         # every node's user defined attrs are worked out first, so one that
         # can't be written raises before anything is added
         kept = []
@@ -2835,6 +2885,7 @@ class FbxExporter:
             kept.append((item, self._user_properties(item, skipped)))
 
         self._skeleton = skeleton_component
+        self._label(*record)
 
         # the fbx node of every item, keyed by item identity.
         # parents can't be found by name, names may be duplicated across branches.
@@ -2874,12 +2925,10 @@ class FbxExporter:
             if item.node_type == "joint":
                 if rooted:
                     roots.add(id(item))
+                # a limb node at the top too, as Maya writes one: Maya reads
+                # an eRoot with no child as a transform, its orient dropped
                 node_attr = fbx.FbxSkeleton.Create(self.manager, "")
-                node_attr.SetSkeletonType(
-                    fbx.FbxSkeleton.EType.eRoot
-                    if rooted
-                    else fbx.FbxSkeleton.EType.eLimbNode
-                )
+                node_attr.SetSkeletonType(fbx.FbxSkeleton.EType.eLimbNode)
                 inherit_type = (
                     fbx.FbxTransform.EInheritType.eInheritRrs
                     if item.segment_scale_compensate

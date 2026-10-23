@@ -245,6 +245,7 @@ ClipData(iterable=None, frames: 'Optional[int]' = None, start_frame: 'int' = 0, 
 Properties:
 
 ```text
+axis_system                        the axis system the values are in, "maya_y_up" or one in words
 end_frame                          
 fps                                
 frame                              
@@ -252,6 +253,7 @@ frame_count
 frames                             
 rest_pose                          the pose the clip's file holds outside its take, or None
 start_frame                        
+unit                               the centimeters one unit of the values' lengths holds, 1.0 for cm
 ```
 
 Methods:
@@ -283,6 +285,13 @@ Owning container for a hierarchy of ``TransformData`` nodes.
 
 ```text
 HierarchyData(iterable=None)
+```
+
+Properties:
+
+```text
+axis_system                        the axis system the values are in, "maya_y_up" or one in words
+unit                               the centimeters one unit of the values' lengths holds, 1.0 for cm
 ```
 
 Methods:
@@ -452,6 +461,7 @@ TransformList(iterable=None)
 Properties:
 
 ```text
+axis_system                        the axis system the values are in, as the nodes' rig records it
 draw_style                         
 ds                                 Maya's short name for draw_style
 im                                 Maya's short name for inverse_matrix
@@ -520,6 +530,7 @@ tx                                 Maya's short name for translate_x
 ty                                 Maya's short name for translate_y
 tz                                 Maya's short name for translate_z
 unique_name                        whether each node's name is its own in its owning hierarchy
+unit                               the cm one unit of the values' lengths holds, as their rig records it
 uuid                               returns a list of all node uuids
 v                                  Maya's short name for visibility
 visibility                         
@@ -3016,7 +3027,7 @@ Properties:
 
 ```text
 manager                            fbx.FbxManager: the fbx manager that handles the memory
-scene                              fbx.FbxScene: the fbx scene to export
+scene                              fbx.FbxScene: the fbx scene to export, labelled with its skeleton's axes and unit
 ```
 
 Methods:

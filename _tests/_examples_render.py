@@ -176,6 +176,8 @@ def build_scene(texture=None) -> Scene:
         angle_of_view       = 40.0,
         fit_padding         = 1.25,
     )
+    scene.axis_system = "x up, y front, right handed"
+    scene.unit        = 2.54
 
     group = TransformData(name="set",   uuid=_UUIDS["set"],   translate=[0.0, -1.0, 0.0])
     props = TransformData(name="props", uuid=_UUIDS["props"], rotate=[0.0, 45.0, 0.0])

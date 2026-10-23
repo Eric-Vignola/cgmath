@@ -8,7 +8,8 @@ every saved field away from its default where that is valid:
 - HierarchyData: a namespaced rig of joints, a locator, a group, a space
   transform and the three SDF primitives (TransformData subclasses that are
   not render classes), parented by uuid, one joint carrying a user attribute
-  of every type and the group a user attribute a built-in hides.
+  of every type and the group a user attribute a built-in hides, its values
+  recorded in Unreal's axes and in meters.
 - TransformList: a selection of that rig, one node's parent left out of it.
 - ClipData: the rig over four frames, every framed channel moving, a frame
   other than the first loaded, its own timebase, and a node reparented after
@@ -144,7 +145,7 @@ def rig() -> HierarchyData:
     and an SDF sphere, box and cylinder used as colliders, parented by uuid.
     The hip carries a user attribute of every type; the group a user
     attribute named like a built-in, which the built-in hides but a save
-    keeps.
+    keeps. Its values are recorded in Unreal's axes and in meters.
     """
     root = TransformData(
         "VLR:root",
@@ -223,6 +224,8 @@ def rig() -> HierarchyData:
     h = HierarchyData([root, pelvis, hip, aim, group, space, head, foot, thigh])
     head.set_parent("VLR:pelvis", world_space=False)
     thigh.set_parent("VLR:hip_L", world_space=False)
+    h.axis_system = "z up, -y front, right handed"
+    h.unit        = 100.0
     return h
 
 
