@@ -38,17 +38,12 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Optional
 
 import numpy as np
 from cgmath.data import Array, Data
-
-
-if TYPE_CHECKING:
-    # NEVER import cgmath.hierarchy at module scope: this module is reachable
-    # during cgmath.geometry.__init__, and hierarchy imports back into a
-    # partially initialized cgmath.geometry via formats.glb.
-    from cgmath.hierarchy import HierarchyData
+from cgmath.hierarchy import HierarchyData
+from cgmath.hierarchy.hierarchy import ClipData, _FrameAxis, _PoseFrame
 
 
 # ============================= posed rigs ================================= #
@@ -75,8 +70,6 @@ class _BoundFrame:
     """
 
     def __init__(self, clip):
-        from cgmath.hierarchy.hierarchy import _PoseFrame
-
         if all(node._hierarchy is clip for node in clip.list):
             row          = slice(clip.frame, clip.frame + 1)
             self._blocks = {name: block[row] for name, block in clip._blocks.items()}
@@ -117,9 +110,6 @@ def _world_matrices(pose) -> tuple:
     (``clip.frames``, or one scoped to some of its nodes).  A clip is read
     from its blocks in one batched evaluation, never node by node.
     """
-    # imported here, not at module scope: see the TYPE_CHECKING note above
-    from cgmath.hierarchy.hierarchy import ClipData, _FrameAxis
-
     if isinstance(pose, _FrameAxis):
         # a scoped axis reads back its own columns, in the order it holds them
         world = pose.world_matrix

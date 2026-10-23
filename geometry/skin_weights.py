@@ -19,12 +19,23 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 import numpy as np
 from cgmath.data import Array, Data, DataList, _load_derived
 from cgmath.formats._fbx_io import open_fbx
+from cgmath.formats.glb import load_model
+from cgmath.geometry.mesh import _walk_fbx_mesh_nodes
 from cgmath.geometry.utils import (
     balance_center_weights,
     blur,
     inpaint,
     pxr,
     subdivide_catmull_clark,
+)
+from cgmath.hierarchy import (
+    HierarchyData,
+    _fbx_axis_turn,
+    _fbx_check_axis_system,
+    _fbx_enum,
+    _fbx_units,
+    _glb_columns,
+    _walk_fbx,
 )
 from scipy.sparse import coo_matrix
 
@@ -1064,19 +1075,6 @@ def _read_skins_fbx(
     if fbx is None:
         raise ImportError("Autodesk FBX Python SDK is not installed")
 
-    # imported here rather than at module scope: cgmath.hierarchy imports
-    # formats.glb, which imports cgmath.geometry, so a top level import closes
-    # the cycle while cgmath.geometry is still loading.
-    # cgmath.geometry.mesh is lazy for symmetry, not necessity.
-    from cgmath.geometry.mesh import _walk_fbx_mesh_nodes
-    from cgmath.hierarchy import (
-        _fbx_axis_turn,
-        _fbx_check_axis_system,
-        _fbx_enum,
-        _fbx_units,
-        _walk_fbx,
-    )
-
     _fbx_check_axis_system(axis_system)
     filename = os.path.expanduser(filename)
 
@@ -1179,10 +1177,6 @@ def _read_skins_glb(filename: str, bind_matrices: bool = False) -> list:
     unit the points get read in -- see ``scale_factor``. ``render`` pairs the
     entries with meshes by position; the public loaders return a ``SkinList``.
     """
-    from cgmath.formats.glb import load_model
-    from cgmath.hierarchy import HierarchyData
-    from cgmath.hierarchy import _glb_columns
-
     filename  = os.path.expanduser(filename)
 
     model     = load_model(filename)

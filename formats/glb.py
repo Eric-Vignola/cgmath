@@ -26,8 +26,6 @@ try:
 except ImportError:
     pygltflib = None
 
-from cgmath.geometry import MeshData, MeshList
-
 # trimesh
 try:
     import trimesh
@@ -426,6 +424,11 @@ class GlbData:
         self.gltf = GLTF2().load(fname)
 
         if trimesh is not None:
+            # imported here, not at module scope: cgmath.hierarchy imports this
+            # module and cgmath.geometry imports cgmath.hierarchy, so a module
+            # level import is a cycle, and geometry would load with every rig
+            from cgmath.geometry import MeshData, MeshList
+
             scene     = trimesh.load(fname)
             mesh_list = []
             for name, data in scene.geometry.items():

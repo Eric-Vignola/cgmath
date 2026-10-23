@@ -83,6 +83,7 @@ from cgmath.geometry.utils import (
     stream_to_matrix,
     subdivide_catmull_clark,
 )
+from cgmath.hierarchy import _fbx_axis_turn, _fbx_check_axis_system, _fbx_units
 from scipy.ndimage import convolve
 from scipy.spatial import QhullError, cKDTree
 
@@ -5429,10 +5430,6 @@ def _load_fbx(
 
     if fbx is None:
         raise ImportError("Autodesk FBX Python SDK is not installed")
-
-    # imported here rather than at module scope: cgmath.hierarchy imports
-    # formats.glb, which imports cgmath.geometry
-    from cgmath.hierarchy import _fbx_axis_turn, _fbx_check_axis_system, _fbx_units
 
     _fbx_check_axis_system(axis_system)
 
