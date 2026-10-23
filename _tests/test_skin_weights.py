@@ -7,7 +7,7 @@ import textwrap
 import unittest
 
 import numpy as np
-from cgmath.geometry._base import LegacyFileError
+from cgmath.data import LegacyFileError
 from cgmath.geometry.mesh import MeshData
 from cgmath.geometry.skin_weights import CompactSkinData, Patterns, SkinData, SkinList
 

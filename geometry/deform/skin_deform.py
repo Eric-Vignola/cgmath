@@ -41,7 +41,7 @@ from enum import Enum
 from typing import List, Optional, TYPE_CHECKING
 
 import numpy as np
-from cgmath.geometry._base import Array, Data
+from cgmath.data import Array, Data
 
 
 if TYPE_CHECKING:

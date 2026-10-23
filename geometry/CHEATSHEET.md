@@ -12,7 +12,7 @@ Concepts, conventions and the file map live in [`README.md`](README.md).
 |---|---|
 | [Setup](#setup) | fixtures: a unit cube, its UVs, two quad grids |
 | [Import surface](#import-surface) | what the package re-exports, and what it does not |
-| [`_base` — the `Data` contract](#_base--the-data-contract) | fields, round trips, `save`/`load`, equality, `DataList` |
+| [`cgmath.data` — the `Data` contract](#cgmathdata--the-data-contract) | fields, round trips, `save`/`load`, equality, `DataList` |
 | [`MeshData` — the polygonal mesh](#meshdata--the-polygonal-mesh) | construction, counts, extents, object matrix, booleans |
 | [Topology maps](#topology-maps) | `f2v` / `v2f` / `e2v` / `ue2v` …, `-1` padding, face census |
 | [Diagnostics](#diagnostics) | borders, shells, non-manifold, lamina, degenerate, unused |
@@ -179,7 +179,10 @@ print(gu.compute_neighbors(cube.v2f, cube.f2v).shape)
 
 ---
 
-## `_base` — the `Data` contract
+## `cgmath.data` — the `Data` contract
+
+`Data` and `DataList` live in `cgmath.data`, which imports nothing of
+geometry, and `cgmath.geometry` exports them too.
 
 Every geometry type is a `@dataclass` deriving from `Data`. Fields are the
 whole payload: equality, hashing, `repr`, pickling and every file format read
@@ -278,6 +281,15 @@ try:
 except LegacyFileError as err:  # a ValueError
     print(type(err).__name__)
 ```
+
+Up to cgmath 2.x `Data` and `DataList` lived in `cgmath.geometry._base`, a
+module that is gone. A file saved then loads all the same: its tag for a plain
+`Data` or `DataList` reads as `cgmath.data`'s, and `load` reads a pickle with
+an unpickler that finds the names it holds in `cgmath.data`. A bare
+`pickle.load` of such a pickle raises `ModuleNotFoundError: No module named
+'cgmath.geometry._base'`: load it with `load()`, and save it again for a pickle
+that `pickle.load` reads. cgmath 2.x, which has no `cgmath.data`, reads none of
+the pickles saved now, nor a file holding a plain `Data` or `DataList`.
 
 Cached topology is never written — a reloaded object recomputes lazily.
 
@@ -385,7 +397,7 @@ The serialization primitives are importable on their own, for dicts that are
 not `Data` objects.
 
 ```python
-from cgmath.geometry._base import (
+from cgmath.data import (
     bytes_to_dict,
     dict_to_bytes,
     dict_to_zip,
@@ -419,7 +431,7 @@ name reads as the property, so `Object(base_color=(1, 2))` says
 `Object.base_color must have shape (3,), got (2,)`.
 
 ```python
-from cgmath.geometry._base import Array
+from cgmath.data import Array
 
 print(Array(np.float64, "N", 3))  # the annotation MeshData.points carries
 

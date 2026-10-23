@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from cgmath.geometry._base import _is_sequence, Array, Data, DataList
+from cgmath.data import _is_sequence, Array, Data, DataList
 from cgmath.geometry.utils import pxr
 
 BLS_PRIM_TYPE = "MorphTarget"

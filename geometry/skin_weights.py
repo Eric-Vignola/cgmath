@@ -17,8 +17,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Tuple, Union
 
 import numpy as np
+from cgmath.data import Array, Data, DataList, _load_derived
 from cgmath.formats._fbx_io import open_fbx
-from cgmath.geometry._base import Array, Data, DataList, _load_derived
 from cgmath.geometry.utils import (
     balance_center_weights,
     blur,

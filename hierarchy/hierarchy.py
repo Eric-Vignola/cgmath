@@ -18,12 +18,12 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional, Union
 
 import numpy as np
-from cgmath.formats._fbx_io import open_fbx, typed
-from cgmath.formats.glb import load_model
-from cgmath.geometry import Data, DataList, ImmutableArray as numpy_array
-from cgmath.geometry._base import (
+from cgmath.data import (
     ITEMS_KEY,
     Array,
+    Data,
+    DataList,
+    ImmutableArray as numpy_array,
     _class_attribute,
     _decode,
     _from_tagged,
@@ -35,6 +35,8 @@ from cgmath.geometry._base import (
     _refusal,
     _save_shares,
 )
+from cgmath.formats._fbx_io import open_fbx, typed
+from cgmath.formats.glb import load_model
 from cgmath.transforms import (
     euler_filter,
     euler_reorder,

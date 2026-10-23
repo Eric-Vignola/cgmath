@@ -12,10 +12,11 @@
 
 * text=auto eol=lf
 
-# The test fixtures are real binaries -- numpy archives and one pickle -- and
+# The test fixtures are real binaries -- numpy archives, pickles, a zip -- and
 # must never be touched. `text=auto` already detects them by their NUL bytes;
 # naming them makes it certain rather than inferred, which is the difference
 # between a rule that is correct and a rule that happens to work.
 
 *.npz binary
 *.pkl binary
+*.zip binary

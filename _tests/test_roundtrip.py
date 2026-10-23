@@ -29,7 +29,7 @@ from unittest import mock
 
 import numpy as np
 import cgmath
-from cgmath.geometry._base import (
+from cgmath.data import (
     _CLASSES,
     _json_tree,
     _pickled,

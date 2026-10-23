@@ -50,14 +50,14 @@ from enum import Enum
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
-from cgmath.formats._fbx_io import FbxReadError, open_fbx, typed
-from cgmath.geometry._base import (
+from cgmath.data import (
     _strip_namespace,
     Array,
     ArraySpec,
     DTYPES_KEY,
     ImmutableArray as numpy_array,
 )
+from cgmath.formats._fbx_io import FbxReadError, open_fbx, typed
 from cgmath.geometry.deform import SkinDeformData
 from cgmath.geometry.mesh import (
     _load_fbx,

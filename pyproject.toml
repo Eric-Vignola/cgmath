@@ -83,7 +83,7 @@ Documentation = "https://github.com/Eric-Vignola/cgmath/blob/main/REFERENCE.md"
 # The root maps to the package name; every subpackage is then addressed
 # relative to it. Both test suites ship, `_tests` and `transforms/_tests`, so
 # `cgmath.utils.run_tests()` runs on an installed copy as it does on a
-# checkout. The 32 fixtures they read sit in `_tests/test_assets`, a folder
+# checkout. The 36 fixtures they read sit in `_tests/test_assets`, a folder
 # with no `__init__.py`: it is listed as a package all the same, which is how
 # setuptools wants a data folder named (it warns otherwise), and its files
 # ship as package data below. The repository's `tools/` and the markdown

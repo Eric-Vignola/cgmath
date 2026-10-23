@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from cgmath.geometry._base import Array, Data
+from cgmath.data import Array, Data
 from cgmath.geometry.mesh import MeshData
 from cgmath.geometry.utils.main import (
     compute_neighbor_distances,

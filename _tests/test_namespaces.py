@@ -10,8 +10,8 @@ import tempfile
 import unittest
 
 import numpy as np
+from cgmath.data import _strip_namespace, get_file_type
 from cgmath.geometry import BSplineData, MeshData, MeshList
-from cgmath.geometry._base import _strip_namespace, get_file_type
 from cgmath.geometry.deform import SkinDeformData
 from cgmath.geometry.skin_weights import CompactSkinData, SkinData, SkinList
 

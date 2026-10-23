@@ -1,3 +1,17 @@
+"""
+The base every cgmath data type is built on, and the files they save as.
+
+:class:`Data` and :class:`DataList`, the ``Array`` declarations of their array
+fields, and the pkl / npz / json files they save and load. Nothing here is
+about geometry: ``import cgmath.data`` loads no ``cgmath.geometry``, numba or
+scipy.
+
+Up to cgmath 2.x this module was ``cgmath.geometry._base``. A file saved then
+names a plain ``Data`` or ``DataList`` there, and a pickle names its functions
+there too: :meth:`Data.load` and :meth:`DataList.load` read both, while a bare
+``pickle.load`` of such a pickle raises ``ModuleNotFoundError``.
+"""
+
 import base64
 import copy
 import fnmatch
@@ -990,12 +1004,27 @@ def _read_npz(filename: str) -> dict:
     return zip_to_dict(filename)
 
 
+# up to cgmath 2.x this module was cgmath.geometry._base, and every pickle
+# saved then names it: _unpickle, _unpickle_array, a plain Data or DataList.
+# cgmath's own reader finds those names here; a bare pickle.load does not
+_MOVED_FROM = "cgmath.geometry._base"
+
+
+class _Unpickler(pickle.Unpickler):
+    """pickle's reader, which finds a name in cgmath.geometry._base in this module"""
+
+    def find_class(self, module, name):
+        if module == _MOVED_FROM:
+            module = __name__
+        return super().find_class(module, name)
+
+
 def _read_pickle(cls, filename: str, derived: bool = False):
     """``cls.load_pickle()``: the file's object, as the class _loaded_class allows"""
     filename = os.path.expanduser(filename)
     try:
         with open(filename, "rb") as f:
-            obj = pickle.load(f)
+            obj = _Unpickler(f).load()
     except LegacyFileError:
         raise LegacyFileError(_OLDER_FILE.format(filename)) from None
 
@@ -2312,6 +2341,10 @@ class Data:
         back whatever class the file holds, a list too. What the file's
         object holds, a field's object or a list's items, comes back as the
         class it names, which may derive from the one declared.
+
+        A file saved by cgmath 2.x, when this module was
+        ``cgmath.geometry._base``, loads too, a pickle as well, which a bare
+        ``pickle.load`` no longer reads.
         """
         return _load_as(cls, filename, mode)
 
@@ -2817,9 +2850,19 @@ class DataList(MutableSequence):
         class the file holds, and ``Data.load()`` any class. Each item comes
         back as the class it names, which may derive from
         ``DATA_LIST_CLASS``: a ``Scene``'s Object, Camera and Light nodes.
+
+        A file saved by cgmath 2.x, when this module was
+        ``cgmath.geometry._base``, loads too, a pickle as well, which a bare
+        ``pickle.load`` no longer reads.
         """
         return _load_as(cls, filename, mode)
 
 
 _register(Data)
 _register(DataList)
+
+# a file saved up to cgmath 2.x tags a plain Data or DataList with this
+# module's old name: the tag reads as the class, and a json or npz file
+# loads without importing cgmath.geometry
+_CLASSES[_MOVED_FROM + ".Data"]     = Data
+_CLASSES[_MOVED_FROM + ".DataList"] = DataList

@@ -97,7 +97,7 @@ from cgmath.geometry.deform import (
 )
 ```
 
-Every one of them subclasses `cgmath.geometry._base.Data`, so they all carry
+Every one of them subclasses `cgmath.data.Data`, so they all carry
 `.copy()`, `.to_dict()`, `.info()`, `.save()` / `.load()`, and all five
 round-trip ready to use — see [Persistence](#persistence) for what is saved.
 

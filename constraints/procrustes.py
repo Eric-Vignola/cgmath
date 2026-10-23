@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import numpy as np
-from cgmath.geometry._base import Array, Data
+from cgmath.data import Array, Data
 from cgmath.transforms import matrix_inverse, matrix_multiply, matrix_to_euler
 
 

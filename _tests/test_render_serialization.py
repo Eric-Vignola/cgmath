@@ -8,7 +8,7 @@ import unittest
 from dataclasses import dataclass, field, fields
 
 import numpy as np
-from cgmath.geometry._base import Data, DataList
+from cgmath.data import Data, DataList
 from cgmath.geometry.mesh import MeshData, UVData
 from cgmath.hierarchy import HierarchyData, TransformData
 from cgmath.render import Camera, Light, Object, Scene

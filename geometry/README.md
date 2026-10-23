@@ -40,7 +40,6 @@ A CSG stack in, a quad `MeshData` out.
 | File | Contents |
 |---|---|
 | `__init__.py` | re-exports 22 names — the package's public surface |
-| `_base.py` | `Data`, `DataList`, `ImmutableArray` and the serialization primitives |
 | `mesh.py` | `MeshData`, `MeshList`, `UVData`, `UVList`, `TriangulateMethod` / `TriangulateRules`, `AreaMethod`, `Axis`, `SampleMethod`, `RenderMethod`, `load_obj` / `load_glb` / `load_fbx` / `load_usd` / `save_obj` |
 | `map.py` | `MapData` (painted scalar map), `GeomSubsetData` (component selection) |
 | `morph_target.py` | `MorphData`, `MorphList` — sparse point offsets |
@@ -197,7 +196,7 @@ takes the declared trailing size.
 
 Your own type follows the same rules. Subclass `Data` under
 `@dataclass(repr=False, eq=False)`, which keeps its value equality and `repr`,
-and declare arrays with `Array` (from `cgmath.geometry._base`). A field named in
+and declare arrays with `Array`, both from `cgmath.data`. A field named in
 `TRANSIENT_FIELDS` is never saved and `==` skips it: use it for caches and
 links, and rebuild them in `_post_load()`, which runs once a load or `copy()`
 has set every field. An instance takes a write to nothing its class does not
@@ -221,8 +220,7 @@ from typing import Optional
 
 import numpy as np
 
-from cgmath.geometry import Data, DataList
-from cgmath.geometry._base import Array
+from cgmath.data import Array, Data, DataList
 
 
 @dataclass(repr=False, eq=False)

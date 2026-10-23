@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from cgmath.geometry._base import Array, Data
+from cgmath.data import Array, Data
 
 
 # =========================== PatchRelaxData ============================== #

@@ -3,7 +3,7 @@ from typing import Optional
 
 import numpy as np
 import scipy.integrate as si
-from cgmath.geometry._base import Array, Data, ImmutableArray as numpy_array
+from cgmath.data import Array, Data, ImmutableArray as numpy_array
 from cgmath.geometry.utils import compute_basis, ordered_closest_params
 from cgmath.geometry.utils._numba._bspline import (
     _closest_points,

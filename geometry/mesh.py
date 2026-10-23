@@ -52,9 +52,8 @@ except ImportError:
     fbx = None
 
 
+from cgmath.data import Array, Data, DataList, get_file_type, ImmutableArray as numpy_array
 from cgmath.formats._fbx_io import open_fbx
-from cgmath.geometry import Data, DataList, ImmutableArray as numpy_array
-from cgmath.geometry._base import Array, get_file_type
 from cgmath.geometry._saddle_surface import integrate, sample
 from cgmath.geometry.utils import (
     average_points,

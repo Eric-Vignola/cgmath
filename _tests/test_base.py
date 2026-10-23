@@ -15,7 +15,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
-from cgmath.geometry._base import (
+from cgmath.data import (
     _as_declared,
     _CLASSES,
     _is_numeric_or_boolean,
@@ -1260,7 +1260,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 
 import numpy as np
-from cgmath.geometry._base import Data
+from cgmath.data import Data
 
 
 @dataclass(repr=False, eq=False)

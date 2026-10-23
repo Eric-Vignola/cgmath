@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 
 import numpy as np
-from cgmath.geometry._base import Array, Data
+from cgmath.data import Array, Data
 from cgmath.geometry.bspline import SampleData
 from cgmath.geometry.utils import compute_basis
 from cgmath.geometry.utils._numba._bspline import (

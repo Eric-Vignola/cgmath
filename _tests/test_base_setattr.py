@@ -26,8 +26,8 @@ from typing import Optional
 from unittest import mock
 
 import numpy as np
-from cgmath.geometry import _base
-from cgmath.geometry._base import Data, DataList
+from cgmath import data as _data
+from cgmath.data import Data, DataList
 from cgmath.geometry.mesh import MeshData, MeshList
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData
 from cgmath.hierarchy import hierarchy as hierarchy_mod
@@ -775,14 +775,14 @@ class TestAnAcceptedWriteWorksNoNamesOut(unittest.TestCase):
 
     def counted(self, writes):
         """the classes whose names ``writes`` work out, a refusal let pass"""
-        real  = _base._writable_names
+        real  = _data._writable_names
         calls = []
 
         def counting(cls, own):
             calls.append(cls.__name__)
             return real(cls, own)
 
-        with mock.patch.object(_base, "_writable_names", counting):
+        with mock.patch.object(_data, "_writable_names", counting):
             for obj, name, value in writes:
                 try:
                     setattr(obj, name, value)

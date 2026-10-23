@@ -14,7 +14,7 @@ Conventions: matrices are row-major with translation at `M[3, :3]`; quaternions 
 - [`cgmath.utils`](#cgmathutils)
 - [`cgmath.hierarchy`](#cgmathhierarchy)
 - [`cgmath.geometry`](#cgmathgeometry)
-- [`cgmath.geometry._base`](#cgmathgeometry_base)
+- [`cgmath.data`](#cgmathdata)
 - [`cgmath.geometry.mesh`](#cgmathgeometrymesh)
 - [`cgmath.geometry.map`](#cgmathgeometrymap)
 - [`cgmath.geometry.morph_target`](#cgmathgeometrymorph_target)
@@ -648,9 +648,11 @@ UVData
 UVList
 ```
 
-## `cgmath.geometry._base`
+## `cgmath.data`
 
 the `Data` / `DataList` contract every type is built on.
+
+> The base every cgmath data type is built on, and the files they save as.
 
 #### `ArraySpec`
 

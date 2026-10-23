@@ -11,7 +11,7 @@ import unittest
 from dataclasses import fields
 
 import numpy as np
-from cgmath.geometry._base import Data, DataList
+from cgmath.data import Data, DataList
 from cgmath.geometry.map import GeomSubsetData, MapData
 from cgmath.geometry.mesh import MeshData, MeshList, UVData, UVList
 from cgmath.geometry.morph_target import MorphData, MorphList

@@ -75,6 +75,7 @@ name with its real signature and first docstring line.
 
 ```
 cgmath/
+├── data.py                Data / DataList / Array / ImmutableArray + serialization
 ├── utils.py               info() / docstring(), pretty_json, profile(), run_tests()
 │
 ├── hierarchy/             TransformData, TransformList, HierarchyData, ClipData
@@ -82,7 +83,6 @@ cgmath/
 │   └── hierarchy.py       the four types, the fbx / glb readers, the batched clip evaluator
 │
 ├── geometry/              meshes, UVs, curves, fields, transfer
-│   ├── _base.py           Data / DataList / ImmutableArray + serialization
 │   ├── mesh.py            MeshData, MeshList, UVData, UVList, the loaders
 │   ├── map.py morph_target.py skin_weights.py    MapData, MorphData, SkinData
 │   ├── bspline.py bspline_patch.py _saddle_surface.py _cdt.py

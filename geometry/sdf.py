@@ -67,7 +67,7 @@ from enum import Enum
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
-from cgmath.geometry._base import Array, ImmutableArray
+from cgmath.data import Array, ImmutableArray
 from cgmath.geometry.mesh import MeshData
 from cgmath.geometry.utils._numba._sdf import (
     _build_cube_to_vertex_map,
