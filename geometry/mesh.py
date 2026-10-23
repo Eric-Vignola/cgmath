@@ -2708,7 +2708,7 @@ class MeshData(Data):
 
         # set a default tolerance using the max deviation
         if tolerance is None:
-            tolerance = self.get_symmetry_deviation()[-1]
+            tolerance = self.get_symmetry_deviation(pivot=pivot, axis=axis)[-1]
 
         # get points
         duplicate = self.copy()
@@ -2736,10 +2736,11 @@ class MeshData(Data):
 
         source_points[match_indices] = mirror_points[indices[match_indices]]
 
-        # do a final symmetry test with zero tolerance for error
+        # do a final symmetry test with zero tolerance for error, about 0:
+        # the points are still taken from the pivot
         duplicate.points = source_points
         if force or duplicate.symmetrical(
-            pivot     = pivot,
+            pivot     = 0.0,
             axis      = axis,
             tolerance = EPSILON,
         ):

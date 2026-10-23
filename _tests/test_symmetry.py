@@ -128,3 +128,30 @@ class TestSymmetry(unittest.TestCase):
         self.assertFalse(obj4.symmetrical())
         self.assertTrue(obj4.fix_symmetry())
         self.assertTrue(obj4==obj1)
+
+    def test_mesh_symmetry_about_any_pivot_and_axis(self):
+        # moved to x = 1 the mesh is fixed about pivot=1.0 as it is about 0,
+        # and with x and z swapped about axis=2 as about axis 0
+        def moved(mesh, shift, axes):
+            new        = mesh.copy()
+            new.points = mesh.points[:, axes] + shift
+            return new
+
+        cases = (
+            (1.0, 0, [1.0, 0.0, 0.0], [0, 1, 2]),
+            (0.0, 2, [0.0, 0.0, 0.0], [2, 1, 0]),
+            (-0.5, 2, [0.0, 0.0, -0.5], [2, 1, 0]),
+        )
+        for side in (1.0, -1.0, 0.0):
+            for tolerance in (None, 0.7):
+                fixed = self.fix_me.copy()
+                self.assertTrue(fixed.fix_symmetry(side=side, tolerance=tolerance))
+                for pivot, axis, shift, axes in cases:
+                    with self.subTest(side=side, tolerance=tolerance, pivot=pivot, axis=axis):
+                        obj = moved(self.fix_me, shift, axes)
+                        self.assertFalse(obj.symmetrical(pivot=pivot, axis=axis))
+                        self.assertTrue(
+                            obj.fix_symmetry(pivot=pivot, axis=axis, side=side, tolerance=tolerance)
+                        )
+                        self.assertTrue(obj.symmetrical(pivot=pivot, axis=axis))
+                        self.assertTrue(obj == moved(fixed, shift, axes))
