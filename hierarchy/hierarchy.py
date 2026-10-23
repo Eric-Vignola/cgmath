@@ -11419,16 +11419,28 @@ class ClipData(HierarchyData):
         from the file's axis system to Maya's, the one ConvertScene gives,
         root travel included. Maya's FBX importer agrees on a file whose up
         axis is x or z and leaves one whose up axis is y in its own axes, as
-        :meth:`HierarchyData.load_fbx` says. Neither agrees on a root an
-        additive layer moves: ConvertScene leaves that layer's translate in
-        the file's axes and Maya's importer parts from both, where the clip
-        keeps the file's world turned. A joint root takes the turn in
-        its joint orient and its translate curves, keeping its rotate curves
-        as authored; any other root has its rotate solved again on every
-        frame in its rotate order, through euler_filter along the frames,
-        frame 0 as solved, and its translate turned. A file already in Maya's
-        Y-up loads as it is, a left handed one raises ValueError, and
-        ``axis_system=None`` keeps the file's own axes.
+        :meth:`HierarchyData.load_fbx` says. The clip parts from both on a
+        root a layer above the base translates, additive, override or
+        passthrough: it keeps that root's translate in the file's world
+        turned, the motion as the file authors it, where ConvertScene leaves
+        that layer's translate in the file's axes, and so does Maya's importer
+        wherever the base layer holds that translate (within 7.7e-7 of
+        ConvertScene; where the base layer holds no curve node for it, Maya
+        parts from ConvertScene as the first live layer item below says). The
+        clip sits 2.8 to 45 off Maya's import of such a root; Maya's import of
+        a Z-up scene it exported, a group root an additive layer translates,
+        sits 45 off that scene turned, the clip 1.5 off it, as Maya's import
+        of the same scene exported Y-up does. A root whose rotation is
+        inactive still blends its layered rotation as ConvertScene's xyz node,
+        as Maya's importer does a group's or a locator's: a zyx group root the
+        layer also turns sits 1.70 off the file's world turned, within 2.3e-3
+        of Maya's FBXImport. A joint root takes the turn in its joint orient
+        and its translate curves, keeping its rotate curves as authored; any
+        other root has its rotate solved again on every frame in its rotate
+        order, through euler_filter along the frames, frame 0 as solved, and
+        its translate turned. A file already in Maya's Y-up loads as it is, a
+        left handed one raises ValueError, and ``axis_system=None`` keeps the
+        file's own axes.
 
         ``node_types`` keeps the kinds of node :meth:`HierarchyData.load_fbx`
         keeps, and what that read folds into the nodes it keeps, the nodes

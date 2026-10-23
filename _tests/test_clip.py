@@ -6773,8 +6773,15 @@ class TestFbxLoadsInMayaAxes(unittest.TestCase):
     matrix, on every frame, is the one the sdk gives after
     FbxAxisSystem.MayaYUp.ConvertScene, the conversion Maya's FBX importer
     runs on a file whose up axis is x or z (it leaves one whose up axis is y
-    as it is). The fixtures are authored straight through the sdk, in the
-    axis system each test names; the truth is the sdk's own evaluation"""
+    as it is), except where an additive layer translates a root, whose
+    translate the clip keeps in the file's world turned
+    (test_a_root_an_additive_layer_moves_keeps_the_files_world_turned); a
+    root whose rotation is inactive still blends its layered rotation as
+    ConvertScene's xyz node, as Maya's importer does a group's or a
+    locator's (TestFbxRotationInactive.test_a_root_a_layer_translates_and_
+    turns_keeps_the_files_translate). The fixtures are authored straight
+    through the sdk, in the axis system each test names; the truth is the
+    sdk's own evaluation"""
 
     FRAMES = 9
 
@@ -7070,11 +7077,14 @@ class TestFbxLoadsInMayaAxes(unittest.TestCase):
 
     def test_a_root_an_additive_layer_moves_keeps_the_files_world_turned(self):
         """a joint root, or a group root, whose translate an additive layer
-        moves along the file's y and z (the group's turned about y as well):
+        moves along the file's y and z, or along y while it turns about y:
         every node, on every frame, is the sdk's world in the file's own
-        axes times the turn. ConvertScene is not the truth here: it leaves
-        the additive layer's translate in the file's axes, and Maya's
-        importer parts from both"""
+        axes times the turn, the motion as the file authors it. Neither
+        ConvertScene nor Maya's importer is the truth here: ConvertScene
+        leaves the additive layer's translate in the file's axes, and so
+        does Maya's importer, the base layer holding each moved root's
+        translate (its translate ConvertScene's to the bit, the clip's 28 to
+        40 off it, probe_published_additive.py, probe_joint_split.py)"""
         turn         = np.eye(4)
         turn[:3, :3] = [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]]
         cases = {

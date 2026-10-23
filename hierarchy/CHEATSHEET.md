@@ -1952,15 +1952,26 @@ X or Z, an Unreal file among them, in the same place. It leaves a file
 whose up axis is Y, pointing up or down, in its own axes, so a Y-up file
 whose front is not +Z, or a -Y-up one, loads turned 90 or 180 degrees
 from where Maya shows it. An Unreal file, Z-up, turns (x, y, z) to
-(x, z, -y), root travel with it. On a root an additive layer moves, a
-clip still keeps the file's world turned, where ConvertScene leaves that
-layer's translate in the file's axes and Maya's importer parts from
-both. The turn goes on the roots: a joint
-root takes it in its joint orient and translate and keeps its rotate
-curves; any other root's rotate is solved again, through `euler_filter`
-on a clip. The mesh readers turn the points and normals, and
-`Object.load_fbx` the skin's bind matrices with them. A file already in
-Maya's Y-up, as `save_fbx` writes, loads as it is; a left-handed one
+(x, z, -y), root travel with it. On a root a layer above the base
+translates, additive, override or passthrough, a clip still keeps the
+root's translate in the file's world turned, the motion as the file
+authors it, where ConvertScene leaves that layer's translate in the
+file's axes, and so does Maya's importer wherever the base layer holds
+that translate (within 7.7e-7 of ConvertScene; where the base layer
+holds no curve node for it, Maya parts from ConvertScene as the first
+live layer item above says). A clip sits 2.8 to 45 off Maya's import of
+such a root; Maya's import of a Z-up scene it exported, a group root an
+additive layer translates, sits 45 off that scene turned, the clip 1.5
+off it, as Maya's import of the same scene exported Y-up does. A root
+whose rotation is inactive still blends its layered rotation as
+ConvertScene's xyz node, as Maya's importer does a group's or a
+locator's (a zyx group root the layer also turns: 1.70 off the file's
+world turned, within 2.3e-3 of Maya's FBXImport). The turn goes on the
+roots: a joint root takes it in its joint orient and translate and keeps
+its rotate curves; any other root's rotate is solved again, through
+`euler_filter` on a clip. The mesh readers turn the points and normals,
+and `Object.load_fbx` the skin's bind matrices with them. A file already
+in Maya's Y-up, as `save_fbx` writes, loads as it is; a left-handed one
 raises `ValueError`, since a rotation can't turn it into Maya's axes.
 `axis_system=None` keeps the file's own axes. `load()` reads an FBX with
 the `load_fbx` defaults and takes no `axis_system`, so a left-handed file
