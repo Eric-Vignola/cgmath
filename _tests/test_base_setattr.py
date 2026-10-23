@@ -705,8 +705,14 @@ def _profiled(write) -> Counter:
 def _cost(write) -> Counter:
     """{event: count} of the Python lines and calls ``write`` runs, and the
     most memory it holds at once beyond what it started with ("held"): the
-    least of three runs, so a free list one run refills is not counted. A
-    copy made in C -- tuple(cls.__dict__) -- is no line and no call."""
+    least of the last five of eight runs under tracemalloc, by when the
+    write holds the same on each. The first run holds more than the write
+    does, for tracemalloc counts no release of memory made before it
+    started: a clip's frame write holds 840 B, then 424 B on each run
+    after (Python 3.11). And a run can hold memory that is not the
+    write's: on Python 3.9 the same write holds 544 B, and now and then
+    763 or 1041 B on one run. A copy made in C -- tuple(cls.__dict__) --
+    is no line and no call."""
     seen = Counter()
 
     def trace(frame, event, arg):
@@ -726,15 +732,20 @@ def _cost(write) -> Counter:
         if started:
             tracemalloc.start()
         try:
-            for _ in range(3):
-                tracemalloc.reset_peak()
+            for _ in range(8):
+                # read twice, then reset the peak: once over 256 B are
+                # traced, a read makes ints of its own and keeps one, which
+                # the second read counts and puts its own in place of, so
+                # the peak starts from what the write starts with
                 before = tracemalloc.get_traced_memory()[0]
+                before = tracemalloc.get_traced_memory()[0]
+                tracemalloc.reset_peak()
                 write()
                 held.append(tracemalloc.get_traced_memory()[1] - before)
         finally:
             if started:
                 tracemalloc.stop()
-    seen["held"] = min(held)
+    seen["held"] = min(held[3:])
     return seen
 
 
@@ -908,6 +919,46 @@ class TestAnAcceptedWriteWorksNoNamesOut(unittest.TestCase):
             if result.failures or result.errors:
                 failing.append(start)
         self.assertEqual(failing, [], first)
+
+    def test_a_block_kept_on_one_run_is_not_the_writes(self):
+        """A clip's frame write that also keeps a block of 1 KB on one of
+        the writes _cost makes, any one, holds what the write alone does.
+        _cost took the least of three runs, and the write held its own only
+        from the third (Python 3.9: 1056, 572, then 544 B): a block kept on
+        that one left the second run's 572 B, 28 B of them _cost's own, as
+        the least."""
+        clip = self.objects["clip"]
+        kept = []
+        made = [0]
+
+        def write(stray):
+            clip.frame = 2
+            made[0] += 1
+            if made[0] == stray:
+                kept.append(bytearray(1024))
+
+        alone = _cost(lambda: write(0))["held"]
+        for stray in range(1, made[0] + 1):
+            made[0] = 0
+            with self.subTest(stray=stray):
+                self.assertEqual(_cost(lambda: write(stray))["held"], alone)
+
+    def test_the_cost_holds_none_of_its_own(self):
+        """A write that makes nothing holds 0 B, tracemalloc already tracing
+        and over 256 B traced. Past 256 B, a count of the memory traced is
+        an int of its own, and a read of it makes two: _cost read each
+        run's after resetting the peak, and counted those 56 B for a write
+        of nothing."""
+        started = not tracemalloc.is_tracing()
+        if started:
+            tracemalloc.start()
+        try:
+            ballast = bytearray(4096)
+            self.assertEqual(_cost(lambda: None)["held"], 0)
+            del ballast
+        finally:
+            if started:
+                tracemalloc.stop()
 
 
 # -- every class cgmath defines --------------------------------------------
