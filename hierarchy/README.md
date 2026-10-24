@@ -34,7 +34,7 @@ with `set_parent("hip")`, which keeps the uuid, and read the name back as
 arrives without one. Names are for humans, `match()` and lookup — they
 may repeat, and `unique_name` tells you when they do. A node joining a
 hierarchy without its parent becomes a root there. `parent_node`, the
-name before 2.0.0, is a deprecated alias until 3.0.0.
+name before 2.0.0, went in 3.0.0; a file that names it still loads.
 
 **Ownership is exclusive.** A node's `_hierarchy` back-pointer names the
 one `HierarchyData` that holds it. `append` / `insert` claim it (pulling

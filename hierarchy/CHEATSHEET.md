@@ -22,7 +22,7 @@ overview see [`README.md`](README.md); for the rest of the library see
 | [Matrices](#matrices) | `matrix`, `world_matrix`, the six factor matrices, `quaternion`, the parent and inverse matrices |
 | [Maya's short names](#mayas-short-names) | `t` `tx` … `wm` `pm` `im` `wim` `pim`, read and written as their long names |
 | [Cache invalidation](#cache-invalidation) | when `world_matrix` is recomputed |
-| [Parenting: `parent_uuid`](#parenting-parent_uuid) | the parent's uuid, `parent_name`, `set_parent` by name, joining a rig, `parent_node`, older files |
+| [Parenting: `parent_uuid`](#parenting-parent_uuid) | the parent's uuid, `parent_name`, `set_parent` by name, joining a rig, older files |
 | [Node queries](#node-queries) | parent / children / branch / root / index |
 | [Node edits](#node-edits) | `set_parent`, `match_*`, `swapaxes`, orient helpers, node type, prefix / suffix, namespaces, user attributes |
 | [`TransformList` — views](#transformlist--views) | slicing, fancy indexing, `match` |
@@ -119,7 +119,6 @@ str(node)           # 'hero'
 | `radius` | `1.0` | joint display radius |
 | `draw_style` | `0` | Maya `drawStyle` |
 | `user_defined_attributes` | `{}` | extra attributes carried through `save_fbx` and back by `load_fbx`, but for arrays, matrices, multis and other compounds; each node gets its own dict |
-| `parent_node` | `None` | `parent_uuid`'s deprecated name, with a `DeprecationWarning`; goes in 3.0.0 |
 
 ---
 
@@ -608,24 +607,22 @@ HierarchyData([lone])                            # a rig with no thigh
 assert lone.parent_uuid is None
 ```
 
-`parent_node`, `parent_uuid`'s name before cgmath 2.0.0, stays until
-3.0.0 as a deprecated alias: the property and the constructor keyword
-read and write `parent_uuid`, and a `to_attributes` mapping naming it maps
-`parent_uuid`, each with a `DeprecationWarning` filed under the caller,
-through an `Object`'s, a `Camera`'s or a `Light`'s constructor too. A name
-is refused the same way. A file saved before 2.0.0 names its parents under
-`"parent_node"` and still loads, a uuid as it is and a name as the first
-node of that name in the loaded rig (a name no node carries leaves a
-root); it saves back as `"parent_uuid"`.
+`parent_node`, `parent_uuid`'s name before cgmath 2.0.0, went in 3.0.0.
+A node has no such attribute: a read or a write raises `AttributeError`,
+as any name the class does not declare does, the constructor keyword
+raises `TypeError`, through an `Object`'s, a `Camera`'s or a `Light`'s
+constructor too, and a `to_attributes` mapping naming it maps nothing, as
+a public name that is no field does. A file saved before 2.0.0 names its
+parents under `"parent_node"` and still loads, a uuid as it is and a name
+as the first node of that name in the loaded rig (a name no node carries
+leaves a root); it saves back as `"parent_uuid"`.
 
 ```python
-import warnings
-
-with warnings.catch_warnings(record=True) as caught:
-    warnings.simplefilter("always")
-    assert rig["knee"].parent_node == rig["thigh"].uuid
-    assert rig["knee"].to_attributes({"parent_node": "parent"}) == {"parent": rig["thigh"].uuid}
-assert [w.category for w in caught] == [DeprecationWarning] * 2
+try:
+    rig["knee"].parent_node
+except AttributeError as error:
+    print(error)    # 'TransformData' object has no attribute 'parent_node'
+assert rig["knee"].to_attributes({"parent_node": "parent"}) == {}
 
 old = HierarchyData.from_dict({
     "a": {"name": "root", "uuid": ids["root"]},
@@ -2643,7 +2640,7 @@ rig["hip"].match("hip")                         # True
 |---|---|---|
 | `parent_uuid = "hip"` | a name raises `ValueError`: `parent_uuid` holds a uuid or `None` | `set_parent("hip")`, which keeps the uuid |
 | a node appended with a `parent_uuid` the rig does not hold | it joins as a root (`parent_uuid = None`), and the parent appended after does not take it back | add the nodes together (`extend`, the constructor), or `set_parent` once both are in |
-| `parent_node` | `parent_uuid`'s deprecated name: it warns, and goes in 3.0.0 | `parent_uuid` |
+| `node.parent_node`, `TransformData(parent_node=...)` | `parent_uuid`'s name before 2.0.0 went in 3.0.0: `AttributeError`, `TypeError` | `parent_uuid`, or `set_parent` by name |
 | `world_matrix` as a call | it is a **property** on every type here | `node.world_matrix`, not `node.world_matrix()` |
 | mutating a channel getter | `node.rotate[0] = 5` writes to a throwaway copy | read, edit, assign back |
 | `clip.frames.rotate += 5` | the block getter is read-only, so `+=` raises | `np.array(...)` then assign, or use `rotate_y += 5` |

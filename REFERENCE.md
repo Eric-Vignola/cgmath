@@ -311,10 +311,10 @@ sort(self, key=None, reverse=False) -> 'None'
 
 #### `TransformData(Data)`
 
-TransformData(name: 'str', node_type: 'Optional[str]' = 'transform', uuid: 'Optional[str]' = None, parent_uuid: 'Optional[str]' = None, scale: 'Optional[np.ndarray]' = None, rotate: 'Optional[np.ndarray]' = None, translate: 'Optional[np.ndarray]' = None, rotate_order: 'Optional[int]' = None, rotate_axis: 'Optional[np.ndarray]' = None, joint_orient: 'Optional[np.ndarray]' = None, visibility: 'Optional[bool]' = None, segment_scale_compensate: 'Optional[bool]' = None, radius: 'Optional[float]' = None, draw_style: 'Optional[int]' = None, user_defined_attributes: 'Optional[dict]' = None, parent_node: 'Optional[str]' = None)
+TransformData(name: 'str', node_type: 'Optional[str]' = 'transform', uuid: 'Optional[str]' = None, parent_uuid: 'Optional[str]' = None, scale: 'Optional[np.ndarray]' = None, rotate: 'Optional[np.ndarray]' = None, translate: 'Optional[np.ndarray]' = None, rotate_order: 'Optional[int]' = None, rotate_axis: 'Optional[np.ndarray]' = None, joint_orient: 'Optional[np.ndarray]' = None, visibility: 'Optional[bool]' = None, segment_scale_compensate: 'Optional[bool]' = None, radius: 'Optional[float]' = None, draw_style: 'Optional[int]' = None, user_defined_attributes: 'Optional[dict]' = None)
 
 ```text
-TransformData(name: 'str', node_type: 'Optional[str]' = 'transform', uuid: 'Optional[str]' = None, parent_uuid: 'Optional[str]' = None, scale: 'Optional[np.ndarray]' = None, rotate: 'Optional[np.ndarray]' = None, translate: 'Optional[np.ndarray]' = None, rotate_order: 'Optional[int]' = None, rotate_axis: 'Optional[np.ndarray]' = None, joint_orient: 'Optional[np.ndarray]' = None, visibility: 'Optional[bool]' = None, segment_scale_compensate: 'Optional[bool]' = None, radius: 'Optional[float]' = None, draw_style: 'Optional[int]' = None, user_defined_attributes: 'Optional[dict]' = None, parent_node: 'Optional[str]' = None)
+TransformData(name: 'str', node_type: 'Optional[str]' = 'transform', uuid: 'Optional[str]' = None, parent_uuid: 'Optional[str]' = None, scale: 'Optional[np.ndarray]' = None, rotate: 'Optional[np.ndarray]' = None, translate: 'Optional[np.ndarray]' = None, rotate_order: 'Optional[int]' = None, rotate_axis: 'Optional[np.ndarray]' = None, joint_orient: 'Optional[np.ndarray]' = None, visibility: 'Optional[bool]' = None, segment_scale_compensate: 'Optional[bool]' = None, radius: 'Optional[float]' = None, draw_style: 'Optional[int]' = None, user_defined_attributes: 'Optional[dict]' = None)
 ```
 
 Fields:
@@ -349,7 +349,6 @@ matrix                             computes the local transform matrix
 parent_inverse_matrix              the inverse of parent_matrix, Maya's parentInverseMatrix; read only
 parent_matrix                      the parent's world matrix, Maya's parentMatrix; read only
 parent_name                        the name of the node's parent, None for a root; read only
-parent_node                        deprecated, goes in cgmath 3.0.0: parent_uuid, by its old name
 parent_scale_inverse               
 parent_scale_inverse_matrix        
 pim                                Maya's short name for parent_inverse_matrix

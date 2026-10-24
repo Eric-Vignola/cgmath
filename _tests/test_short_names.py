@@ -1103,6 +1103,34 @@ class TestUserAttributes(unittest.TestCase):
         )
         self.assertEqual(node.tx, node.translate_x)
 
+    def test_a_warning_finds_its_caller_once_a_file(self):
+        # the warning is filed under the first caller outside cgmath, known by
+        # the file each frame runs in: the answer for each file is kept, so a
+        # loop of loads that warn works each out once. Each count starts with
+        # no file known, whatever ran before it
+        absolute = os.path.abspath
+        answers  = hierarchy_mod._OUTSIDE
+
+        def made(count):
+            paths = []
+
+            def counted(path):
+                paths.append(path)
+                return absolute(path)
+
+            with warnings.catch_warnings(), mock.patch.object(os.path, "abspath", counted), mock.patch.dict(
+                answers, clear=True
+            ):
+                warnings.simplefilter("ignore")
+                for _ in range(count):
+                    node = TransformData.from_dict({"name": "x", "user_defined_attributes": {"tx": _spec(1.0)}})
+            self.assertEqual(node.user_defined_attributes["tx"]["value"], 1.0)
+            return len(paths)
+
+        small, large = made(4), made(16)
+        self.assertGreater(small, 0)
+        self.assertEqual(small, large)
+
     def test_a_clip_with_a_rest_pose_warns_once_a_name(self):
         # the rest pose loads inside the clip's load, and its nodes, the
         # clip's again by their uuids, count once: the warnings a clip with

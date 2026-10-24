@@ -971,13 +971,13 @@ def _not_a_parent_uuid(cls, value) -> ValueError:
     return ValueError(f"{cls.__name__}.parent_uuid takes a uuid or None, not {value!r}{hint}")
 
 
-# cgmath's folder, and its tests' in it: a deprecation warning is filed
-# under the first frame outside cgmath, its tests being outside
+# cgmath's folder, and its tests' in it: a warning is filed under the first
+# frame outside cgmath, its tests being outside
 _PACKAGE_DIR = os.path.normcase(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _TESTS_DIR   = os.path.join(_PACKAGE_DIR, "_tests")
 
-# _outside_cgmath's answer for each file met: a loop writing the deprecated
-# parent_node asks it of each frame at each write, some 2 us of path work
+# _outside_cgmath's answer for each file met: a warning asks it of each frame
+# it walks, some 0.9 us of path work a frame, 0.05 once the answer is kept
 _OUTSIDE = {}
 
 
@@ -989,46 +989,6 @@ def _outside_cgmath(filename: str) -> bool:
         outside            = not path.startswith(_PACKAGE_DIR + os.sep) or path.startswith(_TESTS_DIR + os.sep)
         _OUTSIDE[filename] = outside
     return outside
-
-
-def _parent_node_deprecated(cls) -> None:
-    """parent_node, parent_uuid's name until 2.0.0, read or written
-
-    The warning is filed under the first caller outside cgmath, which
-    Python's default filters show from a script: an Object, a Camera or a
-    Light hands the constructor keyword on to TransformData's, and a list
-    the mapping its to_attributes is given.
-    """
-    level, frame = 2, sys._getframe(1)
-    while frame is not None and not _outside_cgmath(frame.f_code.co_filename):
-        frame = frame.f_back
-        level += 1
-    warnings.warn(
-        f"{cls.__name__}.parent_node is deprecated and goes in cgmath 3.0.0: "
-        f"it is parent_uuid now, and set_parent() parents by name",
-        DeprecationWarning,
-        stacklevel=level,
-    )
-
-
-def _parent_node_mapped(cls, mapping: dict) -> dict:
-    """``mapping``, a to_attributes mapping, with "parent_node", parent_uuid's
-    deprecated name, read as "parent_uuid", with the warning
-
-    Raises
-    ------
-    ValueError
-        ``mapping`` names both.
-    """
-    if "parent_node" not in mapping:
-        return mapping
-    _parent_node_deprecated(cls)
-    if "parent_uuid" in mapping:
-        raise ValueError(
-            f"{cls.__name__}.parent_uuid is given twice in the mapping, as "
-            f"'parent_node' and 'parent_uuid'"
-        )
-    return {("parent_uuid" if key == "parent_node" else key): value for key, value in mapping.items()}
 
 
 def _uuid_of(parent) -> str:
@@ -1228,11 +1188,9 @@ class TransformData(Data):
         radius:                   Optional[float]      = None,
         draw_style:               Optional[int]        = None,
         user_defined_attributes:  Optional[dict]       = None,
-        parent_node:              Optional[str]        = None,
     ):
         """a node named ``name``; ``parent_uuid`` is the uuid of its parent,
-        None for a root, and ``parent_node`` its deprecated name, which goes
-        in cgmath 3.0.0. A uuid.UUID, given as either uuid, is kept as its
+        None for a root. A uuid.UUID, given as either uuid, is kept as its
         text
 
         Raises
@@ -1240,8 +1198,6 @@ class TransformData(Data):
         ValueError
             ``parent_uuid`` is not a uuid: a name is parented through
             :meth:`set_parent` once the node is in its hierarchy.
-        TypeError
-            ``parent_uuid`` and ``parent_node`` are both given.
         """
         # set the variables
         self.name = str(name)
@@ -1251,15 +1207,6 @@ class TransformData(Data):
 
         if uuid is not None:
             self.uuid = str(uuid)
-
-        if parent_node is not None:
-            _parent_node_deprecated(type(self))
-            if parent_uuid is not None:
-                raise TypeError(
-                    f"{type(self).__name__}() takes parent_uuid or parent_node, its "
-                    f"deprecated name, not both"
-                )
-            parent_uuid = parent_node
 
         if parent_uuid is not None:
             self.parent_uuid = parent_uuid
@@ -1669,10 +1616,7 @@ class TransformData(Data):
         by its own name, ``"_translate"``. On an SDFSphere or SDFCylinder the
         two spellings of a radius differ: ``"radius"`` is the primitive's
         radius, as its file saves it, and only ``"_radius"`` names the joint
-        radius.
-
-        ``"parent_node"``, parent_uuid's deprecated name, maps parent_uuid,
-        with a DeprecationWarning, until cgmath 3.0.0.
+        radius. A public name that is no field of the node maps nothing.
 
         Raises
         ------
@@ -1680,7 +1624,7 @@ class TransformData(Data):
             ``mapping`` names one field both ways.
         """
         cls     = type(self)
-        mapping = cls._as_fields(_parent_node_mapped(cls, mapping), "the mapping")
+        mapping = cls._as_fields(mapping, "the mapping")
         return {
             mapping[key]: value if not isinstance(value, np.ndarray) else value.tolist()
             for key, value in self.__dict__.items()
@@ -1729,22 +1673,6 @@ class TransformData(Data):
         """
         parent = self.get_parent()
         return parent.name if isinstance(parent, TransformData) else None
-
-    @property
-    def parent_node(self) -> Optional[str]:
-        """deprecated, goes in cgmath 3.0.0: parent_uuid, by its old name
-
-        Reads and writes parent_uuid, with a DeprecationWarning. Like it, it
-        takes a uuid or None: a name raises ValueError, and set_parent()
-        parents by name.
-        """
-        _parent_node_deprecated(type(self))
-        return self.parent_uuid
-
-    @parent_node.setter
-    def parent_node(self, value: Optional[str]) -> None:
-        _parent_node_deprecated(type(self))
-        self.parent_uuid = value
 
     def get_parent_matrix(self) -> np.ndarray:
         """returns the parent's worldspace matrix
@@ -2478,10 +2406,6 @@ class TransformData(Data):
                 # and each rig listing the node without owning it
                 for lister in self._listers:
                     _structure_changed(lister())
-            elif name == "parent_node":
-                _parent_node_deprecated(type(self))
-                self.parent_uuid = value
-                return
 
             attrs = self.__dict__.get("user_defined_attributes")
             if attrs and name in attrs and not self._is_builtin_attr(name):
@@ -6501,8 +6425,6 @@ class TransformList(DataList[TransformData]):
         among other nodes, on which ``"radius"`` is the joint radius too,
         ``"_sdf_radius"`` names the primitives' radius.
         """
-        # parent_node read here, warned of once rather than once a node
-        mapping = _parent_node_mapped(self.DATA_LIST_CLASS, mapping)
         return [node.to_attributes(mapping) for node in self]
 
     def match_translate(
@@ -11400,9 +11322,7 @@ class _FrameAxis:
         """
         # one (n, F, 3) list per framed channel, rather than a tolist per node.
         # A channel only needs its field's name here: each node's class reads
-        # the whole mapping below, and refuses one naming its field both ways.
-        # parent_node, parent_uuid's deprecated name, is read here, once
-        mapping  = _parent_node_mapped(self._clip.DATA_LIST_CLASS, mapping)
+        # the whole mapping below, and refuses one naming its field both ways
         columns  = self._columns
         field_of = self._clip.DATA_LIST_CLASS._saved_names()[1]
         channels = {field_of.get(key, key) for key in mapping}

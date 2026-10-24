@@ -1003,14 +1003,12 @@ class TestHierarchy(unittest.TestCase):
 
     def test_view_covers_every_settable_transform_property(self):
         # a TransformList is the vectorized view of a hierarchy, so every
-        # channel settable on a node must be settable on the view. parent_node
-        # is no channel: parent_uuid's deprecated name, a field a view sets no
-        # more than it sets parent_uuid
+        # channel settable on a node must be settable on the view
         settable = {
             name
             for name, value in vars(TransformData).items()
             if isinstance(value, property) and value.fset is not None
-        } - {"parent_node"}
+        }
         for name in settable:
             prop = getattr(TransformList, name, None)
             self.assertTrue(
@@ -5633,7 +5631,7 @@ class TestRigIndex(unittest.TestCase):
 class TestParentUuid(unittest.TestCase):
     """a node's parent is a uuid: parent_uuid takes a uuid or None, a name
     goes through set_parent, parent_name reads the parent's name, and
-    parent_node is parent_uuid's deprecated name until 3.0.0"""
+    parent_node, parent_uuid's name before 2.0.0, is gone"""
 
     def test_parent_uuid_takes_a_uuid_or_none(self):
         rig  = _chain()
@@ -5650,17 +5648,13 @@ class TestParentUuid(unittest.TestCase):
             self.assertEqual(loose.parent_uuid, value)
 
         # a uuid.UUID is kept as its text, as the uuid keyword keeps one: in
-        # the constructor, through the deprecated keyword, written, as
-        # 938ae44 kept its text, rather than refused as "not UUID('...')"
+        # the constructor and written, as 938ae44 kept its text, rather than
+        # refused as "not UUID('...')"
         child, parent = uuid_module.uuid4(), uuid_module.uuid4()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            for given in ({"parent_uuid": parent}, {"parent_node": parent}):
-                with self.subTest(given=list(given)):
-                    kid = TransformData("kid", uuid=child, **given)
-                    self.assertEqual(kid.parent_uuid, str(parent))
-                    HierarchyData([kid, TransformData("root", uuid=parent)])
-                    self.assertEqual(kid.parent_name, "root")
+        kid = TransformData("kid", uuid=child, parent_uuid=parent)
+        self.assertEqual(kid.parent_uuid, str(parent))
+        HierarchyData([kid, TransformData("root", uuid=parent)])
+        self.assertEqual(kid.parent_name, "root")
         loose.parent_uuid = parent
         self.assertEqual(loose.parent_uuid, str(parent))
 
@@ -5815,120 +5809,105 @@ class TestParentUuid(unittest.TestCase):
         self.assertEqual(matches(40), (0, 1))
         self.assertEqual(matches(160), (0, 1))
 
-    def test_the_alias_finds_its_caller_once_a_file(self):
-        # each write through parent_node files its warning under the first
-        # caller outside cgmath, known by the file each frame runs in: the
-        # answer for each file is kept, where working it out at each write
-        # ran a loop of such writes 3.6 to 3.8 times 938ae44's. Each count
-        # starts with no file known, whatever ran before it
-        absolute = os.path.abspath
-        answers  = sys.modules[HierarchyData.__module__]._OUTSIDE
+    def test_reading_parent_node_raises(self):
+        # parent_node, parent_uuid's name before 2.0.0, went in 3.0.0: read,
+        # it raises as any name a node does not have does, on a node of a
+        # rig, a lone node, a render node and an SDF primitive. On 58bbdde
+        # it read parent_uuid
+        from cgmath.geometry.sdf import SDFSphere
+        from cgmath.render import Object
 
-        def made(count):
-            paths = []
+        rig = _chain()
+        for node in (rig["head"], TransformData("loose"), Object(name="n"), SDFSphere()):
+            name = type(node).__name__
+            with self.subTest(name):
+                with self.assertRaisesRegex(AttributeError, rf"^'{name}' object has no attribute 'parent_node'$"):
+                    node.parent_node
+                self.assertFalse(hasattr(type(node), "parent_node"))
+                self.assertNotIn("parent_node", dir(node))
 
-            def counted(path):
-                paths.append(path)
-                return absolute(path)
-
-            rig = _chain()
-            with warnings.catch_warnings(), mock.patch.object(os.path, "abspath", counted), mock.patch.dict(
-                answers, clear=True
-            ):
-                warnings.simplefilter("ignore")
-                for _ in range(count):
-                    rig["head"].parent_node = rig["root"].uuid
-            self.assertIs(rig["head"].get_parent(), rig["root"])
-            return len(paths)
-
-        small, large = made(4), made(16)
-        self.assertGreater(small, 0)
-        self.assertEqual(small, large)
-
-    def test_parent_node_is_a_deprecated_alias(self):
+    def test_writing_parent_node_raises_and_changes_nothing(self):
+        # written, it raises as the strict guard does for any name the class
+        # does not declare, whose list of the names a node takes leaves it
+        # out, and the parent stays. On 58bbdde it wrote parent_uuid
         rig  = _chain()
         head = rig["head"]
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            self.assertEqual(head.parent_node, rig["spine"].uuid)
-            head.parent_node = rig["root"].uuid
-            self.assertIs(head.get_parent(), rig["root"])
-            self.assertEqual(head.parent_uuid, rig["root"].uuid)
-            node = TransformData("x", parent_node=rig["root"].uuid)
-            self.assertEqual(node.parent_uuid, rig["root"].uuid)
-        self.assertEqual(len(caught), 3)
-        for warning in caught:
-            self.assertIs(warning.category, DeprecationWarning)
-            self.assertEqual(os.path.normcase(warning.filename), os.path.normcase(__file__))
-            self.assertRegex(
-                str(warning.message),
-                r"^TransformData\.parent_node is deprecated and goes in cgmath 3\.0\.0: "
-                r"it is parent_uuid now, and set_parent\(\) parents by name$",
-            )
+        held = head.parent_uuid
+        for value in (rig["root"].uuid, None, "spine"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    AttributeError,
+                    r"^'TransformData' has no attribute 'parent_node'; public attributes must be "
+                    r"declared on the class \(typo\? expected one of: \[.*\]\); add_user_attribute\(\) "
+                    r"creates a user attribute$",
+                ) as caught:
+                    head.parent_node = value
+                names = str(caught.exception).split("expected one of:")[1]
+                self.assertIn("'parent_uuid'", names)
+                self.assertNotIn("'parent_node'", names)
+                self.assertEqual(head.parent_uuid, held)
+                self.assertIs(head.get_parent(), rig["spine"])
+                self.assertNotIn("parent_node", head.__dict__)
 
-        # a name through it raises as parent_uuid does, and changes nothing
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            with self.assertRaisesRegex(ValueError, r"not 'spine'; set_parent\('spine'\) parents by name$"):
-                head.parent_node = "spine"
-            self.assertEqual(head.parent_uuid, rig["root"].uuid)
-            with self.assertRaisesRegex(ValueError, "takes a uuid or None"):
-                TransformData("x", parent_node="spine")
-            with self.assertRaisesRegex(TypeError, "parent_uuid or parent_node"):
-                TransformData("x", parent_uuid=rig["root"].uuid, parent_node=rig["root"].uuid)
-
-    def test_the_alias_warns_the_caller_of_a_render_node(self):
-        # an Object, a Camera and a Light hand the keyword on to
-        # TransformData's constructor: the warning is the caller's still,
-        # which Python's default filters show from a script, not filed
-        # under render/scene.py, which they hide
+    def test_the_constructor_refuses_parent_node(self):
+        # the keyword is gone from TransformData's constructor, and so from
+        # an Object's, a Camera's and a Light's, which hand theirs on to it:
+        # an unknown keyword's TypeError, None and parent_uuid beside it too.
+        # On 58bbdde each took it as parent_uuid
         from cgmath.render import Camera, Light, Object
 
         root = generate_uuid()
-        for cls in (Object, Camera, Light):
-            with self.subTest(cls.__name__):
-                with warnings.catch_warnings(record=True) as caught:
-                    warnings.simplefilter("always")
-                    node             = cls(name="n", parent_node=root)
-                    node.parent_node = None
-                self.assertIsNone(node.parent_uuid)
-                self.assertEqual(
-                    [(w.category, os.path.normcase(w.filename)) for w in caught],
-                    [(DeprecationWarning, os.path.normcase(__file__))] * 2,
-                )
-                self.assertTrue(str(caught[0].message).startswith(f"{cls.__name__}.parent_node is deprecated"))
+        for cls, made in (
+            (TransformData, lambda **given: TransformData("x", **given)),
+            (Object, lambda **given: Object(name="x", **given)),
+            (Camera, lambda **given: Camera(name="x", **given)),
+            (Light, lambda **given: Light(name="x", **given)),
+        ):
+            for given in ({"parent_node": root}, {"parent_node": None}, {"parent_node": root, "parent_uuid": root}):
+                with self.subTest(cls.__name__, given=sorted(given)):
+                    with self.assertRaisesRegex(
+                        TypeError, r"__init__\(\) got an unexpected keyword argument 'parent_node'$"
+                    ):
+                        made(**given)
 
-    def test_the_alias_maps_parent_uuid_in_to_attributes(self):
-        # a to_attributes mapping naming parent_node maps parent_uuid, with
-        # the warning, once a call: a node, a rig, a clip's frames. Read as
-        # a field, the alias mapped nothing and the parent was left out
+    def test_to_attributes_maps_parent_node_as_any_public_name_of_no_field(self):
+        # a to_attributes mapping naming parent_node maps nothing, as a public
+        # name that is no field of the node does, a property's (parent_name)
+        # too, with no warning, and parent_uuid beside it maps as it does
+        # alone: a node, a rig, a clip's frames. On 58bbdde it mapped
+        # parent_uuid, with a DeprecationWarning, and the two together raised
+        # ValueError
         from cgmath.hierarchy import ClipData
 
         rig  = _chain()
         head = rig["head"]
         clip = ClipData(_chain(), frames=2)
-        for label, call, expected in (
-            ("a node", lambda m: head.to_attributes(m), {"parent": rig["spine"].uuid}),
-            ("a rig", lambda m: rig.to_attributes(m)[2], {"parent": rig["spine"].uuid}),
-            ("a clip's frames", lambda m: clip.frames.to_attributes(m)[2], {"parent": clip["spine"].uuid}),
+        for label, call, parent in (
+            ("a node", lambda m: head.to_attributes(m), rig["spine"].uuid),
+            ("a rig", lambda m: rig.to_attributes(m)[2], rig["spine"].uuid),
+            ("a clip's frames", lambda m: clip.frames.to_attributes(m)[2], clip["spine"].uuid),
         ):
             with self.subTest(label):
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
-                    self.assertEqual(call({"parent_node": "parent"}), expected)
-                self.assertEqual(
-                    [(w.category, os.path.normcase(w.filename)) for w in caught],
-                    [(DeprecationWarning, os.path.normcase(__file__))],
-                )
-                self.assertEqual(call({"parent_uuid": "parent"}), expected)
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", DeprecationWarning)
-                    with self.assertRaisesRegex(
-                        ValueError,
-                        r"^TransformData\.parent_uuid is given twice in the mapping, as 'parent_node' "
-                        r"and 'parent_uuid'$",
-                    ):
-                        call({"parent_node": "a", "parent_uuid": "b"})
+                    self.assertEqual(call({"parent_node": "parent"}), {})
+                    self.assertEqual(call({"no_such_field": "parent"}), {})
+                    self.assertEqual(call({"parent_name": "parent"}), {})
+                    self.assertEqual(call({"parent_node": "a", "parent_uuid": "b"}), {"b": parent})
+                    self.assertEqual(call({"parent_uuid": "parent"}), {"parent": parent})
+                self.assertEqual(caught, [])
+
+    def test_parent_node_can_be_a_user_attribute(self):
+        # no longer a built-in name, parent_node can be a user attribute, as
+        # any name the class does not have can: added, read and written as
+        # one, the parent untouched. On 58bbdde add_user_attribute refused it
+        node = TransformData("x", parent_uuid=generate_uuid())
+        held = node.parent_uuid
+        node.add_user_attribute("parent_node", 1.0)
+        self.assertEqual(node.parent_node, 1.0)
+        node.parent_node = 2.0
+        self.assertEqual(node.user_defined_attributes["parent_node"]["value"], 2.0)
+        self.assertEqual(node.parent_uuid, held)
 
     def test_a_batch_joins_in_any_order(self):
         # the constructor, extend and a load check the parents once every
