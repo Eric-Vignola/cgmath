@@ -3882,11 +3882,12 @@ def _check_operands(data, other) -> None:
 def _held_records(values) -> list:
     """the ``(axis_system, unit)`` records the nodes of a match_* or paste
     operand or receiver hold, each once, sorted: a frame axis's clip's, a
-    rig's or clip's own, a view's nodes' (``TransformList._held_records``),
-    a node's rig's and a sequence's nodes' rigs'. A node no rig owns holds
-    none, as it holds none joining a rig, but in a view
-    :meth:`TransformList.load_fbx` gave, or one taken from it, which holds
-    its load's"""
+    rig's or clip's own and the rigs' of the nodes it lists without owning
+    them (an item assignment lists such a node), a view's nodes'
+    (``TransformList._held_records``), a node's rig's and a sequence's
+    nodes' rigs'. A node no rig owns holds none, as it holds none joining a
+    rig, but in a view :meth:`TransformList.load_fbx` gave, or one taken
+    from it, which holds its load's"""
     if isinstance(values, _FrameAxis):
         values = values._clip
     if isinstance(values, TransformList):
@@ -7673,7 +7674,16 @@ class HierarchyData(TransformList):
         return self._axis_system, self._unit
 
     def _held_records(self) -> list:
-        return [self._records()]
+        # a node an item assignment lists here that another rig owns is in
+        # that rig's record, and a match or a paste writes or reads its
+        # values with the rest: its record counts, as a view's nodes' do, so
+        # one of another record is refused before the first node moves
+        records = {self._records()}
+        for node in self.list:
+            owner = getattr(node, "_hierarchy", None)
+            if owner is not None and owner is not self:
+                records.add(owner._records())
+        return sorted(records)
 
     def _join_records(self, nodes, given=None) -> None:
         """

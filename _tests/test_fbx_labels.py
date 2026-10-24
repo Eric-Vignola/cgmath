@@ -25,6 +25,11 @@ from cgmath.hierarchy import generate_uuid
 
 UNREAL = "z up, -y front, right handed"
 
+# the records other than hand-built data's, ("maya_y_up", 1.0), the record
+# refusals are tested with: another unit, other axes, and both, so a check
+# that compares one half of a record alone lets one of them through
+_OTHERS = ((UNREAL, 100.0), ("maya_y_up", 100.0), (UNREAL, 1.0))
+
 
 def _chain() -> HierarchyData:
     """a joint root over a joint, beside a group root over a locator"""
@@ -52,6 +57,12 @@ def _joined(rig, method: str, nodes):
     """``rig`` once ``nodes`` joined it by ``method``, append or extend"""
     getattr(rig, method)(nodes)
     return rig
+
+
+def _names_both(test, caught, record) -> None:
+    """the ValueError ``caught`` names ``record`` and hand-built data's"""
+    test.assertIn(f"axis_system {record[0]!r}, unit {record[1]!r}", str(caught.exception))
+    test.assertIn("axis_system 'maya_y_up', unit 1.0", str(caught.exception))
 
 
 class TestTheRecord(unittest.TestCase):
@@ -302,36 +313,39 @@ class TestTheRecord(unittest.TestCase):
         self.assertEqual((mixed.axis_system, mixed.unit), ("maya_y_up", 100.0))
 
     def test_nodes_of_a_rig_recording_another_join_no_rig(self):
-        def pair():
+        def pair(record=(UNREAL, 100.0)):
             rig, other = _chain(), _chain()
-            other.axis_system, other.unit = UNREAL, 100.0
+            other.axis_system, other.unit = record
             return rig, other
 
-        def refused(label, call, rig, other):
+        def refused(label, call, rig, other, record):
             names = (rig.name, other.name)
-            with self.subTest(label):
+            with self.subTest(label, record=record):
                 with self.assertRaises(ValueError) as caught:
                     call()
-                self.assertIn("unit 100.0", str(caught.exception))
-                self.assertIn("unit 1.0", str(caught.exception))
+                _names_both(self, caught, record)
                 self.assertEqual((rig.name, other.name), names)  # nothing moved
                 self.assertEqual(_records(rig), ("maya_y_up", 1.0))
 
-        for label, join in (
-            ("extend", lambda rig, other: rig.extend(other)),
-            ("extend(a view)", lambda rig, other: rig.extend(other.match("grp", "loc"))),
-            ("append", lambda rig, other: rig.append(other["loc"])),
-            ("insert", lambda rig, other: rig.insert(0, other["loc"])),
-            ("an item", lambda rig, other: rig.__setitem__(0, other["loc"])),
-            ("a slice", lambda rig, other: rig.__setitem__(slice(0, 1), [other["loc"]])),
-        ):
-            rig, other = pair()
-            refused(label, lambda: join(rig, other), rig, other)
-        rig, other = pair()
-        refused("HierarchyData(nodes)", lambda: HierarchyData([rig["hip"], other["grp"]]), rig, other)
-        refused("ClipData(nodes)", lambda: ClipData([rig["hip"], other["grp"]], frames=2), rig, other)
-        refused("ClipData.from_poses", lambda: ClipData.from_poses([rig, other]), rig, other)
-        refused("ClipData.from_poses(nodes)", lambda: ClipData.from_poses([rig, list(other)]), rig, other)
+        for record in _OTHERS:
+            for label, join in (
+                ("extend", lambda rig, other: rig.extend(other)),
+                ("extend(a view)", lambda rig, other: rig.extend(other.match("grp", "loc"))),
+                ("append", lambda rig, other: rig.append(other["loc"])),
+                ("insert", lambda rig, other: rig.insert(0, other["loc"])),
+                ("an item", lambda rig, other: rig.__setitem__(0, other["loc"])),
+                ("a slice", lambda rig, other: rig.__setitem__(slice(0, 1), [other["loc"]])),
+            ):
+                rig, other = pair(record)
+                refused(label, lambda: join(rig, other), rig, other, record)
+            rig, other = pair(record)
+            for label, call in (
+                ("HierarchyData(nodes)", lambda: HierarchyData([rig["hip"], other["grp"]])),
+                ("ClipData(nodes)", lambda: ClipData([rig["hip"], other["grp"]], frames=2)),
+                ("ClipData.from_poses", lambda: ClipData.from_poses([rig, other])),
+                ("ClipData.from_poses(nodes)", lambda: ClipData.from_poses([rig, list(other)])),
+            ):
+                refused(label, call, rig, other, record)
 
         # an empty rig takes theirs
         for label, build in (
@@ -356,19 +370,20 @@ class TestTheRecord(unittest.TestCase):
         # in its load's record, joining by extend or by a slice alike
         from cgmath.hierarchy.hierarchy import _recorded
 
-        def loaded():
-            return _recorded(TransformList([node.copy() for node in _chain()]), (UNREAL, 100.0))
+        def loaded(record=(UNREAL, 100.0)):
+            return _recorded(TransformList([node.copy() for node in _chain()]), record)
 
-        for label, join in (
-            ("extend(a load's view)", lambda rig, view: rig.extend(view)),
-            ("a slice at the end", lambda rig, view: rig.__setitem__(slice(len(rig), None), view)),
-            ("a slice at 0", lambda rig, view: rig.__setitem__(slice(0, 0), view)),
-            ("a slice over every node", lambda rig, view: rig.__setitem__(slice(None), view)),
-        ):
-            rig, view = _chain(), loaded()
-            refused(label, lambda: join(rig, view), rig, view)
-        clip, view = ClipData(_chain(), frames=2), loaded()
-        refused("a clip's slice", lambda: clip.__setitem__(slice(len(clip), None), view), clip, view)
+        for record in _OTHERS:
+            for label, join in (
+                ("extend(a load's view)", lambda rig, view: rig.extend(view)),
+                ("a slice at the end", lambda rig, view: rig.__setitem__(slice(len(rig), None), view)),
+                ("a slice at 0", lambda rig, view: rig.__setitem__(slice(0, 0), view)),
+                ("a slice over every node", lambda rig, view: rig.__setitem__(slice(None), view)),
+            ):
+                rig, view = _chain(), loaded(record)
+                refused(label, lambda: join(rig, view), rig, view, record)
+            clip, view = ClipData(_chain(), frames=2), loaded(record)
+            refused("a clip's slice", lambda: clip.__setitem__(slice(len(clip), None), view), clip, view, record)
         for label, join in (
             ("an empty rig's extend", lambda rig, view: rig.extend(view)),
             ("an empty rig's slice", lambda rig, view: rig.__setitem__(slice(None), view)),
@@ -470,31 +485,31 @@ class TestTheRecord(unittest.TestCase):
         posed["knee"].rotate = (0.0, 0.0, -45.0)
         delta                = posed.get_delta(rig)
         deltas               = ClipData(posed, frames=3).get_delta(rig)
-        other                = posed.copy()
-        other.axis_system, other.unit = UNREAL, 100.0
-        clip = ClipData(other, frames=3)
-        for label, call in (
-            ("get_delta", lambda: other.get_delta(rig)),
-            ("get_delta of a view", lambda: other.match("hip", "knee").get_delta(rig.match("hip", "knee"))),
-            ("add_delta", lambda: other.add_delta(delta)),
-            ("rig - rig", lambda: other - rig),
-            ("delta + rig", lambda: delta + other),
-            ("get_delta(frames)", lambda: rig.get_delta(clip.frames)),
-            ("add_delta(frames)", lambda: other.add_delta(deltas.frames)),
-            ("clip.get_delta", lambda: clip.get_delta(rig)),
-            ("clip.add_delta", lambda: clip.add_delta(delta)),
-            ("clip.add_delta(frames)", lambda: clip.add_delta(deltas.frames)),
-            ("rig -= rig", lambda: other.copy().__isub__(rig)),
-            ("delta += rig", lambda: delta.copy().__iadd__(other)),
-            ("frames -= rig", lambda: clip.copy().frames.__isub__(rig)),
-            ("frames += rig", lambda: deltas.copy().frames.__iadd__(other)),
-        ):
-            with self.subTest(label):
-                with self.assertRaises(ValueError) as caught:
-                    call()
-                self.assertIn("unit 100.0", str(caught.exception))
-                self.assertIn("unit 1.0", str(caught.exception))
-        self.assertEqual(_records(other.add_delta(other.get_delta(other.copy()))), (UNREAL, 100.0))
+        for record in _OTHERS:
+            other = posed.copy()
+            other.axis_system, other.unit = record
+            clip = ClipData(other, frames=3)
+            for label, call in (
+                ("get_delta", lambda: other.get_delta(rig)),
+                ("get_delta of a view", lambda: other.match("hip", "knee").get_delta(rig.match("hip", "knee"))),
+                ("add_delta", lambda: other.add_delta(delta)),
+                ("rig - rig", lambda: other - rig),
+                ("delta + rig", lambda: delta + other),
+                ("get_delta(frames)", lambda: rig.get_delta(clip.frames)),
+                ("add_delta(frames)", lambda: other.add_delta(deltas.frames)),
+                ("clip.get_delta", lambda: clip.get_delta(rig)),
+                ("clip.add_delta", lambda: clip.add_delta(delta)),
+                ("clip.add_delta(frames)", lambda: clip.add_delta(deltas.frames)),
+                ("rig -= rig", lambda: other.copy().__isub__(rig)),
+                ("delta += rig", lambda: delta.copy().__iadd__(other)),
+                ("frames -= rig", lambda: clip.copy().frames.__isub__(rig)),
+                ("frames += rig", lambda: deltas.copy().frames.__iadd__(other)),
+            ):
+                with self.subTest(label, record=record):
+                    with self.assertRaises(ValueError) as caught:
+                        call()
+                    _names_both(self, caught, record)
+            self.assertEqual(_records(other.add_delta(other.get_delta(other.copy()))), record)
 
     def test_matching_or_pasting_takes_one_record(self):
         """the values of nodes of another record matched or pasted into a
@@ -561,16 +576,63 @@ class TestTheRecord(unittest.TestCase):
             "frames[0] = an iterator": paste(0, lambda d: iter(d["other"].list)),
             "frames[0] = a load's view": paste(0, lambda d: d["loaded"]),
         }
-        for label, call in calls.items():
-            with self.subTest(label):
-                data   = build((UNREAL, 100.0))
-                before = state(data)
-                with self.assertRaises(ValueError) as caught:
-                    call(data)
-                self.assertIn("unit 100.0", str(caught.exception))
-                self.assertIn("unit 1.0", str(caught.exception))
-                for key, values in state(data).items():
-                    np.testing.assert_array_equal(values, before[key], err_msg=key)  # nothing moved
+        for record in _OTHERS:
+            for label, call in calls.items():
+                with self.subTest(label, record=record):
+                    data   = build(record)
+                    before = state(data)
+                    with self.assertRaises(ValueError) as caught:
+                        call(data)
+                    _names_both(self, caught, record)
+                    for key, values in state(data).items():
+                        np.testing.assert_array_equal(values, before[key], err_msg=key)  # nothing moved
+
+        # a rig or a clip listing a node another rig owns, as an item
+        # assignment lists one, holds that rig's record for it too: once the
+        # owner or the lister is relabelled, a match or a paste is refused
+        # before the first node moves, by every route, where the rig's own
+        # record alone let it through to the listed node, the nodes before it
+        # moved, and clip.frames took it whole
+        def moved():
+            """a chain whose every node sits and turns elsewhere"""
+            rig = _chain()
+            for node in rig:
+                node.translate = np.asarray(node.translate) + 5.0
+                node.rotate    = np.asarray(node.rotate) + 5.0
+            return rig
+
+        listed = {
+            "rig.match_matrix(rig)": lambda a, c: a.match_matrix(c),
+            "rig.match_translate(rig)": lambda a, c: a.match_translate(c),
+            "rig.match_rotate(rig)": lambda a, c: a.match_rotate(c),
+            "its rig.match_matrix(the lister)": lambda a, c: c.match_matrix(a),
+            "clip.match_matrix(rig)": lambda a, c: a.match_matrix(c),
+            "clip.frames.match_matrix(rig)": lambda a, c: a.frames.match_matrix(c),
+            "clip.frames[0] = rig": lambda a, c: a.frames.__setitem__(0, c),
+        }
+        for relabelled in ("the owner", "the lister"):
+            for label, call in listed.items():
+                with self.subTest(label, relabelled=relabelled):
+                    a    = ClipData(_chain(), frames=3) if label.startswith("clip") else _chain()
+                    b    = _chain()
+                    c    = moved()
+                    a[3] = b["loc"]
+                    if relabelled == "the owner":
+                        b.unit = 100.0
+                    else:
+                        a.unit = c.unit = 100.0
+                    before = [np.array([node.world_matrix for node in x]) for x in (a, b, c)]
+                    if isinstance(a, ClipData):
+                        before.append(np.array(a.frames.world_matrix))
+                    with self.assertRaises(ValueError) as caught:
+                        call(a, c)
+                    self.assertIn("unit 100.0", str(caught.exception))
+                    self.assertIn("unit 1.0", str(caught.exception))
+                    after = [np.array([node.world_matrix for node in x]) for x in (a, b, c)]
+                    if isinstance(a, ClipData):
+                        after.append(np.array(a.frames.world_matrix))
+                    for got, want in zip(after, before):
+                        np.testing.assert_array_equal(got, want)  # nothing moved
 
         # of the same record each one runs, and moves its receiver
         for label, call in calls.items():

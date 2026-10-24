@@ -2029,21 +2029,23 @@ load's view holding nodes no rig owns beside a rig's of another record,
 nodes of a rig joining one that records another (an empty rig takes
 theirs), the pose algebra between two, matching or pasting the values of
 nodes of another (`match_translate`, `match_rotate`, `match_matrix`, and
-a pose or frames pasted into `clip.frames`; values pass as they are),
-`ClipData.from_poses` of poses of two, and a clip's rest pose of
-another. `save_fbx` labels the file with the record, the unit set
-explicitly, and writes the values as they are, so a save loads with the
-defaults, and imports into Maya, where the file the values were read
-from does, in whatever axes and unit they were read. Where the read and
-Maya part, as on a Y-up file whose front is not +Z read with the
-defaults, the save parts too (`save_fbx`'s docstring lists the cases). A
-save in another unit than cm holds its lengths in that unit, as a file
-authored in it does, which Maya's importer brings in with its top nodes
-scaled by the unit (100 for metres) at the positions the values say. A
-mesh holds no record: its points are in its node's object space, the
-same in any axes, in the unit its reader's `scale_factor` gives, the
-unit a rig read with the same `scale_factor` records. `save_fbx` writes
-no geometry; a mesh's node, read as a transform, is written as a group.
+a pose or frames pasted into `clip.frames`; values pass as they are; a
+node a rig lists that another rig owns, as an item assignment lists one,
+counts in that rig's record), `ClipData.from_poses` of poses of two, and
+a clip's rest pose of another. `save_fbx` labels the file with the
+record, the unit set explicitly, and writes the values as they are, so a
+save loads with the defaults, and imports into Maya, where the file the
+values were read from does, in whatever axes and unit they were read.
+Where the read and Maya part, as on a Y-up file whose front is not +Z
+read with the defaults, the save parts too (`save_fbx`'s docstring lists
+the cases). A save in another unit than cm holds its lengths in that
+unit, as a file authored in it does, which Maya's importer brings in
+with its top nodes scaled by the unit (100 for metres) at the positions
+the values say. A mesh holds no record: its points are in its node's
+object space, the same in any axes, in the unit its reader's
+`scale_factor` gives, the unit a rig read with the same `scale_factor`
+records. `save_fbx` writes no geometry; a mesh's node, read as a
+transform, is written as a group.
 
 ```python
 rig = make_chain()
