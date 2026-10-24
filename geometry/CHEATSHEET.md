@@ -1108,18 +1108,18 @@ which Maya bakes into the points, is not read. A file that holds its
 unit as a scale on the scene root's children, as the SDK's and Maya's
 unit conversions write it, keeps the points under such a root in cm,
 and they are read as they are, as `HierarchyData.load_fbx` says: its
-meshes load as the cm file's. A mesh at or under a root the export
-found scaled other than 1, which it scales by 1/s all the same (s the
-cm one unit holds), is under no such root: its points load s times
-larger and its node scaled 1/s, so it is right once posed, but on the
-frames of a clip where a later layer of a take keys that root's
-translate. A mesh on or under a node the export scales by 1/s once more
-there, or skinned to one (from the second joint of a Maya skeleton
-down, its first joint under such a root), is off once posed by a rig of
-the nodes' own values (`pose="node"`) or by a clip, and right posed at
-the bind by a `pose="bind"` rig when a bind pose lists those nodes, as
-Maya's export lists a skin's joints; `HierarchyData.load_fbx` says
-which.
+meshes load as the cm file's. A mesh at or under a root the export found
+scaled other than 1, which it scales by 1/s all the same (s the cm one
+unit holds), is under no such root: its points load s times larger and
+its node scaled 1/s, so it is right once posed, but on the frames of a
+clip where a later layer of a take keys that root's translate, or an
+override or passthrough one a scale there (`HierarchyData.load_fbx`). A
+mesh on or under a node the export scales by 1/s once more there, or
+skinned to one (from the second joint of a Maya skeleton down, its first
+joint under such a root), is off once posed by a rig of the nodes' own
+values (`pose="node"`) or by a clip, and right posed at the bind by a
+`pose="bind"` rig when a bind pose lists those nodes, as Maya's export
+lists a skin's joints; `HierarchyData.load_fbx` says which.
 
 USD prims round-trip through `from_prim` / `to_prim` on `MeshData`, `UVData`,
 `MapData`, `GeomSubsetData`, `MorphData` and `CompactSkinData`.

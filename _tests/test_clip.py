@@ -6987,10 +6987,12 @@ class TestFbxUnitHeldAsAScale(unittest.TestCase):
         return path
 
     # the additive layer's translate z on the OUTSIDE group, keyed by
-    # outside(layered=True) on frames 0, 5 and 10
-    ADDED = (0, 25, -25)
+    # outside(layered=True) on frames 0, 5 and 10, and the scale x
+    # outside(layered=True, scaled=True) keys there instead
+    ADDED  = (0, 25, -25)
+    SCALED = (1.0, 1.5, 0.75)
 
-    def outside(self, name="outside.fbx", chain=False, layered=False):
+    def outside(self, name="outside.fbx", chain=False, layered=False, mode=0, weight=100.0, scaled=False):
         """the OUTSIDE tree in cm: a joint root, a unit root once converted;
         a group root scaled 2, which the export finds scaled other than 1,
         holding a joint, a joint under it that compensates its parent's
@@ -7001,7 +7003,10 @@ class TestFbxUnitHeldAsAScale(unittest.TestCase):
         compensating joints, which the bind pose lists too, as Maya's export
         lists every skin influence. ``layered`` keys the group's translate x
         on a base layer and its translate z on an additive one, ADDED, at
-        30 fps"""
+        30 fps; ``mode`` is that layer's blend mode (1 override, 2
+        passthrough) and ``weight`` its weight; ``scaled`` has the base
+        layer key the group's scale x at 2 and the later one key it,
+        SCALED, in place of its translate"""
         manager = FBX.FbxManager.Create()
         manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
         scene = FBX.FbxScene.Create(manager, "scene")
@@ -7024,8 +7029,16 @@ class TestFbxUnitHeldAsAScale(unittest.TestCase):
             add   = FBX.FbxAnimLayer.Create(scene, "add")
             stack.AddMember(base)
             stack.AddMember(add)
+            if mode:
+                add.BlendMode.Set(float(mode))
+            if weight != 100.0:
+                add.Weight.Set(weight)
             self.keys(made["big"].LclTranslation, base, "X", (-10, 15, 40))
-            self.keys(made["big"].LclTranslation, add, "Z", self.ADDED)
+            if scaled:
+                self.keys(made["big"].LclScaling, base, "X", (2, 2, 2))
+                self.keys(made["big"].LclScaling, add, "X", self.SCALED)
+            else:
+                self.keys(made["big"].LclTranslation, add, "Z", self.ADDED)
             first, last = FBX.FbxTime(), FBX.FbxTime()
             first.SetSecondDouble(0.0)
             last.SetSecondDouble((self.FRAMES - 1) / self.FPS)
@@ -7244,6 +7257,29 @@ class TestFbxUnitHeldAsAScale(unittest.TestCase):
                         self.assertTrue(twice)
                         self.assertGreater(float(np.abs(got["lone3"][3] - want["lone3"][3]).max()), 1.0)
 
+    def later_values(self, path):
+        """(FRAMES, 3) the translate the OUTSIDE group's later layer holds
+        on every frame: its curve, and on the channels it holds no curve
+        for the value the sdk wrote there, the group's own, as Maya's export
+        writes it"""
+        manager, scene = self.open(path)
+        try:
+            stack = scene.GetSrcObject(FBX.FbxCriteria.ObjectType(FBX.FbxAnimStack.ClassId), 0)
+            layer = stack.GetSrcObject(FBX.FbxCriteria.ObjectType(FBX.FbxAnimLayer.ClassId), 1)
+            node  = scene.GetRootNode().FindChild("big").LclTranslation.GetCurveNode(layer)
+            held  = np.zeros((self.FRAMES, 3))
+            time  = FBX.FbxTime()
+            for axis in range(3):
+                for frame in range(self.FRAMES):
+                    time.SetSecondDouble(frame / self.FPS)
+                    if node.GetCurveCount(axis):
+                        held[frame, axis] = node.GetCurve(axis).Evaluate(time)[0]
+                    else:
+                        held[frame, axis] = node.GetChannelValue(axis, 0.0)
+            return held
+        finally:
+            manager.Destroy()
+
     def test_a_root_scaled_other_than_1_is_off_by_what_a_later_layer_adds(self):
         """the export converts the translate curves of a take's first layer
         alone, on the OUTSIDE group root, scaled 2, as on a unit root, and
@@ -7257,25 +7293,8 @@ class TestFbxUnitHeldAsAScale(unittest.TestCase):
         cm   = ClipData.load_fbx(path)
         want = self.clip_worlds(cm)
 
-        # what the additive layer adds on every frame: its curve, and on the
-        # channels it holds no curve for the value the sdk wrote there, the
-        # group's own, as Maya's export writes it
-        manager, scene = self.open(path)
-        try:
-            stack = scene.GetSrcObject(FBX.FbxCriteria.ObjectType(FBX.FbxAnimStack.ClassId), 0)
-            layer = stack.GetSrcObject(FBX.FbxCriteria.ObjectType(FBX.FbxAnimLayer.ClassId), 1)
-            node  = scene.GetRootNode().FindChild("big").LclTranslation.GetCurveNode(layer)
-            added = np.zeros((self.FRAMES, 3))
-            time  = FBX.FbxTime()
-            for axis in range(3):
-                for frame in range(self.FRAMES):
-                    time.SetSecondDouble(frame / self.FPS)
-                    if node.GetCurveCount(axis):
-                        added[frame, axis] = node.GetCurve(axis).Evaluate(time)[0]
-                    else:
-                        added[frame, axis] = node.GetChannelValue(axis, 0.0)
-        finally:
-            manager.Destroy()
+        # what the additive layer adds on every frame
+        added = self.later_values(path)
         self.assertTrue(np.allclose(added[:, 2], np.interp(np.arange(self.FRAMES), (0, 5, 10), self.ADDED)))
         self.assertTrue(np.array_equal(added[:, :2], np.tile((-10.0, 2.0), (self.FRAMES, 1))))
         for unit, s in self.UNITS:
@@ -7294,6 +7313,53 @@ class TestFbxUnitHeldAsAScale(unittest.TestCase):
                 ref  = self.rig_worlds(cm.rest_pose)
                 for name in ("big", "lone", "lone2", "pad", "slab"):
                     self.assertTrue(np.allclose(rest[name][3], ref[name][3], rtol=0, atol=1e-9), name)
+
+    def test_a_root_scaled_other_than_1_is_off_by_a_later_layers_own_values(self):
+        """an override or a passthrough layer, at weight 100 or 50, keying
+        the translate z of the OUTSIDE group root, scaled 2: the export
+        leaves its curves in cm, and the group and every node under it are
+        off the cm file's clip by s - 1 times the layer's own translate times
+        its weight, on every channel its curve node holds, y among them,
+        which the layer holds at the group's own 2 and adds nothing to at
+        weight 100; every frame is where the sdk puts it, the lengths times
+        s. A scale x such a layer keys on the group is read as the cm value
+        it is: the joints under the group are off their cm positions, where
+        an additive layer's, which multiplies, puts every node there, as
+        the docs say"""
+        for mode, weight in ((1, 100.0), (1, 50.0), (2, 50.0)):
+            path = self.outside(f"later {mode} {weight:g}.fbx", layered=True, mode=mode, weight=weight)
+            want = self.clip_worlds(ClipData.load_fbx(path))
+            own  = weight / 100.0 * self.later_values(path)
+            self.assertTrue(np.all(own[:, 1] == weight / 100.0 * 2.0))
+            for unit, s in self.UNITS:
+                with self.subTest(mode=mode, weight=weight, unit=unit):
+                    meters = self.converted(path, unit)
+                    got    = self.clip_worlds(ClipData.load_fbx(meters))
+                    self.assertWorlds(got, self.sdk_frames(meters, s), 1e-5, ("top",))
+                    for name in ("big", "lone", "lone2", "pad", "slab"):
+                        off = got[name][:, 3, :3] - want[name][:, 3, :3]
+                        self.assertTrue(np.allclose(off, (s - 1) * own, rtol=0, atol=1e-5), name)
+                    self.assertGreater(float(np.abs(got["big"][:, 3, 1] - want["big"][:, 3, 1]).min()), 1.0)
+
+        for mode in (1, 2, 0):
+            path = self.outside(f"scaled {mode}.fbx", layered=True, mode=mode, scaled=True)
+            want = self.clip_worlds(ClipData.load_fbx(path))
+            for unit, s in self.UNITS:
+                with self.subTest(scaled=mode, unit=unit):
+                    meters = self.converted(path, unit)
+                    got    = self.clip_worlds(ClipData.load_fbx(meters))
+                    self.assertWorlds(got, self.sdk_frames(meters, s), 1e-4, ("top",))
+                    gaps = {
+                        name: float(np.abs(got[name][:, 3, :3] - want[name][:, 3, :3]).max())
+                        for name in ("big", "lone", "lone2", "pad", "slab")
+                    }
+                    if mode:
+                        self.assertLess(gaps["big"], 1e-5)
+                        for name in ("lone", "lone2", "pad", "slab"):
+                            self.assertGreater(gaps[name], 1.0, name)
+                    else:
+                        for name, gap in gaps.items():
+                            self.assertLess(gap, 1e-5, name)
 
     def test_a_mesh_skinned_to_a_joint_scaled_twice_is_right_at_its_bind(self):
         """a cube under the OUTSIDE group skinned to its two compensating
@@ -7319,6 +7385,96 @@ class TestFbxUnitHeldAsAScale(unittest.TestCase):
                 meters = self.converted(path, unit)
                 self.assertTrue(np.allclose(posed(meters, "bind"), want["bind"], rtol=0, atol=1e-9))
                 self.assertGreater(float(np.abs(posed(meters, "node") - want["node"]).max()), 1.0)
+
+    def test_an_unlisted_joint_under_joints_compensating_from_root_is_right(self):
+        """under pose="bind" a node no bind pose lists keeps its own values
+        under its parent's bind: under a group root scaled 2, a joint that
+        compensates its parent's scale, which a bind pose lists, then two
+        more that do, which it leaves out, the last holding a cube, as
+        Maya's export leaves out the end joints of a skeleton: none is a
+        node the export scales once more, and each loads where the cm file
+        has it, scaled 1/s like the rest, not 1/s^2, the cube too"""
+        tree = (
+            ("big", None, "group", (-10, 2, 3), (0, 0, 15), (2, 2, 2), False),
+            ("c1", "big", "joint", (1, 1, 1), (0, 0, 10), (1, 1.5, 1), True),
+            ("c2", "c1", "joint", (0, 6, 0), (20, 0, 0), (1, 1, 1.3), True),
+            ("c3", "c2", "joint", (0, 5, 0), (0, 0, -30), (1, 1, 1), True),
+            ("box", "c3", "mesh", (0, 2, 0), (0, 0, 0), (1, 1, 1), False),
+        )
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        made  = self.make(scene, tree)
+        pose  = FBX.FbxPose.Create(scene, "bindPose")
+        pose.SetIsBindPose(True)
+        for node in ("big", "c1"):
+            pose.Add(made[node], FBX.FbxMatrix(made[node].EvaluateGlobalTransform()))
+        scene.AddPose(pose)
+        # off the bind, so a read of the nodes' own values would put them elsewhere
+        made["c1"].LclRotation.Set(FBX.FbxDouble3(0.0, 25.0, 20.0))
+        path = self.save(manager, scene, self.path("unlisted.fbx"))
+        manager.Destroy()
+
+        want = self.rig_worlds(HierarchyData.load_fbx(path, pose="bind"))
+        node = self.rig_worlds(HierarchyData.load_fbx(path))
+        self.assertGreater(float(np.abs(want["c3"][3] - node["c3"][3]).max()), 1.0)
+        for unit, s in self.UNITS:
+            with self.subTest(unit=unit):
+                got = self.rig_worlds(HierarchyData.load_fbx(self.converted(path, unit), pose="bind"))
+                for name in ("big", "c1", "c2", "c3", "box"):
+                    self.assertTrue(np.allclose(got[name][3], want[name][3], rtol=0, atol=1e-9), name)
+                    self.assertTrue(np.allclose(got[name][:3, :3] * s, want[name][:3, :3], rtol=0, atol=1e-9), name)
+
+    def test_nodes_under_a_listed_joint_under_one_scaled_twice_are_right(self):
+        """under pose="bind" the node the export scales once more, which no
+        bind pose lists, loads scaled 1/s^2 at its cm position, and a node
+        under it that a bind pose lists loads at its cm bind scaled 1/s, and
+        so do the nodes under that one that no bind pose lists, a joint and a
+        cube: under a group root scaled 2, a joint, then a joint that
+        compensates its parent's scale, left out of the bind pose, and one
+        under it that compensates too, which the bind pose lists, holding the
+        joint and the cube, all three joints turned off the bind. With that
+        last joint left out too, it and the two under it are off their cm
+        bind (probe_bind_shapes.py)"""
+        tree = (
+            ("big", None, "group", (-10, 2, 3), (0, 0, 15), (2, 2, 2), False),
+            ("lone", "big", "joint", (1, 1, 1), (0, 0, 10), (1, 1, 1), False),
+            ("lone2", "lone", "joint", (0, 6, 0), (20, 0, 0), (1, 1.5, 1), True),
+            ("lone3", "lone2", "joint", (0, 5, 0), (0, 0, -30), (1, 1, 1), True),
+            ("tip", "lone3", "joint", (0, 4, 0), (0, 0, 0), (1, 1, 1), False),
+            ("box", "lone3", "mesh", (0, 2, 0), (0, 0, 0), (1, 1, 1), False),
+        )
+        for listed in (("big", "lone", "lone3"), ("big", "lone")):
+            manager = FBX.FbxManager.Create()
+            manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+            scene = FBX.FbxScene.Create(manager, "scene")
+            made  = self.make(scene, tree)
+            pose  = FBX.FbxPose.Create(scene, "bindPose")
+            pose.SetIsBindPose(True)
+            for node in listed:
+                pose.Add(made[node], FBX.FbxMatrix(made[node].EvaluateGlobalTransform()))
+            scene.AddPose(pose)
+            # off the bind, so a read of the nodes' own values would put them elsewhere
+            for node, turn in (("lone", (0, 25, 20)), ("lone2", (35, 0, 0)), ("lone3", (0, -20, 10))):
+                made[node].LclRotation.Set(FBX.FbxDouble3(*turn))
+            path = self.save(manager, scene, self.path(f"listed {len(listed)}.fbx"))
+            manager.Destroy()
+
+            want = self.rig_worlds(HierarchyData.load_fbx(path, pose="bind"))
+            for unit, s in self.UNITS:
+                with self.subTest(listed=listed, unit=unit):
+                    got = self.rig_worlds(HierarchyData.load_fbx(self.converted(path, unit), pose="bind"))
+                    self.assertTrue(np.allclose(got["lone2"][3], want["lone2"][3], rtol=0, atol=1e-9))
+                    twice = np.allclose(got["lone2"][:3, :3] * s ** 2, want["lone2"][:3, :3], rtol=0, atol=1e-9)
+                    self.assertTrue(twice)
+                    if "lone3" not in listed:
+                        for name in ("lone3", "tip", "box"):
+                            self.assertGreater(float(np.abs(got[name][3] - want[name][3]).max()), 1.0, name)
+                        continue
+                    for name in ("big", "lone", "lone3", "tip", "box"):
+                        self.assertTrue(np.allclose(got[name][3], want[name][3], rtol=0, atol=1e-9), name)
+                        once = np.allclose(got[name][:3, :3] * s, want[name][:3, :3], rtol=0, atol=1e-9)
+                        self.assertTrue(once, name)
 
     def test_a_mesh_under_a_root_scaled_other_than_1_is_right_once_posed(self):
         """a mesh under a root the export found scaled other than 1, outside
@@ -7654,12 +7810,12 @@ class TestFbxLoadsInMayaAxes(unittest.TestCase):
     as it is), except where an additive layer translates a root, whose
     translate the clip keeps in the file's world turned
     (test_a_root_an_additive_layer_moves_keeps_the_files_world_turned); a
-    root whose rotation is inactive still blends its layered rotation as
-    ConvertScene's xyz node, as Maya's importer does a group's or a
-    locator's (TestFbxRotationInactive.test_a_root_a_layer_translates_and_
-    turns_keeps_the_files_translate). The fixtures are authored straight
-    through the sdk, in the axis system each test names; the truth is the
-    sdk's own evaluation"""
+    root whose rotation is inactive still blends its rotation, blended by
+    layer, as ConvertScene's xyz node, as Maya's importer does a group's, a
+    locator's or a joint's (TestFbxRotationInactive.
+    test_a_root_a_layer_translates_and_turns_keeps_the_files_translate).
+    The fixtures are authored straight through the sdk, in the axis system
+    each test names; the truth is the sdk's own evaluation"""
 
     FRAMES = 9
 
@@ -7985,6 +8141,87 @@ class TestFbxLoadsInMayaAxes(unittest.TestCase):
                 moved     = additive[0][0]
                 converted = self.truth(path, self.FRAMES)[moved]
                 self.assertGreater(float(np.abs(converted - want[moved]).max()), 1.0)
+
+    def test_a_root_a_layer_turns_by_channel_is_where_convertscene_puts_it(self):
+        """a group root in each rotate order, rotation active and inactive,
+        and a joint root, each holding a locator, keyed on rotate, under an
+        additive layer that turns them by channel, as Maya's exporter writes
+        an additive animLayer, or by layer: every node, on every frame, is
+        where the sdk puts it after ConvertScene, in a Z-up and an X-up file.
+        Maya's importer parts from it on such a group root (by channel in
+        xyz, xzy, zxy and yxz in the Z-up file, in zyx, xzy, yzx and zxy in
+        the X-up one, and by layer in an order other than xyz, but yxz in
+        the X-up file, the layers merged: 0.45 to 1.66 as matrices,
+        probe_bychannel_maya.py); the clip keeps the sdk's values, as
+        ClipData.load_fbx's docstring says"""
+        source = FBX.FbxNode.EPivotSet.eSourcePivot
+        linear = FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear
+        frames = np.arange(self.FRAMES)
+
+        def keyed(prop, layer, axis, values):
+            curve = prop.GetCurve(layer, axis, True)
+            curve.KeyModifyBegin()
+            for frame, value in enumerate(values.tolist()):
+                time = FBX.FbxTime()
+                time.SetSecondDouble(frame / 24.0)
+                key = curve.KeyAdd(time)[0]
+                curve.KeySetValue(key, value)
+                curve.KeySetInterpolation(key, linear)
+            curve.KeyModifyEnd()
+
+        for label, axes in (("Z-up", FBX.FbxAxisSystem.MayaZUp), ("X-up", self.axes("eXAxis", "eParityOdd"))):
+            with self.subTest(axes=label):
+                manager = FBX.FbxManager.Create()
+                manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+                scene = FBX.FbxScene.Create(manager, "scene")
+                scene.GetGlobalSettings().SetAxisSystem(axes)
+                scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames24)
+                stack  = FBX.FbxAnimStack.Create(scene, "Take 001")
+                base   = FBX.FbxAnimLayer.Create(scene, "Base Layer")
+                layers = {}
+                stack.AddMember(base)
+                for mode, accumulation in (("C", 1.0), ("L", 0.0)):
+                    layers[mode] = FBX.FbxAnimLayer.Create(scene, f"add{mode}")
+                    layers[mode].BlendMode.Set(0.0)  # additive
+                    layers[mode].RotationAccumulationMode.Set(accumulation)
+                    stack.AddMember(layers[mode])
+                roots = [(f"{m}{o}{'a' if on else 'i'}", "group", o, on) for m in "CL" for o in range(6) for on in (True, False)]
+                roots += [("Cj", "joint", 0, True), ("Lj", "joint", 0, True)]
+                for index, (name, kind, order, active) in enumerate(roots):
+                    made = FBX.FbxNode.Create(scene, name)
+                    if kind == "joint":
+                        attr = FBX.FbxSkeleton.Create(scene, name)
+                        attr.SetSkeletonType(FBX.FbxSkeleton.EType.eLimbNode)
+                    else:
+                        attr = FBX.FbxNull.Create(scene, name)
+                        attr.Look.Set(FBX.FbxNull.ELook.eNone.value)
+                    made.SetNodeAttribute(attr)
+                    made.LclTranslation.Set(FBX.FbxDouble3(index * 1.5, 1.0, -1.0))
+                    made.SetRotationActive(active)
+                    made.SetRotationOrder(source, list(FBX.EFbxRotationOrder)[order])
+                    scene.GetRootNode().AddChild(made)
+                    kid  = FBX.FbxNode.Create(scene, f"{name}_kid")
+                    look = FBX.FbxNull.Create(scene, f"{name}_kid")
+                    look.Look.Set(FBX.FbxNull.ELook.eCross.value)
+                    kid.SetNodeAttribute(look)
+                    kid.LclTranslation.Set(FBX.FbxDouble3(0.5, 1.5, -1.0))
+                    made.AddChild(kid)
+                    for axis, (rest, step) in zip("XYZ", ((25.0, 5.0), (-35.0, 9.0), (45.0, 13.0))):
+                        keyed(made.LclRotation, base, axis, rest + step * frames)
+                    keyed(made.LclRotation, layers[name[0]], "X", np.full(self.FRAMES, 20.0))
+                    keyed(made.LclRotation, layers[name[0]], "Y", -3.0 * frames)
+                path     = os.path.join(self.tmp.name, f"channel {label}.fbx")
+                exporter = FBX.FbxExporter.Create(manager, "")
+                exporter.Initialize(path, -1, manager.GetIOSettings())
+                exporter.Export(scene)
+                exporter.Destroy()
+                manager.Destroy()
+
+                clip = ClipData.load_fbx(path)
+                self.assertWorlds(self.clip_worlds(clip), self.truth(path, self.FRAMES))
+                # the premise: a layer by channel and one by layer blend apart
+                file = self.truth(path, self.FRAMES, convert=False)
+                self.assertGreater(float(np.abs(file["C4a"][:, :3, :3] - file["L4a"][:, :3, :3]).max()), 0.1)
 
     def test_a_group_root_rotate_is_solved_again_and_filtered(self):
         """its curve turns 50 degrees a frame: solved again frame by frame it
@@ -9293,11 +9530,12 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         return path
 
     def test_a_view_reads_its_pre_and_post_rotation_as_maya_does(self):
-        """Maya's importer reads a camera's and a light's pre and post
-        rotation, and its rotate order, whether its rotation is active or
-        not: the view's children turn by its rotate axis (a camera's what
-        its post rotation adds to fbx's view axis, :attr:`VIEWS`), its
-        rotate in its order (:attr:`VIEW_ORDERS`) and its pre rotation. But a
+        """Maya's importer reads a camera's or a light's pre rotation and
+        rotate order, and a camera's post rotation, whether its rotation is
+        active or not, and leaves a light's post rotation out: the view's
+        children turn by its rotate axis (a camera's what its post rotation
+        adds to fbx's view axis, a light's none, :attr:`VIEWS`), its rotate
+        in its order (:attr:`VIEW_ORDERS`) and its pre rotation. But a
         root of a file whose up axis is x or z with its rotation inactive:
         the sdk's ConvertScene, which turns that file into Maya's Y-up,
         drops both and turns it in xyz, so such a camera turns its children
@@ -9332,6 +9570,95 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
                         kid   = view + suffix + "_kid"
                         self.assertTrue(np.allclose(own[kid].world_matrix, want, rtol=0.0, atol=1e-9), kid)
                         self.assertTrue(np.allclose(maya[kid].world_matrix, want @ turn, rtol=0.0, atol=1e-9), kid)
+
+    def test_a_pre_rotation_under_a_layer_turns_as_the_sdk_turns_it(self):
+        """a group in each rotate order with a pre rotation, keyed on rotate,
+        under an additive layer that turns it by channel or by layer, each
+        holding a locator: every node, on every frame, where the sdk puts
+        it, a group by channel turned by its order's turn of the base and
+        the layer's angles added, then by the pre rotation. Maya's importer
+        bakes the pre rotation into the rotate and the layer adds to that:
+        by channel the turn of the baked angles plus the layer's, more than
+        0.01 apart in every order, and by layer it parts in every order but
+        xyz, merged too (p_zyxpre.py: 1.98e-2 to 1.96 apart as matrices);
+        the clip keeps the sdk's values, as ClipData.load_fbx's docstring
+        says"""
+        source  = FBX.FbxNode.EPivotSet.eSourcePivot
+        linear  = FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear
+        frames  = np.arange(self.FRAMES)
+        pre     = (10.0, 20.0, 30.0)
+        base    = np.stack([25.0 + 5.0 * frames, -35.0 + 9.0 * frames, 45.0 + 13.0 * frames], axis=1)
+        added   = np.stack([np.full(self.FRAMES, 20.0), -3.0 * frames, np.full(self.FRAMES, 5.0)], axis=1)
+        path    = os.path.join(self.tmp.name, "pre_layered.fbx")
+
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames24)
+        stack  = FBX.FbxAnimStack.Create(scene, "Take 001")
+        layers = {"base": FBX.FbxAnimLayer.Create(scene, "Base Layer")}
+        stack.AddMember(layers["base"])
+        for mode, accumulation in (("C", 1.0), ("L", 0.0)):
+            layers[mode] = FBX.FbxAnimLayer.Create(scene, f"add{mode}")
+            layers[mode].BlendMode.Set(0.0)  # additive
+            layers[mode].RotationAccumulationMode.Set(accumulation)
+            stack.AddMember(layers[mode])
+
+        def keyed(prop, layer, axis, values):
+            curve = prop.GetCurve(layer, axis, True)
+            curve.KeyModifyBegin()
+            for frame, value in enumerate(values.tolist()):
+                time = FBX.FbxTime()
+                time.SetSecondDouble(frame / 24.0)
+                key = curve.KeyAdd(time)[0]
+                curve.KeySetValue(key, value)
+                curve.KeySetInterpolation(key, linear)
+            curve.KeyModifyEnd()
+
+        names = [f"{mode}{order}" for mode in "CL" for order in range(6)]
+        for index, name in enumerate(names):
+            made = FBX.FbxNode.Create(scene, name)
+            attr = FBX.FbxNull.Create(scene, name)
+            attr.Look.Set(FBX.FbxNull.ELook.eNone.value)
+            made.SetNodeAttribute(attr)
+            made.LclTranslation.Set(FBX.FbxDouble3(index * 1.5, 1.0, -1.0))
+            made.SetRotationActive(True)
+            made.SetRotationOrder(source, list(FBX.EFbxRotationOrder)[int(name[1])])
+            made.SetPreRotation(source, FBX.FbxVector4(*pre, 1.0))
+            scene.GetRootNode().AddChild(made)
+            kid  = FBX.FbxNode.Create(scene, f"{name}_kid")
+            look = FBX.FbxNull.Create(scene, f"{name}_kid")
+            look.Look.Set(FBX.FbxNull.ELook.eCross.value)
+            kid.SetNodeAttribute(look)
+            kid.LclTranslation.Set(FBX.FbxDouble3(0.5, 1.5, -1.0))
+            made.AddChild(kid)
+            for axis in range(3):
+                keyed(made.LclRotation, layers["base"], "XYZ"[axis], base[:, axis])
+                keyed(made.LclRotation, layers[name[0]], "XYZ"[axis], added[:, axis])
+        exporter = FBX.FbxExporter.Create(manager, "")
+        exporter.Initialize(path, -1, manager.GetIOSettings())
+        exporter.Export(scene)
+        exporter.Destroy()
+        manager.Destroy()
+
+        clip   = ClipData.load_fbx(path)
+        worlds = self.clip_worlds(clip)
+        self.assertWorlds(worlds, self.truth(path, self.FRAMES))
+
+        def turned(angles, order):
+            return euler_to_matrix(np.radians(angles), np.full(len(angles), order))[:, :3, :3]
+
+        first = turned(np.tile(pre, (self.FRAMES, 1)), 0)
+        for order in range(6):
+            with self.subTest(order=order):
+                maya_order = hierarchy.hierarchy._FBX_ROTATE_ORDERS[order]
+                want       = turned(base + added, maya_order) @ first
+                got        = worlds[f"C{order}"][:, :3, :3]
+                self.assertTrue(np.allclose(got, want, rtol=0.0, atol=1e-9), np.abs(got - want).max())
+                # the premise: Maya's baked angles plus the layer's turn elsewhere
+                baked = np.degrees(matrix_to_euler(turned(base, maya_order) @ first, np.full(self.FRAMES, maya_order)))
+                maya  = turned(baked + added, maya_order)
+                self.assertGreater(float(np.abs(maya - got).max()), 0.01)
 
     def test_a_file_whose_dropped_nodes_and_pivots_move_nothing_reads_as_it_holds_it(self):
         """an attribute-less group at the identity, a mesh whose pivots
@@ -10394,22 +10721,24 @@ class TestFbxRotationInactive(unittest.TestCase):
     def test_a_root_a_layer_translates_and_turns_keeps_the_files_translate(self):
         """a root an additive layer translates keeps its translate in the
         file's world turned, where ConvertScene leaves the layer's translate
-        in the file's axes (TestFbxLoadsInMayaAxes.test_a_root_an_additive_
-        layer_moves_keeps_the_files_world_turned), but a root whose rotation
-        is inactive still blends its layered rotation as ConvertScene's xyz
-        node, as Maya's importer does a group's or a locator's: on the
-        layered roots, moved by the layer as well, in a Z-up, an X-up and a
-        Y-up file whose front is x, every root's world translate is the
-        file's world turned on every frame, ConvertScene's 16 to 40 off it,
-        and every node's 3x3 the sdk's after ConvertScene, which the file's
-        world turned is 0.90 off on the zyx group, the yxz locator and the
-        xzy joint (1.70 on probe_translate_turn_rot.py's fixture, where the
-        zyx group is within 2.3e-3 of Maya's FBXImport in a Z-up file and
-        1.5e-3 in an X-up one). The read turned such a root and blended it
-        in the stored order before: its 3x3 up to 1.89 off; blended in that
-        order alone, 0.90; in xyz at the roots the read keeps alone, the
-        locator under "bare" 0.68; and in xyz at a node the read keeps under
-        a root it drops, that locator 0.65 (probe_layered_fixture.py)"""
+        in the file's axes (TestFbxLoadsInMayaAxes.
+        test_a_root_an_additive_layer_moves_keeps_the_files_world_turned),
+        but a root whose rotation is inactive still blends its rotation,
+        blended by layer, as ConvertScene's xyz node, as Maya's importer does
+        a group's, a locator's or a joint's: on the layered roots, moved by
+        the layer as well, in a Z-up, an X-up and a Y-up file whose front is
+        x, every root's world translate is the file's world turned on every
+        frame, ConvertScene's 16 to 40 off it, and every node's 3x3 the sdk's
+        after ConvertScene, which the file's world turned is 0.90 off on the
+        zyx group, the yxz locator and the xzy joint (1.70 on
+        probe_translate_turn_rot.py's fixture, where the zyx group's 3x3 is
+        within 1.7e-7 of Maya's FBXImport into a scene at the file's frame rate
+        in a Z-up and an X-up file, its translate 49 and 30 off Maya's import).
+        The read turned such a root and blended it in the stored order before:
+        its 3x3 up to 1.89 off; blended in that order alone, 0.90; in xyz at
+        the roots the read keeps alone, the locator under "bare" 0.68; and in
+        xyz at a node the read keeps under a root it drops, that locator 0.65
+        (probe_layered_fixture.py)"""
         axes = TestFbxLoadsInMayaAxes.axes
         for index, (label, system) in enumerate(
             (

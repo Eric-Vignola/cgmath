@@ -5397,13 +5397,14 @@ def load_fbx(filename: str, scale_factor: float | None = None) -> list:
     holds), is under no such root: its points load s times larger and its
     node, in the rig loaders, scaled 1/s, so it is right once posed, but on
     the frames of a clip where a later layer of a take keys that root's
-    translate. A mesh on or under a node the export scales by 1/s once more
-    there, or skinned to one (from the second joint of a Maya skeleton down,
-    its first joint under such a root), is off once posed by a rig of the
-    nodes' own values (``pose="node"``) or by a clip, and right posed at the
-    bind by a ``pose="bind"`` rig when a bind pose lists those nodes, as
-    Maya's export lists a skin's joints; ``HierarchyData.load_fbx`` says
-    which.
+    translate, or an override or passthrough one a scale there
+    (``HierarchyData.load_fbx``). A mesh on or under a node the export
+    scales by 1/s once more there, or skinned to one (from the second joint
+    of a Maya skeleton down, its first joint under such a root), is off once
+    posed by a rig of the nodes' own values (``pose="node"``) or by a clip,
+    and right posed at the bind by a ``pose="bind"`` rig when a bind pose
+    lists those nodes, as Maya's export lists a skin's joints;
+    ``HierarchyData.load_fbx`` says which.
     """
     return _load_fbx(filename, scale_factor)
 

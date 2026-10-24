@@ -447,13 +447,14 @@ class Object(TransformData):
                 (s the cm one unit holds): its points load s times larger
                 and its node, in the rig loaders, scaled 1/s, so it is
                 right once posed, but on the frames of a clip where a
-                later layer of a take keys that root's translate. On or
-                under a node the export scales by 1/s once more, or
-                skinned to one, from the second joint of a Maya skeleton
-                down, it is off once posed by a rig of the nodes' own
-                values (``pose="node"``) or by a clip, and right posed at
-                the bind by a ``pose="bind"`` rig when a bind pose lists
-                those nodes, as ``HierarchyData.load_fbx`` says.
+                later layer of a take keys that root's translate, or an
+                override or passthrough one a scale there. On or under a
+                node the export scales by 1/s once more, or skinned to one,
+                from the second joint of a Maya skeleton down, it is off
+                once posed by a rig of the nodes' own values
+                (``pose="node"``) or by a clip, and right posed at the bind
+                by a ``pose="bind"`` rig when a bind pose lists those
+                nodes, as ``HierarchyData.load_fbx`` says.
             axis_system: "maya_y_up" (default) turns the points, the
                 normals and the bind matrices from the file's axis
                 system into Maya's Y-up, by the turn the rig loaders

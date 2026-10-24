@@ -5750,50 +5750,81 @@ class TransformList(DataList[TransformData]):
         and so does a root the export found scaled other than 1: its nodes load
         as the sdk places them, where the cm file has them, scaled 1/s, and the
         points of a mesh at or under it s times larger, right once posed. But
-        such a root's translate keyed on a later layer of a take, which the
-        export leaves in cm, is multiplied by s with the rest: on a clip the
-        root and every node under it are off by s - 1 times what that layer
-        adds to the translate. And a node there that compensates its parent's
-        scale under a parent that is neither the root nor compensating, as the
-        second joint of a Maya skeleton does when its first joint sits under
-        such a root, is scaled 1/s once more by the export, and every node
-        under it with it. Read by their own values (``pose`` "node", and a
-        clip on every frame and its rest pose), that node loads at its cm
-        position scaled 1/s^2, the nodes under it off their cm positions, and
-        a mesh on or under it, or skinned to it, is off once posed. Under
-        ``pose`` "bind" a node a bind pose lists takes its bind matrix, which
-        the export converts as a world matrix: it loads where the cm file has
-        it, scaled 1/s like the rest, and so do the nodes under it and the
-        meshes on them or skinned to them, posed at the bind; a compensating
-        node no bind pose lists, under a parent other than the root, still
-        loads scaled 1/s^2, the nodes under it off. Maya's export lists every
-        skin influence and the nodes above it. Maya's importer scales every
-        root by s whatever its scale, and every compensating node, which
-        brings all of these back but puts a file only labelled in meters at
-        scale 100. The one risk: a root authored at exactly 1/s in a file
-        labelled in that unit is read as the unit. A number is the caller's
-        own factor, and neither the file's unit nor a unit held as a scale is
-        read.
+        the export leaves the curves of a take's later layers in cm, and on
+        such a root and the nodes under it the read takes them as the sdk
+        places them. A translate the root keys on one is multiplied by s with
+        the rest: on a clip the root and every node under it are off by s - 1
+        times that layer's own translate times its weight, on each channel
+        its curve node holds: what an additive layer adds, an override or
+        passthrough layer's whole value, a channel it holds unkeyed too
+        (Maya's meters export of a group scaled 2 whose translate x and z an
+        override animLayer keys: 2475 cm off on frame 5, and 198 along y,
+        which the layer holds at the group's own value). A scale an override
+        or passthrough layer keys on the root, or on a node under it that does
+        not inherit its parent's scale, is read as the cm value it is, s
+        times what the rest of the read gives it, and every node under it is
+        off (that group's scale x on an override animLayer: its joints 792
+        and 1780 cm off); an additive layer's scale, which multiplies, loads
+        right. And a node there that compensates its parent's scale under a
+        parent that is neither the root nor compensating, as the second joint
+        of a Maya skeleton does when its first joint sits under such a root, is
+        scaled 1/s once more by the export, and every node under it with it.
+        Read by their own values (``pose`` "node", and a clip on every frame
+        and its rest pose), that node loads at its cm position scaled 1/s^2,
+        the nodes under it off their cm positions, and a mesh on or under it,
+        or skinned to it, is off once posed. Under ``pose`` "bind" a node a
+        bind pose lists takes its bind matrix, which the export converts as a
+        world matrix: it loads where the cm file has it, scaled 1/s like the
+        rest, and so do the nodes under it and the meshes on them or skinned to
+        them, posed at the bind. A node no bind pose lists keeps what its own
+        values give it under its parent's bind: the node the export scales once
+        more, and a compensating node under it, still loads scaled 1/s^2, and
+        the nodes under them that no bind pose lists are off, but for those
+        under a node one lists, which load right, as that node does; any other
+        loads scaled 1/s like the rest, as the joints of a skeleton whose root
+        joint is scaled other than 1 do, the end joints Maya's export leaves
+        out of the bind pose among them. Maya's export lists every skin
+        influence, the joints between them and the nodes above them. Maya's
+        importer scales every root by s whatever its scale, and every
+        compensating node, which brings all of these back but puts a file only
+        labelled in meters at scale 100. The one risk: a root authored at
+        exactly 1/s in a file labelled in that unit is read as the unit. A
+        number is the caller's own factor, and neither the file's unit nor a
+        unit held as a scale is read.
 
         ``axis_system`` "maya_y_up", the default, loads the scene in Maya's
         Y-up axes as ``FbxAxisSystem.MayaYUp.ConvertScene`` converts it:
         every node's world matrix is the file's times the turn from the
         file's axis system to Maya's. Maya's FBX importer puts a file whose
-        up axis is x or z, an Unreal file among them, in the same place. It
-        leaves a file whose up axis is y, pointing up or down, in its own
-        axes, so a y-up file whose front is not +z, or a -y-up one, loads here
-        turned 90 or 180 degrees from where Maya shows it. The turn
-        comes from the file's ``FbxAxisSystem`` (its up vector, front vector
-        and handedness) and goes on each root the read keeps, the way
-        ConvertScene puts it on the scene root's children: a joint root takes
-        it in its joint orient and its translate, keeping its rotate, any
-        other root has its rotate solved again in its rotate order and its
-        translate turned. An Unreal file, Z-up, turns (x, y, z) to (x, z, -y).
-        A file already in Maya's Y-up, such as one save_fbx wrote from a
-        default read, loads as it is. A left handed file raises ValueError,
-        since no rotation turns it into Maya's axes. ``axis_system=None``
-        keeps the file's own axes. Which way the character faces is left as
-        the file has it.
+        up axis is x or z, an Unreal file among them, in the same place, but
+        for a skeleton node at the root of the file, eRoot or eEffector, that
+        holds no eLimbNode child, which it imports as a transform, 1.41 off
+        ConvertScene's in its 3x3 in a Z-up file and 1.28 in an X-up one, the
+        nodes under it up to 2.98 and 5.0 off in translate, where the read
+        follows ConvertScene: one that holds an eLimbNode, as an Unreal file's
+        skeleton root does, imports as a joint where ConvertScene puts it,
+        and save_fbx writes every joint as an eLimbNode. Maya's importer also
+        parts from the read on a node below the roots that is no camera or
+        light whose rotation is inactive, in another order than xyz, which it
+        turns by neither order (``node_types`` below): on the files measured,
+        1.2 to 2.0 apart in the 3x3, and the node under it, up to 2.7 off in
+        translate. On such a file a clip parts from Maya's import also where a
+        layer blends the rotation of a root that is no joint, and in a file of
+        any axes where Maya's import keys what it solves or merges at another
+        frame rate than the file's (:meth:`ClipData.load_fbx`). Maya's importer
+        leaves a file whose up axis is y, pointing up or down, in its own axes,
+        so a y-up file whose front is not +z, or a -y-up one, loads here turned
+        90 or 180 degrees from where Maya shows it. The turn comes from the
+        file's ``FbxAxisSystem`` (its up vector, front vector and handedness)
+        and goes on each root the read keeps, the way ConvertScene puts it on
+        the scene root's children: a joint root takes it in its joint orient
+        and its translate, keeping its rotate, any other root has its rotate
+        solved again in its rotate order and its translate turned. An Unreal
+        file, Z-up, turns (x, y, z) to (x, z, -y). A file already in Maya's
+        Y-up, such as one save_fbx wrote from a default read, loads as it is. A
+        left handed file raises ValueError, since no rotation turns it into
+        Maya's axes. ``axis_system=None`` keeps the file's own axes. Which way
+        the character faces is left as the file has it.
 
         ``pose`` "node", the default, reads the nodes' own values. "bind"
         reads the skin bind pose a skinned file stores, which the node
@@ -5871,13 +5902,16 @@ class TransformList(DataList[TransformData]):
         under 1e-12 sit where Maya puts them, down to about 1e-154, under
         which the read overflows; along an axis it is scaled exactly 0,
         those under a joint the read drops collapse onto it: Maya holds
-        1e-12 there, which a kept node does not. Under a kept node scaled
-        under 1e-12 the translates that place the nodes below it can
-        reach the inverse of that scale, which ``world_matrix`` multiplies
-        back but Maya, holding 1e-12, does not: such a frame written with
-        ``save_fbx`` imports into Maya away from where Maya imports the
-        file (a locator under a kept locator split under (1, 1, -1e-13):
-        its translate 1.6e12, 1.34 off). Folded in the same way is
+        1e-12 there, which a kept node does not. Under a kept node the read
+        scales under 1e-12, its own scale times what its split takes from
+        the uneven dropped nodes above it (a locator scaled 1.5e-11 under a
+        dropped node scaled 0.05 reads 7.5e-13), the translates that place
+        the nodes below it can reach the inverse of that scale, which
+        ``world_matrix`` multiplies back but Maya, holding 1e-12, does not:
+        such a frame written with ``save_fbx`` imports into Maya away from
+        where Maya imports the file (a locator under a kept locator split
+        under (1, 1, -1e-13): its translate 1.6e12, 1.34 off; under that
+        locator read 7.5e-13, 0.059 off). Folded in the same way is
         what a node's own channels can't hold: its rotate and scale pivots
         and offsets, in its translate, rotation active or not, and, on a
         node that is no joint, its pre and post rotation, which the sdk
@@ -12293,38 +12327,52 @@ class ClipData(HierarchyData):
         read as they are. A root the export found scaled other than 1 holds
         no unit: its translate is multiplied after the blend, the later
         layers' cm values with the first layer's, so the root and every node
-        under it are off by s - 1 times what a later layer adds to that
-        translate, s the cm one unit of the file holds, as
-        :meth:`HierarchyData.load_fbx` says.
+        under it are off by s - 1 times each later layer's own translate
+        times its weight, s the cm one unit of the file holds, on each
+        channel its curve node holds: what an additive layer adds, an
+        override or passthrough layer's whole value; and a scale an override
+        or passthrough layer keys on that root, or on a node under it that
+        does not inherit its parent's scale, is read as the cm value it is,
+        every node under it off, as :meth:`HierarchyData.load_fbx` says.
 
         ``axis_system`` "maya_y_up", the default, loads the take in Maya's
         Y-up axes, as :meth:`HierarchyData.load_fbx` loads the rig: every
         node's world matrix, on every frame, is the file's times the turn
         from the file's axis system to Maya's, the one ConvertScene gives,
         root travel included. Maya's FBX importer agrees on a file whose up
-        axis is x or z and leaves one whose up axis is y in its own axes, as
-        :meth:`HierarchyData.load_fbx` says. The clip parts from both on a
-        root a layer above the base translates, additive, override or
-        passthrough: it keeps that root's translate in the file's world
-        turned, the motion as the file authors it, where ConvertScene leaves
-        that layer's translate in the file's axes, and so does Maya's importer
-        wherever the base layer holds that translate (within 7.7e-7 of
-        ConvertScene; where the base layer holds no curve node for it, Maya
-        parts from ConvertScene as the first live layer item below says). The
-        clip sits 2.8 to 45 off Maya's import of such a root; Maya's import of
-        a Z-up scene it exported, a group root an additive layer translates,
-        sits 45 off that scene turned, the clip 1.5 off it, as Maya's import
-        of the same scene exported Y-up does. A root whose rotation is
-        inactive still blends its layered rotation as ConvertScene's xyz node,
-        as Maya's importer does a group's or a locator's: a zyx group root the
-        layer also turns sits 1.70 off the file's world turned, within 2.3e-3
-        of Maya's FBXImport. A joint root takes the turn in its joint orient
-        and its translate curves, keeping its rotate curves as authored; any
-        other root has its rotate solved again on every frame in its rotate
-        order, through euler_filter along the frames, frame 0 as solved, and
-        its translate turned. A file already in Maya's Y-up loads as it is, a
-        left handed one raises ValueError, and ``axis_system=None`` keeps the
-        file's own axes.
+        axis is x or z, but on a skeleton root it imports as a transform and on
+        a node below the roots that is no camera or light whose rotation is
+        inactive, in another order than xyz, as :meth:`HierarchyData.load_fbx`
+        says, and where the list below says, a root that is no joint whose
+        rotation a layer blends among them, and leaves one whose up axis is y
+        in its own axes. In a file of any axes it also parts from the clip
+        where it keys at another frame rate than the file's, as the list says.
+        The clip parts from both on a root a layer above the base translates,
+        additive, override or passthrough: it keeps that root's translate in
+        the file's world turned, the motion as the file authors it, where
+        ConvertScene leaves that layer's translate in the file's axes, and so
+        does Maya's importer wherever the base layer holds that translate
+        (within 7.7e-7 of ConvertScene; where the base layer holds no curve
+        node for it, Maya parts from ConvertScene as the first live layer item
+        below says). The clip sits 2.8 to 49 off Maya's import of such a root
+        on the files measured, a gap that grows with how far the layer moves
+        it; Maya's import of a Z-up scene it exported, a group root an additive
+        layer translates, sits 45 off that scene turned, the clip 1.5 off it,
+        as Maya's import of the same scene exported Y-up does, and puts that
+        group's 3x3, in xyz, 1.41 off ConvertScene's and the clip's, as the
+        list below says. A root whose rotation is inactive still blends its
+        rotation, blended by layer, as ConvertScene's xyz node, as Maya's
+        importer does a group's, a locator's or a joint's: a zyx group root the
+        layer also translates and turns has its 3x3 1.70 off the file's world
+        turned and within 1.7e-7 of Maya's FBXImport into a scene at the file's
+        frame rate, and its translate the file's world turned, 49 off Maya's
+        import in a Z-up file and 30 in an X-up one. A joint root takes the
+        turn in its joint orient and its translate curves, keeping its rotate
+        curves as authored; any other root has its rotate solved again on every
+        frame in its rotate order, through euler_filter along the frames, frame
+        0 as solved, and its translate turned. A file already in Maya's Y-up
+        loads as it is, a left handed one raises ValueError, and
+        ``axis_system=None`` keeps the file's own axes.
 
         ``node_types`` keeps the kinds of node :meth:`HierarchyData.load_fbx`
         keeps, and what that read folds into the nodes it keeps, the nodes
@@ -12412,6 +12460,88 @@ class ClipData(HierarchyData):
           in its own order the way it blends xyz. Additive layers agree only
           on xyz (but for the sign cases below), passthrough layers on xyz and
           zyx; the others are up to 2.0 apart as matrices;
+        - Maya's FBXImport merges the layers, as it does by default, on a node
+          that turns in xzy, yzx, yxz or zxy, a group or a joint, root or not
+          (but a root of the next item), in a Y-up and a Z-up file alike: on
+          some frames, by channel or by layer, the merged turn parts from the
+          sdk's, up to 2.0 apart as matrices. By channel such a frame holds the
+          sdk's angles with x and z turned by 180 degrees and y by 180 - y, the
+          same turn in xyz and zyx alone (a frame the sdk turns by
+          (-100, 68, -25), after one at (120, -54, 205), merges to
+          (80, 112, 155), 1.77 to 1.99 apart), where the layers kept agree; by
+          layer, keys of 120 to 128 degrees about y part on every frame, 1.23
+          to 1.99 apart. Merged, a node in xyz or zyx agrees within 2.0e-7, and
+          so did every order on the smaller turns measured, by layer too, which
+          kept parts as the item above says; but a frame whose y angle is 90
+          merges by channel to angles that hold the turn in xyz alone (0.27 to
+          0.55 apart in the other orders), and a node that is no joint with a
+          pre rotation parts as the item on it below says;
+        - a layer blends the rotation of a root that is no joint in a file
+          whose up axis is x or z, which Maya's importer turns into its Y-up:
+          it can part from ConvertScene there in any rotate order, by channel
+          or by layer, the layers kept or merged, up to 2.0 apart as matrices
+          (Maya's own Z-up export of a group root in xyz, its default order,
+          under an additive animLayer, which it writes by channel: 1.41 apart,
+          the locator under it 2.25 off). On files the sdk wrote, by channel
+          0.40 to 1.96 apart, a root whose rotation is inactive as a root in
+          xyz, which ConvertScene makes it, in orders that hang on the file's
+          axes and on the turns: on the smaller turns measured and on a turn of
+          120 to 128 degrees about y, xyz, xzy, zxy and yxz in Maya's Z-up axes
+          and zyx, xzy, yzx and zxy in an X-up file whose front is z, the other
+          two agreeing; in a Z-up file whose front is x, in an X-up one whose
+          front is y, and on keys that turn far from one frame to the next (5
+          frames, up to 230 degrees apart on an axis), every order. By layer,
+          in every order but xyz, 0.40 to 1.93 apart, merged on the smaller
+          turns too, but yxz in that X-up file, and kept as the first item
+          says. On every file and turn measured, a root in xyz, or one whose
+          rotation is inactive, agrees by layer within 2.7e-7, and a joint root
+          parts only where any node does (the two items above). The clip keeps
+          ConvertScene's values there, within 7.1e-15;
+        - Maya's FBXImport keys the curves it solves or merges at the rate its
+          FBXImportResamplingRateSource option names, by default "Scene", the
+          rate the scene runs at when the import starts; the import then sets
+          the scene to the file's rate. It solves the rotate of a root that is
+          no joint in a file whose up axis is x or z; the rotate of a node that
+          is no joint with a pre rotation it reads (rotation active, or on a
+          camera or a light), which it bakes into that rotate, in a y-up file
+          too; and the rotate of a node that is no camera or light whose
+          rotation is inactive, in another order than xyz, but a root of a file
+          whose up axis is x or z, which it turns by neither order
+          (``node_types``). It merges a take's layers, as it does by default,
+          into new curves on the nodes they hold, a joint's rotate and
+          translate too. The other curves keep the file's keys, of a single
+          layer or of kept layers: a joint's, its pre rotation kept as its
+          joint orient, a camera's or a light's with no pre rotation, a node's
+          whose post rotation it keeps as its rotate axis, translates, pivots
+          and offsets. From a scene at another rate, the keys it makes sit on
+          the frames of that rate, not the file's, and on the file's frames
+          between them Maya parts from the clip by amounts that hang on both
+          rates. On the files measured, a 30 fps file imported from Maya's
+          default 24 fps scene, its keys 1.25 of the file's frames apart: a
+          root that is no joint of an X- or Z-up file up to 0.17 apart as
+          matrices, the node under it up to 0.29 off; a node with a pre
+          rotation up to 6.9e-2, the locator under it up to 0.11; the nodes of
+          a merged take up to 1.6e-2, the locators under them up to 3.9e-2.
+          From a 25 fps scene: a group root of a Z-up file 0.16 apart, the
+          locator under it 0.19; the nodes of a merged take up to 6.4e-2, the
+          locators under them 9.8e-2. With that option set to "File", or from a
+          scene at the file's rate or at 60 fps for a 30 fps file, it keys
+          every frame of the file and agrees on them within 3.5e-7 in the 3x3
+          and 9.6e-7 in translate, but on a node it turns by neither order, 1.2
+          to 2.0 apart in the 3x3 at any rate, and where another item of this
+          list says;
+        - an additive layer above the base turns a node that is no joint whose
+          pre rotation Maya's FBXImport bakes into its rotate (the item above):
+          by channel, in every rotate order, the layers kept or merged, the
+          layer's angles add to the baked ones, where the sdk adds them to the
+          node's own under the pre rotation; by layer, in every order but xyz,
+          merged too, where the same node with no pre rotation agrees merged on
+          the turns measured. On the files measured, by channel 1.98e-2 to 1.54
+          apart as matrices, by layer merged 4.15e-2 to 1.96, the smaller on
+          turns under 45 degrees, the larger on turns of up to 330, the node
+          under it up to 3.3 off in translate; by layer, a node in xyz agrees
+          within 1.6e-7, kept or merged. A post rotation, which Maya keeps as
+          the rotate axis, parts only where a node with none does;
         - an additive layer blends a rotation by layer at a weight other than
           0 or 100, and the quaternion Maya builds from the layer's angles
           (qz qy qx of the half angles on an xyz node) has the other sign
