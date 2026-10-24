@@ -328,15 +328,22 @@ class SkinData(Data):
         return ids
 
     def __iadd__(self, other):
-        """concatenates two skin data objects inplace"""
+        """
+        concatenates two skin data objects inplace: other's vertices after
+        this one's, on the influences of both, this one's first; other stays
+        as it was
+        """
         if not all([self.valid, other.valid]):
             raise ValueError("Invalid SkinData objects cannot be added.")
+        # conform widens every skin it is given: a shallow copy of other takes
+        # the widening, so other keeps its own influences and weights
+        other = copy.copy(other)
         self.conform(self, other)
         self.weights = np.concatenate([self.weights, other.weights])
         return self
 
     def __add__(self, other):
-        """concatenates two skin data objects"""
+        """concatenates two skin data objects into a new one, both left as they were"""
         new = self.copy()
         new.__iadd__(other)
         return new

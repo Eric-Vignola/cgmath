@@ -368,8 +368,12 @@ Two independent things.
   `patterns` / `Patterns`. Skin *deformation* is not here — see
   [`deform/`](deform/README.md).
 - `MorphData` is **sparse**: `offsets` `(N, 3)` plus the `indices` they apply
-  to. It supports `+ - * / **`, merging the two index sets, so `sum(morph_list)`
-  works.
+  to. `+` and `-` take another `MorphData`, merging the two index sets, and
+  `*` and `/` a number; a `MorphList` does the same shape by shape, or with
+  one operand a shape. A number added or subtracted, on either side (but 0
+  on the left: `0 + a` is a copy and `0 - a` is `a * -1`, so
+  `sum(morph_list)` works), a number over a morph, a morph times or over a
+  morph and `**` raise `TypeError`.
 - `MapData` is a sparse per-component scalar map; `GeomSubsetData` is a
   component selection. Both carry `component_type` of `"v"`, `"f"` or `"e"` and
   convert to and from a single-influence `SkinData`.

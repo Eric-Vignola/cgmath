@@ -212,6 +212,42 @@ class TestSkinData(unittest.TestCase):
         self.assertTrue(skin.influences == ["joint1", "joint2", "joint3", "joint4"])
         self.assertEqual(skin.weights.shape, (8, 4))
 
+    def test_a_sum_leaves_the_skin_it_adds_as_it_was(self):
+        # conform widens every skin it is given: a + b and a += b widen a
+        # copy of b, so b keeps its influences, in its order, and its
+        # weights; the sum is the one it was
+        sums = {
+            # none of plane1's influences
+            "plane3": (
+                ["joint1", "joint2", "joint3", "joint4"],
+                [[1, 0, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0], [0, 1, 0, 0],
+                 [0, 0, 0, 1], [0, 0, 0, 1], [0, 0, 0.8, 0.2], [0, 0, 0.8, 0.2]],
+            ),
+            # plane1's, the other way round
+            "plane2": (["joint1", "joint2"], [[1, 0], [1, 0], [0, 1], [0, 1]] * 2),
+        }
+        for name, (influences, weights) in sums.items():
+            for op in ("+", "+="):
+                with self.subTest(b=name, op=op):
+                    a, b = self.plane1.copy(), getattr(self, name).copy()
+                    a_was, b_was = a.copy(), b.copy()
+                    b_weights = b.weights
+                    if op == "+":
+                        total = a + b
+                    else:
+                        total = a
+                        total += b
+                    self.assertEqual(total.influences, influences)
+                    np.testing.assert_array_equal(total.weights, weights)
+                    if op == "+":
+                        self.assertEqual(a.influences, a_was.influences)
+                        np.testing.assert_array_equal(a.weights, a_was.weights)
+                    else:
+                        self.assertIs(total, a)
+                    self.assertEqual(b.influences, b_was.influences)
+                    np.testing.assert_array_equal(b.weights, b_was.weights)
+                    self.assertIs(b.weights, b_weights)
+
     def test_fnmatch(self):
         # test fnmatch
         skin_cube = self.skin_cube.copy()
@@ -274,9 +310,13 @@ class TestSkinData(unittest.TestCase):
         self.assertTrue(split == skin_plane)
 
         # extract cube out of combo, influence order will be different
-        # but we can still test for equivalency
+        # but we can still test for equivalency: against the cube on the
+        # combo's influences, as + conforms a copy of it (is_equivalent
+        # takes the influences two skins share in one order)
         split = combo[skin_plane.size :]
-        self.assertTrue(split.is_equivalent(skin_cube))
+        wide  = skin_cube.copy()
+        SkinData.conform(skin_plane.copy(), wide)
+        self.assertTrue(split.is_equivalent(wide))
 
     def test_max_counts(self):
         skin_cube = self.skin_cube.copy()

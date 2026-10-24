@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numbers
 import operator
 from dataclasses import dataclass
 from typing import Optional
@@ -10,11 +11,63 @@ from cgmath.geometry.utils import pxr
 
 BLS_PRIM_TYPE = "MorphTarget"
 
+# the item operation each of a MorphList's operators takes shape by shape
+_OPERATORS = {"+": operator.add, "-": operator.sub, "*": operator.mul, "/": operator.truediv}
+
+
+def _is_zero(value) -> bool:
+    """whether ``value`` is the number 0, which builtin sum() starts from"""
+    return isinstance(value, numbers.Number) and value == 0
+
+
+class _Name(str):
+    """an operand's name in a refusal, where its class would mislead"""
+
+
+def _holding(sequence, item) -> _Name:
+    """a sequence named by the item a refusal is about: ``a list holding an int``"""
+    names = ("array" if isinstance(x, np.ndarray) else type(x).__name__ for x in (sequence, item))
+    return _Name(" holding ".join(("an " if x[:1].lower() in "aeiou" else "a ") + x for x in names))
+
+
+def _refused(left, op: str, right) -> TypeError:
+    """
+    the error for ``left op right``, which has no meaning for morph targets,
+    saying what has one; ``left`` and ``right`` each an operand, its class
+    or a :class:`_Name`
+    """
+    if op in ("+", "-"):
+        supported = (
+            "a MorphData adds or subtracts another MorphData (a + b, a - b; 0 + a is a "
+            "copy of a and 0 - a is a * -1, so sum() works), and a MorphList adds or "
+            "subtracts a MorphData from every shape, or a MorphList or a sequence of "
+            "MorphData shape by shape"
+        )
+    else:
+        supported = (
+            "a MorphData multiplies or divides by a number (a * 2, 2 * a, a / 2), and "
+            "a MorphList by a number, or by a sequence of numbers, one a shape"
+        )
+    left, right = (
+        x if isinstance(x, _Name) else x.__name__ if isinstance(x, type) else type(x).__name__
+        for x in (left, right)
+    )
+    return TypeError(f"{left} {op} {right} has no meaning: {supported}")
+
 
 @dataclass(repr=False, eq=False)
 class MorphData(Data):
     """
     Morph target data class.
+
+    Arithmetic: ``a + b`` and ``a - b`` add or subtract another MorphData,
+    merging the two index sets; ``0 + a`` is a copy of ``a`` and ``0 - a``
+    is ``a * -1``, so builtin sum() works; ``a * 2``, ``2 * a`` and
+    ``a / 2`` scale the offsets, and ``a * [1, 1, 2]`` and
+    ``a / [1, 1, 2]`` their x, y and z each by its own number. Nothing else
+    has a meaning and raises TypeError: a number added or subtracted (which
+    shifted the indices), a morph times or over a morph, a number over or
+    less a morph, a power.
     """
 
     EQUALITY_TEST_IGNORE = ["name"]
@@ -117,8 +170,15 @@ class MorphData(Data):
         self.indices   = self.indices[sorted_indices]
         self.offsets   = self.offsets[sorted_indices]
 
+    # --------------------------------- arithmetic --------------------------------- #
+
     def __iadd__(self, other):
-        """inplace add of two morph targets"""
+        """
+        in place, another MorphData's offsets added: the two index sets
+        merged, the offsets of an index both hold summed, the names joined
+        on their ``_`` separated parts. A number added has no meaning
+        (TypeError): it no longer shifts the indices
+        """
 
         if isinstance(other, MorphData):
             if self.size == 0:
@@ -145,28 +205,32 @@ class MorphData(Data):
 
                 self.name = "_".join(self_name)
 
-        # assume arithmetic offset of the indices
+        # a number or anything else added has no meaning
         else:
-            self.indices += int(other)
+            raise _refused(self, "+", other)
 
         return self
 
     def __add__(self, other):
-        """addition of two morph targets"""
+        """a new MorphData, another one's offsets added, as ``+=`` adds them"""
         new = self.copy()
         return new.__iadd__(other)
 
     def __radd__(self, other):
         """
-        right-hand side addition of two morph targets
-        allows to use builtin sum()
+        ``0 + morph``, a copy of the morph, so builtin sum() works; any other
+        number added has no meaning (TypeError)
         """
-        if other == 0:
-            return self
-        return self.__add__(other)
+        if _is_zero(other):
+            return self.copy()
+        raise _refused(other, "+", self)
 
     def __isub__(self, other):
-        """inplace subtraction of two morph targets"""
+        """
+        in place, another MorphData's offsets subtracted, the index sets
+        merged and the names joined as ``+=`` does. A number subtracted has
+        no meaning (TypeError): it no longer shifts the indices
+        """
 
         if isinstance(other, MorphData):
             if self.size == 0:
@@ -193,96 +257,68 @@ class MorphData(Data):
 
                 self.name = "_".join(self_name)
 
-        # assume arithmetic offset of the indices
+        # a number or anything else subtracted has no meaning
         else:
-            self.indices -= int(other)
+            raise _refused(self, "-", other)
 
         return self
 
     def __sub__(self, other):
-        """subtraction of two morph targets"""
+        """a new MorphData, another one's offsets subtracted, as ``-=`` subtracts them"""
         new = self.copy()
         return new.__isub__(other)
 
     def __rsub__(self, other):
         """
-        right-hand side subtraction of two morph targets
+        ``0 - morph``, the morph negated, a new one; any other number less a
+        morph has no meaning (TypeError)
         """
-        if other == 0:
+        if _is_zero(other):
             return self * -1
-        return self.__sub__(other)
+        raise _refused(other, "-", self)
 
     def __imul__(self, other):
-        """inplace multiplication of two morph targets"""
+        """
+        in place, the offsets times a number (or what numpy multiplies an
+        (N, 3) array by). A morph times a morph, a MorphData or a MorphList,
+        has no meaning (TypeError)
+        """
+        if isinstance(other, (Data, DataList)):
+            raise _refused(self, "*", other)
 
-        if isinstance(other, MorphData):
-            if self.size == 0:
-                return self  # nothing to multiply
-            else:
-                merged_indices = np.concatenate([self.indices, other.indices])
-                merged_indices = np.unique(merged_indices)
-
-                offsets               = np.zeros((merged_indices.max() + 1, 3))
-                offsets[self.indices] = self.offsets
-                offsets[other.indices] *= other.offsets
-
-                self.indices = merged_indices
-                self.offsets = offsets[merged_indices]
-
-        # assume arithmetic multiplication
-        else:
-            self.offsets *= other
-
+        self.offsets *= other
         return self
 
     def __mul__(self, other):
-        """multiplication of two morph targets"""
+        """a new MorphData, its offsets times a number, as ``*=`` multiplies them"""
         new = self.copy()
         return new.__imul__(other)
 
     def __rmul__(self, other):
-        """
-        right-hand side multiplication of two morph targets
-        """
+        """``2 * morph``, the same as ``morph * 2``"""
+        if isinstance(other, (Data, DataList)):
+            raise _refused(other, "*", self)
         return self.__mul__(other)
 
     def __itruediv__(self, other):
-        """inplace division of two morph targets"""
+        """
+        in place, the offsets divided by a number (or what numpy divides an
+        (N, 3) array by). A morph over a morph has no meaning (TypeError)
+        """
+        if isinstance(other, (Data, DataList)):
+            raise _refused(self, "/", other)
 
-        # assume arithmetic division
         self.offsets /= other
-
         return self
 
     def __truediv__(self, other):
-        """multiplication of two morph targets"""
+        """a new MorphData, its offsets divided by a number, as ``/=`` divides them"""
         new = self.copy()
         return new.__itruediv__(other)
 
     def __rtruediv__(self, other):
-        """
-        right-hand side multiplication of two morph targets
-        """
-        return self.__truediv__(other)
-
-    def __ipow__(self, other):
-        """inplace exponent of two morph targets"""
-
-        # assume arithmetic exponent
-        abs_power    = np.abs(self.offsets) ** other
-        self.offsets = np.sign(self.offsets) * abs_power
-        return self
-
-    def __pow__(self, other):
-        """exponent of two morph targets"""
-        new = self.copy()
-        return new.__ipow__(other)
-
-    def __rpow__(self, other):
-        """
-        right-hand side exponent of two morph targets
-        """
-        return self.__pow__(other)
+        """``2 / morph`` has no meaning (TypeError): a morph divides by a number"""
+        raise _refused(other, "/", self)
 
     @classmethod
     def from_mesh_data(
@@ -338,6 +374,26 @@ class MorphData(Data):
 
 
 class MorphList(DataList[MorphData]):
+    """
+    A list of MorphData, its arithmetic shape by shape.
+
+    ``shapes + a`` and ``shapes - a`` add or subtract a MorphData from every
+    shape; a MorphList, or a list or a tuple of MorphData, adds or
+    subtracts shape by shape, a list or a tuple on the left too.
+    ``shapes * 2`` and ``shapes / 2`` scale every shape, and a sequence of
+    numbers, one a shape, each its own, so ``(shapes * s) / s == shapes``.
+    ``0 + shapes`` and ``0 - shapes`` are a copy and every shape negated, so
+    builtin sum() works. Each of these gives a new list, a new shape in
+    each place, so a shape the list holds twice is acted on once in each;
+    in place, ``+=``, ``-=``, ``*=`` and ``/=`` change the shapes the list
+    holds, so one it holds twice is changed twice. What has no meaning
+    raises TypeError, whatever the two lengths, an empty list's too, before
+    a sequence of another length raises RuntimeError and before any shape
+    is changed. An operand numpy refuses, None or an array of another
+    shape, raises numpy's error at the shape it reaches, in place the
+    shapes before that one already changed.
+    """
+
     # --------- vectorized properties and methods --------- #
     @property
     def size(self) -> np.ndarray:
@@ -370,139 +426,169 @@ class MorphList(DataList[MorphData]):
 
     # -------------------------- shape math operations --------------------------- #
 
-    def _sequence_first(self, other, op) -> MorphList:
+    def _per_shape(self, other, op: str) -> list:
         """
-        ``other op self`` with a python list or tuple ``other`` on the left:
-        each of its items op the shape it pairs with, the item first, as the
-        item operation does it. On copies of the shapes, as ``0 + shape``
-        gives the shape itself.
+        the operand of each shape for ``self op other``: a MorphList's or a
+        sequence's items, one a shape, else ``other`` for every shape. What
+        has no meaning raises TypeError first, whatever the two lengths: for
+        ``+`` and ``-`` anything but a MorphData, for ``*`` and ``/`` a
+        morph. Then a sequence of another length raises RuntimeError. The
+        refusal names the operand, a python list, tuple or array by the item
+        refused: ``MorphList + a list holding a MorphList``
         """
-        other = list(other)
-        if len(self.list) != len(other):
+        many  = isinstance(other, MorphList) or _is_sequence(other)
+        items = list(other) if many else [other]
+        plain = many and not isinstance(other, DataList)
+        if op in ("+", "-"):
+            refused = [x for x in items if not isinstance(x, MorphData)]
+        else:
+            refused = [x for x in [other] + items if isinstance(x, (Data, DataList))]
+        if refused:
+            raise _refused(self, op, _holding(other, refused[0]) if plain else other)
+
+        if not many:
+            return items * len(self.list)
+        if len(self.list) != len(items):
             raise RuntimeError("Lists must have the same length.")
-        return type(self)([op(y, x) for x, y in zip(self.copy().list, other)])
+        return items
+
+    def _new_shapes(self, other, op: str) -> MorphList:
+        """
+        ``self op other``, a new list: each shape op the operand
+        :meth:`_per_shape` pairs with it, as the item operation gives it, a
+        new shape in each place, so a shape the list holds twice is acted on
+        once in each
+        """
+        return type(self)([_OPERATORS[op](x, y) for x, y in zip(self.list, self._per_shape(other, op))])
+
+    def _sequence_first(self, other, op: str) -> MorphList:
+        """
+        ``other op self`` with ``other`` on the left a python list or tuple,
+        or a DataList that is no MorphList: each of its items op the shape
+        it pairs with, the item first, as the item operation does it, each
+        giving a new shape. What that refuses raises TypeError first,
+        whatever the two lengths: for ``+`` and ``-`` anything but a
+        MorphData or 0, for ``*`` a morph. Then a sequence of another length
+        raises RuntimeError. The refusal names a list or a tuple by the item
+        refused, ``a list holding an int - MorphList``, a DataList by its
+        class, ``SkinList + MorphList``
+        """
+        items = list(other)
+        if op in ("+", "-"):
+            refused = [x for x in items if not (isinstance(x, MorphData) or _is_zero(x))]
+        else:
+            refused = [x for x in items if isinstance(x, (Data, DataList))]
+        if refused:
+            raise _refused(other if isinstance(other, DataList) else _holding(other, refused[0]), op, self)
+
+        if len(self.list) != len(items):
+            raise RuntimeError("Lists must have the same length.")
+        return type(self)([_OPERATORS[op](y, x) for x, y in zip(self.list, items)])
 
     def __iadd__(self, other):
-        """inplace add of morph targets"""
-
-        if isinstance(other, MorphList) or _is_sequence(other):
-            other = list(other)
-            if len(self.list) != len(other):
-                raise RuntimeError("Lists must have the same length.")
-
-            for i in range(len(self.list)):
-                self.list[i] += other[i]
-
-        # assume arithmetic addition or addition of MorphData
-        else:
-            for shape in self.list:
-                shape += other
+        """
+        in place, shape by shape: a MorphData added to every shape, or a
+        MorphList's or a sequence's MorphData to the shape each pairs with,
+        as ``MorphData +=`` adds one; a shape the list holds twice is
+        changed in each place, so twice. A number has no meaning
+        (TypeError), and nothing is changed
+        """
+        others = self._per_shape(other, "+")
+        for i in range(len(self.list)):
+            self.list[i] += others[i]
 
         return self
 
     def __add__(self, other):
-        new = self.copy()
-        return new.__iadd__(other)
+        """a new MorphList, as ``+=`` adds, a new shape in each place"""
+        return self._new_shapes(other, "+")
 
     def __radd__(self, other):
-        if other == 0:
-            return self
+        """
+        ``0 + shapes``, a copy, a new shape in each place, so builtin sum()
+        works; a list or a tuple of MorphData on the left, each item plus
+        the shape it pairs with. A number has no meaning (TypeError)
+        """
+        if _is_zero(other):
+            return type(self)([shape.copy() for shape in self.list])
         if _is_sequence(other):
-            return self._sequence_first(other, operator.add)
-        return self.__add__(other)
+            return self._sequence_first(other, "+")
+        raise _refused(other, "+", self)
 
     def __isub__(self, other):
-        """subtraction add of morph targets"""
-
-        if isinstance(other, MorphList) or _is_sequence(other):
-            other = list(other)
-            if len(self.list) != len(other):
-                raise RuntimeError("Lists must have the same length.")
-
-            for i in range(len(self.list)):
-                self.list[i] -= other[i]
-
-        # assume arithmetic subtraction or subtraction of MorphData
-        else:
-            for shape in self.list:
-                shape -= other
+        """
+        in place, shape by shape: a MorphData subtracted from every shape, or
+        a MorphList's or a sequence's MorphData from the shape each pairs
+        with, as ``MorphData -=`` subtracts one; a shape the list holds
+        twice is changed in each place, so twice. A number has no meaning
+        (TypeError), and nothing is changed
+        """
+        others = self._per_shape(other, "-")
+        for i in range(len(self.list)):
+            self.list[i] -= others[i]
 
         return self
 
     def __sub__(self, other):
-        new = self.copy()
-        return new.__isub__(other)
+        """a new MorphList, as ``-=`` subtracts, a new shape in each place"""
+        return self._new_shapes(other, "-")
 
     def __rsub__(self, other):
-        if other == 0:
+        """
+        ``0 - shapes``, every shape negated, a new list; a list or a tuple of
+        MorphData on the left, each item less the shape it pairs with. Any
+        other number has no meaning (TypeError)
+        """
+        if _is_zero(other):
             return self * -1
         if _is_sequence(other):
-            return self._sequence_first(other, operator.sub)
-        return self.__sub__(other)
+            return self._sequence_first(other, "-")
+        raise _refused(other, "-", self)
 
     def __imul__(self, other):
-        """inplace multiplication of morph targets"""
-
-        if isinstance(other, MorphList) or _is_sequence(other):
-            other = list(other)
-            if len(self.list) != len(other):
-                raise RuntimeError("Lists must have the same length.")
-
-            for i in range(len(self.list)):
-                self.list[i] *= other[i]
-
-        # assume arithmetic multiplication or multiplication of MorphData
-        else:
-            for shape in self.list:
-                shape *= other
+        """
+        in place, shape by shape: every shape times a number, or each times
+        the number a sequence pairs with it; a shape the list holds twice is
+        changed in each place, so twice. A morph times a morph, a MorphData,
+        or a MorphList shape by shape, has no meaning (TypeError), and
+        nothing is changed
+        """
+        others = self._per_shape(other, "*")
+        for i in range(len(self.list)):
+            self.list[i] *= others[i]
 
         return self
 
     def __mul__(self, other):
-        new = self.copy()
-        return new.__imul__(other)
+        """a new MorphList, as ``*=`` multiplies, a new shape in each place"""
+        return self._new_shapes(other, "*")
 
     def __rmul__(self, other):
+        """``2 * shapes`` or ``[2, 3] * shapes``, each item times the shape it pairs with"""
+        if isinstance(other, (Data, DataList)):
+            raise _refused(other, "*", self)
         if _is_sequence(other):
-            return self._sequence_first(other, operator.mul)
+            return self._sequence_first(other, "*")
         return self.__mul__(other)
 
     def __itruediv__(self, other):
-        """inplace division morph targets"""
-
-        # assume arithmetic division
-        for shape in self.list:
-            shape /= other
+        """
+        in place, shape by shape: every shape divided by a number, or each
+        by the number a sequence pairs with it, as ``*=`` multiplies, so
+        ``(shapes * s) / s == shapes``; a shape the list holds twice is
+        changed in each place, so twice. A morph over a morph has no meaning
+        (TypeError), and nothing is changed
+        """
+        others = self._per_shape(other, "/")
+        for i in range(len(self.list)):
+            self.list[i] /= others[i]
 
         return self
 
     def __truediv__(self, other):
-        """multiplication of two morph targets"""
-        new = self.copy()
-        return new.__itruediv__(other)
+        """a new MorphList, as ``/=`` divides, a new shape in each place"""
+        return self._new_shapes(other, "/")
 
     def __rtruediv__(self, other):
-        """
-        right-hand side multiplication of morph targets
-        """
-        return self.__truediv__(other)
-
-    def __ipow__(self, other):
-        """inplace exponent of morph targets"""
-
-        # assume arithmetic exponent
-        for shape in self.list:
-            shape **= other
-
-        return self
-
-    def __pow__(self, other):
-        """exponent of two morph targets"""
-        new = self.copy()
-        return new.__ipow__(other)
-
-    def __rpow__(self, other):
-        """
-        right-hand side exponent of two morph targets
-        """
-        return self.__pow__(other)
+        """``2 / shapes`` has no meaning (TypeError): a shape divides by a number"""
+        raise _refused(other, "/", self)

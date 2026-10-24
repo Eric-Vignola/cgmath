@@ -1,3 +1,4 @@
+import operator
 import os
 import pickle
 import subprocess
@@ -9,6 +10,7 @@ import unittest
 import numpy as np
 from cgmath.geometry.mesh import MeshData
 from cgmath.geometry.morph_target import MorphData, MorphList
+from cgmath.geometry.skin_weights import SkinData, SkinList
 
 try:
     from pxr import Usd
@@ -17,6 +19,12 @@ except ImportError:
 
 # the folder holding the cgmath package, for a fresh interpreter to import it
 PROJECTS = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# a Data with no * of its own: skin * morph reaches the morph's __rmul__
+SKIN = SkinData(weights=np.array([[1.0]]), influences=["root"])
+
+# a DataList that is no MorphList, named as itself, not by the items it holds
+SKINS = SkinList([SKIN.copy(), SKIN.copy(), SKIN.copy()])
 
 
 
@@ -195,16 +203,16 @@ class TestMorphList(unittest.TestCase):
         list1  = self.list.copy()
         shape1 = list1[0].copy()
 
-        list1  += 2
-        shape1 += 2
+        list1  += self.jawOpen
+        shape1 += self.jawOpen
         self.assertTrue(list1[0] == shape1)
 
         # sub
         list1  = self.list.copy()
         shape1 = list1[0].copy()
 
-        list1  -= 2
-        shape1 -= 2
+        list1  -= self.jawOpen
+        shape1 -= self.jawOpen
         self.assertTrue(list1[0] == shape1)
 
         # mult
@@ -240,29 +248,39 @@ class TestMorphList(unittest.TestCase):
     def test_operators_take_any_sequence(self):
         # shape by shape against a MorphList, a python list, a tuple or an
         # array of the same length, the same answer each way, the operands
-        # left as they were; a list or a tuple on the left too, item first
+        # left as they were; a list or a tuple on the left too, item first.
+        # + and - take shapes, * and / numbers, one a shape
         shapes = [self.jawOpen.copy(), self.eyesClosed.copy(), self.jawClosed.copy()]
         before = self.list.copy(), MorphList(shapes).copy()
-        ops    = {"+": lambda a, b: a + b, "-": lambda a, b: a - b, "*": lambda a, b: a * b}
-        for name, op in ops.items():
-            for others in (shapes, [2, 3, 4]):
-                expected = MorphList([op(x.copy(), y) for x, y in zip(self.list, others)])
-                first    = MorphList(others) if others is shapes else np.array(others)
-                for other in (first, list(others), tuple(others)):
-                    with self.subTest(op=name, other=type(other).__name__, of=type(others[0]).__name__):
-                        obj = self.list.copy()
-                        if name == "+":
-                            obj += other
-                        elif name == "-":
-                            obj -= other
-                        else:
-                            obj *= other
-                        self.assertIsInstance(obj, MorphList)
-                        self.assertTrue(obj == expected)
-                        self.assertTrue(op(self.list.copy(), other) == expected)
-                        self.assertTrue((self.list, MorphList(shapes)) == before)
+        ops = {
+            "+": (lambda a, b: a + b, shapes),
+            "-": (lambda a, b: a - b, shapes),
+            "*": (lambda a, b: a * b, [2, 3, 4]),
+            "/": (lambda a, b: a / b, [2, 4, 8]),
+        }
+        inplace = {"+": operator.iadd, "-": operator.isub, "*": operator.imul, "/": operator.itruediv}
+        for name, (op, others) in ops.items():
+            expected = MorphList([op(x.copy(), y) for x, y in zip(self.list, others)])
+            first    = MorphList(others) if others is shapes else np.array(others)
+            for other in (first, list(others), tuple(others)):
+                with self.subTest(op=name, other=type(other).__name__, of=type(others[0]).__name__):
+                    obj = self.list.copy()
+                    if name == "+":
+                        obj += other
+                    elif name == "-":
+                        obj -= other
+                    elif name == "*":
+                        obj *= other
+                    else:
+                        obj /= other
+                    self.assertIsInstance(obj, MorphList)
+                    self.assertTrue(obj == expected)
+                    self.assertTrue(op(self.list.copy(), other) == expected)
+                    self.assertTrue((self.list, MorphList(shapes)) == before)
 
-                # on the left: each item op the shape it pairs with, names too
+            # on the left: each item op the shape it pairs with, names too;
+            # a number over a shape has no meaning
+            if name != "/":
                 expected = MorphList([op(y, x.copy()) for x, y in zip(self.list, others)])
                 for other in (list(others), tuple(others)):
                     with self.subTest(op=name, left=type(other).__name__, of=type(others[0]).__name__):
@@ -272,55 +290,207 @@ class TestMorphList(unittest.TestCase):
                         self.assertEqual([x.name for x in obj], [x.name for x in expected])
                         self.assertTrue((self.list, MorphList(shapes)) == before)
 
-            # a sequence of another length is refused, on either side
-            for args in ((self.list.copy(), shapes[:2]), (shapes[:2], self.list.copy())):
-                with self.assertRaises(RuntimeError):
-                    op(*args)
+            # a sequence of another length, shorter or longer, is refused, on
+            # either side and in place, the list left as it was
+            for wrong in (others[:2], others + others[:1]):
+                pairs = [(self.list.copy(), wrong)]
+                if name != "/":
+                    pairs.append((wrong, self.list.copy()))
+                for args in pairs:
+                    with self.subTest(op=name, length=len(wrong), left=args[0] is wrong):
+                        with self.assertRaisesRegex(RuntimeError, "same length"):
+                            op(*args)
+                with self.subTest(op=name + "=", length=len(wrong)):
+                    obj = self.list.copy()
+                    with self.assertRaisesRegex(RuntimeError, "same length"):
+                        inplace[name](obj, wrong)
+                    self.assertTrue(obj == self.list)
 
-        # 0 + a shape is the shape itself: the sum holds none of the operand's shapes
+        # 0 + a shape is a copy of the shape: the sum holds none of the operand's shapes
         obj = [0, 0, 0] + self.list
         self.assertTrue(obj == self.list)
         self.assertFalse(any(x is y for x in obj for y in self.list))
 
-    def test_pow_list(self):
-        """Test power operations for MorphList"""
-        # Test in-place power
-        list1  = self.list.copy()
-        shape1 = list1[0].copy()
-        
-        # Set all offsets to 2 for easier verification
-        for shape in list1:
-            shape.offsets[:] = 2.0
-        shape1.offsets[:] = 2.0
-        
-        list1  **= 2
-        shape1 **= 2
-        
-        self.assertTrue(list1[0] == shape1)
-        self.assertTrue(np.all(list1[0].offsets == 4.0))
-        self.assertTrue(np.all(list1[1].offsets == 4.0))
-        self.assertTrue(np.all(list1[2].offsets == 4.0))
-        
-        # Test power operator
-        list2 = self.list.copy()
-        for shape in list2:
-            shape.offsets[:] = 3.0
-        
-        list3 = list2 ** 2
-        self.assertTrue(np.all(list3[0].offsets == 9.0))
-        self.assertTrue(np.all(list3[1].offsets == 9.0))
-        self.assertTrue(np.all(list3[2].offsets == 9.0))
-        
-        # Verify original is unchanged
-        self.assertTrue(np.all(list2[0].offsets == 3.0))
-        
-        # Test with higher powers
-        list4 = self.list.copy()
-        for shape in list4:
-            shape.offsets[:] = 2.0
-        
-        list5 = list4 ** 3
-        self.assertTrue(np.all(list5[0].offsets == 8.0))
+    def test_numbers_divide_shape_by_shape(self):
+        # one number a shape, as * takes them: (shapes * s) / s is shapes
+        for s in ([2.0, 4.0, 0.5], (2.0, 4.0, 0.5), np.array([2.0, 4.0, 0.5])):
+            with self.subTest(s=type(s).__name__):
+                scaled = self.list * s
+                self.assertTrue(scaled / s == self.list)
+                for shape, by, back in zip(self.list, s, scaled / s):
+                    np.testing.assert_array_equal(back.offsets, (shape * by).offsets / by)
+                obj = scaled.copy()
+                obj /= s
+                self.assertTrue(obj == self.list)
+        # one number divides every shape
+        halved = self.list / 2
+        for shape, half in zip(self.list, halved):
+            np.testing.assert_array_equal(half.offsets, shape.offsets / 2)
+        # a sequence of another length, shorter or longer, is refused before
+        # any shape is divided
+        for wrong in ([2.0, 4.0], [2.0, 4.0, 0.5, 8.0]):
+            with self.subTest(length=len(wrong)):
+                obj = self.list.copy()
+                with self.assertRaisesRegex(RuntimeError, "same length"):
+                    obj /= wrong
+                self.assertTrue(obj == self.list)
+
+    def test_what_has_no_meaning_raises(self):
+        # a number added or subtracted (it shifted the indices), a number
+        # less or over the list, a morph times or over a morph, a power:
+        # TypeError naming what has a meaning, nothing changed in place; a
+        # list, a tuple or an array named by the item refused
+        shapes = self.list
+        before = self.list.copy()
+        sums   = "has no meaning: a MorphData adds or subtracts another MorphData"
+        scales = "has no meaning: a MorphData multiplies or divides by a number"
+        cases = (
+            ("shapes + 2", lambda x: x + 2, r"^MorphList \+ int " + sums),
+            ("shapes - 2.5", lambda x: x - 2.5, r"^MorphList - float " + sums),
+            ("2 + shapes", lambda x: 2 + x, r"^int \+ MorphList " + sums),
+            ("5 - shapes", lambda x: 5 - x, r"^int - MorphList " + sums),
+            ("shapes + [shape, 2, shape]", lambda x: x + [self.jawOpen, 2, self.jawOpen], r"^MorphList \+ a list holding an int " + sums),
+            ("[1, 2, 3] + shapes", lambda x: [1, 2, 3] + x, r"^a list holding an int \+ MorphList " + sums),
+            ("shapes + array", lambda x: x + np.array([2.0, 2.0, 2.0]), r"^MorphList \+ an array holding a float64 " + sums),
+            ("shapes * shapes", lambda x: x * x.copy(), r"^MorphList \* MorphList " + scales),
+            ("shapes * shape", lambda x: x * self.jawOpen, r"^MorphList \* MorphData " + scales),
+            ("shape * shapes", lambda x: self.jawOpen * x, r"^MorphData \* MorphList " + scales),
+            ("skin * shapes", lambda x: SKIN * x, r"^SkinData \* MorphList " + scales),
+            ("shapes + skins", lambda x: x + SKINS, r"^MorphList \+ SkinList " + sums),
+            ("skins + shapes", lambda x: SKINS + x, r"^SkinList \+ MorphList " + sums),
+            ("shapes * [2, shape, 2]", lambda x: x * [2, self.jawOpen, 2], r"^MorphList \* a list holding a MorphData " + scales),
+            ("shapes / shapes", lambda x: x / x.copy(), r"^MorphList / MorphList " + scales),
+            ("2 / shapes", lambda x: 2 / x, r"^int / MorphList " + scales),
+            ("[1, 2, 3] / shapes", lambda x: [1, 2, 3] / x, r"^list / MorphList " + scales),
+            ("shapes ** 2", lambda x: x ** 2, r"unsupported operand type\(s\) for \*\* or pow\(\)"),
+            ("2 ** shapes", lambda x: 2 ** x, r"unsupported operand type\(s\) for \*\* or pow\(\)"),
+        )
+        for label, op, refused in cases:
+            with self.subTest(op=label):
+                obj = shapes.copy()
+                with self.assertRaisesRegex(TypeError, refused):
+                    op(obj)
+                self.assertTrue(obj == before)
+
+        # in place, refused before any shape is changed
+        inplace = (
+            ("+= 2", lambda x: x.__iadd__(2)),
+            ("-= [shape, shape, 2]", lambda x: x.__isub__([self.jawOpen, self.jawOpen, 2])),
+            ("*= [2, 2, shape]", lambda x: x.__imul__([2, 2, self.jawOpen])),
+            ("/= [2, 2, shape]", lambda x: x.__itruediv__([2, 2, self.jawOpen])),
+        )
+        for label, op in inplace:
+            with self.subTest(op=label):
+                obj   = shapes.copy()
+                items = list(obj)
+                with self.assertRaises(TypeError):
+                    op(obj)
+                self.assertTrue(obj == before)
+                self.assertTrue(all(x is y for x, y in zip(obj, items)))
+        with self.assertRaises(TypeError):
+            obj = shapes.copy()
+            obj **= 2
+
+        # whatever the two lengths: an empty list refuses what a full one
+        # does, and an operand of another length that has no meaning raises
+        # TypeError, not the RuntimeError of a length that does not fit; a
+        # list of MorphLists, on either side, of the list's length and of
+        # another. Each list acted on, in place or not, left as it was
+        empty = MorphList([])
+        two   = MorphList([self.jawOpen.copy(), self.jawClosed.copy()])
+        lists = [two, two, two]
+        lengths = (
+            ("empty + 2", empty, lambda x: x + 2, r"^MorphList \+ int " + sums),
+            ("empty - 2", empty, lambda x: x - 2, r"^MorphList - int " + sums),
+            ("empty += 2", empty.copy(), lambda x: x.__iadd__(2), r"^MorphList \+ int " + sums),
+            ("empty * shape", empty, lambda x: x * self.jawOpen, r"^MorphList \* MorphData " + scales),
+            ("empty / empty", empty, lambda x: x / empty.copy(), r"^MorphList / MorphList " + scales),
+            ("[2] + empty", empty, lambda x: [2] + x, r"^a list holding an int \+ MorphList " + sums),
+            ("[shape] * empty", empty, lambda x: [self.jawOpen] * x, r"^a list holding a MorphData \* MorphList " + scales),
+            ("shapes * two", shapes, lambda x: x * two, r"^MorphList \* MorphList " + scales),
+            ("shapes /= two", shapes.copy(), lambda x: x.__itruediv__(two), r"^MorphList / MorphList " + scales),
+            ("shapes + [2, 2]", shapes, lambda x: x + [2, 2], r"^MorphList \+ a list holding an int " + sums),
+            ("shapes -= [2, 2]", shapes.copy(), lambda x: x.__isub__([2, 2]), r"^MorphList - a list holding an int " + sums),
+            ("shapes * [2, shape]", shapes, lambda x: x * [2, self.jawOpen], r"^MorphList \* a list holding a MorphData " + scales),
+            ("[2, 2] - shapes", shapes, lambda x: [2, 2] - x, r"^a list holding an int - MorphList " + sums),
+            ("[2, shape] * shapes", shapes, lambda x: [2, self.jawOpen] * x, r"^a list holding a MorphData \* MorphList " + scales),
+            ("shapes + [two, two, two]", shapes, lambda x: x + lists, r"^MorphList \+ a list holding a MorphList " + sums),
+            ("shapes -= [two, two, two]", shapes.copy(), lambda x: x.__isub__(lists), r"^MorphList - a list holding a MorphList " + sums),
+            ("shapes += (two, two)", shapes.copy(), lambda x: x.__iadd__((two, two)), r"^MorphList \+ a tuple holding a MorphList " + sums),
+            ("[two, two, two] + shapes", shapes, lambda x: lists + x, r"^a list holding a MorphList \+ MorphList " + sums),
+            ("[two, two] - shapes", shapes, lambda x: lists[:2] - x, r"^a list holding a MorphList - MorphList " + sums),
+            ("[two, two, two] * shapes", shapes, lambda x: lists * x, r"^a list holding a MorphList \* MorphList " + scales),
+        )
+        for label, obj, op, refused in lengths:
+            with self.subTest(op=label):
+                was   = obj.copy()
+                items = list(obj)
+                with self.assertRaisesRegex(TypeError, refused):
+                    op(obj)
+                self.assertTrue(obj == was)
+                self.assertTrue(all(x is y for x, y in zip(obj, items)))
+        self.assertTrue(shapes == before)
+        self.assertTrue(two == MorphList([self.jawOpen, self.jawClosed]))
+        # what has a meaning still works: an empty list plus one, a 0 on the left
+        self.assertTrue(empty + MorphList([]) == empty)
+        self.assertTrue([0] + MorphList([self.jawOpen]) == MorphList([self.jawOpen]))
+
+    def test_zero_gives_a_new_list(self):
+        # 0 + shapes and sum() of one list give a copy, 0 - shapes every shape negated
+        for obj in (0 + self.list, sum([self.list])):
+            self.assertTrue(obj == self.list)
+            self.assertIsNot(obj, self.list)
+            self.assertFalse(any(x is y for x in obj for y in self.list))
+        obj = 0 - self.list
+        self.assertTrue(obj == self.list * -1)
+        self.assertFalse(any(x is y for x in obj for y in self.list))
+
+    def test_a_shape_held_twice_is_acted_on_once_in_each_place(self):
+        # a new list holds a new shape in each place: a shape the list holds
+        # twice is acted on once in each, the operands left as they were
+        a     = MorphData(name="a", offsets=np.array([[1.0, 0.0, 0.0]]), indices=np.array([0]))
+        b     = MorphData(name="b", offsets=np.array([[0.0, 1.0, 0.0]]), indices=np.array([0]))
+        twice = MorphList([a, a])
+        cases = (
+            ("twice * 2", lambda x: x * 2, [[2, 0, 0], [2, 0, 0]]),
+            ("2 * twice", lambda x: 2 * x, [[2, 0, 0], [2, 0, 0]]),
+            ("twice / 2", lambda x: x / 2, [[0.5, 0, 0], [0.5, 0, 0]]),
+            ("twice * [2, 4]", lambda x: x * [2, 4], [[2, 0, 0], [4, 0, 0]]),
+            ("twice / [2, 4]", lambda x: x / [2, 4], [[0.5, 0, 0], [0.25, 0, 0]]),
+            ("0 - twice", lambda x: 0 - x, [[-1, 0, 0], [-1, 0, 0]]),
+            ("0 + twice", lambda x: 0 + x, [[1, 0, 0], [1, 0, 0]]),
+            ("twice + b", lambda x: x + b, [[1, 1, 0], [1, 1, 0]]),
+            ("twice - [b, b]", lambda x: x - [b, b], [[1, -1, 0], [1, -1, 0]]),
+            ("[b, b] - twice", lambda x: [b, b] - x, [[-1, 1, 0], [-1, 1, 0]]),
+            ("sum([twice, twice])", lambda x: sum([x, x]), [[2, 0, 0], [2, 0, 0]]),
+        )
+        for label, op, expected in cases:
+            with self.subTest(op=label):
+                obj = op(twice)
+                self.assertEqual([shape.offsets.tolist() for shape in obj], [[row] for row in expected])
+                self.assertIsNot(obj[0], obj[1])
+                self.assertTrue(twice[0] is twice[1] is a)
+                self.assertEqual(a.offsets.tolist(), [[1.0, 0.0, 0.0]])
+                self.assertEqual(b.offsets.tolist(), [[0.0, 1.0, 0.0]])
+        # so sum() of one list scales in place once each
+        total = sum([twice])
+        total *= 2
+        self.assertEqual([shape.offsets.tolist() for shape in total], [[[2.0, 0.0, 0.0]]] * 2)
+        # in place, the list's own shapes change: the one it holds twice,
+        # twice, whichever the operator
+        in_place = (
+            ("+= b", operator.iadd, b, [[1.0, 2.0, 0.0]]),
+            ("-= b", operator.isub, b, [[1.0, -2.0, 0.0]]),
+            ("*= 2", operator.imul, 2, [[4.0, 0.0, 0.0]]),
+            ("/= 2", operator.itruediv, 2, [[0.25, 0.0, 0.0]]),
+        )
+        for label, op, other, expected in in_place:
+            with self.subTest(in_place=label):
+                shape = a.copy()
+                obj   = MorphList([shape] * 2)
+                self.assertIs(op(obj, other), obj)
+                self.assertTrue(obj[0] is obj[1] is shape)
+                self.assertEqual(shape.offsets.tolist(), expected)
 
     def test_prune_offsets(self):
         obj = self.list.copy()
@@ -513,11 +683,6 @@ class TestMorphData(unittest.TestCase):
         self.assertTrue(np.allclose(unit, [1.0, 1.0, 0.0]))
 
     def test_add(self):
-        shape = self.shape.copy()
-        shape += 2
-        expected = np.array([7, 5, 6])
-        self.assertTrue(np.allclose(shape.indices, expected))
-
         shape  = self.shape.copy()
         shape2 = self.shape2.copy()
         shape3 = shape + shape2
@@ -551,11 +716,76 @@ class TestMorphData(unittest.TestCase):
         shape /= 2
         self.assertTrue(np.allclose(shape.magnitudes, mag / 2))
 
-    def test_pow(self):
-        shape            = self.shape.copy()
-        shape.offsets[:] = 3
-        shape **= 2
-        self.assertTrue(np.all(shape.offsets == 9))
+    def test_pow_has_no_meaning(self):
+        # ** is gone, on either side and in place
+        shape = self.shape.copy()
+        for label, op in (("shape ** 2", lambda x: x ** 2), ("2 ** shape", lambda x: 2 ** x)):
+            with self.subTest(op=label):
+                with self.assertRaisesRegex(TypeError, r"unsupported operand type\(s\) for \*\* or pow\(\)"):
+                    op(shape)
+        with self.assertRaises(TypeError):
+            shape **= 2
+        self.assertTrue(shape == self.shape)
+
+    def test_what_has_no_meaning_raises(self):
+        # a number added or subtracted no longer shifts the indices; a number
+        # less or over a morph, a morph times or over a morph: TypeError
+        # naming what has a meaning, the morph left as it was
+        sums   = "has no meaning: a MorphData adds or subtracts another MorphData"
+        scales = "has no meaning: a MorphData multiplies or divides by a number"
+        cases = (
+            ("shape + 2", lambda x: x + 2, r"^MorphData \+ int " + sums),
+            ("shape - 2", lambda x: x - 2, r"^MorphData - int " + sums),
+            ("shape + 2.0", lambda x: x + 2.0, r"^MorphData \+ float " + sums),
+            ("2 + shape", lambda x: 2 + x, r"^int \+ MorphData " + sums),
+            ("5 - shape", lambda x: 5 - x, r"^int - MorphData " + sums),
+            ("shape + shapes", lambda x: x + MorphList([self.shape2]), r"^MorphData \+ MorphList " + sums),
+            ("shape * shape", lambda x: x * self.shape2, r"^MorphData \* MorphData " + scales),
+            ("shape / shape", lambda x: x / self.shape2, r"^MorphData / MorphData " + scales),
+            ("2 / shape", lambda x: 2 / x, r"^int / MorphData " + scales),
+            ("2.0 / shape", lambda x: 2.0 / x, r"^float / MorphData " + scales),
+            ("skin * shape", lambda x: SKIN * x, r"^SkinData \* MorphData " + scales),
+        )
+        for label, op, refused in cases:
+            with self.subTest(op=label):
+                shape = self.shape.copy()
+                with self.assertRaisesRegex(TypeError, refused):
+                    op(shape)
+                self.assertTrue(shape == self.shape)
+
+        inplace = (
+            ("+= 2", lambda x: x.__iadd__(2)),
+            ("-= 2", lambda x: x.__isub__(2)),
+            ("*= shape", lambda x: x.__imul__(self.shape2)),
+            ("/= shape", lambda x: x.__itruediv__(self.shape2)),
+        )
+        for label, op in inplace:
+            with self.subTest(op=label):
+                shape = self.shape.copy()
+                with self.assertRaises(TypeError):
+                    op(shape)
+                self.assertTrue(shape == self.shape)
+
+        # the refusal's hint is an expression that works: 0 - a is a * -1
+        with self.assertRaisesRegex(TypeError, r"0 - a is a \* -1, so sum\(\) works"):
+            self.shape + 2
+        self.assertTrue(0 - self.shape == self.shape * -1)
+
+        # numbers scale it, on either side
+        np.testing.assert_array_equal((2 * self.shape).offsets, self.shape.offsets * 2)
+        np.testing.assert_array_equal((self.shape * 2).offsets, self.shape.offsets * 2)
+        np.testing.assert_array_equal((self.shape / 2).offsets, self.shape.offsets / 2)
+
+    def test_zero_gives_a_new_morph(self):
+        # sum() starts at 0: 0 + a morph is a copy, never the morph itself, as
+        # every other sum is a new morph; 0 - a morph is it negated
+        for obj in (0 + self.shape, sum([self.shape])):
+            self.assertTrue(obj == self.shape)
+            self.assertIsNot(obj, self.shape)
+            self.assertIsNot(obj.offsets, self.shape.offsets)
+        obj = 0 - self.shape
+        np.testing.assert_array_equal(obj.offsets, -self.shape.offsets)
+        np.testing.assert_array_equal(obj.indices, self.shape.indices)
 
     def test_sub(self):
         """Test subtraction operations for MorphData"""
@@ -584,12 +814,6 @@ class TestMorphData(unittest.TestCase):
         # Test subtraction operator
         shape4 = shape - shape2
         self.assertTrue(np.allclose(shape4.indices, expected_indices))
-        
-        # Test subtraction with scalar (index offset)
-        shape5 = self.shape.copy()
-        shape5 -= 2
-        expected_indices_scalar = np.array([3, 1, 2])
-        self.assertTrue(np.allclose(shape5.indices, expected_indices_scalar))
         
         # Test right-hand subtraction with 0
         shape6               = 0 - self.shape

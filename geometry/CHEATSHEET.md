@@ -1293,8 +1293,15 @@ print(morph.indices)
 
 ### Arithmetic
 
-`+ - * / **` work element-wise, merging the two index sets. Names are
-concatenated on the union of their `_` separated parts.
+`a + b` and `a - b` add or subtract another `MorphData`, merging the two
+index sets; names are concatenated on the union of their `_` separated
+parts. A number scales the offsets, `a * 2`, `2 * a`, `a / 2`, and three
+numbers their x, y and z, `a / [1, 1, 2]`. `0 + a` is a copy of `a` and
+`0 - a` is `a * -1`, so `sum()` works. Nothing else has a meaning: a
+number added or subtracted (which shifted the indices), a morph times or
+over a morph and a number less or over a morph (`5 - a`, `2 / a`) raise
+`TypeError` saying what has one; `**` is gone and raises Python's own
+`TypeError`.
 
 ```python
 a = MorphData(name="a", indices=np.array([0, 1]), offsets=np.array([[1., 0, 0], [1., 0, 0]]))
@@ -1302,7 +1309,14 @@ b = MorphData(name="b", indices=np.array([1, 2]), offsets=np.array([[0., 1, 0], 
 
 print((a + b).name, (a + b).indices, (a + b).offsets)
 print((a - b).offsets)
-print((a * 2.0).offsets, (a / 2.0).offsets, (a ** 2).offsets)
+print((a * 2.0).offsets, (2.0 * a).offsets, (a / 2.0).offsets)
+print(sum([a, b]).name, sum([a]) is a)  # a_b False: 0 + a is a copy
+
+for refused in (lambda: a + 2, lambda: a * b, lambda: 2 / a, lambda: a ** 2):
+    try:
+        refused()
+    except TypeError as err:
+        print(err)  # MorphData + int has no meaning: a MorphData adds or subtracts another MorphData ...
 ```
 
 ### `MorphList`
@@ -1322,6 +1336,20 @@ print(combined.name, combined.size)
 
 scaled = MorphList([a.copy(), b.copy()]) * 0.5
 print(scaled[0].offsets.max())
+
+# shape by shape: a MorphData to every shape, a list of them one a shape,
+# and a number, or a list of numbers one a shape, for * and /
+pair = MorphList([a.copy(), b.copy()])
+print((pair + a).name, (pair - [a, b]).size)  # ['a', 'b_a'] [2 2]
+each = pair * [2.0, 4.0]
+assert each / [2.0, 4.0] == pair
+
+# three numbers: a MorphData divides its x, y and z by them, a MorphList of
+# three shapes each shape by its own (a list of any other length raises)
+ones = MorphData(name="ones", offsets=np.ones((2, 3)))
+trio = MorphList([ones.copy(), ones.copy(), ones.copy()])
+print((ones / [1.0, 2.0, 4.0]).offsets[0].tolist())              # [1.0, 0.5, 0.25]: x, y and z
+print([s.offsets[0, 0].item() for s in trio / [1.0, 2.0, 4.0]])  # [1.0, 0.5, 0.25]: shape by shape
 ```
 
 ---
@@ -1406,6 +1434,7 @@ other = SkinData(
 )
 merged = skin + other                              # concatenates vertices
 print(merged.size, merged.influences, merged.valid)
+assert other.influences == ["tail", "root"]        # + and += leave other as it was
 
 head = merged[: skin.size]                         # slicing keeps all influences
 print(head.size, head.influences)
@@ -1414,7 +1443,7 @@ print(merged[np.arange(2)].size)
 a2, b2 = skin.copy(), other.copy()
 SkinData.conform(a2, b2)       # align influence lists in place
 print(a2.influences == b2.influences)
-print(a2.is_equivalent(skin))  # order-insensitive comparison
+print(a2.is_equivalent(skin))  # the same weights on the influences both hold, in the same order
 ```
 
 ### Smoothing over mesh topology

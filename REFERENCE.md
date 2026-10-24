@@ -1480,7 +1480,7 @@ to_prim(self, prim) -> 'None'
 
 #### `MorphList(DataList)`
 
-A list of Data objects of one class.
+A list of MorphData, its arithmetic shape by shape.
 
 ```text
 MorphList(iterable=None)
