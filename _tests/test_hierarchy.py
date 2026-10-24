@@ -5812,7 +5812,7 @@ class TestParentUuid(unittest.TestCase):
     def test_reading_parent_node_raises(self):
         # parent_node, parent_uuid's name before 2.0.0, went in 3.0.0: read,
         # it raises as any name a node does not have does, on a node of a
-        # rig, a lone node, a render node and an SDF primitive. On 58bbdde
+        # rig, a lone node, a render node and an SDF primitive. On b23cc42
         # it read parent_uuid
         from cgmath.geometry.sdf import SDFSphere
         from cgmath.render import Object
@@ -5829,7 +5829,7 @@ class TestParentUuid(unittest.TestCase):
     def test_writing_parent_node_raises_and_changes_nothing(self):
         # written, it raises as the strict guard does for any name the class
         # does not declare, whose list of the names a node takes leaves it
-        # out, and the parent stays. On 58bbdde it wrote parent_uuid
+        # out, and the parent stays. On b23cc42 it wrote parent_uuid
         rig  = _chain()
         head = rig["head"]
         held = head.parent_uuid
@@ -5852,8 +5852,9 @@ class TestParentUuid(unittest.TestCase):
     def test_the_constructor_refuses_parent_node(self):
         # the keyword is gone from TransformData's constructor, and so from
         # an Object's, a Camera's and a Light's, which hand theirs on to it:
-        # an unknown keyword's TypeError, None and parent_uuid beside it too.
-        # On 58bbdde each took it as parent_uuid
+        # an unknown keyword's TypeError, None and parent_uuid beside it too
+        # (Python 3.13 adds "Did you mean 'parent_uuid'?" to its message).
+        # On b23cc42 each took it as parent_uuid
         from cgmath.render import Camera, Light, Object
 
         root = generate_uuid()
@@ -5866,7 +5867,9 @@ class TestParentUuid(unittest.TestCase):
             for given in ({"parent_node": root}, {"parent_node": None}, {"parent_node": root, "parent_uuid": root}):
                 with self.subTest(cls.__name__, given=sorted(given)):
                     with self.assertRaisesRegex(
-                        TypeError, r"__init__\(\) got an unexpected keyword argument 'parent_node'$"
+                        TypeError,
+                        r"__init__\(\) got an unexpected keyword argument 'parent_node'"
+                        r"(\. Did you mean 'parent_uuid'\?)?$",
                     ):
                         made(**given)
 
@@ -5874,7 +5877,7 @@ class TestParentUuid(unittest.TestCase):
         # a to_attributes mapping naming parent_node maps nothing, as a public
         # name that is no field of the node does, a property's (parent_name)
         # too, with no warning, and parent_uuid beside it maps as it does
-        # alone: a node, a rig, a clip's frames. On 58bbdde it mapped
+        # alone: a node, a rig, a clip's frames. On b23cc42 it mapped
         # parent_uuid, with a DeprecationWarning, and the two together raised
         # ValueError
         from cgmath.hierarchy import ClipData
@@ -5900,7 +5903,7 @@ class TestParentUuid(unittest.TestCase):
     def test_parent_node_can_be_a_user_attribute(self):
         # no longer a built-in name, parent_node can be a user attribute, as
         # any name the class does not have can: added, read and written as
-        # one, the parent untouched. On 58bbdde add_user_attribute refused it
+        # one, the parent untouched. On b23cc42 add_user_attribute refused it
         node = TransformData("x", parent_uuid=generate_uuid())
         held = node.parent_uuid
         node.add_user_attribute("parent_node", 1.0)

@@ -498,7 +498,7 @@ class TestMorphList(unittest.TestCase):
     def test_in_place_takes_the_lists_own_shapes_as_they_were(self):
         # in place, an operand that is, or holds, one of the list's own
         # shapes is taken as it was before any shape changed, as a new list
-        # takes it: on 58bbdde a shape changed in place was the operand of
+        # takes it: on b23cc42 a shape changed in place was the operand of
         # the shapes after it as it had become, so shapes -= shapes[0] left
         # the second shape as it was. The list's shapes still change in
         # place: a caller's reference to one sees it, and a shape held twice
