@@ -9573,14 +9573,22 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
 
     def test_a_pre_rotation_under_a_layer_turns_as_the_sdk_turns_it(self):
         """a group in each rotate order with a pre rotation, keyed on rotate,
-        under an additive layer that turns it by channel or by layer, each
-        holding a locator: every node, on every frame, where the sdk puts
-        it, a group by channel turned by its order's turn of the base and
-        the layer's angles added, then by the pre rotation. Maya's importer
-        bakes the pre rotation into the rotate and the layer adds to that:
-        by channel the turn of the baked angles plus the layer's, more than
-        0.01 apart in every order, and by layer it parts in every order but
-        xyz, merged too (p_zyxpre.py: 1.98e-2 to 1.96 apart as matrices);
+        under an additive, an override or a passthrough layer at weight 100
+        that turns it by channel or by layer, each holding a locator: every
+        node, on every frame, where the sdk puts it, a group by channel under
+        the additive layer turned by its order's turn of the base and the
+        layer's angles added, then by the pre rotation, and under the override
+        or passthrough layer, either way, by its order's turn of the layer's
+        angles, then by the pre rotation. Maya's importer bakes the pre
+        rotation into the rotate and leaves the layer's angles as they are: the
+        additive layer by channel adds them to the baked ones, on this fixture
+        more than 0.01 apart in every order, and by layer it parts in every
+        order but xyz, merged too (on p_zyxpre.py's, w_prelayer.py's and
+        f_pre.py's pre rotations about mixed axes, by channel 4.3e-3 to 1.99
+        apart as matrices, by layer merged 6.5e-3 to 2.0); the override or
+        passthrough layer's angles take the place of the baked ones, the pre
+        rotation lost, on this fixture more than 0.01 apart in every order
+        (w_prelayer.py's and f_pre.py's files at weight 100: 9.3e-2 to 1.67);
         the clip keeps the sdk's values, as ClipData.load_fbx's docstring
         says"""
         source  = FBX.FbxNode.EPivotSet.eSourcePivot
@@ -9590,6 +9598,7 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         base    = np.stack([25.0 + 5.0 * frames, -35.0 + 9.0 * frames, 45.0 + 13.0 * frames], axis=1)
         added   = np.stack([np.full(self.FRAMES, 20.0), -3.0 * frames, np.full(self.FRAMES, 5.0)], axis=1)
         path    = os.path.join(self.tmp.name, "pre_layered.fbx")
+        modes   = {"C": (0, 1), "L": (0, 0), "O": (1, 1), "V": (1, 0), "P": (2, 1), "Q": (2, 0)}
 
         manager = FBX.FbxManager.Create()
         manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
@@ -9598,10 +9607,12 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         stack  = FBX.FbxAnimStack.Create(scene, "Take 001")
         layers = {"base": FBX.FbxAnimLayer.Create(scene, "Base Layer")}
         stack.AddMember(layers["base"])
-        for mode, accumulation in (("C", 1.0), ("L", 0.0)):
-            layers[mode] = FBX.FbxAnimLayer.Create(scene, f"add{mode}")
-            layers[mode].BlendMode.Set(0.0)  # additive
-            layers[mode].RotationAccumulationMode.Set(accumulation)
+        # each later layer's blend mode (0 additive, 1 override, 2
+        # passthrough) and rotation accumulation (0 by layer, 1 by channel)
+        for mode, (blend, accumulation) in modes.items():
+            layers[mode] = FBX.FbxAnimLayer.Create(scene, f"later{mode}")
+            layers[mode].BlendMode.Set(float(blend))
+            layers[mode].RotationAccumulationMode.Set(float(accumulation))
             stack.AddMember(layers[mode])
 
         def keyed(prop, layer, axis, values):
@@ -9615,7 +9626,7 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
                 curve.KeySetInterpolation(key, linear)
             curve.KeyModifyEnd()
 
-        names = [f"{mode}{order}" for mode in "CL" for order in range(6)]
+        names = [f"{mode}{order}" for mode in modes for order in range(6)]
         for index, name in enumerate(names):
             made = FBX.FbxNode.Create(scene, name)
             attr = FBX.FbxNull.Create(scene, name)
@@ -9650,15 +9661,22 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
 
         first = turned(np.tile(pre, (self.FRAMES, 1)), 0)
         for order in range(6):
+            maya_order = hierarchy.hierarchy._FBX_ROTATE_ORDERS[order]
             with self.subTest(order=order):
-                maya_order = hierarchy.hierarchy._FBX_ROTATE_ORDERS[order]
-                want       = turned(base + added, maya_order) @ first
-                got        = worlds[f"C{order}"][:, :3, :3]
+                want = turned(base + added, maya_order) @ first
+                got  = worlds[f"C{order}"][:, :3, :3]
                 self.assertTrue(np.allclose(got, want, rtol=0.0, atol=1e-9), np.abs(got - want).max())
                 # the premise: Maya's baked angles plus the layer's turn elsewhere
                 baked = np.degrees(matrix_to_euler(turned(base, maya_order) @ first, np.full(self.FRAMES, maya_order)))
                 maya  = turned(baked + added, maya_order)
                 self.assertGreater(float(np.abs(maya - got).max()), 0.01)
+            for mode in "OVPQ":
+                with self.subTest(order=order, mode=mode):
+                    want = turned(added, maya_order) @ first
+                    got  = worlds[f"{mode}{order}"][:, :3, :3]
+                    self.assertTrue(np.allclose(got, want, rtol=0.0, atol=1e-9), np.abs(got - want).max())
+                    # the premise: the layer's angles alone, the pre rotation lost, turn elsewhere
+                    self.assertGreater(float(np.abs(turned(added, maya_order) - got).max()), 0.01)
 
     def test_a_file_whose_dropped_nodes_and_pivots_move_nothing_reads_as_it_holds_it(self):
         """an attribute-less group at the identity, a mesh whose pivots

@@ -1827,12 +1827,54 @@ loader's, where:
   (-100, 68, -25), after one at (120, -54, 205), merges to
   (80, 112, 155), 1.77 to 1.99 apart), where the layers kept agree; by
   layer, keys of 120 to 128 degrees about y part on every frame, 1.23 to
-  1.99 apart. Merged, a node in xyz or zyx agrees within 2.0e-7, and so
-  did every order on the smaller turns measured, by layer too, which
-  kept parts as the item above says; but a frame whose y angle is 90
-  merges by channel to angles that hold the turn in xyz alone (0.27 to
-  0.55 apart in the other orders), and a node that is no joint with a
-  pre rotation parts as the item on it below says;
+  1.99 apart. Merged, a node in xyz or zyx agrees, and so did every
+  order on the smaller turns measured, by layer too, which kept parts as
+  the item above says, but for the single precision values the curves it
+  merges, bakes or solves hold, the rotate's as well as the scale's and
+  the translate's, which part from the SDK's the more the larger they
+  are. The angles that count are, by channel, the sums of the keys,
+  which Maya rounds to single precision, or the angles its curve holds
+  where those are larger: it starts the curve on the take's first frame
+  at the angles nearest 0 that turn the node as the sums do, whole turns
+  off and on either branch (sums of (330, 89.7, 330) held as
+  (-30, 89.7, -30), of (3500, 89.7, 3500) as (80, 90.3, 80)), and its
+  continuity can carry the curve on past the sums where the keys jump
+  (random keys summing to under 245 degrees: curves holding up to 1210);
+  by layer, and where Maya solves the rotate (a root of the next item, a
+  node whose pre rotation it bakes), the angles it solves, and more
+  where that continuity carries them on. On the files measured, as
+  matrices on a node of world scale 1, within 3.7e-7 on angles up to 250
+  degrees, 5.7e-7 up to 500, 1.3e-6 up to 1000 and 4.3e-6 up to 3600, by
+  channel within the single precision spacing of the largest such angle
+  in radians (2.642e-7 on sums of 205 degrees and 4.228e-6 on sums of
+  3505, 0.992 of it, where single precision rounds the x and z sums by
+  almost half of it each near y = 90), and within 2.2e-15 on keys in
+  whole degrees, whose sums single precision holds. A scale on the node
+  or above it multiplies that, on the files measured, by up to the
+  largest axis of the node's world scale (scales of 2 to 10 and
+  (1, 2, 3): a node scaled 3.5, or under one scaled 3.5, 7.0e-7 by
+  channel and 8.2e-7 by layer on angles up to 250; one whose scale is
+  keyed to 10, 9.0e-7 on angles to 193); a node under it, and with a
+  rotate pivot the node itself, is off in translate by about that gap at
+  scale 1 times its world distance from the node's rotate pivot, up to
+  1.7 times that on the files measured and 2.9 under a group scaled
+  (1, 2, 3) (a locator 19.7 from a node at scale 1, 3.7e-6 off on angles
+  up to 250, the one under the node keyed to 10, 1.7e-6); a translate
+  both layers key is up to 6.0e-8 (2^-24) of its size off (3.8e-6 at
+  71). But a frame whose blended y angle is 90 or -90, or a whole number
+  of turns from either (Maya holds 270 as -90 and -270 as 90), merges by
+  channel to angles that hold its turn in xyz alone, x - z kept at 90
+  and x + z at -90: those nearest the key before's (the frame before's
+  at the file's rate), and on a take's first frame, which has none
+  before it, those nearest 0 ((25, 90, 30) merges to (-2.5, 90, 2.5)).
+  On the files measured, y from -810 to 810, 8.5e-3 to 0.89 apart in
+  xzy, yzx, yxz and zxy and 1.4e-2 to 1.4 in zyx, the more the further x
+  and z move, and up to 2.0 where the merged angles also sit a half turn
+  off the keys as above, x and z turned by 180 degrees and y by 180 - y,
+  as the frames after such a first frame can go on doing (a take whose
+  first frame, (-150, -90, 170), merges to (10, -90, 10): 1.58 to 1.97
+  apart in those four orders on every frame). A node that is no joint
+  with a pre rotation parts as the item on it below says;
 - a layer blends the rotation of a root that is no joint in a file whose
   up axis is X or Z, which Maya's importer turns into its Y-up: it can
   part from ConvertScene there in any rotate order, by channel or by
@@ -1851,9 +1893,11 @@ loader's, where:
   order but xyz, 0.40 to 1.93 apart, merged on the smaller turns too,
   but yxz in that X-up file, and kept as the first item says. On every
   file and turn measured, a root in xyz, or one whose rotation is
-  inactive, agrees by layer within 2.7e-7, and a joint root parts only
-  where any node does (the two items above). The loader keeps
-  ConvertScene's values there, within 7.1e-15;
+  inactive, agrees by layer but for the single precision of the curves
+  Maya solves, as the second item says, and where it holds one level
+  (the next item); and a joint root parts only where any node does (the
+  two items above). The loader keeps ConvertScene's values there, within
+  7.1e-15;
 - Maya's FBXImport keys the curves it solves or merges at the rate its
   FBXImportResamplingRateSource option names, by default "Scene", the
   rate the scene runs at when the import starts; the import then sets
@@ -1880,23 +1924,88 @@ loader's, where:
   merged take up to 1.6e-2, the locators under them up to 3.9e-2. From a
   25 fps scene: a group root of a Z-up file 0.16 apart, the locator
   under it 0.19; the nodes of a merged take up to 6.4e-2, the locators
-  under them 9.8e-2. With that option set to "File", or from a scene at
-  the file's rate or at 60 fps for a 30 fps file, it keys every frame of
-  the file and agrees on them within 3.5e-7 in the 3x3 and 9.6e-7 in
-  translate, but on a node it turns by neither order, 1.2 to 2.0 apart
-  in the 3x3 at any rate, and where another item of this list says;
-- an additive layer above the base turns a node that is no joint whose
-  pre rotation Maya's FBXImport bakes into its rotate (the item above):
-  by channel, in every rotate order, the layers kept or merged, the
-  layer's angles add to the baked ones, where the SDK adds them to the
-  node's own under the pre rotation; by layer, in every order but xyz,
-  merged too, where the same node with no pre rotation agrees merged on
-  the turns measured. On the files measured, by channel 1.98e-2 to 1.54
-  apart as matrices, by layer merged 4.15e-2 to 1.96, the smaller on
-  turns under 45 degrees, the larger on turns of up to 330, the node
-  under it up to 3.3 off in translate; by layer, a node in xyz agrees
-  within 1.6e-7, kept or merged. A post rotation, which Maya keeps as
-  the rotate axis, parts only where a node with none does;
+  under them 9.8e-2. A node it turns by neither order parts from the
+  loader at another rate by its gap at the file's rate and by a share of
+  its own, which grows with how far the angles Maya solves bend or jump
+  between that rate's frames, not with that gap, as the `axis_system`
+  paragraph below says (a smooth turn about one axis, which agrees at
+  the file's rate, 1.0e-2 to 6.1e-2 apart on the files measured). With
+  that option set to "File", or from a scene at the file's rate or at a
+  whole multiple of it, it keys every frame of the file (on the files
+  measured, from 60, 120, 150 and 240 fps scenes for a 30 fps file and
+  48, 120 and 240 fps ones for a 24 fps file) and agrees on them but for
+  the single precision of the curves it solves or merges, as the second
+  item says (as matrices within 3.7e-7 on a node of world scale 1 on
+  angles up to 250 degrees, more on larger angles, under a scale and on
+  the nodes under it), and where a curve it bakes or solves moves by
+  less than about 1e-2 degrees a frame of the rate it keys at, which it
+  can hold level over runs of frames, a faster scene holding more: on
+  the files measured, moving by 1e-4 to 6e-3 degrees a frame, up to
+  3.7e-4 apart as matrices on takes of 11 and 101 frames, and from 120
+  to 240 fps scenes up to 3.0e-4 more than at the file's rate on curves
+  moving by about 1e-2 degrees a frame of the file and 1.1e-4 on a root
+  of an X-up file; and from a 60 fps scene one curve of the 3,372 it
+  made lost its key on the take's last frame, 1.3e-4 apart there. From a
+  90 fps scene, though, every curve it made held keys on the take's
+  first and last frames alone: on the 30 and 24 fps files measured up to
+  2.0 apart as matrices on nodes of world scale 1, the nodes under them
+  up to 3.6 off in translate. On a node it turns by neither order it is
+  as far apart at the file's rate as the `axis_system` paragraph below
+  says, and it parts where another item of this list says;
+- a layer above the base turns a node that is no joint whose pre
+  rotation Maya's FBXImport bakes into its rotate (the item above),
+  leaving the layer's own angles as they are. An additive layer adds
+  them to the baked ones by channel, the layers kept or merged, where
+  the SDK adds them to the node's own under the pre rotation: that parts
+  in every rotate order, but for a pre rotation about one axis alone in
+  the two orders that turn about that axis last (xyz and yxz for z, yzx
+  and zyx for x, xzy and zxy for y), which agree on the smaller turns
+  (on the files measured within 1.2e-15 in nine such cases of ten, the
+  others, on the larger turns, 9.5e-2 to 2.0 apart). By layer it parts
+  in every order but xyz, merged too, but for yxz under a pre rotation
+  about z alone merged on the smaller turns measured (within 1.6e-7),
+  where the same node with no pre rotation agrees merged on the turns
+  measured. On the files measured, pre rotations about mixed axes that
+  turn 7 to 161 degrees, by channel 4.3e-3 to 1.99 apart as matrices, by
+  layer merged 6.5e-3 to 2.0, more as the pre rotation and the turns
+  grow; by layer, a node in xyz agrees, kept or merged, but for the
+  single precision of the curve Maya bakes and where it holds that curve
+  level (the item above): within 4.5e-7 on keys of up to 330 degrees and
+  4.5e-6 on keys to 3500 on a node of world scale 1, a scale multiplying
+  these as the second item says, and 1.2e-4 on a baked curve held level
+  over three frames; a post rotation, which Maya keeps as the rotate
+  axis, parts only where a node with none does. An override layer's
+  angles take the place of the baked ones in every order, by layer
+  merged at every weight measured or kept at 100, and by channel at 100,
+  and so do a passthrough layer's at weight 100: the pre rotation is
+  lost where the layer holds the rotate, Maya turning the node by the
+  layer's angles alone where the SDK turns it by them under the pre
+  rotation, apart by about what the pre rotation turns it. By channel
+  under 100 the gap stays near that one; kept by layer under 100 Maya
+  weighs the override, as the item on that says, so the gap holds both.
+  On the files measured, weights 10 to 100: by layer merged, at 100 and
+  by channel, 8.7e-2 to 0.12 as matrices for a pre rotation of 7
+  degrees, 0.42 to 0.68 for 36 to 43, 0.75 to 0.98 for 60 to 66 and 1.35
+  to 1.72 for 120 to 161, by channel under 100 within 0.21 of the gap
+  the layer's angles alone give; kept by layer under 100, 0.11 to 1.99,
+  and 0.11 to 1.92 for 7 degrees. Under 100 a passthrough layer's angles
+  mix with the baked ones, which hold the pre rotation, so part of it
+  stays, the more the lower the weight: on the smaller pre rotations and
+  turns the gap is about the weight times the gap at 100 (by channel, a
+  pre rotation of 7 degrees on the smaller keys, 2.1e-2 to 2.6e-2 at 25,
+  4.5e-2 to 5.1e-2 at 50 and 6.9e-2 to 7.5e-2 at 75), and over both
+  modes and every pre rotation measured 2.1e-2 to 2.0 at 25, 4.5e-2 to
+  2.0 at 50 and 6.9e-2 to 2.0 at 75, where the same node with no pre
+  rotation agrees but where another item of this list says. In every
+  mode measured such a node turns about its rotate pivot, so a node
+  under it, and with a pivot the node itself, is off in translate by up
+  to twice its world distance from that pivot times the largest over the
+  smallest singular value of the parent's world 3x3, as the
+  `axis_system` paragraph below says, and a node on the pivot agrees: on
+  the files measured, under even scales, up to 2.0 times that distance
+  (3.72 at 1.87 and 38.9 at 19.7; with pivots 0.5 to 7.1 away, the node
+  itself 4.00 off with one 2 away), under a group scaled (1, 0.5, 2) up
+  to 3.48 times it, and a node on the pivot within 5.7e-14;
 - an additive layer blends a rotation by layer at a weight other than 0
   or 100, and the quaternion Maya builds from the layer's angles (qz qy
   qx of the half angles on an xyz node) has the other sign from the one
@@ -2084,47 +2193,102 @@ skeleton root does, imports as a joint where ConvertScene puts it, and
 `save_fbx` writes every joint as an `eLimbNode`. Maya's importer also
 parts from the loaders on a node below the roots that is no camera or
 light whose rotation is inactive, in another order than xyz, which it
-turns by neither order (below): on the files measured, 1.2 to 2.0 apart
-in the 3x3, and the node under it, up to 2.7 off in translate. On such a
-file Maya's importer also parts from ConvertScene, and so from a clip,
-where a layer blends the rotation of a root that is no joint, and in a
-file of any axes where it keys what it solves or merges at another frame
-rate than the file's (the list above). Maya's importer leaves a file
-whose up axis is Y, pointing up or down, in its own axes, so a Y-up file
-whose front is not +Z, or a -Y-up one, loads turned 90 or 180 degrees
-from where Maya shows it. An Unreal file, Z-up, turns (x, y, z) to
-(x, z, -y), root travel with it. On a root a layer above the base
-translates, additive, override or passthrough, a clip still keeps the
-root's translate in the file's world turned, the motion as the file
-authors it, where ConvertScene leaves that layer's translate in the
-file's axes, and so does Maya's importer wherever the base layer holds
-that translate (within 7.7e-7 of ConvertScene; where the base layer
-holds no curve node for it, Maya parts from ConvertScene as the first
-live layer item above says). A clip sits 2.8 to 49 off Maya's import of
-such a root on the files measured, a gap that grows with how far the
-layer moves it; Maya's import of a Z-up scene it exported, a group root
-an additive layer translates, sits 45 off that scene turned, the clip
-1.5 off it, as Maya's import of the same scene exported Y-up does, and
-puts that group's 3x3, in xyz, 1.41 off ConvertScene's and the clip's,
-as the list above says. A root whose rotation is inactive still blends
-its rotation, blended by layer, as ConvertScene's xyz node, as Maya's
-importer does a group's, a locator's or a joint's (a zyx group root the
-layer also translates and turns: its 3x3 1.70 off the file's world
-turned and within 1.7e-7 of Maya's FBXImport into a scene at the file's
-frame rate, its translate the file's world turned, 49 off Maya's import
-in a Z-up file and 30 in an X-up one). The turn goes on the roots: a
-joint root takes it in its joint orient and translate and keeps its
-rotate curves; any other root's rotate is solved again, through
-`euler_filter` on a clip. A mesh takes the turn through its node: the
-mesh readers keep each mesh in its own space and take no `axis_system`,
-and `render.Object.load_fbx`, a mesh with no node above it, turns its
-points, normals and skin bind matrices. A file already in Maya's Y-up,
-as `save_fbx` writes a default read, loads as it is; a left-handed one
-raises `ValueError`, since a rotation can't turn it into Maya's axes.
-`axis_system=None` keeps the file's own axes. `load()` passes
-`axis_system` on to `load_fbx` as it does any argument, so a left-handed
-file reads through `HierarchyData.load(path, axis_system=None)` too.
-Which way the character faces stays as the file has it.
+turns by neither order (below). At the file's rate, with
+FBXImportResamplingRateSource "File", or from a scene whose rate is a
+whole multiple of the file's but 90 fps, Maya's import and the loaders
+are up to 2.0 apart in the 3x3 on a node of world scale 1: on keys
+within whole turns of the angles Maya's xyz solve returns (y between -90
+and 90), less the less the node turns, up to about the square of that
+turn in radians on turns under 20 degrees, and on keys off that branch,
+as (180, 170, 180) is of (0, 10, 0), up to about twice the turn in
+radians in xzy, yzx, yxz and zxy, zyx keeping the square; and on a take
+up to 3.9e-4 more where Maya holds the rotate it solves level (the list
+above). Against the same node under the same parents with every scale 1,
+a scale multiplies that by the node's world scale, by the largest axis
+of an uneven one at most, where the scales above the node are even; by
+up to the product of the largest axes of its own scale and those above
+it where no parent scaled unevenly is turned or sits under a turned one;
+and otherwise by up to 1.19 times that product on the files measured (a
+node scaled (3, 1, 1) under a group scaled (1, 1, 3) and turned), 1.46
+times it in a numpy scan of the rule Maya follows and never more than
+2.13 times it. Such a node turns about its rotate pivot: a node under it
+is off in translate by up to twice its world distance from that pivot,
+and so is the node itself where it has one, times the largest over the
+smallest singular value of the node's parent's world 3x3 (1 where the
+scales above it are even, and that 3x3's longest row over its shortest
+only where no turned parent sits under one scaled unevenly), and a node
+on the pivot agrees. On the files measured, up to 3.0e-4 on turns of 1.1
+degrees, 3.3e-2 on 11, 0.32 on 35, 1.1 on 72 and 2.0 on turns past 110,
+and off the branch 3.6e-2 on turns of 1.4 degrees, 7.1e-2 on 3 and 0.35
+on 10; on turns of up to 111 degrees, 5.1 on a node scaled 3, 4.9 on one
+scaled (1, 2, 3) and 3.4 under one scaled 2; on turns of 11 degrees, a
+node scaled (3, 1, 1) under one scaled (1, 1, 3) 8.2 times its gap at
+scale 1, where the largest axis of its world 3x3 is 3.1 and the product
+of the two largest axes 9; a locator 1.9 away up to 3.6 off, one 5.6
+away 10.6, and one 0.1 away under a group scaled (1, 0.1, 1) up to 10
+times that distance, as much with a group turned 45 degrees between
+them, where that 3x3's rows give 2.8; with rotate pivots 0.5 to 7.1
+away, the node itself up to 1.99 times that distance off (3.94 with a
+pivot 2 away) and 3.96 times it under a group scaled (1, 0.5, 2), and a
+node on the pivot within 5.9e-14. From another rate Maya keys such a
+node at that rate (the list above), and on the file's frames between
+those keys it parts from the loaders by the gap above and by a share of
+its own, the two adding or partly cancelling: that share grows with how
+far the angles Maya solves bend between that rate's frames, not with the
+gap, and is largest where they jump, as they do by 180 degrees where the
+node's turn passes y = 90 or -90 in xyz. On the files measured, on nodes
+of world scale 1, from 24, 25 and 48 fps scenes for a 30 fps file and 30
+and 25 fps ones for a 24 fps file: a smooth turn about one axis, which
+agrees at the file's rate, 1.0e-2 to 6.1e-2 apart; keys that turn back
+each frame, 4.1e-6 apart at the file's rate on a 0.14 degree turn and
+3.1e-4 to 6.4e-4 from those scenes, 4.2e-4 and 3.2e-3 to 6.6e-3 on a 1.4
+degree one, 1.1e-2 and 1.6e-2 to 3.9e-2 on a 7 degree one; keys linear
+in time, at their largest within 2 percent of the gap at the file's
+rate, but Maya's turn parting from its own at the file's rate by up to
+1.3e-3 on turns up to 45 degrees, 4.3e-2 on turns to 111 and 1.9 on
+frames where the angles it solves jump. A scale multiplies the share as
+it does the gap: from a 25 fps scene for a 24 fps file, the keys whose
+share is 1.85 at scale 1 have one of 7.42 on a node scaled (1, 2, 3)
+under one scaled (2, 2, 2). On an X- or Z-up file Maya's importer also
+parts from ConvertScene, and so from a clip, where a layer blends the
+rotation of a root that is no joint, and in a file of any axes where it
+keys what it solves or merges at another frame rate than the file's (the
+list above). Maya's importer leaves a file whose up axis is Y, pointing
+up or down, in its own axes, so a Y-up file whose front is not +Z, or a
+-Y-up one, loads turned 90 or 180 degrees from where Maya shows it. An
+Unreal file, Z-up, turns (x, y, z) to (x, z, -y), root travel with it.
+On a root a layer above the base translates, additive, override or
+passthrough, a clip still keeps the root's translate in the file's world
+turned, the motion as the file authors it, where ConvertScene leaves
+that layer's translate in the file's axes, and so does Maya's importer
+wherever the base layer holds that translate (within 7.7e-7 of
+ConvertScene; where the base layer holds no curve node for it, Maya
+parts from ConvertScene as the first live layer item above says). A clip
+sits 2.8 to 49 off Maya's import of such a root on the files measured, a
+gap that grows with how far the layer moves it; Maya's import of a Z-up
+scene it exported, a group root an additive layer translates, sits 45
+off that scene turned, the clip 1.5 off it, as Maya's import of the same
+scene exported Y-up does, and puts that group's 3x3, in xyz, 1.41 off
+ConvertScene's and the clip's, as the list above says. A root whose
+rotation is inactive still blends its rotation, blended by layer, as
+ConvertScene's xyz node, as Maya's importer does a group's, a locator's
+or a joint's (a zyx group root the layer also translates and turns: its
+3x3 1.70 off the file's world turned and within 1.7e-7 of Maya's
+FBXImport into a scene at the file's frame rate, its translate the
+file's world turned, 49 off Maya's import in a Z-up file and 30 in an
+X-up one). The turn goes on the roots: a joint root takes it in its
+joint orient and translate and keeps its rotate curves; any other root's
+rotate is solved again, through `euler_filter` on a clip. A mesh takes
+the turn through its node: the mesh readers keep each mesh in its own
+space and take no `axis_system`, and `render.Object.load_fbx`, a mesh
+with no node above it, turns its points, normals and skin bind matrices.
+A file already in Maya's Y-up, as `save_fbx` writes a default read,
+loads as it is; a left-handed one raises `ValueError`, since a rotation
+can't turn it into Maya's axes. `axis_system=None` keeps the file's own
+axes. `load()` passes `axis_system` on to `load_fbx` as it does any
+argument, so a left-handed file reads through
+`HierarchyData.load(path, axis_system=None)` too. Which way the
+character faces stays as the file has it.
 
 A rig and a clip record the axis system and the unit their values are
 in, `axis_system` and `unit`, saved with them. The FBX loaders record
