@@ -5927,6 +5927,29 @@ class TransformList(DataList[TransformData]):
         read that keeps fewer kinds puts each node it keeps where a full bind
         read puts it.
 
+        A node's inherit type is taken on a joint alone, beyond a unit root's
+        scale: eInheritRrs, which leaves the parent's own scale out, as segment
+        scale compensate, where the sdk and Maya's importer put it. Every other
+        node is read as eInheritRSrs, whatever the file stores: one that is no
+        joint stored eInheritRrSs, which scales it along its own axes by its
+        parent's world scale where eInheritRSrs shears it, is off where that
+        scale is uneven, and one stored eInheritRrs wherever its parent's own
+        scale is other than 1, even or not, the nodes under them with them. A
+        unit root's scale counts as 1 there: the read divides its 1/s out of
+        every node under it stored eInheritRrs, joint or not, so one directly
+        under it is where the sdk puts it. A node turned (20, 40, 60) and
+        scaled (1, 1.5, 0.75) under a group turned (0, 30, 0) and scaled
+        (1, 2, 3) is 1.11 off the sdk in the 3x3 either way, a locator at
+        (0.5, 1, -2) under it 2.34 and 1.75 in translate; under one scaled
+        (2, 2, 2) the eInheritRrSs node is within 8.9e-16, the eInheritRrs one
+        0.99 off, its locator 2.03. Maya's importer puts both where the sdk
+        does, within 1.1e-15 in the 3x3 and 2.3e-15 in translate, baking the
+        inherit type into the node's own scale and shear. A joint stored
+        eInheritRrSs is read as Maya's importer reads it, as eInheritRSrs, and
+        is as far off the sdk as such a group. On the files measured Maya's
+        export writes eInheritRrs on joints alone, and every eInheritRrSs node,
+        Unreal's, sits under scales of 1, where the read is right.
+
         The rig records what the read produced, which :meth:`save_fbx`
         labels a file with: :attr:`HierarchyData.axis_system`, "maya_y_up",
         or with ``axis_system=None`` the file's own axes in words ("z up, -y
@@ -12362,6 +12385,20 @@ class ClipData(HierarchyData):
         through euler_filter; any other node has its rotate solved again on
         every frame; a node whose pivot its rotate or scale moves takes it in
         its translate on every frame.
+
+        A node's inherit type is read as :meth:`HierarchyData.load_fbx` reads
+        it, on every frame: a node that is no joint stored eInheritRrSs or
+        eInheritRrs, read as eInheritRSrs, parts from the sdk and from Maya's
+        import under a parent scaled as that says, a unit root's scale counting
+        as 1, and the nodes under it with it. Scaled (1, 1.5, 0.75) and keyed
+        (20, 40, 60), (35, -10, 80), (-25, 50, 10), (60, 20, -40) and
+        (5, -70, 30) over 5 frames under a group turned (0, 30, 0) and scaled
+        (1, 2, 3), the eInheritRrSs node is 1.63 off in the 3x3 and the
+        eInheritRrs one 2.11, a locator at (0.5, 1, -2) under each 2.98 and
+        2.88 in translate; under one scaled (2, 2, 2) the eInheritRrs node
+        1.35, its locator 2.13. A joint stored eInheritRrSs is read as Maya's
+        importer reads it, the two within 1.8e-15 and both 1.63 off the sdk
+        there.
 
         The clip's :attr:`rest_pose` is the file's static pose, the nodes'
         own values outside the take (the world matrices

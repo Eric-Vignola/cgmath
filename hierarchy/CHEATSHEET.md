@@ -2414,9 +2414,28 @@ Maya's importer keeps as the camera's rotate axis. Maya reads a camera's
 or a light's pre rotation and rotate order, and a camera's post
 rotation, whether its rotation is active or not, and so does the read,
 but on a root of an X- or Z-up file with its rotation inactive, where
-the axis conversion drops them and turns the root in xyz. Under
-`pose="bind"` a dropped node a bind pose lists is
-folded in at its bind, so each node kept sits where the full bind
+the axis conversion drops them and turns the root in xyz. The inherit
+type is taken on a joint alone, beyond a unit root's scale:
+`eInheritRrs`, which leaves the parent's own scale out, as segment scale
+compensate, where the SDK and Maya put it. Every other node reads as
+`eInheritRSrs`, whatever the file stores: one that is no joint stored
+`eInheritRrSs`, which scales it along its own axes by its parent's world
+scale, is off where that scale is uneven, one stored `eInheritRrs`
+wherever its parent's own scale is other than 1, and the nodes under
+them with them; a unit root's scale counts as 1 there, the read dividing
+its 1/s out of every node under it stored `eInheritRrs`, joint or not. A
+node turned (20, 40, 60) and scaled (1, 1.5, 0.75) under a group turned
+(0, 30, 0) and scaled (1, 2, 3) is 1.11 off the SDK in the 3x3 either
+way, a locator at (0.5, 1, -2) under it 2.34 and 1.75 in translate, and
+keyed (20, 40, 60), (35, -10, 80), (-25, 50, 10), (60, 20, -40) and
+(5, -70, 30) over 5 frames 1.63 and 2.11 on a clip, its locator 2.98 and
+2.88; under one scaled (2, 2, 2) the `eInheritRrSs` node is within
+8.9e-16 and the `eInheritRrs` one 0.99 off (1.35 on the clip), its
+locator 2.03 (2.13). Maya's importer puts both where the SDK does,
+baking the inherit type into the node's own scale and shear. A joint
+stored `eInheritRrSs` reads as Maya's importer reads it, `eInheritRSrs`,
+as far off the SDK. Under `pose="bind"` a dropped node a bind pose lists
+is folded in at its bind, so each node kept sits where the full bind
 read puts it. A file whose dropped nodes, pivots and offsets hold the
 identity reads as it holds its nodes, to the bit.
 

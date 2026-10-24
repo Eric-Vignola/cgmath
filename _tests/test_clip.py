@@ -9678,6 +9678,128 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
                     # the premise: the layer's angles alone, the pre rotation lost, turn elsewhere
                     self.assertGreater(float(np.abs(turned(added, maya_order) - got).max()), 0.01)
 
+    def test_an_inherit_type_is_taken_on_a_joint_alone_beyond_the_unit(self):
+        """under a group turned (0, 30, 0), a group and a joint of each
+        inherit type, keyed in rotate, a locator under each group and a
+        joint under each joint: the read takes eInheritRrs on a joint as
+        segment scale compensate and reads every other node as
+        eInheritRSrs, so on the rig and on every frame of the clip the
+        eInheritRSrs nodes, the eInheritRrs joint and the nodes under them
+        are where the sdk puts them, and the eInheritRrSs ones too under the
+        group scaled (2, 2, 2); under it scaled (1, 2, 3) the eInheritRrSs
+        group and joint are off, and the eInheritRrs group under either, the
+        nodes under them with them. Under the group at scale 1 in the file
+        converted to m, a unit root scaled 0.01 whose 0.01 the export puts
+        on every eInheritRrs node too, every node is where the sdk puts the
+        cm file's: the read divides the unit out of the eInheritRrs group as
+        of the joint. A docs pin of the gap the load_fbx docstrings give, on
+        r3_rrss.py's fixture, which Maya's FBXImport puts where the sdk
+        does, but its eInheritRrSs joint, which it reads as the read does:
+        under (1, 2, 3) each 1.11 off in the 3x3 on the rig, and 1.63, 2.11
+        for eInheritRrs, on the clip; under (2, 2, 2) the eInheritRrs group
+        0.99 and 1.35"""
+        source  = FBX.FbxNode.EPivotSet.eSourcePivot
+        linear  = FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear
+        inherit = FBX.FbxTransform.EInheritType
+        types   = {"RrSs": inherit.eInheritRrSs, "RSrs": inherit.eInheritRSrs, "Rrs": inherit.eInheritRrs}
+        keys    = np.array([(20, 40, 60), (35, -10, 80), (-25, 50, 10), (60, 20, -40), (5, -70, 30)], dtype=float)
+
+        def authored(name, scale, unit=False):
+            """(the cm file, the file read): with ``unit`` that file in m, as
+            Maya's unit converting export writes it"""
+            path    = os.path.join(self.tmp.name, name)
+            manager = FBX.FbxManager.Create()
+            manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+            scene = FBX.FbxScene.Create(manager, "scene")
+            scene.GetGlobalSettings().SetAxisSystem(FBX.FbxAxisSystem.MayaYUp)
+            scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames24)
+            stack = FBX.FbxAnimStack.Create(scene, "Take 001")
+            layer = FBX.FbxAnimLayer.Create(scene, "Base Layer")
+            stack.AddMember(layer)
+
+            def node(name, parent, kind, t=(0, 0, 0), r=(0, 0, 0), s=(1, 1, 1), how=inherit.eInheritRSrs):
+                out = FBX.FbxNode.Create(scene, name)
+                if kind == "joint":
+                    out.SetNodeAttribute(FBX.FbxSkeleton.Create(scene, name))
+                else:
+                    attr = FBX.FbxNull.Create(scene, name)
+                    look = FBX.FbxNull.ELook.eCross if kind == "locator" else FBX.FbxNull.ELook.eNone
+                    attr.Look.Set(look.value)
+                    out.SetNodeAttribute(attr)
+                out.LclTranslation.Set(FBX.FbxDouble3(*t))
+                out.LclRotation.Set(FBX.FbxDouble3(*r))
+                out.LclScaling.Set(FBX.FbxDouble3(*s))
+                out.SetRotationActive(True)
+                out.SetRotationOrder(source, FBX.EFbxRotationOrder.eEulerXYZ)
+                out.SetTransformationInheritType(how)
+                (parent or scene.GetRootNode()).AddChild(out)
+                return out
+
+            top = node("P", None, "transform", (0, 1, 0), (0, 30, 0), scale)
+            for i, (tag, how) in enumerate(types.items()):
+                for kind, below, under, t in (("transform", "locator", "g", (i, 0.5, -0.5)),
+                                              ("joint", "joint", "j", (i, -0.5, 0.5))):
+                    made = node(under + tag, top, kind, t, tuple(keys[0]), (1, 1.5, 0.75), how)
+                    node(("l" if kind == "transform" else "k") + tag, made, below, (0.5, 1.0, -2.0))
+                    for axis in range(3):
+                        curve = made.LclRotation.GetCurve(layer, "XYZ"[axis], True)
+                        curve.KeyModifyBegin()
+                        for frame, value in enumerate(keys[:, axis].tolist()):
+                            time = FBX.FbxTime()
+                            time.SetSecondDouble(frame / 24.0)
+                            key = curve.KeyAdd(time)[0]
+                            curve.KeySetValue(key, value)
+                            curve.KeySetInterpolation(key, linear)
+                        curve.KeyModifyEnd()
+
+            def export(where):
+                exporter = FBX.FbxExporter.Create(manager, "")
+                exporter.Initialize(where, -1, manager.GetIOSettings())
+                exporter.Export(scene)
+                exporter.Destroy()
+
+            export(path)
+            read = path
+            if unit:
+                FBX.FbxSystemUnit.m.ConvertScene(scene)
+                read = os.path.join(self.tmp.name, "m_" + name)
+                export(read)
+            manager.Destroy()
+            return path, read
+
+        def gaps(got, want):
+            """{name: (gap in the 3x3, gap in translate)}"""
+            out = {}
+            for name, world in got.items():
+                world, truth = np.asarray(world), np.asarray(want[name])
+                out[name] = (
+                    float(np.abs(world[..., :3, :3] - truth[..., :3, :3]).max()),
+                    float(np.abs(world[..., 3, :3] - truth[..., 3, :3]).max()),
+                )
+            return out
+
+        for label, scale, unit, off in (
+            ("uneven", (1, 2, 3), False, ("gRrSs", "lRrSs", "jRrSs", "kRrSs", "gRrs", "lRrs")),
+            ("even", (2, 2, 2), False, ("gRrs", "lRrs")),
+            ("unit", (1, 1, 1), True, ()),
+        ):
+            path, file = authored(f"inherit_{label}.fbx", scale, unit)
+            rig  = HierarchyData.load_fbx(file)
+            clip = ClipData.load_fbx(file)
+            self.assertEqual([rig[f"j{tag}"].segment_scale_compensate for tag in types], [False, False, True])
+            for read, worlds, want in (
+                ("rig", self.rig_worlds(rig), self.truth(path)),
+                ("clip", self.clip_worlds(clip), self.truth(path, len(keys))),
+            ):
+                for name, (turn, move) in gaps(worlds, want).items():
+                    with self.subTest(label, read=read, node=name):
+                        if name not in off:
+                            self.assertLess(max(turn, move), 1e-9)
+                        elif name[0] in "gj":
+                            self.assertGreater(turn, 0.9)
+                        else:
+                            self.assertGreater(move, 1.5)
+
     def test_a_file_whose_dropped_nodes_and_pivots_move_nothing_reads_as_it_holds_it(self):
         """an attribute-less group at the identity, a mesh whose pivots
         cancel, and nodes under them: every channel the file's own, to the
