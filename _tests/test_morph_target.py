@@ -6,8 +6,11 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 import numpy as np
+from numpy.lib.stride_tricks import as_strided, sliding_window_view
+from cgmath.geometry import morph_target
 from cgmath.geometry.mesh import MeshData
 from cgmath.geometry.morph_target import MorphData, MorphList
 from cgmath.geometry.skin_weights import SkinData, SkinList
@@ -491,6 +494,204 @@ class TestMorphList(unittest.TestCase):
                 self.assertIs(op(obj, other), obj)
                 self.assertTrue(obj[0] is obj[1] is shape)
                 self.assertEqual(shape.offsets.tolist(), expected)
+
+    def test_in_place_takes_the_lists_own_shapes_as_they_were(self):
+        # in place, an operand that is, or holds, one of the list's own
+        # shapes is taken as it was before any shape changed, as a new list
+        # takes it: on 58bbdde a shape changed in place was the operand of
+        # the shapes after it as it had become, so shapes -= shapes[0] left
+        # the second shape as it was. The list's shapes still change in
+        # place: a caller's reference to one sees it, and a shape held twice
+        # is changed in each place, each time by the operand as it was
+        def make(*rows):
+            return MorphList([MorphData(name=f"s{i}", offsets=np.array([row], dtype=float), indices=np.array([0]))
+                              for i, row in enumerate(rows)])
+
+        two   = ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
+        three = ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0])
+        cases = (
+            ("L -= L[0]", two, operator.isub, lambda L: L[0], [[0, 0, 0], [-1, 1, 0]]),
+            ("L += L[0]", two, operator.iadd, lambda L: L[0], [[2, 0, 0], [1, 1, 0]]),
+            ("L += [L[1], L[0]]", two, operator.iadd, lambda L: [L[1], L[0]], [[1, 1, 0], [1, 1, 0]]),
+            ("L -= [L[1], L[0]]", two, operator.isub, lambda L: [L[1], L[0]], [[1, -1, 0], [-1, 1, 0]]),
+            ("L += (L[1], L[0])", two, operator.iadd, lambda L: (L[1], L[0]), [[1, 1, 0], [1, 1, 0]]),
+            ("L += MorphList([L[1], L[0]])", two, operator.iadd, lambda L: MorphList([L[1], L[0]]),
+             [[1, 1, 0], [1, 1, 0]]),
+            ("L -= MorphList([L[1], L[0]])", two, operator.isub, lambda L: MorphList([L[1], L[0]]),
+             [[1, -1, 0], [-1, 1, 0]]),
+            ("L += L[::-1]", two, operator.iadd, lambda L: L[::-1], [[1, 1, 0], [1, 1, 0]]),
+            ("L -= L[::-1]", two, operator.isub, lambda L: L[::-1], [[1, -1, 0], [-1, 1, 0]]),
+            ("L += L", two, operator.iadd, lambda L: L, [[2, 0, 0], [0, 2, 0]]),
+            ("L -= L", two, operator.isub, lambda L: L, [[0, 0, 0], [0, 0, 0]]),
+            # each place's operand a shape an earlier place changed
+            ("L += [L[2], L[0], L[1]]", three, operator.iadd, lambda L: [L[2], L[0], L[1]],
+             [[1, 0, 1], [1, 1, 0], [0, 1, 1]]),
+            ("L -= [L[1], L[2], L[0]]", three, operator.isub, lambda L: [L[1], L[2], L[0]],
+             [[1, -1, 0], [0, 1, -1], [-1, 0, 1]]),
+        )
+        for label, rows, op, operand, expected in cases:
+            with self.subTest(label):
+                obj    = make(*rows)
+                shapes = list(obj)
+                self.assertIs(op(obj, operand(obj)), obj)
+                self.assertTrue(all(x is y for x, y in zip(obj, shapes)))
+                self.assertEqual([shape.offsets.tolist() for shape in obj], [[row] for row in expected])
+
+        # * and / by arrays that hold the shapes' offsets: a's rows, and its
+        # whole offsets as the operand of each shape, each as it was. The
+        # first shape's offsets a view of another array's memory, as a
+        # MorphData keeps an array it is given; and views of a's offsets
+        # whose .base is no array, which only their bounds tie to its memory:
+        # as_strided's, sliding_window_view's, a memoryview's
+        def scaled():
+            memory = np.arange(1.0, 7.0).reshape(2, 3)
+            a      = MorphData(name="a", offsets=memory, indices=np.array([0, 1]))
+            b      = MorphData(name="b", offsets=np.full((2, 3), 2.0), indices=np.array([0, 1]))
+            return a, b, MorphList([a, b])
+
+        a0, b0, _ = scaled()
+        a0, b0 = a0.offsets.copy(), b0.offsets.copy()
+        times = (a0 * a0[0], b0 * a0[1])
+        over  = (a0 / a0[0], b0 / a0[1])
+        for label, op, operand, expected in (
+            ("L *= a.offsets", operator.imul, lambda a, b: a.offsets, times),
+            ("L /= a.offsets", operator.itruediv, lambda a, b: a.offsets, over),
+            ("L *= [b.offsets, a.offsets]", operator.imul, lambda a, b: [b.offsets, a.offsets], (a0 * b0, b0 * a0)),
+            ("L /= [a.offsets[1], a.offsets[0]]", operator.itruediv, lambda a, b: [a.offsets[1], a.offsets[0]],
+             (a0 / a0[1], b0 / a0[0])),
+            ("L *= as_strided(a.offsets)", operator.imul, lambda a, b: as_strided(a.offsets), times),
+            ("L /= sliding_window_view(a.offsets, (1, 3))[:, 0, 0]", operator.itruediv,
+             lambda a, b: sliding_window_view(a.offsets, (1, 3))[:, 0, 0], over),
+            ("L *= np.asarray(memoryview(a.offsets))", operator.imul,
+             lambda a, b: np.asarray(memoryview(a.offsets)), times),
+            ("L /= np.frombuffer(a.offsets.data)", operator.itruediv,
+             lambda a, b: np.frombuffer(a.offsets.data).reshape(2, 3), over),
+        ):
+            with self.subTest(label):
+                a, b, obj = scaled()
+                self.assertFalse(a.offsets.flags.owndata)
+                self.assertIs(op(obj, operand(a, b)), obj)
+                self.assertTrue(obj[0] is a and obj[1] is b)
+                np.testing.assert_allclose(a.offsets, expected[0], rtol=0, atol=1e-15)
+                np.testing.assert_allclose(b.offsets, expected[1], rtol=0, atol=1e-15)
+
+        # a's offsets themselves such a view, as_strided's of another array:
+        # that array, and its rows, taken as they were
+        def strided():
+            memory = np.arange(1.0, 7.0).reshape(2, 3)
+            a      = MorphData(name="a", offsets=as_strided(memory), indices=np.array([0, 1]))
+            b      = MorphData(name="b", offsets=np.full((2, 3), 2.0), indices=np.array([0, 1]))
+            return memory, a, b, MorphList([a, b])
+
+        for label, op, operand, expected in (
+            ("L *= the array a's offsets view", operator.imul, lambda memory: memory, times),
+            ("L /= [its row 1, its row 0]", operator.itruediv, lambda memory: [memory[1], memory[0]],
+             (a0 / a0[1], b0 / a0[0])),
+        ):
+            with self.subTest(label):
+                memory, a, b, obj = strided()
+                self.assertFalse(isinstance(a.offsets.base, np.ndarray))
+                self.assertIs(op(obj, operand(memory)), obj)
+                np.testing.assert_allclose(a.offsets, expected[0], rtol=0, atol=1e-15)
+                np.testing.assert_allclose(b.offsets, expected[1], rtol=0, atol=1e-15)
+
+        # a shape held twice, its offsets the operand of the place between:
+        # taken as the first place left them
+        with self.subTest("[a, b, a] *= [2, a.offsets, 3]"):
+            a, b, _ = scaled()
+            obj = MorphList([a, b, a])
+            obj *= [2.0, a.offsets, 3.0]
+            np.testing.assert_allclose(a.offsets, a0 * 6.0, rtol=0, atol=1e-15)
+            np.testing.assert_allclose(b.offsets, b0 * a0, rtol=0, atol=1e-15)
+
+        # a shape held twice, its operand that shape: changed in each place,
+        # each time by the shape as it was, so three times it in all, and b
+        # between its two places takes it as it was too
+        for label, op, held, expected in (
+            ("[a, a] += a", operator.iadd, 2, [[3, 0, 0], [3, 0, 0]]),
+            ("[a, a] -= a", operator.isub, 2, [[-1, 0, 0], [-1, 0, 0]]),
+            ("[a, b, a] -= a", operator.isub, 3, [[-1, 0, 0], [-1, 1, 0], [-1, 0, 0]]),
+        ):
+            with self.subTest(label):
+                a, b = make(*two)
+                obj = MorphList([a, a] if held == 2 else [a, b, a])
+                self.assertIs(op(obj, a), obj)
+                self.assertTrue(obj[0] is obj[-1] is a)
+                self.assertEqual([shape.offsets.tolist() for shape in obj], [[row] for row in expected])
+
+        # an operand is copied once, and only when an earlier place changes
+        # it: shapes += shapes copies nothing, nor does an operand from
+        # outside the list, and shapes -= shapes[0] copies the first shape
+        # once for the two places after it
+        real = MorphData.copy
+        c    = MorphData(name="c", offsets=np.array([[0.0, 0.0, 2.0]]), indices=np.array([0]))
+        d    = MorphData(name="d", offsets=np.array([[3.0, 0.0, 0.0]]), indices=np.array([0]))
+        for label, rows, op, operand, copied in (
+            ("L += L", two, operator.iadd, lambda L: L, []),
+            ("L += c", two, operator.iadd, lambda L: c, []),
+            ("L += [c, d]", two, operator.iadd, lambda L: [c, d], []),
+            ("L -= MorphList([c, d])", two, operator.isub, lambda L: MorphList([c, d]), []),
+            ("L -= L[0]", three, operator.isub, lambda L: L[0], ["s0"]),
+            ("L += L[::-1]", three, operator.iadd, lambda L: L[::-1], ["s0"]),
+            ("L += [L[2], L[0], L[1]]", three, operator.iadd, lambda L: [L[2], L[0], L[1]], ["s0", "s1"]),
+        ):
+            with self.subTest(copies=label):
+                made = []
+
+                def counted(shape):
+                    made.append(shape.name)
+                    return real(shape)
+
+                obj = make(*rows)
+                with mock.patch.object(MorphData, "copy", counted):
+                    op(obj, operand(obj))
+                self.assertEqual(made, copied)
+
+        # and so is an array: each shape's own offsets at its own place, as
+        # they are and as_strided's views of them, and arrays from outside
+        # the list come back as they are, and so does the array a shape's
+        # offsets view at that shape's place; a view of the first shape's
+        # offsets comes back copied once for the two places after it
+        obj = make(*three)
+        own = [shape.offsets for shape in obj]
+        for label, operand in (
+            ("each shape's own offsets", own),
+            ("as_strided views of them", [as_strided(x) for x in own]),
+            ("arrays from outside", [np.ones((1, 3)), np.full((1, 3), 2.0), np.zeros((1, 3))]),
+        ):
+            with self.subTest(copies=label):
+                got = obj._in_place_operands(operand, "*")
+                self.assertTrue(all(x is y for x, y in zip(got, operand)))
+        memory, a, b, pair = strided()
+        got = pair._in_place_operands([memory, b.offsets], "*")
+        self.assertTrue(got[0] is memory and got[1] is b.offsets)
+        view = obj[0].offsets[0]
+        got  = obj._in_place_operands([view] * 3, "/")
+        self.assertIs(got[0], view)
+        self.assertTrue(got[1] is got[2] and got[1] is not view)
+        np.testing.assert_array_equal(got[1], view)
+
+        # the rows of an array from outside the list find their owner through
+        # .base, so no memory bounds are compared: a list of n shapes takes
+        # no n * n checks
+        table = np.arange(9.0).reshape(3, 3)
+        with mock.patch.object(np, "may_share_memory", wraps=np.may_share_memory) as bounds:
+            got = obj._in_place_operands(table, "*")
+        self.assertEqual(bounds.call_count, 0)
+        self.assertTrue(all(x.base is table.base for x in got))
+
+        # and numbers alone, no array among them, look at no memory
+        with mock.patch.object(morph_target, "_owner", wraps=morph_target._owner) as owner:
+            obj *= [1.0, 2.0, 3.0]
+            obj /= 2.0
+        self.assertEqual(owner.call_count, 0)
+
+        # a caller's reference to one of the list's shapes sees the change
+        obj   = make(*two)
+        first = obj[0]
+        obj -= obj[0]
+        self.assertIs(obj[0], first)
+        self.assertEqual(first.offsets.tolist(), [[0.0, 0.0, 0.0]])
 
     def test_prune_offsets(self):
         obj = self.list.copy()

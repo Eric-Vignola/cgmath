@@ -24,6 +24,17 @@ class _Name(str):
     """an operand's name in a refusal, where its class would mislead"""
 
 
+def _owner(array: np.ndarray) -> Optional[np.ndarray]:
+    """the array that owns ``array``'s memory, found through the ``.base``
+    of its views: itself, or the one they view. None where that walk ends
+    on an array that owns no memory, its ``.base`` no array: an as_strided
+    or sliding_window_view view, an array of a memoryview or of another
+    object's buffer, whose memory only its bounds tell"""
+    while isinstance(array.base, np.ndarray):
+        array = array.base
+    return array if array.flags.owndata else None
+
+
 def _holding(sequence, item) -> _Name:
     """a sequence named by the item a refusal is about: ``a list holding an int``"""
     names = ("array" if isinstance(x, np.ndarray) else type(x).__name__ for x in (sequence, item))
@@ -386,7 +397,11 @@ class MorphList(DataList[MorphData]):
     builtin sum() works. Each of these gives a new list, a new shape in
     each place, so a shape the list holds twice is acted on once in each;
     in place, ``+=``, ``-=``, ``*=`` and ``/=`` change the shapes the list
-    holds, so one it holds twice is changed twice. What has no meaning
+    holds, so one it holds twice is changed twice, each shape by its
+    operand as it was before any shape changed: an operand that is, or
+    holds, one of the list's own shapes, or an array of a shape's offsets,
+    is taken as it was, so ``shapes -= shapes[0]`` subtracts the first
+    shape from every shape, the first included. What has no meaning
     raises TypeError, whatever the two lengths, an empty list's too, before
     a sequence of another length raises RuntimeError and before any shape
     is changed. An operand numpy refuses, None or an array of another
@@ -452,6 +467,64 @@ class MorphList(DataList[MorphData]):
             raise RuntimeError("Lists must have the same length.")
         return items
 
+    def _in_place_operands(self, other, op: str) -> list:
+        """
+        :meth:`_per_shape`'s operands for ``self op= other``, each as it is
+        before any shape changes. An operand that an earlier place changes
+        is copied first, once: for ``+`` and ``-`` one of the list's own
+        shapes, for ``*`` and ``/`` an array that shares memory with a
+        shape's offsets: the offsets, a view of them, an as_strided or a
+        memoryview's array of them too. Two arrays share it where one array
+        owns the memory of both (:func:`_owner`), or, where either has no
+        owner, where their bounds meet (``np.may_share_memory``). So
+        ``shapes -= shapes[0]`` subtracts the first shape as it was from
+        every shape, the first included, and ``shapes += shapes[::-1]`` adds
+        to each the shape it pairs with as it was; ``shapes += shapes``
+        copies only a shape it holds twice, once, for its later place,
+        each other shape its own operand, and an operand from outside
+        the list is never copied
+        """
+        others = self._per_shape(other, op)
+        morphs = op in ("+", "-")
+
+        # numbers alone, no array among them: nothing a place changes
+        if not morphs and not any(isinstance(x, np.ndarray) for x in others):
+            return others
+
+        # the first place of each shape, for * and / of its offsets' owner;
+        # offsets with none are kept with their place, compared by bounds
+        first = {}
+        loose = []
+        for place, shape in enumerate(self.list):
+            if morphs:
+                first.setdefault(id(shape), place)
+                continue
+            owner = _owner(shape.offsets)
+            if owner is None:
+                loose.append((place, shape.offsets))
+            else:
+                first.setdefault(id(owner), place)
+
+        copies = {}
+        for place, x in enumerate(others):
+            if morphs:
+                changed = first.get(id(x), place) < place
+            elif isinstance(x, np.ndarray):
+                owner = _owner(x)
+                if owner is None:
+                    changed = any(np.may_share_memory(x, shape.offsets) for shape in self.list[:place])
+                else:
+                    changed = first.get(id(owner), place) < place or any(
+                        at < place and np.may_share_memory(x, offsets) for at, offsets in loose
+                    )
+            else:
+                continue
+            if changed:
+                if id(x) not in copies:
+                    copies[id(x)] = x.copy() if morphs else np.array(x)
+                others[place] = copies[id(x)]
+        return others
+
     def _new_shapes(self, other, op: str) -> MorphList:
         """
         ``self op other``, a new list: each shape op the operand
@@ -490,10 +563,12 @@ class MorphList(DataList[MorphData]):
         in place, shape by shape: a MorphData added to every shape, or a
         MorphList's or a sequence's MorphData to the shape each pairs with,
         as ``MorphData +=`` adds one; a shape the list holds twice is
-        changed in each place, so twice. A number has no meaning
-        (TypeError), and nothing is changed
+        changed in each place, so twice. Each operand is added as it was
+        before any shape changed, one of the list's own shapes too
+        (:meth:`_in_place_operands`). A number has no meaning (TypeError),
+        and nothing is changed
         """
-        others = self._per_shape(other, "+")
+        others = self._in_place_operands(other, "+")
         for i in range(len(self.list)):
             self.list[i] += others[i]
 
@@ -520,10 +595,12 @@ class MorphList(DataList[MorphData]):
         in place, shape by shape: a MorphData subtracted from every shape, or
         a MorphList's or a sequence's MorphData from the shape each pairs
         with, as ``MorphData -=`` subtracts one; a shape the list holds
-        twice is changed in each place, so twice. A number has no meaning
-        (TypeError), and nothing is changed
+        twice is changed in each place, so twice. Each operand is
+        subtracted as it was before any shape changed, one of the list's
+        own shapes too (:meth:`_in_place_operands`). A number has no
+        meaning (TypeError), and nothing is changed
         """
-        others = self._per_shape(other, "-")
+        others = self._in_place_operands(other, "-")
         for i in range(len(self.list)):
             self.list[i] -= others[i]
 
@@ -549,11 +626,12 @@ class MorphList(DataList[MorphData]):
         """
         in place, shape by shape: every shape times a number, or each times
         the number a sequence pairs with it; a shape the list holds twice is
-        changed in each place, so twice. A morph times a morph, a MorphData,
-        or a MorphList shape by shape, has no meaning (TypeError), and
-        nothing is changed
+        changed in each place, so twice. An array of a shape's offsets is
+        taken as it was before any shape changed (:meth:`_in_place_operands`).
+        A morph times a morph, a MorphData, or a MorphList shape by shape,
+        has no meaning (TypeError), and nothing is changed
         """
-        others = self._per_shape(other, "*")
+        others = self._in_place_operands(other, "*")
         for i in range(len(self.list)):
             self.list[i] *= others[i]
 
@@ -576,10 +654,12 @@ class MorphList(DataList[MorphData]):
         in place, shape by shape: every shape divided by a number, or each
         by the number a sequence pairs with it, as ``*=`` multiplies, so
         ``(shapes * s) / s == shapes``; a shape the list holds twice is
-        changed in each place, so twice. A morph over a morph has no meaning
-        (TypeError), and nothing is changed
+        changed in each place, so twice. An array of a shape's offsets is
+        taken as it was before any shape changed (:meth:`_in_place_operands`).
+        A morph over a morph has no meaning (TypeError), and nothing is
+        changed
         """
-        others = self._per_shape(other, "/")
+        others = self._in_place_operands(other, "/")
         for i in range(len(self.list)):
             self.list[i] /= others[i]
 
