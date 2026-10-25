@@ -5991,6 +5991,147 @@ class TestClipLoadGlb(unittest.TestCase):
         with self.assertRaises(IndexError):
             ClipData.load_glb(path, scale_factor=1.0, animation=7)
 
+    def test_keys_on_frames_0_and_1_give_two_frames(self):
+        """glTF stores key times as float32 seconds, so 1/24 reads back a hair
+        late, 1.00000003 frames after the first key; one whole frame is
+        still two frames, both ends included, not three
+        """
+        path = self.build(
+            times       = np.float32([0.0, 1.0 / 24.0]),
+            translation = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        )
+
+        clip = ClipData.load_glb(path, scale_factor=1.0, fps=24.0)
+
+        self.assertEqual(clip.frame_count, 2)
+        self.assertTrue(
+            np.allclose(np.array(clip.frames.translate)[:, 0, 0], [0.0, 1.0])
+        )
+
+    def test_the_last_frame_shows_the_last_key(self):
+        """float32 can store the last key a hair after the whole frame the
+        span snaps to, so that frame is sampled on the key itself: a held key
+        shows on its frame, a linear channel ends exactly on its last key,
+        and so does a ragged tail the snap takes in late in a long clip.
+        The other frames stay on the grid, and a one frame clip stays on the
+        earliest key
+        """
+
+        def load(times, interpolation, fps):
+            keys = np.float32(times).astype(float)
+            path = self.build(
+                times         = keys,
+                translation   = [[float(i), 0.0, 0.0] for i in range(len(keys))],
+                interpolation = interpolation,
+            )
+            clip = ClipData.load_glb(path, scale_factor=1.0, fps=fps)
+            return keys, np.array(clip.frames.translate)[:, 0, 0]
+
+        # keys on frames 0 and 1, the second stored a hair late
+        _, tx = load(np.array([0.0, 1.0]) / 24.0, "STEP", 24.0)
+        self.assertEqual(tx.tolist(), [0.0, 1.0])
+
+        # the same ten minutes in, 8 frames apart
+        _, tx = load(np.array([36000.0, 36008.0]) / 60.0, "STEP", 60.0)
+        self.assertEqual(tx.tolist(), [0.0] * 8 + [1.0])
+
+        # keys on frames 0 to 4; then a last key 30.01 frames after the
+        # first, 18 minutes in, which one float32 spacing takes in
+        for times, fps in (
+            (np.arange(5.0) / 24.0, 24.0),
+            (np.array([66000.0, 66030.01]) / 60.0, 60.0),
+        ):
+            with self.subTest(fps=fps):
+                keys, tx = load(times, "LINEAR", fps)
+
+                grid = keys[0] + np.arange(len(tx) - 1) / fps
+                want = np.interp(grid, keys, np.arange(len(keys)))
+                self.assertEqual(tx[-1], len(keys) - 1)
+                self.assertTrue(np.allclose(tx[:-1], want, rtol=0.0, atol=1e-12))
+
+        # two keys one float32 spacing apart are one frame
+        hair = float(np.nextafter(np.float32(10.0), np.float32(11.0)))
+        _, tx = load([10.0, hair], "STEP", 24.0)
+        self.assertEqual(tx.tolist(), [0.0])
+
+    def test_an_exact_last_key_shows_on_the_last_frame(self):
+        """at 24000/1001 fps, keys on frames 0 and 24000 are 0 and 1001 s,
+        exact in float32, but the grid's last time, 24000 / fps in float64,
+        rounds a hair short of 1001: that frame is still sampled on the key,
+        so a held key shows on it
+        """
+        fps = 24000.0 / 1001.0
+        path = self.build(
+            times         = np.float32([0.0, 1001.0]),
+            translation   = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            interpolation = "STEP",
+        )
+
+        clip = ClipData.load_glb(path, scale_factor=1.0, fps=fps)
+        tx   = np.array(clip.frames.translate)[:, 0, 0]
+
+        self.assertEqual(clip.frame_count, 24001)
+        self.assertEqual(tx[-1], 1.0)
+        self.assertEqual(np.count_nonzero(tx), 1)
+
+    def test_spans_of_whole_frames_count_whole_frames(self):
+        """short and long spans, starting up to ten minutes in, at 24, 30
+        and 60 fps, each one keyed on whole frames and stored as float32
+        seconds: a plain ceil counted about half of them a frame long
+        """
+        rng   = np.random.default_rng(1)
+        spans = []
+        for fps in (24.0, 30.0, 60.0):
+            late = int(600 * fps)
+            for _ in range(40):
+                start = int(rng.integers(0, 200))
+                spans.append((fps, start, start + int(rng.integers(1, 201))))
+            for _ in range(40):
+                start = int(rng.integers(0, late + 1))
+                spans.append((fps, start, start + int(rng.integers(1, 201))))
+            for _ in range(20):
+                start = int(rng.integers(0, late + 1))
+                spans.append((fps, start, start + int(rng.integers(201, late + 1))))
+
+        wrong = []
+        for fps, start, end in spans:
+            path = self.build(
+                times       = np.float32([start / fps, end / fps]),
+                translation = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            )
+            count = ClipData.load_glb(path, scale_factor=1.0, fps=fps).frame_count
+            if count != end - start + 1:
+                wrong.append((fps, start, end, count))
+
+        self.assertEqual(wrong, [], f"{len(wrong)} of {len(spans)} spans miscounted")
+
+    def test_a_ragged_span_rounds_up(self):
+        """a last key between frames adds a frame, so the tail of the
+        animation is inside the grid, as before: keys at 0 and 1.5 frames
+        give 3; spans half and a quarter of a frame off, which round would
+        shrink, and a tenth of a frame off; ten minutes in at 60 fps, the
+        same, and a span float32 stores 1.33 spacings past 10 frames, which
+        a wider snap would take in
+        """
+        for fps, first, last, want in (
+            (24.0, 0.0, 1.5, 3),
+            (24.0, 0.0, 1.25, 3),
+            (24.0, 0.0, 2.5, 4),
+            (24.0, 0.0, 1.1, 3),
+            (60.0, 36000.0, 36010.5, 12),
+            (60.0, 36000.0, 36010.25, 12),
+            (60.0, 36000.0, 36010.005, 12),
+        ):
+            with self.subTest(fps=fps, first=first, last=last):
+                path = self.build(
+                    times       = np.float32([first / fps, last / fps]),
+                    translation = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                )
+
+                clip = ClipData.load_glb(path, scale_factor=1.0, fps=fps)
+
+                self.assertEqual(clip.frame_count, want)
+
 
 @unittest.skipIf(pygltflib is None, "pygltflib is not installed")
 class TestClipLoadGlbNodeOrder(unittest.TestCase):

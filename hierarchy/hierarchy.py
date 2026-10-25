@@ -251,6 +251,30 @@ def _sample_gltf(sampler, times: np.ndarray, width: int) -> np.ndarray:
     return values[left] + (values[right] - values[left]) * weight[:, None]
 
 
+def _glb_frame_count(first: float, last: float, fps: float) -> int:
+    """the frames a glTF animation from ``first`` to ``last`` seconds spans at
+    ``fps``, both ends included
+
+    glTF stores key times as float32 seconds, so keys on whole frames read
+    back a hair off them: frames 0 and 1 at 24 fps are 1.00000003 frames
+    apart, which a plain ceil counts as 3 frames. A span within one float32
+    spacing of the later key time of a whole number of frames is that whole
+    number, and its last whole frame can fall a hair before the last key:
+    on two frames or more the caller samples that frame on the key itself,
+    and keys within one spacing of each other give one frame, on the first.
+    Any other span rounds up, so its last key falls inside the grid rather
+    than past its end. The spacing grows with the time, so the snap reaches
+    further on a key minutes in than on one near zero.
+    """
+    span  = float(last - first) * fps
+    whole = round(span)
+    grain = float(np.spacing(np.float32(max(abs(first), abs(last))))) * fps
+
+    if abs(span - whole) <= grain:
+        return whole + 1
+    return int(np.ceil(span)) + 1
+
+
 def _is_sequence(obj, ndim: int = 1) -> bool:
     """tests if given input is a sequence matching the desired dimension number"""
     if isinstance(obj, Iterable) and not isinstance(obj, (str, bytes, dict, set)):
@@ -12215,6 +12239,19 @@ class ClipData(HierarchyData):
         frame. That conversion picks an euler branch per frame, so the
         result goes through ``euler_filter``.
 
+        The grid starts on the earliest key of the channels read. Keys on
+        whole frames give exactly that many frames, both ends included --
+        keys at frames 0 and 24 give 25 -- although glTF stores key times
+        as float32 seconds, a hair off the frames: a span within one
+        float32 spacing of the last key time of a whole number of frames
+        counts as that number. On a clip of two frames or more, when the
+        last key sits a hair after the last frame, that frame is sampled on
+        the key itself, so a held (STEP) last key still shows. A last key
+        further between frames adds the frame after it. Either way a clip
+        of two frames or more ends on or past its last key, so the tail of
+        the animation is inside the grid. Keys all within one float32
+        spacing of each other give one frame, on the earliest key.
+
         A file with no animation gives a one frame clip rather than an
         error -- it is an accurate reading of a rig that does not move.
         A channel on a node the rig does not read, such as a mesh, animates
@@ -12257,15 +12294,19 @@ class ClipData(HierarchyData):
         if not spans:
             return cls(rig, frames=1, start_frame=start_frame, fps=fps)
 
-        first = min(keys[0] for keys in spans)
-        last  = max(keys[-1] for keys in spans)
+        first  = min(keys[0] for keys in spans)
+        last   = max(keys[-1] for keys in spans)
 
-        # ceil, so the tail of the animation is inside the grid rather than
-        # half a frame past its end
-        frames = int(np.ceil((last - first) * fps)) + 1
+        frames = _glb_frame_count(first, last, fps)
         times  = first + np.arange(frames) / fps
+        if frames > 1:
+            # the last frame can fall a hair before the last key: float32
+            # stored the key a hair late, or float64 rounded the frame's time
+            # a hair short of it. That frame samples the key itself, so a
+            # held last key still shows
+            times[-1] = max(times[-1], last)
 
-        clip   = cls(rig, frames=frames, start_frame=start_frame, fps=fps)
+        clip = cls(rig, frames=frames, start_frame=start_frame, fps=fps)
 
         # seeded with the rest pose, which is what unanimated nodes keep
         scale     = np.array(clip.frames.scale)

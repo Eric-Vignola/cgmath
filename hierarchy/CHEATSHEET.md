@@ -2478,6 +2478,16 @@ above it; and the whole rotate curve of a joint an uneven dropped scale
 re-solves on some frames, as `ClipData.load_fbx` says. A file with no
 animation gives a one-frame clip rather than an error.
 
+`ClipData.load_glb`'s grid starts on the earliest key. Keys on whole
+frames give exactly that many frames, both ends included — keys at frames
+0 and 24 give 25 — although glTF stores key times as float32 seconds, a
+hair off the frames. When the last key of a clip of two frames or more
+sits a hair after the last frame, the frame is sampled on the key itself,
+so a held (STEP) last key still shows. A last key further between frames,
+more than one float32 spacing off, adds the frame after it. Either way
+such a clip's tail is inside the grid. Keys all within one float32
+spacing of each other give one frame, on the earliest key.
+
 `ClipData.load_fbx` defaults to the first take that was actually keyed,
 not to index 0, because a file can hold takes with no curves at all.
 
