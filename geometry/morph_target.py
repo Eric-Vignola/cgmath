@@ -35,6 +35,27 @@ def _owner(array: np.ndarray) -> Optional[np.ndarray]:
     return array if array.flags.owndata else None
 
 
+def _as_read(operand):
+    """``operand`` as numpy reads it, an array: a list's or a tuple's rows
+    copied into a new one, a memoryview's or another buffer's memory
+    viewed. ``operand`` itself where numpy reads it as objects, which an
+    array holds and does not read, or refuses it, or hands it the
+    operation, its class having an ``__array_ufunc__`` or its
+    ``__array_priority__`` above an array's 0: numpy meets it at its
+    place, as before. ``operand`` itself too where its
+    ``__array_priority__`` cannot be compared with 0, a string or None, a
+    priority numpy ignores: numpy reads it at its place, as 3.0.0 left it"""
+    if hasattr(type(operand), "__array_ufunc__"):
+        return operand
+    try:
+        if getattr(operand, "__array_priority__", 0.0) > 0.0:
+            return operand
+        array = np.asarray(operand)
+    except Exception:
+        return operand
+    return operand if array.dtype == object else array
+
+
 def _holding(sequence, item) -> _Name:
     """a sequence named by the item a refusal is about: ``a list holding an int``"""
     names = ("array" if isinstance(x, np.ndarray) else type(x).__name__ for x in (sequence, item))
@@ -401,12 +422,16 @@ class MorphList(DataList[MorphData]):
     operand as it was before any shape changed: an operand that is, or
     holds, one of the list's own shapes, or an array of a shape's offsets,
     is taken as it was, so ``shapes -= shapes[0]`` subtracts the first
-    shape from every shape, the first included. What has no meaning
-    raises TypeError, whatever the two lengths, an empty list's too, before
-    a sequence of another length raises RuntimeError and before any shape
-    is changed. An operand numpy refuses, None or an array of another
-    shape, raises numpy's error at the shape it reaches, in place the
-    shapes before that one already changed.
+    shape from every shape, the first included. Two shapes built on one
+    float64 array share its memory and are scaled as one shape held twice
+    is: ``*=`` and ``/=`` scale that memory in each place, so twice; built
+    on an array of another dtype, or on a list, each holds a copy of its
+    own, scaled once. What has no meaning raises TypeError, whatever the
+    two lengths, an empty list's too, before a sequence of another length
+    raises RuntimeError and before any shape is changed. An operand numpy
+    refuses, None or an array of another shape, raises numpy's error at
+    the shape it reaches, in place the shapes before that one already
+    changed.
     """
 
     # --------- vectorized properties and methods --------- #
@@ -470,25 +495,51 @@ class MorphList(DataList[MorphData]):
     def _in_place_operands(self, other, op: str) -> list:
         """
         :meth:`_per_shape`'s operands for ``self op= other``, each as it is
-        before any shape changes. An operand that an earlier place changes
-        is copied first, once: for ``+`` and ``-`` one of the list's own
-        shapes, for ``*`` and ``/`` an array that shares memory with a
-        shape's offsets: the offsets, a view of them, an as_strided or a
-        memoryview's array of them too. Two arrays share it where one array
-        owns the memory of both (:func:`_owner`), or, where either has no
-        owner, where their bounds meet (``np.may_share_memory``). So
+        before any shape changes. For ``*`` and ``/``, an operand that is no
+        number and no array, a list or a tuple of a shape's rows, a
+        memoryview of its offsets, is first read as numpy reads it, once
+        (:func:`_as_read`): an exact list's or tuple's rows (a subclass's
+        ``__array__`` may give a shape's own memory) copied as they are into
+        new memory, which no shape shares, so it is compared with none, a
+        buffer an array over its memory. Then an operand that an
+        earlier place changes is copied first, once: for ``+`` and ``-``
+        one of the list's own shapes, for ``*`` and ``/`` an array that
+        shares memory with a shape's offsets: the offsets, a view of them,
+        an as_strided or a memoryview's array of them too. Two arrays share
+        it where one array owns the memory of both (:func:`_owner`), or,
+        where either has no owner, where their bounds meet
+        (``np.may_share_memory``): an operand with none is compared with
+        each shape before its place once, however many places hold it. So
         ``shapes -= shapes[0]`` subtracts the first shape as it was from
-        every shape, the first included, and ``shapes += shapes[::-1]`` adds
-        to each the shape it pairs with as it was; ``shapes += shapes``
-        copies only a shape it holds twice, once, for its later place,
-        each other shape its own operand, and an operand from outside
-        the list is never copied
+        every shape, the first included, and ``shapes += shapes[::-1]``
+        adds to each the shape it pairs with as it was; ``shapes += shapes``
+        copies only a shape it holds twice, once, for its later place, each
+        other shape its own operand, and an operand from outside the list
+        is never copied
         """
         others = self._per_shape(other, op)
         morphs = op in ("+", "-")
 
-        # numbers alone, no array among them: nothing a place changes
-        if not morphs and not any(isinstance(x, np.ndarray) for x in others):
+        # for * and /, an operand that is no number and no array read as
+        # numpy reads it, once, before any shape changes: a list of a
+        # shape's rows is then the rows as they were, and a buffer of its
+        # offsets an array that is checked below. An exact list's or
+        # tuple's array (not a subclass's) is new memory, which no shape
+        # shares: fresh, never checked
+        fresh = set()
+        if not morphs:
+            read = {}
+            for place, x in enumerate(others):
+                if not isinstance(x, (numbers.Number, np.ndarray)):
+                    if id(x) not in read:
+                        read[id(x)] = _as_read(x)
+                        if type(x) in (list, tuple):
+                            fresh.add(id(read[id(x)]))
+                    others[place] = read[id(x)]
+
+        # numbers alone, no array among them but fresh ones: nothing a
+        # place changes
+        if not morphs and not any(isinstance(x, np.ndarray) and id(x) not in fresh for x in others):
             return others
 
         # the first place of each shape, for * and / of its offsets' owner;
@@ -505,14 +556,23 @@ class MorphList(DataList[MorphData]):
             else:
                 first.setdefault(id(owner), place)
 
-        copies = {}
+        # an operand with no owner: how far its bounds were compared with
+        # the shapes', and whether one met them, so one held in every
+        # place is compared with each shape once, not once for each pair
+        copies  = {}
+        scanned = {}
         for place, x in enumerate(others):
             if morphs:
                 changed = first.get(id(x), place) < place
-            elif isinstance(x, np.ndarray):
+            elif isinstance(x, np.ndarray) and id(x) not in fresh:
                 owner = _owner(x)
                 if owner is None:
-                    changed = any(np.may_share_memory(x, shape.offsets) for shape in self.list[:place])
+                    at, met = scanned.get(id(x), (0, False))
+                    while not met and at < place:
+                        met = np.may_share_memory(x, self.list[at].offsets)
+                        at += 1
+                    scanned[id(x)] = (at, met)
+                    changed        = met
                 else:
                     changed = first.get(id(owner), place) < place or any(
                         at < place and np.may_share_memory(x, offsets) for at, offsets in loose
@@ -626,8 +686,9 @@ class MorphList(DataList[MorphData]):
         """
         in place, shape by shape: every shape times a number, or each times
         the number a sequence pairs with it; a shape the list holds twice is
-        changed in each place, so twice. An array of a shape's offsets is
-        taken as it was before any shape changed (:meth:`_in_place_operands`).
+        changed in each place, so twice. An operand that is, or holds, a
+        shape's offsets, an array of them or a list of their rows, is taken
+        as it was before any shape changed (:meth:`_in_place_operands`).
         A morph times a morph, a MorphData, or a MorphList shape by shape,
         has no meaning (TypeError), and nothing is changed
         """
@@ -654,8 +715,9 @@ class MorphList(DataList[MorphData]):
         in place, shape by shape: every shape divided by a number, or each
         by the number a sequence pairs with it, as ``*=`` multiplies, so
         ``(shapes * s) / s == shapes``; a shape the list holds twice is
-        changed in each place, so twice. An array of a shape's offsets is
-        taken as it was before any shape changed (:meth:`_in_place_operands`).
+        changed in each place, so twice. An operand that is, or holds, a
+        shape's offsets, an array of them or a list of their rows, is taken
+        as it was before any shape changed (:meth:`_in_place_operands`).
         A morph over a morph has no meaning (TypeError), and nothing is
         changed
         """

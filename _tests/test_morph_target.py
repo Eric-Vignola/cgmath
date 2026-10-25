@@ -30,6 +30,101 @@ SKIN = SkinData(weights=np.array([[1.0]]), influences=["root"])
 SKINS = SkinList([SKIN.copy(), SKIN.copy(), SKIN.copy()])
 
 
+class _Exposed:
+    """an array's memory and nothing else: no sequence, numpy reads it
+    through its __array_interface__"""
+
+    def __init__(self, array):
+        self.__array_interface__ = array.__array_interface__
+        self.array               = array
+
+
+class _ExposedPriorityZero(_Exposed):
+    """the same, its __array_priority__ an array's own, 0: numpy reads it
+    and does not hand it the operation"""
+
+    __array_priority__ = 0.0
+
+
+class _ExposedPriorityBelowZero(_Exposed):
+    """the same, its __array_priority__ below an array's: numpy reads it
+    and does not hand it the operation"""
+
+    __array_priority__ = -1.0
+
+
+class _RowsWithArray(list):
+    """a list subclass of an array's rows that numpy reads through its
+    __array__, the array itself: no python list's new memory"""
+
+    def __init__(self, array):
+        super().__init__(array)
+        self.array = array
+
+    def __array__(self, dtype=None, copy=None):
+        return self.array
+
+
+class _Refusing:
+    """an array numpy may read, in an operand that refuses numpy's
+    operations: numpy raises TypeError where it meets it"""
+
+    __array_ufunc__ = None
+
+    def __array__(self, dtype=None, copy=None):
+        return np.full(3, 2.0)
+
+
+class _Unreadable:
+    """an operand numpy cannot read: its __array__ raises TypeError, which
+    numpy raises where it meets it"""
+
+    def __array__(self, dtype=None, copy=None):
+        raise TypeError("unreadable")
+
+
+class _Deferred:
+    """an array numpy may read, in an operand numpy hands an array's
+    operations to, its __array_priority__ above an array's, though it has
+    no __array_ufunc__: with no * or / of its own, numpy raises TypeError
+    where it meets it"""
+
+    __array_priority__ = 10.0
+
+    def __array__(self, dtype=None, copy=None):
+        return np.full(3, 2.0)
+
+
+class _DeferredOwn(_Deferred):
+    """the same, with a reflected * and / of its own: three times, a third"""
+
+    def __rmul__(self, other):
+        return np.asarray(other) * 3.0
+
+    def __rtruediv__(self, other):
+        return np.asarray(other) / 3.0
+
+
+class _DeferredOnInstance:
+    """the same as _Deferred, its __array_priority__ set on the instance,
+    where numpy reads it too"""
+
+    def __init__(self):
+        self.__array_priority__ = 10.0
+
+    def __array__(self, dtype=None, copy=None):
+        return np.full(3, 2.0)
+
+
+class _OddPriority:
+    """an __array_priority__ numpy cannot read as a float, and ignores"""
+
+    __array_priority__ = "high"
+
+    def __array__(self, dtype=None, copy=None):
+        return np.full(3, 2.0)
+
+
 
 class TestMorphList(unittest.TestCase):
     def setUp(self):
@@ -494,6 +589,31 @@ class TestMorphList(unittest.TestCase):
                 self.assertIs(op(obj, other), obj)
                 self.assertTrue(obj[0] is obj[1] is shape)
                 self.assertEqual(shape.offsets.tolist(), expected)
+        # and two shapes built on one float64 array share it, changed once in
+        # each place, as one shape held twice is: twice; built on an array of
+        # another dtype or on a list, each holds a copy of its own, changed
+        # once, and what they were built on is left as it was
+        for label, op, expected in (
+            ("*= 2", operator.imul, [[4.0, 0.0, 0.0]]),
+            ("/= 2", operator.itruediv, [[0.25, 0.0, 0.0]]),
+        ):
+            with self.subTest(one_array=label):
+                memory = np.array([[1.0, 0.0, 0.0]])
+                obj    = MorphList([MorphData(name=name, offsets=memory, indices=np.array([0])) for name in "ab"])
+                self.assertIs(op(obj, 2), obj)
+                self.assertTrue(obj[0].offsets is obj[1].offsets is memory)
+                self.assertEqual(memory.tolist(), expected)
+        for label, built_on in (
+            ("an int64 array", np.array([[1, 0, 0]], dtype=np.int64)),
+            ("a float32 array", np.array([[1.0, 0.0, 0.0]], dtype=np.float32)),
+            ("a list", [[1.0, 0.0, 0.0]]),
+        ):
+            with self.subTest(one_copy_each=label):
+                obj = MorphList([MorphData(name=name, offsets=built_on, indices=np.array([0])) for name in "ab"])
+                obj *= 2
+                self.assertFalse(np.shares_memory(obj[0].offsets, obj[1].offsets))
+                self.assertEqual([shape.offsets.tolist() for shape in obj], [[[2.0, 0.0, 0.0]]] * 2)
+                self.assertEqual(np.asarray(built_on).tolist(), [[1.0, 0.0, 0.0]])
 
     def test_in_place_takes_the_lists_own_shapes_as_they_were(self):
         # in place, an operand that is, or holds, one of the list's own
@@ -604,6 +724,54 @@ class TestMorphList(unittest.TestCase):
             np.testing.assert_allclose(a.offsets, a0 * 6.0, rtol=0, atol=1e-15)
             np.testing.assert_allclose(b.offsets, b0 * a0, rtol=0, atol=1e-15)
 
+        # and so is a python list or tuple of a shape's rows, a list holding
+        # one, a memoryview of its offsets, or what numpy reads through an
+        # __array_interface__, one whose __array_priority__ is an array's 0
+        # or below too, or a list subclass's __array__: each read as it was,
+        # as the same operation on a copy of the list reads it, the operand
+        # computed first. On 3.0.0 numpy read such an operand only at its
+        # place, a's rows as the place before had left them:
+        # L *= [list(b.offsets), list(a.offsets)] gave b times the a it had
+        # become, [[4, 8, 12], [36, 45, 54]]
+        def two_rows():
+            a = MorphData(name="a", offsets=np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), indices=np.array([0, 1]))
+            b = MorphData(name="b", offsets=np.array([[2.0, 2.0, 2.0], [3.0, 3.0, 3.0]]), indices=np.array([0, 1]))
+            return MorphList([a, b])
+
+        forms = (
+            ("[list(L[1].offsets), list(L[0].offsets)]", lambda L: [list(L[1].offsets), list(L[0].offsets)]),
+            ("[tuple(L[1].offsets), tuple(L[0].offsets)]", lambda L: [tuple(L[1].offsets), tuple(L[0].offsets)]),
+            ("[[L[0].offsets[1]], [L[0].offsets[0]]]", lambda L: [[L[0].offsets[1]], [L[0].offsets[0]]]),
+            ("[2, [L[0].offsets[0], L[0].offsets[1]]]", lambda L: [2.0, [L[0].offsets[0], L[0].offsets[1]]]),
+            ("map(list, [L[1].offsets, L[0].offsets])", lambda L: map(list, [L[1].offsets, L[0].offsets])),
+            ("[2, list(L[0].offsets)]", lambda L: [2.0, list(L[0].offsets)]),
+            ("[2, memoryview(L[0].offsets)]", lambda L: [2.0, memoryview(L[0].offsets)]),
+            ("_Exposed(L[0].offsets)", lambda L: _Exposed(L[0].offsets)),
+            ("[2, _Exposed(L[0].offsets)]", lambda L: [2.0, _Exposed(L[0].offsets)]),
+            ("_ExposedPriorityZero(L[0].offsets)", lambda L: _ExposedPriorityZero(L[0].offsets)),
+            ("_ExposedPriorityBelowZero(L[0].offsets)", lambda L: _ExposedPriorityBelowZero(L[0].offsets)),
+            ("[2, _RowsWithArray(L[0].offsets)]", lambda L: [2.0, _RowsWithArray(L[0].offsets)]),
+        )
+        for sign, op in (("*=", operator.imul), ("/=", operator.itruediv)):
+            for form, operand in forms:
+                with self.subTest(f"L {sign} {form}"):
+                    obj    = two_rows()
+                    shapes = list(obj)
+                    other  = operand(obj)
+                    held   = list(other) if isinstance(other, list) else None
+                    want   = op(obj.copy(), operand(obj))
+                    self.assertIs(op(obj, other), obj)
+                    self.assertTrue(all(x is y for x, y in zip(obj, shapes)))
+                    for got, expected in zip(obj, want):
+                        np.testing.assert_allclose(got.offsets, expected.offsets, rtol=0, atol=1e-15)
+                    # the operand itself left as it was: it holds what it held
+                    if held is not None:
+                        self.assertTrue(all(x is y for x, y in zip(other, held)))
+        with self.subTest("L *= [list(L[1].offsets), list(L[0].offsets)], by hand"):
+            obj = two_rows()
+            obj *= [list(obj[1].offsets), list(obj[0].offsets)]
+            self.assertEqual([shape.offsets.tolist() for shape in obj], [[[2, 4, 6], [12, 15, 18]]] * 2)
+
         # a shape held twice, its operand that shape: changed in each place,
         # each time by the shape as it was, so three times it in all, and b
         # between its two places takes it as it was too
@@ -671,6 +839,63 @@ class TestMorphList(unittest.TestCase):
         self.assertTrue(got[1] is got[2] and got[1] is not view)
         np.testing.assert_array_equal(got[1], view)
 
+        # and each operand with no owner keeps its own comparisons: one from
+        # outside comes back as it is, and one over the first shape's offsets
+        # after it comes back copied, compared from the first shape on, not
+        # from where the other's comparisons stopped
+        outside = as_strided(np.ones((1, 3)))
+        with self.subTest(copies="[2, as_strided(outside), as_strided(L[0].offsets)]"):
+            got = obj._in_place_operands([2.0, outside, as_strided(obj[0].offsets)], "*")
+            self.assertIs(got[1], outside)
+            self.assertFalse(np.shares_memory(got[2], obj[0].offsets))
+
+        # an operand that is no number and no array is read as numpy reads
+        # it, once, before any shape changes: one held in every place is one
+        # array, that of the first shape's offsets copied once for the places
+        # after it, and a list held twice is one array. What numpy reads as
+        # objects, or cannot read, or refuses, or hands its operations to (an
+        # __array_ufunc__, or an __array_priority__ above an array's, on its
+        # class or on itself), comes back as it is: numpy's error raised at
+        # its place, as before, the shapes before it already changed, or the
+        # operand's own operation done, as in a new list. So does one whose
+        # __array_priority__ cannot be compared with 0, which numpy ignores
+        got = obj._in_place_operands(_Exposed(view), "/")
+        self.assertTrue(isinstance(got[0], np.ndarray) and np.shares_memory(got[0], view))
+        self.assertTrue(got[1] is got[2] and not np.shares_memory(got[1], view))
+        np.testing.assert_array_equal(got[1], view)
+        scale  = [1.0, 2.0, 3.0]
+        ragged = [[1.0, 2.0], [3.0]]
+        got    = obj._in_place_operands([scale, scale, None], "*")
+        self.assertTrue(isinstance(got[0], np.ndarray) and got[0] is got[1])
+        np.testing.assert_array_equal(got[0], scale)
+        self.assertIs(got[2], None)
+        self.assertIs(obj._in_place_operands([2.0, ragged, 3.0], "*")[1], ragged)
+        deferred = _Deferred()
+        with self.subTest(read="[2, _Deferred(), 3]"):
+            self.assertIs(obj._in_place_operands([2.0, deferred, 3.0], "*")[1], deferred)
+        odd = _OddPriority()
+        with self.subTest(read="[2, _OddPriority(), 3]"):
+            self.assertIs(obj._in_place_operands([2.0, odd, 3.0], "*")[1], odd)
+        for label, operand, error in (
+            ("L *= [2, None, 2]", [2.0, None, 2.0], TypeError),
+            ("L *= [2, a ragged list, 2]", [2.0, ragged, 2.0], ValueError),
+            ("L *= [2, _Unreadable(), 2]", [2.0, _Unreadable(), 2.0], TypeError),
+            ("L *= [2, _Refusing(), 2]", [2.0, _Refusing(), 2.0], TypeError),
+            ("L *= [2, _Deferred(), 2]", [2.0, _Deferred(), 2.0], TypeError),
+            ("L *= [2, _DeferredOnInstance(), 2]", [2.0, _DeferredOnInstance(), 2.0], TypeError),
+        ):
+            with self.subTest(refused=label):
+                refusing = make(*three)
+                with self.assertRaises(error):
+                    refusing *= operand
+                self.assertEqual([shape.offsets.tolist() for shape in refusing], [[[2, 0, 0]], [[0, 1, 0]], [[0, 0, 1]]])
+        for sign, op, new in (("*=", operator.imul, operator.mul), ("/=", operator.itruediv, operator.truediv)):
+            with self.subTest(deferred=f"L {sign} _DeferredOwn()"):
+                want = new(make(*three), _DeferredOwn())
+                got  = make(*three)
+                self.assertIs(op(got, _DeferredOwn()), got)
+                self.assertEqual([shape.offsets.tolist() for shape in got], [shape.offsets.tolist() for shape in want])
+
         # the rows of an array from outside the list find their owner through
         # .base, so no memory bounds are compared: a list of n shapes takes
         # no n * n checks
@@ -680,11 +905,52 @@ class TestMorphList(unittest.TestCase):
         self.assertEqual(bounds.call_count, 0)
         self.assertTrue(all(x.base is table.base for x in got))
 
-        # and numbers alone, no array among them, look at no memory
+        # and one with no owner held in every place, a memoryview's array or
+        # an __array_interface__ object's, is compared with each shape before
+        # the last place once: n - 1 checks, not one for each pair
+        many = MorphList([MorphData(name=f"s{i}", offsets=np.ones((1, 3)), indices=np.array([0])) for i in range(20)])
+        for label, operand in (
+            ("[memoryview(xyz)] * 20", lambda xyz: [memoryview(xyz)] * 20),
+            ("_Exposed(xyz)", _Exposed),
+        ):
+            with self.subTest(bounds=label):
+                with mock.patch.object(np, "may_share_memory", wraps=np.may_share_memory) as bounds:
+                    got = many._in_place_operands(operand(np.ones(3)), "*")
+                self.assertEqual(bounds.call_count, 19)
+                self.assertTrue(isinstance(got[0], np.ndarray) and all(x is got[0] for x in got))
+
+        # and an exact list's or tuple's rows are read into new memory, which
+        # no shape shares, so they are compared with none, though the shapes'
+        # offsets have no owner: alone they look at no memory, as numbers do,
+        # and beside an array from outside only the owners of that array and
+        # of the 20 shapes are looked for, 21
+        loose = MorphList(
+            [MorphData(name=f"s{i}", offsets=as_strided(np.ones((1, 3))), indices=np.array([0])) for i in range(20)]
+        )
+        for label, operand, owners in (
+            ("[[1, 1, 0]] * 20", [[1.0, 1.0, 0.0]] * 20, 0),
+            ("[(1, 1, i) for i in range(20)]", [(1.0, 1.0, float(i)) for i in range(20)], 0),
+            ("[ones(3)] + [[1, 1, 0]] * 19", [np.ones(3)] + [[1.0, 1.0, 0.0]] * 19, 21),
+        ):
+            with self.subTest(bounds=label):
+                with mock.patch.object(np, "may_share_memory", wraps=np.may_share_memory) as bounds:
+                    with mock.patch.object(morph_target, "_owner", wraps=morph_target._owner) as owner:
+                        loose._in_place_operands(operand, "*")
+                self.assertEqual(bounds.call_count, 0)
+                self.assertEqual(owner.call_count, owners)
+
+        # and numbers alone, no array among them, look at no memory, numpy's
+        # numbers too, and read none as an array; nor does + or -, its
+        # operands morphs
         with mock.patch.object(morph_target, "_owner", wraps=morph_target._owner) as owner:
-            obj *= [1.0, 2.0, 3.0]
-            obj /= 2.0
+            with mock.patch.object(morph_target, "_as_read", wraps=morph_target._as_read) as read:
+                obj *= [1.0, 2.0, 3.0]
+                obj /= 2.0
+                obj *= [np.float32(1.0), np.int64(2), np.float64(0.5)]
+                obj += obj[0]
+                obj -= [c, d, obj[1]]
         self.assertEqual(owner.call_count, 0)
+        self.assertEqual(read.call_count, 0)
 
         # a caller's reference to one of the list's shapes sees the change
         obj   = make(*two)
