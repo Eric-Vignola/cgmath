@@ -2478,8 +2478,13 @@ above it; and the whole rotate curve of a joint an uneven dropped scale
 re-solves on some frames, as `ClipData.load_fbx` says. A file with no
 animation gives a one-frame clip rather than an error.
 
-`ClipData.load_fbx` defaults to the first take that was actually keyed,
-not to index 0, because a file can hold takes with no curves at all.
+`ClipData.load_fbx` defaults to the first take that holds a key, not to
+index 0, because a file can hold takes with no curves at all, or with
+curve nodes and curves but not one key, such as an empty "Take 001"
+ahead of the animation (cgmath 3.0.0 took the first take holding curves,
+keys or not). In a file with no key at all it takes the first take that
+holds curves, then the first take. `take=` picks any take by index, an
+empty one included.
 
 Its frames default to the take's stored span and every key of the take
 together, out to whole frames: an Unreal take, whose span stops a frame

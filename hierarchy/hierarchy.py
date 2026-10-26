@@ -12705,10 +12705,13 @@ class ClipData(HierarchyData):
           Maya's own import of it carries on past the keys as the clip does,
           but for linear and stepped tangents.
 
-        ``take`` defaults to the first one that was actually keyed rather than
-        to index 0, because a file can carry takes holding no curves at all
-        and reading one back gives the rest pose on every frame -- a silent
-        answer that looks like a broken loader rather than an empty take. Pass
+        ``take`` defaults to the first one that holds a key rather than to
+        index 0, then, in a file with no key at all, to the first that holds
+        curves, then to index 0. A file can carry takes holding no curves, or
+        curve nodes and curves with no key on them (an empty "Take 001" ahead
+        of the animation), and reading one back gives the rest pose on every
+        frame -- a silent answer that looks like a broken loader rather than
+        an empty take. The frames left out default to the take picked. Pass
         an index to override, including onto an empty take.
 
         ``start_frame`` and ``end_frame`` are frame numbers on the file's own
@@ -12772,8 +12775,13 @@ class ClipData(HierarchyData):
             # scene's object for one that sits where it did
             stacks = [typed(scene.GetSrcObject(criteria, index), FBX.FbxAnimStack, FBX) for index in range(count)]
 
+            # the first take holding a key, then the first holding curves:
+            # a take can hold curve nodes, curves even, and not one key, and
+            # reads back as the rest pose on every frame
             if take is None:
-                stack = next((x for x in stacks if _fbx_has_curves(x)), stacks[0])
+                stack = next((x for x in stacks if _fbx_key_ticks(x) is not None), None)
+                if stack is None:
+                    stack = next((x for x in stacks if _fbx_has_curves(x)), stacks[0])
             else:
                 if not -count <= take < count:
                     raise IndexError(f"take {take} out of range, the file holds {count}")

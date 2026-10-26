@@ -6225,6 +6225,8 @@ class TestClipLoadFbx(unittest.TestCase):
         keyed_stack = 0,
         layer_keys  = None,
         unit        = None,
+        unkeyed     = None,
+        spans       = None,
     ):
         """a chain of joints, keys given as {joint: {channel: [(sec, value)]}}
 
@@ -6233,7 +6235,11 @@ class TestClipLoadFbx(unittest.TestCase):
         time span, which is what makes an unkeyed one look plausible.
         ``layer_keys``, keys of the same kind, go on a second layer of the
         keyed stack. ``unit`` names the file's ``FbxSystemUnit``, cm when
-        None; the values are written as given, in that unit.
+        None; the values are written as given, in that unit. ``unkeyed``,
+        {stack: kind}, gives a stack that is not keyed a curve node on the
+        first joint's translate, "curve_node" with no curve on it, "curve"
+        with an X curve holding no key, as an empty "Take 001" can hold.
+        ``spans``, {stack: (sec, sec)}, gives a stack its own time span.
         """
         manager = FBX.FbxManager.Create()
         manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
@@ -6285,9 +6291,15 @@ class TestClipLoadFbx(unittest.TestCase):
                                 )
                             curve.KeyModifyEnd()
 
+            elif (unkeyed or {}).get(index):
+                node = nodes[joints[0]]
+                node.LclTranslation.GetCurveNode(layer, True)
+                if unkeyed[index] == "curve":
+                    node.LclTranslation.GetCurve(layer, "X", True)
+
             first, last = FBX.FbxTime(), FBX.FbxTime()
-            first.SetSecondDouble(float(span[0]))
-            last.SetSecondDouble(float(span[1]))
+            first.SetSecondDouble(float((spans or {}).get(index, span)[0]))
+            last.SetSecondDouble(float((spans or {}).get(index, span)[1]))
             stack.SetLocalTimeSpan(FBX.FbxTimeSpan(first, last))
 
         path     = os.path.join(self.tmp.name, name)
@@ -6638,6 +6650,50 @@ class TestClipLoadFbx(unittest.TestCase):
         translate = np.array(clip.frames.translate)[:, 0, 0]
         self.assertGreater(float(np.abs(translate - translate[0]).max()), 1.0)
         self.assertAlmostEqual(float(translate[-1]), 9.0, places=4)
+
+    def test_the_default_take_skips_a_take_whose_curves_hold_no_key(self):
+        """an empty "Take 001" ahead of the animation can hold a curve node,
+        a curve even, and not one key: the default is the keyed take, and so
+        are the frames, where the empty take's wider span would give more
+        """
+        for kind in ("curve_node", "curve"):
+            with self.subTest(kind=kind):
+                path = self.authored(
+                    f"{kind}.fbx",
+                    keys        = {"joint1": {"tx": [(0.0, 0.0), (1.0, 9.0)]}},
+                    stacks      = 2,
+                    keyed_stack = 1,
+                    unkeyed     = {0: kind},
+                    spans       = {0: (0.0, 2.0)},
+                )
+
+                clip      = ClipData.load_fbx(path, fps=4.0)
+                translate = np.array(clip.frames.translate)[:, 0, 0]
+
+                self.assertEqual(clip.frame_count, 5)
+                self.assertAlmostEqual(float(translate[0]), 0.0, places=4)
+                self.assertAlmostEqual(float(translate[-1]), 9.0, places=4)
+
+                # an index still reaches the empty take, at its own span
+                empty = ClipData.load_fbx(path, fps=4.0, take=0)
+                self.assertEqual(empty.frame_count, 9)
+                self.assertTrue(np.allclose(np.array(empty.frames.translate)[:, 0, 0], 0.0))
+
+    def test_with_no_key_the_default_take_is_the_first_holding_curves(self):
+        """no take holds a key: the first holding curves, ahead of index 0,
+        which holds none, and of a later take holding curves too
+        """
+        path = self.authored(
+            stacks      = 3,
+            keyed_stack = -1,
+            unkeyed     = {1: "curve", 2: "curve_node"},
+            spans       = {0: (0.0, 1.0), 1: (0.0, 2.0), 2: (0.0, 3.0)},
+        )
+
+        clip = ClipData.load_fbx(path, fps=4.0)
+
+        self.assertEqual(clip.frame_count, 9)
+        self.assertTrue(np.allclose(np.array(clip.frames.translate)[:, 0, 1], 1.0))
 
     def test_an_explicit_take_still_reaches_an_empty_one(self):
         """the default is a convenience, not a filter -- indexes stay literal"""
