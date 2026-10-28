@@ -10787,12 +10787,19 @@ def _frame_property(channel: str) -> property:
 def _frame_component(channel: str, axis: int) -> property:
     """builds the x / y / z accessor for one framed channel
 
-    One node reads back as (F, 1), and a flat list of F values writes it
-    the same way.
+    A read is a copy, a new array every time, so ``+=`` works on it and a
+    write to it changes nothing until it is assigned back. One node reads
+    back as (F, 1), and a flat list of F values writes it the same way.
     """
 
     def getter(self) -> np.ndarray:
-        return np.ascontiguousarray(getattr(self, channel)[..., axis])
+        # always a copy: the channel read is read only (on the whole axis a
+        # view of the clip, on a scoped axis a copy), and its slice is
+        # contiguous already for one frame of one node or for no node, and
+        # can be on a block not in C order (one node over every frame of a
+        # Fortran-ordered block, say), so a copy made only when the slice is
+        # not would hand it back read only
+        return getattr(self, channel)[..., axis].copy()
 
     def setter(self, value) -> None:
         current = np.array(getattr(self, channel))
@@ -10828,6 +10835,12 @@ class _FrameAxis:
     Only what the axis defines can be written. Each ``clip.frames`` is a new
     axis, so a write to anything else, ``clip.frames.rotate_order = 0`` say,
     would land on a throwaway object and change nothing; it raises instead.
+
+    A channel read, ``rotate`` say, is read only: on the whole axis it is a
+    view of the clip, which an edit in place would change without rebinding
+    the nodes, and on a scoped axis a copy, which would lose the edit. A
+    component read, ``rotate_y``, is a copy of its own, so ``+=`` works on a
+    component on any clip and any scope and writes back through it.
 
     An axis can be held across an edit that reorders the clip's nodes: it
     keeps its nodes' uuids, not their positions, and lines the clip up with

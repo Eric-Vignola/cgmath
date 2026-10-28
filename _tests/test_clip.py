@@ -2,6 +2,7 @@ import contextlib
 import copy
 import itertools
 import json as std_json
+import operator
 import os
 import pickle
 import sys
@@ -4927,6 +4928,229 @@ class TestClipScopedFrames(unittest.TestCase):
         view = self.clip.frames["j1"].translate
         with self.assertRaises(ValueError):
             view[0, 0, 0] = 1.0
+
+
+class TestClipFrameComponentCopies(unittest.TestCase):
+    """a component read on the frame axis is a new array whatever the clip's
+    size, so ``+=`` works on it
+
+    A 1-frame clip with one node in scope used to hand back a read-only slice
+    of the channel read, its one value being contiguous already, and
+    ``clip.frames["knee"].rotate_y += 5`` raised "output array is
+    read-only". An empty scope, a match of no node say, did the same on a
+    clip of any length, a slice of no value being contiguous too, and so did
+    a clip whose blocks are not in C order, where a slice of many values,
+    one node over every frame, can be contiguous.
+    """
+
+    # each framed channel, and Maya's short name of it before the x, y or z
+    CHANNELS = {
+        "scale":        "s",
+        "rotate":       "r",
+        "translate":    "t",
+        "rotate_axis":  "ra",
+        "joint_orient": "jo",
+    }
+
+    # the ops ``+=``, ``-=``, ``*=`` and ``/=`` run, in turn
+    OPS = (
+        (operator.iadd, 5.0),
+        (operator.isub, 2.0),
+        (operator.imul, 3.0),
+        (operator.itruediv, 4.0),
+    )
+
+    @classmethod
+    def components(cls):
+        """(channel, axis, component name, Maya's short name) for each of
+        the 15 components"""
+        for channel, short in cls.CHANNELS.items():
+            for axis, letter in enumerate("xyz"):
+                yield channel, axis, f"{channel}_{letter}", f"{short}{letter}"
+
+    @classmethod
+    def clip(cls, frames: int, count: int = 4) -> ClipData:
+        """a ``frames`` frame clip of a ``count`` joint chain, every value of
+        every channel its own"""
+        clip  = ClipData(chain(count), frames=frames)
+        shape = (frames, count, 3)
+        for i, channel in enumerate(cls.CHANNELS):
+            values = np.arange(np.prod(shape), dtype=float).reshape(shape)
+            setattr(clip.frames, channel, 1.0 + i + values / 8.0)
+        return clip
+
+    @staticmethod
+    def augment(axis, name: str, op, value: float) -> None:
+        """``axis.<name> op= value``, run as Python runs it: the read, the op
+        in place on what was read, the write back"""
+        setattr(axis, name, op(getattr(axis, name), value))
+
+    def test_one_frame_one_node_takes_every_in_place_op(self):
+        """+=, -=, *= and /= on each component of a 1-frame clip's one
+        named node, and on its Maya short name: each writes the clip's block
+        and the node bound to the frame reads it"""
+        for channel, axis, long, short in self.components():
+            for name in (long, short):
+                with self.subTest(name=name):
+                    clip   = self.clip(1)
+                    scoped = clip.frames["j2"]
+                    want   = np.array(getattr(clip.frames, channel))
+
+                    for op, value in self.OPS:
+                        self.augment(scoped, name, op, value)
+                        want[0, 2, axis] = op(want[0, 2, axis], value)
+
+                        self.assertTrue(np.array_equal(getattr(clip.frames, channel), want))
+                        self.assertEqual(getattr(clip["j2"], channel)[axis], want[0, 2, axis])
+                        self.assertEqual(getattr(scoped, name).tolist(), [[want[0, 2, axis]]])
+
+    def test_one_node_in_scope_any_way_takes_an_in_place_op(self):
+        """a list of one name or one index, a match of one node, and the
+        whole axis of a one-node rig, all on a 1-frame clip"""
+        scopes = {
+            "a list of one name":  (4, 2, lambda clip: clip.frames[["j2"]]),
+            "a list of one index": (4, 2, lambda clip: clip.frames[[2]]),
+            "a match of one node": (4, 2, lambda clip: clip.frames.match("j2")),
+            "a one-node rig":      (1, 0, lambda clip: clip.frames),
+        }
+        for label, (count, column, scope) in scopes.items():
+            for channel, axis, name, _ in self.components():
+                with self.subTest(scope=label, name=name):
+                    clip = self.clip(1, count)
+                    want = np.array(getattr(clip.frames, channel))
+                    want[0, column, axis] += 5.0
+
+                    self.augment(scope(clip), name, operator.iadd, 5.0)
+
+                    node = clip[column]
+                    self.assertTrue(np.array_equal(getattr(clip.frames, channel), want))
+                    self.assertEqual(getattr(node, channel)[axis], want[0, column, axis])
+
+    def test_an_empty_scope_takes_an_in_place_op(self):
+        """an empty list and a match of no node on a 3-frame clip: ``+=``
+        changes no channel, and the read is a writeable (3, 0)"""
+        scopes = {
+            "an empty list":      lambda clip: clip.frames[[]],
+            "a match of no node": lambda clip: clip.frames.match("none*", exact=False),
+        }
+        for label, scope in scopes.items():
+            for channel, axis, name, _ in self.components():
+                with self.subTest(scope=label, name=name):
+                    clip   = self.clip(3)
+                    before = {key: np.array(getattr(clip.frames, key)) for key in self.CHANNELS}
+
+                    self.augment(scope(clip), name, operator.iadd, 5.0)
+
+                    for key, block in before.items():
+                        self.assertTrue(np.array_equal(getattr(clip.frames, key), block))
+
+                    got = getattr(scope(clip), name)
+                    self.assertTrue(got.flags.writeable)
+                    self.assertEqual(got.shape, (3, 0))
+
+    @staticmethod
+    def planes(block: np.ndarray) -> np.ndarray:
+        """``block`` with each component in a C-ordered (F, N) plane of its
+        own, seen as (F, N, 3)"""
+        return np.moveaxis(np.ascontiguousarray(np.moveaxis(block, -1, 0)), 0, -1)
+
+    def test_blocks_not_in_c_order_take_an_in_place_op(self):
+        """clips loaded from trees whose blocks are not in C order, where a
+        component's slice of the whole axis, many values, is contiguous: a
+        3-frame, 1-node and a 1-frame, 4-node clip of Fortran-ordered blocks,
+        and a 3-frame, 2-node clip with each component in a plane of its own.
+        ``+=`` writes the block and the node, and the read is writeable and
+        its own"""
+        clips = (
+            ("Fortran", np.asfortranarray, 3, 1),
+            ("Fortran", np.asfortranarray, 1, 4),
+            ("planes", self.planes, 3, 2),
+        )
+        for order, layout, frames, count in clips:
+            for channel, axis, name, _ in self.components():
+                with self.subTest(order=order, frames=frames, count=count, name=name):
+                    tree           = self.clip(frames, count).to_dict()
+                    tree["blocks"] = {key: layout(block) for key, block in tree["blocks"].items()}
+                    clip           = ClipData.from_dict(tree)
+                    read           = getattr(clip.frames, channel)
+                    want           = np.array(read)
+                    want[..., axis] += 5.0
+
+                    # the case itself: the loaded block keeps the order it was
+                    # given, and a component's slice of it is contiguous
+                    self.assertFalse(read.flags.c_contiguous)
+                    self.assertTrue(read[..., axis].flags.c_contiguous)
+
+                    self.augment(clip.frames, name, operator.iadd, 5.0)
+
+                    self.assertTrue(np.array_equal(getattr(clip.frames, channel), want))
+                    self.assertEqual(getattr(clip[0], channel)[axis], want[0, 0, axis])
+
+                    got = getattr(clip.frames, name)
+                    self.assertTrue(got.flags.writeable)
+                    self.assertFalse(np.shares_memory(got, getattr(clip.frames, channel)))
+
+    def test_a_component_read_is_a_new_array(self):
+        """writeable and its own: writing it changes nothing until it is
+        assigned back. float64, (F, n) and C-contiguous as before; the
+        channel read it comes from stays read only"""
+        cases = {
+            "1 frame, one node by name":  (1, 4, lambda clip: clip.frames["j2"], 1),
+            "1 frame, a one-node rig":    (1, 1, lambda clip: clip.frames, 1),
+            "1 frame, every node":        (1, 4, lambda clip: clip.frames, 4),
+            "6 frames, one node by name": (6, 4, lambda clip: clip.frames["j2"], 1),
+            "6 frames, two nodes":        (6, 4, lambda clip: clip.frames[["j1", "j3"]], 2),
+            "6 frames, every node":       (6, 4, lambda clip: clip.frames, 4),
+        }
+        for label, (frames, count, scope, columns) in cases.items():
+            for channel, axis, name, _ in self.components():
+                with self.subTest(case=label, name=name):
+                    clip   = self.clip(frames, count)
+                    scoped = scope(clip)
+                    before = np.array(getattr(clip.frames, channel))
+                    view   = getattr(scoped, channel)
+                    got    = getattr(scoped, name)
+
+                    self.assertFalse(view.flags.writeable)
+                    self.assertTrue(got.flags.writeable)
+                    self.assertTrue(got.flags.c_contiguous)
+                    self.assertEqual(got.dtype, np.float64)
+                    self.assertEqual(got.shape, (frames, columns))
+                    self.assertTrue(np.array_equal(got, view[..., axis]))
+                    self.assertFalse(np.shares_memory(got, getattr(clip.frames, channel)))
+
+                    got[...] = -1.0
+                    self.assertTrue(np.array_equal(getattr(clip.frames, channel), before))
+                    self.assertTrue(np.array_equal(getattr(scoped, name), view[..., axis]))
+                    self.assertEqual(getattr(clip[0], channel)[axis], before[0, 0, axis])
+
+    def test_a_longer_clip_and_several_nodes_read_and_augment_as_before(self):
+        """each component read is the channel's slice, value for value, and
+        ``+=`` adds to the nodes in scope alone"""
+        scopes = {
+            "every node":           (None, lambda clip: clip.frames),
+            "two nodes by name":    ([1, 3], lambda clip: clip.frames[["j1", "j3"]]),
+            "one node by name":     ([2], lambda clip: clip.frames["j2"]),
+            "a match of two nodes": ([0, 1], lambda clip: clip.frames.match("j[01]", exact=False)),
+        }
+        for label, (columns, scope) in scopes.items():
+            for channel, axis, name, short in self.components():
+                with self.subTest(scope=label, name=name):
+                    clip   = self.clip(6)
+                    block  = np.array(getattr(clip.frames, channel))
+                    scoped = scope(clip)
+                    cut    = block if columns is None else block[:, columns]
+
+                    self.assertTrue(np.array_equal(getattr(scoped, name), cut[..., axis]))
+                    self.assertTrue(np.array_equal(getattr(scoped, short), cut[..., axis]))
+
+                    self.augment(scoped, name, operator.iadd, 5.0)
+                    want = block.copy()
+                    if columns is None:
+                        want[..., axis] += 5.0
+                    else:
+                        want[:, columns, axis] += 5.0
+                    self.assertTrue(np.array_equal(getattr(clip.frames, channel), want))
 
 
 class TestClipFramedReads(unittest.TestCase):

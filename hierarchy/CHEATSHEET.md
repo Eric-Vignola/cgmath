@@ -1288,7 +1288,7 @@ except IndexError as error:
 |---|---|
 | `clip.frames.translate` | `(F, N, 3)` block, **read only** |
 | `clip.frames.translate = values` | write the whole block |
-| `clip.frames.translate_y` | `(F, N)` one component |
+| `clip.frames.translate_y` | `(F, N)` one component, a copy |
 | `clip.frames[12]` | scrubs to 12 and returns the clip itself |
 | `clip.frames[12] = pose` | writes one pose |
 | `clip.frames[10:20]` | a new 10-frame clip cut out of the range (always a copy) |
@@ -1326,12 +1326,19 @@ clip.frames.rotate_y += 5.0                     # components work in place
 
 ### Components
 
-Each framed channel has `_x`, `_y`, `_z`, shaped `(F, N)`.
+Each framed channel has `_x`, `_y`, `_z`, shaped `(F, N)`. A read is a
+copy, a new array every time: `+=` works on it whatever the clip and the
+scope, one frame of one node included, and writing into it changes
+nothing until it is assigned back.
 
 ```python
 clip.frames.translate_y.shape                   # (6, 3)
 clip.frames.translate_y = np.zeros((6, 3))
 assert np.allclose(clip.frames.translate[..., 1], 0.0)
+
+one = ClipData(make_chain(), frames=1)
+one.frames["knee"].rotate_y += 5.0              # one frame of one node
+assert one["knee"].rotate_y == 5.0
 ```
 
 ### Scoping to nodes
