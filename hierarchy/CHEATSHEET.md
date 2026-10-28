@@ -2495,6 +2495,22 @@ more than one float32 spacing off, adds the frame after it. Either way
 such a clip's tail is inside the grid. Keys all within one float32
 spacing of each other give one frame, on the earliest key.
 
+A held (STEP) key shows from the frame it was keyed for: a key time up to
+one float32 spacing after a frame's time, the spacing taken at the key
+time as for the count, counts as on that frame, and of two keys on one
+frame that way the later shows. A key exactly on a frame keeps it, though
+a second key sits a spacing after it, so a one-frame clip of two such keys
+shows the first. Exactly on a frame means on the grid's time, which starts
+on the earliest key's float32 time; when that time rounded, a key on its
+authored frame can sit a hair before the grid's frame, and a second key up
+to a spacing after the frame then shows there, as any key stored a hair
+late does. The grid's first key is float32 too, so a key truly between
+frames is taken in up to about two spacings after a frame: in clips up to
+40 minutes in, 0.01 frame after one at 60 fps from 17 minutes in and at
+any rate from 34, never 0.03 frame or more. A key further off, such as
+half a frame, shows from the next frame on. LINEAR and CUBICSPLINE
+channels are sampled at the grid's times as they are.
+
 `ClipData.load_fbx` defaults to the first take that holds a key, not to
 index 0, because a file can hold takes with no curves at all, or with
 curve nodes and curves but not one key, such as an empty "Take 001"

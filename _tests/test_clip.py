@@ -5955,7 +5955,11 @@ class TestClipLoadGlb(unittest.TestCase):
         nodes         = ("joint1",),
         target        = 0,
     ):
-        """writes a glb of one animated node, returning the path"""
+        """writes a glb of one animated node, returning the path
+
+        ``times`` and ``interpolation`` are one for every channel, or a dict
+        of them by path, for channels keyed apart
+        """
         blob = b""
         views, accessors, samplers, channels = [], [], [], []
 
@@ -5978,8 +5982,10 @@ class TestClipLoadGlb(unittest.TestCase):
             )
             return len(accessors) - 1
 
+        def by_path(setting, path):
+            return setting[path] if isinstance(setting, dict) else setting
+
         if times is not None:
-            keys = accessor(np.asarray(times, dtype=np.float32).ravel(), "SCALAR")
             for values, kind, path in (
                 (translation, "VEC3", "translation"),
                 (rotation, "VEC4", "rotation"),
@@ -5987,11 +5993,12 @@ class TestClipLoadGlb(unittest.TestCase):
             ):
                 if values is None:
                     continue
+                keys = np.asarray(by_path(times, path), dtype=np.float32).ravel()
                 samplers.append(
                     AnimationSampler(
-                        input         = keys,
+                        input         = accessor(keys, "SCALAR"),
                         output        = accessor(values, kind),
-                        interpolation = interpolation,
+                        interpolation = by_path(interpolation, path),
                     )
                 )
                 channels.append(
@@ -6238,7 +6245,8 @@ class TestClipLoadGlb(unittest.TestCase):
         shows on its frame, a linear channel ends exactly on its last key,
         and so does a ragged tail the snap takes in late in a long clip.
         The other frames stay on the grid, and a one frame clip stays on the
-        earliest key
+        earliest key, a held channel's too, though its second key sits one
+        float32 spacing later
         """
 
         def load(times, interpolation, fps):
@@ -6273,8 +6281,12 @@ class TestClipLoadGlb(unittest.TestCase):
                 self.assertEqual(tx[-1], len(keys) - 1)
                 self.assertTrue(np.allclose(tx[:-1], want, rtol=0.0, atol=1e-12))
 
-        # two keys one float32 spacing apart are one frame
+        # two keys one float32 spacing apart are one frame, on the earliest
+        # key: a linear channel gives that key, and so does a held one, the
+        # earliest key being exactly on the frame
         hair = float(np.nextafter(np.float32(10.0), np.float32(11.0)))
+        _, tx = load([10.0, hair], "LINEAR", 24.0)
+        self.assertEqual(tx.tolist(), [0.0])
         _, tx = load([10.0, hair], "STEP", 24.0)
         self.assertEqual(tx.tolist(), [0.0])
 
@@ -6355,6 +6367,255 @@ class TestClipLoadGlb(unittest.TestCase):
                 clip = ClipData.load_glb(path, scale_factor=1.0, fps=fps)
 
                 self.assertEqual(clip.frame_count, want)
+
+    def test_a_step_key_shows_on_the_frame_it_was_keyed_for(self):
+        """glTF stores key times as float32 seconds, so a key on a frame
+        often reads back a hair after that frame's time on the grid; a held
+        (STEP) key still shows from its own frame, not from the next one.
+        Keys on every frame, and on a few, at 24, 30, 60 and 30000/1001
+        fps, from the start, 13 frames and three minutes in, and at 60 fps
+        17, 18, 20 and 40 minutes in, where float32 spaces its times
+        furthest apart: frame k shows the last key keyed on or before it
+        """
+        late = []
+        for fps in (24.0, 30.0, 60.0, 30000.0 / 1001.0):
+            starts = [0, 13, round(180 * fps) + 7]
+            if fps == 60.0:
+                starts += [61203, 66000, 71999, 144005]
+
+            for start, keyed in itertools.product(
+                starts, (np.arange(61.0), np.array([0.0, 3.0, 10.0, 17.0, 40.0]))
+            ):
+                path = self.build(
+                    times         = np.float32((start + keyed) / fps),
+                    translation   = [[float(i), 0.0, 0.0] for i in range(len(keyed))],
+                    interpolation = "STEP",
+                )
+
+                clip = ClipData.load_glb(path, scale_factor=1.0, fps=fps)
+
+                tx   = np.array(clip.frames.translate)[:, 0, 0]
+                want = np.searchsorted(keyed, np.arange(keyed[-1] + 1), side="right") - 1
+                self.assertEqual(clip.frame_count, len(want))
+                if np.any(tx != want):
+                    off = int(np.count_nonzero(tx != want))
+                    late.append((round(fps, 2), start, len(keyed), off))
+
+        self.assertEqual(
+            late, [], "(fps, first frame, keys, frames showing the key before)"
+        )
+
+    def test_a_step_key_one_float32_spacing_late_is_on_its_frame(self):
+        """the snap is one float32 spacing taken at the key time, both ends
+        included, and no more. At 32 fps every time here is exact. A key
+        one spacing after frame 1's time shows on frame 1, and so does a
+        key on 1024 s after a frame 1 at 1024 s less that spacing: below
+        1024 s float32 spaces its times half as far, so the frame time's
+        own spacing would not reach the key. A key two spacings after frame
+        1 shows from frame 2. Before 0 the spacing is the key time's size
+        too: a key one spacing after a frame 1 at -1024.03125 s shows on it
+        (glTF wants no time before 0, but a file can hold one). And a frame
+        before a held channel's first key shows that key, and so does that
+        key's own frame, though a second key sits one spacing after it. At
+        24 fps float32 stores the key on frame 5 a hair before the frame's
+        time: a key a hair before its frame is not exactly on it, so a key
+        one spacing after it shows there
+        """
+        fps  = 32.0
+        step = float(np.spacing(np.float32(1024.0)))
+        for times, want in (
+            ([1024.0 - step - 1.0 / fps, 1024.0, 1024.0 + 2.0 / fps - step], [0, 1, 1, 2]),
+            ([1024.0, 1024.0 + 1.0 / fps + step, 1024.0 + 4.0 / fps], [0, 1, 1, 1, 2]),
+            ([1024.0, 1024.0 + 1.0 / fps + 2.0 * step, 1024.0 + 4.0 / fps], [0, 0, 1, 1, 2]),
+            ([-1024.0 - 2.0 / fps, -1024.0 - 1.0 / fps + step, -1024.0 + 1.0 / fps], [0, 1, 1, 2]),
+        ):
+            with self.subTest(times=times):
+                self.assertTrue(np.array_equal(np.float32(times), times))
+                path = self.build(
+                    times         = times,
+                    translation   = [[float(i), 0.0, 0.0] for i in range(3)],
+                    interpolation = "STEP",
+                )
+
+                clip = ClipData.load_glb(path, scale_factor=1.0, fps=fps)
+
+                tx   = np.array(clip.frames.translate)[:, 0, 0]
+                self.assertEqual(tx.tolist(), want)
+
+        # keys on frames 0 to 10 at 24 fps, float32 times, and a second key
+        # one spacing after the key on frame 5, which float32 stores 5e-9 s
+        # before the frame's time on the grid
+        keys = np.float32(np.arange(11.0) / 24.0)
+        keys = np.insert(keys, 6, np.nextafter(keys[5], np.float32(np.inf)))
+        with self.subTest(fps=24.0, rounded_down="frame 5"):
+            self.assertLess(float(keys[5]), float(keys[0]) + 5.0 / 24.0)
+            path = self.build(
+                times         = keys,
+                translation   = [[float(i), 0.0, 0.0] for i in range(12)],
+                interpolation = "STEP",
+            )
+
+            clip = ClipData.load_glb(path, scale_factor=1.0, fps=24.0)
+
+            tx   = np.array(clip.frames.translate)[:, 0, 0]
+            self.assertEqual(tx.tolist(), [0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11])
+
+        # the scale channel starts the grid two frames before the held one,
+        # whose first key is exactly on frame 2
+        held = 1024.0 + 2.0 / fps
+        path = self.build(
+            times={
+                "translation": [held, held + step, 1024.0 + 4.0 / fps],
+                "scale":       [1024.0, 1024.0 + 4.0 / fps],
+            },
+            translation   = [[float(i), 0.0, 0.0] for i in range(3)],
+            scale         = [[1.0, 1.0, 1.0]] * 2,
+            interpolation = {"translation": "STEP", "scale": "LINEAR"},
+        )
+
+        clip = ClipData.load_glb(path, scale_factor=1.0, fps=fps)
+
+        tx   = np.array(clip.frames.translate)[:, 0, 0]
+        self.assertEqual(tx.tolist(), [0, 0, 0, 1, 2])
+
+    def test_keys_exactly_on_frames_read_as_before(self):
+        """keys whose float32 time is their frame's time exactly, every
+        third frame at 24 fps (eighths of a second) and every frame at 8
+        fps, from 0 and 1024 s in, and at 8 fps also from 1024 s before 0
+        (glTF wants no time before 0, but a file can hold one): a held key
+        shows from its frame on, and a linear channel gives each key's own
+        value on its frame, bit for bit, as before
+        """
+        rng = np.random.default_rng(3)
+        for fps, every, start in (
+            (24.0, 3, 0.0),
+            (24.0, 3, 1024.0),
+            (8.0, 1, 0.0),
+            (8.0, 1, 1024.0),
+            (8.0, 1, -1024.0),
+        ):
+            keys   = start + np.arange(13.0) * every / fps
+            values = np.float32(rng.uniform(-5.0, 5.0, size=(13, 3))).astype(float)
+            self.assertTrue(np.array_equal(np.float32(keys), keys))
+
+            for interpolation in ("STEP", "LINEAR"):
+                with self.subTest(fps=fps, start=start, interpolation=interpolation):
+                    path = self.build(
+                        times         = keys,
+                        translation   = values,
+                        interpolation = interpolation,
+                    )
+
+                    clip = ClipData.load_glb(path, scale_factor=1.0, fps=fps)
+
+                    translate = np.array(clip.frames.translate)[:, 0]
+                    self.assertEqual(clip.frame_count, 12 * every + 1)
+                    self.assertEqual(translate[::every].tolist(), values.tolist())
+                    if interpolation == "STEP":
+                        held = np.repeat(values, every, axis=0)[: clip.frame_count]
+                        self.assertEqual(translate.tolist(), held.tolist())
+
+    def test_a_step_key_exactly_on_its_frame_keeps_it(self):
+        """a held key whose float32 time is its frame's time exactly keeps
+        that frame, as before and as glTF's own sampler gives, though a
+        second key sits one float32 spacing after it: the snap is for keys
+        float32 stored late. Keys on frames 0 to 16 at 32 fps, every time
+        exact, from 1 s, 1024 s in and 1024 s before 0, the key on frame 8
+        followed by one a spacing after it: frame 8 shows its own key and
+        the later key shows on no frame
+        """
+        fps = 32.0
+        for start in (1.0, 1024.0, -1024.0):
+            with self.subTest(start=start):
+                keys = start + np.arange(17.0) / fps
+                twin = np.nextafter(np.float32(keys[8]), np.float32(np.inf))
+                keys = np.insert(keys, 9, float(twin))
+                self.assertTrue(np.array_equal(np.float32(keys), keys))
+                path = self.build(
+                    times         = keys,
+                    translation   = [[float(i), 0.0, 0.0] for i in range(18)],
+                    interpolation = "STEP",
+                )
+
+                clip = ClipData.load_glb(path, scale_factor=1.0, fps=fps)
+
+                tx   = np.array(clip.frames.translate)[:, 0, 0]
+                self.assertEqual(tx.tolist(), list(range(9)) + list(range(10, 18)))
+
+    def test_linear_and_cubic_channels_beside_a_held_one_read_as_before(self):
+        """the snap is a held channel's alone: a linear and a cubic channel
+        keyed on every frame beside a held one, float32 times, at 24 fps
+        from the start and at 60 fps 18 minutes in, give the glTF sampler's
+        values at the grid's times, bit for bit, as before
+        """
+        rng = np.random.default_rng(5)
+
+        def sampled(keys, values, times, cubic):
+            # the glTF sampler in the loader's own arithmetic, so the
+            # comparison can be exact: the segment of the last key at or
+            # before each time, the last segment for a time on the last key
+            right = np.clip(np.searchsorted(keys, times, side="right"), 1, len(keys) - 1)
+            left  = right - 1
+            span  = keys[right] - keys[left]
+            u     = ((times - keys[left]) / span)[:, None]
+            if not cubic:
+                return values[left] + (values[right] - values[left]) * u
+
+            uu  = u * u
+            uuu = uu * u
+            return (
+                (2.0 * uuu - 3.0 * uu + 1.0) * values[left, 1]
+                + (uuu - 2.0 * uu + u) * (span[:, None] * values[left, 2])
+                + (-2.0 * uuu + 3.0 * uu) * values[right, 1]
+                + (uuu - uu) * (span[:, None] * values[right, 0])
+            )
+
+        for fps, start in ((24.0, 0), (60.0, 66000)):
+            keys = np.float32((start + np.arange(25.0)) / fps).astype(float)
+            for interpolation, width in (("LINEAR", 1), ("CUBICSPLINE", 3)):
+                with self.subTest(fps=fps, interpolation=interpolation):
+                    values = rng.uniform(-5.0, 5.0, size=(25 * width, 3))
+                    values = np.float32(values).astype(float)
+                    path = self.build(
+                        times         = keys,
+                        translation   = values,
+                        scale         = [[float(i + 1), 1.0, 1.0] for i in range(25)],
+                        interpolation = {"translation": interpolation, "scale": "STEP"},
+                    )
+
+                    clip = ClipData.load_glb(path, scale_factor=1.0, fps=fps)
+
+                    times     = keys[0] + np.arange(clip.frame_count) / fps
+                    times[-1] = max(times[-1], keys[-1])
+                    if width == 3:
+                        values = values.reshape(25, 3, 3)
+                    want = sampled(keys, values, np.clip(times, keys[0], keys[-1]), width == 3)
+
+                    self.assertEqual(clip.frame_count, 25)
+                    self.assertTrue(
+                        np.array_equal(np.array(clip.frames.translate)[:, 0], want)
+                    )
+
+    def test_a_step_key_off_its_frame_shows_from_the_frame_after(self):
+        """a key truly between frames is no rounding: half, a quarter and a
+        twentieth of a frame after frame 4, at 24 fps from the start and at
+        60 fps 18 minutes in, frame 4 still shows the key before it and
+        frame 5 the key
+        """
+        for (fps, start), off in itertools.product(
+            ((24.0, 0.0), (60.0, 66000.0)), (0.5, 0.25, 0.05)
+        ):
+            with self.subTest(fps=fps, start=start, off=off):
+                path = self.build(
+                    times         = np.float32((start + np.array([0.0, 4.0 + off, 9.0])) / fps),
+                    translation   = [[float(i), 0.0, 0.0] for i in range(3)],
+                    interpolation = "STEP",
+                )
+
+                clip = ClipData.load_glb(path, scale_factor=1.0, fps=fps)
+
+                tx   = np.array(clip.frames.translate)[:, 0, 0]
+                self.assertEqual(tx.tolist(), [0.0] * 5 + [1.0] * 4 + [2.0])
 
 
 @unittest.skipIf(pygltflib is None, "pygltflib is not installed")

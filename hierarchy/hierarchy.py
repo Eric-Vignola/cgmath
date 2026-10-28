@@ -204,6 +204,16 @@ def _sample_gltf(sampler, times: np.ndarray, width: int) -> np.ndarray:
     glTF keys every property on its own timeline, so a frame grid has to be
     interpolated rather than read off. Outside the authored range the first
     and last keys hold.
+
+    A held (STEP) key shows from the frame it was keyed for. glTF stores
+    key times as float32 seconds, and the rounding of a key and of the
+    grid's first key can put a key on a frame up to one float32 spacing
+    after that frame's time, so a time within one spacing before a key, the
+    spacing taken at the key time, counts as on the key; of two keys on one
+    time that way, the later shows. A key exactly on a time keeps it, as
+    glTF's own sampler gives, though a second key sits a spacing after it.
+    A key further off, half a frame say, shows from the next time on.
+    Linear and cubic samplers are read at the times as given.
     """
     keys   = np.asarray(sampler.keyframe_times, dtype=float).ravel()
     values = np.asarray(sampler.keyframe_values, dtype=float)
@@ -226,11 +236,19 @@ def _sample_gltf(sampler, times: np.ndarray, width: int) -> np.ndarray:
 
     if sampler.interpolation == "STEP":
         # a held key owns the instant it lands on, including the last one,
-        # so this indexes the key rather than the segment ahead of it
-        held = np.clip(
-            np.searchsorted(keys, clamped, side="right") - 1, 0, len(keys) - 1
+        # so this indexes the key rather than the segment ahead of it, and
+        # the times up to one float32 spacing of the key time before it.
+        # The times go in unclamped: one before the first key shows that
+        # key, even with a second key within a spacing of it. A key exactly
+        # on a time keeps it, though a second key sits a spacing after it
+        early = keys - np.spacing(np.abs(keys).astype(np.float32)).astype(float)
+        snapped = np.clip(
+            np.searchsorted(early, times, side="right") - 1, 0, len(keys) - 1
         )
-        return values[held]
+        plain = np.clip(
+            np.searchsorted(keys, times, side="right") - 1, 0, len(keys) - 1
+        )
+        return values[np.where(keys[plain] == times, plain, snapped)]
 
     if cubic:
         # the spec scales the tangents by the segment length
@@ -12264,6 +12282,24 @@ class ClipData(HierarchyData):
         of two frames or more ends on or past its last key, so the tail of
         the animation is inside the grid. Keys all within one float32
         spacing of each other give one frame, on the earliest key.
+
+        A held (STEP) key shows from the frame it was keyed for. float32
+        can store it a hair after that frame's time, so a key up to one
+        float32 spacing after a frame, the spacing taken at the key time as
+        for the count, counts as on that frame, and of two keys on one
+        frame that way the later shows. A key exactly on a frame keeps it,
+        though a second key sits a spacing after it, so a one frame clip of
+        two such keys shows the first. Exactly on a frame means on the
+        grid's time, which starts on the earliest key's float32 time; when
+        that time rounded, a key on its authored frame can sit a hair before
+        the grid's frame, and a second key up to a spacing after the frame
+        then shows there, as any key stored a hair late does. The grid's
+        first key is float32 too, so a key truly between frames is taken in
+        up to about two spacings after a frame: in clips up to 40 minutes
+        in, 0.01 frame after one at 60 fps from 17 minutes in and at any
+        rate from 34, never 0.03 frame or more. A key further after a frame,
+        half a frame say, shows from the next frame on. Linear and cubic
+        channels are sampled at the grid's times as they are.
 
         A file with no animation gives a one frame clip rather than an
         error -- it is an accurate reading of a rig that does not move.
