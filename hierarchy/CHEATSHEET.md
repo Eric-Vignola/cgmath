@@ -2490,26 +2490,34 @@ frames give exactly that many frames, both ends included — keys at frames
 0 and 24 give 25 — although glTF stores key times as float32 seconds, a
 hair off the frames. When the last key of a clip of two frames or more
 sits a hair after the last frame, the frame is sampled on the key itself,
-so a held (STEP) last key still shows. A last key further between frames,
-more than one float32 spacing off, adds the frame after it. Either way
-such a clip's tail is inside the grid. Keys all within one float32
-spacing of each other give one frame, on the earliest key.
+so a held (STEP) last key still shows, unless a held channel's own key
+sits exactly on that frame, which then keeps it. A last key further
+between frames, more than one float32 spacing off, adds the frame after
+it. Either way such a clip's tail is inside the grid, save a held key a
+hair after a key of its channel exactly on the last frame: that key shows
+on no frame. Keys all within one float32 spacing of each other give one
+frame, on the earliest key.
 
 A held (STEP) key shows from the frame it was keyed for: a key time up to
-one float32 spacing after a frame's time, the spacing taken at the key
-time as for the count, counts as on that frame, and of two keys on one
-frame that way the later shows. A key exactly on a frame keeps it, though
-a second key sits a spacing after it, so a one-frame clip of two such keys
-shows the first. Exactly on a frame means on the grid's time, which starts
-on the earliest key's float32 time; when that time rounded, a key on its
-authored frame can sit a hair before the grid's frame, and a second key up
-to a spacing after the frame then shows there, as any key stored a hair
-late does. The grid's first key is float32 too, so a key truly between
-frames is taken in up to about two spacings after a frame: in clips up to
-40 minutes in, 0.01 frame after one at 60 fps from 17 minutes in and at
-any rate from 34, never 0.03 frame or more. A key further off, such as
-half a frame, shows from the next frame on. LINEAR and CUBICSPLINE
-channels are sampled at the grid's times as they are.
+one float32 spacing after a frame's time, the spacing taken at the key's
+own time, counts as on that frame, and of two keys on one frame that way
+the later shows. A key exactly on a frame keeps it, the last frame too,
+though a second key sits a spacing after it, so a one-frame clip of two
+such keys shows the first. Exactly on a frame means on the grid's time,
+which starts on the earliest key's float32 time; when that time rounded, a
+key on its authored frame can sit a hair before the grid's frame, and a
+second key up to a spacing after the frame then shows there, as any key
+stored a hair late does: 6 of 1,621 generated test files hold such a pair,
+and each shows the second key. The grid's first key is float32 too, so a
+key truly between frames is taken in up to about two spacings after a
+frame: in clips up to 40 minutes in, 0.01 frame after one at 60 fps from
+17 minutes in and at any rate from 34, never 0.03 frame or more. An
+exporter that computes key times in float32 arithmetic can store a key
+more than a spacing after its frame, so such a held key can still show a
+frame late, as such a span can still count a frame long. A key further
+off, such as half a frame, shows from the next frame on. LINEAR and
+CUBICSPLINE channels are read at the frames' times as they are, with no
+snap, their last frame on the last key as above.
 
 `ClipData.load_fbx` defaults to the first take that holds a key, not to
 index 0, because a file can hold takes with no curves at all, or with

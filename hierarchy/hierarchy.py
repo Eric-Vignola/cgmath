@@ -276,13 +276,15 @@ def _glb_frame_count(first: float, last: float, fps: float) -> int:
     glTF stores key times as float32 seconds, so keys on whole frames read
     back a hair off them: frames 0 and 1 at 24 fps are 1.00000003 frames
     apart, which a plain ceil counts as 3 frames. A span within one float32
-    spacing of the later key time of a whole number of frames is that whole
-    number, and its last whole frame can fall a hair before the last key:
-    on two frames or more the caller samples that frame on the key itself,
-    and keys within one spacing of each other give one frame, on the first.
-    Any other span rounds up, so its last key falls inside the grid rather
-    than past its end. The spacing grows with the time, so the snap reaches
-    further on a key minutes in than on one near zero.
+    spacing of a whole number of frames, the spacing taken at the larger in
+    size of the first and last key times (the last key's for any clip from
+    0 on), is that whole number, and its last whole frame can fall a hair
+    before the last key: on two frames or more the caller samples that
+    frame on the key itself, unless a held channel's own key sits exactly
+    on the frame, and keys within one spacing of each other give one frame,
+    on the first. Any other span rounds up, so its last key falls inside
+    the grid rather than past its end. The spacing grows with the time, so
+    the snap reaches further on a key minutes in than on one near zero.
     """
     span  = float(last - first) * fps
     whole = round(span)
@@ -12279,32 +12281,42 @@ class ClipData(HierarchyData):
         whole frames give exactly that many frames, both ends included --
         keys at frames 0 and 24 give 25 -- although glTF stores key times
         as float32 seconds, a hair off the frames: a span within one
-        float32 spacing of the last key time of a whole number of frames
-        counts as that number. On a clip of two frames or more, when the
-        last key sits a hair after the last frame, that frame is sampled on
-        the key itself, so a held (STEP) last key still shows. A last key
-        further between frames adds the frame after it. Either way a clip
-        of two frames or more ends on or past its last key, so the tail of
-        the animation is inside the grid. Keys all within one float32
-        spacing of each other give one frame, on the earliest key.
+        float32 spacing of a whole number of frames, the spacing taken at
+        the larger in size of the first and last key times (the last key's
+        for any clip from 0 on), counts as that number. On a clip of two
+        frames or more, when the last key sits a hair after the last frame,
+        that frame is sampled on the key itself, so a held (STEP) last key
+        still shows, unless a held channel's own key sits exactly on that
+        frame, which then keeps it. A last key further between frames adds
+        the frame after it. Either way a clip of two frames or more ends on
+        or past its last key, so the tail of the animation is inside the
+        grid, save a held key a hair after a key of its channel exactly on
+        the last frame: that key shows on no frame. Keys all within one
+        float32 spacing of each other give one frame, on the earliest key.
 
         A held (STEP) key shows from the frame it was keyed for. float32
         can store it a hair after that frame's time, so a key up to one
-        float32 spacing after a frame, the spacing taken at the key time as
-        for the count, counts as on that frame, and of two keys on one
-        frame that way the later shows. A key exactly on a frame keeps it,
-        though a second key sits a spacing after it, so a one frame clip of
-        two such keys shows the first. Exactly on a frame means on the
-        grid's time, which starts on the earliest key's float32 time; when
-        that time rounded, a key on its authored frame can sit a hair before
-        the grid's frame, and a second key up to a spacing after the frame
-        then shows there, as any key stored a hair late does. The grid's
-        first key is float32 too, so a key truly between frames is taken in
-        up to about two spacings after a frame: in clips up to 40 minutes
-        in, 0.01 frame after one at 60 fps from 17 minutes in and at any
-        rate from 34, never 0.03 frame or more. A key further after a frame,
-        half a frame say, shows from the next frame on. Linear and cubic
-        channels are sampled at the grid's times as they are.
+        float32 spacing after a frame, the spacing taken at the key's own
+        time, counts as on that frame, and of two keys on one frame that
+        way the later shows. A key exactly on a frame keeps it, the last
+        frame too, though a second key sits a spacing after it, so a one
+        frame clip of two such keys shows the first. Exactly on a frame
+        means on the grid's time, which starts on the earliest key's
+        float32 time; when that time rounded, a key on its authored frame
+        can sit a hair before the grid's frame, and a second key up to a
+        spacing after the frame then shows there, as any key stored a hair
+        late does: 6 of 1,621 generated test files hold such a pair, and
+        each shows the second key. The grid's first key is float32 too, so
+        a key truly between frames is taken in up to about two spacings
+        after a frame: in clips up to 40 minutes in, 0.01 frame after one
+        at 60 fps from 17 minutes in and at any rate from 34, never 0.03
+        frame or more. An exporter that computes key times in float32
+        arithmetic can store a key more than a spacing after its frame, so
+        such a held key can still show a frame late, as such a span can
+        still count a frame long. A key further after a frame, half a frame
+        say, shows from the next frame on. Linear and cubic channels are
+        read at the frames' times as they are, with no snap, their last
+        frame on the last key as above.
 
         A file with no animation gives a one frame clip rather than an
         error -- it is an accurate reading of a rig that does not move.
@@ -12352,12 +12364,14 @@ class ClipData(HierarchyData):
         last   = max(keys[-1] for keys in spans)
 
         frames = _glb_frame_count(first, last, fps)
-        times  = first + np.arange(frames) / fps
+        grid   = first + np.arange(frames) / fps
+        times  = grid.copy()
         if frames > 1:
             # the last frame can fall a hair before the last key: float32
             # stored the key a hair late, or float64 rounded the frame's time
             # a hair short of it. That frame samples the key itself, so a
-            # held last key still shows
+            # held last key still shows, unless a held channel's own key sits
+            # exactly on the frame's time (below)
             times[-1] = max(times[-1], last)
 
         clip = cls(rig, frames=frames, start_frame=start_frame, fps=fps)
@@ -12370,17 +12384,26 @@ class ClipData(HierarchyData):
         for channel, index in channels:
             sampler = animations[animation].samplers[channel.sampler]
 
+            # a held key exactly on the last frame's time keeps that frame,
+            # as on any other frame, though a second key sits a spacing
+            # after it: that channel reads the last frame on the grid
+            at = times
+            if sampler.interpolation == "STEP":
+                held = np.asarray(sampler.keyframe_times, dtype=float)
+                if np.any(held == grid[-1]):
+                    at = grid
+
             if channel.path == "translation":
-                translate[:, index] = _sample_gltf(sampler, times, 3) * scale_factor
+                translate[:, index] = _sample_gltf(sampler, at, 3) * scale_factor
             elif channel.path == "scale":
-                scale[:, index] = _sample_gltf(sampler, times, 3)
+                scale[:, index] = _sample_gltf(sampler, at, 3)
             else:
                 # the rest branch puts the node's orientation in joint_orient,
                 # so rotate carries the delta from it and nothing else
                 node = clip[index]
                 delta = q_multiply(
                     q_conjugate(node.quaternion),
-                    q_normalize(_sample_gltf(sampler, times, 4)),
+                    q_normalize(_sample_gltf(sampler, at, 4)),
                 )
                 rotate[:, index] = np.degrees(
                     quaternion_to_euler(delta, node.rotate_order)
