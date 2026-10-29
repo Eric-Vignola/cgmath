@@ -6421,9 +6421,7 @@ class TestClipLoadGlb(unittest.TestCase):
         frame 1's, a key three of its own spacings after frame 1 shows from
         frame 2. And a frame before a held channel's first key shows that
         key, and so does that key's own frame, though a second key sits one
-        spacing after it. At 24 fps float32 stores the key on frame 5 a
-        hair before the frame's time: a key a hair before its frame is not
-        exactly on it, so a key one spacing after it shows there
+        spacing after it
         """
         fps  = 32.0
         step = float(np.spacing(np.float32(1024.0)))
@@ -6447,24 +6445,6 @@ class TestClipLoadGlb(unittest.TestCase):
 
                 tx   = np.array(clip.frames.translate)[:, 0, 0]
                 self.assertEqual(tx.tolist(), want)
-
-        # keys on frames 0 to 10 at 24 fps, float32 times, and a second key
-        # one spacing after the key on frame 5, which float32 stores 5e-9 s
-        # before the frame's time on the grid
-        keys = np.float32(np.arange(11.0) / 24.0)
-        keys = np.insert(keys, 6, np.nextafter(keys[5], np.float32(np.inf)))
-        with self.subTest(fps=24.0, rounded_down="frame 5"):
-            self.assertLess(float(keys[5]), float(keys[0]) + 5.0 / 24.0)
-            path = self.build(
-                times         = keys,
-                translation   = [[float(i), 0.0, 0.0] for i in range(12)],
-                interpolation = "STEP",
-            )
-
-            clip = ClipData.load_glb(path, scale_factor=1.0, fps=24.0)
-
-            tx   = np.array(clip.frames.translate)[:, 0, 0]
-            self.assertEqual(tx.tolist(), [0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11])
 
         # the scale channel starts the grid two frames before the held one,
         # whose first key is exactly on frame 2
@@ -6547,6 +6527,140 @@ class TestClipLoadGlb(unittest.TestCase):
 
                 tx   = np.array(clip.frames.translate)[:, 0, 0]
                 self.assertEqual(tx.tolist(), list(range(9)) + list(range(10, 18)))
+
+    def load_held(self, keys, fps):
+        """the frame count and translate x of a held channel, key i x = i"""
+        path = self.build(
+            times         = keys,
+            translation   = [[float(i), 0.0, 0.0] for i in range(len(keys))],
+            interpolation = "STEP",
+        )
+
+        clip = ClipData.load_glb(path, scale_factor=1.0, fps=fps)
+
+        return clip.frame_count, np.array(clip.frames.translate)[:, 0, 0].tolist()
+
+    def test_a_step_key_on_its_frames_float32_time_keeps_it(self):
+        """a held key whose time is its frame's time rounded to float32 is
+        exactly on that frame, whichever side of the frame's time float32
+        put it, and keeps the frame though a second key sits one float32
+        spacing after it, as glTF's own sampler gives for a key a hair
+        before its frame. float32 stores a third of the frame times at 24
+        fps a hair early: frame 5 is 0.2083333284 s for 0.2083333333 s.
+        Keys on every frame at 24, 30 and 24000/1001 fps, a second key one
+        spacing after a key float32 stores a hair before its frame,
+        mid-clip and on the last frame: that key shows on its frame and the
+        second key on no frame. So does a key float32 stores a hair after
+        the last frame's time, 1.0833333731 s for 1.0833333333 s on a grid
+        from 4 s before 0, where the last frame was sampled on the second
+        key. And at 24 fps from 0.9583332539 s, frame 1 is 0.9999999205 s,
+        which float32 rounds up onto 0.9999999404 s, the float32 under 1 s:
+        a key there keeps frame 1, mid-clip and on the last frame, though a
+        key on 1 s is within its own spacing of the frame's time
+        """
+        ntsc = 24000.0 / 1001.0
+        for fps, start, keyed, k, early in (
+            (24.0, 0.0, np.arange(11.0), 5, True),
+            (24.0, 0.0, np.arange(6.0), 5, True),
+            (30.0, 0.0, np.arange(26.0), 17, True),
+            (30.0, 0.0, np.arange(18.0), 17, True),
+            (ntsc, 0.0, np.arange(10.0), 4, True),
+            (ntsc, 0.0, np.arange(5.0), 4, True),
+            (24.0, -4.0, np.array([0.0, 122.0]), 1, False),
+        ):
+            last = k == len(keyed) - 1
+            with self.subTest(fps=fps, start=start, frame=int(keyed[k]), last=last):
+                # the second key, one spacing after key k, is key k + 1
+                keys  = np.float32(start + keyed / fps).astype(float)
+                twin  = float(np.nextafter(np.float32(keys[k]), np.float32(np.inf)))
+                shown = np.searchsorted(keyed, np.arange(keyed[-1] + 1), side="right") - 1
+                want  = np.where(shown > k, shown + 1, shown)
+                self.assertNotEqual(keys[k], start + keyed[k] / fps)
+                self.assertEqual(keys[k] < start + keyed[k] / fps, early)
+
+                count, tx = self.load_held(np.insert(keys, k + 1, twin), fps)
+
+                self.assertEqual(count, len(want))
+                self.assertEqual(tx, want.tolist())
+
+        first = 16078164 * 2.0 ** -24
+        under = float(np.nextafter(np.float32(1.0), np.float32(0.0)))
+        self.assertGreater(under, first + 1.0 / 24.0)
+        self.assertEqual(float(np.float32(first + 1.0 / 24.0)), under)
+        for keys, want in (
+            ([first, under, 1.0, first + 3.0 / 24.0], [0, 1, 2, 3]),
+            ([first, under, 1.0], [0, 1]),
+        ):
+            with self.subTest(fps=24.0, first=first, keys=len(keys)):
+                self.assertTrue(np.array_equal(np.float32(keys), keys))
+
+                count, tx = self.load_held(keys, 24.0)
+
+                self.assertEqual(count, len(want))
+                self.assertEqual(tx, want)
+
+    def test_a_step_key_a_hair_after_or_on_its_frame_keeps_it_mid_clip(self):
+        """a held key float32 stores a hair after its frame's time, and one
+        exactly on it, keep that frame mid-clip as before, though a second
+        key sits one float32 spacing after it: keys on every frame, the
+        second key after frame 4 at 24 fps (0.1666666716 s for
+        0.1666666667 s), frame 1 at 30 fps and frame 3 at 24000/1001 fps,
+        and after frame 6 at 24 fps (0.25 s) and frame 15 at 30 fps
+        (0.5 s), exact. Each shows on its frame, the second key on no
+        frame. Of two keys on one time, the later shows, as before: frame
+        5 at 24 fps, keyed twice on 0.2083333284 s, a hair before the
+        frame. A key one float32 step below its frame's float32 time is
+        not on it and gives way to a key within a spacing after the frame:
+        frame 5 at 24 fps, keyed on 0.2083333135 s for 0.2083333284 s and
+        again on 0.2083333433 s, shows the second key. And a key float32
+        arithmetic stores one spacing after its frame's float32 value,
+        frame 3 at 30 fps as 0.1000000089 s, 1.2 spacings after 0.1 s,
+        still shows from the frame after
+        """
+        ntsc = 24000.0 / 1001.0
+        for fps, keyed, k, kind in (
+            (24.0, np.arange(9.0), 4, "after"),
+            (30.0, np.arange(6.0), 1, "after"),
+            (ntsc, np.arange(7.0), 3, "after"),
+            (24.0, np.arange(9.0), 6, "exact"),
+            (30.0, np.arange(18.0), 15, "exact"),
+            (24.0, np.arange(9.0), 5, "twice"),
+            (24.0, np.arange(11.0), 5, "below"),
+        ):
+            with self.subTest(fps=fps, frame=k, kind=kind):
+                keys = np.float32(keyed / fps).astype(float)
+                twin = float(np.nextafter(np.float32(keys[k]), np.float32(np.inf)))
+                want = [i if i <= k else i + 1 for i in range(len(keyed))]
+                if kind == "exact":
+                    self.assertEqual(keys[k], keyed[k] / fps)
+                elif kind == "after":
+                    self.assertGreater(keys[k], keyed[k] / fps)
+                elif kind == "below":
+                    # key k one float32 step below the frame's float32
+                    # time, the second key one step above it
+                    self.assertGreater(twin, keyed[k] / fps)
+                    keys[k] = float(np.nextafter(np.float32(keys[k]), np.float32(-np.inf)))
+                    want[k] = k + 1
+                else:
+                    self.assertLess(keys[k], keyed[k] / fps)
+                    twin    = keys[k]
+                    want[k] = k + 1
+
+                count, tx = self.load_held(np.insert(keys, k + 1, twin), fps)
+
+                self.assertEqual(count, len(keyed))
+                self.assertEqual(tx, want)
+
+        # float32 arithmetic stores frame 3 at 30 fps one spacing after
+        # 0.1 s's own float32 value, 1.2 spacings after 0.1 s
+        late = np.float32(np.float32(3.0) * np.float32(1.0 / 30.0))
+        self.assertEqual(late, np.nextafter(np.float32(0.1), np.float32(np.inf)))
+        self.assertGreater(float(np.float32(0.1)), 0.1)
+
+        count, tx = self.load_held([0.0, float(late), float(np.float32(0.2))], 30.0)
+
+        self.assertEqual(count, 7)
+        self.assertEqual(tx, [0, 0, 0, 0, 1, 1, 2])
 
     def test_a_step_key_exactly_on_the_last_frame_keeps_it(self):
         """a held key whose float32 time is the last frame's time exactly
@@ -6634,12 +6748,18 @@ class TestClipLoadGlb(unittest.TestCase):
         is sampled on the last key, as before. A linear channel and a cubic
         channel keyed the same beside such a held one end on the later key;
         a key two spacings after the exact one adds a frame and shows on
-        it; a held key float32 stored a hair after the last frame's time,
-        so not exactly on it, gives way to a key one spacing after it; and
-        a held channel with no key on the last frame, beside one with a key
-        exactly on it, still shows its own last key there. The last two
-        start 4 s before 0, so the count, its spacing taken at 4 s, takes
-        in a key further after the frame than its own spacing
+        it; a held channel with no key on the last frame, beside one with a
+        key exactly on it, still shows its own last key there; a held last
+        key one float32 step after the last frame's float32 time,
+        1.0833334923 s for 1.0833333731 s on a grid from 4 s before 0 at 24
+        fps, is not on that frame and shows there; and a held key one
+        float32 step after frame 4's float32 time on a grid from 1 s before
+        0 at 30 fps, -0.8666666150 s for -0.8666666746 s, a hair after the
+        frame's time and within its own spacing of it, is not on that frame
+        either: the last key, one step after it, shows there. The last three
+        start 4, 4 and 1 s before 0, so the count, its spacing taken at the
+        first key's time, takes in a key further after the frame than its
+        own spacing
         """
         fps  = 8.0
         keys = np.arange(5.0) / fps
@@ -6674,23 +6794,6 @@ class TestClipLoadGlb(unittest.TestCase):
 
         self.assertEqual(np.array(clip.frames.translate)[:, 0, 0].tolist(), [0, 1, 2, 3, 4, 5])
 
-        # frame 122 of a grid from -4 s at 24 fps is 1.0833333333 s, which
-        # float32 stores as 1.0833333731 s, a hair after it
-        fps  = 24.0
-        late = np.float32(-4.0 + 122.0 / fps)
-        self.assertGreater(float(late), -4.0 + 122.0 / fps)
-        path = self.build(
-            times         = [-4.0, float(late), float(np.nextafter(late, np.float32(np.inf)))],
-            translation   = [[float(i), 0.0, 0.0] for i in range(3)],
-            interpolation = "STEP",
-        )
-
-        clip = ClipData.load_glb(path, scale_factor=1.0, fps=fps)
-
-        tx   = np.array(clip.frames.translate)[:, 0, 0]
-        self.assertEqual(clip.frame_count, 123)
-        self.assertEqual(tx[-2:].tolist(), [0.0, 2.0])
-
         # at 8 fps from -4 s the held translation keys 1 s, the last
         # frame's time, and a key one spacing after it; the held scale
         # keys only a time three of its own spacings after 1 s, which the
@@ -6711,6 +6814,35 @@ class TestClipLoadGlb(unittest.TestCase):
 
         self.assertEqual(clip.frame_count, 41)
         self.assertEqual(np.array(clip.frames.scale)[:, 0, 0].tolist(), [1.0] * 40 + [2.0])
+
+        # frame 122 of a grid from -4 s at 24 fps is 1.0833333333 s, which
+        # float32 stores as 1.0833333731 s; the held last key sits one
+        # float32 step after that, on no frame's float32 time
+        fps   = 24.0
+        frame = np.float32(-4.0 + 122.0 / fps)
+        late  = float(np.nextafter(frame, np.float32(np.inf)))
+        self.assertGreater(float(frame), -4.0 + 122.0 / fps)
+
+        count, tx = self.load_held([-4.0, late], fps)
+
+        self.assertEqual(count, 123)
+        self.assertEqual(tx[-2:], [0, 1])
+
+        # frame 4 of a grid from -1 s at 30 fps is -0.8666666667 s, which
+        # float32 stores as -0.8666666746 s; the held key one float32 step
+        # after that sits a hair after the frame's time, within its own
+        # spacing of it, on no frame's float32 time, and the last key sits
+        # one step after it
+        fps   = 30.0
+        frame = np.float32(-1.0 + 4.0 / fps)
+        hair  = float(np.nextafter(frame, np.float32(np.inf)))
+        after = float(np.nextafter(np.float32(hair), np.float32(np.inf)))
+        self.assertGreater(hair, -1.0 + 4.0 / fps)
+
+        count, tx = self.load_held([-1.0, float(np.float32(-1.0 + 3.0 / fps)), hair, after], fps)
+
+        self.assertEqual(count, 5)
+        self.assertEqual(tx[-2:], [1, 3])
 
     def test_linear_and_cubic_channels_beside_a_held_one_read_as_before(self):
         """the snap is a held channel's alone: a linear and a cubic channel

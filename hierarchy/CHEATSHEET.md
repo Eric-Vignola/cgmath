@@ -2503,21 +2503,25 @@ one float32 spacing after a frame's time, the spacing taken at the key's
 own time, counts as on that frame, and of two keys on one frame that way
 the later shows. A key exactly on a frame keeps it, the last frame too,
 though a second key sits a spacing after it, so a one-frame clip of two
-such keys shows the first. Exactly on a frame means on the grid's time,
-which starts on the earliest key's float32 time; when that time rounded, a
-key on its authored frame can sit a hair before the grid's frame, and a
-second key up to a spacing after the frame then shows there, as any key
-stored a hair late does: 6 of 1,621 generated test files hold such a pair,
-and each shows the second key. The grid's first key is float32 too, so a
-key truly between frames is taken in up to about two spacings after a
-frame: in clips up to 40 minutes in, 0.01 frame after one at 60 fps from
-17 minutes in and at any rate from 34, never 0.03 frame or more. An
-exporter that computes key times in float32 arithmetic can store a key
-more than a spacing after its frame, so such a held key can still show a
-frame late, as such a span can still count a frame long. A key further
-off, such as half a frame, shows from the next frame on. LINEAR and
-CUBICSPLINE channels are read at the frames' times as they are, with no
-snap, their last frame on the last key as above.
+such keys shows the first. Exactly on a frame means on the grid's time
+rounded to float32, whichever side of that time float32 put the key:
+float32 stores a third of the frame times at 24 fps a hair early, frame 5
+as 0.2083333284 s for 0.2083333333 s, and such a key keeps its frame too.
+The grid starts on the earliest key's float32 time; when that time rounded
+up and a key's own time rounded down, the key can sit half a spacing or
+more before the grid's frame, off its float32 value, and a second key a
+spacing after it, on that value, then shows there: 14 of 1,621 generated
+test files hold such a pair, the key 0.5 to 0.93 of its spacings before
+the frame. The grid's first key is float32 too, so a key truly between
+frames is taken in up to about two spacings after a frame: in clips up to
+40 minutes in, 0.01 frame after one at 60 fps from 17 minutes in and at
+any rate from 34, never 0.03 frame or more. An exporter that computes key
+times in float32 arithmetic can store a key more than a spacing after its
+frame, so such a held key can still show a frame late, as such a span can
+still count a frame long. A key further off, such as half a frame, shows
+from the next frame on. LINEAR and CUBICSPLINE channels are read at the
+frames' times as they are, with no snap, their last frame on the last key
+as above.
 
 `ClipData.load_fbx` defaults to the first take that holds a key, not to
 index 0, because a file can hold takes with no curves at all, or with

@@ -210,10 +210,12 @@ def _sample_gltf(sampler, times: np.ndarray, width: int) -> np.ndarray:
     grid's first key can put a key on a frame up to one float32 spacing
     after that frame's time, so a time within one spacing before a key, the
     spacing taken at the key time, counts as on the key; of two keys on one
-    time that way, the later shows. A key exactly on a time keeps it, as
-    glTF's own sampler gives, though a second key sits a spacing after it.
-    A key further off, half a frame say, shows from the next time on.
-    Linear and cubic samplers are read at the times as given.
+    time that way, the later shows. A key exactly on a time, on the time's
+    own float32 value whichever side of the time float32 put it, keeps it,
+    as glTF's own sampler gives for a key at or before the time, though a
+    second key sits a spacing after it, and of two keys on that value the
+    later shows. A key further off, half a frame say, shows from the next
+    time on. Linear and cubic samplers are read at the times as given.
     """
     keys   = np.asarray(sampler.keyframe_times, dtype=float).ravel()
     values = np.asarray(sampler.keyframe_values, dtype=float)
@@ -239,16 +241,19 @@ def _sample_gltf(sampler, times: np.ndarray, width: int) -> np.ndarray:
         # so this indexes the key rather than the segment ahead of it, and
         # the times up to one float32 spacing of the key time before it.
         # The times go in unclamped: one before the first key shows that
-        # key, even with a second key within a spacing of it. A key exactly
-        # on a time keeps it, though a second key sits a spacing after it
+        # key, even with a second key within a spacing of it. A key on a
+        # time's own float32 value is exactly on it, whichever side of the
+        # time float32 put it, and keeps it, though a second key sits a
+        # spacing after it
         early = keys - np.spacing(np.abs(keys).astype(np.float32)).astype(float)
         snapped = np.clip(
             np.searchsorted(early, times, side="right") - 1, 0, len(keys) - 1
         )
+        exact = times.astype(np.float32).astype(float)
         plain = np.clip(
-            np.searchsorted(keys, times, side="right") - 1, 0, len(keys) - 1
+            np.searchsorted(keys, exact, side="right") - 1, 0, len(keys) - 1
         )
-        return values[np.where(keys[plain] == times, plain, snapped)]
+        return values[np.where(keys[plain] == exact, plain, snapped)]
 
     if cubic:
         # the spec scales the tangents by the segment length
@@ -281,10 +286,11 @@ def _glb_frame_count(first: float, last: float, fps: float) -> int:
     0 on), is that whole number, and its last whole frame can fall a hair
     before the last key: on two frames or more the caller samples that
     frame on the key itself, unless a held channel's own key sits exactly
-    on the frame, and keys within one spacing of each other give one frame,
-    on the first. Any other span rounds up, so its last key falls inside
-    the grid rather than past its end. The spacing grows with the time, so
-    the snap reaches further on a key minutes in than on one near zero.
+    on the frame, on its float32 time, and keys within one spacing of each
+    other give one frame, on the first. Any other span rounds up, so its
+    last key falls inside the grid rather than past its end. The spacing
+    grows with the time, so the snap reaches further on a key minutes in
+    than on one near zero.
     """
     span  = float(last - first) * fps
     whole = round(span)
@@ -12301,12 +12307,16 @@ class ClipData(HierarchyData):
         way the later shows. A key exactly on a frame keeps it, the last
         frame too, though a second key sits a spacing after it, so a one
         frame clip of two such keys shows the first. Exactly on a frame
-        means on the grid's time, which starts on the earliest key's
-        float32 time; when that time rounded, a key on its authored frame
-        can sit a hair before the grid's frame, and a second key up to a
-        spacing after the frame then shows there, as any key stored a hair
-        late does: 6 of 1,621 generated test files hold such a pair, and
-        each shows the second key. The grid's first key is float32 too, so
+        means on the grid's time rounded to float32, whichever side of that
+        time float32 put the key: float32 stores a third of the frame times
+        at 24 fps a hair early, frame 5 as 0.2083333284 s for
+        0.2083333333 s, and such a key keeps its frame too. The grid starts
+        on the earliest key's float32 time; when that time rounded up and a
+        key's own time rounded down, the key can sit half a spacing or more
+        before the grid's frame, off its float32 value, and a second key a
+        spacing after it, on that value, then shows there: 14 of 1,621
+        generated test files hold such a pair, the key 0.5 to 0.93 of its
+        spacings before the frame. The grid's first key is float32 too, so
         a key truly between frames is taken in up to about two spacings
         after a frame: in clips up to 40 minutes in, 0.01 frame after one
         at 60 fps from 17 minutes in and at any rate from 34, never 0.03
@@ -12384,13 +12394,14 @@ class ClipData(HierarchyData):
         for channel, index in channels:
             sampler = animations[animation].samplers[channel.sampler]
 
-            # a held key exactly on the last frame's time keeps that frame,
-            # as on any other frame, though a second key sits a spacing
-            # after it: that channel reads the last frame on the grid
+            # a held key exactly on the last frame's time, its float32 value,
+            # keeps that frame, as on any other frame, though a second key
+            # sits a spacing after it: that channel reads the last frame on
+            # the grid
             at = times
             if sampler.interpolation == "STEP":
                 held = np.asarray(sampler.keyframe_times, dtype=float)
-                if np.any(held == grid[-1]):
+                if np.any(held == float(np.float32(grid[-1]))):
                     at = grid
 
             if channel.path == "translation":
