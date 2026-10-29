@@ -988,8 +988,8 @@ def _control_points(mesh):
 @unittest.skipIf(fbx is None, "Autodesk FBX Python SDK is not installed")
 class TestFbxMeshesInTheirOwnSpace(FbxCase):
     """the FBX mesh readers keep each mesh in its own object space, as the
-    file, the sdk and Maya keep it, so under its node's world from a rig read
-    from the same file a mesh is where the sdk puts it
+    file, the sdk and Maya keep it but in cm, so under its node's world from
+    a rig read from the same file a mesh is where the sdk puts it
 
     The rig loaders turn a Z-up file into Maya's Y-up on its roots, and a
     mesh takes that turn through its node. Mesh readers that turned the
@@ -1265,7 +1265,7 @@ class TestFbxGeometricTransform(FbxCase):
     """the FBX mesh readers bake a node's geometric transform, the offset
     that moves its mesh alone and not its children, into the mesh, as Maya's
     FBXImport does; 3.0.0 left it out, the meshes with an offset in this
-    file 2.00 to 5.50 off Maya's object space
+    file 2.00 to 8.29 off Maya's object space
 
     The points take the offset as the sdk's FbxAMatrix(T, R, S) composes it,
     scaled, then turned in xyz whatever the node's rotate order, then moved,
@@ -1286,12 +1286,19 @@ class TestFbxGeometricTransform(FbxCase):
     (1.5, 0.5, 2); ``turned``, offset by a turn (25, -40, 60) alone on a
     node whose rotate order is zxy; ``mirror``, offset by a mirroring
     (-1.5, 0.5, 2); ``plain``, no offset; ``body``, offset and skinned to a
-    hip and a knee posed off its bind; and ``scaled``, offset by an uneven
-    scale (0.5, 2, 1) alone. The normals are authored off the faces' own,
-    and longer or shorter than 1 on the meshes with an offset. The file of
-    flattening offsets holds ``flat``, offset by (0.5, 1, 0), (10, 20, 30)
-    and a scale (1, 0, 1); ``edge``, by a scale (-0, 1, 1) alone; and
-    ``thin``, offset as ``flat`` but by a scale (1, 1e-30, 1).
+    hip and a knee posed off its bind; ``scaled``, offset by an uneven
+    scale (0.5, 2, 1) alone; ``mirror2``, offset by (0.5, -1, 2), the turn
+    (25, -40, 60) and a scale with two negative axes, (-1.5, -0.5, 2),
+    which does not mirror; and ``mirror3``, by (-1, 0.5, 1), the same turn
+    and a scale with three, (-1.5, -0.5, -2), which mirrors. The normals
+    are authored off the faces' own, and longer or shorter than 1 on the
+    meshes with an offset. The file of flattening offsets holds ``flat``,
+    offset by (0.5, 1, 0), (10, 20, 30) and a scale (1, 0, 1); ``edge``,
+    by a scale (-0, 1, 1) alone; and ``thin``, offset as ``flat`` but by a
+    scale (1, 1e-30, 1). The file of a shared mesh holds one cube mesh
+    under two nodes, ``moved``, offset as ``geo`` but by the turn
+    (25, -40, 60), and ``kept``, no offset, either one first in the
+    hierarchy.
     """
 
     # Maya's Z-up into its Y-up: (x, y, z) -> (x, z, -y)
@@ -1299,12 +1306,14 @@ class TestFbxGeometricTransform(FbxCase):
     CORNERS = TestFbxMeshesInTheirOwnSpace.CORNERS
     FACES   = TestFbxMeshesInTheirOwnSpace.FACES
     OFFSETS = {
-        "geo":    ((0.0, 3.0, 0.0), (0.0, 0.0, 30.0), (1.5, 0.5, 2.0)),
-        "turned": ((0.0, 0.0, 0.0), (25.0, -40.0, 60.0), (1.0, 1.0, 1.0)),
-        "mirror": ((1.0, 2.0, 3.0), (0.0, 0.0, 30.0), (-1.5, 0.5, 2.0)),
-        "plain":  None,
-        "body":   ((0.5, 1.0, 0.0), (0.0, 0.0, 30.0), (1.0, 2.0, 1.0)),
-        "scaled": ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.5, 2.0, 1.0)),
+        "geo":     ((0.0, 3.0, 0.0), (0.0, 0.0, 30.0), (1.5, 0.5, 2.0)),
+        "turned":  ((0.0, 0.0, 0.0), (25.0, -40.0, 60.0), (1.0, 1.0, 1.0)),
+        "mirror":  ((1.0, 2.0, 3.0), (0.0, 0.0, 30.0), (-1.5, 0.5, 2.0)),
+        "plain":   None,
+        "body":    ((0.5, 1.0, 0.0), (0.0, 0.0, 30.0), (1.0, 2.0, 1.0)),
+        "scaled":  ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.5, 2.0, 1.0)),
+        "mirror2": ((0.5, -1.0, 2.0), (25.0, -40.0, 60.0), (-1.5, -0.5, 2.0)),
+        "mirror3": ((-1.0, 0.5, 1.0), (25.0, -40.0, 60.0), (-1.5, -0.5, -2.0)),
     }
     # offsets that flatten the mesh, a scale of 0 on an axis
     FLAT = {
@@ -1314,6 +1323,8 @@ class TestFbxGeometricTransform(FbxCase):
     # one that nearly flattens it, a scale near 0 but not 0: Maya keeps its
     # normals, turned by the rule
     THIN = {"thin": ((0.5, 1.0, 0.0), (10.0, 20.0, 30.0), (1.0, 1e-30, 1.0))}
+    # the offset of ``moved``, one of two nodes that share a mesh
+    SHARED = ((0.0, 3.0, 0.0), (25.0, -40.0, 60.0), (1.5, 0.5, 2.0))
 
     def cases(self):
         """(label, FbxSystemUnit name, axis system, cm per unit, turn)"""
@@ -1580,6 +1591,71 @@ class TestFbxGeometricTransform(FbxCase):
                     np.testing.assert_allclose(obj.mesh.points, local @ turn, rtol=0.0, atol=1e-9)
                     np.testing.assert_allclose(got, self.turned(normals, matrix) @ turn, rtol=0.0, atol=1e-9)
 
+    def shared_file(self, name, unit, axes, kept_first):
+        """a file of one cube mesh under two nodes at the top of the scene:
+        ``moved``, offset by ``SHARED``, the node the mesh is made for, and
+        ``kept``, no offset, first in the hierarchy when ``kept_first``"""
+
+        def populate(scene):
+            settings = scene.GetGlobalSettings()
+            settings.SetSystemUnit(getattr(fbx.FbxSystemUnit, unit))
+            settings.SetAxisSystem(axes)
+            moved, mesh = self.cube(scene, "moved", self.SHARED)
+            kept = fbx.FbxNode.Create(scene, "kept")
+            kept.SetNodeAttribute(mesh)
+            moved.LclTranslation.Set(fbx.FbxDouble3(2.0, -1.0, 0.5))
+            kept.LclTranslation.Set(fbx.FbxDouble3(-3.0, 1.0, 2.0))
+            kept.LclRotation.Set(fbx.FbxDouble3(10.0, 30.0, -20.0))
+            for node in (kept, moved) if kept_first else (moved, kept):
+                scene.GetRootNode().AddChild(node)
+
+        return self.write(name, populate)
+
+    def test_nodes_that_share_a_mesh_each_bake_their_own_offset(self):
+        """one mesh under two nodes, one offset and one not: every reader
+        reads it under each node with that node's own offset baked, the
+        control points through the node's own FbxAMatrix(T, R, S), as the
+        sdk puts it, and under each node's world from the rig where the sdk
+        puts it; under the node with none it reads as the file holds it, its
+        normals' lengths too. Maya's FBXImport differs: it bakes one offset
+        into both, that of the first such node in the hierarchy"""
+        names = ("moved", "kept")
+        for label, unit, axes, cm, turn in self.cases():
+            for kept_first in (False, True):
+                with self.subTest(file=label, kept_first=kept_first):
+                    path = self.shared_file(f"shared {label} {kept_first}.fbx", unit, axes, kept_first)
+                    with open_fbx(path, fbx) as scene:
+                        # the premise: one mesh, which both nodes hold
+                        shapes = {_find(scene, name).GetNodeAttribute().GetUniqueID() for name in names}
+                        self.assertEqual(len(shapes), 1)
+                        self.assertEqual(_find(scene, "kept").GetNodeAttribute().GetNodeCount(), 2)
+
+                    truth  = self.sdk_truth(path, cm, names)
+                    meshes = MeshList.load_fbx(path)
+                    read   = {mesh.name: mesh for mesh in meshes}
+                    pairs  = {mesh.name: mesh for mesh, _ in mesh_load_fbx(path)}
+                    rig    = HierarchyData.load_fbx(path)
+                    self.assertEqual(sorted(read), sorted(names))
+                    self.assertGreater(float(np.abs(truth["moved"][0] - truth["kept"][0]).max()), 1.0)
+
+                    for name in names:
+                        local, normals, matrix, world = truth[name]
+                        node = np.asarray(rig[name].world_matrix)
+                        for mesh in (read[name], pairs[name], MeshData.load_fbx(path, name=name)):
+                            got = np.asarray(mesh.normals)[mesh.normal_indices]
+                            np.testing.assert_allclose(mesh.points, local, rtol=0.0, atol=1e-9)
+                            placed = np.asarray(mesh.points) @ node[:3, :3] + node[3, :3]
+                            np.testing.assert_allclose(placed, world, rtol=0.0, atol=1e-9)
+                            if name == "kept":
+                                np.testing.assert_array_equal(got, normals)
+                            else:
+                                np.testing.assert_allclose(got, self.turned(normals, matrix), rtol=0.0, atol=1e-9)
+
+                    for index, mesh in enumerate(meshes):
+                        obj = Object.load_fbx(path, index=index, extract_texture=False, load_skin=False)
+                        self.assertEqual(obj.name, mesh.name)
+                        np.testing.assert_allclose(obj.mesh.points, truth[mesh.name][0] @ turn, rtol=0.0, atol=1e-9)
+
     def flat_file(self, name, unit, axes):
         """a file of the cubes ``FLAT`` and ``THIN`` offset, under the scene
         root"""
@@ -1665,7 +1741,7 @@ class TestFbxGeometricTransform(FbxCase):
             mel.eval("FBXResetImport")
             mel.eval(f'FBXImport -f "{path.replace(os.sep, "/")}"')
 
-            for name in ("geo", "turned", "mirror", "plain", "scaled"):
+            for name in ("geo", "turned", "mirror", "plain", "scaled", "mirror2", "mirror3"):
                 with self.subTest(file=label, mesh=name):
                     mesh  = read[name]
                     maya  = shape(name)

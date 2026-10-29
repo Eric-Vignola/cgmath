@@ -1133,10 +1133,20 @@ UVData.load_fbx("hero.fbx", channel=0)
 UVList.load_glb("hero.glb", name="body")    # one mesh's UV channels
 ```
 
-The FBX mesh readers keep each mesh in its own object space, as Maya's
-importer puts it: the points, normals and UVs leave out the mesh's node,
-and with it the turn `HierarchyData.load_fbx` puts on a rig's roots to
-load a file in Maya's Y-up. A node's geometric transform, the offset the
+The FBX mesh readers keep each mesh in its own object space: the points,
+normals and UVs leave out the mesh's node, and with it the turn
+`HierarchyData.load_fbx` puts on a rig's roots to load a file in Maya's
+Y-up. The points and the UVs are where Maya's importer puts them, but
+for the points' unit: Maya's object space holds the numbers the file
+holds, which the readers multiply as `scale_factor` says (below), into
+cm by default, so a mesh of a file in meters reads 100 times Maya's
+points, or Maya's own at or under a root that holds the file's unit as a
+scale. The normals are Maya's on a mesh its node's geometric transform
+(below) moves; a mesh whose node holds none keeps the file's normals as
+the file holds them, their lengths too, where Maya's importer makes them
+unit length. Nodes that share one mesh are the exception for the points
+and the normals: Maya's importer bakes one node's geometric transform
+into all of them (below). A node's geometric transform, the offset the
 file gives the node's mesh alone and not its children, is baked into the
 mesh, as Maya's importer bakes it: the points take it as the FBX SDK's
 `FbxAMatrix(T, R, S)` composes it, scaled, turned in xyz whatever the

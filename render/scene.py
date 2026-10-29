@@ -1958,7 +1958,8 @@ class Scene(HierarchyData):
     # HierarchyData's fbx reader and writer know joints only: a Scene read
     # through them would hold no Object, and one written would lose its meshes
     load_fbx = _NoRoute(
-        "HierarchyData's fbx reader gives joints, not Objects: Object.load_fbx reads one mesh"
+        "Scene reads FBX files from 4.0.0; today use Object.load_fbx(path, index=i) per mesh, "
+        "or Scene.load_glb"
     )
     save_fbx = _NoRoute("HierarchyData's fbx writer writes joints only: a Scene's meshes would be lost")
 

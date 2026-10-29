@@ -13,6 +13,7 @@ obj readers read first.
 
 import locale
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -296,6 +297,29 @@ class TestLoad(_Files):
         self.assertIsInstance(Scene.load(path, name="set"), Scene)
         with self.assertRaisesRegex(TypeError, r"Scene\.load_obj: .*'nme'.*takes name$"):
             Scene.load(path, nme="set")
+
+    # what Scene's refusal of an fbx file says to read one with today
+    SCENE_FBX = "Scene reads FBX files from 4.0.0; today use Object.load_fbx(path, index=i) per mesh, or Scene.load_glb"
+
+    def test_a_scene_says_what_reads_an_fbx_today(self):
+        """Scene reads no fbx file before 4.0.0: its refusal, a direct
+        call's TypeError and a load's ValueError alike, names what reads an
+        fbx's meshes today; the refusal to write one is as it was"""
+        path = self.path("x.fbx")
+        open(path, "wb").close()
+        with self.assertRaises(TypeError) as caught:
+            Scene.load_fbx(path)
+        self.assertEqual(str(caught.exception), f"Scene.load_fbx: {self.SCENE_FBX}")
+        with self.assertRaises(ValueError) as caught:
+            Scene.load(path)
+        refusal = str(caught.exception).split("; it loads ")[0]
+        self.assertEqual(refusal, f"Scene has no reader for fbx files ({self.SCENE_FBX}): {path}")
+        with self.assertRaises(TypeError) as caught:
+            Scene().save_fbx(self.path("y.fbx"))
+        self.assertEqual(
+            str(caught.exception),
+            "Scene.save_fbx: HierarchyData's fbx writer writes joints only: a Scene's meshes would be lost",
+        )
 
     def test_the_factory_refuses_an_asset_naming_the_readers(self):
         path = quad().save(self.path("q.obj"))
@@ -724,13 +748,14 @@ class TestFbx(_Files):
             self.rig().save(self.path("again.fbx"), ascii=True)
         self.assertFalse(os.path.exists(self.path("again.fbx")))
 
-    def test_a_scene_refuses_the_joint_only_routes(self):
-        path = self.rig().save(self.path("rig.fbx"))
-        with self.assertRaisesRegex(ValueError, "Scene has no reader for fbx files .*joints"):
+    def test_a_scene_refuses_the_fbx_routes(self):
+        path  = self.rig().save(self.path("rig.fbx"))
+        today = re.escape(TestLoad.SCENE_FBX)
+        with self.assertRaisesRegex(ValueError, rf"^Scene has no reader for fbx files \({today}\): "):
             Scene.load(path)
         with self.assertRaisesRegex(ValueError, "Scene has no writer for fbx files .*meshes"):
             Scene().save(self.path("scene.fbx"))
-        with self.assertRaisesRegex(TypeError, r"^Scene\.load_fbx: "):
+        with self.assertRaisesRegex(TypeError, rf"^Scene\.load_fbx: {today}$"):
             Scene.load_fbx(path)
         self.assertFalse(os.path.exists(self.path("scene.fbx")))
 

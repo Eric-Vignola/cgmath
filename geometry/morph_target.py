@@ -421,17 +421,22 @@ class MorphList(DataList[MorphData]):
     holds, so one it holds twice is changed twice, each shape by its
     operand as it was before any shape changed: an operand that is, or
     holds, one of the list's own shapes, or an array of a shape's offsets,
-    is taken as it was, so ``shapes -= shapes[0]`` subtracts the first
-    shape from every shape, the first included. Two shapes built on one
-    float64 array share its memory and are scaled as one shape held twice
-    is: ``*=`` and ``/=`` scale that memory in each place, so twice; built
-    on an array of another dtype, or on a list, each holds a copy of its
-    own, scaled once. What has no meaning raises TypeError, whatever the
-    two lengths, an empty list's too, before a sequence of another length
-    raises RuntimeError and before any shape is changed. An operand numpy
-    refuses, None or an array of another shape, raises numpy's error at
-    the shape it reaches, in place the shapes before that one already
-    changed.
+    of any ndarray class (an ``np.matrix``, a masked array), is taken as it
+    was, so ``shapes -= shapes[0]`` subtracts the first shape from every
+    shape, the first included. An operand that is no array but whose class
+    has an ``__array_ufunc__``, whose ``__array_priority__`` is above 0, or
+    whose ``__array_priority__`` numpy ignores (a string or None), is left
+    to numpy to read at its own place: it reads a shape as it has become,
+    as in 3.0.0. Two shapes built on one float64 array in the machine's
+    byte order share its memory and are scaled as one shape held twice is:
+    ``*=`` and ``/=`` scale that memory in each place, so twice; built on
+    an array of another dtype or byte order, or on a list, each holds a
+    copy of its own, scaled once. What has no meaning raises TypeError,
+    whatever the two lengths, an empty list's too, before a sequence of
+    another length raises RuntimeError and before any shape is changed. An
+    operand numpy refuses, None or an array of another shape, raises
+    numpy's error at the shape it reaches, in place the shapes before that
+    one already changed.
     """
 
     # --------- vectorized properties and methods --------- #
@@ -687,10 +692,15 @@ class MorphList(DataList[MorphData]):
         in place, shape by shape: every shape times a number, or each times
         the number a sequence pairs with it; a shape the list holds twice is
         changed in each place, so twice. An operand that is, or holds, a
-        shape's offsets, an array of them or a list of their rows, is taken
-        as it was before any shape changed (:meth:`_in_place_operands`).
-        A morph times a morph, a MorphData, or a MorphList shape by shape,
-        has no meaning (TypeError), and nothing is changed
+        shape's offsets, an array of them of any ndarray class or a list of
+        their rows, is taken as it was before any shape changed
+        (:meth:`_in_place_operands`). An operand that is no array but whose
+        class has an ``__array_ufunc__``, whose ``__array_priority__`` is
+        above 0, or whose ``__array_priority__`` numpy ignores (a string or
+        None), is left to numpy to read at its own place: it reads a shape as
+        it has become, as in 3.0.0. A morph times a morph, a MorphData, or a
+        MorphList shape by shape, has no meaning (TypeError), and nothing is
+        changed
         """
         others = self._in_place_operands(other, "*")
         for i in range(len(self.list)):
@@ -716,10 +726,14 @@ class MorphList(DataList[MorphData]):
         by the number a sequence pairs with it, as ``*=`` multiplies, so
         ``(shapes * s) / s == shapes``; a shape the list holds twice is
         changed in each place, so twice. An operand that is, or holds, a
-        shape's offsets, an array of them or a list of their rows, is taken
-        as it was before any shape changed (:meth:`_in_place_operands`).
-        A morph over a morph has no meaning (TypeError), and nothing is
-        changed
+        shape's offsets, an array of them of any ndarray class or a list of
+        their rows, is taken as it was before any shape changed
+        (:meth:`_in_place_operands`). An operand that is no array but whose
+        class has an ``__array_ufunc__``, whose ``__array_priority__`` is
+        above 0, or whose ``__array_priority__`` numpy ignores (a string or
+        None), is left to numpy to read at its own place: it reads a shape as
+        it has become, as in 3.0.0. A morph over a morph has no meaning
+        (TypeError), and nothing is changed
         """
         others = self._in_place_operands(other, "/")
         for i in range(len(self.list)):

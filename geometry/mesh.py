@@ -5558,12 +5558,23 @@ def _extract_fbx_normals(
 def load_fbx(filename: str, scale_factor: float | None = None) -> list:
     """loads fbx file and returns list of (MeshData, UVList) tuples
 
-    Each mesh's points, normals and UVs are in its own object space, as
-    Maya's importer puts them: its node's transform is left out, and so is
-    the turn ``HierarchyData.load_fbx`` and ``ClipData.load_fbx`` put on a
-    rig's roots to load a file in Maya's Y-up, which reaches a mesh through
-    its node. Under the world matrix ``W`` of its node in a rig read from
-    the same file, which keeps a mesh's node as a transform named after it,
+    Each mesh's points, normals and UVs are in its own object space: its
+    node's transform is left out, and so is the turn
+    ``HierarchyData.load_fbx`` and ``ClipData.load_fbx`` put on a rig's
+    roots to load a file in Maya's Y-up, which reaches a mesh through its
+    node. The points and the UVs are where Maya's importer puts them, but
+    for the points' unit: Maya's object space holds the numbers the file
+    holds, which the readers multiply as ``scale_factor`` says (below),
+    into centimeters by default, so a mesh of a file in meters reads 100
+    times Maya's points, or Maya's own at or under a root that holds the
+    file's unit as a scale. The normals are Maya's on a mesh its node's
+    geometric transform moves (below); a mesh whose node holds none keeps
+    the file's normals as the file holds them, their lengths too, where
+    Maya's importer makes them unit length. Nodes that share one mesh are
+    the exception for the points and the normals: Maya's importer bakes
+    one node's geometric transform into all of them (below). Under the
+    world matrix ``W`` of its node in a rig read from the same file, which
+    keeps a mesh's node as a transform named after it,
     ``points @ W[:3, :3] + W[3, :3]`` is where the file puts the mesh, in
     centimeters and Maya's Y-up. Any file reads as it is, a left handed one
     too. ``render.Object.load_fbx``, whose Object has no node to carry the
