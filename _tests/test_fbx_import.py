@@ -43,6 +43,8 @@ def _make_fake_fbx_module() -> types.SimpleNamespace:
     # ---- enums --------------------------------------------------------------
     attr_etype            = types.SimpleNamespace(eMesh="eMesh")
     fake.FbxNodeAttribute = types.SimpleNamespace(EType=attr_etype)
+    pivot_set             = types.SimpleNamespace(eSourcePivot="eSourcePivot")
+    fake.FbxNode          = types.SimpleNamespace(EPivotSet=pivot_set)
 
     mapping = types.SimpleNamespace(
         eByPolygonVertex = "ByPolygonVertex",
@@ -209,6 +211,10 @@ def _make_fake_mesh_node(fake_fbx, *, name, fbx_mesh, materials=None):
     node.GetNodeAttribute.return_value = attr
     # Make _walk_fbx_mesh_nodes treat this node as a leaf.
     node.GetChildCount.return_value = 0
+    # no geometric transform, the offset a node gives its mesh alone
+    node.GetGeometricTranslation.return_value = (0.0, 0.0, 0.0, 1.0)
+    node.GetGeometricRotation.return_value    = (0.0, 0.0, 0.0, 1.0)
+    node.GetGeometricScaling.return_value     = (1.0, 1.0, 1.0, 1.0)
 
     materials                          = materials or []
     node.GetMaterialCount.return_value = len(materials)

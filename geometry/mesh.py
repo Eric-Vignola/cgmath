@@ -96,6 +96,7 @@ from cgmath.geometry.utils import (
     subdivide_catmull_clark,
 )
 from cgmath.hierarchy import _fbx_axis_turn, _fbx_check_axis_system, _fbx_units
+from cgmath.transforms import euler_to_matrix
 from scipy.ndimage import convolve
 from scipy.spatial import QhullError, cKDTree
 
@@ -2943,8 +2944,9 @@ class MeshData(Data):
     ) -> "MeshData":
         """returns a single MeshData from an fbx file (first mesh if name is None)
 
-        In the mesh's own object space, in centimeters by default:
-        ``scale_factor`` as in :func:`load_fbx`.
+        In the mesh's own object space, its node's geometric transform baked
+        in as Maya's importer bakes it, in centimeters by default: the
+        geometric transform and ``scale_factor`` as in :func:`load_fbx`.
         """
         data = load_fbx(filename, scale_factor)
         if not data:
@@ -4776,8 +4778,9 @@ class MeshList(DataList[MeshData]):
     def load_fbx(cls, filename: str, scale_factor: float | None = None) -> "MeshList":
         """loads all meshes from an fbx file into a MeshList
 
-        Each in its own object space, in centimeters by default:
-        ``scale_factor`` as in :func:`load_fbx`.
+        Each in its own object space, its node's geometric transform baked
+        in as Maya's importer bakes it, in centimeters by default: the
+        geometric transform and ``scale_factor`` as in :func:`load_fbx`.
         """
         return cls([mesh_data for mesh_data, _ in load_fbx(filename, scale_factor)])
 
@@ -5403,6 +5406,41 @@ def _fbx_control_points(mesh) -> np.ndarray:
     return points
 
 
+def _fbx_geometric_transform(node, space: float) -> Optional[tuple]:
+    """an FbxNode's geometric transform, the offset the file gives the
+    node's mesh alone and not its children, as ``(matrix, translate,
+    rotation)``: the points take ``points @ matrix + translate``, the
+    translate times ``space``, the cm the node's own space holds per unit
+    (``_FbxUnits.space``), and the normals ``normals @ rotation``; None when
+    the node holds none, so its mesh reads as the file holds it
+
+    Composed as the sdk's ``FbxAMatrix(T, R, S)`` composes it and Maya's
+    FBXImport bakes it into the points: scaled, then turned in xyz whatever
+    the node's rotate order, then moved. ``rotation`` is the matrix's
+    rotation part, its scale left out, negated when the scale mirrors (a
+    negative determinant): the normals turn as Maya's import turns them, by
+    the offset's rotation alone, flipped in a mirror, whose faces keep their
+    order. Under an uneven scale they are then not perpendicular to the
+    stretched faces, as in Maya. ``rotation`` is None when the scale is 0 on
+    an axis, which flattens the mesh: Maya's import then drops the file's
+    normals and rebuilds its own from the flat faces, and the readers drop
+    them too.
+    """
+    pivot     = fbx.FbxNode.EPivotSet.eSourcePivot
+    translate = np.array(tuple(node.GetGeometricTranslation(pivot))[:3], dtype=np.float64)
+    rotate    = np.array(tuple(node.GetGeometricRotation(pivot))[:3],    dtype=np.float64)
+    scale     = np.array(tuple(node.GetGeometricScaling(pivot))[:3],     dtype=np.float64)
+    if not translate.any() and not rotate.any() and (scale == 1.0).all():
+        return None
+
+    turn   = euler_to_matrix(np.radians(rotate))[0, :3, :3]
+    signs  = np.where(scale < 0.0, -1.0, 1.0)
+    matrix = scale[:, None] * turn
+    if (scale == 0.0).any():
+        return matrix, translate * space, None
+    return matrix, translate * space, np.prod(signs) * signs[:, None] * turn
+
+
 def _fbx_polygon_streams(mesh) -> Tuple[np.ndarray, np.ndarray]:
     """Returns (indices, counts) -- flat face-vertex stream + per-face vertex count."""
     n_polys = mesh.GetPolygonCount()
@@ -5520,25 +5558,54 @@ def _extract_fbx_normals(
 def load_fbx(filename: str, scale_factor: float | None = None) -> list:
     """loads fbx file and returns list of (MeshData, UVList) tuples
 
-    Each mesh's points, normals and UVs are in its own object space, as the
-    file, the fbx sdk and Maya keep them: its node's transform is left out,
-    and so is the turn ``HierarchyData.load_fbx`` and ``ClipData.load_fbx``
-    put on a rig's roots to load a file in Maya's Y-up, which reaches a mesh
-    through its node. Under the world matrix ``W`` of its node in a rig read
-    from the same file, which keeps a mesh's node as a transform named after
-    it, ``points @ W[:3, :3] + W[3, :3]`` is where the file puts the mesh, in
+    Each mesh's points, normals and UVs are in its own object space, as
+    Maya's importer puts them: its node's transform is left out, and so is
+    the turn ``HierarchyData.load_fbx`` and ``ClipData.load_fbx`` put on a
+    rig's roots to load a file in Maya's Y-up, which reaches a mesh through
+    its node. Under the world matrix ``W`` of its node in a rig read from
+    the same file, which keeps a mesh's node as a transform named after it,
+    ``points @ W[:3, :3] + W[3, :3]`` is where the file puts the mesh, in
     centimeters and Maya's Y-up. Any file reads as it is, a left handed one
     too. ``render.Object.load_fbx``, whose Object has no node to carry the
-    turn, turns its points itself. A node's geometric transform, which
-    moves its mesh alone and which Maya's importer bakes into the points,
-    is not read: such a mesh's points come back without it.
+    turn, turns its points itself.
+
+    A node's geometric transform, the offset the file gives the node's mesh
+    alone and not its children, is baked into the mesh, as Maya's importer
+    bakes it. The points take it as the fbx sdk composes it
+    (``FbxAMatrix(T, R, S)``): scaled, then turned in xyz whatever the
+    node's rotate order, as Maya turns it too (within 9.25e-08 for all six
+    orders), then moved, its translation in the unit the points are read
+    in. The normals are turned by the offset's rotation alone, its scale
+    left out, and flipped when it mirrors (a negative determinant), at unit
+    length, as Maya's importer turns them: under an uneven offset scale
+    they are not perpendicular to the stretched faces, as in Maya. An offset
+    whose scale is exactly 0 on an axis flattens the mesh: Maya's importer
+    then drops the file's normals and rebuilds its own from the flat faces,
+    and the readers read the mesh with no normals (``normals`` and
+    ``normal_indices`` None); a scale near 0 but not 0, 1e-30 say, keeps
+    them, as Maya's importer does. A caller who needs normals on such a mesh
+    rebuilds them with ``MeshData.set_normals``. Where the file maps its
+    normals by control point or holds none, Maya's edges are soft, and
+    ``set_normals()`` is within 6.78e-08 of Maya's normals in a probe; where
+    it maps them per polygon vertex, Maya makes every edge hard: there
+    ``set_normals()`` is 1.77 off and ``set_normals(hard_edge_angle=60)``
+    within 1.48e-06. The faces keep the file's order, a mirror's too, and
+    the UVs are the file's. Nodes that share one mesh each read it with
+    their own offset baked in, where the fbx sdk puts it; Maya's importer
+    differs: it bakes one offset into all of them, that of the first such
+    node in the scene's hierarchy, as one instanced shape in one probe,
+    where the second node's mesh was 4.29 cm off the sdk's in its own space
+    and 6.93 cm off in the world, and as separate shapes with that same
+    offset in another, whose file attaches the mesh first to a node later in
+    the hierarchy. A mesh whose node holds no geometric transform reads as
+    the file holds it.
 
     ``scale_factor`` None, the default, converts the file's unit to
     centimeters, as ``HierarchyData.load_fbx`` and ``ClipData.load_fbx`` do:
     the points are multiplied by the centimeters one unit of the file holds,
     1.0 for a file in cm, 100.0 for one in meters. A number is the caller's
-    own factor, and the file's unit is not read. Normals and UVs keep the
-    file's values. A mesh at or under a child of the scene root that holds
+    own factor, and the file's unit is not read. Normals and UVs are not
+    scaled. A mesh at or under a child of the scene root that holds
     the file's unit as a scale, as the sdk's and Maya's unit conversions
     write it (``HierarchyData.load_fbx``), holds its points in cm already,
     and they are read as they are: such a file's meshes load as the cm
@@ -5567,12 +5634,13 @@ def _load_fbx(
     """:func:`load_fbx`'s read, and ``render.Object.load_fbx``'s
 
     ``axis_system`` None, the default, leaves each mesh in its own space, as
-    :func:`load_fbx` reads it. "maya_y_up" turns the points and the normals
-    by the turn the rig loaders put on a rig's roots (``_fbx_axis_turn``), an
-    Unreal file's (x, y, z) to (x, z, -y): the mesh as Maya's Y-up holds it
-    under a node with nothing above it and no transform of its own, which is
-    what an Object shows. A file already in Maya's Y-up reads as it is; a
-    left handed one raises ValueError.
+    :func:`load_fbx` reads it, its node's geometric transform baked in.
+    "maya_y_up" then turns the points and the normals by the turn the rig
+    loaders put on a rig's roots (``_fbx_axis_turn``), an Unreal file's
+    (x, y, z) to (x, z, -y): the mesh as Maya's Y-up holds it under a node
+    with nothing above it and no other transform of its own, which is what
+    an Object shows. A file already in Maya's Y-up reads as it is; a left
+    handed one raises ValueError.
     """
 
     if fbx is None:
@@ -5590,9 +5658,23 @@ def _load_fbx(
         data = []
         for node in mesh_nodes:
             mesh   = node.GetNodeAttribute()
-            points = _fbx_control_points(mesh) * units.space(node)
+            space  = units.space(node)
+            points = _fbx_control_points(mesh) * space
             indices, counts = _fbx_polygon_streams(mesh)
             normals, normal_indices = _extract_fbx_normals(mesh, counts)
+
+            # the node's geometric transform, which moves its mesh alone, is
+            # baked into the mesh as Maya's import bakes it, before the turn
+            offset = _fbx_geometric_transform(node, space)
+            if offset is not None:
+                matrix, translate, rotation = offset
+                points = points @ matrix + translate
+                if rotation is None:
+                    # a flattening offset: Maya drops the file's normals
+                    normals, normal_indices = None, None
+                elif normals is not None:
+                    normals = _l2_normalize(normals @ rotation)
+
             if turn is not None:
                 points = points @ turn
                 if normals is not None:

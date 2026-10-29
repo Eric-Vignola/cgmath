@@ -1067,11 +1067,13 @@ def _read_skins_fbx(
     ``[[A j / m, 0], [b j, 1]]``.
 
     They take the mesh's points from its own object space, where
-    ``cgmath.geometry.mesh.load_fbx`` reads them, as the file keeps them.
-    ``axis_system`` None, the default, leaves them so: a rig read in Maya's
-    Y-up, ``HierarchyData.load_fbx``'s default, has joint worlds ``W K``,
-    ``K`` the turn its roots take as a 4x4, so ``p B W K`` is the file's
-    posed point, turned. "maya_y_up" is for points turned as
+    ``cgmath.geometry.mesh.load_fbx`` reads them, its node's geometric
+    transform baked in: the sdk's skin blend applies that offset before the
+    cluster's matrices, so the matrices as the file holds them pose the
+    baked points. ``axis_system`` None, the default, leaves them so: a rig
+    read in Maya's Y-up, ``HierarchyData.load_fbx``'s default, has joint
+    worlds ``W K``, ``K`` the turn its roots take as a 4x4, so ``p B W K``
+    is the file's posed point, turned. "maya_y_up" is for points turned as
     ``render.Object.load_fbx`` turns them, ``p C``: the inverse bind becomes
     ``K^-1 B`` (its first three rows ``C^T`` times the file's), and ``p C
     K^-1 B W K`` is the same point. Only the matrices turn, so a left handed

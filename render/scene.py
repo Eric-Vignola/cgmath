@@ -417,11 +417,12 @@ class Object(TransformData):
         and ``ClipData.load_fbx`` put on a rig's roots to load a file in
         Maya's Y-up, so the Object takes that turn on its points, normals
         and skin bind matrices instead (``axis_system``). It shows the
-        mesh's own points turned into Maya's Y-up, where the file puts a
-        mesh whose node has no transform and nothing above it, and
-        :meth:`pose` with a rig or a clip read from the same file, with the
-        same ``scale_factor`` and ``axis_system``, puts a skinned mesh
-        where the file has it.
+        mesh's own points, its node's geometric transform baked in as
+        :func:`cgmath.geometry.mesh.load_fbx` says, turned into Maya's
+        Y-up, where the file puts a mesh whose node has no other transform
+        and nothing above it, and :meth:`pose` with a rig or a clip read
+        from the same file, with the same ``scale_factor`` and
+        ``axis_system``, puts a skinned mesh where the file has it.
 
         Args:
             filename: Path to the ``.fbx`` file (``~`` and env vars OK).

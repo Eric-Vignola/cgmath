@@ -1243,6 +1243,457 @@ class TestFbxMeshesInTheirOwnSpace(FbxCase):
                         np.testing.assert_allclose(obj.mesh.points, truth["flat"][1], rtol=0.0, atol=1e-12)
 
 
+def _polar(matrix):
+    """the orthogonal factor of a (3, 3) matrix's polar decomposition: its
+    rotation part, a mirror with it when its determinant is negative"""
+    u, _, vt = np.linalg.svd(matrix)
+    return u @ vt
+
+
+def _off_face_normals():
+    """(24, 3) unit face-vertex normals for the cube's 24 face corners, each
+    face's own tipped a different way, so a rule that turns them by the
+    rotation alone and one that takes the scale too part on every one"""
+    k      = np.arange(24.0)
+    tipped = np.repeat(TestFbxMeshesInTheirOwnSpace.NORMALS, 4, axis=0)
+    tipped = tipped + 0.4 * np.c_[np.sin(k), np.cos(k), np.sin(2.0 * k)]
+    return tipped / np.linalg.norm(tipped, axis=1, keepdims=True)
+
+
+@unittest.skipIf(fbx is None, "Autodesk FBX Python SDK is not installed")
+class TestFbxGeometricTransform(FbxCase):
+    """the FBX mesh readers bake a node's geometric transform, the offset
+    that moves its mesh alone and not its children, into the mesh, as Maya's
+    FBXImport does; 3.0.0 left it out, the meshes with an offset in this
+    file 2.00 to 5.50 off Maya's object space
+
+    The points take the offset as the sdk's FbxAMatrix(T, R, S) composes it,
+    scaled, then turned in xyz whatever the node's rotate order, then moved,
+    its translation times the unit, so under their node's world they are
+    where the sdk puts them. The normals take the offset's rotation alone,
+    flipped when it mirrors, at unit length, as Maya's import turns them:
+    ``sign(det G) * n @ U``, U the rotation part of the offset's 3x3 G. So
+    under an uneven offset scale they are not perpendicular to the stretched
+    faces, as in Maya. The faces keep the file's order, a mirror's too, and
+    a skinned mesh posed by its rig is the sdk's blend, which applies the
+    offset before the cluster's matrices, with the inverse binds as read.
+    An offset whose scale is 0 on an axis flattens the mesh, and the readers
+    drop its normals, as Maya's import does; a scale near 0 but not 0 does
+    not flatten it, and its normals follow the rule, as Maya keeps them.
+
+    Each file holds, under a group moved, turned and evenly scaled
+    (``grp``): ``geo``, offset by (0, 3, 0), (0, 0, 30) and an uneven
+    (1.5, 0.5, 2); ``turned``, offset by a turn (25, -40, 60) alone on a
+    node whose rotate order is zxy; ``mirror``, offset by a mirroring
+    (-1.5, 0.5, 2); ``plain``, no offset; ``body``, offset and skinned to a
+    hip and a knee posed off its bind; and ``scaled``, offset by an uneven
+    scale (0.5, 2, 1) alone. The normals are authored off the faces' own,
+    and longer or shorter than 1 on the meshes with an offset. The file of
+    flattening offsets holds ``flat``, offset by (0.5, 1, 0), (10, 20, 30)
+    and a scale (1, 0, 1); ``edge``, by a scale (-0, 1, 1) alone; and
+    ``thin``, offset as ``flat`` but by a scale (1, 1e-30, 1).
+    """
+
+    # Maya's Z-up into its Y-up: (x, y, z) -> (x, z, -y)
+    TURN    = TestFbxMeshesInTheirOwnSpace.TURN
+    CORNERS = TestFbxMeshesInTheirOwnSpace.CORNERS
+    FACES   = TestFbxMeshesInTheirOwnSpace.FACES
+    OFFSETS = {
+        "geo":    ((0.0, 3.0, 0.0), (0.0, 0.0, 30.0), (1.5, 0.5, 2.0)),
+        "turned": ((0.0, 0.0, 0.0), (25.0, -40.0, 60.0), (1.0, 1.0, 1.0)),
+        "mirror": ((1.0, 2.0, 3.0), (0.0, 0.0, 30.0), (-1.5, 0.5, 2.0)),
+        "plain":  None,
+        "body":   ((0.5, 1.0, 0.0), (0.0, 0.0, 30.0), (1.0, 2.0, 1.0)),
+        "scaled": ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.5, 2.0, 1.0)),
+    }
+    # offsets that flatten the mesh, a scale of 0 on an axis
+    FLAT = {
+        "flat": ((0.5, 1.0, 0.0), (10.0, 20.0, 30.0), (1.0, 0.0, 1.0)),
+        "edge": ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (-0.0, 1.0, 1.0)),
+    }
+    # one that nearly flattens it, a scale near 0 but not 0: Maya keeps its
+    # normals, turned by the rule
+    THIN = {"thin": ((0.5, 1.0, 0.0), (10.0, 20.0, 30.0), (1.0, 1e-30, 1.0))}
+
+    def cases(self):
+        """(label, FbxSystemUnit name, axis system, cm per unit, turn)"""
+        system = fbx.FbxAxisSystem
+        return (
+            ("cm Y-up", "cm", system.MayaYUp, 1.0, np.eye(3)),
+            ("cm Z-up", "cm", system.MayaZUp, 1.0, self.TURN),
+            ("m Z-up", "m", system.MayaZUp, 100.0, self.TURN),
+        )
+
+    def cube(self, scene, node_name, offset):
+        """a node of the cube with its normals authored, offset by
+        ``offset``, (T, R, S), or None; returns (node, mesh)"""
+        normals = _off_face_normals()
+        lengths = 0.5 + 0.1 * np.arange(len(normals))
+
+        mesh = fbx.FbxMesh.Create(scene, f"{node_name}Shape")
+        mesh.InitControlPoints(len(self.CORNERS))
+        for index, corner in enumerate(self.CORNERS):
+            mesh.SetControlPointAt(fbx.FbxVector4(*corner, 1.0), index)
+        for face in self.FACES:
+            mesh.BeginPolygon()
+            for index in face:
+                mesh.AddPolygon(index)
+            mesh.EndPolygon()
+        element = mesh.CreateElementNormal()
+        element.SetMappingMode(fbx.FbxLayerElement.EMappingMode.eByPolygonVertex)
+        element.SetReferenceMode(fbx.FbxLayerElement.EReferenceMode.eDirect)
+        authored = normals if offset is None else normals * lengths[:, None]
+        for normal in authored:
+            element.GetDirectArray().Add(fbx.FbxVector4(*normal, 0.0))
+
+        node = fbx.FbxNode.Create(scene, node_name)
+        node.SetNodeAttribute(mesh)
+        if offset is not None:
+            pivot = fbx.FbxNode.EPivotSet.eSourcePivot
+            node.SetGeometricTranslation(pivot, fbx.FbxVector4(*offset[0], 1.0))
+            node.SetGeometricRotation(pivot, fbx.FbxVector4(*offset[1], 1.0))
+            node.SetGeometricScaling(pivot, fbx.FbxVector4(*offset[2], 1.0))
+        return node, mesh
+
+    def scene_file(self, name, unit, axes):
+        """the file the class docstring describes, in ``unit`` and ``axes``"""
+
+        def populate(scene):
+            settings = scene.GetGlobalSettings()
+            settings.SetSystemUnit(getattr(fbx.FbxSystemUnit, unit))
+            settings.SetAxisSystem(axes)
+
+            group = fbx.FbxNode.Create(scene, "grp")
+            group.SetNodeAttribute(fbx.FbxNull.Create(scene, "grpAttr"))
+            group.LclTranslation.Set(fbx.FbxDouble3(1.0, 2.0, -3.0))
+            group.LclRotation.Set(fbx.FbxDouble3(10.0, 20.0, 30.0))
+            group.LclScaling.Set(fbx.FbxDouble3(1.5, 1.5, 1.5))
+            scene.GetRootNode().AddChild(group)
+
+            nodes = {}
+            for index, (node_name, offset) in enumerate(self.OFFSETS.items()):
+                node, mesh = self.cube(scene, node_name, offset)
+                node.LclTranslation.Set(fbx.FbxDouble3(4.0 * index, -1.0, 2.0))
+                node.LclRotation.Set(fbx.FbxDouble3(0.0, 45.0, 0.0))
+                group.AddChild(node)
+                nodes[node_name] = node, mesh
+
+            turned = nodes["turned"][0]
+            turned.SetRotationActive(True)
+            turned.SetRotationOrder(fbx.FbxNode.EPivotSet.eSourcePivot, fbx.EFbxRotationOrder.eEulerZXY)
+            turned.LclRotation.Set(fbx.FbxDouble3(10.0, 0.0, 20.0))
+
+            hip  = add_joint(scene, "hip")
+            knee = add_joint(scene, "knee", parent=hip)
+            hip.LclTranslation.Set(fbx.FbxDouble3(0.0, 1.0, 0.5))
+            hip.LclRotation.Set(fbx.FbxDouble3(0.0, 0.0, 10.0))
+            knee.LclTranslation.Set(fbx.FbxDouble3(0.0, -0.5, 0.1))
+            knee.LclRotation.Set(fbx.FbxDouble3(20.0, 0.0, 0.0))
+            body, mesh = nodes["body"]
+            weights = [
+                (hip, {0: 1.0, 1: 1.0, 2: 0.5, 3: 0.5, 4: 1.0, 5: 0.25}),
+                (knee, {2: 0.5, 3: 0.5, 5: 0.75, 6: 1.0, 7: 1.0}),
+            ]
+            skin = bind(scene, mesh, weights)
+            for index in range(skin.GetClusterCount()):
+                cluster = skin.GetCluster(index)
+                cluster.SetTransformMatrix(body.EvaluateGlobalTransform())
+                cluster.SetTransformLinkMatrix(cluster.GetLink().EvaluateGlobalTransform())
+            knee.LclRotation.Set(fbx.FbxDouble3(50.0, 0.0, 0.0))
+
+        return self.write(name, populate)
+
+    @staticmethod
+    def offset(node):
+        """the node's geometric transform as the sdk composes it,
+        FbxAMatrix(T, R, S), a row-vector 4x4"""
+        pivot = fbx.FbxNode.EPivotSet.eSourcePivot
+        return _rows(
+            fbx.FbxAMatrix(
+                node.GetGeometricTranslation(pivot),
+                node.GetGeometricRotation(pivot),
+                node.GetGeometricScaling(pivot),
+            )
+        )
+
+    def sdk_truth(self, path, cm, names=None):
+        """{mesh: (its points with the offset, times ``cm``; the file's
+        face-vertex normals; the offset's 3x3; the sdk's world points, the
+        offset's then the node's world after FbxAxisSystem.MayaYUp
+        .ConvertScene, times ``cm``)}, for the meshes ``names`` or the
+        class's"""
+        names = self.OFFSETS if names is None else names
+        out   = {}
+        with open_fbx(path, fbx) as scene:
+            for name in names:
+                node      = _find(scene, name)
+                mesh      = node.GetNodeAttribute()
+                points    = _control_points(mesh)
+                offset    = self.offset(node)
+                array     = mesh.GetElementNormal(0).GetDirectArray()
+                normals   = np.array([list(array.GetAt(i))[:3] for i in range(array.GetCount())])
+                local     = (points @ offset[:3, :3] + offset[3, :3]) * cm
+                out[name] = [local, normals, offset[:3, :3]]
+            fbx.FbxAxisSystem.MayaYUp.ConvertScene(scene)
+            for name in names:
+                node   = _find(scene, name)
+                points = _control_points(node.GetNodeAttribute())
+                world  = self.offset(node) @ _rows(node.EvaluateGlobalTransform())
+                out[name].append((points @ world[:3, :3] + world[3, :3]) * cm)
+        return out
+
+    @staticmethod
+    def turned(normals, matrix):
+        """the normals as Maya's import turns them by an offset whose 3x3 is
+        ``matrix``: at unit length, by its rotation part, flipped when it
+        mirrors"""
+        unit = normals / np.linalg.norm(normals, axis=1, keepdims=True)
+        return np.sign(np.linalg.det(matrix)) * unit @ _polar(matrix)
+
+    def sdk_blend(self, path, cm, turn):
+        """the body as the sdk's linear blend of its clusters puts it, the
+        offset applied first (the sdk's ViewScene sample, DrawScene.cxx), in
+        the file's axes, then turned and times ``cm``"""
+        with open_fbx(path, fbx) as scene:
+            node   = _find(scene, "body")
+            mesh   = node.GetNodeAttribute()
+            points = np.c_[_control_points(mesh), np.ones(mesh.GetControlPointsCount())]
+            skin   = mesh.GetDeformer(0, fbx.FbxDeformer.EDeformerType.eSkin)
+            blend  = np.zeros_like(points)
+            for index in range(skin.GetClusterCount()):
+                cluster = skin.GetCluster(index)
+                link_bind, mesh_bind = fbx.FbxAMatrix(), fbx.FbxAMatrix()
+                cluster.GetTransformLinkMatrix(link_bind)
+                cluster.GetTransformMatrix(mesh_bind)
+                link     = _rows(cluster.GetLink().EvaluateGlobalTransform())
+                skinning = self.offset(node) @ _rows(mesh_bind) @ np.linalg.inv(_rows(link_bind)) @ link
+                for vertex, weight in zip(cluster.GetControlPointIndices(), cluster.GetControlPointWeights()):
+                    blend[vertex] += weight * (points[vertex] @ skinning)
+        return blend[:, :3] @ turn * cm
+
+    def faces(self, mesh):
+        """a MeshData's faces, as lists of point indices"""
+        ends = np.cumsum(mesh.counts)
+        return [list(np.asarray(mesh.indices)[end - count:end]) for count, end in zip(mesh.counts, ends)]
+
+    def test_the_points_and_normals_take_the_offset(self):
+        """every reader: the points with the offset baked, times the unit;
+        the normals turned by its rotation alone, flipped in a mirror, unit
+        length; the faces in the file's order; a mesh with no offset as the
+        file holds it, to the bit"""
+        for label, unit, axes, cm, _ in self.cases():
+            with self.subTest(file=label):
+                path  = self.scene_file(f"points {label}.fbx", unit, axes)
+                truth = self.sdk_truth(path, cm)
+                read  = {mesh.name: mesh for mesh in MeshList.load_fbx(path)}
+                pairs = {mesh.name: mesh for mesh, _ in mesh_load_fbx(path)}
+                self.assertEqual(sorted(read), sorted(self.OFFSETS))
+
+                for name in self.OFFSETS:
+                    local, normals, matrix, _ = truth[name]
+                    for mesh in (read[name], pairs[name], MeshData.load_fbx(path, name=name)):
+                        got = np.asarray(mesh.normals)[mesh.normal_indices]
+                        self.assertEqual(self.faces(mesh), [list(face) for face in self.FACES])
+                        if self.OFFSETS[name] is None:
+                            np.testing.assert_array_equal(mesh.points, local)
+                            np.testing.assert_array_equal(got, normals)
+                            continue
+                        np.testing.assert_allclose(mesh.points, local, rtol=0.0, atol=1e-9)
+                        np.testing.assert_allclose(got, self.turned(normals, matrix), rtol=0.0, atol=1e-9)
+                        np.testing.assert_allclose(np.linalg.norm(got, axis=1), 1.0, rtol=0.0, atol=1e-12)
+
+    def test_the_normals_are_not_the_faces_own_under_an_uneven_scale(self):
+        """as in Maya: turned by the offset's rotation alone, the normals of
+        ``geo`` are not what its inverse transpose, which keeps a normal
+        perpendicular to a stretched face, makes of them; ``mirror``'s are
+        flipped, its faces kept, so they agree with the face order"""
+        def unit(rows):
+            return rows / np.linalg.norm(rows, axis=1, keepdims=True)
+
+        path    = self.scene_file("normals.fbx", "cm", fbx.FbxAxisSystem.MayaYUp)
+        truth   = self.sdk_truth(path, 1.0)
+        read    = {mesh.name: mesh for mesh in MeshList.load_fbx(path)}
+        normals = {name: np.asarray(read[name].normals)[read[name].normal_indices] for name in read}
+
+        _, authored, matrix, _ = truth["geo"]
+        square = unit(authored @ np.linalg.inv(matrix).T)
+        self.assertGreater(float(np.abs(normals["geo"] - square).max()), 0.3)
+
+        _, authored, matrix, _ = truth["mirror"]
+        self.assertLess(np.linalg.det(matrix), 0.0)
+        unflipped = unit(authored) @ _polar(matrix)
+        np.testing.assert_allclose(normals["mirror"], -unflipped, rtol=0.0, atol=1e-9)
+        self.assertEqual(self.faces(read["mirror"]), [list(face) for face in self.FACES])
+
+    def test_under_its_nodes_world_a_mesh_is_where_the_sdk_puts_it(self):
+        """each mesh's node, from HierarchyData.load_fbx and ClipData.load_fbx
+        of the same file, places its points where the sdk does, the offset
+        and the node's world"""
+        for label, unit, axes, cm, _ in self.cases():
+            with self.subTest(file=label):
+                path  = self.scene_file(f"worlds {label}.fbx", unit, axes)
+                truth = self.sdk_truth(path, cm)
+                read  = {mesh.name: np.asarray(mesh.points) for mesh in MeshList.load_fbx(path)}
+
+                for loader in (HierarchyData.load_fbx, ClipData.load_fbx):
+                    rig = loader(path)
+                    for name in self.OFFSETS:
+                        world = np.asarray(rig[name].world_matrix)
+                        got   = read[name] @ world[:3, :3] + world[3, :3]
+                        np.testing.assert_allclose(got, truth[name][3], rtol=0.0, atol=1e-9)
+
+    def test_a_skinned_mesh_posed_by_the_rig_is_the_sdks_blend(self):
+        """the reader's points, the offset baked, and _read_skins_fbx's
+        inverse binds as read, deformed by the rig or the clip of the same
+        file; and the Object, whose points and binds turn together"""
+        for label, unit, axes, cm, turn in self.cases():
+            with self.subTest(file=label):
+                path  = self.scene_file(f"skin {label}.fbx", unit, axes)
+                want  = self.sdk_blend(path, cm, turn)
+                mesh  = MeshData.load_fbx(path, name="body")
+                skins = {skin.name: (skin, binds) for skin, binds in _read_skins_fbx(path, bind_matrices=True)}
+
+                deformer = SkinDeformData(mesh, skins["body"][0], inverse_bind_matrices=skins["body"][1])
+                index    = [x.name for x in MeshList.load_fbx(path)].index("body")
+                obj      = Object.load_fbx(path, index=index, extract_texture=False)
+                for loader in (HierarchyData.load_fbx, ClipData.load_fbx):
+                    rig = loader(path)
+                    np.testing.assert_allclose(deformer.apply(rig), want, rtol=0.0, atol=1e-9)
+                    np.testing.assert_allclose(obj.pose(rig).mesh.points, want, rtol=0.0, atol=1e-9)
+                    obj.restore_bind_pose()
+
+    def test_the_object_turns_the_mesh_with_its_offset(self):
+        """Object.load_fbx shows each mesh as MeshList.load_fbx reads it, the
+        offset baked, then turned into Maya's Y-up, points and normals"""
+        for label, unit, axes, cm, turn in self.cases():
+            with self.subTest(file=label):
+                path  = self.scene_file(f"object {label}.fbx", unit, axes)
+                truth = self.sdk_truth(path, cm)
+                for index, mesh in enumerate(MeshList.load_fbx(path)):
+                    obj = Object.load_fbx(path, index=index, extract_texture=False, load_skin=False)
+                    self.assertEqual(obj.name, mesh.name)
+                    np.testing.assert_array_equal(obj.mesh.points, np.asarray(mesh.points) @ turn)
+                    np.testing.assert_array_equal(obj.mesh.normals, np.asarray(mesh.normals) @ turn)
+
+                    local, normals, matrix, _ = truth[mesh.name]
+                    got = np.asarray(obj.mesh.normals)[obj.mesh.normal_indices]
+                    np.testing.assert_allclose(obj.mesh.points, local @ turn, rtol=0.0, atol=1e-9)
+                    np.testing.assert_allclose(got, self.turned(normals, matrix) @ turn, rtol=0.0, atol=1e-9)
+
+    def flat_file(self, name, unit, axes):
+        """a file of the cubes ``FLAT`` and ``THIN`` offset, under the scene
+        root"""
+
+        def populate(scene):
+            settings = scene.GetGlobalSettings()
+            settings.SetSystemUnit(getattr(fbx.FbxSystemUnit, unit))
+            settings.SetAxisSystem(axes)
+            for node_name, offset in {**self.FLAT, **self.THIN}.items():
+                node, _ = self.cube(scene, node_name, offset)
+                scene.GetRootNode().AddChild(node)
+
+        return self.write(name, populate)
+
+    def test_an_offset_that_flattens_the_mesh_drops_its_normals(self):
+        """an offset whose scale is 0 on an axis flattens the mesh: Maya's
+        FBXImport drops the file's normals and rebuilds its own from the flat
+        faces, so every reader reads the mesh with no normals, its points
+        flattened where the sdk puts them; a scale near 0 but not 0 does not
+        flatten it, and every reader keeps its normals, turned by the rule,
+        as Maya keeps them"""
+        offsets = {**self.FLAT, **self.THIN}
+        for label, unit, axes, cm, turn in self.cases():
+            with self.subTest(file=label):
+                path   = self.flat_file(f"flat {label}.fbx", unit, axes)
+                truth  = self.sdk_truth(path, cm, offsets)
+                meshes = MeshList.load_fbx(path)
+                pairs  = {mesh.name: mesh for mesh, _ in mesh_load_fbx(path)}
+                self.assertEqual(sorted(mesh.name for mesh in meshes), sorted(offsets))
+
+                for index, mesh in enumerate(meshes):
+                    local, normals, matrix, _ = truth[mesh.name]
+                    self.assertEqual(len(normals), len(self.FACES) * 4)
+                    obj   = Object.load_fbx(path, index=index, extract_texture=False, load_skin=False)
+                    reads = (mesh, pairs[mesh.name], MeshData.load_fbx(path, name=mesh.name), obj.mesh)
+                    for read, into in zip(reads, (np.eye(3), np.eye(3), np.eye(3), turn)):
+                        if mesh.name not in self.THIN:
+                            self.assertIsNone(read.normals)
+                            self.assertIsNone(read.normal_indices)
+                            continue
+                        self.assertIsNotNone(read.normals)
+                        got = np.asarray(read.normals)[read.normal_indices]
+                        np.testing.assert_allclose(got, self.turned(normals, matrix) @ into, rtol=0.0, atol=1e-9)
+                    np.testing.assert_allclose(mesh.points, local, rtol=0.0, atol=1e-9)
+                    np.testing.assert_allclose(obj.mesh.points, local @ turn, rtol=0.0, atol=1e-9)
+
+    def test_maya_imports_the_mesh_where_the_readers_put_it(self):
+        """Maya's own FBXImport: its object-space points are the reader's,
+        over the cm one unit of the file holds (Maya keeps a file's unit in
+        its object space and scales the node), and under their node's world
+        from HierarchyData.load_fbx the points are where Maya puts the mesh,
+        both within the gap between Maya's points and the sdk's (Maya holds
+        a mesh's points in single precision) plus 1e-9; its face-vertex
+        normals are the reader's within 2e-7 (single precision: at most
+        1.2e-7 measured), its faces in the file's order. Needs mayapy with
+        the fbxmaya plug-in"""
+        try:
+            import maya.api.OpenMaya as om
+            import maya.cmds as cmds
+            import maya.mel as mel
+
+            cmds.loadPlugin("fbxmaya", quiet=True)
+        except Exception:  # not running in Maya, or no fbx plug-in
+            self.skipTest("needs Maya and its fbxmaya plug-in")
+
+        def shape(name):
+            selection = om.MSelectionList()
+            selection.add(name)
+            path = selection.getDagPath(0)
+            path.extendToShape()
+            return om.MFnMesh(path)
+
+        def rows(values):
+            return np.array([[value.x, value.y, value.z] for value in values])
+
+        self.addCleanup(cmds.file, new=True, force=True)
+        for label, unit, axes, cm, _ in self.cases():
+            path  = self.scene_file(f"maya {label}.fbx", unit, axes)
+            truth = self.sdk_truth(path, cm)
+            read  = {mesh.name: mesh for mesh in MeshList.load_fbx(path)}
+            rig   = HierarchyData.load_fbx(path)
+            cmds.file(new=True, force=True)
+            mel.eval("FBXResetImport")
+            mel.eval(f'FBXImport -f "{path.replace(os.sep, "/")}"')
+
+            for name in ("geo", "turned", "mirror", "plain", "scaled"):
+                with self.subTest(file=label, mesh=name):
+                    mesh  = read[name]
+                    maya  = shape(name)
+                    faces = [list(maya.getPolygonVertices(face)) for face in range(maya.numPolygons)]
+                    local = rows(maya.getPoints(om.MSpace.kObject))
+                    world = rows(maya.getPoints(om.MSpace.kWorld))
+                    normals = rows(
+                        normal
+                        for face in range(maya.numPolygons)
+                        for normal in maya.getFaceVertexNormals(face, om.MSpace.kObject)
+                    )
+                    self.assertEqual(faces, self.faces(mesh))
+
+                    gap = float(np.abs(local - truth[name][0] / cm).max())
+                    self.assertLess(gap, 1e-6)
+                    got = np.asarray(mesh.points) / cm
+                    self.assertLessEqual(float(np.abs(got - local).max()), gap + 1e-9)
+
+                    gap = float(np.abs(world - truth[name][3]).max())
+                    self.assertLess(gap, 1e-6 * max(1.0, float(np.abs(world).max())))
+                    node = np.asarray(rig[name].world_matrix)
+                    got  = np.asarray(mesh.points) @ node[:3, :3] + node[3, :3]
+                    self.assertLessEqual(float(np.abs(got - world).max()), gap + 1e-9)
+
+                    got = np.asarray(mesh.normals)[mesh.normal_indices]
+                    self.assertLess(float(np.abs(got - normals).max()), 2e-7)
+
+
 @unittest.skipIf(not HAVE_GLB, "pygltflib / trimesh are not installed")
 class TestGlbBindPose(GlbCase):
     """same rule for glb, with the unit conversion the fbx path also does

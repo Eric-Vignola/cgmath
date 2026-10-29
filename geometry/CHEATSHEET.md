@@ -1133,15 +1133,43 @@ UVData.load_fbx("hero.fbx", channel=0)
 UVList.load_glb("hero.glb", name="body")    # one mesh's UV channels
 ```
 
-The FBX mesh readers keep each mesh in its own object space, as the
-file, the FBX SDK and Maya keep it: the points, normals and UVs leave out
-the mesh's node, and with it the turn `HierarchyData.load_fbx` puts on a
-rig's roots to load a file in Maya's Y-up. `scale_factor=None`, the
-default, converts the file's unit to centimetres as the rig loaders do
-(the points, never the normals or the UVs), and a number is the caller's
-own factor. Under the world matrix of its node in a rig read from the
-same file, which keeps a mesh's node as a transform named after it, a
-mesh sits where the file puts it, in cm and Maya's Y-up:
+The FBX mesh readers keep each mesh in its own object space, as Maya's
+importer puts it: the points, normals and UVs leave out the mesh's node,
+and with it the turn `HierarchyData.load_fbx` puts on a rig's roots to
+load a file in Maya's Y-up. A node's geometric transform, the offset the
+file gives the node's mesh alone and not its children, is baked into the
+mesh, as Maya's importer bakes it: the points take it as the FBX SDK's
+`FbxAMatrix(T, R, S)` composes it, scaled, turned in xyz whatever the
+node's rotate order (Maya within 9.25e-08 of that for all six orders),
+then moved. The normals are turned by the offset's rotation alone and
+flipped when it mirrors, at unit length, as Maya's importer turns them,
+so under an uneven offset scale they are not perpendicular to the
+stretched faces, as in Maya. An offset whose scale is exactly 0 on an
+axis flattens the mesh: Maya's importer then drops the file's normals
+and rebuilds its own from the flat faces, and the readers read the mesh
+with no normals; a scale near 0 but not 0, 1e-30 say, keeps them, as
+Maya's importer does. A caller who needs normals on such a mesh rebuilds
+them with `set_normals`. Where the file maps its normals by control
+point or holds none, Maya's edges are soft, and `set_normals()` is
+within 6.78e-08 of Maya's normals in a probe; where it maps them per
+polygon vertex, Maya makes every edge hard: there `set_normals()` is
+1.77 off and `set_normals(hard_edge_angle=60)` within 1.48e-06. The
+faces keep the file's order, a mirror's too; the UVs and the skin
+weights are the file's, and so are the inverse binds, which pose the
+baked points as the SDK blends a skin, the offset first. Nodes that
+share one mesh each read it with their own offset baked in, where the
+SDK puts it; Maya's importer bakes one offset into all of them, that of
+the first such node in the scene's hierarchy: one instanced shape in a
+probe (the second node's mesh 4.29 cm off the SDK's in its own space,
+6.93 cm in the world), separate shapes with that same offset in another,
+whose file attaches the mesh first to a node later in the hierarchy. A
+mesh whose node holds no geometric transform reads as the file holds it.
+`scale_factor=None`, the default, converts the file's unit to
+centimetres as the rig loaders do (the points, never the normals or the
+UVs), and a number is the caller's own factor. Under the world matrix of
+its node in a rig read from the same file, which keeps a mesh's node as
+a transform named after it, a mesh sits where the file puts it, in cm
+and Maya's Y-up:
 
 <!-- notest -->
 ```python
@@ -1161,24 +1189,24 @@ own space is the same in any axes, and its unit is the one its reader's
 records, so under its node's world from that rig, read in whatever axes,
 it is where the rig's record says. `save_fbx` writes no geometry: a
 mesh's node, which the rig loaders read as a transform, is written as a
-group. `render.Object.load_fbx`, a mesh with no node to
-carry the turn, turns its points itself. A node's geometric transform,
-which Maya bakes into the points, is not read. A file that holds its
-unit as a scale on the scene root's children, as the SDK's and Maya's
-unit conversions write it, keeps the points under such a root in cm,
-and they are read as they are, as `HierarchyData.load_fbx` says: its
-meshes load as the cm file's. A mesh at or under a root the export found
-scaled other than 1, which it scales by 1/s all the same (s the cm one
-unit holds), is under no such root: its points load s times larger and
-its node scaled 1/s, so it is right once posed, but on the frames of a
-clip where a later layer of a take keys that root's translate, or an
-override or passthrough one a scale there (`HierarchyData.load_fbx`). A
-mesh on or under a node the export scales by 1/s once more there, or
-skinned to one (from the second joint of a Maya skeleton down, its first
-joint under such a root), is off once posed by a rig of the nodes' own
-values (`pose="node"`) or by a clip, and right posed at the bind by a
-`pose="bind"` rig when a bind pose lists those nodes, as Maya's export
-lists a skin's joints; `HierarchyData.load_fbx` says which.
+group. `render.Object.load_fbx`, a mesh with no node to carry the turn,
+turns its points itself, the geometric transform baked in first. A file
+that holds its unit as a scale on the scene root's children, as the
+SDK's and Maya's unit conversions write it, keeps the points under such
+a root in cm, and they are read as they are, as `HierarchyData.load_fbx`
+says: its meshes load as the cm file's. A mesh at or under a root the
+export found scaled other than 1, which it scales by 1/s all the same (s
+the cm one unit holds), is under no such root: its points load s times
+larger and its node scaled 1/s, so it is right once posed, but on the
+frames of a clip where a later layer of a take keys that root's
+translate, or an override or passthrough one a scale there
+(`HierarchyData.load_fbx`). A mesh on or under a node the export scales
+by 1/s once more there, or skinned to one (from the second joint of a
+Maya skeleton down, its first joint under such a root), is off once
+posed by a rig of the nodes' own values (`pose="node"`) or by a clip,
+and right posed at the bind by a `pose="bind"` rig when a bind pose
+lists those nodes, as Maya's export lists a skin's joints;
+`HierarchyData.load_fbx` says which.
 
 USD prims round-trip through `from_prim` / `to_prim` on `MeshData`, `UVData`,
 `MapData`, `GeomSubsetData`, `MorphData` and `CompactSkinData`.
