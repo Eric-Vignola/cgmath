@@ -5,6 +5,7 @@ import json as std_json
 import operator
 import os
 import pickle
+import re
 import sys
 import tempfile
 import unittest
@@ -6853,19 +6854,26 @@ class TestClipLoadFbx(unittest.TestCase):
         unit        = None,
         unkeyed     = None,
         spans       = None,
+        stack_keys  = None,
+        active      = None,
     ):
         """a chain of joints, keys given as {joint: {channel: [(sec, value)]}}
 
-        Only ``keyed_stack`` is keyed, so selecting any other take has to show
-        up as a node that no longer moves. Every stack still gets the same
-        time span, which is what makes an unkeyed one look plausible.
-        ``layer_keys``, keys of the same kind, go on a second layer of the
-        keyed stack. ``unit`` names the file's ``FbxSystemUnit``, cm when
-        None; the values are written as given, in that unit. ``unkeyed``,
-        {stack: kind}, gives a stack that is not keyed a curve node on the
-        first joint's translate, "curve_node" with no curve on it, "curve"
-        with an X curve holding no key, as an empty "Take 001" can hold.
-        ``spans``, {stack: (sec, sec)}, gives a stack its own time span.
+        Only ``keyed_stack`` is keyed, and any stack ``stack_keys``
+        ({stack: keys}, of the same kind as ``keys``) names, so selecting
+        any other take has to show up as a node that no longer moves. Every
+        stack gets the time span ``span``, which is what makes an unkeyed
+        one look plausible, unless ``spans``, {stack: (sec, sec)}, gives it
+        its own. ``active`` names the take the file records as active, its
+        ``ActiveAnimStackName``, none recorded when None. ``layer_keys``,
+        keys of the same kind, go on a second layer of the keyed stack.
+        ``unit`` names the file's ``FbxSystemUnit``, cm when None; the
+        values are written as given, in that unit. ``unkeyed``, {stack:
+        kind}, gives a stack that is not keyed a curve node on the first
+        joint's translate, "curve_node" with no curve on it, "curve" with an
+        X curve holding no key, as an empty "Take 001" can hold. The sdk's
+        writer drops a curve holding no key, so a file asking for one is
+        written as ASCII and the curve put back into its text.
         """
         manager = FBX.FbxManager.Create()
         manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
@@ -6893,9 +6901,10 @@ class TestClipLoadFbx(unittest.TestCase):
             layer = FBX.FbxAnimLayer.Create(scene, "Base Layer")
             stack.AddMember(layer)
 
-            if index == keyed_stack:
-                keyed = [(layer, keys)]
-                if layer_keys:
+            own = (stack_keys or {}).get(index)
+            if index == keyed_stack or own:
+                keyed = [(layer, keys if index == keyed_stack else own)]
+                if layer_keys and index == keyed_stack:
                     second = FBX.FbxAnimLayer.Create(scene, "Layer 2")
                     stack.AddMember(second)
                     keyed.append((second, layer_keys))
@@ -6928,14 +6937,56 @@ class TestClipLoadFbx(unittest.TestCase):
             last.SetSecondDouble(float((spans or {}).get(index, span)[1]))
             stack.SetLocalTimeSpan(FBX.FbxTimeSpan(first, last))
 
+        if active is not None:
+            scene.ActiveAnimStackName.Set(FBX.FbxString(active))
+
+        keyless = "curve" in (unkeyed or {}).values()
+        writer  = -1
+        if keyless:
+            registry = manager.GetIOPluginRegistry()
+            writer   = registry.FindWriterIDByDescription("FBX ascii (*.fbx)")
+
         path     = os.path.join(self.tmp.name, name)
         exporter = FBX.FbxExporter.Create(manager, "")
-        if not exporter.Initialize(path, -1, manager.GetIOSettings()):
+        if not exporter.Initialize(path, writer, manager.GetIOSettings()):
             raise RuntimeError(f"cannot write {path}")
         exporter.Export(scene)
         exporter.Destroy()
         manager.Destroy()
+        if keyless:
+            self.put_back_keyless_curves(path)
         return path
+
+    @staticmethod
+    def put_back_keyless_curves(path):
+        """put back into an ASCII file the curves holding no key that the
+        sdk's writer leaves out: it still counts each one among the file's
+        curves and connects it to its curve node, as "d|X" and the like, but
+        writes no object for it
+
+        The file holds its own path, in whatever bytes the writer gave it,
+        so it is read and written back byte for byte, as latin-1.
+        """
+        with open(path, encoding="latin-1", newline="") as f:
+            text = f.read()
+
+        defined = set(re.findall(r"^\tAnimationCurve: (\d+),", text, re.M))
+        named   = re.findall(r'^\tC: "OP",(\d+),\d+, "d\|[XYZ]"', text, re.M)
+        fields  = ("KeyTime", "KeyValueFloat", "KeyAttrFlags", "KeyAttrDataFloat", "KeyAttrRefCount")
+        empty   = "".join(f"\t\t{field}: *0 {{\n\t\t\ta: \n\t\t}} \n" for field in fields)
+        curves = "".join(
+            f'\tAnimationCurve: {x}, "AnimCurve::", "" {{\n'
+            f"\t\tDefault: 0\n\t\tKeyVer: 4009\n{empty}\t}}\n"
+            for x in named
+            if x not in defined
+        )
+
+        at   = text.index("\tAnimationCurveNode: ")
+        text = text[:at] + curves + text[at:]
+        if "KeyTime: *0 {" not in text:
+            raise RuntimeError(f"{path} holds no curve with no key")
+        with open(path, "w", encoding="latin-1", newline="") as f:
+            f.write(text)
 
     def test_a_take_lands_on_the_frame_grid(self):
         path = self.authored(keys={"joint1": {"tx": [(0.0, 0.0), (1.0, 24.0)]}})
@@ -7284,8 +7335,10 @@ class TestClipLoadFbx(unittest.TestCase):
         """
         for kind in ("curve_node", "curve"):
             with self.subTest(kind=kind):
+                # a name outside ASCII, as a temp folder under a user's
+                # profile can hold: an ASCII file holds its own path
                 path = self.authored(
-                    f"{kind}.fbx",
+                    f"{kind}_\u00e9.fbx",
                     keys        = {"joint1": {"tx": [(0.0, 0.0), (1.0, 9.0)]}},
                     stacks      = 2,
                     keyed_stack = 1,
@@ -7306,19 +7359,83 @@ class TestClipLoadFbx(unittest.TestCase):
                 self.assertTrue(np.allclose(np.array(empty.frames.translate)[:, 0, 0], 0.0))
 
     def test_with_no_key_the_default_take_is_the_first_holding_curves(self):
-        """no take holds a key: the first holding curves, ahead of index 0,
-        which holds none, and of a later take holding curves too
+        """no take holds a key: the first holding a curve node, ahead of
+        index 0, which holds none, and of a later take holding one too; both
+        are bare curve nodes, with no curve on them
         """
         path = self.authored(
             stacks      = 3,
             keyed_stack = -1,
-            unkeyed     = {1: "curve", 2: "curve_node"},
+            unkeyed     = {1: "curve_node", 2: "curve_node"},
             spans       = {0: (0.0, 1.0), 1: (0.0, 2.0), 2: (0.0, 3.0)},
         )
 
         clip = ClipData.load_fbx(path, fps=4.0)
 
         self.assertEqual(clip.frame_count, 9)
+        self.assertTrue(np.allclose(np.array(clip.frames.translate)[:, 0, 1], 1.0))
+
+    def test_of_two_keyed_takes_the_default_is_the_first(self):
+        """two takes hold keys, of different spans and values: the default
+        is the first of them, its values and its frames, whether it is take
+        0 or follows an empty take, not the last keyed take, whose curves
+        Maya's FBXImport loads, nor the one holding more keys, nor the one
+        the file records as active
+        """
+        # the second keyed take holds more keys than the first
+        first  = {"joint1": {"tx": [(0.0, 10.0), (1.0, 19.0)]}}
+        second = {"joint1": {"tx": [(0.5, 100.0), (1.5, 110.0), (2.5, 120.0)]}}
+        layouts = {
+            # the two keyed takes alone, the second recorded as the active take
+            "nothing": dict(
+                stacks      = 2,
+                keyed_stack = 0,
+                stack_keys  = {1: second},
+                spans       = {0: (0.0, 1.0), 1: (0.5, 2.5)},
+                active      = "Take 002",
+            ),
+            # an empty take of the widest span first, holding a curve node
+            "an empty take": dict(
+                stacks      = 3,
+                keyed_stack = 1,
+                stack_keys  = {2: second},
+                unkeyed     = {0: "curve_node"},
+                spans       = {0: (0.0, 3.0), 1: (0.0, 1.0), 2: (0.5, 2.5)},
+            ),
+        }
+        for ahead, layout in layouts.items():
+            with self.subTest(ahead=ahead):
+                path = self.authored(f"{ahead.replace(' ', '_')}.fbx", keys=first, **layout)
+
+                clip      = ClipData.load_fbx(path, fps=4.0)
+                translate = np.array(clip.frames.translate)[:, 0, 0]
+
+                self.assertEqual((clip.start_frame, clip.frame_count), (0, 5))
+                self.assertAlmostEqual(float(translate[0]), 10.0, places=4)
+                self.assertAlmostEqual(float(translate[-1]), 19.0, places=4)
+
+                # the second keyed take is there, at its own span and values
+                last      = ClipData.load_fbx(path, fps=4.0, take=-1)
+                translate = np.array(last.frames.translate)[:, 0, 0]
+                self.assertEqual((last.start_frame, last.frame_count), (2, 9))
+                self.assertAlmostEqual(float(translate[0]), 100.0, places=4)
+                self.assertAlmostEqual(float(translate[-1]), 120.0, places=4)
+
+    def test_with_no_key_and_no_curve_node_the_default_is_take_0(self):
+        """no take holds a key or a curve node: the default is take 0 and
+        its frames, not a later take's span, nor the take the file records
+        as active
+        """
+        path = self.authored(
+            stacks      = 3,
+            keyed_stack = -1,
+            spans       = {0: (0.25, 2.0), 1: (0.0, 1.0), 2: (0.5, 3.0)},
+            active      = "Take 003",
+        )
+
+        clip = ClipData.load_fbx(path, fps=4.0)
+
+        self.assertEqual((clip.start_frame, clip.frame_count), (1, 8))
         self.assertTrue(np.allclose(np.array(clip.frames.translate)[:, 0, 1], 1.0))
 
     def test_an_explicit_take_still_reaches_an_empty_one(self):

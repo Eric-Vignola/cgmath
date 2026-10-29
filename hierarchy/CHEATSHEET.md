@@ -2514,10 +2514,41 @@ channels are sampled at the grid's times as they are.
 `ClipData.load_fbx` defaults to the first take that holds a key, not to
 index 0, because a file can hold takes with no curves at all, or with
 curve nodes and curves but not one key, such as an empty "Take 001"
-ahead of the animation (cgmath 3.0.0 took the first take holding curves,
-keys or not). In a file with no key at all it takes the first take that
-holds curves, then the first take. `take=` picks any take by index, an
-empty one included.
+ahead of the animation (cgmath 3.0.0 took the first take holding a curve
+node, keyed or not). In a file with no key at all it takes the first take
+that holds a curve node, with or without a curve, then the first take.
+`take=` picks any take by index, an empty one included. An empty take
+reads back as its own static values on every frame, the rest pose where
+its curve nodes hold the node's own. A curve with no key reads at its
+curve node's value, where the SDK's evaluator takes the curve's own
+default, and so does Maya where the curve is in the file's active take
+and the last take does not key its channel (a curve with no key in any
+other take, the last included, Maya does not read): under a curve node
+holding Y at 55, a Y curve with no key whose default is 99 reads 55 in
+the clip, 99 in the SDK's evaluator and, there, in Maya.
+
+Maya 2025's `FBXImport`, with its default settings, picks otherwise. It
+loads its curves from the file's last take, keyed or not, so an empty
+last take imports no curve. That is the last take the file's Takes
+section lists, not the last take object, which `take=-1` loads; the two
+are the same take wherever the file lists its takes in the order it
+holds them, as the SDK and Maya write them, and only a file edited by
+hand, its takes reordered or one left out of its Takes section, parts
+them (of the test files with two or more takes imported in Maya 2025,
+the 148 written with the SDK and the 6 exported by Maya list them in
+that order, and the 23 that do not were edited by hand); in a file with
+no Takes section Maya loads the last take object's curves, the take
+`take=-1` loads. Its playback range is the span of the file's active
+take: the take the file's `ActiveAnimStackName` names, or the first take
+object, the one `take=0` loads, when that name is empty, missing or
+names no take. A channel the last take does not key holds the value the
+active take gives it at frame 0. So the clip's curves are Maya's where
+the first take holding a key is the last take, or where no take holds
+one, though its frames, and a channel no take keys, can still differ
+there (Maya holds the active take's value at frame 0); `take=-1` loads
+the last take's curves, over that take's own frames, with a channel it
+does not key at that take's own value for it (its curve node's, the rest
+pose where it holds none).
 
 Its frames default to the take's stored span and every key of the take
 together, out to whole frames: an Unreal take, whose span stops a frame
@@ -2528,6 +2559,20 @@ frame, so a span of frames 60-121 reads 62 frames. `start_frame` and
 own: a `start_frame` passed alone no longer moves the end, which stays
 the take's last frame (cgmath 2 kept the take's length instead), and one
 past that frame raises `ValueError` naming it.
+
+The clip's frames are the picked take's, where Maya's playback range is
+the active take's. On 5 of 32 test files imported in Maya 2025, 3.0.1
+moved the frames off Maya's playback range: cgmath 3.0.0 loaded the
+empty first take, the rest pose over Maya's playback range, and 3.0.1
+loads the keyed take's curves, as Maya does, over that take's frames:
+
+| The file | Maya's playback range | The clip's frames |
+|---|---|---|
+| An empty first take over frames 0-48, holding a curve node and recorded as the active take, then a take keyed over frames 0-10 | 0-48 | 0-10 |
+| The same file, with no active take recorded | 0-48 | 0-10 |
+| The same file, its empty take over frames 0-40 | 0-40 | 0-10 |
+| The same file, its empty take holding a curve with no key on it | 0-48 | 0-10 |
+| Maya's own export, split into an empty take over frames 100-110 and a take keyed over frames 0-10 with its original take deleted, which records "Take 001", a name neither take has, as active | 100-110 | 0-10 |
 
 `clip.rest_pose` is the pose the file holds outside its take, the nodes'
 own values: a `HierarchyData` with the clip's names and node order, taken

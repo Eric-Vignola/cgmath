@@ -3490,7 +3490,7 @@ def _fbx_fold_shear(whole, sized, turn, frames: int, uneven) -> Optional[np.ndar
 
 
 def _fbx_has_curves(stack) -> bool:
-    """whether an animation stack holds any curves at all
+    """whether an animation stack holds any curve node, with or without a curve
 
     The criteria have to be built here rather than at import: they match
     nothing unless an FbxManager already exists.
@@ -4755,9 +4755,14 @@ def _fbx_turns_to_euler(q: np.ndarray, order: int) -> np.ndarray:
 
 
 def _fbx_held(curve_node, curve, axis: int) -> float:
-    """what the sdk takes for a channel with a curve node but no keys: the
-    curve node's own value, rounded to single precision when a curve is
-    there at all"""
+    """the value read for a channel with a curve node but no keys: the curve
+    node's own value, rounded to single precision when a curve is there at all.
+    It is what the sdk takes where the channel has no curve. For a curve with
+    no key the sdk's evaluator takes the curve's own default instead, which
+    this does not read, and so does Maya where the curve is in the file's
+    active take and the last take does not key its channel: under a curve node
+    holding 55, a curve with no key whose default is 99 reads 55 here, 99 in
+    the sdk and, there, in Maya"""
     held = curve_node.GetChannelValue(axis, 0.0)
     if curve is not None:
         held = float(np.float32(held))
@@ -12797,12 +12802,62 @@ class ClipData(HierarchyData):
 
         ``take`` defaults to the first one that holds a key rather than to
         index 0, then, in a file with no key at all, to the first that holds
-        curves, then to index 0. A file can carry takes holding no curves, or
-        curve nodes and curves with no key on them (an empty "Take 001" ahead
-        of the animation), and reading one back gives the rest pose on every
-        frame -- a silent answer that looks like a broken loader rather than
-        an empty take. The frames left out default to the take picked. Pass
-        an index to override, including onto an empty take.
+        a curve node, with or without a curve, then to index 0. A file can
+        carry takes holding no curves, or curve nodes and curves with no key
+        on them (an empty "Take 001" ahead of the animation), and reading one
+        back gives that take's own static values on every frame, the rest
+        pose where its curve nodes hold the node's own -- a silent answer
+        that looks like a broken loader rather than an empty take. A curve with
+        no key reads at its curve node's value, where the sdk's evaluator takes
+        the curve's own default, and so does Maya where the curve is in the
+        file's active take and the last take does not key its channel (a curve
+        with no key in any other take, the last included, Maya does not read):
+        under a curve node holding Y at 55, a Y curve with no key whose default
+        is 99 reads 55 in the clip, 99 in the sdk's evaluator and, there, in
+        Maya. The frames left out default to the take picked. Pass an index to
+        override, including onto an empty take.
+
+        Maya 2025's FBXImport, with its default settings, picks otherwise. It
+        loads its curves from the file's last take, keyed or not, so an empty
+        last take imports no curve. That is the last take the file's Takes
+        section lists, not the last take object, which ``take=-1`` loads; the
+        two are the same take wherever the file lists its takes in the order it
+        holds them, as the sdk and Maya write them, and only a file edited by
+        hand, its takes reordered or one left out of its Takes section, parts
+        them (of the test files with two or more takes imported in Maya 2025,
+        the 148 written with the sdk and the 6 exported by Maya list them in
+        that order, and the 23 that do not were edited by hand); in a file with
+        no Takes section Maya loads the last take object's curves, the take
+        ``take=-1`` loads. Its playback range is the span of the file's active
+        take: the take the file's ``ActiveAnimStackName`` names, or the first
+        take object, the one ``take=0`` loads, when that name is empty, missing
+        or names no take. A channel the last take does not key holds the value
+        the active take gives it at frame 0. So the clip's curves are Maya's
+        where the first take holding a key is the last take, or where no take
+        holds one, though its frames, and a channel no take keys, can still
+        differ there (Maya holds the active take's value at frame 0);
+        ``take=-1`` loads the last take's curves, over that take's own frames,
+        with a channel it does not key at that take's own value for it (its
+        curve node's, the rest pose where it holds none). The clip's frames are
+        the picked take's, where Maya's playback range is the active take's. On
+        5 of 32 test files imported in Maya 2025, 3.0.1 moved the frames off
+        Maya's playback range: cgmath 3.0.0 loaded the empty first take, the
+        rest pose over Maya's playback range, and 3.0.1 loads the keyed take's
+        curves, as Maya does, over that take's frames:
+
+        - an empty first take over frames 0-48, holding a curve node and
+          recorded as the active take, then a take keyed over frames 0-10:
+          Maya 0-48, the clip 0-10;
+        - the same file, with no active take recorded: Maya 0-48, the clip
+          0-10;
+        - the same file, its empty take over frames 0-40: Maya 0-40, the clip
+          0-10;
+        - the same file, its empty take holding a curve with no key on it:
+          Maya 0-48, the clip 0-10;
+        - Maya's own export, split into an empty take over frames 100-110 and
+          a take keyed over frames 0-10 with its original take deleted, which
+          records "Take 001", a name neither take has, as active: Maya
+          100-110, the clip 0-10.
 
         ``start_frame`` and ``end_frame`` are frame numbers on the file's own
         timeline, at the clip's frame rate. Each one left out covers both the
@@ -12865,9 +12920,14 @@ class ClipData(HierarchyData):
             # scene's object for one that sits where it did
             stacks = [typed(scene.GetSrcObject(criteria, index), FBX.FbxAnimStack, FBX) for index in range(count)]
 
-            # the first take holding a key, then the first holding curves:
-            # a take can hold curve nodes, curves even, and not one key, and
-            # reads back as the rest pose on every frame
+            # the first take holding a key, then the first holding a curve
+            # node, with or without a curve: a take can hold curve nodes,
+            # curves even, and not one key, and reads back as its own static
+            # values on every frame, the rest pose where its curve nodes hold
+            # the node's own (a curve with no key at its curve node's value,
+            # where the sdk takes the curve's own default, and so does Maya
+            # where the curve is in the file's active take and the last take
+            # does not key its channel: _fbx_held)
             if take is None:
                 stack = next((x for x in stacks if _fbx_key_ticks(x) is not None), None)
                 if stack is None:
