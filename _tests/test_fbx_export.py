@@ -38,6 +38,103 @@ def _joint(name, parent=None, **kwargs):
     )
 
 
+def _node(name, parent=None, node_type="transform", **kwargs):
+    """Returns a TransformData of ``node_type`` with a uuid, parented by uuid."""
+    return TransformData(
+        name        = name,
+        node_type   = node_type,
+        uuid        = str(uuid.uuid4()).upper(),
+        parent_uuid = parent.uuid if parent is not None else None,
+        **kwargs,
+    )
+
+
+def scaled_rig():
+    """probe_save.py's scaled rig: a group scaled (1, 3, 0.5) turned 30 over
+    a turned group with a locator under it, a joint and a turned
+    space_transform, and beside them a group, a locator and a joint with
+    segment_scale_compensate on"""
+    top = _node("sc", rotate=(0.0, 0.0, 30.0), scale=(1.0, 3.0, 0.5))
+    kid = _node("sc_kid", top, rotate=(40.0, 10.0, -20.0), translate=(1.0, 1.0, 0.0))
+    return HierarchyData([
+        top,
+        kid,
+        _node("sc_loc", kid, "locator", translate=(0.0, 2.0, 1.0)),
+        _node("sc_jnt", top, "joint", rotate=(40.0, 10.0, -20.0), translate=(-1.0, 1.0, 0.0)),
+        _node("sc_spc", top, "space_transform", rotate=(40.0, 10.0, -20.0), translate=(-1.0, -1.0, 0.0)),
+        _node("sc_grp", top, rotate=(10.0, 20.0, 30.0), translate=(1.0, 0.0, 1.0), scale=(1.0, 1.5, 0.75),
+              segment_scale_compensate=True),
+        _node("sc_lcf", top, "locator", translate=(0.5, 1.0, -2.0), segment_scale_compensate=True),
+        _node("sc_cmp", top, "joint", translate=(0.0, 1.0, 1.0), segment_scale_compensate=True),
+    ])
+
+
+# the parents a group with segment_scale_compensate on is saved under:
+# (label, P's scale, P's rotate, G's scale or None for no G); the first three
+# are not mirrored, the last three are
+FLAGGED_CASES = (
+    ("(1, 2, 3)", (1.0, 2.0, 3.0), (0.0, 30.0, 0.0), None),
+    ("(2, 2, 2)", (2.0, 2.0, 2.0), (0.0, 30.0, 0.0), None),
+    ("(2, 1, 0.5) under (1, 2, 3)", (2.0, 1.0, 0.5), (0.0, 30.0, 15.0), (1.0, 2.0, 3.0)),
+    ("(-1, 2, 3)", (-1.0, 2.0, 3.0), (0.0, 30.0, 0.0), None),
+    ("(-2, -2, -2)", (-2.0, -2.0, -2.0), (0.0, 30.0, 0.0), None),
+    ("(-1, 1, 1) under (1, 2, 3)", (-1.0, 1.0, 1.0), (0.0, 30.0, 0.0), (1.0, 2.0, 3.0)),
+)
+
+
+# the parents a group with segment_scale_compensate on and its own scale
+# mirrored is saved under: (label, P's scale or None for no P); the sdk places
+# it under each, Maya's importer under the last two alone, which mirror too
+MIRRORED_CASES = (
+    ("no parent", None),
+    ("(1, 1, 1)", (1.0, 1.0, 1.0)),
+    ("(2, 2, 2)", (2.0, 2.0, 2.0)),
+    ("(1, 2, 3)", (1.0, 2.0, 3.0)),
+    ("(-1, 2, 3)", (-1.0, 2.0, 3.0)),
+    ("(-2, -2, -2)", (-2.0, -2.0, -2.0)),
+)
+
+
+def flagged_rig(scale, rotate, grand=None, own=(1.0, 1.5, 0.75)):
+    """a group gRrs and a locator xRrs with segment_scale_compensate on under
+    a group P at (0, 1, 0) turned ``rotate`` and scaled ``scale``, when given,
+    itself under a group G at (0, 0.5, 0) turned (10, 0, 20) and scaled
+    ``grand`` when given: gRrs at (2, 0.5, -0.5) turned (20, 40, 60) and
+    scaled ``own``, over a locator lRrs, a turned group cRrs over a locator
+    dRrs, and a joint jRrs over a joint kRrs, both compensating their
+    parent's scale (flag_mirror.py's rig); xRrs scaled the signs of ``own``"""
+    nodes = []
+    top   = None
+    if grand is not None:
+        top = _node("G", translate=(0.0, 0.5, 0.0), rotate=(10.0, 0.0, 20.0), scale=grand)
+        nodes.append(top)
+    P = top
+    if scale is not None:
+        P = _node("P", top, translate=(0.0, 1.0, 0.0), rotate=rotate, scale=scale)
+        nodes.append(P)
+    g = _node("gRrs", P, translate=(2.0, 0.5, -0.5), rotate=(20.0, 40.0, 60.0), scale=own,
+              segment_scale_compensate=True)
+    c = _node("cRrs", g, translate=(1.0, 0.0, 0.0), rotate=(10.0, 20.0, 30.0))
+    j = _node("jRrs", g, "joint", translate=(0.0, 0.0, 1.0), segment_scale_compensate=True)
+    nodes += [
+        g,
+        _node("lRrs", g, "locator", translate=(0.5, 1.0, -2.0)),
+        c,
+        _node("dRrs", c, "locator", translate=(0.0, 1.0, 0.0)),
+        j,
+        _node("kRrs", j, "joint", translate=(0.0, 1.0, 0.0), segment_scale_compensate=True),
+        _node("xRrs", P, "locator", translate=(-1.0, 0.5, 0.5), rotate=(0.0, 0.0, 45.0), scale=np.sign(own),
+              segment_scale_compensate=True),
+    ]
+    return HierarchyData(nodes)
+
+
+def gaps(got, want):
+    """(3x3, position) largest gaps between two world matrices"""
+    got, want = np.asarray(got), np.asarray(want)
+    return float(np.abs(got[:3, :3] - want[:3, :3]).max()), float(np.abs(got[3, :3] - want[3, :3]).max())
+
+
 @contextlib.contextmanager
 def _no_fbx_warnings(test):
     """
@@ -173,6 +270,16 @@ class TestFbxExportSkeleton(unittest.TestCase):
             return (name, look)
 
         return self._walk(_attribute)
+
+    def _placed(self):
+        """Returns {node name: (inherit type name, sdk world matrix)}."""
+
+        def _place(node):
+            world  = node.EvaluateGlobalTransform()
+            matrix = np.array([[world.Get(r, c) for c in range(4)] for r in range(4)])
+            return node.GetTransformationInheritType().name, matrix
+
+        return {path.rsplit("|", 1)[-1]: placed for path, placed in self._walk(_place).items()}
 
     def test_duplicate_names_keep_their_parent(self):
         root  = _joint("root")
@@ -334,6 +441,95 @@ class TestFbxExportSkeleton(unittest.TestCase):
             self.assertTrue(np.allclose(world, want, rtol=0.0, atol=1e-9), name)
             self.assertTrue(np.allclose(loaded[name].world_matrix, want, rtol=0.0, atol=1e-9), name)
             self.assertEqual(loaded[name].rotate_order, rig[name].rotate_order, name)
+
+    def test_every_node_is_written_with_its_inherit_type(self):
+        """eInheritRrs on a node that compensates its parent's scale,
+        eInheritRSrs on any other, a group or a locator too, as Maya's
+        exporter writes a group and a locator. Written with the sdk's
+        default, eInheritRrSs, which scales a node along its own axes by its
+        parent's world scale, a turned group under a group scaled (1, 3, 0.5)
+        sat 1.58 off the rig in its 3x3 in the sdk, and a locator under it
+        3.17 in position (probe_save.py); the sdk now puts every node where
+        the rig has it"""
+        rig = scaled_rig()
+        self._export(rig)
+        placed = self._placed()
+        for node in rig:
+            with self.subTest(node.name):
+                inherit, world = placed[node.name]
+                axes, position = gaps(world, node.world_matrix)
+                self.assertLessEqual(axes, 1e-9)
+                # the largest measured on this file
+                self.assertLessEqual(position, 8.881784197001252e-16)
+                self.assertEqual(inherit, "eInheritRrs" if node.segment_scale_compensate else "eInheritRSrs")
+
+    def test_a_mirrored_group_compensating_its_parents_scale_is_written_eInheritRrs(self):
+        """a group or locator with segment_scale_compensate on and its own
+        scale mirrored is written eInheritRrs and the sdk puts it and every
+        node under it where the rig has it, with no parent, under a mirrored
+        parent and under one that is not (TransformList.save_fbx says where
+        Maya's importer does not). Written eInheritRrSs, its axes sat off
+        under any parent scaled other than 1"""
+        # the largest position gap measured on each file
+        bounds = {
+            "no parent":    6.661338147750939e-16,
+            "(1, 1, 1)":    4.440892098500626e-16,
+            "(2, 2, 2)":    4.440892098500626e-16,
+            "(1, 2, 3)":    4.440892098500626e-16,
+            "(-1, 2, 3)":   4.440892098500626e-16,
+            "(-2, -2, -2)": 4.440892098500626e-16,
+        }
+        for label, scale in MIRRORED_CASES:
+            with self.subTest(label):
+                rig = flagged_rig(scale, (0.0, 30.0, 0.0), own=(-1.0, 1.5, 0.75))
+                self._export(rig)
+                placed = self._placed()
+                for node in rig:
+                    axes, position = gaps(placed[node.name][1], node.world_matrix)
+                    self.assertLessEqual(axes, 1e-9, node.name)
+                    self.assertLessEqual(position, bounds[label], node.name)
+                    inherit = "eInheritRrs" if node.segment_scale_compensate else "eInheritRSrs"
+                    self.assertEqual(placed[node.name][0], inherit, node.name)
+
+    def test_a_group_compensating_its_parents_scale_is_written_eInheritRrs(self):
+        """a group or locator with segment_scale_compensate on, which a rig
+        built or edited by hand can hold, is written eInheritRrs, as a joint
+        is, so the sdk puts it and every node under it where the rig has it,
+        under mirrored and sheared parents too; written eInheritRrSs, a
+        group's axes sat 1.32 off under a parent scaled (1, 2, 3). Read back
+        its flag is off, as this release reads every node that is no joint,
+        its channels the ones saved"""
+        # the largest position gap measured on each file
+        bounds = {
+            "(1, 2, 3)": 4.440892098500626e-16,
+            "(2, 2, 2)": 4.440892098500626e-16,
+            "(2, 1, 0.5) under (1, 2, 3)": 3.552713678800501e-15,
+            "(-1, 2, 3)": 4.440892098500626e-16,
+            "(-2, -2, -2)": 8.881784197001252e-16,
+            "(-1, 1, 1) under (1, 2, 3)": 1.7763568394002505e-15,
+        }
+        for label, scale, rotate, grand in FLAGGED_CASES:
+            with self.subTest(label):
+                rig = flagged_rig(scale, rotate, grand)
+                self._export(rig)
+                placed = self._placed()
+                for node in rig:
+                    axes, position = gaps(placed[node.name][1], node.world_matrix)
+                    self.assertLessEqual(axes, 1e-9, node.name)
+                    self.assertLessEqual(position, bounds[label], node.name)
+                for node in rig:
+                    inherit = "eInheritRrs" if node.segment_scale_compensate else "eInheritRSrs"
+                    self.assertEqual(placed[node.name][0], inherit, node.name)
+
+                back = HierarchyData.load_fbx(self.path)
+                for node in rig:
+                    read = back[node.name]
+                    flag = node.segment_scale_compensate and node.node_type == "joint"
+                    self.assertEqual(read.segment_scale_compensate, flag, node.name)
+                    for channel in ("translate", "rotate", "scale"):
+                        np.testing.assert_allclose(
+                            getattr(read, channel), getattr(node, channel), rtol=0.0, atol=1e-12, err_msg=node.name
+                        )
 
     def test_unsupported_node_types_are_skipped(self):
         # a constraint can't be exported, it is skipped along with what is under it

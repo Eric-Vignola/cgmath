@@ -1093,15 +1093,25 @@ with FbxExporter() as ascii_exporter:
 
 Each `TransformData` maps onto FBX like this:
 
-| `node_type` | FBX attribute | Extras applied |
-|---|---|---|
-| `"joint"` | `FbxSkeleton`, `eLimbNode` at the top too, as Maya writes every joint (Maya's importer reads an `eRoot` with no child as a plain transform) | `joint_orient` → pre-rotation, `rotate_axis` → inverted post-rotation, `segment_scale_compensate` → inherit type |
-| `"transform"`, `"space_transform"` | `FbxNull` | — |
-| `"locator"` | `FbxMarker` | — |
-| anything else | — | `RuntimeError` |
+| `node_type` | FBX attribute | Inherit type | Extras applied |
+|---|---|---|---|
+| `"joint"` | `FbxSkeleton`, `eLimbNode` at the top too, as Maya writes every joint (Maya's importer reads an `eRoot` with no child as a plain transform) | `eInheritRrs` with `segment_scale_compensate` on, `eInheritRSrs` with it off | `joint_orient` → pre-rotation, `rotate_axis` → inverted post-rotation |
+| `"transform"`, `"space_transform"` | `FbxNull`, look `eNone` | the same | — |
+| `"locator"` | `FbxNull`, look `eCross`, as Maya writes a locator | the same | — |
+| anything else | not written, nor any node under it; one warning names how many of each type were skipped | — | — |
 
 Every node is written with rotation active, as Maya's exporter writes it:
-FBX turns a node without it in xyz, whatever its `rotate_order`.
+FBX turns a node without it in xyz, whatever its `rotate_order`. A group
+or a locator gets the inherit type a joint gets, `eInheritRSrs` unless
+`segment_scale_compensate` is on, as Maya's exporter writes a group or a
+locator: FBX's default, `eInheritRrSs`, which earlier versions left on
+them, scales a node along its own axes by its parent's world scale, so
+under an unevenly scaled parent the SDK and Maya's importer put it, and
+the nodes under it, elsewhere than the rig has them (a group at (1, 1, 0)
+turned (40, 10, -20) under a group turned 30 about z and scaled
+(1, 3, 0.5): 1.58 off in its 3x3, a locator at (0, 2, 1) under it 3.17 in
+position). `HierarchyData.save_fbx` says where Maya puts a group or a
+locator with `segment_scale_compensate` on.
 
 The scene is labelled with the axis system and the unit the skeleton's
 values are in, as the rig records them (`axis_system`, `unit`; Maya's

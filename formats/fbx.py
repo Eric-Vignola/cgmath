@@ -2827,6 +2827,15 @@ class FbxExporter:
         importer brings a root skeleton node (``eRoot``) with no child in as
         a plain transform, without its joint orient.
 
+        Every node takes the inherit type its ``segment_scale_compensate``
+        says, ``eInheritRrs`` when on and ``eInheritRSrs`` when off, a group
+        and a locator too, as Maya's own exporter writes a group or a
+        locator: the sdk's default, ``eInheritRrSs``, which an earlier
+        version left on them, scales a node along its own axes by its
+        parent's world scale, so the sdk and Maya's importer put a group
+        under an unevenly scaled parent, and the nodes under it, elsewhere
+        than the component has them.
+
         The scene is labelled with the axis system and unit the component's
         values are in, as it records them (``HierarchyData.axis_system`` and
         ``unit``; a view's are its rig's, a list's of nodes their rig's): the
@@ -2912,6 +2921,17 @@ class FbxExporter:
             # ignores the rotate order of a node without it, turning it in xyz
             node.SetRotationActive(True)
 
+            # the inherit type on every node, a group and a locator too: the
+            # sdk's default, eInheritRrSs, scales a node along its own axes by
+            # its parent's world scale, which no node does in cgmath or in
+            # Maya, whose exporter writes eInheritRSrs on a group or locator
+            inherit_type = (
+                fbx.FbxTransform.EInheritType.eInheritRrs
+                if item.segment_scale_compensate
+                else fbx.FbxTransform.EInheritType.eInheritRSrs
+            )
+            node.SetTransformationInheritType(inherit_type)
+
             # a parent the export leaves out -- outside the view exported, or
             # a parent_uuid no node carries -- makes the node a root, as a
             # view's copy() does: never a node found by its name
@@ -2929,12 +2949,6 @@ class FbxExporter:
                 # an eRoot with no child as a transform, its orient dropped
                 node_attr = fbx.FbxSkeleton.Create(self.manager, "")
                 node_attr.SetSkeletonType(fbx.FbxSkeleton.EType.eLimbNode)
-                inherit_type = (
-                    fbx.FbxTransform.EInheritType.eInheritRrs
-                    if item.segment_scale_compensate
-                    else fbx.FbxTransform.EInheritType.eInheritRSrs
-                )
-                node.SetTransformationInheritType(inherit_type)
                 # pre and post rotation, which fbx reads with rotation active
                 node.SetPreRotation(
                     fbx.FbxNode.EPivotSet.eSourcePivot,

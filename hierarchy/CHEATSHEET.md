@@ -2104,6 +2104,115 @@ back = HierarchyData.load_fbx(os.path.join(WORKDIR, "prop.fbx"))
 assert np.allclose(back["prop"].world_matrix, world)
 ```
 
+Every node is written with the inherit type its `segment_scale_compensate`
+says, `eInheritRrs` when on and `eInheritRSrs` when off, groups and
+locators too, as Maya's exporter writes a group or a locator. An earlier
+`save_fbx` wrote a group or a locator `eInheritRrSs`, which scales it
+along its own axes by its parent's world scale: under an unevenly scaled
+parent the SDK and Maya's importer put it, and the nodes under it,
+elsewhere than the rig had them (a group at (1, 1, 0) turned
+(40, 10, -20) under a group turned 30 about z and scaled (1, 3, 0.5)
+1.58 off in its 3x3, a locator at (0, 2, 1) under it 3.17 in position),
+while `load_fbx`, reading it as `eInheritRSrs`, puts it where it was
+saved: load such a file and `save_fbx` it again. That does not reach a
+group or a locator that had `segment_scale_compensate` on, or the nodes
+under it: the file does not hold the flag.
+
+`load_fbx` reads a node that is no joint as `eInheritRSrs` whatever the
+file stores, and `save_fbx` writes the inherit type the rig gives it, so
+a load then a save of a file storing one `eInheritRrSs`, the SDK's
+default, or `eInheritRrs` imports where the read has it, not where the
+file does, in Maya's importer and the SDK's conversion alike: a node
+turned (20, 40, 60) and scaled (1, 1.5, 0.75) under a group turned
+(0, 30, 0) and scaled (1, 2, 3) is 1.11 off the file in its 3x3, and a
+locator at (0.5, 1, -2) under it 2.34 or 1.75 in position. An earlier
+`save_fbx` wrote it `eInheritRrSs`, which put one stored so back where
+the file has it, and one stored `eInheritRSrs` off it by the same 1.11
+and 2.34.
+
+A group or a locator with `segment_scale_compensate` on, which a rig
+built or edited by hand can hold and no reader sets, is written
+`eInheritRrs`. In a save in cm of a rig labelled Maya's Y-up the SDK
+places it and the nodes under it where the rig has them, its scale or
+its parent's mirrored or not (a scale mirrors with an odd number of
+negative axes), and Maya's importer does too. Three cases part, Maya's
+importer in each and the SDK in the last. Their numbers are one rig's,
+the largest over five turns, and grow with its scales and offsets: a
+group at (2, 0.5, -0.5) scaled (1, 1.5, 0.75), turned (20, 40, 60),
+(35, -10, 80), (-25, 50, 10), (60, 20, -40) and (5, -70, 30), under a
+group at (0, 1, 0) turned (0, 30, 0), with a locator at (0.5, 1, -2)
+under it and, for the second case, a joint at (0, 0, 1) under it over a
+joint at (0, 1, 0) over a second locator at (0.25, 1, 0), both joints
+compensating their scale.
+
+- Where exactly one of its own scale and its parent's own scale mirrors,
+  Maya's importer can part from the SDK and the rig on it and every node
+  under it: 2.70 in the group's axes and 4.27 in the locator's position
+  under a parent scaled (-1, 2, 3) or (-2, -2, -2), 8.03 and 8.38 under
+  one scaled (-1, 1, 1) under a group turned (10, 0, 20) and scaled
+  (1, 2, 3). The group scaled (-1, 1.5, 0.75) is 2.70 and 4.27 off under
+  a parent scaled (2, 2, 2) or (1, 2, 3), and also where an earlier
+  `save_fbx`, which wrote it `eInheritRrSs`, had it and the locator
+  where the rig has them: 2.70 and 4.27 under a parent scaled 1, 2.51
+  and 4.29 with no parent. With both mirrored Maya's importer puts it
+  where the rig has it.
+- A joint compensating its scale directly under it, and every node under
+  that joint, Maya's importer can put elsewhere than the SDK and the
+  rig, unless the group's scale is positive and its parent's scale 1, or
+  1 in size with two negative axes, or it has no parent: 1.33 off in
+  their axes under a parent scaled (1, 2, 3), the lower joint 1.07 in
+  position and the second locator 2.18; 0.98, 0.901 and 1.88 under
+  (2, 2, 2). The group scaled (-1, -1.5, 0.75), which does not mirror,
+  stays where the rig has it, but its joints are 1.94, 1.67 and 3.40 off
+  with no parent and 1.96, 1.80 and 3.75 under a parent scaled 1, where
+  an earlier `save_fbx`, which wrote it `eInheritRrSs`, had them where
+  the rig has them.
+- Under a parent whose scale is near 0 or far apart on its axes, or whose
+  world is. Where the product of that parent's own scale is under
+  2.22e-16 in size the SDK and Maya's importer part from the rig: 1.35 in
+  the group's axes and 2.13 in the locator's position under a parent
+  scaled (s, s, s), s 6e-06 or less (within 9e-16 at 6.1e-06). Above it
+  Maya's importer alone can: in the group's axes 3.9e-10 under a parent
+  scaled (1.32, 1.8, z) at z 1e-03, 2.3e-08 at 1e-04, 0.171 at 3e-06 and
+  2.16 at 1e-06; in the group's axes and the locator's position 3.85 and
+  3.23 under (1e4, 1, 1e-4), 3.32 and 7.34 under (1, 1e8, 1), 5.42 and
+  21.2 under a parent scaled 1 under a group at (0, 0.5, 0) turned
+  (10, 0, 20) and scaled (1e6, 1, 1e-6), and 3.96e+04 and 7.27e+04 under
+  (1e-12, 1, 3e-4). Near 0 it can bring a node in not finite, where the
+  SDK and `load_fbx` stay finite.
+
+A rig labelled anything else, X-up, Z-up or left handed, has no such
+promise: such a node, and every node under it, can import elsewhere than
+the SDK and the rig. At a top node in a rotate order other than xyz that
+is new: an earlier `save_fbx`, which wrote it `eInheritRrSs`, had it
+where the rig has it. On the rig above with no parent, in cm, labelled
+`"z up, -y front, right handed"`, that is up to 2.53 in the group's axes
+and 3.44 in the locator's position over rotate orders 1 to 5.
+
+`load_fbx` reads such a group or locator back with the flag off, as
+`eInheritRSrs`, with the channels saved: at its saved position unless a
+group or a locator with the flag on is above it, its axes and the nodes
+under it off where its parent's own scale is not 1, on the rig above
+2.11 in its axes and 2.88 in the locator's position under a parent
+scaled (1, 2, 3). Under a unit root it is not the channels saved: the
+read divides that root's scale out of the node, as `load_fbx`'s
+docstring says, so a scale of 1 under a top node scaled 0.01 in metres
+reads 100. `save()` keeps the flag.
+
+```python
+flagged = HierarchyData([
+    TransformData("top", rotate=(0.0, 30.0, 0.0), scale=(1.0, 2.0, 3.0)),
+    TransformData("grp", translate=(2.0, 0.5, -0.5), rotate=(20.0, 40.0, 60.0), segment_scale_compensate=True),
+])
+flagged["grp"].set_parent("top", world_space=False)
+flagged.save_fbx(os.path.join(WORKDIR, "flagged.fbx"))
+
+back = HierarchyData.load_fbx(os.path.join(WORKDIR, "flagged.fbx"))["grp"]
+assert not back.segment_scale_compensate  # read as eInheritRSrs
+assert np.allclose(back.world_matrix[3], flagged["grp"].world_matrix[3])
+assert not np.allclose(back.world_matrix, flagged["grp"].world_matrix)
+```
+
 `ClipData.save_fbx` writes one pose and no animation stack, so a
 multi-frame clip refuses rather than silently shipping whichever frame
 is loaded. The message names the cut that would work.
@@ -2320,15 +2429,24 @@ record, the unit set explicitly, and writes the values as they are, so a
 save loads with the defaults, and imports into Maya, where the file the
 values were read from does, in whatever axes and unit they were read.
 Where the read and Maya part, as on a Y-up file whose front is not +Z
-read with the defaults, the save parts too (`save_fbx`'s docstring lists
-the cases). A save in another unit than cm holds its lengths in that
-unit, as a file authored in it does, which Maya's importer brings in
-with its top nodes scaled by the unit (100 for metres) at the positions
-the values say. A mesh holds no record: its points are in its node's
-object space, the same in any axes, in the unit its reader's
-`scale_factor` gives, the unit a rig read with the same `scale_factor`
-records. `save_fbx` writes no geometry; a mesh's node, read as a
-transform, is written as a group.
+read with the defaults, or on a group the file stores `eInheritRrSs`
+under an unevenly scaled parent, the save parts too (`save_fbx`'s
+docstring lists the cases). A save in another unit than cm holds its
+lengths in that unit, as a file authored in it does, which Maya's
+importer brings in with its top nodes scaled by the unit (100 for
+metres) at the positions the values say, but for a node written
+`eInheritRrs` whose parent is neither a top node nor written
+`eInheritRrs`: the conversion multiplies its scale by the unit, so it
+takes the unit twice, with the nodes under it, and the second of the
+three cases of a group with `segment_scale_compensate` on counts the
+scale the conversion gives that group's parent: a joint compensating
+its scale directly under such a group directly under a top node is off
+in Maya's importer though that top node's scale is 1 (`save_fbx`'s
+docstring gives the numbers). A mesh holds no record: its
+points are in its node's object space, the same in any axes, in the unit
+its reader's `scale_factor` gives, the unit a rig read with the same
+`scale_factor` records. `save_fbx` writes no geometry; a mesh's node,
+read as a transform, is written as a group.
 
 ```python
 rig = make_chain()

@@ -1191,12 +1191,47 @@ def _maya():
     return cmds, mel
 
 
+def _stored(path, inherit) -> str:
+    """load_fbx's rig, written with the sdk: a group P at (0, 1, 0) turned
+    (0, 30, 0) and scaled (1, 2, 3) over a group g at (2, 0.5, -0.5) turned
+    (20, 40, 60), scaled (1, 1.5, 0.75) and stored ``inherit``, over a locator
+    l at (0.5, 1, -2)"""
+    manager = FBX.FbxManager.Create()
+    manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+    scene = FBX.FbxScene.Create(manager, "scene")
+    scene.GetGlobalSettings().SetAxisSystem(FBX.FbxAxisSystem.MayaYUp)
+
+    def node(name, parent, translate, rotate=(0, 0, 0), scale=(1, 1, 1), stored=None, look="eNone"):
+        made = FBX.FbxNode.Create(scene, name)
+        attr = FBX.FbxNull.Create(scene, name)
+        attr.Look.Set(getattr(FBX.FbxNull.ELook, look).value)
+        made.SetNodeAttribute(attr)
+        made.LclTranslation.Set(FBX.FbxDouble3(*translate))
+        made.LclRotation.Set(FBX.FbxDouble3(*rotate))
+        made.LclScaling.Set(FBX.FbxDouble3(*scale))
+        made.SetRotationActive(True)
+        made.SetTransformationInheritType(stored or FBX.FbxTransform.EInheritType.eInheritRSrs)
+        parent.AddChild(made)
+        return made
+
+    top = node("P", scene.GetRootNode(), (0, 1, 0), (0, 30, 0), (1, 2, 3))
+    grp = node("g", top, (2, 0.5, -0.5), (20, 40, 60), (1, 1.5, 0.75), inherit)
+    node("l", grp, (0.5, 1, -2), look="eCross")
+    exporter = FBX.FbxExporter.Create(manager, "")
+    exporter.Initialize(path, -1, manager.GetIOSettings())
+    exporter.Export(scene)
+    exporter.Destroy()
+    manager.Destroy()
+    return path
+
+
 @unittest.skipIf(FBX is None, "the Autodesk FBX SDK is required")
 class TestSaveFbxInMaya(unittest.TestCase):
     """Maya's FBXImport of a save puts every node where it puts the file the
     values were read from, and a mesh, placed under the group its node is
-    saved as, where Maya puts the file's mesh. Needs mayapy with the fbxmaya
-    plug-in"""
+    saved as, where Maya puts the file's mesh, but for a node that is no joint
+    the read puts off the file, which it puts where the read has it. Needs
+    mayapy with the fbxmaya plug-in"""
 
     @classmethod
     def setUpClass(cls):
@@ -1278,6 +1313,141 @@ class TestSaveFbxInMaya(unittest.TestCase):
         self.assertEqual(self.cmds.nodeType("hip"), "joint")
         self.assertTrue(np.allclose(self.cmds.getAttr("hip.jointOrient")[0], (0.0, 0.0, 90.0)))
         self.assertLess(float(np.abs(worlds["hip"] - np.asarray(rig["hip"].world_matrix)).max()), 1e-9)
+
+    def test_groups_and_locators_import_where_the_rig_has_them(self):
+        """every node written with its inherit type, eInheritRSrs on a group
+        or a locator as Maya's exporter writes them: written eInheritRrSs, a
+        turned group under a group scaled (1, 3, 0.5) imported 1.58 off the
+        rig in its 3x3, and a locator under it 3.17 in position
+        (probe_save.py)"""
+        from cgmath._tests.test_fbx_export import gaps, scaled_rig
+
+        rig = scaled_rig()
+        out = os.path.join(self.out, "scaled.fbx")
+        rig.save_fbx(out)
+        worlds, _ = self.imported(out)
+        for node in rig:
+            axes, position = gaps(worlds[node.name], node.world_matrix)
+            self.assertLessEqual(axes, 1e-9, node.name)
+            # the largest measured on this file
+            self.assertLessEqual(position, 8.881784197001252e-16, node.name)
+
+    def test_a_node_the_read_puts_off_its_file_imports_where_the_read_has_it(self):
+        """load_fbx reads a node that is no joint as eInheritRSrs whatever the
+        file stores and save_fbx writes that, so a load then a save of a file
+        storing one eInheritRrSs or eInheritRrs puts it, in the sdk and in
+        Maya, where the read has it, not where the file does: on load_fbx's
+        rig 1.11 off the file in the 3x3, a locator 2.34 or 1.75 in position.
+        An earlier save_fbx wrote it eInheritRrSs: one stored so imported
+        where the file does, 1.11 off the read (TransformList.save_fbx)"""
+        from cgmath._tests.test_fbx_export import gaps
+
+        # how far the locator's position lands off the file's
+        for inherit, moved in (("eInheritRrSs", 2.34), ("eInheritRrs", 1.75)):
+            with self.subTest(inherit):
+                stored = getattr(FBX.FbxTransform.EInheritType, inherit)
+                path   = _stored(os.path.join(self.out, f"{inherit}.fbx"), stored)
+                rig    = HierarchyData.load_fbx(path)
+                out    = os.path.join(self.out, f"{inherit}_saved.fbx")
+                rig.save_fbx(out)
+                sdk = _sdk_worlds(out)
+                worlds, _ = self.imported(out)
+                file, _ = self.imported(path)
+                for node in rig:
+                    for placed in (sdk, worlds):
+                        axes, position = gaps(placed[node.name], node.world_matrix)
+                        self.assertLessEqual(axes, 1e-9, node.name)
+                        # the largest measured on these two files
+                        self.assertLessEqual(position, 8.881784197001252e-16, node.name)
+                axes, position = gaps(worlds["l"], file["l"])
+                self.assertAlmostEqual(axes, 1.11, places=2)
+                self.assertAlmostEqual(position, moved, places=2)
+
+    def test_a_mirrored_group_under_a_mirrored_parent_imports_where_the_rig_has_it(self):
+        """a group or locator with segment_scale_compensate on whose own scale
+        and its parent's both mirror: Maya's FBXImport puts it and the groups
+        and locators under it where the rig has them (written eInheritRrSs,
+        off under either parent); it parts from the sdk and the rig where one
+        of the two mirrors alone (TransformList.save_fbx). Not the
+        compensating joints directly under it (flag_mirror.py)"""
+        from cgmath._tests.test_fbx_export import MIRRORED_CASES, flagged_rig, gaps
+
+        # the largest position gap measured on each file
+        bounds = {
+            "(-1, 2, 3)":   8.881784197001252e-16,
+            "(-2, -2, -2)": 8.881784197001252e-16,
+        }
+        for label, scale in MIRRORED_CASES[-2:]:
+            with self.subTest(label):
+                rig = flagged_rig(scale, (0.0, 30.0, 0.0), own=(-1.0, 1.5, 0.75))
+                out = os.path.join(self.out, "mirrored.fbx")
+                rig.save_fbx(out)
+                worlds, _ = self.imported(out)
+                for node in rig:
+                    if node.name in ("jRrs", "kRrs"):
+                        continue
+                    axes, position = gaps(worlds[node.name], node.world_matrix)
+                    self.assertLessEqual(axes, 1e-9, node.name)
+                    self.assertLessEqual(position, bounds[label], node.name)
+
+    def test_a_group_compensating_its_parents_scale_imports_where_the_rig_has_it(self):
+        """a group or locator with segment_scale_compensate on, written
+        eInheritRrs, under a parent whose own scale is not mirrored: Maya's
+        FBXImport puts it and the groups and locators under it where the rig
+        has them (written eInheritRrSs, the group's axes 1.32 off under a
+        parent scaled (1, 2, 3)). Not the compensating joints directly under
+        it, which Maya's import puts elsewhere than the sdk and the rig, nor
+        any node of its branch under a mirrored parent (flag_mirror.py)"""
+        from cgmath._tests.test_fbx_export import FLAGGED_CASES, flagged_rig, gaps
+
+        # the largest position gap measured on each file
+        bounds = {
+            "(1, 2, 3)": 4.440892098500626e-16,
+            "(2, 2, 2)": 4.440892098500626e-16,
+            "(2, 1, 0.5) under (1, 2, 3)": 2.6645352591003757e-15,
+        }
+        for label, scale, rotate, grand in FLAGGED_CASES[:3]:
+            with self.subTest(label):
+                rig = flagged_rig(scale, rotate, grand)
+                out = os.path.join(self.out, "flagged.fbx")
+                rig.save_fbx(out)
+                worlds, _ = self.imported(out)
+                for node in rig:
+                    if node.name in ("jRrs", "kRrs"):
+                        continue
+                    axes, position = gaps(worlds[node.name], node.world_matrix)
+                    self.assertLessEqual(axes, 1e-9, node.name)
+                    self.assertLessEqual(position, bounds[label], node.name)
+
+    def test_a_joint_under_a_compensating_group_imports_where_the_rig_has_it(self):
+        """a joint compensating its scale directly under a group with
+        segment_scale_compensate on, and the joint under it, import where the
+        rig has them when the group's scale is positive and it has no parent,
+        or its parent's scale is 1, or 1 in size with two negative axes
+        (TransformList.save_fbx's second case). Written eInheritRrSs, cRrs
+        imported 0.230 off in its 3x3 with no parent, and under (-1, 1, -1)
+        gRrs 1.74, jRrs 1.76 and lRrs 4.06 in position (flag_mirror.py's rig)"""
+        from cgmath._tests.test_fbx_export import flagged_rig, gaps
+
+        # P's scale, or None for no parent; the largest position gap measured
+        # on each file
+        cases = {
+            "no parent":   (None, 6.661338147750939e-16),
+            "(1, 1, 1)":   ((1.0, 1.0, 1.0), 4.440892098500626e-16),
+            "(-1, 1, -1)": ((-1.0, 1.0, -1.0), 4.440892098500626e-16),
+            "(1, -1, -1)": ((1.0, -1.0, -1.0), 4.440892098500626e-16),
+            "(-1, -1, 1)": ((-1.0, -1.0, 1.0), 4.440892098500626e-16),
+        }
+        for label, (scale, bound) in cases.items():
+            with self.subTest(label):
+                rig = flagged_rig(scale, (0.0, 30.0, 0.0))
+                out = os.path.join(self.out, "joints.fbx")
+                rig.save_fbx(out)
+                worlds, _ = self.imported(out)
+                for node in rig:
+                    axes, position = gaps(worlds[node.name], node.world_matrix)
+                    self.assertLessEqual(axes, 1e-9, node.name)
+                    self.assertLessEqual(position, bound, node.name)
 
 
 if __name__ == "__main__":
