@@ -129,6 +129,20 @@ def flagged_rig(scale, rotate, grand=None, own=(1.0, 1.5, 0.75)):
     return HierarchyData(nodes)
 
 
+def tiny_rig():
+    """probe_l1b.py's rig, and -2e-12 beside its scales: for each value v a
+    group K<i> scaled (1.32, 1.8, v) over a joint KJ<i> and a locator KL<i>"""
+    nodes = []
+    for i, v in enumerate((0.0, 1e-13, -1e-13, -2e-12)):
+        top = _node(f"K{i}", translate=(0.67 + 3 * i, 2.84, 3.5), rotate=(27.5, 5.9, 85.6), scale=(1.32, 1.8, v))
+        nodes += [
+            top,
+            _node(f"KJ{i}", top, "joint", translate=(0.3, 0.4, 0.2), rotate=(10.0, 0.0, 30.0)),
+            _node(f"KL{i}", top, "locator", translate=(0.3, 1.0, 0.25), rotate=(20.0, 0.0, 0.0)),
+        ]
+    return HierarchyData(nodes)
+
+
 def gaps(got, want):
     """(3x3, position) largest gaps between two world matrices"""
     got, want = np.asarray(got), np.asarray(want)
@@ -530,6 +544,46 @@ class TestFbxExportSkeleton(unittest.TestCase):
                         np.testing.assert_allclose(
                             getattr(read, channel), getattr(node, channel), rtol=0.0, atol=1e-12, err_msg=node.name
                         )
+
+    def test_a_scale_under_1e_12_is_written_as_maya_writes_it(self):
+        """a scale under 1e-12 in size, 0 and -0 among them, is written as
+        1e-12, positive, as Maya 2025's FBXExport writes a static one; one of
+        1e-12 or more in size as it is (probe_l1.py)"""
+        values = (0.0, -0.0, 1e-13, -1e-13, 5e-13, 1e-12, -1e-12, 2e-12)
+        rig    = HierarchyData([_node(f"k{i}", scale=(1.32, 1.8, v)) for i, v in enumerate(values)])
+        rig.append(_node("joint", node_type="joint", scale=(0.0, 1.0, -1e-13)))
+        rig.append(_node("locator", node_type="locator", scale=(1e-13, -0.0, 3.0)))
+        self._export(rig)
+
+        written  = {name: tuple(scale) for name, scale in self._walk(lambda node: node.LclScaling.Get()).items()}
+        expected = (1e-12, 1e-12, 1e-12, 1e-12, 1e-12, 1e-12, -1e-12, 2e-12)
+        for i, z in enumerate(expected):
+            self.assertEqual(repr(written[f"|k{i}"]), repr((1.32, 1.8, z)), values[i])
+        self.assertEqual(repr(written["|joint"]), repr((1e-12, 1.0, 1e-12)))
+        self.assertEqual(repr(written["|locator"]), repr((1e-12, 1e-12, 3.0)))
+
+    def test_a_scale_under_1e_12_reads_back_as_1e_12(self):
+        """probe_l1b.py's rig, a group scaled (1.32, 1.8, v) over a joint and
+        a locator, v 0, 1e-13 and -1e-13, and -2e-12 beside them, read back
+        from its save: v as 1e-12, -2e-12 as it is, every world equal to the
+        rig's with 1e-12 in place of each v, and within 1e-12, the size of
+        the clamp, of the rig's own (l1c.py). Written as given, the read gave
+        v back"""
+        rig = tiny_rig()
+        self._export(rig)
+        back = HierarchyData.load_fbx(self.path)
+
+        clamped = tiny_rig()
+        for i, z in enumerate((1e-12, 1e-12, 1e-12, -2e-12)):
+            self.assertEqual(back[f"K{i}"].scale.tolist(), [1.32, 1.8, z])
+            clamped[f"K{i}"].scale = (1.32, 1.8, z)
+        for node in rig:
+            read = back[node.name].world_matrix
+            axes, position = gaps(read, clamped[node.name].world_matrix)
+            self.assertLessEqual(axes, 1e-9, node.name)
+            # the largest measured on this file
+            self.assertLessEqual(position, 0.0, node.name)
+            self.assertLessEqual(max(gaps(read, node.world_matrix)), 1e-12, node.name)
 
     def test_unsupported_node_types_are_skipped(self):
         # a constraint can't be exported, it is skipped along with what is under it

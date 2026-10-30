@@ -1449,6 +1449,26 @@ class TestSaveFbxInMaya(unittest.TestCase):
                     self.assertLessEqual(axes, 1e-9, node.name)
                     self.assertLessEqual(position, bound, node.name)
 
+    def test_a_scale_under_1e_12_imports_where_the_read_puts_it(self):
+        """probe_l1b.py's rig, a group scaled (1.32, 1.8, v) over a joint and
+        a locator, v 0, 1e-13 and -1e-13, and -2e-12 beside them: written
+        1e-12 in place of each v, as Maya's FBXExport writes such a scale,
+        Maya's FBXImport puts every node where load_fbx reads the save.
+        Written as given, the read held 0 or 1e-13 where Maya holds 1e-12,
+        2.43e-13 off Maya in a locator's position and 9.71e-13 in the 3x3
+        (probe_l1b.py)"""
+        from cgmath._tests.test_fbx_export import gaps, tiny_rig
+
+        out = os.path.join(self.out, "tiny.fbx")
+        tiny_rig().save_fbx(out)
+        worlds, _ = self.imported(out)
+        for node in HierarchyData.load_fbx(out):
+            self.assertTrue(np.isfinite(worlds[node.name]).all(), node.name)
+            axes, position = gaps(worlds[node.name], node.world_matrix)
+            self.assertLessEqual(axes, 1e-9, node.name)
+            # the largest measured on this file
+            self.assertLessEqual(position, 4.440892098500626e-16, node.name)
+
 
 if __name__ == "__main__":
     unittest.main()

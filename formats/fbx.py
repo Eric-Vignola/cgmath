@@ -2839,7 +2839,10 @@ class FbxExporter:
         The scene is labelled with the axis system and unit the component's
         values are in, as it records them (``HierarchyData.axis_system`` and
         ``unit``; a view's are its rig's, a list's of nodes their rig's): the
-        values are written as they are, under that label.
+        values are written as they are, under that label, but for a scale
+        under 1e-12 in size, 0 and -0 among them, written as 1e-12,
+        positive, as Maya's own exporter writes a static one and as Maya's
+        evaluation holds it.
 
         Raises ValueError, before anything is added, when a user defined string
         attr is not plain ASCII, the only text the FBX SDK takes, or a node's user
@@ -2863,7 +2866,7 @@ class FbxExporter:
         # never writes them as scene nodes.
         # imported here, cgmath.hierarchy imports this module.
         from cgmath.hierarchy import SUPPORTED_NODE_TYPES
-        from cgmath.hierarchy.hierarchy import TransformList
+        from cgmath.hierarchy.hierarchy import TransformList, _fbx_maya_scale
 
         skipped_nodes = {}
         dropped       = set()
@@ -2910,7 +2913,11 @@ class FbxExporter:
 
             node.LclTranslation.Set(fbx.FbxDouble3(*item.translate))
             node.LclRotation.Set(fbx.FbxDouble3(*item.rotate))
-            node.LclScaling.Set(fbx.FbxDouble3(*item.scale))
+            # a scale under 1e-12 in size as 1e-12, positive, as Maya's
+            # exporter writes a static one: Maya's evaluation holds such a
+            # scale as 1e-12, so load_fbx and Maya's import of the file then
+            # place the nodes under it alike
+            node.LclScaling.Set(fbx.FbxDouble3(*_fbx_maya_scale(item.scale)))
 
             node.SetRotationOrder(
                 fbx.FbxNode.EPivotSet.eSourcePivot,

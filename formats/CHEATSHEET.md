@@ -1116,8 +1116,11 @@ locator with `segment_scale_compensate` on.
 The scene is labelled with the axis system and the unit the skeleton's
 values are in, as the rig records them (`axis_system`, `unit`; Maya's
 Y-up and cm for a hand-built one), the unit set explicitly, and the
-values are written as they are: `HierarchyData.save_fbx` says where that
-puts a save on a load and in Maya.
+values are written as they are, but for a scale under 1e-12 in size, 0
+and -0 among them, written as 1e-12, positive, as Maya's own exporter
+writes a static one and as Maya's evaluation holds it:
+`HierarchyData.save_fbx` says where that puts a save on a load and in
+Maya.
 
 `user_defined_attributes` become real FBX properties, typed the way Maya's
 own FBX plug-in types them, and `load_fbx` reads them back as the same

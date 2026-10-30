@@ -6079,19 +6079,26 @@ class TransformList(DataList[TransformData]):
         The file is labelled with the axis system and the unit the values
         are in, as the rig records them (:attr:`axis_system`, :attr:`unit`;
         a view's are its rig's), the unit set explicitly, and holds the
-        values as they are. A rig :meth:`load_fbx` read with its defaults is
-        saved in Maya's Y-up and cm, one read with ``axis_system=None`` in
-        the file's own axes, and one read with a number for ``scale_factor``
-        in the unit that number leaves its lengths in (a cm file read with
-        0.01, in meters). So a save loads with :meth:`load_fbx`'s defaults
-        where the file the rig was read from does, in cm and Maya's Y-up,
-        read as it is (``axis_system=None, scale_factor=1.0``) gives the
-        values back, and Maya's FBXImport, and the sdk's ``ConvertScene`` to
-        Maya's Y-up and cm, put it where they put that file. Raises
-        ValueError, before anything is written, for a view holding nodes of
-        rigs that record other axes or units, and for :meth:`load_fbx`'s
-        view, or one taken from it, holding nodes no rig owns beside nodes
-        of a rig that records another.
+        values as they are but for a scale under 1e-12 in size, 0 and -0
+        among them, which it holds as 1e-12, positive, as Maya's own FBX
+        export writes a static one and as Maya's evaluation holds it: such a
+        scale loads back as 1e-12, and, in a save in cm of a rig labelled
+        Maya's Y-up, the nodes under it where Maya's FBXImport of the save
+        puts them, but for a group or a locator with
+        segment_scale_compensate on and the nodes under that. A rig
+        :meth:`load_fbx` read with its defaults is saved in Maya's Y-up and
+        cm, one read with ``axis_system=None`` in the file's own axes, and
+        one read with a number for ``scale_factor`` in the unit that number
+        leaves its lengths in (a cm file read with 0.01, in meters). So a
+        save loads with :meth:`load_fbx`'s defaults where the file the rig
+        was read from does, in cm and Maya's Y-up, read as it is
+        (``axis_system=None, scale_factor=1.0``) gives the values back, a
+        scale under 1e-12 as 1e-12, and Maya's FBXImport, and the sdk's
+        ``ConvertScene`` to Maya's Y-up and cm, put it where they put that
+        file. Raises ValueError, before anything is written, for a view
+        holding nodes of rigs that record other axes or units, and for
+        :meth:`load_fbx`'s view, or one taken from it, holding nodes no rig
+        owns beside nodes of a rig that records another.
 
         Where the read and Maya part, they part on the save too. A node that
         is no joint is read as eInheritRSrs whatever the file stores and
@@ -6219,20 +6226,20 @@ class TransformList(DataList[TransformData]):
           1.94, 1.67 and 3.40 off with no parent and 1.96, 1.80 and 3.75
           under a parent scaled 1, where an earlier save_fbx, which wrote it
           eInheritRrSs, had them where the rig has them.
-        - Under a parent whose scale is near 0 or far apart on its axes, or
-          whose world is. Where the product of that parent's own scale is
-          under 2.22e-16 in size the sdk and Maya's importer part from the
-          rig: 1.35 in the group's axes and 2.13 in the locator's position
-          under a parent scaled (s, s, s), s 6e-06 or less (within 9e-16 at
-          6.1e-06). Above it Maya's importer alone can: in the group's axes
-          3.9e-10 under a parent scaled (1.32, 1.8, z) at z 1e-03, 2.3e-08
-          at 1e-04, 0.171 at 3e-06 and 2.16 at 1e-06; in the group's axes
-          and the locator's position 3.85 and 3.23 under (1e4, 1, 1e-4),
-          3.32 and 7.34 under (1, 1e8, 1), 5.42 and 21.2 under a parent
-          scaled 1 under a group at (0, 0.5, 0) turned (10, 0, 20) and
-          scaled (1e6, 1, 1e-6), and 3.96e+04 and 7.27e+04 under
-          (1e-12, 1, 3e-4). Near 0 it can bring a node in not finite, where
-          the sdk and load_fbx stay finite.
+        - Under a parent whose scale is near 0, a scale written as 1e-12
+          among them, or far apart on its axes, or whose world is. Where the
+          product of that parent's own scale is under 2.22e-16 in size the
+          sdk and Maya's importer part from the rig: 1.35 in the group's
+          axes and 2.13 in the locator's position under a parent scaled
+          (s, s, s), s 6e-06 or less (within 9e-16 at 6.1e-06). Above it
+          Maya's importer alone can: in the group's axes 3.9e-10 under a
+          parent scaled (1.32, 1.8, z) at z 1e-03, 2.3e-08 at 1e-04, 0.171
+          at 3e-06 and 2.16 at 1e-06; in the group's axes and the locator's
+          position 3.85 and 3.23 under (1e4, 1, 1e-4), 3.32 and 7.34 under
+          (1, 1e8, 1), 5.42 and 21.2 under a parent scaled 1 under a group
+          at (0, 0.5, 0) turned (10, 0, 20) and scaled (1e6, 1, 1e-6), and
+          3.96e+04 and 7.27e+04 under (1e-12, 1, 3e-4). Near 0 it can bring
+          a node in not finite, where the sdk and load_fbx stay finite.
 
         A rig labelled anything else, X-up, Z-up or left handed, has no such
         promise: such a node, and every node under it, can import elsewhere
