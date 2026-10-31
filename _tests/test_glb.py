@@ -9,6 +9,7 @@ from cgmath.formats.glb import (
     get_dtype_cnt,
     load_accessor_data,
     load_gltf,
+    load_model,
     pygltflib,
     repair_null_skin_joints,
 )
@@ -16,13 +17,51 @@ from cgmath.formats.glb import (
 if pygltflib is not None:
     from pygltflib import (
         Accessor,
+        Attributes,
         Buffer,
         BufferView,
         FLOAT,
         GLTF2,
+        Mesh,
+        Node,
+        Primitive,
+        Scene,
         SHORT,
         UNSIGNED_BYTE,
+        UNSIGNED_SHORT,
     )
+
+
+@unittest.skipIf(pygltflib is None, "pygltflib is not installed")
+class TestLoadModelArrays(unittest.TestCase):
+    """load_model's arrays can be changed in place"""
+
+    def test_a_primitive_can_be_moved_in_place(self):
+        points  = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+        corners = np.array([0, 1, 2], dtype=np.uint16)
+        blob    = points.tobytes() + corners.tobytes()
+
+        gltf         = GLTF2()
+        gltf.buffers = [Buffer(byteLength=len(blob))]
+        gltf.bufferViews = [
+            BufferView(buffer=0, byteOffset=0, byteLength=36), BufferView(buffer=0, byteOffset=36, byteLength=6)
+        ]
+        gltf.accessors = [
+            Accessor(bufferView=0, componentType=FLOAT, count=3, type="VEC3", max=[1, 1, 0], min=[0, 0, 0]),
+            Accessor(bufferView=1, componentType=UNSIGNED_SHORT, count=3, type="SCALAR"),
+        ]
+        gltf.meshes = [Mesh(name="tri", primitives=[Primitive(attributes=Attributes(POSITION=0), indices=1)])]
+        gltf.nodes  = [Node(name="tri", mesh=0)]
+        gltf.scenes = [Scene(nodes=[0])]
+        gltf.set_binary_blob(blob)
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "tri.glb")
+            gltf.save(path)
+            prim = load_model(path).meshes[0].primitives[0]
+
+        prim.vertices[0] += 1
+        prim.triangles[0] = 2
+        self.assertTrue(np.array_equal(prim.vertices[0], [1, 1, 1]))
 
 
 @unittest.skipIf(pygltflib is None, "pygltflib is not installed")
@@ -135,6 +174,29 @@ class TestLoadAccessorData(unittest.TestCase):
         self.assertTrue(
             np.array_equal(load_accessor_data(gltf, gltf.accessors[1]), uvs)
         )
+
+    def testArraysAreTheirOwn(self):
+        """the arrays were read only views of the file's bytes: each is now
+        writable, and a change to one is not seen by the next read"""
+        positions = np.arange(9, dtype=np.float32).reshape(3, 3)
+        uvs       = (np.arange(6, dtype=np.float32) * 0.25).reshape(3, 2)
+        packed = self.build(
+            positions.tobytes(),
+            [{"byteOffset": 0, "byteLength": 36}],
+            [{"bufferView": 0, "componentType": FLOAT, "count": 3, "type": "VEC3"}],
+        )
+        blob = b"".join(positions[i].tobytes() + uvs[i].tobytes() for i in range(3))
+        interleaved = self.build(
+            blob,
+            [{"byteOffset": 0, "byteLength": len(blob), "byteStride": 20}],
+            [{"bufferView": 0, "byteOffset": 12, "componentType": FLOAT, "count": 3, "type": "VEC2"}],
+        )
+        for label, gltf, expected in (("packed", packed, positions), ("interleaved", interleaved, uvs)):
+            with self.subTest(label):
+                got = load_accessor_data(gltf, gltf.accessors[0])
+                self.assertTrue(got.flags.writeable)
+                got[0] += 1
+                self.assertTrue(np.array_equal(load_accessor_data(gltf, gltf.accessors[0]), expected))
 
     def testNormalizedShortIsDequantized(self):
         """a quantized rotation used to arrive scaled by 32767"""

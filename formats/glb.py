@@ -116,8 +116,9 @@ def load_accessor_data(gltf, accessor):
             count  = (accessor.count - 1) * stride + item_size,
             offset = start,
         )
+        # the rows gathered are new memory, read as the accessor's type
         rows     = np.arange(accessor.count)[:, None] * stride + np.arange(item_size)
-        elements = np.frombuffer(raw[rows].tobytes(), dtype=dtype)
+        elements = raw[rows].view(dtype).reshape(-1)
 
     if cnt > 1:
         elements = np.reshape(elements, (-1, cnt))
@@ -126,6 +127,12 @@ def load_accessor_data(gltf, accessor):
         elements = np.maximum(
             elements / np.float32(np.iinfo(dtype).max), np.float32(-1.0)
         ).astype(np.float32)
+
+    # an array that views the file's bytes is read only: it is copied into
+    # memory of its own, so a primitive's points can be changed in place.
+    # The others are new arrays already
+    if not elements.flags.writeable:
+        elements = elements.copy()
 
     return elements
 
