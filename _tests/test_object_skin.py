@@ -1855,6 +1855,148 @@ class TestFbxNormalsAtUnitLength(unittest.TestCase):
         self.assertLess(float(np.abs(got - maya).max()), 2e-7)
 
 
+@unittest.skipIf(fbx is None, "Autodesk FBX Python SDK is not installed")
+class TestFbxNormalsByFaceOrWhole(unittest.TestCase):
+    """normals mapped one per face (eByPolygon), direct or indexed, or one
+    for the whole mesh (eAllSame) read on each face's corners, as the FBX
+    mapping says; they raised NotImplementedError. Maya's FBXImport (2025)
+    reads the ones indexed by face so, but a direct one as if it were
+    mapped by control point: a corner takes the value at its control
+    point's place, and 0 past the values. One indexed for the whole mesh it
+    reads so on its first corner alone; the others read past the index
+    array, 0 or another of the file's values from one import to the next
+
+    Each file holds two quads side by side, no offset, and unit normals.
+    """
+
+    POINTS = ((0, 0, 0), (1, 0, 0), (2, 0, 0), (0, 1, 0), (1, 1, 0), (2, 1, 0))
+    FACES  = ((0, 1, 4, 3), (1, 2, 5, 4))
+    TILTED = ((0.0, 0.0, 1.0), (0.6, 0.0, 0.8), (0.0, -0.28, 0.96))
+
+    def build(self, name, mapping, reference, direct, indices=()):
+        from cgmath.formats._fbx_io import new_manager
+
+        path    = os.path.join(self.tmp.name, name)
+        manager = new_manager(fbx)
+        try:
+            scene = fbx.FbxScene.Create(manager, "")
+            node  = fbx.FbxNode.Create(scene, "strip")
+            mesh  = fbx.FbxMesh.Create(scene, "stripShape")
+            mesh.InitControlPoints(len(self.POINTS))
+            for index, point in enumerate(self.POINTS):
+                mesh.SetControlPointAt(fbx.FbxVector4(*point, 1.0), index)
+            for face in self.FACES:
+                mesh.BeginPolygon()
+                for index in face:
+                    mesh.AddPolygon(index)
+                mesh.EndPolygon()
+            normals = mesh.CreateElementNormal()
+            normals.SetMappingMode(mapping)
+            normals.SetReferenceMode(reference)
+            for value in direct:
+                normals.GetDirectArray().Add(fbx.FbxVector4(*value, 1.0))
+            for index in indices:
+                normals.GetIndexArray().Add(index)
+            node.SetNodeAttribute(mesh)
+            scene.GetRootNode().AddChild(node)
+            exporter = fbx.FbxExporter.Create(manager, "")
+            exporter.Initialize(path, -1, manager.GetIOSettings())
+            exporter.Export(scene)
+            exporter.Destroy()
+        finally:
+            manager.Destroy()
+        return path
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        modes  = fbx.FbxLayerElement.EMappingMode
+        refs   = fbx.FbxLayerElement.EReferenceMode
+        tilted = np.array(self.TILTED)
+        self.files = {
+            # (path, the normal of each of the eight corners)
+            "by face, direct": (
+                self.build("face_direct.fbx", modes.eByPolygon, refs.eDirect, tilted[:2]),
+                tilted[[0, 0, 0, 0, 1, 1, 1, 1]],
+            ),
+            "by face, indexed": (
+                self.build("face_indexed.fbx", modes.eByPolygon, refs.eIndexToDirect, tilted, (2, 1)),
+                tilted[[2, 2, 2, 2, 1, 1, 1, 1]],
+            ),
+            "all same, direct": (
+                self.build("same_direct.fbx", modes.eAllSame, refs.eDirect, tilted[1:2]),
+                tilted[[1] * 8],
+            ),
+            "all same, indexed": (
+                self.build("same_indexed.fbx", modes.eAllSame, refs.eIndexToDirect, tilted, (2,)),
+                tilted[[2] * 8],
+            ),
+        }
+
+    def test_every_reader_reads_them_on_the_corners(self):
+        for label, (path, expected) in self.files.items():
+            for reader, read in (
+                ("MeshList.load_fbx", lambda: MeshList.load_fbx(path)[0]),
+                ("mesh.load_fbx", lambda: mesh_load_fbx(path)[0][0]),
+                ("Object.load_fbx", lambda: Object.load_fbx(path, extract_texture=False).mesh),
+            ):
+                with self.subTest(file=label, reader=reader):
+                    mesh = read()
+                    got  = np.asarray(mesh.normals)[mesh.normal_indices]
+                    np.testing.assert_allclose(got, expected, rtol=0.0, atol=1e-15)
+
+    def test_maya_reads_them_so(self):
+        """Maya's face-vertex normals are the readers' within 2e-7 (single
+        precision) for normals indexed by face; for direct ones they are
+        the values at the corners' control points, 0 past them; for ones
+        indexed for the whole mesh the first corner holds the indexed value
+        and every other one 0 or one of the file's values, whichever an
+        import reads past the index array. Needs mayapy with the fbxmaya
+        plug-in"""
+        try:
+            import maya.api.OpenMaya as om
+            import maya.cmds as cmds
+            import maya.mel as mel
+
+            cmds.loadPlugin("fbxmaya", quiet=True)
+        except Exception:  # not running in Maya, or no fbx plug-in
+            self.skipTest("needs Maya and its fbxmaya plug-in")
+
+        self.addCleanup(cmds.file, new=True, force=True)
+        for label, (path, _) in self.files.items():
+            with self.subTest(file=label):
+                cmds.file(new=True, force=True)
+                mel.eval("FBXResetImport")
+                mel.eval(f'FBXImport -f "{path.replace(os.sep, "/")}"')
+                selection = om.MSelectionList()
+                selection.add("strip")
+                dag = selection.getDagPath(0)
+                dag.extendToShape()
+                shape = om.MFnMesh(dag)
+                maya = np.array(
+                    [
+                        [n.x, n.y, n.z]
+                        for face in range(shape.numPolygons)
+                        for n in shape.getFaceVertexNormals(face, om.MSpace.kObject)
+                    ]
+                )
+                mesh   = MeshList.load_fbx(path)[0]
+                got    = np.asarray(mesh.normals)[mesh.normal_indices]
+                corner = np.concatenate(self.FACES)
+                if label.endswith("direct"):
+                    values = np.asarray(mesh.normals)
+                    got    = np.array([values[x] if x < len(values) else np.zeros(3) for x in corner])
+                elif label.startswith("all same"):
+                    # the file's index array is (2,); past it each import
+                    # reads what it finds, 0 or one of the three values
+                    choices = np.concatenate([np.zeros((1, 3)), self.TILTED])
+                    apart   = np.abs(maya[:, None] - choices[None]).max(axis=-1).min(axis=-1)
+                    self.assertLess(float(apart.max()), 2e-7)
+                    got    = maya.copy()
+                    got[0] = self.TILTED[2]
+                self.assertLess(float(np.abs(got - maya).max()), 2e-7)
+
+
 @unittest.skipIf(not HAVE_GLB, "pygltflib / trimesh are not installed")
 class TestGlbBindPose(GlbCase):
     """same rule for glb, with the unit conversion the fbx path also does

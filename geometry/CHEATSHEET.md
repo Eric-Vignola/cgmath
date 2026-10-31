@@ -1175,23 +1175,31 @@ maps its normals by control point or holds none, Maya's edges are soft,
 and `set_normals()` is within 6.78e-08 of Maya's normals in a probe;
 where it maps them per polygon vertex, Maya makes every edge hard: there
 `set_normals()` is 1.77 off and `set_normals(hard_edge_angle=60)` within
-1.48e-06. The faces keep the file's order, a mirror's too; the UVs and
-the skin weights are the file's, and so are the inverse binds, which
-pose the baked points as the SDK blends a skin, the offset first. Nodes
-that share one mesh each read it with their own offset baked in, where
-the SDK puts it; Maya's importer bakes one offset into all of them, that
-of the first such node in the scene's hierarchy: one instanced shape in
-a probe (the second node's mesh 4.29 cm off the SDK's in its own space,
-6.93 cm in the world), separate shapes with that same offset in another,
-whose file attaches the mesh first to a node later in the hierarchy. A
-mesh whose node holds no geometric transform reads as the file holds it.
-`scale_factor=None`, the default, converts the file's unit to
-centimetres as the rig loaders do (the points, never the normals or the
-UVs), and a number is the caller's own factor. Under the world matrix of
-its node in a rig read from the same file, which keeps a mesh's node as
-a transform named after it, a mesh sits where Maya's import puts it, in
-cm and Maya's Y-up, its node's world being Maya's and the points
-themselves untouched:
+1.48e-06. Normals mapped one per face, or one for the whole mesh, read
+on each face's corners, as the mapping says; Maya's importer reads one
+indexed by face so, but a direct one as if mapped by control point, 0
+past the values, and one indexed for the whole mesh so on its first
+corner alone, the others 0 or another of the file's values from one
+import to the next. The faces keep the file's order, a mirror's too; the
+UVs and the skin weights are the file's (UVs mapped one per face, or one
+for the whole mesh, read on each face's corners as the mapping says, as
+Maya's importer reads one per face, where it assigns no UV to a mesh
+whose UVs are one for the whole mesh), and so are the inverse binds,
+which pose the baked points as the SDK blends a skin, the offset first.
+Nodes that share one mesh each read it with their own offset baked in,
+where the SDK puts it; Maya's importer bakes one offset into all of
+them, that of the first such node in the scene's hierarchy: one
+instanced shape in a probe (the second node's mesh 4.29 cm off the SDK's
+in its own space, 6.93 cm in the world), separate shapes with that same
+offset in another, whose file attaches the mesh first to a node later in
+the hierarchy. A mesh whose node holds no geometric transform reads as
+the file holds it. `scale_factor=None`, the default, converts the file's
+unit to centimetres as the rig loaders do (the points, never the normals
+or the UVs), and a number is the caller's own factor. Under the world
+matrix of its node in a rig read from the same file, which keeps a
+mesh's node as a transform named after it, a mesh sits where Maya's
+import puts it, in cm and Maya's Y-up, its node's world being Maya's and
+the points themselves untouched:
 
 <!-- notest -->
 ```python

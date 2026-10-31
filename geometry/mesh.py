@@ -5510,6 +5510,31 @@ def _fbx_face_varying_indices(mesh, layer_element, counts: np.ndarray) -> np.nda
                     )
             offset += sz
 
+    # one value per face, on each of its corners, as the mapping says (Maya
+    # reads one indexed by face so, a direct one as by control point)
+    elif mapping == EMap.eByPolygon:
+        faces = np.repeat(np.arange(len(counts)), counts)
+        if reference == ERef.eIndexToDirect:
+            lookup  = np.array([index_array.GetAt(i) for i in range(index_array.GetCount())], dtype=np.int32)
+            indices = lookup[faces]
+        elif reference == ERef.eDirect:
+            indices = faces.astype(np.int32)
+        else:
+            raise NotImplementedError(
+                f"Unsupported FBX reference mode for ByPolygon: {reference}"
+            )
+
+    # one value for the whole mesh, on every corner
+    elif mapping == EMap.eAllSame:
+        if reference == ERef.eIndexToDirect:
+            indices[:] = index_array.GetAt(0)
+        elif reference == ERef.eDirect:
+            indices[:] = 0
+        else:
+            raise NotImplementedError(
+                f"Unsupported FBX reference mode for AllSame: {reference}"
+            )
+
     else:
         raise NotImplementedError(f"Unsupported FBX mapping mode: {mapping}")
 
@@ -5609,16 +5634,25 @@ def load_fbx(filename: str, scale_factor: float | None = None) -> list:
     ``set_normals()`` is within 6.78e-08 of Maya's normals in a probe; where
     it maps them per polygon vertex, Maya makes every edge hard: there
     ``set_normals()`` is 1.77 off and ``set_normals(hard_edge_angle=60)``
-    within 1.48e-06. The faces keep the file's order, a mirror's too, and
-    the UVs are the file's. Nodes that share one mesh each read it with
-    their own offset baked in, where the fbx sdk puts it; Maya's importer
-    differs: it bakes one offset into all of them, that of the first such
-    node in the scene's hierarchy, as one instanced shape in one probe,
-    where the second node's mesh was 4.29 cm off the sdk's in its own space
-    and 6.93 cm off in the world, and as separate shapes with that same
-    offset in another, whose file attaches the mesh first to a node later in
-    the hierarchy. A mesh whose node holds no geometric transform reads as
-    the file holds it.
+    within 1.48e-06. Normals mapped one per face, or one for the whole mesh,
+    are read on each face's corners, as the mapping says; Maya's importer
+    reads one indexed by face so, but a direct one as if mapped by control
+    point, each corner the value at its control point's place and 0 past the
+    values, and one indexed for the whole mesh so on its first corner alone,
+    the others reading past the index array: 0 or another of the file's
+    values, from one import to the next. The faces keep the file's order, a
+    mirror's too, and the UVs are the file's: UVs mapped one per face, or
+    one for the whole mesh, read on each face's corners as the mapping says,
+    as Maya's importer reads one per face, where it assigns no UV to a mesh
+    whose UVs are one for the whole mesh. Nodes that share one mesh each
+    read it with their own offset baked in, where the fbx sdk puts it;
+    Maya's importer differs: it bakes one offset into all of them, that of
+    the first such node in the scene's hierarchy, as one instanced shape in
+    one probe, where the second node's mesh was 4.29 cm off the sdk's in its
+    own space and 6.93 cm off in the world, and as separate shapes with that
+    same offset in another, whose file attaches the mesh first to a node
+    later in the hierarchy. A mesh whose node holds no geometric transform
+    reads as the file holds it.
 
     ``scale_factor`` None, the default, converts the file's unit to
     centimeters, as ``HierarchyData.load_fbx`` and ``ClipData.load_fbx`` do:
