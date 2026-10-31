@@ -1487,8 +1487,8 @@ class TestFbxGeometricTransform(FbxCase):
     def test_the_points_and_normals_take_the_offset(self):
         """every reader: the points with the offset baked, times the unit;
         the normals turned by its rotation alone, flipped in a mirror, unit
-        length; the faces in the file's order; a mesh with no offset as the
-        file holds it, to the bit"""
+        length; the faces in the file's order; a mesh with no offset's points
+        as the file holds them, to the bit, its normals at unit length"""
         for label, unit, axes, cm, _ in self.cases():
             with self.subTest(file=label):
                 path  = self.scene_file(f"points {label}.fbx", unit, axes)
@@ -1504,7 +1504,8 @@ class TestFbxGeometricTransform(FbxCase):
                         self.assertEqual(self.faces(mesh), [list(face) for face in self.FACES])
                         if self.OFFSETS[name] is None:
                             np.testing.assert_array_equal(mesh.points, local)
-                            np.testing.assert_array_equal(got, normals)
+                            unit_length = normals / np.linalg.norm(normals, axis=1, keepdims=True)
+                            np.testing.assert_allclose(got, unit_length, rtol=0.0, atol=1e-15)
                             continue
                         np.testing.assert_allclose(mesh.points, local, rtol=0.0, atol=1e-9)
                         np.testing.assert_allclose(got, self.turned(normals, matrix), rtol=0.0, atol=1e-9)
@@ -1614,7 +1615,7 @@ class TestFbxGeometricTransform(FbxCase):
         control points through the node's own FbxAMatrix(T, R, S), as the
         sdk puts it, and under each node's world from the rig where the sdk
         puts it; under the node with none it reads as the file holds it, its
-        normals' lengths too. Maya's FBXImport differs: it bakes one offset
+        normals at unit length. Maya's FBXImport differs: it bakes one offset
         into both, that of the first such node in the hierarchy"""
         names = ("moved", "kept")
         for label, unit, axes, cm, turn in self.cases():
@@ -1644,7 +1645,8 @@ class TestFbxGeometricTransform(FbxCase):
                             placed = np.asarray(mesh.points) @ node[:3, :3] + node[3, :3]
                             np.testing.assert_allclose(placed, world, rtol=0.0, atol=1e-9)
                             if name == "kept":
-                                np.testing.assert_array_equal(got, normals)
+                                unit_length = normals / np.linalg.norm(normals, axis=1, keepdims=True)
+                                np.testing.assert_allclose(got, unit_length, rtol=0.0, atol=1e-15)
                             else:
                                 np.testing.assert_allclose(got, self.turned(normals, matrix), rtol=0.0, atol=1e-9)
 
@@ -1765,6 +1767,92 @@ class TestFbxGeometricTransform(FbxCase):
 
                     got = np.asarray(mesh.normals)[mesh.normal_indices]
                     self.assertLess(float(np.abs(got - normals).max()), 2e-7)
+
+
+@unittest.skipIf(fbx is None, "Autodesk FBX Python SDK is not installed")
+class TestFbxNormalsAtUnitLength(unittest.TestCase):
+    """every authored normal reads at unit length, as Maya's FBXImport makes
+    it, on a mesh its node's geometric transform leaves alone too; a normal
+    of length 0 stays 0, never NaN
+
+    The file holds one quad, no offset, its normals by control point 0.5,
+    1, 2.8 and 0 long.
+    """
+
+    LENGTHS    = (0.5, 1.0, 2.8, 0.0)
+    DIRECTIONS = ((0.0, 0.0, 1.0), (0.6, 0.0, 0.8), (0.0, -0.28, 0.96), (0.0, 0.0, 1.0))
+
+    def setUp(self):
+        from cgmath.formats._fbx_io import new_manager
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, "lengths.fbx")
+        manager   = new_manager(fbx)
+        try:
+            scene = fbx.FbxScene.Create(manager, "")
+            node  = fbx.FbxNode.Create(scene, "quad")
+            mesh  = fbx.FbxMesh.Create(scene, "quadShape")
+            mesh.InitControlPoints(4)
+            for index, corner in enumerate(((0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0))):
+                mesh.SetControlPointAt(fbx.FbxVector4(*corner, 1.0), index)
+            mesh.BeginPolygon()
+            for index in range(4):
+                mesh.AddPolygon(index)
+            mesh.EndPolygon()
+            normals = mesh.CreateElementNormal()
+            normals.SetMappingMode(fbx.FbxLayerElement.EMappingMode.eByControlPoint)
+            normals.SetReferenceMode(fbx.FbxLayerElement.EReferenceMode.eDirect)
+            for length, direction in zip(self.LENGTHS, self.DIRECTIONS):
+                normals.GetDirectArray().Add(fbx.FbxVector4(*(length * np.array(direction)), 1.0))
+            node.SetNodeAttribute(mesh)
+            scene.GetRootNode().AddChild(node)
+            exporter = fbx.FbxExporter.Create(manager, "")
+            exporter.Initialize(self.path, -1, manager.GetIOSettings())
+            exporter.Export(scene)
+            exporter.Destroy()
+        finally:
+            manager.Destroy()
+
+    def test_every_reader_gives_unit_normals(self):
+        expected    = np.array(self.DIRECTIONS)
+        expected[3] = 0.0
+        for label, mesh in (
+            ("MeshList.load_fbx", MeshList.load_fbx(self.path)[0]),
+            ("mesh.load_fbx", mesh_load_fbx(self.path)[0][0]),
+            ("MeshData.load_fbx", MeshData.load_fbx(self.path)),
+            ("Object.load_fbx", Object.load_fbx(self.path, extract_texture=False).mesh),
+        ):
+            with self.subTest(label):
+                got = np.asarray(mesh.normals)[mesh.normal_indices]
+                self.assertFalse(np.isnan(got).any())
+                np.testing.assert_allclose(got, expected, rtol=0.0, atol=1e-15)
+
+    def test_maya_makes_them_unit_too(self):
+        """Maya's normals are the readers' within 2e-7 (single precision),
+        the one of length 0 kept 0 by both. Needs mayapy with the fbxmaya
+        plug-in"""
+        try:
+            import maya.api.OpenMaya as om
+            import maya.cmds as cmds
+            import maya.mel as mel
+
+            cmds.loadPlugin("fbxmaya", quiet=True)
+        except Exception:  # not running in Maya, or no fbx plug-in
+            self.skipTest("needs Maya and its fbxmaya plug-in")
+
+        self.addCleanup(cmds.file, new=True, force=True)
+        cmds.file(new=True, force=True)
+        mel.eval("FBXResetImport")
+        mel.eval(f'FBXImport -f "{self.path.replace(os.sep, "/")}"')
+        selection = om.MSelectionList()
+        selection.add("quad")
+        path = selection.getDagPath(0)
+        path.extendToShape()
+        maya = np.array([[n.x, n.y, n.z] for n in om.MFnMesh(path).getFaceVertexNormals(0, om.MSpace.kObject)])
+        mesh = MeshList.load_fbx(self.path)[0]
+        got  = np.asarray(mesh.normals)[mesh.normal_indices]
+        self.assertLess(float(np.abs(got - maya).max()), 2e-7)
 
 
 @unittest.skipIf(not HAVE_GLB, "pygltflib / trimesh are not installed")

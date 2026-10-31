@@ -1141,36 +1141,47 @@ for the points' unit: Maya's object space holds the numbers the file
 holds, which the readers multiply as `scale_factor` says (below), into
 cm by default, so a mesh of a file in meters reads 100 times Maya's
 points, or Maya's own at or under a root that holds the file's unit as a
-scale. The normals are Maya's on a mesh its node's geometric transform
-(below) moves; a mesh whose node holds none keeps the file's normals as
-the file holds them, their lengths too, where Maya's importer makes them
-unit length. Nodes that share one mesh are the exception for the points
-and the normals: Maya's importer bakes one node's geometric transform
-into all of them (below). A node's geometric transform, the offset the
-file gives the node's mesh alone and not its children, is baked into the
-mesh, as Maya's importer bakes it: the points take it as the FBX SDK's
-`FbxAMatrix(T, R, S)` composes it, scaled, turned in xyz whatever the
-node's rotate order (Maya within 9.25e-08 of that for all six orders),
-then moved. The normals are turned by the offset's rotation alone and
-flipped when it mirrors, at unit length, as Maya's importer turns them,
-so under an uneven offset scale they are not perpendicular to the
-stretched faces, as in Maya. An offset whose scale is exactly 0 on an
-axis flattens the mesh: Maya's importer then drops the file's normals
-and rebuilds its own from the flat faces, and the readers read the mesh
-with no normals; a scale near 0 but not 0, 1e-30 say, keeps them, as
-Maya's importer does. A caller who needs normals on such a mesh rebuilds
-them with `set_normals`. Where the file maps its normals by control
-point or holds none, Maya's edges are soft, and `set_normals()` is
-within 6.78e-08 of Maya's normals in a probe; where it maps them per
-polygon vertex, Maya makes every edge hard: there `set_normals()` is
-1.77 off and `set_normals(hard_edge_angle=60)` within 1.48e-06. The
-faces keep the file's order, a mirror's too; the UVs and the skin
-weights are the file's, and so are the inverse binds, which pose the
-baked points as the SDK blends a skin, the offset first. Nodes that
-share one mesh each read it with their own offset baked in, where the
-SDK puts it; Maya's importer bakes one offset into all of them, that of
-the first such node in the scene's hierarchy: one instanced shape in a
-probe (the second node's mesh 4.29 cm off the SDK's in its own space,
+scale. The normals are the file's, unit length, as Maya's importer makes
+the file's normals on a mesh with no skin, its node's geometric
+transform (below) moving it or not; on a skinned mesh Maya's importer
+holds normals of its own, up to 1.99 apart on the retarget assets
+measured (1.62 on two quads bound to one joint). One of length 0 stays
+0, never NaN, as in Maya, which also keeps an authored normal shorter
+than 1e-10 as the file holds it, not unit (at 1e-10 itself some
+directions read unit), down to 1e-39, below which single precision
+underflows (some corners 0 at 1e-45, all from 1e-46), where the readers
+make it unit, within 3e-14 down to 1e-155 and less closely below (0.018
+off unit at 1e-161, up to about 0.56 between that and 1e-162), and keep
+one whose squared length underflows (from 1e-162: 1e-200, 1e-300) as the
+file holds it, on the lengths measured: such a corner sits up to 1 off
+Maya's in a component, and up to about 1.22 where the squares lose
+digits, between 1e-162 and 1e-155. Nodes that share one mesh are the
+exception for the points and the normals: Maya's importer bakes one
+node's geometric transform into all of them (below). A node's geometric
+transform, the offset the file gives the node's mesh alone and not its
+children, is baked into the mesh, as Maya's importer bakes it: the
+points take it as the FBX SDK's `FbxAMatrix(T, R, S)` composes it,
+scaled, turned in xyz whatever the node's rotate order (Maya within
+9.25e-08 of that for all six orders), then moved. The normals are turned
+by the offset's rotation alone and flipped when it mirrors, at unit
+length, as Maya's importer turns them, so under an uneven offset scale
+they are not perpendicular to the stretched faces, as in Maya. An offset
+whose scale is exactly 0 on an axis flattens the mesh: Maya's importer
+then drops the file's normals and rebuilds its own from the flat faces,
+and the readers read the mesh with no normals; a scale near 0 but not 0,
+1e-30 say, keeps them, as Maya's importer does. A caller who needs
+normals on such a mesh rebuilds them with `set_normals`. Where the file
+maps its normals by control point or holds none, Maya's edges are soft,
+and `set_normals()` is within 6.78e-08 of Maya's normals in a probe;
+where it maps them per polygon vertex, Maya makes every edge hard: there
+`set_normals()` is 1.77 off and `set_normals(hard_edge_angle=60)` within
+1.48e-06. The faces keep the file's order, a mirror's too; the UVs and
+the skin weights are the file's, and so are the inverse binds, which
+pose the baked points as the SDK blends a skin, the offset first. Nodes
+that share one mesh each read it with their own offset baked in, where
+the SDK puts it; Maya's importer bakes one offset into all of them, that
+of the first such node in the scene's hierarchy: one instanced shape in
+a probe (the second node's mesh 4.29 cm off the SDK's in its own space,
 6.93 cm in the world), separate shapes with that same offset in another,
 whose file attaches the mesh first to a node later in the hierarchy. A
 mesh whose node holds no geometric transform reads as the file holds it.
