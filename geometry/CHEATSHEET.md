@@ -449,6 +449,46 @@ assert MeshList.from_bytes(meshes.to_bytes()) == meshes
 print(sorted(meshes.to_dict()), MeshList.LIST_FIELDS)  # ['__class__', '__items__'] ()
 ```
 
+A list passes a member of its items on in one line of its class body,
+`forward(member)`: each item's, called by name, in order. A function gives a
+plain function with the item's parameters and docstring; a property, or a
+field given by name, a real property, writable when the line says how deep
+one value per item is (`per_item_ndim`). `returns` says what comes back:
+`"none"`, `"list"`, `"array"`, `"same"` (a list of the list's own class) or
+a list class. A member the item class lacks, or a name `DataList` itself
+needs (`copy`, `index`, `sort` ...), raises TypeError when the class is made.
+
+```python
+from dataclasses import dataclass
+from typing import Optional
+
+from cgmath.data import Data, DataList, forward
+
+
+@dataclass(repr=False, eq=False)
+class Peg(Data):
+    name:   Optional[str] = None
+    height: float = 1.0
+
+    def raise_by(self, amount: float) -> float:
+        """raises the peg; returns its new height"""
+        self.height += amount
+        return self.height
+
+
+class Pegs(DataList[Peg]):
+    raise_by = forward(Peg.raise_by, returns="array")
+    height   = forward("height", returns="array", per_item_ndim=1)
+
+
+pegs = Pegs([Peg("a", 1.0), Peg("b", 2.0)])
+print(pegs.raise_by(0.5))                       # [1.5 2.5]: each peg's, in order
+pegs.height = [3.0, 4.0]                        # one value per item ...
+pegs.height = 0.0                               # ... or one for every item
+print(pegs.height)                              # [0. 0.]
+print(Pegs.raise_by.__doc__.splitlines()[0])    # Peg.raise_by() on every item, in order
+```
+
 ### Module helpers
 
 The serialization primitives are importable on their own, for dicts that are

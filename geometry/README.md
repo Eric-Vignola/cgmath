@@ -111,7 +111,11 @@ the same save/load surface. A list class names that class in brackets,
 `class MeshList(DataList[MeshData])`, which sets its `DATA_LIST_CLASS` and lets
 an editor complete `meshes[0].` and `for mesh in meshes:` with `MeshData`'s
 members. A list holding a narrower class than its base names it beside the
-base, `class UVList(MeshList, DataList[UVData])`.
+base, `class UVList(MeshList, DataList[UVData])`. `forward()` passes a member
+of the items on in one line of the list's body: `merge = forward(MeshData.merge)`
+calls each mesh's `merge` in order, and a property, or a field given by name,
+becomes a property (`uuid = forward("uuid", returns="list")` in a
+`class TransformList(DataList[TransformData])`, whose items declare `uuid`).
 
 ### Saving and loading
 

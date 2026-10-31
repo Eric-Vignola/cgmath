@@ -2714,6 +2714,275 @@ class Data:
         return dict_to_bytes(self.to_dict())
 
 
+# ---------------------------------- FORWARD --------------------------------- #
+
+# where forward() marks each function it makes, a property's getter and setter
+# included, with the _Forwarded it stands for
+FORWARD_MARK = "__cgmath_forward__"
+
+# what a forwarded member hands back: nothing, a list of the items' results, an
+# array of them, or a new list of the list's own class
+_FORWARD_MODES = ("none", "list", "array", "same")
+
+
+class _Forwarded:
+    """what one ``forward()`` line passes on: the item member (``member``, a
+    function, a property or a field's name), its name on an item
+    (``item_name``), ``returns``, ``per_item_ndim`` and ``doc``; and, once its
+    list class is made, that class (``owner``) and its name there
+    (``attribute``)"""
+
+    __slots__ = ("member", "item_name", "returns", "per_item_ndim", "doc", "owner", "attribute", "_returned")
+
+    def __init__(self, member, returns, per_item_ndim, doc):
+        self.member        = member
+        self.item_name     = _member_name(member)
+        self.returns       = returns
+        self.per_item_ndim = per_item_ndim
+        self.doc           = doc
+        self.owner         = None
+        self.attribute     = None
+        self._returned     = None
+
+    @property
+    def label(self) -> str:
+        """the member as its class names it, ``MeshData.merge``: the item
+        class's name and the member's, where the class is known"""
+        held     = self.member.fget if isinstance(self.member, property) else self.member
+        qualname = getattr(held, "__qualname__", "")
+        if qualname.endswith("." + self.item_name) and "<" not in qualname:
+            return qualname
+        item = getattr(self.owner, "DATA_LIST_CLASS", None)
+        return f"{item.__name__}.{self.item_name}" if item is not None else self.item_name
+
+    def result(self, owner_list, results: list):
+        """the items' ``results`` as ``returns`` hands them back"""
+        returns = self.returns
+        if returns == "none":
+            return None
+        if returns == "list":
+            return results
+        if returns == "array":
+            return np.array(results)
+        if returns == "same":
+            return type(owner_list)(results)
+        return self.returned_class()(results)
+
+    def returned_class(self) -> type:
+        """the list class ``returns`` names, a name resolved in the module of
+        the list class on first use"""
+        if self._returned is None:
+            returns = self.returns
+            if isinstance(returns, str):
+                module  = sys.modules[self.owner.__module__] if self.owner is not None else None
+                returns = getattr(module, returns, None)
+                if not isinstance(returns, type):
+                    raise TypeError(
+                        f"{self.owner.__name__}.{self.attribute} returns {self.returns!r}, "
+                        f"which names no class in {self.owner.__module__}"
+                    )
+            self._returned = returns
+        return self._returned
+
+
+def _member_name(member) -> str:
+    """the name an item holds ``member`` under: a field's name as given, a
+    function's own, a property's getter's"""
+    if isinstance(member, str):
+        return member
+    if isinstance(member, property):
+        return member.fget.__name__
+    return member.__name__
+
+
+def _is_per_item(value, ndim: int) -> bool:
+    """whether ``value`` is one value per item: an iterable but a str, bytes,
+    dict or set, ``ndim`` deep"""
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes, dict, set)):
+        try:
+            return np.asarray(value).ndim == ndim
+        except ValueError:  # ragged: one value for every item
+            return False
+    return False
+
+
+def _forward_signature(member, returns) -> Optional[inspect.Signature]:
+    """the item member's parameters, its return annotation the one
+    ``returns`` hands back"""
+    try:
+        signature = inspect.signature(member)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(returns, str) and returns in ("none", "list", "array"):
+        annotation = {"none": None, "list": list, "array": np.ndarray}[returns]
+    else:
+        annotation = returns  # a list class or its name; "same" until the class is made
+    return signature.replace(return_annotation=annotation)
+
+
+def _forward_doc(spec: _Forwarded, what: str) -> str:
+    """the first line, ``what`` the member does over the items, then the
+    line's own ``doc`` and the item member's docstring"""
+    parts = [what]
+    if spec.doc:
+        parts.append(inspect.cleandoc(spec.doc))
+    held = spec.member.fget if isinstance(spec.member, property) else spec.member
+    if not isinstance(held, str) and getattr(held, "__doc__", None):
+        parts.append(inspect.cleandoc(held.__doc__))
+    return "\n\n".join(parts)
+
+
+def forward(member, returns=None, per_item_ndim: Optional[int] = None, doc: Optional[str] = None):
+    """
+    One line in a list class's body that passes a member of its items on:
+    each item's, called by name, in order, over the list as it is when called.
+
+    ``member`` is the item class's function or property object,
+    ``MeshData.merge``, ``TransformData.translate``; a dataclass field has no
+    such object, so give its name, ``"uuid"``.
+
+    ``returns`` says what the list hands back: ``"none"`` (a function's
+    default), ``"list"`` (a property's default), ``"array"`` (``np.array`` of
+    the results), ``"same"`` (a new list of the list's own class), a list
+    class, or the name of one in the list class's module, looked up on first
+    use (a class defined further down).
+
+    A function becomes a plain function carrying the item's parameters and
+    docstring; a property or field a real ``property``, read only unless
+    ``per_item_ndim`` is given: a write then gives item ``i`` ``value[i]``
+    when the value is an iterable (not a str, bytes, dict or set) that many
+    dimensions deep, and every item the whole value otherwise. ``doc`` adds
+    what only the list says.
+
+    ::
+
+        class MeshList(DataList[MeshData]):
+            merge = forward(MeshData.merge)
+
+
+        class TransformList(DataList[TransformData]):
+            translate = forward(TransformData.translate, returns="array", per_item_ndim=2)
+            uuid      = forward("uuid", returns="list")
+
+    The names are checked when the list class is made: a member its item
+    class lacks, or a name ``DataList`` itself defines, raises TypeError.
+    """
+    function = isinstance(member, str) or isinstance(member, property)
+    if returns is None:
+        returns = "list" if function else "none"
+    if not (isinstance(returns, type) or isinstance(returns, str)):
+        raise TypeError(f"returns takes one of {_FORWARD_MODES}, a list class or its name, not {returns!r}")
+    if not isinstance(member, (str, property)) and not inspect.isfunction(member):
+        raise TypeError(f"forward() takes an item's function, property or field name, not {member!r}")
+    if per_item_ndim is not None and not function:
+        raise TypeError("per_item_ndim is for a property or field, which a write can reach")
+
+    spec = _Forwarded(member, returns, per_item_ndim, doc)
+    name = spec.item_name
+
+    if not function:
+        def method(self, *args, **kwargs):
+            items = list(self.list)
+            return spec.result(self, [getattr(item, spec.item_name)(*args, **kwargs) for item in items])
+
+        method.__name__     = name
+        method.__qualname__ = name
+        method.__wrapped__  = member
+        method.__doc__      = _forward_doc(spec, f"{spec.label}() on every item, in order")
+        signature           = _forward_signature(member, returns)
+        if signature is not None:
+            method.__signature__ = signature
+        setattr(method, FORWARD_MARK, spec)
+        return method
+
+    def getter(self):
+        return spec.result(self, [getattr(item, spec.item_name) for item in list(self.list)])
+
+    getter.__name__ = name
+    setattr(getter, FORWARD_MARK, spec)
+    setter = None
+    if per_item_ndim is not None:
+        def setter(self, value) -> None:
+            if per_item_ndim > 1 and isinstance(value, Iterable) and not isinstance(value, (str, bytes, dict, set)):
+                value = np.asarray(value)
+            each = _is_per_item(value, per_item_ndim)
+            for i, item in enumerate(list(self.list)):
+                setattr(item, spec.item_name, value[i] if each else value)
+
+        setter.__name__ = name
+        setattr(setter, FORWARD_MARK, spec)
+    return property(getter, setter, doc=_forward_doc(spec, f"{spec.label} of every item"))
+
+
+def _forwarded(raw) -> Optional[_Forwarded]:
+    """the _Forwarded a class attribute stands for, None for one forward()
+    did not make"""
+    held = raw.fget if isinstance(raw, property) else raw
+    return getattr(held, FORWARD_MARK, None) if callable(held) else None
+
+
+def _forward_lines(cls) -> None:
+    """fixes the names of ``cls``'s own forward lines and checks every forward
+    line it holds, its own and inherited, against its item class
+
+    Raises
+    ------
+    TypeError
+        A line is named as a member ``DataList`` itself defines, or names a
+        member the item class lacks.
+    """
+    reserved = {}
+    for base in (DataList,) + MutableSequence.__mro__:
+        for name, raw in vars(base).items():
+            if _forwarded(raw) is None:
+                reserved.setdefault(name, base.__name__)
+
+    for name, raw in list(vars(cls).items()):
+        spec = _forwarded(raw)
+        if spec is None:
+            continue
+        if cls is not DataList and name in reserved:
+            raise TypeError(
+                f"{cls.__name__}.{name} forwards {spec.label}, but {name!r} is {reserved[name]}'s own "
+                f"member, which a list needs: name the line otherwise"
+            )
+        if spec.owner is None:
+            spec.owner, spec.attribute = cls, name
+            for function in ((raw.fget, raw.fset) if isinstance(raw, property) else (raw,)):
+                if function is not None:
+                    function.__name__     = name
+                    function.__qualname__ = f"{cls.__qualname__}.{name}"
+                    function.__module__   = cls.__module__
+            if isinstance(raw, property):
+                raw.__doc__ = _forward_doc(spec, f"{spec.label} of every item")
+            else:
+                raw.__doc__ = _forward_doc(spec, f"{spec.label}() on every item, in order")
+                signature   = getattr(raw, "__signature__", None)
+                if signature is not None and spec.returns == "same":
+                    raw.__signature__ = signature.replace(return_annotation=cls.__name__)
+
+    if "_ITEM_PARAMETER" in vars(cls):
+        return  # a list still generic: its subclasses name the item class
+    item = cls.DATA_LIST_CLASS
+    for name in dir(cls):
+        spec = _forwarded(_class_attribute(cls, name))
+        if spec is None:
+            continue
+        if isinstance(spec.member, str):
+            declared = {f.name for f in fields(item)} if is_dataclass(item) else set()
+            for base in item.__mro__:
+                declared.update(vars(base).get("__annotations__", {}))
+            if spec.member not in declared:
+                raise TypeError(
+                    f"{cls.__name__}.{name} forwards the field {spec.member!r}, which "
+                    f"{item.__name__} does not declare"
+                )
+        elif _class_attribute(item, spec.item_name) is _NO_DEFAULT:
+            raise TypeError(
+                f"{cls.__name__}.{name} forwards {spec.label}, which {item.__name__} does not have"
+            )
+
+
 # the class a list holds, named in brackets: class MeshList(DataList[MeshData])
 _Item = TypeVar("_Item")
 
@@ -2844,6 +3113,7 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
                     f"says: name the class once, in the brackets"
                 )
             cls.DATA_LIST_CLASS = item
+        _forward_lines(cls)
         _register(cls)
 
     def __setattr__(self, name: str, value) -> None:

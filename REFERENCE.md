@@ -843,6 +843,8 @@ dict_to_bytes(data: dict, compression=8) -> bytes
 dict_to_zip(data: dict, filename, compression=8) -> None
     writes a tree of dicts, lists, arrays and scalars as an npz file
 flatten_nested_lists(xs)
+forward(member, returns=None, per_item_ndim: Optional[int] = None, doc: Optional[str] = None)
+    One line in a list class's body that passes a member of its items on:
 get_annotations(cls)
     returns a dict of all annotations including inherited ones
 get_file_type(filename: str) -> str
@@ -858,6 +860,7 @@ Constants:
 ```text
 CLASS_KEY = '__class__'
 DTYPES_KEY = '__dtypes__'
+FORWARD_MARK = '__cgmath_forward__'
 ID_KEY = '__id__'
 ITEMS_KEY = '__items__'
 MISSING = <dataclasses._MISSING_TYPE object at 0x000001DC7F460F50>
