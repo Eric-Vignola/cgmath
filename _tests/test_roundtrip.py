@@ -567,7 +567,7 @@ class TestPublicSavedNames(unittest.TestCase):
 
     # the classes holding such fields, and names each example saves publicly
     PUBLIC = {
-        "TransformData":  ("translate", "rotate_order", "joint_orient", "radius"),
+        "TransformData":  ("translate", "rotate_order", "joint_orient", "radius", "shear"),
         "Camera":         ("translate", "rotate"),
         "Light":          ("translate", "visibility"),
         "Object":         ("mesh", "uv", "texture", "skin", "base_color", "wireframe"),
@@ -651,7 +651,7 @@ class TestPublicSavedNames(unittest.TestCase):
         clip = self.listed["ClipData"][1]()
         self.assertEqual(
             list(clip.to_dict()["blocks"]),
-            ["scale", "rotate", "translate", "rotate_axis", "joint_orient"],
+            ["scale", "rotate", "translate", "rotate_axis", "joint_orient", "shear"],
         )
 
     def test_every_format_saves_the_public_names_and_loads_the_same_object(self):

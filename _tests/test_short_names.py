@@ -1,6 +1,6 @@
 """Maya's short attribute names, and the four matrices that came with them.
 
-Each of the 31 short names reads and writes what its long name does, on a
+Each of the 35 short names reads and writes what its long name does, on a
 node, a rig, a clip's bound frame and the clip's frame axis, and raises what
 it raises. parent_matrix, inverse_matrix, world_inverse_matrix and
 parent_inverse_matrix are checked against matrices composed here with
@@ -47,6 +47,10 @@ MAYA_NAMES = (
     ("sx", "scale_x", "scaleX"),
     ("sy", "scale_y", "scaleY"),
     ("sz", "scale_z", "scaleZ"),
+    ("sh", "shear", "shear"),
+    ("shxy", "shear_xy", "shearXY"),
+    ("shxz", "shear_xz", "shearXZ"),
+    ("shyz", "shear_yz", "shearYZ"),
     ("jo", "joint_orient", "jointOrient"),
     ("jox", "joint_orient_x", "jointOrientX"),
     ("joy", "joint_orient_y", "jointOrientY"),
@@ -69,8 +73,9 @@ MAYA_NAMES = (
 )
 SHORT = {short: long for short, long, _ in MAYA_NAMES}
 
-VECTORS    = ("translate", "rotate", "scale", "joint_orient", "rotate_axis")
-COMPONENTS = tuple(f"{vector}_{axis}" for vector in VECTORS for axis in "xyz")
+AXES       = ("translate", "rotate", "scale", "joint_orient", "rotate_axis")
+VECTORS    = AXES + ("shear",)
+COMPONENTS = tuple(f"{vector}_{axis}" for vector in AXES for axis in "xyz") + ("shear_xy", "shear_xz", "shear_yz")
 READ_ONLY  = ("parent_matrix", "inverse_matrix", "world_inverse_matrix", "parent_inverse_matrix")
 
 # what every frame shares: a clip's frame axis has none of these
@@ -88,6 +93,7 @@ POSES = (
         rotate_axis=(7, -8, 9),
         rotate_order=3,
         segment_scale_compensate=True,
+        shear=(0.25, -0.5, 0.75),
     )),
     ("knee", "hip", dict(
         translate    = (0, 7, -2),
@@ -97,6 +103,7 @@ POSES = (
         rotate_axis  = (0, 12, 0),
         rotate_order = 5,
         visibility   = False,
+        shear        = (-0.75, 0.5, 0.25),
     )),
     ("foot", "knee", dict(
         translate=(1, -3, 2),
@@ -144,6 +151,7 @@ def _clip() -> ClipData:
     clip.frames.scale        = clip.frames.scale * rng.uniform(0.7, 1.4, shape)
     clip.frames.joint_orient = clip.frames.joint_orient + rng.uniform(-10.0, 10.0, shape)
     clip.frames.rotate_axis  = clip.frames.rotate_axis + rng.uniform(-10.0, 10.0, shape)
+    clip.frames.shear        = clip.frames.shear + rng.uniform(-0.25, 0.25, shape)
     clip.frame               = BOUND
     return clip
 
@@ -201,7 +209,7 @@ TARGETS = {
 class TestTheNames(unittest.TestCase):
     def test_they_are_maya_2025s(self):
         self.assertEqual(_SHORT_NAMES, SHORT)
-        self.assertEqual(len(SHORT), 31)
+        self.assertEqual(len(SHORT), 35)
 
     def test_is_has_none(self):
         # inverseScale's short name is a Python keyword: node.is would not parse
@@ -369,7 +377,7 @@ def _rotation(degrees, order: int) -> np.ndarray:
 
 def _composed(channels: dict, nodes) -> tuple:
     """(local, world, parent world) of ``nodes``, (N, 4, 4) each, composed
-    here from their (N, 3) ``channels``: S RO R JO IS T, then down the chain"""
+    here from their (N, 3) ``channels``: S Sh RO R JO IS T, then down the chain"""
     index  = {node.uuid: i for i, node in enumerate(nodes)}
     local  = np.empty((len(nodes), 4, 4))
     world  = np.empty((len(nodes), 4, 4))
@@ -377,6 +385,8 @@ def _composed(channels: dict, nodes) -> tuple:
     for i, node in enumerate(nodes):
         up = index.get(node.parent_uuid)
         S  = np.diag(list(channels["scale"][i]) + [1.0])
+        Sh = np.eye(4)
+        Sh[1, 0], Sh[2, 0], Sh[2, 1] = channels["shear"][i]
         IS = np.eye(4)
         if node.segment_scale_compensate and up is not None:
             IS = np.diag(list(1.0 / channels["scale"][up]) + [1.0])
@@ -385,7 +395,7 @@ def _composed(channels: dict, nodes) -> tuple:
         RO        = _rotation(channels["rotate_axis"][i],  0)
         R         = _rotation(channels["rotate"][i],       node.rotate_order)
         JO        = _rotation(channels["joint_orient"][i], 0)
-        local[i]  = S @ RO @ R @ JO @ IS @ T
+        local[i]  = S @ Sh @ RO @ R @ JO @ IS @ T
         parent[i] = np.eye(4) if up is None else world[up]
         world[i]  = local[i] @ parent[i]
     return local, world, parent
@@ -794,7 +804,7 @@ class TestTheFourMatrices(unittest.TestCase):
             if parent:
                 cmds.connectAttr(parent + ".scale", joint + ".inverseScale")
             node = rig[name]
-            for attr in ("t", "r", "s", "jo", "ra"):
+            for attr in ("t", "r", "s", "sh", "jo", "ra"):
                 cmds.setAttr(f"{joint}.{attr}", *getattr(node, attr).tolist())
             for attr in ("ro", "ssc", "v", "radi", "ds"):
                 cmds.setAttr(f"{joint}.{attr}", getattr(node, attr))

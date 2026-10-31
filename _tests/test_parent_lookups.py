@@ -298,6 +298,7 @@ class TestClipParentLookups(unittest.TestCase):
                     rotate_axis=rng.uniform(-20.0, 20.0, size=3),
                     rotate_order=int(rng.integers(0, 6)),
                     segment_scale_compensate=bool(rng.integers(0, 2)),
+                    shear=rng.uniform(-0.3, 0.3, size=3),
                 )
                 for name, uuid, parent in zip(names, uuids, parents)
             ]
@@ -310,6 +311,7 @@ class TestClipParentLookups(unittest.TestCase):
         clip.frames.rotate    = clip.frames.rotate + rng.normal(size=shape) * 20.0
         clip.frames.translate = clip.frames.translate + rng.normal(size=shape) * 0.3
         clip.frames.scale     = clip.frames.scale * rng.uniform(0.8, 1.2, size=shape)
+        clip.frames.shear     = clip.frames.shear + rng.uniform(-0.1, 0.1, size=shape)
         return clip
 
     @staticmethod

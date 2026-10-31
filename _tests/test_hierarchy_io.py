@@ -12,7 +12,7 @@ from cgmath.geometry import Data
 from cgmath.hierarchy import HierarchyData, TransformData, TransformList
 
 
-CHANNELS = ("_scale", "_rotate", "_translate", "_rotate_axis", "_joint_orient")
+CHANNELS = ("_scale", "_rotate", "_translate", "_rotate_axis", "_joint_orient", "_shear")
 
 
 def rig():

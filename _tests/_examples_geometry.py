@@ -305,6 +305,7 @@ def _place_in_scene(node, uuid: str) -> None:
     node.parent_uuid  = _SDF_GROUP
     node.rotate_order = 2  # zxy
     node.rotate_axis  = [0.0, 0.0, 10.0]
+    node.shear        = [0.125, 0.0, -0.25]
     node.visibility   = False
     node.add_user_attribute("blend", 0.25)
     node.add_user_attribute("material", "rubber")

@@ -311,10 +311,10 @@ sort(self, key=None, reverse=False) -> 'None'
 
 #### `TransformData(Data)`
 
-TransformData(name: 'str', node_type: 'Optional[str]' = 'transform', uuid: 'Optional[str]' = None, parent_uuid: 'Optional[str]' = None, scale: 'Optional[np.ndarray]' = None, rotate: 'Optional[np.ndarray]' = None, translate: 'Optional[np.ndarray]' = None, rotate_order: 'Optional[int]' = None, rotate_axis: 'Optional[np.ndarray]' = None, joint_orient: 'Optional[np.ndarray]' = None, visibility: 'Optional[bool]' = None, segment_scale_compensate: 'Optional[bool]' = None, radius: 'Optional[float]' = None, draw_style: 'Optional[int]' = None, user_defined_attributes: 'Optional[dict]' = None)
+TransformData(name: 'str', node_type: 'Optional[str]' = 'transform', uuid: 'Optional[str]' = None, parent_uuid: 'Optional[str]' = None, scale: 'Optional[np.ndarray]' = None, rotate: 'Optional[np.ndarray]' = None, translate: 'Optional[np.ndarray]' = None, rotate_order: 'Optional[int]' = None, rotate_axis: 'Optional[np.ndarray]' = None, joint_orient: 'Optional[np.ndarray]' = None, visibility: 'Optional[bool]' = None, segment_scale_compensate: 'Optional[bool]' = None, radius: 'Optional[float]' = None, draw_style: 'Optional[int]' = None, user_defined_attributes: 'Optional[dict]' = None, shear: 'Optional[np.ndarray]' = None)
 
 ```text
-TransformData(name: 'str', node_type: 'Optional[str]' = 'transform', uuid: 'Optional[str]' = None, parent_uuid: 'Optional[str]' = None, scale: 'Optional[np.ndarray]' = None, rotate: 'Optional[np.ndarray]' = None, translate: 'Optional[np.ndarray]' = None, rotate_order: 'Optional[int]' = None, rotate_axis: 'Optional[np.ndarray]' = None, joint_orient: 'Optional[np.ndarray]' = None, visibility: 'Optional[bool]' = None, segment_scale_compensate: 'Optional[bool]' = None, radius: 'Optional[float]' = None, draw_style: 'Optional[int]' = None, user_defined_attributes: 'Optional[dict]' = None)
+TransformData(name: 'str', node_type: 'Optional[str]' = 'transform', uuid: 'Optional[str]' = None, parent_uuid: 'Optional[str]' = None, scale: 'Optional[np.ndarray]' = None, rotate: 'Optional[np.ndarray]' = None, translate: 'Optional[np.ndarray]' = None, rotate_order: 'Optional[int]' = None, rotate_axis: 'Optional[np.ndarray]' = None, joint_orient: 'Optional[np.ndarray]' = None, visibility: 'Optional[bool]' = None, segment_scale_compensate: 'Optional[bool]' = None, radius: 'Optional[float]' = None, draw_style: 'Optional[int]' = None, user_defined_attributes: 'Optional[dict]' = None, shear: 'Optional[np.ndarray]' = None)
 ```
 
 Fields:
@@ -384,6 +384,15 @@ scale_x
 scale_y                            
 scale_z                            
 segment_scale_compensate           
+sh                                 Maya's short name for shear
+shear                              Maya's shearXY, shearXZ and shearYZ, the components xy, xz and yz
+shear_matrix                       the shear factor alone, Sh of S * Sh * RO * ...: the identity
+shear_xy                           
+shear_xz                           
+shear_yz                           
+shxy                               Maya's short name for shear_xy
+shxz                               Maya's short name for shear_xz
+shyz                               Maya's short name for shear_yz
 ssc                                Maya's short name for segment_scale_compensate
 sx                                 Maya's short name for scale_x
 sy                                 Maya's short name for scale_y
@@ -445,7 +454,7 @@ set_rotate_to_joint_orient(self) -> 'None'
     sets rotate and rotate_axis to 0 and applies all rotation to joint_orient
 swapaxes(self, axis0: 'int', axis1: 'int', negate: 'bool' = False) -> 'None'
     swaps two of this node's local axes without moving its children
-to_attributes(self, mapping: 'dict' = {'_scale': 'scale', '_rotate': 'rotate', '_translate': 'translate', '_rotate_order': 'rotateOrder', '_rotate_axis': 'rotateAxis', '_joint_orient': 'jointOrient', '_segment_scale_compensate': 'segmentScaleCompensate', '_radius': 'radius', '_visibility': 'visibility', '_draw_style': 'drawStyle'}) -> 'dict'
+to_attributes(self, mapping: 'dict' = {'_scale': 'scale', '_shear': 'shear', '_rotate': 'rotate', '_translate': 'translate', '_rotate_order': 'rotateOrder', '_rotate_axis': 'rotateAxis', '_joint_orient': 'jointOrient', '_segment_scale_compensate': 'segmentScaleCompensate', '_radius': 'radius', '_visibility': 'visibility', '_draw_style': 'drawStyle'}) -> 'dict'
     returns a dict mapped against expected DCC node attributes
 ```
 
@@ -515,6 +524,15 @@ scale_x
 scale_y                            
 scale_z                            
 segment_scale_compensate           
+sh                                 Maya's short name for shear
+shear                              
+shear_matrix                       
+shear_xy                           
+shear_xz                           
+shear_yz                           
+shxy                               Maya's short name for shear_xy
+shxz                               Maya's short name for shear_xz
+shyz                               Maya's short name for shear_yz
 ssc                                Maya's short name for segment_scale_compensate
 sx                                 Maya's short name for scale_x
 sy                                 Maya's short name for scale_y
@@ -596,7 +614,7 @@ set_rotate_to_joint_orient(self) -> 'None'
     sets rotate to 0 and applies all rotation to joint_orient
 swapaxes(self, axis0: 'int', axis1: 'int', negate: 'bool' = False) -> 'None'
     swaps two local axes on every node in the view
-to_attributes(self, mapping: 'dict' = {'_scale': 'scale', '_rotate': 'rotate', '_translate': 'translate', '_rotate_order': 'rotateOrder', '_rotate_axis': 'rotateAxis', '_joint_orient': 'jointOrient', '_segment_scale_compensate': 'segmentScaleCompensate', '_radius': 'radius', '_visibility': 'visibility', '_draw_style': 'drawStyle'}) -> 'List[dict]'
+to_attributes(self, mapping: 'dict' = {'_scale': 'scale', '_shear': 'shear', '_rotate': 'rotate', '_translate': 'translate', '_rotate_order': 'rotateOrder', '_rotate_axis': 'rotateAxis', '_joint_orient': 'jointOrient', '_segment_scale_compensate': 'segmentScaleCompensate', '_radius': 'radius', '_visibility': 'visibility', '_draw_style': 'drawStyle'}) -> 'List[dict]'
     returns every node's attributes as a list of dicts
 to_dict(self) -> 'dict'
     The list as a tree. A view saves as the hierarchy :meth:`copy`
@@ -620,7 +638,7 @@ validate_uuid(uuid_string: 'str') -> 'bool'
 Constants:
 
 ```text
-MAYA_ATTRIBUTE_MAP = {'_scale': 'scale', '_rotate': 'rotate', '_translate': 't...
+MAYA_ATTRIBUTE_MAP = {'_scale': 'scale', '_shear': 'shear', '_rotate': 'rotate...
 SUPPORTED_NODE_TYPES = ('transform', 'joint', 'locator', 'space_transform')
 ```
 

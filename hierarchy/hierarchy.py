@@ -88,6 +88,7 @@ __all__ = [
 # attribute names mapped against Autodesk Maya
 MAYA_ATTRIBUTE_MAP = {
     "_scale": "scale",
+    "_shear": "shear",
     "_rotate": "rotate",
     "_translate": "translate",
     "_rotate_order": "rotateOrder",
@@ -406,9 +407,9 @@ def _axis_permutation(axis0: int, axis1: int, negate: bool) -> np.ndarray:
 def _component_property(channel: str, axis: str) -> property:
     """builds a vectorized accessor for one component of a vector channel
 
-    there are fifteen of these (scale_x .. rotate_axis_z) and they only
-    differ by which TransformData property they forward to, so they are
-    generated rather than written out fifteen times.
+    there are eighteen of these (scale_x .. rotate_axis_z, shear_xy ..
+    shear_yz) and they only differ by which TransformData property they
+    forward to, so they are generated rather than written out eighteen times.
     """
     name = f"{channel}_{axis}"
 
@@ -447,6 +448,10 @@ _SHORT_NAMES = {
     "sx":   "scale_x",
     "sy":   "scale_y",
     "sz":   "scale_z",
+    "sh":   "shear",
+    "shxy": "shear_xy",
+    "shxz": "shear_xz",
+    "shyz": "shear_yz",
     "jo":   "joint_orient",
     "jox":  "joint_orient_x",
     "joy":  "joint_orient_y",
@@ -472,6 +477,11 @@ _SHORT_NAMES = {
 # that came with them included: a file's user attribute carrying one loads
 # all the same, hidden by the built-in, and is warned of
 _TAKEN_NAMES = frozenset(_SHORT_NAMES) | {
+    "shear",
+    "shear_xy",
+    "shear_xz",
+    "shear_yz",
+    "shear_matrix",
     "parent_matrix",
     "inverse_matrix",
     "world_inverse_matrix",
@@ -1201,6 +1211,7 @@ class TransformData(Data):
     _translate:    Array(np.float64, 3) = numpy_array([0.0, 0.0, 0.0])
     _rotate_order: Optional[int] = 0  # xyz, yzx, zxy, xzy, yxz, zyx
     _rotate_axis:  Array(np.float64, 3) = numpy_array([0.0, 0.0, 0.0])
+    _shear:        Array(np.float64, 3) = numpy_array([0.0, 0.0, 0.0])
 
     # attributes specific to joints as defined by Maya
     _joint_orient:             Array(np.float64, 3) = numpy_array([0.0, 0.0, 0.0])
@@ -1238,6 +1249,7 @@ class TransformData(Data):
         radius:                   Optional[float]      = None,
         draw_style:               Optional[int]        = None,
         user_defined_attributes:  Optional[dict]       = None,
+        shear:                    Optional[np.ndarray] = None,
     ):
         """a node named ``name``; ``parent_uuid`` is the uuid of its parent,
         None for a root. A uuid.UUID, given as either uuid, is kept as its
@@ -1287,6 +1299,11 @@ class TransformData(Data):
             self._rotate_axis = np.array(rotate_axis, dtype=float)
         else:
             self._rotate_axis = np.zeros(3, dtype=float)
+
+        if shear is not None:
+            self._shear = np.array(shear, dtype=float)
+        else:
+            self._shear = np.zeros(3, dtype=float)
 
         if joint_orient is not None:
             self._joint_orient = np.array(joint_orient, dtype=float)
@@ -1359,6 +1376,52 @@ class TransformData(Data):
             setattr(self, name, np.array(value, dtype=float))
         else:
             current[...] = value
+
+    @property
+    def shear(self) -> np.ndarray:
+        """Maya's shearXY, shearXZ and shearYZ, the components xy, xz and yz
+
+        ``matrix`` puts them between scale and rotate, S * Sh * RO * ..., as
+        Maya does on a transform and a joint alike: ``Sh`` is the identity
+        with xy in row y, column x, and xz and yz in row z, columns x and y
+        (:attr:`shear_matrix`). A segment scale compensated child divides by
+        its parent's scale alone, so a parent's shear passes into its world.
+        """
+        return np.array(self._shear, dtype=float)
+
+    @shear.setter
+    def shear(self, value: np.ndarray) -> None:
+        self._write_channel("_shear", value)
+
+    @property
+    def shear_xy(self) -> float:
+        return self.shear[0]
+
+    @shear_xy.setter
+    def shear_xy(self, value: float) -> None:
+        h          = self.shear
+        h[0]       = value
+        self.shear = h
+
+    @property
+    def shear_xz(self) -> float:
+        return self.shear[1]
+
+    @shear_xz.setter
+    def shear_xz(self, value: float) -> None:
+        h          = self.shear
+        h[1]       = value
+        self.shear = h
+
+    @property
+    def shear_yz(self) -> float:
+        return self.shear[2]
+
+    @shear_yz.setter
+    def shear_yz(self, value: float) -> None:
+        h          = self.shear
+        h[2]       = value
+        self.shear = h
 
     @property
     def scale(self) -> np.ndarray:
@@ -2088,7 +2151,7 @@ class TransformData(Data):
     @property
     def quaternion(self) -> np.ndarray:
         """rotation as a quaterion"""
-        # matrix = [S] * [RO] * [R] * [JO] * [IS] * [T]
+        # matrix = [S] * [Sh] * [RO] * [R] * [JO] * [IS] * [T]
         RO = self.rotate_axis_matrix
         R  = self.rotate_matrix
         JO = self.joint_orient_matrix
@@ -2125,6 +2188,17 @@ class TransformData(Data):
         return S
 
     @property
+    def shear_matrix(self) -> np.ndarray:
+        """the shear factor alone, Sh of S * Sh * RO * ...: the identity
+        with xy in row y, column x, and xz and yz in row z, columns x and y"""
+        xy, xz, yz = self._shear
+        Sh       = np.eye(4)
+        Sh[1, 0] = xy
+        Sh[2, 0] = xz
+        Sh[2, 1] = yz
+        return Sh
+
+    @property
     def parent_scale_inverse_matrix(self) -> np.ndarray:
         IS = np.eye(4)
         if self.segment_scale_compensate:
@@ -2141,8 +2215,11 @@ class TransformData(Data):
     def matrix(self) -> np.ndarray:
         """computes the local transform matrix"""
 
-        # matrix = [S] * [RO] * [R] * [JO] * [IS] * [T]
+        # matrix = [S] * [Sh] * [RO] * [R] * [JO] * [IS] * [T]; a node with
+        # no shear skips the product
         S  = self.scale_matrix
+        if self._shear.any():
+            S = np.dot(S, self.shear_matrix)
         RO = self.rotate_axis_matrix
         R  = self.rotate_matrix
         JO = self.joint_orient_matrix
@@ -2161,17 +2238,19 @@ class TransformData(Data):
 
         Scale, rotate and translate are solved; rotate_axis, joint_orient
         and segment_scale_compensate are kept as they are, so a matrix the
-        node can hold (one without shear) reads back as written. A mirror
-        goes on scale z, the way Maya splits a matrix, and what a zero scale
-        leaves of the rotation is kept from the current one.
+        node can hold (one without shear) reads back as written. A target's
+        shear is dropped: a node that is no joint writes its shear 0, a joint
+        keeps the shear it holds. A mirror goes on scale z, the way Maya
+        splits a matrix, and what a zero scale leaves of the rotation is kept
+        from the current one.
         """
         M = np.asarray(M, dtype=float).reshape(4, 4)
 
         # trigger the update only if the matrix has changed
         if not _same_transform(self.matrix, M):
-            # the local matrix is [S][RO][R][JO][IS][T]; strip the joint
+            # the local matrix is [S][Sh][RO][R][JO][IS][T]; strip the joint
             # orient AND parent-scale-inverse factors (JO * IS) from the right
-            # to recover the [S][RO][R] block.
+            # to recover the [S][Sh][RO][R] block.
             # ignoring IS here corrupts the decomposition whenever the parent
             # has non-unit scale and this node is segment-scale-compensated.
             # NOTE: a true inverse is required -- IS carries a scale, so JO * IS
@@ -2188,6 +2267,8 @@ class TransformData(Data):
             current = np.dot(RO, self.rotate_matrix)[:3, :3]
             scale, rotation = _scale_and_rotation(B[:3, :3], current)
             self.scale = scale
+            if self.node_type != "joint" and self._shear.any():
+                self.shear = 0.0
 
             # rotate: rotate_axis is kept, so R = inv(RO) * [RO][R], the way
             # the quaternion setter solves it
@@ -5914,16 +5995,16 @@ class TransformList(DataList[TransformData]):
         the scale of each joint under it that compensates its parent's scale
         (segment scale compensate), which a joint compensating a dropped
         parent divides out instead. An uneven one under a node turned in it
-        would take shear, which no node holds: that node's position is the
-        file's, its axes squared, its rotate solved again from the matrix,
-        a joint's too, and the length of each of its axes is the file's
-        where its kept parent's world scales evenly, as under a joint that
-        compensates the scale. The shear it drops goes on the kept nodes
-        under it, so they stay where the file puts them, under a scale
-        under 1e-12 too: a joint that compensates its scale takes it in its
-        channels, split again, and any other node keeps the rotate and
-        scale it holds without it, the file's where nothing else moves it,
-        takes the shear in its translate alone and hands it on. Their
+        would take shear, which this read gives no node: that node's
+        position is the file's, its axes squared, its rotate solved again
+        from the matrix, a joint's too, and the length of each of its axes
+        is the file's where its kept parent's world scales evenly, as under
+        a joint that compensates the scale. The shear it drops goes on the
+        kept nodes under it, so they stay where the file puts them, under a
+        scale under 1e-12 too: a joint that compensates its scale takes it
+        in its channels, split again, and any other node keeps the rotate
+        and scale it holds without it, the file's where nothing else moves
+        it, takes the shear in its translate alone and hands it on. Their
         positions are the file's, but on a frame the node is scaled exactly
         0 along an axis, which leaves the shear no inverse; their axes are
         the split's, or their own under the parent the read gives them. A
@@ -6084,7 +6165,8 @@ class TransformList(DataList[TransformData]):
         The file is labelled with the axis system and the unit the values
         are in, as the rig records them (:attr:`axis_system`, :attr:`unit`;
         a view's are its rig's), the unit set explicitly, and holds the
-        values as they are but for a scale under 1e-12 in size, 0 and -0
+        values as they are, but for a node's shear, which FBX has no channel
+        for and the save leaves out, and a scale under 1e-12 in size, 0 and -0
         among them, which it holds as 1e-12, positive, as Maya's own FBX
         export writes a static one and as Maya's evaluation holds it: such a
         scale loads back as 1e-12, and, in a save in cm of a rig labelled
@@ -6778,6 +6860,24 @@ class TransformList(DataList[TransformData]):
                 node.scale = value
 
     @property
+    def shear(self) -> np.ndarray:
+        values = []
+        for node in self:
+            values.append(node.shear)
+        return np.array(values)
+
+    @shear.setter
+    def shear(self, value: np.ndarray) -> None:
+        value = np.asarray(value)
+
+        if _is_sequence(value, ndim=2):
+            for i, node in enumerate(self):
+                node.shear = value[i]
+        else:
+            for node in self:
+                node.shear = value
+
+    @property
     def rotate(self) -> np.ndarray:
         values = []
         for node in self:
@@ -6993,6 +7093,13 @@ class TransformList(DataList[TransformData]):
         return np.array(values)
 
     @property
+    def shear_matrix(self) -> np.ndarray:
+        values = []
+        for node in self:
+            values.append(node.shear_matrix)
+        return np.array(values)
+
+    @property
     def rotate_axis_matrix(self) -> np.ndarray:
         values = []
         for node in self:
@@ -7098,6 +7205,10 @@ class TransformList(DataList[TransformData]):
     scale_x  = _component_property("scale",        "x")
     scale_y  = _component_property("scale",        "y")
     scale_z  = _component_property("scale",        "z")
+
+    shear_xy = _component_property("shear",        "xy")
+    shear_xz = _component_property("shear",        "xz")
+    shear_yz = _component_property("shear",        "yz")
 
     rotate_x = _component_property("rotate",       "x")
     rotate_y = _component_property("rotate",       "y")
@@ -8558,6 +8669,20 @@ def _diagonal(values: np.ndarray) -> np.ndarray:
     return out
 
 
+def _scale_shears(scale: np.ndarray, shear: np.ndarray) -> np.ndarray:
+    """(..., 3) scales and shears as the (..., 4, 4) lower triangular S * Sh
+
+    A stack holding no shear is :func:`_diagonal`'s and pays one test, so a
+    scale that is not finite stays out of any 0 * inf.
+    """
+    out = _diagonal(scale)
+    if shear.any():
+        out[..., 1, 0] = scale[..., 1] * shear[..., 0]
+        out[..., 2, 0] = scale[..., 2] * shear[..., 1]
+        out[..., 2, 1] = scale[..., 2] * shear[..., 2]
+    return out
+
+
 def _translation(values: np.ndarray) -> np.ndarray:
     """(..., 3) offsets as (..., 4, 4) row vector translation matrices"""
     out                  = np.zeros(values.shape[:-1] + (4, 4), dtype=float)
@@ -8727,15 +8852,21 @@ def _rotation_local(M: np.ndarray, parent: np.ndarray) -> np.ndarray:
     return M @ (np.swapaxes(parent, -1, -2) / lengths[..., None, :])
 
 
-def _local_matrices(scale, RO, R, JO, inverse, translate) -> np.ndarray:
+def _local_matrices(scale, RO, R, JO, inverse, translate, shear) -> np.ndarray:
     """(..., 4, 4) local matrices from their factors
 
-    S * RO * R * JO * IS * T, as TransformData.matrix composes them, with
-    the diagonal and translation factors applied as the row and column
+    S * Sh * RO * R * JO * IS * T, as TransformData.matrix composes them,
+    with the diagonal and translation factors applied as the row and column
     scales and the row they are; ``inverse`` is the parent scale a
-    compensated node divides out, 1 for any other.
+    compensated node divides out, 1 for any other. A stack holding shear
+    takes the rows of Sh, read from the unsheared rows: row z takes row y as
+    it stood.
     """
     block            = RO[..., :3, :3] @ R[..., :3, :3] @ JO[..., :3, :3]
+    if shear.any():
+        x, y = block[..., 0, :].copy(), block[..., 1, :].copy()
+        block[..., 1, :] = y + shear[..., 0, None] * x
+        block[..., 2, :] = block[..., 2, :] + shear[..., 1, None] * x + shear[..., 2, None] * y
     out              = np.zeros(block.shape[:-2] + (4, 4), dtype=float)
     out[..., :3, :3] = block * scale[..., :, None] * (1.0 / inverse)[..., None, :]
     out[..., 3, :3]  = translate
@@ -8766,7 +8897,9 @@ def _span_world(clip: "ClipData", span: slice) -> np.ndarray:
         blocks["_joint_orient"][span],
         orders,
     )
-    local = _local_matrices(scale, RO, R, JO, inverse, blocks["_translate"][span])
+    local = _local_matrices(
+        scale, RO, R, JO, inverse, blocks["_translate"][span], blocks["_shear"][span]
+    )
     return _evaluate_world(local, parents)
 
 
@@ -8846,6 +8979,12 @@ def _solve_frames(clip, columns, span: slice, op: str, target, axes=None) -> Non
     children solve under what the channels will hold, as they do frame by
     frame. The inverses of RO and of JO * IS are their transposes, scaled
     for IS; a parent's world takes a true inverse.
+
+    A target's shear is dropped: a solved element of a node that is no joint
+    writes shear 0 and a joint keeps its own, as the matrix setter does.
+    ``"rotate"`` and ``"quaternion"`` write rotate alone, every node's shear
+    kept, and a node's shear stays in the local matrix its children solve
+    under.
     """
     from cgmath.transforms._numba._euler import MAYA_EA
 
@@ -8907,12 +9046,14 @@ def _solve_frames(clip, columns, span: slice, op: str, target, axes=None) -> Non
     compensate = np.array(
         [bool(nodes[i].segment_scale_compensate) for i in rel], dtype=bool
     )
+    joints = np.array([nodes[i].node_type == "joint" for i in rel], dtype=bool)
 
     # working copies of the channels written; rotate_axis and joint_orient
     # are kept, as every setter keeps them
     scale  = blocks["_scale"][span][:, rel]
     rotate = blocks["_rotate"][span][:, rel]
     offset = blocks["_translate"][span][:, rel]
+    shear  = blocks["_shear"][span][:, rel]
     RO, R, JO = _chain_matrices(
         blocks["_rotate_axis"][span][:, rel],
         rotate,
@@ -8975,7 +9116,7 @@ def _solve_frames(clip, columns, span: slice, op: str, target, axes=None) -> Non
             inverse[:, moved] = scale[:, prel[lvl[moved]]]
 
         local = _local_matrices(
-            scale[:, lvl], RO[:, lvl], R[:, lvl], JO[:, lvl], inverse, offset[:, lvl]
+            scale[:, lvl], RO[:, lvl], R[:, lvl], JO[:, lvl], inverse, offset[:, lvl], shear[:, lvl]
         )
         if world is not None:
             PW           = np.broadcast_to(eye, (frames, len(lvl), 4, 4)).copy()
@@ -9023,13 +9164,14 @@ def _solve_frames(clip, columns, span: slice, op: str, target, axes=None) -> Non
                         B, lambda: RO3[:, t] @ R[:, t, :3, :3]
                     )
                     scale[:, t]  = np.where(todo[..., None], s, scale[:, t])
+                    shear[:, t]  = np.where((todo & ~joints[t])[..., None], 0.0, shear[:, t])
                     offset[:, t] = np.where(todo[..., None], goal[..., 3, :3], offset[:, t])
                     rebuild(RO3t @ rotation, t, todo)
 
             # the solved nodes' local from what their channels now hold, for
             # the world their children solve under
             local[:, hit] = _local_matrices(
-                scale[:, t], RO[:, t], R[:, t], JO[:, t], inverse[:, hit], offset[:, t]
+                scale[:, t], RO[:, t], R[:, t], JO[:, t], inverse[:, hit], offset[:, t], shear[:, t]
             )
 
         if world is not None:
@@ -9044,7 +9186,7 @@ def _solve_frames(clip, columns, span: slice, op: str, target, axes=None) -> Non
     if len(done):
         rotate[:, done] = _filtered(rotate[:, done], orders[done])
 
-    solved = {"_scale": scale, "_rotate": rotate, "_translate": offset}
+    solved = {"_scale": scale, "_rotate": rotate, "_translate": offset, "_shear": shear}
     for channel in ("_rotate",) if op == "rotate" else solved:
         blocks[channel][span, columns] = solved[channel][:, tpos]
     clip._bind(clip._frame)
@@ -9261,7 +9403,7 @@ def _local_factors(
 ) -> tuple:
     """every frame's local matrix factors, and each node's parent
 
-    Returns S, RO, R, JO, IS and T, each (F, N, 4, 4) and built as the
+    Returns S * Sh, RO, R, JO, IS and T, each (F, N, 4, 4) and built as the
     TransformData property of that factor builds it, then each node's
     parent as a position in the clip, -1 for a root. ``parents`` is the
     clip's parent map, when the caller already has it.
@@ -9283,13 +9425,15 @@ def _local_factors(
 
 
 def _factors(channels: dict, orders: np.ndarray, inverse: np.ndarray) -> tuple:
-    """S, RO, R, JO, IS and T for (F, N, 3) channels, each (F, N, 4, 4)
+    """S * Sh, RO, R, JO, IS and T for (F, N, 3) channels, each (F, N, 4, 4)
 
-    Each built as the TransformData property of that factor builds it.
-    ``inverse`` is the parent scale each node's IS divides by, ones where
-    segment scale compensation is off or there is no parent.
+    Each built as the TransformData property of that factor builds it, the
+    shear inside the first (:func:`_scale_shears`), so a caller multiplies
+    six factors whether a node holds shear or not. ``inverse`` is the parent
+    scale each node's IS divides by, ones where segment scale compensation
+    is off or there is no parent.
     """
-    S  = _diagonal(channels["_scale"])
+    S  = _scale_shears(channels["_scale"], channels["_shear"])
     RO = _euler_matrices(channels["_rotate_axis"],  None)
     R  = _euler_matrices(channels["_rotate"],       orders)
     JO = _euler_matrices(channels["_joint_orient"], None)
@@ -9301,8 +9445,8 @@ def _factors(channels: dict, orders: np.ndarray, inverse: np.ndarray) -> tuple:
 def _compose_local(channels: dict, orders: np.ndarray, inverse: np.ndarray) -> np.ndarray:
     """(F, N, 3) channels as (F, N, 4, 4) local matrices
 
-    Mirrors TransformData.matrix factor for factor: S * RO * R * JO * IS * T,
-    as :func:`_evaluate_local` does for a whole clip.
+    Mirrors TransformData.matrix factor for factor: S * Sh * RO * R * JO *
+    IS * T, as :func:`_evaluate_local` does for a whole clip.
     """
     S, RO, R, JO, IS, T = _factors(channels, orders, inverse)
     return S @ RO @ R @ JO @ IS @ T
@@ -9313,8 +9457,9 @@ def _evaluate_local(
 ) -> np.ndarray:
     """every frame's local matrices as (F, N, 4, 4)
 
-    Mirrors TransformData.matrix factor for factor: S * RO * R * JO * IS * T.
-    ``parents`` is the clip's parent map, when the caller already has it.
+    Mirrors TransformData.matrix factor for factor: S * Sh * RO * R * JO *
+    IS * T. ``parents`` is the clip's parent map, when the caller already has
+    it.
     """
     S, RO, R, JO, IS, T, _ = _local_factors(clip, parents)
     return S @ RO @ R @ JO @ IS @ T
@@ -9548,18 +9693,20 @@ def _reorder_like_maya(rotate: np.ndarray, before, after) -> np.ndarray:
     return np.where(shorter[:, None], alternate, standard).reshape(shape)
 
 
-def _solve_local(target: np.ndarray, channels: dict, orders, inverse: np.ndarray, gap: bool = False) -> tuple:
+def _solve_local(target: np.ndarray, channels: dict, orders, inverse: np.ndarray, joints, gap: bool = False) -> tuple:
     """TransformData.matrix's setter for (F, n) frames and nodes at once
 
     ``target`` holds the (F, n, 4, 4) local matrices to reach, ``channels``
-    the (F, n, 3) channels the nodes hold now, and ``inverse`` the parent
-    scale each one's IS divides by. Scale, rotate and translate are solved
-    and rotate_axis, joint_orient and segment_scale_compensate kept, step for
-    step as the setter does, so a frame whose channels already make the
-    target, to round-off, keeps them as the setter would.
+    the (F, n, 3) channels the nodes hold now, ``inverse`` the parent scale
+    each one's IS divides by, and ``joints`` (n,) which of them are joints.
+    Scale, rotate and translate are solved and rotate_axis, joint_orient and
+    segment_scale_compensate kept, step for step as the setter does, so a
+    frame whose channels already make the target, to round-off, keeps them
+    as the setter would. A target's shear is dropped: a solved element of a
+    node that is no joint takes shear 0, a joint keeps its own.
 
-    Returns the new (scale, rotate, translate), each (F, n, 3), and with
-    ``gap`` the largest entry the keep test found between the channels'
+    Returns the new (scale, rotate, translate, shear), each (F, n, 3), and
+    with ``gap`` the largest entry the keep test found between the channels'
     matrix and the target, (F, n).
     """
     shape = target.shape[:-2]
@@ -9583,6 +9730,7 @@ def _solve_local(target: np.ndarray, channels: dict, orders, inverse: np.ndarray
         np.where(keep, channels["_scale"], scale),
         np.where(keep, channels["_rotate"], rotate),
         np.where(keep, channels["_translate"], target[..., 3, :3]),
+        np.where(keep | np.asarray(joints, dtype=bool)[:, None], channels["_shear"], 0.0),
     )
     if gap:
         return solved + (np.abs(composed - target).max(axis=(-2, -1)),)
@@ -9654,6 +9802,7 @@ class _RigFrames:
         self.compensate = _RowValues(
             lambda row: bool(self.nodes[row].segment_scale_compensate), bool
         )
+        self.joints     = _RowValues(lambda row: self.nodes[row].node_type == "joint", bool)
         self._index     = self.lookups.index_of(owner)
         self._place     = None   # id(node) -> row, built only when the index can not say
         self._parents   = None   # every row's parent, once the whole map is asked for
@@ -9976,7 +10125,7 @@ def _reparent(owner, nodes, parent, world_space: bool) -> None:
         # every node to the world
         worlds = frames.world(rows)
         first  = _solve_under(frames, rows, worlds, -1, gap=True)
-        first, gap = first[:3], first[3]
+        first, gap = first[:4], first[4]
         if _cascades(frames, rows, parents, worlds, first, above, gap):
             # one at a time, each reading what the ones before it wrote
             frames.set_parents(rows, parents[rows])
@@ -10066,8 +10215,9 @@ def _swap_rows(frames: _RigFrames, targets, axis0: int, axis1: int, negate: bool
 
         local = world[:, k] @ np.linalg.inv(moved[:, up])
         kids  = {c: v[:, k] for c, v in ch.items()}
-        S, R, T = _solve_local(local, kids, orders[k], inverse)
+        S, R, T, H = _solve_local(local, kids, orders[k], inverse, frames.joints[rows[k]])
         ch["_scale"][:, k], ch["_rotate"][:, k], ch["_translate"][:, k] = S, R, T
+        ch["_shear"][:, k] = H
 
     # the swap: scale permutes exactly, RO and R are conjugated and JO left
     # multiplied, which reproduces P * [RO][R][JO]
@@ -10081,7 +10231,7 @@ def _swap_rows(frames: _RigFrames, targets, axis0: int, axis1: int, negate: bool
     ch["_rotate"][:, t]       = _matrices_to_euler(P @ R @ Pi, orders[t])
     ch["_rotate"]             = _filtered(ch["_rotate"], orders)
 
-    for channel in ("_scale", "_rotate", "_translate"):
+    for channel in ("_scale", "_rotate", "_translate", "_shear"):
         frames.write(channel, rows, ch[channel])
     frames.write("_rotate_axis", targets, ch["_rotate_axis"][:, t])
     frames.write("_joint_orient", targets, ch["_joint_orient"][:, t])
@@ -10149,10 +10299,10 @@ def _fold_orient_rows(frames: _RigFrames, rows) -> None:
 
 def _solve_under(frames: _RigFrames, rows, worlds: np.ndarray, parent: int, gap: bool = False) -> tuple:
     """set_parent in world space, every frame at once: ``rows`` now hang under
-    row ``parent`` (-1 for none), and the (scale, rotate, translate) that keep
-    their ``worlds`` (F, n, 4, 4) there are solved as world_matrix's setter
-    solves them, and with ``gap`` the keep test's gap (:func:`_solve_local`).
-    Nothing is written."""
+    row ``parent`` (-1 for none), and the (scale, rotate, translate, shear)
+    that keep their ``worlds`` (F, n, 4, 4) there are solved as world_matrix's
+    setter solves them, and with ``gap`` the keep test's gap
+    (:func:`_solve_local`). Nothing is written."""
     rows = np.asarray(rows, dtype=int)
     frames.set_parents(rows, parent)
 
@@ -10162,7 +10312,7 @@ def _solve_under(frames: _RigFrames, rows, worlds: np.ndarray, parent: int, gap:
         target = worlds @ np.linalg.inv(frames.world([parent]))
 
     channels = frames.channels(rows)
-    return _solve_local(target, channels, frames.orders[rows], frames.inverse(rows), gap)
+    return _solve_local(target, channels, frames.orders[rows], frames.inverse(rows), frames.joints[rows], gap)
 
 
 def _to_the_world_in_turn(frames: _RigFrames, rows, parents: np.ndarray, worlds: np.ndarray) -> None:
@@ -10298,7 +10448,7 @@ def _to_the_world_in_turn(frames: _RigFrames, rows, parents: np.ndarray, worlds:
         _write_solved(frames, [row], solved)
 
         # its local as a root: no IS, rotate_axis and joint_orient as they were
-        scale             = _diagonal(solved[0][:, 0])
+        scale             = _scale_shears(solved[0][:, 0], solved[3][:, 0])
         axis              = _euler_matrices(frames.read("_rotate_axis", [row]), None)[:, 0]
         rotate            = _euler_matrices(solved[1], frames.orders[[row]])[:, 0]
         orient            = _euler_matrices(frames.read("_joint_orient", [row]), None)[:, 0]
@@ -10322,7 +10472,7 @@ def _compress(link: dict, reach: dict, node) -> None:
 
 
 def _write_solved(frames: _RigFrames, rows, solved: tuple) -> None:
-    for channel, values in zip(("_scale", "_rotate", "_translate"), solved):
+    for channel, values in zip(("_scale", "_rotate", "_translate", "_shear"), solved):
         frames.write(channel, rows, values)
 
 
@@ -10684,7 +10834,10 @@ def _under_gain(frames: _RigFrames, rows, local: np.ndarray, solved: tuple, kept
     flip     = np.linalg.inv(parent)
     target   = local[:, under] @ flip[:, None]
     channels = {name: values[:, under] for name, values in kept.items()}
-    channels.update(_scale=solved[0][:, under], _rotate=solved[1][:, under], _translate=solved[2][:, under])
+    channels.update(
+        _scale=solved[0][:, under], _rotate=solved[1][:, under],
+        _translate=solved[2][:, under], _shear=solved[3][:, under],
+    )
     on             = np.asarray(frames.compensate[rows[under]], dtype=bool)
     inverse        = np.ones(target.shape[:2] + (3,))
     inverse[:, on] = scale[:, None]
@@ -10804,7 +10957,7 @@ def _cascades(
         return False
 
     before = frames.channels(rows)
-    after  = dict(before, _scale=solved[0], _rotate=solved[1], _translate=solved[2])
+    after  = dict(before, _scale=solved[0], _rotate=solved[1], _translate=solved[2], _shear=solved[3])
     local  = _compose_local(after, frames.orders[rows], np.ones_like(solved[0]))
     axes   = worlds[..., :3, :3]
     scale  = before["_scale"]
@@ -10949,7 +11102,7 @@ def _frame_property(channel: str) -> property:
 
 
 def _frame_component(channel: str, axis: int) -> property:
-    """builds the x / y / z accessor for one framed channel
+    """builds the component accessor for one framed channel
 
     A read is a copy, a new array every time, so ``+=`` works on it and a
     write to it changes nothing until it is assigned back. One node reads
@@ -11414,7 +11567,11 @@ class _FrameAxis:
     translate      = _frame_property("_translate")
     rotate_axis    = _frame_property("_rotate_axis")
     joint_orient   = _frame_property("_joint_orient")
+    shear          = _frame_property("_shear")
 
+    shear_xy       = _frame_component("shear",        0)
+    shear_xz       = _frame_component("shear",        1)
+    shear_yz       = _frame_component("shear",        2)
     scale_x        = _frame_component("scale",        0)
     scale_y        = _frame_component("scale",        1)
     scale_z        = _frame_component("scale",        2)
@@ -11444,6 +11601,11 @@ class _FrameAxis:
     def scale_matrix(self) -> np.ndarray:
         """every frame's scale matrices, (F, N, 4, 4)"""
         return _diagonal(self.scale)
+
+    @property
+    def shear_matrix(self) -> np.ndarray:
+        """every frame's shear matrices, (F, N, 4, 4)"""
+        return _scale_shears(np.ones_like(self.shear), self.shear)
 
     @property
     def rotate_axis_matrix(self) -> np.ndarray:
@@ -11670,6 +11832,7 @@ class ClipData(HierarchyData):
         "_translate",
         "_rotate_axis",
         "_joint_orient",
+        "_shear",
     )
 
     # saved beside the nodes: the timebase, the loaded frame, one (F, N, 3)
@@ -11677,7 +11840,9 @@ class ClipData(HierarchyData):
     # record of the axes and unit. A file names them as their properties,
     # start_frame, fps, frame, rest_pose, axis_system and unit, and the
     # blocks, which have none, "blocks", each keyed by its channel's
-    # property, "translate". A clip with no rest pose saves no "rest_pose"
+    # property, "translate". A clip with no rest pose saves no "rest_pose",
+    # and a shear block all zero is left out, so a clip holding no shear
+    # saves as one did before it had any; a load fills it back with zeros
     LIST_FIELDS = (
         "_start_frame",
         "_fps",
@@ -12184,6 +12349,7 @@ class ClipData(HierarchyData):
         clip._blocks["_translate"][:, cols]    = offset
         clip._blocks["_rotate_axis"][:, cols]  = d["_rotate_axis"]
         clip._blocks["_joint_orient"][:, cols] = d["_joint_orient"]
+        clip._blocks["_shear"][:, cols]        = d["_shear"]
         clip._bind(0)
         return clip
 
@@ -12220,7 +12386,8 @@ class ClipData(HierarchyData):
         curves then go through ``euler_filter`` with each node's rotate
         order, frame 0 kept. Returns the ``(F, N, 3)`` scale, rotate and
         translate in ``deltas``' order; a node the pairing leaves out holds
-        its delta's own channels, as it does per frame.
+        its delta's own channels, as it does per frame. Each node's shear is
+        its delta's, which the level's worlds compose.
         """
         frames = self.frame_count
 
@@ -12324,13 +12491,14 @@ class ClipData(HierarchyData):
                     offset[:, i] = local[..., 3, :3]
 
             # the level's world for the children below it, factor for factor
-            # S * RO * R * JO * IS * T as TransformData.matrix composes it
+            # S * Sh * RO * R * JO * IS * T as TransformData.matrix composes it
             inverse                 = np.ones((frames, len(idx), 3))
             compensated             = rooted & compensate[idx]
             inverse[:, compensated] = scale[:, above[compensated]]
 
+            shear = np.broadcast_to(d["_shear"], shape)[:, idx]
             local_world = (
-                _diagonal(scale[:, idx])
+                _scale_shears(scale[:, idx], shear)
                 @ RO[:, idx]
                 @ _euler_matrices(rotate[:, idx], orders[idx])
                 @ JO[:, idx]
@@ -13246,7 +13414,8 @@ class ClipData(HierarchyData):
         stack, so a clip holding more than one frame has to say which frame
         it meant rather than quietly shipping whichever one is loaded. The
         file is labelled with the clip's :attr:`axis_system` and
-        :attr:`unit`, as :meth:`HierarchyData.save_fbx` labels a rig's.
+        :attr:`unit`, as :meth:`HierarchyData.save_fbx` labels a rig's, and
+        like it leaves a node's shear out: FBX has no channel for it.
         """
         if self.frame_count > 1:
             raise ValueError(
@@ -13272,7 +13441,13 @@ class ClipData(HierarchyData):
         tree   = super().to_dict()
         blocks = tree.get("blocks")
         if isinstance(blocks, dict):
-            tree["blocks"] = {self._channel_name(c): block for c, block in blocks.items()}
+            # a shear block all zero is left out, as a node leaves a zero
+            # shear out: a clip holding no shear saves as it always has
+            tree["blocks"] = {
+                self._channel_name(c): block
+                for c, block in blocks.items()
+                if c != "_shear" or np.any(self._blocks[c])
+            }
         # a clip with no rest pose saves as one did before it had any
         if tree.get("rest_pose", ...) is None:
             del tree["rest_pose"]
@@ -13299,13 +13474,15 @@ class ClipData(HierarchyData):
         """
         Checks the loaded blocks and binds the nodes to the saved frame. A
         node's channels are views of one row of the blocks, which no file
-        keeps, so they are rebound here.
+        keeps, so they are rebound here. A file with no shear block holds
+        none: to_dict leaves an all zero one out, and a file older than
+        shear never had one, so it comes back as zeros.
 
         Raises
         ------
         ValueError
             The blocks are not one (F, N, 3) array per framed channel, all
-            of the same F, N the node count.
+            of the same F, N the node count; shear alone may be missing.
         TypeError
             The rest pose is not a :class:`HierarchyData`, or is a clip.
         ValueError
@@ -13339,6 +13516,9 @@ class ClipData(HierarchyData):
                 )
             blocks[channel] = block
 
+        if blocks and "_shear" not in blocks:
+            first            = next(iter(blocks.values()))
+            blocks["_shear"] = np.zeros(first.shape, dtype=np.float64)
         if blocks and set(blocks) != set(self.FRAMED_CHANNELS):
             missing = sorted(self._channel_name(x) for x in set(self.FRAMED_CHANNELS) - set(blocks))
             raise ValueError(f"ClipData is missing the blocks {missing}")

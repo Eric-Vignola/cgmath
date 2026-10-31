@@ -15,7 +15,7 @@ from cgmath.hierarchy import (
 
 | Type | Role |
 |---|---|
-| `TransformData` | one node: name, uuid, parent, SRT, joint channels, matrices |
+| `TransformData` | one node: name, uuid, parent, SRT, shear, joint channels, matrices |
 | `TransformList` | a **non-owning** selection of nodes — vectorized reads and writes |
 | `HierarchyData` | the **owning** container — a rig; a `TransformList` that claims its nodes |
 | `ClipData` | a `HierarchyData` holding `F` poses instead of one |
@@ -46,12 +46,13 @@ node reached through a selection still answers `get_parent()`,
 **Row vectors, Maya composition.** Translation lives at `M[3, :3]`, and
 
 ```
-matrix = S · RO · R · JO · IS · T          # local
+matrix = S · Sh · RO · R · JO · IS · T     # local
 world  = matrix · parent_world             # accumulated down the chain
 ```
 
-`RO` is `rotate_axis`, `JO` is `joint_orient`, `IS` is the parent's
-inverse scale (identity unless `segment_scale_compensate` is on).
+`Sh` is Maya's shear, `RO` is `rotate_axis`, `JO` is `joint_orient`, `IS`
+is the parent's inverse scale (identity unless
+`segment_scale_compensate` is on).
 `rotate_order` picks which of the six euler orders builds `R`.
 
 **`world_matrix` is a property on every type** — `node.world_matrix`,
@@ -72,6 +73,7 @@ are the names Maya 2025 gives a joint's attributes:
 | `t` `tx` `ty` `tz` | `translate` `translate_x` `translate_y` `translate_z` |
 | `r` `rx` `ry` `rz` | `rotate` `rotate_x` `rotate_y` `rotate_z` |
 | `s` `sx` `sy` `sz` | `scale` `scale_x` `scale_y` `scale_z` |
+| `sh` `shxy` `shxz` `shyz` | `shear` `shear_xy` `shear_xz` `shear_yz` |
 | `jo` `jox` `joy` `joz` | `joint_orient` `joint_orient_x` `joint_orient_y` `joint_orient_z` |
 | `ra` `rax` `ray` `raz` | `rotate_axis` `rotate_axis_x` `rotate_axis_y` `rotate_axis_z` |
 | `ro` `ssc` `v` `radi` `ds` | `rotate_order` `segment_scale_compensate` `visibility` `radius` `draw_style` |
@@ -99,9 +101,9 @@ carries one loads, hidden, with one warning a name.
 **A clip's nodes are its playback head.** Each framed channel is bound
 to one row of a dense `(F, N, 3)` block. Scrubbing rebinds; reading a
 channel reads the loaded frame; writing one writes it. Only `scale`,
-`rotate`, `translate`, `rotate_axis` and `joint_orient` are framed —
-names, parenting, `rotate_order` and the display flags are structural
-and shared by every frame.
+`rotate`, `translate`, `rotate_axis`, `joint_orient` and `shear` are
+framed — names, parenting, `rotate_order` and the display flags are
+structural and shared by every frame.
 
 **Rig edits cover every frame.** `swapaxes`, the orient helpers,
 `set_parent` in world space, a joint becoming another type and

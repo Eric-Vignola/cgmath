@@ -134,6 +134,7 @@ def transform_data() -> TransformData:
         segment_scale_compensate=True,
         radius=2.5,
         draw_style=2,
+        shear=[0.125, -0.25, 0.5],
     )
     add_every_user_attribute(node)
     return node
@@ -253,6 +254,7 @@ def clip_data() -> ClipData:
     frames.scale        = frames.scale * (1.0 + ramp * [0.0, 0.125, 0.0])
     frames.rotate_axis  = frames.rotate_axis + ramp * [0.5, 0.0, 0.0]
     frames.joint_orient = frames.joint_orient + ramp * [0.0, 0.0, 2.0]
+    frames.shear        = frames.shear + ramp * [0.125, 0.0, -0.25]
 
     # one node over every frame reads (F, 1), and writes the same shape
     clip.frames["VLR:root"].translate_y = np.array([[95.0], [96.5], [98.0], [99.5]])

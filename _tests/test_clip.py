@@ -404,7 +404,7 @@ class TestClipFiles(unittest.TestCase):
             "a node short":    ("rotate", np.ones((3, 3, 3)), "block rotate must have shape"),
             "no frames":       ("rotate", np.ones((0, 4, 3)), "block rotate must have shape"),
             "a frame short":   ("scale", np.ones((2, 4, 3)), "different frame counts"),
-            "an unknown name": ("shear", np.ones((3, 4, 3)), "no framed channel 'shear'"),
+            "an unknown name": ("stretch", np.ones((3, 4, 3)), "no framed channel 'stretch'"),
         }
         for label, (channel, block, message) in bad.items():
             with self.subTest(label):
@@ -847,6 +847,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
             ("joint_orient", xyz),
             ("scale", None),
             ("translate", None),
+            ("shear", None),
         ):
             want = _stacked(poses, channel)
             if axes is not None:
@@ -1055,7 +1056,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
         # itself is the smallest such loop: on a clip it rewrote the node's
         # channels on every frame and left it its own parent
         def held(h, frames):
-            channels = ("scale", "rotate", "translate")
+            channels = ("scale", "rotate", "translate", "shear")
             if frames:
                 return {c: np.array(getattr(h.frames, c)) for c in channels}
             return {c: np.array(getattr(h, c)) for c in channels}
@@ -1110,7 +1111,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                     before = (
                         list(h.uuid),
                         [n.parent_uuid for n in h],
-                        {c: np.array(getattr(owner, c)) for c in ("scale", "rotate", "translate")},
+                        {c: np.array(getattr(owner, c)) for c in ("scale", "rotate", "translate", "shear")},
                     )
                     with self.assertRaisesRegex(ValueError, "hangs below it"):
                         TransformList([h.list[1], h.list[0]]).set_parent("x", world_space=world_space)
@@ -2770,7 +2771,7 @@ class TestClipDeltas(unittest.TestCase):
         )
 
 
-CHANNELS = ("rotate", "translate", "scale", "joint_orient", "rotate_axis")
+CHANNELS = ("rotate", "translate", "scale", "joint_orient", "rotate_axis", "shear")
 
 
 def pose_at(clip, frame):
@@ -2812,6 +2813,12 @@ class _DeltaRigs:
     def _chain(self, count, seed, **kwargs):
         names = [f"j{i}" for i in range(count)]
         return self._rig(names, [None] + names[:-1], seed, **kwargs)
+
+    def _with_moving_shear(self, clip, seed=33):
+        """``clip`` holding a shear of its own on every node and frame"""
+        shape             = clip.frames.shear.shape
+        clip.frames.shear = np.random.default_rng(seed).uniform(-0.4, 0.4, size=shape)
+        return clip
 
     def _animated(self, rig, frames=6, seed=9, scale=True, orient=False):
         rng                   = np.random.default_rng(seed)
@@ -2870,7 +2877,7 @@ class _DeltaRigs:
         self.assertEqual(fast.frame_count, slow.frame_count)
         self.assertEqual(fast.start_frame, slow.start_frame)
         self.assertEqual(fast.fps, slow.fps)
-        for channel in ("rotate", "translate", "scale", "joint_orient", "rotate_axis"):
+        for channel in ("rotate", "translate", "scale", "joint_orient", "rotate_axis", "shear"):
             np.testing.assert_array_equal(
                 getattr(fast.frames, channel), getattr(slow.frames, channel), channel
             )
@@ -2948,9 +2955,9 @@ class TestClipDeltaVectorised(_DeltaRigs, unittest.TestCase):
 
     def test_source_clip_is_left_alone(self):
         source     = self._chain(5, seed=5)
-        clip       = self._animated(source)
+        clip       = self._with_moving_shear(self._animated(source))
         clip.frame = 3
-        before     = {c: np.array(getattr(clip.frames, c)) for c in ("rotate", "translate", "scale")}
+        before     = {c: np.array(getattr(clip.frames, c)) for c in ("rotate", "translate", "scale", "shear")}
 
         clip.add_delta(self._chain(5, seed=17).get_delta(source))
 
@@ -3070,9 +3077,9 @@ class TestClipDeltaVectorised(_DeltaRigs, unittest.TestCase):
             clip.get_delta(other)
 
     def test_the_other_clip_of_get_delta_is_left_alone(self):
-        other       = self._animated(self._chain(5, seed=17), seed=21)
+        other       = self._with_moving_shear(self._animated(self._chain(5, seed=17), seed=21))
         other.frame = 2
-        before      = {c: np.array(getattr(other.frames, c)) for c in ("rotate", "translate", "scale")}
+        before      = {c: np.array(getattr(other.frames, c)) for c in ("rotate", "translate", "scale", "shear")}
 
         self._animated(self._chain(5, seed=5)).get_delta(other)
 
@@ -3118,9 +3125,9 @@ class TestClipDeltaVectorised(_DeltaRigs, unittest.TestCase):
             clip.add_delta(deltas)
 
     def test_the_delta_clip_is_left_alone(self):
-        deltas       = self._animated(self._chain(5, seed=17), seed=21)
+        deltas       = self._with_moving_shear(self._animated(self._chain(5, seed=17), seed=21))
         deltas.frame = 2
-        before       = {c: np.array(getattr(deltas.frames, c)) for c in ("rotate", "translate", "scale")}
+        before       = {c: np.array(getattr(deltas.frames, c)) for c in ("rotate", "translate", "scale", "shear")}
 
         self._animated(self._chain(5, seed=5)).add_delta(deltas)
 
@@ -3921,7 +3928,7 @@ class TestClipBranchResets(unittest.TestCase):
         """the clip's cached reads equal the pose's channels and its world
         matrices computed from scratch"""
         self.assertEqual(clip.name, pose.name, label)
-        for channel in ("rotate", "translate", "scale", "rotate_axis", "joint_orient"):
+        for channel in ("rotate", "translate", "scale", "rotate_axis", "joint_orient", "shear"):
             np.testing.assert_allclose(
                 getattr(clip, channel), getattr(pose, channel), atol=1e-9,
                 err_msg=f"{label}: {channel}",
@@ -3938,6 +3945,7 @@ class TestClipBranchResets(unittest.TestCase):
         "scale": lambda h, f, o: setattr(h, "scale", o.frames.scale[f]),
         "joint_orient": lambda h, f, o: setattr(h, "joint_orient", o.frames.joint_orient[f]),
         "rotate_axis": lambda h, f, o: setattr(h, "rotate_axis", o.frames.rotate_axis[f]),
+        "shear": lambda h, f, o: setattr(h, "shear", (0.1 + 0.1 * f, 0.2, -0.3)),
         "one node": lambda h, f, o: setattr(h["j1"], "translate_y", 3.0 + f),
         "isub": lambda h, f, o: h.__isub__(TransformList._owned_copy(o)),
     }
@@ -4153,7 +4161,7 @@ class TestClipFramedSolve(unittest.TestCase):
             np.allclose(fast.frames.world_matrix, slow.frames.world_matrix, rtol=0.0, atol=1e-9),
             "world",
         )
-        for channel in ("rotate", "translate", "scale", "rotate_axis", "joint_orient"):
+        for channel in ("rotate", "translate", "scale", "rotate_axis", "joint_orient", "shear"):
             self.assertTrue(
                 np.allclose(
                     getattr(fast.frames, channel), getattr(slow.frames, channel),
@@ -4345,7 +4353,7 @@ class TestClipFramedSolve(unittest.TestCase):
         rotate = np.array(clip.frames.rotate)
         rotate[3:, 2] += 360.0
         clip.frames.rotate = rotate
-        before             = {c: np.array(getattr(clip.frames, c)) for c in ("scale", "rotate", "translate")}
+        before             = {c: np.array(getattr(clip.frames, c)) for c in ("scale", "rotate", "translate", "shear")}
 
         clip.frames.world_matrix = np.array(clip.frames.world_matrix)
         clip.frames.matrix       = np.array(clip.frames.matrix)
@@ -4357,7 +4365,7 @@ class TestClipFramedSolve(unittest.TestCase):
     def test_untargeted_nodes_keep_their_channels_and_follow(self):
         clip, other = self._pair()
         below  = [node.name for node in clip["j0"].get_branch()][1:]
-        before = {c: np.array(getattr(clip.frames, c)) for c in ("scale", "rotate", "translate")}
+        before = {c: np.array(getattr(clip.frames, c)) for c in ("scale", "rotate", "translate", "shear")}
         world  = np.array(clip.frames[below].world_matrix)
 
         clip.frames["j0"].match_matrix(other.frames["j0"])
@@ -4457,7 +4465,7 @@ class TestClipFramedSolve(unittest.TestCase):
                         write(axis, nodes)
                         write(fresh.frames if scope is None else fresh.frames[scope], nodes)
                         self.assertEqual(held.name, fresh.name)
-                        for channel in ("scale", "rotate", "translate"):
+                        for channel in ("scale", "rotate", "translate", "shear"):
                             self.assertTrue(np.array_equal(
                                 getattr(held.frames, channel), getattr(fresh.frames, channel)
                             ), channel)
@@ -4688,7 +4696,7 @@ class TestClipFramedSolve(unittest.TestCase):
                 fast = clip.copy()
                 twin = other.copy()
                 fast.frame, twin.frame = frame, frame
-                before = {c: np.array(getattr(fast.frames, c)) for c in ("scale", "rotate", "translate")}
+                before = {c: np.array(getattr(fast.frames, c)) for c in ("scale", "rotate", "translate", "shear")}
                 write(fast, twin)
 
                 pose = self._pose(clip, frame)
@@ -4854,6 +4862,8 @@ class TestClipScopedFrames(unittest.TestCase):
         for channel in ("scale", "rotate", "translate", "rotate_axis", "joint_orient"):
             for axis in "xyz":
                 self.assertTrue(hasattr(self.clip.frames, f"{channel}_{axis}"))
+        for axes in ("xy", "xz", "yz"):
+            self.assertTrue(hasattr(self.clip.frames, f"shear_{axes}"))
 
     # --- frame ranges --- #
     def test_a_slice_cuts_a_new_clip(self):
@@ -4944,13 +4954,15 @@ class TestClipFrameComponentCopies(unittest.TestCase):
     one node over every frame, can be contiguous.
     """
 
-    # each framed channel, and Maya's short name of it before the x, y or z
+    # each framed channel, and Maya's short name of it before the letters
+    # of a component
     CHANNELS = {
         "scale":        "s",
         "rotate":       "r",
         "translate":    "t",
         "rotate_axis":  "ra",
         "joint_orient": "jo",
+        "shear":        "sh",
     }
 
     # the ops ``+=``, ``-=``, ``*=`` and ``/=`` run, in turn
@@ -4963,10 +4975,10 @@ class TestClipFrameComponentCopies(unittest.TestCase):
 
     @classmethod
     def components(cls):
-        """(channel, axis, component name, Maya's short name) for each of
-        the 15 components"""
+        """(channel, axis, component name, Maya's short name) for each
+        component, shear's being xy, xz and yz"""
         for channel, short in cls.CHANNELS.items():
-            for axis, letter in enumerate("xyz"):
+            for axis, letter in enumerate(("xy", "xz", "yz") if channel == "shear" else "xyz"):
                 yield channel, axis, f"{channel}_{letter}", f"{short}{letter}"
 
     @classmethod
@@ -5163,6 +5175,7 @@ class TestClipFramedReads(unittest.TestCase):
 
     MATRICES = (
         "scale_matrix",
+        "shear_matrix",
         "rotate_axis_matrix",
         "rotate_matrix",
         "joint_orient_matrix",
@@ -5170,7 +5183,7 @@ class TestClipFramedReads(unittest.TestCase):
         "parent_scale_inverse_matrix",
         "translate_matrix",
     )
-    FRAMED = ("scale", "rotate", "translate", "rotateAxis", "jointOrient")
+    FRAMED = ("scale", "rotate", "translate", "rotateAxis", "jointOrient", "shear")
 
     def _rig(self, count=14, seed=7):
         # every feature a factor reads: rotate orders, segment scale
@@ -5202,7 +5215,7 @@ class TestClipFramedReads(unittest.TestCase):
         return HierarchyData(nodes)
 
     def _animated(self, rig, frames=7, seed=11):
-        # all five framed channels move, scale included, so a parent's scale
+        # every framed channel moves, scale included, so a parent's scale
         # differs from frame to frame
         rng   = np.random.default_rng(seed)
         clip  = ClipData(rig, frames=frames, start_frame=1001, fps=30.0)
@@ -5211,6 +5224,7 @@ class TestClipFramedReads(unittest.TestCase):
             block = getattr(clip.frames, channel) + rng.normal(size=shape) * 10.0
             setattr(clip.frames, channel, block)
         clip.frames.scale = clip.frames.scale * rng.uniform(0.7, 1.3, size=shape)
+        clip.frames.shear = rng.uniform(-0.5, 0.5, size=shape)
         clip.frame        = 0
         return clip
 
@@ -5419,7 +5433,9 @@ class TestClipFramedReads(unittest.TestCase):
         "translate",
         "rotate_axis",
         "joint_orient",
+        "shear",
         "rotate_y",
+        "shear_xz",
         "matrix",
         "world_matrix",
         "parent_matrix",
@@ -5516,7 +5532,7 @@ class TestClipPoseWrites(unittest.TestCase):
     180 degrees, so a write that refiltered its keys would show.
     """
 
-    CHANNELS = ("scale", "rotate", "translate", "rotate_axis", "joint_orient")
+    CHANNELS = ("scale", "rotate", "translate", "rotate_axis", "joint_orient", "shear")
 
     def _rig(self, count=9, seed=3, prefix="j"):
         # branching, parented by uuid as files are, with every factor the
@@ -5724,14 +5740,14 @@ class TestClipPoseWrites(unittest.TestCase):
                 self._assert_frames(clip, expected)
 
     def test_a_fill_reads_the_pose_once(self):
-        # not once per frame: 5 framed channels of each node, read one time
+        # not once per frame: every framed channel of each node, read one time
         clip = self._target()
         pose = self._pose_at(self._animated(self._rig(), seed=8), 3)
 
         with self._channel_reads(pose.list) as reads:
             clip.frames[:] = pose
 
-        self.assertEqual(len(reads), 5 * len(pose))
+        self.assertEqual(len(reads), len(ClipData.FRAMED_CHANNELS) * len(pose))
 
     def test_an_axis_held_across_a_reorder_writes_by_the_current_order(self):
         # set_parent sorts the new parent ahead of its child after the axis
@@ -7832,7 +7848,7 @@ class TestClipLoadFbx(unittest.TestCase):
                 self.assertIs(type(rest), HierarchyData)
                 self.assertEqual((rest.name, rest.uuid), (clip.name, clip.uuid))
                 self.assertEqual(rest.name, rig.name)
-                for channel in ("translate", "rotate", "scale", "joint_orient", "rotate_axis"):
+                for channel in ("translate", "rotate", "scale", "joint_orient", "rotate_axis", "shear"):
                     self.assertTrue(np.array_equal(getattr(rest, channel), getattr(rig, channel)), channel)
                 self.assertTrue(np.allclose(rest["joint1"].translate, [0.0, factor, 0.0]))
                 self.assertTrue(np.allclose(rest["joint2"].rotate, 0.0))
@@ -9181,7 +9197,7 @@ class TestFbxLoadsInMayaAxes(unittest.TestCase):
                 maya = loader(path)
                 file = loader(path, axis_system=None)
                 for name in ("knee", "prop"):
-                    for channel in ("translate", "rotate", "scale", "joint_orient", "rotate_axis"):
+                    for channel in ("translate", "rotate", "scale", "joint_orient", "rotate_axis", "shear"):
                         same = np.array_equal(getattr(maya[name], channel), getattr(file[name], channel))
                         self.assertTrue(same, f"{name}.{channel}")
 
@@ -9400,12 +9416,12 @@ class TestFbxLoadsInMayaAxes(unittest.TestCase):
             with self.subTest(loader=loader.__qualname__):
                 maya = loader(path)
                 file = loader(path, axis_system=None)
-                for channel in ("translate", "rotate", "scale", "joint_orient", "rotate_axis"):
+                for channel in ("translate", "rotate", "scale", "joint_orient", "rotate_axis", "shear"):
                     self.assertTrue(np.array_equal(getattr(maya, channel), getattr(file, channel)))
 
         clip = ClipData.load_fbx(path)
         file = ClipData.load_fbx(path, axis_system=None)
-        for channel in ("translate", "rotate", "scale", "joint_orient", "rotate_axis"):
+        for channel in ("translate", "rotate", "scale", "joint_orient", "rotate_axis", "shear"):
             self.assertTrue(np.array_equal(getattr(clip.frames, channel), getattr(file.frames, channel)))
 
     def test_a_left_handed_file_raises_unless_its_axes_are_kept(self):
@@ -9459,7 +9475,7 @@ class TestFbxBindPose(unittest.TestCase):
         ("Z-up m", "MayaZUp", "m", 100.0),
     )
 
-    CHANNELS = ("translate", "rotate", "scale", "joint_orient", "rotate_axis")
+    CHANNELS = ("translate", "rotate", "scale", "joint_orient", "rotate_axis", "shear")
 
     def setUp(self):
         super().setUp()
@@ -10030,7 +10046,7 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         locator; a camera with no post rotation, and one with none and
         rotation inactive, as the sdk makes one, each holding a node.
         ``sheared`` adds a joint that does not compensate, turned under the
-        uneven group, which no node can hold, spinning 50 degrees a frame,
+        uneven group, which this read gives no node, spinning 50 degrees a frame,
         and under it a joint that compensates it, a locator turned and
         scaled (2, 1, 3) holding a locator, a node with no attribute,
         turned and moved, holding a joint scaled (1, 1.5, 2) with a post
@@ -11150,7 +11166,7 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
                     rig  = HierarchyData.load_fbx(path, node_types=kinds)
                     clip = ClipData.load_fbx(path, node_types=kinds)
                     for channels in (rig, clip.frames, clip.rest_pose):
-                        for channel in ("translate", "rotate", "scale", "joint_orient"):
+                        for channel in ("translate", "rotate", "scale", "joint_orient", "shear"):
                             self.assertTrue(np.isfinite(np.asarray(getattr(channels, channel))).all(), channel)
 
                     worlds = self.clip_worlds(clip)
@@ -11196,7 +11212,7 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
             with self.subTest(node_types=kinds, scale=(1, -1e-13, 1)):
                 got  = ClipData.load_fbx(tiny, node_types=kinds)
                 same = ClipData.load_fbx(held, node_types=kinds)
-                for channel in ("translate", "rotate", "scale", "joint_orient"):
+                for channel in ("translate", "rotate", "scale", "joint_orient", "shear"):
                     self.assertTrue(np.array_equal(getattr(got.frames, channel), getattr(same.frames, channel)), channel)
                 self.assertTrue(np.all(got.frames.scale[1, got.index("j0")] > 0.0))
                 self.assertWorlds({n: w[1, 3] for n, w in self.clip_worlds(got).items()},

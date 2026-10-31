@@ -261,7 +261,7 @@ DCC like Maya that usually means setting `PATH` in a startup script — see
 ## 4. Build a joint hierarchy from scratch
 
 A `TransformData` is one transform node with Maya's channel set: name,
-uuid, parent, SRT, `rotate_order`, `joint_orient`,
+uuid, parent, SRT, `shear`, `rotate_order`, `joint_orient`,
 `segment_scale_compensate`. A `HierarchyData` owns a set of them.
 
 Parenting is by **uuid**: `parent_uuid` holds the parent's uuid, and a

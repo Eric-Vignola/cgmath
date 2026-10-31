@@ -124,6 +124,7 @@ def _every_channel(node: TransformData, rotate_order: int) -> None:
     node.rotate_order             = rotate_order
     node.rotate_axis              = [0.0, 5.0, 0.0]
     node.joint_orient             = [0.0, 0.0, 15.0]
+    node.shear                    = [0.125, 0.0, -0.25]
     node.visibility               = False
     node.segment_scale_compensate = True
     node.radius                   = 0.25

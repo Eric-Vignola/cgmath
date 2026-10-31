@@ -1027,9 +1027,9 @@ class Object(TransformData):
     def _capture_transform_state(self) -> tuple:
         """Snapshot of the local SRT values + composed world_matrix.
 
-        The local SRT tuples (``_translate`` / ``_rotate`` / ``_scale``)
-        are read from the dataclass storage directly, so they're always
-        current -- they don't depend on ``TransformData``'s
+        The local SRT tuples (``_translate`` / ``_rotate`` / ``_scale`` /
+        ``_shear``) are read from the dataclass storage directly, so
+        they're always current -- they don't depend on ``TransformData``'s
         ``_world_matrix`` cache (which has a known lag bug for direct
         local mutations on standalone, parent-less nodes: the rotate /
         translate / scale setter calls ``_reset_branch_world_matrices``
@@ -1046,6 +1046,7 @@ class Object(TransformData):
             tuple(np.asarray(self._translate, dtype=float).ravel()),
             tuple(np.asarray(self._rotate, dtype=float).ravel()),
             tuple(np.asarray(self._scale, dtype=float).ravel()),
+            tuple(np.asarray(self._shear, dtype=float).ravel()),
             np.asarray(self.world_matrix).tobytes(),
         )
 
@@ -2158,8 +2159,8 @@ class Scene(HierarchyData):
             :attr:`default_camera_name` (these affect render output but
             are not forwarded as render() kwargs).
           - Per-node: type, uuid, visibility, raw local SRT
-            (``_translate`` / ``_rotate`` / ``_scale``) AND composed
-            ``world_matrix`` bytes -- the local SRT catches direct
+            (``_translate`` / ``_rotate`` / ``_scale`` / ``_shear``) AND
+            composed ``world_matrix`` bytes -- the local SRT catches direct
             mutations even when ``TransformData``'s ``_world_matrix``
             cache lags (see :meth:`Object._capture_transform_state`),
             and ``world_matrix`` bytes catch ancestor mutations.
@@ -2207,6 +2208,7 @@ class Scene(HierarchyData):
                 tuple(np.asarray(node._translate, dtype=float).ravel()),
                 tuple(np.asarray(node._rotate, dtype=float).ravel()),
                 tuple(np.asarray(node._scale, dtype=float).ravel()),
+                tuple(np.asarray(node._shear, dtype=float).ravel()),
                 np.asarray(node.world_matrix).tobytes(),
             )
             if isinstance(node, Object):

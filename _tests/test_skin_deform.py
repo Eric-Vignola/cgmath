@@ -155,6 +155,7 @@ def branching_clip(joints: int = 12, frames: int = 9, seed: int = 23):
         walk = np.cumsum(rng.normal(size=shape) * step, axis=0)
         setattr(clip.frames, channel, getattr(clip.frames, channel) + walk)
     clip.frames.scale = clip.frames.scale * rng.uniform(0.9, 1.1, shape)
+    clip.frames.shear = rng.uniform(-0.2, 0.2, shape)
     clip.frame        = 0
     return rig, clip
 

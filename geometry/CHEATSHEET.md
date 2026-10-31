@@ -2661,6 +2661,11 @@ print(round(float(sphere.evaluate(X, Y, Z).min()), 4))  # local, ignores scale
 print(round(float(sphere.sample(X, Y, Z).min()), 4))    # world, honours SRT
 ```
 
+A primitive saves `shear` with its other channels and does not evaluate
+it: `sample()` and `bounding_box()` ignore it, as they ignore
+`rotate_axis`, `joint_orient` and parents. The constructors take no
+`shear`: set the property.
+
 ### `DMCField` — CSG stack with a lazy mesh
 
 `resolution` is *subdivisions per world unit*; bounds are auto-derived from

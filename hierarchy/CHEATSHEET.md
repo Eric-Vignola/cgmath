@@ -19,7 +19,7 @@ overview see [`README.md`](README.md); for the rest of the library see
 | [Joint channels](#joint-channels) | `rotate_order`, `rotate_axis`, `joint_orient`, `segment_scale_compensate` |
 | [Changing rotate order](#changing-rotate-order) | `set_rotate_order` keeps the pose; the raw `rotate_order` setter does not |
 | [Display + user channels](#display--user-channels) | `visibility`, `radius`, `draw_style`, `user_defined_attributes` |
-| [Matrices](#matrices) | `matrix`, `world_matrix`, the six factor matrices, `quaternion`, the parent and inverse matrices |
+| [Matrices](#matrices) | `matrix`, `world_matrix`, the seven factor matrices, `quaternion`, the parent and inverse matrices |
 | [Maya's short names](#mayas-short-names) | `t` `tx` … `wm` `pm` `im` `wim` `pim`, read and written as their long names |
 | [Cache invalidation](#cache-invalidation) | when `world_matrix` is recomputed |
 | [Parenting: `parent_uuid`](#parenting-parent_uuid) | the parent's uuid, `parent_name`, `set_parent` by name, joining a rig, older files |
@@ -114,6 +114,7 @@ str(node)           # 'hero'
 | `rotate_order` | `0` | `0=xyz 1=yzx 2=zxy 3=xzy 4=yxz 5=zyx` |
 | `rotate_axis` | `(0, 0, 0)` | degrees; Maya `rotateAxis` |
 | `joint_orient` | `(0, 0, 0)` | degrees; Maya `jointOrient` |
+| `shear` | `(0, 0, 0)` | Maya `shearXY`, `shearXZ`, `shearYZ`; the constructor's last parameter |
 | `visibility` | `True` | |
 | `segment_scale_compensate` | `False` | divide out the parent's scale |
 | `radius` | `1.0` | joint display radius |
@@ -155,6 +156,10 @@ except ValueError as error:
 | translate | `translate` | `translate_x` `translate_y` `translate_z` |
 | rotate axis | `rotate_axis` | `rotate_axis_x` `rotate_axis_y` `rotate_axis_z` |
 | joint orient | `joint_orient` | `joint_orient_x` `joint_orient_y` `joint_orient_z` |
+| shear | `shear` | `shear_xy` `shear_xz` `shear_yz` |
+
+Shear's components are xy, xz and yz, Maya's `shearXY`, `shearXZ` and
+`shearYZ`, not x, y and z.
 
 The getter hands back a copy, so mutating it changes nothing — assign
 the channel back.
@@ -259,8 +264,9 @@ joint.user_defined_attributes = {"stretch": {"value": 1.0, "keyable": True}}
 # Maya-named attribute dump, ready to push at a DCC
 joint.to_attributes()
 # {'scale': [...], 'rotate': [...], 'translate': [...], 'rotateOrder': 5,
-#  'rotateAxis': [...], 'jointOrient': [...], 'segmentScaleCompensate': False,
-#  'radius': 2.5, 'visibility': False, 'drawStyle': 2}
+#  'rotateAxis': [...], 'shear': [...], 'jointOrient': [...],
+#  'segmentScaleCompensate': False, 'radius': 2.5, 'visibility': False,
+#  'drawStyle': 2}
 assert joint.to_attributes()["jointOrient"] == [0.0, 30.0, 0.0]
 ```
 
@@ -287,7 +293,7 @@ Row-vector convention: translation lives at `M[3, :3]`, and a local
 matrix composes as
 
 ```
-matrix = S · RO · R · JO · IS · T
+matrix = S · Sh · RO · R · JO · IS · T
 world  = matrix · parent_world
 ```
 
@@ -301,6 +307,7 @@ n.get_parent_matrix()        # (4, 4) the parent's world, eye(4) at a root
 | Property | Read | Write | Contents |
 |---|---|---|---|
 | `scale_matrix` | yes | — | `S` |
+| `shear_matrix` | yes | — | `Sh` |
 | `rotate_axis_matrix` | yes | — | `RO` |
 | `rotate_matrix` | yes | — | `R`, built with `rotate_order` |
 | `joint_orient_matrix` | yes | — | `JO` |
@@ -313,6 +320,24 @@ n.get_parent_matrix()        # (4, 4) the parent's world, eye(4) at a root
 | `inverse_matrix` | yes | — | the inverse of `matrix`, Maya's `inverseMatrix` |
 | `world_inverse_matrix` | yes | — | the inverse of `world_matrix`, Maya's `worldInverseMatrix` |
 | `parent_inverse_matrix` | yes | — | the inverse of `parent_matrix`, Maya's `parentInverseMatrix` |
+
+`Sh` is the identity with `shear_xy` in row y, column x, and `shear_xz` and
+`shear_yz` in row z, columns x and y: one matrix, no term crossing them. It
+sits between scale and rotate on every node, joints included, as Maya
+evaluates them, and `IS` divides by the parent's scale alone, so a parent's
+shear passes into a compensated child's world. A node holding no shear
+skips the product.
+
+```python
+sheared = TransformData("sheared", scale=(1, 2, 3), shear=(0.5, -0.25, 0.75), translate=(4, 5, 6))
+assert np.array_equal(sheared.shear_matrix[:3, :3], [[1, 0, 0], [0.5, 1, 0], [-0.25, 0.75, 1]])
+
+# what Maya 2025's node.matrix reads with these channels
+assert np.array_equal(
+    sheared.matrix,
+    [[1, 0, 0, 0], [1, 2, 0, 0], [-0.75, 2.25, 3, 0], [4, 5, 6, 1]],
+)
+```
 
 The four last are true inverses, `np.linalg.inv`, as Maya's are: a
 non-uniform scale under a rotation shears a matrix, which
@@ -352,9 +377,11 @@ assert np.allclose(rig["knee"].world_matrix[3, :3], [5.0, 5.0, 5.0])
 
 Writing `matrix` / `world_matrix` decomposes into scale, rotate and
 translate, solving `rotate` around the `rotate_axis`, `joint_orient` and
-`segment_scale_compensate` the node already has, so the matrix reads back
-as written. A mirror goes on `scale_z`, the way Maya splits a matrix, and
-what a zero scale leaves of the rotation is kept from the current one.
+`segment_scale_compensate` the node already has, so a matrix with no shear
+reads back as written. A target's shear is dropped: a node that is no
+joint writes its `shear` 0, a joint keeps the one it holds. A mirror goes
+on `scale_z`, the way Maya splits a matrix, and what a zero scale leaves
+of the rotation is kept from the current one.
 Writing `quaternion` solves only `rotate`, keeping `rotate_axis` and
 `joint_orient`. `set_parent()` and `match_matrix()` write through them
 too, so a reparented transform or locator keeps its `rotate_axis`, which
@@ -422,6 +449,7 @@ steps.frames.wim.shape                      # (3, 2, 4, 4)
 | `t` `tx` `ty` `tz` | `translate` `translate_x` `translate_y` `translate_z` | `translate` `translateX` … | yes |
 | `r` `rx` `ry` `rz` | `rotate` `rotate_x` `rotate_y` `rotate_z` | `rotate` `rotateX` … | yes |
 | `s` `sx` `sy` `sz` | `scale` `scale_x` `scale_y` `scale_z` | `scale` `scaleX` … | yes |
+| `sh` `shxy` `shxz` `shyz` | `shear` `shear_xy` `shear_xz` `shear_yz` | `shear` `shearXY` `shearXZ` `shearYZ` | yes |
 | `jo` `jox` `joy` `joz` | `joint_orient` `joint_orient_x` … | `jointOrient` `jointOrientX` … | yes |
 | `ra` `rax` `ray` `raz` | `rotate_axis` `rotate_axis_x` … | `rotateAxis` `rotateAxisX` … | yes |
 | `ro` | `rotate_order` | `rotateOrder` | yes |
@@ -957,9 +985,9 @@ assert np.allclose(rig.world_matrix, target)
 ```
 
 Read-only list properties: `name`, `uuid`, `indices`,
-`rotate_axes`, `unique_name`, `parent_scale_inverse`, and the six factor
-matrices (`scale_matrix`, `rotate_axis_matrix`, `rotate_matrix`,
-`joint_orient_matrix`, `parent_scale_inverse_matrix`,
+`rotate_axes`, `unique_name`, `parent_scale_inverse`, and the seven factor
+matrices (`scale_matrix`, `shear_matrix`, `rotate_axis_matrix`,
+`rotate_matrix`, `joint_orient_matrix`, `parent_scale_inverse_matrix`,
 `translate_matrix`).
 
 ```python
@@ -1258,9 +1286,9 @@ assert np.allclose(clip.frames.rotate[3, 2, 2], 45.0)
 ```
 
 Framed channels: `scale`, `rotate`, `translate`, `rotate_axis`,
-`joint_orient` (`ClipData.FRAMED_CHANNELS`). Everything else — names,
-uuids, parenting, `rotate_order`, `segment_scale_compensate`, `radius`,
-`draw_style` — is structural and shared by every frame.
+`joint_orient`, `shear` (`ClipData.FRAMED_CHANNELS`). Everything else —
+names, uuids, parenting, `rotate_order`, `segment_scale_compensate`,
+`radius`, `draw_style` — is structural and shared by every frame.
 
 ```python
 clip.frame                = 0
@@ -1326,10 +1354,10 @@ clip.frames.rotate_y += 5.0                     # components work in place
 
 ### Components
 
-Each framed channel has `_x`, `_y`, `_z`, shaped `(F, N)`. A read is a
-copy, a new array every time: `+=` works on it whatever the clip and the
-scope, one frame of one node included, and writing into it changes
-nothing until it is assigned back.
+Each framed channel has `_x`, `_y`, `_z`, shear `_xy`, `_xz`, `_yz`,
+shaped `(F, N)`. A read is a copy, a new array every time: `+=` works on
+it whatever the clip and the scope, one frame of one node included, and
+writing into it changes nothing until it is assigned back.
 
 ```python
 clip.frames.translate_y.shape                   # (6, 3)
@@ -1440,7 +1468,7 @@ once, each equal bit for bit to the node's own read on every frame:
 
 | Read | Every frame |
 |---|---|
-| `scale_matrix`, `rotate_axis_matrix`, `rotate_matrix`, `joint_orient_matrix`, `translate_matrix` | `(F, N, 4, 4)`, `rotate_matrix` in each node's rotate order |
+| `scale_matrix`, `shear_matrix`, `rotate_axis_matrix`, `rotate_matrix`, `joint_orient_matrix`, `translate_matrix` | `(F, N, 4, 4)`, `rotate_matrix` in each node's rotate order |
 | `parent_scale_inverse` | `(F, N, 3)`: the parent's scale, ones for a root, whatever `segment_scale_compensate` says |
 | `parent_scale_inverse_matrix` | `(F, N, 4, 4)`: identity for a node that does not compensate |
 | `parent_matrix`, `get_parent_matrix()` | `(F, N, 4, 4)`: identity for a root, or a parent the clip does not hold |
@@ -2096,7 +2124,7 @@ loader's, where:
 | `TransformList.load_glb` | `(filename, scale_factor=100.0, pose_frame=None)` |
 | `ClipData.load_fbx` | `(filename, scale_factor=None, take=None, fps=None, start_frame=None, end_frame=None, axis_system="maya_y_up", node_types=None)` |
 | `ClipData.load_glb` | `(filename, scale_factor=100.0, animation=0, fps=24.0, start_frame=0)` |
-| `TransformList.save_fbx` | `(filename, zero_root=False, as_ascii=False)` — binary unless `as_ascii` |
+| `TransformList.save_fbx` | `(filename, zero_root=False, as_ascii=False)` — binary unless `as_ascii`; FBX has no shear, so the save leaves it out |
 
 `zero_root=True` writes the root joint with an identity transform, so the
 file carries the skeleton at the origin. The root joint is the first joint
@@ -2555,8 +2583,8 @@ its rotate curves, but on a frame where an uneven scale among them
 under a turn solves its rotate again; any other node has its rotate
 solved again. A uniform scale among them goes on the node's scale, and
 on each joint under it that compensates its parent's scale; an uneven
-one under a node turned in it would need shear, which no node holds:
-that node keeps the file's position, and its axis lengths where its
+one under a node turned in it would need shear, which this read gives no
+node: that node keeps the file's position, and its axis lengths where its
 kept parent's world scales evenly, and the nodes under it take the
 shear it drops, so they stay where the file puts them, under a scale
 under 1e-12 too: a joint that compensates it in its channels, any
@@ -2881,8 +2909,10 @@ unit its values are in, `axis_system` and `unit`. A `ClipData` saves its
 record and its timebase, named as its properties: `start_frame`, `fps`,
 `frame` (the loaded frame, which a load scrubs back to), and `blocks`, one
 `(F, N, 3)` array per framed channel, each keyed by the channel's
-property. A clip holding a `rest_pose` saves it as well, under
-`rest_pose`, as a hierarchy's tree; one holding none saves no such entry.
+property, but for a `shear` block all zero, which is left out, as a node
+leaves out a zero `shear`, and which a load fills with zeros. A clip
+holding a `rest_pose` saves it as well, under `rest_pose`, as a
+hierarchy's tree; one holding none saves no such entry.
 
 ```python
 sorted(clip.to_dict())

@@ -410,7 +410,12 @@ def _cylinder_axis(value: int) -> int:
 
 @dataclass(repr=False, eq=False)
 class SDFSphere(TransformData):
-    """Sphere SDF primitive inheriting transform properties from TransformData."""
+    """Sphere SDF primitive inheriting transform properties from TransformData.
+
+    Shear is saved and loaded with the node. ``sample`` and ``bounding_box``
+    ignore it, as they ignore rotate_axis, joint_orient and parents, and the
+    constructor takes no ``shear``: set the property.
+    """
 
     # under the radius property; TransformData's _radius is the joint radius
     _sdf_radius: float = 1.0
@@ -503,7 +508,12 @@ class SDFSphere(TransformData):
 
 @dataclass(repr=False, eq=False)
 class SDFBox(TransformData):
-    """Axis-aligned box SDF primitive inheriting transform properties from TransformData."""
+    """Axis-aligned box SDF primitive inheriting transform properties from TransformData.
+
+    Shear is saved and loaded with the node. ``sample`` and ``bounding_box``
+    ignore it, as they ignore rotate_axis, joint_orient and parents, and the
+    constructor takes no ``shear``: set the property.
+    """
 
     # under the half_extents property
     _half_extents: Array(np.float64, 3) = ImmutableArray(np.array([0.5, 0.5, 0.5]))
@@ -592,7 +602,12 @@ class SDFBox(TransformData):
 
 @dataclass(repr=False, eq=False)
 class SDFCylinder(TransformData):
-    """Capped cylinder SDF primitive inheriting transform properties from TransformData."""
+    """Capped cylinder SDF primitive inheriting transform properties from TransformData.
+
+    Shear is saved and loaded with the node. ``sample`` and ``bounding_box``
+    ignore it, as they ignore rotate_axis, joint_orient and parents, and the
+    constructor takes no ``shear``: set the property.
+    """
 
     # under the radius, height and axis properties; TransformData's _radius is
     # the joint radius

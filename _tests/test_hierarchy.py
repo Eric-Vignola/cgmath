@@ -295,7 +295,7 @@ class TestHierarchy(unittest.TestCase):
 
         self.assertTrue(np.allclose(node.rotate, [1.5, 2.5, 3.5]))
         for channel in ('_scale', '_rotate', '_translate', '_rotate_axis',
-                        '_joint_orient'):
+                        '_joint_orient', '_shear'):
             default = np.asarray(getattr(TransformData, channel))
             self.assertEqual(default.dtype, np.float64)
 
@@ -304,7 +304,7 @@ class TestHierarchy(unittest.TestCase):
         # through the property has to say the same, not numpy's broadcast error
         node = TransformData(name='a', translate=[1.0, 2.0, 3.0])
 
-        for channel in ('scale', 'rotate', 'translate', 'rotate_axis', 'joint_orient'):
+        for channel in ('scale', 'rotate', 'translate', 'rotate_axis', 'joint_orient', 'shear'):
             message = rf'^TransformData\.{channel} must have shape \(3,\), got \(2,\)$'
             with self.subTest(channel=channel):
                 with self.assertRaisesRegex(ValueError, message):
@@ -642,7 +642,7 @@ class TestHierarchy(unittest.TestCase):
                 self.assertTrue(allclose(node.translate, a[node.name].translate))
 
     def test_matrix_setter_accounts_for_parent_scale_inverse(self):
-        # the local matrix is [S][RO][R][JO][IS][T]; when a parent has
+        # the local matrix is [S][Sh][RO][R][JO][IS][T]; when a parent has
         # non-unit scale and the child is segment-scale-compensated, IS != I
         # and the matrix setter must strip it or the S/R decomposition (and
         # therefore the matrix round-trip) is wrong
@@ -799,7 +799,7 @@ class TestHierarchy(unittest.TestCase):
                     self.assertTrue(np.array_equal(node.rotate_axis, rotate_axis))
 
     def test_matrix_setters_keep_rotate_axis(self):
-        # the local matrix is [S][RO][R][JO][IS][T]; writing matrix or
+        # the local matrix is [S][Sh][RO][R][JO][IS][T]; writing matrix or
         # world_matrix solves S, R and T around the RO, JO and IS the node
         # already has, so what is written reads back and rotate_axis stays.
         # a mirrored child (a negative scale) reads back as well
@@ -3175,6 +3175,7 @@ def _worlds_by_scan(rig, made: dict) -> dict:
                     IS[:3, :3] /= parent.scale
                 local = made[key] = (
                     member.scale_matrix
+                    @ member.shear_matrix
                     @ member.rotate_axis_matrix
                     @ member.rotate_matrix
                     @ member.joint_orient_matrix
@@ -6194,7 +6195,7 @@ def _hard_rig(count=30, seed=7, order=None) -> HierarchyData:
 
 
 def _channels(rig) -> dict:
-    channels     = ("scale", "rotate", "translate", "rotate_axis", "joint_orient")
+    channels     = ("scale", "rotate", "translate", "rotate_axis", "joint_orient", "shear")
     out          = {c: np.array([getattr(node, c) for node in rig]) for c in channels}
     out["world"] = np.array([node.world_matrix for node in rig])
     return out
@@ -6255,7 +6256,7 @@ class TestBatchedSwapaxes(unittest.TestCase):
                     np.abs(single.rotate_matrix - batch.rotate_matrix).max(), 1.2e-7
                 )
                 self.assertLess(np.abs(got["translate"] - want["translate"]).max(), reach)
-                for key in ("scale", "rotate_axis", "joint_orient"):
+                for key in ("scale", "rotate_axis", "joint_orient", "shear"):
                     self.assertLess(np.abs(got[key] - want[key]).max(), 1e-9, key)
 
     def test_children_keep_their_world_and_swapped_nodes_permute(self):
