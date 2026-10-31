@@ -2001,10 +2001,11 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
             self._rig_against_one_at_a_time([n.copy() for n in built], [1, 2], None, cascades=True, animated=False)
 
         # a turn of about 7e-14 radians reaching x under n, scaled (1, 100,
-        # 0.01): what x's split reads off is far from square, and the turn
-        # takes that along, a change that is not one, which the split gains
-        # on. Passed as it is, the batch was 2.3e-9 and 1.8e-9 off one node
-        # at a time
+        # 0.01): a row-length split read a block far from square off x, and
+        # the turn took that along, a change that is not one, which the split
+        # gained on: the batch was 2.3e-9 and 1.8e-9 off one node at a time.
+        # The split squares its input now, so the turn passes as it is and
+        # the batch stays within 1e-9
         for rotate in ((-83.2745, 46.2769, -141.877), (-100.6545, 52.8268, -144.2076)):
             with self.subTest("a turn reaching a split far from square", rotate=rotate):
                 t     = 3e-12
@@ -2034,7 +2035,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
                     ),
                     TransformData("c", uuid=uuids[4], parent_uuid=uuids[3], node_type="joint", translate=(1.0, 0.0, 0.0)),
                 ]
-                self._rig_against_one_at_a_time(nodes, [1, 3], None, cascades=True, animated=False)
+                self._rig_against_one_at_a_time(nodes, [1, 3], None, cascades=False, animated=False)
 
         # a stretch with nothing on the diagonal: a, kept at the origin under
         # a scale (1, 1 + 1e-12, 1 - 1e-12) turned 45 degrees about x, goes
@@ -2941,9 +2942,10 @@ class TestClipDeltaVectorised(_DeltaRigs, unittest.TestCase):
         self._assert_same(clip.add_delta(delta), self._per_frame("add_delta", clip, delta))
 
     def test_a_clip_of_deltas_still_pairs_frame_for_frame(self):
-        # no scale animation: a non-uniform parent scale without segment
-        # scale compensation shears the child, which a delta (a rotation per
-        # node) cannot carry, so that round trip was never exact
+        # no scale animation: this pins the pairing. A delta carries a
+        # rotation per node, Maya's orientation of a world that shears, and
+        # an additive shear, so the round trip also holds under a non-uniform
+        # parent scale (test_shear.TestShearPoseAlgebra)
         rig = self._chain(5, seed=5)
         a   = self._animated(rig, seed=9, scale=False)
         b   = self._animated(rig, seed=21, scale=False)
@@ -10522,11 +10524,15 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         self.assertTrue(np.allclose(np.linalg.norm(rig["tiltloc"].world_matrix[2, :3]), np.linalg.norm(want["tiltloc"][2, :3])))
         self.assertGreater(np.abs(worlds["tiltloc"] - frames["tiltloc"]).max(), 0.01)
 
-        # the twin's split is the matrix setter's, its rotate axis and joint
-        # orient kept: its world written through the setter comes back as read
-        split                       = HierarchyData.load_fbx(path, axis_system=None, node_types=("joint", "locator"))
-        split["ptilt"].world_matrix = want["ptilt"]
-        self.assertTrue(np.allclose(split["ptilt"].world_matrix, rig["ptilt"].world_matrix, rtol=0.0, atol=1e-9))
+        # the twin's split is by row length, as the fold keeps it until the
+        # read takes shear, its rotate axis and joint orient kept: its scale
+        # is the row lengths of the block its world asks for
+        module = sys.modules[ClipData.__module__]
+        held   = rig["ptilt"]
+        block  = want["ptilt"] @ np.linalg.inv(held.get_parent_matrix())
+        block  = block @ np.linalg.inv(held.joint_orient_matrix @ held.parent_scale_inverse_matrix)
+        sized  = module._scales_and_rotations(block[:3, :3][None], np.eye(3)[None])[0][0]
+        self.assertTrue(np.allclose(sized, held.scale, rtol=0.0, atol=1e-9))
         self.assertGreater(np.abs(rig["ptilt"].world_matrix - want["ptilt"]).max(), 0.01)
         self.assertFalse(np.allclose(rig["ptilt"].rotate_axis, 0.0) or np.allclose(rig["ptilt"].joint_orient, 0.0))
 

@@ -759,14 +759,20 @@ class TestHierarchy(unittest.TestCase):
         # out, so match_rotate solves R around the rotate_axis, joint_orient
         # and compensated parent scale the node already has. leaving RO out
         # missed by up to 1.0 per matrix element, leaving IS out by 0.5. a
-        # non-uniform parent scale without compensation shears the child,
-        # which no rotate can follow, so that case is left out
+        # non-uniform parent scale without compensation shears the child:
+        # its world's orientation, Maya's split of it, still lands, the last
+        # case
         target = TransformData('t', rotate=[33.0, -48.0, 121.0], translate=[4.0, 5.0, 6.0])
         want   = _rotation(target.world_matrix)
         cases = itertools.product(
             range(6),
             ([0.0, 0.0, 0.0], [25.0, -40.0, 60.0]),
-            ((False, [1.0, 1.0, 1.0]), (True, [1.0, 1.0, 1.0]), (True, [2.0, 0.5, 1.5])),
+            (
+                (False, [1.0, 1.0, 1.0]),
+                (True, [1.0, 1.0, 1.0]),
+                (True, [2.0, 0.5, 1.5]),
+                (False, [2.0, 0.5, 1.5]),
+            ),
         )
         for order, rotate_axis, (compensate, parent_scale) in cases:
             operands = {
@@ -6285,10 +6291,10 @@ class TestBatchedSwapaxes(unittest.TestCase):
 
 class TestSwapaxesUnderAMirror(unittest.TestCase):
     """a child is put back through the matrix setter, which puts a mirror on
-    scale z: under a parent chain mirroring another axis its scale signs
-    move, and a segment scale compensated child of it moves too. The list
-    method gives what the per node method run parent first gives, that
-    exception included"""
+    scale z: a child with a mirror of its own on x or y comes back with it
+    on z, its scale signs moved, and a segment scale compensated child of
+    it moves too. The list method gives what the per node method run parent
+    first gives, that exception included"""
 
     def _rig(self, mirror):
         ids = [generate_uuid() for _ in range(4)]
@@ -6391,11 +6397,12 @@ class TestSetParentCost(unittest.TestCase):
                         self.assertLessEqual(pair["frames"], 1)
 
     def test_one_at_a_time_down_a_chain_grows_with_the_chain(self):
-        # a chain of transforms with non-uniform scale and no compensation
-        # shears, so set_parent goes one node at a time. Leaf first, each
-        # node's world was worked out again from the root, and so was the
-        # chain's end for each leaf hanging off it when the selection went
-        # back up the chain between leaves: 46,346 and 48,140 rows through
+        # a chain of joints with non-uniform scale and no compensation
+        # shears, which a joint does not take, so set_parent goes one node
+        # at a time; a chain of transforms takes it and goes together. Leaf
+        # first, each node's world was worked out again from the root, and so
+        # was the chain's end for each leaf hanging off it when the selection
+        # went back up the chain between leaves: 46,346 and 48,140 rows through
         # the local factors at 300 nodes, 182,696 and 186,290 at 600. Now
         # 1,497 and 2,992, then 2,997 and 5,992, and 1,497 and 2,997 in list
         # order, which took 1,795 and 3,595
@@ -6410,6 +6417,7 @@ class TestSetParentCost(unittest.TestCase):
             nodes = [
                 TransformData(
                     f"j{i}",
+                    node_type   = "joint",
                     uuid        = uuids[i],
                     parent_uuid = uuids[i - 1] if i else None,
                     translate   = rng.normal(size=3),
@@ -6465,6 +6473,7 @@ class TestSetParentCost(unittest.TestCase):
             nodes = [
                 TransformData(
                     f"j{i}",
+                    node_type   = "joint",
                     uuid        = uuids[i],
                     parent_uuid = None if i == 0 else uuids[min(i - 1, half - 1)],
                     translate   = rng.normal(size=3),
@@ -6517,6 +6526,7 @@ class TestSetParentCost(unittest.TestCase):
             nodes = [
                 TransformData(
                     f"j{i}",
+                    node_type   = "joint",
                     uuid        = uuids[i],
                     parent_uuid = None if i == 0 else uuids[min(i - 1, half - 1)],
                     translate   = rng.normal(size=3) * size,

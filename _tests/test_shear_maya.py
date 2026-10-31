@@ -2,7 +2,7 @@
 
 test_assets/maya_shear.npz holds what Maya 2025 did, recorded by
 tools/make_maya_shear_fixture.py (its docstring lists every array). Nothing
-here needs Maya.
+here needs Maya but TestInMaya, which skips without it.
 """
 from __future__ import annotations
 
@@ -108,6 +108,163 @@ class TestCompose(unittest.TestCase):
         got = TransformData("a", scale=(1.0, 2.0, 3.0), shear=(0.5, -0.25, 0.75)).matrix
         self.assertEqual(got[1, :3].tolist(), [1.0, 2.0, 0.0])
         self.assertEqual(got[2, :3].tolist(), [-0.75, 2.25, 3.0])
+
+
+class TestSplit(unittest.TestCase):
+    """the matrix setters against xform -m and -ws -m. Maya's Euler branch is
+    not asserted: rotate is compared as matrices"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.data  = load_fixture()
+        cls.kinds = [str(kind) for kind in cls.data["scale_kinds"]]
+
+    def lossy(self, i: int) -> bool:
+        # a scale below about 1e-10 is lossy in Maya's split
+        return self.kinds[self.data["split_scale_kind"][i]] == "near_zero_1e-12"
+
+    def solved(self, i: int) -> TransformData:
+        """record ``i``'s node, under a transform holding its parent's world,
+        after the target of that record went through the setter"""
+        data   = self.data
+        kind   = "joint" if data["split_node_type"][i] else "transform"
+        parent = None
+        nodes  = []
+        if data["split_has_parent"][i]:
+            parent        = TransformData("p", uuid="00000000-0000-4000-8000-000000000001")
+            parent.matrix = data["split_parent_world"][i]
+            nodes.append(parent)
+        node = TransformData(
+            "n",
+            node_type=kind,
+            uuid="00000000-0000-4000-8000-000000000002",
+            parent_uuid=None if parent is None else parent.uuid,
+            scale=data["split_before_scale"][i],
+            shear=data["split_before_shear"][i],
+            rotate=data["split_before_rotate"][i],
+            translate=data["split_before_translate"][i],
+            rotate_order=int(data["split_rotate_order"][i]),
+            rotate_axis=data["split_before_rotate_axis"][i],
+            joint_orient=data["split_before_joint_orient"][i],
+            segment_scale_compensate=bool(data["split_segment_scale_compensate"][i]),
+        )
+        nodes.append(node)
+        HierarchyData(nodes)
+        if data["split_space"][i]:
+            node.world_matrix = data["split_target"][i]
+        else:
+            node.matrix = data["split_target"][i]
+        return node
+
+    def rotate_gap(self, i: int, node: TransformData) -> float:
+        data = self.data
+        maya = TransformData("m", rotate=data["split_after_rotate"][i], rotate_order=int(data["split_rotate_order"][i]))
+        return float(np.abs(node.rotate_matrix - maya.rotate_matrix).max())
+
+    def test_a_transform_is_xform_m(self):
+        data = self.data
+        seen = 0
+        for i in np.flatnonzero(data["split_node_type"] == 0).tolist():
+            if self.lossy(i):
+                continue
+            seen += 1
+            node = self.solved(i)
+            with self.subTest(record=i, kind=self.kinds[data["split_scale_kind"][i]]):
+                self.assertLessEqual(relative(node.matrix, data["split_matrix_after"][i]),    1e-12)
+                self.assertLessEqual(np.abs(node.scale - data["split_after_scale"][i]).max(), 1e-12)
+                self.assertLessEqual(np.abs(node.shear - data["split_after_shear"][i]).max(), 1e-12)
+                self.assertTrue(np.array_equal(node.rotate_axis, data["split_before_rotate_axis"][i]))
+                self.assertLessEqual(self.rotate_gap(i, node), 1e-10)
+        self.assertEqual(seen, 63)
+
+    def test_a_transform_lands_where_mayas_split_is_lossy(self):
+        # Maya's own split misses these targets, 0.75 from what it wrote
+        data = self.data
+        for i in np.flatnonzero(data["split_node_type"] == 0).tolist():
+            if self.lossy(i):
+                node = self.solved(i)
+                got  = node.world_matrix if data["split_space"][i] else node.matrix
+                with self.subTest(record=i):
+                    self.assertLessEqual(relative(got, data["split_target"][i]), 1e-11)
+
+    def test_a_joint_is_xform_m(self):
+        # a compensated joint under a parent, 24 records, is a fact and no
+        # target: Maya misses a target it can hold there, cgmath strips IS
+        # from the right
+        data = self.data
+        seen = 0
+        for i in np.flatnonzero(data["split_node_type"] == 1).tolist():
+            compensated = data["split_segment_scale_compensate"][i] and data["split_has_parent"][i]
+            if self.lossy(i) or compensated:
+                continue
+            seen += 1
+            node = self.solved(i)
+            with self.subTest(record=i, kind=self.kinds[data["split_scale_kind"][i]]):
+                self.assertLessEqual(relative(node.matrix, data["split_matrix_after"][i]), 1e-12)
+                self.assertLessEqual(np.abs(node.scale - data["split_after_scale"][i]).max(), 1e-12)
+                self.assertTrue(np.array_equal(node.shear, data["split_before_shear"][i]))
+                self.assertTrue(np.array_equal(node.joint_orient, data["split_before_joint_orient"][i]))
+                self.assertTrue(np.array_equal(node.rotate_axis, data["split_before_rotate_axis"][i]))
+        self.assertEqual(seen, 44)
+
+
+class TestInMaya(unittest.TestCase):
+    """a live scene. Needs mayapy"""
+
+    def setUp(self):
+        try:
+            import maya.cmds as cmds
+
+            cmds.createNode("transform", name="cgmath_probe")
+        except Exception:  # not running in Maya
+            self.skipTest("needs Maya")
+        self.cmds = cmds
+        self.addCleanup(cmds.file, new=True, force=True)
+        cmds.file(new=True, force=True)
+
+    def _maya_node(self, name: str, node: TransformData) -> str:
+        cmds = self.cmds
+        made = cmds.createNode("transform", name=name)
+        for attr in ("t", "r", "s", "sh", "ra"):
+            cmds.setAttr(f"{made}.{attr}", *getattr(node, attr).tolist())
+        cmds.setAttr(f"{made}.ro", node.rotate_order)
+        return made
+
+    def test_set_parent_is_cmds_parent_on_a_transform(self):
+        cmds = self.cmds
+        rng  = np.random.default_rng(13)
+        for trial in range(12):
+            cmds.file(new=True, force=True)
+            parent = TransformData(
+                "p",
+                uuid      = "00000000-0000-4000-8000-000000000001",
+                scale     = rng.uniform(0.4, 2.2, 3),
+                rotate    = rng.uniform(-170.0, 170.0, 3),
+                translate = rng.uniform(-3.0, 3.0, 3),
+                shear     = rng.uniform(-1.0, 1.0, 3) if trial % 2 else None,
+            )
+            child = TransformData(
+                "c",
+                uuid         = "00000000-0000-4000-8000-000000000002",
+                scale        = rng.uniform(0.4, 2.2, 3),
+                rotate       = rng.uniform(-170.0, 170.0, 3),
+                translate    = rng.uniform(-3.0, 3.0, 3),
+                rotate_order = int(rng.integers(0, 6)),
+                rotate_axis  = rng.uniform(-30.0, 30.0, 3),
+            )
+            HierarchyData([parent, child])
+            p, c = self._maya_node("p", parent), self._maya_node("c", child)
+
+            cmds.parent(c, p)
+            child.set_parent("p")
+
+            c      = "p|c"
+            matrix = np.array(cmds.getAttr(c + ".m"), dtype=float).reshape(4, 4)
+            with self.subTest(trial=trial):
+                self.assertLessEqual(np.abs(child.scale - np.array(cmds.getAttr(c + ".s")[0])).max(), 1e-12)
+                self.assertLessEqual(np.abs(child.shear - np.array(cmds.getAttr(c + ".sh")[0])).max(), 1e-12)
+                self.assertLessEqual(np.abs(child.matrix[:3, :3] - matrix[:3, :3]).max(), 1e-12)
+                self.assertLessEqual(np.abs(child.matrix[3, :3] - matrix[3, :3]).max(), 1e-12)
 
 
 if __name__ == "__main__":

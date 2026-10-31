@@ -375,18 +375,28 @@ rig["knee"].world_matrix = target                  # solves the local for you
 assert np.allclose(rig["knee"].world_matrix[3, :3], [5.0, 5.0, 5.0])
 ```
 
-Writing `matrix` / `world_matrix` decomposes into scale, rotate and
-translate, solving `rotate` around the `rotate_axis`, `joint_orient` and
-`segment_scale_compensate` the node already has, so a matrix with no shear
-reads back as written. A target's shear is dropped: a node that is no
-joint writes its `shear` 0, a joint keeps the one it holds. A mirror goes
-on `scale_z`, the way Maya splits a matrix, and what a zero scale leaves
-of the rotation is kept from the current one.
+Writing `matrix` / `world_matrix` decomposes into scale, shear, rotate
+and translate, as Maya's `xform -matrix` does: Gram-Schmidt on the rows of
+`S · Sh · RO · R`, solving `rotate` around the `rotate_axis`, `joint_orient`
+and `segment_scale_compensate` the node already has. On a node that is no
+joint the matrix reads back as written. A joint takes the same scale and
+rotate and keeps the shear it holds, as `xform -matrix` leaves it, so a
+target holding another shear lands off, by `xform`'s own numbers. So can
+a target with the 3x3 it already has, where it holds shear and mirrors x
+or y: the mirror moves to z and the shear stays, `match_translate` and a
+child put back included. A mirror goes on `scale_z`, the way Maya splits a
+matrix, the shear signed by it, and what a zero scale leaves of the
+rotation is kept from the current one, of the shear from the shear the
+node holds. A matrix with no shear in it splits by row length, to the bit.
+On a compensated joint under an uneven parent `IS` comes off the right,
+exact where it can be, which is not Maya's.
 Writing `quaternion` solves only `rotate`, keeping `rotate_axis` and
 `joint_orient`. `set_parent()` and `match_matrix()` write through them
 too, so a reparented transform or locator keeps its `rotate_axis`, which
 `save_fbx` writes for joints only (see
-[Importers and exporters](#importers-and-exporters)).
+[Importers and exporters](#importers-and-exporters)), and takes the shear an
+uneven turned parent asks of it, so its file needs cgmath 3.1.0. `get_delta`
+and `match_rotate` read a world that shears by Maya's split too.
 
 ```python
 knee              = rig["knee"]
@@ -406,6 +416,23 @@ assert np.allclose(knee.scale, [1.0, 1.0, -1.0])         # the mirror lands on z
 
 rig["hip"].quaternion = [0.0, 0.0, 0.0, 1.0]       # identity orientation
 assert np.allclose(rig["hip"].rotate, 0.0, atol=1e-9)
+
+# a sheared target through Maya 2025's xform -m, the channels it wrote
+target = TransformData("target", scale=(1, 2, 3), shear=(0.5, -0.25, 0.75), rotate=(0, 0, 90), translate=(4, 5, 6)).matrix
+
+group        = TransformData("group")
+group.matrix = target
+assert np.allclose(group.matrix, target)                 # reads back as written
+assert np.allclose(group.scale, [1, 2, 3])
+assert np.allclose(group.shear, [0.5, -0.25, 0.75])
+assert np.allclose(group.rotate, [0, 0, 90])
+
+bone        = TransformData("bone", node_type="joint", shear=(0.1, 0.2, 0.3))
+bone.matrix = target
+assert np.allclose(bone.scale, [1, 2, 3])
+assert np.allclose(bone.rotate, [0, 0, 90])
+assert np.allclose(bone.shear, [0.1, 0.2, 0.3])          # a joint keeps its own
+assert not np.allclose(bone.matrix, target)
 ```
 
 ---
@@ -721,6 +748,17 @@ to the end of the list, so a parent always precedes its children. A
 parent that hangs below the node would close a loop: it raises before
 anything moves.
 
+In world space a transform or locator takes the shear an uneven turned
+parent asks of it, as Maya's `parent` does, and keeps its world. A joint
+takes the split's scale and rotate and keeps the shear it holds, so under
+such a parent it lands off: Maya keeps that world by inserting a transform
+above the joint, and `set_parent` adds no node. A joint holding shear with
+a mirror of its own on x or y can land off under any parent, as above. So
+can a joint holding `xz` or `yz` moved to a parent world of the other
+handedness, a mirror on one or three axes against none or two, an even
+parent included: the mirror of its block moves, the split signs those two
+entries and the joint keeps them, as `xform -ws -m` leaves it.
+
 ```python
 rig = make_chain()
 try:
@@ -807,7 +845,30 @@ np.round(j[0].world_matrix[:3, :3], 6).tolist()
 j[0].swapaxes(1, 0, negate=True)                # the negated inverse
 ```
 
-The swap lands in `joint_orient`, so an unposed joint stays unposed.
+The swap lands in `joint_orient`, so an unposed joint stays unposed. A
+node holding shear, a joint too, is split again, `P` on both sides of
+`S · Sh · RO · R`: its scale, shear and rotate change, its world is `P · W`
+and its children keep theirs, but for a joint child holding shear with a
+mirror of its own on x or y, which can move, and a compensated joint
+child: the new scale asks of it a shear a joint does not take, up to 1.66
+off on 3200 rigs. A compensated transform child takes that shear and keeps
+its world, but its own scale moves, so a compensated child of it moves, up
+to 0.52 off on 1600 rigs. Maya has no such command.
+
+A mirror stays on the axes the swap puts it on, whether or not the node
+holds shear: the split's signs go back, `S · Sh · Q` being `S D`, `D Sh D`,
+`D Q` for any `D` of ±1. So a frame holding a noise shear reads as the
+frames around it, one holding a keyed shear keeps their mirror, and a list
+reads as one node at a time on every channel, not only on its worlds. The
+matrix setters still put a mirror on `scale_z`, as Maya's split does.
+
+```python
+m          = make_chain(("m0", "m1"))
+m[0].scale = (1.0, 2.0, -3.0)
+m[0].shear = (0.5, -0.25, 0.75)
+m[0].swapaxes(1, 2)
+assert m[0].scale[1] < 0.0 < m[0].scale[2]      # the mirror went to y with z
+```
 
 ### Rename
 
@@ -1159,6 +1220,12 @@ assert np.allclose(recovered.world_matrix, a.world_matrix, atol=1e-6)
 | | `"name"` | pair on the intersection of the two name sets; allows a partial delta |
 | `translate` | `True` (default) | the delta carries a world-space position difference |
 | | `False` | orientation only; the result keeps its own bone offsets, so proportions survive |
+
+Shear is additive, as scale is: a delta holds `self - other`, on every
+node, joints included, and `add_delta` gives it back. A world that shears
+gives its orientation by Maya's split, so the round trip lands on `a` on a
+rig holding no shear whose worlds shear too. It stays off on a compensated
+node under an uneven parent, and with a mirror on a node or above it.
 
 `get_delta` always returns an owning container, even off a view.
 
@@ -1561,7 +1628,8 @@ assert np.allclose(solved.frames["hip"].rotate_x[:, 0], np.linspace(0.0, 540.0, 
 ## Clip deltas
 
 `get_delta` / `add_delta` cover the whole clip, not just the loaded
-frame, and return a `ClipData` carrying the timebase forward.
+frame, and return a `ClipData` carrying the timebase forward. Shear is
+additive on every frame, as on a rig.
 
 ```python
 rest               = make_chain()
@@ -2562,12 +2630,13 @@ whose `IsBindPose()` is true) lists takes that pose's matrix as its world
 matrix, in cm and Maya's axes as above; a node no bind pose lists keeps
 its own values under its parent, so it follows the parent's bind. The
 worlds are written parents first, each solved into scale, rotate (in the
-node's rotate order) and translate, the joint orient and rotate axis
-kept, and a node its bind leaves where it is keeps its own numbers: a
-file at its bind pose reads the same either way. When two bind poses
-list one node the first wins, with a warning naming the node when a
-later one is more than 1e-6 off it. A file with no bind pose listing a
-node the read keeps, or one above a kept node, raises `ValueError`.
+node's rotate order), translate and, on a node that is no joint, shear,
+the joint orient and rotate axis kept, and a node its bind leaves where
+it is keeps its own numbers: a file at its bind pose reads the same
+either way. When two bind poses list one node the first wins, with a
+warning naming the node when a later one is more than 1e-6 off it. A
+file with no bind pose listing a node the read keeps, or one above a
+kept node, raises `ValueError`.
 `pose="node"`, the default, reads the node values.
 
 `node_types` keeps the kinds of node it names, `"joint"`, `"locator"`,
