@@ -152,6 +152,28 @@ class TestMorphList(unittest.TestCase):
         self.list = MorphList([self.eyesClosed, self.jawClosed, self.jawOpen])
 
 
+    def test_a_memoryview_reads_as_the_array_it_views(self):
+        # a 2-D memoryview's rows are the operand of each shape, as the
+        # array's are: list() of one raised NotImplementedError
+        def shapes():
+            a = MorphData(name="a", offsets=np.arange(1.0, 7.0).reshape(2, 3), indices=np.array([0, 1]))
+            b = MorphData(name="b", offsets=np.full((2, 3), 2.0), indices=np.array([0, 1]))
+            return MorphList([a, b])
+
+        factors = np.array([[2.0, 3.0, 4.0], [0.5, 1.5, 2.5]])
+        for op in (operator.imul, operator.itruediv, operator.mul, operator.truediv):
+            with self.subTest(op=op.__name__):
+                want = op(shapes(), factors)
+                got  = op(shapes(), memoryview(factors))
+                self.assertEqual([x.offsets.tolist() for x in got], [x.offsets.tolist() for x in want])
+
+        # one of a shape's own offsets is read as they were, as the array is
+        obj    = shapes()
+        before = [x.offsets.copy() for x in obj]
+        obj *= memoryview(obj[0].offsets)
+        np.testing.assert_array_equal(obj[0].offsets, before[0] * before[0][0])
+        np.testing.assert_array_equal(obj[1].offsets, before[1] * before[0][1])
+
     def test_bytes(self):
         obj1 = self.list.copy()
         b    = obj1.to_bytes()

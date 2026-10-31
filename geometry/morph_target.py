@@ -479,8 +479,13 @@ class MorphList(DataList[MorphData]):
         ``+`` and ``-`` anything but a MorphData, for ``*`` and ``/`` a
         morph. Then a sequence of another length raises RuntimeError. The
         refusal names the operand, a python list, tuple or array by the item
-        refused: ``MorphList + a list holding a MorphList``
+        refused: ``MorphList + a list holding a MorphList``. A memoryview
+        reads as the array it views, so its rows are a shape's operand each,
+        as the array's are
         """
+        # list() can't take a memoryview of more than one dimension
+        if isinstance(other, memoryview):
+            other = np.asarray(other)
         many  = isinstance(other, MorphList) or _is_sequence(other)
         items = list(other) if many else [other]
         plain = many and not isinstance(other, DataList)
