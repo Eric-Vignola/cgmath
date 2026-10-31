@@ -648,6 +648,9 @@ exporter.Initialize(
 exporter.Export(scene)
 exporter.Destroy()
 manager.Destroy()
+# the destroyed objects' Python names go too: the binding hands an object
+# made later at the same address its stale wrapper, of the old type
+del manager, scene, parent, child, stack, layer, curve, exporter
 ```
 
 ---
