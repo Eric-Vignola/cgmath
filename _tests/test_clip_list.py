@@ -1006,6 +1006,48 @@ class TestClipListLoad(unittest.TestCase):
         with self.subTest(label):
             self.assertEqual(fingerprint(clip), LITERALS[label])
 
+    @unittest.skipIf(pygltflib is None, "pygltflib is not installed")
+    def test_load_glb_parses_once(self):
+        """ClipData.load_glb reads the rig and the take from one parse"""
+        from unittest import mock
+
+        from cgmath.formats import glb
+
+        path = build_glb(os.path.join(self.tmp.name, "takes.glb"))
+        with mock.patch.object(glb, "load_gltf", wraps=glb.load_gltf) as parse:
+            ClipData.load_glb(path, animation=1)
+        self.assertEqual(parse.call_count, 1)
+
+    @unittest.skipIf(pygltflib is None, "pygltflib is not installed")
+    def test_load_glb_splits_a_node_matrix(self):
+        """the rig ClipData.load_glb builds from its one parse splits a node
+        given as a matrix as HierarchyData.load_glb splits it (3.2.0): its
+        turn on joint_orient, its scale and translate, on every frame"""
+        path  = build_glb(os.path.join(self.tmp.name, "matrix.glb"), animations=ANIMATIONS[:1])
+        gltf  = GLTF2().load(path)
+        turn  = np.array([[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        local = np.eye(4)
+        local[:3, :3]             = np.diag([1.0, 2.0, 0.5]) @ turn
+        local[3, :3]              = (0.5, 1.0, -0.25)
+        gltf.nodes[1].translation = None
+        gltf.nodes[1].matrix      = [float(value) for value in local.ravel()]
+        gltf.save(path)
+
+        for factor in (1.0, 100.0):
+            with self.subTest(scale_factor=factor):
+                rig  = HierarchyData.load_glb(path, scale_factor=factor)
+                clip = ClipData.load_glb(path, scale_factor=factor)
+                # the matrix's own: its turn 90 about z, its scale, its place
+                np.testing.assert_allclose(rig["mid"].joint_orient, (0.0, 0.0, 90.0), rtol=0, atol=1e-12)
+                np.testing.assert_allclose(rig["mid"].scale, (1.0, 2.0, 0.5), rtol=0, atol=1e-12)
+                np.testing.assert_allclose(rig["mid"].translate, np.array([0.5, 1.0, -0.25]) * factor, rtol=0, atol=1e-12)
+                for channel in ("translate", "rotate", "joint_orient", "scale"):
+                    np.testing.assert_array_equal(
+                        np.asarray(getattr(clip.frames, channel))[:, 1],
+                        np.broadcast_to(np.asarray(getattr(rig["mid"], channel)), (clip.frame_count, 3)),
+                        err_msg=channel,
+                    )
+
     def test_clip_loaders_bit_identical(self):
         """the clip loaders read what they read before their bodies moved:
         Maya's Walk.fbx and an SDK-built file of three takes (mayapy), and a

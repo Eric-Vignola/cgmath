@@ -283,6 +283,173 @@ def _sample_gltf(sampler, times: np.ndarray, width: int) -> np.ndarray:
     return values[left] + (values[right] - values[left]) * weight[:, None]
 
 
+def _glb_rig(cls, data, scale_factor: float) -> tuple:
+    """the rig a parsed glb, ``data`` (``load_model``'s), holds, as ``cls``,
+    and each node's dict, None for a node skipped, as
+    :meth:`HierarchyData.load_glb` reads them"""
+    # None stands for a node skipped; _glb_columns skips the same ones.
+    # glTF gives a node a matrix or translation, rotation and scale; a
+    # matrix is split once the hierarchy is built
+    node_list = []
+    matrices  = {}
+    for node in data.nodes:
+        node_list.append(None)
+
+        node_type = _glb_node_type(node, data.nodes)
+        if node_type is not None:
+            new_node              = {"name": node.name}
+            new_node["node_type"] = node_type
+            new_node["uuid"]      = generate_uuid()
+
+            if node.matrix:
+                matrices[new_node["uuid"]] = node.matrix
+
+            if node.scale:
+                new_node["scale"] = node.scale
+
+            if node.rotation:
+                new_node["rotate"] = node.rotation
+
+            if node.translation:
+                new_node["translate"] = node.translation
+
+            if node.children:
+                new_node["children"] = node.children
+
+            node_list[-1] = new_node
+
+    # convert the dict so it matches the TransformData class properties
+    hierarchy_data = {}
+
+    # load_model already walked the file's tree parent first. The node
+    # array itself carries no such promise -- exporters write it leaf
+    # first often enough -- and a dcc has to create a parent before it
+    # can parent anything to it.
+    for position in data.ordered_node_indexes:
+        node = node_list[position]
+        if node is not None:
+            # convert children to parent_uuid
+            if "children" in node:
+                for index in node.pop("children", None):
+                    if node_list[index] is not None:
+                        node_list[index]["parent_uuid"] = node["uuid"]
+
+            # convert rotation to joint_orient
+            if "rotate" in node:
+                Q                    = node.pop("rotate", None)
+                node["joint_orient"] = np.degrees(quaternion_to_euler(Q, 0)[0])
+
+            # convert translation to translate
+            if "translate" in node:
+                node["translate"] = np.array(node["translate"]) * scale_factor
+
+            hierarchy_data[node["uuid"]] = node
+
+    # set the pose_frame if requested
+    hierarchy_data                          = cls.from_dict(hierarchy_data)
+    hierarchy_data.segment_scale_compensate = False
+
+    # glTF's column major numbers are the rows of a row vector matrix.
+    # The turn then goes on joint_orient in xyz, rotate 0, as a node's
+    # quaternion does, so either form of a node holds the same channels
+    by_uuid = {node.uuid: node for node in hierarchy_data}
+    for uuid, matrix in matrices.items():
+        M = np.array(matrix, dtype=float).reshape(4, 4)
+        M[3, :3] *= scale_factor
+        node              = by_uuid[uuid]
+        node.matrix       = M
+        Q                 = node.quaternion
+        node.rotate       = np.zeros(3, dtype=float)
+        node.rotate_axis  = np.zeros(3, dtype=float)
+        node.joint_orient = np.degrees(quaternion_to_euler(Q, 0)[0])
+    return hierarchy_data, node_list
+
+
+def _glb_take_clip(cls, model, rig, column, animations, animation, scale_factor, fps, start_frame, take):
+    """``animations[animation]`` of a parsed glb, ``model``, as ``cls``, a
+    ClipData named ``take``, on ``rig`` (the file's rig) through ``column``
+    (:func:`_glb_columns`), as :meth:`ClipData.load_glb` reads it"""
+    channels = []
+    for channel in animations[animation].channels if animations else []:
+        if channel.path not in ("scale", "rotation", "translation"):
+            continue
+        if channel.node not in column:
+            continue
+
+        channels.append((channel, column[channel.node]))
+
+    # the grid spans the channels actually used: a sampler belonging to a
+    # node the rig dropped would otherwise stretch it
+    spans = [
+        np.asarray(
+            animations[animation].samplers[channel.sampler].keyframe_times,
+            dtype=float,
+        ).ravel()
+        for channel, _ in channels
+    ]
+    spans = [keys for keys in spans if keys.size]
+
+    if not spans:
+        return cls(rig, frames=1, start_frame=start_frame, fps=fps, take=take)
+
+    first  = min(keys[0] for keys in spans)
+    last   = max(keys[-1] for keys in spans)
+
+    frames = _glb_frame_count(first, last, fps)
+    grid   = first + np.arange(frames) / fps
+    times  = grid.copy()
+    if frames > 1:
+        # the last frame can fall a hair before the last key: float32
+        # stored the key a hair late, or float64 rounded the frame's time
+        # a hair short of it. That frame samples the key itself, so a
+        # held last key still shows, unless a held channel's own key sits
+        # exactly on the frame's time (below)
+        times[-1] = max(times[-1], last)
+
+    clip = cls(rig, frames=frames, start_frame=start_frame, fps=fps, take=take)
+
+    # seeded with the rest pose, which is what unanimated nodes keep
+    scale     = np.array(clip.frames.scale)
+    rotate    = np.array(clip.frames.rotate)
+    translate = np.array(clip.frames.translate)
+
+    for channel, index in channels:
+        sampler = animations[animation].samplers[channel.sampler]
+
+        # a held key exactly on the last frame's time, its float32 value,
+        # keeps that frame, as on any other frame, though a second key
+        # sits a spacing after it: that channel reads the last frame on
+        # the grid
+        at = times
+        if sampler.interpolation == "STEP":
+            held = np.asarray(sampler.keyframe_times, dtype=float)
+            if np.any(held == float(np.float32(grid[-1]))):
+                at = grid
+
+        if channel.path == "translation":
+            translate[:, index] = _sample_gltf(sampler, at, 3) * scale_factor
+        elif channel.path == "scale":
+            scale[:, index] = _sample_gltf(sampler, at, 3)
+        else:
+            # the rest branch puts the node's orientation in joint_orient,
+            # so rotate carries the delta from it and nothing else
+            node = clip[index]
+            delta = q_multiply(
+                q_conjugate(node.quaternion),
+                q_normalize(_sample_gltf(sampler, at, 4)),
+            )
+            rotate[:, index] = np.degrees(
+                quaternion_to_euler(delta, node.rotate_order)
+            )
+
+    orders                = np.asarray(clip.rotate_order, dtype=np.intp)
+    clip.frames.scale     = scale
+    clip.frames.rotate    = np.degrees(euler_filter(np.radians(rotate), orders))
+    clip.frames.translate = translate
+    clip.frame            = 0
+    return clip
+
+
 def _glb_frame_count(first: float, last: float, fps: float) -> int:
     """the frames a glTF animation from ``first`` to ``last`` seconds spans at
     ``fps``, both ends included
@@ -7449,81 +7616,7 @@ class TransformList(DataList[TransformData]):
         # parse the nodes and look for style2 or momentum joints
         data = load_model(filename)
 
-        # None stands for a node skipped; _glb_columns skips the same ones.
-        # glTF gives a node a matrix or translation, rotation and scale; a
-        # matrix is split once the hierarchy is built
-        node_list = []
-        matrices  = {}
-        for node in data.nodes:
-            node_list.append(None)
-
-            node_type = _glb_node_type(node, data.nodes)
-            if node_type is not None:
-                new_node              = {"name": node.name}
-                new_node["node_type"] = node_type
-                new_node["uuid"]      = generate_uuid()
-
-                if node.matrix:
-                    matrices[new_node["uuid"]] = node.matrix
-
-                if node.scale:
-                    new_node["scale"] = node.scale
-
-                if node.rotation:
-                    new_node["rotate"] = node.rotation
-
-                if node.translation:
-                    new_node["translate"] = node.translation
-
-                if node.children:
-                    new_node["children"] = node.children
-
-                node_list[-1] = new_node
-
-        # convert the dict so it matches the TransformData class properties
-        hierarchy_data = {}
-
-        # load_model already walked the file's tree parent first. The node
-        # array itself carries no such promise -- exporters write it leaf
-        # first often enough -- and a dcc has to create a parent before it
-        # can parent anything to it.
-        for position in data.ordered_node_indexes:
-            node = node_list[position]
-            if node is not None:
-                # convert children to parent_uuid
-                if "children" in node:
-                    for index in node.pop("children", None):
-                        if node_list[index] is not None:
-                            node_list[index]["parent_uuid"] = node["uuid"]
-
-                # convert rotation to joint_orient
-                if "rotate" in node:
-                    Q                    = node.pop("rotate", None)
-                    node["joint_orient"] = np.degrees(quaternion_to_euler(Q, 0)[0])
-
-                # convert translation to translate
-                if "translate" in node:
-                    node["translate"] = np.array(node["translate"]) * scale_factor
-
-                hierarchy_data[node["uuid"]] = node
-
-        # set the pose_frame if requested
-        hierarchy_data                          = cls.from_dict(hierarchy_data)
-        hierarchy_data.segment_scale_compensate = False
-
-        # glTF's column major numbers are the rows of a row vector matrix.
-        # The turn then goes on joint_orient in xyz, rotate 0, as a node's
-        # quaternion does, so either form of a node holds the same channels
-        by_uuid = {node.uuid: node for node in hierarchy_data}
-        for uuid, matrix in matrices.items():
-            M = np.array(matrix, dtype=float).reshape(4, 4)
-            M[3, :3] *= scale_factor
-            node              = by_uuid[uuid]
-            node.matrix       = M
-            Q                 = node.quaternion
-            node.rotate       = np.zeros(3, dtype=float)
-            node.rotate_axis  = np.zeros(3, dtype=float)
-            node.joint_orient = np.degrees(quaternion_to_euler(Q, 0)[0])
+        hierarchy_data, node_list = _glb_rig(cls, data, scale_factor)
 
         if pose_frame is not None and data.animations:
             animation = data.animations[0]
@@ -14746,8 +14839,12 @@ class ClipData(HierarchyData):
         if fps <= 0.0:
             raise ValueError(f"fps must be positive, got {fps}")
 
-        rig   = HierarchyData.load_glb(filename, scale_factor=scale_factor)
+        if GLTF2 is None:
+            raise ImportError("pygltflib not found")
+
+        # one parse, for the rig and the take
         model = load_model(os.path.expanduser(filename))
+        rig, _ = _glb_rig(HierarchyData, model, scale_factor)
 
         animations = model.animations or []
         if animation and not -len(animations) <= animation < len(animations):
@@ -14763,85 +14860,9 @@ class ClipData(HierarchyData):
             raw  = [x.name or "" for x in animations]
             take = _take_names(raw, read=[animation % len(animations)], blank=_blank_animation)[animation]
 
-        channels = []
-        for channel in animations[animation].channels if animations else []:
-            if channel.path not in ("scale", "rotation", "translation"):
-                continue
-            if channel.node not in column:
-                continue
-
-            channels.append((channel, column[channel.node]))
-
-        # the grid spans the channels actually used: a sampler belonging to a
-        # node the rig dropped would otherwise stretch it
-        spans = [
-            np.asarray(
-                animations[animation].samplers[channel.sampler].keyframe_times,
-                dtype=float,
-            ).ravel()
-            for channel, _ in channels
-        ]
-        spans = [keys for keys in spans if keys.size]
-
-        if not spans:
-            return cls(rig, frames=1, start_frame=start_frame, fps=fps, take=take)
-
-        first  = min(keys[0] for keys in spans)
-        last   = max(keys[-1] for keys in spans)
-
-        frames = _glb_frame_count(first, last, fps)
-        grid   = first + np.arange(frames) / fps
-        times  = grid.copy()
-        if frames > 1:
-            # the last frame can fall a hair before the last key: float32
-            # stored the key a hair late, or float64 rounded the frame's time
-            # a hair short of it. That frame samples the key itself, so a
-            # held last key still shows, unless a held channel's own key sits
-            # exactly on the frame's time (below)
-            times[-1] = max(times[-1], last)
-
-        clip = cls(rig, frames=frames, start_frame=start_frame, fps=fps, take=take)
-
-        # seeded with the rest pose, which is what unanimated nodes keep
-        scale     = np.array(clip.frames.scale)
-        rotate    = np.array(clip.frames.rotate)
-        translate = np.array(clip.frames.translate)
-
-        for channel, index in channels:
-            sampler = animations[animation].samplers[channel.sampler]
-
-            # a held key exactly on the last frame's time, its float32 value,
-            # keeps that frame, as on any other frame, though a second key
-            # sits a spacing after it: that channel reads the last frame on
-            # the grid
-            at = times
-            if sampler.interpolation == "STEP":
-                held = np.asarray(sampler.keyframe_times, dtype=float)
-                if np.any(held == float(np.float32(grid[-1]))):
-                    at = grid
-
-            if channel.path == "translation":
-                translate[:, index] = _sample_gltf(sampler, at, 3) * scale_factor
-            elif channel.path == "scale":
-                scale[:, index] = _sample_gltf(sampler, at, 3)
-            else:
-                # the rest branch puts the node's orientation in joint_orient,
-                # so rotate carries the delta from it and nothing else
-                node = clip[index]
-                delta = q_multiply(
-                    q_conjugate(node.quaternion),
-                    q_normalize(_sample_gltf(sampler, at, 4)),
-                )
-                rotate[:, index] = np.degrees(
-                    quaternion_to_euler(delta, node.rotate_order)
-                )
-
-        orders                = np.asarray(clip.rotate_order, dtype=np.intp)
-        clip.frames.scale     = scale
-        clip.frames.rotate    = np.degrees(euler_filter(np.radians(rotate), orders))
-        clip.frames.translate = translate
-        clip.frame            = 0
-        return clip
+        return _glb_take_clip(
+            cls, model, rig, column, animations, animation, scale_factor, fps, start_frame, take
+        )
 
     @classmethod
     def load_fbx(
