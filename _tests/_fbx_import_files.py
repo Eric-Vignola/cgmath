@@ -32,6 +32,15 @@ try:
 except ImportError:
     FBX = None
 
+# a module named fbx that is not the SDK, a folder of that name on the
+# path, holds not all of the SDK's own classes, and is none: the test of
+# cgmath.formats._fbx_io.load_sdk, written out, as nothing of cgmath is
+# imported here
+if FBX is not None and not all(
+    hasattr(FBX, name) for name in ("FbxManager", "FbxScene", "FbxImporter", "FbxExporter", "FbxNode")
+):
+    FBX = None
+
 
 def _axes(name: str):
     if name == "zup":

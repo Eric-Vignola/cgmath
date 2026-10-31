@@ -36,7 +36,7 @@ from cgmath.data import (
     _refusal,
     _save_shares,
 )
-from cgmath.formats._fbx_io import open_fbx, typed
+from cgmath.formats._fbx_io import load_sdk, open_fbx, typed
 from cgmath.formats.glb import load_model
 from cgmath.transforms import (
     euler_filter,
@@ -61,11 +61,11 @@ try:
 except ImportError:
     GLTF2 = None
 
-try:
-    import fbx as FBX
+# None without the SDK, or for a module named fbx that is not it (load_sdk)
+FBX = load_sdk()
+if FBX is not None:
     from cgmath.formats.fbx import LOGGER as _FBX_LOGGER, FbxExporter, _ascii_read_back, _user_property_value
-except ImportError:
-    FBX                  = None
+else:
     FbxExporter          = None
     _FBX_LOGGER          = None
     _ascii_read_back     = None

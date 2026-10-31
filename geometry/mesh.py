@@ -47,12 +47,6 @@ try:
 except ImportError:
     trimesh = None
 
-# autodesk fbx sdk
-try:
-    import fbx
-except ImportError:
-    fbx = None
-
 
 from cgmath.data import (
     _call_route,
@@ -64,7 +58,7 @@ from cgmath.data import (
     DataList,
     ImmutableArray as numpy_array,
 )
-from cgmath.formats._fbx_io import open_fbx
+from cgmath.formats._fbx_io import load_sdk, open_fbx
 from cgmath.formats.glb import _trimesh_scene
 from cgmath.geometry._saddle_surface import integrate, sample
 from cgmath.geometry.utils import (
@@ -99,6 +93,9 @@ from cgmath.hierarchy import _fbx_axis_turn, _fbx_check_axis_system, _fbx_units
 from cgmath.transforms import euler_to_matrix
 from scipy.ndimage import convolve
 from scipy.spatial import QhullError, cKDTree
+
+# autodesk fbx sdk, None without it, or for a module named fbx that is not it
+fbx = load_sdk()
 
 MESH_PRIM_TYPE = "Mesh"
 UV_ATTR_PREFIX = "primvars:st"

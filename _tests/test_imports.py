@@ -18,6 +18,8 @@ import importlib.util
 import os
 import pkgutil
 import re
+import subprocess
+import sys
 import tempfile
 import types
 import unittest
@@ -38,6 +40,22 @@ if importlib.util.find_spec("pxr") is None:
 
 PACKAGE_ROOT = os.path.dirname(os.path.abspath(cgmath.__file__))
 
+# the classes the Autodesk FBX SDK holds, by which load_sdk tells it, written
+# out here so that the tests of load_sdk do not take its word for them
+SDK_CLASSES = ("FbxManager", "FbxScene", "FbxImporter", "FbxExporter", "FbxNode")
+
+
+def _installed_sdk():
+    """the module that imports as ``fbx`` where it holds every one of
+    SDK_CLASSES, else None: load_sdk's rule, written out, so that a
+    load_sdk that never finds the SDK cannot also skip the test that would
+    catch it, and a stranger named fbx makes the SDK's tests skip"""
+    try:
+        import fbx
+    except ImportError:
+        return None
+    return fbx if all(hasattr(fbx, name) for name in SDK_CLASSES) else None
+
 
 def _iter_modules():
     """Yield every importable module name under :mod:`cgmath`, tests excluded."""
@@ -48,6 +66,89 @@ def _iter_modules():
         if any(name == o or name.startswith(o + ".") for o in OPTIONAL):
             continue
         yield name
+
+
+class TestNotTheFbxSdk(unittest.TestCase):
+    """a module that imports as ``fbx`` but is not the Autodesk SDK -- a
+    folder of that name on the path, another package -- is taken for no SDK,
+    as a missing one is: every module still imports, and FBX use says the
+    SDK is missing. The SDK is told by its own classes."""
+
+    # what every module that reaches for the SDK holds it as
+    REPORT = (
+        "import cgmath.hierarchy, cgmath.geometry.mesh, cgmath.geometry.skin_weights, cgmath.render.scene\n"
+        "from cgmath.formats import fbx as module\n"
+        "from cgmath.hierarchy import hierarchy\n"
+        "from cgmath.geometry import mesh, skin_weights\n"
+        "from cgmath.render import scene\n"
+        "print(bool(module.fbx), hierarchy.FBX, hierarchy.FbxExporter, mesh.fbx, skin_weights.fbx, scene._fbx)\n"
+    )
+
+    def run_beside(self, make):
+        """the report, in a python whose path starts with a folder ``make``
+        fills, then this python's own (mayapy's packages come from a venv
+        that only maya.standalone puts on its path)"""
+        holder = os.path.dirname(PACKAGE_ROOT)
+        with tempfile.TemporaryDirectory() as folder:
+            make(folder)
+            path = [folder, holder] + [x for x in sys.path if x and os.path.isdir(x)]
+            env  = dict(os.environ, PYTHONPATH=os.pathsep.join(path))
+            done = subprocess.run(
+                [sys.executable, "-c", self.REPORT], capture_output=True, text=True, env=env, timeout=600, cwd=folder
+            )
+        return done
+
+    def test_a_stranger_named_fbx_is_no_sdk(self):
+        def package(folder):
+            os.makedirs(os.path.join(folder, "fbx"))
+            open(os.path.join(folder, "fbx", "__init__.py"), "w").close()
+
+        def namespace(folder):
+            os.makedirs(os.path.join(folder, "fbx", "textures"))
+
+        def module(folder):
+            with open(os.path.join(folder, "fbx.py"), "w") as handle:
+                handle.write("VERSION = 1\n")
+
+        # a namespace folder gives way to a module of its name anywhere on
+        # the path (PEP 420): the SDK, where one is installed, is found, and
+        # so is a stranger already first on this python's path
+        installed = _installed_sdk() is not None
+        for label, make in (("package", package), ("namespace folder", namespace), ("module", module)):
+            with self.subTest(label):
+                done = self.run_beside(make)
+                self.assertEqual(done.returncode, 0, done.stderr[-1500:])
+                report = done.stdout.split("\n")[-2]
+                if label == "namespace folder" and installed:
+                    self.assertTrue(report.startswith("True <module 'fbx'"), report)
+                else:
+                    self.assertEqual(report, "False None None None None None")
+
+    def test_a_stranger_holding_some_of_the_sdk_classes_is_no_sdk(self):
+        """the SDK holds all five of SDK_NAMES: a module named fbx, first on
+        the path, that holds FbxManager alone, or four of the five, each one
+        left out in turn, is no SDK"""
+        holds = [("FbxManager",)] + [tuple(x for x in SDK_CLASSES if x != left) for left in SDK_CLASSES]
+        for names in holds:
+            with self.subTest(holds=names):
+
+                def partial(folder, names=names):
+                    with open(os.path.join(folder, "fbx.py"), "w") as handle:
+                        handle.write("".join("class %s:\n    pass\n" % name for name in names))
+
+                done = self.run_beside(partial)
+                self.assertEqual(done.returncode, 0, done.stderr[-1500:])
+                self.assertEqual(done.stdout.split("\n")[-2], "False None None None None None")
+
+    @unittest.skipIf(_installed_sdk() is None, "Autodesk FBX Python SDK is not installed")
+    def test_the_sdk_is_told_by_its_own_classes(self):
+        import fbx
+
+        from cgmath.formats import _fbx_io
+        from cgmath.hierarchy import hierarchy
+
+        self.assertIs(_fbx_io.load_sdk(), fbx)
+        self.assertIs(hierarchy.FBX, fbx)
 
 
 class TestEveryModuleImports(unittest.TestCase):

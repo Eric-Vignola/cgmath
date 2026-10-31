@@ -30,14 +30,12 @@ from unittest import mock
 
 import numpy as np
 
+from cgmath.formats._fbx_io import load_sdk
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData, TransformList
 
-try:
-    import fbx as FBX
-
+FBX = load_sdk()
+if FBX is not None:
     from cgmath._tests._fbx_import_files import add_curve, write_layout
-except ImportError:
-    FBX = None
 
 H = sys.modules[ClipData.__module__]
 

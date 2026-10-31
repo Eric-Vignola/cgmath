@@ -58,7 +58,7 @@ from cgmath.data import (
     DTYPES_KEY,
     ImmutableArray as numpy_array,
 )
-from cgmath.formats._fbx_io import FbxReadError, open_fbx, typed
+from cgmath.formats._fbx_io import FbxReadError, load_sdk, open_fbx, typed
 from cgmath.geometry.deform import SkinDeformData
 from cgmath.geometry.mesh import (
     _corner_normals,
@@ -100,10 +100,7 @@ except ImportError:
 # Autodesk FBX SDK (optional) -- only required by :meth:`Object.load_fbx` and
 # :meth:`Object.extract_texture_from_fbx`. Lazy-import keeps the module
 # loadable in environments without the FBX SDK installed.
-try:
-    import fbx as _fbx
-except ImportError:
-    _fbx = None
+_fbx = load_sdk()
 
 
 # -- Object --------------------------------------------------------------------

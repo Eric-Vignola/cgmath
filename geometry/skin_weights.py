@@ -18,7 +18,7 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 
 import numpy as np
 from cgmath.data import Array, Data, DataList, _load_derived
-from cgmath.formats._fbx_io import open_fbx
+from cgmath.formats._fbx_io import load_sdk, open_fbx
 from cgmath.formats.glb import load_model
 from cgmath.geometry.mesh import _walk_fbx_mesh_nodes
 from cgmath.geometry.utils import (
@@ -39,11 +39,8 @@ from cgmath.hierarchy import (
 )
 from scipy.sparse import coo_matrix
 
-# autodesk fbx sdk
-try:
-    import fbx
-except ImportError:
-    fbx = None
+# autodesk fbx sdk, None without it, or for a module named fbx that is not it
+fbx = load_sdk()
 
 JOINT_NAMES_ATTR = "skel:jointNames"
 SKIN_PRIM_TYPE   = "SkinWeights"

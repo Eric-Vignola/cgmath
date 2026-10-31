@@ -17,6 +17,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 
 from cgmath._tests.test_data_module import _fresh
+from cgmath.formats._fbx_io import load_sdk
 
 # where an import can start: a submodule runs its package's __init__ first,
 # so one entry per package is every order the cycle could load in
@@ -48,7 +49,9 @@ print(json.dumps({{
 }}))
 """
 
-HAS_FBX = importlib.util.find_spec("fbx") is not None
+# the SDK by its own classes, as the package tells it: a module named fbx
+# that is not the SDK reads as none here, as in the package
+HAS_FBX = load_sdk() is not None
 
 
 class TestImportOrder(unittest.TestCase):

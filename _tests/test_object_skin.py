@@ -29,7 +29,7 @@ import numpy as np
 from cgmath.geometry.deform import SkinDeformData
 from cgmath.geometry.mesh import MeshData, MeshList, UVList, load as mesh_load, load_fbx as mesh_load_fbx
 from cgmath.geometry.skin_weights import SkinList, _read_skins_fbx
-from cgmath.formats._fbx_io import open_fbx
+from cgmath.formats._fbx_io import load_sdk, open_fbx
 from cgmath.render.scene import Object, Scene
 from cgmath.hierarchy import ClipData, HierarchyData
 
@@ -44,10 +44,7 @@ try:
 except ImportError:
     trimesh = None
 
-try:
-    import fbx
-except ImportError:
-    fbx = None
+fbx = load_sdk()
 
 if pygltflib is not None:
     from cgmath._tests.test_skin_glb import Builder, one_hot, triangle

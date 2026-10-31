@@ -18,13 +18,11 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+from cgmath.formats._fbx_io import load_sdk
 from cgmath.geometry import SkinData
 from cgmath.geometry.skin_weights import SkinList, load_fbx
 
-try:
-    import fbx
-except ImportError:
-    fbx = None
+fbx = load_sdk()
 
 
 def build_scene(manager):

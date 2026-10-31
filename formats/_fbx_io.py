@@ -12,7 +12,7 @@ out to numpy arrays and strings first.
 
 This module imports nothing from cgmath, so any module can use it without an
 import cycle. The caller passes its own ``fbx`` module, which lets tests swap
-a fake SDK in per module.
+a fake SDK in per module; :func:`load_sdk` is how each finds the real one.
 """
 
 import contextlib
@@ -24,6 +24,7 @@ import warnings
 __all__ = [
     "FbxReadError",
     "import_scene",
+    "load_sdk",
     "media_folder",
     "new_manager",
     "open_fbx",
@@ -38,9 +39,29 @@ EXTRACT_FOLDER = "Import|IncludeGrp|EmbedTexture|ExtractFolder"
 
 SDK_MISSING = "Autodesk FBX Python SDK is not installed"
 
+# classes the Autodesk SDK's module holds, which another module that imports
+# as ``fbx`` -- a folder of that name on the path, another package -- does not
+SDK_NAMES = ("FbxManager", "FbxScene", "FbxImporter", "FbxExporter", "FbxNode")
+
 
 class FbxReadError(RuntimeError):
     """the FBX SDK could not open or import a file"""
+
+
+def load_sdk():
+    """
+    The Autodesk FBX SDK's ``fbx`` module, or None where it is not installed.
+    A module that imports by that name but holds not all of the SDK's five
+    classes (:data:`SDK_NAMES`: FbxManager, FbxScene, FbxImporter,
+    FbxExporter, FbxNode) -- a folder named ``fbx`` on the path, another
+    package, one holding some of them -- is not the SDK, and reads as a
+    missing one.
+    """
+    try:
+        import fbx
+    except ImportError:
+        return None
+    return fbx if all(hasattr(fbx, name) for name in SDK_NAMES) else None
 
 
 def short_path(path):

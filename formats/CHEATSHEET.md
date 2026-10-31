@@ -591,8 +591,11 @@ glb.save(os.path.join(WORK, "glbdata_out.glb"))
 
 ## `fbx` — build a fixture
 
-Needs the Autodesk FBX Python SDK. Note `import cgmath.formats.fbx`
-**raises `ImportError`** without it — the SDK import is unguarded.
+Needs the Autodesk FBX Python SDK. Without it `import cgmath.formats.fbx`
+still works, with one `UserWarning`, and every FBX call raises
+`RuntimeError`. A module that imports as `fbx` but holds not all of the
+SDK's five classes (`FbxManager`, `FbxScene`, `FbxImporter`, `FbxExporter`,
+`FbxNode`), such as a folder named `fbx` on the path, counts as no SDK.
 
 Two nulls, one take, one keyed translate curve.
 

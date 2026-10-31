@@ -33,10 +33,7 @@ from cgmath._tests.test_fbx_import import (
     _wire_importer,
 )
 
-try:
-    import fbx
-except ImportError:
-    fbx = None
+fbx = _fbx_io.load_sdk()
 
 try:
     from PIL import Image

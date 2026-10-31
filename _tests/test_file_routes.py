@@ -29,6 +29,7 @@ from unittest import mock
 import numpy as np
 from cgmath import hierarchy
 from cgmath.data import Data, DataList, LegacyFileError, get_file_type
+from cgmath.formats._fbx_io import load_sdk
 from cgmath.formats.glb import GlbData
 from cgmath.geometry import mesh as mesh_module
 from cgmath.geometry import skin_weights
@@ -37,10 +38,7 @@ from cgmath.geometry.skin_weights import SkinList
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData
 from cgmath.render.scene import Object, Scene
 
-try:
-    import fbx
-except ImportError:
-    fbx = None
+fbx = load_sdk()
 
 try:
     import trimesh

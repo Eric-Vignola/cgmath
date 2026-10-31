@@ -11,7 +11,7 @@ import urllib.parse
 import warnings
 
 import numpy as np
-from cgmath.formats._fbx_io import import_scene, media_folder, new_manager, typed
+from cgmath.formats._fbx_io import import_scene, load_sdk, media_folder, new_manager, typed
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,9 +37,9 @@ FBX_SDK_REQUIRED = (
     "cgmath reads and writes -- OBJ, GLB, USD -- works without it."
 )
 
-try:
-    import fbx
-except ImportError:
+# a module that imports as fbx but is not the SDK is taken for none (load_sdk)
+fbx = load_sdk()
+if fbx is None:
 
     class _FbxSdkMissing:
         """Stands in for the absent ``fbx`` module and explains itself."""

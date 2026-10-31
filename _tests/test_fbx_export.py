@@ -21,12 +21,10 @@ from unittest import mock
 
 import numpy as np
 
+from cgmath.formats._fbx_io import load_sdk
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData, TransformList
 
-try:
-    import fbx
-except ImportError:
-    fbx = None
+fbx = load_sdk()
 
 
 def _joint(name, parent=None, **kwargs):
