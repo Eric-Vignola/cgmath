@@ -781,6 +781,7 @@ print(HierarchyData.load_fbx(os.path.join(tmp, "rig2.fbx")).name)
 | One mesh | `MeshData.load_obj / load_glb / load_fbx / load_usd`, or `MeshData.load(path, **kwargs)` |
 | Skin weights | `cgmath.geometry.skin_weights.load_fbx / load_glb` |
 | Every take of a file | `cgmath.hierarchy.ClipList.load_fbx / load_glb(path)` -> one `ClipData` per take |
+| Takes to a file | `clips.save_fbx(path)`: one stack per take, every frame keyed; `clip.save_fbx(path)` writes one take |
 | Animation curves | `cgmath.formats.fbx.SceneData(path)` — the constructor loads; there is no `from_file` |
 | Raw glTF | `cgmath.formats.glb.load_model(path)` -> `Model(name, nodes, ordered_node_indexes, meshes, animations, skins)` |
 

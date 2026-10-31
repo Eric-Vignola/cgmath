@@ -15638,24 +15638,22 @@ class ClipData(HierarchyData):
             )
 
     def save_fbx(self, filename, zero_root=False, as_ascii=False):
-        """saves the bound frame to a .fbx file, binary unless as_ascii is set
+        """saves the clip to a .fbx file, binary unless as_ascii is set
 
-        The exporter writes one pose per node and never opens an animation
-        stack, so a clip holding more than one frame has to say which frame
-        it meant rather than quietly shipping whichever one is loaded. The
-        file is labelled with the clip's :attr:`axis_system` and
-        :attr:`unit`, as :meth:`HierarchyData.save_fbx` labels a rig's, and
-        like it leaves a node's shear out, FBX having no channel for it, with
-        one warning naming the nodes the frame holds one on: Maya's FBXImport
-        and :meth:`load_fbx` read the frame with that shear zeroed.
+        A clip of two frames or more is written as one take, as
+        ``ClipList([clip]).save_fbx`` writes it: every frame keyed, float32.
+        A clip of one frame or none is one pose, written with no take, as
+        :meth:`HierarchyData.save_fbx` writes a rig. The file is labelled
+        with the clip's :attr:`axis_system` and :attr:`unit`, as
+        :meth:`HierarchyData.save_fbx` labels a rig's, and like it leaves a
+        node's shear out, FBX having no channel for it, with one warning
+        naming the nodes the clip holds one on, at its frame for a pose and
+        on any frame for a take: Maya's FBXImport and :meth:`load_fbx` read
+        the clip with that shear zeroed.
         """
         if self.frame_count > 1:
-            raise ValueError(
-                "save_fbx writes one pose but this clip holds "
-                f"{self.frame_count} frames; cut the frame out first, "
-                f"clip.frames[{self.frame}:{self.frame + 1}].save_fbx(...), "
-                "or save it as npz, json or pkl to keep the whole clip"
-            )
+            ClipList([self]).save_fbx(filename, zero_root=zero_root, as_ascii=as_ascii)
+            return
 
         super().save_fbx(filename, zero_root=zero_root, as_ascii=as_ascii)
 
@@ -15866,6 +15864,115 @@ for _name, _op in (
     # list's own += extends and *= repeats: each in-place form is the binary one
     setattr(PerTake, f"__i{_name}__", _binary)
 del _name, _op, _binary, _reflected
+
+
+# the frame rates a saved take may have, each with its fbx.FbxTime.EMode's
+# name: the rates the sdk's modes report, but eCustom (no custom rate can be
+# set in Maya 2025's binding), eFrames30Drop (it reports 0) and
+# eNTSCDropFrame (it repeats 30000/1001)
+_FBX_FRAME_RATES = (
+    (24000.0 / 1001.0, "eFilmFullFrame"),
+    (24.0, "eFrames24"),
+    (25.0, "ePAL"),
+    (30000.0 / 1001.0, "eNTSCFullFrame"),
+    (30.0, "eFrames30"),
+    (48.0, "eFrames48"),
+    (50.0, "eFrames50"),
+    (60000.0 / 1001.0, "eFrames59dot94"),
+    (60.0, "eFrames60"),
+    (72.0, "eFrames72"),
+    (96.0, "eFrames96"),
+    (100.0, "eFrames100"),
+    (120000.0 / 1001.0, "eFrames119dot88"),
+    (120.0, "eFrames120"),
+    (1000.0, "eFrames1000"),
+)
+
+# a take's joint orient or rotate axis this far from another's, or from its
+# own on another frame, is another: fbx holds them as static pre and post
+# rotations
+_TAKE_STATIC_BAND = 1e-9
+
+
+def _fbx_rate_mode(fps: float) -> Optional[str]:
+    """the name of the fbx.FbxTime.EMode of ``fps`` (to 1e-9 relative), None
+    for a rate no mode carries"""
+    for rate, mode in _FBX_FRAME_RATES:
+        if abs(fps - rate) <= 1e-9 * rate:
+            return mode
+    return None
+
+
+def _takes_to_save(clips) -> list:
+    """the name each of ``clips`` is written under, every take checked first,
+    as :meth:`ClipList.save_fbx` says; ValueError for the first that fails,
+    before the sdk is reached"""
+    clips = list(clips)
+    if not clips:
+        raise ValueError("save_fbx: there is no take to save")
+    labels = [_take_label(clip, index) for index, clip in enumerate(clips)]
+    for clip, label in zip(clips, labels):
+        if not clip.frame_count:
+            raise ValueError(f"save_fbx: {label} holds no frame")
+
+    first = clips[0]
+    for clip, label in zip(clips[1:], labels[1:]):
+        if len(clip) != len(first):
+            raise ValueError(f"save_fbx: {label} holds {len(clip)} nodes, {labels[0]} {len(first)}: one rig is written")
+        mine, theirs = _take_rig(first), _take_rig(clip)
+        for column, (a, b) in enumerate(zip(mine, theirs)):
+            if a != b:
+                raise ValueError(
+                    f"save_fbx: node {column} is {a} in {labels[0]} and {b} in {label}: one rig is written"
+                )
+        for channel in ("joint_orient", "rotate_axis"):
+            a   = np.asarray(getattr(first.frames, channel))[0]
+            b   = np.asarray(getattr(clip.frames, channel))[0]
+            far = np.abs(a - b).max(axis=1) > _TAKE_STATIC_BAND if len(a) else np.zeros(0, dtype=bool)
+            if far.any():
+                node = first[int(np.flatnonzero(far)[0])].name
+                raise ValueError(f"save_fbx: {node!r} has another {channel} in {label} than in {labels[0]}")
+
+    for clip, label in zip(clips, labels):
+        for channel in ("joint_orient", "rotate_axis"):
+            block = np.asarray(getattr(clip.frames, channel))
+            moved = np.abs(block - block[:1]).max(axis=(0, 2)) > _TAKE_STATIC_BAND if block.size else []
+            if np.any(moved):
+                node = clip[int(np.flatnonzero(moved)[0])].name
+                raise ValueError(
+                    f"save_fbx: {node!r}'s {channel} changes over the frames of {label}, which fbx holds "
+                    f"as a static rotation"
+                )
+
+    rates = sorted({float(clip.fps) for clip in clips})
+    if len(rates) > 1:
+        raise ValueError(f"save_fbx: the takes play at {rates} fps; one file holds one frame rate")
+    if _fbx_rate_mode(rates[0]) is None:
+        raise ValueError(
+            f"save_fbx: no fbx time mode carries {rates[0]} fps; the rates a take may have are "
+            f"{[round(rate, 6) for rate, _ in _FBX_FRAME_RATES]}"
+        )
+
+    records = [(clip._axis_system, clip._unit) for clip in clips]
+    if len(set(records)) > 1:
+        shown = ", ".join(f"{label}: axis_system {a!r}, unit {u!r}" for label, (a, u) in zip(labels, records))
+        raise ValueError(f"save_fbx: the takes are in other axes or units ({shown}); one file has one of each")
+
+    names = [clip.take.strip() or _blank_take(index) for index, clip in enumerate(clips)]
+    twice = sorted({name for name in names if names.count(name) > 1})
+    if twice:
+        raise ValueError(f"save_fbx: two takes would be written as {twice}; take names must differ")
+    return names
+
+
+def _take_rig(clip) -> list:
+    """what one rig is made of, per node: name, parent's name, node_type,
+    rotate_order, segment_scale_compensate"""
+    names = {node.uuid: node.name for node in clip}
+    return [
+        (node.name, names.get(node.parent_uuid), node.node_type, int(node.rotate_order), bool(node.segment_scale_compensate))
+        for node in clip
+    ]
 
 
 def _take_label(target, index: int) -> str:
@@ -16442,6 +16549,63 @@ class ClipList(DataList[ClipData]):
     set_rotate_to_joint_orient = _every_take(ClipData.set_rotate_to_joint_orient)
     set_joint_orient_to_rotate = _every_take(ClipData.set_joint_orient_to_rotate)
     set_parent                 = _every_take(ClipData.set_parent)
+
+    def save_fbx(self, filename, zero_root: bool = False, as_ascii: bool = False) -> None:
+        """writes every take to one fbx file, binary unless ``as_ascii``
+
+        The rig is written once, as the first take holds it at its bound frame,
+        then one animation stack per take: each node's translate, rotate and
+        scale keyed on every frame, linear, at ``(start_frame + f) / fps``, the
+        stack spanning the take's frames, named after its take (stripped of
+        outer whitespace; a blank one, empty or whitespace only, ``Take 001``,
+        ``Take 002`` ... by its position, as the readers name it). Keys are
+        float32, as fbx keeps them: a take
+        read back is its values rounded to float32, an ASCII file's as the
+        text its writer prints them, about 7 significant digits. A keyed
+        scale is written as it is, as Maya's own export writes it; only a
+        static scale under 1e-12 is raised to 1e-12. The file is labelled
+        with the takes' axes and unit. FBX has no channel for shear: it is
+        left out, as Maya's export leaves it, with one warning naming the
+        nodes holding one on any frame of any take, and Maya's FBXImport
+        and :meth:`load_fbx` read the takes with that shear zeroed, so a
+        sheared node and the nodes under it read back off the take (on the
+        camera-skin layouts measured, up to 25.1 in their axes and 19.9 in
+        position where the clip holds a shear, within 8.5e-7 and 1.8e-6
+        on the 643 that hold none). Maya 2025's FBXImport has no 72
+        or 96 fps time unit: it imports a take at 72, 96 or 119.88 fps into
+        a 24 fps scene, each key at its own second, so on a fractional
+        frame of the scene (a take's frame 1 at 0.333, 0.25 or 0.2002).
+        Read there, every node's world is the take's to float32 (within
+        5.3e-15 in its axes and 4.3e-14 in position on the takes measured);
+        read on the scene's frame of the take's own frame number, it is
+        where the take stands that many 24ths of a second in (up to 8.29
+        and 67.2 off on those takes). ``zero_root`` writes the first root
+        joint at identity, with no curves. ``filename`` may start with
+        ``~``, the home folder. Without the Autodesk SDK it raises
+        ImportError, before anything is checked.
+
+        Checked before anything is written, ValueError naming what fails:
+        a list with no take, a take with no frame, takes on other rigs (the
+        node count, then each node's name, parent, node_type, rotate_order,
+        segment_scale_compensate, and its joint_orient and rotate_axis on
+        the first frame, to 1e-9), a joint_orient or rotate_axis changing
+        within a take, takes at other frame rates or at one no fbx time
+        mode carries (``_FBX_FRAME_RATES``), takes in other axes or units,
+        and two takes written under one name.
+        """
+        if FBX is None:
+            raise ImportError("fbx module not found")
+        # expand ~, as the other io paths do
+        filename = os.path.expanduser(filename)
+
+        names = _takes_to_save(self.list)
+        from cgmath.formats.fbx import FbxExporter
+
+        with FbxExporter() as exporter:
+            exporter.add_skeleton(self.list[0], shear_warning=False)
+            mode = getattr(FBX.FbxTime.EMode, _fbx_rate_mode(float(self.list[0].fps)))
+            exporter.add_takes(self.list, names, mode, zero_root=zero_root)
+            exporter.export(filename, as_ascii=as_ascii, zero_root=zero_root)
 
     # --- reading a file's takes --- #
     @classmethod

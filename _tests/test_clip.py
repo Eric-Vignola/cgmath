@@ -5873,12 +5873,13 @@ class TestClipPoseWrites(unittest.TestCase):
 
 
 class TestClipSaveFbx(unittest.TestCase):
-    """the fbx exporter writes one pose and no animation stack
+    """a clip of two frames or more is written as one take, one of one frame
+    or none as one pose with no animation stack
 
-    Only the tests that actually reach the exporter are skipped without the
-    sdk, rather than the whole class: the refusal cases raise before the sdk
-    is ever touched, so they still say something useful on a machine that
-    does not have it.
+    Only the tests that actually reach the exporter, or the sdk check a
+    save makes before anything else, are skipped without the sdk, rather
+    than the whole class: the others still say something useful on a
+    machine that does not have it.
     """
 
     def setUp(self):
@@ -5895,20 +5896,30 @@ class TestClipSaveFbx(unittest.TestCase):
     def path(self, name="clip.fbx"):
         return os.path.join(self.tmp.name, name)
 
-    def test_a_multi_frame_clip_refuses(self):
-        with self.assertRaises(ValueError) as caught:
-            self.clip.save_fbx(self.path())
+    @unittest.skipIf(FBX is None, "fbx sdk is not installed")
+    def test_a_multi_frame_clip_writes_one_take(self):
+        from cgmath.hierarchy import ClipList
 
-        self.assertIn("10 frames", str(caught.exception))
+        self.clip.save_fbx(self.path())
 
-    def test_the_message_names_the_loaded_frame(self):
-        with self.assertRaises(ValueError) as caught:
-            self.clip.save_fbx(self.path())
-
-        self.assertIn("frames[3:4]", str(caught.exception))
+        back = ClipList.load_fbx(self.path())
+        self.assertEqual((len(back), back.take, back.frame_count, back.start_frame), (1, ["Take 001"], [10], [1001]))
+        rotate = np.array(self.clip.frames.rotate)
+        self.assertTrue(np.allclose(back[0].frames.rotate, rotate.astype(np.float32), rtol=0, atol=1e-9))
 
     @unittest.skipIf(FBX is None, "fbx sdk is not installed")
-    def test_the_escape_hatch_in_the_message_works(self):
+    def test_a_changing_joint_orient_refuses(self):
+        orient                        = np.array(self.clip.frames.joint_orient)
+        orient[:, 1, 0]               = np.arange(10) * 1.0
+        self.clip.frames.joint_orient = orient
+        with self.assertRaises(ValueError) as caught:
+            self.clip.save_fbx(self.path())
+
+        self.assertIn(repr(self.clip[1].name), str(caught.exception))
+        self.assertIn("joint_orient changes over the frames", str(caught.exception))
+
+    @unittest.skipIf(FBX is None, "fbx sdk is not installed")
+    def test_a_one_frame_cut_writes_one_pose(self):
         """frames[f] scrubs and hands back the clip, so it has to be a slice"""
         self.assertIs(self.clip.frames[3], self.clip)
         self.assertEqual(self.clip.frames[3].frame_count, 10)

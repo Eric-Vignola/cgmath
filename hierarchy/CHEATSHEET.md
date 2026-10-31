@@ -1781,7 +1781,27 @@ each. `sort` orders by take. `get_delta` and `add_delta` pair another
 keeps every take's tree, its name included, and `animate` plays a
 `ClipList` of one take.
 
+`ClipList.save_fbx(path)` writes the rig once, as the first take holds
+it, then one animation stack per take, named after it: every node's
+translate, rotate and scale keyed on every frame, linear, as float32 (an
+ASCII file holds about 7 significant digits). A keyed scale is written as
+it is, as Maya's own export writes it; only a static scale under 1e-12 is
+raised to 1e-12. FBX has no channel for shear: it is left out, with one
+warning naming the nodes holding one on any frame of any take, as Maya's
+export leaves it out. It refuses, before anything is written, a list with no
+take, a take with no frame, takes on other rigs, a joint orient or rotate
+axis that changes within a take (fbx holds them static), takes at other
+frame rates or at one no fbx time mode carries, takes in other axes or
+units, and two takes of one name.
+
 ```python
+path      = os.path.join(WORKDIR, "takes.fbx")
+clips.fps = 24.0                                    # one file, one frame rate
+clips.save_fbx(path)                                # also clips.save(path)
+back = ClipList.load_fbx(path)
+assert back.take == ["idle", "walk"] and back.frame_count == [6, 4]
+assert np.allclose(back["walk"].frames.rotate, walk.frames.rotate, atol=1e-5)
+
 rest  = ClipList([ClipData(make_chain(), frames=4, take="walk"), ClipData(make_chain(), frames=6, take="idle")])
 delta = clips.get_delta(rest)                       # idle against idle, walk against walk
 assert delta.take == ["idle", "walk"]
@@ -1789,6 +1809,17 @@ assert delta.take == ["idle", "walk"]
 path = clips.save(os.path.join(WORKDIR, "takes.npz"))
 assert ClipList.load(path) == clips
 ```
+
+FBX keeps no shear, so a sheared node and the nodes under it read back,
+and import in Maya, off the take, as Maya's own export leaves them: on
+the camera-skin layouts measured, up to 25.1 in their axes and 19.9 in
+position where the clip holds a shear, within 8.5e-7 and 1.8e-6 where it
+holds none. Maya 2025's `FBXImport` has no 72 or 96 fps time unit: a take
+saved at 72, 96 or 119.88 fps imports into a 24 fps scene, each key at
+its own second, so on a fractional frame (the take's frame 1 at 0.333,
+0.25 or 0.2002), where every node's world is the take's to float32; read
+on the scene frame of the take's frame number, the take stands that many
+24ths of a second in (up to 8.29 and 67.2 off on the takes measured).
 
 ---
 
@@ -2555,19 +2586,18 @@ back = HierarchyData.load_fbx(os.path.join(WORKDIR, "squashed.fbx"))
 assert back["flat"].scale.tolist() == [1e-12, 1e-12, -1e-12]
 ```
 
-`ClipData.save_fbx` writes one pose and no animation stack, so a
-multi-frame clip refuses rather than silently shipping whichever frame
-is loaded. The message names the cut that would work.
+`ClipData.save_fbx` writes a clip of two frames or more as one take,
+as `ClipList([clip]).save_fbx` writes it (see [`ClipList` —
+takes](#cliplist--takes)); a clip of one frame or none, a cut of one
+frame among them, is one pose with no animation stack.
 
 ```python
-animated       = ClipData(make_chain(), frames=10)
-animated.frame = 3
-try:
-    animated.save_fbx(os.path.join(WORKDIR, "nope.fbx"))
-except ValueError as error:
-    print(str(error)[:60])                      # ... clip holds 10 frames ...
+animated = ClipData(make_chain(), frames=10, start_frame=1001)
+animated.save_fbx(os.path.join(WORKDIR, "take.fbx"))
+back = ClipList.load_fbx(os.path.join(WORKDIR, "take.fbx"))
+assert back.take == ["Take 001"] and back.frame_count == [10] and back.start_frame == [1001]
 
-animated.frames[3:4].save_fbx(os.path.join(WORKDIR, "frame3.fbx"))
+animated.frames[3:4].save_fbx(os.path.join(WORKDIR, "frame3.fbx"))  # one pose
 ```
 
 For `load_fbx`, `scale_factor=None` converts the file's unit to
@@ -3289,10 +3319,11 @@ saved by an older cgmath names no class: it raises `LegacyFileError` (a
 `ValueError`) and no longer loads.
 
 An fbx or a glb goes the same way to the class's own `load_fbx` /
-`load_glb` / `save_fbx`, the arguments after `mode` with it, by keyword: one
-it does not take raises `TypeError` before the file is read or written. An
-fbx keeps what `save_fbx` writes, one pose; a clip of more than one frame
-saves as npz, json or pkl. `Data.load` refuses an fbx, which names no class.
+`load_glb` / `save_fbx`, the arguments after `mode` with it, by keyword:
+one it does not take raises `TypeError` before the file is read or
+written. An fbx keeps what `save_fbx` writes: a rig's pose, a clip's
+frames as a take, a `ClipList`'s takes, each keyed on every frame as
+float32. `Data.load` refuses an fbx, which names no class.
 
 <!-- notest -->
 ```python

@@ -275,7 +275,7 @@ classmethod load_fbx(cls, filename: 'str', scale_factor: 'Optional[float]' = Non
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, animation: 'int' = 0, fps: 'float' = 24.0, start_frame: 'int' = 0) -> "'ClipData'"
     builds a clip from a glb's animation
 save_fbx(self, filename, zero_root=False, as_ascii=False)
-    saves the bound frame to a .fbx file, binary unless as_ascii is set
+    saves the clip to a .fbx file, binary unless as_ascii is set
 strip_namespace(self, namespace: 'Optional[str]' = None) -> 'None'
     ``strip_namespace()`` on every node and the rest pose's, all or nothing.
 to_dict(self) -> 'dict'
@@ -395,6 +395,8 @@ classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, fps: '
     every animation of a glb file, one :class:`ClipData` each
 match(self, *args, exclude: 'bool' = False, exact: 'bool' = True) -> '_Takes'
     every take's ``match``, the nodes it selects at the frame each take
+save_fbx(self, filename, zero_root: 'bool' = False, as_ascii: 'bool' = False) -> 'None'
+    writes every take to one fbx file, binary unless ``as_ascii``
 set_joint_orient_to_rotate(self) -> None
     TransformList.set_joint_orient_to_rotate() on every take, every take or none
 set_parent(self, parent: "Union['TransformData', str, None]", world_space: 'bool' = True) -> None
@@ -3165,6 +3167,8 @@ Methods:
 ```text
 clear(self)
     Remove all keyframes from the animation curve while preserving attribute connections
+set_keys(self, times, values, interpolation: str = 'linear') -> None
+    Replace every key of the curve with one per time, linear by default
 ```
 
 #### `CurveList(BaseList)`
@@ -3200,8 +3204,10 @@ scene                              fbx.FbxScene: the fbx scene to export, labell
 Methods:
 
 ```text
-add_skeleton(self, skeleton_component) -> None
+add_skeleton(self, skeleton_component, shear_warning: bool = True) -> None
     Add a skeleton component to the scene.
+add_takes(self, clips, names, time_mode, zero_root: bool = False) -> None
+    One animation stack per clip, after :meth:`add_skeleton`
 close(self) -> None
     frees the manager, and with it the scene and every node added
 export(self, path: pathlib.Path, as_ascii=False, zero_root=False) -> None
@@ -3225,7 +3231,7 @@ curves                             Get all animation curves in this layer
 Methods:
 
 ```text
-create_curve(self, node_name, property_name)
+create_curve(self, node_name, property_name, fbx_node=None)
     Create a new animation curve for an unkeyed attribute
 rename(self, name: str)
     Rename this layer to a new name
@@ -3300,7 +3306,7 @@ start_time                         Get the start time of this take
 Methods:
 
 ```text
-create_curve(self, node_name, property_name)
+create_curve(self, node_name, property_name, fbx_node=None)
     Create a new animation curve for this take
 create_layer(self, name: str)
     Create a new animation layer under this take

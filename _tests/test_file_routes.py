@@ -35,7 +35,7 @@ from cgmath.geometry import mesh as mesh_module
 from cgmath.geometry import skin_weights
 from cgmath.geometry.mesh import MeshData, MeshList, UVData, UVList
 from cgmath.geometry.skin_weights import SkinList
-from cgmath.hierarchy import ClipData, HierarchyData, TransformData
+from cgmath.hierarchy import ClipData, ClipList, HierarchyData, TransformData
 from cgmath.render.scene import Object, Scene
 
 fbx = load_sdk()
@@ -257,13 +257,11 @@ class TestSave(_Files):
             uv.save_obj(self.path("uv.obj"))
         self.assertFalse(os.path.exists(self.path("uv.obj")))
 
-    def test_a_clip_of_many_frames_names_the_files_that_keep_it(self):
-        # save_fbx writes one pose; save() reaches it now, so the refusal
-        # names the formats that keep the whole clip, not save()
+    @unittest.skipIf(fbx is None, "Autodesk FBX Python SDK is not installed")
+    def test_a_clip_of_many_frames_saves_as_one_take(self):
         clip = ClipData(HierarchyData([TransformData("root", node_type="joint")]), frames=3)
-        with self.assertRaisesRegex(ValueError, "or save it as npz, json or pkl to keep the whole clip$"):
-            clip.save(self.path("clip.fbx"))
-        self.assertFalse(os.path.exists(self.path("clip.fbx")))
+        path = clip.save(self.path("clip.fbx"))
+        self.assertEqual(ClipList.load(path).frame_count, [3])
 
 
 class TestLoad(_Files):

@@ -1295,5 +1295,380 @@ class TestClipListLoad(unittest.TestCase):
             self.check("walk", ClipData.load_fbx(WALK))
 
 
+# TAKES without the keys on the node with no attribute, which the read folds
+# into the hips' joint orient every frame, a joint orient fbx can't key
+PLAIN_TAKES = tuple((name, {k: v for k, v in keys.items() if k != "offset"}) for name, keys in TAKES)
+
+
+def at_float32(values) -> np.ndarray:
+    """values as fbx keys hold them"""
+    return np.asarray(values, dtype=np.float64).astype(np.float32).astype(np.float64)
+
+
+class TestClipListSaveFbx(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def path(self, name):
+        return os.path.join(self.tmp.name, name)
+
+    def assert_back(self, clips, back, exact_statics=False):
+        """``back``, read from what ``clips`` wrote: the same takes, every
+        channel the float32 of the one written"""
+        self.assertEqual(back.take, [take.strip() or f"Take {i + 1:03d}" for i, take in enumerate(clips.take)])
+        self.assertEqual((back.frame_count, back.start_frame, back.fps), (clips.frame_count, clips.start_frame, clips.fps))
+        for a, b in zip(clips, back):
+            self.assertEqual(list(a.name), list(b.name))
+            for channel in ("translate", "rotate", "scale"):
+                np.testing.assert_allclose(
+                    np.asarray(getattr(b.frames, channel)), at_float32(getattr(a.frames, channel)), rtol=0, atol=1e-9
+                )
+            if exact_statics:
+                for channel in ("joint_orient", "rotate_axis"):
+                    np.testing.assert_array_equal(np.asarray(getattr(b.frames, channel)), np.asarray(getattr(a.frames, channel)))
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_round_trip(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            source = build_fbx(self.path("takes.fbx"), takes=PLAIN_TAKES)
+            clips  = ClipList.load_fbx(source)
+            with self.subTest("read from an fbx"):
+                clips.save_fbx(self.path("back.fbx"))
+                back = ClipList.load_fbx(self.path("back.fbx"))
+                self.assert_back(clips, back)
+                self.assertEqual((back.axis_system, back.unit), (clips.axis_system, clips.unit))
+
+            with self.subTest("hand-built, random channels"):
+                rng  = np.random.default_rng(7)
+                made = ClipList([hand_built("idle", 6), hand_built("walk", 4)])
+                for clip in made:
+                    clip.frames.rotate    = rng.uniform(-170, 170, np.asarray(clip.frames.rotate).shape)
+                    clip.frames.translate = rng.uniform(-50, 50, np.asarray(clip.frames.translate).shape)
+                # one joint orient, static, on every take: fbx holds one
+                made[0][1].joint_orient  = (10.0, 0.0, -5.0)
+                made.frames.joint_orient = PerTake([np.broadcast_to(np.asarray(made[0].frames.joint_orient)[0], np.asarray(c.frames.joint_orient).shape).copy() for c in made])
+                made.save_fbx(self.path("made.fbx"))
+                self.assert_back(made, ClipList.load_fbx(self.path("made.fbx"), axis_system=None), exact_statics=True)
+
+            with self.subTest("frames 60 to 121"):
+                keys = {"hips": {"t": [(60, (0, 90, 0)), (121, (5, 90, 0))]}}
+                long = ClipList.load_fbx(build_fbx(self.path("long.fbx"), takes=[("long", keys)]))
+                long.save_fbx(self.path("long_back.fbx"))
+                self.assertEqual(ClipList.load_fbx(self.path("long_back.fbx")).frame_count, [62])
+
+            with self.subTest("ascii"):
+                # an ascii file holds keys as the text its writer prints, about
+                # 7 significant digits: 4.6e-7 of the value here
+                clips.save_fbx(self.path("ascii.fbx"), as_ascii=True)
+                back = ClipList.load_fbx(self.path("ascii.fbx"))
+                self.assertEqual((back.take, back.frame_count), (clips.take, clips.frame_count))
+                for a, b in zip(clips, back):
+                    for channel in ("translate", "rotate", "scale"):
+                        np.testing.assert_allclose(
+                            np.asarray(getattr(b.frames, channel)), np.asarray(getattr(a.frames, channel)), rtol=1e-6, atol=1e-9
+                        )
+
+            with self.subTest("zero_root"):
+                clips.save_fbx(self.path("zero.fbx"), zero_root=True)
+                for take in ClipList.load_fbx(self.path("zero.fbx"), axis_system=None):
+                    np.testing.assert_array_equal(np.asarray(take.frames.matrix)[:, 0], np.broadcast_to(np.eye(4), (take.frame_count, 4, 4)))
+
+            with self.subTest("a take named ' idle '"):
+                spaced      = clips[1:2].copy()
+                spaced.take = " idle "
+                spaced.save_fbx(self.path("spaced.fbx"))
+                self.assertEqual(ClipList.load_fbx(self.path("spaced.fbx")).take, ["idle"])
+
+            with self.subTest("a z-up file read in its own axes"):
+                zup = ClipList.load_fbx(build_fbx(self.path("zup.fbx"), takes=PLAIN_TAKES, up_axis=2), axis_system=None)
+                zup.save_fbx(self.path("zup_back.fbx"))
+                back = ClipList.load_fbx(self.path("zup_back.fbx"), axis_system=None)
+                self.assert_back(zup, back)
+                self.assertEqual(back.axis_system, zup.axis_system)
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_a_name_with_a_space(self):
+        """a take is named as clip.take says, "Walk Forward" kept as it
+        is; Take 001 ... only for a blank name"""
+        clips = ClipList([hand_built("Walk Forward", 4), hand_built("Run", 3), hand_built(" ", 2)])
+        clips.save_fbx(self.path("named.fbx"))
+        back = ClipList.load_fbx(self.path("named.fbx"))
+        self.assertEqual(back.take, ["Walk Forward", "Run", "Take 003"])
+        self.assertEqual(ClipData.load_fbx(self.path("named.fbx"), take=0).take, "Walk Forward")
+        self.assertEqual(back.frame_count, [4, 3, 2])
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_shear_on_any_frame_is_named_once(self):
+        """fbx has no channel for shear: one warning names the nodes holding
+        one on any frame of any take, parents first, as a rig's save names
+        those of its frame; none where no take holds any"""
+        from cgmath._tests.test_fbx_export import _no_fbx_warnings, scaled_rig
+
+        clips = ClipList([ClipData(scaled_rig(), frames=3, take="a"), ClipData(scaled_rig(), frames=2, take="b")])
+        with _no_fbx_warnings(self):
+            clips.save_fbx(self.path("plain.fbx"))
+
+        names = list(clips[0].name)
+        for clip, frame, node in ((clips[1], 1, "sc_lcf"), (clips[0], 2, "sc_loc"), (clips[1], 0, "sc_kid")):
+            shear                              = np.array(clip.frames.shear)
+            shear[frame, names.index(node), 0] = 0.5
+            clip.frames.shear                  = shear
+        with self.assertLogs("cgmath.formats.fbx", "WARNING") as logged:
+            clips.save_fbx(self.path("sheared.fbx"))
+        said = [record.getMessage() for record in logged.records if "no shear" in record.getMessage()]
+        self.assertEqual(len(said), 1, said)
+        # parents first, as a rig's save names them: sc_loc is under sc_kid
+        self.assertTrue(said[0].endswith(": sc_kid, sc_lcf, sc_loc"), said[0])
+        rig = scaled_rig()
+        for node in ("sc_lcf", "sc_loc", "sc_kid"):
+            rig[node].shear = (0.5, 0.0, 0.0)
+        with self.assertLogs("cgmath.formats.fbx", "WARNING") as logged:
+            rig.save_fbx(self.path("rig.fbx"))
+        self.assertEqual([record.getMessage() for record in logged.records if "no shear" in record.getMessage()], said)
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_refusals(self):
+        """each check raises before the sdk is reached, naming what fails"""
+        def cases():
+            yield "no take", ClipList(), "no take to save"
+            empty = ClipList([hand_built("a"), ClipData(hand_built("b"), take="b")])
+            yield "a take with no frame", empty, "take 1 ('b') holds no frame"
+            renamed            = ClipList([hand_built("a"), hand_built("b")])
+            renamed[1][1].name = "tap"
+            yield "a renamed node", renamed, "node 1 is"
+            moved                   = ClipList([hand_built("a"), hand_built("b")])
+            moved[1][1].parent_uuid = None
+            yield "a node reparented", moved, "node 1 is"
+            ordered                    = ClipList([hand_built("a"), hand_built("b")])
+            ordered[1][0].rotate_order = 3
+            yield "another rotate order", ordered, "node 0 is"
+            oriented                        = ClipList([hand_built("a"), hand_built("b")])
+            oriented[1].frames.joint_orient = np.full(np.asarray(oriented[1].frames.joint_orient).shape, 5.0)
+            yield "another joint orient", oriented, "'root' has another joint_orient in take 1 ('b')"
+            moving                        = ClipList([hand_built("a")])
+            orient                        = np.array(moving[0].frames.joint_orient)
+            orient[:, 1, 0]               = np.arange(6)
+            moving[0].frames.joint_orient = orient
+            yield "a joint orient moving", moving, "'tip''s joint_orient changes over the frames of take 0 ('a')"
+            rates        = ClipList([hand_built("a"), hand_built("b")])
+            rates[1].fps = 30.0
+            yield "two frame rates", rates, "[24.0, 30.0] fps"
+            odd     = ClipList([hand_built("a")])
+            odd.fps = 17.5
+            yield "17.5 fps", odd, (
+                "no fbx time mode carries 17.5 fps; the rates a take may have are [23.976024, 24.0, 25.0, "
+                "29.97003, 30.0, 48.0, 50.0, 59.94006, 60.0, 72.0, 96.0, 100.0, 119.88012, 120.0, 1000.0]"
+            )
+            twice = ClipList([hand_built("idle"), hand_built("idle")])
+            yield "two takes named idle", twice, "['idle']"
+            spaced = ClipList([hand_built("idle"), hand_built(" idle ")])
+            yield "idle and ' idle '", spaced, "['idle']"
+            labels         = ClipList([hand_built("a"), hand_built("b")])
+            labels[1].unit = 100.0
+            yield "takes in two units", labels, "in other axes or units"
+
+        for label, clips, message in cases():
+            with self.subTest(label):
+                with self.assertRaises(ValueError) as caught:
+                    clips.save_fbx(self.path(f"{label}.fbx"))
+                self.assertIn(message, str(caught.exception))
+                self.assertFalse(os.path.exists(self.path(f"{label}.fbx")))
+
+    def test_with_no_sdk_a_save_raises_import_error(self):
+        """with no Autodesk SDK ClipList.save_fbx, ClipData.save_fbx of
+        two frames or more and ClipList.save of an fbx raise ImportError, as
+        HierarchyData.save_fbx and the readers do, before the takes are
+        checked; nothing is written. The SDK's absence patched in where the
+        SDK is installed"""
+        from unittest import mock
+
+        from cgmath.hierarchy import hierarchy
+
+        clips = ClipList([hand_built("idle", 3)])
+        with mock.patch.object(hierarchy, "FBX", None), mock.patch.object(hierarchy, "FbxExporter", None):
+            for label, save in (
+                ("ClipList.save_fbx", clips.save_fbx),
+                ("ClipData.save_fbx of 3 frames", clips[0].save_fbx),
+                ("ClipList.save", clips.save),
+                ("a list with no take", ClipList().save_fbx),
+            ):
+                with self.subTest(label):
+                    path = self.path(f"{label}.fbx")
+                    with self.assertRaisesRegex(ImportError, "^fbx module not found$"):
+                        save(path)
+                    self.assertFalse(os.path.exists(path))
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_a_path_from_the_home_folder(self):
+        """~ is the home folder, as in every other save and read:
+        ClipList.save_fbx and ClipData.save_fbx of two frames or more write
+        there, and load_fbx of the same path reads the file back"""
+        from unittest import mock
+
+        home, cwd = self.path("home"), self.path("cwd")
+        os.makedirs(home)
+        os.makedirs(cwd)
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(cwd)
+        clips = ClipList([hand_built("idle", 3)])
+        with mock.patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
+            clips.save_fbx("~/list.fbx")
+            clips[0].save_fbx("~/clip.fbx")
+            for name in ("list.fbx", "clip.fbx"):
+                with self.subTest(name):
+                    self.assertTrue(os.path.isfile(os.path.join(home, name)))
+                    self.assertEqual(ClipList.load_fbx(f"~/{name}").take, ["idle"])
+        self.assertEqual(os.listdir(cwd), [])  # no folder named ~ where the save ran
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_frame_rate_table(self):
+        from cgmath.hierarchy.hierarchy import _FBX_FRAME_RATES
+
+        held = {name for _, name in _FBX_FRAME_RATES}
+        for rate, name in _FBX_FRAME_RATES:
+            with self.subTest(name):
+                got = FBX.FbxTime.GetFrameRate(getattr(FBX.FbxTime.EMode, name))
+                self.assertAlmostEqual(got / rate, 1.0, delta=1e-12)
+        for name in dir(FBX.FbxTime.EMode):
+            if not name.startswith("e") or name in ("eCustom", "eModesCount", "eDefaultMode"):
+                continue
+            rate = FBX.FbxTime.GetFrameRate(getattr(FBX.FbxTime.EMode, name))
+            if rate > 0 and name not in held:
+                self.assertTrue(any(abs(rate - r) <= 1e-9 * r for r, _ in _FBX_FRAME_RATES), name)
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_curves_are_linear_keys(self):
+        from cgmath.formats._fbx_io import open_fbx
+
+        clips = ClipList([hand_built("idle", 6), hand_built("walk", 4)])
+        for name, zero_root in (("keys.fbx", False), ("zero.fbx", True)):
+            clips.save_fbx(self.path(name), zero_root=zero_root)
+            with open_fbx(self.path(name), FBX) as scene:
+                criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimStack.ClassId)
+                stacks   = [scene.GetSrcObject(criteria, i) for i in range(scene.GetSrcObjectCount(criteria))]
+                self.assertEqual([x.GetName() for x in stacks], ["idle", "walk"])
+                nodes        = {scene.GetRootNode().GetChild(0).GetName(): scene.GetRootNode().GetChild(0)}
+                nodes["tip"] = nodes["root"].GetChild(0)
+                for stack, frames in zip(stacks, (6, 4)):
+                    layer = stack.GetMember(FBX.FbxCriteria.ObjectType(FBX.FbxAnimLayer.ClassId), 0)
+                    for node_name, node in nodes.items():
+                        for prop in (node.LclTranslation, node.LclRotation, node.LclScaling):
+                            for component in "XYZ":
+                                curve = prop.GetCurve(layer, component, False)
+                                if zero_root and node_name == "root":
+                                    self.assertIsNone(curve)
+                                    continue
+                                self.assertEqual(curve.KeyGetCount(), frames)
+                                for k in range(frames):
+                                    self.assertAlmostEqual(curve.KeyGetTime(k).GetSecondDouble(), k / 24.0, places=9)
+                                    self.assertEqual(
+                                        curve.KeyGetInterpolation(k),
+                                        FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear,
+                                    )
+
+    def maya_frames(self, path, take, frames):
+        """{node: (F, 4, 4) world matrices} of Maya 2025's FBXImport of take
+        ``take`` (1-based -t), on each of ``frames``; skips without Maya"""
+        from cgmath._tests.test_fbx_labels import _maya
+
+        maya = _maya()
+        if maya is None:
+            self.skipTest("needs Maya and its fbxmaya plug-in")
+        cmds, mel = maya
+        self.addCleanup(cmds.file, new=True, force=True)
+        cmds.file(new=True, force=True)
+        mel.eval("FBXResetImport")
+        mel.eval(f'FBXImport -f "{path.replace(os.sep, "/")}" -t {take}')
+        nodes  = cmds.ls(type="transform", long=True)
+        worlds = {node.rsplit("|", 1)[-1]: [] for node in nodes}
+        for frame in frames:
+            cmds.currentTime(frame)
+            for node in nodes:
+                worlds[node.rsplit("|", 1)[-1]].append(cmds.xform(node, q=True, ws=True, m=True))
+        return {name: np.array(rows).reshape(-1, 4, 4) for name, rows in worlds.items()}
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_keyed_scales_are_written_as_they_are(self):
+        """QE (a): a keyed scale of 0 is written as 0, as Maya's own export
+        writes it; only a static scale under 1e-12 is raised to 1e-12; Maya's
+        import of it is finite on every frame"""
+        clips                 = ClipList([hand_built("idle", 4)])
+        scale                 = np.array(clips[0].frames.scale)
+        scale[2, 0]           = 0.0
+        clips[0].frames.scale = scale
+        clips.save_fbx(self.path("scale.fbx"))
+        back = ClipList.load_fbx(self.path("scale.fbx"), axis_system=None)
+        self.assertEqual(float(np.asarray(back[0].frames.scale)[2, 0, 0]), 0.0)
+
+        # Maya's evaluation holds the key of 0 as 1e-12: 9.85e-13, turned 10
+        worlds = self.maya_frames(self.path("scale.fbx"), 1, range(4))
+        self.assertLessEqual(abs(worlds["root"][2, 0, 0]), 1e-12)
+        for name in ("root", "tip"):
+            self.assertTrue(np.isfinite(worlds[name]).all(), name)
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_maya_reads_every_take(self):
+        """Maya 2025's FBXImport of each take (1-based -t) holds each frame's
+        channels within 1e-6 of the take's float32 values. Needs mayapy with
+        the fbxmaya plug-in"""
+        try:
+            import maya.cmds as cmds
+            import maya.mel as mel
+
+            cmds.loadPlugin("fbxmaya", quiet=True)
+        except Exception:  # not running in Maya, or no fbx plug-in
+            self.skipTest("needs Maya and its fbxmaya plug-in")
+
+        clips                     = ClipList([hand_built("idle", 6), hand_built("walk", 4)])
+        clips[1].frames.translate = np.asarray(clips[1].frames.translate) + [0.0, 0.0, 2.5]
+        clips.save_fbx(self.path("maya.fbx"))
+        self.addCleanup(cmds.file, new=True, force=True)
+        for index, clip in enumerate(clips):
+            with self.subTest(take=clip.take):
+                cmds.file(new=True, force=True)
+                mel.eval("FBXResetImport")
+                mel.eval(f'FBXImport -f "{self.path("maya.fbx").replace(os.sep, "/")}" -t {index + 1}')
+                for column, node in enumerate(clip):
+                    for channel, attr in (("rotate", "rotate"), ("translate", "translate")):
+                        want = at_float32(getattr(clip.frames, channel))[:, column]
+                        got  = np.array([cmds.getAttr(f"{node.name}.{attr}", time=f)[0] for f in range(clip.frame_count)])
+                        np.testing.assert_allclose(got, want, rtol=0, atol=1e-6)
+
+        # groups, locators, a joint and a space transform under a group
+        # scaled (1, 3, 0.5) and turned, moving, where cgmath has them on every
+        # frame (each node written with its inherit type)
+        from cgmath._tests.test_fbx_export import gaps, scaled_rig
+
+        moving = ClipList([ClipData(scaled_rig(), frames=4, take="a"), ClipData(scaled_rig(), frames=3, take="b")])
+        for step, clip in zip((1.0, -2.0), moving):
+            turns  = np.array(clip.frames.rotate)
+            places = np.array(clip.frames.translate)
+            turns[:, 1]     += np.arange(clip.frame_count)[:, None] * 10.0 * step
+            places[:, 0, 0] += np.arange(clip.frame_count) * step
+            clip.frames.rotate, clip.frames.translate = turns, places
+        moving.save_fbx(self.path("scaled.fbx"))
+        for index, clip in enumerate(moving):
+            with self.subTest(take=clip.take, rig="scaled"):
+                worlds = self.maya_frames(self.path("scaled.fbx"), index + 1, range(clip.frame_count))
+                for column, node in enumerate(clip):
+                    want = np.asarray(clip.frames.world_matrix)[:, column]
+                    for frame in range(clip.frame_count):
+                        axes, position = gaps(worlds[node.name][frame], want[frame])
+                        self.assertLessEqual(axes, 1e-9, (node.name, frame))
+                        # the largest measured on this file
+                        self.assertLessEqual(position, 8.881784197001252e-16, (node.name, frame))
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_routes(self):
+        clips = ClipList([hand_built("idle", 6)])
+        path  = clips.save(self.path("routed.fbx"))
+        self.assertEqual(ClipList.load(path).take, ["idle"])
+        with self.assertRaisesRegex(TypeError, "zeroroot"):
+            clips.save(self.path("wrong.fbx"), zeroroot=True)
+        self.assertFalse(os.path.exists(self.path("wrong.fbx")))
+
+
 if __name__ == "__main__":
     unittest.main()

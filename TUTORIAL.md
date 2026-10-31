@@ -902,15 +902,16 @@ loaded.frame = 12                                     # 0-based index into the c
 print(round(float(loaded["knee"].rotate_z), 3))       # 45.0
 ```
 
-`ClipData.save_fbx` writes **one pose** and no animation stack, so a
-multi-frame clip refuses rather than silently shipping whichever frame is
-loaded. Cut a frame out first.
+`ClipData.save_fbx` writes a clip of two frames or more as **one take**,
+every frame keyed as float32, which `ClipList.load_fbx` reads back; a clip
+of one frame, a cut of one frame among them, is written as one pose.
 
 ```python
-try:
-    loaded.save_fbx(os.path.join(WORK, "nope.fbx"))
-except ValueError as error:
-    print(str(error)[:58])
+from cgmath.hierarchy import ClipList
+
+loaded.save_fbx(os.path.join(WORK, "take.fbx"))
+back = ClipList.load_fbx(os.path.join(WORK, "take.fbx"))
+print(back.take, back.frame_count)                    # ['bend'] [25]
 
 loaded.frames[12:13].save_fbx(os.path.join(WORK, "frame12.fbx"))
 print(os.path.exists(os.path.join(WORK, "frame12.fbx")))

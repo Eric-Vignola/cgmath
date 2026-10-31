@@ -874,8 +874,12 @@ class TestSaveShear(unittest.TestCase):
         self.assertEqual(self.words(logged.records), [["kid"]])
         with _no_fbx_warnings(self):
             clip.frames[0:1].save_fbx(self.path)
-        with self.assertRaises(ValueError):
-            clip.save_fbx(self.path)
+        # the clip, a take: named for its frame 2, whatever frame it is on
+        for frame in (0, 2):
+            clip.frame = frame
+            with self.assertLogs("cgmath.formats.fbx", "WARNING") as logged:
+                clip.save_fbx(self.path)
+            self.assertEqual(self.words(logged.records), [["kid"]])
 
     def test_a_skipped_node_is_not_named(self):
         top   = _node("top")

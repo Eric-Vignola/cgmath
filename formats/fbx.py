@@ -694,7 +694,7 @@ class TakeData(BaseData):
                 f"Use take.layers[index].curves instead."
             )
 
-    def create_curve(self, node_name, property_name):
+    def create_curve(self, node_name, property_name, fbx_node=None):
         """
         Create a new animation curve for this take
 
@@ -704,6 +704,9 @@ class TakeData(BaseData):
         Args:
             node_name (str): Name of the node containing the attribute
             property_name (str): Property name (Maya or FBX style)
+            fbx_node (fbx.FbxNode): the node itself, found by no name: a rig
+                may repeat a name across branches, where a search by name finds
+                the first
 
         Returns:
             CurveData: New CurveData object for the created curve
@@ -722,7 +725,7 @@ class TakeData(BaseData):
 
         if len(layers) == 1:
             # Only one layer, delegate to its create_curve method
-            return layers[0].create_curve(node_name, property_name)
+            return layers[0].create_curve(node_name, property_name, fbx_node=fbx_node)
         else:
             # Multiple layers, raise error
             raise RuntimeError(
@@ -909,7 +912,7 @@ class LayerData(BaseData):
         # Set the new name on the animation layer
         self._data.SetName(new_name)
 
-    def create_curve(self, node_name, property_name):
+    def create_curve(self, node_name, property_name, fbx_node=None):
         """
         Create a new animation curve for an unkeyed attribute
 
@@ -925,6 +928,9 @@ class LayerData(BaseData):
         Args:
             node_name (str): Name of the node containing the attribute
             property_name (str): Property name (Maya or FBX style)
+            fbx_node (fbx.FbxNode): the node itself, which skips the search by
+                name: that finds a name's first node, and a rig may repeat
+                names across branches
 
         Returns:
             CurveData: New CurveData object for the created curve
@@ -962,7 +968,7 @@ class LayerData(BaseData):
                     return found
             return None
 
-        target_node = find_node_recursive(root_node, node_name)
+        target_node = fbx_node if fbx_node is not None else find_node_recursive(root_node, node_name)
 
         # If not found as regular node, search for blendshape channel
         if target_node is None:
@@ -1177,6 +1183,16 @@ class LayerData(BaseData):
         return node_name, property_name
 
 
+def _fbx_times(seconds) -> list:
+    """an ``fbx.FbxTime`` per time in seconds"""
+    made = []
+    for value in np.asarray(seconds, dtype=np.float64).ravel().tolist():
+        fbx_time = fbx.FbxTime()
+        fbx_time.SetSecondDouble(value)
+        made.append(fbx_time)
+    return made
+
+
 class CurveData(BaseData):
     """Class to manipulate a specific animation curve from FBX data"""
 
@@ -1363,6 +1379,59 @@ class CurveData(BaseData):
         finally:
             # Always end keyframe modification, even if an error occurs
             self._data.KeyModifyEnd()
+
+    def set_keys(self, times, values, interpolation: str = "linear") -> None:
+        """
+        Replace every key of the curve with one per time, linear by default
+
+        Args:
+            times (list or numpy.ndarray): key times in seconds
+            values (list or numpy.ndarray): one value per time; a DeformPercent
+                curve's as the ``values`` setter takes them, 0.0 to 1.0
+            interpolation (str): "linear", "constant" or "cubic"
+
+        Raises:
+            ValueError: times and values of other lengths, a value or time that
+                is not finite, or an interpolation not named here
+        """
+        modes = {
+            "linear":   fbx.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear,
+            "constant": fbx.FbxAnimCurveDef.EInterpolationType.eInterpolationConstant,
+            "cubic":    fbx.FbxAnimCurveDef.EInterpolationType.eInterpolationCubic,
+        }
+        if interpolation not in modes:
+            raise ValueError(f"interpolation is one of {sorted(modes)}, not {interpolation!r}")
+        times  = np.asarray(times, dtype=np.float64).ravel()
+        values = np.asarray(values, dtype=np.float64).ravel()
+        if len(times) != len(values):
+            raise ValueError(f"{len(times)} times against {len(values)} values")
+        if not (np.all(np.isfinite(times)) and np.all(np.isfinite(values))):
+            raise ValueError("every time and value must be a finite number")
+        if self._is_deform_percent_curve():
+            values = values * 100.0
+
+        self._set_keys_at(_fbx_times(times), values, modes[interpolation])
+
+    def _set_keys_at(self, fbx_times, values, mode) -> None:
+        """every key replaced by one per ``fbx.FbxTime`` of ``fbx_times``,
+        ``values`` (an array) as they are, ``mode`` an EInterpolationType: the
+        times made once serve every curve of a take"""
+        curve = self._data
+        add   = curve.KeyAdd
+        # one key, its interpolation set once, added at each time with its
+        # value: the binding converts an enum argument through python's enum
+        # machinery, which a KeySet a key would pay each time (half the write)
+        key = fbx.FbxAnimCurveKey()
+        key.SetInterpolation(mode)
+        value_of = key.SetValue
+        curve.KeyModifyBegin()
+        try:
+            curve.KeyClear()
+            for fbx_time, value in zip(fbx_times, values.tolist()):
+                value_of(value)
+                add(fbx_time, key)
+        finally:
+            curve.KeyModifyEnd()
 
     @property
     def frames(self):
@@ -2821,7 +2890,7 @@ class FbxExporter:
         self.close()
         return False
 
-    def add_skeleton(self, skeleton_component) -> None:
+    def add_skeleton(self, skeleton_component, shear_warning: bool = True) -> None:
         """Add a skeleton component to the scene.
 
         Each node is added after its parent, whatever order the component
@@ -2850,7 +2919,9 @@ class FbxExporter:
         it, so scale, rotate and translate are written as they are and one
         warning names the nodes holding one, parents first, as Maya's own
         exporter names them. Those nodes and the nodes under them load where
-        the component with that shear zeroed has them.
+        the component with that shear zeroed has them. ``shear_warning``
+        False leaves that warning to :meth:`add_takes`, which names the nodes
+        holding a shear on any frame of any take.
 
         Raises ValueError, before anything is added, when a user defined string
         attr is not plain ASCII, the only text the FBX SDK takes, or a node's user
@@ -3023,7 +3094,7 @@ class FbxExporter:
             LOGGER.warning(f"skipped user defined attrs with no fbx type: {counts}")
 
         sheared = [item.name for item, _ in kept if item.shear.any()]
-        if sheared:
+        if sheared and shear_warning:
             names = ", ".join(sheared)
             LOGGER.warning(f"fbx holds no shear, saved without it, these nodes and those under them move: {names}")
         LOGGER.info(f"added skeleton: {skeleton_component}")
@@ -3193,23 +3264,7 @@ class FbxExporter:
 
         # zero-out root translations and rotations
         if zero_root:
-            # the first joint the file writes as a root: one at the world, or
-            # one whose parent the export leaves out, a view's top node.
-            # meshes and locators can sit at the world too
-            roots = self._roots
-            if not roots:
-                raise ValueError(
-                    "zero_root needs a joint parented to the world, or whose "
-                    "parent the export leaves out"
-                )
-            root_name = roots[0].name
-
-            # by identity: names may repeat across branches
-            LOGGER.debug(f"Zero-ing Root: {root_name}")
-            skel_root = self._fbx_nodes.get(id(roots[0]))
-            if skel_root is None:
-                raise RuntimeError(f"Could not find {root_name} to reset!")
-
+            skel_root = self._zero_root()
             skel_root.LclTranslation.Set(fbx.FbxDouble3(0, 0, 0))
             skel_root.LclRotation.Set(fbx.FbxDouble3(0, 0, 0))
             skel_root.LclScaling.Set(fbx.FbxDouble3(1, 1, 1))
@@ -3226,6 +3281,83 @@ class FbxExporter:
 
         if not exporter.Export(self.scene):
             raise Exception(f"Failed to export to: {path}!")
+
+    def _zero_root(self):
+        """the FbxNode zero_root zeroes: the first joint the file writes as a
+        root, one at the world or one whose parent the export leaves out, a
+        view's top node (meshes and locators can sit at the world too)"""
+        roots = self._roots
+        if not roots:
+            raise ValueError(
+                "zero_root needs a joint parented to the world, or whose "
+                "parent the export leaves out"
+            )
+        root_name = roots[0].name
+
+        # by identity: names may repeat across branches
+        LOGGER.debug(f"Zero-ing Root: {root_name}")
+        skel_root = self._fbx_nodes.get(id(roots[0]))
+        if skel_root is None:
+            raise RuntimeError(f"Could not find {root_name} to reset!")
+        return skel_root
+
+    def add_takes(self, clips, names, time_mode, zero_root: bool = False) -> None:
+        """One animation stack per clip, after :meth:`add_skeleton`
+
+        ``clips`` are takes of the skeleton added, their nodes in its order;
+        ``names`` each one's stack name and ``time_mode`` the
+        ``fbx.FbxTime.EMode`` of their frame rate, which the scene takes.
+        Each stack spans its clip's frames and holds a BaseLayer in which
+        every node the skeleton wrote, the root ``zero_root`` zeroes aside,
+        has its Lcl Translation, Rotation and Scaling X, Y and Z keyed on
+        every frame, linear, at ``(start_frame + f) / fps``: the values each
+        frame holds, keyed scales as they are, as Maya's own export writes
+        them. The curves are made on each node itself, never by name. fbx
+        has no channel for shear: one warning names the nodes the skeleton
+        wrote that hold one on any frame of any take, parents first, as
+        :meth:`add_skeleton` names those of its bound frame (pass it
+        ``shear_warning=False``).
+        """
+        self.scene.GetGlobalSettings().SetTimeMode(time_mode)
+        skeleton = list(self._skeleton) if self._skeleton is not None else []
+        skipped  = self._zero_root() if zero_root else None
+        written  = [(column, self._fbx_nodes.get(id(node))) for column, node in enumerate(skeleton)]
+        written  = [(column, node) for column, node in written if node is not None and node is not skipped]
+
+        # the skeleton's nodes in the order it wrote them, parents first
+        held = np.zeros(len(skeleton), dtype=bool)
+        for clip in clips:
+            held |= np.any(np.asarray(clip.frames.shear) != 0.0, axis=(0, 2))
+        column  = {id(node): index for index, node in enumerate(skeleton)}
+        sheared = [skeleton[column[key]].name for key in self._fbx_nodes if key in column and held[column[key]]]
+        if sheared:
+            LOGGER.warning(
+                f"fbx holds no shear, saved without it, these nodes and those under them move: {', '.join(sheared)}"
+            )
+
+        for clip, name in zip(clips, names):
+            stack = fbx.FbxAnimStack.Create(self.scene, name)
+            self.scene.AddMember(stack)
+            first, last = fbx.FbxTime(), fbx.FbxTime()
+            first.SetSecondDouble(clip.start_frame / clip.fps)
+            last.SetSecondDouble(clip.end_frame / clip.fps)
+            stack.SetLocalTimeSpan(fbx.FbxTimeSpan(first, last))
+            stack.SetReferenceTimeSpan(fbx.FbxTimeSpan(first, last))
+            layer  = TakeData(self.scene, stack).create_layer("BaseLayer")
+            times  = _fbx_times((clip.start_frame + np.arange(clip.frame_count)) / clip.fps)
+            mode   = fbx.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear
+
+            frames = clip.frames
+            blocks = (
+                ("translate", np.asarray(frames.translate)),
+                ("rotate", np.asarray(frames.rotate)),
+                ("scale", np.asarray(frames.scale)),
+            )
+            for column, fbx_node in written:
+                for channel, block in blocks:
+                    for axis, component in enumerate("XYZ"):
+                        curve = layer.create_curve(fbx_node.GetName(), f"{channel}{component}", fbx_node=fbx_node)
+                        curve._set_keys_at(times, block[:, column, axis], mode)
 
     def _get_acsii_type(self):
         plg_rego     = self.manager.GetIOPluginRegistry()
