@@ -184,7 +184,7 @@ class TestInheritedRoutes(unittest.TestCase):
         self.assertTrue(os.path.abspath(lines[0]).startswith(root), lines[0])
         self.assertEqual(
             lines[1].split(","),
-            ["ClipData", "HierarchyData", "MeshData", "MeshList", "Object", "SkinData", "SkinList",
+            ["ClipData", "ClipList", "HierarchyData", "MeshData", "MeshList", "Object", "SkinData", "SkinList",
              "TransformList", "UVData", "UVList"],
         )
 
@@ -759,7 +759,7 @@ class TestFbx(_Files):
 
     def test_the_factory_refuses_an_fbx(self):
         path = self.rig().save(self.path("rig.fbx"))
-        with self.assertRaisesRegex(ValueError, r"is an fbx file, which names none.*ClipData, HierarchyData"):
+        with self.assertRaisesRegex(ValueError, r"is an fbx file, which names none.*ClipData, ClipList, HierarchyData"):
             Data.load(path)
 
 

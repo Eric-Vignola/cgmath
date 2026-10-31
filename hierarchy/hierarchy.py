@@ -14221,10 +14221,11 @@ class ClipData(HierarchyData):
         For an Unreal animation that is the skeleton's bind pose. It
         records the clip's axes and unit (:attr:`axis_system`,
         :attr:`unit`). It is saved with the clip, and a copy or a cut of
-        frames (``clip.frames[10:20]``) holds a copy of it. It is None on a
-        clip the constructor, :meth:`from_poses` or :meth:`load_glb` builds, on
-        one the pose algebra builds (:meth:`get_delta`, :meth:`add_delta`),
-        which holds new animation, and on a saved clip that held none.
+        frames (``clip.frames[10:20]``) holds a copy of it. :meth:`load_glb`
+        sets the file's node pose, the pose the rig is built from. It is None
+        on a clip the constructor or :meth:`from_poses` builds, on one the
+        pose algebra builds (:meth:`get_delta`, :meth:`add_delta`), which
+        holds new animation, and on a saved clip that held none.
         ``strip_namespace()`` on the clip strips its names too, and setting
         the clip's :attr:`axis_system` or :attr:`unit` gives the clip a copy
         of it relabelled with the clip, leaving the one set as it was; any
@@ -14860,9 +14861,10 @@ class ClipData(HierarchyData):
             raw  = [x.name or "" for x in animations]
             take = _take_names(raw, read=[animation % len(animations)], blank=_blank_animation)[animation]
 
-        return _glb_take_clip(
-            cls, model, rig, column, animations, animation, scale_factor, fps, start_frame, take
-        )
+        clip = _glb_take_clip(cls, model, rig, column, animations, animation, scale_factor, fps, start_frame, take)
+        # the file's node pose, which the rig is built from, as FBX's rest pose
+        clip._rest_pose = rig.copy()
+        return clip
 
     @classmethod
     def load_fbx(
@@ -16440,6 +16442,98 @@ class ClipList(DataList[ClipData]):
     set_rotate_to_joint_orient = _every_take(ClipData.set_rotate_to_joint_orient)
     set_joint_orient_to_rotate = _every_take(ClipData.set_joint_orient_to_rotate)
     set_parent                 = _every_take(ClipData.set_parent)
+
+    # --- reading a file's takes --- #
+    @classmethod
+    def load_fbx(
+        cls,
+        filename:     str,
+        scale_factor: Optional[float] = None,
+        fps:          Optional[float] = None,
+        axis_system:  Optional[str]   = "maya_y_up",
+        node_types:   Optional[tuple] = None,
+    ) -> "ClipList":
+        """every take of an fbx file, one :class:`ClipData` each
+
+        One open, one walk of the nodes, one rig, rest pose and axis turn
+        for the whole file; every take, an animation stack, in file order,
+        read as ``ClipData.load_fbx(filename, take=i)`` reads it, with the
+        same keywords, and named as that names it (:attr:`ClipData.take`),
+        every take holding its own copy of the file's rest pose and sharing
+        the rig's uuids. It reads every take, so it takes no take argument:
+        pick one from the list (``clips["idle"]``, ``clips[1]``), or read
+        one alone with ``ClipData.load_fbx(filename, take=...)``. A file
+        with no take gives an empty list. A camera scaled unevenly or
+        sheared warns once for each take that shows one, as
+        ``ClipData.load_fbx(filename, take=i)`` warns of it: a file of
+        three such takes, three warnings.
+        """
+        if fps is not None and fps <= 0.0:
+            raise ValueError(f"fps must be positive, got {fps}")
+        if FBX is None:
+            raise ImportError("fbx module not found")
+        _fbx_check_scale_factor(scale_factor)
+        _fbx_check_axis_system(axis_system)
+        kinds = _fbx_check_node_types(node_types)
+
+        with _NodesLoad(), open_fbx(filename, FBX) as scene:
+            turn   = _fbx_axis_turn(scene, axis_system, filename)
+            units  = _fbx_units(scene, scale_factor)
+            record = _fbx_record(scene, axis_system, scale_factor)
+            hierarchy_data, nodes, tree = _walk_fbx(scene, units, kinds, turn is not None)
+
+            rest = copy.deepcopy(hierarchy_data)
+            if turn is not None:
+                _fbx_turn_walk(rest, turn)
+            rest   = _recorded(HierarchyData.from_dict(rest), record)
+
+            stacks = _fbx_stacks(scene)
+            names  = _take_names([stack.GetName() for stack in stacks])
+            rig    = HierarchyData.from_dict(hierarchy_data) if stacks else None
+            clips = [
+                _fbx_take_clip(
+                    ClipData, scene, stack, rig, rest.copy(), hierarchy_data, nodes, tree, turn, record,
+                    filename, fps, None, None, name,
+                )
+                for stack, name in zip(stacks, names)
+            ]
+        return cls(clips)
+
+    @classmethod
+    def load_glb(
+        cls,
+        filename:     str,
+        scale_factor: float = 100.0,
+        fps:          float = 24.0,
+    ) -> "ClipList":
+        """every animation of a glb file, one :class:`ClipData` each
+
+        One parse and one rig for the whole file; every take, a glTF
+        animation, in file order, read as ``ClipData.load_glb(filename,
+        animation=i)`` reads it and named as that names it, each holding its
+        own copy of the file's node pose as its rest pose. It reads every
+        take, so it takes no take argument: pick one from the list
+        (``clips["idle"]``, ``clips[1]``), or read one alone with
+        ``ClipData.load_glb(filename, animation=i)``. A file with no
+        animation gives an empty list.
+        """
+        if fps <= 0.0:
+            raise ValueError(f"fps must be positive, got {fps}")
+        if GLTF2 is None:
+            raise ImportError("pygltflib not found")
+
+        model = load_model(os.path.expanduser(filename))
+        rig, _ = _glb_rig(HierarchyData, model, scale_factor)
+        animations = model.animations or []
+        raw        = [x.name or "" for x in animations]
+        names      = _take_names(raw, blank=_blank_animation)
+        column     = _glb_columns(model, rig, filename)
+        clips      = []
+        for index, name in enumerate(names):
+            clip            = _glb_take_clip(ClipData, model, rig, column, animations, index, scale_factor, fps, 0, name)
+            clip._rest_pose = rig.copy()
+            clips.append(clip)
+        return cls(clips)
 
     # --- every take's timebase and record --- #
     fps         = _per_take("fps")

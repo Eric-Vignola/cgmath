@@ -1754,6 +1754,23 @@ except IndexError as error:
     assert "take 1 ('walk')" in str(error) and clips.frame == [2, 2]
 ```
 
+`ClipList.load_fbx(path)` reads every take of a file from one open, each
+as `ClipData.load_fbx(path, take=i)` reads it and named as that names it,
+with the same keywords; `ClipList.load_glb(path)` reads every glTF
+animation from one parse. Neither takes a take argument: pick a take from
+the list, or read one alone with `ClipData.load_fbx(path, take=...)` or
+`ClipData.load_glb(path, animation=i)`. Each take holds its own copy of
+the file's rest pose, a glb's node pose for a glb; editing one leaves the
+others. `ClipList.load(path)` routes by extension.
+
+<!-- notest -->
+```python
+clips = ClipList.load_fbx("anim.fbx")         # every take, in file order
+idle  = clips["idle"]                         # one of them, by its name
+run   = ClipList.load_glb("anim.glb")["run"]  # every animation, then one by its name
+assert clips[0].rest_pose is not clips[1].rest_pose
+```
+
 The rig edits, `clips.set_rotate_order("zyx")` say, run on every take or
 none, as `strip_namespace` renames every take or none: when a take
 refuses, every take is put back as it was and the error raised. So does

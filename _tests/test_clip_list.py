@@ -71,10 +71,11 @@ TAKES = (
 )
 
 
-def build_fbx(path, takes=TAKES, up_axis=1, unit=1.0):
+def build_fbx(path, takes=TAKES, up_axis=1, unit=1.0, mixed=False):
     """an fbx of ``CHAIN`` under a node with no attribute, ``offset``, turned
     and moved, keyed by ``takes``, one stack each, at 24 fps; ``up_axis`` 2
-    for a z-up file, ``unit`` the cm a unit holds"""
+    for a z-up file, ``unit`` the cm a unit holds; ``mixed``, a group
+    between the spine and the head and a locator under the head"""
     manager = FBX.FbxManager.Create()
     manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
     try:
@@ -101,6 +102,22 @@ def build_fbx(path, takes=TAKES, up_axis=1, unit=1.0):
             node.SetRotationOrder(pivot, FBX.EFbxRotationOrder(order))
             nodes[parent or "offset"].AddChild(node)
             nodes[name] = node
+        if mixed:
+            bare = FBX.FbxNull.Create(scene, "")
+            bare.Look.Set(FBX.FbxNull.ELook.eNone.value)
+            group = FBX.FbxNode.Create(scene, "grp")
+            group.SetNodeAttribute(bare)
+            group.LclTranslation.Set(FBX.FbxDouble3(0.0, 4.0, 0.0))
+            group.LclRotation.Set(FBX.FbxDouble3(0.0, 0.0, 20.0))
+            nodes["spine"].RemoveChild(nodes["head"])
+            group.AddChild(nodes["head"])
+            nodes["spine"].AddChild(group)
+            look = FBX.FbxNull.Create(scene, "")
+            look.Look.Set(FBX.FbxNull.ELook.eCross.value)
+            locator = FBX.FbxNode.Create(scene, "loc")
+            locator.SetNodeAttribute(look)
+            locator.LclTranslation.Set(FBX.FbxDouble3(0.0, 3.0, 0.0))
+            nodes["head"].AddChild(locator)
 
         props = {"t": "LclTranslation", "r": "LclRotation", "s": "LclScaling"}
         for take, keys in takes:
@@ -1005,6 +1022,216 @@ class TestClipListLoad(unittest.TestCase):
     def check(self, label, clip):
         with self.subTest(label):
             self.assertEqual(fingerprint(clip), LITERALS[label])
+
+    def same_take(self, got, want):
+        """a take of a ClipList equal to the ClipData read alone: its frames,
+        timebase, name, labels and rest pose"""
+        self.assertEqual(fingerprint(got), fingerprint(want))
+        self.assertEqual((got.take, got.axis_system, got.unit), (want.take, want.axis_system, want.unit))
+        if want.rest_pose is None:
+            self.assertIsNone(got.rest_pose)
+            return
+        self.assertEqual([n.name for n in got.rest_pose], [n.name for n in want.rest_pose])
+        np.testing.assert_array_equal(np.asarray(got.rest_pose.world_matrix), np.asarray(want.rest_pose.world_matrix))
+        self.assertEqual((got.rest_pose.axis_system, got.rest_pose.unit), (want.rest_pose.axis_system, want.rest_pose.unit))
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_load_fbx_every_stack(self):
+        from unittest import mock
+
+        path = build_fbx(os.path.join(self.tmp.name, "takes.fbx"))
+        with warnings.catch_warnings(record=True) as caught, \
+                mock.patch.object(FBX.FbxImporter, "Create", wraps=FBX.FbxImporter.Create) as opened:
+            warnings.simplefilter("always")
+            clips = ClipList.load_fbx(path)
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual(clips.take, ["walk", "idle", "idle_1"])
+        self.assertEqual(len([w for w in caught if "takes that would read under one name are told apart" in str(w.message)]), 1)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for index, clip in enumerate(clips):
+                with self.subTest(take=index):
+                    self.same_take(clip, ClipData.load_fbx(path, take=index))
+            self.assertEqual(len({clip[0].uuid for clip in clips}), 1)  # one rig's uuids
+
+            # every take, no take argument
+            for keyword in ("takes", "take"):
+                with self.assertRaisesRegex(TypeError, rf"unexpected keyword argument '{keyword}'"):
+                    ClipList.load_fbx(path, **{keyword: ["walk"]})
+
+            clash = build_fbx(os.path.join(self.tmp.name, "clash.fbx"), takes=[(n, TAKES[0][1]) for n in ("idle", "idle", "idle_1")])
+            self.assertEqual(ClipList.load_fbx(clash).take, ["idle", "idle_2", "idle_1"])
+
+            # a z-up file in metres: each take turned and in cm, as alone
+            zup = build_fbx(os.path.join(self.tmp.name, "zup.fbx"), up_axis=2, unit=100.0)
+            for index, clip in enumerate(ClipList.load_fbx(zup)):
+                self.same_take(clip, ClipData.load_fbx(zup, take=index))
+            joints = ClipList.load_fbx(path, node_types=("joint",))
+            for index, clip in enumerate(joints):
+                self.same_take(clip, ClipData.load_fbx(path, take=index, node_types=("joint",)))
+
+            # a rig holding a group and a locator: the joints alone, each take
+            # as read alone with node_types, fewer nodes than the plain read
+            mixed  = build_fbx(os.path.join(self.tmp.name, "mixed.fbx"), mixed=True)
+            plain  = ClipList.load_fbx(mixed)
+            joints = ClipList.load_fbx(mixed, node_types=("joint",))
+            self.assertEqual(plain.name,         [["hips", "spine", "grp", "head", "loc"]] * 3)
+            self.assertEqual(plain[0].node_type, ["joint", "joint", "transform", "joint", "locator"])
+            self.assertEqual(joints.name,        [["hips", "spine", "head"]] * 3)
+            for index, clip in enumerate(joints):
+                self.same_take(clip, ClipData.load_fbx(mixed, take=index, node_types=("joint",)))
+
+            # every keyword reaches every take, each read as alone with it
+            plain = ClipList.load_fbx(zup)
+            for keyword in ({"fps": 30.0}, {"scale_factor": 2.0}, {"axis_system": None}):
+                with self.subTest(**keyword):
+                    clips = ClipList.load_fbx(zup, **keyword)
+                    for index, clip in enumerate(clips):
+                        self.same_take(clip, ClipData.load_fbx(zup, take=index, **keyword))
+                        self.assertNotEqual(fingerprint(clip), fingerprint(plain[index]))
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_a_file_with_no_take(self):
+        path = build_fbx(os.path.join(self.tmp.name, "still.fbx"), takes=())
+        self.assertEqual(len(ClipList.load_fbx(path)), 0)
+        self.assertEqual(ClipData.load_fbx(path).frame_count, 1)
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_rest_pose_per_take(self):
+        """every take holds its own copy of the file's rest pose"""
+        path = build_fbx(os.path.join(self.tmp.name, "takes.fbx"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            clips = ClipList.load_fbx(path)
+            file  = ClipData.load_fbx(path).rest_pose
+        rests = [clip.rest_pose for clip in clips]
+        self.assertEqual(len({id(rest) for rest in rests}), 3)
+        for rest in rests:
+            np.testing.assert_array_equal(np.asarray(rest.world_matrix), np.asarray(file.world_matrix))
+        rests[0]["hips"].translate = (1.0, 2.0, 3.0)
+        np.testing.assert_array_equal(np.asarray(rests[1].world_matrix), np.asarray(file.world_matrix))
+        saved = ClipList.load(clips.save(os.path.join(self.tmp.name, "takes.npz")))
+        self.assertEqual(len({id(clip.rest_pose) for clip in saved}), 3)
+
+    @unittest.skipIf(pygltflib is None, "pygltflib is not installed")
+    def test_load_glb_every_animation(self):
+        from unittest import mock
+
+        from cgmath.formats import glb
+
+        path = build_glb(os.path.join(self.tmp.name, "takes.glb"))
+        with warnings.catch_warnings(record=True) as caught, \
+                mock.patch.object(glb, "load_gltf", wraps=glb.load_gltf) as parse:
+            warnings.simplefilter("always")
+            clips = ClipList.load_glb(path)
+        self.assertEqual(parse.call_count, 1)
+        self.assertEqual(clips.take, ["walk", "animation1", "walk_1"])
+        self.assertEqual(len([w for w in caught if "takes that would read under one name are told apart" in str(w.message)]), 1)
+        rig = HierarchyData.load_glb(path)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for index, clip in enumerate(clips):
+                with self.subTest(take=index):
+                    self.same_take(clip, ClipData.load_glb(path, animation=index))
+                    # the file's node pose as the rest pose
+                    np.testing.assert_array_equal(np.asarray(clip.rest_pose.world_matrix), np.asarray(rig.world_matrix))
+        # each take its own copy, edited alone
+        self.assertEqual(len({id(clip.rest_pose) for clip in clips}), 3)
+        clips[0].rest_pose["root"].translate = (1.0, 2.0, 3.0)
+        for clip in clips[1:]:
+            np.testing.assert_array_equal(np.asarray(clip.rest_pose.world_matrix), np.asarray(rig.world_matrix))
+        still = build_glb(os.path.join(self.tmp.name, "still.glb"), animations=())
+        self.assertEqual(len(ClipList.load_glb(still)), 0)
+
+    def test_blank_names_in_the_list(self):
+        """the list names a blank take as ClipData's
+        loaders name it, Take 001 ... by position in an fbx, animation<i> in
+        a glb, before two takes of one name are told apart"""
+        if pygltflib is not None:
+            animations = [(name,) + ANIMATIONS[0][1:] for name in ("", "  ", "animation1", "walk")]
+            path       = build_glb(os.path.join(self.tmp.name, "blank.glb"), animations=animations)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                clips = ClipList.load_glb(path)
+            self.assertEqual(clips.take, ["animation0", "animation1", "animation1_1", "walk"])
+            self.assertEqual(len([w for w in caught if "take 2 'animation1' as 'animation1_1'" in str(w.message)]), 1)
+            # the warning names a take as the file holds it
+            animations = [(name,) + ANIMATIONS[0][1:] for name in ("animation1", "  ")]
+            path       = build_glb(os.path.join(self.tmp.name, "spaces.glb"), animations=animations)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                self.assertEqual(ClipList.load_glb(path).take, ["animation1", "animation1_1"])
+            self.assertEqual(
+                [str(w.message) for w in caught],
+                ["takes that would read under one name are told apart: take 1 '  ' as 'animation1_1'"],
+            )
+        if FBX is not None:
+            stacks = [(name, TAKES[0][1]) for name in ("idle", "", "Take 002", " ")]
+            path   = build_fbx(os.path.join(self.tmp.name, "blank.fbx"), takes=stacks)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                clips = ClipList.load_fbx(path)
+            self.assertEqual(clips.take, ["idle", "Take 002", "Take 002_1", "Take 004"])
+            self.assertEqual(len([w for w in caught if "take 2 'Take 002' as 'Take 002_1'" in str(w.message)]), 1)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                for index, clip in enumerate(clips):
+                    self.same_take(clip, ClipData.load_fbx(path, take=index))
+
+    @unittest.skipIf(pygltflib is None, "pygltflib is not installed")
+    def test_load_glb_takes_no_take_argument(self):
+        """ClipList.load_glb reads every
+        animation, as ClipList.load_fbx every take; one alone is
+        ClipData.load_glb's, by animation=i. takes= and take= are refused
+        before the file is parsed"""
+        from unittest import mock
+
+        from cgmath.formats import glb
+
+        path = build_glb(os.path.join(self.tmp.name, "takes.glb"))
+        with mock.patch.object(glb, "load_gltf", wraps=glb.load_gltf) as parse:
+            for keyword, value in (("takes", ["walk"]), ("takes", ()), ("take", 0)):
+                with self.subTest(keyword=keyword, value=value):
+                    with self.assertRaisesRegex(TypeError, rf"unexpected keyword argument '{keyword}'"):
+                        ClipList.load_glb(path, **{keyword: value})
+            for keyword in ("takes", "take"):
+                with self.subTest(route=keyword):
+                    with self.assertRaisesRegex(TypeError, rf"ClipList\.load_glb: .*'{keyword}'"):
+                        ClipList.load(path, **{keyword: ["walk"]})
+        self.assertEqual(parse.call_count, 0)
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_fbx_grid_counts_whole_spans(self):
+        """3.0.0's frame rule survives: 62 frames for frames 60-121 at 24 fps,
+        14 for frames 1-14"""
+        keys  = {"hips": {"t": [(60, (0, 90, 0)), (121, (5, 90, 0))]}}
+        path  = build_fbx(os.path.join(self.tmp.name, "spans.fbx"), takes=[("long", keys), ("short", {"hips": {"t": [(1, (0, 90, 0)), (14, (1, 90, 0))]}})])
+        clips = ClipList.load_fbx(path)
+        self.assertEqual(clips.frame_count, [62, 14])
+        self.assertEqual(clips.start_frame, [60, 1])
+
+    def test_routes(self):
+        """ClipList.load routes an fbx or glb by extension, its keywords
+        checked before the file is read"""
+        if pygltflib is not None:
+            path = build_glb(os.path.join(self.tmp.name, "takes.glb"))
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                self.assertEqual(ClipList.load(path).take, ["walk", "animation1", "walk_1"])
+            with self.assertRaisesRegex(TypeError, r"ClipList\.load_glb: .*'takes'"):
+                ClipList.load(path, takes=["walk"])
+        if FBX is not None:
+            path = build_fbx(os.path.join(self.tmp.name, "takes.fbx"))
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                self.assertEqual(ClipList.load(path).take, ["walk", "idle", "idle_1"])
+            # every take, no take argument, refused before the file is opened
+            from unittest import mock
+
+            with mock.patch.object(FBX.FbxImporter, "Create", wraps=FBX.FbxImporter.Create) as opened:
+                with self.assertRaisesRegex(TypeError, r"ClipList\.load_fbx: .*'takes'"):
+                    ClipList.load(path, takes=["idle"])
+            self.assertEqual(opened.call_count, 0)
 
     @unittest.skipIf(pygltflib is None, "pygltflib is not installed")
     def test_load_glb_parses_once(self):

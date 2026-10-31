@@ -389,6 +389,10 @@ get_delta(self, other, by: 'str' = 'index', translate: 'bool' = True) -> "'ClipL
     every take's :meth:`ClipData.get_delta`, against another
 index(self, value, start=0, stop=None) -> 'int'
     the position of the first take named ``value``, or of that clip,
+classmethod load_fbx(cls, filename: 'str', scale_factor: 'Optional[float]' = None, fps: 'Optional[float]' = None, axis_system: 'Optional[str]' = 'maya_y_up', node_types: 'Optional[tuple]' = None) -> "'ClipList'"
+    every take of an fbx file, one :class:`ClipData` each
+classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, fps: 'float' = 24.0) -> "'ClipList'"
+    every animation of a glb file, one :class:`ClipData` each
 match(self, *args, exclude: 'bool' = False, exact: 'bool' = True) -> '_Takes'
     every take's ``match``, the nodes it selects at the frame each take
 set_joint_orient_to_rotate(self) -> None
