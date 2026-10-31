@@ -6671,6 +6671,129 @@ _DEQUE_ROWS = 32
 _RENAMES_SPARED = 16
 
 
+def _fbx_stacks(scene) -> list:
+    """the scene's takes, its animation stacks in file order, typed: the
+    binding can hand back a live wrapper of an earlier scene's object for one
+    that sits where it did"""
+    criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimStack.ClassId)
+    return [typed(scene.GetSrcObject(criteria, index), FBX.FbxAnimStack, FBX) for index in range(scene.GetSrcObjectCount(criteria))]
+
+
+def _fbx_take_clip(
+    cls, scene, stack, rig, rest, hierarchy_data, nodes, tree, turn, record, filename, fps, start_frame, end_frame
+):
+    """one take of an open scene as ``cls``, a ClipData: ``stack`` read as
+    :meth:`ClipData.load_fbx` reads its take, the frames by its frame rule,
+    every node sampled, folded and its roots turned, on a clip built from
+    ``rig`` (the walk's dicts, in the file's own axes) holding ``rest`` as its
+    rest pose and the read's ``record``. ``hierarchy_data``, ``nodes`` and
+    ``tree`` are the walk's (:func:`_walk_fbx`), ``turn`` the axis turn or
+    None. The scene must still be open."""
+    # the evaluator reads whichever stack is current, not the one we hold
+    scene.SetCurrentAnimationStack(stack)
+
+    if fps is None:
+        fps = _fbx_frame_rate(scene.GetGlobalSettings().GetTimeMode())
+        if fps <= 0.0:
+            raise ValueError(
+                f"{filename!r} uses a time mode the fbx sdk reports no "
+                "frame rate for, so the frame rate has to be given: "
+                "load_fbx(..., fps=...)"
+            )
+
+    # the stored span and every key of the take: Unreal stores the
+    # span a frame short of its last key, and a Maya export can store
+    # one wider than its keys
+    per_second = _fbx_ticks_per_second()
+    span       = stack.GetLocalTimeSpan()
+    bounds     = [int(span.GetStart().Get()), int(span.GetStop().Get())]
+    keys       = _fbx_key_ticks(stack)
+    if keys is not None:
+        bounds = [min(bounds[0], keys[0]), max(bounds[1], keys[1])]
+    first, last = _fbx_whole_frames(bounds, fps, per_second).tolist()
+
+    # out to whole frames, so both ends are inside the grid rather
+    # than part of a frame past it
+    start = int(np.floor(first)) if start_frame is None else int(start_frame)
+    stop  = int(np.ceil(last)) if end_frame is None else int(end_frame)
+
+    # each end defaults on its own, so one passed alone can fall past
+    # the take's other end: the error names the end the take gave
+    if stop < start:
+        if end_frame is None:
+            raise ValueError(
+                f"start_frame {start} is past the take's last frame {stop}; "
+                "pass end_frame too"
+            )
+        if start_frame is None:
+            raise ValueError(
+                f"end_frame {stop} is before the take's first frame {start}; "
+                "pass start_frame too"
+            )
+        raise ValueError(f"end_frame {stop} is before start_frame {start}")
+
+    clip         = cls(rig, frames=stop - start + 1, start_frame=start, fps=fps)
+    column       = {uuid: index for index, uuid in enumerate(clip.uuid)}
+    scale        = np.array(clip.frames.scale)
+    rotate       = np.array(clip.frames.rotate)
+    translate    = np.array(clip.frames.translate)
+    joint_orient = np.array(clip.frames.joint_orient)
+
+    # every node of the tree, the kept ones through the objects the
+    # walk handed back and the dropped ones above them, sampled as the
+    # file holds them, then folded every frame at once, as the walk
+    # folds their static values
+    uuids = list(hierarchy_data)
+    sampled = [
+        (nodes[uuids[kept]] if kept >= 0 else tree.nodes[position], position)
+        for position, kept in enumerate(tree.kept.tolist())
+    ]
+    held = [
+        np.repeat(values[None], clip.frame_count, axis=0)
+        for values in (tree.translate, tree.rotate, tree.scale)
+    ]
+
+    # the frame grid in the sdk's ticks, every frame sampled at once
+    ticks = _fbx_ticks((start + np.arange(clip.frame_count)) / fps, per_second)
+    _fbx_sample_take(stack, sampled, ticks, tree, held)
+    sheared  = _fbx_sheared_cameras(tree, stack, ticks)
+    file_fps = _fbx_frame_rate(scene.GetGlobalSettings().GetTimeMode()) or fps
+    baked = _fbx_clip_bakes(
+        tree, stack, sampled, file_fps, (start + np.arange(clip.frame_count)) * file_fps / fps, held
+    )
+
+    # a joint's orient as the fold leaves it, every frame: a node a
+    # dropped node above moves only at its static values took the fold
+    # in the rig the clip was built from
+    folded = _fbx_fold(tree, *held, baked)
+    put    = np.array([column[uuid] for uuid in uuids], dtype=np.intp)
+    joints = tree.joint[tree.columns]
+    translate[:, put], rotate[:, put], scale[:, put] = folded[:3]
+    joint_orient[:, put[joints]] = folded[3][:, joints]
+    shear                        = np.zeros(translate.shape)
+    shear[:, put]                = folded[5]
+
+    if turn is not None:
+        roots  = [index for index, node in enumerate(clip) if node.parent_uuid is None]
+        joints = [clip[index].node_type == "joint" for index in roots]
+        orders = [clip[index].rotate_order for index in roots]
+
+        turned = _fbx_turn_roots(
+            turn, joints, orders, translate[:, roots], rotate[:, roots], joint_orient[:, roots]
+        )
+        translate[:, roots], rotate[:, roots], joint_orient[:, roots] = turned
+
+    clip.frames.joint_orient = joint_orient
+    clip.frames.scale        = scale
+    clip.frames.shear        = shear
+    clip.frames.rotate       = rotate
+    clip.frames.translate    = translate
+    clip.frame               = 0
+    clip._rest_pose          = rest
+    _fbx_warn_cameras(sheared)
+    return _recorded(clip, record)
+
+
 def _insort_row(table: dict, key, row: int) -> None:
     """puts ``row`` in order among the rows ``table`` holds for ``key``"""
     rows = table.get(key)
@@ -15360,8 +15483,8 @@ class ClipData(HierarchyData):
             if turn is not None:
                 _fbx_turn_walk(rest, turn)
 
-            criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimStack.ClassId)
-            count    = scene.GetSrcObjectCount(criteria)
+            stacks = _fbx_stacks(scene)
+            count  = len(stacks)
 
             # the rest pose and, with a take, the rig the clip is built from,
             # in the file's own axes, turned once every frame is sampled
@@ -15373,10 +15496,6 @@ class ClipData(HierarchyData):
                 clip._rest_pose = rest
                 _fbx_warn_cameras(_fbx_sheared_cameras(tree))
                 return _recorded(clip, record)
-
-            # typed: the binding can hand back a live wrapper of an earlier
-            # scene's object for one that sits where it did
-            stacks = [typed(scene.GetSrcObject(criteria, index), FBX.FbxAnimStack, FBX) for index in range(count)]
 
             # the first take holding a key, then the first holding a curve
             # node, with or without a curve: a take can hold curve nodes,
@@ -15394,109 +15513,10 @@ class ClipData(HierarchyData):
 
                 stack = stacks[take % count]
 
-            # the evaluator reads whichever stack is current, not the one we hold
-            scene.SetCurrentAnimationStack(stack)
-
-            if fps is None:
-                fps = _fbx_frame_rate(scene.GetGlobalSettings().GetTimeMode())
-                if fps <= 0.0:
-                    raise ValueError(
-                        f"{filename!r} uses a time mode the fbx sdk reports no "
-                        "frame rate for, so the frame rate has to be given: "
-                        "load_fbx(..., fps=...)"
-                    )
-
-            # the stored span and every key of the take: Unreal stores the
-            # span a frame short of its last key, and a Maya export can store
-            # one wider than its keys
-            per_second = _fbx_ticks_per_second()
-            span       = stack.GetLocalTimeSpan()
-            bounds     = [int(span.GetStart().Get()), int(span.GetStop().Get())]
-            keys       = _fbx_key_ticks(stack)
-            if keys is not None:
-                bounds = [min(bounds[0], keys[0]), max(bounds[1], keys[1])]
-            first, last = _fbx_whole_frames(bounds, fps, per_second).tolist()
-
-            # out to whole frames, so both ends are inside the grid rather
-            # than part of a frame past it
-            start = int(np.floor(first)) if start_frame is None else int(start_frame)
-            stop  = int(np.ceil(last)) if end_frame is None else int(end_frame)
-
-            # each end defaults on its own, so one passed alone can fall past
-            # the take's other end: the error names the end the take gave
-            if stop < start:
-                if end_frame is None:
-                    raise ValueError(
-                        f"start_frame {start} is past the take's last frame {stop}; "
-                        "pass end_frame too"
-                    )
-                if start_frame is None:
-                    raise ValueError(
-                        f"end_frame {stop} is before the take's first frame {start}; "
-                        "pass start_frame too"
-                    )
-                raise ValueError(f"end_frame {stop} is before start_frame {start}")
-
-            clip         = cls(rig, frames=stop - start + 1, start_frame=start, fps=fps)
-            column       = {uuid: index for index, uuid in enumerate(clip.uuid)}
-            scale        = np.array(clip.frames.scale)
-            rotate       = np.array(clip.frames.rotate)
-            translate    = np.array(clip.frames.translate)
-            joint_orient = np.array(clip.frames.joint_orient)
-
-            # every node of the tree, the kept ones through the objects the
-            # walk handed back and the dropped ones above them, sampled as the
-            # file holds them, then folded every frame at once, as the walk
-            # folds their static values
-            uuids = list(hierarchy_data)
-            sampled = [
-                (nodes[uuids[kept]] if kept >= 0 else tree.nodes[position], position)
-                for position, kept in enumerate(tree.kept.tolist())
-            ]
-            held = [
-                np.repeat(values[None], clip.frame_count, axis=0)
-                for values in (tree.translate, tree.rotate, tree.scale)
-            ]
-
-            # the frame grid in the sdk's ticks, every frame sampled at once
-            ticks = _fbx_ticks((start + np.arange(clip.frame_count)) / fps, per_second)
-            _fbx_sample_take(stack, sampled, ticks, tree, held)
-            sheared  = _fbx_sheared_cameras(tree, stack, ticks)
-            file_fps = _fbx_frame_rate(scene.GetGlobalSettings().GetTimeMode()) or fps
-            baked = _fbx_clip_bakes(
-                tree, stack, sampled, file_fps, (start + np.arange(clip.frame_count)) * file_fps / fps, held
+            return _fbx_take_clip(
+                cls, scene, stack, rig, rest, hierarchy_data, nodes, tree, turn, record, filename, fps,
+                start_frame, end_frame,
             )
-
-        # a joint's orient as the fold leaves it, every frame: a node a
-        # dropped node above moves only at its static values took the fold
-        # in the rig the clip was built from
-        folded = _fbx_fold(tree, *held, baked)
-        put    = np.array([column[uuid] for uuid in uuids], dtype=np.intp)
-        joints = tree.joint[tree.columns]
-        translate[:, put], rotate[:, put], scale[:, put] = folded[:3]
-        joint_orient[:, put[joints]] = folded[3][:, joints]
-        shear                        = np.zeros(translate.shape)
-        shear[:, put]                = folded[5]
-
-        if turn is not None:
-            roots  = [index for index, node in enumerate(clip) if node.parent_uuid is None]
-            joints = [clip[index].node_type == "joint" for index in roots]
-            orders = [clip[index].rotate_order for index in roots]
-
-            turned = _fbx_turn_roots(
-                turn, joints, orders, translate[:, roots], rotate[:, roots], joint_orient[:, roots]
-            )
-            translate[:, roots], rotate[:, roots], joint_orient[:, roots] = turned
-
-        clip.frames.joint_orient = joint_orient
-        clip.frames.scale        = scale
-        clip.frames.shear        = shear
-        clip.frames.rotate       = rotate
-        clip.frames.translate    = translate
-        clip.frame               = 0
-        clip._rest_pose          = rest
-        _fbx_warn_cameras(sheared)
-        return _recorded(clip, record)
 
     def save_fbx(self, filename, zero_root=False, as_ascii=False):
         """saves the bound frame to a .fbx file, binary unless as_ascii is set
