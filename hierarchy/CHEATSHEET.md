@@ -3088,17 +3088,17 @@ as above.
 index 0, because a file can hold takes with no curves at all, or with
 curve nodes and curves but not one key, such as an empty "Take 001"
 ahead of the animation (cgmath 3.0.0 took the first take holding a curve
-node, keyed or not). In a file with no key at all it takes the first take
-that holds a curve node, with or without a curve, then the first take.
-`take=` picks any take by index, an empty one included. An empty take
-reads back as its own static values on every frame, the rest pose where
-its curve nodes hold the node's own. A curve with no key reads at its
-curve node's value, where the SDK's evaluator takes the curve's own
-default, and so does Maya where the curve is in the file's active take
-and the last take does not key its channel (a curve with no key in any
-other take, the last included, Maya does not read): under a curve node
-holding Y at 55, a Y curve with no key whose default is 99 reads 55 in
-the clip, 99 in the SDK's evaluator and, there, in Maya.
+node, keyed or not). In a file with no key at all it takes the first
+take that holds a curve node, with or without a curve, then the first
+take. `take=` picks any take by index, an empty one included. An empty
+take reads back as its own static values on every frame, the rest pose
+where its curve nodes hold the node's own. A curve with no key reads at
+the curve's own default, as the SDK's evaluator reads it, and so does
+Maya where the curve is in the file's active take and the last take does
+not key its channel (a curve with no key in any other take, the last
+included, Maya does not read): under a curve node holding Y at 55, a Y
+curve with no key whose default is 99 reads 99. A curve node's channel
+with no curve reads at the curve node's value.
 
 Maya 2025's `FBXImport`, with its default settings, picks otherwise. It
 loads its curves from the file's last take, keyed or not, so an empty

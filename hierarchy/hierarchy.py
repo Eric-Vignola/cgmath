@@ -6388,18 +6388,17 @@ def _fbx_turns_to_euler(q: np.ndarray, order: int) -> np.ndarray:
 
 
 def _fbx_held(curve_node, curve, axis: int) -> float:
-    """the value read for a channel with a curve node but no keys: the curve
-    node's own value, rounded to single precision when a curve is there at all.
-    It is what the sdk takes where the channel has no curve. For a curve with
-    no key the sdk's evaluator takes the curve's own default instead, which
-    this does not read, and so does Maya where the curve is in the file's
-    active take and the last take does not key its channel: under a curve node
-    holding 55, a curve with no key whose default is 99 reads 55 here, 99 in
-    the sdk and, there, in Maya"""
-    held = curve_node.GetChannelValue(axis, 0.0)
-    if curve is not None:
-        held = float(np.float32(held))
-    return held
+    """the value read for a channel with a curve node but no keys: a curve's
+    own default where the channel has a curve with no key, as the sdk's
+    evaluator reads it, and Maya where the curve is in the file's active take
+    and the last take does not key its channel (under a curve node holding
+    55, a curve with no key whose default is 99 reads 99); the curve node's
+    own value where it has no curve, as the sdk takes it"""
+    if curve is None:
+        return curve_node.GetChannelValue(axis, 0.0)
+    # newer bindings hand back the value alone, Maya 2025's (value, index)
+    held = curve.Evaluate(FBX.FbxTime())
+    return float(np.float32(held[0] if isinstance(held, tuple) else held))
 
 
 def _fbx_layer_channel(layer, props, ticks, per_second: int) -> tuple:
@@ -15252,13 +15251,13 @@ class ClipData(HierarchyData):
         back gives that take's own static values on every frame, the rest
         pose where its curve nodes hold the node's own -- a silent answer
         that looks like a broken loader rather than an empty take. A curve with
-        no key reads at its curve node's value, where the sdk's evaluator takes
-        the curve's own default, and so does Maya where the curve is in the
-        file's active take and the last take does not key its channel (a curve
-        with no key in any other take, the last included, Maya does not read):
-        under a curve node holding Y at 55, a Y curve with no key whose default
-        is 99 reads 55 in the clip, 99 in the sdk's evaluator and, there, in
-        Maya. The frames left out default to the take picked. Pass an index to
+        no key reads at the curve's own default, as the sdk's evaluator reads
+        it, and so does Maya where the curve is in the file's active take and
+        the last take does not key its channel (a curve with no key in any
+        other take, the last included, Maya does not read): under a curve node
+        holding Y at 55, a Y curve with no key whose default is 99 reads 99. A
+        curve node's channel with no curve reads at the curve node's value.
+        The frames left out default to the take picked. Pass an index to
         override, including onto an empty take.
 
         Maya 2025's FBXImport, with its default settings, picks otherwise. It
@@ -15383,10 +15382,8 @@ class ClipData(HierarchyData):
             # node, with or without a curve: a take can hold curve nodes,
             # curves even, and not one key, and reads back as its own static
             # values on every frame, the rest pose where its curve nodes hold
-            # the node's own (a curve with no key at its curve node's value,
-            # where the sdk takes the curve's own default, and so does Maya
-            # where the curve is in the file's active take and the last take
-            # does not key its channel: _fbx_held)
+            # the node's own (a curve with no key at the curve's own default,
+            # as the sdk and Maya read it: _fbx_held)
             if take is None:
                 stack = next((x for x in stacks if _fbx_key_ticks(x) is not None), None)
                 if stack is None:

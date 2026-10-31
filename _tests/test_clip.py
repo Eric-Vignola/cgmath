@@ -7677,6 +7677,96 @@ class TestClipLoadFbx(unittest.TestCase):
                 self.assertEqual(empty.frame_count, 9)
                 self.assertTrue(np.allclose(np.array(empty.frames.translate)[:, 0, 0], 0.0))
 
+    def test_a_curve_with_no_key_reads_at_its_own_default(self):
+        """a curve with no key reads at the curve's own
+        default, as the sdk's evaluator and Maya read it, not at its curve
+        node's value; a channel with no curve still reads the curve node's"""
+        path = self.authored("keyless_default.fbx", keyed_stack=None, unkeyed={0: "curve"})
+        with open(path, encoding="latin-1", newline="") as f:
+            text = f.read()
+        text, defaults = re.subn(r"^\t\tDefault: 0$", "\t\tDefault: 99", text, flags=re.M)
+        text, held = re.subn(r'(P: "d\|X", "Number", "", "A",)[^\n]*', r"\g<1>55", text)
+        text, others = re.subn(r'(P: "d\|[YZ]", "Number", "", "A",)[^\n]*', r"\g<1>3", text)
+        self.assertEqual((defaults, held, others), (1, 1, 2))
+        with open(path, "w", encoding="latin-1", newline="") as f:
+            f.write(text)
+
+        translate = np.array(ClipData.load_fbx(path, fps=4.0, take=0).frames.translate)[:, 0]
+
+        self.assertTrue(np.array_equal(translate[:, 0], np.full(len(translate), 99.0)), translate[:, 0])
+        self.assertTrue(np.array_equal(translate[:, 1:], np.full((len(translate), 2), 3.0)), translate[:, 1:])
+
+    def test_a_layer_weight_curve_with_no_key_reads_at_its_own_default(self):
+        """a layer's Weight curve holding no key weighs the layer at the
+        curve's own default, as the sdk's evaluator reads it, not at its
+        curve node's value: an additive layer adding 10 to translate x over
+        a base of 1, its Weight curve node holding 50 and a keyless curve of
+        default 20, reads 3 on every frame (6 at the curve node's value)"""
+        manager = FBX.FbxManager.Create()
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames24)
+        attr = FBX.FbxSkeleton.Create(scene, "joint1Attr")
+        attr.SetSkeletonType(FBX.FbxSkeleton.EType.eLimbNode)
+        node = FBX.FbxNode.Create(scene, "joint1")
+        node.SetNodeAttribute(attr)
+        scene.GetRootNode().AddChild(node)
+
+        stack  = FBX.FbxAnimStack.Create(scene, "Take 001")
+        layers = [FBX.FbxAnimLayer.Create(scene, name) for name in ("Base Layer", "Layer 2")]
+        for layer, value in zip(layers, (1.0, 10.0)):
+            stack.AddMember(layer)
+            curve = node.LclTranslation.GetCurve(layer, "X", True)
+            curve.KeyModifyBegin()
+            for seconds in (0.0, 1.0):
+                time = FBX.FbxTime()
+                time.SetSecondDouble(seconds)
+                key = curve.KeyAdd(time)[0]
+                curve.KeySetValue(key, value)
+                curve.KeySetInterpolation(key, FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear)
+            curve.KeyModifyEnd()
+        layers[1].BlendMode.Set(0.0)  # additive
+        layers[1].Weight.Set(50.0)
+        layers[1].Weight.GetCurve(layers[1], True)  # a curve with no key
+
+        path     = os.path.join(self.tmp.name, "keyless_weight.fbx")
+        writer   = manager.GetIOPluginRegistry().FindWriterIDByDescription("FBX ascii (*.fbx)")
+        exporter = FBX.FbxExporter.Create(manager, "")
+        if not exporter.Initialize(path, writer, manager.GetIOSettings()):
+            raise RuntimeError(f"cannot write {path}")
+        exporter.Export(scene)
+        exporter.Destroy()
+        manager.Destroy()
+
+        # the writer leaves the keyless curve out, its connection in: put it
+        # back, its default 20, the curve node's value 50
+        with open(path, encoding="latin-1", newline="") as f:
+            text = f.read()
+        named = re.findall(r'^\tC: "OP",(\d+),\d+, "d\|Weight"', text, re.M)
+        self.assertEqual(len(named), 1)
+        fields = ("KeyTime", "KeyValueFloat", "KeyAttrFlags", "KeyAttrDataFloat", "KeyAttrRefCount")
+        empty  = "".join(f"\t\t{field}: *0 {{\n\t\t\ta: \n\t\t}} \n" for field in fields)
+        curve  = f'\tAnimationCurve: {named[0]}, "AnimCurve::", "" {{\n\t\tDefault: 20\n\t\tKeyVer: 4009\n{empty}\t}}\n'
+        at     = text.index("\tAnimationCurveNode: ")
+        text   = text[:at] + curve + text[at:]
+        text, held = re.subn(r'(P: "d\|Weight", "Number", "", "A",)[^\n]*', r"\g<1>50", text)
+        self.assertEqual(held, 1)
+        with open(path, "w", encoding="latin-1", newline="") as f:
+            f.write(text)
+
+        translate = np.array(ClipData.load_fbx(path, fps=4.0).frames.translate)[:, 0, 0]
+
+        self.assertTrue(np.array_equal(translate, np.full(len(translate), 3.0)), translate)
+        # the sdk's own evaluator, frame by frame
+        with hierarchy.hierarchy.open_fbx(path, FBX) as scene:
+            criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimStack.ClassId)
+            scene.SetCurrentAnimationStack(scene.GetSrcObject(criteria, 0))
+            node = scene.GetRootNode().GetChild(0)
+            for frame in range(len(translate)):
+                time = FBX.FbxTime()
+                time.SetSecondDouble(frame / 4.0)
+                self.assertAlmostEqual(node.EvaluateLocalTranslation(time)[0], 3.0, places=6)
+
     def test_with_no_key_the_default_take_is_the_first_holding_curves(self):
         """no take holds a key: the first holding a curve node, ahead of
         index 0, which holds none, and of a later take holding one too; both
