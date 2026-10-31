@@ -838,7 +838,8 @@ print(spin.name, spin.key_count)                  # pCube2.rotateZ 0
 |---|---|
 | `"translateX"` / `"rotateY"` / `"scaleZ"` | `"Lcl TranslationX"` / `"Lcl RotationY"` / `"Lcl ScalingZ"` |
 | `"visibility"` | `"Visibility"` |
-| node=`"face_mesh"`, property=`"smile"` | `"face_mesh.smile"` + `"DeformPercent"` |
+| node=`"face_blend.smile"`, property=`"DeformPercent"`: the blend shape's name, not the mesh's | the `"DeformPercent"` of blend shape `face_blend`'s channel `smile` |
+| node=`"face_blend"`, property=`"smile"` | the same, only where the file names the channel `"face_blend.smile"`, as Maya's export does |
 | an FBX name already | passed straight through |
 
 An unknown node raises `ValueError`:

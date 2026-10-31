@@ -1848,37 +1848,54 @@ loader's, where:
   node whose pre rotation it bakes), the angles it solves, and more
   where that continuity carries them on. On the files measured, as
   matrices on a node of world scale 1, within 3.7e-7 on angles up to 250
-  degrees, 5.7e-7 up to 500, 1.3e-6 up to 1000 and 4.3e-6 up to 3600, by
-  channel within the single precision spacing of the largest such angle
-  in radians (2.642e-7 on sums of 205 degrees and 4.228e-6 on sums of
+  degrees, 5.7e-7 up to 500, 1.4e-6 up to 1000 and 4.6e-6 up to
+  3600, by channel within 1.12 times the single precision spacing
+  of the largest such angle in degrees, taken in radians, which
+  bounds it (2.642e-7 on sums of 205 degrees and 4.228e-6 on sums of
   3505, 0.992 of it, where single precision rounds the x and z sums by
-  almost half of it each near y = 90), and within 2.2e-15 on keys in
-  whole degrees, whose sums single precision holds. A scale on the node
-  or above it multiplies that, on the files measured, by up to the
-  largest axis of the node's world scale (scales of 2 to 10 and
-  (1, 2, 3): a node scaled 3.5, or under one scaled 3.5, 7.0e-7 by
-  channel and 8.2e-7 by layer on angles up to 250; one whose scale is
-  keyed to 10, 9.0e-7 on angles to 193); a node under it, and with a
-  rotate pivot the node itself, is off in translate by about that gap at
-  scale 1 times its world distance from the node's rotate pivot, up to
-  1.7 times that on the files measured and 2.9 under a group scaled
-  (1, 2, 3) (a locator 19.7 from a node at scale 1, 3.7e-6 off on angles
-  up to 250, the one under the node keyed to 10, 1.7e-6); a translate
-  both layers key is up to 6.0e-8 (2^-24) of its size off (3.8e-6 at
-  71). But a frame whose blended y angle is 90 or -90, or a whole number
+  almost half of it each near y = 90; 4.508e-6 on sums to 3385, 1.058 of
+  it, where it rounds all three so away from y = 90), and within
+  2.8e-15 on keys in whole degrees up to 1000 and 7.1e-15 up to
+  3600, whose sums single precision holds. Against the same node
+  under the same parents with every scale 1, a scale on the node or
+  above it multiplies that by up to the largest axis of the node's
+  world scale where the scales above it are even (scales of 2 to
+  10 and (1, 2, 3): a node scaled 3.5, or under one scaled 3.5, 7.0e-7
+  by channel and 8.2e-7 by layer on angles up to 250; one whose scale is
+  keyed to 10, 9.0e-7 on angles to 193), by up to the product of the
+  largest axes of its own scale and those above it where no parent
+  scaled unevenly is turned or sits under a turned one (a node scaled
+  (3, 1, 1) under a group scaled (1, 1, 3), 9.0 times), and otherwise
+  by up to 2.13 times that product (8.91 times on the files measured,
+  on a node scaled (3, 1, 1) under a group scaled (1, 1, 3) under
+  one turned 45 degrees); a node under it, and with a rotate pivot
+  the node itself, is off in translate by up to 2.13 times that
+  gap at scale 1, times its world distance from the node's rotate
+  pivot, times the largest over the smallest singular value of the
+  node's parent's world 3x3: on the files measured up to 1.7 times
+  that gap times that distance under even scales, 2.9 under a group
+  scaled (1, 2, 3), 4.9 under two uneven levels and 11.1 under a
+  group scaled (1, 0.1, 1) with a turned group between (a locator
+  19.7 from a node at scale 1, 3.7e-6 off on angles up to 250, the
+  one under the node keyed to 10, 1.7e-6); a translate both layers
+  key is up to 6.0e-8 (2^-24) of its size off (3.8e-6 at 71). But
+  a frame whose blended y angle is 90 or -90, or a whole number
   of turns from either (Maya holds 270 as -90 and -270 as 90), merges by
   channel to angles that hold its turn in xyz alone, x - z kept at 90
   and x + z at -90: those nearest the key before's (the frame before's
   at the file's rate), and on a take's first frame, which has none
   before it, those nearest 0 ((25, 90, 30) merges to (-2.5, 90, 2.5)).
-  On the files measured, y from -810 to 810, 8.5e-3 to 0.89 apart in
-  xzy, yzx, yxz and zxy and 1.4e-2 to 1.4 in zyx, the more the further x
-  and z move, and up to 2.0 where the merged angles also sit a half turn
-  off the keys as above, x and z turned by 180 degrees and y by 180 - y,
-  as the frames after such a first frame can go on doing (a take whose
-  first frame, (-150, -90, 170), merges to (10, -90, 10): 1.58 to 1.97
-  apart in those four orders on every frame). A node that is no joint
-  with a pre rotation parts as the item on it below says;
+  Such a frame is up to 2 sin(c / 2) apart as matrices in xzy, yzx,
+  yxz and zxy and 2 abs(sin c) in zyx, c half how far x + z (at
+  90) or x - z (at -90) has moved since the last frame before its run of
+  frames at that y, or from 0 where the run starts the take: none where
+  it has not moved (on the files measured, y from -810 to 810, 0 to 1.41
+  and 0 to 1.97), and up to 2.0 where the merged angles also sit a half
+  turn off the keys as above, x and z turned by 180 degrees and y by
+  180 - y, as the frames after such a first frame can go on doing (a
+  take whose first frame, (-150, -90, 170), merges to (10, -90, 10):
+  1.58 to 1.97 apart in those four orders on every frame). A node that
+  is no joint with a pre rotation parts as the item on it below says;
 - a layer blends the rotation of a root that is no joint in a file whose
   up axis is X or Z, which Maya's importer turns into its Y-up: it can
   part from ConvertScene there in any rotate order, by channel or by
@@ -1932,28 +1949,44 @@ loader's, where:
   loader at another rate by its gap at the file's rate and by a share of
   its own, which grows with how far the angles Maya solves bend or jump
   between that rate's frames, not with that gap, as the `axis_system`
-  paragraph below says (a smooth turn about one axis, which agrees at
-  the file's rate, 1.0e-2 to 6.1e-2 apart on the files measured). With
-  that option set to "File", or from a scene at the file's rate or at a
-  whole multiple of it, it keys every frame of the file (on the files
-  measured, from 60, 120, 150 and 240 fps scenes for a 30 fps file and
-  48, 120 and 240 fps ones for a 24 fps file) and agrees on them but for
-  the single precision of the curves it solves or merges, as the second
+  paragraph below says (a smooth turn about one axis, which agrees
+  at the file's rate, parts by 2.8e-3 to 5.3e-3 times the largest
+  second difference of its keys in degrees a frame squared from 24
+  and 25 fps scenes for a 30 fps file, 0.33 to 0.77 of that from
+  48, and by 1.9e-3 to 4.2e-3 times it from 30 and 25 fps scenes
+  for a 24 fps file (on the files measured, on second differences of
+  1e-2 or more, 2.9e-5 to 6.8e-1)). With that option set to "File",
+  or from a scene at the file's rate or at a whole multiple of it,
+  it keys every frame of the file (on the files measured, from 60,
+  120, 150 and 240 fps scenes for a 30 fps file and 48, 120 and
+  240 fps ones for a 24 fps file) and agrees on them but for the
+  single precision of the curves it solves or merges, as the second
   item says (as matrices within 3.7e-7 on a node of world scale 1 on
   angles up to 250 degrees, more on larger angles, under a scale and on
   the nodes under it), and where a curve it bakes or solves moves by
   less than about 1e-2 degrees a frame of the rate it keys at, which it
   can hold level over runs of frames, a faster scene holding more: on
   the files measured, moving by 1e-4 to 6e-3 degrees a frame, up to
-  3.7e-4 apart as matrices on takes of 11 and 101 frames, and from 120
-  to 240 fps scenes up to 3.0e-4 more than at the file's rate on curves
-  moving by about 1e-2 degrees a frame of the file and 1.1e-4 on a root
-  of an X-up file; and from a 60 fps scene one curve of the 3,372 it
-  made lost its key on the take's last frame, 1.3e-4 apart there. From a
-  90 fps scene, though, every curve it made held keys on the take's
-  first and last frames alone: on the 30 and 24 fps files measured up to
-  2.0 apart as matrices on nodes of world scale 1, the nodes under them
-  up to 3.6 off in translate. On a node it turns by neither order it is
+  4.2e-4 apart as matrices on a node of world scale 1 on takes of
+  11 and 101 frames, a scale multiplying it as the second item says
+  (1.3e-3 on a group scaled 3) and each held channel within 1.3e-2
+  degrees of its curve, and from 120 to 240 fps scenes up to 3.0e-4
+  more than at the file's rate on curves moving by about 1e-2 degrees
+  a frame of the file and 1.1e-4 on a root of an X-up file; and from
+  a 60 fps scene one curve of the 3,372 it made lost its key on the
+  take's last frame, 1.3e-4 apart there. From a 90 fps scene, though,
+  every curve it made held a key only on each whole second, kept or
+  on a single layer counted from time 0, from the last at or before
+  the take's first frame, and also on its last frame, merged counted
+  from that first frame, up to the first at or after its last frame (a
+  41-frame take of a 30 fps file: frames 0, 30 and 40, merged 0, 30 and
+  60; of a 24 fps file 0, 24 and 40, merged 0, 24 and 48; an 11-frame
+  take: 0 and 10, merged 0 and 30, or 0 and 24 from a 24 fps file; a
+  31-frame take of a 30 fps file: 0 and 30, merged too; a take of frames
+  37 to 77 of a 30 fps file: 30, 60 and 77, merged 37, 67 and 97): on
+  the 30 and 24 fps files measured up to 2.0 apart as matrices on nodes
+  of world scale 1, a node under them up to twice its world distance off
+  in translate (3.72 at 1.87). On a node it turns by neither order it is
   as far apart at the file's rate as the `axis_system` paragraph below
   says, and it parts where another item of this list says;
 - a layer above the base turns a node that is no joint whose pre
@@ -1964,30 +1997,37 @@ loader's, where:
   in every rotate order, but for a pre rotation about one axis alone in
   the two orders that turn about that axis last (xyz and yxz for z, yzx
   and zyx for x, xzy and zxy for y), which agree on the smaller turns
-  (on the files measured within 1.2e-15 in nine such cases of ten, the
-  others, on the larger turns, 9.5e-2 to 2.0 apart). By layer it parts
-  in every order but xyz, merged too, but for yxz under a pre rotation
-  about z alone merged on the smaller turns measured (within 1.6e-7),
-  where the same node with no pre rotation agrees merged on the turns
-  measured. On the files measured, pre rotations about mixed axes that
-  turn 7 to 161 degrees, by channel 4.3e-3 to 1.99 apart as matrices, by
-  layer merged 6.5e-3 to 2.0, more as the pre rotation and the turns
-  grow; by layer, a node in xyz agrees, kept or merged, but for the
-  single precision of the curve Maya bakes and where it holds that curve
-  level (the item above): within 4.5e-7 on keys of up to 330 degrees and
-  4.5e-6 on keys to 3500 on a node of world scale 1, a scale multiplying
-  these as the second item says, and 1.2e-4 on a baked curve held level
-  over three frames; a post rotation, which Maya keeps as the rotate
-  axis, parts only where a node with none does. An override layer's
-  angles take the place of the baked ones in every order, by layer
-  merged at every weight measured or kept at 100, and by channel at 100,
-  and so do a passthrough layer's at weight 100: the pre rotation is
-  lost where the layer holds the rotate, Maya turning the node by the
-  layer's angles alone where the SDK turns it by them under the pre
-  rotation, apart by about what the pre rotation turns it. By channel
-  under 100 the gap stays near that one; kept by layer under 100 Maya
-  weighs the override, as the item on that says, so the gap holds both.
-  On the files measured, weights 10 to 100: by layer merged, at 100 and
+  (on the files measured, on turns of up to 77 degrees under a pre
+  rotation of up to 100 and 57 under a larger one within 1.2e-15 on
+  keys single precision holds, in whole, half or quarter degrees,
+  and within 2.6e-7 on keys it does not, but where Maya holds a
+  curve level (the item above) or merges a frame at y = 90 or -90,
+  the pre rotation counted (the second item); on larger turns, on
+  keys drawn at random, the same in 11,183 cases of 14,565, the
+  others up to 2.0 apart, growing with the layer's angles). By layer
+  it parts in every order but xyz, merged too, but for yxz under a
+  pre rotation about z alone merged on the smaller turns measured
+  (within 1.6e-7), where the same node with no pre rotation agrees
+  merged on the turns measured. On the files measured, pre rotations
+  about mixed axes that turn 7 to 161 degrees, by channel 4.3e-3
+  to 1.99 apart as matrices, by layer merged 6.5e-3 to 2.0, more
+  as the pre rotation and the turns grow; by layer, a node in xyz
+  agrees, kept or merged, but for the single precision of the curve Maya
+  bakes and where it holds that curve level (the item above): within
+  4.5e-7 on keys of up to 330 degrees and 4.5e-6 on keys to 3500 on
+  a node of world scale 1, a scale multiplying these as the second
+  item says, and 1.2e-4 on a baked curve held level over three frames;
+  a post rotation, which Maya keeps as the rotate axis, parts only
+  where a node with none does. An override layer's angles take the
+  place of the baked ones in every order, by layer merged at every
+  weight measured or kept at 100, and by channel at 100, and so do a
+  passthrough layer's at weight 100: the pre rotation is lost where
+  the layer holds the rotate, Maya turning the node by the layer's
+  angles alone where the SDK turns it by them under the pre rotation,
+  apart by about what the pre rotation turns it. By channel under 100
+  the gap stays near that one; kept by layer under 100 Maya weighs
+  the override, as the item on that says, so the gap holds both. On
+  the files measured, weights 10 to 100: by layer merged, at 100 and
   by channel, 8.7e-2 to 0.12 as matrices for a pre rotation of 7
   degrees, 0.42 to 0.68 for 36 to 43, 0.75 to 0.98 for 60 to 66 and 1.35
   to 1.72 for 120 to 161, by channel under 100 within 0.21 of the gap
@@ -2353,7 +2393,7 @@ scaled (1, 2, 3) and 3.4 under one scaled 2; on turns of 11 degrees, a
 node scaled (3, 1, 1) under one scaled (1, 1, 3) 8.2 times its gap at
 scale 1, where the largest axis of its world 3x3 is 3.1 and the product
 of the two largest axes 9; a locator 1.9 away up to 3.6 off, one 5.6
-away 10.6, and one 0.1 away under a group scaled (1, 0.1, 1) up to 10
+away 10.6, and one 0.1 away under a group scaled (1, 0.1, 1) up to 10.1
 times that distance, as much with a group turned 45 degrees between
 them, where that 3x3's rows give 2.8; with rotate pivots 0.5 to 7.1
 away, the node itself up to 1.99 times that distance off (3.94 with a
@@ -2367,12 +2407,17 @@ gap, and is largest where they jump, as they do by 180 degrees where the
 node's turn passes y = 90 or -90 in xyz. On the files measured, on nodes
 of world scale 1, from 24, 25 and 48 fps scenes for a 30 fps file and 30
 and 25 fps ones for a 24 fps file: a smooth turn about one axis, which
-agrees at the file's rate, 1.0e-2 to 6.1e-2 apart; keys that turn back
-each frame, 4.1e-6 apart at the file's rate on a 0.14 degree turn and
-3.1e-4 to 6.4e-4 from those scenes, 4.2e-4 and 3.2e-3 to 6.6e-3 on a 1.4
-degree one, 1.1e-2 and 1.6e-2 to 3.9e-2 on a 7 degree one; keys linear
-in time, at their largest within 2 percent of the gap at the file's
-rate, but Maya's turn parting from its own at the file's rate by up to
+agrees at the file's rate, parts by 2.8e-3 to 5.3e-3 times the largest
+second difference of its keys in degrees a frame squared from 24
+and 25 fps scenes for a 30 fps file, 0.33 to 0.77 of that from 48,
+and by 1.9e-3 to 4.2e-3 times it from 30 and 25 fps scenes for a
+24 fps file (on the files measured, on second differences of 1e-2
+or more, 2.9e-5 to 6.8e-1); keys that turn back each frame, 4.1e-6
+apart at the file's rate on a 0.14 degree turn and 3.1e-4 to 6.4e-4
+from those scenes, 4.2e-4 and 3.2e-3 to 6.6e-3 on a 1.4 degree one,
+1.1e-2 and 1.6e-2 to 3.9e-2 on a 7 degree one; keys linear in time,
+at their largest within 2 percent of the gap at the file's rate,
+but Maya's turn parting from its own at the file's rate by up to
 1.3e-3 on turns up to 45 degrees, 4.3e-2 on turns to 111 and 1.9 on
 frames where the angles it solves jump. A scale multiplies the share as
 it does the gap: from a 25 fps scene for a 24 fps file, the keys whose

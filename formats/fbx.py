@@ -915,7 +915,11 @@ class LayerData(BaseData):
 
         Supports both Maya and FBX naming conventions:
         - Maya transforms: "translateX" -> "Lcl TranslationX"
-        - Maya blendshapes: node="face_mesh", property="smile" -> "face_mesh.smile.DeformPercent"
+        - Maya blend shapes: node="face_blend.smile", property="DeformPercent"
+          (the blend shape's name, not its mesh's) -> the DeformPercent of
+          blend shape face_blend's channel smile; node="face_blend",
+          property="smile" works only where the file names the channel
+          "face_blend.smile", as Maya's FBX export does
         - FBX naming: Direct usage of FBX property names
 
         Args:
