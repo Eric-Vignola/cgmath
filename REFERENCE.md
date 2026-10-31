@@ -239,7 +239,7 @@ TransformList
 A HierarchyData holding F poses rather than one.
 
 ```text
-ClipData(iterable=None, frames: 'Optional[int]' = None, start_frame: 'int' = 0, fps: 'float' = 24.0)
+ClipData(iterable=None, frames: 'Optional[int]' = None, start_frame: 'int' = 0, fps: 'float' = 24.0, take: 'str' = '')
 ```
 
 Properties:
@@ -253,6 +253,7 @@ frame_count
 frames                             
 rest_pose                          the pose the clip's file holds outside its take, or None
 start_frame                        
+take                               the name of the take the clip holds, "" when built by hand
 unit                               the centimeters one unit of the values' lengths holds, 1.0 for cm
 ```
 
@@ -2853,10 +2854,10 @@ glTF / GLB reading and payload blobs (needs `pygltflib`).
 
 #### `Animation(tuple)`
 
-Animation(samplers, channels, duration)
+Animation(samplers, channels, duration, name)
 
 ```text
-Animation(samplers, channels, duration)
+Animation(samplers, channels, duration, name=None)
 ```
 
 #### `AnimationChannel(tuple)`

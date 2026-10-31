@@ -3090,15 +3090,25 @@ curve nodes and curves but not one key, such as an empty "Take 001"
 ahead of the animation (cgmath 3.0.0 took the first take holding a curve
 node, keyed or not). In a file with no key at all it takes the first
 take that holds a curve node, with or without a curve, then the first
-take. `take=` picks any take by index, an empty one included. An empty
-take reads back as its own static values on every frame, the rest pose
-where its curve nodes hold the node's own. A curve with no key reads at
-the curve's own default, as the SDK's evaluator reads it, and so does
-Maya where the curve is in the file's active take and the last take does
-not key its channel (a curve with no key in any other take, the last
-included, Maya does not read): under a curve node holding Y at 55, a Y
-curve with no key whose default is 99 reads 99. A curve node's channel
-with no curve reads at the curve node's value.
+take. `take=` picks any take by index, an empty one included. The clip
+names the take it holds, `clip.take`: the animation stack's name, two
+takes of one name told apart as `idle`, `idle_2` (a file holding stacks
+`idle`, `idle`, `idle_1`), with a warning. `ClipData.load_glb` names its
+clip the same way, from the glTF animation's name, else `animation<i>`.
+A blank name (empty or whitespace only, as `str.strip()` counts it:
+spaces, tabs, line breaks, a no-break space) reads as `Take 001`,
+`Take 002` ... by the take's position in an fbx and as `animation<i>` in
+a glb, before two takes of one name are told apart: stacks `""`, `""`
+read as `Take 001`, `Take 002`. A clip built by hand holds `""`, and a
+save leaves an empty take out. An empty take reads back as its own
+static values on every frame, the rest pose where its curve nodes hold
+the node's own. A curve with no key reads at the curve's own default, as
+the SDK's evaluator reads it, and so does Maya where the curve is in the
+file's active take and the last take does not key its channel (a curve
+with no key in any other take, the last included, Maya does not read):
+under a curve node holding Y at 55, a Y curve with no key whose default
+is 99 reads 99. A curve node's channel with no curve reads at the curve
+node's value.
 
 Maya 2025's `FBXImport`, with its default settings, picks otherwise. It
 loads its curves from the file's last take, keyed or not, so an empty

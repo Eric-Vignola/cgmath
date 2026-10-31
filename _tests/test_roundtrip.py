@@ -578,7 +578,7 @@ class TestPublicSavedNames(unittest.TestCase):
         "SkinData":       ("patterns",),
         "ProcrustesData": ("scale_offset",),
         "HierarchyData":  ("axis_system", "unit"),
-        "ClipData":       ("start_frame", "fps", "frame", "blocks", "axis_system", "unit"),
+        "ClipData":       ("start_frame", "fps", "frame", "blocks", "axis_system", "unit", "take"),
     }
 
     @classmethod

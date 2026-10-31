@@ -5,16 +5,20 @@ pygltflib, here, keying each take apart, so a loader that read another take
 than the one asked for shows.
 """
 
+import copy
 import hashlib
 import os
+import pickle
 import sys
 import tempfile
 import unittest
+import warnings
 
 import numpy as np
 from cgmath.formats._fbx_io import load_sdk
-from cgmath.formats.glb import pygltflib
-from cgmath.hierarchy import ClipData
+from cgmath.formats.glb import load_model, pygltflib
+from cgmath.hierarchy import ClipData, HierarchyData, TransformData
+from cgmath.hierarchy.hierarchy import _take_names
 
 if pygltflib is not None:
     from pygltflib import (
@@ -287,6 +291,147 @@ LITERALS = {'fbx 0': {'blocks': {'_joint_orient': 'd760653dad991759992423796bf2a
           'frames': 122,
           'names':  'c2f31c6ed48f2d94e339bb37b051ce094b7200bda32e7897457b109c58568b57',
           'start': 0}}
+
+
+def hand_built(take="", frames=6):
+    """a clip of a two-joint rig, built by hand, its rotate moving"""
+    rig = HierarchyData()
+    rig.append(TransformData("root", node_type="joint", translate=(0.0, 1.0, 0.0)))
+    rig.append(TransformData("tip", node_type="joint", translate=(0.0, 2.0, 0.0)))
+    rig[1].parent_uuid = rig[0].uuid
+    clip               = ClipData(rig, frames=frames, take=take)
+    turns              = np.array(clip.frames.rotate)
+    turns[:, :, 2] += np.arange(frames)[:, None] * 5.0
+    clip.frames.rotate = turns
+    return clip
+
+
+class TestClipTake(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_saved_only_when_set(self):
+        plain = hand_built()
+        self.assertEqual(plain.take, "")
+        tree = plain.to_dict()
+        self.assertNotIn("take", tree)
+        self.assertNotIn("_take", tree)
+
+        named = hand_built(take="idle")
+        tree  = named.to_dict()
+        self.assertEqual(tree["take"], "idle")
+        self.assertNotIn("_take", tree)
+        for ext in ("pkl", "npz", "json"):
+            with self.subTest(ext):
+                path = named.save(os.path.join(self.tmp.name, f"clip.{ext}"))
+                self.assertEqual(ClipData.load(path).take, "idle")
+        tree["_take"] = tree.pop("take")
+        self.assertEqual(ClipData.from_dict(tree).take, "idle")
+        self.assertNotEqual(named, hand_built(take="walk"))
+
+    def test_a_take_is_a_str(self):
+        with self.assertRaisesRegex(TypeError, "a take's name is a str"):
+            ClipData(take=3)
+        clip = hand_built()
+        with self.assertRaisesRegex(TypeError, "a take's name is a str"):
+            clip.take = None
+        clip.take = "run"
+        self.assertEqual(clip.take, "run")
+
+    def test_carried(self):
+        clip = hand_built(take="idle")
+        pose = HierarchyData(node.copy() for node in clip)
+        for label, made in (
+            ("copy", lambda: clip.copy()),
+            ("deepcopy", lambda: copy.deepcopy(clip)),
+            ("pickle", lambda: pickle.loads(pickle.dumps(clip))),
+            ("cut", lambda: clip.frames[2:5]),
+            ("cut backwards", lambda: clip.frames[::-2]),
+            ("delta against a pose", lambda: clip.get_delta(pose)),
+            ("delta against a clip", lambda: clip.get_delta(hand_built())),
+            ("one delta added", lambda: clip.add_delta(pose)),
+            ("a clip of deltas added", lambda: clip.add_delta(hand_built())),
+        ):
+            with self.subTest(label):
+                self.assertEqual(made().take, "idle")
+        self.assertEqual(ClipData.from_poses([pose, pose]).take, "")
+
+    def test_take_names(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.assertEqual(_take_names(["idle", "idle", "idle_1"]), ["idle", "idle_2", "idle_1"])
+        self.assertEqual(len(caught), 1)
+        self.assertEqual(
+            str(caught[0].message), "takes that would read under one name are told apart: take 1 'idle' as 'idle_2'"
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.assertEqual(_take_names(["walk", "idle", "idle"], read=[0]), ["walk", "idle", "idle_1"])
+        self.assertEqual(caught, [])
+
+    def test_blank_names(self):
+        """a blank name, empty or whitespace only, reads
+        by the take's position, Take 001, Take 002 ..., before two takes of
+        one name are told apart; a glb's as an animation with no name, the
+        warning naming the take as the file does"""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.assertEqual(_take_names(["", " ", "idle"]), ["Take 001", "Take 002", "idle"])
+            self.assertEqual(_take_names(["\t", "\u00a0\n", "a\tb"]), ["Take 001", "Take 002", "a\tb"])
+        self.assertEqual(caught, [])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.assertEqual(_take_names(["idle", "", "Take 002"]), ["idle", "Take 002", "Take 002_1"])
+            self.assertEqual(_take_names(["Take 002", "  "]), ["Take 002", "Take 002_1"])
+        self.assertEqual(len(caught), 2)
+        self.assertIn("take 2 'Take 002' as 'Take 002_1'", str(caught[0].message))
+        self.assertIn("take 1 '  ' as 'Take 002_1'", str(caught[1].message))
+
+        if pygltflib is not None:
+            animations = [(name,) + ANIMATIONS[0][1:] for name in ("", None, "  ", "animation1")]
+            path       = build_glb(os.path.join(self.tmp.name, "blank.glb"), animations=animations)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                names = [ClipData.load_glb(path, animation=i).take for i in range(4)]
+            self.assertEqual(names, ["animation0", "animation1", "animation2", "animation1_1"])
+            # the warning names the take as the file holds it
+            animations = [(name,) + ANIMATIONS[0][1:] for name in ("animation1", "  ")]
+            path       = build_glb(os.path.join(self.tmp.name, "spaces.glb"), animations=animations)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                self.assertEqual(ClipData.load_glb(path, animation=1).take, "animation1_1")
+            self.assertEqual(
+                [str(w.message) for w in caught],
+                ["takes that would read under one name are told apart: take 1 '  ' as 'animation1_1'"],
+            )
+        if FBX is not None:
+            stacks = [(name, TAKES[0][1]) for name in ("", "  ", "idle", "", "Take 002")]
+            path   = build_fbx(os.path.join(self.tmp.name, "blank.fbx"), takes=stacks)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                names = [ClipData.load_fbx(path, take=i).take for i in range(5)]
+            self.assertEqual(names, ["Take 001", "Take 002", "idle", "Take 004", "Take 002_1"])
+
+    @unittest.skipIf(pygltflib is None, "pygltflib is not installed")
+    def test_glb_names(self):
+        path = build_glb(os.path.join(self.tmp.name, "takes.glb"))
+        self.assertEqual([x.name for x in load_model(path).animations], ["walk", None, "walk"])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            names = [ClipData.load_glb(path, animation=i).take for i in range(3)]
+        self.assertEqual(names, ["walk", "animation1", "walk_1"])
+        self.assertEqual(len(caught), 1)
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_fbx_names(self):
+        path = build_fbx(os.path.join(self.tmp.name, "takes.fbx"))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            names = [ClipData.load_fbx(path, take=i).take for i in range(3)]
+        self.assertEqual(names, ["walk", "idle", "idle_1"])
+        self.assertEqual(len(caught), 1)
+        self.assertEqual(ClipData.load_fbx(path).take, "walk")
 
 
 class TestClipListLoad(unittest.TestCase):

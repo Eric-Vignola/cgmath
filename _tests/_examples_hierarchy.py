@@ -245,7 +245,7 @@ def transform_list() -> TransformList:
 def clip_data() -> ClipData:
     """the rig over four frames from 1001 at 30 fps, every framed channel
     moving, frame 2 loaded"""
-    clip   = ClipData(rig(), frames=4, start_frame=1001, fps=30.0)
+    clip   = ClipData(rig(), frames=4, start_frame=1001, fps=30.0, take="wave")
     frames = clip.frames
     ramp   = np.arange(4, dtype=float)[:, None, None]
 

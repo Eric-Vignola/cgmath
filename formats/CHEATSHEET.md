@@ -263,8 +263,9 @@ print(faces.shape, faces[0])
 
 ```python
 anim = model.animations[0]
-print(anim._fields)   # ('samplers', 'channels', 'duration')
+print(anim._fields)   # ('samplers', 'channels', 'duration', 'name')
 print(anim.duration)  # max last keyframe time across samplers
+print(anim.name)      # the animation's name, None when the file gives none
 
 sampler = anim.samplers[0]
 print(sampler.interpolation)          # 'LINEAR' | 'STEP' | 'CUBICSPLINE'

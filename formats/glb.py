@@ -44,7 +44,7 @@ AnimationSampler = namedtuple(
     "AnimationSampler", "interpolation keyframe_times keyframe_values"
 )
 AnimationChannel = namedtuple("AnimationChannel", "sampler node path")
-Animation        = namedtuple("Animation",        "samplers channels, duration")
+Animation        = namedtuple("Animation", "samplers channels duration name", defaults=(None,))
 Skin             = namedtuple("Skin",             "joints inverse_bind_matrices")
 
 
@@ -363,7 +363,7 @@ def load_model(fname):
             c = AnimationChannel(chnl.sampler, chnl.target.node, chnl.target.path)
             channels.append(c)
 
-        a = Animation(samplers, channels, duration)
+        a = Animation(samplers, channels, duration, anim.name)
         animations.append(a)
 
     skins = []

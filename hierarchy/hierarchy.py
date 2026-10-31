@@ -6671,6 +6671,59 @@ _DEQUE_ROWS = 32
 _RENAMES_SPARED = 16
 
 
+def _take_name(value) -> str:
+    """a take's name, a str; TypeError for anything else"""
+    if not isinstance(value, str):
+        raise TypeError(f"a take's name is a str, not {type(value).__name__}: {value!r}")
+    return value
+
+
+def _blank_take(index: int) -> str:
+    """the name of a take whose own name is blank, by its position from 0:
+    Take 001, Take 002 ..."""
+    return f"Take {index + 1:03d}"
+
+
+def _blank_animation(index: int) -> str:
+    """the name of a glTF animation whose own name is blank or missing, by
+    its position from 0: animation0, animation1 ..."""
+    return f"animation{index}"
+
+
+def _take_names(raw, read=None, blank=_blank_take) -> list:
+    """the name of each of a file's takes, from the ``raw`` names it gives them
+    in file order: a blank one (empty or whitespace only, as ``str.strip()``
+    counts it: spaces, tabs, line breaks, a no-break space) is first named by
+    its position, ``blank(index)`` (:func:`_blank_take`, a glb's
+    :func:`_blank_animation`), then a name an earlier take holds gets the first
+    ``_k`` (k = 1, 2, ...) no take holds, raw or given, so stacks idle, idle,
+    idle_1 are idle, idle_2, idle_1, and stacks "", "" Take 001, Take 002. One
+    warning names the takes renamed among those ``read`` (indices; None, every
+    take), each under the name the file gives it."""
+    given   = [name if name.strip() else blank(index) for index, name in enumerate(raw)]
+    held    = set(given)
+    used    = set()
+    names   = []
+    renamed = []
+    for index, (name, own) in enumerate(zip(given, raw)):
+        if name in used:
+            k = 1
+            while f"{name}_{k}" in held or f"{name}_{k}" in used:
+                k += 1
+            renamed.append((index, own, f"{name}_{k}"))
+            name = f"{name}_{k}"
+        used.add(name)
+        names.append(name)
+    wanted = set(range(len(raw)) if read is None else read)
+    shown  = [f"take {index} {old!r} as {new!r}" for index, old, new in renamed if index in wanted]
+    if shown:
+        warnings.warn(
+            "takes that would read under one name are told apart: " + ", ".join(shown),
+            stacklevel=3,
+        )
+    return names
+
+
 def _fbx_stacks(scene) -> list:
     """the scene's takes, its animation stacks in file order, typed: the
     binding can hand back a live wrapper of an earlier scene's object for one
@@ -6680,15 +6733,16 @@ def _fbx_stacks(scene) -> list:
 
 
 def _fbx_take_clip(
-    cls, scene, stack, rig, rest, hierarchy_data, nodes, tree, turn, record, filename, fps, start_frame, end_frame
+    cls, scene, stack, rig, rest, hierarchy_data, nodes, tree, turn, record, filename, fps, start_frame, end_frame,
+    take="",
 ):
-    """one take of an open scene as ``cls``, a ClipData: ``stack`` read as
-    :meth:`ClipData.load_fbx` reads its take, the frames by its frame rule,
-    every node sampled, folded and its roots turned, on a clip built from
-    ``rig`` (the walk's dicts, in the file's own axes) holding ``rest`` as its
-    rest pose and the read's ``record``. ``hierarchy_data``, ``nodes`` and
-    ``tree`` are the walk's (:func:`_walk_fbx`), ``turn`` the axis turn or
-    None. The scene must still be open."""
+    """one take of an open scene as ``cls``, a ClipData named ``take``:
+    ``stack`` read as :meth:`ClipData.load_fbx` reads its take, the frames by
+    its frame rule, every node sampled, folded and its roots turned, on a clip
+    built from ``rig`` (the walk's dicts, in the file's own axes) holding
+    ``rest`` as its rest pose and the read's ``record``. ``hierarchy_data``,
+    ``nodes`` and ``tree`` are the walk's (:func:`_walk_fbx`), ``turn`` the
+    axis turn or None. The scene must still be open."""
     # the evaluator reads whichever stack is current, not the one we hold
     scene.SetCurrentAnimationStack(stack)
 
@@ -6790,6 +6844,7 @@ def _fbx_take_clip(
     clip.frames.translate    = translate
     clip.frame               = 0
     clip._rest_pose          = rest
+    clip._take               = take
     _fbx_warn_cameras(sheared)
     return _recorded(clip, record)
 
@@ -13853,13 +13908,14 @@ class ClipData(HierarchyData):
     )
 
     # saved beside the nodes: the timebase, the loaded frame, one (F, N, 3)
-    # block per framed channel, keyed by channel, the rest pose, and a rig's
-    # record of the axes and unit. A file names them as their properties,
-    # start_frame, fps, frame, rest_pose, axis_system and unit, and the
-    # blocks, which have none, "blocks", each keyed by its channel's
-    # property, "translate". A clip with no rest pose saves no "rest_pose",
-    # and a shear block all zero is left out, so a clip holding no shear
-    # saves as one did before it had any; a load fills it back with zeros
+    # block per framed channel, keyed by channel, the rest pose, a rig's
+    # record of the axes and unit, and the take's name. A file names them as
+    # their properties, start_frame, fps, frame, rest_pose, axis_system, unit
+    # and take, and the blocks, which have none, "blocks", each keyed by its
+    # channel's property, "translate". A clip with no rest pose saves no
+    # "rest_pose", one with no take name no "take", and a shear block all
+    # zero is left out, so a clip holding no shear saves as one did before it
+    # had any; a load fills it back with zeros
     LIST_FIELDS = (
         "_start_frame",
         "_fps",
@@ -13868,6 +13924,7 @@ class ClipData(HierarchyData):
         "_rest_pose",
         "_axis_system",
         "_unit",
+        "_take",
     )
     SAVED_NAMES = {"_blocks": "blocks"}
 
@@ -13881,6 +13938,7 @@ class ClipData(HierarchyData):
         frames:      Optional[int] = None,
         start_frame: int           = 0,
         fps:         float         = 24.0,
+        take:        str           = "",
     ):
         self._blocks      = {}
         self._columns     = []
@@ -13888,6 +13946,7 @@ class ClipData(HierarchyData):
         self._start_frame = int(start_frame)
         self._fps         = float(fps)
         self._rest_pose   = None
+        self._take        = _take_name(take)
 
         # a clip owns its nodes: adopting the caller's rig would empty it.
         # The record of a rig, clip or view comes with its nodes, and so
@@ -14033,6 +14092,25 @@ class ClipData(HierarchyData):
                 "clip.frames[:] = other or clip.frames.rotate = values"
             )
 
+    # --- take --- #
+    @property
+    def take(self) -> str:
+        """the name of the take the clip holds, "" when built by hand
+
+        The loaders set it: an FBX animation stack's name, a blank one (empty
+        or whitespace only) ``Take 001``, ``Take 002`` ... by its position; a
+        glTF animation's name, a blank or missing one ``animation<i>``; a name
+        two takes of one file share told apart as ``ClipList.load_fbx`` tells
+        them apart. Saved as
+        ``take``, and left out of a save where it is "". A copy, a cut of
+        frames, :meth:`get_delta` and :meth:`add_delta` keep it.
+        """
+        return self._take
+
+    @take.setter
+    def take(self, value: str) -> None:
+        self._take = _take_name(value)
+
     # --- rest pose --- #
     @property
     def rest_pose(self) -> Optional[HierarchyData]:
@@ -14140,6 +14218,7 @@ class ClipData(HierarchyData):
         clip._start_frame = int(start_frame)
         clip._fps         = float(fps)
         clip._rest_pose   = None
+        clip._take        = ""
         clip._axis_system = hierarchy._axis_system
         clip._unit        = hierarchy._unit
         clip.list         = hierarchy.list
@@ -14354,7 +14433,8 @@ class ClipData(HierarchyData):
 
         # the result takes over `new`, which nothing else holds, rather than
         # copying every node of it a second time
-        clip = ClipData._adopt(new, frames, self._start_frame, self._fps)
+        clip       = ClipData._adopt(new, frames, self._start_frame, self._fps)
+        clip._take = self._take
 
         # block columns belong to uuids; line the solved rows up through them
         # rather than trusting the clip to keep `new`'s order
@@ -14553,6 +14633,7 @@ class ClipData(HierarchyData):
         new._blocks    = {c: np.array(b[span]) for c, b in self._blocks.items()}
         new._columns   = list(self._columns)
         new._rest_pose = self._rest_pose_copy()
+        new._take      = self._take
         new._bind(0)
         return new
 
@@ -14572,6 +14653,7 @@ class ClipData(HierarchyData):
         # come with them: a copy left claiming no columns would have its next
         # realign reseed every frame from the one pose the nodes are bound to
         new._columns = list(self._columns)
+        new._take    = self._take
         new._bind(self._frame)
         return new
 
@@ -14667,7 +14749,13 @@ class ClipData(HierarchyData):
                 f"animation {animation} out of range, the file holds {len(animations)}"
             )
 
-        column   = _glb_columns(model, rig, filename)
+        column = _glb_columns(model, rig, filename)
+
+        # the clip is named as ClipList.load_glb names the take
+        take = ""
+        if animations:
+            raw  = [x.name or "" for x in animations]
+            take = _take_names(raw, read=[animation % len(animations)], blank=_blank_animation)[animation]
 
         channels = []
         for channel in animations[animation].channels if animations else []:
@@ -14690,7 +14778,7 @@ class ClipData(HierarchyData):
         spans = [keys for keys in spans if keys.size]
 
         if not spans:
-            return cls(rig, frames=1, start_frame=start_frame, fps=fps)
+            return cls(rig, frames=1, start_frame=start_frame, fps=fps, take=take)
 
         first  = min(keys[0] for keys in spans)
         last   = max(keys[-1] for keys in spans)
@@ -14706,7 +14794,7 @@ class ClipData(HierarchyData):
             # exactly on the frame's time (below)
             times[-1] = max(times[-1], last)
 
-        clip = cls(rig, frames=frames, start_frame=start_frame, fps=fps)
+        clip = cls(rig, frames=frames, start_frame=start_frame, fps=fps, take=take)
 
         # seeded with the rest pose, which is what unanimated nodes keep
         scale     = np.array(clip.frames.scale)
@@ -15513,9 +15601,11 @@ class ClipData(HierarchyData):
 
                 stack = stacks[take % count]
 
+            index = next(i for i, x in enumerate(stacks) if x.GetUniqueID() == stack.GetUniqueID())
+            names = _take_names([x.GetName() for x in stacks], read=[index])
             return _fbx_take_clip(
                 cls, scene, stack, rig, rest, hierarchy_data, nodes, tree, turn, record, filename, fps,
-                start_frame, end_frame,
+                start_frame, end_frame, names[index],
             )
 
     def save_fbx(self, filename, zero_root=False, as_ascii=False):
@@ -15561,9 +15651,12 @@ class ClipData(HierarchyData):
                 for c, block in blocks.items()
                 if c != "_shear" or np.any(self._blocks[c])
             }
-        # a clip with no rest pose saves as one did before it had any
+        # a clip with no rest pose, or no take name, saves as one did before
+        # it had any
         if tree.get("rest_pose", ...) is None:
             del tree["rest_pose"]
+        if tree.get("take", None) == "":
+            del tree["take"]
         return tree
 
     @classmethod
