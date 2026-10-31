@@ -5,6 +5,7 @@ import itertools
 import bisect
 import json
 import numbers
+import operator
 import os
 import re
 import sys
@@ -20,6 +21,7 @@ from typing import Any, List, Optional, overload, Union
 
 import numpy as np
 from cgmath.data import (
+    FORWARD_MARK,
     ITEMS_KEY,
     Array,
     Data,
@@ -27,6 +29,7 @@ from cgmath.data import (
     ImmutableArray as numpy_array,
     _class_attribute,
     _decode,
+    _forward_doc,
     _from_tagged,
     _holds_numbered,
     _load_derived,
@@ -35,6 +38,7 @@ from cgmath.data import (
     _reached_twice,
     _refusal,
     _save_shares,
+    forward,
 )
 from cgmath.formats._fbx_io import load_sdk, open_fbx, typed
 from cgmath.formats.glb import load_model
@@ -74,7 +78,9 @@ else:
 
 __all__ = [
     "ClipData",
+    "ClipList",
     "HierarchyData",
+    "PerTake",
     "TransformData",
     "TransformList",
     "MAYA_ATTRIBUTE_MAP",
@@ -15769,6 +15775,748 @@ class ClipData(HierarchyData):
         return super().__eq__(other)
 
     __hash__ = HierarchyData.__hash__
+
+
+# ---------------------------------- TAKES ----------------------------------- #
+
+
+class PerTake(list):
+    """One value per take of a :class:`ClipList`, in take order.
+
+    What a ClipList's per-take members read, ``clips.fps`` or
+    ``clips.frames.rotate``. Its arithmetic works element by element:
+    against another PerTake pairwise (ValueError when the lengths differ),
+    against anything else with that value for every take. An in-place form
+    (``+=``, ``*=`` ...) gives a new PerTake and changes no element, so
+    ``clips.frames.rotate += 5`` reaches the takes through the setter.
+    Written, a PerTake gives each take its own value; anything else, a plain
+    list included, is one value for every take.
+    """
+
+    # numpy defers to the reflected operators: np.float64(2) * values
+    __array_ufunc__ = None
+
+    def _pairs(self, other):
+        """each element with its partner in ``other``"""
+        if isinstance(other, PerTake):
+            if len(other) != len(self):
+                raise ValueError(f"{len(self)} takes against {len(other)}: a PerTake holds one value per take")
+            return zip(self, other)
+        return ((value, other) for value in self)
+
+    def __neg__(self) -> "PerTake":
+        return PerTake(-value for value in self)
+
+    def __pos__(self) -> "PerTake":
+        return PerTake(+value for value in self)
+
+    def __abs__(self) -> "PerTake":
+        return PerTake(abs(value) for value in self)
+
+
+def _per_take_operator(op) -> tuple:
+    """a PerTake's binary operator and its reflected form, element by element"""
+
+    def binary(self, other):
+        return PerTake(op(a, b) for a, b in self._pairs(other))
+
+    def reflected(self, other):
+        return PerTake(op(b, a) for a, b in self._pairs(other))
+
+    return binary, reflected
+
+
+for _name, _op in (
+    ("add", operator.add),
+    ("sub", operator.sub),
+    ("mul", operator.mul),
+    ("truediv", operator.truediv),
+    ("floordiv", operator.floordiv),
+    ("mod", operator.mod),
+    ("pow", operator.pow),
+    ("matmul", operator.matmul),
+):
+    _binary, _reflected = _per_take_operator(_op)
+    _binary.__name__, _reflected.__name__ = f"__{_name}__", f"__r{_name}__"
+    setattr(PerTake, f"__{_name}__", _binary)
+    setattr(PerTake, f"__r{_name}__", _reflected)
+    # list's own += extends and *= repeats: each in-place form is the binary one
+    setattr(PerTake, f"__i{_name}__", _binary)
+del _name, _op, _binary, _reflected
+
+
+def _take_label(target, index: int) -> str:
+    """the take a target belongs to, as an error names it"""
+    clip = target if isinstance(target, ClipData) else getattr(target, "_clip", None)
+    take = getattr(clip, "_take", "")
+    return f"take {index} ({take!r})" if take else f"take {index}"
+
+
+def _take_values(value, targets: list, name: str) -> list:
+    """the value each of ``targets`` takes for ``name``: a PerTake's own,
+    anything else whole for each, every one checked before any is written
+
+    A value for an array a target holds must fit its shape, read one way:
+    first a one-node frame axis's rule (an (F, 1) column takes a flat
+    (F,)), then ``np.broadcast_to`` the shape it holds. ValueError names
+    the take that does not fit, or a PerTake of another length.
+    """
+    if isinstance(value, PerTake):
+        if len(value) != len(targets):
+            raise ValueError(f"{len(value)} values for {len(targets)} takes: a PerTake holds one per take")
+        values = list(value)
+    else:
+        values = [value] * len(targets)
+    for index, (target, item) in enumerate(zip(targets, values)):
+        current = getattr(target, name, None)
+        if not isinstance(current, np.ndarray) or isinstance(item, (str, bytes)):
+            continue
+        try:
+            array = np.asarray(item, dtype=float)
+        except (TypeError, ValueError):
+            continue  # the take's own setter says what is wrong with it
+        if current.ndim == 2 and current.shape[1] == 1 and array.shape == (current.shape[0],):
+            array = array[:, None]
+        try:
+            np.broadcast_to(array, current.shape)
+        except ValueError:
+            raise ValueError(
+                f"{_take_label(target, index)} holds {name} as {current.shape}, which {array.shape} "
+                f"does not fit; no take was written"
+            ) from None
+    return values
+
+
+# the members a write solves into a node's channels: put back through their
+# own setter they would be solved again, so their channels are put back
+_TAKE_SOLVED   = ("matrix", "world_matrix", "quaternion")
+_TAKE_CHANNELS = ("translate", "rotate", "scale", "shear", "rotate_axis", "joint_orient")
+
+# the members a write folds through the take: a joint that becomes another
+# type folds its joint orient into rotate on every frame and resets its
+# segment_scale_compensate, radius and draw_style, so the whole take is held
+_TAKE_WHOLE = ("node_type",)
+
+# what a whole take's hold leaves as it is: a node's links to the rigs that
+# own or list it, and its cached world matrix, which the put back drops; a
+# clip's node list and blocks, held apart, its structure counts, which the
+# put back moves on, and the caches they key
+_HOLD_NODE_SKIP = ("_hierarchy", "_listers", "_world_matrix")
+_HOLD_CLIP_SKIP = (
+    "list",
+    "_blocks",
+    "_index_version",
+    "_structure_version",
+    "_rig_index_cache",
+    "_parent_rows_cache",
+    "_column_place_cache",
+)
+
+
+def _take_of(target) -> Optional["ClipData"]:
+    """the take a write to ``target`` reaches: a clip, a frame axis's clip,
+    or the clip a view's nodes belong to; None for a view of no node"""
+    if isinstance(target, ClipData):
+        return target
+    clip = getattr(target, "_clip", None)
+    if clip is not None:
+        return clip
+    for node in target.list:
+        return node._hierarchy
+    return None
+
+
+def _held_copy(value):
+    """a copy of an array or a dict a hold keeps beside it, None for any
+    other value, which a write replaces rather than changes"""
+    if isinstance(value, np.ndarray):
+        return np.array(value)
+    if isinstance(value, dict):
+        return dict(value)
+    return None
+
+
+def _take_whole(clip) -> Optional[tuple]:
+    """one take held whole, for :func:`_put_whole`: every frame block, the
+    array and a copy of it, the clip's own fields (the columns, the bound
+    frame, the timebase, the record, the name, the rest pose), its nodes in
+    their order, parents among their fields, and every node's own fields,
+    an array or a dict with a copy of it. It walks the nodes, not the
+    frames; None for no clip"""
+    if clip is None:
+        return None
+    blocks = {channel: (block, block.copy()) for channel, block in clip._blocks.items()}
+    own    = {name: value for name, value in clip.__dict__.items() if name not in _HOLD_CLIP_SKIP}
+    if "_columns" in own:
+        own["_columns"] = list(own["_columns"])
+    nodes = list(clip.list)
+    fields = [
+        {name: (value, _held_copy(value)) for name, value in node.__dict__.items() if name not in _HOLD_NODE_SKIP}
+        for node in nodes
+    ]
+    return clip, clip._blocks, blocks, own, nodes, fields
+
+
+def _put_whole(held: Optional[tuple]) -> None:
+    """a take as :func:`_take_whole` held it, put back in place: the same
+    clip, block arrays and node objects, each field written straight back,
+    never through a setter that solves or folds; then its caches retired
+    and its nodes bound to its frame again"""
+    if held is None:
+        return
+    clip, kept, blocks, own, nodes, fields = held
+    for block, copied in blocks.values():
+        block[...] = copied
+    kept.clear()
+    kept.update((channel, block) for channel, (block, _) in blocks.items())
+    for name in [name for name in clip.__dict__ if name not in _HOLD_CLIP_SKIP and name not in own]:
+        del clip.__dict__[name]
+    clip.__dict__.update(own)
+    clip.__dict__["_blocks"] = kept
+    clip.list[:]             = nodes
+    for node, values in zip(nodes, fields):
+        for name in [name for name in node.__dict__ if name not in _HOLD_NODE_SKIP and name not in values]:
+            del node.__dict__[name]
+        for name, (value, copied) in values.items():
+            if isinstance(copied, np.ndarray):
+                value[...] = copied
+            elif copied is not None:
+                value.clear()
+                value.update(copied)
+            node.__dict__[name] = value
+    _structure_changed(clip)
+    clip._bind(clip._frame)
+
+
+def _take_held(target, name: str) -> tuple:
+    """what a write of ``name`` can change on one take's ``target``, as it
+    is, for :func:`_put_back`: the member's value, an array copied, or the
+    channels of a member solved into them; and a clip's rest pose, which a
+    relabel of its axes or unit replaces. A member that folds through the
+    take (``_TAKE_WHOLE``, ``node_type``) holds the whole take instead
+    (:func:`_take_whole`)"""
+    if name in _TAKE_WHOLE:
+        return None, None, _take_whole(_take_of(target))
+    held = []
+    for member in _TAKE_CHANNELS if name in _TAKE_SOLVED else (name,):
+        value = getattr(target, member)
+        held.append((member, np.array(value) if isinstance(value, np.ndarray) else value))
+    return held, target._rest_pose if isinstance(target, ClipData) else None, None
+
+
+def _put_back(target, held: tuple) -> None:
+    """``target`` as :func:`_take_held` held it"""
+    values, rest, whole = held
+    if values is None:
+        _put_whole(whole)
+        return
+    for member, value in values:
+        if member != "rest_pose":
+            setattr(target, member, value)
+    if isinstance(target, ClipData):
+        target._rest_pose = rest
+
+
+def _per_take(name: str, writable: bool = True, copied: bool = False) -> property:
+    """a property of a ClipList, or of its takes' frame axes or views, that
+    reads ``name`` from every take as a PerTake and, ``writable``, writes it to
+    every take or none: each checked first (:func:`_take_values`), and when a
+    take's own setter refuses, the takes written before it put back as they
+    were (:func:`_take_held`: the member, the channels a solved member writes,
+    or the whole take for ``node_type``, which folds) and the error raised.
+    ``copied``: one value, not a PerTake, is copied for each take, so each
+    holds its own"""
+
+    def getter(self) -> PerTake:
+        return PerTake(getattr(target, name) for target in self._take_targets())
+
+    def setter(self, value) -> None:
+        targets = self._take_targets()
+        values  = _take_values(value, targets, name)
+        if copied and not isinstance(value, PerTake):
+            values = [item.copy() if isinstance(item, HierarchyData) else item for item in values]
+        held = [_take_held(target, name) for target in targets]
+        done = 0
+        try:
+            for target, item in zip(targets, values):
+                setattr(target, name, item)
+                done += 1
+        except BaseException:
+            for target, kept in zip(targets[: done + 1], held):
+                _put_back(target, kept)
+            raise
+
+    doc = f"``{name}`` of every take, a PerTake"
+    if writable:
+        doc += "; a write reaches every take or none"
+    if copied:
+        doc += ", one value copied for each take"
+    getter.__name__ = name
+    getter.__doc__  = doc
+    setter.__name__ = name
+    if not writable:
+        return property(getter, doc=doc)
+    return property(getter, setter, doc=doc)
+
+
+def _scrub(targets: list, frame) -> None:
+    """every take's clip to ``frame``, every take checked first: IndexError
+    names one too short, and no take moves"""
+    clips = [target if isinstance(target, ClipData) else target._clip for target in targets]
+    for index, clip in enumerate(clips):
+        try:
+            clip._resolve_frame(frame)
+        except IndexError:
+            raise IndexError(
+                f"frame {frame} is past {_take_label(clip, index)}, which holds {clip.frame_count} frames; "
+                f"no take was scrubbed"
+            ) from None
+    for clip in clips:
+        clip.frame = frame
+
+
+class _Takes:
+    """The same frame axis or view of every take of a :class:`ClipList`.
+
+    ``clips.frames`` and ``clips.match("L_*")`` give one; it reads and
+    writes its members on every take, as a ClipList does, and chains:
+    ``clips.frames.match("L_*").rotate_y += 5``. ``[k]`` scrubs every take
+    to frame ``k`` and gives back the ClipList, ``[a:b]`` gives a ClipList
+    of each take's cut, a node or a list of nodes each take's axis scoped
+    to them. An item assignment, ``clips.frames[1:3] = other`` or
+    ``clips.frames[2] = pose``, one value for every take or a PerTake of
+    one each, reaches every take or none: a PerTake of another length
+    changes no take, and when a take refuses, every take it reached is put
+    back whole, as it was, and the error raised.
+    """
+
+    __slots__ = ("_targets", "_owner")
+
+    def __init__(self, targets, owner):
+        self._targets = list(targets)
+        self._owner   = owner
+
+    def _take_targets(self) -> list:
+        return list(self._targets)
+
+    def __len__(self) -> int:
+        return len(self._targets)
+
+    def __repr__(self) -> str:
+        return f"<{len(self._targets)} takes of {type(self._targets[0]).__name__ if self._targets else 'nothing'}>"
+
+    def __getitem__(self, query):
+        if isinstance(query, (int, np.integer)) and not isinstance(query, bool):
+            _scrub(self._targets, int(query))
+            return self._owner
+        if isinstance(query, slice):
+            return ClipList(target[query] for target in self._targets)
+        return _Takes([target[query] for target in self._targets], self._owner)
+
+    def __setitem__(self, query, value) -> None:
+        values = list(value) if isinstance(value, PerTake) else [value] * len(self._targets)
+        if len(values) != len(self._targets):
+            raise ValueError(f"{len(values)} values for {len(self._targets)} takes: a PerTake holds one per take")
+        held = [_take_whole(_take_of(target)) for target in self._targets]
+        done = 0
+        try:
+            for target, item in zip(self._targets, values):
+                target[query] = item
+                done += 1
+        except BaseException:
+            for kept in held[: done + 1]:
+                _put_whole(kept)
+            raise
+
+    def match(self, *args, exclude: bool = False, exact: bool = True) -> "_Takes":
+        """every take's ``match``, as a _Takes"""
+        return _Takes([target.match(*args, exclude=exclude, exact=exact) for target in self._targets], self._owner)
+
+    # every frame of every take: the framed channels and what reads them
+    translate             = _per_take("translate")
+    rotate                = _per_take("rotate")
+    scale                 = _per_take("scale")
+    rotate_axis           = _per_take("rotate_axis")
+    joint_orient          = _per_take("joint_orient")
+    translate_x           = _per_take("translate_x")
+    translate_y           = _per_take("translate_y")
+    translate_z           = _per_take("translate_z")
+    rotate_x              = _per_take("rotate_x")
+    rotate_y              = _per_take("rotate_y")
+    rotate_z              = _per_take("rotate_z")
+    scale_x               = _per_take("scale_x")
+    scale_y               = _per_take("scale_y")
+    scale_z               = _per_take("scale_z")
+    rotate_axis_x         = _per_take("rotate_axis_x")
+    rotate_axis_y         = _per_take("rotate_axis_y")
+    rotate_axis_z         = _per_take("rotate_axis_z")
+    joint_orient_x        = _per_take("joint_orient_x")
+    joint_orient_y        = _per_take("joint_orient_y")
+    joint_orient_z        = _per_take("joint_orient_z")
+    shear                 = _per_take("shear")
+    shear_xy              = _per_take("shear_xy")
+    shear_xz              = _per_take("shear_xz")
+    shear_yz              = _per_take("shear_yz")
+    matrix                = _per_take("matrix")
+    world_matrix          = _per_take("world_matrix")
+    quaternion            = _per_take("quaternion")
+    parent_matrix         = _per_take("parent_matrix",         writable=False)
+    inverse_matrix        = _per_take("inverse_matrix",        writable=False)
+    world_inverse_matrix  = _per_take("world_inverse_matrix",  writable=False)
+    parent_inverse_matrix = _per_take("parent_inverse_matrix", writable=False)
+    t    = _per_take("translate")
+    r    = _per_take("rotate")
+    s    = _per_take("scale")
+    ra   = _per_take("rotate_axis")
+    jo   = _per_take("joint_orient")
+    tx   = _per_take("translate_x")
+    ty   = _per_take("translate_y")
+    tz   = _per_take("translate_z")
+    rx   = _per_take("rotate_x")
+    ry   = _per_take("rotate_y")
+    rz   = _per_take("rotate_z")
+    sx   = _per_take("scale_x")
+    sy   = _per_take("scale_y")
+    sz   = _per_take("scale_z")
+    rax  = _per_take("rotate_axis_x")
+    ray  = _per_take("rotate_axis_y")
+    raz  = _per_take("rotate_axis_z")
+    jox  = _per_take("joint_orient_x")
+    joy  = _per_take("joint_orient_y")
+    joz  = _per_take("joint_orient_z")
+    sh   = _per_take("shear")
+    shxy = _per_take("shear_xy")
+    shxz = _per_take("shear_xz")
+    shyz = _per_take("shear_yz")
+    m    = _per_take("matrix")
+    wm   = _per_take("world_matrix")
+    pm   = _per_take("parent_matrix",         writable=False)
+    im   = _per_take("inverse_matrix",        writable=False)
+    wim  = _per_take("world_inverse_matrix",  writable=False)
+    pim  = _per_take("parent_inverse_matrix", writable=False)
+
+
+# what a rig edit of a ClipList says after its first line (_every_take)
+_EVERY_TAKE_DOC = (
+    "Every take is held whole first, its frames, nodes and fields; when a "
+    "take refuses, every take is put back as it was, the same clip and node "
+    "objects, and the error raised."
+)
+
+
+def _every_take(member):
+    """a rig edit of a ClipList's takes, one line of its body: the method
+    :func:`forward` makes of ``member``, every take or none. Every take is
+    held whole first (:func:`_take_whole`), and when a take refuses, every
+    take is put back in place (:func:`_put_whole`) and the error raised.
+    ``help()``, REFERENCE.md and the forward-line guard see the line as a
+    forwarded method with the item's parameters; :func:`_every_take_text`
+    gives it its first line once the class is made"""
+    forwarded = forward(member, doc=_EVERY_TAKE_DOC)
+
+    def edit(self, *args, **kwargs):
+        held = [_take_whole(clip) for clip in self.list]
+        try:
+            return forwarded(self, *args, **kwargs)
+        except BaseException:
+            for kept in held:
+                _put_whole(kept)
+            raise
+
+    for name in ("__name__", "__qualname__", "__doc__", "__signature__"):
+        if hasattr(forwarded, name):
+            setattr(edit, name, getattr(forwarded, name))
+    edit.__wrapped__ = member
+    setattr(edit, FORWARD_MARK, getattr(forwarded, FORWARD_MARK))
+    return edit
+
+
+def _every_take_text(cls) -> None:
+    """the first line of each rig edit of ``cls`` that :func:`_every_take`
+    made, once DataList has finished its line: every take or none, where a
+    forward() line says on every item, in order"""
+    for raw in vars(cls).values():
+        spec = getattr(raw, FORWARD_MARK, None)
+        if spec is not None and spec.doc is _EVERY_TAKE_DOC:
+            raw.__doc__ = _forward_doc(spec, f"{spec.label}() on every take, every take or none")
+
+
+class ClipList(DataList[ClipData]):
+    """Every take of a file: one :class:`ClipData` per take, in file order.
+
+    ``ClipList.load_fbx`` and ``load_glb`` read a file's takes, each a clip
+    of its own, holding its own copy of the file's rest pose; a take is
+    found by its name (``clips["idle"]``, ``"idle" in clips``,
+    ``clips.get("idle")``, ``clips.index("idle")``) or its position, and
+    ``clips.take`` lists the names.
+
+    A member of the takes is passed on by a line of its own in the class: a
+    value reads as a :class:`PerTake`, one per take (``clips.fps``,
+    ``clips.translate``, ``clips.t``), and a write gives every take that value,
+    or each its own from a PerTake, every take or none: a value one take cannot
+    hold, by its shape or by that take's own setter, changes no take, a
+    ``node_type`` that folds a joint's orient into its rotate among them. One
+    rest pose written is copied for each take, so each holds its own.
+    ``clips.frames`` and ``clips.match(...)`` give the same for every take's
+    frame axis or selection, an item assignment (``clips.frames[1:3] = other``)
+    among them, and chain. A name the class does not declare raises
+    AttributeError, on an empty list too.
+
+    The rig edits (``set_rotate_order``, ``swapaxes``,
+    ``set_rotate_to_joint_orient``, ``set_joint_orient_to_rotate``,
+    ``set_parent``) run on every take, every take or none, as
+    ``strip_namespace`` renames every take or none: when a take refuses, every
+    take is put back whole, as it was, and the error raised. ``sort`` orders by
+    take. ``get_delta`` and ``add_delta`` pair another ClipList by take name,
+    any other operand going to every take. ``save`` keeps every take's tree;
+    ``Scene.animate`` plays a ClipList of one take.
+
+    An editor completes every member; it shows a rig edit, a forwarded
+    method, as ``(*args, **kwargs)``, its parameters showing in ``help()``
+    and REFERENCE.md (a later release gives editors the real ones).
+    """
+
+    def _take_targets(self) -> list:
+        return list(self.list)
+
+    # --- lookup by take --- #
+    def __getitem__(self, query):
+        """a take by its name; anything else as a DataList takes it"""
+        if isinstance(query, str):
+            for clip in self.list:
+                if clip.take == query:
+                    return clip
+            raise KeyError(f"no take named {query!r}; the takes are {self.take}")
+        return super().__getitem__(query)
+
+    def __contains__(self, item) -> bool:
+        """whether a take of that name, or that clip, is in the list"""
+        if isinstance(item, str):
+            return any(clip.take == item for clip in self.list)
+        return any(clip is item for clip in self.list)
+
+    def index(self, value, start=0, stop=None) -> int:
+        """the position of the first take named ``value``, or of that clip,
+        searched from ``start`` up to ``stop`` as ``list.index`` searches;
+        ValueError when there is none"""
+        start, stop, _ = slice(start, stop).indices(len(self))
+        for i in range(start, stop):
+            clip = self.list[i]
+            if clip is value or (isinstance(value, str) and clip.take == value):
+                return i
+        raise ValueError(f"{value!r} is not a take of the list; the takes are {self.take}")
+
+    def get(self, take: str, default=None):
+        """the first take named ``take``, or ``default``"""
+        for clip in self.list:
+            if clip.take == take:
+                return clip
+        return default
+
+    @property
+    def take(self) -> List[str]:
+        """every take's name, in order; written, one name for every take or
+        a PerTake of one each, every one checked first"""
+        return [clip.take for clip in self.list]
+
+    @take.setter
+    def take(self, value) -> None:
+        values = _take_values(value, list(self.list), "take")
+        for item in values:
+            _take_name(item)
+        for clip, item in zip(self.list, values):
+            clip.take = item
+
+    def sort(self, key=None, reverse: bool = False) -> None:
+        """orders the takes, by their names unless ``key`` says otherwise"""
+        self.list.sort(key=key or (lambda clip: clip.take), reverse=reverse)
+
+    def strip_namespace(self, namespace: Optional[str] = None) -> None:
+        """``strip_namespace()`` on every take, every take or none: a take
+        that refuses puts back the names of the takes stripped before it,
+        their rest poses' too, and raises"""
+        held = []
+        for clip in self.list:
+            rest = clip.rest_pose
+            held.append(([node.name for node in clip], None if rest is None else [node.name for node in rest]))
+        done = 0
+        try:
+            for clip in self.list:
+                clip.strip_namespace(namespace)
+                done += 1
+        except ValueError:
+            for clip, (names, rest_names) in zip(self.list[: done + 1], held):
+                for node, name in zip(clip, names):
+                    node.name = name
+                if rest_names is not None:
+                    for node, name in zip(clip.rest_pose, rest_names):
+                        node.name = name
+            raise
+
+    # --- every take's frames and selections --- #
+    @property
+    def frames(self) -> _Takes:
+        """every take's frame axis, as a _Takes"""
+        return _Takes([clip.frames for clip in self.list], self)
+
+    def match(self, *args, exclude: bool = False, exact: bool = True) -> _Takes:
+        """every take's ``match``, the nodes it selects at the frame each take
+        is on, as a _Takes"""
+        return _Takes([clip.match(*args, exclude=exclude, exact=exact) for clip in self.list], self)
+
+    @property
+    def frame(self) -> PerTake:
+        """the frame every take is on; written, every take scrubbed to it, or
+        each to its own from a PerTake, every take checked first"""
+        return PerTake(clip.frame for clip in self.list)
+
+    @frame.setter
+    def frame(self, value) -> None:
+        values = list(value) if isinstance(value, PerTake) else [value] * len(self.list)
+        if len(values) != len(self.list):
+            raise ValueError(f"{len(values)} frames for {len(self.list)} takes: a PerTake holds one per take")
+        for index, (clip, frame) in enumerate(zip(self.list, values)):
+            try:
+                clip._resolve_frame(frame)
+            except IndexError:
+                raise IndexError(
+                    f"frame {frame} is past {_take_label(clip, index)}, which holds {clip.frame_count} "
+                    f"frames; no take was scrubbed"
+                ) from None
+        for clip, frame in zip(self.list, values):
+            clip.frame = frame
+
+    # --- the pose algebra, take by take --- #
+    def _paired(self, other) -> list:
+        """each take with what it is paired with: another ClipList's take of
+        its name, or ``other`` itself"""
+        if not isinstance(other, ClipList):
+            return [(clip, other) for clip in self.list]
+        mine, theirs = self.take, other.take
+        if len(mine) == len(theirs) and not any(mine) and not any(theirs):
+            return list(zip(self.list, other.list))  # unnamed takes built by hand: by position
+        repeated = sorted({x for x in mine if mine.count(x) > 1} | {x for x in theirs if theirs.count(x) > 1})
+        if repeated:
+            raise ValueError(f"takes named twice cannot be paired by name: {repeated}")
+        missing = [x for x in mine if x not in theirs]
+        if missing:
+            raise ValueError(f"the other list holds no take {missing[0]!r}; it holds {theirs}")
+        return [(clip, other[clip.take]) for clip in self.list]
+
+    def get_delta(self, other, by: str = "index", translate: bool = True) -> "ClipList":
+        """every take's :meth:`ClipData.get_delta`, against another
+        ClipList's take of its name or against ``other`` itself"""
+        return ClipList(clip.get_delta(item, by=by, translate=translate) for clip, item in self._paired(other))
+
+    def add_delta(self, delta, by: str = "index", translate: bool = True) -> "ClipList":
+        """every take's :meth:`ClipData.add_delta`, with another ClipList's
+        take of its name or with ``delta`` itself"""
+        return ClipList(clip.add_delta(item, by=by, translate=translate) for clip, item in self._paired(delta))
+
+    # --- the rig edits, on every take or none --- #
+    set_rotate_order           = _every_take(ClipData.set_rotate_order)
+    swapaxes                   = _every_take(ClipData.swapaxes)
+    set_rotate_to_joint_orient = _every_take(ClipData.set_rotate_to_joint_orient)
+    set_joint_orient_to_rotate = _every_take(ClipData.set_joint_orient_to_rotate)
+    set_parent                 = _every_take(ClipData.set_parent)
+
+    # --- every take's timebase and record --- #
+    fps         = _per_take("fps")
+    start_frame = _per_take("start_frame")
+    end_frame   = _per_take("end_frame",   writable=False)
+    frame_count = _per_take("frame_count", writable=False)
+    rest_pose   = _per_take("rest_pose",   copied=True)
+    axis_system = _per_take("axis_system")
+    unit        = _per_take("unit")
+
+    # --- every take's nodes, at the frame it is on --- #
+    translate = _per_take("translate")
+    rotate = _per_take("rotate")
+    scale  = _per_take("scale")
+    rotate_axis  = _per_take("rotate_axis")
+    joint_orient = _per_take("joint_orient")
+    translate_x  = _per_take("translate_x")
+    translate_y  = _per_take("translate_y")
+    translate_z  = _per_take("translate_z")
+    rotate_x     = _per_take("rotate_x")
+    rotate_y     = _per_take("rotate_y")
+    rotate_z     = _per_take("rotate_z")
+    scale_x = _per_take("scale_x")
+    scale_y = _per_take("scale_y")
+    scale_z = _per_take("scale_z")
+    rotate_axis_x  = _per_take("rotate_axis_x")
+    rotate_axis_y  = _per_take("rotate_axis_y")
+    rotate_axis_z  = _per_take("rotate_axis_z")
+    joint_orient_x = _per_take("joint_orient_x")
+    joint_orient_y = _per_take("joint_orient_y")
+    joint_orient_z = _per_take("joint_orient_z")
+    shear = _per_take("shear")
+    shear_xy                 = _per_take("shear_xy")
+    shear_xz                 = _per_take("shear_xz")
+    shear_yz                 = _per_take("shear_yz")
+    rotate_order             = _per_take("rotate_order")
+    segment_scale_compensate = _per_take("segment_scale_compensate")
+    visibility               = _per_take("visibility")
+    radius = _per_take("radius")
+    draw_style = _per_take("draw_style")
+    matrix = _per_take("matrix")
+    world_matrix          = _per_take("world_matrix")
+    quaternion            = _per_take("quaternion")
+    parent_matrix         = _per_take("parent_matrix", writable=False)
+    inverse_matrix        = _per_take("inverse_matrix", writable=False)
+    world_inverse_matrix  = _per_take("world_inverse_matrix", writable=False)
+    parent_inverse_matrix = _per_take("parent_inverse_matrix", writable=False)
+    uuid = _per_take("uuid", writable=False)
+    node_type = _per_take("node_type")
+    t    = _per_take("translate")
+    r    = _per_take("rotate")
+    s    = _per_take("scale")
+    ra   = _per_take("rotate_axis")
+    jo   = _per_take("joint_orient")
+    tx   = _per_take("translate_x")
+    ty   = _per_take("translate_y")
+    tz   = _per_take("translate_z")
+    rx   = _per_take("rotate_x")
+    ry   = _per_take("rotate_y")
+    rz   = _per_take("rotate_z")
+    sx   = _per_take("scale_x")
+    sy   = _per_take("scale_y")
+    sz   = _per_take("scale_z")
+    rax  = _per_take("rotate_axis_x")
+    ray  = _per_take("rotate_axis_y")
+    raz  = _per_take("rotate_axis_z")
+    jox  = _per_take("joint_orient_x")
+    joy  = _per_take("joint_orient_y")
+    joz  = _per_take("joint_orient_z")
+    sh   = _per_take("shear")
+    shxy = _per_take("shear_xy")
+    shxz = _per_take("shear_xz")
+    shyz = _per_take("shear_yz")
+    ro   = _per_take("rotate_order")
+    ssc  = _per_take("segment_scale_compensate")
+    v    = _per_take("visibility")
+    radi = _per_take("radius")
+    ds   = _per_take("draw_style")
+    m    = _per_take("matrix")
+    wm   = _per_take("world_matrix")
+    pm   = _per_take("parent_matrix",         writable=False)
+    im   = _per_take("inverse_matrix",        writable=False)
+    wim  = _per_take("world_inverse_matrix",  writable=False)
+    pim  = _per_take("parent_inverse_matrix", writable=False)
+
+
+def _check_per_take(cls, item: type) -> None:
+    """every per-take member of ``cls`` names a member ``item`` has, so a
+    misspelt line fails at import rather than on the first read"""
+    for name, raw in vars(cls).items():
+        if isinstance(raw, property) and getattr(raw.fget, "__qualname__", "").startswith("_per_take."):
+            if not hasattr(item, raw.fget.__name__):
+                raise TypeError(f"{cls.__name__}.{name} reads {raw.fget.__name__!r}, which {item.__name__} lacks")
+
+
+_check_per_take(ClipList, ClipData)
+_check_per_take(_Takes, _FrameAxis)
+_every_take_text(ClipList)
 
 
 # ------------------------------- FILE LOADERS ------------------------------- #

@@ -229,7 +229,9 @@ Re-exported classes:
 
 ```text
 ClipData
+ClipList
 HierarchyData
+PerTake
 TransformData
 TransformList
 ```
@@ -280,6 +282,131 @@ to_dict(self) -> 'dict'
     The list as a tree. A view saves as the hierarchy :meth:`copy`
 ```
 
+#### `ClipList(DataList)`
+
+Every take of a file: one :class:`ClipData` per take, in file order.
+
+```text
+ClipList(iterable=None)
+```
+
+Properties:
+
+```text
+axis_system                        ``axis_system`` of every take, a PerTake; a write reaches every take or none
+draw_style                         ``draw_style`` of every take, a PerTake; a write reaches every take or none
+ds                                 ``draw_style`` of every take, a PerTake; a write reaches every take or none
+end_frame                          ``end_frame`` of every take, a PerTake
+fps                                ``fps`` of every take, a PerTake; a write reaches every take or none
+frame                              the frame every take is on; written, every take scrubbed to it, or
+frame_count                        ``frame_count`` of every take, a PerTake
+frames                             every take's frame axis, as a _Takes
+im                                 ``inverse_matrix`` of every take, a PerTake
+inverse_matrix                     ``inverse_matrix`` of every take, a PerTake
+jo                                 ``joint_orient`` of every take, a PerTake; a write reaches every take or none
+joint_orient                       ``joint_orient`` of every take, a PerTake; a write reaches every take or none
+joint_orient_x                     ``joint_orient_x`` of every take, a PerTake; a write reaches every take or none
+joint_orient_y                     ``joint_orient_y`` of every take, a PerTake; a write reaches every take or none
+joint_orient_z                     ``joint_orient_z`` of every take, a PerTake; a write reaches every take or none
+jox                                ``joint_orient_x`` of every take, a PerTake; a write reaches every take or none
+joy                                ``joint_orient_y`` of every take, a PerTake; a write reaches every take or none
+joz                                ``joint_orient_z`` of every take, a PerTake; a write reaches every take or none
+m                                  ``matrix`` of every take, a PerTake; a write reaches every take or none
+matrix                             ``matrix`` of every take, a PerTake; a write reaches every take or none
+node_type                          ``node_type`` of every take, a PerTake; a write reaches every take or none
+parent_inverse_matrix              ``parent_inverse_matrix`` of every take, a PerTake
+parent_matrix                      ``parent_matrix`` of every take, a PerTake
+pim                                ``parent_inverse_matrix`` of every take, a PerTake
+pm                                 ``parent_matrix`` of every take, a PerTake
+quaternion                         ``quaternion`` of every take, a PerTake; a write reaches every take or none
+r                                  ``rotate`` of every take, a PerTake; a write reaches every take or none
+ra                                 ``rotate_axis`` of every take, a PerTake; a write reaches every take or none
+radi                               ``radius`` of every take, a PerTake; a write reaches every take or none
+radius                             ``radius`` of every take, a PerTake; a write reaches every take or none
+rax                                ``rotate_axis_x`` of every take, a PerTake; a write reaches every take or none
+ray                                ``rotate_axis_y`` of every take, a PerTake; a write reaches every take or none
+raz                                ``rotate_axis_z`` of every take, a PerTake; a write reaches every take or none
+rest_pose                          ``rest_pose`` of every take, a PerTake; a write reaches every take or none, one value copied for each take
+ro                                 ``rotate_order`` of every take, a PerTake; a write reaches every take or none
+rotate                             ``rotate`` of every take, a PerTake; a write reaches every take or none
+rotate_axis                        ``rotate_axis`` of every take, a PerTake; a write reaches every take or none
+rotate_axis_x                      ``rotate_axis_x`` of every take, a PerTake; a write reaches every take or none
+rotate_axis_y                      ``rotate_axis_y`` of every take, a PerTake; a write reaches every take or none
+rotate_axis_z                      ``rotate_axis_z`` of every take, a PerTake; a write reaches every take or none
+rotate_order                       ``rotate_order`` of every take, a PerTake; a write reaches every take or none
+rotate_x                           ``rotate_x`` of every take, a PerTake; a write reaches every take or none
+rotate_y                           ``rotate_y`` of every take, a PerTake; a write reaches every take or none
+rotate_z                           ``rotate_z`` of every take, a PerTake; a write reaches every take or none
+rx                                 ``rotate_x`` of every take, a PerTake; a write reaches every take or none
+ry                                 ``rotate_y`` of every take, a PerTake; a write reaches every take or none
+rz                                 ``rotate_z`` of every take, a PerTake; a write reaches every take or none
+s                                  ``scale`` of every take, a PerTake; a write reaches every take or none
+scale                              ``scale`` of every take, a PerTake; a write reaches every take or none
+scale_x                            ``scale_x`` of every take, a PerTake; a write reaches every take or none
+scale_y                            ``scale_y`` of every take, a PerTake; a write reaches every take or none
+scale_z                            ``scale_z`` of every take, a PerTake; a write reaches every take or none
+segment_scale_compensate           ``segment_scale_compensate`` of every take, a PerTake; a write reaches every take or none
+sh                                 ``shear`` of every take, a PerTake; a write reaches every take or none
+shear                              ``shear`` of every take, a PerTake; a write reaches every take or none
+shear_xy                           ``shear_xy`` of every take, a PerTake; a write reaches every take or none
+shear_xz                           ``shear_xz`` of every take, a PerTake; a write reaches every take or none
+shear_yz                           ``shear_yz`` of every take, a PerTake; a write reaches every take or none
+shxy                               ``shear_xy`` of every take, a PerTake; a write reaches every take or none
+shxz                               ``shear_xz`` of every take, a PerTake; a write reaches every take or none
+shyz                               ``shear_yz`` of every take, a PerTake; a write reaches every take or none
+ssc                                ``segment_scale_compensate`` of every take, a PerTake; a write reaches every take or none
+start_frame                        ``start_frame`` of every take, a PerTake; a write reaches every take or none
+sx                                 ``scale_x`` of every take, a PerTake; a write reaches every take or none
+sy                                 ``scale_y`` of every take, a PerTake; a write reaches every take or none
+sz                                 ``scale_z`` of every take, a PerTake; a write reaches every take or none
+t                                  ``translate`` of every take, a PerTake; a write reaches every take or none
+take                               every take's name, in order; written, one name for every take or
+translate                          ``translate`` of every take, a PerTake; a write reaches every take or none
+translate_x                        ``translate_x`` of every take, a PerTake; a write reaches every take or none
+translate_y                        ``translate_y`` of every take, a PerTake; a write reaches every take or none
+translate_z                        ``translate_z`` of every take, a PerTake; a write reaches every take or none
+tx                                 ``translate_x`` of every take, a PerTake; a write reaches every take or none
+ty                                 ``translate_y`` of every take, a PerTake; a write reaches every take or none
+tz                                 ``translate_z`` of every take, a PerTake; a write reaches every take or none
+unit                               ``unit`` of every take, a PerTake; a write reaches every take or none
+uuid                               ``uuid`` of every take, a PerTake
+v                                  ``visibility`` of every take, a PerTake; a write reaches every take or none
+visibility                         ``visibility`` of every take, a PerTake; a write reaches every take or none
+wim                                ``world_inverse_matrix`` of every take, a PerTake
+wm                                 ``world_matrix`` of every take, a PerTake; a write reaches every take or none
+world_inverse_matrix               ``world_inverse_matrix`` of every take, a PerTake
+world_matrix                       ``world_matrix`` of every take, a PerTake; a write reaches every take or none
+```
+
+Methods:
+
+```text
+add_delta(self, delta, by: 'str' = 'index', translate: 'bool' = True) -> "'ClipList'"
+    every take's :meth:`ClipData.add_delta`, with another ClipList's
+get(self, take: 'str', default=None)
+    the first take named ``take``, or ``default``
+get_delta(self, other, by: 'str' = 'index', translate: 'bool' = True) -> "'ClipList'"
+    every take's :meth:`ClipData.get_delta`, against another
+index(self, value, start=0, stop=None) -> 'int'
+    the position of the first take named ``value``, or of that clip,
+match(self, *args, exclude: 'bool' = False, exact: 'bool' = True) -> '_Takes'
+    every take's ``match``, the nodes it selects at the frame each take
+set_joint_orient_to_rotate(self) -> None
+    TransformList.set_joint_orient_to_rotate() on every take, every take or none
+set_parent(self, parent: "Union['TransformData', str, None]", world_space: 'bool' = True) -> None
+    TransformList.set_parent() on every take, every take or none
+set_rotate_order(self, order) -> None
+    TransformList.set_rotate_order() on every take, every take or none
+set_rotate_to_joint_orient(self) -> None
+    TransformList.set_rotate_to_joint_orient() on every take, every take or none
+sort(self, key=None, reverse: 'bool' = False) -> 'None'
+    orders the takes, by their names unless ``key`` says otherwise
+strip_namespace(self, namespace: 'Optional[str]' = None) -> 'None'
+    ``strip_namespace()`` on every take, every take or none: a take
+swapaxes(self, axis0: 'int', axis1: 'int', negate: 'bool' = False) -> None
+    TransformList.swapaxes() on every take, every take or none
+```
+
 #### `HierarchyData(TransformList)`
 
 Owning container for a hierarchy of ``TransformData`` nodes.
@@ -308,6 +435,14 @@ pop(self, index=-1) -> 'TransformData'
     S.pop([index]) -> item -- remove and return item at index (default last).
 sort(self, key=None, reverse=False) -> 'None'
     sorts the nodes in place, by name unless ``key`` says otherwise
+```
+
+#### `PerTake(list)`
+
+One value per take of a :class:`ClipList`, in take order.
+
+```text
+PerTake(iterable=(), /)
 ```
 
 #### `TransformData(Data)`

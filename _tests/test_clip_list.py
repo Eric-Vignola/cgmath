@@ -15,10 +15,16 @@ import unittest
 import warnings
 
 import numpy as np
+from cgmath.data import FORWARD_MARK
 from cgmath.formats._fbx_io import load_sdk
 from cgmath.formats.glb import load_model, pygltflib
-from cgmath.hierarchy import ClipData, HierarchyData, TransformData
+from cgmath.hierarchy import ClipData, ClipList, HierarchyData, PerTake, TransformData
 from cgmath.hierarchy.hierarchy import _take_names
+
+try:
+    import jedi
+except ImportError:
+    jedi = None
 
 if pygltflib is not None:
     from pygltflib import (
@@ -293,11 +299,11 @@ LITERALS = {'fbx 0': {'blocks': {'_joint_orient': 'd760653dad991759992423796bf2a
           'start': 0}}
 
 
-def hand_built(take="", frames=6):
+def hand_built(take="", frames=6, namespace=""):
     """a clip of a two-joint rig, built by hand, its rotate moving"""
     rig = HierarchyData()
-    rig.append(TransformData("root", node_type="joint", translate=(0.0, 1.0, 0.0)))
-    rig.append(TransformData("tip", node_type="joint", translate=(0.0, 2.0, 0.0)))
+    rig.append(TransformData(f"{namespace}root", node_type="joint", translate=(0.0, 1.0, 0.0)))
+    rig.append(TransformData(f"{namespace}tip", node_type="joint", translate=(0.0, 2.0, 0.0)))
     rig[1].parent_uuid = rig[0].uuid
     clip               = ClipData(rig, frames=frames, take=take)
     turns              = np.array(clip.frames.rotate)
@@ -432,6 +438,563 @@ class TestClipTake(unittest.TestCase):
         self.assertEqual(names, ["walk", "idle", "idle_1"])
         self.assertEqual(len(caught), 1)
         self.assertEqual(ClipData.load_fbx(path).take, "walk")
+
+
+def two_takes():
+    """takes of 6 and 4 frames, idle and walk, of a namespaced rig"""
+    return ClipList([hand_built("idle", 6, "ns:"), hand_built("walk", 4, "ns:")])
+
+
+def channels(clip) -> dict:
+    """every block of a clip, copied"""
+    return {name: np.array(block) for name, block in clip._blocks.items()}
+
+
+def whole(clips) -> list:
+    """every take as a refused write or edit must leave it, to the bit: its
+    blocks and columns, timebase, record, name, bound frame and rest pose
+    object, and its nodes in their order, the same objects, each with its
+    own fields"""
+    held = []
+    for clip in clips:
+        nodes = [
+            (id(n), n.name, n.uuid, n.parent_uuid, n.node_type, int(n.rotate_order), bool(n.segment_scale_compensate),
+             bool(n.visibility), float(n.radius), int(n.draw_style), dict(n.user_defined_attributes))
+            for n in clip
+        ]
+        held.append((
+            {name: (block.shape, block.tobytes()) for name, block in clip._blocks.items()},
+            list(clip._columns),
+            (clip.fps, clip.start_frame, clip.unit, clip.axis_system, id(clip.rest_pose), clip.take, clip.frame),
+            nodes,
+        ))
+    return held
+
+
+def oriented(take, count=3, frames=5, kind="joint"):
+    """a clip of a chain of ``count`` nodes of ``kind``, each joint holding
+    a joint orient, radius 2.5, draw_style 2 and segment_scale_compensate
+    on, the second node a rotate axis, its rotate moving, a rest pose of its
+    own, bound to frame 1"""
+    rig = HierarchyData()
+    for index in range(count):
+        rig.append(TransformData(f"n{index}", node_type=kind, translate=(0.0, 1.0 + index, 0.5 * index)))
+        if index:
+            rig[index].parent_uuid = rig[index - 1].uuid
+        if kind == "joint":
+            rig[index].joint_orient             = (10.0 * index - 5.0, 15.0, 5.0 * index)
+            rig[index].radius                   = 2.5
+            rig[index].draw_style               = 2
+            rig[index].segment_scale_compensate = True
+    if count > 1:
+        rig[1].rotate_axis = (3.0, 4.0, 5.0)
+    clip  = ClipData(rig, frames=frames, take=take)
+    turns = np.array(clip.frames.rotate)
+    turns[:, :, 0] += np.arange(frames)[:, None] * 4.0
+    turns[:, :, 2] += np.arange(frames)[:, None] * 7.0
+    clip.frames.rotate = turns
+    clip.rest_pose     = HierarchyData(node.copy() for node in clip)
+    clip.frame         = 1
+    return clip
+
+
+def oriented_takes(counts=(3, 3, 3), kind="joint") -> ClipList:
+    """takes a, b and c of :func:`oriented`, of 5, 6 and 4 frames"""
+    return ClipList([oriented(take, count, frames, kind) for take, count, frames in zip("abc", counts, (5, 6, 4))])
+
+
+class TestClipList(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_built_copied_and_saved(self):
+        clips = two_takes()
+        self.assertIs(type(clips.list), list)
+        for label, made in (
+            ("copy.copy", lambda: copy.copy(clips)),
+            ("deepcopy", lambda: copy.deepcopy(clips)),
+            ("copy()", lambda: clips.copy()),
+            ("pickle", lambda: pickle.loads(pickle.dumps(clips))),
+            ("pkl", lambda: ClipList.load(clips.save(os.path.join(self.tmp.name, "c.pkl")))),
+            ("npz", lambda: ClipList.load(clips.save(os.path.join(self.tmp.name, "c.npz")))),
+            ("json", lambda: ClipList.load(clips.save(os.path.join(self.tmp.name, "c.json")))),
+        ):
+            with self.subTest(label):
+                other = made()
+                self.assertEqual(other.take, ["idle", "walk"])
+                self.assertEqual(other, clips)
+                self.assertIs(type(other.list), list)
+        clips.take = PerTake(["x", "y"])
+        self.assertEqual(clips.take, ["x", "y"])
+
+    def test_a_misspelt_name_changes_no_take(self):
+        clips  = two_takes()
+        before = [channels(clip) for clip in clips]
+        with self.assertRaisesRegex(AttributeError, "'ClipList' has no attribute 'tyop'"):
+            clips.tyop = 1
+        with self.assertRaises(AttributeError):
+            clips.frames.tyop = 1
+        with self.assertRaises(AttributeError):
+            ClipList().tyop
+        for clip, held in zip(clips, before):
+            for name, block in channels(clip).items():
+                np.testing.assert_array_equal(block, held[name])
+
+    def test_lookup_by_take(self):
+        clips = two_takes()
+        self.assertIs(clips["walk"], clips[1])
+        self.assertIn("idle", clips)
+        self.assertNotIn("run", clips)
+        self.assertIs(clips.get("walk"), clips[1])
+        self.assertEqual(clips.get("run", 7), 7)
+        self.assertEqual(clips.index("walk"), 1)
+        with self.assertRaisesRegex(KeyError, r"no take named 'run'; the takes are \['idle', 'walk'\]"):
+            clips["run"]
+        with self.assertRaisesRegex(ValueError, "'run' is not a take of the list"):
+            clips.index("run")
+        self.assertEqual(clips.name, [["ns:root", "ns:tip"], ["ns:root", "ns:tip"]])
+
+    def test_per_take_values(self):
+        clips = two_takes()
+        self.assertIsInstance(clips.fps, PerTake)
+        self.assertEqual(clips.frame_count, [6, 4])
+        values = PerTake([1.0, 2.0])
+        self.assertEqual(values + 1, [2.0, 3.0])
+        self.assertEqual(values * PerTake([3.0, 4.0]), [3.0, 8.0])
+        self.assertEqual(np.float64(2) * values, [2.0, 4.0])
+        self.assertEqual(-values, [-1.0, -2.0])
+        self.assertEqual(abs(PerTake([-1.0])), [1.0])
+        held = values
+        values += 5
+        self.assertEqual(held, [1.0, 2.0])  # the old one, element by element, as it was
+        self.assertEqual(values, [6.0, 7.0])
+        with self.assertRaisesRegex(ValueError, "2 takes against 3"):
+            PerTake([1, 2]) + PerTake([1, 2, 3])
+
+        rotate = [np.array(x) for x in clips.frames.rotate]
+        clips.frames.rotate += 5  # read-only views: a new PerTake, then the setter
+        for clip, before in zip(clips, rotate):
+            np.testing.assert_allclose(np.asarray(clip.frames.rotate), np.asarray(before) + 5)
+
+    def test_frames_write_every_frame_of_every_take(self):
+        clips  = two_takes()
+        before = [np.array(clip.frames.rotate) for clip in clips]
+        clips.frames.match("ns:tip").rotate_y += 5
+        for clip, held in zip(clips, before):
+            turned = np.array(clip.frames.rotate)
+            np.testing.assert_allclose(turned[:, 1, 1], held[:, 1, 1] + 5)  # tip, every frame
+            np.testing.assert_array_equal(turned[:, 0], held[:, 0])         # root untouched
+        cut = clips.frames[1:3]
+        self.assertIsInstance(cut, ClipList)
+        self.assertEqual((cut.take, cut.frame_count), (["idle", "walk"], [2, 2]))
+
+    def test_match_writes_the_current_frame(self):
+        clips       = two_takes()
+        clips.frame = 2
+        before      = [np.array(clip.frames.rotate) for clip in clips]
+        clips.match("ns:tip").rotate_y += 5
+        for clip, held in zip(clips, before):
+            turned = np.array(clip.frames.rotate)
+            held[2, 1, 1] += 5
+            np.testing.assert_allclose(turned, held)
+
+    def test_one_value_or_one_per_take(self):
+        clips     = two_takes()
+        clips.fps = 30.0
+        self.assertEqual(clips.fps, [30.0, 30.0])
+        clips.fps = PerTake([24.0, 25.0])
+        self.assertEqual(clips.fps, [24.0, 25.0])
+
+        before = [channels(clip) for clip in clips]
+        for label, write in (
+            ("a PerTake of 3", lambda: setattr(clips, "fps", PerTake([1.0, 2.0, 3.0]))),
+            ("fits take 0 only", lambda: setattr(clips.frames, "rotate", np.zeros((6, 2, 3)))),
+            ("one node's flat column", lambda: setattr(clips.frames["ns:tip"], "rotate_y", np.zeros(6))),
+        ):
+            with self.subTest(label), self.assertRaises(ValueError) as caught:
+                write()
+            if label != "a PerTake of 3":
+                self.assertIn("take 1 ('walk')", str(caught.exception))
+        for clip, held in zip(clips, before):
+            for name, block in channels(clip).items():
+                np.testing.assert_array_equal(block, held[name])
+
+        for scrub in (lambda: setattr(clips, "frame", 5), lambda: clips.frames[5]):
+            with self.assertRaisesRegex(IndexError, r"take 1 \('walk'\), which holds 4 frames; no take was scrubbed"):
+                scrub()
+            self.assertEqual(clips.frame, [0, 0])
+        self.assertIs(clips.frames[3], clips)
+        self.assertEqual(clips.frame, [3, 3])
+
+    def test_a_refused_write_changes_no_take(self):
+        """a write reaches every take or none, every member: a last value
+        the last take's own setter refuses leaves every take as it was, the
+        takes written before it put back, its rest pose the same object"""
+
+        def made():
+            clips = ClipList([hand_built("a", 6), hand_built("b", 6), hand_built("c", 4)])
+            for clip in clips:
+                clip.rest_pose = HierarchyData(node.copy() for node in clip)
+            return clips
+
+        def state(clips):
+            return [
+                (
+                    {name: block.tobytes() for name, block in channels(clip).items()},
+                    (clip.fps, clip.start_frame, clip.unit, clip.axis_system, id(clip.rest_pose), clip.take, clip.frame),
+                    [(n.name, int(n.rotate_order), n.node_type, bool(n.segment_scale_compensate), n.visibility,
+                      n.radius, n.draw_style) for n in clip],
+                )
+                for clip in clips
+            ]
+
+        def moved(value, name):
+            """a value of the take's own kind other than the one it holds"""
+            if isinstance(value, np.ndarray):
+                return np.array(value) + (1 if value.dtype.kind in "fiu" else 0)
+            if isinstance(value, bool):
+                return not value
+            if isinstance(value, (int, float)):
+                return value + 1
+            if isinstance(value, HierarchyData):
+                return HierarchyData(node.copy() for node in value)
+            if name == "axis_system":
+                return "z up, -y front, right handed"
+            return value
+
+        refused = set()
+        for owner in ("ClipList", "_Takes"):
+            cls = ClipList if owner == "ClipList" else type(made().frames)
+            for name, raw in list(vars(cls).items()):
+                if not (isinstance(raw, property) and raw.fget.__qualname__.startswith("_per_take.") and raw.fset):
+                    continue
+                for bad in ("x", object()):
+                    with self.subTest(member=f"{owner}.{name}", bad=type(bad).__name__):
+                        clips  = made()
+                        target = clips if owner == "ClipList" else clips.frames
+                        held   = getattr(target, name)
+                        before = state(clips)
+                        try:
+                            setattr(target, name, PerTake([moved(held[0], name), moved(held[1], name), bad]))
+                        except (TypeError, ValueError):
+                            refused.add(name)
+                            self.assertEqual(state(clips), before)
+        for name in ("fps", "start_frame", "unit", "rest_pose", "translate", "world_matrix", "rotate_order"):
+            self.assertIn(name, refused)
+
+        # takes 0 and 1 turn their joints into transforms, which
+        # folds each joint orient into rotate and resets radius, draw_style
+        # and segment_scale_compensate, and the last take's list is one
+        # short: the whole of every take is put back
+        clips  = oriented_takes()
+        before = whole(clips)
+        with self.assertRaisesRegex(ValueError, "got 2 node types for 3 nodes"):
+            clips.node_type = PerTake([["transform"] * 3, ["transform"] * 3, ["transform"] * 2])
+        self.assertEqual(whole(clips), before)
+        self.assertEqual(clips.node_type, [["joint"] * 3] * 3)
+        clips.node_type = "transform"  # one every take holds: as each take alone
+        alone           = oriented_takes()
+        for clip in alone:
+            clip.node_type = "transform"
+        for clip, own in zip(clips, alone):
+            for name, block in clip._blocks.items():
+                np.testing.assert_array_equal(block, own._blocks[name])
+
+        # on groups a sheared matrix writes a shear, which the
+        # put back takes back with the other channels
+        shear       = np.eye(4)
+        shear[1, 0] = 0.3
+        for owner, name in (("ClipList", "matrix"), ("ClipList", "world_matrix"), ("_Takes", "matrix")):
+            with self.subTest(member=f"{owner}.{name}", nodes="groups"):
+                clips  = oriented_takes(kind="transform")
+                target = clips if owner == "ClipList" else clips.frames
+                held   = getattr(target, name)
+                values = [np.asarray(value) @ shear if owner == "_Takes" else shear @ np.asarray(value) for value in held[:2]]
+                before = whole(clips)
+                with self.assertRaises((TypeError, ValueError)):
+                    setattr(target, name, PerTake(values + ["x"]))
+                self.assertEqual(whole(clips), before)
+                self.assertFalse(any(np.any(clip._blocks["_shear"]) for clip in clips))
+
+    def test_one_rest_pose_is_copied_for_each_take(self):
+        """each take holds its own copy of the rest pose, one
+        written whole too; a PerTake gives each its own as given"""
+        clips           = two_takes()
+        rig             = HierarchyData(node.copy() for node in clips[0])
+        clips.rest_pose = rig
+        rests           = list(clips.rest_pose)
+        self.assertEqual(len({id(rest) for rest in rests + [rig]}), 3)
+        for rest in rests:
+            np.testing.assert_array_equal(np.asarray(rest.world_matrix), np.asarray(rig.world_matrix))
+        rests[0][0].translate = (5.0, 6.0, 7.0)
+        np.testing.assert_array_equal(np.asarray(rests[1].world_matrix), np.asarray(rig.world_matrix))
+        np.testing.assert_array_equal(np.asarray(rig.world_matrix), np.asarray(clips[1].rest_pose.world_matrix))
+
+        own             = PerTake([rig, HierarchyData(node.copy() for node in clips[1])])
+        clips.rest_pose = own
+        self.assertIs(clips[0].rest_pose, own[0])
+        self.assertIs(clips[1].rest_pose, own[1])
+
+    def test_edits_run_on_every_take(self):
+        clips = two_takes()
+        alone = [clip.copy() for clip in clips]
+        clips.set_rotate_order("zyx")
+        for clip in alone:
+            clip.set_rotate_order("zyx")
+        for clip, own in zip(clips, alone):
+            np.testing.assert_allclose(np.asarray(clip.frames.rotate), np.asarray(own.frames.rotate))
+            self.assertEqual(list(clip.rotate_order), list(own.rotate_order))
+
+        copied = clips.copy()
+        copied.frames.rotate += 1
+        self.assertFalse(np.allclose(np.asarray(copied[0].frames.rotate), np.asarray(clips[0].frames.rotate)))
+
+        clips.strip_namespace()
+        self.assertEqual(clips.name, [["root", "tip"], ["root", "tip"]])
+
+        clash = ClipList([hand_built("a", 3, "ns:"), hand_built("b", 3, "ns:")])
+        for clip in clash:
+            clip.rest_pose = HierarchyData(node.copy() for node in clip)
+        clash[1].append(TransformData("tip", node_type="joint"))  # take 1 would hold two tips
+        with self.assertRaises(ValueError):
+            clash.strip_namespace()
+        self.assertEqual(clash[0].name, ["ns:root", "ns:tip"])
+        # the rest poses' names put back too, the stripped take's and the refused one's
+        self.assertEqual([[node.name for node in clip.rest_pose] for clip in clash], [["ns:root", "ns:tip"]] * 2)
+
+    def refused_edit(self, name, args, refused=()):
+        """the rig edit ``name`` reaches every take or
+        none. Each of ``refused``, (arguments, error), on takes of 3, 3 and 2
+        nodes, which the last take refuses by its rig; and ``args`` on takes
+        of one rig, the last take's own edit made to change it and then
+        raise. Either way every take is as before, the refusing one
+        included, the same objects; ``args``, which every take accepts,
+        gives each take what the edit gives it alone"""
+        from unittest import mock
+
+        for given, error in refused:
+            with self.subTest(arguments=given):
+                clips  = oriented_takes((3, 3, 2))
+                before = whole(clips)
+                with self.assertRaisesRegex(ValueError, error):
+                    getattr(clips, name)(*given)
+                self.assertEqual(whole(clips), before)
+
+        clips   = oriented_takes()
+        before  = whole(clips)
+        real    = getattr(ClipData, name)
+        reached = []
+
+        def edit(clip, *given, **keywords):
+            real(clip, *given, **keywords)
+            reached.append(whole([clip])[0] != before[len(reached)])
+            if clip is clips[-1]:
+                raise RuntimeError(f"{name} refused after its edit")
+
+        with mock.patch.object(ClipData, name, edit):
+            with self.assertRaisesRegex(RuntimeError, "refused after its edit"):
+                getattr(clips, name)(*args)
+        self.assertEqual(reached, [True, True, True])  # every take edited, the last then refusing
+        self.assertEqual(whole(clips), before)
+
+        alone = oriented_takes()
+        for clip in alone:
+            getattr(clip, name)(*args)
+        getattr(clips, name)(*args)
+        for clip, own in zip(clips, alone):
+            names = {node.uuid: node.name for node in clip}
+            mine  = {node.uuid: node.name for node in own}
+            self.assertEqual([(n.name, names.get(n.parent_uuid), n.node_type, int(n.rotate_order)) for n in clip],
+                             [(n.name, mine.get(n.parent_uuid), n.node_type, int(n.rotate_order)) for n in own])
+            for channel, block in clip._blocks.items():
+                np.testing.assert_array_equal(block, own._blocks[channel])
+
+    def test_set_rotate_order_reaches_every_take_or_none(self):
+        refused = (((["zyx", "yxz", "xzy"],), "got 3 rotate orders for 2 nodes"),)
+        self.refused_edit("set_rotate_order", ("zyx",), refused)
+
+    def test_swapaxes_reaches_every_take_or_none(self):
+        self.refused_edit("swapaxes", (0, 1))
+
+    def test_set_rotate_to_joint_orient_reaches_every_take_or_none(self):
+        self.refused_edit("set_rotate_to_joint_orient", ())
+
+    def test_set_joint_orient_to_rotate_reaches_every_take_or_none(self):
+        self.refused_edit("set_joint_orient_to_rotate", ())
+
+    def test_set_parent_reaches_every_take_or_none(self):
+        refused = ((("n2",), "n2 is not in list"), (("n2", False), "n2 is not in list"))
+        self.refused_edit("set_parent", ("n2",), refused)
+
+    def test_an_item_assignment_reaches_every_take_or_none(self):
+        """an item assignment on every take's frames
+        reaches every take or none: a PerTake of another length changes no
+        take, and so does a value the last take refuses, or the last take's
+        own write made to change it and then raise, the refusing take put
+        back too; a value every take holds gives each what it gives alone"""
+        from unittest import mock
+
+        def turned(clips, last=None):
+            """each take's clip copied and turned, the last ``last`` if given"""
+            values = []
+            for clip in clips:
+                value               = clip.copy()
+                value.frames.rotate = np.asarray(value.frames.rotate) + 10.0
+                values.append(value)
+            if last is not None:
+                values[-1] = last
+            return values
+
+        def posed(clips, last=None):
+            """each take's pose moved, the last ``last`` if given"""
+            values = []
+            for clip in clips:
+                value              = HierarchyData(node.copy() for node in clip)
+                value[0].translate = (4.0, 5.0, 6.0)
+                values.append(value)
+            if last is not None:
+                values[-1] = last
+            return values
+
+        short = oriented("x", 2, 4)  # a rig one node short, of the last take's 4 frames
+        for label, query, value, error in (
+            ("frames pasted", slice(None), lambda c: PerTake(turned(c, short)), "pose holds 2 nodes, clip holds 3"),
+            ("a pose", 2, lambda c: PerTake(posed(c, HierarchyData(n.copy() for n in short))), "pose holds 2 nodes"),
+            ("a PerTake of 2 for 3 takes", slice(None), lambda c: PerTake(turned(c)[:2]), "2 values for 3 takes"),
+        ):
+            with self.subTest(label):
+                clips  = oriented_takes()
+                before = whole(clips)
+                with self.assertRaisesRegex(ValueError, error):
+                    clips.frames[query] = value(clips)
+                self.assertEqual(whole(clips), before)
+
+        clips   = oriented_takes()
+        before  = whole(clips)
+        axis    = type(clips[0].frames)
+        real    = axis.__setitem__
+        reached = []
+
+        def written(frames, query, value):
+            real(frames, query, value)
+            reached.append(whole([frames._clip])[0] != before[len(reached)])
+            if frames._clip is clips[-1]:
+                raise RuntimeError("refused after its write")
+
+        with mock.patch.object(axis, "__setitem__", written):
+            with self.assertRaisesRegex(RuntimeError, "refused after its write"):
+                clips.frames[2] = PerTake(posed(clips))
+        self.assertEqual(reached, [True, True, True])
+        self.assertEqual(whole(clips), before)
+
+        alone           = oriented_takes()
+        values          = turned(clips)
+        clips.frames[:] = PerTake(values)
+        for clip, value in zip(alone, values):
+            clip.frames[:] = value
+        clips.frames[1] = PerTake(posed(clips))
+        for clip, value in zip(alone, posed(alone)):
+            clip.frames[1] = value
+        for clip, own in zip(clips, alone):
+            for channel, block in clip._blocks.items():
+                np.testing.assert_array_equal(block, own._blocks[channel])
+
+    def test_deltas_pair_by_take(self):
+        clips = two_takes()
+        rest  = ClipList([hand_built("walk", 4, "ns:"), hand_built("idle", 6, "ns:")])
+        delta = clips.get_delta(rest)
+        self.assertEqual(delta.take, ["idle", "walk"])
+        np.testing.assert_allclose(np.asarray(delta[0].frames.rotate), np.asarray(clips[0].get_delta(rest[1]).frames.rotate))
+        with self.assertRaisesRegex(ValueError, "holds no take 'walk'"):
+            clips.get_delta(ClipList([hand_built("idle", 6, "ns:")]))
+        twice = ClipList([hand_built("idle", 6, "ns:"), hand_built("idle", 6, "ns:")])
+        with self.assertRaisesRegex(ValueError, r"takes named twice cannot be paired by name: \['idle'\]"):
+            clips.get_delta(twice)
+        unnamed = ClipList([hand_built("", 6), hand_built("", 4)])
+        self.assertEqual(len(unnamed.get_delta(ClipList([hand_built("", 6), hand_built("", 4)]))), 2)
+        pose  = HierarchyData(node.copy() for node in clips[0])
+        added = clips.add_delta(pose)
+        self.assertEqual(added.take, ["idle", "walk"])
+
+    def test_shear_passes_on(self):
+        """shear is a channel like the others: every take's at the frame it
+        is on and over its every frame, by its long and short names"""
+        clips = two_takes()
+        clips.frames.shear_xz += 0.25
+        clips.frames.shyz = 0.5
+        for clip in clips:
+            block = np.asarray(clip.frames.shear)
+            np.testing.assert_array_equal(block, np.broadcast_to([0.0, 0.25, 0.5], block.shape))
+        clips.shxy = 0.125
+        self.assertEqual([np.asarray(held).tolist() for held in clips.shear],
+                         [np.asarray(clip.shear).tolist() for clip in clips])
+        self.assertEqual([np.asarray(held).tolist() for held in clips.sh],
+                         [[[0.125, 0.25, 0.5]] * len(clip) for clip in clips])
+        self.assertEqual([np.asarray(held).tolist() for held in clips.frames.shear_yz],
+                         [[[0.5] * len(clip)] * clip.frame_count for clip in clips])
+        self.assertEqual([np.asarray(held).tolist() for held in clips.frames.shear],
+                         [np.asarray(clip.frames.shear).tolist() for clip in clips])
+
+    def test_animate_plays_one_take(self):
+        from cgmath.render.scene import Scene, _one_take
+
+        clip = hand_built("idle")
+        self.assertIs(_one_take(clip), clip)
+        self.assertIs(_one_take(ClipList([clip])), clip)
+        with self.assertRaisesRegex(ValueError, r"holds 2: \['idle', 'walk'\]; pick one, animate\(clips\['idle'\]\)"):
+            Scene().animate(two_takes())
+        with self.assertRaisesRegex(ValueError, "holds no take"):
+            Scene().animate(ClipList())
+        with self.assertRaisesRegex(TypeError, "not str"):
+            Scene().animate("idle")
+
+    def test_forwarded_members_are_listed(self):
+        """every member a ClipList passes on is a line of its own
+        class, in dir() and in REFERENCE.md"""
+        lines = [name for name, raw in vars(ClipList).items()
+                 if isinstance(raw, property) and raw.fget.__qualname__.startswith("_per_take.")
+                 or getattr(raw, FORWARD_MARK, None) is not None]
+        self.assertGreater(len(lines), 60)
+        for name in ("strip_namespace", "fps", "t", "frames", "take", "set_rotate_order", "wm"):
+            self.assertIn(name, dir(ClipList))
+        reference = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "REFERENCE.md")
+        with open(reference, encoding="utf-8") as handle:
+            text = handle.read()
+        start   = text.index("ClipList(DataList)")
+        section = text[start : text.index("\n#### ", start)]  # up to the next class
+        listed  = section.splitlines()
+        for name in lines:
+            with self.subTest(name):
+                self.assertRegex(section, rf"(?m)^{name}\b")
+                raw = vars(ClipList)[name]
+                if isinstance(raw, property):
+                    # listed with its whole text, which its getter carries
+                    self.assertEqual(raw.fget.__doc__, raw.__doc__)
+                    self.assertRegex(section, rf"(?m)^{name} +``{raw.fget.__name__}`` of every take")
+                    self.assertIn(f"{name:<34} {raw.__doc__}", listed)
+                else:
+                    # a rig edit: its signature, then its first line, every take or none
+                    first = raw.__doc__.split("\n", 1)[0]
+                    self.assertTrue(first.endswith("() on every take, every take or none"), first)
+                    at = next(i for i, line in enumerate(listed) if line.startswith(f"{name}("))
+                    self.assertEqual(listed[at + 1], f"    {first}")
+
+    @unittest.skipIf(
+        os.environ.get("CGMATH_JEDI_TEST") != "1" or jedi is None,
+        "runs only with CGMATH_JEDI_TEST=1 and jedi installed",
+    )
+    def test_jedi_completes_a_clip_list(self):
+        cache = tempfile.TemporaryDirectory()
+        self.addCleanup(cache.cleanup)
+        self.addCleanup(setattr, jedi.settings, "cache_directory", jedi.settings.cache_directory)
+        jedi.settings.cache_directory = cache.name
+        root    = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        project = jedi.Project(path=root, added_sys_path=[root], smart_sys_path=False)
+        source  = "from cgmath.hierarchy import ClipList\nclips = ClipList()\nclips."
+        names   = {x.name for x in jedi.Script(source, project=project).complete(3, len("clips."))}
+        for name in ("strip_namespace", "fps", "t"):
+            self.assertIn(name, names)
 
 
 class TestClipListLoad(unittest.TestCase):

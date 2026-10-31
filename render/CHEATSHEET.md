@@ -463,10 +463,10 @@ shown here:
 
 ```python
 hero = Object.load_glb("hero.glb", load_skin=True)   # attaches .skin
-hero.pose(posed_rig)      # HierarchyData, a ClipData at its frame, or (J, 4, 4)
+hero.pose(posed_rig)                                       # HierarchyData, a ClipData at its frame, or (J, 4, 4)
 hero.render("posed.png")
-hero.restore_bind_pose()  # back to the bind mesh
-hero.animate(clip, output="anim.{frame:04d}.png", fps=24)
+hero.restore_bind_pose()                                   # back to the bind mesh
+hero.animate(clip, output="anim.{frame:04d}.png", fps=24)  # a ClipData, or a ClipList of one take
 ```
 
 `pose()` always deforms the *bind* mesh, never the current one, so a

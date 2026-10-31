@@ -36,6 +36,7 @@ overview see [`README.md`](README.md); for the rest of the library see
 | [Batched evaluation](#batched-evaluation) | `frames.matrix`, `frames.world_matrix`, the factor matrices, `parent_matrix`, `to_attributes()` |
 | [Solving every frame](#solving-every-frame) | `frames.world_matrix =`, `frames.matrix =`, `frames.quaternion`, `frames.match_*` |
 | [Clip deltas](#clip-deltas) | retargeting a whole clip |
+| [`ClipList` — takes](#cliplist--takes) | a file's takes, one clip each, read and written per take |
 | [Rig edits on a clip](#rig-edits-on-a-clip) | every frame at once, the curves filtered |
 | [Importers and exporters](#importers-and-exporters) | fbx, glb, auto-detect |
 | [Serialization](#serialization) | json / npz / pkl, dict, bytes |
@@ -1707,6 +1708,69 @@ clip.frame = 2
 bound      = clip.copy()
 bound -= rest                                   # the bound frame, frame 2, alone
 assert np.allclose(bound.frames.rotate[0], clip.frames.rotate[0])
+```
+
+---
+
+## `ClipList` — takes
+
+A file can hold several takes. A `ClipList` holds them, one `ClipData`
+each, in file order; `clip.take` names each (a clip built by hand holds
+`""`). A take is found by its name or its position, and every member the
+takes share is a line of `ClipList`'s own: a value reads as a `PerTake`,
+one per take, and a write reaches every take, one value for all or a
+`PerTake` of one each, or none: a value one take cannot hold changes no
+take, and one rest pose written is copied for each take. A misspelt name
+raises.
+
+```python
+from cgmath.hierarchy import ClipList, PerTake
+
+idle  = ClipData(make_chain(), frames=6, take="idle")
+walk  = ClipData(make_chain(), frames=4, take="walk")
+clips = ClipList([idle, walk])
+
+assert clips.take == ["idle", "walk"]
+assert clips["walk"] is walk and "idle" in clips and clips.index("walk") == 1
+assert clips.get("run") is None
+assert clips.frame_count == [6, 4]                  # a PerTake, one per take
+
+clips.fps = 30.0                   # one value, every take
+clips.fps = PerTake([24.0, 25.0])  # one per take
+assert clips.fps == [24.0, 25.0]
+
+clips.frames.match("hip").rotate_y += 5             # every frame of every take
+assert np.allclose(walk.frames["hip"].rotate_y, 5.0)
+clips.frame = 2                                     # every take scrubbed to 2
+clips.match("knee").rotate_x += 10                  # frame 2 of every take
+assert np.allclose(idle.frames["knee"].rotate_x[:, 0], [0, 0, 10, 0, 0, 0])
+
+cuts = clips.frames[1:3]                            # each take's frames 1 and 2
+assert cuts.take == ["idle", "walk"] and cuts.frame_count == [2, 2]
+
+try:
+    clips.frame = 5                                 # walk holds 4 frames: no take moves
+except IndexError as error:
+    assert "take 1 ('walk')" in str(error) and clips.frame == [2, 2]
+```
+
+The rig edits, `clips.set_rotate_order("zyx")` say, run on every take or
+none, as `strip_namespace` renames every take or none: when a take
+refuses, every take is put back as it was and the error raised. So does
+an item assignment, `clips.frames[1:3] = other` or
+`clips.frames[2] = pose`, one value for every take or a `PerTake` of one
+each. `sort` orders by take. `get_delta` and `add_delta` pair another
+`ClipList` by take name, and send anything else to every take. `save`
+keeps every take's tree, its name included, and `animate` plays a
+`ClipList` of one take.
+
+```python
+rest  = ClipList([ClipData(make_chain(), frames=4, take="walk"), ClipData(make_chain(), frames=6, take="idle")])
+delta = clips.get_delta(rest)                       # idle against idle, walk against walk
+assert delta.take == ["idle", "walk"]
+
+path = clips.save(os.path.join(WORKDIR, "takes.npz"))
+assert ClipList.load(path) == clips
 ```
 
 ---

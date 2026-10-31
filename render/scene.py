@@ -1570,7 +1570,8 @@ class Object(TransformData):
         is where the arguments and the output-format rules are documented.
 
         Args:
-            clip: A :class:`ClipData` holding the animation.
+            clip: A :class:`ClipData` holding the animation, or a
+                :class:`ClipList` of one take.
             output: Output file path, or a ``{frame}`` pattern for sequences.
             resolution: ``(width, height)``.  Defaults to :attr:`resolution`.
             samples_per_pixel: MSAA count.  Defaults to
@@ -1584,7 +1585,9 @@ class Object(TransformData):
             A single output path for video / gif, or the list of frame paths.
 
         Raises:
-            ValueError: If this Object has no skin to animate.
+            ValueError: If this Object has no skin to animate, or if *clip*
+                is a ClipList of no take or of more than one.
+            TypeError: If *clip* is neither a ClipData nor a ClipList.
 
         Note:
             As with :meth:`turntable`, the preview scene holds a stand-in
@@ -1592,6 +1595,7 @@ class Object(TransformData):
             parent's transform is NOT applied. The stand-in is what the clip
             deforms: this Object keeps its mesh and stays under its parent.
         """
+        clip = _one_take(clip)
         if self._skin is None:
             raise ValueError(
                 f"Object {self.name!r} has no skin to animate -- load it with "
@@ -2649,8 +2653,9 @@ class Scene(HierarchyData):
         ``.gif`` encode to one file, anything else writes an image sequence.
 
         Args:
-            clip: A :class:`ClipData` holding the animation.  Its joints are
-                matched to each Object's skin by name, once, up front.
+            clip: A :class:`ClipData` holding the animation, or a
+                :class:`ClipList` of one take.  Its joints are matched to
+                each Object's skin by name, once, up front.
             output_pattern: Output filename.  Image sequences support a
                 ``{frame[:NNd]}`` placeholder and get one if absent.
             fit: ``"auto"`` (default) samples poses across the clip and
@@ -2679,8 +2684,11 @@ class Scene(HierarchyData):
         Raises:
             ValueError: If the scene holds no visible skinned Objects, if the
                 clip has no frames, if an Object is skinned to joints the clip
-                does not hold, or if *fit* is not one of the two options.
+                does not hold, if *fit* is not one of the two options, or if
+                *clip* is a ClipList of no take or of more than one.
+            TypeError: If *clip* is neither a ClipData nor a ClipList.
         """
+        clip          = _one_take(clip)
         render_kwargs = self._merge_render_config(render_kwargs)
 
         frame_count   = int(clip.frame_count)
@@ -3097,6 +3105,34 @@ class Scene(HierarchyData):
 
 
 # -- helpers ---------------------------------------------------------------------------
+
+
+def _one_take(clip):
+    """the one take ``animate`` plays: a ClipData as it is, a ClipList of one
+    take that take
+
+    Raises
+    ------
+    ValueError
+        A ClipList of no take, or of two or more, naming them and how to
+        pick one.
+    TypeError
+        Anything else, a take's name included.
+    """
+    from cgmath.hierarchy import ClipData, ClipList
+
+    if isinstance(clip, ClipList):
+        if len(clip) == 1:
+            return clip[0]
+        if not len(clip):
+            raise ValueError("animate: the ClipList holds no take")
+        raise ValueError(
+            f"animate plays one take, and the ClipList holds {len(clip)}: {clip.take}; "
+            f"pick one, animate(clips[{clip.take[0]!r}])"
+        )
+    if isinstance(clip, ClipData):
+        return clip
+    raise TypeError(f"animate plays a ClipData or a ClipList of one take, not {type(clip).__name__}: {clip!r}")
 
 
 def _validate_samples_per_pixel(

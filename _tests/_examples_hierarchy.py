@@ -29,7 +29,7 @@ import uuid
 
 import numpy as np
 from cgmath.geometry.sdf import SDFBox, SDFCylinder, SDFSphere
-from cgmath.hierarchy import ClipData, HierarchyData, TransformData, TransformList
+from cgmath.hierarchy import ClipData, ClipList, HierarchyData, TransformData, TransformList
 
 _NAMESPACE = uuid.UUID("6f1c2a9e-3b7d-4e55-9a0c-2d8e4f6b1a37")
 
@@ -267,11 +267,22 @@ def clip_data() -> ClipData:
     return clip
 
 
+def clip_list() -> ClipList:
+    """two takes of the rig: clip_data()'s wave, and an idle cut of two of
+    its frames, its frame 1 loaded"""
+    wave       = clip_data()
+    idle       = wave.frames[1:3]
+    idle.take  = "idle"
+    idle.frame = 1
+    return ClipList([wave, idle])
+
+
 EXAMPLES = {
     TransformData: transform_data,
     TransformList: transform_list,
     HierarchyData: hierarchy_data,
     ClipData:      clip_data,
+    ClipList:      clip_list,
 }
 
 # a TransformList is a view: it owns no nodes, so it saves as the hierarchy

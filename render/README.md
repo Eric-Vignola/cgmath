@@ -638,8 +638,8 @@ scene.turntable("seq/anim.png", n_frames=4)               # auto-injects → seq
 
 `turntable()` moves the camera and holds the scene still.
 `Scene.animate()` moves the scene: every visible Object carrying a
-`skin` is posed to each frame of a `ClipData`, and Objects without one
-render as static props. Each Object deforms a chunk of frames per
+`skin` is posed to each frame of a `ClipData`, or of a `ClipList` of one
+take, and Objects without one render as static props. Each Object deforms a chunk of frames per
 deformer call, every frame unless that many points would pass 64 MB, and
 the frames render one at a time. The scene is put back in its bind pose
 when the call finishes.

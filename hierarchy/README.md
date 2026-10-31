@@ -19,6 +19,7 @@ from cgmath.hierarchy import (
 | `TransformList` | a **non-owning** selection of nodes — vectorized reads and writes |
 | `HierarchyData` | the **owning** container — a rig; a `TransformList` that claims its nodes |
 | `ClipData` | a `HierarchyData` holding `F` poses instead of one |
+| `ClipList` | a file's takes, one `ClipData` each, read and written per take |
 
 Each is a subclass of the one above it, so a clip answers every rig
 question, and a rig answers every selection question.

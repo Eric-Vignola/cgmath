@@ -2848,7 +2848,10 @@ def forward(member, returns=None, per_item_ndim: Optional[int] = None, doc: Opti
     use (a class defined further down).
 
     A function becomes a plain function carrying the item's parameters and
-    docstring; a property or field a real ``property``, read only unless
+    docstring, which ``help()`` and REFERENCE.md show; an editor completes
+    its name but shows it as ``(*args, **kwargs)``, as static analysis
+    reads the function, not the parameters it is given when the class is
+    made. A property or field becomes a real ``property``, read only unless
     ``per_item_ndim`` is given: a write then gives item ``i`` ``value[i]``
     when the value is an iterable (not a str, bytes, dict or set) that many
     dimensions deep, and every item the whole value otherwise. ``doc`` adds
