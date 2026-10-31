@@ -7238,7 +7238,22 @@ class TransformList(DataList[TransformData]):
 
         A node holding a mesh is not read as a joint, whatever its name, and
         ``pose_frame`` leaves its channels out: a joint named like it keeps
-        its own pose.
+        its own pose. A node's quaternion goes on joint_orient, in xyz. A
+        node that gives its transform as a matrix, not as translation,
+        rotation and scale, is split as ``TransformData.matrix`` splits one,
+        its translation times ``scale_factor`` and a mirror on scale z, and
+        its turn then goes on joint_orient in xyz, rotate 0, so the same node
+        read from either form holds the same channels and world matrix, but
+        for a mirror: the matrix's goes on scale z, so a TRS node mirrored on
+        x or y holds other channels than its matrix twin, the same world
+        matrix (a scale of (-1, 1, 1) reads (1, 1, -1) from the matrix, with
+        another joint_orient). glTF requires such a matrix to split into
+        translation, rotation and scale; one holding a shear keeps it as shear
+        on a node that is no joint, a locator, within 1.5e-15 of the file's
+        matrix on the matrices measured, and a joint, which holds none, reads
+        it without: given an xy shear of 0.5 on a scale of (1, 2, 1), a joint
+        sits 0.123 to 1.0 off the file's matrix on the six matrices measured,
+        moved, turned and neither.
         """
 
         # make sure pygltflib is available
@@ -7251,8 +7266,11 @@ class TransformList(DataList[TransformData]):
         # parse the nodes and look for style2 or momentum joints
         data = load_model(filename)
 
-        # None stands for a node skipped; _glb_columns skips the same ones
+        # None stands for a node skipped; _glb_columns skips the same ones.
+        # glTF gives a node a matrix or translation, rotation and scale; a
+        # matrix is split once the hierarchy is built
         node_list = []
+        matrices  = {}
         for node in data.nodes:
             node_list.append(None)
 
@@ -7261,6 +7279,9 @@ class TransformList(DataList[TransformData]):
                 new_node              = {"name": node.name}
                 new_node["node_type"] = node_type
                 new_node["uuid"]      = generate_uuid()
+
+                if node.matrix:
+                    matrices[new_node["uuid"]] = node.matrix
 
                 if node.scale:
                     new_node["scale"] = node.scale
@@ -7306,6 +7327,20 @@ class TransformList(DataList[TransformData]):
         # set the pose_frame if requested
         hierarchy_data                          = cls.from_dict(hierarchy_data)
         hierarchy_data.segment_scale_compensate = False
+
+        # glTF's column major numbers are the rows of a row vector matrix.
+        # The turn then goes on joint_orient in xyz, rotate 0, as a node's
+        # quaternion does, so either form of a node holds the same channels
+        by_uuid = {node.uuid: node for node in hierarchy_data}
+        for uuid, matrix in matrices.items():
+            M = np.array(matrix, dtype=float).reshape(4, 4)
+            M[3, :3] *= scale_factor
+            node              = by_uuid[uuid]
+            node.matrix       = M
+            Q                 = node.quaternion
+            node.rotate       = np.zeros(3, dtype=float)
+            node.rotate_axis  = np.zeros(3, dtype=float)
+            node.joint_orient = np.degrees(quaternion_to_euler(Q, 0)[0])
 
         if pose_frame is not None and data.animations:
             animation = data.animations[0]

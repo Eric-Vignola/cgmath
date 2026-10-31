@@ -3011,11 +3011,24 @@ assert np.allclose(joints["knee"].world_matrix, grouped["knee"].world_matrix)
 
 For `load_glb`, `scale_factor` converts units (glTF is metres, so `100.0`
 gives centimetres); `pose_frame` reads one frame of the file's animation
-onto the rest pose. A node holding a mesh is not read as a joint, whatever
-its name, so a namespaced `ns:body` mesh neither loads as a joint nor
-hides a joint named `ns`. Nor does a mesh named like a joint lend that
-joint its animation: `pose_frame` and `ClipData.load_glb` read the joint's
-own channels, and a skin bound to the joint loads.
+onto the rest pose. A node's quaternion goes on `joint_orient`, in xyz;
+a node that gives its transform as a matrix instead is split as
+`TransformData.matrix` splits one, a mirror on scale z, and its turn then
+goes on `joint_orient` in xyz, `rotate` 0, so the same node read from
+either form holds the same channels and world matrix, but for a mirror:
+the matrix's goes on scale z, so a TRS node mirrored on x or y holds
+other channels than its matrix twin, the same world matrix (a scale of
+(-1, 1, 1) reads (1, 1, -1) from the matrix, with another
+`joint_orient`). A shear in such a matrix stays as `shear` on a node
+that is no joint, within 1.5e-15 of the file's matrix on the matrices
+measured; a joint holds none and reads the matrix without it: given an
+xy shear of 0.5 on a scale of (1, 2, 1), 0.123 to 1.0 off the file's
+matrix on the six matrices measured. A node holding a mesh is not read
+as a joint, whatever its name, so a namespaced `ns:body` mesh neither
+loads as a joint nor hides a joint named `ns`. Nor does a mesh named
+like a joint lend that joint its animation: `pose_frame` and
+`ClipData.load_glb` read the joint's own channels, and a skin bound to
+the joint loads.
 
 glTF keys every property on its own timeline, so `load_glb` resamples
 the samplers onto a uniform grid at `fps` and runs the result through

@@ -2033,6 +2033,70 @@ class TestLoadGlbNodeOrder(unittest.TestCase):
 
 
 @unittest.skipIf(pygltflib is None, "pygltflib is not installed")
+class TestLoadGlbNodeMatrix(unittest.TestCase):
+    """a glb node may give its transform as a matrix instead of translation,
+    rotation and scale: load_glb read such a node as identity; it now splits
+    the matrix as TransformData.matrix splits one and puts the turn on
+    joint_orient in xyz, rotate 0, as a node's quaternion goes"""
+
+    TRANSLATION = [1.5, -2.0, 0.75]
+    ROTATION    = [0.1825742, 0.3651484, 0.0, 0.9128709]  # x y z w, unit
+    SCALE       = [1.5, 0.5, 2.0]
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_a_matrix_node_holds_its_trs_twin_channels(self):
+        norm = np.linalg.norm(self.ROTATION)
+        x, y, z, w = [value / norm for value in self.ROTATION]
+
+        # the same transform as a matrix, built here: T R S on column
+        # vectors, which glb's column major numbers give as the rows of the
+        # row vector matrix S R^T T
+        turn = np.array(
+            [
+                [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+            ]
+        )
+        local         = np.eye(4)
+        local[:3, :3] = np.diag(self.SCALE) @ turn.T
+        local[3, :3]  = self.TRANSLATION
+        gltf          = GLTF2()
+        gltf.scene    = 0
+        gltf.nodes = [
+            Node(name="trs", translation=self.TRANSLATION, rotation=[x, y, z, w], scale=self.SCALE, children=[1]),
+            Node(name="tip", translation=[0.0, 1.0, 0.5]),
+            Node(name="mat", matrix=[float(value) for value in local.ravel()], children=[3]),
+            Node(name="tap", translation=[0.0, 1.0, 0.5]),
+        ]
+        gltf.scenes  = [Scene(nodes=[0, 2])]
+        gltf.buffers = [Buffer(byteLength=4)]
+        gltf.set_binary_blob(b"\x00\x00\x00\x00")
+        path = os.path.join(self.tmp.name, "both.glb")
+        gltf.save(path)
+
+        for factor in (1.0, 100.0):
+            with self.subTest(scale_factor=factor):
+                rig = HierarchyData.load_glb(path, scale_factor=factor)
+                for channel in ("translate", "rotate", "joint_orient", "scale"):
+                    np.testing.assert_allclose(
+                        np.asarray(getattr(rig["mat"], channel)),
+                        np.asarray(getattr(rig["trs"], channel)),
+                        rtol    = 0.0,
+                        atol    = 1e-12,
+                        err_msg = channel,
+                    )
+                for one, two in (("trs", "mat"), ("tip", "tap")):
+                    np.testing.assert_allclose(
+                        np.asarray(rig[two].world_matrix), np.asarray(rig[one].world_matrix), rtol=0.0, atol=3e-14
+                    )
+
+
+@unittest.skipIf(pygltflib is None, "pygltflib is not installed")
 class TestLoadGlbDuplicateLeaves(unittest.TestCase):
     """three.js writes every joint of a skinned rig twice
 
