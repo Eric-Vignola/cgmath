@@ -1372,6 +1372,30 @@ class TestSaveFbxInMaya(unittest.TestCase):
                 self.assertAlmostEqual(axes, turned, places=2)
                 self.assertAlmostEqual(position, moved, places=2)
 
+    def test_a_sheared_rig(self):
+        """a rig holding shear on groups and joints: Maya's FBXImport of its
+        save is the rig with that shear zeroed, one warning naming them"""
+        from cgmath._tests.test_fbx_export import _joint, _node, gaps
+
+        top = _node("top", rotate=(0.0, 0.0, 30.0), scale=(1.0, 2.0, 3.0), shear=(0.5, 0.25, -0.75))
+        mid = _node("mid", top, translate=(1.0, 0.0, 0.0), rotate=(10.0, 20.0, 30.0), shear=(0.0, 0.5, 0.0))
+        hip = _joint("hip", mid, translate=(0.0, 1.0, 0.0), rotate=(0.0, 0.0, 45.0), shear=(0.0, 0.0, 0.25))
+        rig = HierarchyData([top, mid, hip, _node("end", hip, "locator", translate=(0.0, 1.0, 0.0))])
+        out = os.path.join(self.out, "sheared.fbx")
+        with self.assertLogs("cgmath.formats.fbx", "WARNING") as logged:
+            rig.save_fbx(out)
+        self.assertEqual(len(logged.records), 1)
+        self.assertIn("top, mid, hip", logged.records[0].getMessage())
+
+        zeroed = rig.copy()
+        for node in zeroed:
+            node.shear = (0.0, 0.0, 0.0)
+        worlds, _ = self.imported(out)
+        for node in zeroed:
+            axes, position = gaps(worlds[node.name], node.world_matrix)
+            self.assertLessEqual(axes, 1e-9, node.name)
+            self.assertLessEqual(position, 2e-14, node.name)
+
     def test_a_flagged_group_reads_back_where_maya_reads_it(self):
         """a group or locator with segment_scale_compensate on is written
         eInheritRrs (TransformList.save_fbx), and load_fbx reads that file as

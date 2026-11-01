@@ -2676,23 +2676,25 @@ from does, in whatever axes and unit they were read.
 Where the read and Maya part, as on a Y-up file whose front is not +Z
 read with the defaults, the save parts too (`save_fbx`'s docstring lists
 the cases). A node's shear, which FBX has no channel for, stays out of
-the save, as out of Maya's: it and the nodes under it land where the rig
-with that shear zeroed has them. A save in another unit than cm holds its
-lengths in that unit, as a file authored in it does, which Maya's
-importer brings in with its top nodes scaled by the unit (100 for
-metres) at the positions the values say, but for a node written
-`eInheritRrs` whose parent is neither a top node nor written
-`eInheritRrs`: the conversion multiplies its scale by the unit, so it
-takes the unit twice, with the nodes under it, and the second of the
-three cases of a group with `segment_scale_compensate` on counts the
-scale the conversion gives that group's parent: a joint compensating
-its scale directly under such a group directly under a top node is off
-in Maya's importer though that top node's scale is 1 (`save_fbx`'s
-docstring gives the numbers). A mesh holds no record: its
-points are in its node's object space, the same in any axes, in the unit
-its reader's `scale_factor` gives, the unit a rig read with the same
-`scale_factor` records. `save_fbx` writes no geometry; a mesh's node,
-read as a transform, is written as a group.
+the save, as out of Maya's, one warning naming the nodes holding one:
+they and the nodes under them land where the rig with that shear zeroed
+has them, up to 4.20 off on a typed group read back from a file of its
+own; a group read under an even parent holds none and saves as read. A
+save in another unit than cm holds its lengths in that unit, as a file
+authored in it does, which Maya's importer brings in with its top nodes
+scaled by the unit (100 for metres) at the positions the values say, but
+for a node written `eInheritRrs` whose parent is neither a top node nor
+written `eInheritRrs`: the conversion multiplies its scale by the unit,
+so it takes the unit twice, with the nodes under it, and the second of
+the three cases of a group with `segment_scale_compensate` on counts the
+scale the conversion gives that group's parent: a joint compensating its
+scale directly under such a group directly under a top node is off in
+Maya's importer though that top node's scale is 1 (`save_fbx`'s
+docstring gives the numbers). A mesh holds no record: its points are in
+its node's object space, the same in any axes, in the unit its reader's
+`scale_factor` gives, the unit a rig read with the same `scale_factor`
+records. `save_fbx` writes no geometry; a mesh's node, read as a
+transform, is written as a group.
 
 ```python
 rig = make_chain()

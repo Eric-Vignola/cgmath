@@ -2846,7 +2846,11 @@ class FbxExporter:
         values are written as they are, under that label, but for a scale
         under 1e-12 in size, 0 and -0 among them, written as 1e-12,
         positive, as Maya's own exporter writes a static one and as Maya's
-        evaluation holds it.
+        evaluation holds it, and for a node's shear: fbx has no channel for
+        it, so scale, rotate and translate are written as they are and one
+        warning names the nodes holding one, parents first, as Maya's own
+        exporter names them. Those nodes and the nodes under them load where
+        the component with that shear zeroed has them.
 
         Raises ValueError, before anything is added, when a user defined string
         attr is not plain ASCII, the only text the FBX SDK takes, or a node's user
@@ -3017,6 +3021,11 @@ class FbxExporter:
         if skipped:
             counts = ", ".join(f"{v} {k}" for k, v in sorted(skipped.items()))
             LOGGER.warning(f"skipped user defined attrs with no fbx type: {counts}")
+
+        sheared = [item.name for item, _ in kept if item.shear.any()]
+        if sheared:
+            names = ", ".join(sheared)
+            LOGGER.warning(f"fbx holds no shear, saved without it, these nodes and those under them move: {names}")
         LOGGER.info(f"added skeleton: {skeleton_component}")
 
     @classmethod

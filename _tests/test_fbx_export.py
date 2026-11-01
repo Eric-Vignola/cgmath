@@ -11,15 +11,17 @@ import json
 import logging
 import math
 import os
+import re
 import tempfile
 import unittest
 import urllib.parse
 import uuid
 import warnings
+from unittest import mock
 
 import numpy as np
 
-from cgmath.hierarchy import HierarchyData, TransformData, TransformList
+from cgmath.hierarchy import ClipData, HierarchyData, TransformData, TransformList
 
 try:
     import fbx
@@ -813,6 +815,152 @@ def _spec(kind, value=None, keyable=True, channel_box=False, **extra):
     spec["keyable"]     = keyable
     spec["channel_box"] = channel_box
     return spec
+
+
+@unittest.skipIf(fbx is None, "the Autodesk FBX SDK is required")
+class TestSaveShear(unittest.TestCase):
+    """fbx has no shear channel: a save writes scale, rotate and translate as
+    they are and one warning names the nodes holding one, parents first, as
+    Maya's exporter does"""
+
+    SHEAR = (0.5, 0.25, -0.75)
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.folder = tmp.name
+        self.path   = os.path.join(tmp.name, "sheared.fbx")
+
+    def rig(self):
+        """two groups and a joint holding shear, a group and a locator
+        holding none, listed child first"""
+        top    = _node("top", rotate=(0.0, 0.0, 30.0), scale=(1.0, 2.0, 3.0), shear=self.SHEAR)
+        mid    = _node("mid", top, translate=(1.0, 0.0, 0.0), shear=(0.0, 0.5, 0.0))
+        hip    = _joint("hip", mid, translate=(0.0, 1.0, 0.0), shear=(0.0, 0.0, 0.25))
+        beside = _node("beside", top, translate=(0.0, 0.0, 1.0))
+        return HierarchyData([hip, mid, top, beside, _node("end", hip, "locator", translate=(0.0, 1.0, 0.0))])
+
+    def words(self, records):
+        return [record.getMessage().rsplit(": ", 1)[-1].split(", ") for record in records]
+
+    def test_one_warning(self):
+        with self.assertLogs("cgmath.formats.fbx", "WARNING") as logged:
+            self.rig().save_fbx(self.path)
+        self.assertEqual(self.words(logged.records), [["top", "mid", "hip"]])
+        self.assertIn("no shear", logged.records[0].getMessage())
+
+    def test_no_shear_no_warning(self):
+        rig = scaled_rig()
+        with _no_fbx_warnings(self):
+            rig.save_fbx(self.path)
+            TransformList(list(rig)).save_fbx(self.path)
+            ClipData(rig, frames=1).save_fbx(self.path)
+
+            # a rig read from a file holding none: a group under an even parent
+            top = _node("top", scale=(2.0, 2.0, 2.0))
+            kid = _node("kid", top, rotate=(20.0, 40.0, 60.0), segment_scale_compensate=True)
+            HierarchyData([top, kid]).save_fbx(self.path)
+            back = HierarchyData.load_fbx(self.path)
+            self.assertFalse(back["kid"].shear.any())
+            back.save_fbx(self.path)
+
+    def test_a_clip_names_its_frame(self):
+        top               = _node("top", scale=(1.0, 2.0, 3.0))
+        kid               = _node("kid", top, translate=(1.0, 0.0, 0.0))
+        clip              = ClipData(HierarchyData([top, kid]), frames=3)
+        block             = np.zeros((3, 2, 3))
+        block[2, 1]       = self.SHEAR
+        clip.frames.shear = block
+        with self.assertLogs("cgmath.formats.fbx", "WARNING") as logged:
+            clip.frames[2:3].save_fbx(self.path)
+        self.assertEqual(self.words(logged.records), [["kid"]])
+        with _no_fbx_warnings(self):
+            clip.frames[0:1].save_fbx(self.path)
+        with self.assertRaises(ValueError):
+            clip.save_fbx(self.path)
+
+    def test_a_skipped_node_is_not_named(self):
+        top   = _node("top")
+        gone  = _node("gone", top, "ikHandle", shear=self.SHEAR)
+        under = _node("under", gone, shear=self.SHEAR)
+        rig   = HierarchyData([top, gone, under, _joint("hip", top, shear=self.SHEAR)])
+        with self.assertLogs("cgmath.formats.fbx", "WARNING") as logged:
+            rig.save_fbx(self.path)
+        shear = [record for record in logged.records if "no shear" in record.getMessage()]
+        self.assertEqual(self.words(shear), [["hip"]])
+
+        # an export that raises warns of nothing
+        strings = {"label": {"dataType": "string", "value": "hanche gauche \u00e9", "keyable": False}}
+        with _no_fbx_warnings(self), self.assertRaises(ValueError):
+            HierarchyData([_node("top", shear=self.SHEAR, user_defined_attributes=strings)]).save_fbx(self.path)
+
+        # nothing kept holds any: no warning of shear, the skip's alone
+        clean = _node("top")
+        with self.assertLogs("cgmath.formats.fbx", "WARNING") as logged:
+            HierarchyData([clean, _node("gone", clean, "ikHandle", shear=self.SHEAR)]).save_fbx(self.path)
+        self.assertFalse([record for record in logged.records if "no shear" in record.getMessage()])
+
+    def test_srt_as_today(self):
+        rig = self.rig()
+        rig.save_fbx(self.path)
+
+        def read(node):
+            properties, prop = [], node.GetFirstProperty()
+            while prop.IsValid():
+                properties.append(prop.GetName().Buffer())
+                prop = node.GetNextProperty(prop)
+            return (
+                tuple(node.LclTranslation.Get()),
+                tuple(node.LclRotation.Get()),
+                tuple(node.LclScaling.Get()),
+                node.GetTransformationInheritType().name,
+                properties,
+            )
+
+        placed = {path.rsplit("|", 1)[-1]: held for path, held in TestFbxExportSkeleton._walk(self, read).items()}
+        for node in rig:
+            translate, rotate, scale, inherit, properties = placed[node.name]
+            np.testing.assert_array_equal(translate, node.translate, err_msg=node.name)
+            np.testing.assert_array_equal(rotate,    node.rotate,    err_msg=node.name)
+            np.testing.assert_array_equal(scale,     node.scale,     err_msg=node.name)
+            self.assertEqual(inherit, "eInheritRrs" if node.segment_scale_compensate else "eInheritRSrs", node.name)
+            self.assertFalse([name for name in properties if "shear" in name.lower()], node.name)
+
+        zeroed = rig.copy()
+        for node in zeroed:
+            node.shear = (0.0, 0.0, 0.0)
+        back = HierarchyData.load_fbx(self.path, axis_system=None, scale_factor=1.0)
+        for node in zeroed:
+            np.testing.assert_array_equal(back[node.name].world_matrix, node.world_matrix, err_msg=node.name)
+            self.assertFalse(back[node.name].shear.any(), node.name)
+
+    def test_the_same_file(self):
+        """a rig with no shear writes what the writer wrote before it had a
+        warning: twice saved, the second with the warning patched out, ids
+        and dates masked, no line differs, no line says shear, and the file
+        is 3.0.3's, its lines counted and its nodes in the order it wrote
+        them"""
+        rig = scaled_rig()
+
+        def text(name):
+            path = os.path.join(self.folder, name)
+            rig.save_fbx(path, as_ascii=True)
+            with open(path, encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+            stamp = re.compile(r"\s*(Year|Month|Day|Hour|Minute|Second|Millisecond):")
+            return [re.sub(r"\b\d{8,}\b", "id", line) for line in lines if not stamp.match(line) and "DocumentUrl" not in line]
+
+        first = text("first.fbx")
+        import cgmath.formats.fbx as module
+
+        with mock.patch.object(module.LOGGER, "warning") as warned:
+            second = text("second.fbx")
+        warned.assert_not_called()
+        self.assertEqual(first, second)
+        self.assertFalse([line for line in first if "shear" in line.lower()])
+        self.assertEqual(len(first), 388)
+        order = re.findall(r'^\s*Model: id, "Model::(\w+)"', "\n".join(first), re.M)
+        self.assertEqual(order, ["sc", "sc_kid", "sc_jnt", "sc_spc", "sc_grp", "sc_lcf", "sc_cmp", "sc_loc"])
 
 
 @unittest.skipIf(fbx is None, "the Autodesk FBX SDK is required")

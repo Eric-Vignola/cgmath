@@ -1101,6 +1101,19 @@ Each `TransformData` maps onto FBX like this:
 | `"locator"` | `FbxNull`, look `eCross`, as Maya writes a locator | the same | — |
 | anything else | not written, nor any node under it; one warning names how many of each type were skipped | — | — |
 
+FBX has no shear channel. A node's scale, rotate and translate are written
+as they are, and one warning names the nodes holding shear, parents first,
+as Maya's own exporter names them: they and the nodes under them load where
+the rig with that shear zeroed has them, in Maya and in `load_fbx` alike.
+
+```python
+sheared = HierarchyData([TransformData("grp", shear=(0.5, 0.0, 0.0)), TransformData("loc", node_type="locator")])
+sheared.save_fbx(os.path.join(WORK, "sheared.fbx"))  # warns: names grp
+
+back = HierarchyData.load_fbx(os.path.join(WORK, "sheared.fbx"))
+assert not back["grp"].shear.any()
+```
+
 Every node is written with rotation active, as Maya's exporter writes it:
 FBX turns a node without it in xyz, whatever its `rotate_order`. A group
 or a locator gets the inherit type a joint gets, `eInheritRSrs` unless

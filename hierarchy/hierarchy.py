@@ -7817,16 +7817,19 @@ class TransformList(DataList[TransformData]):
         The file is labelled with the axis system and the unit the values
         are in, as the rig records them (:attr:`axis_system`, :attr:`unit`;
         a view's are its rig's), the unit set explicitly, and holds the
-        values as they are, but for a node's shear, which FBX has no channel
-        for and the save leaves out, as Maya's exporter does, so that node
-        and the nodes under it land where the rig with that shear zeroed has
-        them, and a scale under 1e-12 in size, 0 and -0
-        among them, which it holds as 1e-12, positive, as Maya's own FBX
-        export writes a static one and as Maya's evaluation holds it: such a
-        scale loads back as 1e-12, and, in a save in cm of a rig labelled
-        Maya's Y-up, the nodes under it where Maya's FBXImport of the save
-        puts them, but for a group or a locator with
-        segment_scale_compensate on and the nodes under that. A rig
+        values as they are, but for a node's shear and a scale under 1e-12.
+        FBX has no channel for shear and the save leaves it out, as Maya's
+        exporter does, with one warning naming the nodes holding one, so
+        that node and the nodes under it land where the rig with that shear
+        zeroed has them, in Maya's FBXImport and in :meth:`load_fbx` alike,
+        up to 4.20 off on a typed group read back from a file of its own; a
+        group read under an even parent holds none and saves as read. A
+        scale under 1e-12 in size, 0 and -0 among them, it holds as 1e-12,
+        positive, as Maya's own FBX export writes a static one and as Maya's
+        evaluation holds it: such a scale loads back as 1e-12, and, in a
+        save in cm of a rig labelled Maya's Y-up, the nodes under it where
+        Maya's FBXImport of the save puts them, but for a group or a locator
+        with segment_scale_compensate on and the nodes under that. A rig
         :meth:`load_fbx` read with its defaults is saved in Maya's Y-up and
         cm, one read with ``axis_system=None`` in the file's own axes, and
         one read with a number for ``scale_factor`` in the unit that number
@@ -15412,7 +15415,9 @@ class ClipData(HierarchyData):
         it meant rather than quietly shipping whichever one is loaded. The
         file is labelled with the clip's :attr:`axis_system` and
         :attr:`unit`, as :meth:`HierarchyData.save_fbx` labels a rig's, and
-        like it leaves a node's shear out: FBX has no channel for it.
+        like it leaves a node's shear out, FBX having no channel for it, with
+        one warning naming the nodes the frame holds one on: Maya's FBXImport
+        and :meth:`load_fbx` read the frame with that shear zeroed.
         """
         if self.frame_count > 1:
             raise ValueError(
