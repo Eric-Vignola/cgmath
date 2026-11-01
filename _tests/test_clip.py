@@ -9119,6 +9119,9 @@ class TestFbxLoadsInMayaAxes(unittest.TestCase):
         return {node.name: stack[:, i] for i, node in enumerate(clip)}
 
     def test_every_frame_is_where_the_sdk_puts_it_in_maya_axes(self):
+        """but for one root: in eZAxis eParityOdd loc's turn passes the gimbal
+        of its order mid-curve and the sdk's conversion leaves an axis level,
+        so loc and prop take Maya's solve, 0.347 off the sdk, as in Maya"""
         for label, axes in self.right_handed():
             with self.subTest(axes=label):
                 path = self.authored(axes, name=f"{label}.fbx")
@@ -9126,7 +9129,13 @@ class TestFbxLoadsInMayaAxes(unittest.TestCase):
                 clip = ClipData.load_fbx(path)
 
                 self.assertEqual(clip.frame_count, self.FRAMES)
-                self.assertWorlds(self.clip_worlds(clip), self.truth(path, self.FRAMES))
+                worlds = self.clip_worlds(clip)
+                truth  = self.truth(path, self.FRAMES)
+                if label == "eZAxis eParityOdd":
+                    for name in ("loc", "prop"):
+                        self.assertGreater(float(np.abs(worlds[name] - truth[name]).max()), 0.3, name)
+                        del worlds[name], truth[name]
+                self.assertWorlds(worlds, truth)
 
     def test_the_rig_is_where_the_sdk_puts_it_in_maya_axes(self):
         for label, axes in self.right_handed():
@@ -9936,13 +9945,15 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
     """the fbx loaders keep the kinds node_types names and fold what the
     read can't hold into the nodes they keep: a dropped node's transform
     (one of a kind left out, one with no attribute, a camera, an LOD group)
-    into the kept nodes under it, and the pivots, offsets and a node's pre
-    and post rotation its channels can't hold, every frame for a clip. The
-    fixture is authored straight through the sdk, Maya's inheritance on
-    every node (a joint compensates its parent's scale, any other node
-    inherits it); the truth is the sdk's own evaluation, but for a camera's
-    or a light's post rotation, which Maya places their children by as
-    :attr:`VIEW_POST` says"""
+    into the kept nodes under it, a node that is no joint with shear where
+    its block takes it, a joint without, and the pivots, offsets and a
+    node's pre and post rotation its channels can't hold, every frame for a
+    clip. The fixture is authored straight through the sdk, Maya's
+    inheritance on every node (a joint compensates its parent's scale, any
+    other node inherits it); the truth is the sdk's own evaluation, which
+    is Maya's import on those files, but for a camera's or a light's post
+    rotation, which Maya places their children by as :attr:`VIEW_POST`
+    says"""
 
     FRAMES = 9
 
@@ -10352,9 +10363,16 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
     def test_every_kept_node_is_where_the_sdk_puts_it(self):
         """the rig, the clip's rest pose and every frame of the clip, in
         Maya's Y-up and in the file's own axes, a Y-up file and a Z-up one,
-        whatever the read drops"""
+        whatever the read drops; but in the Z-up file the joint root with
+        pivots, pj, and the joint under it, 1.05 off the sdk: the read turns
+        a joint root's pivot term by its axis turn as Maya's import does,
+        which moves them toward Maya's, 2.21 to 1.16 and 6.39 to 5.35. Maya
+        imports this writer's pj and pjkid as transforms, skeleton roots
+        (eRoot) with no limb node under them; the read keeps them joints
+        where ConvertScene puts them, as 3.0.2 did"""
         for label, axes in (("Y-up", None), ("Z-up", FBX.FbxAxisSystem.MayaZUp)):
             path = self.authored(axes, name=f"{label}.fbx")
+            away = ("pj", "pjkid") if axes is not None else ()
             for convert, system in ((True, "maya_y_up"), (False, None)):
                 rest   = self.truth(path, convert=convert)
                 frames = self.truth(path, self.FRAMES, convert=convert)
@@ -10364,9 +10382,11 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
                         clip = ClipData.load_fbx(path, axis_system=system, node_types=kinds)
 
                         self.assertEqual(clip.frame_count, self.FRAMES)
-                        self.assertWorlds(self.rig_worlds(rig),            rest)
-                        self.assertWorlds(self.rig_worlds(clip.rest_pose), rest)
-                        self.assertWorlds(self.clip_worlds(clip),          frames)
+                        worlds = [self.rig_worlds(rig), self.rig_worlds(clip.rest_pose), self.clip_worlds(clip)]
+                        for got, want in zip(worlds, (rest, rest, frames)):
+                            for name in [name for name in away if name in got]:
+                                self.assertGreater(float(np.abs(got.pop(name) - want[name]).max()), 1.0, name)
+                            self.assertWorlds(got, want)
 
     def test_a_joint_takes_what_is_dropped_above_it_in_its_joint_orient(self):
         """a joints-only read: the hip, under the dropped group and the
@@ -10451,25 +10471,28 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
     def test_a_scale_the_read_drops_is_held_or_divided_out(self):
         """under the dropped group scaled unevenly, a joint that compensates
         it divides it out, keeping its own scale; one that does not, and a
-        locator, unturned, take it in their scale. One turned under it
-        would need shear: its position and the length of each of its axes
-        are the file's, which way they point is not, and the nodes under it
-        take the shear it drops, so a joint compensating it, a locator and
-        a joint under it, a joint under a dropped node turned under it and
-        one under a dropped node scaled 2, and the locators under those,
-        are at the file's positions, on the rig and on every frame of the
-        clip; the locator, the joint under it and the joint under the turned
-        node, which do not compensate, the joints with a post rotation,
-        hold the file's own rotate and scale, the locator's own z axis the
-        file's length, and the locator and the joint under the turned node
-        are scaled unevenly, so the locators under them are where the file
-        puts them only with each one's own scale in what it hands on; its
-        rotate, spinning 50 degrees a frame, is solved again and filtered.
-        A twin with a pre and a post rotation (a joint orient and a rotate
-        axis) splits as the matrix setter splits the file's world, and the
-        locator under it is at the file's position; under a group uneven on
-        frames 1 to 4 alone, the nodes are at the file's positions on every
-        frame. A sliver of uneven scale, 1e-4, is split the same way"""
+        locator, unturned, take it in their scale. A joint turned under it
+        would need shear, which a joint takes no more than xform -m gives
+        it: its position is the file's, its scale and rotate the matrix
+        setter's split, which way its axes point and how long they are not
+        the file's, and the nodes under it take the shear it drops, so a
+        joint compensating it, a locator and a joint under it, a joint under
+        a dropped node turned under it and one under a dropped node scaled
+        2, and the locators under those, are at the file's positions, on the
+        rig and on every frame of the clip. The locator under the joint takes
+        what the joint drops in its block, with shear, and stops it, so it
+        sits on the file's world; the joint under it and the joint under the
+        turned node, which do not compensate, the joints with a post
+        rotation, hold the file's own rotate and scale, and the joint under
+        the turned node is scaled unevenly, so the locators under them are
+        where the file puts them only with its own scale in what it hands
+        on; the sheared joint's rotate, spinning 50 degrees a frame, is
+        solved again and filtered. A twin with a pre and a post rotation (a
+        joint orient and a rotate axis) splits as the matrix setter splits
+        the file's world, and the locator under it is at the file's
+        position; under a group uneven on frames 1 to 4 alone, the nodes are
+        at the file's positions on every frame. A sliver of uneven scale,
+        1e-4, is split the same way"""
         path = self.authored(sheared=True)
 
         rig  = HierarchyData.load_fbx(path, axis_system=None, node_types=("joint", "locator"))
@@ -10482,8 +10505,6 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
 
         tilt = rig["tilt"].world_matrix
         self.assertTrue(np.allclose(tilt[3], want["tilt"][3], rtol=0.0, atol=1e-9))
-        lengths = np.linalg.norm(tilt[:3, :3], axis=1)
-        self.assertTrue(np.allclose(lengths, np.linalg.norm(want["tilt"][:3, :3], axis=1), rtol=0.0, atol=1e-9))
         self.assertGreater(np.abs(tilt - want["tilt"]).max(), 0.01)
 
         clip   = ClipData.load_fbx(path, axis_system=None, node_types=("joint", "locator"))
@@ -10497,20 +10518,10 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
                 self.assertTrue(np.allclose(rig[name].world_matrix[3], want[name][3], rtol=0.0, atol=1e-9))
                 self.assertTrue(np.allclose(worlds[name][:, 3], frames[name][:, 3], rtol=0.0, atol=1e-9))
 
-        # a joint that compensates the sheared one takes the shear in its
-        # channels, its axes the file's length
-        for name in ("tiltkid", "bendcomp"):
-            with self.subTest(name):
-                lengths = np.linalg.norm(frames[name][:, :3, :3], axis=-1)
-                self.assertTrue(np.allclose(np.linalg.norm(worlds[name][:, :3, :3], axis=-1), lengths, rtol=0.0, atol=1e-9))
-                lengths = np.linalg.norm(want[name][:3, :3], axis=-1)
-                self.assertTrue(np.allclose(np.linalg.norm(rig[name].world_matrix[:3, :3], axis=-1), lengths, rtol=0.0, atol=1e-9))
-
-        # a node that does not compensate keeps its own channels under the
-        # sheared joint, the shear in its translate alone: a locator, a
-        # joint under it and one under a dropped node turned under it
+        # a joint that does not compensate keeps its own channels under the
+        # sheared joint, the shear in its translate alone: one under the
+        # locator and one under a dropped node turned under it
         for name, rotate, scale in (
-            ("tiltloc", (0.0, 0.0, 45.0), (2.0, 1.0, 3.0)),
             ("tiltfree", (0.0, 0.0, 35.0), (1.0, 1.0, 1.0)),
             ("bendkid", (10.0, 0.0, 0.0), (1.0, 1.5, 2.0)),
         ):
@@ -10519,19 +10530,21 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
                 with self.subTest(name, channel=channel):
                     self.assertTrue(np.array_equal(getattr(rig[name], channel), value))
                     self.assertTrue(np.array_equal(getattr(clip.frames, channel)[:, column], np.tile(value, (self.FRAMES, 1))))
-        length = np.linalg.norm(frames["tiltloc"][:, 2, :3], axis=-1)
-        self.assertTrue(np.allclose(np.linalg.norm(worlds["tiltloc"][:, 2, :3], axis=-1), length, rtol=0.0, atol=1e-12))
-        self.assertTrue(np.allclose(np.linalg.norm(rig["tiltloc"].world_matrix[2, :3]), np.linalg.norm(want["tiltloc"][2, :3])))
-        self.assertGreater(np.abs(worlds["tiltloc"] - frames["tiltloc"]).max(), 0.01)
 
-        # the twin's split is by row length, as the fold keeps it until the
-        # read takes shear, its rotate axis and joint orient kept: its scale
-        # is the row lengths of the block its world asks for
+        # the locator under the sheared joint takes what the joint drops in
+        # its own block and holds the shear: it sits on the file's world
+        self.assertLess(np.abs(worlds["tiltloc"] - frames["tiltloc"]).max(), 1e-9)
+        self.assertLess(np.abs(rig["tiltloc"].world_matrix - want["tiltloc"]).max(), 1e-9)
+        self.assertGreater(np.abs(rig["tiltloc"].shear).max(), 0.01)
+
+        # the twin's split is the matrix setter's, its rotate axis and joint
+        # orient kept, the shear thrown away: its scale is that split's of
+        # the block its world asks for
         module = sys.modules[ClipData.__module__]
         held   = rig["ptilt"]
         block  = want["ptilt"] @ np.linalg.inv(held.get_parent_matrix())
         block  = block @ np.linalg.inv(held.joint_orient_matrix @ held.parent_scale_inverse_matrix)
-        sized  = module._scales_and_rotations(block[:3, :3][None], np.eye(3)[None])[0][0]
+        sized  = module._scales_shears_and_rotations(block[:3, :3][None], np.eye(3)[None], np.zeros((1, 3)))[0][0]
         self.assertTrue(np.allclose(sized, held.scale, rtol=0.0, atol=1e-9))
         self.assertGreater(np.abs(rig["ptilt"].world_matrix - want["ptilt"]).max(), 0.01)
         self.assertFalse(np.allclose(rig["ptilt"].rotate_axis, 0.0) or np.allclose(rig["ptilt"].joint_orient, 0.0))
@@ -10549,8 +10562,6 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
 
         nudged = rig["ntilt"].world_matrix
         self.assertTrue(np.allclose(nudged[3], want["ntilt"][3], rtol=0.0, atol=1e-12))
-        lengths = np.linalg.norm(nudged[:3, :3], axis=1)
-        self.assertTrue(np.allclose(lengths, np.linalg.norm(want["ntilt"][:3, :3], axis=1), rtol=0.0, atol=1e-12))
 
     def test_a_child_of_a_camera_or_a_light_is_placed_as_maya_places_it(self):
         """fbx's view axis, the post rotation Maya writes on a camera,
@@ -10800,26 +10811,21 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
                     # the premise: the layer's angles alone, the pre rotation lost, turn elsewhere
                     self.assertGreater(float(np.abs(turned(added, maya_order) - got).max()), 0.01)
 
-    def test_an_inherit_type_is_taken_on_a_joint_alone_beyond_the_unit(self):
+    def test_a_joint_alone_keeps_its_inherit_type_to_itself_beyond_the_unit(self):
         """under a group turned (0, 30, 0), a group and a joint of each
         inherit type, keyed in rotate, a locator under each group and a
         joint under each joint: the read takes eInheritRrs on a joint as
-        segment scale compensate and reads every other node as
-        eInheritRSrs, so on the rig and on every frame of the clip the
-        eInheritRSrs nodes, the eInheritRrs joint and the nodes under them
-        are where the sdk puts them, and the eInheritRrSs ones too under the
-        group scaled (2, 2, 2); under it scaled (1, 2, 3) the eInheritRrSs
-        group and joint are off, and the eInheritRrs group under either, the
-        nodes under them with them. Under the group at scale 1 in the file
-        converted to m, a unit root scaled 0.01 whose 0.01 the export puts
-        on every eInheritRrs node too, every node is where the sdk puts the
-        cm file's: the read divides the unit out of the eInheritRrs group as
-        of the joint. A docs pin of the gap the load_fbx docstrings give, on
-        r3_rrss.py's fixture, which Maya's FBXImport puts where the sdk
-        does, but its eInheritRrSs joint, which it reads as the read does:
-        under (1, 2, 3) each 1.11 off in the 3x3 on the rig, and 1.63, 2.11
-        for eInheritRrs, on the clip; under (2, 2, 2) the eInheritRrs group
-        0.99 and 1.35"""
+        segment scale compensate, reads every other joint as eInheritRSrs,
+        as Maya's FBXImport does, and places a group of any type where
+        Maya does. On r3_rrss.py's fixture Maya puts every node where the
+        sdk does but the eInheritRrSs joint, so on the rig and on every
+        frame of the clip every node is where the sdk puts it, under the
+        group scaled (1, 2, 3) and under it scaled (2, 2, 2), but that joint
+        and the joint under it under (1, 2, 3), as in Maya. Under the group
+        at scale 1 in the file converted to m, a unit root scaled 0.01
+        whose 0.01 the export puts on every eInheritRrs node too, every node
+        is where the sdk puts the cm file's: the read divides the unit out
+        of the eInheritRrs group as of the joint"""
         source  = FBX.FbxNode.EPivotSet.eSourcePivot
         linear  = FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear
         inherit = FBX.FbxTransform.EInheritType
@@ -10901,8 +10907,8 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
             return out
 
         for label, scale, unit, off in (
-            ("uneven", (1, 2, 3), False, ("gRrSs", "lRrSs", "jRrSs", "kRrSs", "gRrs", "lRrs")),
-            ("even", (2, 2, 2), False, ("gRrs", "lRrs")),
+            ("uneven", (1, 2, 3), False, ("jRrSs", "kRrSs")),
+            ("even", (2, 2, 2), False, ()),
             ("unit", (1, 1, 1), True, ()),
         ):
             path, file = authored(f"inherit_{label}.fbx", scale, unit)
@@ -11486,11 +11492,12 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
     def test_a_split_scaled_under_1e_12_hands_its_shear_down(self):
         """a locator the read keeps, which needs shear under a dropped node
         scaled (1, 2, 0.5) and turned, scaled along x 5e-13, -1e-13 and
-        1e-12, under 1e-12 of its largest scale: its split hands the shear
-        it drops down all the same, so the locator under it, and the one
-        under a joint that compensates it, which divides that scale out
-        again, are where the sdk puts them, and Maya's FBXImport, read whole
-        or locators only, on the rig and on every frame"""
+        1e-12, under 1e-12 of its largest scale: it holds its shear, and
+        what its flat row leaves it hands down all the same, so it, the
+        locator under it, and the one under a joint that compensates it,
+        which divides that scale out again, are where the sdk puts them,
+        and Maya's FBXImport, read whole or locators only, on the rig and on
+        every frame"""
         path   = self.split_tiny()
         want   = self.truth(path)
         frames = self.truth(path, len(self.SPLIT))
@@ -11503,7 +11510,7 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
                     with self.subTest(name):
                         self.assertTrue(np.allclose(rig[name].world_matrix[3], want[name][3], rtol=0.0, atol=1e-9))
                         self.assertTrue(np.allclose(world[:, 3], frames[name][:, 3], rtol=0.0, atol=1e-9))
-                self.assertGreater(np.abs(worlds["K"] - frames["K"]).max(), 0.01)
+                self.assertLess(np.abs(worlds["K"] - frames["K"]).max(), 1e-9)
 
     def test_the_split_of_a_block(self):
         """a rotation is one, its scale exactly 1, a rotation times one

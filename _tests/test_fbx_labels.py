@@ -1229,9 +1229,9 @@ def _stored(path, inherit) -> str:
 class TestSaveFbxInMaya(unittest.TestCase):
     """Maya's FBXImport of a save puts every node where it puts the file the
     values were read from, and a mesh, placed under the group its node is
-    saved as, where Maya puts the file's mesh, but for a node that is no joint
-    the read puts off the file, which it puts where the read has it. Needs
-    mayapy with the fbxmaya plug-in"""
+    saved as, where Maya puts the file's mesh, but for a node holding shear,
+    which fbx can't hold: it and the nodes under it land where the rig with
+    that shear zeroed has them. Needs mayapy with the fbxmaya plug-in"""
 
     @classmethod
     def setUpClass(cls):
@@ -1332,36 +1332,66 @@ class TestSaveFbxInMaya(unittest.TestCase):
             # the largest measured on this file
             self.assertLessEqual(position, 8.881784197001252e-16, node.name)
 
-    def test_a_node_the_read_puts_off_its_file_imports_where_the_read_has_it(self):
-        """load_fbx reads a node that is no joint as eInheritRSrs whatever the
-        file stores and save_fbx writes that, so a load then a save of a file
-        storing one eInheritRrSs or eInheritRrs puts it, in the sdk and in
-        Maya, where the read has it, not where the file does: on load_fbx's
-        rig 1.11 off the file in the 3x3, a locator 2.34 or 1.75 in position.
-        An earlier save_fbx wrote it eInheritRrSs: one stored so imported
-        where the file does, 1.11 off the read (TransformList.save_fbx)"""
+    def test_a_node_the_read_shears_imports_with_that_shear_zeroed(self):
+        """load_fbx puts a node stored eInheritRrSs or eInheritRrs under a
+        scaled parent where Maya puts it, holding shear, and save_fbx writes
+        scale, rotate and translate alone, eInheritRSrs, as Maya's exporter
+        writes them: a load then a save lands, in the sdk and in Maya, where
+        the rig with that shear zeroed has it, 1.44 or 0.663 off the read in
+        the 3x3 and a locator 4.20 or 1.62 in position"""
         from cgmath._tests.test_fbx_export import gaps
 
-        # how far the locator's position lands off the file's
-        for inherit, moved in (("eInheritRrSs", 2.34), ("eInheritRrs", 1.75)):
+        # how far the locator lands off the read, in the 3x3 and in position
+        for inherit, turned, moved in (("eInheritRrSs", 1.44, 4.20), ("eInheritRrs", 0.663, 1.62)):
             with self.subTest(inherit):
                 stored = getattr(FBX.FbxTransform.EInheritType, inherit)
                 path   = _stored(os.path.join(self.out, f"{inherit}.fbx"), stored)
                 rig    = HierarchyData.load_fbx(path)
-                out    = os.path.join(self.out, f"{inherit}_saved.fbx")
+                file, _ = self.imported(path)
+                for node in rig:
+                    axes, position = gaps(file[node.name], node.world_matrix)
+                    self.assertLessEqual(axes, 1e-9, node.name)
+                    # the largest measured on these two files
+                    self.assertLessEqual(position, 1.3322676295501878e-15, node.name)
+                self.assertGreater(np.abs(rig["g"].shear).max(), 0.4)
+
+                out = os.path.join(self.out, f"{inherit}_saved.fbx")
                 rig.save_fbx(out)
                 sdk = _sdk_worlds(out)
                 worlds, _ = self.imported(out)
-                file, _ = self.imported(path)
-                for node in rig:
+                zeroed = rig.copy()
+                for node in zeroed:
+                    node.shear = (0.0, 0.0, 0.0)
+                for node in zeroed:
                     for placed in (sdk, worlds):
                         axes, position = gaps(placed[node.name], node.world_matrix)
                         self.assertLessEqual(axes, 1e-9, node.name)
                         # the largest measured on these two files
                         self.assertLessEqual(position, 8.881784197001252e-16, node.name)
-                axes, position = gaps(worlds["l"], file["l"])
-                self.assertAlmostEqual(axes, 1.11, places=2)
+                axes, position = gaps(worlds["l"], rig["l"].world_matrix)
+                self.assertAlmostEqual(axes, turned, places=2)
                 self.assertAlmostEqual(position, moved, places=2)
+
+    def test_a_flagged_group_reads_back_where_maya_reads_it(self):
+        """a group or locator with segment_scale_compensate on is written
+        eInheritRrs (TransformList.save_fbx), and load_fbx reads that file as
+        Maya reads any: every node where Maya's FBXImport puts it, a mirrored
+        parent, where Maya parts from the rig, among them, the group baked,
+        with shear under an uneven parent, its flag off"""
+        from cgmath._tests.test_fbx_export import FLAGGED_CASES, flagged_rig, gaps
+
+        for label, scale, rotate, grand in FLAGGED_CASES:
+            with self.subTest(label):
+                out = os.path.join(self.out, "flagged.fbx")
+                flagged_rig(scale, rotate, grand).save_fbx(out)
+                back = HierarchyData.load_fbx(out)
+                worlds, _ = self.imported(out)
+                for node in back:
+                    axes, position = gaps(worlds[node.name], node.world_matrix)
+                    self.assertLessEqual(axes, 1e-9, node.name)
+                    # the largest measured on these six files
+                    self.assertLessEqual(position, 3.552713678800501e-15, node.name)
+                    self.assertEqual(node.segment_scale_compensate, node.node_type == "joint", node.name)
 
     def test_a_mirrored_group_under_a_mirrored_parent_imports_where_the_rig_has_it(self):
         """a group or locator with segment_scale_compensate on whose own scale

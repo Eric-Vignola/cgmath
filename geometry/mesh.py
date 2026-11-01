@@ -5575,8 +5575,9 @@ def load_fbx(filename: str, scale_factor: float | None = None) -> list:
     one node's geometric transform into all of them (below). Under the
     world matrix ``W`` of its node in a rig read from the same file, which
     keeps a mesh's node as a transform named after it,
-    ``points @ W[:3, :3] + W[3, :3]`` is where the file puts the mesh, in
-    centimeters and Maya's Y-up. Any file reads as it is, a left handed one
+    ``points @ W[:3, :3] + W[3, :3]`` is where Maya's import puts the mesh,
+    in centimeters and Maya's Y-up, its node's world being Maya's and the
+    points themselves untouched. Any file reads as it is, a left handed one
     too. ``render.Object.load_fbx``, whose Object has no node to carry the
     turn, turns its points itself.
 

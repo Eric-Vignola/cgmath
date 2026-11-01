@@ -511,8 +511,12 @@ class TestFbxExportSkeleton(unittest.TestCase):
         is, so the sdk puts it and every node under it where the rig has it,
         under mirrored and sheared parents too; written eInheritRrSs, a
         group's axes sat 1.32 off under a parent scaled (1, 2, 3). Read back
-        its flag is off, as this release reads every node that is no joint,
-        its channels the ones saved"""
+        its flag is off, as on every node that is no joint, and it reads as
+        Maya reads an eInheritRrs node, baked, not the same channels: under
+        a parent that does not mirror it and the groups and locators under
+        it sit where the rig has them, holding shear under an uneven parent
+        and none under an even one (a joint under it, and everything under
+        a mirrored parent, Maya's: TestSaveFbxInMaya)"""
         # the largest position gap measured on each file
         bounds = {
             "(1, 2, 3)": 4.440892098500626e-16,
@@ -540,10 +544,12 @@ class TestFbxExportSkeleton(unittest.TestCase):
                     read = back[node.name]
                     flag = node.segment_scale_compensate and node.node_type == "joint"
                     self.assertEqual(read.segment_scale_compensate, flag, node.name)
-                    for channel in ("translate", "rotate", "scale"):
-                        np.testing.assert_allclose(
-                            getattr(read, channel), getattr(node, channel), rtol=0.0, atol=1e-12, err_msg=node.name
-                        )
+                    if node.node_type != "joint" and scale[0] > 0.0:
+                        axes, position = gaps(read.world_matrix, node.world_matrix)
+                        self.assertLessEqual(axes, 1e-9, node.name)
+                        # the largest measured on these files
+                        self.assertLessEqual(position, 1.7763568394002505e-15, node.name)
+                self.assertEqual(bool(np.abs(back["gRrs"].shear).max() > 0.01), len(set(np.abs(scale))) > 1)
 
     def test_a_scale_under_1e_12_is_written_as_maya_writes_it(self):
         """a scale under 1e-12 in size, 0 and -0 among them, is written as

@@ -1178,8 +1178,9 @@ mesh whose node holds no geometric transform reads as the file holds it.
 centimetres as the rig loaders do (the points, never the normals or the
 UVs), and a number is the caller's own factor. Under the world matrix of
 its node in a rig read from the same file, which keeps a mesh's node as
-a transform named after it, a mesh sits where the file puts it, in cm
-and Maya's Y-up:
+a transform named after it, a mesh sits where Maya's import puts it, in
+cm and Maya's Y-up, its node's world being Maya's and the points
+themselves untouched:
 
 <!-- notest -->
 ```python
@@ -1188,7 +1189,7 @@ from cgmath.hierarchy import HierarchyData
 rig   = HierarchyData.load_fbx("hero.fbx")
 body  = MeshData.load_fbx("hero.fbx", name="body")
 W     = rig["body"].world_matrix
-world = body.points @ W[:3, :3] + W[3, :3]  # where the file puts the mesh
+world = body.points @ W[:3, :3] + W[3, :3]  # where Maya's import puts the mesh
 ```
 
 The readers take no `axis_system` and read any file as it is, a

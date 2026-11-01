@@ -914,6 +914,11 @@ def euler_filter(euler, axes):
     degenerate key -- a rotate rebuilt from a matrix scaled to zero -- stays
     on its own frame rather than spreading to the rest of its curve.
     """
+    return _euler_filter_by(euler, axes, False)
+
+
+def _euler_filter_by(euler, axes, squares):
+    """:func:`euler_filter`, ``squares`` True by the fbx sdk's cost"""
     from cgmath.transforms._numba._euler import MAYA_EA, _euler_filter
 
     euler = _set_dimension(euler, 2)
@@ -933,16 +938,14 @@ def euler_filter(euler, axes):
     count  = curves.shape[1]
 
     # the axis the flip reflects rather than turns is the middle one of the
-    # rotate order, which is what MAYA_EA already stores
+    # rotate order, which the kernel reads off MAYA_EA
     try:
-        per_curve = np.broadcast_to(axes, (count,))
+        per_curve = np.ascontiguousarray(np.broadcast_to(axes, (count,)))
     except ValueError:
         raise ValueError(
             f"length mismatch: got {[count, len(axes)]}; every input must "
             f"be length {count} or 1"
         ) from None
-
-    middle = MAYA_EA[per_curve, 1]
 
     # both candidates slide onto the turn nearest the previous frame, then
     # the shorter move wins. summing the axes rather than squaring them is
@@ -957,7 +960,7 @@ def euler_filter(euler, axes):
 
     # the threads share out the curves; a curve's frames run in order, so a
     # single curve is one thread's work however long it is, and runs on one
-    _sized(_euler_filter, frames * count if count > 1 else 1)(out, middle)
+    _sized(_euler_filter, frames * count if count > 1 else 1)(out, per_curve, squares)
 
     return out.reshape(shape)
 

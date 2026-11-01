@@ -1089,7 +1089,7 @@ def _read_skins_fbx(
     with open_fbx(filename, fbx) as scene:
         units = _fbx_units(scene, scale_factor, fbx)
         turn  = _fbx_axis_turn(scene, axis_system, filename, fbx) if bind_matrices else None
-        hierarchy_data, nodes, _ = _walk_fbx(scene, units)
+        hierarchy_data, nodes, _ = _walk_fbx(scene, units, bakes=False)
 
         named = {
             node.GetUniqueID(): hierarchy_data[unique_id]["name"]

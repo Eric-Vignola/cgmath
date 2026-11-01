@@ -2045,46 +2045,47 @@ loader's, where:
   loader at another rate by its gap at the file's rate and by a share of
   its own, which grows with how far the angles Maya solves bend or jump
   between that rate's frames, not with that gap, as the `axis_system`
-  paragraph below says (a smooth turn about one axis, which agrees
-  at the file's rate, parts by 2.8e-3 to 5.3e-3 times the largest
-  second difference of its keys in degrees a frame squared from 24
-  and 25 fps scenes for a 30 fps file, 0.33 to 0.77 of that from
-  48, and by 1.9e-3 to 4.2e-3 times it from 30 and 25 fps scenes
-  for a 24 fps file (on the files measured, on second differences of
-  1e-2 or more, 2.9e-5 to 6.8e-1)). With that option set to "File",
-  or from a scene at the file's rate or at a whole multiple of it,
-  it keys every frame of the file (on the files measured, from 60,
-  120, 150 and 240 fps scenes for a 30 fps file and 48, 120 and
-  240 fps ones for a 24 fps file) and agrees on them but for the
-  single precision of the curves it solves or merges, as the second
-  item says (as matrices within 3.7e-7 on a node of world scale 1 on
-  angles up to 250 degrees, more on larger angles, under a scale and on
-  the nodes under it), and where a curve it bakes or solves moves by
-  less than about 1e-2 degrees a frame of the rate it keys at, which it
-  can hold level over runs of frames, a faster scene holding more: on
-  the files measured, moving by 1e-4 to 6e-3 degrees a frame, up to
-  4.2e-4 apart as matrices on a node of world scale 1 on takes of
-  11 and 101 frames, a scale multiplying it as the second item says
-  (1.3e-3 on a group scaled 3) and each held channel within 1.3e-2
-  degrees of its curve, and from 120 to 240 fps scenes up to 3.0e-4
-  more than at the file's rate on curves moving by about 1e-2 degrees
-  a frame of the file and 1.1e-4 on a root of an X-up file; and from
-  a 60 fps scene one curve of the 3,372 it made lost its key on the
-  take's last frame, 1.3e-4 apart there. From a 90 fps scene, though,
-  every curve it made held a key only on each whole second, kept or
-  on a single layer counted from time 0, from the last at or before
-  the take's first frame, and also on its last frame, merged counted
-  from that first frame, up to the first at or after its last frame (a
-  41-frame take of a 30 fps file: frames 0, 30 and 40, merged 0, 30 and
-  60; of a 24 fps file 0, 24 and 40, merged 0, 24 and 48; an 11-frame
-  take: 0 and 10, merged 0 and 30, or 0 and 24 from a 24 fps file; a
-  31-frame take of a 30 fps file: 0 and 30, merged too; a take of frames
-  37 to 77 of a 30 fps file: 30, 60 and 77, merged 37, 67 and 97): on
-  the 30 and 24 fps files measured up to 2.0 apart as matrices on nodes
-  of world scale 1, a node under them up to twice its world distance off
-  in translate (3.72 at 1.87). On a node it turns by neither order it is
-  as far apart at the file's rate as the `axis_system` paragraph below
-  says, and it parts where another item of this list says;
+  paragraph below says (a smooth turn about one axis, which agrees at
+  the file's rate, parts by 2.8e-3 to 5.3e-3 times the largest second
+  difference of its keys in degrees a frame squared from 24 and 25 fps
+  scenes for a 30 fps file, 0.33 to 0.77 of that from 48, and by 1.9e-3
+  to 4.2e-3 times it from 30 and 25 fps scenes for a 24 fps file (on the
+  files measured, on second differences of 1e-2 or more, 2.9e-5 to
+  6.8e-1)). With that option set to "File", or from a scene at the
+  file's rate or at a whole multiple of it, it keys every frame of the
+  file (on the files measured, from 60, 120, 150 and 240 fps scenes for
+  a 30 fps file and 48, 120 and 240 fps ones for a 24 fps file) and
+  agrees on them but for the single precision of the curves it solves or
+  merges, as the second item says (as matrices within 3.7e-7 on a node
+  of world scale 1 on angles up to 250 degrees, more on larger angles,
+  under a scale and on the nodes under it), and where a curve it bakes
+  or solves moves by less than about 1e-2 degrees a frame of the rate it
+  keys at, which the SDK's constant key reducer, at its 0.009, can hold
+  level over runs of frames, at the file's rate too on a node with a pre
+  rotation, a faster scene holding more: on the files measured, moving
+  by 1e-4 to 6e-3 degrees a frame, up to 4.2e-4 apart as matrices on a
+  node of world scale 1 on takes of 11 and 101 frames, a scale
+  multiplying it as the second item says (1.3e-3 on a group scaled 3)
+  and each held channel within 1.3e-2 degrees of its curve, and from 120
+  to 240 fps scenes up to 3.0e-4 more than at the file's rate on curves
+  moving by about 1e-2 degrees a frame of the file and 1.1e-4 on a root
+  of an X-up file; and from a 60 fps scene one curve of the 3,372 it
+  made lost its key on the take's last frame, 1.3e-4 apart there. From a
+  90 fps scene, though, every curve it made held a key only on each
+  whole second, kept or on a single layer counted from time 0, from the
+  last at or before the take's first frame, and also on its last frame,
+  merged counted from that first frame, up to the first at or after its
+  last frame (a 41-frame take of a 30 fps file: frames 0, 30 and 40,
+  merged 0, 30 and 60; of a 24 fps file 0, 24 and 40, merged 0, 24 and
+  48; an 11-frame take: 0 and 10, merged 0 and 30, or 0 and 24 from a 24
+  fps file; a 31-frame take of a 30 fps file: 0 and 30, merged too; a
+  take of frames 37 to 77 of a 30 fps file: 30, 60 and 77, merged 37, 67
+  and 97): on the 30 and 24 fps files measured up to 2.0 apart as
+  matrices on nodes of world scale 1, a node under them up to twice its
+  world distance off in translate (3.72 at 1.87). On a node it turns by
+  neither order it is as far apart at the file's rate as the
+  `axis_system` paragraph below says, and it parts where another item of
+  this list says;
 - a layer above the base turns a node that is no joint whose pre
   rotation Maya's FBXImport bakes into its rotate (the item above),
   leaving the layer's own angles as they are. An additive layer adds
@@ -2145,7 +2146,8 @@ loader's, where:
   the files measured, under even scales, up to 2.0 times that distance
   (3.72 at 1.87 and 38.9 at 19.7; with pivots 0.5 to 7.1 away, the node
   itself 4.00 off with one 2 away), under a group scaled (1, 0.5, 2) up
-  to 3.48 times it, and a node on the pivot within 5.7e-14;
+  to 3.48 times it, and a node on the pivot within 5.7e-14. Between
+  keys a bake reads double where Maya reads the SDK's float32;
 - an additive layer blends a rotation by layer at a weight other than 0
   or 100, and the quaternion Maya builds from the layer's angles (qz qy
   qx of the half angles on an xyz node) has the other sign from the one
@@ -2165,12 +2167,15 @@ loader's, where:
   export);
 - the first live layer holds no curve node for a channel a later layer
   holds: the SDK starts it from 0, and Maya does not (0.82 units apart
-  in translation, 1.94 in scale);
+  in translation, 1.94 in scale), an additive layer there adding to the
+  node's static value, up to 3.21 apart as matrices and 5.49 in position
+  on the files measured, a bake above or below it with it;
 - a layer is soloed: solo changes nothing in the SDK, and Maya honours
   it;
-- the base layer is muted: the SDK skips it, but Maya's exporter does
-  not write that mute, so a Maya take whose base layer is muted loads
-  with it playing;
+- the base layer is muted: the SDK skips it, where Maya's import plays
+  it, up to 2.01 apart as matrices and 3.65 in position on the files
+  measured; Maya's exporter does not write that mute, so a Maya take
+  whose base layer is muted loads with it playing;
 - a curve has weighted tangents: Maya's exporter does not write them as
   the scene holds them, so between keys a Maya export loads up to about
   2.5e-2 of the curve's range off what Maya showed (over 5e-3 on 7 of 72
@@ -2183,7 +2188,105 @@ loader's, where:
   tangent do not (up to 158 units 48 frames out on Maya's own exports).
   A weighted one on no layer is the export again: Maya's own import of
   it carries on past the keys as the loader does, but for linear and
-  stepped tangents.
+  stepped tangents;
+- a node has quaternion interpolation: Maya resamples it where the
+  loader reads its curves as keyed, Euler, up to 2.17 apart as matrices
+  and 4.90 in position on the node's own frames on the files measured,
+  a bake above or below it with it, the rig agreeing;
+- a curve has mirror repetition past its keys: 1.33 apart as matrices
+  and 2.1 in position on the frames past them, on the file measured;
+- a bake that steps from a first key before 0 off a whole frame reads a
+  node above it with a pre rotation, or a root of an X- or Z-up file,
+  between the whole frames Maya's conversion re-keyed that node on,
+  where the loader reads its own curves: up to 5.57 as matrices and 11.5
+  in position on 720 files drawn at random;
+- a node that does not bake, with a channel a layer past the take's
+  first keys, muted or not: Maya merges that channel over the take's
+  span and holds it before and after, where the loader reads the file's
+  layers on every frame, up to 2.05 as matrices and 3.94 in position
+  outside the span on the files measured; inside it a curve of the first
+  layer moving under 0.009, which Maya's conversion empties, holds its
+  first key's value in Maya, up to 0.0259 as matrices and 0.0129 in
+  position, 0.477 and 0.239 on a unit root of a file in metres; and on
+  the one such node measured with a pre rotation, in order xzy and keyed
+  first before 0 off a whole frame, Maya's merged rotate turns it off its
+  own rotation, 5.01 as matrices and 9.61 in position on every frame;
+- a unit root of a file in metres, its scale 1/100, whose first-layer
+  translate curve Maya's conversion empties under a later layer: up to
+  0.501 in position where the root does not bake and 0.8 where it does,
+  on the files measured;
+- a node stored `eInheritRrs` under the root of a file in metres whose
+  first-layer scale curve, moving under 0.009, sits under a live later
+  layer: the loader holds that curve emptied, as Maya's conversion
+  empties one in a file in cm, and Maya keeps it, 0.475 as matrices and
+  0.237 in position on the file measured;
+- a take whose span starts off a whole frame, with a cubic later layer:
+  Maya re-keys a channel it merges on the span's own steps and a bake
+  reads between those keys, where the loader samples the layers on whole
+  frames, up to 0.132 and 0.191 in position on the two spans measured; a
+  linear layer agrees;
+- a skinned mesh under a camera root of an X- or Z-up file with a rotate
+  axis, stored `eInheritRrSs` or `eInheritRrs` under a camera scaled
+  unevenly, rig and clip: up to 5.14 as matrices and 10.6 in position on
+  the files measured;
+- a skinned mesh under a mirrored camera root with pivots, of an X- or
+  Z-up file: Maya's camera holds another rotate pivot translate than the
+  file's offsets give, and the mesh and every node under it sit up to
+  1.39 off in position, 1.55 with a pre rotation on the camera, rig and
+  clip, on the files measured;
+- a skinned mesh under a mirrored camera root of an X- or Z-up file with
+  a group stored `eInheritRrs` between them: Maya places the mesh off the
+  rule's place, up to 3.22 as matrices and 6.06 in position, 1.53 and
+  1.64 where no node is scaled unevenly, rig and clip, on the files
+  measured; Maya's rule there in a later release;
+- a skinned mesh under a camera root of an X- or Z-up file with a rotate
+  axis, with both a pre and a post rotation, under a camera scaled
+  unevenly, rig and clip: up to 9.31 as matrices and 9.25 in position
+  at rest, 3.56 and 4.54 on a clip keyed on one rotate axis, on the
+  files measured, growing with the camera's uneven scale;
+- a keyed skinned mesh under a camera root of an X- or Z-up file with a
+  rotate axis whose rotate or translate at frame 0 is off its static
+  value: Maya works the rule out from the mesh's channels at frame 0,
+  live layers included, where the loader works it out at the static
+  pose, so the mesh and every node under it sit off by what that offset
+  changes, with no bound: on a keyed translate x or z its frame-0
+  offset times the camera's scale (10 in position on one keyed 10 off
+  under a camera scaled 1, 18.5 under a turned one scaled 2), on a keyed
+  rotate y or z a turn that grows with the offset, the camera's scale
+  and the mesh's size (2.83 as matrices and 3.12 in position under a
+  camera scaled 1, 5.67 and 6.29 under one scaled 2, 6.02 and 9.8 with
+  a live later rotate layer under a camera scaled (1, 2, 3)), on the
+  files measured;
+- a keyed skinned mesh under a camera root of an X- or Z-up file with a
+  rotate axis whose static rotate, as the camera rule works it out, sits
+  at an exact tie of the two euler solutions' sums of absolute angles
+  (mesh rotations such as (90, 135, 0) or (-45, 45, -90) under a turned
+  camera): Maya's pick and the loader's each follow their own rounding
+  and part on 5 to 17 of the 44 tie rotations of a 45-degree grid, by
+  the camera's turn (8 under (10, 30, -20)); on the tie layouts built,
+  up to 1.98 as matrices and 4.39 in position, 3.61 and 8.36 under a
+  camera scaled 2, the rig agreeing;
+- a skinned mesh with a pre rotation in another order than xyz, rig and
+  clip: Maya holds the angles of its fold in the node's order, read in
+  xyz, where the loader holds the file's rotation, up to 1.98 as
+  matrices and 1.93 in position on the nodes under it at rest and on a
+  clip, 1.86 and 2.26 on a keyed one, on the files measured with no
+  node scaled unevenly; under a camera root of an X- or Z-up file, keyed
+  on some rotate axes, the mesh holds its own rotate on all three, up to
+  1.72 and 3.1, 4.16 and 6.36 under a camera scaled (1, 2, 3); Maya's
+  rule in a later release;
+- a skinned mesh keyed on some of its rotate axes outside that camera
+  rule, under a group root or a camera root of a Y-up file, whose static
+  rotation is not Maya's own euler solve of it: Maya re-solves its
+  static rotate by that solve, as under a camera root of an X- or Z-up
+  file, where the loader holds the file's angles, up to 1.98 as matrices
+  and 3.96 in position under a group root, Y- and Z-up, and 1.97 and
+  4.90 under a camera root of a Y-up file, on the files measured, as in
+  3.0.3, the rig agreeing;
+- a keyed joint with pivots: Maya re-keys its pivot term into its
+  translate and filters it at 0.009 (the fourth item), holding it level
+  where the loader reads the file's curves: up to 0.0114 in position on
+  the files measured.
 
 | Loader | Signature |
 |---|---|
@@ -2249,22 +2352,8 @@ parent the SDK and Maya's importer put it, and the nodes under it,
 elsewhere than the rig had them (a group at (1, 1, 0) turned
 (40, 10, -20) under a group turned 30 about z and scaled (1, 3, 0.5)
 1.58 off in its 3x3, a locator at (0, 2, 1) under it 3.17 in position),
-while `load_fbx`, reading it as `eInheritRSrs`, puts it where it was
-saved: load such a file and `save_fbx` it again. That does not reach a
-group or a locator that had `segment_scale_compensate` on, or the nodes
-under it: the file does not hold the flag.
-
-`load_fbx` reads a node that is no joint as `eInheritRSrs` whatever the
-file stores, and `save_fbx` writes the inherit type the rig gives it, so
-a load then a save of a file storing one `eInheritRrSs`, the SDK's
-default, or `eInheritRrs` imports where the read has it, not where the
-file does, in Maya's importer and the SDK's conversion alike: a node
-turned (20, 40, 60) and scaled (1, 1.5, 0.75) under a group turned
-(0, 30, 0) and scaled (1, 2, 3) is 1.11 off the file in its 3x3, and a
-locator at (0.5, 1, -2) under it 2.34 or 1.75 in position. An earlier
-`save_fbx` wrote it `eInheritRrSs`, which put one stored so back where
-the file has it, and one stored `eInheritRSrs` off it by the same 1.11
-and 2.34.
+and `load_fbx` reads such a file where they do, not where it was saved.
+A rig's own values are in a `save()` file.
 
 A group or a locator with `segment_scale_compensate` on, which a rig
 built or edited by hand can hold and no reader sets, is written
@@ -2326,14 +2415,11 @@ where the rig has it. On the rig above with no parent, in cm, labelled
 and 3.44 in the locator's position over rotate orders 1 to 5.
 
 `load_fbx` reads such a group or locator back with the flag off, as
-`eInheritRSrs`, with the channels saved: at its saved position unless a
-group or a locator with the flag on is above it, its axes and the nodes
-under it off where its parent's own scale is not 1, on the rig above
-2.11 in its axes and 2.88 in the locator's position under a parent
-scaled (1, 2, 3). Under a unit root it is not the channels saved: the
-read divides that root's scale out of the node, as `load_fbx`'s
-docstring says, so a scale of 1 under a top node scaled 0.01 in metres
-reads 100. `save()` keeps the flag.
+Maya reads an `eInheritRrs` node, baked: where Maya's FBXImport puts it
+and the nodes under it, not the channels saved, with shear under a
+parent scaled unevenly and none under an even one. Under a unit root the
+read divides that root's scale out of the node first, as `load_fbx`'s
+docstring says. `save()` keeps the flag.
 
 ```python
 flagged = HierarchyData([
@@ -2344,9 +2430,9 @@ flagged["grp"].set_parent("top", world_space=False)
 flagged.save_fbx(os.path.join(WORKDIR, "flagged.fbx"))
 
 back = HierarchyData.load_fbx(os.path.join(WORKDIR, "flagged.fbx"))["grp"]
-assert not back.segment_scale_compensate  # read as eInheritRSrs
-assert np.allclose(back.world_matrix[3], flagged["grp"].world_matrix[3])
-assert not np.allclose(back.world_matrix, flagged["grp"].world_matrix)
+assert not back.segment_scale_compensate  # baked, as Maya reads it
+assert np.allclose(back.world_matrix, flagged["grp"].world_matrix)
+assert np.any(back.shear)
 ```
 
 A scale under 1e-12 in size, 0 and -0 among them, is written as 1e-12,
@@ -2440,104 +2526,106 @@ The FBX mesh readers (`geometry.mesh.load_fbx`, `MeshData.load_fbx`,
 `MeshList.load_fbx`) and `render.Object.load_fbx`, points and skin bind
 matrices alike, take the same `scale_factor`, with the same default, so
 a mesh under its node's world, or posed by a rig or a clip read from the
-same file, sits where the file puts it.
+same file, sits where Maya's import puts it.
 
 `axis_system="maya_y_up"`, the default, loads an FBX in Maya's Y-up
 axes the way `FbxAxisSystem.MayaYUp.ConvertScene` converts it: every
-node's world matrix, on every frame of a clip, is the file's times the
-turn from the file's axis system (its up vector, front vector and
-handedness) to Maya's. Maya's FBX importer puts a file whose up axis is
-X or Z, an Unreal file among them, in the same place, but for a
-skeleton node at the root of the file, `eRoot` or `eEffector`, that
-holds no `eLimbNode` child, which it imports as a transform, 1.41 off
-ConvertScene's in its 3x3 in a Z-up file and 1.28 in an X-up one, the
-nodes under it up to 2.98 and 5.0 off in translate, where the loaders
-follow ConvertScene: one that holds an `eLimbNode`, as an Unreal file's
-skeleton root does, imports as a joint where ConvertScene puts it, and
-`save_fbx` writes every joint as an `eLimbNode`. Maya's importer also
-parts from the loaders on a node below the roots that is no camera or
-light whose rotation is inactive, in another order than xyz, which it
-turns by neither order (below). At the file's rate, with
-FBXImportResamplingRateSource "File", or from a scene whose rate is a
-whole multiple of the file's but 90 fps, Maya's import and the loaders
-are up to 2.0 apart in the 3x3 on a node of world scale 1: on keys
-within whole turns of the angles Maya's xyz solve returns (y between -90
-and 90), less the less the node turns, up to about the square of that
-turn in radians on turns under 20 degrees, and on keys off that branch,
-as (180, 170, 180) is of (0, 10, 0), up to about twice the turn in
-radians in xzy, yzx, yxz and zxy, zyx keeping the square; and on a take
-up to 3.9e-4 more where Maya holds the rotate it solves level (the list
-above). Against the same node under the same parents with every scale 1,
-a scale multiplies that by the node's world scale, by the largest axis
-of an uneven one at most, where the scales above the node are even; by
-up to the product of the largest axes of its own scale and those above
-it where no parent scaled unevenly is turned or sits under a turned one;
-and otherwise by up to 1.19 times that product on the files measured (a
-node scaled (3, 1, 1) under a group scaled (1, 1, 3) and turned), 1.46
-times it in a numpy scan of the rule Maya follows and never more than
-2.13 times it. Such a node turns about its rotate pivot: a node under it
-is off in translate by up to twice its world distance from that pivot,
-and so is the node itself where it has one, times the largest over the
-smallest singular value of the node's parent's world 3x3 (1 where the
-scales above it are even, and that 3x3's longest row over its shortest
-only where no turned parent sits under one scaled unevenly), and a node
-on the pivot agrees. On the files measured, up to 3.0e-4 on turns of 1.1
-degrees, 3.3e-2 on 11, 0.32 on 35, 1.1 on 72 and 2.0 on turns past 110,
-and off the branch 3.6e-2 on turns of 1.4 degrees, 7.1e-2 on 3 and 0.35
-on 10; on turns of up to 111 degrees, 5.1 on a node scaled 3, 4.9 on one
-scaled (1, 2, 3) and 3.4 under one scaled 2; on turns of 11 degrees, a
-node scaled (3, 1, 1) under one scaled (1, 1, 3) 8.2 times its gap at
-scale 1, where the largest axis of its world 3x3 is 3.1 and the product
-of the two largest axes 9; a locator 1.9 away up to 3.6 off, one 5.6
-away 10.6, and one 0.1 away under a group scaled (1, 0.1, 1) up to 10.1
-times that distance, as much with a group turned 45 degrees between
-them, where that 3x3's rows give 2.8; with rotate pivots 0.5 to 7.1
-away, the node itself up to 1.99 times that distance off (3.94 with a
-pivot 2 away) and 3.96 times it under a group scaled (1, 0.5, 2), and a
-node on the pivot within 5.9e-14. From another rate Maya keys such a
-node at that rate (the list above), and on the file's frames between
-those keys it parts from the loaders by the gap above and by a share of
-its own, the two adding or partly cancelling: that share grows with how
-far the angles Maya solves bend between that rate's frames, not with the
-gap, and is largest where they jump, as they do by 180 degrees where the
-node's turn passes y = 90 or -90 in xyz. On the files measured, on nodes
-of world scale 1, from 24, 25 and 48 fps scenes for a 30 fps file and 30
-and 25 fps ones for a 24 fps file: a smooth turn about one axis, which
-agrees at the file's rate, parts by 2.8e-3 to 5.3e-3 times the largest
-second difference of its keys in degrees a frame squared from 24
-and 25 fps scenes for a 30 fps file, 0.33 to 0.77 of that from 48,
-and by 1.9e-3 to 4.2e-3 times it from 30 and 25 fps scenes for a
-24 fps file (on the files measured, on second differences of 1e-2
-or more, 2.9e-5 to 6.8e-1); keys that turn back each frame, 4.1e-6
-apart at the file's rate on a 0.14 degree turn and 3.1e-4 to 6.4e-4
-from those scenes, 4.2e-4 and 3.2e-3 to 6.6e-3 on a 1.4 degree one,
-1.1e-2 and 1.6e-2 to 3.9e-2 on a 7 degree one; keys linear in time,
-at their largest within 2 percent of the gap at the file's rate,
-but Maya's turn parting from its own at the file's rate by up to
-1.3e-3 on turns up to 45 degrees, 4.3e-2 on turns to 111 and 1.9 on
-frames where the angles it solves jump. A scale multiplies the share as
-it does the gap: from a 25 fps scene for a 24 fps file, the keys whose
-share is 1.85 at scale 1 have one of 7.42 on a node scaled (1, 2, 3)
-under one scaled (2, 2, 2). On an X- or Z-up file Maya's importer also
-parts from ConvertScene, and so from a clip, where a layer blends the
-rotation of a root that is no joint, and in a file of any axes where it
-keys what it solves or merges at another frame rate than the file's (the
-list above). Maya's importer leaves a file whose up axis is Y, pointing
-up or down, in its own axes, so a Y-up file whose front is not +Z, or a
--Y-up one, loads turned 90 or 180 degrees from where Maya shows it. An
-Unreal file, Z-up, turns (x, y, z) to (x, z, -y), root travel with it.
-On a root a layer above the base translates, additive, override or
-passthrough, a clip still keeps the root's translate in the file's world
-turned, the motion as the file authors it, where ConvertScene leaves
-that layer's translate in the file's axes, and so does Maya's importer
-wherever the base layer holds that translate (within 7.7e-7 of
-ConvertScene; where the base layer holds no curve node for it, Maya
-parts from ConvertScene as the first live layer item above says). A clip
-sits 2.8 to 49 off Maya's import of such a root on the files measured, a
-gap that grows with how far the layer moves it; Maya's import of a Z-up
-scene it exported, a group root an additive layer translates, sits 45
-off that scene turned, the clip 1.5 off it, as Maya's import of the same
-scene exported Y-up does, and puts that group's 3x3, in xyz, 1.41 off
+node's world matrix, on every whole frame of a clip, is the one Maya's
+FBXImport gives it, in the file's axes times the turn from the file's
+axis system (its up vector, front vector and handedness) to Maya's where
+the read turns, and that import parts from the SDK's own evaluation on
+the nodes the inherit paragraph below names. Maya's FBX importer
+puts a file whose up axis is X or Z, an Unreal file among them, in the
+same place as ConvertScene, but for a skeleton node at the root of the
+file, `eRoot` or `eEffector`, that holds no `eLimbNode` child, which it
+imports as a transform, 1.41 off ConvertScene's in its 3x3 in a Z-up
+file and 1.28 in an X-up one, the nodes under it up to 2.98 and 5.0 off
+in translate, where the loaders follow ConvertScene: one that holds an
+`eLimbNode`, as an Unreal file's skeleton root does, imports as a joint
+where ConvertScene puts it, and `save_fbx` writes every joint as an
+`eLimbNode`. Maya's importer also parts from the loaders on a node below
+the roots that is no camera or light whose rotation is inactive, in
+another order than xyz, which it turns by neither order (below). At the
+file's rate, with FBXImportResamplingRateSource "File", or from a scene
+whose rate is a whole multiple of the file's but 90 fps, Maya's import
+and the loaders are up to 2.0 apart in the 3x3 on a node of world scale
+1: on keys within whole turns of the angles Maya's xyz solve returns (y
+between -90 and 90), less the less the node turns, up to about the
+square of that turn in radians on turns under 20 degrees, and on keys
+off that branch, as (180, 170, 180) is of (0, 10, 0), up to about twice
+the turn in radians in xzy, yzx, yxz and zxy, zyx keeping the square;
+and on a take up to 3.9e-4 more where Maya holds the rotate it solves
+level (the list above). Against the same node under the same parents
+with every scale 1, a scale multiplies that by the node's world scale,
+by the largest axis of an uneven one at most, where the scales above the
+node are even; by up to the product of the largest axes of its own scale
+and those above it where no parent scaled unevenly is turned or sits
+under a turned one; and otherwise by up to 1.19 times that product on
+the files measured (a node scaled (3, 1, 1) under a group scaled (1, 1,
+3) and turned), 1.46 times it in a numpy scan of the rule Maya follows
+and never more than 2.13 times it. Such a node turns about its rotate
+pivot: a node under it is off in translate by up to twice its world
+distance from that pivot, and so is the node itself where it has one,
+times the largest over the smallest singular value of the node's
+parent's world 3x3 (1 where the scales above it are even, and that 3x3's
+longest row over its shortest only where no turned parent sits under one
+scaled unevenly), and a node on the pivot agrees. On the files measured,
+up to 3.0e-4 on turns of 1.1 degrees, 3.3e-2 on 11, 0.32 on 35, 1.1 on
+72 and 2.0 on turns past 110, and off the branch 3.6e-2 on turns of 1.4
+degrees, 7.1e-2 on 3 and 0.35 on 10; on turns of up to 111 degrees, 5.1
+on a node scaled 3, 4.9 on one scaled (1, 2, 3) and 3.4 under one scaled
+2; on turns of 11 degrees, a node scaled (3, 1, 1) under one scaled (1,
+1, 3) 8.2 times its gap at scale 1, where the largest axis of its world
+3x3 is 3.1 and the product of the two largest axes 9; a locator 1.9 away
+up to 3.6 off, one 5.6 away 10.6, and one 0.1 away under a group scaled
+(1, 0.1, 1) up to 10.1 times that distance, as much with a group turned
+45 degrees between them, where that 3x3's rows give 2.8; with rotate
+pivots 0.5 to 7.1 away, the node itself up to 1.99 times that distance
+off (3.94 with a pivot 2 away) and 3.96 times it under a group scaled
+(1, 0.5, 2), and a node on the pivot within 5.9e-14. From another rate
+Maya keys such a node at that rate (the list above), and on the file's
+frames between those keys it parts from the loaders by the gap above and
+by a share of its own, the two adding or partly cancelling: that share
+grows with how far the angles Maya solves bend between that rate's
+frames, not with the gap, and is largest where they jump, as they do by
+180 degrees where the node's turn passes y = 90 or -90 in xyz. On the
+files measured, on nodes of world scale 1, from 24, 25 and 48 fps scenes
+for a 30 fps file and 30 and 25 fps ones for a 24 fps file: a smooth
+turn about one axis, which agrees at the file's rate, parts by 2.8e-3 to
+5.3e-3 times the largest second difference of its keys in degrees a
+frame squared from 24 and 25 fps scenes for a 30 fps file, 0.33 to 0.77
+of that from 48, and by 1.9e-3 to 4.2e-3 times it from 30 and 25 fps
+scenes for a 24 fps file (on the files measured, on second differences
+of 1e-2 or more, 2.9e-5 to 6.8e-1); keys that turn back each frame,
+4.1e-6 apart at the file's rate on a 0.14 degree turn and 3.1e-4 to
+6.4e-4 from those scenes, 4.2e-4 and 3.2e-3 to 6.6e-3 on a 1.4 degree
+one, 1.1e-2 and 1.6e-2 to 3.9e-2 on a 7 degree one; keys linear in time,
+at their largest within 2 percent of the gap at the file's rate, but
+Maya's turn parting from its own at the file's rate by up to 1.3e-3 on
+turns up to 45 degrees, 4.3e-2 on turns to 111 and 1.9 on frames where
+the angles it solves jump. A scale multiplies the share as it does the
+gap: from a 25 fps scene for a 24 fps file, the keys whose share is 1.85
+at scale 1 have one of 7.42 on a node scaled (1, 2, 3) under one scaled
+(2, 2, 2). On an X- or Z-up file Maya's importer also parts from
+ConvertScene, and so from a clip, where a layer blends the rotation of a
+root that is no joint, and in a file of any axes where it keys what it
+solves or merges at another frame rate than the file's (the list above).
+Maya's importer leaves a file whose up axis is Y, pointing up or down,
+in its own axes, so a Y-up file whose front is not +Z, or a -Y-up one,
+loads turned 90 or 180 degrees from where Maya shows it. An Unreal file,
+Z-up, turns (x, y, z) to (x, z, -y), root travel with it. On a root a
+layer above the base translates, additive, override or passthrough, a
+clip still keeps the root's translate in the file's world turned, the
+motion as the file authors it, where ConvertScene leaves that layer's
+translate in the file's axes, and so does Maya's importer wherever the
+base layer holds that translate (within 7.7e-7 of ConvertScene; where
+the base layer holds no curve node for it, Maya parts from ConvertScene
+as the first live layer item above says). A clip sits 2.8 to 49 off
+Maya's import of such a root on the files measured, a gap that grows
+with how far the layer moves it; Maya's import of a Z-up scene it
+exported, a group root an additive layer translates, sits 45 off that
+scene turned, the clip 1.5 off it, as Maya's import of the same scene
+exported Y-up does, and puts that group's 3x3, in xyz, 1.41 off
 ConvertScene's and the clip's, as the list above says. A root whose
 rotation is inactive still blends its rotation, blended by layer, as
 ConvertScene's xyz node, as Maya's importer does a group's, a locator's
@@ -2555,9 +2643,9 @@ A file already in Maya's Y-up, as `save_fbx` writes a default read,
 loads as it is; a left-handed one raises `ValueError`, since a rotation
 can't turn it into Maya's axes. `axis_system=None` keeps the file's own
 axes. `load()` passes `axis_system` on to `load_fbx` as it does any
-argument, so a left-handed file reads through
-`HierarchyData.load(path, axis_system=None)` too. Which way the
-character faces stays as the file has it.
+argument, so a left-handed file reads through `HierarchyData.load(path,
+axis_system=None)` too. Which way the character faces stays as the file
+has it.
 
 A rig and a clip record the axis system and the unit their values are
 in, `axis_system` and `unit`, saved with them. The FBX loaders record
@@ -2586,9 +2674,10 @@ for a scale under 1e-12 in size, written as 1e-12), so a save loads with
 the defaults, and imports into Maya, where the file the values were read
 from does, in whatever axes and unit they were read.
 Where the read and Maya part, as on a Y-up file whose front is not +Z
-read with the defaults, or on a group the file stores `eInheritRrSs`
-under an unevenly scaled parent, the save parts too (`save_fbx`'s
-docstring lists the cases). A save in another unit than cm holds its
+read with the defaults, the save parts too (`save_fbx`'s docstring lists
+the cases). A node's shear, which FBX has no channel for, stays out of
+the save, as out of Maya's: it and the nodes under it land where the rig
+with that shear zeroed has them. A save in another unit than cm holds its
 lengths in that unit, as a file authored in it does, which Maya's
 importer brings in with its top nodes scaled by the unit (100 for
 metres) at the positions the values say, but for a node written
@@ -2646,81 +2735,232 @@ its meshes and groups. A node of another kind (a camera, a light, an LOD
 group), one with no node attribute and the scene root are always
 dropped, and a kept node goes under its nearest kept ancestor. What the
 dropped nodes between them hold is folded into its channels, on every
-frame of a clip, so its world matrix stays the file's: a joint takes
-their turn in its joint orient and their move in its translate, keeping
-its rotate curves, but on a frame where an uneven scale among them
-under a turn solves its rotate again; any other node has its rotate
-solved again. A uniform scale among them goes on the node's scale, and
-on each joint under it that compensates its parent's scale; an uneven
-one under a node turned in it would need shear, which this read gives no
-node: that node keeps the file's position, and its axis lengths where its
-kept parent's world scales evenly, and the nodes under it take the
-shear it drops, so they stay where the file puts them, under a scale
-under 1e-12 too: a joint that compensates it in its channels, any
-other node in its translate alone, keeping its own rotate and scale.
-Their axes can point and stretch away from the file's, and on a frame
-the node is scaled exactly 0 along an axis the shear has no inverse
-and stays out of them. A scale under 1e-12 on a dropped node is read
-as 1e-12, as Maya holds a scale: a joint that compensates a dropped
-node scaled to 0 keeps its axes and sits on that node's position, and
-a node that does not collapses onto it, as in Maya. A kept node keeps
-its own scale, 0 included, and `world_matrix` divides by it as it is:
-a joint compensating a kept node scaled to 0, and what sits under it,
-come back with a NaN `world_matrix`, their channels finite, where Maya
-keeps that joint's axes. A joint compensating a kept node, kept or
-dropped, divides out that node's own scale, and a kept one keeps the
-scale of a node dropped above the kept node, as Maya does: a joint
-under a locator scaled 5e-13 under a dropped node scaled 2 takes that
-2 in its scale. A read that drops the joints under a kept node scaled
-exactly 0 collapses the nodes it keeps below them onto that node along
-each axis scaled 0, where Maya, holding 1e-12, keeps them apart;
-under a scale that is tiny but not 0, down to about 1e-154, they
-sit where Maya puts them. Under a kept node the read scales under
-1e-12, its own scale times what its split takes from the uneven
-dropped nodes above it (a locator scaled 1.5e-11 under a dropped node
-scaled 0.05 reads 7.5e-13), the translates that place the nodes below
-it can reach the inverse of that scale, which `world_matrix`
-multiplies back but Maya, holding 1e-12, does not: such a frame
-written with `save_fbx` imports into Maya away from where Maya imports
-the file (1.34 off with a translate of 1.6e12; 0.059 under that
-locator). A node's own pivots and offsets go into its translate,
+frame of a clip, so its world matrix stays the one Maya's FBXImport
+gives it: a joint takes their turn in its joint orient and their move in
+its translate, keeping its rotate curves, but on a frame where an uneven
+scale among them under a turn solves its rotate again; any other node
+has its rotate solved again. A uniform scale among them goes on the
+node's scale, and on each joint under it that compensates its parent's
+scale; an uneven one under a node turned in it takes shear. A node that
+is no joint holds it, as the matrix setters split a matrix, on Maya's
+world, within 2.71e-14 in the 3x3 on the test files. A joint takes what
+`xform -m` gives one, no shear: its position is Maya's, its axes off by
+the shear no joint holds, up to 22.8 on the 359 layouts measured, and
+the nodes under it take what it drops, so they stay where Maya puts
+them, under a scale under 1e-12 too: a node that is no joint in its
+channels, with shear, stopping it, a joint that compensates it in its
+channels, any other joint in its translate alone, keeping its own rotate
+and scale. On a frame the node is scaled exactly 0 along an axis the
+shear has no inverse and stays out of them. A dropped camera, light, LOD
+group or curve follows the rule as any node that is no joint; one that
+shears under an unevenly scaled parent holds no node, whatever its
+inherit type, the joints under it off in the 3x3 by what they can't
+hold, up to 3.46 on the files measured, their positions Maya's. A scale
+under 1e-12 on a dropped node is read as 1e-12, as Maya holds a scale: a
+joint that compensates a dropped node scaled to 0 keeps its axes and
+sits on that node's position, and a node that does not collapses onto
+it, as in Maya. A kept node keeps its own scale, 0 included, and
+`world_matrix` divides by it as it is: a joint compensating a kept node
+scaled to 0, and what sits under it, come back with a NaN
+`world_matrix`, their channels finite, where Maya keeps that joint's
+axes. A joint compensating a kept node, kept or dropped, divides out
+that node's own scale, and a kept one keeps the scale of a node dropped
+above the kept node, as Maya does: a joint under a locator scaled 5e-13
+under a dropped node scaled 2 takes that 2 in its scale. A read that
+drops the joints under a kept node scaled exactly 0 collapses the nodes
+it keeps below them onto that node along each axis scaled 0, where Maya,
+holding 1e-12, keeps them apart; under a scale that is tiny but not 0,
+down to about 1e-154, they sit where Maya puts them. Under a kept node
+the read scales under 1e-12, its own scale times what its split takes
+from the uneven dropped nodes above it (a locator scaled 1.5e-11 under a
+dropped node scaled 0.05 reads 7.5e-13), `world_matrix` multiplies by
+that scale where Maya, holding 1e-12, does not: such a frame written
+with `save_fbx` imports into Maya off where Maya imports the file by the
+rounding of that product (6.97e-9 in position under a locator split to
+(6.6e-13, 1.8, 0.5), 5.07e-9 under that locator), and by the shear the
+save leaves out. A node's own pivots and offsets go into its translate,
 and the pre and post rotation of a node that is no joint into its
-rotate, so a group whose pivot Maya centred on its children loads
-where Maya shows it. A node whose rotation is inactive turns in xyz, as
-the SDK turns it, its `rotate_order` 0 whatever order the file stores;
-Maya's importer turns such a node by neither order, keeping the stored
-order on the xyz angles of that order's turn, but on a root of an X- or
-Z-up file. A light's post rotation, FBX's view axis, is
-left out, as Maya places its children; a camera's turns its children by
-what it adds to the view axis Maya's exporter writes, (0, -90, 0), which
-Maya's importer keeps as the camera's rotate axis. Maya reads a camera's
-or a light's pre rotation and rotate order, and a camera's post
-rotation, whether its rotation is active or not, and so does the read,
-but on a root of an X- or Z-up file with its rotation inactive, where
-the axis conversion drops them and turns the root in xyz. The inherit
-type is taken on a joint alone, beyond a unit root's scale:
-`eInheritRrs`, which leaves the parent's own scale out, as segment scale
-compensate, where the SDK and Maya put it. Every other node reads as
-`eInheritRSrs`, whatever the file stores: one that is no joint stored
-`eInheritRrSs`, which scales it along its own axes by its parent's world
-scale, is off where that scale is uneven, one stored `eInheritRrs`
-wherever its parent's own scale is other than 1, and the nodes under
-them with them; a unit root's scale counts as 1 there, the read dividing
-its 1/s out of every node under it stored `eInheritRrs`, joint or not. A
-node turned (20, 40, 60) and scaled (1, 1.5, 0.75) under a group turned
-(0, 30, 0) and scaled (1, 2, 3) is 1.11 off the SDK in the 3x3 either
-way, a locator at (0.5, 1, -2) under it 2.34 and 1.75 in translate, and
-keyed (20, 40, 60), (35, -10, 80), (-25, 50, 10), (60, 20, -40) and
-(5, -70, 30) over 5 frames 1.63 and 2.11 on a clip, its locator 2.98 and
-2.88; under one scaled (2, 2, 2) the `eInheritRrSs` node is within
-8.9e-16 and the `eInheritRrs` one 0.99 off (1.35 on the clip), its
-locator 2.03 (2.13). Maya's importer puts both where the SDK does,
-baking the inherit type into the node's own scale and shear. A joint
-stored `eInheritRrSs` reads as Maya's importer reads it, `eInheritRSrs`,
-as far off the SDK. Under `pose="bind"` a dropped node a bind pose lists
-is folded in at its bind, so each node kept sits where the full bind
-read puts it. A file whose dropped nodes, pivots and offsets hold the
-identity reads as it holds its nodes, to the bit.
+rotate, so a group whose pivot Maya centred on its children loads where
+Maya shows it. A node whose rotation is inactive turns in xyz, as the
+SDK turns it, its `rotate_order` 0 whatever order the file stores, and a
+bake reads it so; Maya's importer turns such a node by neither order,
+keeping the stored order on the xyz angles of that order's turn, but on
+a root of an X- or Z-up file, so the rule below holds with rotation
+active. A light's post rotation, FBX's view axis, is left out, as Maya
+places its children; a camera's turns its children by what it adds to
+the view axis Maya's exporter writes, (0, -90, 0), which Maya's importer
+keeps as the camera's rotate axis. Maya reads a camera's or a light's
+pre rotation and rotate order, and a camera's post rotation, whether its
+rotation is active or not, and so does the read, but on a root of an X-
+or Z-up file with its rotation inactive, where the axis conversion drops
+them and turns the root in xyz. A camera scaled unevenly or sheared, its
+own three scale magnitudes apart or its world in the file's scene
+holding a shear, two of its rows off square, each by more than
+1.00001e-4 relative to their size (`FBX_EVEN_BAND`, the band of the even
+test below), at the static pose or on any frame a clip reads, warns:
+each read logs one warning through `cgmath.formats.fbx`'s logger, as
+`save_fbx`'s warnings are logged, naming each such camera, and reads as
+it would with none, its values the same; a later release refuses such a
+file. A mirrored camera, its three scale magnitudes equal, is none, and
+a read that raises warns of nothing. Under `pose="bind"` a dropped node
+a bind pose lists is folded in at its bind, so each node kept sits where
+the full bind read puts it. A file whose dropped nodes, pivots and
+offsets hold the identity reads as it holds its nodes, to the bit, where
+it also holds no node the rule below bakes, no node that is no joint
+with a pre rotation, or a root of an X- or Z-up file, on a negative
+scale or, on a clip, keyed first before 0 off a whole frame, no joint
+with both a pre or post rotation and pivots, nor a joint root with
+pivots in an X- or Z-up file, no node with no attribute under a joint
+with pivots or a pre rotation, no skinned mesh under a camera root of an
+X- or Z-up file, and no keyed node of the emptied axis below.
+
+A node's inherit type is read as Maya 2025's FBXImport reads it: every
+node with its rotation active sits where that import puts it, with
+animation off on a rig and on every whole frame on a clip, and Maya
+2027's is the same. A joint is never baked: it keeps the file's
+channels, `eInheritRrs` as segment scale compensate, any other type as
+`eInheritRSrs`, and with a pre or a post rotation and pivots takes
+Maya's translate, as does a joint root with pivots in an X- or Z-up
+file, whose axis turn Maya holds as a pre rotation. A node that is no
+joint, a root of the file among them, goes by what it stores.
+`eInheritRSrs` reads as it is, and so does `eInheritRrSs` where its
+parent's world reads one scale and no shear at the static pose, each
+within 1.00001e-4, a root always, and, on a clip, with no scale curve
+from the parent up leaving its first key's value by more than 1e-5,
+whatever that world reads on the frames. Anywhere else `eInheritRrSs`
+bakes, and `eInheritRrs` always does: Maya turns the type into the
+node's own channels, held here as scale, shear, rotate and translate, so
+a node under a parent scaled unevenly holds a shear, one under an even
+parent none, and the nodes under it sit where Maya puts them. A unit
+root's scale counts as 1 there, the read dividing its 1/s out of every
+node under it stored `eInheritRrs`, joint or not. A mesh that bakes with
+a skin of at least one cluster holds, at the static pose, the shear of
+its bake and the rest read again with no curve anywhere, its own rotate
+the principal solve of its rotate and pre rotation: the rows' lengths of
+that block as its scale and the SDK's GetR of it as its rotate, negated
+where it mirrors, its points untouched; a keyed one bakes on its frames
+as any node. A skinned mesh under a camera root of an X- or Z-up file
+with a rotate axis, the camera baked or not, sits where the SDK places
+it, which leaves that axis out, as far as its local matrix holds it: the
+rows' lengths and the GetR of its local matrix times its parent's world
+without that axis over Maya's, the camera holding Maya's split of a
+mirrored scale or its bake, no shear, its rotate Maya's own solve of
+that GetR, but at an exact tie of the two solutions' sums of absolute
+angles, where each picks by its own rounding (the list above). On a clip
+one with no curve holds that on every frame, and one with a curve holds
+the translate, rotate and scale that gives at the static pose (Maya's
+clip import works them out from the keyed mesh's channels at frame 0,
+live layers included: the list above), the translate less its pivots'
+term, but on each axis a curve keys, which takes the mesh's own, as do
+all three axes of a channel a later layer keys, muted or not, and turns
+about its pivots by the rotate and scale it then holds, unless it bakes,
+which it does as any node; one with a pre rotation in another order than
+xyz, keyed on some rotate axes, holds its own rotate on all three. A
+node with no attribute under a joint is a joint in Maya's import: where
+it bakes it holds the bake's scale and rotate and no shear at the static
+pose, and stored `eInheritRrs` it divides its parent's scale out once
+more, as a joint that compensates; unbaked, it keeps no pivot or offset,
+and with a pre rotation it turns by that pre rotation twice, folded into
+its rotate and kept as its joint orient, and with its rotation inactive
+once, kept as its joint orient. On a clip one whose keys the conversion
+leaves as they are (below) keeps its pre and post rotation as its joint
+orient and rotate axis.
+
+Maya works a bake out in the SDK's conversion, where a node that is no
+joint with a pre rotation, and a root of an X- or Z-up file, whose turn
+is a pre rotation, reads its rotate in xyz with no pre and no post
+rotation: the file's r and S at the static pose, so such a root stored
+`eInheritRrs` loses its turn, and on a frame the angles of Sig R Rpre in
+its own order, Sig all three axes negative on a negative determinant
+and all positive on a positive one. A mirrored node with a pre rotation
+holds that scale unbaked too.
+
+A bake runs from the earlier of 0 and a node's first key, in whole
+frames of the file's rate, to the later of 0 and its last key, and holds
+that last one after it while its parent moves on; before its first key
+it holds that key's value, and a node with no curve holds its static
+bake on every frame. A first key before 0 off a whole frame steps from
+that key. So a `start_frame` past every key reads the hold, and a read
+at another `fps` steps a baked node on the bake's frames, as Maya's keys
+do, where an unbaked one blends. On a node with a pre rotation, or a
+root of an X- or Z-up file, a last key off a whole frame holds to the
+whole frame after it, the angles are the ones the SDK's conversion
+re-keys, the solution nearest the frame before, a frame at the gimbal of
+the node's order sharing what its outer axes moved. The conversion
+re-keys such a node from the whole frame its first key truncates to,
+towards 0, holding that frame's rotate and scale below it, so its angles
+take their branch from there, and the read holds them so, on the clip's
+frames and on the frames a bake reads; a node whose keys all sit before
+that frame, a lone key before 0 off a whole frame among them, turns by
+its keys alone, its pre and post rotation lost, as Maya leaves it. Maya
+runs that conversion on the take's first layer alone, and so does the
+read, then merges the layers channel by channel: a translate, rotate or
+scale with a key in a layer past the first, muted or not, it keys on
+every whole frame of the take's span, stepping from its start where that
+sits off a whole frame, with what the layers that are not muted give
+over what the conversion left of the first, a curve the conversion
+emptied holding its first key's value and, below the whole frame the
+conversion re-keys a node from, the first layer's rotate and scale held
+at that frame, and holds that before and after the span; every other
+channel keeps what the conversion leaves it. A node that bakes does so
+from the earlier of 0 and the first key of any of its channels to the
+later of 0 and the last, and so does the read. A node that does not bake
+reads such a channel as the file's layers give it, on every frame (the
+list above). A node's rest pose can be unbaked where its frames bake, as
+Maya's two imports differ. A layer above a bake bakes with it. On a file
+of two takes Maya bakes a typed node from the first take's values; the
+read uses the take it reads. A camera scaled unevenly or sheared warns as
+above, at the static pose or on any of the clip's frames, one warning a
+read.
+
+Maya rounds to single precision what this read keeps in the file's
+numbers: an unbaked node's static translate, a keyed baked node's
+unkeyed one, a joint's pivots, a re-keyed rotate, a mesh's points, and
+between keys a bake reads double where Maya reads the SDK's float32. So
+on files whose numbers single precision does not hold nodes sit off
+Maya's import, by up to 3.08e-5 in the 3x3 and 1.94e-6 in position on
+the files measured, both on a keyed node with a pre rotation under
+sheared parents, and within 2e-14 in position on 180 files whose numbers
+it does hold (three named at their own gap, at most 1e-13). It grows
+with the depth and the spread of a sheared chain: of 72 chains of 16
+nodes 33 sit past 1e-5, 22 of them under 1e-3, the worst 121 in the 3x3
+and 0.174 in position. Maya's conversion also filters each curve it
+re-keys, the SDK's
+`FbxAnimCurveFilterConstantKeyReducer` at its tolerance of 0.009. On a
+node with a pre rotation, or a root of an X- or Z-up file, a curve whose
+keys all sit within 0.009 of its last key is no curve: a node left none
+holds its static bake on every frame, whatever a single key says, and a
+level curve beside a moving one adds no frames to the bake. In an order
+other than xyz an Euler axis that stays level can sit on the other
+solution in Maya's import, the node off the file's own rotation; the
+read follows Maya. What it leaves level inside a curve that moves under
+0.009 a step is not copied: on 80 files shaped as a baked export 66 sit
+within 1e-5, the other 14 up to 0.0435 in the 3x3 and 0.0703 in
+position; a keyed joint with pivots, whose pivot term Maya re-keys into
+its translate and filters so, holds level there too, up to 0.0114 in
+position on the files measured.
+
+A typed node's shear is Maya's. `_tests/test_assets/fbx_maya_import.npz`
+holds Maya's world of each file its test writes from a layout; here is one
+written by the test's own writer, a group stored `eInheritRrs` under a
+group scaled (1, 2, 3):
+
+```python
+import json
+
+import cgmath._tests as tests
+from cgmath._tests._fbx_import_files import write_layout
+
+record = np.load(os.path.join(os.path.dirname(tests.__file__), "test_assets", "fbx_maya_import.npz"))
+typed  = os.path.join(WORKDIR, "typed.fbx")
+write_layout(typed, json.loads(bytes(record["s0_s123|layout"])))
+
+held = HierarchyData.load_fbx(typed)["gRrs"]
+assert np.allclose(held.world_matrix[:, :3].ravel(), record["s0_s123|s|gRrs"], rtol=0.0, atol=1e-13)
+
+clip = ClipData.load_fbx(typed, start_frame=0, end_frame=6)
+assert np.allclose(clip.frames.shear[:, clip.index("gRrs")], record["s0_s123|h|gRrs"], rtol=0.0, atol=1e-6)
+```
 
 ```python
 grouped = HierarchyData([
@@ -2757,8 +2997,9 @@ the SDK gives it, and so does every rotation the read solves again: the
 rotate of a root that is no joint, turned to Maya's axes; the rotate of
 any other node that is no joint, for a node the read drops above it or
 for its own pre and post rotation; a joint orient, for a node dropped
-above it; and the whole rotate curve of a joint an uneven dropped scale
-re-solves on some frames, as `ClipData.load_fbx` says. A file with no
+above it; the whole rotate curve of a joint an uneven dropped scale
+re-solves on some frames, as `ClipData.load_fbx` says; and a baked node's
+rotate, solved again on every frame, its shear beside it. A file with no
 animation gives a one-frame clip rather than an error.
 
 `ClipData.load_glb`'s grid starts on the earliest key. Keys on whole

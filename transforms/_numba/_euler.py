@@ -156,18 +156,27 @@ def _euler_to_quaternion(euler, axes):
     return quat
 
 
+# how close a middle angle sits to +-90 degrees, in radians, where the fbx
+# sdk reads a rotation as gimbal locked: 5e-6 degrees
+_SDK_GIMBAL = np.radians(5e-6)
+
+
 @njit(parallel=True, cache=True)
-def _euler_filter(euler, middle):
+def _euler_filter(euler, orders, squares=False):
     """Filters (frames, curves, 3) euler angles along the frames, in place.
 
     The curves are shared out between threads; within a curve the frames run
     in order, since each one depends on the frame before it, filtered. A
     frame is replaced by whichever of its two representations, slid onto
     the turn nearest the frame before, moves the least. The other
-    representation turns every axis by half a turn and reflects the
-    ``middle`` one of the curve's rotate order. The cost sums the axes, left
-    to right, as maya's filterCurve does; on a tie the frame keeps its own
-    representation.
+    representation turns every axis by half a turn and reflects the middle
+    one of the curve's rotate order, ``orders[c]``. The cost sums the axes,
+    left to right, as maya's filterCurve does; on a tie the frame keeps its
+    own representation. ``squares`` sums the squares of the axes instead, as
+    the fbx sdk does when it re-keys a rotation, and so it shares a frame at
+    the order's gimbal: there the outer axes turn about one axis, only their
+    sum or difference is the rotation's, and the representation nearest the
+    frame before by that cost moves each of them by half of what it moved.
 
     A frame holding a nan or an inf on any axis is a gap: it is left as it
     is, and the next finite frame is filtered against the last finite one,
@@ -179,7 +188,9 @@ def _euler_filter(euler, middle):
     """
     turn = 2.0 * np.pi
     for c in prange(euler.shape[1]):
-        reflect = middle[c]
+        outer   = MAYA_EA[orders[c], 0]
+        reflect = MAYA_EA[orders[c], 1]
+        inner   = MAYA_EA[orders[c], 2]
         kept    = np.empty(3, dtype=euler.dtype)
         flipped = np.empty(3, dtype=euler.dtype)
         last    = -1  # the last finite frame, filtered
@@ -206,8 +217,12 @@ def _euler_filter(euler, middle):
 
                 kept[axis]    = current + turn * np.rint((previous - current) / turn)
                 flipped[axis] = other + turn * np.rint((previous - other) / turn)
-                kept_cost    += abs(kept[axis] - previous)
-                flipped_cost += abs(flipped[axis] - previous)
+                if squares:
+                    kept_cost    += (kept[axis] - previous) ** 2
+                    flipped_cost += (flipped[axis] - previous) ** 2
+                else:
+                    kept_cost    += abs(kept[axis] - previous)
+                    flipped_cost += abs(flipped[axis] - previous)
 
             # numpy's argmin: the first minimum wins, and a nan counts as one
             if flipped_cost < kept_cost or (
@@ -218,4 +233,17 @@ def _euler_filter(euler, middle):
             else:
                 for axis in range(3):
                     euler[f, c, axis] = kept[axis]
+
+            # at the gimbal the outer axes hold one angle between them, the
+            # inner one turning with the sign of the middle's sine, against
+            # it in xyz, yzx and zxy
+            if squares and abs(euler[f, c, reflect] % np.pi - 0.5 * np.pi) < _SDK_GIMBAL:
+                sign = 1.0 if np.sin(euler[f, c, reflect]) > 0.0 else -1.0
+                if orders[c] < 3:
+                    sign = -sign
+                now                = euler[f, c, outer] + sign * euler[f, c, inner]
+                before             = euler[last, c, outer] + sign * euler[last, c, inner]
+                half               = 0.5 * (now - before)
+                euler[f, c, outer] = euler[last, c, outer] + half
+                euler[f, c, inner] = euler[last, c, inner] + sign * half
             last = f

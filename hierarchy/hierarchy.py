@@ -53,6 +53,7 @@ from cgmath.transforms import (
     quaternion_to_euler,
     quaternion_to_matrix,
 )
+from cgmath.transforms.main import _euler_filter_by
 
 
 try:
@@ -62,10 +63,11 @@ except ImportError:
 
 try:
     import fbx as FBX
-    from cgmath.formats.fbx import FbxExporter, _ascii_read_back, _user_property_value
+    from cgmath.formats.fbx import LOGGER as _FBX_LOGGER, FbxExporter, _ascii_read_back, _user_property_value
 except ImportError:
     FBX                  = None
     FbxExporter          = None
+    _FBX_LOGGER          = None
     _ascii_read_back     = None
     _user_property_value = None
 
@@ -3138,6 +3140,34 @@ class _FbxTree:
     position of each kept column's node and ``above`` each kept column's
     nearest kept ancestor's column, -1 for a root.
 
+    What Maya's import reads (:func:`_fbx_scene_worlds`): ``inherit`` (n,),
+    how a node inherits its parent, 0 eInheritRSrs, 1 eInheritRrSs, 2
+    eInheritRrs; ``folds`` (n,), whether its import folds a pre rotation on
+    the node, one that is no joint with a pre rotation, or a root of a file
+    whose up axis is x or z, right handed, whose turn ``axis_turn`` (3, 3)
+    holds, None on any other file (:func:`_fbx_converted_turn`), whatever
+    axis_system the read asks for; ``skinned`` (n,), whether a mesh stored
+    eInheritRrSs or eInheritRrs has a skin with a cluster; ``null_joint``
+    (n,), whether a node with no node attribute sits under a skeleton node,
+    which Maya's import makes a joint, and ``null_pre`` (n, 3) the pre
+    rotation such a joint keeps as its joint orient where its rotation is
+    inactive, 0 elsewhere; ``camera_skins`` (n,), whether a mesh with a
+    skin of at least one cluster sits under a camera root of a file
+    ``axis_turn`` turns whose post rotation turns past fbx's view axis
+    (``axis``, :func:`_fbx_camera_skins`); ``cameras``, ``(views, rows)``,
+    the file's cameras and every node above one as a tree of their own, read
+    as these nodes are, and the cameras' positions in it, None in a file
+    with no camera (:func:`_fbx_sheared_cameras`). A clip's read sets three
+    more (:func:`_fbx_clip_bakes`): ``keyed`` (n,), whether a node has a curve
+    in the take, in a layer that is not muted or in any layer past the
+    first; ``mixed``, {i: (axes, values, level)}, the rotate axes the sdk's
+    conversion empties on a node that Maya's own solve then takes
+    (:func:`_fbx_mixed_angles`), which no file whose up vector points down
+    (``up_down``) does, both None before it; and ``loose``, the keyed nodes
+    of ``folds`` that conversion leaves as the file keys them, their keys
+    all before the whole frame their first key truncates to, empty before
+    it.
+
     The scale factor is the node's own (:class:`_FbxUnits`): ``lengths``
     (n,) holds what its translate, curves included, is multiplied by, the
     file's unit in cm, but 1 under a unit root, and ``unit_scale`` (n, 3)
@@ -3168,7 +3198,64 @@ class _FbxTree:
         "lengths",
         "unit_scale",
         "unit_roots",
+        "inherit",
+        "folds",
+        "axis_turn",
+        "keyed",
+        "mixed",
+        "skinned",
+        "up_down",
+        "null_joint",
+        "null_pre",
+        "loose",
+        "camera_skins",
+        "cameras",
     )
+
+
+# the slots of _FbxTree that hold a row per node (_fbx_subtree)
+_FBX_NODE_SLOTS = (
+    "parent",
+    "kept",
+    "joint",
+    "compensate",
+    "orders",
+    "blend",
+    "translate",
+    "rotate",
+    "scale",
+    "pre",
+    "axis",
+    "pivots",
+    "lengths",
+    "unit_scale",
+    "unit_roots",
+    "inherit",
+    "folds",
+    "skinned",
+    "null_joint",
+    "null_pre",
+    "camera_skins",
+)
+
+
+def _fbx_subtree(tree: _FbxTree, rows) -> _FbxTree:
+    """the nodes ``rows`` of ``tree``, positions in order, each one's parent
+    among them but the first's, as a tree of their own: every row of a node
+    taken as it is, each parent renumbered, the rest of the tree shared"""
+    rows     = np.asarray(rows, dtype=np.intp)
+    at       = np.full(len(tree.parent), -1, dtype=np.intp)
+    at[rows] = np.arange(len(rows))
+    out      = _FbxTree()
+    for name in _FbxTree.__slots__:
+        if name in _FBX_NODE_SLOTS:
+            setattr(out, name, getattr(tree, name)[rows])
+        elif hasattr(tree, name):
+            setattr(out, name, getattr(tree, name))
+    up         = tree.parent[rows]
+    out.nodes  = [tree.nodes[i] for i in rows.tolist()]
+    out.parent = np.where(up >= 0, at[up], -1).astype(np.intp)
+    return out
 
 
 # the post rotation Maya's exporter writes on a camera, (0, -90, 0), fbx's
@@ -3184,6 +3271,7 @@ def _walk_fbx(
     units:      "_FbxUnits",
     node_types: Optional[frozenset] = None,
     turned:     bool                = False,
+    bakes:      bool                = True,
 ):
     """walks an open fbx scene's nodes into TransformData dicts
 
@@ -3194,17 +3282,19 @@ def _walk_fbx(
     node's parent is its nearest kept ancestor. What the nodes dropped
     between them hold, and the pivots, offsets and the pre and post rotation
     of a node that is no joint, which its channels can't hold, are folded
-    into its channels (:func:`_fbx_fold`), so its world matrix is the
-    file's. ``turned`` says the read turns the file into Maya's axes
-    (:func:`_fbx_axis_turn`), which only the orders a take's layers blend
-    in follow (``blend``, :class:`_FbxTree`). ``units`` (:func:`_fbx_units`)
-    says what each node's lengths are multiplied by and its scale divided
-    by. A unit root's pivots are read through the scale it holds, 1/s of
-    the one it loads with: the rotate pivot and both offsets are in the
-    file's unit, the scale pivot in the root's own space, in cm, and the
-    scale offset takes what the scale pivot, applied on either side of that
-    scale, moves, ``so s + sp (s - 1)``, so its local matrix is the file's
-    with the unit taken out.
+    into its channels (:func:`_fbx_fold`), so its world matrix is the one
+    Maya's FBXImport gives it with animation off, what that import bakes
+    among it (:func:`_fbx_static_bakes`), which ``bakes`` False leaves out
+    for a read of names alone, the skin read's. ``turned`` says the read
+    turns the file into Maya's axes (:func:`_fbx_axis_turn`), which only the
+    orders a take's layers blend in follow (``blend``, :class:`_FbxTree`).
+    ``units`` (:func:`_fbx_units`) says what each node's lengths are multiplied
+    by and its scale divided by. A unit root's pivots are read through the
+    scale it holds, 1/s of the one it loads with: the rotate pivot and both
+    offsets are in the file's unit, the scale pivot in the root's own space, in
+    cm, and the scale offset takes what the scale pivot, applied on either side
+    of that scale, moves, ``so s + sp (s - 1)``, so its local matrix is the
+    file's with the unit taken out.
 
     Hands back the dicts, the ``FbxNode`` behind each uuid, because an
     animated read has to sample those same objects and fbx lets two nodes
@@ -3214,15 +3304,17 @@ def _walk_fbx(
 
     The nodes live only as long as the ``open_fbx`` block the scene came from.
     """
-    skeleton     = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eSkeleton")
-    marker       = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eMarker")
-    null         = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eNull")
-    mesh         = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eMesh")
-    camera       = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eCamera")
-    light        = _fbx_enum(FBX.FbxNodeAttribute, "EType",        "eLight")
-    cross        = _fbx_enum(FBX.FbxNull,          "ELook",        "eCross")
-    source_pivot = _fbx_enum(FBX.FbxNode,          "EPivotSet",    "eSourcePivot")
-    inherit_rrs  = _fbx_enum(FBX.FbxTransform,     "EInheritType", "eInheritRrs")
+    skeleton     = _fbx_enum(FBX.FbxNodeAttribute, "EType",         "eSkeleton")
+    marker       = _fbx_enum(FBX.FbxNodeAttribute, "EType",         "eMarker")
+    null         = _fbx_enum(FBX.FbxNodeAttribute, "EType",         "eNull")
+    mesh         = _fbx_enum(FBX.FbxNodeAttribute, "EType",         "eMesh")
+    skin_kind    = _fbx_enum(FBX.FbxDeformer,      "EDeformerType", "eSkin")
+    camera       = _fbx_enum(FBX.FbxNodeAttribute, "EType",         "eCamera")
+    light        = _fbx_enum(FBX.FbxNodeAttribute, "EType",         "eLight")
+    cross        = _fbx_enum(FBX.FbxNull,          "ELook",         "eCross")
+    source_pivot = _fbx_enum(FBX.FbxNode,          "EPivotSet",     "eSourcePivot")
+    inherit_rrs  = _fbx_enum(FBX.FbxTransform,     "EInheritType",  "eInheritRrs")
+    inherit_rrss = _fbx_enum(FBX.FbxTransform,     "EInheritType",  "eInheritRrSs")
 
     # Maya's importer reads a camera's or a light's pre rotation and rotate
     # order, and a camera's post rotation, whether its rotation is active or
@@ -3235,7 +3327,7 @@ def _walk_fbx(
 
     # every node, parents first, in the order the walk has always met them:
     # a node, then each of its children's branches in turn
-    found, parents, kinds, views = [], [], [], []
+    found, parents, kinds, views, bare = [], [], [], [], []
     stack = [(scene.GetRootNode(), -1)]
     while stack:
         node, parent = stack.pop()
@@ -3263,36 +3355,60 @@ def _walk_fbx(
         parents.append(parent)
         kinds.append(kind)
         views.append(view)
+        bare.append(not attr)
         here = len(found) - 1
         stack.extend((node.GetChild(i), here) for i in reversed(range(node.GetChildCount())))
 
     keeps = [kind is not None and (node_types is None or kind in node_types) for kind in kinds]
 
-    # the tree: the kept nodes and every node above one, renumbered
+    # the tree: the kept nodes and every node above one, renumbered; read
+    # with them, the cameras and every node above one, split off after into
+    # a tree of their own for the warning of a camera scaled unevenly or
+    # sheared (_fbx_sheared_cameras), so the tree holds what it held
     needed = list(keeps)
     for index in reversed(range(len(found))):
         if needed[index] and parents[index] >= 0:
             needed[parents[index]] = True
-    place = np.cumsum(needed) - 1
-    rows  = [index for index in range(len(found)) if needed[index]]
+    viewing = [False] * len(found)
+    for index in [index for index, view in enumerate(views) if view == "camera"]:
+        while index >= 0 and not viewing[index]:
+            viewing[index] = True
+            index          = parents[index]
+    place = np.cumsum([a or b for a, b in zip(needed, viewing)]) - 1
+    rows  = [index for index in range(len(found)) if needed[index] or viewing[index]]
 
-    tree            = _FbxTree()
-    tree.nodes      = [found[index] for index in rows]
-    tree.parent     = np.array([place[parents[i]] if parents[i] >= 0 else -1 for i in rows], dtype=np.intp)
-    tree.kept       = np.full(len(rows), -1, dtype=np.intp)
-    tree.joint      = np.array([kinds[i] == "joint" for i in rows], dtype=bool)
-    tree.compensate = np.zeros(len(rows), dtype=bool)
-    tree.orders     = np.zeros(len(rows), dtype=np.intp)
-    tree.blend      = np.zeros(len(rows), dtype=np.intp)
-    tree.translate  = np.zeros((len(rows), 3))
-    tree.rotate     = np.zeros((len(rows), 3))
-    tree.scale      = np.ones((len(rows), 3))
-    tree.pre        = np.zeros((len(rows), 3))
-    tree.axis       = np.zeros((len(rows), 3))
-    tree.pivots     = np.zeros((len(rows), 4, 3))
-    tree.lengths    = np.full(len(rows), units.factor)
-    tree.unit_scale = np.ones((len(rows), 3))
-    tree.unit_roots = np.zeros(len(rows), dtype=bool)
+    tree              = _FbxTree()
+    tree.nodes        = [found[index] for index in rows]
+    tree.parent       = np.array([place[parents[i]] if parents[i] >= 0 else -1 for i in rows], dtype=np.intp)
+    tree.kept         = np.full(len(rows), -1, dtype=np.intp)
+    tree.joint        = np.array([kinds[i] == "joint" for i in rows], dtype=bool)
+    tree.compensate   = np.zeros(len(rows), dtype=bool)
+    tree.orders       = np.zeros(len(rows), dtype=np.intp)
+    tree.blend        = np.zeros(len(rows), dtype=np.intp)
+    tree.translate    = np.zeros((len(rows), 3))
+    tree.rotate       = np.zeros((len(rows), 3))
+    tree.scale        = np.ones((len(rows), 3))
+    tree.pre          = np.zeros((len(rows), 3))
+    tree.axis         = np.zeros((len(rows), 3))
+    tree.pivots       = np.zeros((len(rows), 4, 3))
+    tree.lengths      = np.full(len(rows), units.factor)
+    tree.unit_scale   = np.ones((len(rows), 3))
+    tree.unit_roots   = np.zeros(len(rows), dtype=bool)
+    tree.inherit      = np.zeros(len(rows), dtype=np.intp)
+    tree.folds        = np.zeros(len(rows), dtype=bool)
+    tree.axis_turn    = _fbx_converted_turn(scene)
+    tree.keyed        = None
+    tree.mixed        = None
+    tree.skinned      = np.zeros(len(rows), dtype=bool)
+    tree.up_down      = _fbx_scene_axes(scene)[1] < 0
+    tree.loose        = frozenset()
+    tree.null_pre     = np.zeros((len(rows), 3))
+    tree.camera_skins = np.zeros(len(rows), dtype=bool)
+    tree.cameras      = None
+
+    # Maya's import makes a node with no node attribute a joint where its
+    # parent is a skeleton node
+    tree.null_joint = np.array([parents[i] > 0 and kinds[parents[i]] == "joint" and bare[i] for i in rows], dtype=bool)
 
     # the nodes inside a unit root hold cm already: the lengths under them
     # are read as they are, and the scale of each that holds the unit is
@@ -3363,9 +3479,13 @@ def _walk_fbx(
             tree.pivots[position, 1]  = sp
             tree.pivots[position, 3]  = tree.pivots[position, 3] + sp * (length - 1.0)
 
-        # the pre rotation where the read takes it, as above
+        # the pre rotation where the read takes it, as above; the joint Maya
+        # makes of a node of null_joint keeps it as its joint orient, rotation
+        # active or not
         if active:
             tree.pre[position] = tuple(node.GetPreRotation(source_pivot))[:3]
+        elif tree.null_joint[position]:
+            tree.null_pre[position] = tuple(node.GetPreRotation(source_pivot))[:3]
 
         # fbx composes the post rotation as its inverse. A light's is fbx's
         # view axis, which Maya places its children without; a camera's turns
@@ -3381,8 +3501,33 @@ def _walk_fbx(
                 axis = 0.0 if np.abs(turn - np.eye(3)).max() <= _FBX_FOLD_BAND else _matrices_to_eulers(turn, 0)
             tree.axis[position] = axis
 
+        inherit = node.GetTransformationInheritType()
+        if inherit == inherit_rrs:
+            tree.inherit[position] = 2
+        elif inherit == inherit_rrss:
+            tree.inherit[position] = 1
         if kinds[index] == "joint":
-            tree.compensate[position] = node.GetTransformationInheritType() == inherit_rrs
+            tree.compensate[position] = inherit == inherit_rrs
+        elif parents[index] >= 0:
+            turns                = tree.axis_turn is not None and parents[index] == 0
+            tree.folds[position] = turns or bool(np.any(tree.pre[position] != 0.0))
+        # a mesh under a camera root of a file ConvertScene turns, whose
+        # post rotation turns past fbx's view axis (_fbx_camera_skins)
+        under = False
+        if bakes and kinds[index] == "mesh" and tree.axis_turn is not None:
+            root = index
+            while parents[root] > 0:
+                root = parents[root]
+            under = views[root] == "camera" and bool(np.any(tree.axis[place[root]] != 0.0))
+        if bakes and kinds[index] == "mesh" and (tree.inherit[position] != 0 or under):
+            # a skin holding no cluster is none to Maya's import
+            attribute = typed(node.GetNodeAttribute(), FBX.FbxMesh, FBX)
+            skins     = range(attribute.GetDeformerCount(skin_kind))
+            skinned = any(
+                typed(attribute.GetDeformer(k, skin_kind), FBX.FbxSkin, FBX).GetClusterCount() > 0 for k in skins
+            )
+            tree.skinned[position]      = skinned and tree.inherit[position] != 0
+            tree.camera_skins[position] = skinned and under
 
         if not keeps[index]:
             continue
@@ -3428,12 +3573,21 @@ def _walk_fbx(
         hierarchy_data[unique_id] = data
         nodes[unique_id]          = node
 
+    # the cameras split off: the tree keeps the kept nodes and those above
+    if any(viewing):
+        aside        = np.flatnonzero([viewing[index] for index in rows])
+        cameras      = [position for position, index in enumerate(rows) if views[index] == "camera"]
+        views_tree   = _fbx_subtree(tree, aside)
+        tree         = _fbx_subtree(tree, np.flatnonzero([needed[index] for index in rows]))
+        tree.cameras = (views_tree, np.searchsorted(aside, cameras).tolist())
+
     tree.columns = np.flatnonzero(tree.kept >= 0)
     tree.above   = np.array(above, dtype=np.intp)
 
     # what the file holds that the dicts can't: folded in, on the static values
-    translate, rotate, scale, joint_orient, changed = _fbx_fold(
-        tree, tree.translate[None], tree.rotate[None], tree.scale[None]
+    baked = _fbx_static_bakes(tree) if bakes else None
+    translate, rotate, scale, joint_orient, changed, shear = _fbx_fold(
+        tree, tree.translate[None], tree.rotate[None], tree.scale[None], baked
     )
     for column, data in enumerate(hierarchy_data.values()):
         if not changed[column]:
@@ -3441,6 +3595,8 @@ def _walk_fbx(
         data["translate"] = translate[0, column]
         data["rotate"]    = rotate[0, column]
         data["scale"]     = scale[0, column]
+        if shear[0, column].any():
+            data["shear"] = shear[0, column]
         if data["node_type"] == "joint":
             data["joint_orient"] = joint_orient[0, column]
 
@@ -3451,6 +3607,23 @@ def _walk_fbx(
 # a fraction of its size, is one: the products of rotations a fold forms are
 # a few ulps off one
 _FBX_FOLD_BAND = 1e-12
+
+# how far off one scale and no shear a parent's world can sit and Maya still
+# leave an eInheritRrSs node under it unbaked (_fbx_even), each entry of GS:
+# 2,100 random parents, a fresh import each: unbaked at most 9.999e-5, baked
+# from 1.0006e-4. An exact 1 + 1e-4 stays unbaked, 1 + 1.00005e-4 bakes
+FBX_EVEN_BAND = 1.00001e-4
+
+# how far a scale curve on or above a parent can leave its first key's value
+# and Maya still leave that eInheritRrSs node unbaked: base 1, 83 float32
+# units (9.89e-6) stay, 84 (1.0014e-5) bake
+FBX_FLAT_CURVE = 1e-5
+
+# the value and derivative tolerance of the sdk's
+# FbxAnimCurveFilterConstantKeyReducer at its defaults, which Maya's fold of
+# a pre rotation runs on each curve (_fbx_left_keys). No relation to
+# FBX_FLAT_CURVE, which is Maya's own scale test
+_FBX_KEY_TOLERANCE = 0.009
 
 
 def _fbx_fold_split(block: np.ndarray) -> tuple:
@@ -3480,11 +3653,13 @@ def _fbx_fold_split(block: np.ndarray) -> tuple:
     return U, s, ~even
 
 
-def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
+def _fbx_fold(tree: _FbxTree, translate, rotate, scale, baked: Optional[dict] = None) -> tuple:
     """the kept nodes' channels, (F, k, 3) each, from those of every node of
     ``tree`` as the file holds them, (F, n, 3) each, every frame at once:
-    ``(translate, rotate, scale, joint_orient, changed)``, ``changed`` (k,)
-    saying which kept nodes the fold moved off the file's values
+    ``(translate, rotate, scale, joint_orient, changed, shear)``, ``changed``
+    (k,) saying which kept nodes the fold moved off the file's values, and
+    ``baked``, {i: (F, 4, 4)}, the local matrices Maya's import bakes
+    (:func:`_fbx_static_bakes`, :func:`_fbx_clip_bakes`), which no joint is
 
     Row vectors. The sdk composes a node's local matrix as Sp^-1 S Sp Soff
     Rp^-1 RA R JO Rp Roff T: Sp and Rp the scale and rotate pivots, Soff and
@@ -3504,25 +3679,51 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
       root, so its rotate curves stay as authored;
     - any other node, which the walk gives no rotate axis or joint orient,
       takes RA R JO E in its rotate, solved again in its rotate order;
-    - E a rotation U times one scale s puts s on the node's scale; a block
-      no node can hold under a turn, scales uneven, is split by row length,
-      as :func:`_scales_and_rotations` does, shear dropped: a joint takes
-      E's nearest rotation in place of U in its joint orient and splits its
-      scale and rotate out of the rest, its own scaled rotation times E with
-      that joint orient taken out; any other node splits its whole block,
-      its scale times RA R JO E, into its scale and rotate. What it drops,
-      the block it should hold times the inverse of the one it holds
-      (:func:`_fbx_fold_shear`), goes on the kept nodes under it, so
-      they stay where the file puts them, under a scale under 1e-12 too: a
-      joint that compensates its parent's scale takes it in its block as a
-      dropped node's matrix, split again; any other node keeps the
-      channels it holds without it, takes it in its translate alone, and
-      hands on what it should hold times the inverse of what it holds
-      (:func:`_fbx_hand_on`). On a frame the node is scaled exactly 0
-      along an axis the shear has no inverse and stays out of them. The
-      split keeps the length of each row of the block, so a node's axes
-      are the file's length where its kept parent's world scales evenly;
-      elsewhere which way they point and how long they are is the split's.
+    - E a rotation U times one scale s puts s on the node's scale. Any other
+      block goes through the split the matrix setters make
+      (:func:`_scales_shears_and_rotations`). A node that is no joint holds
+      its whole block, its scale times RA R JO E, as scale, shear and rotate,
+      and hands nothing on, but on a frame a row of its scale sits at most
+      1e-12 of the largest: the split fills that row from the current
+      rotation, so the node hands on what it should hold times the inverse
+      of what it holds, as a joint does. A joint takes what ``xform -m``
+      gives one, which leaves a joint's shear alone: E's nearest rotation in
+      place of U in its joint orient, its scale and rotate out of the rest,
+      its own scaled rotation times E with that joint orient taken out, the
+      shear thrown away. What it drops, the block it should hold times the
+      inverse of the one it holds (:func:`_fbx_fold_shear`), goes on the
+      kept nodes under it, so they stay where Maya puts them, under a scale
+      under 1e-12 too: a node that is no joint takes it in its block as a
+      dropped node's matrix and stops it, a joint that compensates its
+      parent's scale too, split again; any other joint keeps the channels it
+      holds without it, takes it in its translate alone, and hands on what it
+      should hold times the inverse of what it holds (:func:`_fbx_hand_on`).
+      On a frame the node is scaled exactly 0 along an axis the shear has no
+      inverse and stays out of them.
+
+    A node of ``baked`` holds the block Maya baked, S Sh R T, split the same
+    way, its rotate the file's where a row is flat and through euler_filter
+    along the frames, its rotate order and its pivots' own; what the nodes
+    dropped above it move goes on that block, and a dropped one is folded
+    into those under it as any dropped node's matrix. A node of
+    ``tree.folds`` with a negative axis holds Maya's scale, S Sig, and turns
+    by Sig R (:func:`_fbx_flips`), so ``sized`` stands for the file's scale
+    wherever the fold reads one, and one of ``tree.mixed`` takes Maya's solve
+    of the axes the sdk's conversion emptied (:func:`_fbx_mixed_angles`). One
+    of ``tree.loose`` turns by its keys alone, its pre and post rotation, and
+    a root's axis turn, lost. One of ``tree.null_joint`` keeps no pivot or
+    offset, as the joint Maya makes of it; where it does not bake it turns
+    by its pre rotation twice, Maya's fold and Maya's joint orient, and with
+    its rotation inactive once, its joint orient (``tree.null_pre``), and of
+    ``tree.loose`` by RA R JO, the pre and post rotation the conversion
+    leaves kept as Maya's joint orient and rotate axis; one that bakes,
+    stored eInheritRrs, divides its parent's scale attribute out of its bake
+    on every frame. A joint with a pre or a post rotation, or a joint root of
+    a file ConvertScene turns, whose axis turn is a pre rotation there, turns
+    its pivots by its rotate alone and its scale offset by RA R JO, as Maya's
+    translate does: t + Roff + Rp + (Sp - Sp S - Rp) R + Soff Q. A parent's
+    scale a compensating joint divides out is Maya's attribute: S, S Sig on a
+    node with a pre rotation, the split's on a baked node.
 
     A scale under 1e-12 in size is read as 1e-12, as Maya's evaluation holds
     it (:func:`_fbx_maya_scale`), wherever the fold multiplies or divides by
@@ -3545,8 +3746,14 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
     goes through euler_filter along the frames, frame 0 as solved. A kept
     node nothing moves keeps the file's values to the bit, and so does every
     node of a file whose dropped nodes, pivots and offsets hold the
-    identity. The kept nodes go parents first, so a compensating joint
-    divides out its kept parent's scale as the fold leaves it.
+    identity, nothing of ``baked``, ``tree.mixed``, ``tree.loose`` or a
+    negative axis on a node of ``tree.folds`` among them, no node of
+    ``tree.null_joint`` with a pre rotation or pivots, no node of a clip
+    held below the whole frame its first key truncates to
+    (:func:`_fbx_clip_bakes`), and no joint with both a pre or post
+    rotation and pivots, nor a joint root with pivots in a file
+    ConvertScene turns. The kept nodes go parents first, so a compensating
+    joint divides out its kept parent's scale as the fold leaves it.
     """
     frames  = len(translate)
     kept    = tree.kept
@@ -3559,10 +3766,33 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
     out_rotate    = rotate[:, columns].copy()
     out_scale     = scale[:, columns].copy()
     out_orient    = np.repeat(tree.pre[columns][None], frames, axis=0)
+    out_shear     = np.zeros((frames, count, 3))
     changed       = np.zeros(count, dtype=bool)
+    baked         = {} if baked is None else baked
 
-    pivoted = np.any(tree.pivots != 0.0, axis=(1, 2))
-    turned  = np.any(tree.pre != 0.0, axis=1) | np.any(tree.axis != 0.0, axis=1)
+    pivoted = np.any(tree.pivots != 0.0, axis=(1, 2)) & ~tree.null_joint
+    turned  = np.any(tree.pre != 0.0, axis=1) | np.any(tree.axis != 0.0, axis=1) | np.any(tree.null_pre != 0.0, axis=1)
+
+    # Maya's scale attribute: a mirrored node with a pre rotation re-splits
+    # all negative, S Sig, and turns by Sig R; a baked node's is its split's
+    flip  = _fbx_flips(tree, scale)
+    sized = scale if flip is None else scale * flip
+    attr  = sized
+    if baked:
+        attr = sized.copy()
+        for i, matrix in baked.items():
+            attr[:, i] = _scales_shears_and_rotations(
+                matrix[:, :3, :3], np.broadcast_to(eye, (frames, 3, 3)), np.zeros((frames, 3))
+            )[0]
+
+        # a node with no attribute under a skeleton node, stored eInheritRrs,
+        # is a joint that compensates in Maya: it divides out its parent's
+        # scale attribute on each frame, past its bake
+        baked = dict(baked)
+        for i in [i for i in baked if tree.null_joint[i] and tree.inherit[i] == 2 and parent[i] > 0]:
+            matrix            = baked[i].copy()
+            matrix[:, :3, :3] = matrix[:, :3, :3] / _fbx_maya_scale(attr[:, parent[i]])[:, None, :]
+            baked[i]          = matrix
 
     # the scale a node's own block divides out: its parent's, when it
     # compensates, held as Maya holds a scale, so a joint compensating a
@@ -3573,11 +3803,11 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
     # holds
     divided           = np.ones((frames, len(kept), 3))
     rows              = np.flatnonzero(tree.compensate & (parent >= 0))
-    divided[:, rows]  = _fbx_maya_scale(scale[:, parent[rows]])
+    divided[:, rows]  = _fbx_maya_scale(attr[:, parent[rows]])
     under             = rows[kept[parent[rows]] >= 0]
-    own               = scale[:, parent[under]]
+    own               = attr[:, parent[under]]
     divided[:, under] = np.where(own == 0.0, 1.0, own)
-    maya_scale        = _fbx_maya_scale(scale)
+    maya_scale        = _fbx_maya_scale(sized)
 
     # a dropped node that holds the identity on every frame moves nothing
     still = (
@@ -3589,13 +3819,38 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
         & np.all(scale == 1.0, axis=(0, 2))
         & np.all(divided == 1.0, axis=(0, 2))
     )
+    for i in baked:
+        still[i] = False
 
     def orientations(i: int) -> np.ndarray:
         """(F, 3, 3) RA R JO of node i"""
         R = _eulers_to_matrices(rotate[:, i], tree.orders[i])[:, :3, :3]
+        if tree.null_pre[i].any():
+            # rotation inactive: Maya's joint keeps the pre rotation as its
+            # joint orient all the same
+            return R @ _eulers_to_matrices(tree.null_pre[i], 0)[:3, :3]
+        if i in tree.loose:
+            # the conversion leaves it its keys and no pre or post rotation;
+            # on a root the read turns, the turn it held as one is lost too,
+            # and the joint Maya makes of a node with no attribute keeps them
+            # as its rotate axis and joint orient
+            if tree.null_joint[i]:
+                RA, JO = _eulers_to_matrices(np.array([tree.axis[i], tree.pre[i]]), 0)[:, :3, :3]
+                return RA @ R @ JO
+            return R if tree.axis_turn is None or parent[i] != 0 else R @ tree.axis_turn.T
+        if flip is not None:
+            R = flip[:, i, :, None] * R
+        if tree.mixed and i in tree.mixed:
+            pre    = _fbx_pre_turn(tree, i)
+            angles = _fbx_mixed_angles(R @ pre, tree.orders[i], *tree.mixed[i])
+            R      = _eulers_to_matrices(angles, tree.orders[i])[:, :3, :3] @ pre.T
         if not turned[i]:
             return R
         RA, JO = _eulers_to_matrices(np.array([tree.axis[i], tree.pre[i]]), 0)[:, :3, :3]
+        if tree.null_joint[i]:
+            # Maya's import folds the pre rotation into the rotate, then
+            # keeps it as the joint orient of the joint it makes too
+            return RA @ R @ JO @ JO
         return RA @ R @ JO
 
     def offset(i: int, Q: np.ndarray, sizes: np.ndarray) -> np.ndarray:
@@ -3604,12 +3859,27 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
         if not pivoted[i]:
             return translate[:, i]
         rp, sp, ro, so = tree.pivots[i]
+        rooted = tree.axis_turn is not None and parent[i] == 0
+        if tree.joint[i] and (turned[i] or rooted):
+            # Maya turns a joint's pivots by its rotate alone, the scale
+            # offset by RA R JO; a root's axis turn is a pre rotation there,
+            # which the turn into Maya's axes puts back on the rotate's term
+            R     = _eulers_to_matrices(rotate[:, i], tree.orders[i])[:, :3, :3]
+            alone = np.einsum("fi,fij->fj", (sp - rp) - sp * sizes[:, i], R)
+            return (
+                translate[:, i]
+                + (ro + rp)
+                + (alone @ tree.axis_turn.T if rooted else alone)
+                + np.einsum("i,fij->fj", so, Q)
+            )
         moved = (so + sp - rp) - sp * sizes[:, i]
         return translate[:, i] + ((ro + rp) + np.einsum("fi,fij->fj", moved, Q))
 
     def local(i: int) -> np.ndarray:
         """(F, 4, 4) dropped node i's local matrix, its parent's scale
         divided out, its scales as Maya holds them"""
+        if i in baked:
+            return baked[i]
         Q                 = orientations(i)
         matrix            = np.zeros((frames, 4, 4))
         matrix[:, :3, :3] = maya_scale[:, i, :, None] * Q / divided[:, i, None, :]
@@ -3630,7 +3900,7 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
 
     # the shear a kept node's split drops, per column, (F, 4, 4), on the
     # frames it drops any: the kept nodes under it take it as they take a
-    # dropped node's matrix, so they stay where the file puts them
+    # dropped node's matrix, so they stay where Maya puts them
     sheared = {}
 
     for column, i in enumerate(columns.tolist()):
@@ -3638,12 +3908,13 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
         ancestor = tree.above[column]
         D        = chain.get(up) if up >= 0 and kept[up] < 0 else None
 
-        # the shear the kept parent's split dropped: a compensating joint
-        # takes it in its block, split again; any other node keeps the
-        # channels it holds without it, takes it in its translate alone and
-        # hands it on, so its rotate and scale stay the file's
+        # the shear the kept parent's split dropped: a node that is no joint
+        # takes it in its block and stops it, with shear, a compensating
+        # joint too, split again; any other joint keeps the channels it
+        # holds without it, takes it in its translate alone and hands it on,
+        # so its rotate and scale stay the file's
         lost = sheared.get(ancestor)
-        if lost is not None and tree.compensate[i]:
+        if lost is not None and (tree.compensate[i] or not tree.joint[i]):
             D, lost = (lost if D is None else D @ lost), None
         moved = D if lost is None else (lost if D is None else D @ lost)
         block = None if D is None else D[:, :3, :3]
@@ -3665,26 +3936,56 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
             if block is not None or not np.array_equal(divided[:, i], held):
                 block = (eye if block is None else block) / divided[:, i, :, None] * held[:, None, :]
 
-        level = block is None or bool(np.all(block == eye))
-        if not (pivoted[i] or moved is not None or not level or (turned[i] and not tree.joint[i])):
+        level   = block is None or bool(np.all(block == eye))
+        flipped = (flip is not None and bool(np.any(flip[:, i] != 1.0))) or bool(tree.mixed and i in tree.mixed)
+        flipped = flipped or i in tree.loose
+        if not (
+            pivoted[i]
+            or moved is not None
+            or not level
+            or (turned[i] and not tree.joint[i])
+            or flipped
+            or i in baked
+        ):
+            continue
+
+        if i in baked:
+            # the block Maya baked, S Sh R T, with what the nodes dropped
+            # above it move, shear and all: lost is in D on a node that
+            # is no joint, so moved and block go together
+            matrix = baked[i]
+            t      = matrix[:, 3, :3]
+            whole  = matrix[:, :3, :3]
+            if moved is not None:
+                t     = np.einsum("fi,fij->fj", t, moved[:, :3, :3]) + moved[:, 3, :3]
+                whole = whole @ block
+            order = tree.orders[i]
+            size_i, turn, sh = _scales_shears_and_rotations(
+                whole, _eulers_to_matrices(rotate[:, i], order)[:, :3, :3], np.zeros((frames, 3))
+            )
+            out_translate[:, column] = t
+            out_scale[:, column]     = size_i
+            out_shear[:, column]     = sh
+            out_rotate[:, column]    = _filtered(_matrices_to_eulers(turn, order)[:, None], [order])[:, 0]
+            changed[column]          = True
             continue
 
         Q = orientations(i)
-        t = offset(i, Q, scale)
+        t = offset(i, Q, sized)
         if moved is not None:
             t = np.einsum("fi,fij->fj", t, moved[:, :3, :3]) + moved[:, 3, :3]
         out_translate[:, column] = t
         changed[column]          = True
 
-        if level and (tree.joint[i] or not turned[i]):
+        if level and (tree.joint[i] or not turned[i]) and not flipped:
             if lost is not None:
-                _fbx_hand_on(sheared, column, scale[:, i, :, None] * Q @ moved[:, :3, :3], scale[:, i], Q)
+                _fbx_hand_on(sheared, column, sized[:, i, :, None] * Q @ moved[:, :3, :3], sized[:, i], Q)
             continue
 
         U, s, uneven = _fbx_fold_split(np.broadcast_to(eye, (frames, 3, 3)) if block is None else block)
         order = tree.orders[i]
         if uneven.any():
-            whole = (scale[uneven, i, :, None] * Q[uneven]) @ block[uneven]
+            whole = (sized[uneven, i, :, None] * Q[uneven]) @ block[uneven]
         if tree.joint[i]:
             # the joint orient takes the turn, the scale its size
             JO                    = _eulers_to_matrices(tree.pre[i], 0)[:3, :3] @ U
@@ -3694,41 +3995,52 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale) -> tuple:
                 RA      = _eulers_to_matrices(tree.axis[i], 0)[:3, :3]
                 current = RA @ _eulers_to_matrices(rotate[uneven, i], order)[:, :3, :3]
                 whole   = whole @ np.swapaxes(JO[uneven], -1, -2)
-                sized, turn = _scales_and_rotations(whole, current)
-                out_scale[uneven, column]  = sized
+                size_i, turn, _ = _scales_shears_and_rotations(whole, current, np.zeros((len(whole), 3)))
+                out_scale[uneven, column]  = size_i
                 out_rotate[uneven, column] = _matrices_to_eulers(RA.T @ turn, order)
                 out_rotate[:, column]      = _filtered(out_rotate[:, column][:, None], [order])[:, 0]
         else:
             # the rotate takes the pre and post rotation and the turn
             solved = _matrices_to_eulers(Q @ U, order)
-            sized  = scale[:, i] * s[:, None]
+            size_i = sized[:, i] * s[:, None]
             if uneven.any():
-                sized[uneven], turn = _scales_and_rotations(whole, Q[uneven])
-                solved[uneven] = _matrices_to_eulers(turn, order)
-            out_scale[:, column]  = sized
+                size_i[uneven], turn, sh = _scales_shears_and_rotations(whole, Q[uneven], np.zeros((len(whole), 3)))
+                solved[uneven]            = _matrices_to_eulers(turn, order)
+                out_shear[uneven, column] = sh
+            out_scale[:, column]  = size_i
             out_rotate[:, column] = _filtered(solved[:, None], [order])[:, 0]
+            if uneven.any():
+                # a flat row's direction is the split's own: what it leaves
+                # goes on the kept nodes under it, a joint's hand-on
+                sizes = np.abs(size_i[uneven])
+                flat  = (sizes <= 1e-12 * sizes.max(axis=-1, keepdims=True)).any(axis=-1)
+                if flat.any():
+                    short = np.zeros(frames, dtype=bool)
+                    short[np.flatnonzero(uneven)[flat]] = True
+                    shear = _scale_shears(np.ones_like(sh[flat]), sh[flat])[..., :3, :3]
+                    lost  = _fbx_fold_shear(whole[flat], size_i[uneven][flat], turn[flat], frames, short, shear)
+                    if lost is not None:
+                        sheared[column] = lost
+            continue
 
         if lost is not None:
-            # the rotation the node holds, rotate axis and joint orient in
+            # the rotation the joint holds, rotate axis and joint orient in
+            RA    = _eulers_to_matrices(tree.axis[i], 0)[:3, :3]
             holds = _eulers_to_matrices(out_rotate[:, column], order)[:, :3, :3]
-            if tree.joint[i]:
-                RA    = _eulers_to_matrices(tree.axis[i], 0)[:3, :3]
-                holds = RA @ holds @ _eulers_to_matrices(out_orient[:, column], 0)[:, :3, :3]
-            _fbx_hand_on(sheared, column, scale[:, i, :, None] * Q @ moved[:, :3, :3], out_scale[:, column], holds)
+            holds = RA @ holds @ _eulers_to_matrices(out_orient[:, column], 0)[:, :3, :3]
+            _fbx_hand_on(sheared, column, sized[:, i, :, None] * Q @ moved[:, :3, :3], out_scale[:, column], holds)
         elif uneven.any():
-            # the rotation the node holds, its joint orient left out
-            holds = _eulers_to_matrices(out_rotate[uneven, column], order)[:, :3, :3]
-            if tree.joint[i]:
-                holds = RA @ holds
-            lost = _fbx_fold_shear(whole, out_scale[uneven, column], holds, frames, uneven)
+            # the rotation the joint holds, its joint orient left out
+            holds = RA @ _eulers_to_matrices(out_rotate[uneven, column], order)[:, :3, :3]
+            lost  = _fbx_fold_shear(whole, out_scale[uneven, column], holds, frames, uneven)
             if lost is not None:
                 sheared[column] = lost
 
-    return out_translate, out_rotate, out_scale, out_orient, changed
+    return out_translate, out_rotate, out_scale, out_orient, changed, out_shear
 
 
 def _fbx_hand_on(sheared: dict, column: int, whole, sized, holds) -> None:
-    """puts in ``sheared[column]`` what a kept node under a sheared one hands
+    """puts in ``sheared[column]`` what a kept joint under a sheared one hands
     on to the nodes under it, on every frame, where any frame hands on any:
     ``whole`` (F, 3, 3), the block it should hold under its kept parent,
     times the inverse of the one its channels hold, ``sized`` (F, 3) times
@@ -3753,14 +4065,16 @@ def _fbx_maya_scale(scale: np.ndarray) -> np.ndarray:
     return np.where(np.abs(scale) < _FBX_LEAST_SCALE, _FBX_LEAST_SCALE, scale)
 
 
-def _fbx_fold_shear(whole, sized, turn, frames: int, uneven) -> Optional[np.ndarray]:
-    """(F, 4, 4) the shear a split dropped, ``whole @ inv(sized turn)`` on
-    the ``uneven`` frames, the identity on the others; None where every
+def _fbx_fold_shear(whole, sized, turn, frames: int, uneven, shear=None) -> Optional[np.ndarray]:
+    """(F, 4, 4) the shear a split dropped, ``whole @ inv(sized shear turn)``
+    on the ``uneven`` frames, the identity on the others; None where every
     frame drops none, within :data:`_FBX_FOLD_BAND`
 
     ``whole`` (u, 3, 3) is the block the node should hold, its joint orient
-    taken out, and ``sized`` and ``turn`` the scale and the rotation its
-    channels hold; a frame where a scale is 0, or a value is not finite,
+    taken out, and ``sized``, ``turn`` and ``shear`` (u, 3, 3), None for none,
+    the scale, the rotation and the shear its channels hold, a joint's none
+    and a node's that is no joint on the frames a flat row leaves it short
+    of its block; a frame where a scale is 0, or a value is not finite,
     has no inverse, what it would drop not finite, and keeps the
     identity. A scale however small has one, and keeps its shear: a
     joint under the node that compensates it divides that scale out
@@ -3768,7 +4082,10 @@ def _fbx_fold_shear(whole, sized, turn, frames: int, uneven) -> Optional[np.ndar
     """
     eye = np.eye(3)
     with np.errstate(divide="ignore", invalid="ignore"):
-        lost = whole @ np.swapaxes(turn, -1, -2) / sized[:, None, :]
+        lost = whole @ np.swapaxes(turn, -1, -2)
+        if shear is not None:
+            lost = lost @ np.linalg.inv(shear)
+        lost = lost / sized[:, None, :]
     ok = np.isfinite(lost).all(axis=(-2, -1))
     ok &= np.abs(lost - eye).max(axis=(-2, -1)) > _FBX_FOLD_BAND
     if not ok.any():
@@ -3778,6 +4095,1011 @@ def _fbx_fold_shear(whole, sized, turn, frames: int, uneven) -> Optional[np.ndar
     rows              = np.flatnonzero(uneven)[ok]
     out[rows, :3, :3] = lost[ok]
     return out
+
+
+def _fbx_converted_turn(scene) -> Optional[np.ndarray]:
+    """the (3, 3) turn the sdk's ConvertScene gives the roots of a right
+    handed file whose up axis is x or z, whatever axis_system the read asks
+    for, and None on every other file. Maya's importer works out a bake in
+    that converted scene, where the turn is a root's pre rotation
+    (:func:`_fbx_folded_angles`)"""
+    up_axis, _, _, _, right = _fbx_scene_axes(scene)
+    if up_axis == 1 or not right:
+        return None
+    return _fbx_axis_turn(scene, _MAYA_Y_UP, "")
+
+
+def _fbx_flips(tree: _FbxTree, scale: np.ndarray) -> Optional[np.ndarray]:
+    """(F, n, 3) Sig, which takes a file's scale ``scale`` (F, n, 3) to the
+    one Maya holds on a node that folds a pre rotation (``tree.folds``):
+    sign(det S) sign(S), a zero counted positive, so a negative determinant
+    reads all three axes negative and a positive one all three positive, and
+    1 on every other node, ``tree.loose`` among them. None where no such
+    node holds a negative axis, so a file with none reads to the bit as it
+    did"""
+    rows = np.flatnonzero(tree.folds)
+    if tree.loose:
+        rows = np.array([i for i in rows.tolist() if i not in tree.loose], dtype=np.intp)
+    if not len(rows):
+        return None
+    values = scale[:, rows]
+    if not (values < 0.0).any():
+        return None
+    sign          = np.where(values < 0.0, -1.0, 1.0)
+    flip          = np.ones(scale.shape)
+    flip[:, rows] = sign * sign.prod(axis=-1, keepdims=True)
+    return flip
+
+
+def _fbx_pre_turn(tree: _FbxTree, i: int) -> np.ndarray:
+    """(3, 3) the pre rotation node i folds: its own, then the axis turn on
+    a root of a file ConvertScene turns (:func:`_fbx_converted_turn`)"""
+    pre = _eulers_to_matrices(tree.pre[i], 0)[:3, :3]
+    if tree.axis_turn is not None and tree.parent[i] == 0:
+        pre = pre @ tree.axis_turn
+    return pre
+
+
+def _fbx_get_r(block: np.ndarray) -> np.ndarray:
+    """(..., 3, 3) the rotation the sdk's ``GetR`` reads off a block: its rows
+    at length 1, all three negated where it mirrors, solved in xyz and built
+    again, so a sheared block's rotation is the sdk's and no rotation of the
+    block's own, near gimbal too"""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rows = block / np.linalg.norm(block, axis=-1, keepdims=True)
+        rows = np.where((_det3(rows) < 0.0)[..., None, None], -rows, rows)
+    return _eulers_to_matrices(_matrices_to_eulers(rows, 0), 0)[..., :3, :3]
+
+
+def _fbx_gimbal_halves(angles: np.ndarray, order: int) -> np.ndarray:
+    """(F, 3) euler ``angles`` in ``order`` with a frame at that order's
+    gimbal, its middle axis within 5e-6 of 90, as the sdk solves it with no
+    frame before it: the free angle shared between the outer axes, half of
+    it on the first and -sign(middle) half on the last in xyz, yzx and zxy,
+    +sign(middle) half in xzy, yxz and zyx. On a curve the sdk shares what
+    that angle moved from the frame before (:func:`_fbx_folded_angles`)"""
+    from cgmath.transforms._numba._euler import MAYA_EA
+
+    first, middle, last = MAYA_EA[order]
+    at = np.abs(np.abs(angles[:, middle]) - 90.0) < 5e-6
+    if not at.any():
+        return angles
+    angles            = angles.copy()
+    half              = 0.5 * (angles[at, first] + angles[at, last])
+    angles[at, first] = half
+    angles[at, last]  = np.sign(angles[at, middle]) * (-1.0 if order < 3 else 1.0) * half
+    return angles
+
+
+def _fbx_other_solve(angles: np.ndarray, order: int) -> np.ndarray:
+    """(..., 3) the other euler solution of ``angles`` in ``order``, the outer
+    axes a half turn on and the middle one 180 less it, none wrapped"""
+    from cgmath.transforms._numba._euler import MAYA_EA
+
+    first, middle, last = MAYA_EA[order]
+    other = np.array(angles, dtype=float)
+    other[..., first] += 180.0
+    other[..., last]  += 180.0
+    other[..., middle] = 180.0 - other[..., middle]
+    return other
+
+
+def _fbx_maya_solve(block: np.ndarray, order: int) -> np.ndarray:
+    """(3,) Maya's own euler solve of a rotation ``block`` (3, 3) in
+    ``order``, MEulerRotation's: of the principal solve, +180 read as -180,
+    and the other solution (:func:`_fbx_other_solve`), the smaller sum of
+    absolute angles. Maya's on 20,000 of 20,000 random rotations in each
+    order, where the principal solve alone is on 19,071 to 19,141, and on
+    720 of 720 with an outer axis at a half turn, where it is on 490; but
+    at an exact tie of the two sums, where Maya's pick and this one each
+    follow their own rounding (ClipData.load_fbx's list), and on an angle
+    1e-9 to 5.7e-9 degrees under +180, which Maya reads as -180, within
+    1e-10 radians of it, and this solve, within 1e-9 degrees, does not"""
+    solved = _matrices_to_eulers(block, order)
+    solved = np.where(solved >= 180.0 - 1e-9, solved - 360.0, solved)
+    other  = _fbx_other_solve(solved, order)
+    return other if np.abs(other).sum() < np.abs(solved).sum() else solved
+
+
+def _fbx_mixed_angles(block: np.ndarray, order: int, axes, values, level) -> np.ndarray:
+    """(F, 3) the euler angles Maya's import holds on a node whose rotate
+    axes ``axes`` the sdk's conversion emptied (``tree.mixed``): on each frame
+    the solution of ``block`` (F, 3, 3) whose ``axes`` sit on ``level``,
+    those axes then set to ``values``. Each frame finds its solution on its
+    own, so a read of some frames gives what the full read gives them"""
+
+    def away(solve: np.ndarray) -> np.ndarray:
+        return np.abs((solve - level + 180.0) % 360.0 - 180.0)[:, axes].max(axis=-1)
+
+    one           = _fbx_gimbal_halves(_matrices_to_eulers(block, order), order)
+    two           = _fbx_other_solve(one, order)
+    held          = np.where((away(one) <= away(two))[:, None], one, two)
+    held[:, axes] = values[axes]
+    return held
+
+
+def _fbx_folded_angles(tree: _FbxTree, i: int, rotate: np.ndarray, flip, held: Optional[tuple] = None) -> np.ndarray:
+    """(F, 3) a(f) of a node of ``tree.folds``: the euler angles, in its own
+    order, of Sig R Rpre, ``rotate`` (F, 3) its file's values and ``flip`` (F,
+    3) its Sig or None, in double, where Maya rounds to float32. The scene
+    Maya bakes in (:func:`_fbx_scene_worlds`) reads them in xyz, so the branch
+    is a different rotation there and not the same one spelled differently: a
+    node with a curve in the take (``tree.keyed``) takes the solution nearest
+    the frame before, by the sum of squares of the steps, from 0
+    (:func:`_filtered`, ``squares``), as the sdk re-keys it, a frame at the
+    order's gimbal too, where the outer axes share what their free angle moved
+    from the frame before; a node with none the principal solve. ``held``,
+    (below, first, above, last), holds the rows ``below`` at the row ``first``
+    and those ``above`` at ``last`` once filtered: a rotate a later layer
+    keys, which Maya merges over the take's span on the branch the conversion
+    gave it (:func:`_fbx_clip_bakes`)"""
+    order = tree.orders[i]
+    block = _eulers_to_matrices(rotate, order)[:, :3, :3] @ _fbx_pre_turn(tree, i)
+    if flip is not None:
+        block = flip[:, :, None] * block
+    angles = _fbx_gimbal_halves(_matrices_to_eulers(block, order), order)
+    if not tree.keyed[i]:
+        return angles
+    angles = _filtered(np.concatenate([np.zeros((1, 3)), angles])[:, None], [order], True)[1:, 0]
+    if held is not None:
+        below, first, above, last = held
+        angles[below], angles[above] = angles[first], angles[last]
+    return angles
+
+
+def _fbx_scene_local(
+    tree:      _FbxTree,
+    T,
+    R,
+    i:         int,
+    sizes,
+    flip,
+    converted: bool,
+    static:    bool,
+    held:      Optional[tuple] = None,
+) -> tuple:
+    """(Q, sizes, tf), node i's rotation (F, 3, 3), scale (F, 3) and
+    translation (F, 3), the last with its pivots and offsets in it, from its
+    file's ``T`` and ``R``, (F, n, 3), and scale ``sizes`` (F, 3)
+
+    ``converted`` False reads the file's own scene. True reads the scene
+    Maya bakes in (:func:`_fbx_scene_worlds`): a node of ``tree.folds`` holds
+    no pre and no post rotation and reads its rotate in xyz, a(f) and S Sig
+    on a frame, its file's r and S at the static pose (``static``); a joint
+    root holds the axis turn on the right of Q, and every root's translate
+    and rotate pivot turn with it, as they sit in the parent's frame.
+    ``held`` goes to a(f) (:func:`_fbx_folded_angles`).
+    """
+    turn = tree.axis_turn if converted and tree.parent[i] == 0 else None
+    if converted and i in tree.loose:
+        Q = _eulers_to_matrices(R[:, i], 0)[:, :3, :3]
+    elif converted and tree.folds[i]:
+        angles = R[:, i]
+        if not static:
+            one    = None if flip is None else flip[:, i]
+            angles = _fbx_folded_angles(tree, i, R[:, i], one, held)
+            sizes  = sizes if one is None else sizes * one
+        Q = _eulers_to_matrices(angles, 0)[:, :3, :3]
+    else:
+        RA, JO = _eulers_to_matrices(np.array([tree.axis[i], tree.pre[i]]), 0)[:, :3, :3]
+        Q = RA @ _eulers_to_matrices(R[:, i], tree.orders[i])[:, :3, :3] @ (JO if turn is None else JO @ turn)
+    rp, sp, ro, so = tree.pivots[i]
+    held = T[:, i] + (ro + rp)
+    if turn is not None:
+        held = held @ turn
+    return Q, sizes, held + np.einsum("fi,fij->fj", (so + sp - rp) - sp * sizes, Q)
+
+
+def _fbx_scene_worlds(tree: _FbxTree, T, R, S, rows, converted: bool, static: bool, spans: Optional[dict] = None) -> dict:
+    """{i: (F, 4, 4)} the worlds of ``rows``, parents first, every frame of
+    the (F, n, 3) channels at once: numpy's model of the sdk's evaluation
+
+    No sdk call: the scene Maya bakes in is in no file, and a call a frame
+    and a node is a loop over frames in clip code. With P3 and Pt the parent's
+    world, GR the rotation the sdk reads off P3 (:func:`_fbx_get_r`) and GS =
+    P3 GR^T: S Q P3 for eInheritRSrs, S GS Q GR for eInheritRrSs, S Q S_p^-1
+    P3 for eInheritRrs, S_p the parent's scale, all held as Maya holds a scale
+    (:func:`_fbx_maya_scale`), and tf P3 + Pt for the translation, a node
+    under the scene root reading P3 as the identity. ``converted`` says which
+    scene (:func:`_fbx_scene_local`): the file's for the even test
+    (:func:`_fbx_even`), which sees no turn on a root, the converted one for a
+    bake. ``spans``, {i: held}, the holds of a(f)
+    (:func:`_fbx_folded_angles`).
+    """
+    frames = len(T)
+    eye    = np.broadcast_to(np.eye(4), (frames, 4, 4))
+    flip   = _fbx_flips(tree, S) if converted and not static else None
+    worlds = {}
+    for i in rows:
+        up   = tree.parent[i]
+        P    = worlds.get(up, eye)
+        P3   = P[:, :3, :3]
+        held = None if spans is None else spans.get(i)
+        Q, sizes, t = _fbx_scene_local(tree, T, R, i, _fbx_maya_scale(S[:, i]), flip, converted, static, held)
+
+        world = np.zeros((frames, 4, 4))
+        if tree.inherit[i] == 1 and up > 0:
+            GR               = _fbx_get_r(P3)
+            GS               = P3 @ np.swapaxes(GR, -1, -2)
+            world[:, :3, :3] = sizes[:, :, None] * GS @ Q @ GR
+        elif tree.inherit[i] == 2 and up > 0:
+            held             = S[:, up] if flip is None else S[:, up] * flip[:, up]
+            world[:, :3, :3] = (sizes[:, :, None] * Q) / _fbx_maya_scale(held)[:, None, :] @ P3
+        else:
+            world[:, :3, :3] = sizes[:, :, None] * Q @ P3
+        world[:, 3, :3] = np.einsum("fi,fij->fj", t, P3) + P[:, 3, :3]
+        world[:, 3, 3]  = 1.0
+        worlds[i]       = world
+    return worlds
+
+
+def _fbx_chain(tree: _FbxTree, rows) -> list:
+    """``rows`` and every node above them, the scene root out, parents first"""
+    need = np.zeros(len(tree.parent), dtype=bool)
+    for i in np.asarray(rows, dtype=np.intp).tolist():
+        while i > 0 and not need[i]:
+            need[i] = True
+            i       = int(tree.parent[i])
+    return np.flatnonzero(need).tolist()
+
+
+def _fbx_even(block: np.ndarray) -> np.ndarray:
+    """(F,) whether Maya reads a parent's world (F, 3, 3) as one scale and no
+    shear: with GS = P3 GR^T (:func:`_fbx_get_r`), its diagonal within
+    :data:`FBX_EVEN_BAND` of its first entry, relative to it, and every other
+    entry within that band as it stands. No band on P3 P3^T fits Maya's
+    verdicts: they hang on the Euler solve of GR"""
+    GS   = block @ np.swapaxes(_fbx_get_r(block), -1, -2)
+    size = np.einsum("...ii->...i", GS)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rows = np.abs(size[..., 1:] / size[..., :1] - 1.0).max(axis=-1)
+    off = np.abs(GS - size[..., None] * np.eye(3)).max(axis=(-2, -1))
+    return (rows <= FBX_EVEN_BAND) & (off <= FBX_EVEN_BAND)
+
+
+def _fbx_typed_rows(tree: _FbxTree) -> np.ndarray:
+    """the positions of the nodes Maya's import may bake: stored eInheritRrSs
+    or eInheritRrs, no joint, roots of the file among them"""
+    return np.flatnonzero((tree.inherit != 0) & ~tree.joint & (tree.parent >= 0))
+
+
+def _fbx_inherited_block(tree: _FbxTree, S, i: int, Q, sizes, flip, worlds: dict) -> np.ndarray:
+    """(F, 3, 3) node i's rotation ``Q`` (F, 3, 3) and scale ``sizes`` (F, 3)
+    through what it inherits, in the converted scene (:func:`_fbx_scene_worlds`,
+    ``worlds``, ``flip`` as there): S GS Q GS^-1 for eInheritRrSs, S Q S_p^-1
+    for eInheritRrs, S_p the parent's scale, S Q under the scene root. A
+    frame whose GS has no inverse keeps S Q, the others bake"""
+    up    = tree.parent[i]
+    block = sizes[:, :, None] * Q
+    if tree.inherit[i] == 1:
+        if up > 0:
+            P3 = worlds[up][:, :3, :3]
+            GS = P3 @ np.swapaxes(_fbx_get_r(P3), -1, -2)
+            ok = _invertible(GS)
+            if ok.any():
+                held      = block @ np.swapaxes(Q, -1, -2)
+                block[ok] = held[ok] @ GS[ok] @ Q[ok] @ np.linalg.inv(GS[ok])
+    elif up > 0:
+        held  = S[:, up] if flip is None else S[:, up] * flip[:, up]
+        block = block / _fbx_maya_scale(held)[:, None, :]
+    return block
+
+
+def _fbx_skin_block(tree: _FbxTree, T, R, S, i: int, block: np.ndarray) -> tuple:
+    """(block, t), (F, 3, 3) and (F, 3), what a skinned mesh holds where it
+    bakes and holds its static bake, ``block`` that bake: Maya takes the
+    shear of ``block`` and reads the rest again in the converted scene with
+    no curve on any node, a folded mesh's rotate the principal solve of R
+    Rpre and its file's scale. Of that block B', the rows' lengths, negated
+    where B' mirrors, and the GetR of B', and the translation through the
+    same rotation"""
+    frames      = len(T)
+    plain       = copy.copy(tree)
+    plain.keyed = np.zeros(len(tree.parent), dtype=bool)
+    up          = tree.parent[i]
+    worlds      = _fbx_scene_worlds(plain, T, R, S, _fbx_chain(tree, [up]), True, False) if up > 0 else {}
+
+    Q, sizes, t = _fbx_scene_local(plain, T, R, i, S[:, i], None, True, False)
+    again = _fbx_inherited_block(plain, S, i, Q, sizes, _fbx_flips(tree, S), worlds)
+    sign  = np.where(_det3(again) < 0.0, -1.0, 1.0)[:, None, None]
+    again = sign * again
+
+    eye   = np.broadcast_to(np.eye(3), (frames, 3, 3))
+    shear = _scales_shears_and_rotations(block, eye, np.zeros((frames, 3)))[2]
+    rows  = _scale_shears(np.linalg.norm(again, axis=-1), shear)[..., :3, :3]
+    return sign * (rows @ _fbx_get_r(again)), t
+
+
+def _fbx_bake_block(
+    tree:   _FbxTree,
+    T,
+    R,
+    S,
+    i:      int,
+    flip,
+    worlds: dict,
+    static: bool,
+    spans:  Optional[dict] = None,
+) -> np.ndarray:
+    """(F, 4, 4) the local matrix Maya's import bakes on node i, in the
+    converted scene (:func:`_fbx_scene_worlds`, ``worlds``, ``flip`` as
+    there): the block of :func:`_fbx_inherited_block` and the node's own
+    translation
+
+    A block whose determinant is negative is negated, as Maya's split takes
+    it. A skinned mesh that holds its static bake reads its block again
+    (:func:`_fbx_skin_block`); on a curve it bakes as any node. A node with
+    no attribute under a skeleton node is a joint in Maya's import
+    (``tree.null_joint``): its static bake holds the split's scale and
+    rotation and no shear, and stored eInheritRrs it divides its parent's
+    scale out once more on every frame, as a joint that compensates it
+    (:func:`_fbx_fold`). On a root of a file ConvertScene turns the block
+    goes back into the file's axes, which :func:`_fbx_turn_roots` turns.
+    ``spans`` as :func:`_fbx_scene_worlds`' own.
+    """
+    frames = len(T)
+    up     = tree.parent[i]
+    Q, sizes, t = _fbx_scene_local(tree, T, R, i, S[:, i], flip, True, static, None if spans is None else spans.get(i))
+    block = _fbx_inherited_block(tree, S, i, Q, sizes, flip, worlds)
+
+    block[_det3(block) < 0.0] *= -1.0
+    if tree.skinned[i] and static:
+        block, t = _fbx_skin_block(tree, T, R, S, i, block)
+    if tree.null_joint[i] and static:
+        eye = np.broadcast_to(np.eye(3), (frames, 3, 3))
+        held, turn, _ = _scales_shears_and_rotations(block, eye, np.zeros((frames, 3)))
+        block = held[:, :, None] * turn
+
+    if up == 0 and tree.axis_turn is not None:
+        back  = tree.axis_turn.T
+        block = block @ back
+        t     = t @ back
+
+    out            = np.zeros((frames, 4, 4))
+    out[:, :3, :3] = block
+    out[:, 3, :3]  = t
+    out[:, 3, 3]   = 1.0
+    return out
+
+
+def _fbx_static_bakes(tree: _FbxTree) -> dict:
+    """{i: (1, 4, 4)} what Maya's import with animation off bakes: every node
+    of :func:`_fbx_typed_rows` but one stored eInheritRrSs under a parent
+    even at the static pose (:func:`_fbx_even`), a root's parent always so,
+    and every mesh of ``tree.camera_skins`` (:func:`_fbx_camera_skins`).
+    The rig reads no take: a clip's frames decide on their own and can part
+    from it, as Maya's two imports do (:func:`_fbx_clip_bakes`)"""
+    rows = _fbx_typed_rows(tree)
+    T, R, S = tree.translate[None], tree.rotate[None], tree.scale[None]
+    if not len(rows):
+        return _fbx_camera_skins(tree, T, R, S, {}, True)
+
+    open_  = rows[(tree.inherit[rows] == 1) & (tree.parent[rows] > 0)]
+    worlds = _fbx_scene_worlds(tree, T, R, S, _fbx_chain(tree, tree.parent[open_]), False, True)
+    even   = {up: bool(_fbx_even(worlds[up][:, :3, :3]).all()) for up in set(tree.parent[open_].tolist())}
+    rows   = [i for i in rows.tolist() if not (tree.inherit[i] == 1 and even.get(tree.parent[i], True))]
+    worlds = _fbx_scene_worlds(tree, T, R, S, _fbx_chain(tree, tree.parent[rows]), True, True)
+    baked  = {i: _fbx_bake_block(tree, T, R, S, i, None, worlds, True) for i in rows}
+    return _fbx_camera_skins(tree, T, R, S, baked, True)
+
+
+def _fbx_camera_skins(tree: _FbxTree, T, R, S, baked: dict, static: bool, channels=None) -> dict:
+    """``baked`` with the local matrices Maya's import gives the skinned
+    meshes of ``tree.camera_skins``, on the channels ``T``, ``R`` and ``S``
+    (F, n, 3): the static pose's, or with ``static`` False a clip's frames,
+    ``channels`` (n, 3, 3) saying which axes of each node's translate,
+    rotate and scale a curve keys, every axis of a channel a later layer
+    keys
+
+    A skinned mesh under a camera root of a file ConvertScene turns sits
+    where the sdk places it, which leaves out the rotate axis Maya reads off
+    that camera (:class:`_FbxTree`), as far as its local matrix holds it
+    against Maya's world of its parent: of B = L W'(p) W(p)^-1, L the
+    mesh's own local matrix, its bake where it bakes, W' its parent's world
+    in the file's scene with the camera's axis left out
+    (:func:`_fbx_scene_worlds`), and W Maya's, where the camera is as Maya
+    holds it, its scale S Sig and its rotate Sig R where it mirrors
+    (:func:`_fbx_flips`), its bake where it bakes, the rows' lengths and the
+    GetR, negated where B mirrors, and B's translation: no shear. The read
+    works that out at the static pose alone, as Maya's import with
+    animation off does (Maya's clip import works it out from the keyed
+    mesh's channels at frame 0, live layers included: ClipData.load_fbx's
+    list), and holds it as the mesh's channels, the rotate Maya's own solve
+    of that GetR in the mesh's rotate order (:func:`_fbx_maya_solve`), the
+    translate B's translation less its pivots' term. On a clip's frames a
+    mesh with no curve holds them; one with a curve holds them on each axis
+    no curve keys and the mesh's own value on each axis a curve keys, and on
+    all three axes of a channel a later layer keys, muted or not, as Maya
+    merges it whole, and turns about its pivots by the rotate and scale it
+    then holds; one that folds a pre rotation in another order than xyz,
+    keyed on some rotate axes, holds its own rotate on all three."""
+    rows = np.flatnonzero(tree.camera_skins).tolist()
+    if not rows:
+        return baked
+    out = dict(baked)
+
+    if not static:
+        # the static pose's, but a camera root that bakes with a curve keeps
+        # the axis turn one with none loses, in the clip's bake as in Maya's
+        rest       = copy.copy(tree)
+        rest.loose = frozenset()
+        rest.mixed = {}
+        still      = _fbx_static_bakes(rest)
+        frames     = len(T)
+        tops       = set()
+        for i in rows:
+            while tree.parent[i] > 0:
+                i = int(tree.parent[i])
+            tops.add(i)
+        moved = [top for top in sorted(tops) if top in baked and tree.keyed[top]]
+        if moved:
+            sT, sR, sS = tree.translate[None], tree.rotate[None], tree.scale[None]
+            flip  = _fbx_flips(rest, sS)
+            again = {i: block for i, block in still.items() if not tree.camera_skins[i]}
+            for top in moved:
+                again[top] = _fbx_bake_block(rest, sT, sR, sS, top, flip, {}, False)
+            still = _fbx_camera_skins(rest, sT, sR, sS, again, True)
+        for i in rows:
+            block = still[i]
+            if not tree.keyed[i]:
+                out[i] = np.repeat(block, frames, axis=0)
+                continue
+            if i in baked:
+                continue
+
+            # the static values Maya holds, each axis a curve keys the mesh's
+            # own, composed again as Maya composes its channels; a mesh that
+            # folds a pre rotation in another order than xyz, keyed on some
+            # rotate axes, holds its own rotate on all three, Maya's rule
+            # there left out (ClipData.load_fbx's list); no test pins the
+            # whole-channel case, as no edge can sit within 2e-6 there while
+            # Maya's rule is left out
+            B     = block[0]
+            sign  = -1.0 if _det3(B[:3, :3]) < 0.0 else 1.0
+            keys  = channels[i]
+            sizes = sign * np.linalg.norm(B[:3, :3], axis=-1)
+            held  = _fbx_get_r(sign * B[:3, :3])
+            Q, own, _ = _fbx_scene_local(tree, T, R, i, _fbx_maya_scale(S[:, i]), None, False, False)
+            size  = np.where(keys[2], own, sizes)
+            whole = keys[1].all() or (keys[1].any() and tree.folds[i] and tree.orders[i] != 0)
+            turn  = Q if whole else np.broadcast_to(held, Q.shape)
+            if keys[1].any() and not whole:
+                RA     = _eulers_to_matrices(tree.axis[i], 0)[:3, :3]
+                angles = R[:, i]
+                if tree.folds[i]:
+                    flip   = _fbx_flips(tree, S)
+                    angles = _fbx_folded_angles(tree, i, angles, None if flip is None else flip[:, i])
+                angles = np.where(keys[1], angles, _fbx_maya_solve(RA.T @ held, tree.orders[i]))
+                turn   = RA @ _eulers_to_matrices(angles, tree.orders[i])[:, :3, :3]
+            rp, sp, ro, so = tree.pivots[i]
+            place = B[3, :3] - ((ro + rp) + ((so + sp - rp) - sp * sizes) @ held)
+
+            local            = np.zeros((frames, 4, 4))
+            local[:, :3, :3] = size[:, :, None] * turn
+            local[:, 3, :3]  = np.where(keys[0], T[:, i], place) + (ro + rp) + np.einsum("fi,fij->fj", (so + sp - rp) - sp * size, turn)
+            local[:, 3, 3]   = 1.0
+            out[i]           = local
+        return out
+
+    # the camera roots, whose axis the sdk leaves out, and Maya's own of
+    # those that mirror or bake, against the file's
+    plain      = copy.copy(tree)
+    plain.axis = tree.axis.copy()
+    roots      = {}
+    for i in rows:
+        top = i
+        while tree.parent[top] > 0:
+            top = int(tree.parent[top])
+        roots[i]        = top
+        plain.axis[top] = 0.0
+
+    chain  = _fbx_chain(tree, tree.parent[rows])
+    worlds = _fbx_scene_worlds(tree, T, R, S, chain, False, True)
+    bare   = _fbx_scene_worlds(plain, T, R, S, chain, False, True)
+    flip   = _fbx_flips(tree, S)
+    swaps  = {}
+    for top in set(roots.values()):
+        if top in baked:
+            maya = baked[top]
+        elif flip is not None and np.any(flip[:, top] != 1.0):
+            sized = flip[:, top] * S[:, top]
+            RA, JO = _eulers_to_matrices(np.array([tree.axis[top], tree.pre[top]]), 0)[:, :3, :3]
+            turn = RA @ (flip[:, top, :, None] * _eulers_to_matrices(R[:, top], tree.orders[top])[:, :3, :3]) @ JO
+            rp, sp, ro, so = tree.pivots[top]
+            maya            = np.zeros((len(T), 4, 4))
+            maya[:, :3, :3] = _fbx_maya_scale(sized)[:, :, None] * turn
+            maya[:, 3, :3]  = T[:, top] + (ro + rp) + np.einsum("fi,fij->fj", (so + sp - rp) - sp * _fbx_maya_scale(sized), turn)
+            maya[:, 3, 3]   = 1.0
+        else:
+            continue
+        swaps[top] = np.linalg.inv(worlds[top]) @ maya
+
+    for i in rows:
+        up = tree.parent[i]
+        if i in baked:
+            local = baked[i]
+        else:
+            Q, sizes, t = _fbx_scene_local(tree, T, R, i, _fbx_maya_scale(S[:, i]), None, False, True)
+            local            = np.zeros((len(T), 4, 4))
+            local[:, :3, :3] = sizes[:, :, None] * Q
+            local[:, 3, :3]  = t
+            local[:, 3, 3]   = 1.0
+        world           = worlds[up] if roots[i] not in swaps else worlds[up] @ swaps[roots[i]]
+        held            = local @ bare[up] @ np.linalg.inv(world)
+        block           = held[:, :3, :3]
+        sign            = np.where(_det3(block) < 0.0, -1.0, 1.0)[:, None, None]
+        held[:, :3, :3] = sign * (np.linalg.norm(block, axis=-1)[:, :, None] * _fbx_get_r(sign * block))
+        out[i]          = held
+    return out
+
+
+def _fbx_sheared(sizes: np.ndarray, block: np.ndarray) -> np.ndarray:
+    """(F,) whether a camera is scaled unevenly or sheared on each frame:
+    its three scale magnitudes ``sizes`` (F, 3) apart, or its world ``block``
+    (F, 3, 3) holding a shear, two of its rows off square, each by more than
+    :data:`FBX_EVEN_BAND` relative to their size"""
+    top   = sizes.max(axis=-1)
+    apart = sizes.min(axis=-1) < top - FBX_EVEN_BAND * top
+    gram  = block @ np.swapaxes(block, -1, -2)
+    size  = np.sqrt(np.einsum("...ii->...i", gram))
+    skew  = np.abs(gram) > FBX_EVEN_BAND * size[..., :, None] * size[..., None, :]
+    return apart | (skew & ~np.eye(3, dtype=bool)).any(axis=(-2, -1))
+
+
+def _fbx_sheared_cameras(tree: _FbxTree, stack=None, ticks=None) -> list:
+    """the names of the cameras of a read (``tree.cameras``) scaled unevenly
+    or sheared (:func:`_fbx_sheared`): its own three scale magnitudes apart,
+    or its world in the file's scene (:func:`_fbx_scene_worlds`) holding a
+    shear, at the static pose or, with a take's ``stack``, on any of the
+    frames ``ticks``, every frame at once. A mirrored camera, its three
+    scale magnitudes equal, is none. The read's own values take nothing from
+    here"""
+    if tree.cameras is None:
+        return []
+    views, rows = tree.cameras
+    chain  = _fbx_chain(views, rows)
+    static = [values[None] for values in (views.translate, views.rotate, views.scale)]
+    takes  = [(static, _fbx_scene_worlds(views, *static, chain, False, True))]
+    if stack is not None:
+        blocks = [np.repeat(values, len(ticks), axis=0) for values in static]
+        _fbx_sample_take(stack, list(zip(views.nodes, range(len(views.nodes)))), ticks, views, blocks)
+        takes.append((blocks, _fbx_scene_worlds(views, *blocks, chain, False, False)))
+    return [
+        views.nodes[i].GetName()
+        for i in rows
+        if any(_fbx_sheared(np.abs(channels[2][:, i]), worlds[i][:, :3, :3]).any() for channels, worlds in takes)
+    ]
+
+
+def _fbx_warn_cameras(names: list) -> None:
+    """one warning naming the cameras of a read scaled unevenly or sheared
+    (:func:`_fbx_sheared_cameras`), logged as save_fbx's warnings are;
+    nothing where there is none"""
+    if names:
+        _FBX_LOGGER.warning(
+            f"fbx cameras scaled unevenly or sheared, read as they are; a later release will refuse a file holding one: {', '.join(names)}"
+        )
+
+
+def _fbx_left_keys(values: np.ndarray) -> tuple:
+    """what the sdk's ``FbxAnimCurveFilterConstantKeyReducer``, at its
+    defaults, leaves of curves (K, C), which hangs on the keys' values and
+    order alone: ``(left, first, last)``, each (C,), whether any key stays
+    and the positions of the first and the last that do. A curve none of
+    whose keys sits past :data:`_FBX_KEY_TOLERANCE` of its last key leaves
+    nothing, whatever its range; the last key left is two past the last key
+    that does, the first two before the first key past the tolerance of the
+    first key's value (exact on a level head, a few frames off on one that
+    drifts under the tolerance a key)"""
+    count = len(values)
+    off   = np.abs(values - values[-1]) > _FBX_KEY_TOLERANCE
+    left  = off.any(axis=0)
+    last  = np.minimum(count - 1 - np.argmax(off[::-1], axis=0) + 2, count - 1)
+    first = np.maximum(np.argmax(np.abs(values - values[0]) > _FBX_KEY_TOLERANCE, axis=0) - 2, 0)
+    return left, first, last
+
+
+def _fbx_node_curves(tree: _FbxTree, stack, rows) -> tuple:
+    """what the take's layers key on the nodes ``rows``, by channel
+    (translate, rotate, scale): ``(keyed, axes, bounds, merged, keys,
+    repeats)``. ``keyed`` (n,), whether a node has a curve with a key
+    in a layer that is not muted or in any layer past the take's first, a
+    flat one and a translate curve alone among them; ``axes`` (n, 3, 3),
+    which axes of each channel hold a curve with a key in the take's first
+    layer, where that layer is not muted, and ``bounds`` (n, 3, 2) the first
+    and the last of those keys in ticks, meaningless where there is none;
+    ``merged`` (n, 3), whether a channel has a key in a layer past the
+    take's first, muted or not, which Maya's import merges over the take's
+    span (:func:`_fbx_clip_bakes`); ``keys`` {i: [(axis, ticks, values),
+    ...]} of the translate curves in that first layer of a node of
+    ``tree.folds``, whose conversion reads the file's own keys, whatever
+    the later layers; and ``repeats``, whether a curve repeats before its
+    keys, which the frames before them then have to sample"""
+    criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimLayer.ClassId)
+    every    = [stack.GetSrcObject(criteria, i) for i in range(stack.GetSrcObjectCount(criteria))]
+    every    = [typed(layer, FBX.FbxAnimLayer, FBX) for layer in every]
+    layers   = [layer for layer in every if not layer.Mute.Get()]
+    alive    = {layer.GetUniqueID() for layer in layers}
+
+    size     = len(tree.nodes)
+    keyed    = np.zeros(size,         dtype=bool)
+    axes     = np.zeros((size, 3, 3), dtype=bool)
+    bounds   = np.zeros((size, 3, 2), dtype=np.int64)
+    merged   = np.zeros((size, 3),    dtype=bool)
+    keys     = {}
+    repeats  = False
+    constant = _fbx_enum(FBX.FbxAnimCurve, "EExtrapolationType", "eConstant")
+    tick_of  = FBX.FbxTime.Get
+
+    for i in rows:
+        node = tree.nodes[i]
+        for channel, prop in enumerate((node.LclTranslation, node.LclRotation, node.LclScaling)):
+            for index, layer in enumerate(every):
+                curve_node = typed(prop.GetCurveNode(layer), FBX.FbxAnimCurveNode, FBX)
+                if curve_node is None:
+                    continue
+                for axis in range(3):
+                    curve = typed(curve_node.GetCurve(axis), FBX.FbxAnimCurve, FBX)
+                    count = curve.KeyGetCount() if curve is not None else 0
+                    if not count:
+                        continue
+                    on                 = layer.GetUniqueID() in alive
+                    merged[i, channel] = merged[i, channel] or index > 0
+                    if not on:
+                        continue
+                    keyed[i] = True
+                    repeats  = repeats or curve.GetPreExtrapolation() != constant
+                    if index:
+                        continue
+                    lo = curve.KeyGetTime(0).Get()
+                    hi = curve.KeyGetTime(count - 1).Get()
+                    if axes[i, channel].any():
+                        lo, hi = min(bounds[i, channel, 0], lo), max(bounds[i, channel, 1], hi)
+                    bounds[i, channel]     = lo, hi
+                    axes[i, channel, axis] = True
+                    if tree.folds[i] and channel == 0:
+                        keys.setdefault(i, []).append(
+                            (
+                                axis,
+                                np.fromiter(map(tick_of, map(curve.KeyGetTime, range(count))), np.int64, count),
+                                np.fromiter(map(curve.KeyGetValue, range(count)), np.float64, count),
+                            )
+                        )
+    return keyed | merged.any(axis=1), axes, bounds, merged, keys, repeats
+
+
+def _fbx_reduced(tree: _FbxTree, i: int, R, S, flip, grid, span: tuple, keys, merged) -> tuple:
+    """what the sdk's conversion leaves of the curves of a keyed node i of
+    ``tree.folds``, which it runs on the take's first layer alone:
+    ``(first, last, emptied, level, gone)``, the frames of the first and the
+    last key left on the channels no later layer keys, None where no curve
+    is left there, the rotate axes (3,) it empties of those, a(f)
+    (:func:`_fbx_folded_angles`) on the node's first key, and ``gone`` (3,
+    3), whether it empties each axis of the translate, rotate and scale
+    curves
+
+    The conversion re-keys the rotate, as a(f), and the scale, as S Sig, on
+    the whole frames from the one the node's first key of any curve
+    truncates to, towards 0, to the last one before its last key, and on a
+    last key off a whole frame, ``span`` in frames, where the curves hold
+    what they hold on the whole frame after it; keeps the translate's own
+    keys, ``keys``, [(axis, frames, values)] a curve, whatever the later
+    layers; and hands each curve to the sdk's key reducer
+    (:func:`_fbx_left_keys`). A channel of ``merged`` (3,), which a later
+    layer keys, keeps the take's span after it (:func:`_fbx_clip_bakes`):
+    its frames do not count here. ``R`` and ``S`` hold that first layer's
+    values alone on the ``grid``'s frames, and ``flip`` its Sig.
+    """
+    window = (grid >= np.trunc(span[0]) - _FBX_FRAME_SNAP) & (grid <= np.ceil(span[1] - _FBX_FRAME_SNAP))
+    angles = _fbx_folded_angles(tree, i, R[:, i], None if flip is None else flip[:, i])[window]
+    sizes  = S[window, i] if flip is None else S[window, i] * flip[window, i]
+    frames = grid[window]
+    gone   = np.zeros((3, 3), dtype=bool)
+
+    curves = [(1, [0, 1, 2], frames, angles), (2, [0, 1, 2], frames, sizes)]
+    curves += [(0, [axis], at, values[:, None]) for axis, at, values in keys]
+
+    starts, stops = [], []
+    for channel, axes, at, values in curves:
+        left, first, last = _fbx_left_keys(values)
+        gone[channel, axes] = ~left
+        if merged[channel]:
+            continue
+        starts.extend(at[first[left]].tolist())
+        stops.extend(at[last[left]].tolist())
+    emptied = gone[1] & ~merged[1]
+    if not starts:
+        return None, None, emptied, angles[0], gone
+    return min(starts), max(stops), emptied, angles[0], gone
+
+
+def _fbx_emptied_solve(tree: _FbxTree, i: int, R, flip, grid) -> np.ndarray:
+    """(3,) Maya's own solve of a node with an emptied rotate axis, which is
+    the sdk's where the order is xyz and on no other: of Sig R Rpre on the
+    frame nearest 0 (:func:`_fbx_maya_solve`)"""
+    order = tree.orders[i]
+    at    = int(np.argmin(np.abs(grid)))
+    block = _eulers_to_matrices(R[at, i], order)[:3, :3] @ _fbx_pre_turn(tree, i)
+    if flip is not None:
+        block = flip[at, i, :, None] * block
+    return _fbx_maya_solve(block, order)
+
+
+def _fbx_clip_bakes(tree: _FbxTree, stack, sampled: list, file_fps: float, frames: np.ndarray, held: list) -> dict:
+    """{i: (F, 4, 4)} the local matrices Maya's import bakes on the clip's
+    ``frames``, (F,) in the file's frames, whole or not, for the nodes
+    :func:`_fbx_typed_rows` gives, from the take's curves; sets ``tree.keyed``,
+    ``tree.mixed`` and ``tree.loose``, and holds in ``held``, the clip's
+    translate, rotate and scale (F, n, 3), what the conversion holds below a
+    folded node's keys
+
+    Maya's fold is the sdk's ``ConvertPivotAnimationRecursive`` and its key
+    reduction, run on the take's first layer alone, which the read samples
+    on its own as well (:func:`_fbx_sample_take`'s ``base``). The read keeps
+    :func:`_fbx_scene_worlds`' model and takes four things from the call:
+    which frames a folded node's curves leave (:func:`_fbx_reduced`), the
+    emptied axes of ``tree.mixed``, the folded nodes it leaves as the file
+    keys them, ``tree.loose``, whose keys all sit before the whole frame the
+    first one truncates to, towards 0, and the frame it re-keys any other
+    from: that whole frame, below which a node keyed first before 0 off a
+    whole frame holds that frame's rotate and scale, on the grid and on the
+    clip's frames, so its angles take their branch from there.
+
+    Maya then merges the take's layers channel by channel, translate, rotate
+    and scale: a channel with a key in a layer past the first, muted or not,
+    keys the take's span, stepping from its start where that sits off a whole
+    frame, with what the layers that are not muted give over what the
+    conversion left of the first, a curve the conversion emptied holding its
+    first key's value under them and, below a head, the first layer's rotate
+    and scale held at the head's whole frame, and holds that before and after
+    the span; every other channel keeps what the conversion leaves it. The
+    nodes a bake needs are sampled once, one :func:`_fbx_sample_take` call on
+    a grid of whole frames of the file, never per frame, from the earlier of
+    0 and the chain's first key to the later of 0 and the chain's last, the
+    frames before that first key one row, every curve holding its first key
+    there, unless a curve repeats before its keys; once more where a later
+    layer keys any of them, the merge in.
+
+    A node stored eInheritRrSs stays unbaked where its parent's world is even
+    at the static pose and no node from the parent up holds a scale curve
+    leaving its first key by more than :data:`FBX_FLAT_CURVE`
+    (:func:`_fbx_even`), whatever that world does on the frames; a root's
+    parent always is. The others bake. Their first and last key are the
+    earliest and the latest of their channels', the conversion's or the
+    span's. On a frame the bake reads the row of tau, the node's whole frame
+    below, clipped to the earlier of 0 and its first key and the later of 0
+    and its last, so it holds after its last key and a read at another fps
+    steps as Maya's keys do; a first key before 0 off a whole frame steps
+    from that key, on one more sampled grid per distinct fraction. A node
+    left no curve holds its static bake on every frame. A node that does
+    not bake reads, on a channel a later layer keys, the layers that are not
+    muted as the file holds them, on every frame.
+    """
+    rows   = _fbx_typed_rows(tree)
+    folded = np.flatnonzero(tree.folds)
+    if not len(rows) and not len(folded):
+        return {}
+
+    count = len(frames)
+    need  = set(_fbx_chain(tree, rows)).union(folded.tolist(), np.flatnonzero(tree.camera_skins).tolist())
+    keyed, axes, bounds, merged, keys, repeats = _fbx_node_curves(tree, stack, sorted(need))
+    tree.keyed = keyed
+    tree.mixed = {}
+    if not keyed.any():
+        return {i: np.repeat(block, count, axis=0) for i, block in _fbx_static_bakes(tree).items()}
+
+    # each node's first and last key, in frames: on a channel no later layer
+    # keys, its keys in the take's first layer; on one a later layer keys,
+    # the take's span. The conversion's: every key of that first layer
+    per_second = _fbx_ticks_per_second()
+    to_frame   = file_fps / per_second
+    own        = axes.any(axis=2)
+    later      = merged.any(axis=1)
+    ends       = np.zeros(0)
+    if later.any():
+        span = stack.GetLocalTimeSpan()
+        ends = np.array([span.GetStart().Get(), span.GetStop().Get()]) * to_frame
+    edges = bounds * to_frame
+    kept  = own & ~merged
+    start = np.where(kept, edges[..., 0], np.inf).min(axis=1)
+    stop  = np.where(kept, edges[..., 1], -np.inf).max(axis=1)
+    if later.any():
+        start[later] = np.minimum(start[later], ends[0])
+        stop[later]  = np.maximum(stop[later], ends[1])
+    first    = np.where(own, edges[..., 0], np.inf).min(axis=1)
+    last     = np.where(own, edges[..., 1], -np.inf).max(axis=1)
+    converts = folded[own[folded].any(axis=1)]
+
+    # the grid of whole frames, from the earlier of 0 and the first key
+    lowest = int(np.floor(min(start[keyed].min(), first[converts].min(initial=np.inf)) + _FBX_FRAME_SNAP))
+    begin  = min(0, lowest)
+    end    = max(0, int(np.ceil(max(stop[keyed].max(), last[converts].max(initial=-np.inf)) - _FBX_FRAME_SNAP)))
+    grid   = np.arange(begin, end + 1)
+    if lowest > begin + 1 and not repeats:
+        grid = np.concatenate([[begin], np.arange(lowest, end + 1)])
+
+    # the conversion re-keys a folded node from the whole frame its first key
+    # truncates to, towards 0: a node whose keys all sit before that frame, a
+    # lone key before 0 off a whole frame among them, it leaves as the file
+    # keys it, with no pre or post rotation; one keyed first before 0 off a
+    # whole frame holds that frame's rotate and scale below it, so its angles
+    # take their branch from there
+    heads = {}
+    loose = []
+    for i in converts.tolist():
+        head = np.trunc(first[i])
+        if head > last[i] + _FBX_FRAME_SNAP:
+            loose.append(i)
+        elif head > first[i] + _FBX_FRAME_SNAP:
+            heads[i] = head
+    tree.loose = frozenset(loose)
+
+    wanted = [pair for pair in sampled if pair[1] in need]
+    sT, sR, sS = tree.translate[None], tree.rotate[None], tree.scale[None]
+    holds = {}
+    fixed = {}
+    turns = [i for i in folded[merged[folded, 1]].tolist() if i not in tree.loose]
+
+    def hold(blocks: list, at: np.ndarray, every: bool = True) -> None:
+        """the rows of ``blocks`` (T, R, S) on the frames ``at`` below a
+        head, at the rotate and scale of the head's whole frame; ``every``
+        False leaves out a channel a later layer keys"""
+        for i, (rotate, scale) in holds.items():
+            below = at < heads[i] - _FBX_FRAME_SNAP
+            if every or not merged[i, 1]:
+                blocks[1][below, i] = rotate
+            if every or not merged[i, 2]:
+                blocks[2][below, i] = scale
+
+    def sample(at: np.ndarray, merge: bool = True, alone: Optional[list] = None) -> list:
+        """T, R and S, (len(at), n, 3), the nodes a bake needs on the frames
+        ``at``, held below a head, on a channel a later layer keys the first
+        layer alone, the later layers over it, and, with ``merge``, on such a
+        channel before and after the take's span; ``alone`` takes the first
+        layer's own R and S, and T as the rest pose holds it"""
+        both, back = np.unique(np.concatenate([at, ends if merge else ends[:0]]), return_inverse=True)
+        blocks = [np.repeat(values[None], len(both), axis=0) for values in (tree.translate, tree.rotate, tree.scale)]
+        firsts = None if alone is None else [block.copy() for block in blocks]
+        under  = dict(fixed)
+        for i, values in holds.items():
+            below = (both < heads[i] - _FBX_FRAME_SNAP)[:, None]
+            for channel in (1, 2):
+                if merged[i, channel]:
+                    mask, value = under.get((i, channel), (np.zeros(3, dtype=bool), values[channel - 1]))
+                    under[(i, channel)] = (below | mask, np.where(mask, value, values[channel - 1]))
+        _fbx_sample_take(stack, wanted, _fbx_ticks(both / file_fps, per_second), tree, blocks, under, firsts)
+        hold(blocks, both, False)
+        if alone is not None:
+            alone.extend(block[back[: len(at)]] for block in firsts)
+        if merge and len(ends):
+            lo, hi = back[len(at):]
+            for channel in range(3):
+                for i in np.flatnonzero(merged[:, channel]).tolist():
+                    if channel == 1 and i in turns:
+                        continue
+                    blocks[channel][both < ends[0] - _FBX_FRAME_SNAP, i] = blocks[channel][lo, i]
+                    blocks[channel][both > ends[1] + _FBX_FRAME_SNAP, i] = blocks[channel][hi, i]
+        return [block[back[: len(at)]] for block in blocks]
+
+    def spanned(at: np.ndarray) -> Optional[dict]:
+        """{i: held} the holds of a(f) on the frames ``at`` of a folded node
+        whose rotate a later layer keys (:func:`_fbx_folded_angles`), None
+        where there is none"""
+        if not turns:
+            return None
+        below = at < ends[0] - _FBX_FRAME_SNAP
+        above = at > ends[1] + _FBX_FRAME_SNAP
+        held  = (below, min(int(below.sum()), len(at) - 1), above, max(len(at) - 1 - int(above.sum()), 0))
+        return dict.fromkeys(turns, held)
+
+    # the heads' whole frames sit on the grid, so it holds their values: the
+    # first layer's, which the conversion reads alone
+    base = []
+    T, R, S = sample(grid, False, base)
+    for i, head in heads.items():
+        row      = int(np.searchsorted(grid, head))
+        holds[i] = (base[1][row, i].copy(), base[2][row, i].copy())
+    hold([T, R, S], grid)
+    hold(base, grid)
+    hold(held, frames, False)
+
+    # what the conversion leaves of a folded node's curves, and an axis it
+    # empties that Maya's own solve then takes; a channel a later layer keys
+    # goes past it, but for a curve of the first layer it empties, which
+    # holds its first key's value under the later layers
+    alive = keyed.copy()
+    R0, S0 = base[1:]
+    flip = _fbx_flips(tree, S0)
+    for i in converts.tolist():
+        if i in tree.loose:
+            continue
+        own_keys = [(axis, at * to_frame, values) for axis, at, values in keys.get(i, ())]
+        lo, hi, emptied, level, gone = _fbx_reduced(tree, i, R0, S0, flip, grid, (first[i], last[i]), own_keys, merged[i])
+        row = int(np.searchsorted(grid, np.trunc(first[i]) - _FBX_FRAME_SNAP))
+        if merged[i, 0]:
+            # a unit root's first layer reads its translate in cm, the file's
+            # unit times its length (_fbx_sample_take). No test pins this
+            # factor: it changes the read only where the unit root bakes, and
+            # on every such file measured Maya's import sits 0.8 off the read
+            # in position with it (99.8 without), as it does 0.5 off the same
+            # root unbaked
+            factor = tree.lengths[i] if tree.unit_roots[i] else 1.0
+            for axis, _, values in own_keys:
+                if gone[0, axis]:
+                    mask, value = fixed.setdefault((i, 0), (np.zeros(3, dtype=bool), np.zeros(3)))
+                    mask[axis], value[axis] = True, values[0] * factor
+        if merged[i, 1] and axes[i, 1].any() and gone[1].all():
+            fixed[(i, 1)] = (axes[i, 1].copy(), R0[row, i].copy())
+        if merged[i, 2] and (axes[i, 2] & gone[2]).any():
+            fixed[(i, 2)] = (axes[i, 2] & gone[2], S0[row, i].copy())
+        if lo is None and not later[i]:
+            alive[i] = False
+            continue
+        if lo is not None:
+            start[i], stop[i] = (min(lo, ends[0]), max(hi, ends[1])) if later[i] else (lo, hi)
+        else:
+            start[i], stop[i] = ends
+        if tree.orders[i] and emptied.any() and not emptied.all() and not tree.up_down and not (S0[:, i] == 0.0).any():
+            solve = _fbx_emptied_solve(tree, i, R0, flip, grid)
+            apart = (level - solve + 180.0) % 360.0 - 180.0
+            if (np.abs(apart[emptied]) > _FBX_KEY_TOLERANCE).any():
+                tree.mixed[i] = (emptied, solve, level)
+
+    # the merge: the grid again, the later layers over what the conversion
+    # left of the first, each merged channel held outside the take's span
+    if later.any():
+        T, R, S = sample(grid)
+    flip = _fbx_flips(tree, S)
+
+    # the even test: the static pose, and the scale curves over the whole
+    # take, so it never hangs on a clip's window; what a parent's world does
+    # on the frames does not count, as in Maya
+    moves  = (np.abs(S - S[:1]) > FBX_FLAT_CURVE).any(axis=(0, 2))
+    climbs = {0: False}
+    for i in sorted(need):
+        climbs[i] = bool(moves[i]) or climbs.get(int(tree.parent[i]), False)
+
+    bake  = [i for i in rows.tolist() if tree.inherit[i] != 1 or (tree.parent[i] > 0 and climbs[int(tree.parent[i])])]
+    open_ = [i for i in rows.tolist() if tree.inherit[i] == 1 and tree.parent[i] > 0 and not climbs[int(tree.parent[i])]]
+    if open_:
+        rest = _fbx_scene_worlds(tree, sT, sR, sS, _fbx_chain(tree, tree.parent[open_]), False, True)
+        even = {up: bool(_fbx_even(rest[up][:, :3, :3]).all()) for up in set(tree.parent[open_].tolist())}
+        bake = sorted(bake + [i for i in open_ if not even[tree.parent[i]]])
+
+    # the bakes
+    chain     = _fbx_chain(tree, tree.parent[bake])
+    moving    = [i for i in bake if alive[i]]
+    spans     = spanned(grid)
+    worlds    = _fbx_scene_worlds(tree, T, R, S, chain, True, False, spans) if moving else {}
+    rest      = _fbx_scene_worlds(tree, sT, sR, sS, chain, True, True) if len(moving) < len(bake) else {}
+    wholes    = np.floor(frames + _FBX_FRAME_SNAP)
+    fractions = {}
+    out       = {}
+    for i in bake:
+        if not alive[i]:
+            out[i] = np.repeat(_fbx_bake_block(tree, sT, sR, sS, i, None, rest, True), count, axis=0)
+            continue
+        t0   = min(0.0, start[i])
+        part = t0 - np.floor(t0 + _FBX_FRAME_SNAP)
+        if part <= _FBX_FRAME_SNAP:
+            block  = _fbx_bake_block(tree, T, R, S, i, flip, worlds, False, spans)
+            high   = np.ceil(max(0.0, stop[i]) - _FBX_FRAME_SNAP)
+            tau    = np.clip(wholes, min(0.0, np.floor(start[i] + _FBX_FRAME_SNAP)), high)
+            out[i] = block[np.searchsorted(grid, tau, side="right") - 1]
+            continue
+
+        # a first key before 0 off a whole frame: whole frames from that key
+        part = float(part)
+        if part not in fractions:
+            steps           = np.arange(begin, end + 2) + part
+            blocks          = sample(steps)
+            fractions[part] = blocks + [spanned(steps)]
+            fractions[part].append(_fbx_scene_worlds(tree, *blocks, chain, True, False, fractions[part][3]))
+        T2, R2, S2, spans2, worlds2 = fractions[part]
+        block  = _fbx_bake_block(tree, T2, R2, S2, i, _fbx_flips(tree, S2), worlds2, False, spans2)
+        steps  = np.clip(np.floor(frames - t0 + _FBX_FRAME_SNAP), 0, np.ceil(max(0.0, stop[i]) - t0 - _FBX_FRAME_SNAP))
+        out[i] = block[(steps + np.floor(t0 + _FBX_FRAME_SNAP) - begin).astype(np.intp)]
+    return _fbx_camera_skins(tree, *held, out, False, axes | merged[:, :, None])
 
 
 def _fbx_has_curves(stack) -> bool:
@@ -4345,8 +5667,12 @@ def _fbx_kept_binds(tree: _FbxTree, listed: dict, uuids: list) -> dict:
     whole.kept    = np.arange(len(kept), dtype=np.intp)
     whole.columns = whole.kept
     whole.above   = tree.parent
-    translate, rotate, scale, joint_orient, _ = _fbx_fold(
-        whole, tree.translate[None], tree.rotate[None], tree.scale[None]
+    translate, rotate, scale, joint_orient, _, shear = _fbx_fold(
+        whole,
+        tree.translate[None],
+        tree.rotate[None],
+        tree.scale[None],
+        _fbx_static_bakes(tree),
     )
 
     ids  = [generate_uuid() for _ in range(len(kept))]
@@ -4359,6 +5685,7 @@ def _fbx_kept_binds(tree: _FbxTree, listed: dict, uuids: list) -> dict:
             "translate":    translate[0, p],
             "rotate":       rotate[0, p],
             "scale":        scale[0, p],
+            "shear":        shear[0, p],
             "node_type":    "joint" if tree.joint[p] else "transform",
         }
         if up >= 0:
@@ -5192,7 +6519,7 @@ def _fbx_blend(
     return np.where(owned[None], out, below)
 
 
-def _fbx_sample_take(stack, sampled, ticks, tree: _FbxTree, blocks) -> None:
+def _fbx_sample_take(stack, sampled, ticks, tree: _FbxTree, blocks, fixed: Optional[dict] = None, base: Optional[list] = None) -> None:
     """the current take's local channels of ``sampled`` ((node, column) pairs,
     a column a position of ``tree``) on the ``ticks`` grid, written into
     ``blocks`` (translate, rotate, scale, each frames x nodes x 3), the
@@ -5228,6 +6555,18 @@ def _fbx_sample_take(stack, sampled, ticks, tree: _FbxTree, blocks) -> None:
     frame 0 as the sdk gives it, where the sdk's curve can step by a whole
     turn or flip near gimbal. A curve no such layer touches keeps the
     branches the file holds.
+
+    ``fixed``, {(column, channel): (axes, values)}, holds those axes of a
+    column's channel in the take's first layer at those values, (3,),
+    under the later layers, ``axes`` (3,) on every frame or (frames, 3)
+    frame by frame: a curve Maya's conversion empties, and the frames below
+    the whole frame it re-keys a node from, before it merges the layers
+    (:func:`_fbx_clip_bakes`), in the units the first layer reads in once
+    converted. ``base``, blocks as ``blocks``, takes that first layer's
+    rotate and scale alone, as the file holds them, before any other layer
+    blends over them: what the conversion reads; its translate block is left
+    as it is, the conversion reading the translate's own keys
+    (:func:`_fbx_node_curves`).
     """
     criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimLayer.ClassId)
     layers   = [stack.GetSrcObject(criteria, i) for i in range(stack.GetSrcObjectCount(criteria))]
@@ -5261,6 +6600,12 @@ def _fbx_sample_take(stack, sampled, ticks, tree: _FbxTree, blocks) -> None:
             blended = blended * lengths
         elif converted and channel == 2 and np.any(sizes != 1.0):
             blended = blended / sizes
+        if base is not None and converted and channel and keyed.any():
+            base[channel][:, columns[keyed]] = blended[:, keyed]
+        for at, column in enumerate(columns.tolist() if fixed and converted else ()):
+            if (column, channel) in fixed:
+                axes, values = fixed[(column, channel)]
+                blended[:, at] = np.where(axes, values, blended[:, at])
         rebuilt = np.zeros(len(sampled), dtype=bool)
         for layer, weight in zip(layers[1:], weights):
             present, owned, values = _fbx_layer_channel(layer, props, ticks, per_second)
@@ -6056,14 +7401,17 @@ class TransformList(DataList[TransformData]):
 
         ``axis_system`` "maya_y_up", the default, loads the scene in Maya's
         Y-up axes as ``FbxAxisSystem.MayaYUp.ConvertScene`` converts it:
-        every node's world matrix is the file's times the turn from the
-        file's axis system to Maya's. Maya's FBX importer puts a file whose
-        up axis is x or z, an Unreal file among them, in the same place, but
-        for a skeleton node at the root of the file, eRoot or eEffector, that
-        holds no eLimbNode child, which it imports as a transform, 1.41 off
-        ConvertScene's in its 3x3 in a Z-up file and 1.28 in an X-up one, the
-        nodes under it up to 2.98 and 5.0 off in translate, where the read
-        follows ConvertScene: one that holds an eLimbNode, as an Unreal file's
+        every node's world matrix is the one Maya's FBXImport gives it, in
+        the file's axes times the turn from the file's axis system to Maya's
+        where the read turns, and that import parts from the sdk's own
+        evaluation on the nodes the inherit paragraph below names. Maya's FBX
+        importer puts a file whose up axis is x or z, an Unreal file among
+        them, in the same place as ConvertScene, but for a skeleton node at
+        the root of the file, eRoot or eEffector, that holds no eLimbNode
+        child, which it imports as a transform, 1.41 off ConvertScene's in
+        its 3x3 in a Z-up file and 1.28 in an X-up one, the nodes under it
+        up to 2.98 and 5.0 off in translate, where the read follows
+        ConvertScene: one that holds an eLimbNode, as an Unreal file's
         skeleton root does, imports as a joint where ConvertScene puts it,
         and save_fbx writes every joint as an eLimbNode. Maya's importer also
         parts from the read on a node below the roots that is no camera or
@@ -6184,34 +7532,41 @@ class TransformList(DataList[TransformData]):
         no collection of names, raises TypeError; an unknown name, or no
         name at all, raises ValueError.
 
-        Every kept node's world matrix is the file's all the same: what the
-        nodes dropped between it and its kept parent hold is folded into its
-        channels, on every frame for a clip, the way the turn above goes on
-        a root. A joint takes their turn in its joint orient and their move
-        in its translate, keeping its rotate (but for the uneven scale
-        below); any other node has its rotate solved again in its rotate
-        order. A uniform scale among them goes on the node's scale, and on
-        the scale of each joint under it that compensates its parent's scale
-        (segment scale compensate), which a joint compensating a dropped
-        parent divides out instead. An uneven one under a node turned in it
-        would take shear, which this read gives no node: that node's
-        position is the file's, its axes squared, its rotate solved again
-        from the matrix, a joint's too, and the length of each of its axes
-        is the file's where its kept parent's world scales evenly, as under
-        a joint that compensates the scale. The shear it drops goes on the
-        kept nodes under it, so they stay where the file puts them, under a
-        scale under 1e-12 too: a joint that compensates its scale takes it
-        in its channels, split again, and any other node keeps the rotate
-        and scale it holds without it, the file's where nothing else moves
-        it, takes the shear in its translate alone and hands it on. Their
-        positions are the file's, but on a frame the node is scaled exactly
-        0 along an axis, which leaves the shear no inverse; their axes are
-        the split's, or their own under the parent the read gives them. A
-        scale under 1e-12 in size on a dropped node is read as 1e-12, as
-        Maya's evaluation holds a scale: a joint that compensates a dropped
-        node scaled to 0 keeps its axes and sits on that node's position,
-        and a node that does not collapses onto it, its axes 1e-12 long,
-        the 1e-12 in its scale, where Maya 2025 puts them; the sdk's own
+        Every kept node's world matrix is the one Maya's FBXImport gives it
+        all the same: what the nodes dropped between it and its kept parent
+        hold is folded into its channels, on every frame for a clip, the way
+        the turn above goes on a root. A joint takes their turn in its joint
+        orient and their move in its translate, keeping its rotate (but for
+        the uneven scale below); any other node has its rotate solved again
+        in its rotate order. A uniform scale among them goes on the node's
+        scale, and on the scale of each joint under it that compensates its
+        parent's scale (segment scale compensate), which a joint compensating
+        a dropped parent divides out instead. An uneven one under a node
+        turned in it takes shear. A node that is no joint holds it, scale,
+        shear and rotate as the matrix setters split a matrix, so it sits on
+        Maya's world, within 2.71e-14 in the 3x3 on the test files. A joint
+        takes what ``xform -m`` gives one, no shear: the scale and rotate of
+        that split, its rotate solved again from the matrix, its position
+        Maya's, its axes off Maya's by the shear no joint holds, up to 22.8
+        on the 359 layouts measured read joints alone, where 3.0.2 was 25.4
+        in its axes and 33.3 in position. What it drops goes on the kept
+        nodes under it, so they stay where Maya puts them, under a scale
+        under 1e-12 too: a node that is no joint takes it in its channels,
+        with shear, and stops it, a joint that compensates its scale takes
+        it in its channels, split again, and any other joint keeps the
+        rotate and scale it holds without it, the file's where nothing else
+        moves it, takes the shear in its translate alone and hands it on.
+        Their positions are Maya's, but on a frame the node is scaled exactly
+        0 along an axis, which leaves the shear no inverse. A dropped camera,
+        light, LOD group or curve follows the rule as any node that is no
+        joint; one that shears under an unevenly scaled parent holds no node,
+        whatever its inherit type: the joints under it are off by what
+        they can't hold, up to 3.46 in the 3x3 on the files measured, their
+        positions Maya's. A scale under 1e-12 in size on a dropped node is read
+        as 1e-12, as Maya's evaluation holds a scale: a joint that compensates
+        a dropped node scaled to 0 keeps its axes and sits on that node's
+        position, and a node that does not collapses onto it, its axes 1e-12
+        long, the 1e-12 in its scale, where Maya 2025 puts them; the sdk's own
         evaluation gives NaN there. A kept node's own scale keeps the
         file's value, 0 included, which cgmath's evaluation divides by as
         it is: ``world_matrix`` is NaN on a joint that compensates a kept
@@ -6228,13 +7583,14 @@ class TransformList(DataList[TransformData]):
         1e-12 there, which a kept node does not. Under a kept node the read
         scales under 1e-12, its own scale times what its split takes from
         the uneven dropped nodes above it (a locator scaled 1.5e-11 under a
-        dropped node scaled 0.05 reads 7.5e-13), the translates that place
-        the nodes below it can reach the inverse of that scale, which
-        ``world_matrix`` multiplies back but Maya, holding 1e-12, does not:
-        such a frame written with ``save_fbx`` imports into Maya away from
-        where Maya imports the file (a locator under a kept locator split
-        under (1, 1, -1e-13): its translate 1.6e12, 1.34 off; under that
-        locator read 7.5e-13, 0.059 off). Folded in the same way is
+        dropped node scaled 0.05 reads 7.5e-13), ``world_matrix`` multiplies
+        by that scale where Maya, holding 1e-12, does not: such a frame
+        written with ``save_fbx`` imports into Maya off where Maya imports
+        the file by the rounding of that product (a locator under a kept
+        locator scaled (5e-13, 1, 1) under a dropped node scaled (1, 2, 0.5),
+        split to (6.6e-13, 1.8, 0.5): 6.97e-9 off in position, one under a
+        joint under it 1.56e-8; under that locator read 7.5e-13, 5.07e-9
+        off), and by the shear the save leaves out. Folded in the same way is
         what a node's own channels can't hold: its rotate and scale pivots
         and offsets, in its translate, rotation active or not, and, on a
         node that is no joint, its pre and post rotation, which the sdk
@@ -6242,10 +7598,11 @@ class TransformList(DataList[TransformData]):
         as its joint orient and rotate axis). A node whose rotation is
         inactive turns in xyz, as the sdk turns it, its rotate_order 0
         whatever order the file stores, and its pre and post rotation left
-        out. Maya's importer turns such a node by neither order, keeping the
-        stored order on the xyz angles of that order's turn, but on a root
-        of a file whose up axis is x or z, whose rotation the sdk's
-        ConvertScene turns on in xyz; Maya's exporter writes every node with
+        out, and a bake reads it so. Maya's importer turns such a node by
+        neither order, keeping the stored order on the xyz angles of that
+        order's turn, but on a root of a file whose up axis is x or z, whose
+        rotation the sdk's ConvertScene turns on in xyz, so the rule below
+        holds with rotation active; Maya's exporter writes every node with
         rotation active, as save_fbx does. A Maya group whose pivot is
         centred on its children loads where Maya shows it. A light's post
         rotation is fbx's view axis, which Maya places its children without,
@@ -6259,39 +7616,129 @@ class TransformList(DataList[TransformData]):
         up axis is x or z with its rotation inactive: the sdk's ConvertScene,
         which turns that file into Maya's Y-up for Maya's importer, drops
         them and turns that root in xyz, so such a camera turns its children
-        by (0, -90, 0) whatever its post rotation.
-        The sdk's own evaluation puts those children elsewhere. A node
-        nothing moves keeps the file's values to the bit, so a file whose
-        dropped nodes, pivots and offsets hold the identity, as Unreal's and
-        Maya's skeleton exports do, reads as it did. Under ``pose="bind"`` a
-        node the read drops follows the bind rule above as a kept one would:
-        it is folded in at its bind when a bind pose lists it, so the nodes
-        under it follow that bind, and at its own values otherwise. A bind
-        read that keeps fewer kinds puts each node it keeps where a full bind
-        read puts it.
+        by (0, -90, 0) whatever its post rotation. The sdk's own evaluation
+        puts those children elsewhere. A camera scaled unevenly or sheared, its
+        own three scale magnitudes apart or its world in the file's scene
+        holding a shear, two of its rows off square, each by more than
+        1.00001e-4 relative to their size (FBX_EVEN_BAND, the band of the even
+        test below), at the static pose or on any frame a clip reads, warns:
+        each read logs one warning through cgmath.formats.fbx's logger, as
+        save_fbx's warnings are logged, naming each such camera, and reads as
+        it would with none, its values the same; a later release refuses such a
+        file. A mirrored camera, its three scale magnitudes equal, is none, and
+        a read that raises warns of nothing. A node nothing moves keeps the
+        file's values to the bit, so a file whose dropped nodes, pivots and
+        offsets hold the identity, as Unreal's and Maya's skeleton exports do,
+        reads as it did, where it also holds no node the rule below bakes, no
+        node that is no joint with a pre rotation, or a root of an X- or Z-up
+        file, on a negative scale or, on a clip, keyed first before 0 off a
+        whole frame, no joint with both a pre or post rotation and pivots, nor
+        a joint root with pivots in an X- or Z-up file, no node with no
+        attribute under a joint with pivots or a pre rotation, no skinned mesh
+        under a camera root of an X- or Z-up file, and no keyed node of the
+        emptied axis below. Under ``pose="bind"`` a node the read drops follows
+        the bind rule above as a kept one would: it is folded in at its bind
+        when a bind pose lists it, so the nodes under it follow that bind, and
+        at its own values otherwise. A bind read that keeps fewer kinds puts
+        each node it keeps where a full bind read puts it.
 
-        A node's inherit type is taken on a joint alone, beyond a unit root's
-        scale: eInheritRrs, which leaves the parent's own scale out, as segment
-        scale compensate, where the sdk and Maya's importer put it. Every other
-        node is read as eInheritRSrs, whatever the file stores: one that is no
-        joint stored eInheritRrSs, which scales it along its own axes by its
-        parent's world scale where eInheritRSrs shears it, is off where that
-        scale is uneven, and one stored eInheritRrs wherever its parent's own
-        scale is other than 1, even or not, the nodes under them with them. A
-        unit root's scale counts as 1 there: the read divides its 1/s out of
-        every node under it stored eInheritRrs, joint or not, so one directly
-        under it is where the sdk puts it. A node turned (20, 40, 60) and
-        scaled (1, 1.5, 0.75) under a group turned (0, 30, 0) and scaled
-        (1, 2, 3) is 1.11 off the sdk in the 3x3 either way, a locator at
-        (0.5, 1, -2) under it 2.34 and 1.75 in translate; under one scaled
-        (2, 2, 2) the eInheritRrSs node is within 8.9e-16, the eInheritRrs one
-        0.99 off, its locator 2.03. Maya's importer puts both where the sdk
-        does, within 1.1e-15 in the 3x3 and 2.3e-15 in translate, baking the
-        inherit type into the node's own scale and shear. A joint stored
-        eInheritRrSs is read as Maya's importer reads it, as eInheritRSrs, and
-        is as far off the sdk as such a group. On the files measured Maya's
-        export writes eInheritRrs on joints alone, and every eInheritRrSs node,
-        Unreal's, sits under scales of 1, where the read is right.
+        A node's inherit type is read as Maya 2025's FBXImport reads it: every
+        node with its rotation active sits where that import puts it, with
+        animation off on a rig (a rig reads no take), and Maya 2027's is the
+        same. A joint is never baked: it keeps the file's channels, eInheritRrs
+        as segment scale compensate, any other type as eInheritRSrs. With a
+        pre or a post rotation and pivots its translate is Maya's, and so is a
+        joint root's with pivots in an X- or Z-up file, whose axis turn Maya
+        holds as a pre rotation. A node that is no joint, a root of the file
+        among them, its parent the scene root, goes by what it stores.
+        eInheritRSrs reads as it is, and so does eInheritRrSs where its
+        parent's world reads one scale and no shear, each within 1.00001e-4,
+        a root always, a mirrored node under such a parent keeping its
+        negative scale. Anywhere else eInheritRrSs bakes, and eInheritRrs
+        always does: Maya turns the type into the node's own channels, its
+        local matrix its world over its parent's with the parent's scale
+        taken out of eInheritRrs, negated where its determinant is negative,
+        held here as scale, shear, rotate and translate, pivots and rotate
+        axis 0, in the file's rotate order. So a node under a parent scaled
+        unevenly holds a shear, one under an even parent none, and the nodes
+        under it sit where Maya puts them. A unit root's scale counts as 1
+        there: the read divides its 1/s out of every node under it stored
+        eInheritRrs, joint or not. A mesh that bakes with a skin of at least
+        one cluster holds, at the static pose, the shear of its bake and the
+        rest read again with no curve anywhere, its own rotate the principal
+        solve of its rotate and pre rotation: of that block, the rows' lengths
+        as its scale and the sdk's GetR as its rotate, negated where it
+        mirrors, as Maya's skin read does, its points untouched; a keyed one
+        bakes on its frames as any node. A skinned mesh under a camera root
+        of an X- or Z-up file with a rotate axis (above), the camera baked or
+        not, sits where the sdk places it, which leaves that axis out, as far
+        as its local matrix holds it: the rows' lengths and the GetR of its
+        local matrix times its parent's world without that axis over Maya's,
+        the camera holding Maya's split of a mirrored scale or its bake, no
+        shear, its points untouched, its rotate Maya's own solve of that
+        GetR, but at an exact tie of the two solutions' sums of absolute
+        angles, where each picks by its own rounding (ClipData.load_fbx's
+        list). On a clip one with no curve holds that on every frame, and one
+        with a curve holds the translate, rotate and scale that gives at the
+        static pose (Maya's clip import works them out from the keyed mesh's
+        channels at frame 0, live layers included: ClipData.load_fbx's list),
+        the translate less its pivots' term, but on each axis a curve keys,
+        which takes the mesh's own, as do all three axes of a channel a later
+        layer keys, muted or not, and turns about its pivots by the rotate
+        and scale it then holds, unless it bakes, which it does as any node;
+        one with a pre rotation in another order than xyz, keyed on some
+        rotate axes, holds its own rotate on all three. A node with no
+        attribute under a joint is a joint in Maya's import: where it bakes, it
+        holds the bake's scale and rotate and no shear at the static pose, and
+        stored eInheritRrs it divides its parent's scale out once more, as a
+        joint that compensates; unbaked, it keeps no pivot or offset, and with
+        a pre rotation it turns by that pre rotation twice, folded into its
+        rotate and kept as its joint orient, and with its rotation inactive
+        once, kept as its joint orient. A clip's node whose keys the conversion
+        leaves as they are (ClipData.load_fbx) keeps its pre and post
+        rotation there as its joint orient and rotate axis.
+
+        Maya works a bake out in the sdk's conversion, ConvertScene and
+        ``ConvertPivotAnimationRecursive``, where a node that is no joint with
+        a pre rotation, and a root of a file whose up axis is x or z, whose
+        turn is a pre rotation, holds no pre and no post rotation and reads
+        its rotate in xyz: the file's r and S at the static pose, so such a
+        root stored eInheritRrs loses its turn, and on a frame the angles of
+        Sig R Rpre in its own order, Sig all three axes negative on a negative
+        determinant and all positive on a positive one. A mirrored node with
+        a pre rotation holds that scale unbaked too, and turns by Sig R.
+
+        Maya rounds to single precision what this read keeps in the file's
+        numbers: an unbaked node's static translate, a keyed baked node's
+        unkeyed one, a joint's pivots, a re-keyed rotate, a mesh's points, and
+        between keys a bake reads double where Maya reads the sdk's float32. So
+        on files whose numbers single precision does not hold nodes sit off
+        Maya's import, by up to 3.08e-5 in the 3x3 and 1.94e-6 in position on
+        the files measured, both on a keyed node with a pre rotation under
+        sheared parents, and within 2e-14 in position on 180 files whose
+        numbers it does hold (three named at their own gap, at most 1e-13). It
+        grows with the depth and the spread of a sheared chain, Maya's rounding
+        multiplied by each block's spread: of 72 chains of 16 nodes 33 sit past
+        1e-5, 22 of them under 1e-3, the worst 121 in the 3x3 and 0.174 in
+        position. Maya's conversion also filters each curve it re-keys,
+        ``FbxAnimCurveFilterConstantKeyReducer`` at its tolerance of 0.009, and
+        two things of that reach the read. On a node with a pre rotation, or a
+        root of an X- or Z-up file, a curve whose keys all sit within 0.009 of
+        its last key is no curve: a node left none holds its static bake on
+        every frame, whatever a single key says, and a level curve beside a
+        moving one adds no frames to the bake. And in an order other than xyz
+        an Euler axis that stays level can sit on the other solution in Maya's
+        import, the node off the file's own rotation; the read follows Maya.
+        What it leaves level inside a curve that moves under 0.009 a step is
+        not copied: on 80 files shaped as a baked export 66 sit within 1e-5,
+        the other 14 up to 0.0435 in the 3x3 and 0.0703 in position; a keyed
+        joint with pivots, whose pivot term Maya re-keys into its translate
+        and filters so, holds level there too, up to 0.0114 in position on the
+        files measured. A file written by an earlier save_fbx with a group or
+        a locator left eInheritRrSs reads where Maya reads it, not where it
+        was saved, and a group with segment_scale_compensate on, which
+        save_fbx writes eInheritRrs, reads back baked: Maya's world, not the
+        same channels, shear included.
 
         The rig records what the read produced, which :meth:`save_fbx`
         labels a file with: :attr:`HierarchyData.axis_system`, "maya_y_up",
@@ -6326,7 +7773,8 @@ class TransformList(DataList[TransformData]):
             units  = _fbx_units(scene, scale_factor)
             record = _fbx_record(scene, axis_system, scale_factor)
             hierarchy_data, _, tree = _walk_fbx(scene, units, kinds, turn is not None)
-            listed = _fbx_bind_matrices(scene, tree, units, filename) if pose == "bind" else None
+            listed  = _fbx_bind_matrices(scene, tree, units, filename) if pose == "bind" else None
+            sheared = _fbx_sheared_cameras(tree)
 
         # each kept node's bind, a dropped node a bind pose lists folded in
         # at its bind, in the file's axes
@@ -6335,9 +7783,12 @@ class TransformList(DataList[TransformData]):
         if turn is not None:
             _fbx_turn_walk(hierarchy_data, turn)
 
-        # build the TransformList
+        # build the TransformList; a camera scaled unevenly or sheared warns
+        # once the read is done, a read that raises of nothing
         if binds is None:
-            return _recorded(cls.from_dict(hierarchy_data), record)
+            built = cls.from_dict(hierarchy_data)
+            _fbx_warn_cameras(sheared)
+            return _recorded(built, record)
 
         # a bind is a world matrix, solved under the node's parent, which a
         # view's nodes, owned by no rig, can't find: they are posed in a rig
@@ -6349,7 +7800,9 @@ class TransformList(DataList[TransformData]):
         with _NodesLoad():
             rig = (cls if owns else HierarchyData).from_dict(hierarchy_data)
             _fbx_pose_binds(rig, binds, turn)
-        return _recorded(rig if owns else cls(node.copy() for node in rig), record)
+        built = rig if owns else cls(node.copy() for node in rig)
+        _fbx_warn_cameras(sheared)
+        return _recorded(built, record)
 
     def save_fbx(self, filename, zero_root=False, as_ascii=False):
         """saves the data to a .fbx file, binary unless as_ascii is set
@@ -6365,7 +7818,9 @@ class TransformList(DataList[TransformData]):
         are in, as the rig records them (:attr:`axis_system`, :attr:`unit`;
         a view's are its rig's), the unit set explicitly, and holds the
         values as they are, but for a node's shear, which FBX has no channel
-        for and the save leaves out, and a scale under 1e-12 in size, 0 and -0
+        for and the save leaves out, as Maya's exporter does, so that node
+        and the nodes under it land where the rig with that shear zeroed has
+        them, and a scale under 1e-12 in size, 0 and -0
         among them, which it holds as 1e-12, positive, as Maya's own FBX
         export writes a static one and as Maya's evaluation holds it: such a
         scale loads back as 1e-12, and, in a save in cm of a rig labelled
@@ -6386,17 +7841,8 @@ class TransformList(DataList[TransformData]):
         :meth:`load_fbx`'s view, or one taken from it, holding nodes no rig
         owns beside nodes of a rig that records another.
 
-        Where the read and Maya part, they part on the save too. A node that
-        is no joint is read as eInheritRSrs whatever the file stores and
-        written with the inherit type the rig gives it, so one the read puts
-        off the file imports where the read has it, not where the file does,
-        in Maya's importer and the sdk's conversion alike: on
-        :meth:`load_fbx`'s rig, stored eInheritRrSs, the sdk's default, or
-        eInheritRrs, 1.11 off the file in the 3x3 and the locator 2.34 or
-        1.75 in position. An earlier save_fbx wrote it eInheritRrSs, which
-        put one stored so back where the file has it, and one stored
-        eInheritRSrs off it by the same 1.11 and 2.34. A file whose up axis
-        is y and whose front is not +z, which the read turns into Maya's
+        Where the read and Maya part, they part on the save too. A file whose
+        up axis is y and whose front is not +z, which the read turns into Maya's
         Y-up and Maya's importer leaves in its own axes, saved from a
         default read imports as the read turned it. A save in another unit
         than cm holds its lengths in that unit, as a file authored in it
@@ -6435,16 +7881,13 @@ class TransformList(DataList[TransformData]):
         mesh holds no record of its own. The fbx mesh readers keep its
         points in its node's object space, which no axis system changes, in
         the unit their ``scale_factor`` gives, the unit a rig read with the
-        same ``scale_factor`` records: under its node's world from that rig,
-        or from Maya's import of the rig's save, it is where its file puts
-        it, but for a mesh on a node the read puts off the file, which
-        follows that node (a triangle with points (0, 0, 0), (1, 0, 0) and
-        (0, 1, 0) is up to 0.663 off on a node turned (20, 40, 60), stored
-        eInheritRrSs or eInheritRrs, under a group turned (0, 30, 0) and
-        scaled (1, 2, 1.5)). Every joint is written as a limb node, as
-        Maya's exporter writes them: Maya's importer brings a root written
-        as a skeleton root (``eRoot``) with no child in as a plain
-        transform, without its joint orient.
+        same ``scale_factor`` records: under its node's world from that rig
+        it is where Maya's import puts it, and so under that node's world
+        from Maya's import of the rig's save, but for a mesh at or under a
+        node holding shear, which the save leaves out. Every joint is written
+        as a limb node, as Maya's exporter writes them: Maya's importer
+        brings a root written as a skeleton root (``eRoot``) with no child
+        in as a plain transform, without its joint orient.
 
         rotate_axis and joint_orient are written for joints only. A
         transform or locator holding a rotate_axis (a matrix write or
@@ -6468,11 +7911,9 @@ class TransformList(DataList[TransformData]):
         importer put it and the nodes under it elsewhere than the rig had
         them (a group at (1, 1, 0) turned (40, 10, -20) under a group turned
         30 about z and scaled (1, 3, 0.5), 1.58 off in its 3x3, a locator at
-        (0, 2, 1) under it 3.17 in position), while load_fbx, which reads it
-        as eInheritRSrs, puts it where it was saved: load such a file and
-        save_fbx it again. That does not reach a group or a locator that had
-        segment_scale_compensate on, or the nodes under it: the file does
-        not hold the flag.
+        (0, 2, 1) under it 3.17 in position), and load_fbx reads such a file
+        where they do, not where it was saved. A rig's own values are in a
+        ``save()`` file.
 
         A group or a locator with segment_scale_compensate on, which a rig
         built or edited by hand can hold and no reader sets, is written
@@ -6537,16 +7978,11 @@ class TransformList(DataList[TransformData]):
         to 5.
 
         load_fbx reads such a group or locator back with the flag off, as
-        eInheritRSrs, with the channels saved: at its saved position unless
-        a group or a locator with the flag on is above it, its axes and the
-        nodes under it off where its parent's own scale is not 1, on the
-        rig above 2.11 in its axes and 2.88 in the locator's position under
-        a parent scaled (1, 2, 3), 2.74 and 4.00 under one turned
-        (0, 30, 15) and scaled (2, 1, 0.5) under a group turned (10, 0, 20)
-        and scaled (1, 2, 3). Under a unit root it is not the channels
-        saved: the read divides that root's scale out of the node, as
-        :meth:`load_fbx` says, so a scale of 1 under a top node scaled 0.01
-        in meters reads 100. save() keeps the flag.
+        Maya reads an eInheritRrs node, baked: where Maya's FBXImport puts it
+        and the nodes under it, not the channels saved, with shear under a
+        parent scaled unevenly and none under an even one. Under a unit root
+        the read divides that root's scale out of the node first, as
+        :meth:`load_fbx` says. save() keeps the flag.
 
         User defined numbers (double, float, doubleAngle, doubleLinear, long,
         short, byte, char), bools, enums, strings, stringArrays and double3 or
@@ -9199,21 +10635,24 @@ def _span_quaternions(clip: "ClipData", columns: np.ndarray, span: slice) -> np.
     return matrix_to_quaternion(M.reshape(-1, 4, 4)).reshape(M.shape[:2] + (4,))
 
 
-def _filtered(degrees: np.ndarray, orders) -> np.ndarray:
+def _filtered(degrees: np.ndarray, orders, squares: bool = False) -> np.ndarray:
     """(F, n, 3) euler degrees through euler_filter, column k in orders[k]
 
     Every later frame takes the solution nearest the one before it, the way
     Maya's Euler Filter keeps the first key. Only what the filter changes is
     added back, in degrees: a key it leaves alone, frame 0 always, comes
     back bit for bit as computed, where a round trip through radians would
-    move some of them by an ulp.
+    move some of them by an ulp. ``squares`` takes the sum of the squares of
+    the angle steps for the cost in place of euler_filter's sum of absolute
+    steps, as the sdk re-keys a rotation (:func:`_fbx_folded_angles`).
     """
     degrees = np.asarray(degrees, dtype=float)
     if degrees.shape[0] < 2 or degrees.shape[1] == 0:
         return degrees.copy()
 
     radians = np.radians(degrees)
-    turned  = euler_filter(radians, np.asarray(orders, dtype=int)) - radians
+    orders  = np.asarray(orders, dtype=int)
+    turned  = (_euler_filter_by(radians, orders, True) if squares else euler_filter(radians, orders)) - radians
     out     = degrees + np.degrees(turned)
     out[0]  = degrees[0]
     return out
@@ -13167,41 +14606,43 @@ class ClipData(HierarchyData):
 
         ``axis_system`` "maya_y_up", the default, loads the take in Maya's
         Y-up axes, as :meth:`HierarchyData.load_fbx` loads the rig: every
-        node's world matrix, on every frame, is the file's times the turn
-        from the file's axis system to Maya's, the one ConvertScene gives,
-        root travel included. Maya's FBX importer agrees on a file whose up
-        axis is x or z, but on a skeleton root it imports as a transform and on
-        a node below the roots that is no camera or light whose rotation is
-        inactive, in another order than xyz, as :meth:`HierarchyData.load_fbx`
-        says, and where the list below says, a root that is no joint whose
-        rotation a layer blends among them, and leaves one whose up axis is y
-        in its own axes. In a file of any axes it also parts from the clip
-        where it keys at another frame rate than the file's, as the list says.
-        The clip parts from both on a root a layer above the base translates,
-        additive, override or passthrough: it keeps that root's translate in
-        the file's world turned, the motion as the file authors it, where
-        ConvertScene leaves that layer's translate in the file's axes, and so
-        does Maya's importer wherever the base layer holds that translate
-        (within 7.7e-7 of ConvertScene; where the base layer holds no curve
-        node for it, Maya parts from ConvertScene as the first live layer item
-        below says). The clip sits 2.8 to 49 off Maya's import of such a root
-        on the files measured, a gap that grows with how far the layer moves
-        it; Maya's import of a Z-up scene it exported, a group root an additive
-        layer translates, sits 45 off that scene turned, the clip 1.5 off it,
-        as Maya's import of the same scene exported Y-up does, and puts that
-        group's 3x3, in xyz, 1.41 off ConvertScene's and the clip's, as the
-        list below says. A root whose rotation is inactive still blends its
-        rotation, blended by layer, as ConvertScene's xyz node, as Maya's
-        importer does a group's, a locator's or a joint's: a zyx group root the
-        layer also translates and turns has its 3x3 1.70 off the file's world
-        turned and within 1.7e-7 of Maya's FBXImport into a scene at the file's
-        frame rate, and its translate the file's world turned, 49 off Maya's
-        import in a Z-up file and 30 in an X-up one. A joint root takes the
-        turn in its joint orient and its translate curves, keeping its rotate
-        curves as authored; any other root has its rotate solved again on every
-        frame in its rotate order, through euler_filter along the frames, frame
-        0 as solved, and its translate turned. A file already in Maya's Y-up
-        loads as it is, a left handed one raises ValueError, and
+        node's world matrix, on every whole frame, is the one Maya's FBXImport
+        gives it, in the file's axes times the turn from the file's axis
+        system to Maya's where the read turns, the one ConvertScene gives,
+        root travel included. Maya's FBX importer agrees on that turn on a
+        file whose up axis is x or z, but on a skeleton root it imports as a
+        transform and on a node below the roots that is no camera or light
+        whose rotation is inactive, in another order than xyz, as
+        :meth:`HierarchyData.load_fbx` says, and where the list below says, a
+        root that is no joint whose rotation a layer blends among them, and
+        leaves one whose up axis is y in its own axes. In a file of any axes
+        it also parts from the clip where it keys at another frame rate than
+        the file's, as the list says. The clip parts from both on a root a
+        layer above the base translates, additive, override or passthrough:
+        it keeps that root's translate in the file's world turned, the motion
+        as the file authors it, where ConvertScene leaves that layer's
+        translate in the file's axes, and so does Maya's importer wherever
+        the base layer holds that translate (within 7.7e-7 of ConvertScene;
+        where the base layer holds no curve node for it, Maya parts from
+        ConvertScene as the first live layer item below says). The clip sits
+        2.8 to 49 off Maya's import of such a root on the files measured, a
+        gap that grows with how far the layer moves it; Maya's import of a
+        Z-up scene it exported, a group root an additive layer translates,
+        sits 45 off that scene turned, the clip 1.5 off it, as Maya's import
+        of the same scene exported Y-up does, and puts that group's 3x3, in
+        xyz, 1.41 off ConvertScene's and the clip's, as the list below says.
+        A root whose rotation is inactive still blends its rotation, blended
+        by layer, as ConvertScene's xyz node, as Maya's importer does a
+        group's, a locator's or a joint's: a zyx group root the layer also
+        translates and turns has its 3x3 1.70 off the file's world turned and
+        within 1.7e-7 of Maya's FBXImport into a scene at the file's frame
+        rate, and its translate the file's world turned, 49 off Maya's import
+        in a Z-up file and 30 in an X-up one. A joint root takes the turn in
+        its joint orient and its translate curves, keeping its rotate curves
+        as authored; any other root has its rotate solved again on every
+        frame in its rotate order, through euler_filter along the frames,
+        frame 0 as solved, and its translate turned. A file already in Maya's
+        Y-up loads as it is, a left handed one raises ValueError, and
         ``axis_system=None`` keeps the file's own axes.
 
         ``node_types`` keeps the kinds of node :meth:`HierarchyData.load_fbx`
@@ -13214,26 +14655,66 @@ class ClipData(HierarchyData):
         the dropped nodes scale it unevenly under a turn, where its rotate
         is solved again from the matrix and its whole rotate curve then goes
         through euler_filter; any other node has its rotate solved again on
-        every frame; a node whose pivot its rotate or scale moves takes it in
-        its translate on every frame.
+        every frame, and takes the shear it needs, a frame at a time; a node
+        whose pivot its rotate or scale moves takes it in its translate on
+        every frame.
 
         A node's inherit type is read as :meth:`HierarchyData.load_fbx` reads
-        it, on every frame: a node that is no joint stored eInheritRrSs or
-        eInheritRrs, read as eInheritRSrs, parts from the sdk and from Maya's
-        import under a parent scaled as that says, a unit root's scale counting
-        as 1, and the nodes under it with it. Scaled (1, 1.5, 0.75) and keyed
-        (20, 40, 60), (35, -10, 80), (-25, 50, 10), (60, 20, -40) and
-        (5, -70, 30) over 5 frames under a group turned (0, 30, 0) and scaled
-        (1, 2, 3), the eInheritRrSs node is 1.63 off in the 3x3 and the
-        eInheritRrs one 2.11, a locator at (0.5, 1, -2) under each 2.98 and
-        2.88 in translate; under one scaled (2, 2, 2) the eInheritRrs node
-        1.35, its locator 2.13. A joint stored eInheritRrSs is read as Maya's
-        importer reads it, the two within 1.8e-15 and both 1.63 off the sdk
-        there.
+        it, a unit root's scale counting as 1: every node with its rotation
+        active sits where Maya's FBXImport puts it on every whole frame. A
+        clip decides on the static pose and the whole take together: a node
+        stored eInheritRrSs stays unbaked where its parent's world reads one
+        scale and no shear at the static pose, whatever it reads on the
+        frames, and no scale curve from the parent up leaves its first key's
+        value by more than 1e-5, so a flat curve counts for nothing and a
+        window of frames reads what the full read gives them. A node's rest
+        pose can be unbaked where its frames bake, as Maya's two imports
+        differ. A baked node holds its block in ``clip.frames``, scale, shear,
+        rotate and translate, (F, N, 3) each. A bake runs from the earlier of
+        0 and the node's first key, in whole frames of the file's rate, to the
+        later of 0 and its last key, and holds that last one after it while
+        its parent moves on; before its first key it holds that key's value,
+        and a node with no curve holds its static bake on every frame. A first
+        key before 0 off a whole frame steps from that key. So a
+        ``start_frame`` past every key reads the hold, and a read at another
+        ``fps`` steps a baked node on the bake's frames, as Maya's keys do,
+        where an unbaked one blends. On a node with a pre rotation, or a root
+        of an X- or Z-up file, the frames are the ones the sdk's key reducer
+        leaves (:meth:`HierarchyData.load_fbx`), a last key off a whole frame
+        holding to the whole frame after it, and the angles the sdk's
+        conversion re-keys, the solution nearest the frame before, a frame at
+        the gimbal of the node's order sharing what its outer axes moved. That
+        conversion re-keys such a node from the whole frame its first key
+        truncates to, towards 0, holding that frame's rotate and scale below
+        it, so its angles take their branch from there, and the read holds
+        them so, on the clip's frames and on the frames a bake reads; one
+        whose keys all sit before that frame, a lone key before 0 off a whole
+        frame among them, it leaves as keyed, and Maya then turns it by its
+        keys alone, its pre and post rotation lost (a node with no attribute
+        under a joint keeps them as its joint orient and rotate axis), which
+        the read follows. Maya runs that conversion on the take's first layer
+        alone, and so does the read, then merges the layers channel by
+        channel: a translate, rotate or scale with a key in a layer past the
+        first, muted or not, it keys on every whole frame of the take's span,
+        stepping from its start where that sits off a whole frame, with what
+        the layers that are not muted give over what the conversion left of
+        the first, a curve the conversion emptied holding its first key's
+        value and, below the whole frame the conversion re-keys a node from,
+        the first layer's rotate and scale held at that frame, and holds that
+        before and after the span; every other channel keeps what the
+        conversion leaves it. A node that bakes does so from the earlier of 0
+        and the first key of any of its channels to the later of 0 and the
+        last, and so does the read. A node that does not bake reads such a
+        channel as the file's layers give it, on every frame (the list below).
+        A layer above a bake bakes with it. On a file of two takes Maya bakes
+        a typed node from the first take's values; the read uses the take it
+        reads. A camera scaled unevenly or sheared warns as
+        :meth:`HierarchyData.load_fbx` says, at the static pose or on any of
+        the clip's frames, one warning a read.
 
         The clip's :attr:`rest_pose` is the file's static pose, the nodes'
-        own values outside the take (the world matrices
-        ``FbxNode.EvaluateGlobalTransform`` gives with no time), taken from
+        own values outside the take (the world matrices Maya's FBXImport gives
+        with animation off, :meth:`HierarchyData.load_fbx`'s), taken from
         the same read: a :class:`HierarchyData` with the clip's names and
         node order, loaded as :meth:`HierarchyData.load_fbx` loads the file,
         in the same unit and axes. For an Unreal animation it is the
@@ -13257,9 +14738,10 @@ class ClipData(HierarchyData):
         again for Maya's axes (``axis_system``), the rotate of any node that
         is no joint, solved again for a dropped node above it or its own
         pre and post rotation, a joint's orient, solved again for a dropped
-        node above it, in xyz, and the rotate of a joint a dropped node
+        node above it, in xyz, the rotate of a joint a dropped node
         above it scales unevenly under a turn, solved again on those frames
-        (``node_types``).
+        (``node_types``), and a baked node's rotate, solved again on every
+        frame, its shear beside it.
 
         Every frame is sampled at once: each curve's keys are read once and
         evaluated on the frame grid the way the sdk evaluates them, the same
@@ -13435,46 +14917,47 @@ class ClipData(HierarchyData):
           share of its own, which grows with how far the angles Maya solves
           bend or jump between that rate's frames, not with that gap, as
           :meth:`HierarchyData.load_fbx` says (a smooth turn about one axis,
-          which agrees at the file's rate, parts by 2.8e-3 to 5.3e-3 times
-          the largest second difference of its keys in degrees a frame
-          squared from 24 and 25 fps scenes for a 30 fps file, 0.33 to
-          0.77 of that from 48, and by 1.9e-3 to 4.2e-3 times it from 30
-          and 25 fps scenes for a 24 fps file (on the files measured, on
-          second differences of 1e-2 or more, 2.9e-5 to 6.8e-1)). With
-          that option set to "File", or from a scene at the file's rate
-          or at a whole multiple of it, it keys every frame of the file
-          (on the files measured, from 60, 120, 150 and 240 fps scenes for
-          a 30 fps file and 48, 120 and 240 fps ones for a 24 fps file) and
-          agrees on them but for the single precision of the curves it solves
-          or merges, as the second item says (as matrices within 3.7e-7 on a
-          node of world scale 1 on angles up to 250 degrees, more on larger
-          angles, under a scale and on the nodes under it), and where a curve
-          it bakes or solves moves by less than about 1e-2 degrees a frame of
-          the rate it keys at, which it can hold level over runs of frames, a
-          faster scene holding more: on the files measured, moving by 1e-4 to
-          6e-3 degrees a frame, up to 4.2e-4 apart as matrices on a node of
-          world scale 1 on takes of 11 and 101 frames, a scale multiplying
-          it as the second item says (1.3e-3 on a group scaled 3) and each
-          held channel within 1.3e-2 degrees of its curve, and from 120 to
-          240 fps scenes up to 3.0e-4 more than at the file's rate on curves
-          moving by about 1e-2 degrees a frame of the file and 1.1e-4 on
-          a root of an X-up file; and from a 60 fps scene one curve of the
-          3,372 it made lost its key on the take's last frame, 1.3e-4 apart
-          there. From a 90 fps scene, though, every curve it made held a key
-          only on each whole second, kept or on a single layer counted from
-          time 0, from the last at or before the take's first frame, and also
-          on its last frame, merged counted from that first frame, up to the
-          first at or after its last frame (a 41-frame take of a 30 fps file:
-          frames 0, 30 and 40, merged 0, 30 and 60; of a 24 fps file 0, 24 and
-          40, merged 0, 24 and 48; an 11-frame take: 0 and 10, merged 0 and 30,
-          or 0 and 24 from a 24 fps file; a 31-frame take of a 30 fps file: 0
-          and 30, merged too; a take of frames 37 to 77 of a 30 fps file: 30,
-          60 and 77, merged 37, 67 and 97): on the 30 and 24 fps files measured
-          up to 2.0 apart as matrices on nodes of world scale 1, a node under
-          them up to twice its world distance off in translate (3.72 at 1.87).
-          On a node it turns by neither order it is as far apart at the file's
-          rate as :meth:`HierarchyData.load_fbx` says, and it parts where
-          another item of this list says;
+          which agrees at the file's rate, parts by 2.8e-3 to 5.3e-3 times the
+          largest second difference of its keys in degrees a frame squared from
+          24 and 25 fps scenes for a 30 fps file, 0.33 to 0.77 of that from 48,
+          and by 1.9e-3 to 4.2e-3 times it from 30 and 25 fps scenes for a 24
+          fps file (on the files measured, on second differences of 1e-2 or
+          more, 2.9e-5 to 6.8e-1)). With that option set to "File", or from a
+          scene at the file's rate or at a whole multiple of it, it keys every
+          frame of the file (on the files measured, from 60, 120, 150 and 240
+          fps scenes for a 30 fps file and 48, 120 and 240 fps ones for a 24
+          fps file) and agrees on them but for the single precision of the
+          curves it solves or merges, as the second item says (as matrices
+          within 3.7e-7 on a node of world scale 1 on angles up to 250 degrees,
+          more on larger angles, under a scale and on the nodes under it), and
+          where a curve it bakes or solves moves by less than about 1e-2
+          degrees a frame of the rate it keys at, which the sdk's constant key
+          reducer, at its 0.009, can hold level over runs of frames, at the
+          file's rate too on a node with a pre rotation, a faster scene holding
+          more: on the files measured, moving by 1e-4 to 6e-3 degrees a frame,
+          up to 4.2e-4 apart as matrices on a node of world scale 1 on takes of
+          11 and 101 frames, a scale multiplying it as the second item says
+          (1.3e-3 on a group scaled 3) and each held channel within 1.3e-2
+          degrees of its curve, and from 120 to 240 fps scenes up to 3.0e-4
+          more than at the file's rate on curves moving by about 1e-2 degrees a
+          frame of the file and 1.1e-4 on a root of an X-up file; and from a 60
+          fps scene one curve of the 3,372 it made lost its key on the take's
+          last frame, 1.3e-4 apart there. From a 90 fps scene, though, every
+          curve it made held a key only on each whole second, kept or on a
+          single layer counted from time 0, from the last at or before the
+          take's first frame, and also on its last frame, merged counted from
+          that first frame, up to the first at or after its last frame (a
+          41-frame take of a 30 fps file: frames 0, 30 and 40, merged 0, 30 and
+          60; of a 24 fps file 0, 24 and 40, merged 0, 24 and 48; an 11-frame
+          take: 0 and 10, merged 0 and 30, or 0 and 24 from a 24 fps file; a
+          31-frame take of a 30 fps file: 0 and 30, merged too; a take of
+          frames 37 to 77 of a 30 fps file: 30, 60 and 77, merged 37, 67 and
+          97): on the 30 and 24 fps files measured up to 2.0 apart as matrices
+          on nodes of world scale 1, a node under them up to twice its world
+          distance off in translate (3.72 at 1.87). On a node it turns by
+          neither order it is as far apart at the file's rate as
+          :meth:`HierarchyData.load_fbx` says, and it parts where another item
+          of this list says;
         - a layer above the base turns a node that is no joint whose pre
           rotation Maya's FBXImport bakes into its rotate (the item above),
           leaving the layer's own angles as they are. An additive layer adds
@@ -13536,7 +15019,8 @@ class ClipData(HierarchyData):
           distance (3.72 at 1.87 and 38.9 at 19.7; with pivots 0.5 to 7.1 away,
           the node itself 4.00 off with one 2 away), under a group scaled
           (1, 0.5, 2) up to 3.48 times it, and a node on the pivot within
-          5.7e-14;
+          5.7e-14. Between keys a bake reads double where Maya reads the
+          sdk's float32;
         - an additive layer blends a rotation by layer at a weight other than
           0 or 100, and the quaternion Maya builds from the layer's angles
           (qz qy qx of the half angles on an xyz node) has the other sign
@@ -13556,11 +15040,14 @@ class ClipData(HierarchyData):
           Maya's own export);
         - the first live layer holds no curve node for a channel a later layer
           holds: the sdk starts it from 0, and Maya does not (0.82 units apart
-          in translation, 1.94 in scale);
+          in translation, 1.94 in scale), an additive layer there adding to
+          the node's static value, up to 3.21 apart as matrices and 5.49 in
+          position on the files measured, a bake above or below it with it;
         - a layer is soloed: solo changes nothing here, and Maya honours it;
-        - the base layer is muted: it is skipped here, but Maya's exporter
-          does not write that mute, so a Maya take whose base layer is muted
-          loads with it playing;
+        - the base layer is muted: it is skipped here, where Maya's import
+          plays it, up to 2.01 apart as matrices and 3.65 in position on the
+          files measured; Maya's exporter does not write that mute, so a
+          Maya take whose base layer is muted loads with it playing;
         - a curve has weighted tangents: Maya's exporter does not write them
           as the scene holds them, so between keys a Maya export loads up to
           about 2.5e-2 of the curve's range off what Maya showed (over 5e-3 on
@@ -13573,7 +15060,106 @@ class ClipData(HierarchyData):
           weighted tangent do not (up to 158 units 48 frames out on Maya's
           own exports). A weighted one on no layer is the export again:
           Maya's own import of it carries on past the keys as the clip does,
-          but for linear and stepped tangents.
+          but for linear and stepped tangents;
+        - a node has quaternion interpolation: Maya resamples it where the
+          clip reads its curves as keyed, Euler, up to 2.17 apart as matrices
+          and 4.90 in position on the node's own frames on the files measured,
+          a bake above or below it with it, the rig agreeing;
+        - a curve has mirror repetition past its keys: 1.33 apart as matrices
+          and 2.1 in position on the frames past them, on the file measured;
+        - a bake that steps from a first key before 0 off a whole frame reads
+          a node above it with a pre rotation, or a root of an X- or Z-up
+          file, between the whole frames Maya's conversion re-keyed that node
+          on, where the clip reads its own curves: up to 5.57 as matrices and
+          11.5 in position on 720 files drawn at random;
+        - a node that does not bake, with a channel a layer past the take's
+          first keys, muted or not: Maya merges that channel over the take's
+          span and holds it before and after, where the clip reads the file's
+          layers on every frame, up to 2.05 as matrices and 3.94 in position
+          outside the span on the files measured; inside it a curve of the
+          first layer moving under 0.009, which Maya's conversion empties,
+          holds its first key's value in Maya, up to 0.0259 as matrices and
+          0.0129 in position, 0.477 and 0.239 on a unit root of a file in
+          metres; and on the one such node measured with a pre rotation, in
+          order xzy and keyed first before 0 off a whole frame, Maya's merged
+          rotate turns it off its own rotation, 5.01 as matrices and 9.61 in
+          position on every frame;
+        - a unit root of a file in metres, its scale 1/100, whose first-layer
+          translate curve Maya's conversion empties under a later layer: up
+          to 0.501 in position where the root does not bake and 0.8 where it
+          does, on the files measured;
+        - a node stored eInheritRrs under the root of a file in metres whose
+          first-layer scale curve, moving under 0.009, sits under a live later
+          layer: the clip holds that curve emptied, as Maya's conversion
+          empties one in a file in cm, and Maya keeps it, 0.475 as matrices
+          and 0.237 in position on the file measured;
+        - a take whose span starts off a whole frame, with a cubic later
+          layer: Maya re-keys a channel it merges on the span's own steps and
+          a bake reads between those keys, where the clip samples the layers
+          on whole frames, up to 0.132 and 0.191 in position on the two spans
+          measured; a linear layer agrees;
+        - a skinned mesh under a camera root of an X- or Z-up file with a
+          rotate axis, stored eInheritRrSs or eInheritRrs under a camera
+          scaled unevenly, rig and clip: up to 5.14 as matrices and 10.6 in
+          position on the files measured;
+        - a skinned mesh under a mirrored camera root with pivots, of an X-
+          or Z-up file: Maya's camera holds another rotate pivot translate
+          than the file's offsets give, and the mesh and every node under it
+          sit up to 1.39 off in position, 1.55 with a pre rotation on the
+          camera, rig and clip, on the files measured;
+        - a skinned mesh under a mirrored camera root of an X- or Z-up file
+          with a group stored eInheritRrs between them: Maya places the mesh
+          off the rule's place, up to 3.22 as matrices and 6.06 in position,
+          1.53 and 1.64 where no node is scaled unevenly, rig and clip, on the
+          files measured; Maya's rule there in a later release;
+        - a skinned mesh under a camera root of an X- or Z-up file with a
+          rotate axis, with both a pre and a post rotation, under a camera
+          scaled unevenly, rig and clip: up to 9.31 as matrices and 9.25 in
+          position at rest, 3.56 and 4.54 on a clip keyed on one rotate axis,
+          on the files measured, growing with the camera's uneven scale;
+        - a keyed skinned mesh under a camera root of an X- or Z-up file with
+          a rotate axis whose rotate or translate at frame 0 is off its static
+          value: Maya works the rule out from the mesh's channels at frame 0,
+          live layers included, where the clip works it out at the static
+          pose, so the mesh and every node under it sit off by what that
+          offset changes, with no bound: on a keyed translate x or z its
+          frame-0 offset times the camera's scale (10 in position on one
+          keyed 10 off under a camera scaled 1, 18.5 under a turned one scaled
+          2), on a keyed rotate y or z a turn that grows with the offset, the
+          camera's scale and the mesh's size (2.83 as matrices and 3.12 in
+          position under a camera scaled 1, 5.67 and 6.29 under one scaled 2,
+          6.02 and 9.8 with a live later rotate layer under a camera scaled
+          (1, 2, 3)), on the files measured;
+        - a keyed skinned mesh under a camera root of an X- or Z-up file with a
+          rotate axis whose static rotate, as the camera rule works it out,
+          sits at an exact tie of the two euler solutions' sums of absolute
+          angles (mesh rotations such as (90, 135, 0) or (-45, 45, -90) under a
+          turned camera): Maya's pick and the clip's each follow their own
+          rounding and part on 5 to 17 of the 44 tie rotations of a 45-degree
+          grid, by the camera's turn (8 under (10, 30, -20)); on the tie
+          layouts built, up to 1.98 as matrices and 4.39 in position, 3.61 and
+          8.36 under a camera scaled 2, the rig agreeing;
+        - a skinned mesh with a pre rotation in another order than xyz, rig and
+          clip: Maya holds the angles of its fold in the node's order, read in
+          xyz, where the read holds the file's rotation, up to 1.98 as
+          matrices and 1.93 in position on the nodes under it at rest and on a
+          clip, 1.86 and 2.26 on a keyed one, on the files measured with no
+          node scaled unevenly; under a camera root of an X- or Z-up file,
+          keyed on some rotate axes, the mesh holds its own rotate on all
+          three, up to 1.72 and 3.1, 4.16 and 6.36 under a camera scaled
+          (1, 2, 3); Maya's rule in a later release;
+        - a skinned mesh keyed on some of its rotate axes outside that camera
+          rule, under a group root or a camera root of a Y-up file, whose
+          static rotation is not Maya's own euler solve of it: Maya re-solves
+          its static rotate by that solve, as under a camera root of an X- or
+          Z-up file, where the clip holds the file's angles, up to 1.98 as
+          matrices and 3.96 in position under a group root, Y- and Z-up, and
+          1.97 and 4.90 under a camera root of a Y-up file, on the files
+          measured, as in 3.0.3, the rig agreeing;
+        - a keyed joint with pivots: Maya re-keys its pivot term into its
+          translate and filters it at 0.009 (the fourth item), holding it level
+          where the clip reads the file's curves: up to 0.0114 in position on
+          the files measured.
 
         ``take`` defaults to the first one that holds a key rather than to
         index 0, then, in a file with no key at all, to the first that holds
@@ -13689,6 +15275,7 @@ class ClipData(HierarchyData):
             if not count:
                 clip            = cls(rest, frames=1, start_frame=start_frame or 0, fps=fps or 24.0)
                 clip._rest_pose = rest
+                _fbx_warn_cameras(_fbx_sheared_cameras(tree))
                 return _recorded(clip, record)
 
             # typed: the binding can hand back a live wrapper of an earlier
@@ -13780,15 +15367,22 @@ class ClipData(HierarchyData):
             # the frame grid in the sdk's ticks, every frame sampled at once
             ticks = _fbx_ticks((start + np.arange(clip.frame_count)) / fps, per_second)
             _fbx_sample_take(stack, sampled, ticks, tree, held)
+            sheared  = _fbx_sheared_cameras(tree, stack, ticks)
+            file_fps = _fbx_frame_rate(scene.GetGlobalSettings().GetTimeMode()) or fps
+            baked = _fbx_clip_bakes(
+                tree, stack, sampled, file_fps, (start + np.arange(clip.frame_count)) * file_fps / fps, held
+            )
 
         # a joint's orient as the fold leaves it, every frame: a node a
         # dropped node above moves only at its static values took the fold
         # in the rig the clip was built from
-        folded = _fbx_fold(tree, *held)
+        folded = _fbx_fold(tree, *held, baked)
         put    = np.array([column[uuid] for uuid in uuids], dtype=np.intp)
         joints = tree.joint[tree.columns]
         translate[:, put], rotate[:, put], scale[:, put] = folded[:3]
         joint_orient[:, put[joints]] = folded[3][:, joints]
+        shear                        = np.zeros(translate.shape)
+        shear[:, put]                = folded[5]
 
         if turn is not None:
             roots  = [index for index, node in enumerate(clip) if node.parent_uuid is None]
@@ -13802,10 +15396,12 @@ class ClipData(HierarchyData):
 
         clip.frames.joint_orient = joint_orient
         clip.frames.scale        = scale
+        clip.frames.shear        = shear
         clip.frames.rotate       = rotate
         clip.frames.translate    = translate
         clip.frame               = 0
         clip._rest_pose          = rest
+        _fbx_warn_cameras(sheared)
         return _recorded(clip, record)
 
     def save_fbx(self, filename, zero_root=False, as_ascii=False):
