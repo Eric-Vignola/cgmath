@@ -1167,6 +1167,24 @@ edge("e_camera_axis_later", [R0J, node("C", "camera", None, **CAM3), skinned("g"
 # post rotation
 edge("e_bare_camera", [node("J", "joint", None, **JS), node("N", "camera", "J", **dict(NK, pre=PX5, post=(0, 15, 0)))] + below("N"), **NJ)
 
+# a clip's camera skin takes the rule on frame 0, not at the static pose:
+# keyed off its static value there, from a first key before 0, flat, under
+# a camera scaled 2; a live later layer blended in; frame 0 outside the
+# take's span; a group above the mesh keyed off its static value there
+ZERO = dict(samples=[float(f) for f in range(-6, 11)], span=(-4, 8))
+edge("e_camera_zero_rotate", [R0J, node("C", "camera", None, **CAM), skinned("g", "C", ckeys=[("r", 2, [-4, 4], [30, 150])])] + tail("g"),
+     axes="zup", **ZERO)
+edge("e_camera_zero_flat", [R0J, node("C", "camera", None, **CAM), skinned("g", "C", ckeys=[("t", 0, [0, 8], [3.5, 3.5])])] + tail("g"),
+     axes="xup", **TEN)
+edge("e_camera_zero_scaled", [R0J, node("C", "camera", None, **dict(CAM, s=(2, 2, 2))), skinned("g", "C", ckeys=[("t", 2, [0, 8], [2, 4])])]
+     + tail("g"), axes="xup", **TEN)
+edge("e_camera_zero_layer", [R0J, node("C", "camera", None, **CAM3), skinned("g", "C", ckeys=[("r", 0, [0, 8], [20, 50])])] + tail("g"),
+     axes="zup", layers=[("additive", {"g": {"ckeys": [("r", 1, [0, 6], [15, 35])]}})], **TEN)
+edge("e_camera_zero_span", [R0J, node("C", "camera", None, **CAM), skinned("g", "C", ckeys=[("r", 2, [-4, 4], [30, 110])])] + tail("g"),
+     axes="zup", samples=[float(f) for f in range(-2, 11)], span=(2, 8))
+edge("e_camera_zero_group", [R0J, node("C", "camera", None, **CAM), node("h", "group", "C", t=(0, 1, 0), r=(0, 0, 30), ckeys=[("r", 2, [0, 8], [45, 75])]),
+                             skinned("g", "h")] + tail("g"), axes="xup", **TEN)
+
 
 def write_layout():
     """_fbx_import_files.write_layout, by path: no cgmath is imported here"""

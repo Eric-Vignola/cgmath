@@ -2200,6 +2200,23 @@ loader's, where:
   between the whole frames Maya's conversion re-keyed that node on,
   where the loader reads its own curves: up to 5.57 as matrices and 11.5
   in position on 720 files drawn at random;
+- a skinned mesh under a keyed node, in a take that does not start at
+  frame 0, before or after it, where that node stands otherwise at the
+  take's start than at frame 0: Maya's import holds a mesh with no curve
+  at its world at frame 0, as the loader reads it, taken as a local
+  under its parents as they stand at the take's start, under a group
+  root and a camera root alike (within 6.7e-8 on the layouts measured),
+  where the loader holds its local at frame 0 on every frame, and a
+  keyed mesh there parts too; the loader parts with no bound, growing
+  with how far the node above stands at the take's start from where it
+  stands at frame 0: 2.5 in position on a translate keyed 2.5 apart
+  under a group root, 1.87 as matrices and 1.03 in position under a
+  camera root scaled 2 with a group under it keyed before 0, 0.39 and
+  0.51 under a camera, or a group under it, keyed from 0 in a take from
+  4 (a keyed mesh there 0.43 and 0.47), on the layouts measured in xyz
+  with no pre or post rotation, the rig agreeing; within 8.9e-7 where
+  the node above stands at the take's start as at frame 0 and where the
+  mesh holds no skin; Maya's rule there in a later release;
 - a node that does not bake, with a channel a layer past the take's
   first keys, muted or not: Maya merges that channel over the take's
   span and holds it before and after, where the loader reads the file's
@@ -2239,24 +2256,31 @@ loader's, where:
   rule's place, up to 3.22 as matrices and 6.06 in position, 1.53 and
   1.64 where no node is scaled unevenly, rig and clip, on the files
   measured; Maya's rule there in a later release;
+- a skinned mesh under another skinned mesh under a camera root of an X-
+  or Z-up file: Maya places the lower mesh off the rule's place, rig and
+  clip, by sizes that grow with the depth of the nest and the camera's
+  scale: up to 5.22 as matrices and 10.1 in position at rest and 5.49
+  and 9.53 on a clip three deep under a camera scaled 2, 2.19 and 5.1 at
+  rest three deep under one scaled 1, 3.63 and 3.9 at rest two deep
+  under one scaled 2, on the files measured in xyz with no pre or post
+  rotation and the meshes scaled evenly; Maya's rule there in a later
+  release;
 - a skinned mesh under a camera root of an X- or Z-up file with a rotate
   axis, with both a pre and a post rotation, under a camera scaled
   unevenly, rig and clip: up to 9.31 as matrices and 9.25 in position
   at rest, 3.56 and 4.54 on a clip keyed on one rotate axis, on the
   files measured, growing with the camera's uneven scale;
-- a keyed skinned mesh under a camera root of an X- or Z-up file with a
-  rotate axis whose rotate or translate at frame 0 is off its static
-  value: Maya works the rule out from the mesh's channels at frame 0,
-  live layers included, where the loader works it out at the static
-  pose, so the mesh and every node under it sit off by what that offset
-  changes, with no bound: on a keyed translate x or z its frame-0
-  offset times the camera's scale (10 in position on one keyed 10 off
-  under a camera scaled 1, 18.5 under a turned one scaled 2), on a keyed
-  rotate y or z a turn that grows with the offset, the camera's scale
-  and the mesh's size (2.83 as matrices and 3.12 in position under a
-  camera scaled 1, 5.67 and 6.29 under one scaled 2, 6.02 and 9.8 with
-  a live later rotate layer under a camera scaled (1, 2, 3)), on the
-  files measured;
+- a keyed skinned mesh with a pre rotation, in xyz, under a camera root
+  of an X- or Z-up file with a rotate axis, by sizes that grow with the
+  camera's scale: keyed on rotate z, from its static value at frame 0 or
+  not, up to 2.42 as matrices and 2.47 in position under a camera scaled
+  1, 4.95 and 4.16 under one scaled 2; keyed flat on rotate z 90 off it,
+  up to 2.07 and 1.52, 4.36 and 3.49 under a camera scaled 2; keyed flat
+  on translate x, 0.925 in position at its static value and 10.2 10 off
+  it, 1.51 and 16.6 under a camera scaled 2; on the files measured, with
+  static rotates (20, 40, 60) and (20, -30, 45) and the mesh scaled 1,
+  1.5 or (1, 1.5, 0.75), a translate keyed off its static value at frame
+  0 agreeing;
 - a keyed skinned mesh under a camera root of an X- or Z-up file with a
   rotate axis whose static rotate, as the camera rule works it out, sits
   at an exact tie of the two euler solutions' sums of absolute angles
@@ -2848,11 +2872,16 @@ rows' lengths and the GetR of its local matrix times its parent's world
 without that axis over Maya's, the camera holding Maya's split of a
 mirrored scale or its bake, no shear, its rotate Maya's own solve of
 that GetR, but at an exact tie of the two solutions' sums of absolute
-angles, where each picks by its own rounding (the list above). On a clip
-one with no curve holds that on every frame, and one with a curve holds
-the translate, rotate and scale that gives at the static pose (Maya's
-clip import works them out from the keyed mesh's channels at frame 0,
-live layers included: the list above), the translate less its pivots'
+angles, where each picks by its own rounding, and under another skinned
+mesh, where Maya places it off that rule's place (the list above). A rig
+works that out at the static pose, as Maya's import with animation off
+does, and a clip at frame 0, whatever the take's span, of the take it
+loads, where Maya's import with animation on reads frame 0 of the file's
+active take, so the two agree where the clip loads the active take
+(below): on the channels there of the mesh and of every node above it,
+the layers that are not muted blended in. On a clip one with no curve
+holds that on every frame, and one with a curve holds the translate,
+rotate and scale that gives, the translate less its pivots'
 term, but on each axis a curve keys, which takes the mesh's own, as do
 all three axes of a channel a later layer keys, muted or not, and turns
 about its pivots by the rotate and scale it then holds, unless it bakes,
@@ -3079,7 +3108,18 @@ one, though its frames, and a channel no take keys, can still differ
 there (Maya holds the active take's value at frame 0); `take=-1` loads
 the last take's curves, over that take's own frames, with a channel it
 does not key at that take's own value for it (its curve node's, the rest
-pose where it holds none).
+pose where it holds none). The camera rule of a skinned mesh under a
+camera root of an X- or Z-up file (above) reads frame 0 of the take the
+clip loads, Maya's import frame 0 of the file's active take: where the
+clip loads the active take and it is the last, they agree, and where the
+two takes differ they part, in files that already part from Maya on
+every node under the camera when the active take is not the last. On the
+files of two and three takes measured, in xyz with no pre or post
+rotation: the active take read, the last, within 3.2e-15 as matrices and
+8.1e-8 in position (3.1.0 up to 3.04 and 2.56); the last read with
+`take=-1` where the active take is the first, up to 5.01 as matrices and
+11.1 in position (5.01 and 10.6 at 3.1.0), a node no take keys up to
+3.16 and 2.57 off at both.
 
 Its frames default to the take's stored span and every key of the take
 together, out to whole frames: an Unreal take, whose span stops a frame

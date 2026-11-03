@@ -4483,13 +4483,14 @@ def _fbx_static_bakes(tree: _FbxTree) -> dict:
     return _fbx_camera_skins(tree, T, R, S, baked, True)
 
 
-def _fbx_camera_skins(tree: _FbxTree, T, R, S, baked: dict, static: bool, channels=None) -> dict:
+def _fbx_camera_skins(tree: _FbxTree, T, R, S, baked: dict, static: bool, channels=None, zero=None) -> dict:
     """``baked`` with the local matrices Maya's import gives the skinned
     meshes of ``tree.camera_skins``, on the channels ``T``, ``R`` and ``S``
     (F, n, 3): the static pose's, or with ``static`` False a clip's frames,
     ``channels`` (n, 3, 3) saying which axes of each node's translate,
     rotate and scale a curve keys, every axis of a channel a later layer
-    keys
+    keys, and ``zero`` the clip's translate, rotate and scale (n, 3) on
+    frame 0
 
     A skinned mesh under a camera root of a file ConvertScene turns sits
     where the sdk places it, which leaves out the rotate axis Maya reads off
@@ -4500,40 +4501,52 @@ def _fbx_camera_skins(tree: _FbxTree, T, R, S, baked: dict, static: bool, channe
     (:func:`_fbx_scene_worlds`), and W Maya's, where the camera is as Maya
     holds it, its scale S Sig and its rotate Sig R where it mirrors
     (:func:`_fbx_flips`), its bake where it bakes, the rows' lengths and the
-    GetR, negated where B mirrors, and B's translation: no shear. The read
-    works that out at the static pose alone, as Maya's import with
-    animation off does (Maya's clip import works it out from the keyed
-    mesh's channels at frame 0, live layers included: ClipData.load_fbx's
-    list), and holds it as the mesh's channels, the rotate Maya's own solve
-    of that GetR in the mesh's rotate order (:func:`_fbx_maya_solve`), the
-    translate B's translation less its pivots' term. On a clip's frames a
-    mesh with no curve holds them; one with a curve holds them on each axis
-    no curve keys and the mesh's own value on each axis a curve keys, and on
-    all three axes of a channel a later layer keys, muted or not, as Maya
-    merges it whole, and turns about its pivots by the rotate and scale it
-    then holds; one that folds a pre rotation in another order than xyz,
-    keyed on some rotate axes, holds its own rotate on all three."""
+    GetR, negated where B mirrors, and B's translation: no shear. A rig
+    works that out at the static pose, as Maya's import with animation off
+    does, and a clip at frame 0, whatever the take's span, of the take it
+    loads, where Maya's import with animation on reads frame 0 of the
+    file's active take, so the two agree where the clip loads the active
+    take (ClipData.load_fbx's ``take``): on ``zero``, the channels of the
+    mesh and of every node above it as the clip samples them there, the
+    layers that are not muted blended in and a channel a later layer keys
+    held outside the take's span. It holds that as the mesh's channels, the
+    rotate Maya's own solve of that GetR in the mesh's rotate order
+    (:func:`_fbx_maya_solve`), the translate B's translation less its
+    pivots' term. On a clip's frames a mesh with no curve holds them; one
+    with a curve holds them on each axis no curve keys and the mesh's own
+    value on each axis a curve keys, and on all three axes of a channel a
+    later layer keys, muted or not, as Maya merges it whole, and turns about
+    its pivots by the rotate and scale it then holds; one that folds a pre
+    rotation in another order than xyz, keyed on some rotate axes, holds its
+    own rotate on all three."""
     rows = np.flatnonzero(tree.camera_skins).tolist()
     if not rows:
         return baked
     out = dict(baked)
 
     if not static:
-        # the static pose's, but a camera root that bakes with a curve keeps
-        # the axis turn one with none loses, in the clip's bake as in Maya's
+        # the rule on frame 0, each mesh's channels and those of every node
+        # above it as the clip samples them there; but a camera root that
+        # bakes with a curve keeps the axis turn one with none loses, in the
+        # clip's bake as in Maya's
         rest       = copy.copy(tree)
         rest.loose = frozenset()
         rest.mixed = {}
-        still      = _fbx_static_bakes(rest)
-        frames     = len(T)
-        tops       = set()
+        chain      = _fbx_chain(tree, rows)
+        pose       = [values.copy() for values in (tree.translate, tree.rotate, tree.scale)]
+        for values, at in zip(pose, zero):
+            values[chain] = at[chain]
+        rest.translate, rest.rotate, rest.scale = pose
+        still  = _fbx_static_bakes(rest)
+        frames = len(T)
+        tops   = set()
         for i in rows:
             while tree.parent[i] > 0:
                 i = int(tree.parent[i])
             tops.add(i)
         moved = [top for top in sorted(tops) if top in baked and tree.keyed[top]]
         if moved:
-            sT, sR, sS = tree.translate[None], tree.rotate[None], tree.scale[None]
+            sT, sR, sS = rest.translate[None], rest.rotate[None], rest.scale[None]
             flip  = _fbx_flips(rest, sS)
             again = {i: block for i, block in still.items() if not tree.camera_skins[i]}
             for top in moved:
@@ -4881,7 +4894,7 @@ def _fbx_clip_bakes(tree: _FbxTree, stack, sampled: list, file_fps: float, frame
         return {}
 
     count = len(frames)
-    need  = set(_fbx_chain(tree, rows)).union(folded.tolist(), np.flatnonzero(tree.camera_skins).tolist())
+    need  = set(_fbx_chain(tree, rows)).union(folded.tolist(), _fbx_chain(tree, np.flatnonzero(tree.camera_skins)))
     keyed, axes, bounds, merged, keys, repeats = _fbx_node_curves(tree, stack, sorted(need))
     tree.keyed = keyed
     tree.mixed = {}
@@ -5099,7 +5112,9 @@ def _fbx_clip_bakes(tree: _FbxTree, stack, sampled: list, file_fps: float, frame
         block  = _fbx_bake_block(tree, T2, R2, S2, i, _fbx_flips(tree, S2), worlds2, False, spans2)
         steps  = np.clip(np.floor(frames - t0 + _FBX_FRAME_SNAP), 0, np.ceil(max(0.0, stop[i]) - t0 - _FBX_FRAME_SNAP))
         out[i] = block[(steps + np.floor(t0 + _FBX_FRAME_SNAP) - begin).astype(np.intp)]
-    return _fbx_camera_skins(tree, *held, out, False, axes | merged[:, :, None])
+    # the camera rule reads frame 0 of the grid, which always holds it
+    zero = [values[int(np.searchsorted(grid, 0))] for values in (T, R, S)]
+    return _fbx_camera_skins(tree, *held, out, False, axes | merged[:, :, None], zero)
 
 
 def _fbx_has_curves(stack) -> bool:
@@ -7677,26 +7692,32 @@ class TransformList(DataList[TransformData]):
         the camera holding Maya's split of a mirrored scale or its bake, no
         shear, its points untouched, its rotate Maya's own solve of that
         GetR, but at an exact tie of the two solutions' sums of absolute
-        angles, where each picks by its own rounding (ClipData.load_fbx's
-        list). On a clip one with no curve holds that on every frame, and one
-        with a curve holds the translate, rotate and scale that gives at the
-        static pose (Maya's clip import works them out from the keyed mesh's
-        channels at frame 0, live layers included: ClipData.load_fbx's list),
-        the translate less its pivots' term, but on each axis a curve keys,
-        which takes the mesh's own, as do all three axes of a channel a later
-        layer keys, muted or not, and turns about its pivots by the rotate
-        and scale it then holds, unless it bakes, which it does as any node;
-        one with a pre rotation in another order than xyz, keyed on some
-        rotate axes, holds its own rotate on all three. A node with no
-        attribute under a joint is a joint in Maya's import: where it bakes, it
-        holds the bake's scale and rotate and no shear at the static pose, and
-        stored eInheritRrs it divides its parent's scale out once more, as a
-        joint that compensates; unbaked, it keeps no pivot or offset, and with
-        a pre rotation it turns by that pre rotation twice, folded into its
-        rotate and kept as its joint orient, and with its rotation inactive
-        once, kept as its joint orient. A clip's node whose keys the conversion
-        leaves as they are (ClipData.load_fbx) keeps its pre and post
-        rotation there as its joint orient and rotate axis.
+        angles, where each picks by its own rounding, and under another
+        skinned mesh, where Maya places it off that rule's place
+        (ClipData.load_fbx's list). A rig works that out at the static pose,
+        as Maya's import with animation off does, and a clip at frame 0,
+        whatever the take's span, of the take it loads, where Maya's import
+        with animation on reads frame 0 of the file's active take, so the two
+        agree where the clip loads the active take (ClipData.load_fbx's
+        ``take``): on the channels there of the mesh and of every node above
+        it, the layers that are not muted blended in. On a clip one with no
+        curve holds that on every frame, and one with a curve holds the
+        translate, rotate and scale that gives, the translate less its
+        pivots' term, but on each axis a curve keys, which takes the mesh's
+        own, as do all three axes of a channel a later layer keys, muted or
+        not, and turns about its pivots by the rotate and scale it then
+        holds, unless it bakes, which it does as any node; one with a pre
+        rotation in another order than xyz, keyed on some rotate axes, holds
+        its own rotate on all three. A node with no attribute under a joint
+        is a joint in Maya's import: where it bakes, it holds the bake's scale
+        and rotate and no shear at the static pose, and stored eInheritRrs it
+        divides its parent's scale out once more, as a joint that compensates;
+        unbaked, it keeps no pivot or offset, and with a pre rotation it turns
+        by that pre rotation twice, folded into its rotate and kept as its
+        joint orient, and with its rotation inactive once, kept as its joint
+        orient. A clip's node whose keys the conversion leaves as they are
+        (ClipData.load_fbx) keeps its pre and post rotation there as its
+        joint orient and rotate axis.
 
         Maya works a bake out in the sdk's conversion, ConvertScene and
         ``ConvertPivotAnimationRecursive``, where a node that is no joint with
@@ -15075,6 +15096,23 @@ class ClipData(HierarchyData):
           file, between the whole frames Maya's conversion re-keyed that node
           on, where the clip reads its own curves: up to 5.57 as matrices and
           11.5 in position on 720 files drawn at random;
+        - a skinned mesh under a keyed node, in a take that does not start at
+          frame 0, before or after it, where that node stands otherwise at the
+          take's start than at frame 0: Maya's import holds a mesh with no
+          curve at its world at frame 0, as the clip reads it, taken as a local
+          under its parents as they stand at the take's start, under a group
+          root and a camera root alike (within 6.7e-8 on the layouts measured),
+          where the clip holds its local at frame 0 on every frame, and a keyed
+          mesh there parts too; the clip parts with no bound, growing with how
+          far the node above stands at the take's start from where it stands at
+          frame 0: 2.5 in position on a translate keyed 2.5 apart under a group
+          root, 1.87 as matrices and 1.03 in position under a camera root
+          scaled 2 with a group under it keyed before 0, 0.39 and 0.51 under a
+          camera, or a group under it, keyed from 0 in a take from 4 (a keyed
+          mesh there 0.43 and 0.47), on the layouts measured in xyz with no pre
+          or post rotation, the rig agreeing; within 8.9e-7 where the node
+          above stands at the take's start as at frame 0 and where the mesh
+          holds no skin; Maya's rule there in a later release;
         - a node that does not bake, with a channel a layer past the take's
           first keys, muted or not: Maya merges that channel over the take's
           span and holds it before and after, where the clip reads the file's
@@ -15115,24 +15153,31 @@ class ClipData(HierarchyData):
           off the rule's place, up to 3.22 as matrices and 6.06 in position,
           1.53 and 1.64 where no node is scaled unevenly, rig and clip, on the
           files measured; Maya's rule there in a later release;
+        - a skinned mesh under another skinned mesh under a camera root of an
+          X- or Z-up file: Maya places the lower mesh off the rule's place, rig
+          and clip, by sizes that grow with the depth of the nest and the
+          camera's scale: up to 5.22 as matrices and 10.1 in position at rest
+          and 5.49 and 9.53 on a clip three deep under a camera scaled 2, 2.19
+          and 5.1 at rest three deep under one scaled 1, 3.63 and 3.9 at rest
+          two deep under one scaled 2, on the files measured in xyz with no pre
+          or post rotation and the meshes scaled evenly; Maya's rule there in a
+          later release;
         - a skinned mesh under a camera root of an X- or Z-up file with a
           rotate axis, with both a pre and a post rotation, under a camera
           scaled unevenly, rig and clip: up to 9.31 as matrices and 9.25 in
           position at rest, 3.56 and 4.54 on a clip keyed on one rotate axis,
           on the files measured, growing with the camera's uneven scale;
-        - a keyed skinned mesh under a camera root of an X- or Z-up file with
-          a rotate axis whose rotate or translate at frame 0 is off its static
-          value: Maya works the rule out from the mesh's channels at frame 0,
-          live layers included, where the clip works it out at the static
-          pose, so the mesh and every node under it sit off by what that
-          offset changes, with no bound: on a keyed translate x or z its
-          frame-0 offset times the camera's scale (10 in position on one
-          keyed 10 off under a camera scaled 1, 18.5 under a turned one scaled
-          2), on a keyed rotate y or z a turn that grows with the offset, the
-          camera's scale and the mesh's size (2.83 as matrices and 3.12 in
-          position under a camera scaled 1, 5.67 and 6.29 under one scaled 2,
-          6.02 and 9.8 with a live later rotate layer under a camera scaled
-          (1, 2, 3)), on the files measured;
+        - a keyed skinned mesh with a pre rotation, in xyz, under a camera root
+          of an X- or Z-up file with a rotate axis, by sizes that grow with the
+          camera's scale: keyed on rotate z, from its static value at frame 0
+          or not, up to 2.42 as matrices and 2.47 in position under a camera
+          scaled 1, 4.95 and 4.16 under one scaled 2; keyed flat on rotate z 90
+          off it, up to 2.07 and 1.52, 4.36 and 3.49 under a camera scaled 2;
+          keyed flat on translate x, 0.925 in position at its static value and
+          10.2 10 off it, 1.51 and 16.6 under a camera scaled 2; on the files
+          measured, with static rotates (20, 40, 60) and (20, -30, 45) and the
+          mesh scaled 1, 1.5 or (1, 1.5, 0.75), a translate keyed off its
+          static value at frame 0 agreeing;
         - a keyed skinned mesh under a camera root of an X- or Z-up file with a
           rotate axis whose static rotate, as the camera rule works it out,
           sits at an exact tie of the two euler solutions' sums of absolute
@@ -15202,12 +15247,24 @@ class ClipData(HierarchyData):
         differ there (Maya holds the active take's value at frame 0);
         ``take=-1`` loads the last take's curves, over that take's own frames,
         with a channel it does not key at that take's own value for it (its
-        curve node's, the rest pose where it holds none). The clip's frames are
-        the picked take's, where Maya's playback range is the active take's. On
-        5 of 32 test files imported in Maya 2025, 3.0.1 moved the frames off
-        Maya's playback range: cgmath 3.0.0 loaded the empty first take, the
-        rest pose over Maya's playback range, and 3.0.1 loads the keyed take's
-        curves, as Maya does, over that take's frames:
+        curve node's, the rest pose where it holds none). The camera rule of a
+        skinned mesh under a camera root of an X- or Z-up file
+        (:meth:`TransformList.load_fbx`) reads frame 0 of the take the clip
+        loads, Maya's import frame 0 of the file's active take: where the clip
+        loads the active take and it is the last, they agree, and where the two
+        takes differ they part, in files that already part from Maya on every
+        node under the camera when the active take is not the last. On the
+        files of two and three takes measured, in xyz with no pre or post
+        rotation: the active take read, the last, within 3.2e-15 as matrices
+        and 8.1e-8 in position (3.1.0 up to 3.04 and 2.56); the last read with
+        ``take=-1`` where the active take is the first, up to 5.01 as matrices
+        and 11.1 in position (5.01 and 10.6 at 3.1.0), a node no take keys up
+        to 3.16 and 2.57 off at both. The clip's frames are the picked take's,
+        where Maya's playback range is the active take's. On 5 of 32 test files
+        imported in Maya 2025, 3.0.1 moved the frames off Maya's playback
+        range: cgmath 3.0.0 loaded the empty first take, the rest pose over
+        Maya's playback range, and 3.0.1 loads the keyed take's curves, as Maya
+        does, over that take's frames:
 
         - an empty first take over frames 0-48, holding a curve node and
           recorded as the active take, then a take keyed over frames 0-10:

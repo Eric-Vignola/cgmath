@@ -13,7 +13,7 @@ over its clip and its rig. The ceilings: 2e-14 in position, 5e-14 on
 s0_s2m1h_Gt, 1e-13 on ro_dc_G123_gk and xup_ns_ksc1_Gt123_gs, each past 2e-14 by
 Maya's rounding, and s0_q38's 3x3 at 4.440892098500626e-15. Maya's own single
 precision is not copied, so a file of free values sits up to about 1e-6 off.
-112 more files, the archive's "edges", each pin a rule those 180 cannot see,
+118 more files, the archive's "edges", each pin a rule those 180 cannot see,
 on values single precision does not hold, within 2e-6.
 """
 from __future__ import annotations
@@ -302,9 +302,13 @@ class TestMayaImport(unittest.TestCase):
         keyed, the mesh keyed, on one axis too, with a pre or a post rotation,
         in another order, under a muted later layer, on Maya's other euler
         solution, at a half turn, and with pivots, in rotate and in scale, one
-        with no skin; a camera under a joint; an emptied axis keyed before 0"""
+        with no skin; a camera under a joint; an emptied axis keyed before 0;
+        a clip's camera skin on the rule of frame 0, keyed off its static
+        value there from a first key before 0, flat, under a camera scaled 2,
+        a live later layer blended in, frame 0 outside the take's span, a
+        group above it keyed off its static value there"""
         names = self.data["edges"].tolist()
-        self.assertEqual(len(names), 112)
+        self.assertEqual(len(names), 118)
         for name in names:
             kinds = {node["name"]: node["kind"] for node in layout_of(self.data, name)["nodes"]}
             with self.subTest(name):
