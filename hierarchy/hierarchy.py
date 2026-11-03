@@ -14875,13 +14875,13 @@ class ClipData(HierarchyData):
     def load_fbx(
         cls,
         filename:     str,
-        scale_factor: Optional[float] = None,
-        take:         Optional[int]   = None,
-        fps:          Optional[float] = None,
-        start_frame:  Optional[int]   = None,
-        end_frame:    Optional[int]   = None,
-        axis_system:  Optional[str]   = "maya_y_up",
-        node_types:   Optional[tuple] = None,
+        scale_factor: Optional[float]           = None,
+        take:         Optional[Union[int, str]] = None,
+        fps:          Optional[float]           = None,
+        start_frame:  Optional[int]             = None,
+        end_frame:    Optional[int]             = None,
+        axis_system:  Optional[str]             = "maya_y_up",
+        node_types:   Optional[tuple]           = None,
     ) -> "ClipData":
         """builds a clip from an fbx's animation take
 
@@ -15503,7 +15503,16 @@ class ClipData(HierarchyData):
         holding Y at 55, a Y curve with no key whose default is 99 reads 99. A
         curve node's channel with no curve reads at the curve node's value.
         The frames left out default to the take picked. Pass an index to
-        override, including onto an empty take.
+        override, including onto an empty take, 0 the first and negatives from
+        the end, or a take's name: the take :meth:`ClipList.load_fbx` names so,
+        else the first, in file order, whose name matches outer whitespace
+        aside, as a save strips it (``take="Walk Forward"``; of two stacks
+        named ``idle`` the second as ``take="idle_1"``; of stacks ``" idle "``
+        and ``"idle"``, ``take="idle"`` the second and ``take=" idle "`` the
+        first). A name the file does not hold raises
+        KeyError, on a file with no take too, and an index out of range
+        IndexError, each naming the file's takes; on a file with no take an
+        index or None gives its static pose as a one frame clip.
 
         Maya 2025's FBXImport, with its default settings, picks otherwise. It
         loads its curves from the file's last take, keyed or not, so an empty
@@ -15561,6 +15570,13 @@ class ClipData(HierarchyData):
           records "Take 001", a name neither take has, as active: Maya
           100-110, the clip 0-10.
 
+        4.0.0 changes the default, a break: ``take=-1``, the last take, as
+        Maya's import loads it, becomes the default, and ``None`` the take
+        the file marks active (none marked, or a name the file does not
+        hold: the first take, as Maya's timeline). 3.3.0 keeps 3.2.0's
+        meaning for both, the first take holding a key; pass ``take=`` an
+        index or a name to read the same take under both.
+
         ``start_frame`` and ``end_frame`` are frame numbers on the file's own
         timeline, at the clip's frame rate. Each one left out covers both the
         take's stored span and every key of every curve on every layer of the
@@ -15575,7 +15591,8 @@ class ClipData(HierarchyData):
         on the take's last frame, not the take's length after it, and one past
         that frame raises ValueError naming it; an ``end_frame`` passed alone
         before the take's first frame raises the same way. A file with no
-        animation gives a one frame clip rather than an error.
+        animation gives a one frame clip rather than an error, but for a
+        take asked by name, which raises KeyError as above.
         """
         if fps is not None and fps <= 0.0:
             raise ValueError(f"fps must be positive, got {fps}")
@@ -15614,6 +15631,8 @@ class ClipData(HierarchyData):
             rig  = HierarchyData.from_dict(hierarchy_data) if count else None
 
             if not count:
+                if isinstance(take, str):
+                    raise KeyError(f"the file holds no take named {take!r}; its takes are []")
                 clip            = cls(rest, frames=1, start_frame=start_frame or 0, fps=fps or 24.0)
                 clip._rest_pose = rest
                 _fbx_warn_cameras(_fbx_sheared_cameras(tree))
@@ -15625,18 +15644,32 @@ class ClipData(HierarchyData):
             # values on every frame, the rest pose where its curve nodes hold
             # the node's own (a curve with no key at the curve's own default,
             # as the sdk and Maya read it: _fbx_held)
+            # every take's name, as ClipList.load_fbx names it, warned of
+            # below for the take read alone
+            raw = [x.GetName() for x in stacks]
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                named = _take_names(raw)
             if take is None:
                 stack = next((x for x in stacks if _fbx_key_ticks(x) is not None), None)
                 if stack is None:
                     stack = next((x for x in stacks if _fbx_has_curves(x)), stacks[0])
+            elif isinstance(take, str):
+                # the take the list names so, else the first whose name
+                # matches outer whitespace aside, as the save strips it
+                found = [i for i, name in enumerate(named) if name == take]
+                found = found or [i for i, name in enumerate(named) if name.strip() == take.strip()]
+                if not found:
+                    raise KeyError(f"the file holds no take named {take!r}; its takes are {named}")
+                stack = stacks[found[0]]
             else:
                 if not -count <= take < count:
-                    raise IndexError(f"take {take} out of range, the file holds {count}")
+                    raise IndexError(f"take {take} out of range, the file holds {count}: {named}")
 
                 stack = stacks[take % count]
 
             index = next(i for i, x in enumerate(stacks) if x.GetUniqueID() == stack.GetUniqueID())
-            names = _take_names([x.GetName() for x in stacks], read=[index])
+            names = _take_names(raw, read=[index])
             return _fbx_take_clip(
                 cls, scene, stack, rig, rest, hierarchy_data, nodes, tree, turn, record, filename, fps,
                 start_frame, end_frame, names[index],

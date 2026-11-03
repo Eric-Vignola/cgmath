@@ -1767,5 +1767,188 @@ class TestClipListSaveFbx(unittest.TestCase):
         self.assertFalse(os.path.exists(self.path("wrong.fbx")))
 
 
+# the two files of a Maya import-dialog test (2026-11-01):
+# two joints, the root's
+# translate x keyed per take, (name, keys or None, span), at 24 fps
+DIALOG_FILES = {
+    "three_takes_middle_active": (
+        (("first", [(0, 100.0), (10, 110.0)], (0, 10)),
+         ("middle", [(20, 200.0), (30, 220.0)], (20, 30)),
+         ("last", [(40, 300.0), (50, 330.0)], (40, 50))),
+        "middle",
+    ),
+    "empty_first_take": (
+        (("Take 001", None, (0, 48)),
+         ("Walk Forward", [(0, 100.0), (10, 110.0)], (0, 10)),
+         ("Run", [(0, 200.0), (20, 220.0)], (0, 20))),
+        "Take 001",
+    ),
+}
+
+
+def build_dialog_fbx(path, takes, active):
+    """one of ``DIALOG_FILES``, written with the sdk"""
+    def at(frame):
+        time = FBX.FbxTime()
+        time.SetSecondDouble(frame / 24.0)
+        return time
+
+    manager = FBX.FbxManager.Create()
+    manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+    try:
+        scene = FBX.FbxScene.Create(manager, "scene")
+        scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames24)
+        parent, nodes = scene.GetRootNode(), []
+        for name, place in (("probe_root", (-7.0, 1.0, 0.0)), ("probe_tip", (10.0, 0.0, 0.0))):
+            attr = FBX.FbxSkeleton.Create(scene, name + "Attr")
+            attr.SetSkeletonType(FBX.FbxSkeleton.EType.eLimbNode)
+            node = FBX.FbxNode.Create(scene, name)
+            node.SetNodeAttribute(attr)
+            node.LclTranslation.Set(FBX.FbxDouble3(*place))
+            parent.AddChild(node)
+            nodes.append(node)
+            parent = node
+        stacks = {}
+        for name, keys, span in takes:
+            stack = FBX.FbxAnimStack.Create(scene, name)
+            layer = FBX.FbxAnimLayer.Create(scene, "Base Layer")
+            stack.AddMember(layer)
+            stacks[name] = stack
+            nodes[0].LclTranslation.GetCurveNode(layer, True)
+            if keys:
+                curve = nodes[0].LclTranslation.GetCurve(layer, "X", True)
+                curve.KeyModifyBegin()
+                for frame, value in keys:
+                    index = curve.KeyAdd(at(frame))[0]
+                    curve.KeySetValue(index, value)
+                    curve.KeySetInterpolation(index, FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear)
+                curve.KeyModifyEnd()
+            stack.SetLocalTimeSpan(FBX.FbxTimeSpan(at(span[0]), at(span[1])))
+        scene.SetCurrentAnimationStack(stacks[active])
+        scene.ActiveAnimStackName.Set(FBX.FbxString(active))
+        exporter = FBX.FbxExporter.Create(manager, "")
+        if not exporter.Initialize(path, -1, manager.GetIOSettings()):
+            raise RuntimeError(f"cannot write {path}")
+        exporter.Export(scene)
+        exporter.Destroy()
+    finally:
+        manager.Destroy()
+    return path
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestLoadFbxTakeByName(unittest.TestCase):
+    """ClipData.load_fbx(take="Walk Forward") loads the take of that
+    name, as ClipList.load_fbx names it; the default and None keep 3.2.0's
+    meaning, the first take holding a key, and an int its position"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.files = {
+            name: build_dialog_fbx(os.path.join(self.tmp.name, name + ".fbx"), *spec)
+            for name, spec in DIALOG_FILES.items()
+        }
+
+    def keys(self, clip):
+        """(start, end, translate x of the root on the first and last frame)"""
+        x = np.asarray(clip.frames.translate)[:, 0, 0]
+        return clip.start_frame, clip.end_frame, round(float(x[0]), 9), round(float(x[-1]), 9)
+
+    def test_each_name_loads_its_take(self):
+        three, empty = self.files["three_takes_middle_active"], self.files["empty_first_take"]
+        for path, name, want in (
+            (three, "first", (0, 10, 100.0, 110.0)),
+            (three, "middle", (20, 30, 200.0, 220.0)),
+            (three, "last", (40, 50, 300.0, 330.0)),
+            (empty, "Walk Forward", (0, 10, 100.0, 110.0)),
+            (empty, "Run", (0, 20, 200.0, 220.0)),
+            (empty, "Take 001", (0, 48, -7.0, -7.0)),
+            (empty, " Run ", (0, 20, 200.0, 220.0)),
+        ):
+            with self.subTest(name):
+                clip = ClipData.load_fbx(path, take=name)
+                self.assertEqual(self.keys(clip), want)
+                self.assertEqual(clip.take, name.strip())
+        # and through the route
+        self.assertEqual(ClipData.load(empty, take="Run").take, "Run")
+
+    def test_a_name_as_the_list_names_it(self):
+        """two stacks of one name are idle and idle_1, as ClipList.load_fbx
+        names them, the second read with the list's one warning"""
+        path = build_fbx(os.path.join(self.tmp.name, "idle.fbx"), takes=[(n, TAKES[0][1]) for n in ("idle", "idle")])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            second = ClipData.load_fbx(path, take="idle_1")
+        self.assertEqual(second.take, "idle_1")
+        self.assertEqual(len([w for w in caught if "takes that would read under one name are told apart" in str(w.message)]), 1)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            self.assertEqual(fingerprint(second), fingerprint(ClipData.load_fbx(path, take=1)))
+            self.assertEqual(ClipData.load_fbx(path, take="idle").take, "idle")
+
+    def test_a_name_exactly_first(self):
+        """the take the list names so first, else the
+        first whose name matches outer spaces aside: of stacks ' idle ' and
+        'idle', take='idle' reads 'idle' and take=' idle ' reads ' idle ';
+        a blank second take reads as take="Take 002",
+        ahead of a stack named Take 002 itself"""
+        stacks = [(" idle ", TAKES[0][1]), ("idle", TAKES[1][1]), (" ", TAKES[2][1]), ("Take 002", TAKES[0][1])]
+        path   = build_fbx(os.path.join(self.tmp.name, "names.fbx"), takes=stacks)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            clips = ClipList.load_fbx(path)
+            self.assertEqual(clips.take, [" idle ", "idle", "Take 003", "Take 002"])
+            # "idle " is no take's own name: the first that matches it outer spaces aside
+            for name, index in (("idle", 1), (" idle ", 0), ("idle ", 0), ("Take 003", 2), ("Take 002", 3), (" Take 002 ", 3)):
+                with self.subTest(name):
+                    clip = ClipData.load_fbx(path, take=name)
+                    self.assertEqual(fingerprint(clip), fingerprint(clips[index]))
+                    self.assertEqual(clip.take, clips[index].take)
+            names = ("idle", "", "Take 002")
+            blank = build_fbx(os.path.join(self.tmp.name, "blank.fbx"), takes=[(n, k) for n, (_, k) in zip(names, TAKES)])
+            clips = ClipList.load_fbx(blank)
+            self.assertEqual(clips.take, ["idle", "Take 002", "Take 002_1"])
+            for name, index in (("Take 002", 1), ("Take 002_1", 2)):
+                with self.subTest(name):
+                    self.assertEqual(fingerprint(ClipData.load_fbx(blank, take=name)), fingerprint(clips[index]))
+
+    def test_an_unknown_take_names_the_takes(self):
+        path  = self.files["three_takes_middle_active"]
+        takes = r"\['first', 'middle', 'last'\]"
+        with self.assertRaisesRegex(KeyError, rf"no take named 'Walk'.*{takes}"):
+            ClipData.load_fbx(path, take="Walk")
+        for index in (3, -4):
+            with self.subTest(index):
+                with self.assertRaisesRegex(IndexError, rf"take {index} out of range, the file holds 3: {takes}"):
+                    ClipData.load_fbx(path, take=index)
+
+        # a file with no take holds no name either; an
+        # index and None keep 3.2.0's one frame clip, its static pose
+        still = build_fbx(os.path.join(self.tmp.name, "still.fbx"), takes=())
+        with self.assertRaisesRegex(KeyError, r"no take named 'Walk Forward'; its takes are \[\]"):
+            ClipData.load_fbx(still, take="Walk Forward")
+        for take in (None, 0, 5):
+            with self.subTest(take=take):
+                clip = ClipData.load_fbx(still, take=take)
+                self.assertEqual((clip.frame_count, clip.take), (1, ""))
+
+    def test_the_default_and_none_as_in_3_2_0(self):
+        """the first take holding a key, not the active take nor the last:
+        3.2.0's meaning, kept in 3.3.0 (4.0.0 changes it); an int by position"""
+        three, empty = self.files["three_takes_middle_active"], self.files["empty_first_take"]
+        for path, want in ((three, "first"), (empty, "Walk Forward")):
+            with self.subTest(os.path.basename(path)):
+                self.assertEqual(ClipData.load_fbx(path).take, want)
+                self.assertEqual(ClipData.load_fbx(path, take=None).take, want)
+        self.assertEqual(ClipData.load_fbx(three, take=-1).take,      "last")
+        self.assertEqual(ClipData.load_fbx(empty, take=0).take,       "Take 001")
+        self.assertEqual(self.keys(ClipData.load_fbx(three, take=1)), (20, 30, 200.0, 220.0))
+        # every take a name: the list's names load the list's takes
+        clips = ClipList.load_fbx(empty)
+        for clip in clips:
+            self.assertEqual(fingerprint(ClipData.load_fbx(empty, take=clip.take)), fingerprint(clip))
+
+
 if __name__ == "__main__":
     unittest.main()

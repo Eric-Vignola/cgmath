@@ -270,7 +270,7 @@ classmethod from_poses(cls, poses, start_frame: 'int' = 0, fps: 'float' = 24.0) 
     builds a clip from a sequence of HierarchyData poses
 get_delta(self, other, by: 'str' = 'index', translate: 'bool' = True) -> "'ClipData'"
     The delta of every frame against ``other``, as a clip.
-classmethod load_fbx(cls, filename: 'str', scale_factor: 'Optional[float]' = None, take: 'Optional[int]' = None, fps: 'Optional[float]' = None, start_frame: 'Optional[int]' = None, end_frame: 'Optional[int]' = None, axis_system: 'Optional[str]' = 'maya_y_up', node_types: 'Optional[tuple]' = None) -> "'ClipData'"
+classmethod load_fbx(cls, filename: 'str', scale_factor: 'Optional[float]' = None, take: 'Optional[Union[int, str]]' = None, fps: 'Optional[float]' = None, start_frame: 'Optional[int]' = None, end_frame: 'Optional[int]' = None, axis_system: 'Optional[str]' = 'maya_y_up', node_types: 'Optional[tuple]' = None) -> "'ClipData'"
     builds a clip from an fbx's animation take
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, animation: 'int' = 0, fps: 'float' = 24.0, start_frame: 'int' = 0) -> "'ClipData'"
     builds a clip from a glb's animation
