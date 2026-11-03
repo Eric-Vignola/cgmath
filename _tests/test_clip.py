@@ -5908,15 +5908,23 @@ class TestClipSaveFbx(unittest.TestCase):
         self.assertTrue(np.allclose(back[0].frames.rotate, rotate.astype(np.float32), rtol=0, atol=1e-9))
 
     @unittest.skipIf(FBX is None, "fbx sdk is not installed")
-    def test_a_changing_joint_orient_refuses(self):
+    def test_a_changing_joint_orient_is_keyed_in_rotate(self):
+        """the take holds the first frame's joint orient,
+        every frame's change keyed in its rotate, the world as the clip's"""
+        from cgmath.hierarchy import ClipList
+
         orient                        = np.array(self.clip.frames.joint_orient)
         orient[:, 1, 0]               = np.arange(10) * 1.0
         self.clip.frames.joint_orient = orient
-        with self.assertRaises(ValueError) as caught:
-            self.clip.save_fbx(self.path())
+        self.clip.save_fbx(self.path())
 
-        self.assertIn(repr(self.clip[1].name), str(caught.exception))
-        self.assertIn("joint_orient changes over the frames", str(caught.exception))
+        back = ClipList.load_fbx(self.path(), axis_system=None)[0]
+        want = np.asarray(self.clip.frames.world_matrix)
+        got  = np.asarray(back.frames.world_matrix)
+        self.assertLessEqual(np.abs(got[..., :3, :3] - want[..., :3, :3]).max(), 1e-7)
+        self.assertLessEqual(np.abs(got[..., 3, :3] - want[..., 3, :3]).max(), 4e-7)
+        first = np.broadcast_to(orient[0, 1], (10, 3))
+        np.testing.assert_allclose(np.asarray(back.frames.joint_orient)[:, 1], first, rtol=0, atol=1e-12)
 
     @unittest.skipIf(FBX is None, "fbx sdk is not installed")
     def test_a_one_frame_cut_writes_one_pose(self):

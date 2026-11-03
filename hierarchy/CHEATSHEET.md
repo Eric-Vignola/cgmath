@@ -1788,11 +1788,15 @@ ASCII file holds about 7 significant digits). A keyed scale is written as
 it is, as Maya's own export writes it; only a static scale under 1e-12 is
 raised to 1e-12. FBX has no channel for shear: it is left out, with one
 warning naming the nodes holding one on any frame of any take, as Maya's
-export leaves it out. It refuses, before anything is written, a list with no
-take, a take with no frame, takes on other rigs, a joint orient or rotate
-axis that changes within a take (fbx holds them static), takes at other
-frame rates or at one no fbx time mode carries, takes in other axes or
-units, and two takes of one name.
+export leaves it out. FBX holds one joint orient and rotate axis per
+joint for the file, the first take's first frame's: one that changes
+within a take, or differs between takes, is keyed in that frame's rotate,
+so every node's world on every frame is the take's, to float32 (a node
+that is no joint keys its whole joint orient and rotate axis there). It
+refuses, before anything is written, a list with no take, a take with no
+frame, takes on other rigs, takes at other frame rates or at one no fbx
+time mode carries, takes in other axes or units, and two takes of one
+name.
 
 ```python
 path      = os.path.join(WORKDIR, "takes.fbx")
@@ -2449,18 +2453,22 @@ assert legs.name == ["hip", "knee"] and np.allclose(legs["hip"].translate, 0.0)
 ```
 
 `save_fbx` writes `rotate_axis` (and `joint_orient`) for joints only. A
-transform or locator holding a `rotate_axis` loses it in the file, so it
-reloads off by that rotation. A matrix write, `set_parent()`,
-`match_translate()` and `match_matrix()` all keep a node's `rotate_axis`.
-Fold it into `rotate` before saving: read `matrix`, zero `rotate_axis`,
-write `matrix` back. Every node is written with rotation active, as
-Maya's exporter writes it: FBX turns a node without it in xyz, whatever
-its rotate order. A file an earlier `save_fbx` wrote holds a group or a
-locator with its rotation inactive, so one in another order than xyz
-now loads where the SDK puts it, in xyz, `rotate_order` 0, not where it
-was saved (a zxy group 0.49 off, a joint under it 1.26): load it with
-the version that wrote it, `save()` it, then load that and `save_fbx`
-it with this one.
+transform or locator holding a `rotate_axis` or a `joint_orient` loses
+it in the file, so it reloads off by that rotation, in `load_fbx` and
+Maya's `FBXImport` alike: turned (5, 10, 15) with a `rotate_axis` of
+(10, 20, 30), 0.42 off in its axes and a locator 4 below it 1.44 in
+position (0.41 and 1.39 with that `joint_orient`), a clip of one frame
+as a rig; a `ClipList.save_fbx` take keys it in the rotate. A matrix
+write, `set_parent()`, `match_translate()` and `match_matrix()` all keep
+a node's `rotate_axis`. Fold it into `rotate` before saving: read
+`matrix`, zero `rotate_axis` and `joint_orient`, write `matrix` back.
+Every node is written with rotation active, as Maya's exporter writes
+it: FBX turns a node without it in xyz, whatever its rotate order. A
+file an earlier `save_fbx` wrote holds a group or a locator with its
+rotation inactive, so one in another order than xyz now loads where the
+SDK puts it, in xyz, `rotate_order` 0, not where it was saved (a zxy
+group 0.49 off, a joint under it 1.26): load it with the version that
+wrote it, `save()` it, then load that and `save_fbx` it with this one.
 
 ```python
 held = HierarchyData([

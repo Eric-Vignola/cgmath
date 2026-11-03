@@ -8226,8 +8226,13 @@ class TransformList(DataList[TransformData]):
 
         rotate_axis and joint_orient are written for joints only. A
         transform or locator holding a rotate_axis (a matrix write or
-        set_parent() keeps it) loses it in the file; fold it into rotate
-        first by writing node.matrix back with rotate_axis zeroed. Every
+        set_parent() keeps it) or a joint_orient loses it in the file, and
+        Maya's FBXImport and :meth:`load_fbx` read the node without it: a
+        group or a locator turned (5, 10, 15) with a rotate_axis of (10, 20,
+        30) reads back 0.42 off in its axes and a locator 4 below it 1.44 in
+        position, with that joint_orient 0.41 and 1.39. Fold it into rotate
+        first by writing node.matrix back with rotate_axis and joint_orient
+        zeroed; :meth:`ClipList.save_fbx` keys it in a take's rotate. Every
         node is written with rotation active, as Maya's exporter writes it:
         fbx turns a node without it in xyz, whatever its rotate order. A
         file an earlier save_fbx wrote holds a group or a locator with its
@@ -15650,6 +15655,15 @@ class ClipData(HierarchyData):
         naming the nodes the clip holds one on, at its frame for a pose and
         on any frame for a take: Maya's FBXImport and :meth:`load_fbx` read
         the clip with that shear zeroed.
+
+        A pose holds a rotate_axis and a joint_orient on joints alone, as a
+        rig's save does: a node that is no joint loses its own, and Maya's
+        FBXImport and :meth:`load_fbx` read the node without it (a group or
+        a locator with a rotate_axis of (10, 20, 30), 0.42 off in its axes,
+        a locator 4 below it 1.44 in position, on the layout
+        :meth:`HierarchyData.save_fbx` gives). A take keys it in the node's
+        rotate on every frame, so a clip of two frames or more reads back
+        with it.
         """
         if self.frame_count > 1:
             ClipList([self]).save_fbx(filename, zero_root=zero_root, as_ascii=as_ascii)
@@ -15888,12 +15902,6 @@ _FBX_FRAME_RATES = (
     (1000.0, "eFrames1000"),
 )
 
-# a take's joint orient or rotate axis this far from another's, or from its
-# own on another frame, is another: fbx holds them as static pre and post
-# rotations
-_TAKE_STATIC_BAND = 1e-9
-
-
 def _fbx_rate_mode(fps: float) -> Optional[str]:
     """the name of the fbx.FbxTime.EMode of ``fps`` (to 1e-9 relative), None
     for a rate no mode carries"""
@@ -15925,24 +15933,6 @@ def _takes_to_save(clips) -> list:
                 raise ValueError(
                     f"save_fbx: node {column} is {a} in {labels[0]} and {b} in {label}: one rig is written"
                 )
-        for channel in ("joint_orient", "rotate_axis"):
-            a   = np.asarray(getattr(first.frames, channel))[0]
-            b   = np.asarray(getattr(clip.frames, channel))[0]
-            far = np.abs(a - b).max(axis=1) > _TAKE_STATIC_BAND if len(a) else np.zeros(0, dtype=bool)
-            if far.any():
-                node = first[int(np.flatnonzero(far)[0])].name
-                raise ValueError(f"save_fbx: {node!r} has another {channel} in {label} than in {labels[0]}")
-
-    for clip, label in zip(clips, labels):
-        for channel in ("joint_orient", "rotate_axis"):
-            block = np.asarray(getattr(clip.frames, channel))
-            moved = np.abs(block - block[:1]).max(axis=(0, 2)) > _TAKE_STATIC_BAND if block.size else []
-            if np.any(moved):
-                node = clip[int(np.flatnonzero(moved)[0])].name
-                raise ValueError(
-                    f"save_fbx: {node!r}'s {channel} changes over the frames of {label}, which fbx holds "
-                    f"as a static rotation"
-                )
 
     rates = sorted({float(clip.fps) for clip in clips})
     if len(rates) > 1:
@@ -15963,6 +15953,67 @@ def _takes_to_save(clips) -> list:
     if twice:
         raise ValueError(f"save_fbx: two takes would be written as {twice}; take names must differ")
     return names
+
+
+def _takes_written(clips: list) -> list:
+    """``clips`` as :meth:`ClipList.save_fbx` writes them, checked
+    (:func:`_takes_to_save`): fbx holds one pre and post rotation per node
+    for the file, which the exporter writes on a joint alone, from its joint
+    orient and rotate axis, so the file's are the first take's first frame's
+    on a joint and none on any other node. A take holding another joint
+    orient or rotate axis on any frame, a node's moving within the take or
+    differing from the file's, is written as a copy of it whose rotate keys
+    that difference frame by frame, every frame at once: rotate R' solved in
+    the node's rotate order from RA0^-1 RA R JO JO0^-1, row vectors, RA0 and
+    JO0 the file's, so RA0 R' JO0 is the frame's RA R JO and the node's world
+    is the take's, and the copy holds the file's joint orient and rotate
+    axis. R' is continuous along the frames, from the take's own rotate on
+    its first frame (euler_filter). Any other take is written as it is."""
+    first  = clips[0]
+    joints = np.array([node.node_type == "joint" for node in first], dtype=bool)
+    orient = np.where(joints[:, None], np.asarray(first.frames.joint_orient)[0], 0.0)
+    axis   = np.where(joints[:, None], np.asarray(first.frames.rotate_axis)[0], 0.0)
+    held = (
+        np.transpose(euler_to_matrix(np.radians(axis), 0)[:, :3, :3], (0, 2, 1)),
+        np.transpose(euler_to_matrix(np.radians(orient), 0)[:, :3, :3], (0, 2, 1)),
+    )
+
+    written = []
+    for clip in clips:
+        orients = np.asarray(clip.frames.joint_orient)
+        axes    = np.asarray(clip.frames.rotate_axis)
+        moved   = np.any(orients != orient, axis=(0, 2)) | np.any(axes != axis, axis=(0, 2))
+        if not moved.any():
+            written.append(clip)
+            continue
+
+        columns = np.flatnonzero(moved)
+        frames  = clip.frame_count
+        orders  = np.asarray(clip.rotate_order, dtype=np.intp)[columns]
+        rows    = np.tile(orders, frames)
+        rotate  = np.array(clip.frames.rotate)
+
+        def blocks(values, order):
+            """(F, k, 3, 3) rotations of (F, k, 3) degrees"""
+            flat = euler_to_matrix(np.radians(values.reshape(-1, 3)), order)[:, :3, :3]
+            return flat.reshape(frames, len(columns), 3, 3)
+
+        turn = blocks(axes[:, columns], 0) @ blocks(rotate[:, columns], rows) @ blocks(orients[:, columns], 0)
+        turn = held[0][columns] @ turn @ held[1][columns]
+
+        matrices            = np.zeros((frames * len(columns), 4, 4))
+        matrices[:, :3, :3] = turn.reshape(-1, 3, 3)
+        matrices[:, 3, 3]   = 1.0
+        solved              = matrix_to_euler(matrices, rows).reshape(frames, len(columns), 3)
+        from_first          = np.concatenate([np.radians(rotate[:1, columns]), solved])
+        rotate[:, columns]  = np.degrees(euler_filter(from_first, orders)[1:])
+
+        copy                     = clip.copy()
+        copy.frames.rotate       = rotate
+        copy.frames.joint_orient = np.broadcast_to(orient, orients.shape).copy()
+        copy.frames.rotate_axis  = np.broadcast_to(axis, axes.shape).copy()
+        written.append(copy)
+    return written
 
 
 def _take_rig(clip) -> list:
@@ -16584,14 +16635,28 @@ class ClipList(DataList[ClipData]):
         ``~``, the home folder. Without the Autodesk SDK it raises
         ImportError, before anything is checked.
 
+        FBX holds one pre and post rotation per node for the file, which
+        the save writes on a joint from its joint orient and rotate axis on
+        the first take's first frame, and on no other node. A joint orient or
+        rotate axis that changes within a take, or differs between takes, so
+        saves: every frame of every take keys its difference from those in its
+        rotate, solved in the node's rotate order, continuous along the frames,
+        and a node that is no joint keys its whole joint orient and rotate axis
+        there, so every node's world on every frame is the take's, to the keys'
+        float32 (within 1.05e-7 in its axes and 2.63e-7 in position on the
+        takes measured, rotate keys up to 240.2 degrees, the take's rotate of
+        150 to 220 with its joint orient's change folded in, which float32
+        holds to 7.6e-6, read back and in Maya 2025's FBXImport, in xyz;
+        1.32e-7 and 2.86e-7 in the six rotate orders and two mixes measured).
+        Such a take reads back with the file's joint orient and rotate axis
+        and those rotate keys.
+
         Checked before anything is written, ValueError naming what fails:
         a list with no take, a take with no frame, takes on other rigs (the
-        node count, then each node's name, parent, node_type, rotate_order,
-        segment_scale_compensate, and its joint_orient and rotate_axis on
-        the first frame, to 1e-9), a joint_orient or rotate_axis changing
-        within a take, takes at other frame rates or at one no fbx time
-        mode carries (``_FBX_FRAME_RATES``), takes in other axes or units,
-        and two takes written under one name.
+        node count, then each node's name, parent, node_type, rotate_order
+        and segment_scale_compensate), takes at other frame rates or at one
+        no fbx time mode carries (``_FBX_FRAME_RATES``), takes in other axes
+        or units, and two takes written under one name.
         """
         if FBX is None:
             raise ImportError("fbx module not found")
@@ -16599,12 +16664,13 @@ class ClipList(DataList[ClipData]):
         filename = os.path.expanduser(filename)
 
         names = _takes_to_save(self.list)
+        takes = _takes_written(self.list)
         from cgmath.formats.fbx import FbxExporter
 
         with FbxExporter() as exporter:
-            exporter.add_skeleton(self.list[0], shear_warning=False)
-            mode = getattr(FBX.FbxTime.EMode, _fbx_rate_mode(float(self.list[0].fps)))
-            exporter.add_takes(self.list, names, mode, zero_root=zero_root)
+            exporter.add_skeleton(takes[0], shear_warning=False)
+            mode = getattr(FBX.FbxTime.EMode, _fbx_rate_mode(float(takes[0].fps)))
+            exporter.add_takes(takes, names, mode, zero_root=zero_root)
             exporter.export(filename, as_ascii=as_ascii, zero_root=zero_root)
 
     # --- reading a file's takes --- #

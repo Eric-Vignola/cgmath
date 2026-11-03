@@ -1305,6 +1305,53 @@ def at_float32(values) -> np.ndarray:
     return np.asarray(values, dtype=np.float64).astype(np.float32).astype(np.float64)
 
 
+def orienting_takes(orders=(0, 0, 0)):
+    """two takes of one rig, a joint root, a group, a joint, a joint and a
+    locator, whose joint orients and rotate axes move within a take and
+    differ between the takes, every node turning: take "a", 6 frames, the
+    mid joint's joint orient moving and its rotate z crossing 180, the tip
+    joint's rotate axis moving from (15, 0, 25), the group's rotate axis
+    held; take "b", 4 frames from 10, the mid joint's joint orient and the
+    tip's rotate axis held off take a's first frame, the group's moving.
+    ``orders`` the rotate orders of the mid joint, the tip joint and the
+    group"""
+    rig = HierarchyData()
+    for name, kind, parent, place in (
+        ("root", "joint", None, (0.0, 1.0, 0.0)),
+        ("grp", "transform", "root", (1.0, 0.0, 0.0)),
+        ("mid", "joint", "grp", (0.0, 2.0, 0.0)),
+        ("tip", "joint", "mid", (0.0, 2.0, 0.5)),
+        ("loc", "locator", "tip", (0.0, 1.0, 1.0)),
+    ):
+        rig.append(TransformData(name, node_type=kind, translate=place))
+        if parent is not None:
+            rig[name].parent_uuid = rig[parent].uuid
+    for name, order in zip(("mid", "tip", "grp"), orders):
+        rig[name].rotate_order = order
+    takes = []
+    for take, frames, start in (("a", 6, 0), ("b", 4, 10)):
+        clip  = ClipData(rig, frames=frames, start_frame=start, take=take)
+        f     = np.arange(frames, dtype=float)[:, None]
+        turns = np.array(clip.frames.rotate)
+        turns += np.array([3.0, -4.0, 5.0]) * f[:, :, None] + np.array([10.0, 20.0, -30.0])
+        if take == "a":
+            turns[:, 2, 2] += 180.0 + 9.0 * f[:, 0]  # 150 to 220: across 180
+        clip.frames.rotate = turns
+        orient             = np.array(clip.frames.joint_orient)
+        axis               = np.array(clip.frames.rotate_axis)
+        if take == "a":
+            orient[:, 2] = np.hstack([10.0 + 3.0 * f, -20.0 + 7.0 * f, 5.0 * f])
+            axis[:, 3]   = np.hstack([15.0 + 2.0 * f, 0.0 * f, 25.0 - 3.0 * f])
+            axis[:, 1]   = (15.0, 0.0, 25.0)
+        else:
+            orient[:, 2] = (30.0, 10.0, -5.0)
+            axis[:, 1]   = np.hstack([-6.0 * f, 2.0 * f, 0.0 * f])
+        clip.frames.joint_orient = orient
+        clip.frames.rotate_axis  = axis
+        takes.append(clip)
+    return ClipList(takes)
+
+
 class TestClipListSaveFbx(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1429,6 +1476,64 @@ class TestClipListSaveFbx(unittest.TestCase):
         self.assertEqual([record.getMessage() for record in logged.records if "no shear" in record.getMessage()], said)
 
     @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_a_moving_joint_orient_is_keyed_in_rotate(self):
+        """a joint orient or rotate axis that moves within a
+        take, or differs between takes, saves: the file holds the first
+        take's first frame's as a joint's pre and post rotation, a node that
+        is no joint none, and every frame keys its difference in its rotate,
+        so every node's world on every frame of every take reads back within
+        float32 of the clip's"""
+        both  = orienting_takes()
+        still = orienting_takes()
+        for clip in still:
+            for channel in ("joint_orient", "rotate_axis"):
+                block = np.array(getattr(clip.frames, channel))
+                setattr(clip.frames, channel, np.broadcast_to(block[:1], block.shape).copy())
+        bound       = orienting_takes()
+        bound.frame = PerTake([3, 2])  # the rig written from take a's frame 3
+        cases = (
+            ("within a take", ClipList([both[0]]), [(0, 6)]),
+            ("between takes", still, [(0, 6), (10, 4)]),
+            ("both", both, [(0, 6), (10, 4)]),
+            ("bound frames 3 and 2", bound, [(0, 6), (10, 4)]),
+        )
+        for label, clips, spans in cases:
+            with self.subTest(label):
+                clips.save_fbx(self.path(f"{label}.fbx"))
+                back = ClipList.load_fbx(self.path(f"{label}.fbx"), axis_system=None)
+                self.assertEqual(list(zip(back.start_frame, back.frame_count)), spans)
+                for clip, read in zip(clips, back):
+                    want = np.asarray(clip.frames.world_matrix)
+                    got  = np.asarray(read.frames.world_matrix)
+                    self.assertLessEqual(np.abs(got[..., :3, :3] - want[..., :3, :3]).max(), 2e-7, clip.take)
+                    self.assertLessEqual(np.abs(got[..., 3, :3] - want[..., 3, :3]).max(), 4e-7, clip.take)
+                    # the file's one pre and post rotation per joint: take a's first frame
+                    orient = np.broadcast_to((10.0, -20.0, 0.0), (read.frame_count, 3))
+                    axis   = np.broadcast_to((15.0, 0.0, 25.0), (read.frame_count, 3))
+                    np.testing.assert_allclose(np.asarray(read.frames.joint_orient)[:, 2], orient, rtol=0, atol=1e-12)
+                    np.testing.assert_allclose(np.asarray(read.frames.rotate_axis)[:, 3], axis, rtol=0, atol=1e-12)
+                    # the keys continuous: none a turn away from the frame before
+                    steps = np.abs(np.diff(np.asarray(read.frames.rotate), axis=0))
+                    self.assertLess(steps.max(), 180.0, clip.take)
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_maya_reads_a_moving_joint_orient(self):
+        """Maya 2025's FBXImport of each take (1-based -t) of a moving joint
+        orient and rotate axis saved: every node's world on every frame within
+        float32 of the clip's. Needs mayapy with the fbxmaya plug-in"""
+        clips = orienting_takes()
+        clips.save_fbx(self.path("orient.fbx"))
+        for index, clip in enumerate(clips):
+            with self.subTest(take=clip.take):
+                frames = range(clip.start_frame, clip.start_frame + clip.frame_count)
+                worlds = self.maya_frames(self.path("orient.fbx"), index + 1, frames)
+                want   = np.asarray(clip.frames.world_matrix)
+                for column, node in enumerate(clip):
+                    got = worlds[node.name]
+                    self.assertLessEqual(np.abs(got[:, :3, :3] - want[:, column, :3, :3]).max(), 2e-7, node.name)
+                    self.assertLessEqual(np.abs(got[:, 3, :3] - want[:, column, 3, :3]).max(), 4e-7, node.name)
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_refusals(self):
         """each check raises before the sdk is reached, naming what fails"""
         def cases():
@@ -1444,14 +1549,6 @@ class TestClipListSaveFbx(unittest.TestCase):
             ordered                    = ClipList([hand_built("a"), hand_built("b")])
             ordered[1][0].rotate_order = 3
             yield "another rotate order", ordered, "node 0 is"
-            oriented                        = ClipList([hand_built("a"), hand_built("b")])
-            oriented[1].frames.joint_orient = np.full(np.asarray(oriented[1].frames.joint_orient).shape, 5.0)
-            yield "another joint orient", oriented, "'root' has another joint_orient in take 1 ('b')"
-            moving                        = ClipList([hand_built("a")])
-            orient                        = np.array(moving[0].frames.joint_orient)
-            orient[:, 1, 0]               = np.arange(6)
-            moving[0].frames.joint_orient = orient
-            yield "a joint orient moving", moving, "'tip''s joint_orient changes over the frames of take 0 ('a')"
             rates        = ClipList([hand_built("a"), hand_built("b")])
             rates[1].fps = 30.0
             yield "two frame rates", rates, "[24.0, 30.0] fps"
