@@ -45,7 +45,7 @@ docstring, so import `prim` and `stage` from it directly.
 |---|---|---|
 | `glb` | `pygltflib` | Imports fine. Every entry point raises `RuntimeError("pygltflib is not installed")` |
 | `glb` | `trimesh` (optional) | Imports fine. `GlbData.mesh_list` is `None` |
-| `fbx` | Autodesk FBX Python SDK — not on PyPI, a manual install | Imports fine, with one `UserWarning` naming the SDK and where to get it. Every FBX call raises `RuntimeError` with that same message |
+| `fbx` | Autodesk FBX Python SDK — not on PyPI, a manual install | Imports fine, with one `UserWarning` naming the SDK and where to get it. The FBX readers and `save_fbx` raise `ImportError` at call time; `cgmath.formats.fbx`'s own `SceneData(path)`, an `FbxExporter`'s methods (all but `close`) and any call on its placeholder `fbx` object raise `RuntimeError`, with that same message |
 | `usd.prim`, `usd.stage` | `pxr`, from `usd-core` (the `usd` extra) or the host DCC's own USD | **`import cgmath.formats.usd.prim` raises `ImportError`** — `from pxr import Usd` is unguarded |
 
 So `glb` and `fbx` degrade at call time, while `usd` needs `pxr` at import

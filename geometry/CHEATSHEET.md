@@ -1190,14 +1190,14 @@ measured (1.62 on two quads bound to one joint). One of length 0 stays
 than 1e-10 as the file holds it, not unit (at 1e-10 itself some
 directions read unit), down to 1e-39, below which single precision
 underflows (some corners 0 at 1e-45, all from 1e-46), where the readers
-make it unit, within 3e-14 down to 1e-155 and less closely below (0.018
-off unit at 1e-161, up to about 0.56 between that and 1e-162), and keep
-one whose squared length underflows (from 1e-162: 1e-200, 1e-300) as the
-file holds it, on the lengths measured: such a corner sits up to 1 off
-Maya's in a component, and up to about 1.22 where the squares lose
-digits, between 1e-162 and 1e-155. Nodes that share one mesh are the
-exception for the points and the normals: Maya's importer bakes one
-node's geometric transform into all of them (below). A node's geometric
+make it unit, within about 4e-14 down to 1e-155 and up to about 0.58 off
+unit below, and keep the file's vector where its squared length
+underflows, from about 2.7e-162 down to 1e-300, never NaN, on the
+lengths measured: a corner the readers make unit sits up to about 1 off
+Maya's in a component, and up to about 1.22 between 1e-162 and 1e-155.
+Nodes that share one mesh are the exception for the points and the
+normals: Maya's importer bakes one node's geometric transform into all
+of them (below). A node's geometric
 transform, the offset the file gives the node's mesh alone and not its
 children, is baked into the mesh, as Maya's importer bakes it: the
 points take it as the FBX SDK's `FbxAMatrix(T, R, S)` composes it,

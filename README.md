@@ -188,7 +188,7 @@ see [Requirements](#requirements).
 | Dependency | Used for | Missing behaviour |
 |---|---|---|
 | `pygltflib` | GLB / glTF read | `RuntimeError("pygltflib is not installed")` at call time |
-| Autodesk FBX SDK — not on PyPI, a manual install | FBX read / write | imports fine, with one `UserWarning` naming the SDK and where to get it; every FBX call raises `RuntimeError` with that same message. A module named `fbx` that holds not all of the SDK's five classes (`FbxManager`, `FbxScene`, `FbxImporter`, `FbxExporter`, `FbxNode`; a folder of that name on the path) counts as missing |
+| Autodesk FBX SDK — not on PyPI, a manual install | FBX read / write | imports fine, with one `UserWarning` naming the SDK and where to get it; the FBX readers and `save_fbx` raise `ImportError` at call time, and `cgmath.formats.fbx`'s own `SceneData(path)`, an `FbxExporter`'s methods (all but `close`) and any call on its placeholder `fbx` object raise `RuntimeError`, with that same message. A module named `fbx` that holds not all of the SDK's five classes (`FbxManager`, `FbxScene`, `FbxImporter`, `FbxExporter`, `FbxNode`; a folder of that name on the path) counts as missing |
 | `pxr`, from `usd-core` or the host DCC's own USD | `cgmath.formats.usd` stage / prim helpers; `from_prim` / `to_prim` / `load_usd` in `geometry` | `import cgmath.formats.usd.prim` itself raises `ImportError`, and the `geometry` paths raise `ImportError` at call time (`geometry.utils.pxr()` is the accessor) |
 | `trimesh` | `GlbData.mesh_list` | that attribute is `None` |
 | `PIL` (Pillow) | `Frame.image` / `.save` / `.wireframe` / `.encode_gif`, `to_image`, texture I/O | `RuntimeError("... install Pillow.")` at call time |

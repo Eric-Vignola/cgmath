@@ -5598,21 +5598,20 @@ def load_fbx(filename: str, scale_factor: float | None = None) -> list:
     normal shorter than 1e-10 as the file holds it, not unit (at 1e-10
     itself some directions read unit), down to 1e-39, below which single
     precision underflows (some corners 0 at 1e-45, all from 1e-46), where
-    the read makes it unit, within 3e-14 down to 1e-155 and less closely
-    below (0.018 off unit at 1e-161, up to about 0.56 between that and
-    1e-162), and keeps one whose squared length underflows (from 1e-162:
-    1e-200, 1e-300) as the file holds it, on the lengths measured: such a
-    corner sits up to 1 off Maya's in a component, and up to about 1.22
-    where the squares lose digits, between 1e-162 and 1e-155. Nodes that
-    share one mesh are the exception for the points and the normals: Maya's
-    importer bakes one node's geometric transform into all of them (below).
-    Under the world matrix ``W`` of its node in a rig read from the same
-    file, which keeps a mesh's node as a transform named after it, ``points
-    @ W[:3, :3] + W[3, :3]`` is where Maya's import puts the mesh, in
-    centimeters and Maya's Y-up, its node's world being Maya's and the
-    points themselves untouched. Any file reads as it is, a left handed one
-    too. ``render.Object.load_fbx``, whose Object has no node to carry the
-    turn, turns its points itself.
+    the read makes it unit, within about 4e-14 down to 1e-155 and up to
+    about 0.58 off unit below, and keeps the file's vector where its
+    squared length underflows, from about 2.7e-162 down to 1e-300, never
+    NaN, on the lengths measured: a corner the read makes unit sits up to
+    about 1 off Maya's in a component, and up to about 1.22 between 1e-162
+    and 1e-155. Nodes that share one mesh are the exception for the points
+    and the normals: Maya's importer bakes one node's geometric transform
+    into all of them (below). Under the world matrix ``W`` of its node in a
+    rig read from the same file, which keeps a mesh's node as a transform
+    named after it, ``points @ W[:3, :3] + W[3, :3]`` is where Maya's
+    import puts the mesh, in centimeters and Maya's Y-up, its node's world
+    being Maya's and the points themselves untouched. Any file reads as it
+    is, a left handed one too. ``render.Object.load_fbx``, whose Object has
+    no node to carry the turn, turns its points itself.
 
     A node's geometric transform, the offset the file gives the node's mesh
     alone and not its children, is baked into the mesh, as Maya's importer

@@ -15292,14 +15292,16 @@ class ClipData(HierarchyData):
         files of two and three takes measured, in xyz with no pre or post
         rotation: the active take read, the last, within 3.2e-15 as matrices
         and 8.1e-8 in position (3.1.0 up to 3.04 and 2.56); the last read with
-        ``take=-1`` where the active take is the first, up to 5.01 as matrices
-        and 11.1 in position (5.01 and 10.6 at 3.1.0), a node no take keys up
-        to 3.16 and 2.57 off at both. The clip's frames are the picked take's,
-        where Maya's playback range is the active take's. On 5 of 32 test files
-        imported in Maya 2025, 3.0.1 moved the frames off Maya's playback
-        range: cgmath 3.0.0 loaded the empty first take, the rest pose over
-        Maya's playback range, and 3.0.1 loads the keyed take's curves, as Maya
-        does, over that take's frames:
+        ``take=-1`` where the active take is the first, by a gap that grows
+        with how far the takes stand apart at frame 0: up to 5.01 as matrices
+        and 11.1 in position on those files (5.01 and 10.6 at 3.1.0), up to
+        5.84 and 52.0 on 24 more test files (5.56 and 52.0 at 3.1.0), a node
+        no take keys up to 3.16 and 2.57 off at both. The clip's frames are the
+        picked take's, where Maya's playback range is the active take's. On 5
+        of 32 test files imported in Maya 2025, 3.0.1 moved the frames off
+        Maya's playback range: cgmath 3.0.0 loaded the empty first take, the
+        rest pose over Maya's playback range, and 3.0.1 loads the keyed take's
+        curves, as Maya does, over that take's frames:
 
         - an empty first take over frames 0-48, holding a curve node and
           recorded as the active take, then a take keyed over frames 0-10:
