@@ -258,6 +258,46 @@ class TestLoadFbx(unittest.TestCase):
         formats.save_fbx(self.path("again.fbx"), more)
         self.assert_same(parts(formats.load_fbx(self.path("again.fbx"))), parts(more))
 
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_one_frame_take(self):
+        """a take of one frame at frame 0 reads back with its own frame and
+        values, alone, first or beside others, through ClipList too"""
+        rig           = HierarchyData()
+        a             = TransformData("a", node_type="joint", translate=(0.0, 1.0, 0.0))
+        b             = TransformData("b", node_type="joint", translate=(0.0, 2.0, 0.0))
+        b.parent_uuid = a.uuid
+        rig.append(a)
+        rig.append(b)
+        ntsc = 30000.0 / 1001.0
+
+        def take(name, count, start, fps):
+            clip               = ClipData(rig, frames=count, start_frame=start, fps=fps, take=name)
+            rotate             = np.array(clip.frames.rotate)
+            rotate[:, :, 1]    = np.arange(count)[:, None] * 2.0 + 5.0 + start
+            clip.frames.rotate = rotate
+            return clip
+
+        cases = (
+            [("one", 1, 0, 24.0)],
+            [("long", 200, 1001, ntsc), ("one", 1, 0, ntsc)],
+            [("long", 5, 10, 24.0), ("one", 1, 0, 24.0)],
+            [("one", 1, 0, 24.0), ("long", 5, 10, 24.0)],
+            [("neg", 3, -5, 24.0), ("one", 1, 0, 24.0)],
+            [("one", 1, 5, 24.0), ("two", 2, 0, 24.0)],
+        )
+        for index, specs in enumerate(cases):
+            clips = ClipList([take(*spec) for spec in specs])
+            formats.save_fbx(self.path(f"takes{index}.fbx"), rig, clips)
+            clips.save_fbx(self.path(f"list{index}.fbx"))
+            for read in (formats.load_fbx(self.path(f"takes{index}.fbx")).clips,
+                         ClipList.load_fbx(self.path(f"list{index}.fbx"))):
+                self.assertEqual(read.take, [clip.take for clip in clips], index)
+                for got, want in zip(read, clips):
+                    label = (index, want.take)
+                    self.assertEqual((got.start_frame, got.frame_count), (want.start_frame, want.frame_count), label)
+                    np.testing.assert_array_equal(np.asarray(got.frames.rotate),
+                                                  np.asarray(want.frames.rotate).astype(np.float32), err_msg=str(label))
+
     def test_refusals(self):
         """no file: FileNotFoundError; no sdk: ImportError, before the file
         is looked for"""

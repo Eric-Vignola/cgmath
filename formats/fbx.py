@@ -3337,6 +3337,10 @@ class FbxExporter:
             first, last = fbx.FbxTime(), fbx.FbxTime()
             first.SetSecondDouble(clip.start_frame / clip.fps)
             last.SetSecondDouble(clip.end_frame / clip.fps)
+            # the sdk writes no span (0, 0) and reads another in its place:
+            # one tick past 0, which a read puts on frame 0
+            if first.Get() == 0 and last.Get() == 0:
+                last.Set(1)
             stack.SetLocalTimeSpan(fbx.FbxTimeSpan(first, last))
             stack.SetReferenceTimeSpan(fbx.FbxTimeSpan(first, last))
             layer  = TakeData(self.scene, stack).create_layer("BaseLayer")
