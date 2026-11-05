@@ -12,7 +12,7 @@ from unittest import mock
 import numpy as np
 from cgmath import formats
 from cgmath._tests.test_clip_list import hand_built
-from cgmath.geometry.mesh import MeshData, MeshList, UVData, UVList, _l2_normalize
+from cgmath.geometry.mesh import MeshData, MeshList, UVData, UVList, _l2_normalize, _unit_normals
 from cgmath.geometry.skin_weights import SkinData, SkinList
 from cgmath.hierarchy import ClipData, ClipList, FBX, HierarchyData, PerTake, TransformData
 
@@ -194,8 +194,11 @@ class TestSaveFbxMeshes(unittest.TestCase):
                     self.assertIsNone(back.normals)
                     continue
                 # the reader makes every normal unit length, as Maya's import does
-                np.testing.assert_array_equal(back.normals, _l2_normalize(np.asarray(mesh.normals)))
-                want = {"vertex": mesh.indices, "corner": np.arange(12), "hard": mesh.normal_indices}[normals]
+                np.testing.assert_array_equal(back.normals, _unit_normals(np.asarray(mesh.normals)))
+                want = {"vertex": None, "corner": np.arange(12), "hard": mesh.normal_indices}[normals]
+                if want is None:
+                    self.assertIsNone(back.normal_indices)
+                    continue
                 np.testing.assert_array_equal(back.normal_indices, want)
 
     @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
@@ -709,6 +712,99 @@ class TestSaveFbxMany(unittest.TestCase):
         placed = mesh.points @ world[:3, :3] + world[3, :3]
         got    = np.array(cmds.xform(f"{shape}.vtx[0:11]", q=True, ws=True, t=True)).reshape(-1, 3)
         np.testing.assert_allclose(got, placed, rtol=0, atol=1e-5)
+
+
+
+def rewrite(path, out, edit):
+    """``path`` read with the sdk, ``edit(scene)`` done, written to ``out``"""
+    from cgmath.formats._fbx_io import import_scene, new_manager
+
+    manager = new_manager(FBX)
+    try:
+        scene = import_scene(manager, path, FBX)
+        edit(scene)
+        exporter = FBX.FbxExporter.Create(manager, "")
+        exporter.Initialize(out, -1, manager.GetIOSettings())
+        exporter.Export(scene)
+        exporter.Destroy()
+    finally:
+        manager.Destroy()
+
+
+class TestReadBackAsWritten(unittest.TestCase):
+    """what save_fbx writes reads back as it was, and a load saved and read
+    again reads the same"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def path(self, name):
+        return os.path.join(self.tmp.name, name)
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_rotate_axis(self):
+        """a joint's rotate axis reads back as written, though the post
+        rotation holds its inverse, whose angles read as other angles for
+        the same turn or as the same a few ulps off; a joint with none
+        reads 0.0, not -0.0. A file with no record of it reads the post
+        rotation's angles, the same turn"""
+        axes = [(0.0, 0.0, 0.0), (10.5, -20.25, 30.125), (170.0, 120.0, -100.0), (33.3, 89.9, -0.1),
+                (1e-3, -45.0, 179.0), (-91.7, 13.1, 66.6)]
+        rig = HierarchyData()
+        for index, axis in enumerate(axes):
+            node = TransformData(f"j{index}", node_type="joint", translate=(0.0, 1.0, 0.0), rotate=(5.0, 6.0, 7.0),
+                                 rotate_axis=axis, rotate_order=index % 6, joint_orient=(0.0, 3.0 * index, 0.0))
+            if index:
+                node.parent_uuid = rig[index - 1].uuid
+            rig.append(node)
+        rig.save_fbx(self.path("axes.fbx"))
+        back = HierarchyData.load_fbx(self.path("axes.fbx"), axis_system=None)
+        np.testing.assert_array_equal(back.rotate_axis, rig.rotate_axis)
+        held = np.asarray(back.rotate_axis)
+        self.assertFalse(np.signbit(held[held == 0.0]).any())
+        np.testing.assert_allclose(np.asarray(back.world_matrix), np.asarray(rig.world_matrix), rtol=0, atol=1e-12)
+
+        clip = ClipData(rig, frames=3, take="a")
+        clip.save_fbx(self.path("take.fbx"))
+        (take,) = ClipList.load_fbx(self.path("take.fbx"), axis_system=None)
+        np.testing.assert_array_equal(take.frames.rotate_axis, clip.frames.rotate_axis)
+
+        def forget(scene):
+            for index in range(scene.GetNodeCount()):
+                prop = scene.GetNode(index).FindProperty("cgmath:rotateAxis")
+                if prop.IsValid():
+                    prop.Destroy()
+
+        rewrite(self.path("axes.fbx"), self.path("plain.fbx"), forget)
+        plain = HierarchyData.load_fbx(self.path("plain.fbx"), axis_system=None)
+        np.testing.assert_allclose(np.asarray(plain.world_matrix), np.asarray(rig.world_matrix), rtol=0, atol=1e-12)
+        self.assertGreater(np.abs(np.asarray(plain.rotate_axis) - np.asarray(rig.rotate_axis)).max(), 90.0)
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_normals(self):
+        """normals read at unit length, as Maya's import makes them, but one
+        unit to within 8 ulps reads as the file holds it, so a mesh read,
+        saved and read again reads the same; normals one a vertex read with
+        no normal_indices, as the mesh held them"""
+        rng    = np.random.default_rng(7)
+        points = np.stack(np.meshgrid(np.arange(21.0), np.arange(21.0)), axis=-1).reshape(-1, 2)
+        quads  = [[r * 21 + c, r * 21 + c + 1, r * 21 + c + 22, r * 21 + c + 21] for r in range(20) for c in range(20)]
+        mesh = MeshData(points=np.column_stack([points, np.zeros(len(points))]), indices=np.ravel(quads),
+                        counts=np.full(len(quads), 4), name="grid")
+        for label in ("vertex", "corner"):
+            with self.subTest(label):
+                held                = rng.normal(size=(len(points) if label == "vertex" else len(mesh.indices), 3)) * 3.0
+                mesh.normals        = held
+                mesh.normal_indices = None if label == "vertex" else np.arange(len(mesh.indices))
+                mesh.save_fbx(self.path("normals.fbx"))
+                first = MeshData.load_fbx(self.path("normals.fbx"))
+                np.testing.assert_allclose(first.normals, _l2_normalize(held), rtol=0, atol=1e-15)
+                if label == "vertex":
+                    self.assertIsNone(first.normal_indices)
+                first.save_fbx(self.path("again.fbx"))
+                again = MeshData.load_fbx(self.path("again.fbx"))
+                np.testing.assert_array_equal(again.normals, first.normals)
 
 
 if __name__ == "__main__":

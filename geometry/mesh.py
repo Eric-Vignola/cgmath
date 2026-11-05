@@ -5600,6 +5600,13 @@ def _extract_fbx_normals(
 
     normal_element = mesh.GetElementNormal(0)
     normals        = _fbx_direct_array_to_ndarray(normal_element.GetDirectArray(), dim=3)
+
+    # one a control point, as many as there are: the mesh's own vertex
+    # normals, which a MeshData holds with no normal_indices
+    by_point = normal_element.GetMappingMode() == fbx.FbxLayerElement.EMappingMode.eByControlPoint
+    direct   = normal_element.GetReferenceMode() == fbx.FbxLayerElement.EReferenceMode.eDirect
+    if by_point and direct and len(normals) == mesh.GetControlPointsCount():
+        return normals, None
     normal_indices = _fbx_face_varying_indices(mesh, normal_element, counts)
     return normals, normal_indices
 
@@ -5753,11 +5760,11 @@ def _load_fbx(
                     # a flattening offset: Maya drops the file's normals
                     normals, normal_indices = None, None
                 elif normals is not None:
-                    normals = _l2_normalize(normals @ rotation)
+                    normals = _unit_normals(normals @ rotation)
             elif normals is not None:
                 # Maya's import makes every authored normal unit length; one
                 # of length 0 stays 0
-                normals = _l2_normalize(normals)
+                normals = _unit_normals(normals)
 
             if turn is not None:
                 points = points @ turn
@@ -5832,6 +5839,15 @@ def _compute_shading_normals(
     normals[degenerate] = [0, 1, 0]
 
     return normals
+
+
+def _unit_normals(v: np.ndarray) -> np.ndarray:
+    """``v`` at unit length, as :func:`_l2_normalize` makes it, but for a
+    row already unit to within 8 ulps, kept as it is: so a normal read,
+    saved and read again reads the same"""
+    n    = np.linalg.norm(v, axis=-1, keepdims=True)
+    keep = np.abs(n - 1.0) <= 8.0 * np.finfo(np.float64).eps
+    return np.where(keep, v, v / np.where(n > 0, n, 1.0))
 
 
 def _l2_normalize(v: np.ndarray) -> np.ndarray:

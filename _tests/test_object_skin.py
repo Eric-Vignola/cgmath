@@ -1824,7 +1824,9 @@ class TestFbxNormalsAtUnitLength(unittest.TestCase):
             ("Object.load_fbx", Object.load_fbx(self.path, extract_texture=False).mesh),
         ):
             with self.subTest(label):
-                got = np.asarray(mesh.normals)[mesh.normal_indices]
+                # one a control point: the mesh's own vertex normals
+                ids = mesh.indices if mesh.normal_indices is None else mesh.normal_indices
+                got = np.asarray(mesh.normals)[ids]
                 self.assertFalse(np.isnan(got).any())
                 np.testing.assert_allclose(got, expected, rtol=0.0, atol=1e-15)
 

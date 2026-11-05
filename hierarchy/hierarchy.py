@@ -3075,6 +3075,19 @@ def _fbx_written_specs(node) -> dict:
     }
 
 
+def _fbx_written_axis(node, axis) -> tuple:
+    """the rotate axis save_fbx kept on ``node`` where it turns as ``axis``,
+    the angles its post rotation reads as, within 1e-9; else ``axis``"""
+    if FbxExporter is None:
+        return axis
+    prop = node.FindProperty(FbxExporter._ROTATE_AXIS)
+    if not prop.IsValid():
+        return axis
+    kept = tuple(float(x) for x in FBX.FbxPropertyDouble3(prop).Get())
+    gap  = np.abs(_eulers_to_matrices(kept, 0) - _eulers_to_matrices(axis, 0)).max()
+    return kept if gap <= 1e-9 else axis
+
+
 def _fbx_value(prop, kind: str):
     """a user defined fbx property's value, as a ``kind`` attribute holds it;
     raises UnicodeDecodeError for a string that is not UTF-8"""
@@ -3670,6 +3683,9 @@ def _walk_fbx(
             if active:
                 post.SetR(node.GetPostRotation(source_pivot))
             axis = tuple(post.Inverse().GetR())[:3]
+            if active and not views[index]:
+                # the inverse of no turn reads -0.0: 0.0, as written
+                axis = tuple(x + 0.0 for x in _fbx_written_axis(node, axis))
             if views[index] == "camera":
                 turn = _FBX_CAMERA_AXIS @ _eulers_to_matrices(axis, 0)[:3, :3]
                 axis = 0.0 if np.abs(turn - np.eye(3)).max() <= _FBX_FOLD_BAND else _matrices_to_eulers(turn, 0)

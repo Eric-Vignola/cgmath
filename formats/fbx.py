@@ -2746,6 +2746,14 @@ def _kept_spec(spec: dict, keep: bool) -> dict:
     }
 
 
+def _post_rotation(rotate_axis):
+    """the post rotation a joint of ``rotate_axis`` is written with: fbx
+    composes it as its inverse"""
+    post = fbx.FbxAMatrix()
+    post.SetR(fbx.FbxVector4(*rotate_axis, 1.0))
+    return post.Inverse().GetR()
+
+
 class FbxExporter:
     """
     Export fbx files from pipeline components
@@ -2793,6 +2801,12 @@ class FbxExporter:
     """str: what a stringArray's string starts with, ahead of the list as json"""
 
     _USER_ATTR_SPECS = "cgmath:userAttributes"
+
+    _ROTATE_AXIS = "cgmath:rotateAxis"
+    """str: the hidden property on a joint keeping its rotate axis as given:
+    the post rotation holds its inverse, which reads back as other angles
+    for the same turn, or as the same angles a few ulps off. The readers
+    take it where it turns as the post rotation does."""
     """str: the hidden property on each node keeping its user defined attr specs,
     less the values the properties hold: fbx types alone can't tell a float from a
     double, nor keep an enum's own indices, a double3's children or the channel box
@@ -3037,11 +3051,9 @@ class FbxExporter:
                     fbx.FbxVector4(*item.joint_orient, 1.0),
                 )
                 # fbx composes post rotation as its inverse
-                post = fbx.FbxAMatrix()
-                post.SetR(fbx.FbxVector4(*item.rotate_axis, 1.0))
                 node.SetPostRotation(
                     fbx.FbxNode.EPivotSet.eSourcePivot,
-                    post.Inverse().GetR(),
+                    _post_rotation(item.rotate_axis),
                 )
             # a null's look is what tells a locator from a group, the same way
             # Maya's own FBX plugin writes them. the binding's Look.Set() only
@@ -3075,6 +3087,9 @@ class FbxExporter:
             if specs is not None:
                 prop = fbx.FbxProperty.Create(node, fbx.FbxStringDT, self._USER_ATTR_SPECS, "")
                 prop.Set(specs)
+            if item.node_type == "joint" and np.any(np.asarray(item.rotate_axis) != 0.0):
+                prop = fbx.FbxProperty.Create(node, fbx.FbxDouble3DT, self._ROTATE_AXIS, "")
+                prop.Set(fbx.FbxDouble3(*[float(x) for x in item.rotate_axis]))
 
             node.SetNodeAttribute(node_attr)
 
