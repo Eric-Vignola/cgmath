@@ -75,7 +75,7 @@ def save_fbx(filename, *objects, zero_root: bool = False, as_ascii: bool = False
 
     # expand ~, consistent with the other IO paths
     filename = os.path.expanduser(filename)
-    meshes, groups, skins, rigs, takes = _sort(objects)
+    meshes, groups, skins, rigs, takes = _sort(_opened(objects))
     if (groups or skins) and not meshes:
         raise TypeError("save_fbx writes a UV set or a skin with its mesh: pass the mesh too")
 
@@ -123,6 +123,16 @@ def save_fbx(filename, *objects, zero_root: bool = False, as_ascii: bool = False
             mode = getattr(hierarchy.FBX.FbxTime.EMode, hierarchy._fbx_rate_mode(float(takes[0].fps)))
             exporter.add_takes(takes, names, mode, zero_root=zero_root, columns=columns)
         exporter.export(path=filename, as_ascii=as_ascii, zero_root=zero_root)
+
+
+def _opened(objects) -> list:
+    """``objects``, each FbxContents among them in its parts"""
+    from cgmath.formats._load import FbxContents
+
+    opened = []
+    for item in objects:
+        opened.extend(item.objects() if isinstance(item, FbxContents) else (item,))
+    return opened
 
 
 def _sort(objects) -> tuple:
