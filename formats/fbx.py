@@ -2761,6 +2761,26 @@ def _negative_zeros(item) -> str:
     return ";".join(held)
 
 
+def _key_visibility(node, layer, times, shown) -> None:
+    """``node``'s Visibility keyed in ``layer``, at each ``fbx.FbxTime`` of
+    ``times``, 1.0 where ``shown``, else 0.0, constant interpolation,
+    constant standard: each key holds to the next, as Maya keys it"""
+    node.Visibility.ModifyFlag(fbx.FbxPropertyFlags.EFlags.eAnimatable, True)
+    curve    = typed(node.Visibility.GetCurve(layer, True), fbx.FbxAnimCurve, fbx)
+    constant = fbx.FbxAnimCurveDef.EInterpolationType.eInterpolationConstant
+    standard = fbx.FbxAnimCurveDef.EConstantMode.eConstantStandard
+    curve.KeyModifyBegin()
+    try:
+        curve.KeyClear()
+        for fbx_time, value in zip(times, np.asarray(shown, dtype=bool).tolist()):
+            key = curve.KeyAdd(fbx_time)
+            key = key[0] if isinstance(key, tuple) else key
+            curve.KeySet(key, fbx_time, 1.0 if value else 0.0, constant)
+            curve.KeySetConstantMode(key, standard)
+    finally:
+        curve.KeyModifyEnd()
+
+
 def _post_rotation(rotate_axis):
     """the post rotation a joint of ``rotate_axis`` is written with: fbx
     composes it as its inverse"""
@@ -3376,10 +3396,9 @@ class FbxExporter:
         skeleton = list(self._skeleton) if self._skeleton is not None else []
         skipped  = self._zero_root() if zero_root else None
         columns  = range(len(skeleton)) if columns is None else columns
-        written  = [(column, self._fbx_nodes.get(id(node))) for column, node in zip(columns, skeleton)]
-        written = [
-            (column, node) for column, node in written if column is not None and node is not None and node is not skipped
-        ]
+        looked   = [(column, self._fbx_nodes.get(id(node)), node) for column, node in zip(columns, skeleton)]
+        looked   = [(column, node, item) for column, node, item in looked if column is not None and node is not None]
+        written  = [(column, node) for column, node, _ in looked if node is not skipped]
 
         for clip, name in zip(clips, names):
             stack = fbx.FbxAnimStack.Create(self.scene, name)
@@ -3408,6 +3427,14 @@ class FbxExporter:
                     for axis, component in enumerate("XYZ"):
                         curve = layer.create_curve(fbx_node.GetName(), f"{channel}{component}", fbx_node=fbx_node)
                         curve._set_keys_at(times, block[:, column, axis], mode)
+
+            # a node's visibility other than the file's on any frame of the
+            # take: a Visibility curve keyed on every frame, stepped (constant,
+            # standard), 0 or 1, as Maya's FBXExport keys one
+            shown = np.asarray(frames.visibility)
+            for column, fbx_node, item in looked:
+                if np.any(shown[:, column] != bool(item.visibility)):
+                    _key_visibility(fbx_node, layer._data, times, shown[:, column])
 
     def add_mesh(self, mesh, node=None):
         """Adds a ``MeshData`` as an ``FbxMesh`` and returns it.

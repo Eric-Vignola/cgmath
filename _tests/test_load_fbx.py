@@ -91,6 +91,7 @@ def parts(contents, keys=False) -> dict:
             if keys and channel in ("translate", "rotate", "scale"):
                 block = block.astype(np.float32).astype(np.float64)
             out[f"take {clip.take} {channel}"] = block
+        out[f"take {clip.take} visibility"] = np.asarray(clip.frames.visibility)
     for mesh in contents.meshes:
         for field in ("points", "indices", "counts", "normals", "normal_indices", "matrix"):
             out[f"mesh {mesh.name} {field}"] = getattr(mesh, field)
@@ -361,6 +362,91 @@ class TestLoadFbx(unittest.TestCase):
                            ("m_hide", (False, 1.0, 0)), ("a", (False, 2.5, 2)), ("c", (True, 12.345, 3))):
             got = more[name]
             self.assertEqual((got.visibility, got.radius, got.draw_style), want, name)
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_take_visibility(self):
+        """a take's visibility reads back as saved, a node's own or keyed
+        frame by frame: the take keys a Visibility curve where it is not the
+        rig's, stepped, as Maya's exporter keys one. A file's curve and
+        static Visibility read as Maya's importer reads them: every key
+        stepped, to the next key's value where its constant mode is next,
+        visible above 1e-5"""
+        from cgmath._tests.test_save_fbx import rewrite
+
+        rig           = HierarchyData()
+        g             = TransformData("g", translate=(1.0, 0.0, 0.0))
+        j             = TransformData("j", node_type="joint", translate=(0.0, 1.0, 0.0))
+        k             = TransformData("k", node_type="locator", translate=(0.0, 1.0, 0.0), visibility=False)
+        j.parent_uuid = g.uuid
+        k.parent_uuid = j.uuid
+        for node in (g, j, k):
+            rig.append(node)
+        own = ClipData(rig, frames=3, take="own")
+        own["j"].visibility = False
+        keyed = ClipData(rig, frames=5, start_frame=2, take="keyed")
+        shown = np.asarray(keyed.frames.visibility)
+        shown[:, 1]             = [True, False, False, True, False]
+        shown[:, 2]             = [False, False, True, True, True]
+        keyed.frames.visibility = shown
+        plain = ClipData(rig, frames=2, take="plain")
+        takes = ClipList([own, keyed, plain])
+        formats.save_fbx(self.path("vis.fbx"), rig, takes)
+        first = formats.load_fbx(self.path("vis.fbx"))
+        self.assertEqual([node.visibility for node in first.rig], [True, True, False])
+        for want, got in zip(takes, first.clips):
+            np.testing.assert_array_equal(np.asarray(got.frames.visibility), np.asarray(want.frames.visibility),
+                                          err_msg=want.take)
+        self.assertEqual([clip._visible is None for clip in first.clips], [True, False, True])
+        self.assertEqual([np.shape(shown) for shown in first.clips.frames.visibility], [(3, 3), (5, 3), (2, 3)])
+        self.assertEqual([node.visibility for node in first.clips[0]], [True, False, False])
+        formats.save_fbx(self.path("again.fbx"), first)
+        again = formats.load_fbx(self.path("again.fbx"))
+        for want, got in zip(first.clips, again.clips):
+            np.testing.assert_array_equal(np.asarray(got.frames.visibility), np.asarray(want.frames.visibility))
+        self.assert_same(parts(again), parts(first))
+
+        rig                    = HierarchyData([TransformData(f"n{i}") for i in range(5)])
+        moves                  = ClipData(rig, frames=5, take="t")
+        moves.frames.translate = np.asarray(moves.frames.translate) + np.arange(5)[:, None, None]
+        formats.save_fbx(self.path("plain.fbx"), rig, ClipList([moves]))
+        linear   = FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear
+        constant = FBX.FbxAnimCurveDef.EInterpolationType.eInterpolationConstant
+
+        def add(scene):
+            from cgmath.formats._fbx_io import typed
+
+            criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimStack.ClassId)
+            stack    = typed(scene.GetSrcObject(criteria, 0), FBX.FbxAnimStack, FBX)
+            criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimLayer.ClassId)
+            layer    = typed(stack.GetSrcObject(criteria, 0), FBX.FbxAnimLayer, FBX)
+            nodes = {typed(scene.GetNode(i), FBX.FbxNode, FBX).GetName(): typed(scene.GetNode(i), FBX.FbxNode, FBX)
+                     for i in range(scene.GetNodeCount())}
+            nodes["n0"].Visibility.Set(-0.5)
+            nodes["n1"].Visibility.Set(1e-5)
+            for name, keys, kind, standard in (("n2", ((0, 0.0), (3, 1.0)), constant, True),
+                                               ("n3", ((0, 0.0), (4, 1.0)), linear, False),
+                                               ("n4", ((0, 0.3), (1, -0.5), (2, 2.0), (3, 1e-5), (4, 1.0)), constant, True)):
+                node = nodes[name]
+                node.Visibility.ModifyFlag(FBX.FbxPropertyFlags.EFlags.eAnimatable, True)
+                curve = typed(node.Visibility.GetCurve(layer, True), FBX.FbxAnimCurve, FBX)
+                curve.KeyModifyBegin()
+                for frame, value in keys:
+                    time = FBX.FbxTime()
+                    time.SetSecondDouble(frame / 24.0)
+                    key = curve.KeyAdd(time)[0]
+                    curve.KeySet(key, time, value, kind)
+                    if standard:
+                        curve.KeySetConstantMode(key, FBX.FbxAnimCurveDef.EConstantMode.eConstantStandard)
+                curve.KeyModifyEnd()
+
+        rewrite(self.path("plain.fbx"), self.path("keys.fbx"), add)
+        read = formats.load_fbx(self.path("keys.fbx"))
+        self.assertEqual([node.visibility for node in read.rig], [False, False, True, True, True])
+        shown = np.asarray(read.clips[0].frames.visibility)
+        np.testing.assert_array_equal(shown[:, :2], False)
+        self.assertEqual(shown[:, 2].tolist(), [False, False, False, True, True])
+        self.assertEqual(shown[:, 3].tolist(), [False, True, True, True, True])
+        self.assertEqual(shown[:, 4].tolist(), [True, False, True, False, True])
 
     @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_group_axes(self):

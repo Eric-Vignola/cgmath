@@ -1963,6 +1963,10 @@ class TransformData(Data):
 
     @visibility.setter
     def visibility(self, value: bool) -> None:
+        # a clip holding visibility frame by frame: on every frame
+        owner = self._hierarchy
+        if getattr(owner, "_visible", None) is not None:
+            owner._shown_everywhere(self, bool(value))
         self._visibility = bool(value)
 
     @property
@@ -3800,7 +3804,7 @@ def _walk_fbx(
         else:
             data["node_type"] = "transform"
 
-        data["visibility"] = float(node.Visibility.Get()) != 0.0
+        data["visibility"] = float(node.Visibility.Get()) > _FBX_VISIBLE
         if kinds[index] == "joint":
             data["radius"], data["draw_style"] = _fbx_joint_look(node)
 
@@ -7140,8 +7144,54 @@ def _fbx_take_clip(
     clip.frame               = 0
     clip._rest_pose          = rest
     clip._take               = take
+
+    # visibility keyed in the take, frame by frame
+    shown = None
+    for uuid in uuids:
+        keyed = _fbx_take_visibility(stack, nodes[uuid], ticks)
+        if keyed is not None:
+            shown                  = clip._shown() if shown is None else shown
+            shown[:, column[uuid]] = keyed
+    if shown is not None:
+        clip._show(shown)
     _fbx_warn_cameras(sheared)
     return _recorded(clip, record)
+
+
+# a Visibility above this reads visible, as Maya's FBXImport reads one,
+# static or keyed: 1e-5 hidden, 1.0000001e-5 visible, any negative hidden
+# (vis_sweep.py)
+_FBX_VISIBLE = 1e-5
+
+
+def _fbx_take_visibility(stack, node, ticks) -> Optional[np.ndarray]:
+    """(F,) bool, ``node``'s visibility on each of ``ticks`` from the
+    Visibility curve the take keys it with, as Maya's FBXImport reads one,
+    None where no layer that is not muted keys it: the first such layer's
+    curve, every key stepped, whatever its interpolation, holding its own
+    value up to the next key, or the next key's where its constant mode is
+    eConstantNext; the first key's before the keys, the last key's after;
+    visible above :data:`_FBX_VISIBLE` (vis_probe.py)"""
+    criteria = FBX.FbxCriteria.ObjectType(FBX.FbxAnimLayer.ClassId)
+    for index in range(stack.GetSrcObjectCount(criteria)):
+        layer = typed(stack.GetSrcObject(criteria, index), FBX.FbxAnimLayer, FBX)
+        if layer.Mute.Get():
+            continue
+        curve = typed(node.Visibility.GetCurve(layer, False), FBX.FbxAnimCurve, FBX)
+        count = curve.KeyGetCount() if curve is not None else 0
+        if not count:
+            continue
+        upward  = FBX.FbxAnimCurveDef.EConstantMode.eConstantNext
+        times   = np.array([curve.KeyGetTime(k).Get() for k in range(count)], dtype=np.int64)
+        values  = np.array([curve.KeyGetValue(k) for k in range(count)], dtype=np.float64)
+        ahead   = np.array([curve.KeyGetConstantMode(k) == upward for k in range(count)], dtype=bool)
+        ticks   = np.asarray(ticks, dtype=np.int64)
+        at      = np.searchsorted(times, ticks, side="right") - 1
+        held    = np.clip(at, 0, count - 1)
+        between = (at >= 0) & (at < count - 1) & (times[held] != ticks)
+        held    = np.where(between & ahead[held], held + 1, held)
+        return values[held] > _FBX_VISIBLE
+    return None
 
 
 def _insort_row(table: dict, key, row: int) -> None:
@@ -13643,6 +13693,23 @@ class _FrameAxis:
         return (clip.start_frame + np.arange(len(self))) / clip.fps
 
     @property
+    def visibility(self) -> np.ndarray:
+        """every frame's visibility, (F, N) bool, a copy"""
+        columns = self._columns
+        return self._scoped(self._clip._shown(), columns)
+
+    @visibility.setter
+    def visibility(self, value) -> None:
+        columns = self._columns
+        clip    = self._clip
+        shown   = clip._shown()
+        if columns is None:
+            shown[:] = np.broadcast_to(np.asarray(value, dtype=bool), shown.shape)
+        else:
+            shown[:, columns] = np.broadcast_to(np.asarray(value, dtype=bool), (len(shown), len(columns)))
+        clip._show(shown)
+
+    @property
     def matrix(self) -> np.ndarray:
         """every frame's local matrices, (F, N, 4, 4)"""
         columns = self._columns
@@ -14142,7 +14209,7 @@ class ClipData(HierarchyData):
 
     # the private state a clip holds beside its list, its LIST_FIELDS and a
     # rig's: the uuid each block column stands for, and each uuid's column
-    _STATE = ("_columns", "_column_place_cache")
+    _STATE = ("_columns", "_column_place_cache", "_visible")
 
     def __init__(
         self,
@@ -14200,6 +14267,10 @@ class ClipData(HierarchyData):
     # (the column list, each uuid's column in it)
     _column_place_cache = None
 
+    # (F, N) bool, each node's visibility frame by frame, a column a block
+    # column, or None: each node's own on every frame
+    _visible = None
+
     def _column_place(self) -> dict:
         """each uuid's block column, kept until the column list is replaced"""
         cache = self._column_place_cache
@@ -14235,6 +14306,13 @@ class ClipData(HierarchyData):
                     rebuilt[:, i] = block[:, column]
             self._blocks[channel] = rebuilt
 
+        if self._visible is not None:
+            shown = np.empty((frames, len(wanted)), dtype=bool)
+            for i, node in enumerate(self.list):
+                column      = source.get(node.uuid)
+                shown[:, i] = node.visibility if column is None else self._visible[:, column]
+            self._visible = shown
+
         self._columns = wanted
         self._bind(min(self._frame, max(frames - 1, 0)))
 
@@ -14248,6 +14326,9 @@ class ClipData(HierarchyData):
                 # the field directly, without the check every frame repeats
                 for i, node in enumerate(self.list):
                     node.__dict__[channel] = row[i]
+            if self._visible is not None:
+                for node, shown in zip(self.list, self._visible[frame].tolist()):
+                    node.__dict__["_visibility"] = shown
             self._frame = frame
 
         for node in self.list:
@@ -14847,6 +14928,7 @@ class ClipData(HierarchyData):
         new._columns   = list(self._columns)
         new._rest_pose = self._rest_pose_copy()
         new._take      = self._take
+        new._visible   = None if self._visible is None else np.array(self._visible[span])
         new._bind(0)
         return new
 
@@ -14867,8 +14949,40 @@ class ClipData(HierarchyData):
         # realign reseed every frame from the one pose the nodes are bound to
         new._columns = list(self._columns)
         new._take    = self._take
+        new._visible = None if self._visible is None else self._visible.copy()
         new._bind(self._frame)
         return new
+
+    def _shown(self) -> np.ndarray:
+        """(F, N) bool, each node's visibility on each frame"""
+        self._realign()
+        if self._visible is not None:
+            return self._visible.copy()
+        shown = np.array([node.visibility for node in self.list], dtype=bool)
+        return np.repeat(shown[None], self.frame_count, axis=0)
+
+    def _show(self, shown) -> None:
+        """each node's visibility on each frame, (F, N) bool: held frame by
+        frame where a node's changes along the frames, else as the node's own"""
+        self._realign()
+        shown = np.array(shown, dtype=bool).reshape(self.frame_count, len(self.list))
+        if not len(shown) or np.all(shown == shown[:1]):
+            self._visible = None
+            for node, value in zip(self.list, shown[0].tolist() if len(shown) else ()):
+                node.__dict__["_visibility"] = value
+            return
+        self._visible = shown
+        self._bind(self._frame)
+
+    def _shown_everywhere(self, node, value: bool) -> None:
+        """``node``'s visibility ``value`` on every frame"""
+        self._realign()
+        column = self._column_place().get(node.uuid)
+        if column is not None and self._visible is not None:
+            shown                        = self._visible.copy()
+            shown[:, column]             = value
+            node.__dict__["_visibility"] = value
+            self._show(shown)
 
     def _rest_pose_copy(self) -> Optional[HierarchyData]:
         """a copy of the rest pose, for a copy or a cut of the clip; None when
@@ -15829,6 +15943,9 @@ class ClipData(HierarchyData):
                 for c, block in blocks.items()
                 if c != "_shear" or np.any(self._blocks[c])
             }
+            # visibility held frame by frame, (F, N) bool, beside them
+            if self._visible is not None:
+                tree["blocks"]["visibility"] = self._visible.copy()
         # a clip with no rest pose, or no take name, saves as one did before
         # it had any
         if tree.get("rest_pose", ...) is None:
@@ -15848,7 +15965,7 @@ class ClipData(HierarchyData):
             arrays = {}
             for channel, block in blocks.items():
                 try:
-                    arrays[channel] = np.asarray(block, dtype=np.float64)
+                    arrays[channel] = np.asarray(block, dtype=None if channel == "_visibility" else np.float64)
                 except (TypeError, ValueError):
                     arrays[channel] = block  # _post_load names what is wrong with it
             data["_blocks"] = arrays
@@ -15875,10 +15992,13 @@ class ClipData(HierarchyData):
         super()._post_load()
         _check_rest_pose(self._rest_pose, self)
 
-        # a channel is named as a file names it: "translate"
+        # a channel is named as a file names it: "translate"; visibility
+        # held frame by frame is no framed channel
         count  = len(self.list)
         blocks = {}
-        for channel, block in (self._blocks or {}).items():
+        held   = dict(self._blocks or {})
+        shown  = held.pop("_visibility", None)
+        for channel, block in held.items():
             name = self._channel_name(channel)
             if channel not in self.FRAMED_CHANNELS:
                 raise ValueError(f"ClipData has no framed channel {name!r}")
@@ -15909,11 +16029,22 @@ class ClipData(HierarchyData):
         if len({block.shape[0] for block in blocks.values()}) > 1:
             raise ValueError("ClipData blocks hold different frame counts")
 
+        if shown is not None:
+            frames = len(next(iter(blocks.values()))) if blocks else 0
+            shown  = np.asarray(shown)
+            if shown.dtype.kind != "b" or shown.shape != (frames, count) or not frames:
+                raise ValueError(
+                    f"ClipData block visibility must be (F, {count}) bool, F the blocks' frames, "
+                    f"got {shown.dtype} {shown.shape}"
+                )
+            shown = shown.copy()
+
         self._blocks      = blocks
         self._columns     = [node.uuid for node in self.list]
         self._start_frame = int(self._start_frame)
         self._fps         = float(self._fps)
         self._frame       = int(self._frame) if blocks else 0
+        self._visible     = shown
         self._bind(self._frame)
 
     def strip_namespace(self, namespace: Optional[str] = None) -> None:
@@ -15944,7 +16075,7 @@ class ClipData(HierarchyData):
         # a column belongs to a uuid: line both clips up with their nodes
         self._realign()
         other._realign()
-        return super().__eq__(other)
+        return super().__eq__(other) and np.array_equal(self._shown(), other._shown())
 
     __hash__ = HierarchyData.__hash__
 
@@ -16477,6 +16608,7 @@ class _Takes:
     shear_xy              = _per_take("shear_xy")
     shear_xz              = _per_take("shear_xz")
     shear_yz              = _per_take("shear_yz")
+    visibility            = _per_take("visibility")
     matrix                = _per_take("matrix")
     world_matrix          = _per_take("world_matrix")
     quaternion            = _per_take("quaternion")

@@ -13639,3 +13639,78 @@ class TestFbxFrameRate(unittest.TestCase):
 
     def test_thirty_drop_names_the_same_rate_as_ntsc_drop(self):
         self.assertEqual(self.rate("eFrames30Drop"), self.rate("eNTSCDropFrame"))
+
+class TestVisibilityFrameByFrame(unittest.TestCase):
+    """a clip holds each node's visibility on every frame alike, the node's
+    own, until frames.visibility is set to one that changes along the
+    frames: the nodes, the playback head, then show the frame bound"""
+
+    def clip(self):
+        rig = HierarchyData()
+        for name in ("a", "b", "c"):
+            rig.append(TransformData(name))
+        rig[1].parent_uuid  = rig[0].uuid
+        rig["c"].visibility = False
+        return ClipData(rig, frames=4, start_frame=10, take="t")
+
+    def test_read_and_set(self):
+        clip = self.clip()
+        np.testing.assert_array_equal(clip.frames.visibility, np.repeat([[True, True, False]], 4, axis=0))
+        self.assertIsNone(clip._visible)
+        clip.frames["b"].visibility = [[True], [False], [False], [True]]
+        self.assertEqual([clip.frames[f]["b"].visibility for f in range(4)], [True, False, False, True])
+        self.assertEqual(clip.frames.visibility[:, 1].tolist(), [True, False, False, True])
+        clip.frame = 2
+        self.assertFalse(clip["b"].visibility)
+        clip.frames.visibility = False
+        self.assertIsNone(clip._visible)
+        self.assertEqual([node.visibility for node in clip], [False, False, False])
+
+    def test_a_node_set_is_set_on_every_frame(self):
+        clip                        = self.clip()
+        clip.frames["a"].visibility = [[False], [True], [False], [True]]
+        clip.frame                  = 1
+        clip["a"].visibility        = False
+        self.assertIsNone(clip._visible)
+        self.assertEqual(clip.frames.visibility[:, 0].tolist(), [False] * 4)
+        clip.frames["a"].visibility = [[False], [True], [False], [True]]
+        clip.frames["b"].visibility = [[False], [True], [True], [True]]
+        clip.visibility             = True
+        self.assertEqual(clip.frames.visibility.tolist(), [[True, True, True]] * 4)
+
+    def test_copies_cuts_reorders_and_equality(self):
+        clip                        = self.clip()
+        clip.frames["c"].visibility = [[True], [False], [True], [True]]
+        same                        = clip.copy()
+        self.assertEqual(same, clip)
+        np.testing.assert_array_equal(same.frames.visibility, clip.frames.visibility)
+        np.testing.assert_array_equal(copy.deepcopy(clip).frames.visibility, clip.frames.visibility)
+        self.assertEqual(clip.frames[1:3].frames.visibility[:, 2].tolist(), [False, True])
+        other                        = clip.copy()
+        other.frames["c"].visibility = [[True], [False], [True], [False]]
+        self.assertNotEqual(other, clip)
+        clip["a"].set_parent("c")
+        names = [node.name for node in clip]
+        self.assertEqual(clip.frames.visibility[:, names.index("c")].tolist(), [True, False, True, True])
+        self.assertEqual(clip.frames.visibility[:, names.index("a")].tolist(), [True] * 4)
+
+    def test_saved_and_loaded(self):
+        clip                        = self.clip()
+        clip.frames["b"].visibility = [[True], [False], [False], [True]]
+        clip.frame                  = 1
+        with tempfile.TemporaryDirectory() as folder:
+            for ext in ("json", "npz", "pkl"):
+                with self.subTest(ext):
+                    path = os.path.join(folder, f"clip.{ext}")
+                    clip.save(path)
+                    back = ClipData.load(path)
+                    self.assertEqual(back, clip)
+                    self.assertEqual(back.frame, 1)
+                    self.assertFalse(back["b"].visibility)
+                    np.testing.assert_array_equal(back.frames.visibility, clip.frames.visibility)
+        tree                         = clip.to_dict()
+        tree["blocks"]["visibility"] = np.ones((3, 3), dtype=bool)
+        with self.assertRaisesRegex(ValueError, r"visibility must be \(F, 3\) bool"):
+            ClipData.from_dict(tree)
+        self.assertNotIn("visibility", self.clip().to_dict()["blocks"])
+        self.assertEqual(pickle.loads(pickle.dumps(clip)), clip)
