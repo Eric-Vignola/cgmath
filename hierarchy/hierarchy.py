@@ -40,6 +40,7 @@ from cgmath.data import (
     _save_shares,
     forward,
 )
+from cgmath.formats import save_fbx as _save_fbx
 from cgmath.formats._fbx_io import load_sdk, open_fbx, typed
 from cgmath.formats.glb import load_model
 from cgmath.transforms import (
@@ -8337,21 +8338,7 @@ class TransformList(DataList[TransformData]):
         Maya reads the escaped text: the fbx sdk's ASCII reader changes it
         otherwise, or loses the whole scene for a brace.
         """
-
-        if FbxExporter is None:
-            raise ImportError("fbx module not found")
-
-        # expand ~, consistent with the other IO paths
-        filename = os.path.expanduser(filename)
-
-        with FbxExporter() as exporter:
-            exporter.add_skeleton(self)
-
-            exporter.export(
-                path      = filename,
-                as_ascii  = as_ascii,
-                zero_root = zero_root,
-            )
+        _save_fbx(filename, self, zero_root=zero_root, as_ascii=as_ascii)
 
     # --------- vectorized properties and methods --------- #
     def set_rotate_to_joint_orient(self) -> None:
@@ -15698,11 +15685,7 @@ class ClipData(HierarchyData):
         rotate on every frame, so a clip of two frames or more reads back
         with it.
         """
-        if self.frame_count > 1:
-            ClipList([self]).save_fbx(filename, zero_root=zero_root, as_ascii=as_ascii)
-            return
-
-        super().save_fbx(filename, zero_root=zero_root, as_ascii=as_ascii)
+        _save_fbx(filename, self, zero_root=zero_root, as_ascii=as_ascii)
 
     @classmethod
     def _channel_name(cls, channel: str) -> str:
@@ -15988,7 +15971,7 @@ def _takes_to_save(clips) -> list:
     return names
 
 
-def _takes_written(clips: list) -> list:
+def _takes_written(clips: list, on_file=None) -> list:
     """``clips`` as :meth:`ClipList.save_fbx` writes them, checked
     (:func:`_takes_to_save`): fbx holds one pre and post rotation per node
     for the file, which the exporter writes on a joint alone, from its joint
@@ -16002,10 +15985,13 @@ def _takes_written(clips: list) -> list:
     is the take's, and the copy holds the file's joint orient and rotate
     axis. R' is continuous along the frames, from the take's own rotate on
     its first frame (euler_filter). Any other take is written as it is."""
-    first  = clips[0]
-    joints = np.array([node.node_type == "joint" for node in first], dtype=bool)
-    orient = np.where(joints[:, None], np.asarray(first.frames.joint_orient)[0], 0.0)
-    axis   = np.where(joints[:, None], np.asarray(first.frames.rotate_axis)[0], 0.0)
+    first = clips[0]
+    if on_file is None:
+        joints = np.array([node.node_type == "joint" for node in first], dtype=bool)
+        orient = np.where(joints[:, None], np.asarray(first.frames.joint_orient)[0], 0.0)
+        axis   = np.where(joints[:, None], np.asarray(first.frames.rotate_axis)[0], 0.0)
+    else:
+        orient, axis = on_file
     held = (
         np.transpose(euler_to_matrix(np.radians(axis), 0)[:, :3, :3], (0, 2, 1)),
         np.transpose(euler_to_matrix(np.radians(orient), 0)[:, :3, :3], (0, 2, 1)),
@@ -16691,20 +16677,7 @@ class ClipList(DataList[ClipData]):
         no fbx time mode carries (``_FBX_FRAME_RATES``), takes in other axes
         or units, and two takes written under one name.
         """
-        if FBX is None:
-            raise ImportError("fbx module not found")
-        # expand ~, as the other io paths do
-        filename = os.path.expanduser(filename)
-
-        names = _takes_to_save(self.list)
-        takes = _takes_written(self.list)
-        from cgmath.formats.fbx import FbxExporter
-
-        with FbxExporter() as exporter:
-            exporter.add_skeleton(takes[0], shear_warning=False)
-            mode = getattr(FBX.FbxTime.EMode, _fbx_rate_mode(float(takes[0].fps)))
-            exporter.add_takes(takes, names, mode, zero_root=zero_root)
-            exporter.export(filename, as_ascii=as_ascii, zero_root=zero_root)
+        _save_fbx(filename, self, zero_root=zero_root, as_ascii=as_ascii)
 
     # --- reading a file's takes --- #
     @classmethod

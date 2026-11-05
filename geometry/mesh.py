@@ -58,6 +58,7 @@ from cgmath.data import (
     DataList,
     ImmutableArray as numpy_array,
 )
+from cgmath.formats import save_fbx as _save_fbx
 from cgmath.formats._fbx_io import load_sdk, open_fbx
 from cgmath.formats.glb import _trimesh_scene
 from cgmath.geometry._saddle_surface import integrate, sample
@@ -2956,6 +2957,18 @@ class MeshData(Data):
         available = [m.name for m, _ in data]
         raise ValueError(f"Mesh '{name}' not found; available: {available}")
 
+    def save_fbx(self, filename: str, as_ascii: bool = False) -> None:
+        """writes the mesh to an fbx file, binary unless ``as_ascii``
+
+        One mesh node at the scene root, named after the mesh, holding its
+        points as they are, its faces in their order (ngons kept) and its
+        normals as it holds them, in Maya's Y-up and cm; ``matrix`` is the
+        node's transform. :meth:`load_fbx` reads it back equal, normals one
+        a vertex coming back face-varying (``normal_indices`` the mesh's
+        ``indices``). See :func:`cgmath.formats.save_fbx`.
+        """
+        _save_fbx(filename, self, as_ascii=as_ascii)
+
     @classmethod
     def load_usd(cls, filename: str, name: str | None = None) -> "MeshData":
         """returns a single MeshData from a usd file (the first mesh prim if name is None)"""
@@ -4662,6 +4675,7 @@ class UVData(MeshData):
         "MeshData's obj writer writes 3D points, a UVData's are 2D: "
         "cgmath.geometry.mesh.save_obj writes a UV set beside its mesh"
     )
+    save_fbx = _NoRoute("MeshData's fbx writer writes a mesh, a UVData is a UV set")
 
     # ----------------------------------- GLB ------------------------------------ #
 
@@ -4781,6 +4795,13 @@ class MeshList(DataList[MeshData]):
         """
         return cls([mesh_data for mesh_data, _ in load_fbx(filename, scale_factor)])
 
+    def save_fbx(self, filename: str, as_ascii: bool = False) -> None:
+        """writes every mesh to one fbx file, binary unless ``as_ascii``: a
+        mesh node each, as :meth:`MeshData.save_fbx` writes one, in the
+        list's order; ValueError for two meshes of one name, before anything
+        is written. See :func:`cgmath.formats.save_fbx`."""
+        _save_fbx(filename, self, as_ascii=as_ascii)
+
     @classmethod
     def load_glb(cls, filename: str, scale_factor: float = 100.0) -> "MeshList":
         """loads all meshes from a glb file into a MeshList"""
@@ -4859,6 +4880,8 @@ class MeshList(DataList[MeshData]):
 
 
 class UVList(MeshList, DataList[UVData]):
+    save_fbx = _NoRoute("MeshList's fbx writer writes meshes, a UVList holds UV sets")
+
     @classmethod
     def load_fbx(cls, filename: str, name: str | None = None) -> "UVList":
         """loads all UV channels for one mesh from an fbx file (first mesh if name is None)"""

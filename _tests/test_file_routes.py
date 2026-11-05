@@ -235,13 +235,13 @@ class TestSave(_Files):
         self.assertFalse(os.path.exists(self.path("q.json")))
 
     def test_a_format_without_a_writer_names_those_there_are(self):
-        with self.assertRaisesRegex(ValueError, "no writer for fbx files.*saves json, npz, obj, pickle$"):
-            quad().save(self.path("q.fbx"))
+        with self.assertRaisesRegex(ValueError, "no writer for glb files.*saves fbx, json, npz, obj, pickle$"):
+            quad().save(self.path("q.glb"))
         with self.assertRaisesRegex(ValueError, "no writer for stl files"):
             quad().save(self.path("q.stl"))
         with self.assertRaisesRegex(ValueError, "no writer for a file without an extension"):
             quad().save(self.path("q"))
-        with self.assertRaisesRegex(ValueError, "MeshList has no writer for obj files.*saves json, npz, pickle$"):
+        with self.assertRaisesRegex(ValueError, "MeshList has no writer for obj files.*saves fbx, json, npz, pickle$"):
             MeshList([quad()]).save(self.path("q.obj"))
         self.assertEqual(os.listdir(self.tmp.name), [])
 

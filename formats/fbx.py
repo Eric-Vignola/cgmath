@@ -3301,10 +3301,12 @@ class FbxExporter:
             raise RuntimeError(f"Could not find {root_name} to reset!")
         return skel_root
 
-    def add_takes(self, clips, names, time_mode, zero_root: bool = False) -> None:
+    def add_takes(self, clips, names, time_mode, zero_root: bool = False, columns=None) -> None:
         """One animation stack per clip, after :meth:`add_skeleton`
 
-        ``clips`` are takes of the skeleton added, their nodes in its order;
+        ``clips`` are takes of the skeleton added, their nodes in its order,
+        or, with ``columns``, the clip column each skeleton node is keyed
+        from, None for a node left unkeyed (a rig the takes animate by name);
         ``names`` each one's stack name and ``time_mode`` the
         ``fbx.FbxTime.EMode`` of their frame rate, which the scene takes.
         Each stack spans its clip's frames and holds a BaseLayer in which
@@ -3321,13 +3323,17 @@ class FbxExporter:
         self.scene.GetGlobalSettings().SetTimeMode(time_mode)
         skeleton = list(self._skeleton) if self._skeleton is not None else []
         skipped  = self._zero_root() if zero_root else None
-        written  = [(column, self._fbx_nodes.get(id(node))) for column, node in enumerate(skeleton)]
-        written  = [(column, node) for column, node in written if node is not None and node is not skipped]
+        columns  = range(len(skeleton)) if columns is None else columns
+        written  = [(column, self._fbx_nodes.get(id(node))) for column, node in zip(columns, skeleton)]
+        written = [
+            (column, node) for column, node in written if column is not None and node is not None and node is not skipped
+        ]
 
         # the skeleton's nodes in the order it wrote them, parents first
         held = np.zeros(len(skeleton), dtype=bool)
         for clip in clips:
-            held |= np.any(np.asarray(clip.frames.shear) != 0.0, axis=(0, 2))
+            sheared = np.any(np.asarray(clip.frames.shear) != 0.0, axis=(0, 2))
+            held   |= np.array([c is not None and bool(sheared[c]) for c in columns], dtype=bool)
         column  = {id(node): index for index, node in enumerate(skeleton)}
         sheared = [skeleton[column[key]].name for key in self._fbx_nodes if key in column and held[column[key]]]
         if sheared:
@@ -3358,6 +3364,148 @@ class FbxExporter:
                     for axis, component in enumerate("XYZ"):
                         curve = layer.create_curve(fbx_node.GetName(), f"{channel}{component}", fbx_node=fbx_node)
                         curve._set_keys_at(times, block[:, column, axis], mode)
+
+    def add_mesh(self, mesh, node=None):
+        """Adds a ``MeshData`` as an ``FbxMesh`` and returns it.
+
+        The points are written as they are, in the unit and axes the scene
+        is labelled with, the faces in their order with their vertex counts
+        (ngons kept). Normals are written as the mesh holds them: through
+        ``normal_indices``, indexed, one a face corner (``eByPolygonVertex``,
+        ``eIndexToDirect``); else one a vertex (``eByControlPoint``, as
+        Maya's exporter writes smooth normals) or one a corner; none when it
+        has none. ``node`` is the ``FbxNode`` that takes the mesh, a group the
+        skeleton wrote, whose own transform it keeps; None makes one at the
+        scene root, named after the mesh, with ``mesh.matrix`` as its
+        transform (identity for a mesh read from an fbx). Raises ValueError
+        for normals that fit neither
+        the vertices nor the corners, or a mesh holding polygon holes,
+        which this writer does not write.
+        """
+        # imported here: cgmath.geometry imports this module's package
+        from cgmath.geometry.mesh import _corner_normals
+        from cgmath.hierarchy.hierarchy import TransformData, _fbx_maya_scale
+
+        self._check_open()
+        name  = mesh.name or "mesh"
+        label = f"mesh {name!r}"
+        if mesh.hole_faces is not None and len(mesh.hole_faces):
+            raise ValueError(f"{label} holds polygon holes, which save_fbx does not write")
+        normals, ids = _corner_normals(mesh)
+
+        if node is None:
+            # the node's channels decomposed as a transform's matrix setter does
+            own        = TransformData(name)
+            own.matrix = np.asarray(mesh.matrix, dtype=np.float64)
+            node       = fbx.FbxNode.Create(self.manager, name)
+            node.LclTranslation.Set(fbx.FbxDouble3(*own.translate))
+            node.LclRotation.Set(fbx.FbxDouble3(*own.rotate))
+            node.LclScaling.Set(fbx.FbxDouble3(*_fbx_maya_scale(own.scale)))
+            node.SetRotationOrder(fbx.FbxNode.EPivotSet.eSourcePivot, self._ROTATE_ORDER_MAP[own.rotate_order])
+            node.SetRotationActive(True)
+            node.SetTransformationInheritType(fbx.FbxTransform.EInheritType.eInheritRSrs)
+            self.scene.GetRootNode().AddChild(node)
+
+        shape  = fbx.FbxMesh.Create(self.manager, f"{name}Shape")
+        points = np.asarray(mesh.points, dtype=np.float64).tolist()
+        shape.InitControlPoints(len(points))
+        for index, point in enumerate(points):
+            shape.SetControlPointAt(fbx.FbxVector4(*point, 1.0), index)
+
+        indices = np.asarray(mesh.indices, dtype=np.int64).tolist()
+        start   = 0
+        for size in np.asarray(mesh.counts, dtype=np.int64).tolist():
+            shape.BeginPolygon(-1, -1, -1, False)
+            for vertex in indices[start : start + size]:
+                shape.AddPolygon(vertex)
+            shape.EndPolygon()
+            start += size
+
+        if normals is not None:
+            mapping = fbx.FbxLayerElement.EMappingMode
+            refs    = fbx.FbxLayerElement.EReferenceMode
+            element = shape.CreateElementNormal()
+            if mesh.normal_indices is not None:
+                element.SetMappingMode(mapping.eByPolygonVertex)
+                element.SetReferenceMode(refs.eIndexToDirect)
+                index_array = element.GetIndexArray()
+                for index in np.asarray(ids, dtype=np.int64).tolist():
+                    index_array.Add(index)
+            else:
+                # one a vertex, or one a corner: the ids _corner_normals gave
+                by_point = normals.shape[0] == len(points)
+                element.SetMappingMode(mapping.eByControlPoint if by_point else mapping.eByPolygonVertex)
+                element.SetReferenceMode(refs.eDirect)
+            direct = element.GetDirectArray()
+            for normal in normals.tolist():
+                direct.Add(fbx.FbxVector4(*normal, 0.0))
+
+        node.SetNodeAttribute(shape)
+        LOGGER.info(f"added mesh: {name}")
+        return shape
+
+    def add_uvs(self, shape, uvs) -> None:
+        """Adds UV sets, ``UVData`` each, to an ``FbxMesh`` :meth:`add_mesh`
+        returned, in their order, each named after its set: its UVs as they
+        are, one a face corner through its ``indices`` (``eByPolygonVertex``,
+        ``eIndexToDirect``, as Maya's exporter writes a UV set), each set an
+        element of its own. The sets' faces are the mesh's, which the caller
+        checks (``cgmath.formats.save_fbx`` pairs them)."""
+        self._check_open()
+        mapping = fbx.FbxLayerElement.EMappingMode
+        refs    = fbx.FbxLayerElement.EReferenceMode
+        for uv in uvs:
+            element = shape.CreateElementUV(uv.name)
+            element.SetMappingMode(mapping.eByPolygonVertex)
+            element.SetReferenceMode(refs.eIndexToDirect)
+            direct = element.GetDirectArray()
+            for point in np.asarray(uv.points, dtype=np.float64).tolist():
+                direct.Add(fbx.FbxVector2(*point))
+            index_array = element.GetIndexArray()
+            for index in np.asarray(uv.indices, dtype=np.int64).tolist():
+                index_array.Add(index)
+
+    def add_skin(self, shape, skin, links) -> None:
+        """Adds a ``SkinData`` to an ``FbxMesh`` :meth:`add_mesh` returned:
+        an ``FbxSkin``, one ``FbxCluster`` an influence, in the skin's order,
+        linked to the ``FbxNode`` of ``links`` in that order (nodes the
+        skeleton wrote), and a bind pose listing the mesh's node and the
+        links, as Maya's exporter writes one a skin.
+
+        The nodes as written are the bind pose: each cluster's link matrix
+        is its node's world and its transform matrix the mesh node's, as the
+        sdk evaluates them from the channels written (a static scale under
+        1e-12 as 1e-12), and the bind pose holds the same worlds. Each
+        cluster lists the vertices its influence weighs other than 0, with
+        their weights as stored (float64), normalized link mode, as Maya's
+        exporter writes it; an influence weighing none still has its
+        cluster."""
+        self._check_open()
+        node    = shape.GetNode()
+        name    = node.GetName()
+        worlds  = [link.EvaluateGlobalTransform() for link in links]
+        placed  = node.EvaluateGlobalTransform()
+        weights = np.asarray(skin.weights, dtype=np.float64)
+        made    = fbx.FbxSkin.Create(self.manager, f"{name}Skin")
+        for column, (influence, link) in enumerate(zip(skin.influences, links)):
+            cluster = fbx.FbxCluster.Create(self.manager, influence)
+            cluster.SetLink(link)
+            cluster.SetLinkMode(fbx.FbxCluster.ELinkMode.eNormalize)
+            rows = np.flatnonzero(weights[:, column])
+            for vertex, weight in zip(rows.tolist(), weights[rows, column].tolist()):
+                cluster.AddControlPointIndex(vertex, weight)
+            cluster.SetTransformMatrix(placed)
+            cluster.SetTransformLinkMatrix(worlds[column])
+            made.AddCluster(cluster)
+        shape.AddDeformer(made)
+
+        pose = fbx.FbxPose.Create(self.manager, f"{name}BindPose")
+        pose.SetIsBindPose(True)
+        pose.Add(node, fbx.FbxMatrix(placed))
+        for link, world in zip(links, worlds):
+            pose.Add(link, fbx.FbxMatrix(world))
+        self.scene.AddPose(pose)
+        LOGGER.info(f"added skin: {name}, {len(links)} influences")
 
     def _get_acsii_type(self):
         plg_rego     = self.manager.GetIOPluginRegistry()
