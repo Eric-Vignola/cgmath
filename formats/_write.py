@@ -14,6 +14,9 @@ import numpy as np
 # the fbx writer's logger: its warnings and save_fbx's are one stream
 LOGGER = logging.getLogger("cgmath.formats.fbx")
 
+# fbx has no channel for shear: a node holding more than this is refused
+SHEAR_LIMIT = 1e-9
+
 
 def save_fbx(filename, *objects, zero_root: bool = False, as_ascii: bool = False) -> None:
     """writes ``objects`` to one fbx file, binary unless ``as_ascii``
@@ -86,6 +89,7 @@ def save_fbx(filename, *objects, zero_root: bool = False, as_ascii: bool = False
         raise ValueError(f"save_fbx: {len(rigs)} rigs, a file holds one")
     if skins and not (rigs or takes):
         raise TypeError("save_fbx writes a skin with the rig its influences name: pass the rig too")
+    _refuse_shear(rigs[0] if rigs else None, takes)
 
     columns = None
     if rigs:
@@ -108,7 +112,7 @@ def save_fbx(filename, *objects, zero_root: bool = False, as_ascii: bool = False
 
     with hierarchy.FbxExporter() as exporter:
         if rig is not None:
-            exporter.add_skeleton(rig, shear_warning=bool(rigs))
+            exporter.add_skeleton(rig)
         nodes = {node.name: exporter._fbx_nodes.get(id(node)) for node in (rig if rig is not None else ())}
         for mesh, uvs, skin, home in zip(meshes, sets, owner, homes):
             shape = exporter.add_mesh(mesh, nodes[home] if home is not None else None)
@@ -314,3 +318,35 @@ def _refuse_repeats(names) -> None:
         seen.add(name)
     if repeated:
         raise ValueError(f"save_fbx: node names repeat, which a file pairs by: {repeated}")
+
+
+def _refuse_shear(rig, takes, what: str = "save_fbx") -> None:
+    """ValueError naming the nodes of ``rig`` and of each of ``takes`` that
+    hold a shear over :data:`SHEAR_LIMIT` on any frame: fbx has no channel
+    for it, and a save without it moves them and every node under them"""
+    found, most = [], 0.0
+    if rig is not None and len(rig):
+        shear = np.abs(np.array([node.shear for node in rig], dtype=np.float64))
+        bad   = np.flatnonzero(shear.max(axis=1) > SHEAR_LIMIT)
+        if bad.size:
+            found.append(f"the rig's {[rig[int(i)].name for i in bad]}")
+            most = max(most, float(shear.max()))
+    for index, clip in enumerate(takes or ()):
+        if not clip.frame_count or not len(clip):
+            continue
+        shear = np.abs(np.asarray(clip.frames.shear, dtype=np.float64))
+        held  = shear.max(axis=(0, 2)) > SHEAR_LIMIT
+        if not held.any():
+            continue
+        frames = np.flatnonzero(shear.max(axis=(1, 2)) > SHEAR_LIMIT) + clip.start_frame
+        most   = max(most, float(shear.max()))
+        label  = clip.take.strip() or f"take {index}"
+        found.append(
+            f"take {label!r}'s {[clip[int(i)].name for i in np.flatnonzero(held)]} "
+            f"(frames {int(frames[0])} to {int(frames[-1])})"
+        )
+    if found:
+        raise ValueError(
+            f"{what}: fbx has no shear, and these nodes hold one over {SHEAR_LIMIT:g}, up to {most:.3g}: "
+            + "; ".join(found)
+        )

@@ -1278,6 +1278,10 @@ class TestUserAttributes(unittest.TestCase):
         rig    = _rig(hip={"tx": _spec(7.0)}, knee={"tx": _spec(8.0), "v": _spec(0.5)})
         folder = self.folder()
         path   = os.path.join(folder, "rig.fbx")
+        # fbx has no shear, and save_fbx refuses one: the file the save of
+        # this rig wrote when it left shear out
+        for node in rig:
+            node.shear = (0.0, 0.0, 0.0)
         rig.save_fbx(path)
         taken = self.keyed(path, os.path.join(folder, "take.fbx"))
         bound = self.bound(path, os.path.join(folder, "bind.fbx"), 1.0)

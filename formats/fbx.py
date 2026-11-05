@@ -2890,7 +2890,7 @@ class FbxExporter:
         self.close()
         return False
 
-    def add_skeleton(self, skeleton_component, shear_warning: bool = True) -> None:
+    def add_skeleton(self, skeleton_component) -> None:
         """Add a skeleton component to the scene.
 
         Each node is added after its parent, whatever order the component
@@ -2916,12 +2916,8 @@ class FbxExporter:
         under 1e-12 in size, 0 and -0 among them, written as 1e-12,
         positive, as Maya's own exporter writes a static one and as Maya's
         evaluation holds it, and for a node's shear: fbx has no channel for
-        it, so scale, rotate and translate are written as they are and one
-        warning names the nodes holding one, parents first, as Maya's own
-        exporter names them. Those nodes and the nodes under them load where
-        the component with that shear zeroed has them. ``shear_warning``
-        False leaves that warning to :meth:`add_takes`, which names the nodes
-        holding a shear on any frame of any take.
+        it, so scale, rotate and translate are written as they are
+        (``cgmath.formats.save_fbx`` refuses a shear over 1e-9).
 
         Raises ValueError, before anything is added, when a user defined string
         attr is not plain ASCII, the only text the FBX SDK takes, or a node's user
@@ -3092,11 +3088,6 @@ class FbxExporter:
         if skipped:
             counts = ", ".join(f"{v} {k}" for k, v in sorted(skipped.items()))
             LOGGER.warning(f"skipped user defined attrs with no fbx type: {counts}")
-
-        sheared = [item.name for item, _ in kept if item.shear.any()]
-        if sheared and shear_warning:
-            names = ", ".join(sheared)
-            LOGGER.warning(f"fbx holds no shear, saved without it, these nodes and those under them move: {names}")
         LOGGER.info(f"added skeleton: {skeleton_component}")
 
     @classmethod
@@ -3314,11 +3305,7 @@ class FbxExporter:
         has its Lcl Translation, Rotation and Scaling X, Y and Z keyed on
         every frame, linear, at ``(start_frame + f) / fps``: the values each
         frame holds, keyed scales as they are, as Maya's own export writes
-        them. The curves are made on each node itself, never by name. fbx
-        has no channel for shear: one warning names the nodes the skeleton
-        wrote that hold one on any frame of any take, parents first, as
-        :meth:`add_skeleton` names those of its bound frame (pass it
-        ``shear_warning=False``).
+        them. The curves are made on each node itself, never by name.
         """
         self.scene.GetGlobalSettings().SetTimeMode(time_mode)
         skeleton = list(self._skeleton) if self._skeleton is not None else []
@@ -3328,18 +3315,6 @@ class FbxExporter:
         written = [
             (column, node) for column, node in written if column is not None and node is not None and node is not skipped
         ]
-
-        # the skeleton's nodes in the order it wrote them, parents first
-        held = np.zeros(len(skeleton), dtype=bool)
-        for clip in clips:
-            sheared = np.any(np.asarray(clip.frames.shear) != 0.0, axis=(0, 2))
-            held   |= np.array([c is not None and bool(sheared[c]) for c in columns], dtype=bool)
-        column  = {id(node): index for index, node in enumerate(skeleton)}
-        sheared = [skeleton[column[key]].name for key in self._fbx_nodes if key in column and held[column[key]]]
-        if sheared:
-            LOGGER.warning(
-                f"fbx holds no shear, saved without it, these nodes and those under them move: {', '.join(sheared)}"
-            )
 
         for clip, name in zip(clips, names):
             stack = fbx.FbxAnimStack.Create(self.scene, name)

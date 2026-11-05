@@ -615,6 +615,31 @@ class TestSaveFbxMany(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(bound.joint_orient), np.asarray(rig.joint_orient), rtol=0, atol=1e-12)
 
     @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_shear_is_refused(self):
+        """a rig's node or a take's frame holding a shear over 1e-9 raises
+        ValueError naming them, nothing written; 1e-9 and an uneven scale
+        without shear save"""
+        rig, mesh, skin = skinned(group="body")
+        clips = joint_takes(rig)
+        formats.save_fbx(self.path("plain.fbx"), rig, clips, mesh, skin)
+        rig["body"].scale = (1.0, 2.0, 0.5)
+        rig["mid"].shear  = (0.0, 1e-9, -1e-9)
+        formats.save_fbx(self.path("plain.fbx"), rig, clips, mesh, skin)
+        np.testing.assert_array_equal(HierarchyData.load_fbx(self.path("plain.fbx"), axis_system=None).shear, 0.0)
+
+        sheared              = rig.copy()
+        sheared["mid"].shear = (0.0, 2e-9, 0.0)
+        with self.assertRaisesRegex(ValueError, r"no shear.*the rig's \['mid'\]"):
+            formats.save_fbx(self.path("x.fbx"), sheared, clips, mesh, skin)
+        block                 = np.array(clips[1].frames.shear)
+        block[2, 2]           = (0.0, 0.0, 0.25)
+        clips[1].frames.shear = block
+        for objects in ((rig, clips, mesh, skin), (clips,), (clips[1],)):
+            with self.subTest(len(objects)), self.assertRaisesRegex(ValueError, r"take 'take1''s \['tip'\] \(frames 2 to 2\)"):
+                formats.save_fbx(self.path("x.fbx"), *objects)
+        self.assertFalse(os.path.exists(self.path("x.fbx")))
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_takes_that_do_not_fit_the_rig(self):
         """each raises before the sdk is reached, naming what fails"""
         rig, mesh, _ = skinned(group="body")

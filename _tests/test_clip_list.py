@@ -1447,10 +1447,9 @@ class TestClipListSaveFbx(unittest.TestCase):
         self.assertEqual(back.frame_count, [4, 3, 2])
 
     @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
-    def test_shear_on_any_frame_is_named_once(self):
-        """fbx has no channel for shear: one warning names the nodes holding
-        one on any frame of any take, parents first, as a rig's save names
-        those of its frame; none where no take holds any"""
+    def test_shear_on_any_frame_is_refused(self):
+        """fbx has no channel for shear: a shear on any frame of any take is
+        refused, naming each take's nodes and frames; nothing is written"""
         from cgmath._tests.test_fbx_export import _no_fbx_warnings, scaled_rig
 
         clips = ClipList([ClipData(scaled_rig(), frames=3, take="a"), ClipData(scaled_rig(), frames=2, take="b")])
@@ -1462,18 +1461,10 @@ class TestClipListSaveFbx(unittest.TestCase):
             shear                              = np.array(clip.frames.shear)
             shear[frame, names.index(node), 0] = 0.5
             clip.frames.shear                  = shear
-        with self.assertLogs("cgmath.formats.fbx", "WARNING") as logged:
+        message = r"take 'a''s \['sc_loc'\] \(frames 2 to 2\); take 'b''s \['sc_kid', 'sc_lcf'\] \(frames 0 to 1\)"
+        with self.assertRaisesRegex(ValueError, message):
             clips.save_fbx(self.path("sheared.fbx"))
-        said = [record.getMessage() for record in logged.records if "no shear" in record.getMessage()]
-        self.assertEqual(len(said), 1, said)
-        # parents first, as a rig's save names them: sc_loc is under sc_kid
-        self.assertTrue(said[0].endswith(": sc_kid, sc_lcf, sc_loc"), said[0])
-        rig = scaled_rig()
-        for node in ("sc_lcf", "sc_loc", "sc_kid"):
-            rig[node].shear = (0.5, 0.0, 0.0)
-        with self.assertLogs("cgmath.formats.fbx", "WARNING") as logged:
-            rig.save_fbx(self.path("rig.fbx"))
-        self.assertEqual([record.getMessage() for record in logged.records if "no shear" in record.getMessage()], said)
+        self.assertFalse(os.path.exists(self.path("sheared.fbx")))
 
     @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_a_moving_joint_orient_is_keyed_in_rotate(self):

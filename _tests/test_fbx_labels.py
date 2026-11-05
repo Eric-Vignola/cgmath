@@ -1332,17 +1332,13 @@ class TestSaveFbxInMaya(unittest.TestCase):
             # the largest measured on this file
             self.assertLessEqual(position, 8.881784197001252e-16, node.name)
 
-    def test_a_node_the_read_shears_imports_with_that_shear_zeroed(self):
+    def test_a_node_the_read_shears_is_refused_on_save(self):
         """load_fbx puts a node stored eInheritRrSs or eInheritRrs under a
-        scaled parent where Maya puts it, holding shear, and save_fbx writes
-        scale, rotate and translate alone, eInheritRSrs, as Maya's exporter
-        writes them: a load then a save lands, in the sdk and in Maya, where
-        the rig with that shear zeroed has it, 1.44 or 0.663 off the read in
-        the 3x3 and a locator 4.20 or 1.62 in position"""
+        scaled parent where Maya puts it, holding shear, which fbx has no
+        channel for: save_fbx refuses it, naming it, and writes nothing"""
         from cgmath._tests.test_fbx_export import gaps
 
-        # how far the locator lands off the read, in the 3x3 and in position
-        for inherit, turned, moved in (("eInheritRrSs", 1.44, 4.20), ("eInheritRrs", 0.663, 1.62)):
+        for inherit in ("eInheritRrSs", "eInheritRrs"):
             with self.subTest(inherit):
                 stored = getattr(FBX.FbxTransform.EInheritType, inherit)
                 path   = _stored(os.path.join(self.out, f"{inherit}.fbx"), stored)
@@ -1356,45 +1352,23 @@ class TestSaveFbxInMaya(unittest.TestCase):
                 self.assertGreater(np.abs(rig["g"].shear).max(), 0.4)
 
                 out = os.path.join(self.out, f"{inherit}_saved.fbx")
-                rig.save_fbx(out)
-                sdk = _sdk_worlds(out)
-                worlds, _ = self.imported(out)
-                zeroed = rig.copy()
-                for node in zeroed:
-                    node.shear = (0.0, 0.0, 0.0)
-                for node in zeroed:
-                    for placed in (sdk, worlds):
-                        axes, position = gaps(placed[node.name], node.world_matrix)
-                        self.assertLessEqual(axes, 1e-9, node.name)
-                        # the largest measured on these two files
-                        self.assertLessEqual(position, 8.881784197001252e-16, node.name)
-                axes, position = gaps(worlds["l"], rig["l"].world_matrix)
-                self.assertAlmostEqual(axes, turned, places=2)
-                self.assertAlmostEqual(position, moved, places=2)
+                with self.assertRaisesRegex(ValueError, r"no shear.*'g'"):
+                    rig.save_fbx(out)
+                self.assertFalse(os.path.exists(out))
 
     def test_a_sheared_rig(self):
-        """a rig holding shear on groups and joints: Maya's FBXImport of its
-        save is the rig with that shear zeroed, one warning naming them"""
-        from cgmath._tests.test_fbx_export import _joint, _node, gaps
+        """a rig holding shear on groups and joints is refused, naming them;
+        nothing is written"""
+        from cgmath._tests.test_fbx_export import _joint, _node
 
         top = _node("top", rotate=(0.0, 0.0, 30.0), scale=(1.0, 2.0, 3.0), shear=(0.5, 0.25, -0.75))
         mid = _node("mid", top, translate=(1.0, 0.0, 0.0), rotate=(10.0, 20.0, 30.0), shear=(0.0, 0.5, 0.0))
         hip = _joint("hip", mid, translate=(0.0, 1.0, 0.0), rotate=(0.0, 0.0, 45.0), shear=(0.0, 0.0, 0.25))
         rig = HierarchyData([top, mid, hip, _node("end", hip, "locator", translate=(0.0, 1.0, 0.0))])
         out = os.path.join(self.out, "sheared.fbx")
-        with self.assertLogs("cgmath.formats.fbx", "WARNING") as logged:
+        with self.assertRaisesRegex(ValueError, r"\['top', 'mid', 'hip'\]"):
             rig.save_fbx(out)
-        self.assertEqual(len(logged.records), 1)
-        self.assertIn("top, mid, hip", logged.records[0].getMessage())
-
-        zeroed = rig.copy()
-        for node in zeroed:
-            node.shear = (0.0, 0.0, 0.0)
-        worlds, _ = self.imported(out)
-        for node in zeroed:
-            axes, position = gaps(worlds[node.name], node.world_matrix)
-            self.assertLessEqual(axes, 1e-9, node.name)
-            self.assertLessEqual(position, 2e-14, node.name)
+        self.assertFalse(os.path.exists(out))
 
     def test_a_flagged_group_reads_back_where_maya_reads_it(self):
         """a group or locator with segment_scale_compensate on is written
