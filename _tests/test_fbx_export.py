@@ -946,7 +946,7 @@ class TestSaveShear(unittest.TestCase):
         warned.assert_not_called()
         self.assertEqual(first, second)
         self.assertFalse([line for line in first if "shear" in line.lower()])
-        self.assertEqual(len(first), 388)
+        self.assertEqual(len(first), 394)
         order = re.findall(r'^\s*Model: id, "Model::(\w+)"', "\n".join(first), re.M)
         self.assertEqual(order, ["sc", "sc_kid", "sc_jnt", "sc_spc", "sc_grp", "sc_lcf", "sc_cmp", "sc_loc"])
 

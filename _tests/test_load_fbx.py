@@ -298,6 +298,70 @@ class TestLoadFbx(unittest.TestCase):
                     np.testing.assert_array_equal(np.asarray(got.frames.rotate),
                                                   np.asarray(want.frames.rotate).astype(np.float32), err_msg=str(label))
 
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_visibility_radius_draw_style(self):
+        """a node's visibility and a joint's radius and draw style read back
+        as saved, held as Maya's exporter writes them: Visibility, Size =
+        radius * 100 / 3, Show off for draw style None; a file's own nodes
+        read as Maya's importer reads them"""
+        from cgmath._tests.test_save_fbx import rewrite
+
+        rig = HierarchyData()
+        a = TransformData("a", node_type="joint", translate=(0.0, 1.0, 0.0), visibility=False, radius=2.5,
+                          draw_style=2)
+        b             = TransformData("b", node_type="joint", radius=0.1, draw_style=1)
+        c             = TransformData("c", node_type="joint", radius=12.345, draw_style=3)
+        g             = TransformData("g", visibility=False)
+        spot          = TransformData("spot", node_type="locator", visibility=False)
+        b.parent_uuid = a.uuid
+        c.parent_uuid = b.uuid
+        for node in (a, b, c, g, spot):
+            rig.append(node)
+        formats.save_fbx(self.path("look.fbx"), rig)
+        back = formats.load_fbx(self.path("look.fbx")).rig
+        for node in rig:
+            got = back[node.name]
+            self.assertEqual((got.visibility, got.radius, got.draw_style), (node.visibility, node.radius, node.draw_style),
+                             node.name)
+
+        held = {}
+
+        def add(scene):
+            for index in range(scene.GetNodeCount()):
+                node = scene.GetNode(index)
+                attr = node.GetNodeAttribute()
+                size = attr.FindProperty("Size") if attr else None
+                held[node.GetName()] = (float(node.Visibility.Get()), bool(node.Show.Get()),
+                                        float(FBX.FbxPropertyDouble1(size).Get()) if size is not None and size.IsValid()
+                                        else None)
+            root = scene.GetRootNode()
+            for name, joint, visibility, show, size in (("m_joint", True, 1.0, False, None), ("m_size", True, 1.0, True, 50.0),
+                                                        ("m_vis", False, 0.3, True, None),
+                                                        ("m_hide", False, 0.0, True, None)):
+                node = FBX.FbxNode.Create(scene, name)
+                attr = FBX.FbxSkeleton.Create(scene, "") if joint else FBX.FbxNull.Create(scene, "")
+                if joint:
+                    attr.SetSkeletonType(FBX.FbxSkeleton.EType.eLimbNode)
+                if size is not None:
+                    attr.Size.Set(size)
+                node.SetNodeAttribute(attr)
+                node.Visibility.Set(visibility)
+                node.Show.Set(show)
+                root.AddChild(node)
+
+        rewrite(self.path("look.fbx"), self.path("more.fbx"), add)
+        third = 100.0 / 3.0
+        self.assertEqual(held["a"],        (0.0, False, 2.5 * third))
+        self.assertEqual(held["b"],        (1.0, True, 0.1 * third))
+        self.assertEqual(held["c"],        (1.0, True, 12.345 * third))
+        self.assertEqual(held["g"][:2],    (0.0, True))
+        self.assertEqual(held["spot"][:2], (0.0, False))
+        more = HierarchyData.load_fbx(self.path("more.fbx"))
+        for name, want in (("m_joint", (True, 3.0, 2)), ("m_size", (True, 1.5, 0)), ("m_vis", (True, 1.0, 0)),
+                           ("m_hide", (False, 1.0, 0)), ("a", (False, 2.5, 2)), ("c", (True, 12.345, 3))):
+            got = more[name]
+            self.assertEqual((got.visibility, got.radius, got.draw_style), want, name)
+
     def test_refusals(self):
         """no file: FileNotFoundError; no sdk: ImportError, before the file
         is looked for"""

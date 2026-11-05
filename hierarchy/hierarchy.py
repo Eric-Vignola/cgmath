@@ -2571,7 +2571,7 @@ class TransformData(Data):
 
         # matrix = [S] * [Sh] * [RO] * [R] * [JO] * [IS] * [T]; a node with
         # no shear skips the product
-        S  = self.scale_matrix
+        S = self.scale_matrix
         if self._shear.any():
             S = np.dot(S, self.shear_matrix)
         RO = self.rotate_axis_matrix
@@ -3086,6 +3086,29 @@ def _fbx_written_axis(node, axis) -> tuple:
     kept = tuple(float(x) for x in FBX.FbxPropertyDouble3(prop).Get())
     gap  = np.abs(_eulers_to_matrices(kept, 0) - _eulers_to_matrices(axis, 0)).max()
     return kept if gap <= 1e-9 else axis
+
+
+def _fbx_joint_look(node) -> tuple:
+    """(radius, draw_style) of a skeleton node as Maya's importer reads them:
+    its Size * 3 / 100, and None (2) where Show is off, else 0; or what
+    save_fbx kept in cgmath:radius and cgmath:drawStyle, where the file
+    agrees with it"""
+    attr   = node.GetNodeAttribute()
+    found  = attr.FindProperty("Size") if attr else None
+    size   = float(FBX.FbxPropertyDouble1(found).Get()) if found is not None and found.IsValid() else 100.0
+    radius = size * 3.0 / 100.0
+    shown  = bool(node.Show.Get())
+    style  = 0 if shown else 2
+    if FbxExporter is not None:
+        kept = node.FindProperty(FbxExporter._RADIUS)
+        if kept.IsValid():
+            value = float(FBX.FbxPropertyDouble1(kept).Get())
+            if value * (100.0 / 3.0) == size:
+                radius = value
+        kept = node.FindProperty(FbxExporter._DRAW_STYLE)
+        if kept.IsValid() and shown:
+            style = int(FBX.FbxPropertyInteger1(kept).Get())
+    return radius, style
 
 
 def _fbx_value(prop, kind: str):
@@ -3753,6 +3776,10 @@ def _walk_fbx(
             data["node_type"] = "locator"
         else:
             data["node_type"] = "transform"
+
+        data["visibility"] = float(node.Visibility.Get()) != 0.0
+        if kinds[index] == "joint":
+            data["radius"], data["draw_style"] = _fbx_joint_look(node)
 
         attrs = _fbx_user_attributes(node)
         if attrs:
@@ -10920,7 +10947,7 @@ def _local_matrices(scale, RO, R, JO, inverse, translate, shear) -> np.ndarray:
     takes the rows of Sh, read from the unsheared rows: row z takes row y as
     it stood.
     """
-    block            = RO[..., :3, :3] @ R[..., :3, :3] @ JO[..., :3, :3]
+    block = RO[..., :3, :3] @ R[..., :3, :3] @ JO[..., :3, :3]
     if shear.any():
         x, y = block[..., 0, :].copy(), block[..., 1, :].copy()
         block[..., 1, :] = y + shear[..., 0, None] * x
@@ -12397,7 +12424,7 @@ def _swap_rows(frames: _RigFrames, targets, axis0: int, axis1: int, negate: bool
                 swap_channels(now)
                 after[:, now] = P @ before[:, now]
 
-    ch["_rotate"]             = _filtered(ch["_rotate"], orders)
+    ch["_rotate"] = _filtered(ch["_rotate"], orders)
 
     for channel in ("_scale", "_rotate", "_translate", "_shear"):
         frames.write(channel, rows, ch[channel])
@@ -13029,7 +13056,7 @@ def _under_gain(frames: _RigFrames, rows, local: np.ndarray, solved: tuple, kept
         through = np.maximum(1.0, (1.0 / np.abs(inverse)).max(axis=-1))
         keeps   = 3.0 * keep * (through + np.abs(flip[:, None, :3, :3]).max(axis=(-2, -1)))
 
-    own            = np.isin(under, reached)
+    own = np.isin(under, reached)
     gain[:, under] = np.where(
         own, np.where(usable, np.maximum(_gain(split, snap, turn, turn - 1.0), keeps), np.inf), 1.0
     )

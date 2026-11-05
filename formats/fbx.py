@@ -2802,6 +2802,9 @@ class FbxExporter:
 
     _USER_ATTR_SPECS = "cgmath:userAttributes"
 
+    _RADIUS      = "cgmath:radius"
+    _DRAW_STYLE  = "cgmath:drawStyle"
+
     _ROTATE_AXIS = "cgmath:rotateAxis"
     """str: the hidden property on a joint keeping its rotate axis as given:
     the post rotation holds its inverse, which reads back as other angles
@@ -3090,6 +3093,25 @@ class FbxExporter:
             if item.node_type == "joint" and np.any(np.asarray(item.rotate_axis) != 0.0):
                 prop = fbx.FbxProperty.Create(node, fbx.FbxDouble3DT, self._ROTATE_AXIS, "")
                 prop.Set(fbx.FbxDouble3(*[float(x) for x in item.rotate_axis]))
+
+            # visibility, a joint's radius and draw style as Maya's exporter
+            # writes them: Visibility, the skeleton's Size (radius * 100 / 3)
+            # and Show (off for draw style None), a locator's Show its
+            # visibility; what Maya's reading of them can't give back kept
+            # in a hidden property
+            node.Visibility.Set(1.0 if item.visibility else 0.0)
+            if item.node_type == "joint":
+                radius = float(item.radius)
+                node_attr.Size.Set(radius * (100.0 / 3.0))
+                node.Show.Set(int(item.draw_style) != 2)
+                if radius * (100.0 / 3.0) * 3.0 / 100.0 != radius:
+                    prop = fbx.FbxProperty.Create(node, fbx.FbxDoubleDT, self._RADIUS, "")
+                    prop.Set(radius)
+                if int(item.draw_style) not in (0, 2):
+                    prop = fbx.FbxProperty.Create(node, fbx.FbxIntDT, self._DRAW_STYLE, "")
+                    prop.Set(int(item.draw_style))
+            elif item.node_type == "locator":
+                node.Show.Set(bool(item.visibility))
 
             node.SetNodeAttribute(node_attr)
 
