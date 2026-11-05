@@ -3525,7 +3525,7 @@ class FbxExporter:
         exporter writes it; an influence weighing none still has its
         cluster."""
         self._check_open()
-        node    = shape.GetNode()
+        node    = typed(shape.GetNode(), fbx.FbxNode, fbx)
         name    = node.GetName()
         worlds  = [link.EvaluateGlobalTransform() for link in links]
         placed  = node.EvaluateGlobalTransform()

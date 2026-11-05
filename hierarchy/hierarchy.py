@@ -3110,7 +3110,7 @@ def _fbx_joint_look(node) -> tuple:
     its Size * 3 / 100, and None (2) where Show is off, else 0; or what
     save_fbx kept in cgmath:radius and cgmath:drawStyle, where the file
     agrees with it"""
-    attr   = node.GetNodeAttribute()
+    attr   = typed(node.GetNodeAttribute(), FBX.FbxSkeleton, FBX)
     found  = attr.FindProperty("Size") if attr else None
     size   = float(FBX.FbxPropertyDouble1(found).Get()) if found is not None and found.IsValid() else 100.0
     radius = size * 3.0 / 100.0
@@ -3570,7 +3570,7 @@ def _walk_fbx(
             # a null drawn as a cross is a locator, a bare one is a group,
             # which is how Maya's own FBX plugin tells them apart
             elif attr_type == null:
-                kind = "locator" if attr.Look.Get() == cross else "transform"
+                kind = "locator" if typed(attr, FBX.FbxNull, FBX).Look.Get() == cross else "transform"
             elif attr_type == mesh:
                 kind = "mesh"
             elif attr_type == camera:

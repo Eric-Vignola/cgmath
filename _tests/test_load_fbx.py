@@ -463,6 +463,51 @@ class TestLoadFbx(unittest.TestCase):
         formats.save_fbx(self.path("again.fbx"), first)
         self.assert_same(parts(formats.load_fbx(self.path("again.fbx"))), parts(first))
 
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_wrong_type_wrappers(self):
+        """the binding can hand back a live wrapper of another type for an
+        object that sits where a destroyed one did: a node's attribute a
+        reader reads and a mesh's node the writer reads are typed first, so
+        such a wrapper writes and reads the same file"""
+        from cgmath.formats._fbx_io import typed
+
+        rig, clips, meshes, uvs, skins = build()
+        spot             = TransformData("spot", node_type="locator", translate=(0.0, 1.0, 0.0))
+        spot.parent_uuid = rig["head"].uuid
+        rig.append(spot)
+        formats.save_fbx(self.path("plain.fbx"), rig, clips, meshes, uvs, skins)
+        want = parts(formats.load_fbx(self.path("plain.fbx")))
+
+        null, skeleton = FBX.FbxNodeAttribute.EType.eNull, FBX.FbxNodeAttribute.EType.eSkeleton
+        patched = ((FBX.FbxNode, "GetNodeAttribute"), (FBX.FbxMesh, "GetNode"))
+        kept    = [(owner, name, vars(owner).get(name), getattr(owner, name)) for owner, name in patched]
+        attribute, node_of = kept[0][3], kept[1][3]
+
+        def stale_attribute(node, *args):
+            attr = attribute(node, *args)
+            kind = None if attr is None else attr.GetAttributeType()
+            if kind == null:
+                return typed(attr, FBX.FbxSkeleton, FBX)
+            if kind == skeleton:
+                return typed(attr, FBX.FbxNull, FBX)
+            return attr
+
+        def stale_node(shape, *args):
+            return typed(node_of(shape, *args), FBX.FbxNull, FBX)
+
+        FBX.FbxNode.GetNodeAttribute = stale_attribute
+        FBX.FbxMesh.GetNode          = stale_node
+        try:
+            formats.save_fbx(self.path("stale.fbx"), rig, clips, meshes, uvs, skins)
+            got = parts(formats.load_fbx(self.path("stale.fbx")))
+        finally:
+            for owner, name, own, _ in kept:
+                if own is None:
+                    delattr(owner, name)
+                else:
+                    setattr(owner, name, own)
+        self.assert_same(got, want)
+
     def test_refusals(self):
         """no file: FileNotFoundError; no sdk: ImportError, before the file
         is looked for"""
