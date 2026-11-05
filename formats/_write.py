@@ -17,6 +17,10 @@ LOGGER = logging.getLogger("cgmath.formats.fbx")
 # fbx has no channel for shear: a node holding more than this is refused
 SHEAR_LIMIT = 1e-9
 
+# a node that is no joint holding a joint orient over this is refused: Maya
+# has no channel for it, and folds the pre rotation it would be into rotate
+ORIENT_LIMIT = 1e-9
+
 
 def save_fbx(filename, *objects, zero_root: bool = False, as_ascii: bool = False) -> None:
     """writes ``objects`` to one fbx file, binary unless ``as_ascii``
@@ -90,6 +94,7 @@ def save_fbx(filename, *objects, zero_root: bool = False, as_ascii: bool = False
     if skins and not (rigs or takes):
         raise TypeError("save_fbx writes a skin with the rig its influences name: pass the rig too")
     _refuse_shear(rigs[0] if rigs else None, takes)
+    _refuse_orient(rigs[0] if rigs else None, takes)
 
     columns = None
     if rigs:
@@ -187,8 +192,7 @@ def _sort(objects) -> tuple:
 def _takes_on_rig(takes, rig) -> tuple:
     """``(columns, held)``: the take column each node of ``rig`` is keyed
     from, by name, None for a node no take holds, and the joint orient and
-    rotate axis the file holds for each take column, the rig's on a joint
-    and none on any other node; ValueError for a take's node the rig lacks
+    rotate axis the file holds for each take column, the rig's; ValueError for a take's node the rig lacks
     and takes labelled other than the rig"""
     from cgmath.hierarchy.hierarchy import TransformList
 
@@ -208,10 +212,9 @@ def _takes_on_rig(takes, rig) -> tuple:
     orient = np.zeros((len(first), 3))
     axis   = np.zeros((len(first), 3))
     for index, node in enumerate(first):
-        held = on_rig[node.name]
-        if held.node_type == "joint":
-            orient[index] = np.asarray(held.joint_orient, dtype=np.float64)
-            axis[index]   = np.asarray(held.rotate_axis, dtype=np.float64)
+        held          = on_rig[node.name]
+        orient[index] = np.asarray(held.joint_orient, dtype=np.float64)
+        axis[index]   = np.asarray(held.rotate_axis, dtype=np.float64)
     column = {node.name: index for index, node in enumerate(first)}
     return [column.get(node.name) for node in rig], (orient, axis)
 
@@ -359,4 +362,38 @@ def _refuse_shear(rig, takes, what: str = "save_fbx") -> None:
         raise ValueError(
             f"{what}: fbx has no shear, and these nodes hold one over {SHEAR_LIMIT:g}, up to {most:.3g}: "
             + "; ".join(found)
+        )
+
+
+def _refuse_orient(rig, takes, what: str = "save_fbx") -> None:
+    """ValueError naming the nodes of ``rig`` and of each of ``takes`` that
+    are no joint and hold a joint orient over :data:`ORIENT_LIMIT` on any
+    frame: Maya has no joint orient on a group or a locator"""
+    found, most = [], 0.0
+    if rig is not None and len(rig):
+        others = np.array([node.node_type != "joint" for node in rig], dtype=bool)
+        orient = np.abs(np.array([node.joint_orient for node in rig], dtype=np.float64)).max(axis=1)
+        bad    = np.flatnonzero(others & (orient > ORIENT_LIMIT))
+        if bad.size:
+            found.append(f"the rig's {[rig[int(i)].name for i in bad]}")
+            most = max(most, float(orient[bad].max()))
+    for index, clip in enumerate(takes or ()):
+        if not clip.frame_count or not len(clip):
+            continue
+        others = np.array([node.node_type != "joint" for node in clip], dtype=bool)
+        orient = np.abs(np.asarray(clip.frames.joint_orient, dtype=np.float64)).max(axis=2) * others
+        held   = orient.max(axis=0) > ORIENT_LIMIT
+        if not held.any():
+            continue
+        frames = np.flatnonzero(orient.max(axis=1) > ORIENT_LIMIT) + clip.start_frame
+        most   = max(most, float(orient.max()))
+        label  = clip.take.strip() or f"take {index}"
+        found.append(
+            f"take {label!r}'s {[clip[int(i)].name for i in np.flatnonzero(held)]} "
+            f"(frames {int(frames[0])} to {int(frames[-1])})"
+        )
+    if found:
+        raise ValueError(
+            f"{what}: a group or locator holds no joint orient in fbx or Maya, and these nodes that are no "
+            f"joint hold one over {ORIENT_LIMIT:g}, up to {most:.3g}: " + "; ".join(found)
         )

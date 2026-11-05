@@ -1400,7 +1400,7 @@ class TestClipRigEditsEveryFrame(unittest.TestCase):
         # and left the chain below them up to 9e-9 off one node at a time
         for d, up in ((3e-9, 100.0), (9e-9, 1000.0)):
             with self.subTest(d=d, up=up):
-                rng   = np.random.default_rng(3)
+                rng = np.random.default_rng(3)
                 nodes = [
                     TransformData(
                         "root", node_type="transform", uuid=hierarchy.generate_uuid(), translate=(d, 0.0, 0.0)
@@ -10524,14 +10524,18 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         self.assertTrue(np.allclose(rig["hip"].scale, 2.0, rtol=0.0, atol=1e-12))
         self.assertFalse(np.allclose(rig["hip"].joint_orient, [5.0, -15.0, 25.0], atol=1.0))
 
-    def test_a_node_that_is_no_joint_takes_its_pre_and_post_rotation_in_its_rotate(self):
+    def test_a_node_that_is_no_joint_keeps_its_post_rotation_as_its_rotate_axis(self):
         """a locator with a pre and post rotation and no pivot, at the root
         and under a kept joint, nothing dropped above either, is where the
-        sdk puts it, its rotate no longer its Lcl value, on the rig and every
-        frame of the clip. It, the group and the pivoted locator hold no
-        rotate axis and no joint orient, which save_fbx does not write for
-        them: a save and a load bring every node back where it was. On a
+        sdk puts it, on the rig and every frame of the clip. As Maya's import
+        reads them, it, the group and the pivoted locator hold their post
+        rotation as their rotate axis and take a pre rotation in their
+        rotate, no joint orient: one with a post rotation alone keeps its Lcl
+        rotate. A save and a load bring every node back where it was. On a
         clip the rotate is solved again every frame, through euler_filter"""
+        from cgmath.formats.fbx import _post_rotation
+        from cgmath.hierarchy import hierarchy as H
+
         path   = self.authored()
 
         rig    = HierarchyData.load_fbx(path, axis_system=None)
@@ -10539,15 +10543,18 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
 
         rest   = self.truth(path, convert=False)
         frames = self.truth(path, self.FRAMES, convert=False)
-        for name, lcl in (("rootloc", (0, 30, 0)), ("kidloc", (20, 0, 0))):
+        for name in ("rootloc", "kidloc"):
             with self.subTest(name):
                 self.assertWorlds({name: rig[name].world_matrix}, rest)
                 self.assertWorlds({name: self.clip_worlds(clip)[name]}, frames)
-                self.assertFalse(np.allclose(rig[name].rotate, lcl, atol=1.0))
+        self.assertFalse(np.allclose(rig["rootloc"].rotate, (0, 30, 0), atol=1.0))
+        self.assertTrue(np.array_equal(rig["kidloc"].rotate, (20.0, 0.0, 0.0)))
 
         rig = HierarchyData.load_fbx(path)
-        for name in ("grp", "loc", "rootloc", "kidloc"):
-            self.assertTrue(np.array_equal(rig[name].rotate_axis, np.zeros(3)), name)
+        for name, post in (("grp", (0, 30, 12)), ("loc", (20, 0, 0)), ("rootloc", (0, 0, 25)), ("kidloc", (0, 40, 0))):
+            held = tuple(_post_rotation(rig[name].rotate_axis))[:3]
+            np.testing.assert_allclose(H._eulers_to_matrices(held, 0), H._eulers_to_matrices(post, 0), rtol=0,
+                                       atol=1e-12, err_msg=name)
             self.assertTrue(np.array_equal(rig[name].joint_orient, np.zeros(3)), name)
         again = os.path.join(self.tmp.name, "again.fbx")
         rig.save_fbx(again)
@@ -10558,7 +10565,8 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         clip  = ClipData.load_fbx(path)
         loc   = clip.frames.rotate[:, clip.index("loc")]
         steps = np.abs(np.diff(loc, axis=0)).max()
-        self.assertTrue(np.array_equal(clip.frames.rotate_axis[:, clip.index("loc")], np.zeros((self.FRAMES, 3))))
+        held  = np.repeat(np.asarray(rig["loc"].rotate_axis)[None], self.FRAMES, axis=0)
+        self.assertTrue(np.array_equal(clip.frames.rotate_axis[:, clip.index("loc")], held))
         self.assertLess(steps, 90.0)
         self.assertGreater(np.ptp(loc, axis=0).max(), 180.0)
 

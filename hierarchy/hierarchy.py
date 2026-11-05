@@ -3803,10 +3803,13 @@ def _walk_fbx(
 
     # what the file holds that the dicts can't: folded in, on the static values
     baked = _fbx_static_bakes(tree) if bakes else None
-    translate, rotate, scale, joint_orient, changed, shear = _fbx_fold(
+    translate, rotate, scale, joint_orient, changed, shear, axes = _fbx_fold(
         tree, tree.translate[None], tree.rotate[None], tree.scale[None], baked
     )
     for column, data in enumerate(hierarchy_data.values()):
+        if data["node_type"] != "joint" and (np.any(axes[column]) or np.any(joint_orient[0, column])):
+            data["rotate_axis"]  = axes[column]
+            data["joint_orient"] = joint_orient[0, column]
         if not changed[column]:
             continue
         data["translate"] = translate[0, column]
@@ -3979,16 +3982,26 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale, baked: Optional[dict] = 
     count   = len(columns)
     eye     = np.eye(3)
 
-    out_translate = translate[:, columns].copy()
-    out_rotate    = rotate[:, columns].copy()
-    out_scale     = scale[:, columns].copy()
-    out_orient    = np.repeat(tree.pre[columns][None], frames, axis=0)
-    out_shear     = np.zeros((frames, count, 3))
-    changed       = np.zeros(count, dtype=bool)
-    baked         = {} if baked is None else baked
+    # a kept node that is no joint keeps its post rotation as its rotate
+    # axis, as Maya's import does, and takes the rest of its turn, its pre
+    # rotation among it, in its rotate: no joint orient. One baked or
+    # flipped takes all of it there
+    other          = np.zeros(len(kept), dtype=bool)
+    other[columns] = ~tree.joint[columns]
+
+    out_translate  = translate[:, columns].copy()
+    out_rotate     = rotate[:, columns].copy()
+    out_scale      = scale[:, columns].copy()
+    out_orient     = np.repeat(np.where(tree.joint[columns, None], tree.pre[columns], 0.0)[None], frames, axis=0)
+    out_axis       = tree.axis[columns].copy()
+    out_shear      = np.zeros((frames, count, 3))
+    changed        = np.zeros(count, dtype=bool)
+    baked          = {} if baked is None else baked
 
     pivoted = np.any(tree.pivots != 0.0, axis=(1, 2)) & ~tree.null_joint
     turned  = np.any(tree.pre != 0.0, axis=1) | np.any(tree.axis != 0.0, axis=1) | np.any(tree.null_pre != 0.0, axis=1)
+    folding = np.any(tree.pre != 0.0, axis=1) | np.any(tree.null_pre != 0.0, axis=1)
+    rest    = np.where(other, folding, turned)
 
     # Maya's scale attribute: a mirrored node with a pre rotation re-splits
     # all negative, S Sig, and turns by Sig R; a baked node's is its split's
@@ -4160,7 +4173,7 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale, baked: Optional[dict] = 
             pivoted[i]
             or moved is not None
             or not level
-            or (turned[i] and not tree.joint[i])
+            or (rest[i] and not tree.joint[i])
             or flipped
             or i in baked
         ):
@@ -4184,6 +4197,8 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale, baked: Optional[dict] = 
             out_scale[:, column]     = size_i
             out_shear[:, column]     = sh
             out_rotate[:, column]    = _filtered(_matrices_to_eulers(turn, order)[:, None], [order])[:, 0]
+            out_orient[:, column]    = np.where(tree.joint[i], out_orient[:, column], 0.0)
+            out_axis[column]         = out_axis[column] if tree.joint[i] else 0.0
             changed[column]          = True
             continue
 
@@ -4194,7 +4209,7 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale, baked: Optional[dict] = 
         out_translate[:, column] = t
         changed[column]          = True
 
-        if level and (tree.joint[i] or not turned[i]) and not flipped:
+        if level and (tree.joint[i] or not rest[i]) and not flipped:
             if lost is not None:
                 _fbx_hand_on(sheared, column, sized[:, i, :, None] * Q @ moved[:, :3, :3], sized[:, i], Q)
             continue
@@ -4217,12 +4232,24 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale, baked: Optional[dict] = 
                 out_rotate[uneven, column] = _matrices_to_eulers(RA.T @ turn, order)
                 out_rotate[:, column]      = _filtered(out_rotate[:, column][:, None], [order])[:, 0]
         else:
-            # the rotate takes the pre and post rotation and the turn
-            solved = _matrices_to_eulers(Q @ U, order)
+            # the rotate takes the pre rotation and the turn, the post
+            # rotation too on a node baked or flipped: RA^-1 Q U JO^-1, RA
+            # and JO what the node holds
+            held = None
+            if flipped:
+                out_orient[:, column] = 0.0
+                out_axis[column]      = 0.0
+            elif np.any(tree.axis[i]):
+                held = _eulers_to_matrices(np.array([tree.axis[i], out_orient[0, column]]), 0)[:, :3, :3]
+
+            def unheld(block):
+                return block if held is None else held[0].T @ block @ held[1].T
+
+            solved = _matrices_to_eulers(unheld(Q @ U), order)
             size_i = sized[:, i] * s[:, None]
             if uneven.any():
                 size_i[uneven], turn, sh = _scales_shears_and_rotations(whole, Q[uneven], np.zeros((len(whole), 3)))
-                solved[uneven]            = _matrices_to_eulers(turn, order)
+                solved[uneven]            = _matrices_to_eulers(unheld(turn), order)
                 out_shear[uneven, column] = sh
             out_scale[:, column]  = size_i
             out_rotate[:, column] = _filtered(solved[:, None], [order])[:, 0]
@@ -4253,7 +4280,7 @@ def _fbx_fold(tree: _FbxTree, translate, rotate, scale, baked: Optional[dict] = 
             if lost is not None:
                 sheared[column] = lost
 
-    return out_translate, out_rotate, out_scale, out_orient, changed, out_shear
+    return out_translate, out_rotate, out_scale, out_orient, changed, out_shear, out_axis
 
 
 def _fbx_hand_on(sheared: dict, column: int, whole, sized, holds) -> None:
@@ -5899,7 +5926,7 @@ def _fbx_kept_binds(tree: _FbxTree, listed: dict, uuids: list) -> dict:
     whole.kept    = np.arange(len(kept), dtype=np.intp)
     whole.columns = whole.kept
     whole.above   = tree.parent
-    translate, rotate, scale, joint_orient, _, shear = _fbx_fold(
+    translate, rotate, scale, joint_orient, _, shear, axes = _fbx_fold(
         whole,
         tree.translate[None],
         tree.rotate[None],
@@ -5922,9 +5949,9 @@ def _fbx_kept_binds(tree: _FbxTree, listed: dict, uuids: list) -> dict:
         }
         if up >= 0:
             node["parent_uuid"] = ids[up]
+        node["joint_orient"] = joint_orient[0, p]
+        node["rotate_axis"]  = axes[p]
         if tree.joint[p]:
-            node["joint_orient"]             = joint_orient[0, p]
-            node["rotate_axis"]              = tree.axis[p].copy()
             node["segment_scale_compensate"] = bool(tree.compensate[p])
         data[ids[p]] = node
 
@@ -7041,8 +7068,16 @@ def _fbx_take_clip(
     joints = tree.joint[tree.columns]
     translate[:, put], rotate[:, put], scale[:, put] = folded[:3]
     joint_orient[:, put[joints]] = folded[3][:, joints]
-    shear                        = np.zeros(translate.shape)
-    shear[:, put]                = folded[5]
+
+    # a node that is no joint holds the rotate axis and joint orient the
+    # fold leaves it, on every frame
+    if not joints.all():
+        axis                          = np.array(clip.frames.rotate_axis)
+        axis[:, put[~joints]]         = folded[6][~joints]
+        joint_orient[:, put[~joints]] = folded[3][:, ~joints]
+        clip.frames.rotate_axis       = axis
+    shear         = np.zeros(translate.shape)
+    shear[:, put] = folded[5]
 
     if turn is not None:
         roots  = [index for index, node in enumerate(clip) if node.parent_uuid is None]
@@ -16030,9 +16065,8 @@ def _takes_written(clips: list, on_file=None) -> list:
     its first frame (euler_filter). Any other take is written as it is."""
     first = clips[0]
     if on_file is None:
-        joints = np.array([node.node_type == "joint" for node in first], dtype=bool)
-        orient = np.where(joints[:, None], np.asarray(first.frames.joint_orient)[0], 0.0)
-        axis   = np.where(joints[:, None], np.asarray(first.frames.rotate_axis)[0], 0.0)
+        orient = np.array(np.asarray(first.frames.joint_orient)[0])
+        axis   = np.array(np.asarray(first.frames.rotate_axis)[0])
     else:
         orient, axis = on_file
     held = (

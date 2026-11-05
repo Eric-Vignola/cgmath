@@ -362,6 +362,78 @@ class TestLoadFbx(unittest.TestCase):
             got = more[name]
             self.assertEqual((got.visibility, got.radius, got.draw_style), want, name)
 
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_group_axes(self):
+        """a group's or a locator's rotate axis reads back as saved, rig and
+        takes; the file holds it as the post rotation, no pre rotation. A
+        file's own group reads as Maya's importer reads it: its post
+        rotation its rotate axis, its pre rotation folded into its rotate"""
+        from cgmath._tests.test_save_fbx import rewrite
+        from cgmath.formats.fbx import _post_rotation
+
+        rig = HierarchyData()
+        top = TransformData("top", translate=(1.0, 2.0, 3.0), rotate=(14.0, -25.0, 36.0),
+                            rotate_axis=(-20.0, 95.0, -130.0), rotate_order=4)
+        hips = TransformData("hips", node_type="joint", translate=(0.0, 5.0, 0.0), joint_orient=(0.0, 90.0, 0.0))
+        spot = TransformData("spot", node_type="locator", translate=(0.0, 1.0, 0.0), rotate=(3.0, 2.0, 1.0),
+                             rotate_axis=(179.0, -91.0, 0.5), rotate_order=2)
+        bare             = TransformData("bare", rotate_axis=(0.0, 0.0, 45.0))
+        hips.parent_uuid = top.uuid
+        spot.parent_uuid = hips.uuid
+        bare.parent_uuid = hips.uuid
+        for node in (top, hips, spot, bare):
+            rig.append(node)
+        clip               = ClipData(rig, frames=4, start_frame=0, fps=24.0, take="move")
+        clip.frames.rotate = np.asarray(clip.frames.rotate) + np.arange(4)[:, None, None] * [7.0, -3.0, 5.0]
+        formats.save_fbx(self.path("axes.fbx"), rig, ClipList([clip]))
+        first = formats.load_fbx(self.path("axes.fbx"))
+        for node in rig:
+            for channel in CHANNELS:
+                np.testing.assert_array_equal(getattr(first.rig[node.name], channel), getattr(node, channel),
+                                              err_msg=f"{node.name} {channel}")
+        back = first.clips[0]
+        for channel in CHANNELS:
+            want = np.asarray(getattr(clip.frames, channel))
+            if channel in ("translate", "rotate", "scale"):
+                want = want.astype(np.float32).astype(np.float64)
+            np.testing.assert_array_equal(np.asarray(getattr(back.frames, channel)), want, err_msg=channel)
+        np.testing.assert_allclose(np.asarray(back.frames.world_matrix), np.asarray(clip.frames.world_matrix), rtol=0,
+                                   atol=1e-5)
+        formats.save_fbx(self.path("again.fbx"), first)
+        self.assert_same(parts(formats.load_fbx(self.path("again.fbx"))), parts(first))
+
+        source = FBX.FbxNode.EPivotSet.eSourcePivot
+        held   = {}
+
+        def add(scene):
+            for index in range(scene.GetNodeCount()):
+                node                 = scene.GetNode(index)
+                held[node.GetName()] = (tuple(node.GetPreRotation(source))[:3], tuple(node.GetPostRotation(source))[:3])
+            root = scene.GetRootNode()
+            for name, pre, post in (("m_post", None, (-5.0, 15.0, 25.0)), ("m_both", (10.0, 20.0, 30.0), (-5.0, 15.0, 25.0)),
+                                    ("m_pre", (10.0, 20.0, 30.0), None)):
+                node = FBX.FbxNode.Create(scene, name)
+                node.SetNodeAttribute(FBX.FbxNull.Create(scene, ""))
+                node.SetRotationActive(True)
+                if pre is not None:
+                    node.SetPreRotation(source, FBX.FbxVector4(*pre))
+                if post is not None:
+                    node.SetPostRotation(source, FBX.FbxVector4(*post))
+                node.LclRotation.Set(FBX.FbxDouble3(14.0, -25.0, 36.0))
+                root.AddChild(node)
+
+        rewrite(self.path("axes.fbx"), self.path("maya.fbx"), add)
+        self.assertEqual(held["top"][0], (0.0, 0.0, 0.0))
+        np.testing.assert_allclose(held["spot"][1], tuple(_post_rotation(spot.rotate_axis))[:3], rtol=0, atol=1e-12)
+        maya = HierarchyData.load_fbx(self.path("maya.fbx"))
+        axis = (11.052367, -11.352436, -26.760598)
+        for name, rotate, rotate_axis in (("m_post", (14.0, -25.0, 36.0), axis), ("m_both", (33.998415, -13.135141, 57.603958), axis),
+                                          ("m_pre", (33.998415, -13.135141, 57.603958), (0.0, 0.0, 0.0))):
+            got = maya[name]
+            np.testing.assert_allclose(got.rotate, rotate, rtol=0, atol=1e-6, err_msg=name)
+            np.testing.assert_allclose(got.rotate_axis, rotate_axis, rtol=0, atol=1e-6, err_msg=name)
+            np.testing.assert_array_equal(got.joint_orient, (0.0, 0.0, 0.0), err_msg=name)
+
     def test_refusals(self):
         """no file: FileNotFoundError; no sdk: ImportError, before the file
         is looked for"""

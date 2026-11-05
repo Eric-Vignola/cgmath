@@ -3041,6 +3041,22 @@ class FbxExporter:
 
             parent_node.AddChild(node)
 
+            # pre and post rotation, which fbx reads with rotation active:
+            # Maya's exporter writes a group's or a locator's rotate axis as
+            # its post rotation too, which Maya's importer reads back as its
+            # rotate axis; a joint's joint orient is its pre rotation, and a
+            # node that is no joint holds none (save_fbx refuses one)
+            orient = item.joint_orient if item.node_type == "joint" else (0.0, 0.0, 0.0)
+            node.SetPreRotation(
+                fbx.FbxNode.EPivotSet.eSourcePivot,
+                fbx.FbxVector4(*orient, 1.0),
+            )
+            # fbx composes post rotation as its inverse
+            node.SetPostRotation(
+                fbx.FbxNode.EPivotSet.eSourcePivot,
+                _post_rotation(item.rotate_axis),
+            )
+
             if item.node_type == "joint":
                 if rooted:
                     roots.add(id(item))
@@ -3048,16 +3064,6 @@ class FbxExporter:
                 # an eRoot with no child as a transform, its orient dropped
                 node_attr = fbx.FbxSkeleton.Create(self.manager, "")
                 node_attr.SetSkeletonType(fbx.FbxSkeleton.EType.eLimbNode)
-                # pre and post rotation, which fbx reads with rotation active
-                node.SetPreRotation(
-                    fbx.FbxNode.EPivotSet.eSourcePivot,
-                    fbx.FbxVector4(*item.joint_orient, 1.0),
-                )
-                # fbx composes post rotation as its inverse
-                node.SetPostRotation(
-                    fbx.FbxNode.EPivotSet.eSourcePivot,
-                    _post_rotation(item.rotate_axis),
-                )
             # a null's look is what tells a locator from a group, the same way
             # Maya's own FBX plugin writes them. the binding's Look.Set() only
             # takes the enum's integer value.
@@ -3090,7 +3096,7 @@ class FbxExporter:
             if specs is not None:
                 prop = fbx.FbxProperty.Create(node, fbx.FbxStringDT, self._USER_ATTR_SPECS, "")
                 prop.Set(specs)
-            if item.node_type == "joint" and np.any(np.asarray(item.rotate_axis) != 0.0):
+            if np.any(np.asarray(item.rotate_axis) != 0.0):
                 prop = fbx.FbxProperty.Create(node, fbx.FbxDouble3DT, self._ROTATE_AXIS, "")
                 prop.Set(fbx.FbxDouble3(*[float(x) for x in item.rotate_axis]))
 

@@ -643,6 +643,35 @@ class TestSaveFbxMany(unittest.TestCase):
         self.assertFalse(os.path.exists(self.path("x.fbx")))
 
     @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_a_joint_orient_off_a_joint_is_refused(self):
+        """a group's or a locator's joint orient over 1e-9, in the rig or on
+        a take's frame, raises ValueError naming them, nothing written; a
+        zero one saves, and reads back zero"""
+        rig, mesh, skin = skinned(group="body")
+        rig["body"].joint_orient = (0.0, -0.0, 1e-9)
+        clip                     = ClipData(rig, frames=4, take="move")
+        formats.save_fbx(self.path("zero.fbx"), rig, ClipList([clip]), mesh, skin)
+        back = HierarchyData.load_fbx(self.path("zero.fbx"), axis_system=None)
+        np.testing.assert_array_equal(back["body"].joint_orient, 0.0)
+
+        oriented                      = rig.copy()
+        oriented["body"].joint_orient = (0.0, 2e-9, 0.0)
+        for objects in ((oriented, mesh, skin), (oriented,), (oriented, ClipList([clip]))):
+            with self.subTest(len(objects)), self.assertRaisesRegex(ValueError, r"no joint orient.*the rig's \['body'\]"):
+                formats.save_fbx(self.path("x.fbx"), *objects)
+        with self.assertRaisesRegex(ValueError, r"the rig's \['body'\]"):
+            oriented.save_fbx(self.path("x.fbx"))
+        block                    = np.array(clip.frames.joint_orient)
+        block[1:3, 3]            = (0.0, 0.0, 30.0)
+        clip.frames.joint_orient = block
+        for objects in ((rig, ClipList([clip]), mesh, skin), (ClipList([clip]),), (clip,)):
+            with self.subTest(len(objects)), self.assertRaisesRegex(ValueError, r"take 'move''s \['body'\] \(frames 1 to 2\)"):
+                formats.save_fbx(self.path("x.fbx"), *objects)
+        with self.assertRaisesRegex(ValueError, r"take 'move''s \['body'\]"):
+            clip.save_fbx(self.path("x.fbx"))
+        self.assertFalse(os.path.exists(self.path("x.fbx")))
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_takes_that_do_not_fit_the_rig(self):
         """each raises before the sdk is reached, naming what fails"""
         rig, mesh, _ = skinned(group="body")
