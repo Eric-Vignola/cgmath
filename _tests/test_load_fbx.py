@@ -120,8 +120,8 @@ class TestLoadFbx(unittest.TestCase):
             elif isinstance(value, np.ndarray):
                 np.testing.assert_array_equal(got[key], value, err_msg=key)
                 self.assertEqual(got[key].dtype, value.dtype, key)
-                held = got[key][got[key] == 0.0] if got[key].dtype.kind == "f" else ()
-                self.assertFalse(np.signbit(held).any(), key)
+                if got[key].dtype.kind == "f":
+                    np.testing.assert_array_equal(np.signbit(got[key]), np.signbit(value), err_msg=key)
             else:
                 self.assertEqual(got[key], value, key)
 
@@ -433,6 +433,35 @@ class TestLoadFbx(unittest.TestCase):
             np.testing.assert_allclose(got.rotate, rotate, rtol=0, atol=1e-6, err_msg=name)
             np.testing.assert_allclose(got.rotate_axis, rotate_axis, rtol=0, atol=1e-6, err_msg=name)
             np.testing.assert_array_equal(got.joint_orient, (0.0, 0.0, 0.0), err_msg=name)
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_negative_zeros(self):
+        """a -0.0 in a rig's channel or a take's key reads back -0.0, a
+        channel of zeros among them, which the sdk leaves out of a file"""
+        rig = HierarchyData()
+        hips = TransformData("hips", node_type="joint", translate=(-0.0, 1.0, 0.0), rotate=(0.0, -0.0, 10.0),
+                             joint_orient=(0.0, -0.0, 0.0), rotate_axis=(0.0, 0.0, -0.0))
+        arm = TransformData("arm", node_type="joint", translate=(-0.0, 0.0, 0.0), rotate=(-0.0, -0.0, -0.0),
+                            joint_orient=(5.0, -0.0, 0.0))
+        top = TransformData("top", translate=(0.0, 0.0, -0.0), rotate_axis=(-0.0, 0.0, 0.0),
+                            joint_orient=(0.0, 0.0, -0.0))
+        arm.parent_uuid = hips.uuid
+        for node in (top, hips, arm):
+            rig.append(node)
+        hips.parent_uuid = top.uuid
+        clip             = ClipData(rig, frames=3, start_frame=0, fps=24.0, take="t")
+        for channel in ("joint_orient", "rotate_axis"):
+            held = np.array([getattr(clip[index].name and rig[clip[index].name], channel) for index in range(len(clip))])
+            setattr(clip.frames, channel, np.repeat(held[None], 3, axis=0))
+        translate             = np.array(clip.frames.translate)
+        translate[:, 1, 2]    = -0.0
+        translate[1, 2, 0]    = -0.0
+        clip.frames.translate = translate
+        formats.save_fbx(self.path("zeros.fbx"), rig, ClipList([clip]))
+        first = formats.load_fbx(self.path("zeros.fbx"))
+        self.assert_same(parts(first), parts(formats.FbxContents(rig, ClipList([clip])), keys=True))
+        formats.save_fbx(self.path("again.fbx"), first)
+        self.assert_same(parts(formats.load_fbx(self.path("again.fbx"))), parts(first))
 
     def test_refusals(self):
         """no file: FileNotFoundError; no sdk: ImportError, before the file

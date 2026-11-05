@@ -58,7 +58,6 @@ def load_fbx(filename) -> FbxContents:
         rig = HierarchyData.load_fbx(filename)
     clips = ClipList.load_fbx(filename)
     _refuse_shear(rig, clips.list, "load_fbx")
-    _positive_zeros(rig, clips)
 
     read   = mesh_module.load_fbx(filename)
     meshes = MeshList([mesh for mesh, _ in read])
@@ -66,22 +65,3 @@ def load_fbx(filename) -> FbxContents:
     skins  = SkinList.load_fbx(filename) if len(meshes) else SkinList()
     return FbxContents(rig if len(rig) else None, clips, meshes, uvs, skins)
 
-
-CHANNELS = ("translate", "rotate", "scale", "joint_orient", "rotate_axis", "shear")
-
-
-def _positive_zeros(rig, clips) -> None:
-    """every -0.0 the readers' arithmetic leaves in a channel made 0.0, in
-    place: a file holds the value, and a load of its save reads 0.0"""
-    import numpy as np
-
-    for node in rig:
-        for channel in CHANNELS:
-            value = np.asarray(getattr(node, channel))
-            if np.signbit(value[value == 0.0]).any():
-                setattr(node, channel, value + 0.0)
-    for clip in clips:
-        for channel in CHANNELS:
-            block = np.asarray(getattr(clip.frames, channel))
-            if np.signbit(block[block == 0.0]).any():
-                setattr(clip.frames, channel, block + 0.0)

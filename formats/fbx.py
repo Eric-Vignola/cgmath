@@ -2746,6 +2746,21 @@ def _kept_spec(spec: dict, keep: bool) -> dict:
     }
 
 
+# the channels whose zeros _negative_zeros notes, as the file holds them
+NEGATIVE_ZERO_CHANNELS = ("translate", "rotate", "joint_orient")
+
+
+def _negative_zeros(item) -> str:
+    """``"name x y z;..."`` of each channel of ``item`` holding zeros only,
+    -0.0 among them, 1 for each -0.0; "" where none does"""
+    held = []
+    for name in NEGATIVE_ZERO_CHANNELS:
+        value = np.asarray(getattr(item, name), dtype=np.float64)
+        if np.all(value == 0.0) and np.signbit(value).any():
+            held.append(" ".join([name] + [str(int(x)) for x in np.signbit(value)]))
+    return ";".join(held)
+
+
 def _post_rotation(rotate_axis):
     """the post rotation a joint of ``rotate_axis`` is written with: fbx
     composes it as its inverse"""
@@ -2802,8 +2817,9 @@ class FbxExporter:
 
     _USER_ATTR_SPECS = "cgmath:userAttributes"
 
-    _RADIUS      = "cgmath:radius"
-    _DRAW_STYLE  = "cgmath:drawStyle"
+    _RADIUS          = "cgmath:radius"
+    _DRAW_STYLE      = "cgmath:drawStyle"
+    _NEGATIVE_ZEROS  = "cgmath:negativeZeros"
 
     _ROTATE_AXIS = "cgmath:rotateAxis"
     """str: the hidden property on a joint keeping its rotate axis as given:
@@ -3096,9 +3112,15 @@ class FbxExporter:
             if specs is not None:
                 prop = fbx.FbxProperty.Create(node, fbx.FbxStringDT, self._USER_ATTR_SPECS, "")
                 prop.Set(specs)
-            if np.any(np.asarray(item.rotate_axis) != 0.0):
+            if np.any(np.signbit(item.rotate_axis) | (np.asarray(item.rotate_axis) != 0.0)):
                 prop = fbx.FbxProperty.Create(node, fbx.FbxDouble3DT, self._ROTATE_AXIS, "")
                 prop.Set(fbx.FbxDouble3(*[float(x) for x in item.rotate_axis]))
+            # the sdk leaves out a vector of zeros, -0.0 among them, which
+            # then reads 0.0: which of them are -0.0
+            signs = _negative_zeros(item)
+            if signs:
+                prop = fbx.FbxProperty.Create(node, fbx.FbxStringDT, self._NEGATIVE_ZEROS, "")
+                prop.Set(signs)
 
             # visibility, a joint's radius and draw style as Maya's exporter
             # writes them: Visibility, the skeleton's Size (radius * 100 / 3)
