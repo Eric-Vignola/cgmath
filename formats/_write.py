@@ -208,7 +208,18 @@ def _pair_uvs(meshes, groups) -> list:
     two meshes fit, and for a mesh given two sets of one name"""
     names = [mesh.name or "mesh" for mesh in meshes]
     sets  = [[] for _ in meshes]
-    for group in groups:
+    where = {name: index for index, name in enumerate(names)}
+    for whole in groups:
+        # a set that names its mesh pairs with it, each set on its own
+        group = []
+        for uv in whole:
+            index = where.get(uv.mesh_name) if uv.mesh_name is not None else None
+            if index is None:
+                group.append(uv)
+                continue
+            if not np.array_equal(uv.counts, meshes[index].counts):
+                raise ValueError(f"save_fbx: the UV set {uv.name!r} holds other faces than mesh {names[index]!r}")
+            sets[index].append(uv)
         if not group:
             continue
         labels = [uv.name for uv in group]

@@ -3773,7 +3773,11 @@ class UVData(MeshData):
     _resolution: Array(np.int32, 2) = numpy_array(np.array([2048, 2048], dtype=np.int32))
     _antialias:  bool = False
 
-    EQUALITY_TEST_IGNORE = ["name", "_resolution", "_antialias"]
+    # the mesh the set was read from, which save_fbx pairs it with by name
+    mesh_name: Optional[str] = None
+
+    EQUALITY_TEST_IGNORE = ["name", "mesh_name", "_resolution", "_antialias"]
+    NAMESPACED_FIELDS    = ("name", "mesh_name")
 
     # --- cached attributes --- #
     _buffer   = None  # render buffer
@@ -5770,6 +5774,8 @@ def _load_fbx(
             )
 
             uv_data_list = _extract_fbx_uv_channels(mesh, counts)
+            for uv_data in uv_data_list:
+                uv_data.mesh_name = mesh_data.name
             data.append((mesh_data, UVList(uv_data_list)))
 
         return data

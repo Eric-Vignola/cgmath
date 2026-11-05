@@ -346,6 +346,38 @@ class TestSaveFbxUVs(unittest.TestCase):
         self.assertFalse(os.path.exists(self.path("x.fbx")))
 
     @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_sets_that_name_their_mesh(self):
+        """the readers give each set its mesh's name, and save_fbx pairs a
+        set with the mesh of that name first: meshes of one layout, each with
+        a set named map1, save in one call and read back"""
+        from cgmath.geometry import mesh as mesh_module
+
+        meshes = MeshList([ngon_mesh("a"), ngon_mesh("b"), ngon_mesh("c")])
+        sets   = UVList([ngon_uvs(shift=float(i)) for i in range(3)])
+        with self.assertRaisesRegex(ValueError, "fit meshes"):
+            formats.save_fbx(self.path("x.fbx"), meshes, sets)
+        for uv, mesh in zip(sets, ("c", "a", "b")):
+            uv.mesh_name = mesh
+        formats.save_fbx(self.path("named.fbx"), sets, meshes)
+        for uv, mesh in zip(sets, ("c", "a", "b")):
+            (back,) = UVList.load_fbx(self.path("named.fbx"), name=mesh)
+            self.assertEqual((back.name, back.mesh_name), ("map1", mesh))
+            np.testing.assert_array_equal(back.points, uv.points)
+            np.testing.assert_array_equal(back.indices, uv.indices)
+        again = [uv for _, held in mesh_module.load_fbx(self.path("named.fbx")) for uv in held]
+        self.assertEqual([uv.mesh_name for uv in again], ["a", "b", "c"])
+        formats.save_fbx(self.path("again.fbx"), UVList(again), meshes)
+        for name in "abc":
+            np.testing.assert_array_equal(UVList.load_fbx(self.path("again.fbx"), name=name)[0].points,
+                                          UVList.load_fbx(self.path("named.fbx"), name=name)[0].points)
+
+        sets[0].mesh_name = "a"
+        sets[0].counts    = np.array([4, 3, 5])
+        with self.assertRaisesRegex(ValueError, "'map1' holds other faces than mesh 'a'"):
+            formats.save_fbx(self.path("x.fbx"), meshes, sets)
+        self.assertFalse(os.path.exists(self.path("x.fbx")))
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_maya_reads_the_uv_sets(self):
         """Maya 2025's FBXImport: the set names, the UV count of each and the
         UV of every face corner, to 1e-12"""
