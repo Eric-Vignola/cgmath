@@ -7,9 +7,9 @@ class FbxContents:
     """one fbx file's rig at its bind pose, its takes, meshes, UV sets and
     skins, as :func:`load_fbx` reads them and :func:`save_fbx` writes them"""
 
-    __slots__ = ("rig", "clips", "meshes", "uvs", "skins")
+    __slots__ = ("rig", "clips", "meshes", "uvs", "skins", "active_take", "take_ranges")
 
-    def __init__(self, rig=None, clips=None, meshes=None, uvs=None, skins=None):
+    def __init__(self, rig=None, clips=None, meshes=None, uvs=None, skins=None, active_take=None, take_ranges=None):
         from cgmath.geometry.mesh import MeshList, UVList
         from cgmath.geometry.skin_weights import SkinList
         from cgmath.hierarchy.hierarchy import ClipList
@@ -19,6 +19,9 @@ class FbxContents:
         self.meshes = MeshList() if meshes is None else meshes
         self.uvs    = UVList() if uvs is None else uvs
         self.skins  = SkinList() if skins is None else skins
+
+        self.active_take = active_take
+        self.take_ranges = {} if take_ranges is None else take_ranges
 
     def objects(self) -> list:
         held = [self.rig] if self.rig is not None else []
@@ -42,7 +45,7 @@ def load_fbx(filename) -> FbxContents:
     from cgmath.geometry import mesh as mesh_module
     from cgmath.geometry.mesh import MeshList, UVList
     from cgmath.geometry.skin_weights import SkinList
-    from cgmath.hierarchy.hierarchy import FBX, ClipList, HierarchyData
+    from cgmath.hierarchy.hierarchy import FBX, ClipList, HierarchyData, _fbx_clip_list
 
     if FBX is None:
         raise ImportError("fbx module not found")
@@ -56,12 +59,12 @@ def load_fbx(filename) -> FbxContents:
         if "holds no bind pose" not in str(error):
             raise
         rig = HierarchyData.load_fbx(filename)
-    clips = ClipList.load_fbx(filename)
+    clips, active, ranges = _fbx_clip_list(ClipList, filename)
     _refuse_shear(rig, clips.list, "load_fbx")
 
     read   = mesh_module.load_fbx(filename)
     meshes = MeshList([mesh for mesh, _ in read])
     uvs    = UVList([uv for _, sets in read for uv in sets])
     skins  = SkinList.load_fbx(filename) if len(meshes) else SkinList()
-    return FbxContents(rig if len(rig) else None, clips, meshes, uvs, skins)
+    return FbxContents(rig if len(rig) else None, clips, meshes, uvs, skins, active, ranges)
 

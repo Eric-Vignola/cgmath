@@ -79,6 +79,8 @@ def save_fbx(filename, *objects, zero_root: bool = False, as_ascii: bool = False
 
     # expand ~, consistent with the other IO paths
     filename = os.path.expanduser(filename)
+    active   = _active_take(objects)
+    ranges   = _take_ranges(objects)
     meshes, groups, skins, rigs, takes = _sort(_opened(objects))
     if (groups or skins) and not meshes:
         raise TypeError("save_fbx writes a UV set or a skin with its mesh: pass the mesh too")
@@ -86,6 +88,10 @@ def save_fbx(filename, *objects, zero_root: bool = False, as_ascii: bool = False
     # every take checked before the sdk is reached, then against the rig;
     # takes is None when no clip was passed, [] for an empty ClipList
     names = hierarchy._takes_to_save(takes) if takes is not None else None
+    if names:
+        picked = [k for k, clip in enumerate(takes) if active is not None and clip.take == active]
+        active = names[picked[0]] if picked else names[0]
+        ranges = [ranges.get(clip.take) for clip in takes]
     if not (meshes or rigs or takes):
         held = ", ".join(type(x).__name__ for x in objects) or "nothing"
         raise TypeError(f"save_fbx: nothing to write, got {held}")
@@ -126,8 +132,22 @@ def save_fbx(filename, *objects, zero_root: bool = False, as_ascii: bool = False
                 exporter.add_skin(shape, skin, [nodes[name] for name in skin.influences])
         if takes:
             mode = getattr(hierarchy.FBX.FbxTime.EMode, hierarchy._fbx_rate_mode(float(takes[0].fps)))
-            exporter.add_takes(takes, names, mode, zero_root=zero_root, columns=columns)
+            exporter.add_takes(takes, names, mode, zero_root=zero_root, columns=columns, active=active, ranges=ranges)
         exporter.export(path=filename, as_ascii=as_ascii, zero_root=zero_root)
+
+
+def _active_take(objects):
+    """the active take of the first FbxContents among ``objects``, None
+    without one"""
+    from cgmath.formats._load import FbxContents
+
+    return next((item.active_take for item in objects if isinstance(item, FbxContents)), None)
+
+
+def _take_ranges(objects) -> dict:
+    from cgmath.formats._load import FbxContents
+
+    return next((item.take_ranges for item in objects if isinstance(item, FbxContents)), {})
 
 
 def _opened(objects) -> list:

@@ -910,6 +910,165 @@ class TestReadBackAsWritten(unittest.TestCase):
                         want = np.asarray(take.frames.world_matrix)[frame, take.index(take[node.name])]
                     np.testing.assert_allclose(got, want, rtol=0, atol=1e-5, err_msg=f"{node.name} {frame}")
 
+    def three_takes(self):
+        """``(rig, clips)``: a group over two joints and three takes, A, B and
+        C, from frames 0, -3 and 2, each turning the group its own way"""
+        rig = HierarchyData()
+        for name, kind, parent, values in (
+            ("grp", "transform", None, dict(translate=(2.0, 1.0, -3.0))),
+            ("root", "joint", "grp", dict(translate=(0.0, 1.0, 0.0))),
+            ("tip", "joint", "root", dict(translate=(0.0, 2.0, 0.0))),
+        ):
+            node = TransformData(name, node_type=kind, **values)
+            if parent is not None:
+                node.parent_uuid = rig[parent].uuid
+            rig.append(node)
+        clips = []
+        for k, (take, start) in enumerate((("A", 0), ("B", -3), ("C", 2))):
+            clip  = ClipData(list(rig), frames=6, start_frame=start, take=take)
+            turns = np.array(clip.frames.rotate)
+            turns[:, 0, 2] += 10.0 * (k + 1) * np.arange(6)
+            clip.frames.rotate = turns
+            clips.append(clip)
+        return rig, ClipList(clips)
+
+    def active(self, path, name=None):
+        """the file's ActiveAnimStackName as the sdk reads it; with ``name``,
+        the file written again naming that"""
+        from cgmath.formats._fbx_io import import_scene, new_manager
+
+        manager = new_manager(FBX)
+        try:
+            scene = import_scene(manager, path, FBX)
+            if name is None:
+                return str(scene.ActiveAnimStackName.Get())
+            scene.ActiveAnimStackName.Set(FBX.FbxString(name))
+            exporter = FBX.FbxExporter.Create(manager, "")
+            exporter.Initialize(path, -1, manager.GetIOSettings())
+            exporter.Export(scene)
+            exporter.Destroy()
+        finally:
+            manager.Destroy()
+
+    def spans(self, path, ranges=None):
+        """{take: (start, stop)} each take's span in the file, in frames at
+        24 fps, as the sdk reads it; with ``ranges``, the file written again
+        holding those"""
+        from cgmath.formats._fbx_io import import_scene, new_manager
+        from cgmath.hierarchy.hierarchy import _fbx_stacks
+
+        manager = new_manager(FBX)
+        try:
+            scene  = import_scene(manager, path, FBX)
+            stacks = _fbx_stacks(scene)
+            second = FBX.FbxTime()
+            second.SetSecondDouble(1.0)
+            if ranges is None:
+                return {
+                    stack.GetName(): tuple(t.Get() * 24.0 / second.Get() for t in (stack.GetLocalTimeSpan().GetStart(), stack.GetLocalTimeSpan().GetStop()))
+                    for stack in stacks
+                }
+            for stack in stacks:
+                if stack.GetName() in ranges:
+                    first, last = FBX.FbxTime(), FBX.FbxTime()
+                    first.SetSecondDouble(ranges[stack.GetName()][0] / 24.0)
+                    last.SetSecondDouble(ranges[stack.GetName()][1] / 24.0)
+                    stack.SetLocalTimeSpan(FBX.FbxTimeSpan(first, last))
+                    stack.SetReferenceTimeSpan(FBX.FbxTimeSpan(first, last))
+            exporter = FBX.FbxExporter.Create(manager, "")
+            exporter.Initialize(path, -1, manager.GetIOSettings())
+            exporter.Export(scene)
+            exporter.Destroy()
+        finally:
+            manager.Destroy()
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_the_take_ranges(self):
+        """load_fbx's take_ranges holds each take's span as the file stores
+        it, the playback range Maya's import opens on, apart from the clip's
+        frames, which reach the keys; save_fbx writes it for each take it
+        names, the clip's frames for any other and for objects saved without
+        an FbxContents, so a load saved and read again keeps both"""
+        rig, clips = self.three_takes()
+        formats.save_fbx(self.path("plain.fbx"), rig, clips)
+        self.assertEqual(self.spans(self.path("plain.fbx")), {"A": (0.0, 5.0), "B": (-3.0, 2.0), "C": (2.0, 7.0)})
+        self.assertEqual(formats.load_fbx(self.path("plain.fbx")).take_ranges, {"A": (0.0, 5.0), "B": (-3.0, 2.0), "C": (2.0, 7.0)})
+        ranges = {"A": (1.0, 3.0), "B": (-5.0, 6.0), "C": (2.5, 9.0)}
+        self.spans(self.path("plain.fbx"), ranges)
+        first = formats.load_fbx(self.path("plain.fbx"))
+        self.assertEqual(first.take_ranges, ranges)
+        frames = [(clip.take, clip.start_frame, clip.frame_count) for clip in first.clips]
+        self.assertEqual(frames, [("A", 0, 6), ("B", -5, 12), ("C", 2, 8)])
+        first.save_fbx(self.path("one.fbx"))
+        self.assertEqual(self.spans(self.path("one.fbx")), ranges)
+        again = formats.load_fbx(self.path("one.fbx"))
+        self.assertEqual(again.take_ranges, ranges)
+        self.assertEqual([(clip.take, clip.start_frame, clip.frame_count) for clip in again.clips], frames)
+        formats.save_fbx(self.path("two.fbx"), again)
+        self.assertEqual(formats.load_fbx(self.path("two.fbx")).take_ranges, ranges)
+        again.take_ranges = {"B": (-4.0, 1.0)}
+        again.save_fbx(self.path("three.fbx"))
+        self.assertEqual(self.spans(self.path("three.fbx")), {"A": (0.0, 5.0), "B": (-4.0, 1.0), "C": (2.0, 9.0)})
+        formats.save_fbx(self.path("four.fbx"), again.rig, again.clips)
+        self.assertEqual(self.spans(self.path("four.fbx")), {"A": (0.0, 5.0), "B": (-5.0, 6.0), "C": (2.0, 9.0)})
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_the_active_take(self):
+        """load_fbx's active_take is the take Maya's import opens on, the one
+        the file's ActiveAnimStackName names, else the first, None in a file
+        with no take; save_fbx writes it, the first take saved where it names
+        none of them and for objects saved without an FbxContents, so a load
+        saved and read again keeps it"""
+        rig, clips = self.three_takes()
+        formats.save_fbx(self.path("plain.fbx"), rig, clips)
+        self.assertEqual(self.active(self.path("plain.fbx")), "A")
+        first = formats.load_fbx(self.path("plain.fbx"))
+        self.assertEqual(first.active_take, "A")
+        for active, saved in (("C", "C"), ("B", "B"), ("nope", "A"), (None, "A")):
+            with self.subTest(active=active):
+                first.active_take = active
+                first.save_fbx(self.path("one.fbx"))
+                self.assertEqual(self.active(self.path("one.fbx")), saved)
+                again = formats.load_fbx(self.path("one.fbx"))
+                self.assertEqual(again.active_take, saved)
+                formats.save_fbx(self.path("two.fbx"), again)
+                self.assertEqual(self.active(self.path("two.fbx")), saved)
+                self.assertEqual(formats.load_fbx(self.path("two.fbx")).active_take, saved)
+        for name, read in (("C", "C"), ("nope", "A"), ("", "A")):
+            with self.subTest(named=name):
+                self.active(self.path("plain.fbx"), name)
+                self.assertEqual(formats.load_fbx(self.path("plain.fbx")).active_take, read)
+        rig.save_fbx(self.path("rig.fbx"))
+        self.assertIsNone(formats.load_fbx(self.path("rig.fbx")).active_take)
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_maya_opens_on_the_saved_active_take(self):
+        """Maya 2025's FBXImport of a save opens on its active take, the
+        playback range and the time that take's, as for the file it was
+        loaded from, its span apart from its keys"""
+        from cgmath._tests.test_fbx_labels import _maya
+
+        maya = _maya()
+        if maya is None:
+            self.skipTest("needs Maya and its fbxmaya plug-in")
+        cmds, mel = maya
+        self.addCleanup(cmds.file, new=True, force=True)
+        rig, clips = self.three_takes()
+        formats.save_fbx(self.path("plain.fbx"), rig, clips)
+        self.spans(self.path("plain.fbx"), {"B": (-5.0, 6.0), "C": (2.5, 9.0)})
+        for active, span in (("C", (2.5, 9.0)), ("B", (-5.0, 6.0)), ("A", (0.0, 5.0))):
+            with self.subTest(active=active):
+                self.active(self.path("plain.fbx"), active)
+                contents = formats.load_fbx(self.path("plain.fbx"))
+                contents.save_fbx(self.path("saved.fbx"))
+                for path in (self.path("plain.fbx"), self.path("saved.fbx")):
+                    cmds.file(new=True, force=True)
+                    mel.eval("FBXResetImport")
+                    mel.eval(f'FBXImport -f "{path.replace(os.sep, "/")}"')
+                    got = (cmds.playbackOptions(q=True, min=True), cmds.playbackOptions(q=True, max=True))
+                    self.assertEqual(got, span, path)
+                    self.assertEqual(cmds.currentTime(q=True), span[0], path)
+
     @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_normals(self):
         """normals read at unit length, as Maya's import makes them, but one

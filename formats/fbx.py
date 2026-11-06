@@ -3377,7 +3377,7 @@ class FbxExporter:
             raise RuntimeError(f"Could not find {root_name} to reset!")
         return skel_root
 
-    def add_takes(self, clips, names, time_mode, zero_root: bool = False, columns=None) -> None:
+    def add_takes(self, clips, names, time_mode, zero_root: bool = False, columns=None, active=None, ranges=None) -> None:
         """One animation stack per clip, after :meth:`add_skeleton`
 
         ``clips`` are takes of the skeleton added, their nodes in its order,
@@ -3400,12 +3400,19 @@ class FbxExporter:
         looked   = [(column, node, item) for column, node, item in looked if column is not None and node is not None]
         written  = [(column, node) for column, node, _ in looked if node is not skipped]
 
-        for clip, name in zip(clips, names):
+        ranges   = [None] * len(clips) if ranges is None else ranges
+        second   = fbx.FbxTime()
+        second.SetSecondDouble(1.0)
+        for clip, name, held in zip(clips, names, ranges):
             stack = fbx.FbxAnimStack.Create(self.scene, name)
             self.scene.AddMember(stack)
             first, last = fbx.FbxTime(), fbx.FbxTime()
             first.SetSecondDouble(clip.start_frame / clip.fps)
             last.SetSecondDouble(clip.end_frame / clip.fps)
+            if held is not None:
+                # the span the take was read with, in its frames
+                first.Set(int(round(held[0] * second.Get() / clip.fps)))
+                last.Set(int(round(held[1] * second.Get() / clip.fps)))
             # the sdk writes no span (0, 0) and reads another in its place:
             # one tick past 0, which a read puts on frame 0
             if first.Get() == 0 and last.Get() == 0:
@@ -3435,6 +3442,12 @@ class FbxExporter:
             for column, fbx_node, item in looked:
                 if np.any(shown[:, column] != bool(item.visibility)):
                     _key_visibility(fbx_node, layer._data, times, shown[:, column])
+
+        # the take Maya's import opens on: ``active`` where it names one of
+        # them, else the first
+        names = list(names)
+        if names:
+            self.scene.ActiveAnimStackName.Set(fbx.FbxString(active if active in names else names[0]))
 
     def add_mesh(self, mesh, node=None):
         """Adds a ``MeshData`` as an ``FbxMesh`` and returns it.

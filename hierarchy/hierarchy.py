@@ -7403,6 +7403,52 @@ def _fbx_stacks(scene) -> list:
     return [typed(scene.GetSrcObject(criteria, index), FBX.FbxAnimStack, FBX) for index in range(scene.GetSrcObjectCount(criteria))]
 
 
+def _fbx_clip_list(cls, filename, scale_factor=None, fps=None, axis_system="maya_y_up", node_types=None) -> tuple:
+    """``(clips, active)``: every take of an fbx file as ``cls``, a
+    ClipList, reads it (:meth:`ClipList.load_fbx`), and the name of the take
+    Maya's import opens on, the one the file's ActiveAnimStackName names,
+    else the first, None in a file with no take"""
+    if fps is not None and fps <= 0.0:
+        raise ValueError(f"fps must be positive, got {fps}")
+    if FBX is None:
+        raise ImportError("fbx module not found")
+    _fbx_check_scale_factor(scale_factor)
+    _fbx_check_axis_system(axis_system)
+    kinds = _fbx_check_node_types(node_types)
+
+    with _NodesLoad(), open_fbx(filename, FBX) as scene:
+        turn   = _fbx_axis_turn(scene, axis_system, filename)
+        units  = _fbx_units(scene, scale_factor)
+        record = _fbx_record(scene, axis_system, scale_factor)
+        hierarchy_data, nodes, tree = _walk_fbx(scene, units, kinds, turn is not None)
+
+        rest = copy.deepcopy(hierarchy_data)
+        if turn is not None:
+            _fbx_turn_walk(rest, turn)
+        rest   = _recorded(HierarchyData.from_dict(rest), record)
+
+        stacks = _fbx_stacks(scene)
+        names  = _take_names([stack.GetName() for stack in stacks])
+        rig    = HierarchyData.from_dict(hierarchy_data) if stacks else None
+        clips = [
+            _fbx_take_clip(
+                ClipData, scene, stack, rig, rest.copy(), hierarchy_data, nodes, tree, turn, record,
+                filename, fps, None, None, name,
+            )
+            for stack, name in zip(stacks, names)
+        ]
+        named  = str(scene.ActiveAnimStackName.Get())
+        active = next((name for stack, name in zip(stacks, names) if stack.GetName() == named), names[0] if names else None)
+
+        # each take's span as the file stores it, in the clip's frames
+        per_second = _fbx_ticks_per_second()
+        ranges     = {}
+        for stack, name, clip in zip(stacks, names, clips):
+            span         = stack.GetLocalTimeSpan()
+            ranges[name] = (span.GetStart().Get() * clip.fps / per_second, span.GetStop().Get() * clip.fps / per_second)
+    return cls(clips), active, ranges
+
+
 def _fbx_take_clip(
     cls, scene, stack, rig, rest, hierarchy_data, nodes, tree, turn, record, filename, fps, start_frame, end_frame,
     take="",
@@ -17342,36 +17388,7 @@ class ClipList(DataList[ClipData]):
         ``ClipData.load_fbx(filename, take=i)`` warns of it: a file of
         three such takes, three warnings.
         """
-        if fps is not None and fps <= 0.0:
-            raise ValueError(f"fps must be positive, got {fps}")
-        if FBX is None:
-            raise ImportError("fbx module not found")
-        _fbx_check_scale_factor(scale_factor)
-        _fbx_check_axis_system(axis_system)
-        kinds = _fbx_check_node_types(node_types)
-
-        with _NodesLoad(), open_fbx(filename, FBX) as scene:
-            turn   = _fbx_axis_turn(scene, axis_system, filename)
-            units  = _fbx_units(scene, scale_factor)
-            record = _fbx_record(scene, axis_system, scale_factor)
-            hierarchy_data, nodes, tree = _walk_fbx(scene, units, kinds, turn is not None)
-
-            rest = copy.deepcopy(hierarchy_data)
-            if turn is not None:
-                _fbx_turn_walk(rest, turn)
-            rest   = _recorded(HierarchyData.from_dict(rest), record)
-
-            stacks = _fbx_stacks(scene)
-            names  = _take_names([stack.GetName() for stack in stacks])
-            rig    = HierarchyData.from_dict(hierarchy_data) if stacks else None
-            clips = [
-                _fbx_take_clip(
-                    ClipData, scene, stack, rig, rest.copy(), hierarchy_data, nodes, tree, turn, record,
-                    filename, fps, None, None, name,
-                )
-                for stack, name in zip(stacks, names)
-            ]
-        return cls(clips)
+        return _fbx_clip_list(cls, filename, scale_factor, fps, axis_system, node_types)[0]
 
     @classmethod
     def load_glb(
