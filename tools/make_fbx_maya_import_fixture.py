@@ -1186,6 +1186,78 @@ edge("e_camera_zero_group", [R0J, node("C", "camera", None, **CAM), node("h", "g
                              skinned("g", "h")] + tail("g"), axes="xup", **TEN)
 
 
+# a mesh a bind pose lists: at that pose against Maya's world of its parent on
+# frame 0, at the static pose with animation off, the axes a curve keys its
+# own; under a camera root of a turned file, the pose at the static place or
+# moved; a bind pose listing the joint alone, the mesh at its own channels;
+# a group above keyed off its static value at frame 0; a Y-up camera root; a
+# rotate held on the principal solve beside a keyed axis; under a joint the
+# pose lists off its place; a local entry read as a world; a typed mesh
+# under an uneven parent keeping its bake's shear; a mesh with no skin; a
+# skinned mesh no pose lists under a moved one, keeping its world, and
+# beside one under a camera root, the camera rule; the first of two bind
+# poses; a mirrored pose; a folded mesh keyed in rotate; a keyed root
+def bind(*entries):
+    return [{"name": "bindPose%d" % k, "bind": True, "entries": e} for k, e in enumerate(entries)]
+
+
+CAMB = dict(t=(3, -2, 5), r=(10, 20, 30), s=(2, 2, 2))
+BODY = dict(t=(1, 0.5, -2), r=(15, -25, 40), s=(1, 1, 1))
+LEAF = [node("l2", "locator", "g2", t=(0, 0, 3))]
+edge("e_bind_camera", [R0J, node("C", "camera", None, **CAM3), skinned("g", "C", ckeys=[("t", 0, [0, 8], [3.5, 4.5])])] + tail("g"),
+     axes="zup", poses=bind({"g": {}, "r0": {}}), **TEN)
+edge("e_bind_camera_moved", [R0J, node("C", "camera", None, **CAM3), skinned("g", "C", ckeys=[("r", 2, [0, 8], [80, 110])])] + tail("g"),
+     axes="xup", poses=bind({"g": {"dt": [0, 0, 2], "dr": [0, 0, 30]}, "r0": {}}), **TEN)
+edge("e_bind_camera_joint", [R0J, node("C", "camera", None, **CAM3), skinned("g", "C", ckeys=[("t", 0, [0, 8], [3.5, 4.5])])] + tail("g"),
+     axes="xup", poses=bind({"r0": {}}), **TEN)
+edge("e_bind_group_keyed", [R0J, node("Q", "group", None, **CAMB), node("h", "group", "Q", t=(0, 1, 0), r=(5, 5, 5), ckeys=[("r", 2, [0, 8], [35, 65])]),
+                            skinned("g", "h", **BODY)] + tail("g"), poses=bind({"g": {}, "r0": {}}), **TEN)
+edge("e_bind_yup_camera", [R0J, node("C", "camera", None, **CAMB), skinned("g", "C", **BODY)] + tail("g"), poses=bind({"g": {}, "r0": {}}), **TEN)
+edge("e_bind_branch", [R0J, node("C", "camera", None, **CAMB), skinned("g", "C", ckeys=[("r", 2, [0, 10], [100, 130])], **BODY)] + tail("g"),
+     axes="zup", poses=bind({"g": {"abs": {"t": [2, 1, 0.5], "r": [30, 45, 60], "s": [1, 1, 1]}}, "r0": {}}), **TEN)
+edge("e_bind_joint_parent", [R0J, node("J", "joint", None, t=(3, -2, 5), r=(10, 20, 30)), skinned("g", "J", ckeys=[("t", 0, [0, 8], [3.5, 4.5])])]
+     + tail("g"), poses=bind({"g": {}, "r0": {}, "J": {"dt": [0, 0, 3]}}), **TEN)
+edge("e_bind_local", [R0J, node("P", "group", None, **PN), skinned("g", "P")] + tail("g"), axes="zup",
+     poses=bind({"g": {"dt": [2, 0, 0], "local": True}, "r0": {}}), **TEN)
+edge("e_bind_uneven", [R0J, node("P", "group", None, **PN), skinned("g", "P", "RrSs", **BODY)] + tail("g"),
+     poses=bind({"g": {"dr": [0, 0, 40]}, "r0": {}}), **TEN)
+edge("e_bind_noskin", [R0J, node("P", "group", None, **CAMB), node("g", "mesh", "P", points=MESH, **BODY)] + tail("g"),
+     poses=bind({"g": {"dt": [0, 3, 0]}, "r0": {}}), **TEN)
+edge("e_bind_nested", [R0J, node("P", "group", None, **CAMB), skinned("g", "P", **BODY),
+                       skinned("g2", "g", t=(-1, 0.5, 1), r=(0, 30, -10), s=(1, 1, 1), ckeys=[("t", 0, [0, 8], [9, 19])])] + LEAF + tail("g"),
+     poses=bind({"g": {"dt": [3, 0, 0]}, "r0": {}}), **TEN)
+edge("e_bind_camera_two", [R0J, node("C", "camera", None, **CAMB), skinned("g", "C", **BODY), skinned("g2", "C", t=(-1, 0.5, 1), r=(0, 30, -10), s=(1, 1, 1))]
+     + LEAF + tail("g"), axes="zup", poses=bind({"g": {"dt": [3, 0, 0]}, "r0": {}}), **TEN)
+edge("e_bind_first", [R0J, node("P", "group", None, **CAMB), skinned("g", "P", **BODY)] + tail("g"),
+     poses=bind({"g": {"dt": [3, 0, 0]}, "r0": {}}, {"g": {}, "r0": {}}), **TEN)
+edge("e_bind_mirror", [R0J, node("P", "group", None, **CAMB), skinned("g", "P", ckeys=[("t", 1, [0, 8], [0.5, 2.5])], **BODY)] + tail("g"),
+     axes="zup", poses=bind({"g": {"ds": [-1, 1, 1]}, "r0": {}}), **TEN)
+edge("e_bind_pre_keyed", [R0J, node("P", "group", None, **CAMB), skinned("g", "P", pre=PX5, ckeys=[("r", 2, [0, 10], [100, 130])], **BODY)] + tail("g"),
+     axes="zup", poses=bind({"g": {"dr": [0, 0, 40]}, "r0": {}}), **TEN)
+edge("e_bind_root_keyed", [R0J, skinned("g", None, ckeys=[("t", 0, [0, 8], [11, 21])], **BODY)] + tail("g"), axes="zup",
+     poses=bind({"g": {"dt": [3, 0, 0]}, "r0": {}}), **TEN)
+
+# a member of the mesh's channels the file locks keeps its own value: all of
+# them, as Maya's own export locks a skinned mesh's, or the translate x alone
+LOCKED = [[True] * 3] * 3
+edge("e_bind_locked", [R0J, node("P", "group", None, **CAMB), dict(skinned("g", "P", **BODY), locks=[[True, False, False], [False] * 3, [False] * 3]),
+                       dict(skinned("g2", "P", t=(-1, 0.5, 1), r=(0, 30, -10), s=(1, 1, 1)), locks=LOCKED)] + LEAF + tail("g"),
+     poses=bind({"g": {"dt": [3, 0, 0]}, "g2": {"dt": [3, 0, 0]}, "r0": {}}), **TEN)
+
+# a root the pose lists, a group keyed off its pose or a camera of a turned
+# file, anchors the mesh at its pose, as a joint does; a take whose span
+# starts off 0, after or before it, the group keyed off there: the parent's
+# world at the span's start
+edge("e_bind_root_group", [R0J, node("P", "group", None, ckeys=[("r", 2, [0, 8], [35, 65])], **CAMB), skinned("g", "P", **BODY)] + tail("g"),
+     poses=bind({"g": {"dt": [3, 0, 0]}, "P": {"dt": [0, 2, 0], "dr": [0, 0, 20]}, "r0": {}}), **TEN)
+edge("e_bind_root_camera", [R0J, node("C", "camera", None, **CAM3), skinned("g", "C")] + tail("g"), axes="zup",
+     poses=bind({"g": {"dt": [0, 0, 2]}, "C": {"dt": [1, 0, 0], "dr": [0, 15, 0]}, "r0": {}}), **TEN)
+edge("e_bind_span_late", [R0J, node("P", "group", None, ckeys=[("r", 2, [-4, 8], [20, 80])], **CAMB), skinned("g", "P", **BODY)] + tail("g"),
+     poses=bind({"g": {"dt": [3, 0, 0]}, "r0": {}}), samples=[float(f) for f in range(-4, 11)], span=(3, 8))
+edge("e_bind_span_early", [R0J, node("P", "group", None, ckeys=[("t", 0, [-4, 8], [-1, 5])], **CAMB), skinned("g", "P", **BODY)] + tail("g"),
+     axes="zup", poses=bind({"g": {"dr": [0, 0, 40]}, "r0": {}}), samples=[float(f) for f in range(-4, 11)], span=(-3, 8))
+
+
 def write_layout():
     """_fbx_import_files.write_layout, by path: no cgmath is imported here"""
     path   = os.path.join(HERE, "..", "_tests", "_fbx_import_files.py")

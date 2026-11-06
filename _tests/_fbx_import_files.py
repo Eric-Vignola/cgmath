@@ -127,6 +127,45 @@ def _skin(scene, node, spec: dict, joint) -> None:
     skin.AddCluster(cluster)
 
 
+def _keys(layer, node, spec: dict, fps: float, cubic: bool) -> None:
+    _add_keys(layer, node, spec["keys"], fps, cubic)
+    props = {"t": node.LclTranslation, "r": node.LclRotation, "s": node.LclScaling}
+    for channel, axis, frames, values in spec["ckeys"]:
+        add_curve(layer, props[channel], axis, frames, values, fps, cubic)
+    for channel in spec.get("repeats", ()):
+        for axis in "XYZ":
+            curve = props[channel].GetCurve(layer, axis, False)
+            curve.SetPreExtrapolation(FBX.FbxAnimCurveBase.EExtrapolationType.eRepetition)
+            curve.SetPreExtrapolationCount(2**32 - 1)
+
+
+def _posed(world, offset: dict):
+    """a static world (FbxAMatrix) turned by ``dr`` and scaled by ``ds`` in
+    the node's own frame, then moved by ``dt``"""
+    if offset.get("abs"):
+        out = FBX.FbxAMatrix()
+        out.SetTRS(
+            FBX.FbxVector4(*map(float, offset["abs"]["t"]), 1),
+            FBX.FbxVector4(*map(float, offset["abs"]["r"]), 0),
+            FBX.FbxVector4(*map(float, offset["abs"]["s"]), 1),
+        )
+        return out
+    out = FBX.FbxAMatrix(world)
+    if offset.get("dr") or offset.get("ds"):
+        turn = FBX.FbxAMatrix()
+        turn.SetTRS(
+            FBX.FbxVector4(0, 0, 0, 1),
+            FBX.FbxVector4(*map(float, offset.get("dr", (0, 0, 0))), 0),
+            FBX.FbxVector4(*map(float, offset.get("ds", (1, 1, 1))), 1),
+        )
+        out = out * turn
+    if offset.get("dt"):
+        at = out.GetT()
+        dt = offset["dt"]
+        out.SetT(FBX.FbxVector4(at[0] + dt[0], at[1] + dt[1], at[2] + dt[2], 1.0))
+    return out
+
+
 def write_layout(path: str, layout: dict) -> None:
     """writes the fbx file of ``layout`` to ``path``"""
     source  = FBX.FbxNode.EPivotSet.eSourcePivot
@@ -144,7 +183,9 @@ def write_layout(path: str, layout: dict) -> None:
     layer = FBX.FbxAnimLayer.Create(scene, "Base Layer")
     stack.AddMember(layer)
 
-    made = {}
+    poses = layout.get("poses")
+    later = []
+    made  = {}
     for spec in layout["nodes"]:
         name      = spec["name"]
         node      = FBX.FbxNode.Create(scene, name)
@@ -167,19 +208,43 @@ def write_layout(path: str, layout: dict) -> None:
             node.SetRotationOffset(source, FBX.FbxVector4(*rotate_offset, 1.0))
             node.SetScalingOffset(source, FBX.FbxVector4(*scale_offset, 1.0))
         node.SetTransformationInheritType(types[spec["inherit"]])
+        for prop, members in zip((node.LclTranslation, node.LclRotation, node.LclScaling), spec.get("locks", ())):
+            for k, locked in enumerate(members):
+                if locked:
+                    prop.ModifyFlag(getattr(FBX.FbxPropertyFlags.EFlags, "eLockedMember%d" % k), True)
         (made[spec["parent"]] if spec["parent"] else scene.GetRootNode()).AddChild(node)
-        _add_keys(layer, node, spec["keys"], fps, cubic)
-        props = {"t": node.LclTranslation, "r": node.LclRotation, "s": node.LclScaling}
-        for channel, axis, frames, values in spec["ckeys"]:
-            add_curve(layer, props[channel], axis, frames, values, fps, cubic)
-        for channel in spec.get("repeats", ()):
-            for axis in "XYZ":
-                curve = props[channel].GetCurve(layer, axis, False)
-                curve.SetPreExtrapolation(FBX.FbxAnimCurveBase.EExtrapolationType.eRepetition)
-                curve.SetPreExtrapolationCount(2**32 - 1)
+        if poses:
+            later.append((node, spec))
+        else:
+            _keys(layer, node, spec, fps, cubic)
         if spec.get("skin"):
             _skin(scene, node, spec, made[spec["skin"]])
         made[name] = node
+
+    # the poses, off each node's static world, its keys added after: an
+    # entry with "local" holds its matrix under its parent's static world
+    if poses:
+        evaluator = scene.GetAnimationEvaluator()
+        statics   = {name: FBX.FbxAMatrix(evaluator.GetNodeGlobalTransform(node)) for name, node in made.items()}
+        parents   = {spec["name"]: spec["parent"] for spec in layout["nodes"]}
+        for node, spec in later:
+            _keys(layer, node, spec, fps, cubic)
+        for entry in poses:
+            pose = FBX.FbxPose.Create(scene, entry["name"])
+            pose.SetIsBindPose(bool(entry.get("bind", True)))
+            for name, offset in entry["entries"].items():
+                if offset.get("rows"):
+                    # a matrix as it stands, row by row
+                    held = FBX.FbxMatrix()
+                    for row, values in enumerate(offset["rows"]):
+                        held.SetRow(row, FBX.FbxVector4(*map(float, values)))
+                    pose.Add(made[name], held, False)
+                    continue
+                matrix = _posed(statics[name], offset)
+                if offset.get("local") and parents[name]:
+                    matrix = statics[parents[name]].Inverse() * matrix
+                pose.Add(made[name], FBX.FbxMatrix(matrix), bool(offset.get("local")))
+            scene.AddPose(pose)
 
     for mode, keyed, *muted in layout.get("layers", ()):
         extra = FBX.FbxAnimLayer.Create(scene, "Layer " + mode)

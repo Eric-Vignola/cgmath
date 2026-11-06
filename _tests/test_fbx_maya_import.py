@@ -306,7 +306,7 @@ class TestMayaImport(unittest.TestCase):
         a live later layer blended in, frame 0 outside the take's span, a
         group above it keyed off its static value there"""
         names = self.data["edges"].tolist()
-        self.assertEqual(len(names), 118)
+        self.assertEqual(len(names), 139)
         for name in names:
             kinds = {node["name"]: node["kind"] for node in layout_of(self.data, name)["nodes"]}
             with self.subTest(name):
@@ -903,6 +903,150 @@ class TestTheRead(unittest.TestCase):
         for name in ("j", "k", "e"):
             gap = np.abs(np.asarray(kept[name].world_matrix)[3, :3] - np.asarray(whole[name].world_matrix)[3, :3])
             self.assertLessEqual(float(gap.max()), 1e-12, name)
+
+    def placed(self, name, entry, post=None, order="xyz"):
+        """a skinned mesh g under a root group P keyed off its static value
+        on frame 0, a locator under it, a bind pose listing g at ``entry``
+        and the joint r0"""
+        nodes = [
+            spec("r0", "joint", None, t=(0, 1, 0)),
+            spec("P", "group", None, t=(2, 1, -3), r=(10, 20, 30), ckeys=[("r", 2, [0, 8], [35, 65])]),
+            dict(spec("g", "mesh", "P", t=(1, 0.5, -2), r=(15, -25, 40), order=order, post=post,
+                      points=[(0, 0, 0), (1, 0, 0.2), (0.3, 1, -0.1), (-0.4, 0.5, 0.6)]), skin="r0"),
+            spec("l", "locator", "g", t=(0.5, 1, -2)),
+        ]
+        entries = {"r0": {}} if entry is None else {"g": entry, "r0": {}}
+        return written(self.folder, name, nodes, span=(0, 8), poses=[{"name": "bindPose0", "bind": True, "entries": entries}])
+
+    def test_a_placed_mesh_keeps_its_rotate_axis(self):
+        """a mesh a bind pose places keeps its post rotation as its rotate
+        axis and solves its rotate under it, as Maya 2025's import holds them
+        (measured on this file: rotate and rotateAxis, frames 0 and 4, and
+        with animation off)"""
+        path = self.placed("axis", {"dt": [3, 0, 0]}, post=(-30, 45, 5), order="zxy")
+        axis = [42.0044696, -34.504036982, -31.264084807]
+        clip = ClipData.load_fbx(path)
+        rig  = HierarchyData.load_fbx(path)
+        g    = list(clip.name).index("g")
+        for frame in (0, 4):
+            np.testing.assert_allclose(clip.frames.rotate_axis[frame, g], axis, rtol=0, atol=1e-6)
+            np.testing.assert_allclose(clip.frames.rotate[frame, g], [14.503626386, -27.109529077, 34.924677867], rtol=0, atol=1e-6)
+        np.testing.assert_allclose(rig["g"].rotate_axis, axis, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(rig["g"].rotate, [15.0, -25.0, 40.0], rtol=0, atol=1e-9)
+
+    def three_takes(self, active: str) -> tuple:
+        """``(path, pose)``: a skinned mesh under a root group, a bind pose
+        listing it 3 off its static place, and three takes, A over frames 0
+        to 10, B -4 to 10, C 2 to 12, each turning the group its own way,
+        ``active`` the take the file records as active"""
+        from cgmath._tests._fbx_import_files import _attribute, _skin
+
+        manager = FBX.FbxManager.Create()
+        self.addCleanup(manager.Destroy)
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        scene.GetGlobalSettings().SetAxisSystem(FBX.FbxAxisSystem.MayaYUp)
+        scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames24)
+        made = {}
+        for item in (
+            spec("r0", "joint", None, t=(0, 1, 0)),
+            spec("grp", "group", None, t=(2, 1, -3), r=(10, 20, 30)),
+            spec("body", "mesh", "grp", t=(1, 0.5, -2), r=(15, -25, 40), points=[(0, 0, 0), (1, 0, 0.2), (0.3, 1, -0.1), (-0.4, 0.5, 0.6)]),
+            spec("loc", "locator", "body", t=(4, 0, 0)),
+        ):
+            node = FBX.FbxNode.Create(scene, item["name"])
+            node.SetNodeAttribute(_attribute(scene, item))
+            node.LclTranslation.Set(FBX.FbxDouble3(*item["t"]))
+            node.LclRotation.Set(FBX.FbxDouble3(*item["r"]))
+            (made[item["parent"]] if item["parent"] else scene.GetRootNode()).AddChild(node)
+            made[item["name"]] = node
+            if item["kind"] == "mesh":
+                _skin(scene, node, item, made["r0"])
+        placed = FBX.FbxAMatrix(made["body"].EvaluateGlobalTransform())
+        at     = placed.GetT()
+        placed.SetT(FBX.FbxVector4(at[0] + 3.0, at[1], at[2], 1.0))
+        pose = FBX.FbxPose.Create(scene, "bindPose")
+        pose.SetIsBindPose(True)
+        pose.Add(made["body"], FBX.FbxMatrix(placed))
+        pose.Add(made["r0"], FBX.FbxMatrix(made["r0"].EvaluateGlobalTransform()))
+        scene.AddPose(pose)
+        for name, (first, last), turn in (("A", (0, 10), (20, 80)), ("B", (-4, 10), (-30, 50)), ("C", (2, 12), (60, 100))):
+            stack = FBX.FbxAnimStack.Create(scene, name)
+            layer = FBX.FbxAnimLayer.Create(scene, name + "Layer")
+            stack.AddMember(layer)
+            add_curve(layer, made["grp"].LclRotation, 2, [-6, 14], turn)
+            start, stop = FBX.FbxTime(), FBX.FbxTime()
+            start.SetSecondDouble(first / 24.0)
+            stop.SetSecondDouble(last / 24.0)
+            stack.SetLocalTimeSpan(FBX.FbxTimeSpan(start, stop))
+        scene.ActiveAnimStackName.Set(FBX.FbxString(active))
+        path     = os.path.join(self.folder, "three_%s.fbx" % active)
+        exporter = FBX.FbxExporter.Create(manager, "")
+        exporter.Initialize(path, -1, manager.GetIOSettings())
+        exporter.Export(scene)
+        exporter.Destroy()
+        return path, matrix(placed)
+
+    def test_a_placed_mesh_reads_the_active_takes_start(self):
+        """Maya 2025's import of any take of a file (-t) places a mesh a bind
+        pose lists against its parent's world at the start of the span of the
+        file's active take, on the curves of the take it imports, whichever
+        take is active (three takes from 0, -4 and 2, each active in turn):
+        so does the clip of every take"""
+        for active, opening in (("A", 0), ("B", -4), ("C", 2)):
+            path, pose = self.three_takes(active)
+            for take in "ABC":
+                with self.subTest(active=active, take=take):
+                    clip  = ClipData.load_fbx(path, take=take, start_frame=-6, end_frame=12)
+                    W     = np.asarray(clip.frames.world_matrix)
+                    names = list(clip.name)
+                    group = W[:, names.index("grp")]
+                    held  = W[:, names.index("body")] @ np.linalg.inv(group)
+                    want  = pose @ np.linalg.inv(group[opening + 6])
+                    np.testing.assert_allclose(held, np.broadcast_to(want, held.shape), rtol=0, atol=1e-9)
+
+    def test_a_singular_pose_entry(self):
+        """a bind pose entry of the mesh scaled 0 on an axis, or on all three,
+        places nothing: every read holds no NaN and reads the mesh's own
+        channels, as the file whose pose lists the joint alone"""
+        want = self.placed("plain", None)
+        for name, entry in (("flat", {"ds": [0, 1, 1]}), ("zero", {"abs": {"t": [0, 0, 0], "r": [0, 0, 0], "s": [0, 0, 0]}})):
+            path = self.placed(name, entry)
+            with self.subTest(name):
+                for read in (ClipData.load_fbx, HierarchyData.load_fbx, TransformList.load_fbx):
+                    got, plain = read(path), read(want)
+                    for channel in ("translate", "rotate", "scale", "shear"):
+                        held = np.asarray(getattr(got.frames if read is ClipData.load_fbx else got, channel))
+                        self.assertTrue(np.isfinite(held).all(), (read.__qualname__, channel))
+                        np.testing.assert_array_equal(held, getattr(plain.frames if read is ClipData.load_fbx else plain, channel))
+
+        # rows a, 2a and -a: Maya 2025 places the mesh, its world on frames
+        # 0, 4 and 8 and with animation off measured on this file
+        a    = [0.8, 0.3, -0.2]
+        path = self.placed("rank1", {"rows": [a + [0.0], [2 * x for x in a] + [0.0], [-x for x in a] + [0.0], [4.0, 2.0, -3.0, 1.0]]})
+        maya = {
+            0: ([0.8, 0.3, -0.2], [0.7125678990102939, -1.1661113167039876, 1.1011046209851942],
+                [0.05533305815707201, -0.5831347179372217, -0.6533698442775446], [4.0, 2.0, -3.0]),
+            4: ([0.6950949475004984, 0.4968329839687372, -0.2], [0.9900995541111527, -0.9419508939397789, 1.1011046209851942],
+                [0.20437400078411047, -0.548943634986538, -0.6533698442775446], [3.6730326074756157, 2.48356391649411, -3.0]),
+            8: ([0.5428203230275509, 0.6598076211353316, -0.2], [1.2001575608162125, -0.6535980744010277, 1.1011046209851942],
+                [0.33948719300171704, -0.4773429504837712, -0.6533698442775446], [3.2320508075688776, 2.866025403784439, -3.0]),
+            None: ([0.8, 0.3, -0.2], [0.7157667675735635, -1.2031238893164602, 1.0583812363195626],
+                   [0.043811911728697056, -0.5640241366635018, -0.6707885580804643], [4.0, 2.0, -3.0]),
+        }
+        clip   = ClipData.load_fbx(path)
+        rig    = HierarchyData.load_fbx(path)
+        listed = TransformList.load_fbx(path)
+        g      = list(clip.name).index("g")
+        for frame, rows in maya.items():
+            want = np.zeros((4, 4))
+            want[:, :3] = rows
+            want[3, 3]  = 1.0
+            got = np.asarray(rig["g"].world_matrix if frame is None else np.asarray(clip.frames.world_matrix)[frame, g])
+            np.testing.assert_allclose(got, want, rtol=0, atol=1e-9, err_msg=str(frame))
+        for channel in ("translate", "rotate", "scale", "shear"):
+            self.assertTrue(np.isfinite(np.asarray(getattr(clip.frames, channel))).all(), channel)
+            np.testing.assert_array_equal(getattr(listed, channel), getattr(rig, channel))
 
     def test_a_merged_channel_of_a_node_that_does_not_bake(self):
         """a node with a pre rotation keyed first before 0 off a whole frame:

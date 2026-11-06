@@ -8249,6 +8249,11 @@ class TestFbxUnitHeldAsAScale(unittest.TestCase):
         for node in listed:
             pose.Add(made[node], FBX.FbxMatrix(made[node].EvaluateGlobalTransform()))
         scene.AddPose(pose)
+        # Maya's export locks a skinned mesh's channels, which keeps it off
+        # its bind pose in Maya's import and in the readers
+        for node in ("pad", "cap") if chain else ("pad",):
+            for prop in (made[node].LclTranslation, made[node].LclRotation, made[node].LclScaling):
+                prop.ModifyFlag(FBX.FbxPropertyFlags.EFlags.eLockedAll, True)
         if layered:
             scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames30)
             stack = FBX.FbxAnimStack.Create(scene, "Take 001")
