@@ -304,9 +304,11 @@ class TestMayaImport(unittest.TestCase):
         a clip's camera skin on the rule of frame 0, keyed off its static
         value there from a first key before 0, flat, under a camera scaled 2,
         a live later layer blended in, frame 0 outside the take's span, a
-        group above it keyed off its static value there"""
+        group above it keyed off its static value there; a camera root's
+        skinned mesh, its world on frame 0 held against its parent's at the
+        start of the take's span, beside a mesh a bind pose places too"""
         names = self.data["edges"].tolist()
-        self.assertEqual(len(names), 139)
+        self.assertEqual(len(names), 142)
         for name in names:
             kinds = {node["name"]: node["kind"] for node in layout_of(self.data, name)["nodes"]}
             with self.subTest(name):
@@ -1005,6 +1007,117 @@ class TestTheRead(unittest.TestCase):
                     want  = pose @ np.linalg.inv(group[opening + 6])
                     np.testing.assert_allclose(held, np.broadcast_to(want, held.shape), rtol=0, atol=1e-9)
 
+    def camera_takes(self, active: str, axes: str = "yup", posed: bool = False) -> str:
+        """a skinned mesh 'body' under a group 'h' under a camera root C, no
+        bind pose, a locator under the mesh, and three takes, A over frames
+        0 to 10, B -4 to 10, C 2 to 12, each keying h and C its own way,
+        ``active`` the take the file records as active; ``posed`` adds a
+        skinned mesh 'body2' under h and a bind pose listing it 3 off its
+        static place"""
+        from cgmath._tests._fbx_import_files import _attribute, _axes, _skin
+
+        manager = FBX.FbxManager.Create()
+        self.addCleanup(manager.Destroy)
+        manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+        scene = FBX.FbxScene.Create(manager, "scene")
+        scene.GetGlobalSettings().SetAxisSystem(_axes(axes))
+        scene.GetGlobalSettings().SetTimeMode(FBX.FbxTime.EMode.eFrames24)
+        made = {}
+        for item in (
+            spec("r0", "joint", None, t=(0, 1, 0)),
+            spec("C", "camera", None, t=(3, -2, 5), r=(10, 20, 30), s=(2, 2, 2)),
+            spec("h", "group", "C", t=(0.5, 1, -1), r=(5, 10, 15)),
+            spec("body", "mesh", "h", t=(1, 0.5, -2), r=(15, -25, 40), points=[(0, 0, 0), (1, 0, 0.2), (0.3, 1, -0.1), (-0.4, 0.5, 0.6)]),
+            spec("loc", "locator", "body", t=(4, 0, 0)),
+        ) + ((spec("body2", "mesh", "h", t=(-1, 0.5, 1), r=(0, 30, -10), points=[(0, 0, 0), (1, 0, 0.2), (0.3, 1, -0.1), (-0.4, 0.5, 0.6)]),) if posed else ()):
+            node = FBX.FbxNode.Create(scene, item["name"])
+            node.SetNodeAttribute(_attribute(scene, item))
+            node.LclTranslation.Set(FBX.FbxDouble3(*item["t"]))
+            node.LclRotation.Set(FBX.FbxDouble3(*item["r"]))
+            node.LclScaling.Set(FBX.FbxDouble3(*item["s"]))
+            (made[item["parent"]] if item["parent"] else scene.GetRootNode()).AddChild(node)
+            made[item["name"]] = node
+            if item["kind"] == "mesh":
+                _skin(scene, node, item, made["r0"])
+        if posed:
+            placed = FBX.FbxAMatrix(made["body2"].EvaluateGlobalTransform())
+            at     = placed.GetT()
+            placed.SetT(FBX.FbxVector4(at[0] + 3.0, at[1], at[2], 1.0))
+            pose = FBX.FbxPose.Create(scene, "bindPose")
+            pose.SetIsBindPose(True)
+            pose.Add(made["body2"], FBX.FbxMatrix(placed))
+            pose.Add(made["r0"], FBX.FbxMatrix(made["r0"].EvaluateGlobalTransform()))
+            scene.AddPose(pose)
+        for k, (name, (first, last)) in enumerate((("A", (0, 10)), ("B", (-4, 10)), ("C", (2, 12)))):
+            stack = FBX.FbxAnimStack.Create(scene, name)
+            layer = FBX.FbxAnimLayer.Create(scene, name + "Layer")
+            stack.AddMember(layer)
+            add_curve(layer, made["h"].LclRotation,    2, [-6, 14], (15 + 10 * k, 75 - 25 * k))
+            add_curve(layer, made["h"].LclTranslation, 0, [-6, 14], (0.5 + k, 4.5 - 2 * k))
+            add_curve(layer, made["C"].LclTranslation, 1, [-6, 14], (-2 + k, 4 + k))
+            add_curve(layer, made["C"].LclRotation,    2, [-6, 14], (30 - 20 * k, 90 + 15 * k))
+            start, stop = FBX.FbxTime(), FBX.FbxTime()
+            start.SetSecondDouble(first / 24.0)
+            stop.SetSecondDouble(last / 24.0)
+            stack.SetLocalTimeSpan(FBX.FbxTimeSpan(start, stop))
+        scene.ActiveAnimStackName.Set(FBX.FbxString(active))
+        path     = os.path.join(self.folder, "camera_%s_%s%s.fbx" % (axes, active, "_posed" if posed else ""))
+        exporter = FBX.FbxExporter.Create(manager, "")
+        exporter.Initialize(path, -1, manager.GetIOSettings())
+        exporter.Export(scene)
+        exporter.Destroy()
+        return path
+
+    def test_a_camera_roots_skinned_mesh_reads_the_active_takes_start(self):
+        """Maya 2025's import of the active take of a file with no bind pose
+        holds a camera root's skinned mesh at its world on frame 0 of that
+        take against its parent's world at the start of its span (measured
+        on Y-, X- and Z-up files, one to three takes, each active in turn):
+        so does that take's clip, of a Y-up file here. Any other take reads
+        as 028da3c reads it, whichever take is active and whatever mesh a
+        bind pose places beside it: in a Y-up file the mesh's own channels,
+        in a turned file its world on that take's frame 0, the camera's turn
+        left out (028da3c's read of this file, the mesh under h, frames -6 to
+        12)"""
+        for active, opening in (("A", 0), ("B", -4), ("C", 2)):
+            path  = self.camera_takes(active)
+            rig   = HierarchyData.load_fbx(path)
+            own   = np.asarray(rig["body"].world_matrix) @ np.linalg.inv(np.asarray(rig["h"].world_matrix))
+            W     = {take: np.asarray(ClipData.load_fbx(path, take=take, start_frame=-6, end_frame=12).frames.world_matrix) for take in "ABC"}
+            names = list(ClipData.load_fbx(path, take=active, start_frame=-6, end_frame=12).name)
+            h     = names.index("h")
+            body  = names.index("body")
+            for take in "ABC":
+                with self.subTest(active=active, take=take):
+                    held = W[take][:, body] @ np.linalg.inv(W[take][:, h])
+                    want = own @ W[active][6, h] @ np.linalg.inv(W[take][opening + 6, h]) if take == active else own
+                    np.testing.assert_allclose(held, np.broadcast_to(want, held.shape), rtol=0, atol=1e-9)
+
+        main = {
+            "B": [[0.807419139847654, 0.527717405829102, -0.263796649320412, 0.0], [0.29166564712824, 0.031631374095454, 0.955997179105723, 0.0],
+                  [0.512840601837393, -0.848830840484626, -0.12837726180763, 0.0], [-3.409198186248919, 3.247732505916119, -1.890447252784743, 1.0]],
+            "A": [[0.812423718207414, 0.52441236709952, -0.254871283841705, 0.0], [0.28673697791635, 0.021275114355018, 0.957773081165147, 0.0],
+                  [0.507690464347558, -0.851198589485591, -0.133084009814484, 0.0], [-3.315157976748568, 3.237263149993614, -1.762814741726426, 1.0]],
+        }
+        for axes in ("yup", "xup"):
+            reads = {}
+            for active in "ABC":
+                for posed in (False, True):
+                    path = self.camera_takes(active, axes, posed)
+                    for take in "ABC".replace(active, ""):
+                        clip  = ClipData.load_fbx(path, take=take, start_frame=-6, end_frame=12)
+                        names = list(clip.name)
+                        W     = np.asarray(clip.frames.world_matrix)
+                        reads.setdefault(take, []).append(W[:, [names.index("body"), names.index("loc")]])
+                        if axes == "xup" and take in main:
+                            with self.subTest(axes=axes, active=active, take=take, posed=posed):
+                                held = W[:, names.index("body")] @ np.linalg.inv(W[:, names.index("h")])
+                                np.testing.assert_allclose(held, np.broadcast_to(np.array(main[take]), held.shape), rtol=0, atol=1e-9)
+            for take, held in reads.items():
+                with self.subTest(axes=axes, other=take):
+                    for one in held[1:]:
+                        np.testing.assert_array_equal(one, held[0])
+
     def test_a_singular_pose_entry(self):
         """a bind pose entry of the mesh scaled 0 on an axis, or on all three,
         places nothing: every read holds no NaN and reads the mesh's own
@@ -1039,10 +1152,10 @@ class TestTheRead(unittest.TestCase):
         listed = TransformList.load_fbx(path)
         g      = list(clip.name).index("g")
         for frame, rows in maya.items():
-            want = np.zeros((4, 4))
+            want        = np.zeros((4, 4))
             want[:, :3] = rows
             want[3, 3]  = 1.0
-            got = np.asarray(rig["g"].world_matrix if frame is None else np.asarray(clip.frames.world_matrix)[frame, g])
+            got         = np.asarray(rig["g"].world_matrix if frame is None else np.asarray(clip.frames.world_matrix)[frame, g])
             np.testing.assert_allclose(got, want, rtol=0, atol=1e-9, err_msg=str(frame))
         for channel in ("translate", "rotate", "scale", "shear"):
             self.assertTrue(np.isfinite(np.asarray(getattr(clip.frames, channel))).all(), channel)

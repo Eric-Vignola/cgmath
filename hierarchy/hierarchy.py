@@ -3440,6 +3440,7 @@ class _FbxTree:
         "null_pre",
         "loose",
         "camera_skins",
+        "camera_spans",
         "cameras",
         "binds",
         "bind_static",
@@ -3472,6 +3473,7 @@ _FBX_NODE_SLOTS = (
     "null_joint",
     "null_pre",
     "camera_skins",
+    "camera_spans",
 )
 
 
@@ -3640,6 +3642,7 @@ def _walk_fbx(
     tree.loose        = frozenset()
     tree.null_pre     = np.zeros((len(rows), 3))
     tree.camera_skins = np.zeros(len(rows), dtype=bool)
+    tree.camera_spans = np.zeros(len(rows), dtype=bool)
     tree.cameras      = None
     tree.binds        = {}
     tree.bind_static  = None
@@ -3763,13 +3766,15 @@ def _walk_fbx(
             tree.folds[position] = turns or bool(np.any(tree.pre[position] != 0.0))
         # a mesh under a camera root of a file ConvertScene turns, whose
         # post rotation turns past fbx's view axis (_fbx_camera_skins)
-        under = False
-        if bakes and kinds[index] == "mesh" and tree.axis_turn is not None:
+        under  = False
+        camera = False
+        if bakes and kinds[index] == "mesh":
             root = index
             while parents[root] > 0:
                 root = parents[root]
-            under = views[root] == "camera" and bool(np.any(tree.axis[place[root]] != 0.0))
-        if bakes and kinds[index] == "mesh" and (tree.inherit[position] != 0 or under):
+            camera = views[root] == "camera"
+            under  = camera and tree.axis_turn is not None and bool(np.any(tree.axis[place[root]] != 0.0))
+        if bakes and kinds[index] == "mesh" and (tree.inherit[position] != 0 or camera):
             # a skin holding no cluster is none to Maya's import
             attribute = typed(node.GetNodeAttribute(), FBX.FbxMesh, FBX)
             skins     = range(attribute.GetDeformerCount(skin_kind))
@@ -3778,6 +3783,7 @@ def _walk_fbx(
             )
             tree.skinned[position]      = skinned and tree.inherit[position] != 0
             tree.camera_skins[position] = skinned and under
+            tree.camera_spans[position] = skinned and camera and not under
 
         if not keeps[index]:
             continue
@@ -3845,9 +3851,13 @@ def _walk_fbx(
         tree.binds, held, listed = _fbx_mesh_binds(scene, tree, units)
         if held and not listed:
             tree.camera_skins = np.zeros(len(tree.parent), dtype=bool)
+            tree.camera_spans = np.zeros(len(tree.parent), dtype=bool)
         elif tree.binds:
-            tree.camera_skins                                                                 = tree.camera_skins.copy()
-            tree.camera_skins[[i for i, entry in tree.binds.items() if entry[0] is not None]] = False
+            placed                    = [i for i, entry in tree.binds.items() if entry[0] is not None]
+            tree.camera_skins         = tree.camera_skins.copy()
+            tree.camera_spans         = tree.camera_spans.copy()
+            tree.camera_skins[placed] = False
+            tree.camera_spans[placed] = False
 
     # what the file holds that the dicts can't: folded in, on the static values
     baked = _fbx_static_bakes(tree) if bakes else None
@@ -4790,7 +4800,18 @@ def _fbx_static_bakes(tree: _FbxTree, skins: bool = True) -> dict:
     return _fbx_camera_skins(tree, T, R, S, baked, True) if skins else baked
 
 
-def _fbx_camera_skins(tree: _FbxTree, T, R, S, baked: dict, static: bool, channels=None, zero=None) -> dict:
+def _fbx_camera_skins(
+    tree:    _FbxTree,
+    T,
+    R,
+    S,
+    baked:   dict,
+    static:  bool,
+    channels          = None,
+    zero              = None,
+    first             = None,
+    spans             = (),
+) -> dict:
     """``baked`` with the local matrices Maya's import gives the skinned
     meshes of ``tree.camera_skins``, on the channels ``T``, ``R`` and ``S``
     (F, n, 3): the static pose's, or with ``static`` False a clip's frames,
@@ -4826,7 +4847,8 @@ def _fbx_camera_skins(tree: _FbxTree, T, R, S, baked: dict, static: bool, channe
     its pivots by the rotate and scale it then holds; one that folds a pre
     rotation in another order than xyz, keyed on some rotate axes, holds its
     own rotate on all three."""
-    rows = sorted(set(np.flatnonzero(tree.camera_skins).tolist()) | set(tree.binds))
+    cams = set(np.flatnonzero(tree.camera_skins).tolist()) | set(spans)
+    rows = sorted(cams | set(tree.binds))
     if not rows:
         return baked
     out = dict(baked)
@@ -4848,9 +4870,22 @@ def _fbx_camera_skins(tree: _FbxTree, T, R, S, baked: dict, static: bool, channe
         rest.bind_scales = {}
         rest.bind_axes   = set()
         raw              = _fbx_static_bakes(rest, False)
-        still            = _fbx_camera_skins(rest, rest.translate[None], rest.rotate[None], rest.scale[None], raw, True)
-        frames           = len(T)
-        tops             = set()
+
+        # a camera root's skinned mesh holds its world on ``first``, frame 0
+        # of the file's active take, against Maya's world of its parent on
+        # ``zero``
+        opening, held0 = rest, raw
+        if first is not None:
+            opening = copy.copy(rest)
+            pose    = [values.copy() for values in (tree.translate, tree.rotate, tree.scale)]
+            for values, at in zip(pose, first):
+                values[chain] = at[chain]
+            opening.translate, opening.rotate, opening.scale = pose
+            held0 = _fbx_static_bakes(opening, False)
+        pair   = (opening, held0)
+        still  = _fbx_camera_skins(rest, rest.translate[None], rest.rotate[None], rest.scale[None], raw, True, None, None, pair, spans)
+        frames = len(T)
+        tops   = set()
         for i in rows:
             while tree.parent[i] > 0:
                 i = int(tree.parent[i])
@@ -4863,10 +4898,11 @@ def _fbx_camera_skins(tree: _FbxTree, T, R, S, baked: dict, static: bool, channe
             for top in moved:
                 again[top] = _fbx_bake_block(rest, sT, sR, sS, top, flip, {}, False)
             raw   = again
-            still = _fbx_camera_skins(rest, sT, sR, sS, again, True)
+            held0 = again if first is None else {i: block for i, block in held0.items() if not tree.camera_skins[i]}
+            still = _fbx_camera_skins(rest, sT, sR, sS, again, True, None, None, (opening, held0), spans)
         for i in rows:
             block = still.get(i)
-            if i in tree.binds and not tree.camera_skins[i] and (block is None or block is raw.get(i)):
+            if i in tree.binds and i not in cams and (block is None or block is raw.get(i)):
                 # the pose sits where the mesh's own channels put it
                 continue
             if not tree.keyed[i]:
@@ -4877,7 +4913,7 @@ def _fbx_camera_skins(tree: _FbxTree, T, R, S, baked: dict, static: bool, channe
                 continue
             if i in baked:
                 continue
-            if i in tree.binds and not tree.camera_skins[i]:
+            if i in tree.binds and i not in cams:
                 # every axis a curve keys or the file locks keeps its own
                 locked = tree.binds[i][3]
                 own    = channels[i] | locked
@@ -4924,9 +4960,13 @@ def _fbx_camera_skins(tree: _FbxTree, T, R, S, baked: dict, static: bool, channe
         return out
 
     # the camera roots, whose axis the sdk leaves out, and Maya's own of
-    # those that mirror or bake, against the file's
-    plain      = copy.copy(tree)
-    plain.axis = tree.axis.copy()
+    # those that mirror or bake, against the file's; the sdk's world of a
+    # camera root's skinned mesh on ``first``, (tree, baked) as ``tree`` and
+    # ``baked`` are
+    earlier, sooner = (tree, baked) if first is None else first
+    T0, R0, S0 = (T, R, S) if first is None else (earlier.translate[None], earlier.rotate[None], earlier.scale[None])
+    plain      = copy.copy(earlier)
+    plain.axis = earlier.axis.copy()
     roots      = {}
     for i in rows:
         top = i
@@ -4938,7 +4978,7 @@ def _fbx_camera_skins(tree: _FbxTree, T, R, S, baked: dict, static: bool, channe
 
     chain  = _fbx_chain(tree, tree.parent[rows])
     worlds = _fbx_scene_worlds(tree, T, R, S, chain, False, True)
-    bare   = _fbx_scene_worlds(plain, T, R, S, chain, False, True)
+    bare   = _fbx_scene_worlds(plain, T0, R0, S0, chain, False, True)
     flip   = _fbx_flips(tree, S)
     swaps  = {}
     for top in set(roots.values()):
@@ -4971,7 +5011,7 @@ def _fbx_camera_skins(tree: _FbxTree, T, R, S, baked: dict, static: bool, channe
     placed = {}
     for i in rows:
         up = tree.parent[i]
-        if i in tree.binds and not tree.camera_skins[i]:
+        if i in tree.binds and i not in cams:
             # a mesh a bind pose lists: that pose against Maya's world of its
             # parent, the nearest node above that the pose lists at its pose,
             # a mesh placed above as it is placed; one no bind pose lists
@@ -5021,10 +5061,10 @@ def _fbx_camera_skins(tree: _FbxTree, T, R, S, baked: dict, static: bool, channe
             if i not in baked:
                 tree.bind_axes.add(i)
             continue
-        if i in baked:
-            local = baked[i]
+        if i in sooner:
+            local = sooner[i]
         else:
-            Q, sizes, t = _fbx_scene_local(tree, T, R, i, _fbx_maya_scale(S[:, i]), None, False, True)
+            Q, sizes, t = _fbx_scene_local(earlier, T0, R0, i, _fbx_maya_scale(S0[:, i]), None, False, True)
             local            = np.zeros((len(T), 4, 4))
             local[:, :3, :3] = sizes[:, :, None] * Q
             local[:, 3, :3]  = t
@@ -5348,12 +5388,29 @@ def _fbx_clip_bakes(tree: _FbxTree, stack, sampled: list, file_fps: float, frame
     """
     rows   = _fbx_typed_rows(tree)
     folded = np.flatnonzero(tree.folds)
-    if not len(rows) and not len(folded) and not tree.binds:
+
+    # the file's active take, the one ActiveAnimStackName names, else the
+    # first, and the start of its span, in the file's frames
+    per_second = _fbx_ticks_per_second()
+    to_frame   = file_fps / per_second
+    at, other = 0.0, False
+    late = []
+    if tree.binds or tree.camera_skins.any() or tree.camera_spans.any():
+        scene  = stack.GetScene()
+        stacks = _fbx_stacks(scene) if scene is not None else []
+        named  = str(scene.ActiveAnimStackName.Get()) if scene is not None else ""
+        active = next((x for x in stacks if x.GetName() == named), stacks[0] if stacks else stack)
+        at     = float(active.GetLocalTimeSpan().GetStart().Get() * to_frame)
+        at     = float(np.round(at)) if abs(at - np.round(at)) <= _FBX_FRAME_SNAP else at
+        other  = active.GetUniqueID() != stack.GetUniqueID()
+        if at != 0.0 and not other:
+            late = np.flatnonzero(tree.camera_spans).tolist()
+    if not len(rows) and not len(folded) and not tree.binds and not late:
         return {}
 
     count            = len(frames)
     need             = set(_fbx_chain(tree, rows)).union(folded.tolist(), _fbx_chain(tree, np.flatnonzero(tree.camera_skins)))
-    need             = need.union(_fbx_chain(tree, sorted(tree.binds)))
+    need             = need.union(_fbx_chain(tree, sorted(tree.binds)), _fbx_chain(tree, late))
     tree.rotate_keys = {}
     tree.bind_scales = {}
     tree.bind_axes   = set()
@@ -5366,11 +5423,9 @@ def _fbx_clip_bakes(tree: _FbxTree, stack, sampled: list, file_fps: float, frame
     # each node's first and last key, in frames: on a channel no later layer
     # keys, its keys in the take's first layer; on one a later layer keys,
     # the take's span. The conversion's: every key of that first layer
-    per_second = _fbx_ticks_per_second()
-    to_frame   = file_fps / per_second
-    own        = axes.any(axis=2)
-    later      = merged.any(axis=1)
-    ends       = np.zeros(0)
+    own   = axes.any(axis=2)
+    later = merged.any(axis=1)
+    ends  = np.zeros(0)
     if later.any():
         span = stack.GetLocalTimeSpan()
         ends = np.array([span.GetStart().Get(), span.GetStop().Get()]) * to_frame
@@ -5576,17 +5631,28 @@ def _fbx_clip_bakes(tree: _FbxTree, stack, sampled: list, file_fps: float, frame
         steps  = np.clip(np.floor(frames - t0 + _FBX_FRAME_SNAP), 0, np.ceil(max(0.0, stop[i]) - t0 - _FBX_FRAME_SNAP))
         out[i] = block[(steps + np.floor(t0 + _FBX_FRAME_SNAP) - begin).astype(np.intp)]
     # the camera rule reads frame 0 of the grid, which always holds it; the
-    # nodes above a mesh a bind pose places, the start of the span of the
-    # file's active take, on this take's curves, as Maya's import of this
-    # take does: the take ActiveAnimStackName names, else the first
-    zero = [values[int(np.searchsorted(grid, 0))] for values in (T, R, S)]
-    if tree.binds:
-        scene  = stack.GetScene()
-        stacks = _fbx_stacks(scene) if scene is not None else []
-        named  = str(scene.ActiveAnimStackName.Get()) if scene is not None else ""
-        active = next((x for x in stacks if x.GetName() == named), stacks[0] if stacks else stack)
-        at     = float(active.GetLocalTimeSpan().GetStart().Get() * to_frame)
-        at     = float(np.round(at)) if abs(at - np.round(at)) <= _FBX_FRAME_SNAP else at
+    # nodes above a mesh a bind pose places or a camera root's skinned mesh,
+    # the start of the span of the file's active take, on this take's
+    # curves, as Maya's import of this take does. Such a mesh holds its
+    # world on frame 0 of the active take, which the sdk reads as the file
+    # holds it where this take is another
+    zero  = [values[int(np.searchsorted(grid, 0))] for values in (T, R, S)]
+    first = None
+    cams  = np.flatnonzero(tree.camera_skins).tolist()
+    keys  = axes | merged[:, :, None]
+    if other and cams:
+        # a take other than the active one: a camera root's skinned mesh
+        # reads frame 0 of this take alone, never a mesh a bind pose places
+        alone       = copy.copy(tree)
+        alone.binds = {}
+        out         = _fbx_camera_skins(alone, *held, out, False, keys, zero)
+        if not tree.binds:
+            return out
+        tree              = copy.copy(tree)
+        tree.camera_skins = np.zeros(len(tree.parent), dtype=bool)
+        cams              = []
+    if (tree.binds or cams or late) and (at != 0.0 or other):
+        start = zero
         if at != 0.0:
             row = np.flatnonzero(grid == at)
             if len(row):
@@ -5597,11 +5663,21 @@ def _fbx_clip_bakes(tree: _FbxTree, stack, sampled: list, file_fps: float, frame
                 if not later.any():
                     hold(blocks, when)
                 opening = [block[0] for block in blocks]
-            above = _fbx_chain(tree, tree.parent[sorted(tree.binds)])
+            above = _fbx_chain(tree, tree.parent[sorted(set(tree.binds).union(cams, late))])
             zero  = [values.copy() for values in zero]
             for values, there in zip(zero, opening):
                 values[above] = there[above]
-    return _fbx_camera_skins(tree, *held, out, False, axes | merged[:, :, None], zero)
+
+        # a mesh none of whose parents moves from one to the other keeps
+        # its own channels
+        moving = []
+        for i in late:
+            up = _fbx_chain(tree, [tree.parent[i]])
+            if any(np.any(a[up] != b[up]) for a, b in zip(start, zero)):
+                moving.append(i)
+        late  = moving
+        first = start if cams or late else None
+    return _fbx_camera_skins(tree, *held, out, False, keys, zero, first, late)
 
 
 def _fbx_has_curves(stack) -> bool:

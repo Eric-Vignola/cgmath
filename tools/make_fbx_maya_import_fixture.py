@@ -1257,6 +1257,21 @@ edge("e_bind_span_late", [R0J, node("P", "group", None, ckeys=[("r", 2, [-4, 8],
 edge("e_bind_span_early", [R0J, node("P", "group", None, ckeys=[("t", 0, [-4, 8], [-1, 5])], **CAMB), skinned("g", "P", **BODY)] + tail("g"),
      axes="zup", poses=bind({"g": {"dr": [0, 0, 40]}, "r0": {}}), samples=[float(f) for f in range(-4, 11)], span=(-3, 8))
 
+# a camera root's skinned mesh holds its world on frame 0 against Maya's world
+# of its parent at the start of the take's span: a turned file, the camera
+# and a group between keyed; a Y-up file; a group above a mesh a bind pose
+# places as well, keyed
+SPAN = [float(f) for f in range(-4, 11)]
+edge("e_camera_span_late", [R0J, node("C", "camera", None, ckeys=[("t", 0, [-4, 8], [-1, 5])], **CAM3),
+                            node("h", "group", "C", t=(0, 1, 0), r=(0, 0, 30), ckeys=[("r", 2, [-4, 8], [20, 80])]), skinned("g", "h")] + tail("g"),
+     axes="zup", samples=SPAN, span=(3, 8))
+edge("e_camera_span_yup", [R0J, node("C", "camera", None, ckeys=[("r", 2, [-4, 8], [20, 80])], **CAMB), skinned("g", "C", **BODY)] + tail("g"),
+     samples=SPAN, span=(-3, 8))
+edge("e_camera_span_shared", [R0J, node("C", "camera", None, **CAMB),
+                              node("h", "group", "C", t=(0.5, 1, -1), r=(5, 10, 15), ckeys=[("r", 2, [-4, 8], [15, 75])]),
+                              skinned("g", "h", **BODY), skinned("g2", "h", t=(-1, 0.5, 1), r=(0, 30, -10), s=(1, 1, 1))] + LEAF + tail("g"),
+     axes="zup", poses=bind({"g": {"dt": [3, 0, 0]}, "r0": {}}), samples=SPAN, span=(5, 8))
+
 
 def write_layout():
     """_fbx_import_files.write_layout, by path: no cgmath is imported here"""
