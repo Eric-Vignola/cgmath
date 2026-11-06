@@ -1272,6 +1272,21 @@ edge("e_camera_span_shared", [R0J, node("C", "camera", None, **CAMB),
                               skinned("g", "h", **BODY), skinned("g2", "h", t=(-1, 0.5, 1), r=(0, 30, -10), s=(1, 1, 1))] + LEAF + tail("g"),
      axes="zup", poses=bind({"g": {"dt": [3, 0, 0]}, "r0": {}}), samples=SPAN, span=(5, 8))
 
+# a skinned mesh no bind pose lists under a root that is no camera, the same:
+# a group over a group in a turned file, both keyed; a joint over a joint, in
+# a Y-up file; beside a mesh a bind pose places, under a group of its own
+edge("e_group_span_late", [R0J, node("P", "group", None, ckeys=[("t", 0, [-4, 8], [-1, 5])], **CAMB),
+                           node("h", "group", "P", t=(0, 1, 0), r=(0, 0, 30), ckeys=[("r", 2, [-4, 8], [20, 80])]), skinned("g", "h")] + tail("g"),
+     axes="xup", samples=SPAN, span=(3, 8))
+edge("e_group_span_joint", [R0J, node("J", "joint", None, t=(2, 1, -3), r=(10, 20, 30), ckeys=[("r", 2, [-4, 8], [20, 80])]),
+                            node("J2", "joint", "J", t=(0.5, 1, -1), r=(5, 10, 15), ckeys=[("t", 0, [-4, 8], [0.5, 2.5])]),
+                            skinned("g", "J2", **BODY)] + tail("g"),
+     samples=SPAN, span=(-3, 8))
+edge("e_group_span_mixed", [R0J, node("P", "group", None, ckeys=[("r", 2, [-4, 8], [20, 80])], **CAMB), skinned("g", "P", **BODY),
+                            node("Q", "group", None, t=(-2, 0.5, 1), r=(-5, 15, 25), ckeys=[("t", 0, [-4, 8], [-2, 4])]),
+                            skinned("g2", "Q", t=(-1, 0.5, 1), r=(0, 30, -10), s=(1, 1, 1))] + LEAF + tail("g"),
+     axes="xup", poses=bind({"g": {"dt": [3, 0, 0]}, "r0": {}}), samples=SPAN, span=(5, 8))
+
 
 def write_layout():
     """_fbx_import_files.write_layout, by path: no cgmath is imported here"""

@@ -3765,16 +3765,16 @@ def _walk_fbx(
             turns                = tree.axis_turn is not None and parents[index] == 0
             tree.folds[position] = turns or bool(np.any(tree.pre[position] != 0.0))
         # a mesh under a camera root of a file ConvertScene turns, whose
-        # post rotation turns past fbx's view axis (_fbx_camera_skins)
+        # post rotation turns past fbx's view axis (_fbx_camera_skins); one
+        # under any other root, the span rule alone
         under  = False
-        camera = False
-        if bakes and kinds[index] == "mesh":
+        rooted = bakes and kinds[index] == "mesh" and parents[index] > 0
+        if rooted:
             root = index
             while parents[root] > 0:
                 root = parents[root]
-            camera = views[root] == "camera"
-            under  = camera and tree.axis_turn is not None and bool(np.any(tree.axis[place[root]] != 0.0))
-        if bakes and kinds[index] == "mesh" and (tree.inherit[position] != 0 or camera):
+            under = views[root] == "camera" and tree.axis_turn is not None and bool(np.any(tree.axis[place[root]] != 0.0))
+        if bakes and kinds[index] == "mesh" and (tree.inherit[position] != 0 or rooted):
             # a skin holding no cluster is none to Maya's import
             attribute = typed(node.GetNodeAttribute(), FBX.FbxMesh, FBX)
             skins     = range(attribute.GetDeformerCount(skin_kind))
@@ -3783,7 +3783,7 @@ def _walk_fbx(
             )
             tree.skinned[position]      = skinned and tree.inherit[position] != 0
             tree.camera_skins[position] = skinned and under
-            tree.camera_spans[position] = skinned and camera and not under
+            tree.camera_spans[position] = skinned and rooted and not under
 
         if not keeps[index]:
             continue

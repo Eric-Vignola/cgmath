@@ -306,9 +306,10 @@ class TestMayaImport(unittest.TestCase):
         a live later layer blended in, frame 0 outside the take's span, a
         group above it keyed off its static value there; a camera root's
         skinned mesh, its world on frame 0 held against its parent's at the
-        start of the take's span, beside a mesh a bind pose places too"""
+        start of the take's span, beside a mesh a bind pose places too; and
+        one under a group or a joint root, beside a placed mesh too"""
         names = self.data["edges"].tolist()
-        self.assertEqual(len(names), 142)
+        self.assertEqual(len(names), 145)
         for name in names:
             kinds = {node["name"]: node["kind"] for node in layout_of(self.data, name)["nodes"]}
             with self.subTest(name):
@@ -1007,13 +1008,13 @@ class TestTheRead(unittest.TestCase):
                     want  = pose @ np.linalg.inv(group[opening + 6])
                     np.testing.assert_allclose(held, np.broadcast_to(want, held.shape), rtol=0, atol=1e-9)
 
-    def camera_takes(self, active: str, axes: str = "yup", posed: bool = False) -> str:
+    def camera_takes(self, active: str, axes: str = "yup", posed: bool = False, root: str = "camera") -> str:
         """a skinned mesh 'body' under a group 'h' under a camera root C, no
         bind pose, a locator under the mesh, and three takes, A over frames
         0 to 10, B -4 to 10, C 2 to 12, each keying h and C its own way,
         ``active`` the take the file records as active; ``posed`` adds a
         skinned mesh 'body2' under h and a bind pose listing it 3 off its
-        static place"""
+        static place; ``root`` the kind of C"""
         from cgmath._tests._fbx_import_files import _attribute, _axes, _skin
 
         manager = FBX.FbxManager.Create()
@@ -1025,7 +1026,7 @@ class TestTheRead(unittest.TestCase):
         made = {}
         for item in (
             spec("r0", "joint", None, t=(0, 1, 0)),
-            spec("C", "camera", None, t=(3, -2, 5), r=(10, 20, 30), s=(2, 2, 2)),
+            spec("C", root, None, t=(3, -2, 5), r=(10, 20, 30), s=(2, 2, 2)),
             spec("h", "group", "C", t=(0.5, 1, -1), r=(5, 10, 15)),
             spec("body", "mesh", "h", t=(1, 0.5, -2), r=(15, -25, 40), points=[(0, 0, 0), (1, 0, 0.2), (0.3, 1, -0.1), (-0.4, 0.5, 0.6)]),
             spec("loc", "locator", "body", t=(4, 0, 0)),
@@ -1061,7 +1062,7 @@ class TestTheRead(unittest.TestCase):
             stop.SetSecondDouble(last / 24.0)
             stack.SetLocalTimeSpan(FBX.FbxTimeSpan(start, stop))
         scene.ActiveAnimStackName.Set(FBX.FbxString(active))
-        path     = os.path.join(self.folder, "camera_%s_%s%s.fbx" % (axes, active, "_posed" if posed else ""))
+        path     = os.path.join(self.folder, "%s_%s_%s%s.fbx" % (root, axes, active, "_posed" if posed else ""))
         exporter = FBX.FbxExporter.Create(manager, "")
         exporter.Initialize(path, -1, manager.GetIOSettings())
         exporter.Export(scene)
@@ -1117,6 +1118,31 @@ class TestTheRead(unittest.TestCase):
                 with self.subTest(axes=axes, other=take):
                     for one in held[1:]:
                         np.testing.assert_array_equal(one, held[0])
+
+    def test_a_group_roots_skinned_mesh_reads_the_active_takes_start(self):
+        """Maya 2025's import of the active take holds a skinned mesh no bind
+        pose lists under a root that is no camera as it holds a camera
+        root's, at its world on frame 0 of that take against its parent's
+        world at the start of its span (measured on groups, nulls, a node
+        with no attribute and joints, X-, Y- and Z-up, with no bind pose and
+        beside a mesh one lists): so does that take's clip, in a file with
+        no bind pose and in one listing another mesh under the same group.
+        Any other take reads the mesh's own channels"""
+        for axes in ("yup", "xup"):
+            for posed in (False, True):
+                for active, opening in (("A", 0), ("B", -4), ("C", 2)):
+                    path  = self.camera_takes(active, axes, posed, "group")
+                    rig   = HierarchyData.load_fbx(path)
+                    own   = np.asarray(rig["body"].world_matrix) @ np.linalg.inv(np.asarray(rig["h"].world_matrix))
+                    W     = {take: np.asarray(ClipData.load_fbx(path, take=take, start_frame=-6, end_frame=12).frames.world_matrix) for take in "ABC"}
+                    names = list(ClipData.load_fbx(path, take=active, start_frame=-6, end_frame=12).name)
+                    h     = names.index("h")
+                    body  = names.index("body")
+                    for take in "ABC":
+                        with self.subTest(axes=axes, posed=posed, active=active, take=take):
+                            held = W[take][:, body] @ np.linalg.inv(W[take][:, h])
+                            want = own @ W[active][6, h] @ np.linalg.inv(W[take][opening + 6, h]) if take == active else own
+                            np.testing.assert_allclose(held, np.broadcast_to(want, held.shape), rtol=0, atol=1e-9)
 
     def test_a_singular_pose_entry(self):
         """a bind pose entry of the mesh scaled 0 on an axis, or on all three,
