@@ -3576,6 +3576,13 @@ class FbxExporter:
         for link, world in zip(links, worlds):
             pose.Add(link, fbx.FbxMatrix(world))
         self.scene.AddPose(pose)
+
+        # Maya's FBXExport locks a skinned mesh's translate, rotate and scale,
+        # members 0 to 2, and its import leaves a locked member where it is
+        flags = fbx.FbxPropertyFlags.EFlags
+        for prop in (node.LclTranslation, node.LclRotation, node.LclScaling):
+            for member in (flags.eLockedMember0, flags.eLockedMember1, flags.eLockedMember2):
+                prop.ModifyFlag(member, True)
         LOGGER.info(f"added skin: {name}, {len(links)} influences")
 
     def _get_acsii_type(self):

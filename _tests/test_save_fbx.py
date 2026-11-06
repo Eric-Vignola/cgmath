@@ -810,6 +810,106 @@ class TestReadBackAsWritten(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(plain.world_matrix), np.asarray(rig.world_matrix), rtol=0, atol=1e-12)
         self.assertGreater(np.abs(np.asarray(plain.rotate_axis) - np.asarray(rig.rotate_axis)).max(), 90.0)
 
+    def placed(self):
+        """``(path, rig, clips)``: a rig whose group, joints and skinned mesh
+        'body' (a locator under it) save with a take of the group and the
+        joints alone, the group keyed off the rig's value on frame 0"""
+        rig = HierarchyData()
+        for name, kind, parent, values in (
+            ("grp", "transform", None, dict(translate=(2.0, 1.0, -3.0), rotate=(10.0, 20.0, 30.0))),
+            ("root", "joint", "grp", dict(translate=(0.0, 1.0, 0.0))),
+            ("mid", "joint", "root", dict(translate=(0.0, 2.0, 0.0), rotate=(0.0, 0.0, 10.0))),
+            ("tip", "joint", "mid", dict(translate=(0.0, 2.0, 0.0))),
+            ("body", "transform", "grp", dict(translate=(1.0, 0.5, -2.0), rotate=(15.0, -25.0, 40.0))),
+            ("loc", "locator", "body", dict(translate=(4.0, 0.0, 0.0))),
+        ):
+            node = TransformData(name, node_type=kind, **values)
+            if parent is not None:
+                node.parent_uuid = rig[parent].uuid
+            rig.append(node)
+        _, mesh, skin = skinned()
+        clip  = ClipData([rig[name] for name in ("grp", "root", "mid", "tip")], frames=6, take="move")
+        turns = np.array(clip.frames.rotate)
+        turns[:, 0, 2] += 30.0 + 4.0 * np.arange(6)
+        clip.frames.rotate = turns
+        clips              = ClipList([clip])
+        formats.save_fbx(self.path("placed.fbx"), rig, clips, mesh, skin)
+        return self.path("placed.fbx"), rig, clips
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_a_skinned_mesh_stays_where_it_is_saved(self):
+        """a skinned mesh's translate, rotate and scale are written locked,
+        members 0 to 2, as Maya's FBXExport writes them, so a take keying its
+        group off the rig's value, and not the mesh, reads the mesh where it
+        was saved, its bind pose aside; a load saved and read again reads the
+        same"""
+        from cgmath.formats._fbx_io import import_scene, new_manager
+
+        path, rig, clips = self.placed()
+        flags   = FBX.FbxPropertyFlags.EFlags
+        manager = new_manager(FBX)
+        try:
+            scene = import_scene(manager, path, FBX)
+            for name, held in (("body", [True, True, True, False]), ("grp", [False] * 4), ("mid", [False] * 4)):
+                node = scene.FindNodeByName(name)
+                for prop in (node.LclTranslation, node.LclRotation, node.LclScaling):
+                    got = [prop.GetFlag(getattr(flags, "eLockedMember%d" % k)) for k in range(4)]
+                    self.assertEqual(got, held, name)
+        finally:
+            manager.Destroy()
+
+        first = formats.load_fbx(path)
+        (take,) = first.clips
+        group = np.asarray(clips[0].frames.world_matrix)[:, 0]
+        for name in ("body", "loc"):
+            local = np.asarray(rig[name].world_matrix) @ np.linalg.inv(np.asarray(rig["grp"].world_matrix))
+            got   = np.asarray(take.frames.world_matrix)[:, take.index(take[name])]
+            np.testing.assert_allclose(got, local @ group, rtol=0, atol=1e-5)
+        np.testing.assert_allclose(np.asarray(first.rig.world_matrix), np.asarray(rig.world_matrix), rtol=0, atol=1e-12)
+
+        formats.save_fbx(self.path("again.fbx"), first)
+        again = formats.load_fbx(self.path("again.fbx"))
+        np.testing.assert_array_equal(np.asarray(again.clips[0].frames.world_matrix), np.asarray(take.frames.world_matrix))
+        np.testing.assert_array_equal(np.asarray(again.rig.world_matrix), np.asarray(first.rig.world_matrix))
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_maya_reads_a_saved_mesh_where_load_fbx_does(self):
+        """Maya 2025's FBXImport of that file: every node on every frame of
+        the take, and animation off, where load_fbx reads it, the mesh and
+        its locator on the frames where they were saved"""
+        from cgmath._tests.test_fbx_labels import _maya
+
+        maya = _maya()
+        if maya is None:
+            self.skipTest("needs Maya and its fbxmaya plug-in")
+        cmds, mel = maya
+        self.addCleanup(cmds.file, new=True, force=True)
+        path, rig, clips = self.placed()
+        read  = formats.load_fbx(path)
+        bind  = HierarchyData.load_fbx(path)
+        group = np.asarray(clips[0].frames.world_matrix)[:, 0]
+        (take,) = read.clips
+        for animation in (True, False):
+            cmds.file(new=True, force=True)
+            mel.eval("FBXResetImport")
+            if not animation:
+                mel.eval('FBXProperty "Import|IncludeGrp|Animation" -v false')
+            mel.eval(f'FBXImport -f "{path.replace(os.sep, "/")}"')
+            mel.eval('FBXProperty "Import|IncludeGrp|Animation" -v true')
+            for frame in range(take.frame_count) if animation else (None,):
+                if frame is not None:
+                    cmds.currentTime(frame)
+                    for name in ("body", "loc"):
+                        local = np.asarray(rig[name].world_matrix) @ np.linalg.inv(np.asarray(rig["grp"].world_matrix))
+                        got   = np.array(cmds.xform(name, q=True, ws=True, m=True)).reshape(4, 4)
+                        np.testing.assert_allclose(got, local @ group[frame], rtol=0, atol=1e-5, err_msg=f"saved {name} {frame}")
+                for node in bind:
+                    got  = np.array(cmds.xform(node.name, q=True, ws=True, m=True)).reshape(4, 4)
+                    want = np.asarray(node.world_matrix)
+                    if frame is not None:
+                        want = np.asarray(take.frames.world_matrix)[frame, take.index(take[node.name])]
+                    np.testing.assert_allclose(got, want, rtol=0, atol=1e-5, err_msg=f"{node.name} {frame}")
+
     @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_normals(self):
         """normals read at unit length, as Maya's import makes them, but one
