@@ -40,9 +40,9 @@ from enum import Enum
 from typing import Any
 
 import numpy as np
-from cgmath.geometry._saddle_surface import raycast as raycast_patches
-from cgmath.geometry._saddle_surface import sample as sample_patches
-from cgmath.geometry._saddle_surface import SampleData
+from cgmath.geometry._bilinear_surface import raycast as raycast_patches
+from cgmath.geometry._bilinear_surface import sample as sample_patches
+from cgmath.geometry._bilinear_surface import BilinearSampleData
 from cgmath.geometry.map import GeomSubsetData, MapData
 from cgmath.geometry.mesh import _require_no_ngons, MeshData, SampleMethod, UVData
 from cgmath.geometry.morph_target import MorphData
@@ -112,7 +112,7 @@ class MeshDataResampler:
             dst_uv: Destination UV data object, only required in uv resample mode.
         """
         # shared vars
-        self._sample_cache: dict[tuple, SampleData] = {}
+        self._sample_cache: dict[tuple, BilinearSampleData] = {}
         self._src_mesh = src_mesh
         self._dst_mesh = dst_mesh
         self._src_uv   = src_uv
@@ -125,12 +125,12 @@ class MeshDataResampler:
     # --- properties
 
     @property
-    def spatial_sample_data(self) -> SampleData:
+    def spatial_sample_data(self) -> BilinearSampleData:
         """Cache and return a sample data object in world space (bilinear)."""
         return self.get_sample_data(ResampleMode.SPATIAL)
 
     @property
-    def uv_sample_data(self) -> SampleData:
+    def uv_sample_data(self) -> BilinearSampleData:
         """Cache and return a sample data object in UV space."""
         return self.get_sample_data(ResampleMode.UV)
 
@@ -160,7 +160,7 @@ class MeshDataResampler:
         self,
         mode:   ResampleMode,
         method: SampleMethod | str = SampleMethod.BILINEAR,
-    ) -> SampleData:
+    ) -> BilinearSampleData:
         """Returns a cached sample data object based on mode and method."""
         method    = SampleMethod(method)
         cache_key = (mode, method)

@@ -85,7 +85,7 @@ cgmath/
 ├── geometry/              meshes, UVs, curves, fields, transfer
 │   ├── mesh.py            MeshData, MeshList, UVData, UVList, the loaders
 │   ├── map.py morph_target.py skin_weights.py    MapData, MorphData, SkinData
-│   ├── bspline.py bspline_patch.py _saddle_surface.py _cdt.py
+│   ├── bspline.py bspline_patch.py _bilinear_surface.py _cdt.py
 │   ├── sdf.py             SDF primitives + dual marching cubes
 │   ├── pack.py resample.py
 │   ├── robust_skinweights_transfer_bilinear.py

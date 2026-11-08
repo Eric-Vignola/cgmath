@@ -5,7 +5,7 @@ from unittest import mock
 
 import numpy as np
 from cgmath.geometry import MeshData, MorphList, SkinData, UVList
-from cgmath.geometry._saddle_surface import sample as sample_patches
+from cgmath.geometry._bilinear_surface import sample as sample_patches
 from cgmath.geometry.map import GeomSubsetData, MapData
 from cgmath.geometry.mesh import cv2, SampleMethod, skimage, UVData
 from cgmath.geometry.resample import MeshDataResampler, ResampleMode

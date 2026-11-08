@@ -669,10 +669,13 @@ def _read_npz(filename: str) -> dict:
 _MOVED_FROM     = "cgmath.geometry._base"
 _PLAIN_BUILTINS = frozenset(("complex", "set", "frozenset", "bytearray", "range", "slice"))
 
-# classes renamed since 3.2: a pickle saved before names the old one
+# classes renamed, and a module moved, since 3.2: a pickle saved before names the old one
 _RENAMED = {
     ("cgmath.geometry.bspline", "BSplineData"): ("cgmath.geometry.bspline", "NurbsCurveData"),
+    ("cgmath.geometry.bspline", "SampleData"): ("cgmath.geometry.bspline", "CurveSampleData"),
     ("cgmath.geometry.bspline_patch", "BSplinePatchData"): ("cgmath.geometry.bspline_patch", "NurbsSurfaceData"),
+    ("cgmath.geometry._saddle_surface", "SampleData"): ("cgmath.geometry._bilinear_surface", "BilinearSampleData"),
+    ("cgmath.geometry._saddle_surface", "RaycastData"): ("cgmath.geometry._bilinear_surface", "RaycastData"),
 }
 
 

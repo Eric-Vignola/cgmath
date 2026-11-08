@@ -3274,7 +3274,7 @@ class TestBSpline(unittest.TestCase):
         self.assertTrue(allclose(samples(obj.points), samples.points))
 
     def test_sample_data_copy(self):
-        """Test that SampleData.copy() creates independent copies of all arrays"""
+        """Test that CurveSampleData.copy() creates independent copies of all arrays"""
         obj     = self.open_curve
         samples = obj.sample(obj.points)
 

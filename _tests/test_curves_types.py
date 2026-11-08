@@ -12,9 +12,9 @@ from dataclasses import fields
 
 import numpy as np
 from cgmath.constraints import ProcrustesData
-from cgmath.geometry._saddle_surface import RaycastData, SampleData, sample
+from cgmath.geometry._bilinear_surface import BilinearSampleData, RaycastData, sample
 from cgmath.geometry.bspline import NurbsCurveData
-from cgmath.geometry.bspline import SampleData as CurveSampleData
+from cgmath.geometry.bspline import CurveSampleData
 from cgmath.geometry.bspline_patch import (
     NurbsSurfaceData,
     PatchRaycastData,
@@ -353,7 +353,7 @@ class TestSaddleTypes(_Same):
         )
 
     def check_sample(self, result, n, dims, tag=""):
-        self.assertIsInstance(result, SampleData, tag)
+        self.assertIsInstance(result, BilinearSampleData, tag)
         self.assertArray(result.projections, np.float64, (n, dims), tag)
         self.assertArray(result.distances,   np.float64, (n,),      tag)
         self.assertArray(result.weights,     np.float64, (n, 4),    tag)

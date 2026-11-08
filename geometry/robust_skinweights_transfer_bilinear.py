@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from cgmath.geometry._saddle_surface import SampleData
+from cgmath.geometry._bilinear_surface import BilinearSampleData
 from cgmath.geometry.mesh import MeshData
 from cgmath.geometry.skin_weights import SkinData
 from cgmath.geometry.utils import vector_angle_difference
@@ -36,7 +36,7 @@ class RobustBilinearSkinTransferOptions:
 
 
 def find_matches_closest_surface(
-    sample_data:          SampleData,
+    sample_data:          BilinearSampleData,
     dst_mesh:             MeshData,
     src_skin_weights:     np.ndarray,
     search_radius:        float,
@@ -79,7 +79,7 @@ def robust_skinweights_transfer_bilinear(
     src_skin_data:    SkinData,
     dst_mesh:         MeshData,
     transfer_options: RobustBilinearSkinTransferOptions | None = None,
-    sample_data:      SampleData                        | None = None,
+    sample_data:      BilinearSampleData                | None = None,
 ) -> np.ndarray:
     """
     Transfers skin weights from a source mesh onto a target mesh.

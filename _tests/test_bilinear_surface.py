@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 from cgmath.geometry import MeshData
-from cgmath.geometry._saddle_surface import integrate, sample, SampleData
+from cgmath.geometry._bilinear_surface import integrate, sample, BilinearSampleData
 
 EPSILON = np.finfo(np.float32).eps
 
@@ -141,7 +141,7 @@ class TestSaddleSurfaceSample(unittest.TestCase):
         sample_data  = sample(query_points, self.face_points, self.face_geometry)
 
         # Verify return type
-        self.assertIsInstance(sample_data, SampleData)
+        self.assertIsInstance(sample_data, BilinearSampleData)
 
         # Verify properties
         self.assertEqual(sample_data.projections.shape,  query_points.shape)
@@ -304,7 +304,7 @@ class TestSaddleSurfaceSample(unittest.TestCase):
 
         sample_data  = sample(query_points, triangle_points, triangle_geometry)
 
-        self.assertIsInstance(sample_data, SampleData)
+        self.assertIsInstance(sample_data, BilinearSampleData)
         self.assertEqual(sample_data.projections.shape[0], 1)
         self.assertTrue(sample_data.distances[0] >= 0)
 
@@ -374,9 +374,9 @@ class TestSampleData(unittest.TestCase):
     def setUp(self):
         super().setUp()
 
-        # Create sample SampleData instance for 4 query points sampled from a quad
+        # Create sample BilinearSampleData instance for 4 query points sampled from a quad
         # This simulates sampling 4 points from a quad mesh
-        self.sample_data = SampleData(
+        self.sample_data = BilinearSampleData(
             projections=np.array(
                 [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]
             ),
@@ -399,7 +399,7 @@ class TestSampleData(unittest.TestCase):
         )
 
     def test_sample_data_compute(self):
-        """Test SampleData.compute() method"""
+        """Test BilinearSampleData.compute() method"""
         # Create test values at vertices
         values = np.array(
             [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]
@@ -418,7 +418,7 @@ class TestSampleData(unittest.TestCase):
         self.assertTrue(allclose(result[0], expected_first))
 
     def test_sample_data_call(self):
-        """Test SampleData.__call__() method"""
+        """Test BilinearSampleData.__call__() method"""
         values = np.array(
             [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]
         )
@@ -431,7 +431,7 @@ class TestSampleData(unittest.TestCase):
         self.assertTrue(allclose(result, expected))
 
     def test_sample_data_remap(self):
-        """Test SampleData.remap() method"""
+        """Test BilinearSampleData.remap() method"""
         # Create source and destination meshes
         src_mesh = MeshData(
             points=np.array(
@@ -455,8 +455,8 @@ class TestSampleData(unittest.TestCase):
         # Remap the sample data
         remapped = self.sample_data.remap(src_mesh, dst_mesh, dst_uv)
 
-        # Should return a new SampleData instance
-        self.assertIsInstance(remapped, SampleData)
+        # Should return a new BilinearSampleData instance
+        self.assertIsInstance(remapped, BilinearSampleData)
 
         # Should have same number of samples
         self.assertEqual(
@@ -465,7 +465,7 @@ class TestSampleData(unittest.TestCase):
         self.assertEqual(remapped.weights.shape[0], self.sample_data.weights.shape[0])
 
     def test_sample_data_copy(self):
-        """Test SampleData.copy() creates independent copy"""
+        """Test BilinearSampleData.copy() creates independent copy"""
         copy = self.sample_data.copy()
 
         # Should be equal initially

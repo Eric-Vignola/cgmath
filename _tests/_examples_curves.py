@@ -13,10 +13,10 @@ trips those.
 
 import numpy as np
 from cgmath.constraints.procrustes import ProcrustesData
-from cgmath.geometry._saddle_surface import RaycastData as SaddleRaycastData
-from cgmath.geometry._saddle_surface import SampleData as SaddleSampleData
+from cgmath.geometry._bilinear_surface import RaycastData as BilinearRaycastData
+from cgmath.geometry._bilinear_surface import BilinearSampleData
 from cgmath.geometry.bspline import NurbsCurveData
-from cgmath.geometry.bspline import SampleData as CurveSampleData
+from cgmath.geometry.bspline import CurveSampleData
 from cgmath.geometry.bspline_patch import (
     NurbsSurfaceData,
     PatchRaycastData,
@@ -147,7 +147,7 @@ def patch_raycast() -> PatchRaycastData:
     return surface.raycast(origins, directions, forward_only=False)
 
 
-def saddle_sample() -> SaddleSampleData:
+def saddle_sample() -> BilinearSampleData:
     """points above, below and on a quad-and-triangles mesh, sampled on it"""
     queries = np.array(
         [
@@ -160,7 +160,7 @@ def saddle_sample() -> SaddleSampleData:
     return strip().sample(queries)
 
 
-def saddle_raycast() -> SaddleRaycastData:
+def saddle_raycast() -> BilinearRaycastData:
     """a ray down onto a quad, one up into a triangle, and one that misses (NaN, -1)"""
     origins    = np.array([[0.5, 0.5, 2.0], [1.7, 0.5, -2.0], [9.0, 9.0, 2.0]])
     directions = np.array([[0.0, 0.0, -1.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]])
@@ -187,12 +187,12 @@ def procrustes() -> ProcrustesData:
 
 
 EXAMPLES = {
-    NurbsCurveData:    curve,
-    CurveSampleData:   curve_sample,
-    NurbsSurfaceData:  patch,
-    PatchSampleData:   patch_sample,
-    PatchRaycastData:  patch_raycast,
-    SaddleSampleData:  saddle_sample,
-    SaddleRaycastData: saddle_raycast,
-    ProcrustesData:    procrustes,
+    NurbsCurveData:      curve,
+    CurveSampleData:     curve_sample,
+    NurbsSurfaceData:    patch,
+    PatchSampleData:     patch_sample,
+    PatchRaycastData:    patch_raycast,
+    BilinearSampleData:  saddle_sample,
+    BilinearRaycastData: saddle_raycast,
+    ProcrustesData:      procrustes,
 }

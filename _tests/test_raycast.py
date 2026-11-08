@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 from cgmath.geometry import MeshData
-from cgmath.geometry._saddle_surface import raycast, RaycastData
+from cgmath.geometry._bilinear_surface import raycast, RaycastData
 
 EPSILON = np.finfo(np.float32).eps
 
@@ -12,7 +12,7 @@ def allclose(x, y, atol=1e-4):
 
 
 class TestRaycast(unittest.TestCase):
-    """Tests for the raycast() function in _saddle_surface.py"""
+    """Tests for the raycast() function in _bilinear_surface.py"""
 
     def setUp(self):
         super().setUp()
@@ -687,7 +687,7 @@ class TestMeshDataRaycast(unittest.TestCase):
 
 
 class TestBezierRaycast(unittest.TestCase):
-    """Tests for the Bezier (PN Quad) raycast path in _saddle_surface.py"""
+    """Tests for the Bezier (PN Quad) raycast path in _bilinear_surface.py"""
 
     def setUp(self):
         super().setUp()

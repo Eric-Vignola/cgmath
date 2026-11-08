@@ -61,7 +61,7 @@ from cgmath.data import (
 from cgmath.formats._write import FORK as _FORK
 from cgmath.formats._fbx_io import load_sdk, open_fbx
 from cgmath.formats.glb import _trimesh_scene
-from cgmath.geometry._saddle_surface import integrate, sample
+from cgmath.geometry._bilinear_surface import integrate, sample
 from cgmath.geometry.utils import (
     average_points,
     bilinear_vectors,
@@ -2517,7 +2517,7 @@ class MeshData(ShapeData):
         :meth:`reset_cached_data` (called from :meth:`triangulate`,
         :meth:`quadrangulate`, :meth:`subdivide`, etc.).
         """
-        from cgmath.geometry._saddle_surface import raycast as _raycast
+        from cgmath.geometry._bilinear_surface import raycast as _raycast
 
         _require_no_ngons("raycast", self.counts)
         method = SampleMethod(method)

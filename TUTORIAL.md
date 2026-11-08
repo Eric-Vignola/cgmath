@@ -760,7 +760,7 @@ print(points.shape, tangents.shape, np.round(points[0], 4), np.round(points[-1],
 ```
 
 `sample(query)` is the closest-point projection — the exact closest spot on
-the whole curve — and it returns a `SampleData` rather than a tuple.
+the whole curve — and it returns a `CurveSampleData` rather than a tuple.
 
 ```python
 nearest = curve.sample(np.array([[2.5, 1.5, 0.0]]))

@@ -60,7 +60,7 @@ def integrate(points, geometry, samples=10, method="gauss", tolerance=1e-4):
 
 
 @dataclass(repr=False, eq=False)
-class SampleData(Data):
+class BilinearSampleData(Data):
     """
     A dataclass to hold saddle surface sample data
     """
@@ -390,7 +390,7 @@ def sample(
         occluded = np.full(points.shape[0], False)
         normals  = np.zeros(points.shape, dtype=np.float64)
 
-    return SampleData(
+    return BilinearSampleData(
         projections = projections,
         distances   = distances,
         weights     = weights,

@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from cgmath.data import Array, Data
-from cgmath.geometry.bspline import SampleData
+from cgmath.geometry.bspline import CurveSampleData
 from cgmath.geometry.utils import compute_basis
 from cgmath.hierarchy import ShapeData
 from cgmath.geometry.utils._numba._bspline import (
@@ -22,7 +22,7 @@ except ImportError:
 
 
 @dataclass(repr=False, eq=False)
-class PatchSampleData(SampleData):
+class PatchSampleData(CurveSampleData):
     """
     Sample data for B-spline surface projections.
 

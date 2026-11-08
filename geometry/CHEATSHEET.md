@@ -28,7 +28,7 @@ Concepts, conventions and the file map live in [`README.md`](README.md).
 | [`pack` — UV island packing](#pack--uv-island-packing) | `UVData.pack`, `pack_islands`, resolution / padding / rotations |
 | [`bspline` — curves](#bspline--curves) | knot space, periodic, `from_edit_points`/`fit`, stacked ends, `rebuild`, arc length, basis, `sample()` |
 | [`bspline_patch` — surfaces](#bspline_patch--surfaces) | tensor products, `compute`/`evaluate`, `sample`, `raycast`, area |
-| [`_saddle_surface` — quad-aware surface queries](#_saddle_surface--quad-aware-surface-queries) | `integrate`, `sample`, `remap`, `raycast`, the `MeshData` wrappers |
+| [`_bilinear_surface` — quad-aware surface queries](#_bilinear_surface--quad-aware-surface-queries) | `integrate`, `sample`, `remap`, `raycast`, the `MeshData` wrappers |
 | [`sdf` — signed distance fields, functional API](#sdf--signed-distance-fields-functional-api) | `make_grid`, `eval_*`, CSG, `dual_marching_cubes` |
 | [`sdf` — signed distance fields, OOP API](#sdf--signed-distance-fields-oop-api) | `SDFSphere` / `SDFBox` / `SDFCylinder`, `DMCField` |
 | [`_cdt` — constrained Delaunay triangulation](#_cdt--constrained-delaunay-triangulation) | the n-gon triangulator behind `get_triangulate_rules` |
@@ -141,15 +141,15 @@ from cgmath.geometry import (
 ```
 
 Everything else comes from its own module. Note the asymmetries: `RaycastData`
-is the *saddle-surface* one, `PatchRaycastData` and both `SampleData` classes
-are **not** re-exported, and nothing from `sdf` or `_cdt` is either — the
+is the *bilinear-surface* one, `PatchRaycastData`, `CurveSampleData` and
+`BilinearSampleData` are **not** re-exported, and nothing from `sdf` or `_cdt` is either — the
 `sdf` module docstring's `from cgmath.geometry import dual_marching_cubes`
 raises `ImportError`.
 
 ```python
-from cgmath.geometry import _saddle_surface
+from cgmath.geometry import _bilinear_surface
 from cgmath.geometry._cdt import triangulate_ngon
-from cgmath.geometry.bspline import SampleData
+from cgmath.geometry.bspline import CurveSampleData
 from cgmath.geometry.bspline_patch import PatchRaycastData
 from cgmath.geometry.mesh import AreaMethod, Axis, SampleMethod
 from cgmath.geometry.pack import pack_islands
@@ -157,7 +157,7 @@ from cgmath.geometry.resample import MeshDataResampler, ResampleMode
 from cgmath.geometry.sdf import DMCField, SDFBox, SDFCylinder, SDFSphere
 
 print(AreaMethod, [m.name for m in ResampleMode])
-print(_saddle_surface.RaycastData is RaycastData)
+print(_bilinear_surface.RaycastData is RaycastData)
 ```
 
 The two subpackages document themselves — [`deform/CHEATSHEET.md`](deform/CHEATSHEET.md)
@@ -2071,7 +2071,7 @@ sd_mesh = curve.sample(cube)
 print(sd_mesh.points.shape)      # (8, 3) — one projection per cube vertex
 ```
 
-### `SampleData.compute()` — transfer per-CV values to the samples
+### `CurveSampleData.compute()` — transfer per-CV values to the samples
 
 ```python
 colors = np.array([
@@ -2373,7 +2373,7 @@ bumpy.rebuild_arc_length_table()  # spline + arc-length tables only
 
 ---
 
-## `_saddle_surface` — quad-aware surface queries
+## `_bilinear_surface` — quad-aware surface queries
 
 Every quad in this library is treated as a **bilinear (saddle) patch**, not
 as two triangles. `MeshData.sample()`, `MeshData.raycast()` and
@@ -2383,7 +2383,7 @@ engine underneath, and take raw `points` / `geometry` arrays.
 ### `integrate()` — true bilinear face areas
 
 ```python
-from cgmath.geometry._saddle_surface import integrate
+from cgmath.geometry._bilinear_surface import integrate
 
 quad = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]])
 geom = np.array([[0, 1, 2, 3]])
@@ -2413,7 +2413,7 @@ except ValueError as e:
 ### `sample()` — closest point on the quad surface
 
 ```python
-from cgmath.geometry._saddle_surface import sample
+from cgmath.geometry._bilinear_surface import sample
 
 queries = np.array([
     [0.0, 0.0, 1.5],       # outside, above the +Z face
@@ -2478,7 +2478,7 @@ sd_bezier = sample(
 print(np.round(sd_bezier.distances, 4))
 ```
 
-### `SampleData.compute()` — transfer any per-vertex attribute
+### `BilinearSampleData.compute()` — transfer any per-vertex attribute
 
 ```python
 attr = cube.points * 10.0                # any (V, k) stream
@@ -2486,7 +2486,7 @@ print(np.round(sd.compute(attr), 3))
 print(np.round(sd(attr), 3))             # __call__ alias
 ```
 
-### `SampleData.remap()` — collapse per-UV-point samples to per-vertex
+### `BilinearSampleData.remap()` — collapse per-UV-point samples to per-vertex
 
 `remap()` expects **one sample per UV point** of `dst_uv` and returns **one
 sample per vertex** of `dst_mesh` — the UV split that landed closest wins.
@@ -2508,7 +2508,7 @@ print(remapped.geometry.shape)   # (8, 4) — re-keyed to src_mesh.geometry
 ### `raycast()` — rays against bilinear / Bézier patches
 
 ```python
-from cgmath.geometry._saddle_surface import raycast
+from cgmath.geometry._bilinear_surface import raycast
 
 origins    = np.array([[0.0, 0.0, 2.0], [0.25, 0.25, 2.0], [5.0, 5.0, 2.0]])
 directions = np.array([[0.0, 0.0, -1.0]] * 3)

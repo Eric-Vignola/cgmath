@@ -18,7 +18,7 @@ from scipy.spatial import cKDTree
 
 
 @dataclass(repr=False, eq=False)
-class SampleData(Data):
+class CurveSampleData(Data):
     """
     A dataclass to hold bspline sample data
     """
@@ -1822,7 +1822,7 @@ class NurbsCurveData(ShapeData):
 
         Returns
         -------
-        SampleData
+        CurveSampleData
             Contains projected points, tangents, distances, params, and basis.
             params are in [0, 1] if uniform=True, else [min_param, max_param].
 
@@ -1899,7 +1899,7 @@ class NurbsCurveData(ShapeData):
         # double-applying registration offset)
         basis = self.basis(u, collapse=True, use_numba=self.use_numba, _native=True)
 
-        return SampleData(
+        return CurveSampleData(
             points    = points,
             tangents  = tangents,
             distances = distances,

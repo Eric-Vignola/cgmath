@@ -11,7 +11,7 @@ alpha and depth. What that takes:
   geometry, PN-quad control points) is done once a frame, in the calling
   thread, and a band casts its rays straight into the kernel that
   bilinear_raycast / bezier_raycast would call. Only the rays that hit are
-  post-processed, with _saddle_surface.raycast's own operations
+  post-processed, with _bilinear_surface.raycast's own operations
   (:func:`_cast_hits`).
 * numpy's OpenBLAS can crash or deadlock when matmuls run in several
   threads at once (see ``_BLAS``): every matmul, dot or matvec a band makes
@@ -32,7 +32,7 @@ from typing import List, Optional, Tuple
 
 import numba
 import numpy as np
-from cgmath.geometry._saddle_surface import _quad_geometry
+from cgmath.geometry._bilinear_surface import _quad_geometry
 from cgmath.geometry.mesh import SampleMethod, _require_no_ngons
 from cgmath.render import raytracer as _rt
 from cgmath.render.frame import Frame
@@ -218,7 +218,7 @@ def _prepare(entry: dict) -> _Prepared:
 
 
 def _cast_hits(prep: _Prepared, origins: np.ndarray, directions: np.ndarray):
-    """_saddle_surface.raycast (forward only) for the rays that hit.
+    """_bilinear_surface.raycast (forward only) for the rays that hit.
 
     The kernel bilinear_raycast / bezier_raycast would call, on the arrays
     :func:`_prepare` made, then raycast's post-processing on the hit rows

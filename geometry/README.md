@@ -44,9 +44,9 @@ A CSG stack in, a quad `MeshData` out.
 | `map.py` | `MapData` (painted scalar map), `GeomSubsetData` (component selection) |
 | `morph_target.py` | `MorphData`, `MorphList` — sparse point offsets |
 | `skin_weights.py` | `SkinData`, `SkinList`, `CompactSkinData`, `Patterns`, FBX / GLB readers |
-| `bspline.py` | `NurbsCurveData` and its `SampleData` |
+| `bspline.py` | `NurbsCurveData` and its `CurveSampleData` |
 | `bspline_patch.py` | `NurbsSurfaceData`, `PatchSampleData`, `PatchRaycastData` |
-| `_saddle_surface.py` | `sample`, `raycast`, `integrate` over bilinear / PN-Quad patches |
+| `_bilinear_surface.py` | `sample`, `raycast`, `integrate` over bilinear / PN-Quad patches |
 | `_cdt.py` | constrained Delaunay triangulation, the n-gon path of `triangulate` |
 | `sdf.py` | `make_grid`, `eval_*`, `sdf_*`, `dual_marching_cubes`, `SDFSphere` / `SDFBox` / `SDFCylinder`, `DMCField` |
 | `pack.py` | `pack_islands` — the UV shell packer behind `UVData.pack` |
@@ -375,7 +375,7 @@ Two independent things.
 
 ### Quads are bilinear patches, not two triangles
 
-`_saddle_surface` is the engine behind `MeshData.sample()`, `MeshData.raycast()`,
+`_bilinear_surface` is the engine behind `MeshData.sample()`, `MeshData.raycast()`,
 `MeshData.area` and `MeshData.get_face_areas()`. A quad whose corners are not
 coplanar is integrated and intersected as a genuine saddle. Triangles are padded
 to quads with a `-1` fourth index. An n-gon's area is the sum of the triangles
@@ -454,7 +454,7 @@ world unit*, not a total grid size.
 `MeshDataResampler(src_mesh, dst_mesh)` never changes the destination topology.
 It answers *"what does this source-indexed array become when re-indexed onto the
 destination's vertices?"* Morph targets, skin weights, painted maps, geom
-subsets and whole meshes all ride the same correspondence — a `SampleData`
+subsets and whole meshes all ride the same correspondence — a `BilinearSampleData`
 computed lazily and **cached per `(mode, method)` pair**, so build one resampler
 and call it many times.
 
@@ -667,8 +667,8 @@ Real behaviour, verified — not bugs to work around blindly.
   `from cgmath.geometry import dual_marching_cubes`, which raises
   `ImportError`. The working path is `from cgmath.geometry.sdf import …`.
   Neither `sdf` nor `_cdt` is re-exported at package level, and neither is
-  `PatchRaycastData` or either `SampleData`.
-- `SampleData.remap(src_mesh, dst_mesh, dst_uv)` indexes its arrays by *UV
+  `PatchRaycastData`, `CurveSampleData` or `BilinearSampleData`.
+- `BilinearSampleData.remap(src_mesh, dst_mesh, dst_uv)` indexes its arrays by *UV
   point*, so it needs one sample per UV point of `dst_uv` and returns one per
   mesh vertex.
 - `max_influences` on `RobustBilinearSkinTransferOptions` is applied only by

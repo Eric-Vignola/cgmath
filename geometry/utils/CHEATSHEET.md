@@ -924,8 +924,8 @@ normally calls it.
 |---|---|---|
 | `matrix_to_stream(matrix)` | `-1`-padded matrix → `(indices, counts)` | `geometry/mesh.py` |
 | `stream_to_matrix(values, counts)` | `(indices, counts)` → `-1`-padded matrix | `geometry/mesh.py` |
-| `matrix_index_lookup(matrix, indices)` | `(rows, cols)` of the first occurrence of each value | `geometry/_saddle_surface.py` |
-| `remap_indices(vert_indices, uv_indices, distances)` | closest unique vertex↔uv correspondence | `geometry/_saddle_surface.py` |
+| `matrix_index_lookup(matrix, indices)` | `(rows, cols)` of the first occurrence of each value | `geometry/_bilinear_surface.py` |
+| `remap_indices(vert_indices, uv_indices, distances)` | closest unique vertex↔uv correspondence | `geometry/_bilinear_surface.py` |
 | `average_points(points, geometry)` | row-wise mean of a `-1`-padded gather matrix | `geometry/mesh.py` |
 
 ### Normals, tangent space, triangulation
@@ -943,11 +943,11 @@ normally calls it.
 
 | Kernel | Does | Called by |
 |---|---|---|
-| `compute_centroids(points, geometry, return_radiuses=False)` | per-face centroid (+ bounding radius) | `geometry/mesh.py`, `_saddle_surface.py` |
-| `bilinear_vectors(points, geometry, uv)` | `(dS/du, dS/dv)` on a bilinear patch | `geometry/mesh.py`, `resample.py`, `_saddle_surface.py` |
-| `bilinear_integrate(points, geometry, samples=10, method="gauss", tolerance=1e-4)` | per-face area; `gauss` / `quadrature` / `adaptive` | `geometry/_saddle_surface.py` |
-| `bilinear_sample(p, points, geometry, centroids, radiuses, centroid_distance_tolerance, iteration_count=100, iteration_tolerance=1e-8, uv_border_tolerance=1e-5, normals=None)` | closest point → `(proj, dist, weights, uv, face)` | `geometry/_saddle_surface.py` |
-| `compute_samples(values, weights, geometry)` | apply sampler weights to any per-vertex attribute | `geometry/_saddle_surface.py`, `geometry/resample.py` |
+| `compute_centroids(points, geometry, return_radiuses=False)` | per-face centroid (+ bounding radius) | `geometry/mesh.py`, `_bilinear_surface.py` |
+| `bilinear_vectors(points, geometry, uv)` | `(dS/du, dS/dv)` on a bilinear patch | `geometry/mesh.py`, `resample.py`, `_bilinear_surface.py` |
+| `bilinear_integrate(points, geometry, samples=10, method="gauss", tolerance=1e-4)` | per-face area; `gauss` / `quadrature` / `adaptive` | `geometry/_bilinear_surface.py` |
+| `bilinear_sample(p, points, geometry, centroids, radiuses, centroid_distance_tolerance, iteration_count=100, iteration_tolerance=1e-8, uv_border_tolerance=1e-5, normals=None)` | closest point → `(proj, dist, weights, uv, face)` | `geometry/_bilinear_surface.py` |
+| `compute_samples(values, weights, geometry)` | apply sampler weights to any per-vertex attribute | `geometry/_bilinear_surface.py`, `geometry/resample.py` |
 | `bezier_evaluate(points, normals, geometry, uv)` | PN-Quad bicubic position (`main` only) | `geometry/resample.py` |
 | `bezier_vectors(points, normals, geometry, uv)` | PN-Quad bicubic tangents (`main` only) | `geometry/resample.py` |
 
@@ -955,8 +955,8 @@ normally calls it.
 
 | Kernel | Does | Called by |
 |---|---|---|
-| `bilinear_raycast(points, geometry, origins, directions, twosided=True, bvh=None)` | forward hit `(t, uv, face)` on bilinear patches | `geometry/_saddle_surface.py` |
-| `bezier_raycast(points, geometry, normals, origins, directions, twosided=True, bvh=None)` | same on PN-Quad Bézier patches | `geometry/_saddle_surface.py` |
+| `bilinear_raycast(points, geometry, origins, directions, twosided=True, bvh=None)` | forward hit `(t, uv, face)` on bilinear patches | `geometry/_bilinear_surface.py` |
+| `bezier_raycast(points, geometry, normals, origins, directions, twosided=True, bvh=None)` | same on PN-Quad Bézier patches | `geometry/_bilinear_surface.py` |
 
 ### Splines, FFD, lattices
 

@@ -390,7 +390,7 @@ class TestIdentity(BandCase):
 
     def test_a_mesh_with_no_faces_renders_as_nothing(self):
         # beside the cube: the cube's frame. The whole frame raises
-        # IndexError on it (in _saddle_surface.raycast); the bands cast and
+        # IndexError on it (in _bilinear_surface.raycast); the bands cast and
         # post-process the rays that hit, and none hits a mesh with no face
         mesh, uv = _cube()
         empty = MeshData(
