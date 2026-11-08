@@ -500,8 +500,8 @@ print(t, faces)
 ## B-splines
 
 `compute_basis(u, kv, c, d)` returns the
-`(len(u), num_control_points)` basis matrix. `BSplineData` and
-`BSplinePatchData` call it.
+`(len(u), num_control_points)` basis matrix. `NurbsCurveData` and
+`NurbsSurfaceData` call it.
 
 ```python
 basis = gu.compute_basis(
@@ -521,7 +521,7 @@ point's curve parameter to its closest spot on the curve between its
 neighbours' parameters, never farther than where it started, so the points
 keep their order. `u` is native (the curve runs on `[0, spans]`, `kv` in
 scipy's layout, `cv` wrapped on periodic curves); open curves keep the first
-and last `u`. `BSplineData.fit()` calls it on best fits.
+and last `u`. `NurbsCurveData.fit()` calls it on best fits.
 
 ```python
 kv     = np.array([0, 0, 0, 0, 1, 2, 2, 2, 2], float)  # clamped cubic on [0, 2]

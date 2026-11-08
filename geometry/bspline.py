@@ -5,6 +5,7 @@ import numpy as np
 import scipy.integrate as si
 from cgmath.data import Array, Data, ImmutableArray as numpy_array
 from cgmath.geometry.utils import compute_basis, ordered_closest_params
+from cgmath.hierarchy import ShapeData
 from cgmath.geometry.utils._numba._bspline import (
     _closest_points,
     _compute_basis_parallel,
@@ -46,15 +47,16 @@ class SampleData(Data):
 
 
 @dataclass
-class BSplineData(Data):
+class NurbsCurveData(ShapeData):
     """
-    BSpline data class.
+    NURBS curve data class: a B-spline curve, non-rational (every weight 1),
+    a shape placed by the transform its ``parent_uuid`` names.
 
     Parameters
     ----------
     points : np.ndarray
         Control point positions (N, dims), float64; dims is free (3 in
-        practice). Empty by default, so ``BSplineData()`` is an empty cubic
+        practice). Empty by default, so ``NurbsCurveData()`` is an empty cubic
         for ``fit()`` to fill. An empty value without its dims, such as
         ``[]``, becomes the default's (0, 3).
     degree : int
@@ -787,7 +789,7 @@ class BSplineData(Data):
 
         Example
         -------
-        >>> curve = BSplineData.from_edit_points(joint_positions, collapse=(2, 2))
+        >>> curve = NurbsCurveData.from_edit_points(joint_positions, collapse=(2, 2))
         >>> moved = curve.rebuild(count=8)       # 8 CVs, still stacked
         >>> curve.rebuild(count=16) < 1e-12      # exact: knots inserted
         True
@@ -887,7 +889,7 @@ class BSplineData(Data):
 
         Example
         -------
-        >>> curve = BSplineData.from_edit_points(joint_positions, collapse=(2, 2))
+        >>> curve = NurbsCurveData.from_edit_points(joint_positions, collapse=(2, 2))
         >>> curve.get_collapsed_points()
         [[0, 1], [10, 11]]
         """
@@ -1103,7 +1105,7 @@ class BSplineData(Data):
         periodic: bool            = False,
         collapse: Optional[tuple] = None,
         **fields,
-    ) -> "BSplineData":
+    ) -> "NurbsCurveData":
         """
         A new curve through the points, each one an edit point (where two
         spans join): the curve Maya's EP Curve Tool builds, and the spline
@@ -1111,7 +1113,7 @@ class BSplineData(Data):
 
         ``fit()`` with the count it picks (``count=-1``). For each point's
         parameter as well, or another control point count, fit an empty
-        curve instead: ``curve = BSplineData(); u = curve.fit(points)``.
+        curve instead: ``curve = NurbsCurveData(); u = curve.fit(points)``.
 
         Parameters
         ----------
@@ -1132,7 +1134,7 @@ class BSplineData(Data):
 
         Returns
         -------
-        BSplineData
+        NurbsCurveData
             The new curve.
 
         Raises
@@ -1145,7 +1147,7 @@ class BSplineData(Data):
 
         Example
         -------
-        >>> spine = BSplineData.from_edit_points(joint_positions, collapse=(2, 2))
+        >>> spine = NurbsCurveData.from_edit_points(joint_positions, collapse=(2, 2))
         >>> spine.count == len(joint_positions) + 2
         True
         """
@@ -1166,7 +1168,7 @@ class BSplineData(Data):
         """
         Moves the control points so the curve passes through the points,
         and returns the curve parameter of each point. For a new curve in
-        one line, use ``BSplineData.from_edit_points()``.
+        one line, use ``NurbsCurveData.from_edit_points()``.
 
         With the count it picks (``count=-1``, or any count on an empty
         curve) it builds the curve Maya's EP Curve Tool builds, which is
@@ -1253,13 +1255,13 @@ class BSplineData(Data):
 
         Example
         -------
-        >>> curve = BSplineData()             # a new curve, and each point's u
+        >>> curve = NurbsCurveData()             # a new curve, and each point's u
         >>> u = curve.fit(joint_positions)
         >>> curve.count == len(joint_positions) + 2
         True
         >>> np.allclose(curve.compute(u)[0], joint_positions)
         True
-        >>> spine = BSplineData.from_edit_points(joint_positions, collapse=(2, 2))
+        >>> spine = NurbsCurveData.from_edit_points(joint_positions, collapse=(2, 2))
         >>> u = spine.fit(moved_joints)       # refit: same count and stacks
         >>> spine.get_collapsed_points()
         [[0, 1], [10, 11]]

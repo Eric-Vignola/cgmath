@@ -115,7 +115,7 @@ re-exports:
 ```python
 from cgmath.hierarchy import TransformData, TransformList, HierarchyData, ClipData
 from cgmath.geometry   import MeshData, MeshList, UVData, UVList
-from cgmath.geometry   import BSplineData, BSplinePatchData, PatchSampleData
+from cgmath.geometry   import NurbsCurveData, NurbsSurfaceData, PatchSampleData
 from cgmath.geometry   import MorphData, MorphList, MapData, GeomSubsetData
 from cgmath.geometry   import SkinData, SkinList, CompactSkinData
 from cgmath.geometry   import DeltaMushData, PatchRelaxData

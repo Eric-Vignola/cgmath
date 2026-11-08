@@ -59,20 +59,6 @@ _HOLE_COUNTS  = (4,)
 _HOLE_INDICES = (4, 5, 6, 7)
 
 
-def _panel_matrix() -> np.ndarray:
-    """turned 30 degrees about Y and moved, rows as Maya writes them"""
-    angle = np.radians(30.0)
-    c, s = np.cos(angle), np.sin(angle)
-    return np.array(
-        [
-            [c, 0.0, -s, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [s, 0.0, c, 0.0],
-            [5.0, 0.0, -2.0, 1.0],
-        ]
-    )
-
-
 def _plain_panel() -> MeshData:
     """the panel's topology and points, nothing else"""
     return MeshData(
@@ -86,13 +72,12 @@ def _plain_panel() -> MeshData:
 
 
 def mesh_data() -> MeshData:
-    """the panel, placed, with its hole and hard-edged shading normals"""
+    """the panel, with its hole and hard-edged shading normals"""
     mesh = MeshData(
         indices      = list(_PANEL_INDICES),
         counts       = list(_PANEL_COUNTS),
         points       = np.array(_PANEL_POINTS),
         name         = "panelShape",
-        matrix       = _panel_matrix(),
         hole_faces   = list(_HOLE_FACES),
         hole_counts  = list(_HOLE_COUNTS),
         hole_indices = list(_HOLE_INDICES),

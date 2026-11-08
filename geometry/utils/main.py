@@ -763,7 +763,7 @@ def _seeded_bilinear_sample(
     )
 
 
-# ------------------------------- BSplineData -------------------------------- #
+# ------------------------------- NurbsCurveData -------------------------------- #
 
 
 def compute_basis(u, kv, c, d):
@@ -807,16 +807,16 @@ def ordered_closest_params(points, u, kv, cv, degree, periodic):
         Fit points (n, dims).
     u : array_like
         Starting native parameters (n,), in order; unwrapped on periodic
-        curves (BSplineData._best_fit_params' output). A point only moves to
+        curves (NurbsCurveData._best_fit_params' output). A point only moves to
         a strictly closer spot; one that is not finite stays, as do its
         neighbours.
     kv : array_like
         Knot vector in scipy's layout (c + degree + 1,), never decreasing,
         native range [0, spans]: kv[degree] = 0 and kv[c] = spans
-        (BSplineData._kv); else ValueError, as for shapes that do not fit.
+        (NurbsCurveData._kv); else ValueError, as for shapes that do not fit.
     cv : array_like
         Control points the curve evaluates with (c, dims), wrapped on
-        periodic curves (BSplineData._cv_f64).
+        periodic curves (NurbsCurveData._cv_f64).
     degree : int
         Degree of the curve, a whole number of 1 or more.
     periodic : bool

@@ -109,7 +109,6 @@ class TestMeshRoundTrip(RoundTrip):
 
     def test_mesh_every_field(self):
         mesh              = _box()
-        mesh.matrix       = np.arange(16, dtype=float).reshape(4, 4)
         mesh.hole_faces   = [1]
         mesh.hole_counts  = [3]
         mesh.hole_indices = [2, 3, 5]

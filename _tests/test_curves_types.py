@@ -1,6 +1,6 @@
 """
 Array types and file round trips of the curve and surface data:
-BSplineData, BSplinePatchData and their sample and raycast results, the
+NurbsCurveData, NurbsSurfaceData and their sample and raycast results, the
 saddle surface's sample and raycast results, and ProcrustesData.
 """
 
@@ -13,10 +13,10 @@ from dataclasses import fields
 import numpy as np
 from cgmath.constraints import ProcrustesData
 from cgmath.geometry._saddle_surface import RaycastData, SampleData, sample
-from cgmath.geometry.bspline import BSplineData
+from cgmath.geometry.bspline import NurbsCurveData
 from cgmath.geometry.bspline import SampleData as CurveSampleData
 from cgmath.geometry.bspline_patch import (
-    BSplinePatchData,
+    NurbsSurfaceData,
     PatchRaycastData,
     PatchSampleData,
 )
@@ -93,10 +93,10 @@ class Cast(PatchRaycastData):
 
 class TestBSplineTypes(_Same):
     def test_points_and_knots_convert(self):
-        curve = BSplineData(points=chain().astype(np.float32), knots=None)
+        curve = NurbsCurveData(points=chain().astype(np.float32), knots=None)
         self.assertArray(curve.points, np.float64, (6, 3))
 
-        curve = BSplineData(points=[[0, 0, 0], [1, 0, 0], [2, 1, 0], [3, 1, 0]])
+        curve = NurbsCurveData(points=[[0, 0, 0], [1, 0, 0], [2, 1, 0], [3, 1, 0]])
         self.assertArray(curve.points, np.float64, (4, 3))
         self.assertEqual(curve.count, 4)
 
@@ -105,42 +105,42 @@ class TestBSplineTypes(_Same):
 
     def test_free_dimension(self):
         for dims in (2, 3, 4):
-            curve = BSplineData(points=chain(dims=dims))
+            curve = NurbsCurveData(points=chain(dims=dims))
             self.assertArray(curve.points, np.float64, (6, dims))
             points, _ = curve.compute(0.5)
             self.assertEqual(points.shape, (dims,))
 
     def test_wrong_shape_raises(self):
         with self.assertRaises(ValueError):
-            BSplineData(points=np.zeros(6))
+            NurbsCurveData(points=np.zeros(6))
         with self.assertRaises(ValueError):
-            BSplineData(points=chain(), knots=np.zeros((2, 4)))
+            NurbsCurveData(points=chain(), knots=np.zeros((2, 4)))
 
     def test_empty_points_take_the_default_shape(self):
         # json keeps no shape for an empty array: (0,) comes back as (0, 3)
-        self.assertArray(BSplineData(points=[]).points, np.float64, (0, 3))
-        self.assertArray(BSplineData(points=np.zeros((0, 0))).points, np.float64, (0, 3))
-        self.assertArray(BSplineData(points=np.zeros((0, 2))).points, np.float64, (0, 2))
+        self.assertArray(NurbsCurveData(points=[]).points, np.float64, (0, 3))
+        self.assertArray(NurbsCurveData(points=np.zeros((0, 0))).points, np.float64, (0, 3))
+        self.assertArray(NurbsCurveData(points=np.zeros((0, 2))).points, np.float64, (0, 2))
 
-        curve        = BSplineData()
+        curve        = NurbsCurveData()
         curve.points = np.zeros(0)
         self.assertArray(curve.points, np.float64, (0, 3))
 
     def test_defaults_are_not_shared(self):
-        a = BSplineData()
-        b = BSplineData()
+        a = NurbsCurveData()
+        b = NurbsCurveData()
         self.assertIsNot(a.points, b.points)
         a.fit(chain())
         self.assertEqual(b.points.shape, (0, 3))
 
     def test_round_trips(self):
-        fitted = BSplineData()
+        fitted = NurbsCurveData()
         fitted.fit(chain(8))
 
         curves = {
-            "empty": BSplineData(),
-            "open":  BSplineData(points=chain()),
-            "periodic": BSplineData(
+            "empty": NurbsCurveData(),
+            "open":  NurbsCurveData(points=chain()),
+            "periodic": NurbsCurveData(
                 points             = chain(),
                 periodic           = True,
                 uniform            = True,
@@ -149,19 +149,19 @@ class TestBSplineTypes(_Same):
                 arc_length_samples = 50,
             ),
             "fitted":  fitted,
-            "2d":      BSplineData(points=chain(dims=2), degree=2),
-            "float32": BSplineData(points=chain().astype(np.float32)),
+            "2d":      NurbsCurveData(points=chain(dims=2), degree=2),
+            "float32": NurbsCurveData(points=chain().astype(np.float32)),
         }
         for tag, curve in curves.items():
             self.assertRoundTrips(curve, tag)
 
     def test_equality(self):
-        curve = BSplineData(points=chain())
-        patch = BSplinePatchData(
+        curve = NurbsCurveData(points=chain())
+        patch = NurbsSurfaceData(
             points=grid(), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
         )
-        self.assertTrue(curve == BSplineData(points=chain()))
-        self.assertFalse(curve == BSplineData(points=chain() + 1.0))
+        self.assertTrue(curve == NurbsCurveData(points=chain()))
+        self.assertFalse(curve == NurbsCurveData(points=chain() + 1.0))
 
         # another type is never equal
         self.assertFalse(curve == 5)
@@ -169,20 +169,20 @@ class TestBSplineTypes(_Same):
         self.assertFalse(curve == patch)
 
         # nor another count, dimension, degree or wrap
-        self.assertFalse(curve == BSplineData(points=chain(7)))
-        self.assertFalse(curve == BSplineData(points=chain(dims=2)))
-        self.assertFalse(curve == BSplineData(points=chain(), degree=2))
-        self.assertFalse(curve == BSplineData(points=chain(), periodic=True))
+        self.assertFalse(curve == NurbsCurveData(points=chain(7)))
+        self.assertFalse(curve == NurbsCurveData(points=chain(dims=2)))
+        self.assertFalse(curve == NurbsCurveData(points=chain(), degree=2))
+        self.assertFalse(curve == NurbsCurveData(points=chain(), periodic=True))
 
         # blank curves have no knots to build: their fields decide
-        self.assertTrue(BSplineData() == BSplineData())
-        self.assertFalse(BSplineData() == BSplineData(degree=2))
-        self.assertFalse(BSplineData() == BSplineData(points=np.zeros((0, 2))))
-        self.assertFalse(BSplineData() == curve)
-        self.assertFalse(curve == BSplineData())
+        self.assertTrue(NurbsCurveData() == NurbsCurveData())
+        self.assertFalse(NurbsCurveData() == NurbsCurveData(degree=2))
+        self.assertFalse(NurbsCurveData() == NurbsCurveData(points=np.zeros((0, 2))))
+        self.assertFalse(NurbsCurveData() == curve)
+        self.assertFalse(curve == NurbsCurveData())
 
     def test_caches_are_not_saved(self):
-        curve = BSplineData(points=chain(), uniform=True)
+        curve = NurbsCurveData(points=chain(), uniform=True)
         before, _ = curve.compute([0.1, 0.5, 0.9])
         self.assertIsNotNone(curve._kv)
 
@@ -193,7 +193,7 @@ class TestBSplineTypes(_Same):
             self.assertTrue(np.allclose(before, after), mode)
 
     def test_sample_types(self):
-        curve  = BSplineData(points=chain())
+        curve  = NurbsCurveData(points=chain())
         result = curve.sample(np.array([[1, 0, 1], [5, 1, 0]]))
         self.assertIsInstance(result, CurveSampleData)
         self.assertArray(result.points,    np.float64, (2, 3))
@@ -203,7 +203,7 @@ class TestBSplineTypes(_Same):
         self.assertArray(result.basis,     np.float64, (2, 6))
         self.assertRoundTrips(result, "sample")
 
-        loop = BSplineData(points=chain(dims=2), periodic=True)
+        loop = NurbsCurveData(points=chain(dims=2), periodic=True)
         self.assertRoundTrips(loop.sample(chain(dims=2) * 0.9), "periodic 2d sample")
 
 
@@ -212,7 +212,7 @@ class TestBSplineTypes(_Same):
 
 class TestBSplinePatchTypes(_Same):
     def test_points_convert(self):
-        patch = BSplinePatchData(
+        patch = NurbsSurfaceData(
             points     = grid().astype(np.float32),
             degree_u   = 3,
             degree_v   = 3,
@@ -222,14 +222,14 @@ class TestBSplinePatchTypes(_Same):
         self.assertArray(patch.points, np.float64, (6, 6, 3))
 
         with self.assertRaises(ValueError):
-            BSplinePatchData(points=grid()[0], degree_u=3, degree_v=3, periodic_u=False, periodic_v=False)
+            NurbsSurfaceData(points=grid()[0], degree_u=3, degree_v=3, periodic_u=False, periodic_v=False)
 
     def test_round_trips(self):
         patches = {
-            "open": BSplinePatchData(
+            "open": NurbsSurfaceData(
                 points=grid(), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
             ),
-            "periodic": BSplinePatchData(
+            "periodic": NurbsSurfaceData(
                 points       = grid(),
                 degree_u     = 2,
                 degree_v     = 3,
@@ -239,7 +239,7 @@ class TestBSplinePatchTypes(_Same):
                 registered_u = True,
                 use_numba    = False,
             ),
-            "2d": BSplinePatchData(
+            "2d": NurbsSurfaceData(
                 points=grid()[..., :2], degree_u=3, degree_v=3, periodic_u=False, periodic_v=True
             ),
         }
@@ -247,14 +247,14 @@ class TestBSplinePatchTypes(_Same):
             self.assertRoundTrips(patch, tag)
 
     def test_equality(self):
-        patch = BSplinePatchData(
+        patch = NurbsSurfaceData(
             points=grid(), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
         )
         self.assertTrue(patch == patch.copy())
 
         # another type is never equal
         self.assertFalse(patch == 5)
-        self.assertFalse(patch == BSplineData(points=chain()))
+        self.assertFalse(patch == NurbsCurveData(points=chain()))
 
         # nor another grid shape, degree or wrap
         for points, degree_u, periodic_u in (
@@ -263,7 +263,7 @@ class TestBSplinePatchTypes(_Same):
             (grid(), 2, False),
             (grid(), 3, True),
         ):
-            other = BSplinePatchData(
+            other = NurbsSurfaceData(
                 points     = points,
                 degree_u   = degree_u,
                 degree_v   = 3,
@@ -274,19 +274,19 @@ class TestBSplinePatchTypes(_Same):
 
     def test_normals(self):
         queries = np.array([[0.0, 0.0, 2.0], [1.0, -2.0, 1.0]])
-        patch = BSplinePatchData(
+        patch = NurbsSurfaceData(
             points=grid(), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
         )
         self.assertArray(patch.sample(queries).normals, np.float64, (2, 3))
 
         # a 2-D patch has no normal
-        flat = BSplinePatchData(
+        flat = NurbsSurfaceData(
             points=grid()[..., :2], degree_u=3, degree_v=3, periodic_u=False, periodic_v=True
         )
         self.assertIsNone(flat.sample(queries[:, :2]).normals)
 
     def test_results_copy_as_their_own_class(self):
-        patch = BSplinePatchData(
+        patch = NurbsSurfaceData(
             points=grid(), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
         )
         origins = np.array([[0.0, 0.0, 5.0], [50.0, 50.0, 5.0]])
@@ -297,7 +297,7 @@ class TestBSplinePatchTypes(_Same):
             self.assertSame(mine, mine.copy(), cls.__name__)
 
     def test_sample_types(self):
-        patch = BSplinePatchData(
+        patch = NurbsSurfaceData(
             points=grid(), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
         )
         result = patch.sample(np.array([[0, 0, 2], [1, -2, 1], [3, 3, -1]]))
@@ -314,7 +314,7 @@ class TestBSplinePatchTypes(_Same):
             result.params = np.zeros(3)
 
     def test_raycast_types(self):
-        patch = BSplinePatchData(
+        patch = NurbsSurfaceData(
             points=grid(), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
         )
         origins = np.array([[0.0, 0.0, 5.0], [1.0, 1.0, 5.0], [50.0, 50.0, 5.0]])

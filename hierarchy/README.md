@@ -118,6 +118,14 @@ offset fixed to the bone, not a local rotation difference, so it re-poses
 `b` at *any* pose — that is what lets a delta carry animation between
 rigs whose joint axes or proportions differ. `(a - b) + b == a`.
 
+**A shape sits under a transform.** `ShapeData` is the base of what a
+transform carries: a `MeshData`, a `NurbsCurveData`, a `NurbsSurfaceData`.
+A shape holds a `uuid` of its own and the `parent_uuid` of the
+`TransformData` it sits under — nothing of the transform itself — and
+`shape.world_matrix(hierarchy)` is that transform's world matrix, at the
+frame a clip is on; a shape naming no transform, or one the hierarchy does
+not hold, sits at identity. A hierarchy holds transforms only.
+
 ---
 
 ## When to reach for it
@@ -143,8 +151,9 @@ a skeleton (`cgmath.geometry`).
 ```
 hierarchy/
 ├── __init__.py     re-exports the public surface
-└── hierarchy.py    all of them, plus the fbx / glb readers and the
-                    batched clip evaluator
+├── hierarchy.py    the nodes, hierarchies and clips, plus the fbx / glb
+│                   readers and the batched clip evaluator
+└── shape.py        ShapeData, the base of what sits under a transform
 ```
 
 `hierarchy.py` also exposes `generate_uuid()` / `validate_uuid()` and the

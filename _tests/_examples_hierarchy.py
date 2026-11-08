@@ -28,7 +28,7 @@ from __future__ import annotations
 import uuid
 
 import numpy as np
-from cgmath.hierarchy import ClipData, ClipList, HierarchyData, TransformData, TransformList
+from cgmath.hierarchy import ClipData, ClipList, HierarchyData, ShapeData, TransformData, TransformList
 
 _NAMESPACE = uuid.UUID("6f1c2a9e-3b7d-4e55-9a0c-2d8e4f6b1a37")
 
@@ -212,6 +212,11 @@ def hierarchy_data() -> HierarchyData:
     return rig()
 
 
+def shape_data() -> ShapeData:
+    """the base of every shape, on its own: its uuid and the transform it sits under"""
+    return ShapeData(uuid=_uuid("VLR:shape"), parent_uuid=_uuid("VLR:hip_L"))
+
+
 def transform_list() -> TransformList:
     """a selection of the rig: the hip, its locator and the space transform,
     the hip's parent left out of it"""
@@ -261,6 +266,7 @@ EXAMPLES = {
     HierarchyData: hierarchy_data,
     ClipData:      clip_data,
     ClipList:      clip_list,
+    ShapeData:     shape_data,
 }
 
 # a TransformList is a view: it owns no nodes, so it saves as the hierarchy

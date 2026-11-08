@@ -959,7 +959,6 @@ class _Skinned(_Files):
             a, b = getattr(got, field), getattr(want, field)
             self.assertEqual(a.dtype, b.dtype, field)
             np.testing.assert_array_equal(a, b, err_msg=field)
-        np.testing.assert_array_equal(got.matrix, np.eye(4))
 
     def assertSameSkin(self, got, want):
         self.assertEqual(got.name, want.name)
@@ -1143,12 +1142,6 @@ class TestSkinRefusals(_Skinned):
         self.refused(ValueError, "holds 7 columns for its 8 influences", **source)
 
     def test_the_mesh(self):
-        source                = bundle()
-        matrix                = np.eye(4)
-        matrix[3, 1]          = 1.0
-        source["mesh"].matrix = matrix
-        self.refused(ValueError, "mesh 'body' channel 'matrix'", **source)
-        self.refused(ValueError, "mesh 'body' channel 'matrix'", mesh=source["mesh"])
         mesh              = body()
         mesh.hole_faces   = np.array([0],       dtype=np.int32)
         mesh.hole_counts  = np.array([3],       dtype=np.int32)
@@ -1396,12 +1389,13 @@ def per_corner(uv: UVData) -> np.ndarray:
 
 
 class _Mapped(_Skinned):
-    def assertSameUVs(self, got, want, mesh_name="body"):
+    def assertSameUVs(self, got, want, mesh):
+        """``got`` the sets ``want`` holds, each naming ``mesh``, the loaded mesh, by its uuid"""
         self.assertIsInstance(got, UVList)
         self.assertEqual([uv.name for uv in got], [uv.name for uv in want])
         for a, b in zip(got, want):
             self.assertIsInstance(a, UVData)
-            self.assertEqual(a.mesh_name, mesh_name)
+            self.assertEqual(a.mesh_uuid, mesh.uuid)
             for field in ("points", "counts", "indices"):
                 x, y = getattr(a, field), getattr(b, field)
                 self.assertEqual(x.dtype, y.dtype, f"{a.name} {field}")
@@ -1423,18 +1417,21 @@ class TestUVs(_Mapped):
         self.assertFalse(np.array_equal(uvs[1].indices, np.arange(len(uvs[1].indices))))
         save_fbx(self.path("a.fbx"), **source, uvs=uvs)
         first = load_fbx(self.path("a.fbx"))
-        self.assertSameUVs(first.uvs, uvs)
+        self.assertSameUVs(first.uvs, uvs, first.mesh)
         self.assertSameMesh(first.mesh, source["mesh"])
         self.assertSameSkin(first.skin, source["skin"])
+        self.assertEqual(first.skin.mesh_uuid, first.mesh.uuid)
         # the five fields are save_fbx's arguments in their order
         save_fbx(self.path("b.fbx"), *first)
-        self.assertSameUVs(load_fbx(self.path("b.fbx")).uvs, first.uvs)
+        second = load_fbx(self.path("b.fbx"))
+        self.assertSameUVs(second.uvs, first.uvs, second.mesh)
 
     def test_a_uvdata_is_one_set_and_none_reads_none(self):
         mesh = body()
         uv   = maps(mesh)[1]
         save_fbx(self.path("one.fbx"), mesh=mesh, uvs=uv)
-        self.assertSameUVs(load_fbx(self.path("one.fbx")).uvs, UVList([uv]))
+        got = load_fbx(self.path("one.fbx"))
+        self.assertSameUVs(got.uvs, UVList([uv]), got.mesh)
         for name, kwargs in (
             ("mesh", {"mesh": mesh}),
             ("empty", {"mesh": mesh, "uvs": UVList([])}),
@@ -1490,8 +1487,8 @@ class TestUVs(_Mapped):
         def unmapped(scene):
             shape_of(scene).GetElementUV(1).GetIndexArray().SetAt(4, -1)
 
-        got = load_fbx(_edited(self.path("good.fbx"), self.path("empty.fbx"), empty)).uvs
-        self.assertSameUVs(got, maps(mesh))
+        got = load_fbx(_edited(self.path("good.fbx"), self.path("empty.fbx"), empty))
+        self.assertSameUVs(got.uvs, maps(mesh), got.mesh)
         bad = _edited(self.path("good.fbx"), self.path("unmapped.fbx"), unmapped)
         with self.assertRaisesRegex(ValueError, "UV set 'lightmap' leaves 1 face corners without UVs"):
             load_fbx(bad)
@@ -1556,7 +1553,8 @@ class TestMayaUVs(_InMaya, _Mapped):
             np.testing.assert_array_equal(got.counts, source["mesh"].counts, err_msg=got.name)
             near(per_corner(got), per_corner(want), err_msg=got.name)
         save_fbx(self.path("again.fbx"), *first)
-        self.assertSameUVs(load_fbx(self.path("again.fbx")).uvs, first.uvs)
+        again = load_fbx(self.path("again.fbx"))
+        self.assertSameUVs(again.uvs, first.uvs, again.mesh)
 
     def test_maya_export_of_a_mesh_with_no_uvs_reads_none(self):
         cmds = self.cmds

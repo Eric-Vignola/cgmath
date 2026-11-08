@@ -11,7 +11,7 @@ import unittest
 
 import numpy as np
 from cgmath.data import _strip_namespace, get_file_type
-from cgmath.geometry import BSplineData, MeshData, MeshList
+from cgmath.geometry import NurbsCurveData, MeshData, MeshList
 from cgmath.geometry.deform import SkinDeformData
 from cgmath.geometry.skin_weights import CompactSkinData, SkinData, SkinList
 
@@ -56,7 +56,7 @@ class TestStripName(unittest.TestCase):
 
     def test_a_type_without_a_name_raises(self):
         with self.assertRaises(AttributeError):
-            BSplineData().strip_namespace()
+            NurbsCurveData().strip_namespace()
 
     def test_an_empty_path_raises_whatever_the_items(self):
         for items in (MeshList([]), MeshList([triangle(None)])):

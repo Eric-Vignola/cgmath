@@ -44,8 +44,8 @@ A CSG stack in, a quad `MeshData` out.
 | `map.py` | `MapData` (painted scalar map), `GeomSubsetData` (component selection) |
 | `morph_target.py` | `MorphData`, `MorphList` — sparse point offsets |
 | `skin_weights.py` | `SkinData`, `SkinList`, `CompactSkinData`, `Patterns`, FBX / GLB readers |
-| `bspline.py` | `BSplineData` and its `SampleData` |
-| `bspline_patch.py` | `BSplinePatchData`, `PatchSampleData`, `PatchRaycastData` |
+| `bspline.py` | `NurbsCurveData` and its `SampleData` |
+| `bspline_patch.py` | `NurbsSurfaceData`, `PatchSampleData`, `PatchRaycastData` |
 | `_saddle_surface.py` | `sample`, `raycast`, `integrate` over bilinear / PN-Quad patches |
 | `_cdt.py` | constrained Delaunay triangulation, the n-gon path of `triangulate` |
 | `sdf.py` | `make_grid`, `eval_*`, `sdf_*`, `dual_marching_cubes`, `SDFSphere` / `SDFBox` / `SDFCylinder`, `DMCField` |
@@ -299,8 +299,9 @@ print(back[0] is back[1], back[0] is pins)  # True False
 | `counts` | `(F,)` | corners per face |
 
 Not a triangle array. Mixed triangles / quads / n-gons in one mesh are normal.
-`matrix` is an optional `(4, 4)` row-major object transform that is *not* baked
-into `points` until `to_identity()`.
+A mesh holds no transform of its own: it is a shape (`ShapeData`), with a
+`uuid` and the `parent_uuid` of the `TransformData` it sits under, which
+places it; `points` are in that transform's space, the world's with none.
 
 Counts are `point_count` / `face_count` / `edge_count` / `shell_count` — there
 is no `num_points`.
@@ -426,7 +427,7 @@ through the same weights.
 
 ### Control points are held by reference
 
-`BSplineData(points=arr)` stores `arr` itself when it is already a `float64`
+`NurbsCurveData(points=arr)` stores `arr` itself when it is already a `float64`
 array; it does not copy. Any other input is converted to a new `float64`
 array. Two splines built from one array alias each other, and mutating the
 array behind a built spline leaves stale knot vectors, scipy splines and
@@ -516,8 +517,8 @@ or a quad.
 - **UV `v` increases up**, `v = 0` is the bottom of the texture. A UV face
   `count` of `0` is a legal hole.
 - **Verbs mutate, `from_*` and `get_*` return.** `triangulate`, `quadrangulate`,
-  `merge`, `detach_faces`, `delete_faces`, `subdivide`, `smooth`, `to_identity`,
-  `union`, `difference`, `normalize` and `pack` edit in place and drop the
+  `merge`, `detach_faces`, `delete_faces`, `subdivide`, `smooth`, `union`,
+  `difference`, `normalize` and `pack` edit in place and drop the
   caches; `copy`, `from_faces`, `from_vertices`, `to_uvdata` and every
   `resample_*` hand back a new object.
 - **Optional dependencies** (`cv2`, `skimage`, `PIL`, `trimesh`, `pygltflib`,
@@ -659,7 +660,7 @@ print(dst.weights.shape, dst.influences, dst.valid)
 
 Real behaviour, verified — not bugs to work around blindly.
 
-- `BSplinePatchData.area` is less accurate than it looks. `get_area()` only uses
+- `NurbsSurfaceData.area` is less accurate than it looks. `get_area()` only uses
   composite Simpson when `samples` is **odd**, and `area` calls it with the even
   default `samples=50`, so it falls back to a Riemann sum. Pass an odd count.
 - The `sdf` module docstring advertises

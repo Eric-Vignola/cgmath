@@ -90,7 +90,7 @@ from cgmath.geometry.utils import (
     stream_to_matrix,
     subdivide_catmull_clark,
 )
-from cgmath.hierarchy import _fbx_axis_turn, _fbx_check_axis_system, _fbx_units
+from cgmath.hierarchy import _fbx_axis_turn, _fbx_check_axis_system, _fbx_units, ShapeData
 from cgmath.transforms import euler_to_matrix
 from scipy.ndimage import convolve
 from scipy.spatial import QhullError, cKDTree
@@ -347,18 +347,21 @@ def _loop_senses(points, loops, loop_tris) -> list:
 
 
 @dataclass(repr=False, eq=False)
-class MeshData(Data):
+class MeshData(ShapeData):
     """
     Polygonal descriptor representing an object with edges, faces and vertices.
+
+    A shape: it holds no transform of its own. ``parent_uuid`` names the
+    ``TransformData`` it sits under, which places it (:class:`ShapeData`);
+    the points are in that transform's space, or the world's with none.
     """
 
-    EQUALITY_TEST_IGNORE = ["name"]
+    EQUALITY_TEST_IGNORE = ShapeData.EQUALITY_TEST_IGNORE + ["name"]
 
     indices:        Array(np.int32, "N")
     counts:         Array(np.int32, "N")
     points:         Array(np.float64, "N", 3)
     name:           Optional[str] = None
-    matrix:         Optional[Array(np.float64, 4, 4)] = numpy_array(np.eye(4))
     hole_faces:     Optional[Array(np.int32, "N")] = None
     hole_counts:    Optional[Array(np.int32, "N")] = None
     hole_indices:   Optional[Array(np.int32, "N")] = None
@@ -2106,58 +2109,31 @@ class MeshData(Data):
         """
         return self.__mul__(other)
 
-    def union(self, *args, world_space=False):
-        """combines faces of given Mesh objects to self (this is not a boolean)"""
-
-        # bring self points to worldspace
-        if world_space:
-            points4 = np.dot(self.points4, self.matrix)
-        else:
-            points4 = self.points4
-
-        # bring other objects points into this object's space
+    def union(self, *args):
+        """
+        combines faces of given Mesh objects to self (this is not a boolean);
+        the points are taken as they are, in one space
+        """
+        points = self.points
         for obj in args:
-            self.indices = np.concatenate(
-                [self.indices, obj.indices + points4.shape[0]]
-            )
-            self.counts = np.concatenate([self.counts, obj.counts])
-
-            # bring obj points to worldspace
-            if world_space:
-                points_ = np.dot(obj.points4, obj.matrix)  # - self.matrix[3]
-                points4 = np.concatenate([points4, points_])
-            else:
-                points4 = np.concatenate([points4, obj.points4])
-
-        # bring back points to local space
-        inv_matrix  = self.get_inverse_matrix()
-        self.points = np.dot(points4, inv_matrix.T)[:, : self.points.shape[1]]
+            self.indices = np.concatenate([self.indices, obj.indices + points.shape[0]])
+            self.counts  = np.concatenate([self.counts, obj.counts])
+            points       = np.concatenate([points, obj.points])
+        self.points = points
 
         # reset components
         self.reset_cached_data()
         self.normals        = None
         self.normal_indices = None
 
-    def difference(self, *args, tolerance=1e-6, world_space=False):
+    def difference(self, *args, tolerance=1e-6):
         """removes overlapping faces of given Mesh objects from self (this is not a boolean)"""
-
-        # build a source kdTree
-        if world_space:
-            source = self.copy()
-            source.to_identity()
-        else:
-            source = self
+        source = self
 
         # find matching vertices for each obj to remove
         matched_indices = []
         for obj in args:
-            if world_space:
-                target = obj.copy()
-                target.to_identity()
-            else:
-                target = obj
-
-            tree = cKDTree(target.points)
+            tree = cKDTree(obj.points)
 
             distances, idx = tree.query(source.points)
             indices = np.where(distances <= tolerance)[0]
@@ -2591,19 +2567,6 @@ class MeshData(Data):
             twosided        = twosided,
             bvh             = bvh,
         )
-
-    def to_identity(self) -> None:
-        """sets the matrix to identity and transforms the points accordingly"""
-        self.points = np.dot(self.points4, self.matrix)[:, : self.points.shape[1]]
-        self.matrix = np.eye(4)
-
-    def get_inverse_matrix(self) -> np.ndarray:
-        """computes the inverse matrix"""
-        scale_components   = np.sum(self.matrix[:3, :3] ** 2, axis=1)
-        inv_matrix         = np.eye(4)
-        inv_matrix[:3, :3] = self.matrix[:3, :3] / scale_components[:, None]
-        inv_matrix[3, :3]  = -np.dot(inv_matrix[:3, :3], self.matrix[3, :3])
-        return inv_matrix
 
     def get_extent(self, per_face: bool = False) -> Tuple[np.ndarray]:
         """Returns 2 tuples that represents the extent of this mesh."""
@@ -3775,11 +3738,12 @@ class UVData(MeshData):
     _resolution: Array(np.int32, 2) = numpy_array(np.array([2048, 2048], dtype=np.int32))
     _antialias:  bool = False
 
-    # the mesh the set was read from, which save_fbx pairs it with by name
-    mesh_name: Optional[str] = None
+    # the uuid of the mesh the set maps, which save_fbx pairs it with; a UV
+    # set sits under no transform, so its parent_uuid stays None
+    mesh_uuid: Optional[str] = None
 
-    EQUALITY_TEST_IGNORE = ["name", "mesh_name", "_resolution", "_antialias"]
-    NAMESPACED_FIELDS    = ("name", "mesh_name")
+    EQUALITY_TEST_IGNORE = ShapeData.EQUALITY_TEST_IGNORE + ["name", "mesh_uuid", "_resolution", "_antialias"]
+    NAMESPACED_FIELDS    = ("name",)
 
     # --- cached attributes --- #
     _buffer   = None  # render buffer
@@ -4828,11 +4792,6 @@ class MeshList(DataList[MeshData]):
         """applies merge to all elements"""
         [x.merge() for x in self]
 
-    def to_identity(self):
-        """sets all contained MeshData objects to identity"""
-        for obj in self:
-            obj.to_identity()
-
     def fix_symmetry(
         self,
         pivot:     float              = 0.0,
@@ -4855,21 +4814,12 @@ class MeshList(DataList[MeshData]):
             face_ends   = face_sums[1:]
 
             obj = self[0].copy()
-            obj.to_identity()
             obj.union(*self[1:])
 
             if obj.fix_symmetry(pivot=pivot, axis=axis, side=side, tolerance=tolerance):
                 for i in range(face_starts.size):
-                    indices   = np.arange(face_starts[i], face_ends[i])
-                    mesh      = obj.from_faces(indices)
-                    mesh.name = self[i].name
-
-                    # bring back points to local space
-                    points = mesh.points4 - self[i].matrix[3]
-                    mesh.points = np.dot(points, self[i].get_inverse_matrix().T)[
-                        :, : mesh.points.shape[1]
-                    ]
-                    self[i].points = mesh.points
+                    indices        = np.arange(face_starts[i], face_ends[i])
+                    self[i].points = obj.from_faces(indices).points
 
                 return np.ones(face_counts.size, dtype=bool)
             else:
@@ -5784,7 +5734,7 @@ def _load_fbx(
 
             uv_data_list = _extract_fbx_uv_channels(mesh, counts)
             for uv_data in uv_data_list:
-                uv_data.mesh_name = mesh_data.name
+                uv_data.mesh_uuid = mesh_data.uuid
             data.append((mesh_data, UVList(uv_data_list)))
 
         return data

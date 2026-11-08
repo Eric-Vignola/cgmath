@@ -170,12 +170,13 @@ class CompactSkinData(Data):
 class SkinData(Data):
     """Skin data class with optimized operations."""
 
-    EQUALITY_TEST_IGNORE = ["name"]
+    EQUALITY_TEST_IGNORE = ["name", "mesh_uuid"]
     NAMESPACED_FIELDS    = ("name", "influences")
 
     weights:    Array(np.float64, "N", "J")  # J = len(influences)
     influences: List[str]
     name:       Optional[str] = None
+    mesh_uuid:  Optional[str] = None         # the uuid of the mesh whose points the rows are
 
     # the symmetry name patterns, under the patterns property
     _patterns: dict = field(default_factory=lambda: copy.deepcopy(Patterns.DEFAULT))

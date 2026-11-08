@@ -1,6 +1,6 @@
 """
-Round-trip builders for the curve and surface data: BSplineData and its
-sample, BSplinePatchData and its sample and raycast, the saddle surface's
+Round-trip builders for the curve and surface data: NurbsCurveData and its
+sample, NurbsSurfaceData and its sample and raycast, the saddle surface's
 sample and raycast, and ProcrustesData.
 
 Each builder makes a new object the way users do, through the public
@@ -15,10 +15,10 @@ import numpy as np
 from cgmath.constraints.procrustes import ProcrustesData
 from cgmath.geometry._saddle_surface import RaycastData as SaddleRaycastData
 from cgmath.geometry._saddle_surface import SampleData as SaddleSampleData
-from cgmath.geometry.bspline import BSplineData
+from cgmath.geometry.bspline import NurbsCurveData
 from cgmath.geometry.bspline import SampleData as CurveSampleData
 from cgmath.geometry.bspline_patch import (
-    BSplinePatchData,
+    NurbsSurfaceData,
     PatchRaycastData,
     PatchSampleData,
 )
@@ -77,9 +77,9 @@ def strip():
 # --------------------------------- BUILDERS --------------------------------- #
 
 
-def curve() -> BSplineData:
+def curve() -> NurbsCurveData:
     """a closed quadratic through a ring of edit points, every setting changed"""
-    return BSplineData.from_edit_points(
+    return NurbsCurveData.from_edit_points(
         ring(),
         degree             = 2,
         periodic           = True,
@@ -92,7 +92,7 @@ def curve() -> BSplineData:
 
 def curve_sample() -> CurveSampleData:
     """points beside a spine with stacked ends and Maya's knots, projected onto it"""
-    spine = BSplineData.from_edit_points(arm(), collapse=(2, 2))
+    spine = NurbsCurveData.from_edit_points(arm(), collapse=(2, 2))
     offsets = np.array(
         [
             [0.0, 0.5, 0.0],
@@ -105,9 +105,9 @@ def curve_sample() -> CurveSampleData:
     return spine.sample(arm(5) + offsets)
 
 
-def patch() -> BSplinePatchData:
+def patch() -> NurbsSurfaceData:
     """a tube closed in u, open in v, every setting changed"""
-    return BSplinePatchData(
+    return NurbsSurfaceData(
         points             = tube(),
         degree_u           = 2,
         degree_v           = 3,
@@ -124,7 +124,7 @@ def patch() -> BSplinePatchData:
 
 def patch_sample() -> PatchSampleData:
     """points inside and outside a tube, projected onto it"""
-    surface = BSplinePatchData(
+    surface = NurbsSurfaceData(
         points=tube(), degree_u=2, degree_v=3, periodic_u=True, periodic_v=False
     )
     queries = np.array(
@@ -135,7 +135,7 @@ def patch_sample() -> PatchSampleData:
 
 def patch_raycast() -> PatchRaycastData:
     """rays down onto a sheet, one up into it from below, and one that misses (NaN)"""
-    surface = BSplinePatchData(
+    surface = NurbsSurfaceData(
         points=sheet(), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
     )
     origins = np.array(
@@ -187,9 +187,9 @@ def procrustes() -> ProcrustesData:
 
 
 EXAMPLES = {
-    BSplineData:       curve,
+    NurbsCurveData:    curve,
     CurveSampleData:   curve_sample,
-    BSplinePatchData:  patch,
+    NurbsSurfaceData:  patch,
     PatchSampleData:   patch_sample,
     PatchRaycastData:  patch_raycast,
     SaddleSampleData:  saddle_sample,

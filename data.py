@@ -669,6 +669,12 @@ def _read_npz(filename: str) -> dict:
 _MOVED_FROM     = "cgmath.geometry._base"
 _PLAIN_BUILTINS = frozenset(("complex", "set", "frozenset", "bytearray", "range", "slice"))
 
+# classes renamed since 3.2: a pickle saved before names the old one
+_RENAMED = {
+    ("cgmath.geometry.bspline", "BSplineData"): ("cgmath.geometry.bspline", "NurbsCurveData"),
+    ("cgmath.geometry.bspline_patch", "BSplinePatchData"): ("cgmath.geometry.bspline_patch", "NurbsSurfaceData"),
+}
+
 
 class _Unpickler(pickle.Unpickler):
     """
@@ -684,6 +690,7 @@ class _Unpickler(pickle.Unpickler):
             module = __name__
         if module == __name__ and name in ("_unpickle", "_unpickle_array", "Data", "DataList"):
             return globals()[name]
+        module, name = _RENAMED.get((module, name), (module, name))
         found = None
         if module.partition(".")[0] == "cgmath":
             found = importlib.import_module(module)
@@ -1873,11 +1880,17 @@ class Data:
 
     def __hash__(self):
         # the tree as a pickle holds it, numpy scalars as python ones and
-        # arrays as their bytes: a loaded copy hashes the same
+        # arrays as their bytes, less the fields == does not compare (a
+        # name, a shape's uuid): equal objects hash the same, a loaded copy too
+        cls   = type(self)
+        names = cls._saved_names()[0]
+        tree  = self.to_dict()
+        for name in cls.EQUALITY_TEST_IGNORE:
+            tree.pop(names.get(name, name), None)
         buffer       = io.BytesIO()
         pickler      = pickle.Pickler(buffer, protocol=4)
         pickler.fast = True
-        pickler.dump(_plain(self.to_dict()))
+        pickler.dump(_plain(tree))
         return hash(buffer.getvalue())
 
     def __eq__(self, other) -> bool:

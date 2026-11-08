@@ -115,8 +115,8 @@ Twenty-two names are re-exported from the package root.
 
 ```python
 from cgmath.geometry import (
-    BSplineData,
-    BSplinePatchData,
+    NurbsCurveData,
+    NurbsSurfaceData,
     CompactSkinData,
     Data,
     DataList,
@@ -582,13 +582,21 @@ print(cube.get_extent(per_face=True)[0].shape)  # (F, 3)
 
 print(cube.points4.shape)                       # (V, 4), homogeneous, w == 1
 print(cube.geometry.shape)                      # (F, max(counts)) -- alias of f2v
+```
 
-moved               = cube.copy()
-moved.matrix        = np.eye(4)
-moved.matrix[3, :3] = [10.0, 0.0, 0.0]     # row-major: translation in the last row
-print(moved.get_inverse_matrix()[3, :3])
-moved.to_identity()                        # bake matrix into points
-print(moved.points[0], moved.matrix[3, :3])
+A mesh holds no transform of its own: it is a shape (`ShapeData`), placed by
+the `TransformData` its `parent_uuid` names, and its points are in that
+transform's space. A mesh naming none sits at identity.
+
+```python
+from cgmath.hierarchy import HierarchyData, TransformData
+
+under = TransformData("under", translate=[10.0, 0.0, 0.0])
+rig   = HierarchyData([under])
+moved = cube.copy()
+moved.parent_uuid = under.uuid
+print(moved.world_matrix(rig)[3, :3])           # [10. 0. 0.]: where the mesh sits
+print(cube.world_matrix(rig)[3, :3])            # [0. 0. 0.]: no transform, identity
 ```
 
 ### Point arithmetic and booleans
@@ -1110,7 +1118,6 @@ b.points[:, 0] += 3.0
 meshes = MeshList([a, b])
 
 print([m.name for m in meshes], [m.point_count for m in meshes])
-meshes.to_identity()  # bake every object matrix
 meshes.merge()        # weld each mesh in place
 print([m.point_count for m in meshes])
 ```
@@ -1759,7 +1766,7 @@ rigid rotation plus one global uniform scale is applied.
 ### Build a curve
 
 ```python
-from cgmath.geometry import BSplineData
+from cgmath.geometry import NurbsCurveData
 
 cvs = np.array([
     [0.0, 0.0, 0.0],
@@ -1769,7 +1776,7 @@ cvs = np.array([
     [6.0, 1.0, 0.0],
 ])
 
-curve = BSplineData(points=cvs, degree=3, periodic=False)
+curve = NurbsCurveData(points=cvs, degree=3, periodic=False)
 
 print(curve.count)      # 5 control points
 print(curve.degree)     # 3
@@ -1784,12 +1791,12 @@ when given, is `float64` `(K,)`. A value of another shape raises `ValueError`;
 an empty one such as `[]` becomes the default's `(0, 3)`.
 
 ```python
-print(BSplineData(points=[]).points.shape)  # (0, 3), an empty cubic for fit()
+print(NurbsCurveData(points=[]).points.shape)  # (0, 3), an empty cubic for fit()
 
 try:
-    BSplineData(points=np.zeros(4))
+    NurbsCurveData(points=np.zeros(4))
 except ValueError as err:
-    print(err)  # BSplineData.points must have shape (N, D), got (4,)
+    print(err)  # NurbsCurveData.points must have shape (N, D), got (4,)
 ```
 
 ### Evaluate: points and tangents
@@ -1820,7 +1827,7 @@ print(np.round(p_before, 3), np.round(p_after, 3))
 ### Periodic (closed) curves
 
 ```python
-ring = BSplineData(points=cvs, degree=3, periodic=True)
+ring = NurbsCurveData(points=cvs, degree=3, periodic=True)
 print(ring.max_param)  # == count for a periodic curve
 print(ring.cv.shape)   # (5 + degree, 3) — first `degree` CVs wrapped
 
@@ -1841,7 +1848,7 @@ print(ring.periodic, ring.max_param)  # True 5    (count)
 
 ### `from_edit_points()` / `fit()` — a curve through points
 
-`BSplineData.from_edit_points(points)` builds the curve Maya's EP Curve
+`NurbsCurveData.from_edit_points(points)` builds the curve Maya's EP Curve
 Tool builds, which is also the spline IK curve `ikHandle` builds with
 `simplifyCurve=False`. Each point becomes an edit point, the spans are
 spaced by the distance between the points (kept in `knots`), and an open
@@ -1853,7 +1860,7 @@ curve's parameters, as in Maya: `kv` is Maya's knots and `domain` its
 point's `u`: in order, each on its own stretch of the curve. On a smooth
 chain `sample()` finds the same values, but it searches the whole curve, so
 on a tight fold or a point the chain passes twice it can pick another
-stretch. `BSplineData()` is an empty cubic, ready to fit.
+stretch. `NurbsCurveData()` is an empty cubic, ready to fit.
 
 `count` picks the control point count: `None` (default) keeps the curve's
 own (an empty curve takes Maya's), `-1` takes Maya's, an int sets it. More
@@ -1872,7 +1879,7 @@ joints = np.array([
     [5.0, 8.0, 1.0],
 ])
 
-chain = BSplineData.from_edit_points(joints)
+chain = NurbsCurveData.from_edit_points(joints)
 print(chain.count)            # 7 == len(joints) + degree - 1
 print(np.round(chain.kv, 3))  # Maya's knots: the distance along the joints
 print(chain.domain)           # (0.0, 10.10...): the parameter range
@@ -1887,7 +1894,7 @@ assert np.allclose(p, joints)
 assert np.all(np.isin(u, chain.kv))
 
 # a curve keeps its count: more CVs give the same curve, fewer a best fit
-dense = BSplineData(points=np.zeros((12, 3)))
+dense = NurbsCurveData(points=np.zeros((12, 3)))
 dense.fit(joints)
 print(dense.count)                    # 12
 dense.fit(joints, count=-1)           # Maya's count
@@ -1896,11 +1903,11 @@ dense.fit(joints, count=4, degree=2)  # any count and degree
 print(dense.count, dense.degree)      # 4 2
 
 # closed curves get one control point per point
-loop = BSplineData.from_edit_points(joints, periodic=True)
+loop = NurbsCurveData.from_edit_points(joints, periodic=True)
 print(loop.count)  # 5
 
 # knots in Maya's layout (MFnNurbsCurve.knots()) load as they are
-same = BSplineData(points=chain.points, knots=chain.kv)
+same = NurbsCurveData(points=chain.points, knots=chain.kv)
 assert same == chain
 ```
 
@@ -1917,7 +1924,7 @@ removes them. Stacked CVs come out exactly equal. Closed curves have no
 ends to stack.
 
 ```python
-spine = BSplineData.from_edit_points(joints, collapse=(2, 2))
+spine = NurbsCurveData.from_edit_points(joints, collapse=(2, 2))
 print(spine.count)                   # 7: pairs cost nothing on a cubic
 print(spine.get_collapsed_points())  # [[0, 1], [5, 6]]
 assert np.allclose(spine.compute(0.0)[1], 0.0)  # no tangent at the start
@@ -1932,12 +1939,12 @@ print(spine.count)                   # 8: a triple needs one more
 
 # stacking applies to control points: a repeated edit point raises
 try:
-    BSplineData.from_edit_points(np.vstack([joints[:1], joints]))
+    NurbsCurveData.from_edit_points(np.vstack([joints[:1], joints]))
 except ValueError as error:
     print(error)  # ...points 0 and 1 share a position; ...pass collapse=(2, 0) instead
 
 # every run of neighbouring CVs within tol, anywhere on the curve
-print(BSplineData(points=[[0, 0, 0], [0, 0, 0], [1, 0, 0], [2, 0, 0]]).get_collapsed_points())
+print(NurbsCurveData(points=[[0, 0, 0], [0, 0, 0], [1, 0, 0], [2, 0, 0]]).get_collapsed_points())
 # [[0, 1]]
 ```
 
@@ -1953,7 +1960,7 @@ evenly. Called bare it changes nothing and refreshes the caches. It isn't
 Maya's `rebuildCurve`.
 
 ```python
-spine = BSplineData.from_edit_points(joints, collapse=(2, 2))
+spine = NurbsCurveData.from_edit_points(joints, collapse=(2, 2))
 print(spine.rebuild(count=12) < 1e-12)  # True: more CVs, the same shape
 print(spine.get_collapsed_points())     # [[0, 1], [10, 11]]: stacks kept
 
@@ -1961,7 +1968,7 @@ moved = spine.rebuild(count=5)          # fewer CVs: closest shape
 print(round(moved, 3))  # how far it moved
 print(spine.domain)     # (0.0, 10.10...): same range
 
-flat = BSplineData.from_edit_points(joints)
+flat = NurbsCurveData.from_edit_points(joints)
 flat.rebuild(count=6, knots="even")  # evenly spaced knots, same range
 print(np.round(np.diff(np.unique(flat.kv)), 3))
 
@@ -1985,7 +1992,7 @@ space. With `uniform=True` `u` runs `[0, 1]` and equal steps in `u` are
 equal steps *along the curve*.
 
 ```python
-arc  = BSplineData(points=cvs.copy(), degree=3, periodic=False, uniform=True)
+arc  = NurbsCurveData(points=cvs.copy(), degree=3, periodic=False, uniform=True)
 
 even = arc.compute(np.linspace(0, 1, 9))[0]
 seg  = np.linalg.norm(np.diff(even, axis=0), axis=1)
@@ -1998,8 +2005,8 @@ Only meaningful on periodic curves: it shifts the parameter origin to the
 curve point nearest `points[0]`.
 
 ```python
-plain = BSplineData(points=cvs, degree=3, periodic=True)
-reg   = BSplineData(points=cvs, degree=3, periodic=True, registered=True)
+plain = NurbsCurveData(points=cvs, degree=3, periodic=True)
+reg   = NurbsCurveData(points=cvs, degree=3, periodic=True, registered=True)
 
 print(np.round(plain.compute(0.0)[0], 3))  # not at points[0]
 print(np.round(reg.compute(0.0)[0], 3))    # close to points[0]
@@ -2082,7 +2089,7 @@ assert not np.allclose(sd.points[0], sd2.points[0])
 ### Smoothing control points
 
 ```python
-noisy = BSplineData(
+noisy = NurbsCurveData(
     points=cvs + np.array([[0, 0.4, 0], [0, -0.4, 0], [0, 0.4, 0],
                            [0, -0.4, 0], [0, 0.4, 0]]),
     degree   = 3,
@@ -2115,7 +2122,7 @@ print(round(arc.total_length, 4))
 ### Pure-scipy evaluation
 
 ```python
-scipy_curve = BSplineData(points=cvs, degree=3, periodic=False, use_numba=False)
+scipy_curve = NurbsCurveData(points=cvs, degree=3, periodic=False, use_numba=False)
 assert np.allclose(scipy_curve.compute(u)[0], curve.compute(u)[0])
 ```
 
@@ -2130,12 +2137,12 @@ surface, so every parameter, degree and periodic flag comes in a `_u` / `_v`
 pair. Points that are not a 3-d array raise `ValueError`.
 
 ```python
-from cgmath.geometry import BSplinePatchData
+from cgmath.geometry import NurbsSurfaceData
 
 gx, gy = np.meshgrid(np.linspace(-2, 2, 5), np.linspace(-2, 2, 5), indexing="ij")
 grid = np.stack([gx, gy, 0.35 * (gx**2 - gy**2)], axis=-1)   # a saddle
 
-patch = BSplinePatchData(
+patch = NurbsSurfaceData(
     points=grid,
     degree_u=3, degree_v=3,
     periodic_u=False, periodic_v=False,
@@ -2303,7 +2310,7 @@ for z in np.linspace(-1, 1, 4):
     rings.append(np.stack([np.cos(theta), np.sin(theta), np.full_like(theta, z)], -1))
 tube_cv = np.stack(rings, axis=0)          # (4, 8, 3) → u = along, v = around
 
-tube = BSplinePatchData(
+tube = NurbsSurfaceData(
     points=tube_cv,
     degree_u=2, degree_v=3,
     periodic_u=False, periodic_v=True,
@@ -2328,7 +2335,7 @@ tube.close_u(); tube.open_u()
 ### Arc-length (`uniform_*`) and registration
 
 ```python
-uni = BSplinePatchData(
+uni = NurbsSurfaceData(
     points=grid,
     degree_u=3, degree_v=3,
     periodic_u=False, periodic_v=False,
@@ -2336,7 +2343,7 @@ uni = BSplinePatchData(
 )
 print(np.round(uni.evaluate(np.array([0.0, 0.5, 1.0]), np.array([0.5, 0.5, 0.5])), 3))
 
-reg = BSplinePatchData(
+reg = NurbsSurfaceData(
     points=tube_cv,
     degree_u=2, degree_v=3,
     periodic_u=False, periodic_v=True,
@@ -2350,7 +2357,7 @@ print(np.round(tube_cv[1, 0], 3))
 ### Smoothing and cache control
 
 ```python
-bumpy = BSplinePatchData(
+bumpy = NurbsSurfaceData(
     points=grid + np.random.default_rng(0).normal(0, 0.05, grid.shape),
     degree_u=3, degree_v=3,
     periodic_u=False, periodic_v=False,

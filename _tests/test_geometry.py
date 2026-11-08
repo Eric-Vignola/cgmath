@@ -8,8 +8,8 @@ import warnings
 
 import numpy as np
 from cgmath._tests._examples_geometry import mesh_data, uv_data
-from cgmath.geometry.bspline import BSplineData, _fit_knots
-from cgmath.geometry.bspline_patch import BSplinePatchData
+from cgmath.geometry.bspline import NurbsCurveData, _fit_knots
+from cgmath.geometry.bspline_patch import NurbsSurfaceData
 from cgmath.geometry.mesh import (
     AreaMethod,
     Axis,
@@ -1954,29 +1954,13 @@ class TestMesh(unittest.TestCase):
         self.assertEqual(mesh.hole_faces.dtype,     np.int32)
         self.assertEqual(mesh.normals.dtype,        np.float64)
         self.assertEqual(mesh.normal_indices.dtype, np.int32)
-        self.assertEqual(mesh.matrix.dtype,         np.float64)
 
     def test_field_wrong_size_raises(self):
-        """points are (N, 3), uvs (N, 2), the matrix 4x4"""
+        """points are (N, 3), uvs (N, 2)"""
         with self.assertRaises(ValueError):
             MeshData(points=np.zeros((3, 2)), indices=[0, 1, 2], counts=[3])
         with self.assertRaises(ValueError):
             UVData(points=np.zeros((3, 3)), indices=[0, 1, 2], counts=[3])
-        with self.assertRaises(ValueError):
-            self.box.copy().matrix = np.eye(3)
-
-    def test_matrix_default_per_mesh(self):
-        """meshes never share the default matrix, however they were made"""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            f = os.path.join(temp_dir, "box.npz")
-            self.box.save(f)
-            a = MeshData.load(f)
-            b = MeshData.load(f)
-
-        a.matrix[3, 0] = 7.0
-        self.assertEqual(b.matrix[3, 0], 0.0)
-        self.assertEqual(self.box.copy().matrix[3, 0], 0.0)
-        self.assertEqual(MeshData.matrix[3, 0], 0.0)
 
     # --- obj ---
 
@@ -2454,41 +2438,13 @@ class TestMesh(unittest.TestCase):
         used_verts = np.unique(new_mesh.indices)
         self.assertTrue(np.all(used_verts <= 3))
 
-    def test_to_identity(self):
-        """Test to_identity method"""
+    def test_a_mesh_holds_no_transform_of_its_own(self):
+        """a mesh is a shape: a TransformData it names places it"""
         mesh = self.box.copy()
-
-        # Modify the mesh transform
-        mesh.matrix = np.array([[2, 0, 0, 1],
-                                [0, 2, 0, 2],
-                                [0, 0, 2, 3],
-                                [0, 0, 0, 1]])
-
-        # Reset to identity
-        mesh.to_identity()
-
-        # Matrix should be identity
-        expected_identity = np.eye(4)
-        self.assertTrue(allclose(mesh.matrix, expected_identity))
-
-    def test_get_inverse_matrix(self):
-        """Test get_inverse_matrix method"""
-        mesh = self.box.copy()
-
-        # Set a non-identity matrix
-        mesh.matrix = np.array([[2, 0, 0, 1],
-                                [0, 3, 0, 2],
-                                [0, 0, 4, 3],
-                                [0, 0, 0, 1]], dtype=float)
-
-        # Get inverse
-        inv_matrix = mesh.get_inverse_matrix()
-
-        # Verify it returns a 4x4 matrix
-        self.assertEqual(inv_matrix.shape, (4, 4))
-
-        # Verify it's not the same as the original matrix
-        self.assertFalse(allclose(inv_matrix, mesh.matrix))
+        with self.assertRaises(AttributeError):
+            mesh.matrix = np.eye(4)
+        self.assertIsNone(mesh.parent_uuid)
+        self.assertTrue(allclose(mesh.world_matrix(None), np.eye(4)))
 
     def test_smooth_mesh(self):
         """Test smooth method on mesh"""
@@ -2852,7 +2808,7 @@ class TestBSpline(unittest.TestCase):
         super().setUp()
 
         # define a base shapes
-        self.open_curve = BSplineData(points=np.array([[-4.5505618 ,  0.        , -5.53772071],
+        self.open_curve = NurbsCurveData(points=np.array([[-4.5505618 , 0. , -5.53772071],
                                                        [-9.84751204,  0.        ,  1.44462279],
                                                        [-4.83948636,  0.        ,  5.00802568],
                                                        [ 4.30979133,  0.        ,  6.21187801],
@@ -2861,7 +2817,7 @@ class TestBSpline(unittest.TestCase):
                                       degree=3,
                                       periodic=False)
 
-        self.closed_curve = BSplineData(points=np.array([[-4.5505618 ,  0.        , -5.53772071],
+        self.closed_curve = NurbsCurveData(points=np.array([[-4.5505618 , 0. , -5.53772071],
                                                          [-9.84751204,  0.        ,  1.44462279],
                                                          [-4.83948636,  0.        ,  5.00802568],
                                                          [ 4.30979133,  0.        ,  6.21187801],
@@ -2873,7 +2829,7 @@ class TestBSpline(unittest.TestCase):
     def test_bytes(self):
         obj1 = self.open_curve.copy()
         b    = obj1.to_bytes()
-        obj2 = BSplineData.from_bytes(b)
+        obj2 = NurbsCurveData.from_bytes(b)
         self.assertTrue(obj1 == obj2)
 
     def test_serialize(self):
@@ -2896,7 +2852,7 @@ class TestBSpline(unittest.TestCase):
             obj1.save(f)
 
             # load obj2 from file
-            obj2 = BSplineData.load(f)
+            obj2 = NurbsCurveData.load(f)
 
             # confirm obj2 has no cached data, before == builds it
             self.assertTrue(obj2._kv is None)
@@ -2919,7 +2875,7 @@ class TestBSpline(unittest.TestCase):
 
             # save the file using the ascii format
             obj1.save(f, mode='json')
-            obj2 = BSplineData.load(f)
+            obj2 = NurbsCurveData.load(f)
 
             # confirm they're identical, obj2 cold
             self.assertTrue(obj2._kv is None)
@@ -2930,7 +2886,7 @@ class TestBSpline(unittest.TestCase):
 
             # test npz
             obj1.save(f, mode='npz')
-            obj3 = BSplineData.load(f)
+            obj3 = NurbsCurveData.load(f)
 
             # confirm they're identical, obj3 cold
             self.assertTrue(obj3._kv is None)
@@ -3452,7 +3408,7 @@ class TestBSpline(unittest.TestCase):
 
 
 class TestBSplineFit(unittest.TestCase):
-    """BSplineData.fit(), stored knots, and the kernels that read them."""
+    """NurbsCurveData.fit(), stored knots, and the kernels that read them."""
 
     # a joint chain and the curve Maya 2025 builds for it:
     # ikHandle(solver="ikSplineSolver", simplifyCurve=False)
@@ -3495,7 +3451,7 @@ class TestBSplineFit(unittest.TestCase):
         return spline(u)
 
     def test_blank_curve(self):
-        curve = BSplineData()
+        curve = NurbsCurveData()
         self.assertEqual(curve.points.shape, (0, 3))
         self.assertEqual(curve.degree, 3)
         self.assertFalse(curve.periodic)
@@ -3505,10 +3461,10 @@ class TestBSplineFit(unittest.TestCase):
         self.assertEqual(curve.count, len(self.CHAIN) + 2)
 
         # the default points are not shared with the fitted curve
-        self.assertEqual(BSplineData().points.shape, (0, 3))
+        self.assertEqual(NurbsCurveData().points.shape, (0, 3))
 
     def test_matches_maya_spline_ik(self):
-        curve = BSplineData()
+        curve = NurbsCurveData()
         u     = curve.fit(self.CHAIN)
         self.assertTrue(np.allclose(curve.points, self.MAYA_CVS, atol=1e-9))
 
@@ -3524,7 +3480,7 @@ class TestBSplineFit(unittest.TestCase):
     def test_open_degrees(self):
         points = self.CHAIN[:8]
         for degree in range(1, 8):
-            curve = BSplineData(degree=degree)
+            curve = NurbsCurveData(degree=degree)
             curve.fit(points)
             self.assertEqual(curve.count, len(points) + degree - 1)
 
@@ -3544,7 +3500,7 @@ class TestBSplineFit(unittest.TestCase):
         for n in (7, 8):
             points = self.ring(n)
             for degree in range(1, 8):
-                curve = BSplineData(degree=degree, periodic=True)
+                curve = NurbsCurveData(degree=degree, periodic=True)
                 curve.fit(points)
                 self.assertEqual(curve.count, n)
 
@@ -3561,9 +3517,9 @@ class TestBSplineFit(unittest.TestCase):
 
     def test_periodic_drops_repeated_closing_point(self):
         points = self.ring(6)
-        curve  = BSplineData(periodic=True)
+        curve  = NurbsCurveData(periodic=True)
         curve.fit(points)
-        closed = BSplineData(periodic=True)
+        closed = NurbsCurveData(periodic=True)
         closed.fit(np.vstack([points, points[:1]]))
 
         self.assertEqual(closed.count, 6)
@@ -3571,10 +3527,10 @@ class TestBSplineFit(unittest.TestCase):
 
     def test_keep_count_more(self):
         for periodic, points in ((False, self.CHAIN), (True, self.ring(8))):
-            maya = BSplineData(periodic=periodic)
+            maya = NurbsCurveData(periodic=periodic)
             maya.fit(points)
             for count in (maya.count + 1, maya.count + 7):
-                curve = BSplineData(points=np.zeros((count, 3)), periodic=periodic)
+                curve = NurbsCurveData(points=np.zeros((count, 3)), periodic=periodic)
                 curve.fit(points)
                 self.assertEqual(curve.count, count)
 
@@ -3587,7 +3543,7 @@ class TestBSplineFit(unittest.TestCase):
     def test_keep_count_between(self):
         # fewer control points than Maya's, at least one per point
         for count in (len(self.CHAIN), len(self.CHAIN) + 1):
-            curve = BSplineData(points=np.zeros((count, 3)))
+            curve = NurbsCurveData(points=np.zeros((count, 3)))
             curve.fit(self.CHAIN)
             self.assertEqual(curve.count, count)
             self.assertTrue(np.allclose(curve.sample(self.CHAIN).distances, 0.0, atol=1e-9), count)
@@ -3596,7 +3552,7 @@ class TestBSplineFit(unittest.TestCase):
             self.assertTrue(np.allclose(ends, self.CHAIN[[0, -1]], atol=1e-12), count)
 
     def test_keep_count_fewer(self):
-        curve = BSplineData(points=np.zeros((6, 3)))
+        curve = NurbsCurveData(points=np.zeros((6, 3)))
         curve.fit(self.CHAIN)
         self.assertEqual(curve.count, 6)
 
@@ -3609,7 +3565,7 @@ class TestBSplineFit(unittest.TestCase):
 
     def test_count_argument(self):
         # -1 picks Maya's count, an int sets it, None keeps the curve's
-        curve = BSplineData(points=np.zeros((6, 3)))
+        curve = NurbsCurveData(points=np.zeros((6, 3)))
         curve.fit(self.CHAIN, count=-1)
         self.assertEqual(curve.count, len(self.CHAIN) + 2)
         self.assertTrue(np.allclose(curve.points, self.MAYA_CVS, atol=1e-9))
@@ -3620,7 +3576,7 @@ class TestBSplineFit(unittest.TestCase):
         self.assertEqual(curve.count, 8)
 
     def test_degree_argument(self):
-        curve = BSplineData()
+        curve = NurbsCurveData()
         curve.fit(self.CHAIN, degree=5)
         self.assertEqual((curve.degree, curve.count), (5, len(self.CHAIN) + 4))
 
@@ -3638,24 +3594,24 @@ class TestBSplineFit(unittest.TestCase):
             dict(periodic=True, uniform=True, registered=True),
         ):
             points = self.ring(8) if settings.get("periodic") else self.CHAIN
-            curve  = BSplineData.from_edit_points(points, **settings)
-            fitted = BSplineData(**{k: v for k, v in settings.items() if k != "collapse"})
+            curve  = NurbsCurveData.from_edit_points(points, **settings)
+            fitted = NurbsCurveData(**{k: v for k, v in settings.items() if k != "collapse"})
             fitted.fit(points, count=-1, collapse=settings.get("collapse"))
             tag = str(settings)
 
-            self.assertIsInstance(curve, BSplineData, tag)
+            self.assertIsInstance(curve, NurbsCurveData, tag)
             self.assertTrue(np.array_equal(curve.points, fitted.points), tag)
             self.assertTrue(np.array_equal(curve.knots, fitted.knots), tag)
             self.assertTrue(curve == fitted, tag)
 
-        spine = BSplineData.from_edit_points(self.CHAIN)
+        spine = NurbsCurveData.from_edit_points(self.CHAIN)
         self.assertTrue(np.allclose(spine.points, self.MAYA_CVS, atol=1e-9))
 
         # the fit sets the knots and the points
         with self.assertRaises(TypeError):
-            BSplineData.from_edit_points(self.CHAIN, knots=self.MAYA_KNOTS)
+            NurbsCurveData.from_edit_points(self.CHAIN, knots=self.MAYA_KNOTS)
         with self.assertRaises(TypeError):
-            BSplineData.from_edit_points(self.CHAIN, points=self.CHAIN)
+            NurbsCurveData.from_edit_points(self.CHAIN, points=self.CHAIN)
 
     def test_exact_fit_params_are_the_knots(self):
         # through the points, each point on a knot gets the knot's own value
@@ -3665,13 +3621,13 @@ class TestBSplineFit(unittest.TestCase):
             dict(count=14), dict(count=20), dict(collapse=(2, 2), count=17),
         )
         for kwargs in cases:
-            curve = BSplineData()
+            curve = NurbsCurveData()
             u     = curve.fit(self.CHAIN, **kwargs)
             self.assertTrue(np.all(np.isin(u, curve.kv)), kwargs)
             self.assertTrue(np.allclose(curve.compute(u)[0], self.CHAIN, atol=1e-12), kwargs)
 
         # odd degree periodic: also on the knots
-        loop = BSplineData(periodic=True)
+        loop = NurbsCurveData(periodic=True)
         u    = loop.fit(self.ring(8))
         self.assertTrue(np.all(np.isin(u, loop.kv)))
 
@@ -3685,7 +3641,7 @@ class TestBSplineFit(unittest.TestCase):
             (mid, r"points 2 and 3 share a position$"),
         ):
             with self.assertRaisesRegex(ValueError, message):
-                BSplineData.from_edit_points(points)
+                NurbsCurveData.from_edit_points(points)
 
     def test_fit_returns_sample_params(self):
         # every flag combination and count, on smooth input: fit's u is what
@@ -3695,7 +3651,7 @@ class TestBSplineFit(unittest.TestCase):
             for uniform in (False, True):
                 for registered in (False, True):
                     for count in counts:
-                        curve = BSplineData(
+                        curve = NurbsCurveData(
                             points     = np.zeros((count, 3)),
                             periodic   = periodic,
                             uniform    = uniform,
@@ -3717,7 +3673,7 @@ class TestBSplineFit(unittest.TestCase):
         for periodic, points in ((False, self.CHAIN), (True, self.ring(7))):
             for uniform in (False, True):
                 for registered in (False, True):
-                    curve = BSplineData(periodic=periodic, uniform=uniform, registered=registered)
+                    curve = NurbsCurveData(periodic=periodic, uniform=uniform, registered=registered)
                     found, _ = curve.compute(curve.fit(points))
                     tag = (periodic, uniform, registered)
                     self.assertTrue(np.allclose(found, points, atol=1e-9), tag)
@@ -3725,7 +3681,7 @@ class TestBSplineFit(unittest.TestCase):
     def test_fit_params_repeated_closing_point(self):
         # one u per input point; the closing point gets the first one's
         points = self.ring(6)
-        u      = BSplineData(periodic=True).fit(np.vstack([points, points[:1]]))
+        u      = NurbsCurveData(periodic=True).fit(np.vstack([points, points[:1]]))
         self.assertEqual(u.shape, (7,))
         self.assertEqual(u[-1], u[0])
 
@@ -3736,7 +3692,7 @@ class TestBSplineFit(unittest.TestCase):
             queries = points + rng.normal(scale=0.3, size=points.shape)
             for uniform in (False, True):
                 for registered in (False, True):
-                    curve = BSplineData(
+                    curve = NurbsCurveData(
                         points     = points,
                         periodic   = periodic,
                         uniform    = uniform,
@@ -3751,58 +3707,58 @@ class TestBSplineFit(unittest.TestCase):
                     self.assertTrue(np.allclose(back, found.points, atol=1e-9), tag)
 
         # u=0 on a registered periodic curve is still CV 0's Greville point
-        plain      = BSplineData(points=self.ring(8), periodic=True)
-        registered = BSplineData(points=self.ring(8), periodic=True, registered=True)
+        plain      = NurbsCurveData(points=self.ring(8), periodic=True)
+        registered = NurbsCurveData(points=self.ring(8), periodic=True, registered=True)
         greville   = np.mean(plain.kv[: plain.degree]) % plain.max_param
         self.assertTrue(np.allclose(registered.compute(0.0)[0], plain.compute(greville)[0]))
 
     def test_fit_keeps_callers_array(self):
         points = self.MAYA_CVS.copy()
-        curve  = BSplineData(points=points)
+        curve  = NurbsCurveData(points=points)
         curve.fit(self.CHAIN[::-1])
         self.assertTrue(np.array_equal(points, self.MAYA_CVS))
 
     def test_fit_errors(self):
         # one point
         with self.assertRaises(ValueError):
-            BSplineData().fit(self.CHAIN[:1])
+            NurbsCurveData().fit(self.CHAIN[:1])
 
         # a closed curve through two points
         with self.assertRaises(ValueError):
-            BSplineData(periodic=True).fit(self.CHAIN[:2])
+            NurbsCurveData(periodic=True).fit(self.CHAIN[:2])
 
         # a closed curve with fewer points than its degree
         with self.assertRaises(ValueError):
-            BSplineData(degree=5, periodic=True).fit(self.CHAIN[:4])
+            NurbsCurveData(degree=5, periodic=True).fit(self.CHAIN[:4])
 
         # two consecutive points at the same position
         with self.assertRaises(ValueError):
-            BSplineData().fit(np.vstack([self.CHAIN[:3], self.CHAIN[2:]]))
+            NurbsCurveData().fit(np.vstack([self.CHAIN[:3], self.CHAIN[2:]]))
 
         # a kept count too small for a cubic, or one set too small
         with self.assertRaises(ValueError):
-            BSplineData(points=np.zeros((3, 3))).fit(self.CHAIN)
+            NurbsCurveData(points=np.zeros((3, 3))).fit(self.CHAIN)
         with self.assertRaises(ValueError):
-            BSplineData().fit(self.CHAIN, count=3)
+            NurbsCurveData().fit(self.CHAIN, count=3)
 
         # a count that isn't a whole number
         for count in (2.5, "12", True):
             with self.assertRaises(ValueError):
-                BSplineData().fit(self.CHAIN, count=count)
+                NurbsCurveData().fit(self.CHAIN, count=count)
 
         # degree 0
         with self.assertRaises(ValueError):
-            BSplineData(degree=0).fit(self.CHAIN)
+            NurbsCurveData(degree=0).fit(self.CHAIN)
 
         # not an (N, dims) array
         with self.assertRaises(ValueError):
-            BSplineData().fit(np.zeros(3))
+            NurbsCurveData().fit(np.zeros(3))
 
     def test_knots_field(self):
         # Maya's own knots give Maya's curve
-        fitted = BSplineData()
+        fitted = NurbsCurveData()
         fitted.fit(self.CHAIN)
-        curve = BSplineData(points=self.MAYA_CVS, knots=self.MAYA_KNOTS)
+        curve = NurbsCurveData(points=self.MAYA_CVS, knots=self.MAYA_KNOTS)
         self.assertTrue(np.allclose(curve.kv, self.MAYA_KNOTS, atol=1e-12))
         self.assertTrue(np.allclose(curve.kv, fitted.kv, atol=1e-12))
 
@@ -3811,9 +3767,9 @@ class TestBSplineFit(unittest.TestCase):
 
         # wrong count, decreasing
         with self.assertRaises(ValueError):
-            BSplineData(points=self.MAYA_CVS, knots=self.MAYA_KNOTS[:-1]).kv
+            NurbsCurveData(points=self.MAYA_CVS, knots=self.MAYA_KNOTS[:-1]).kv
         with self.assertRaises(ValueError):
-            BSplineData(points=self.MAYA_CVS, knots=self.MAYA_KNOTS[::-1]).kv
+            NurbsCurveData(points=self.MAYA_CVS, knots=self.MAYA_KNOTS[::-1]).kv
 
     def test_explicit_uniform_knots_change_nothing(self):
         for periodic in (False, True):
@@ -3824,8 +3780,8 @@ class TestBSplineFit(unittest.TestCase):
                     periodic   = periodic,
                     registered = True,
                 )
-                plain = BSplineData(**settings)
-                knots = BSplineData(**settings, knots=plain.kv)
+                plain = NurbsCurveData(**settings)
+                knots = NurbsCurveData(**settings, knots=plain.kv)
                 u     = np.linspace(0, 1, 37) * plain.max_param
                 tag   = (periodic, degree)
 
@@ -3844,9 +3800,9 @@ class TestBSplineFit(unittest.TestCase):
         rng = np.random.default_rng(3)
         for periodic, degree, points in ((False, 3, self.CHAIN), (False, 5, self.CHAIN),
                                          (True, 3, self.ring(8)), (True, 2, self.ring(8))):
-            fast = BSplineData(degree=degree, periodic=periodic)
+            fast = NurbsCurveData(degree=degree, periodic=periodic)
             fast.fit(points)
-            slow = BSplineData(
+            slow = NurbsCurveData(
                 points    = fast.points,
                 degree    = degree,
                 periodic  = periodic,
@@ -3876,52 +3832,52 @@ class TestBSplineFit(unittest.TestCase):
         # scipy. The coarse search's tuning arguments are gone
         queries = self.CHAIN + np.random.default_rng(3).normal(scale=0.2, size=self.CHAIN.shape)
         for knots in (None, self.MAYA_KNOTS):
-            fast = BSplineData(points=self.MAYA_CVS, knots=knots).sample(queries)
-            slow = BSplineData(points=self.MAYA_CVS, knots=knots, use_numba=False).sample(queries)
+            fast = NurbsCurveData(points=self.MAYA_CVS, knots=knots).sample(queries)
+            slow = NurbsCurveData(points=self.MAYA_CVS, knots=knots, use_numba=False).sample(queries)
             tag  = knots is None
             self.assertTrue(np.array_equal(fast.params, slow.params), tag)
             for a, b in ((fast.points, slow.points), (fast.tangents, slow.tangents),
                          (fast.basis, slow.basis)):
                 self.assertTrue(np.allclose(a, b, atol=1e-12), tag)
 
-        curve = BSplineData(points=self.MAYA_CVS)
+        curve = NurbsCurveData(points=self.MAYA_CVS)
         for name in ("initial_samples", "max_newton_iters", "tolerance"):
             with self.assertRaises(TypeError):
                 curve.sample(queries, **{name: 10})
 
     def test_knots_serialize(self):
-        curve = BSplineData()
+        curve = NurbsCurveData()
         curve.fit(self.CHAIN)
         self.assertIn("knots", curve.to_dict())
-        self.assertNotIn("knots", BSplineData(points=self.MAYA_CVS).to_dict())
+        self.assertNotIn("knots", NurbsCurveData(points=self.MAYA_CVS).to_dict())
 
         with tempfile.TemporaryDirectory() as temp_dir:
             f = os.path.join(temp_dir, "curve")
             for mode in ("pkl", "json", "npz"):
                 curve.save(f, mode=mode)
-                loaded = BSplineData.load(f, mode)  # a name without an extension names no format
+                loaded = NurbsCurveData.load(f, mode)  # a name without an extension names no format
                 self.assertTrue(curve == loaded, mode)
                 self.assertTrue(np.allclose(loaded.kv, curve.kv), mode)
 
-        self.assertTrue(curve == BSplineData.from_bytes(curve.to_bytes()))
+        self.assertTrue(curve == NurbsCurveData.from_bytes(curve.to_bytes()))
         self.assertTrue(curve == curve.copy())
 
     def test_eq_compares_knots(self):
-        curve = BSplineData()
+        curve = NurbsCurveData()
         curve.fit(self.CHAIN)
-        self.assertFalse(curve == BSplineData(points=curve.points.copy()))
+        self.assertFalse(curve == NurbsCurveData(points=curve.points.copy()))
 
     def test_open_close_drop_knots(self):
-        curve = BSplineData()
+        curve = NurbsCurveData()
         curve.fit(self.CHAIN)
         curve.close()
         self.assertIsNone(curve.knots)
-        self.assertTrue(np.allclose(curve.kv, BSplineData(points=curve.points, periodic=True).kv))
+        self.assertTrue(np.allclose(curve.kv, NurbsCurveData(points=curve.points, periodic=True).kv))
 
         curve.fit(self.ring(6))
         curve.open()
         self.assertIsNone(curve.knots)
-        self.assertTrue(np.allclose(curve.kv, BSplineData(points=curve.points).kv))
+        self.assertTrue(np.allclose(curve.kv, NurbsCurveData(points=curve.points).kv))
 
 
 class TestBSplineSample(unittest.TestCase):
@@ -3964,17 +3920,17 @@ class TestBSplineSample(unittest.TestCase):
         # legs 0.01 and 0.001 apart: every joint is on the curve, at its own u
         for gap in (0.01, 0.001):
             joints = self.hairpin(gap)
-            curve  = BSplineData.from_edit_points(joints)
+            curve  = NurbsCurveData.from_edit_points(joints)
             found  = self.assert_closest(curve, joints, gap)
             self.assertTrue(np.all(found.distances < 1e-9), gap)
-            self.assertTrue(np.allclose(found.params, BSplineData().fit(joints), atol=1e-9), gap)
+            self.assertTrue(np.allclose(found.params, NurbsCurveData().fit(joints), atol=1e-9), gap)
             self.assert_closest(curve, self.near(curve, 2000, gap), gap)
 
     def test_helix(self):
         # 4 turns 0.031 apart, a best fit to 16 control points
         angles = np.linspace(0.0, 8.0 * np.pi, 64)
         helix  = np.column_stack([np.cos(angles), np.sin(angles), 0.005 * angles])
-        curve  = BSplineData()
+        curve  = NurbsCurveData()
         curve.fit(helix, count=16)
         self.assert_closest(curve, helix)
         self.assert_closest(curve, self.near(curve, 2000, 0.02))
@@ -3986,7 +3942,7 @@ class TestBSplineSample(unittest.TestCase):
             points = np.array([[3.0, 0.0, 0.0], [3.0, 2.0, 0.0], [0.0, -3.0, 0.0],
                                [-3.0, -3.0, 0.0]])[:, :dims]
             query = np.array([[2.9, -1.0, 0.0]])[:, :dims]
-            found = self.assert_closest(BSplineData(points=points), query, dims)
+            found = self.assert_closest(NurbsCurveData(points=points), query, dims)
             self.assertEqual(found.params[0], 0.0, dims)
             self.assertTrue(np.isclose(found.distances[0], np.sqrt(1.01)), dims)
 
@@ -3996,7 +3952,7 @@ class TestBSplineSample(unittest.TestCase):
         angles = 2 * np.pi * np.arange(8) / 8
         loop   = np.column_stack([3 * np.cos(angles), np.sin(3 * angles), 2 * np.sin(angles)])
         for registered in (False, True):
-            curve = BSplineData(points=loop, periodic=True, registered=registered)
+            curve = NurbsCurveData(points=loop, periodic=True, registered=registered)
             top   = curve.max_param
             u     = np.array([0.0, 1e-3, top - 1e-3, 1e-9, top - 1e-9])
             on, tangents = curve.compute(u)
@@ -4015,7 +3971,7 @@ class TestBSplineSample(unittest.TestCase):
         center = np.zeros((1, 3))
         for degree, registered, expected in ((1, False, 0.5), (2, False, 0.0), (2, True, 0.5),
                                              (3, False, 0.5), (3, True, 0.5)):
-            curve = BSplineData(points=square, degree=degree, periodic=True,
+            curve = NurbsCurveData(points=square, degree=degree, periodic=True,
                                 registered=registered)
             found = curve.sample(center)
             tag   = (degree, registered)
@@ -4023,7 +3979,7 @@ class TestBSplineSample(unittest.TestCase):
 
         # both ends of an arch, below it
         arch  = np.array([[-2.0, 0.0, 0.0], [-2.0, 2.0, 0.0], [2.0, 2.0, 0.0], [2.0, 0.0, 0.0]])
-        found = BSplineData(points=arch).sample(np.array([[0.0, -5.0, 0.0]]))
+        found = NurbsCurveData(points=arch).sample(np.array([[0.0, -5.0, 0.0]]))
         self.assertEqual(found.params[0], 0.0)
         self.assertEqual(found.distances[0], np.sqrt(29.0))
 
@@ -4047,7 +4003,7 @@ class TestBSplineSample(unittest.TestCase):
         ties = 0
         for points, degree, query in cases:
             for use_numba in (True, False):
-                curve = BSplineData(points=points, degree=degree, use_numba=use_numba)
+                curve = NurbsCurveData(points=points, degree=degree, use_numba=use_numba)
                 ends  = curve.compute(np.array([curve.min_param, curve.max_param]))[0]
                 gaps  = np.linalg.norm(ends - query, axis=1)
                 found = curve.sample(np.array([query]))
@@ -4067,7 +4023,7 @@ class TestBSplineSample(unittest.TestCase):
         # still searched, or the end would win
         bend = np.array([[-1.0, 0.0, 0.0], [-1.0, 1.0, 0.0], [0.5, 1.0, 0.0], [1.0, 0.0, 0.0]])
         for use_numba in (True, False):
-            curve = BSplineData(points=bend, degree=1, use_numba=use_numba)
+            curve = NurbsCurveData(points=bend, degree=1, use_numba=use_numba)
             for depth in (1.0, 1e5, 1e7):
                 found = curve.sample(np.array([[0.0, -depth, 0.0]]))
                 self.assertEqual(found.params[0], 0.0, (use_numba, depth))
@@ -4086,8 +4042,8 @@ class TestBSplineSample(unittest.TestCase):
         queries = rng.uniform(-1.2, 1.2, (500, 3))
         for settings in cases:
             tag  = str(settings)
-            fast = self.assert_closest(BSplineData(**settings), queries, tag)
-            slow = self.assert_closest(BSplineData(**settings, use_numba=False), queries, tag)
+            fast = self.assert_closest(NurbsCurveData(**settings), queries, tag)
+            slow = self.assert_closest(NurbsCurveData(**settings, use_numba=False), queries, tag)
             self.assertTrue(np.array_equal(fast.params, slow.params), tag)
 
     def test_2d_and_3d(self):
@@ -4095,7 +4051,7 @@ class TestBSplineSample(unittest.TestCase):
         rng = np.random.default_rng(2)
         for dims, count in ((2, 20), (3, 64)):
             for periodic in (False, True):
-                curve = BSplineData(points=np.cumsum(rng.normal(size=(count, dims)), axis=0),
+                curve = NurbsCurveData(points=np.cumsum(rng.normal(size=(count, dims)), axis=0),
                                     periodic=periodic)
                 on   = curve.compute(np.linspace(curve.min_param, curve.max_param, 2000))[0]
                 low  = on.min(axis=0) - 0.1 * np.ptp(on, axis=0)
@@ -4107,7 +4063,7 @@ class TestBSplineSample(unittest.TestCase):
     def test_queries_checked(self):
         # not finite, not the curve's dims, or so far out (1e155 here) that
         # a squared distance could overflow
-        curve = BSplineData(points=np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0],
+        curve = NurbsCurveData(points=np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0],
                                              [3.0, 1.0, 0.0]]))
         for queries in ([[np.nan, 0.0, 0.0]], [[np.inf, 0.0, 0.0]], [[1.0, 2.0]],
                         [[1e155, 0.0, 0.0]]):
@@ -4126,7 +4082,7 @@ class TestBSplineSample(unittest.TestCase):
                 broken       = points.copy()
                 broken[1, 1] = bad
                 with self.assertRaises(ValueError):
-                    BSplineData(points=broken, use_numba=use_numba).sample(points)
+                    NurbsCurveData(points=broken, use_numba=use_numba).sample(points)
 
     def test_huge_and_tiny_curves(self):
         # scaled by 1e160 or 1e-170, a curve's squared distances would
@@ -4135,10 +4091,10 @@ class TestBSplineSample(unittest.TestCase):
         points  = np.array([[1.0, 1.0, 0.0], [2.0, 0.0, 0.0], [3.0, 1.0, 0.0], [4.0, 0.0, 0.0]])
         queries = np.array([[5.0, 0.0, 0.0], [3.9, 0.1, 0.0], [2.5, -1e-3, 0.0]])
         for use_numba in (True, False):
-            found = BSplineData(points=points, use_numba=use_numba).sample(queries)
+            found = NurbsCurveData(points=points, use_numba=use_numba).sample(queries)
             for scale in (1e160, 1e-170):
                 tag    = (use_numba, scale)
-                curve  = BSplineData(points=points * scale, use_numba=use_numba)
+                curve  = NurbsCurveData(points=points * scale, use_numba=use_numba)
                 scaled = curve.sample(queries * scale)
                 on, tangents = curve.compute(scaled.params)
 
@@ -4176,7 +4132,7 @@ class TestBSplineKnotRange(unittest.TestCase):
 
     def curves(self, **kwargs):
         for name, maya in self.MAYA.items():
-            curve = BSplineData(
+            curve = NurbsCurveData(
                 points   = np.array(maya["points"]),
                 degree   = maya["degree"],
                 periodic = maya["periodic"],
@@ -4191,7 +4147,7 @@ class TestBSplineKnotRange(unittest.TestCase):
             self.assertTrue(np.allclose(curve.domain, maya["maya_domain"], atol=1e-12), name)
 
             # and they travel: the same knots build the same curve
-            again = BSplineData(curve.points, curve.degree, curve.periodic, knots=curve.kv)
+            again = NurbsCurveData(curve.points, curve.degree, curve.periodic, knots=curve.kv)
             self.assertTrue(again == curve, name)
 
     def test_points_and_derivatives_at_mayas_parameters(self):
@@ -4228,7 +4184,7 @@ class TestBSplineKnotRange(unittest.TestCase):
             self.assertTrue(np.allclose(back, found.points, atol=1e-9), name)
 
     def test_curves_without_knots_keep_spans(self):
-        curve = BSplineData(points=np.array(self.MAYA["open_own_knots_5_to_8"]["points"]))
+        curve = NurbsCurveData(points=np.array(self.MAYA["open_own_knots_5_to_8"]["points"]))
         self.assertEqual(curve.domain, (0.0, 3))
         self.assertEqual(curve.max_param, 3)
 
@@ -4242,7 +4198,7 @@ class TestBSplineStackedEnds(unittest.TestCase):
     ring       = staticmethod(TestBSplineFit.ring)
 
     def test_spine_pairs(self):
-        curve = BSplineData()
+        curve = NurbsCurveData()
         u     = curve.fit(self.CHAIN, collapse=(2, 2))
 
         # Maya's count and knots, through every joint
@@ -4259,7 +4215,7 @@ class TestBSplineStackedEnds(unittest.TestCase):
         self.assertEqual(curve.get_collapsed_points(), [[0, 1], [10, 11]])
 
     def test_refit_keeps_the_stacks(self):
-        curve = BSplineData()
+        curve = NurbsCurveData()
         curve.fit(self.CHAIN, collapse=(2, 2))
         u = curve.fit(self.CHAIN + [0.0, 1.0, 0.5])
         self.assertEqual(curve.count, len(self.CHAIN) + 2)
@@ -4280,7 +4236,7 @@ class TestBSplineStackedEnds(unittest.TestCase):
             (dict(degree=2, count=-1), n + 2, 2, [[0, 1], [10, 11]]),
         )
         for kwargs, count, degree, groups in cases:
-            curve = BSplineData()
+            curve = NurbsCurveData()
             curve.fit(self.CHAIN, collapse=(2, 2))
             u   = curve.fit(self.CHAIN, **kwargs)
             tag = str(kwargs)
@@ -4297,7 +4253,7 @@ class TestBSplineStackedEnds(unittest.TestCase):
 
     def test_stacked_end_replaces_mayas_end_rule(self):
         # a start pair zeroes the tangent there; the free end keeps C'' = 0
-        curve = BSplineData()
+        curve = NurbsCurveData()
         curve.fit(self.CHAIN, collapse=(2, 0))
         end = float(curve._max_param)
         self.assertTrue(np.allclose(self.derivative(curve, 0.0, 1), 0.0, atol=1e-12))
@@ -4311,14 +4267,14 @@ class TestBSplineStackedEnds(unittest.TestCase):
             self.assertTrue(np.allclose(self.derivative(curve, end, order), 0.0, atol=1e-9))
 
     def test_two_points(self):
-        curve = BSplineData()
+        curve = NurbsCurveData()
         u     = curve.fit(self.CHAIN[:2], collapse=(3, 3))
         self.assertEqual(curve.count, 6)
         self.assertEqual(curve.get_collapsed_points(), [[0, 1, 2], [3, 4, 5]])
         self.assertTrue(np.allclose(curve.compute(u)[0], self.CHAIN[:2], atol=1e-12))
 
     def test_degree_drop_caps_the_stacks(self):
-        curve = BSplineData()
+        curve = NurbsCurveData()
         curve.fit(self.CHAIN, collapse=(3, 3), count=-1)
         curve.fit(self.CHAIN, degree=2)
         self.assertEqual(curve.get_collapsed_points(), [[0, 1], [12, 13]])
@@ -4328,50 +4284,50 @@ class TestBSplineStackedEnds(unittest.TestCase):
     def test_get_collapsed_points(self):
         cv = np.array([[0, 0, 0], [0, 0, 0], [1, 0, 0], [2, 0, 0], [2, 0, 1e-7], [2, 0, 2e-7],
                        [3, 0, 0], [4, 0, 0]], dtype=float)
-        curve = BSplineData(points=cv)
-        self.assertEqual(curve.get_collapsed_points(),         [[0, 1], [3, 4, 5]])
-        self.assertEqual(curve.get_collapsed_points(tol=0.0),  [[0, 1]])
-        self.assertEqual(BSplineData().get_collapsed_points(), [])
+        curve = NurbsCurveData(points=cv)
+        self.assertEqual(curve.get_collapsed_points(),            [[0, 1], [3, 4, 5]])
+        self.assertEqual(curve.get_collapsed_points(tol=0.0),     [[0, 1]])
+        self.assertEqual(NurbsCurveData().get_collapsed_points(), [])
 
         # a periodic curve's run can cross the seam
-        loop = BSplineData(points=np.vstack([cv[1:], cv[:1]]), periodic=True)
+        loop = NurbsCurveData(points=np.vstack([cv[1:], cv[:1]]), periodic=True)
         self.assertEqual(loop.get_collapsed_points(), [[2, 3, 4], [7, 0]])
 
         # every control point in one run
-        self.assertEqual(BSplineData(points=np.zeros((5, 3))).get_collapsed_points(),
+        self.assertEqual(NurbsCurveData(points=np.zeros((5, 3))).get_collapsed_points(),
                          [[0, 1, 2, 3, 4]])
 
     def test_found_stacks(self):
         # a run longer than the degree, or covering every control point, isn't a stack
-        self.assertEqual(BSplineData(points=np.zeros((6, 3)))._end_stacks(None, 3), (0, 0))
-        self.assertEqual(BSplineData(points=np.zeros((3, 3)))._end_stacks(None, 3), (0, 0))
+        self.assertEqual(NurbsCurveData(points=np.zeros((6, 3)))._end_stacks(None, 3), (0, 0))
+        self.assertEqual(NurbsCurveData(points=np.zeros((3, 3)))._end_stacks(None, 3), (0, 0))
         cv = np.vstack([np.zeros((4, 3)), self.CHAIN[1:5]])
-        self.assertEqual(BSplineData(points=cv)._end_stacks(None, 3),     (0, 0))
-        self.assertEqual(BSplineData(points=cv[1:])._end_stacks(None, 3), (3, 0))
-        self.assertEqual(BSplineData(points=cv[1:])._end_stacks(None, 2), (2, 0))
+        self.assertEqual(NurbsCurveData(points=cv)._end_stacks(None, 3),     (0, 0))
+        self.assertEqual(NurbsCurveData(points=cv[1:])._end_stacks(None, 3), (3, 0))
+        self.assertEqual(NurbsCurveData(points=cv[1:])._end_stacks(None, 2), (2, 0))
 
     def test_errors(self):
-        curve = BSplineData()
+        curve = NurbsCurveData()
         for collapse in ((1, 0), (4, 0), (2,), "22", (2.5, 0), (True, 0), 2):
             with self.assertRaises(ValueError, msg=repr(collapse)):
                 curve.fit(self.CHAIN, collapse=collapse)
 
         # periodic curves have no ends
         with self.assertRaises(ValueError):
-            BSplineData(periodic=True).fit(self.ring(8), collapse=(2, 0))
-        BSplineData(periodic=True).fit(self.ring(8), collapse=(0, 0))
+            NurbsCurveData(periodic=True).fit(self.ring(8), collapse=(2, 0))
+        NurbsCurveData(periodic=True).fit(self.ring(8), collapse=(0, 0))
 
         # degree 1 can't stack
         with self.assertRaises(ValueError):
-            BSplineData(degree=1).fit(self.CHAIN, collapse=(2, 2))
+            NurbsCurveData(degree=1).fit(self.CHAIN, collapse=(2, 2))
 
         # too few control points for the stacks
         with self.assertRaises(ValueError):
-            BSplineData().fit(self.CHAIN[:2], collapse=(3, 3), count=5)
+            NurbsCurveData().fit(self.CHAIN[:2], collapse=(3, 3), count=5)
 
 
 class TestBSplineRebuild(unittest.TestCase):
-    """BSplineData.rebuild(): a new count, degree or stacks, closest to the old shape."""
+    """NurbsCurveData.rebuild(): a new count, degree or stacks, closest to the old shape."""
 
     CHAIN = TestBSplineFit.CHAIN
     ring  = staticmethod(TestBSplineFit.ring)
@@ -4385,7 +4341,7 @@ class TestBSplineRebuild(unittest.TestCase):
 
     @staticmethod
     def copy(curve):
-        return BSplineData(
+        return NurbsCurveData(
             points   = curve.points.copy(),
             degree   = curve.degree,
             periodic = curve.periodic,
@@ -4403,18 +4359,18 @@ class TestBSplineRebuild(unittest.TestCase):
     def test_bare_rebuild_refreshes_only(self):
         # after a hand edit, the curve reads the new control points
         for periodic in (False, True):
-            curve = BSplineData(points=self.CHAIN.copy(), periodic=periodic)
+            curve = NurbsCurveData(points=self.CHAIN.copy(), periodic=periodic)
             curve.compute(0.5)
             curve.points[0] = [1.0, 2.0, 3.0]
             self.assertEqual(curve.rebuild(), 0.0)
             self.assertIsNone(curve.knots)
 
-            fresh = BSplineData(points=curve.points.copy(), periodic=periodic)
+            fresh = NurbsCurveData(points=curve.points.copy(), periodic=periodic)
             u     = np.linspace(0, curve.max_param, 50)
             self.assertTrue(np.array_equal(curve.compute(u)[0], fresh.compute(u)[0]), periodic)
 
     def test_same_settings_change_nothing(self):
-        curve = BSplineData()
+        curve = NurbsCurveData()
         curve.fit(self.CHAIN, collapse=(2, 2))
         points, knots = curve.points.copy(), np.array(curve.knots)
         for kwargs in (dict(count=12), dict(degree=3), dict(collapse=(2, 2)), dict(count=12, degree=3)):
@@ -4423,7 +4379,7 @@ class TestBSplineRebuild(unittest.TestCase):
             self.assertTrue(np.array_equal(curve.knots, knots), kwargs)
 
         # even knots on a curve that already has them
-        plain = BSplineData(points=self.CHAIN.copy())
+        plain = NurbsCurveData(points=self.CHAIN.copy())
         self.assertEqual(plain.rebuild(knots="even"), 0.0)
         self.assertIsNone(plain.knots)
 
@@ -4433,7 +4389,7 @@ class TestBSplineRebuild(unittest.TestCase):
             (False, self.HOOK, (0, 0)),
             (True, self.ring(8), (0, 0)),
         ):
-            old = BSplineData(periodic=periodic)
+            old = NurbsCurveData(periodic=periodic)
             old.fit(points, collapse=collapse)
             for count in (old.count + 1, old.count + 6):
                 curve = self.copy(old)
@@ -4452,7 +4408,7 @@ class TestBSplineRebuild(unittest.TestCase):
     def test_fewer_control_points(self):
         for points in (self.CHAIN, self.HOOK):
             for collapse in ((0, 0), (2, 2)):
-                old = BSplineData()
+                old = NurbsCurveData()
                 old.fit(points, collapse=collapse)
                 for count in (5, 6, 8, 10):
                     best  = self.copy(old)
@@ -4477,7 +4433,7 @@ class TestBSplineRebuild(unittest.TestCase):
                         self.assertEqual(best.get_collapsed_points(), [[0, 1], [count - 2, count - 1]], tag)
 
     def test_even_knots(self):
-        old = BSplineData()
+        old = NurbsCurveData()
         old.fit(self.CHAIN)
         curve = self.copy(old)
         curve.rebuild(count=8, knots="even")
@@ -4485,7 +4441,7 @@ class TestBSplineRebuild(unittest.TestCase):
         self.assertEqual(curve.domain, old.domain)
 
     def test_degree(self):
-        old = BSplineData()
+        old = NurbsCurveData()
         old.fit(self.CHAIN, collapse=(2, 2))
         for degree in (2, 5):
             curve = self.copy(old)
@@ -4496,7 +4452,7 @@ class TestBSplineRebuild(unittest.TestCase):
 
     def test_add_stacks(self):
         # stacking an EP curve's ends moves it; fit() through the points instead
-        old = BSplineData()
+        old = NurbsCurveData()
         old.fit(self.CHAIN)
         curve = self.copy(old)
         moved = curve.rebuild(collapse=(2, 2))
@@ -4504,7 +4460,7 @@ class TestBSplineRebuild(unittest.TestCase):
         self.assertTrue(0.0 < moved < 1.0, moved)
 
     def test_periodic(self):
-        old = BSplineData(periodic=True)
+        old = NurbsCurveData(periodic=True)
         old.fit(self.ring(8))
         for kwargs in (dict(count=6), dict(degree=2), dict(count=6, knots="even")):
             curve = self.copy(old)
@@ -4516,14 +4472,14 @@ class TestBSplineRebuild(unittest.TestCase):
     def test_knot_range_kept(self):
         # a Maya curve with its own range keeps it
         cv    = np.array([[0, 0, 0], [1, 0, 0.5], [2, 1, 0], [3, 1, 1], [4, 0, 0], [5, 0.5, 1]], float)
-        curve = BSplineData(points=cv, knots=[5, 5, 5, 5.5, 7, 8, 8, 8])
+        curve = NurbsCurveData(points=cv, knots=[5, 5, 5, 5.5, 7, 8, 8, 8])
         curve.rebuild(count=9)
         self.assertEqual(curve.domain, (5.0, 8.0))
         self.assertEqual(curve.kv[0],  5.0)
         self.assertEqual(curve.kv[-1], 8.0)
 
     def test_errors(self):
-        curve = BSplineData()
+        curve = NurbsCurveData()
         curve.fit(self.CHAIN)
         for kwargs in (dict(count=-1), dict(count=3), dict(count=2.5), dict(degree=0),
                        dict(knots="maya"), dict(collapse=(4, 0)), dict(degree=5, count=5)):
@@ -4531,9 +4487,9 @@ class TestBSplineRebuild(unittest.TestCase):
                 self.copy(curve).rebuild(**kwargs)
 
         with self.assertRaises(ValueError):
-            BSplineData().rebuild(count=5)
+            NurbsCurveData().rebuild(count=5)
         with self.assertRaises(ValueError):
-            BSplineData(points=self.ring(8), periodic=True).rebuild(collapse=(2, 2))
+            NurbsCurveData(points=self.ring(8), periodic=True).rebuild(collapse=(2, 2))
 
 
 def closest_between(curve, point, lo, hi, per_span=64):
@@ -4600,7 +4556,7 @@ class TestBSplineBestFitParams(unittest.TestCase):
         The fitted curve, fit()'s u, the native u fit() made it from, and
         the native u of the partition search it started from
         """
-        curve = BSplineData(degree=degree, periodic=periodic)
+        curve = NurbsCurveData(degree=degree, periodic=periodic)
         u     = curve.fit(points, count=count, collapse=collapse)
         tol   = 1e-12 * max(1.0, float(np.abs(points).max()))
         seed  = _fit_knots(points, count, degree, periodic, tol, collapse)[1]
@@ -4662,7 +4618,7 @@ class TestBSplineBestFitParams(unittest.TestCase):
                 self.check(curve, case["points"], u, native, start, case["name"])
 
     def test_wrapper_checks_its_inputs(self):
-        curve = BSplineData.from_edit_points(self.CHAIN)
+        curve = NurbsCurveData.from_edit_points(self.CHAIN)
         args  = (self.CHAIN, np.linspace(0, curve._max_param, 10), curve._kv, curve._cv_f64, 3, False)
         self.assertEqual(ordered_closest_params(*args).shape, (10,))
         for bad in (
@@ -4713,7 +4669,7 @@ class TestBSplineControlPointParams(unittest.TestCase):
             count  = int(rng.integers(5, 14))
             degree = int(rng.choice([2, 3, 5])) if count > 6 else 3
             points = rng.uniform(-1, 1, size=(count, 3))
-            self.check(BSplineData(points=points, degree=degree), f"open {trial}")
+            self.check(NurbsCurveData(points=points, degree=degree), f"open {trial}")
 
     def test_random_periodic_curves(self):
         rng = np.random.default_rng(8)
@@ -4721,14 +4677,14 @@ class TestBSplineControlPointParams(unittest.TestCase):
             count  = int(rng.integers(5, 12))
             degree = int(rng.choice([2, 3]))
             points = rng.uniform(-1, 1, size=(count, 3))
-            curve  = BSplineData(points=points, degree=degree, periodic=True)
+            curve  = NurbsCurveData(points=points, degree=degree, periodic=True)
             self.check(curve, f"periodic {trial}")
 
     def test_one_spot_one_u(self):
         # two control points in one spot share their closest spot's u: the
         # values never decrease, but they can repeat
         points = np.array([[0, 0, 0], [1, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]], float)
-        curve  = BSplineData(points=points, degree=3)
+        curve  = NurbsCurveData(points=points, degree=3)
         u      = curve.control_point_params
         self.assertAlmostEqual(u[1], u[2], places=12)
         self.check(curve, "one spot")
@@ -6245,7 +6201,7 @@ class TestBezierSampling(unittest.TestCase):
         )
 
 
-class TestBSplinePatchData(unittest.TestCase):
+class TestNurbsSurfaceData(unittest.TestCase):
     def setUp(self):
         super().setUp()
         np.random.seed(42)
@@ -6257,19 +6213,19 @@ class TestBSplinePatchData(unittest.TestCase):
         zz   = np.sin(uu * 0.5) * np.cos(vv * 0.5)
         grid = np.stack([uu, vv, zz], axis=-1)
 
-        self.open_open = BSplinePatchData(
+        self.open_open = NurbsSurfaceData(
             points=grid.copy(), degree_u=3, degree_v=3,
             periodic_u=False, periodic_v=False)
 
-        self.closed_open = BSplinePatchData(
+        self.closed_open = NurbsSurfaceData(
             points=grid.copy(), degree_u=3, degree_v=3,
             periodic_u=True, periodic_v=False)
 
-        self.open_closed = BSplinePatchData(
+        self.open_closed = NurbsSurfaceData(
             points=grid.copy(), degree_u=3, degree_v=3,
             periodic_u=False, periodic_v=True)
 
-        self.closed_closed = BSplinePatchData(
+        self.closed_closed = NurbsSurfaceData(
             points=grid.copy(), degree_u=3, degree_v=3,
             periodic_u=True, periodic_v=True)
 
@@ -6288,7 +6244,7 @@ class TestBSplinePatchData(unittest.TestCase):
 
             # to_bytes / from_bytes round-trip
             b    = obj1.to_bytes()
-            obj2 = BSplinePatchData.from_bytes(b)
+            obj2 = NurbsSurfaceData.from_bytes(b)
             self.assertTrue(obj2._kv_u is None)
             self.assertTrue(obj1 == obj2)
 
@@ -6296,19 +6252,19 @@ class TestBSplinePatchData(unittest.TestCase):
                 # pkl round-trip
                 f = os.path.join(tmp, "test.pkl")
                 obj1.save(f)
-                obj3 = BSplinePatchData.load(f)
+                obj3 = NurbsSurfaceData.load(f)
                 self.assertTrue(obj3._kv_u is None)
                 self.assertTrue(obj1 == obj3)
 
                 # json round-trip
                 obj1.save(f, mode='json')
-                obj4 = BSplinePatchData.load(f)
+                obj4 = NurbsSurfaceData.load(f)
                 self.assertTrue(obj4._kv_u is None)
                 self.assertTrue(obj1 == obj4)
 
                 # npz round-trip
                 obj1.save(f, mode='npz')
-                obj5 = BSplinePatchData.load(f)
+                obj5 = NurbsSurfaceData.load(f)
                 self.assertTrue(obj5._kv_u is None)
                 self.assertTrue(obj1 == obj5)
 
@@ -6449,7 +6405,7 @@ class TestBSplinePatchData(unittest.TestCase):
     # -------------------------------------------------------------- #
 
     def test_registration(self):
-        patch_reg = BSplinePatchData(
+        patch_reg = NurbsSurfaceData(
             points=self.closed_closed.points.copy(),
             degree_u=3, degree_v=3,
             periodic_u=True, periodic_v=True,
@@ -6519,7 +6475,7 @@ class TestBSplinePatchData(unittest.TestCase):
             before = obj.compute(u, v)[0]  # builds the caches
             obj.smooth(n_u=2, n_v=2, polyorder=1)
 
-            fresh = BSplinePatchData(
+            fresh = NurbsSurfaceData(
                 points     = obj.points.copy(),
                 degree_u   = obj.degree_u,
                 degree_v   = obj.degree_v,
@@ -6942,7 +6898,7 @@ class TestBSplinePatchData(unittest.TestCase):
         v_vals = np.linspace(0, 1, 4)
         uu, vv = np.meshgrid(u_vals, v_vals, indexing='ij')
         grid_2d = np.stack([uu, vv], axis=-1)
-        patch_2d = BSplinePatchData(
+        patch_2d = NurbsSurfaceData(
             points=grid_2d, degree_u=2, degree_v=2,
             periodic_u=False, periodic_v=False,
         )
@@ -7031,7 +6987,7 @@ class TestBSplinePatchSample(unittest.TestCase):
     @staticmethod
     def random_patch(rng, periodic_u=False):
         count_u, count_v = rng.integers(4, 9, 2)
-        return BSplinePatchData(
+        return NurbsSurfaceData(
             points     = rng.uniform(-1, 1, size=(count_u, count_v, 3)),
             degree_u   = 3,
             degree_v   = 3,
@@ -7065,7 +7021,7 @@ class TestBSplinePatchSample(unittest.TestCase):
         rng = np.random.default_rng(4)
         x, y = np.meshgrid(np.linspace(-1, 1, 6), np.linspace(-1, 1, 5), indexing="ij")
         points = np.stack([x, y, 0.8 * x * y + 0.3 * x * x], axis=-1)
-        patch = BSplinePatchData(
+        patch = NurbsSurfaceData(
             points=points, degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
         )
         queries = rng.uniform(-2.5, 2.5, size=(400, 3))
@@ -7087,7 +7043,7 @@ class TestBSplinePatchSample(unittest.TestCase):
                 else:
                     y, z = (count_u - 1 - i) / (half - 1) * 5.0 + 0.2, 0.01
                 points[i, j] = (j / (count_v - 1) * 4.0, y, z)
-        patch = BSplinePatchData(
+        patch = NurbsSurfaceData(
             points=points, degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
         )
 
@@ -7101,7 +7057,7 @@ class TestBSplinePatchSample(unittest.TestCase):
     def test_wavy_patch(self):
         x, y = np.meshgrid(np.linspace(0, 4, 16), np.linspace(0, 4, 16), indexing="ij")
         z = 0.6 * np.sin(3 * x) * np.cos(3 * y)
-        patch = BSplinePatchData(
+        patch = NurbsSurfaceData(
             points=np.stack([x, y, z], -1), degree_u=3, degree_v=3,
             periodic_u=False, periodic_v=False,
         )
@@ -7113,7 +7069,7 @@ class TestBSplinePatchSample(unittest.TestCase):
         # and slides along a fold that holds the closest point
         rng = np.random.default_rng(1)
         for degree_v, periodic in ((1, False), (3, False), (1, True)):
-            patch = BSplinePatchData(
+            patch = NurbsSurfaceData(
                 points     = rng.uniform(-1, 1, size=(6, 7, 3)),
                 degree_u   = 1,
                 degree_v   = degree_v,
@@ -7140,10 +7096,10 @@ class TestBSplinePatchSample(unittest.TestCase):
         cone[:, :, 2] = np.linspace(1, -1, 7)[:, None]
         cone[0]       = [0.0, 0.0, 1.0]
         return (
-            BSplinePatchData(
+            NurbsSurfaceData(
                 points=sphere, degree_u=3, degree_v=3, periodic_u=False, periodic_v=True
             ),
-            BSplinePatchData(
+            NurbsSurfaceData(
                 points=cone, degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
             ),
         )
@@ -7156,7 +7112,7 @@ class TestBSplinePatchSample(unittest.TestCase):
         queries = rng.uniform([-0.3, -0.3, 0.7], [0.3, 0.3, 1.6], size=(200, 3))
         queries[100:, 2] *= -1
         for name, patch in zip(("sphere", "cone"), self.pole_patches()):
-            swapped = BSplinePatchData(
+            swapped = NurbsSurfaceData(
                 points     = np.transpose(patch.points, (1, 0, 2)),
                 degree_u   = 3,
                 degree_v   = 3,
@@ -7182,7 +7138,7 @@ class TestBSplinePatchSample(unittest.TestCase):
             ]
         )
         for use_numba in (True, False):
-            patch = BSplinePatchData(
+            patch = NurbsSurfaceData(
                 points     = points,
                 degree_u   = 3,
                 degree_v   = 3,
@@ -7207,7 +7163,7 @@ class TestBSplinePatchSample(unittest.TestCase):
             ]
         )
         patches = [
-            BSplinePatchData(
+            NurbsSurfaceData(
                 points     = points,
                 degree_u   = 3,
                 degree_v   = 3,
@@ -7274,7 +7230,7 @@ class TestBSplinePatchSample(unittest.TestCase):
                 ]
             )
             for use_numba in (True, False):
-                patch = BSplinePatchData(
+                patch = NurbsSurfaceData(
                     points     = points,
                     degree_u   = degree_u,
                     degree_v   = degree_v,
@@ -7297,7 +7253,7 @@ class TestBSplinePatchSample(unittest.TestCase):
         queries = rng.uniform(curve.min(0) - 0.5, curve.max(0) + 0.5, size=(1000, 3))
         for swap in (False, True):
             for use_numba in (True, False):
-                patch = BSplinePatchData(
+                patch = NurbsSurfaceData(
                     points     = np.transpose(points, (1, 0, 2)) if swap else points,
                     degree_u   = 2 if swap else 3,
                     degree_v   = 3 if swap else 2,
@@ -7333,7 +7289,7 @@ class TestBSplinePatchSample(unittest.TestCase):
                 points = np.array([[[x, y, z] for y, z in rows] for x in (0.0, 1.0)])
                 for swap in (False, True):
                     for use_numba in (True, False):
-                        patch = BSplinePatchData(
+                        patch = NurbsSurfaceData(
                             points     = np.transpose(points, (1, 0, 2)) if swap else points,
                             degree_u   = 1,
                             degree_v   = 1,
@@ -7356,7 +7312,7 @@ class TestBSplinePatchSample(unittest.TestCase):
             points[:, 2] = points[:, 1] + [0.0, 1e-14][k % 2] * rng.normal(size=(4, 3))
             queries      = rng.uniform(-1.4, 1.4, size=(300, 3))
             for use_numba in (True, False):
-                patch = BSplinePatchData(
+                patch = NurbsSurfaceData(
                     points     = points,
                     degree_u   = 1,
                     degree_v   = 1,
@@ -7370,7 +7326,7 @@ class TestBSplinePatchSample(unittest.TestCase):
     def test_no_queries(self):
         points = np.random.default_rng(6).uniform(-1, 1, size=(6, 5, 3))
         for use_numba in (True, False):
-            patch = BSplinePatchData(
+            patch = NurbsSurfaceData(
                 points     = points,
                 degree_u   = 3,
                 degree_v   = 3,
@@ -7389,10 +7345,10 @@ class TestBSplinePatchSample(unittest.TestCase):
         for periodic_u in (False, True):
             points  = rng.uniform(-1, 1, size=(6, 7, 3))
             queries = rng.uniform(-1.3, 1.3, size=(200, 3))
-            fast = BSplinePatchData(
+            fast = NurbsSurfaceData(
                 points=points, degree_u=3, degree_v=2, periodic_u=periodic_u, periodic_v=False
             )
-            slow = BSplinePatchData(
+            slow = NurbsSurfaceData(
                 points     = points,
                 degree_u   = 3,
                 degree_v   = 2,
@@ -7407,12 +7363,12 @@ class TestBSplinePatchSample(unittest.TestCase):
                 self.check(slow, queries)
 
         # folds (degree 1, across the seam too) and poles
-        linear = BSplinePatchData(
+        linear = NurbsSurfaceData(
             points=rng.uniform(-1, 1, size=(5, 6, 3)), degree_u=1, degree_v=1,
             periodic_u=True, periodic_v=True,
         )
         for name, fast in zip(("degree 1", "sphere", "cone"), (linear, *self.pole_patches())):
-            slow = BSplinePatchData(
+            slow = NurbsSurfaceData(
                 points     = fast.points,
                 degree_u   = fast.degree_u,
                 degree_v   = fast.degree_v,

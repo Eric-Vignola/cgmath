@@ -2486,7 +2486,7 @@ def _closest_points(points, kv, cv, degree, periodic, origin, chunk=16):
 #            2D Newton-Raphson closest point (surface)                         #
 # --------------------------------------------------------------------------- #
 #
-# BSplinePatchData.sample()'s search. From each seed, a Newton search on the
+# NurbsSurfaceData.sample()'s search. From each seed, a Newton search on the
 # squared distance that only ever takes a step that comes closer. An open
 # edge stops a parameter: one whose slope points out of the patch stays on
 # the edge while the other slides along it, the closest point of that edge's

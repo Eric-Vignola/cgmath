@@ -117,7 +117,7 @@ see the [`cgmath.transforms` CHEATSHEET](transforms/CHEATSHEET.md).
 from cgmath.hierarchy import HierarchyData, TransformData, TransformList, ClipData
 from cgmath.transforms import euler_to_matrix, matrix_point_multiply, quaternion_slerp
 from cgmath.geometry import MeshData, MeshList, UVData, UVList
-from cgmath.geometry import BSplineData, BSplinePatchData
+from cgmath.geometry import NurbsCurveData, NurbsSurfaceData
 from cgmath.geometry import MapData, GeomSubsetData, MorphData, MorphList
 from cgmath.geometry import SkinData, SkinList, CompactSkinData
 from cgmath.geometry import DeltaMushData, PatchRelaxData          # only these two
@@ -607,10 +607,10 @@ re-exported at `cgmath.geometry` level.
 which switches to arc length on `[0, 1]`.
 
 ```python
-from cgmath.geometry import BSplineData
+from cgmath.geometry import NurbsCurveData
 
 cvs   = np.array([[0.0, 0, 0], [1, 2, 0], [2, -2, 0], [3, 0, 0], [4, 1, 0]])
-curve = BSplineData(points=cvs, degree=3, periodic=False, uniform=True)
+curve = NurbsCurveData(points=cvs, degree=3, periodic=False, uniform=True)
 
 points, tangents = curve.compute(np.linspace(0.0, 1.0, 5))[:2]
 print(points.round(3))

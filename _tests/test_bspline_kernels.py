@@ -149,7 +149,7 @@ def patch(d, spans_u, spans_v, periodic_u, seed=8):
     """
     A bumpy cubic patch: a tube around y when periodic in u, a grid
     otherwise. Returns the knot vectors, the control points (wrapped along
-    u when periodic, as BSplinePatchData stores them) and the parameter
+    u when periodic, as NurbsSurfaceData stores them) and the parameter
     ranges.
     """
     rng  = np.random.default_rng(seed)

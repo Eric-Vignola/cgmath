@@ -50,11 +50,11 @@ def load_fbx(filename) -> FbxContents:
     # over no node is no clip
     clip = None if read["take"] is None or not len(skeleton) else _build_clip(read, skeleton, order)
     mesh = _build_mesh(read["mesh"])
-    uvs  = _build_uvs(read["mesh"])
+    uvs  = _build_uvs(read["mesh"], mesh)
     if read["skin"] is not None:
         bind, order = _build(read)
         _settle_bind(read, bind, order)
-        return FbxContents(bind, clip, mesh, _build_skin(read), uvs)
+        return FbxContents(bind, clip, mesh, _build_skin(read, mesh), uvs)
     if clip is not None:
         return FbxContents(None, clip, mesh, None, uvs)
     return FbxContents(skeleton if len(skeleton) else None, None, mesh, None, uvs)
@@ -679,9 +679,9 @@ def _build_mesh(read):
     )
 
 
-def _build_uvs(read):
-    """the UVList of the file's one mesh, in the file's order; None for no
-    mesh or no UV set"""
+def _build_uvs(read, mesh):
+    """the UVList of the file's one mesh, in the file's order, each set
+    naming the mesh by its uuid; None for no mesh or no UV set"""
     from cgmath.geometry.mesh import UVData, UVList
 
     if read is None or not read["uvs"]:
@@ -693,16 +693,17 @@ def _build_uvs(read):
                 points    = points,
                 counts    = np.asarray(read["counts"], dtype=np.int32).copy(),
                 indices   = indices,
-                mesh_name = read["name"],
+                mesh_uuid = mesh.uuid,
             )
             for label, points, indices in read["uvs"]
         ]
     )
 
 
-def _build_skin(read):
-    """the SkinData of the mesh's skin: its points by its influences, in
-    cluster order, a node reached by two clusters one column"""
+def _build_skin(read, mesh):
+    """the SkinData of the mesh's skin, naming the mesh by its uuid: its
+    points by its influences, in cluster order, a node reached by two
+    clusters one column"""
     from cgmath.geometry.skin_weights import SkinData
 
     skin    = read["skin"]
@@ -718,7 +719,7 @@ def _build_skin(read):
     weights = np.zeros((skin["count"], len(places)), dtype=np.float64)
     for cluster in skin["clusters"]:
         np.add.at(weights, (cluster["indices"], places.index(cluster["node"])), cluster["weights"])
-    return SkinData(weights=weights, influences=influences, name=skin["name"] or None)
+    return SkinData(weights=weights, influences=influences, name=skin["name"] or None, mesh_uuid=mesh.uuid)
 
 
 def _near(a, b, within: float) -> bool:

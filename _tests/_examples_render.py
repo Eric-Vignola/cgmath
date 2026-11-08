@@ -37,15 +37,12 @@ def cube_mesh(name: str = "hero_geo") -> MeshData:
             [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5],
         ]
     )
-    quads         = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (2, 3, 7, 6), (1, 2, 6, 5), (0, 4, 7, 3)]
-    matrix        = np.eye(4)
-    matrix[3, :3] = (0.0, 0.5, 0.0)
+    quads = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (2, 3, 7, 6), (1, 2, 6, 5), (0, 4, 7, 3)]
     mesh = MeshData(
         indices = np.array(quads, dtype=np.int32).ravel(),
         counts  = np.full(6, 4, dtype=np.int32),
         points  = points,
         name    = name,
-        matrix  = matrix,
     )
     mesh.set_normals(hard_edge_angle=30.0)  # face-varying: normals + normal_indices
     mesh.hole_faces   = np.zeros(0, dtype=np.int32)  # no holes, said explicitly

@@ -252,17 +252,11 @@ def _check_same(skeleton, clip) -> None:
 
 
 def _check_mesh(mesh, nodes) -> None:
-    """a mesh off identity, holding holes, normals that fit no face corner,
-    faces naming points it does not hold, or named after a node: refused"""
+    """a mesh holding holes, normals that fit no face corner, faces naming
+    points it does not hold, or named after a node: refused"""
     from cgmath.geometry.mesh import _corner_normals
 
-    name   = mesh.name or "mesh"
-    matrix = mesh.matrix
-    if matrix is not None and not np.array_equal(np.asarray(matrix, dtype=np.float64), np.eye(4)):
-        raise ValueError(
-            f"save_fbx: mesh {name!r} channel 'matrix' is {np.round(np.asarray(matrix), 12).tolist()}: {FORK} "
-            f"writes a mesh at identity"
-        )
+    name = mesh.name or "mesh"
     if mesh.hole_faces is not None and len(mesh.hole_faces):
         raise ValueError(f"save_fbx: mesh {name!r} holds {len(mesh.hole_faces)} polygon holes, which {FORK} does not write")
     counts  = np.asarray(mesh.counts, dtype=np.int64)

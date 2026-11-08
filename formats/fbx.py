@@ -3460,9 +3460,8 @@ class FbxExporter:
         Maya's exporter writes smooth normals) or one a corner; none when it
         has none. ``node`` is the ``FbxNode`` that takes the mesh, a group the
         skeleton wrote, whose own transform it keeps; None makes one at the
-        scene root, named after the mesh, with ``mesh.matrix`` as its
-        transform (identity for a mesh read from an fbx). Raises ValueError
-        for normals that fit neither
+        scene root, named after the mesh, at identity: a mesh holds no
+        transform of its own. Raises ValueError for normals that fit neither
         the vertices nor the corners, or a mesh holding polygon holes,
         which this writer does not write.
         """
@@ -3478,10 +3477,9 @@ class FbxExporter:
         normals, ids = _corner_normals(mesh)
 
         if node is None:
-            # the node's channels decomposed as a transform's matrix setter does
-            own        = TransformData(name)
-            own.matrix = np.asarray(mesh.matrix, dtype=np.float64)
-            node       = fbx.FbxNode.Create(self.manager, name)
+            # a node at identity, its channels a transform's defaults
+            own  = TransformData(name)
+            node = fbx.FbxNode.Create(self.manager, name)
             node.LclTranslation.Set(fbx.FbxDouble3(*own.translate))
             node.LclRotation.Set(fbx.FbxDouble3(*own.rotate))
             node.LclScaling.Set(fbx.FbxDouble3(*_fbx_maya_scale(own.scale)))

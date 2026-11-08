@@ -740,14 +740,14 @@ pass `uniform=True`, which switches to arc-length parameterisation where
 equal steps in `u` are equal steps *along* the curve.
 
 ```python
-from cgmath.geometry import BSplineData
+from cgmath.geometry import NurbsCurveData
 
 cv = np.array([
     [0, 0, 0], [1, 2, 0], [2, 1, 0],
     [3, 3, 0], [4, 0, 0], [5, 2, 0],
 ], dtype=float)
 
-curve = BSplineData(points=cv, degree=3, periodic=False, uniform=True)
+curve = NurbsCurveData(points=cv, degree=3, periodic=False, uniform=True)
 print(curve.count, curve.degree, curve.max_param, round(curve.total_length, 4))
 ```
 
@@ -788,17 +788,17 @@ print(np.round(curve.compute(0.0)[0], 4))
 
 ### Surfaces
 
-`BSplinePatchData` is the tensor-product version: every parameter, degree
+`NurbsSurfaceData` is the tensor-product version: every parameter, degree
 and periodic flag comes in a `_u` / `_v` pair.
 
 ```python
-from cgmath.geometry import BSplinePatchData
+from cgmath.geometry import NurbsSurfaceData
 
 nu = nv = 4
 gu, gv = np.meshgrid(np.linspace(0, 3, nu), np.linspace(0, 3, nv), indexing="ij")
 saddle = np.stack([gu, gv, (gu - 1.5) ** 2 * 0.2 - (gv - 1.5) ** 2 * 0.2], axis=-1)
 
-patch = BSplinePatchData(
+patch = NurbsSurfaceData(
     points=saddle, degree_u=3, degree_v=3,
     periodic_u=False, periodic_v=False,
 )

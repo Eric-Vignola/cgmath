@@ -14,8 +14,8 @@ import numpy as np
 from cgmath._tests._examples_curves import arm, sheet, strip, tube
 from cgmath._tests.test_roundtrip import FORMATS, assert_same
 from cgmath.constraints.procrustes import ProcrustesData
-from cgmath.geometry.bspline import BSplineData
-from cgmath.geometry.bspline_patch import BSplinePatchData
+from cgmath.geometry.bspline import NurbsCurveData
+from cgmath.geometry.bspline_patch import NurbsSurfaceData
 
 NOTHING = np.zeros((0, 3))
 
@@ -32,7 +32,7 @@ class TestEmptyRoundTrips(unittest.TestCase):
         assert_same(self, obj, obj.copy(), f"{type(obj).__name__}.copy()")
 
     def test_empty_curve(self):
-        curve = BSplineData(
+        curve = NurbsCurveData(
             degree             = 2,
             periodic           = True,
             uniform            = True,
@@ -44,13 +44,13 @@ class TestEmptyRoundTrips(unittest.TestCase):
         self.check(curve)
 
     def test_nothing_sampled_on_a_curve(self):
-        result = BSplineData.from_edit_points(arm()).sample(NOTHING)
+        result = NurbsCurveData.from_edit_points(arm()).sample(NOTHING)
         self.assertEqual(result.points.shape, (0, 3))
         self.assertEqual(result.basis.shape, (0, 8))
         self.check(result)
 
     def test_nothing_sampled_on_a_patch(self):
-        surface = BSplinePatchData(
+        surface = NurbsSurfaceData(
             points=tube(), degree_u=2, degree_v=3, periodic_u=True, periodic_v=False
         )
         result = surface.sample(NOTHING)
@@ -59,7 +59,7 @@ class TestEmptyRoundTrips(unittest.TestCase):
         self.check(result)
 
     def test_nothing_cast_at_a_patch(self):
-        surface = BSplinePatchData(
+        surface = NurbsSurfaceData(
             points=sheet(), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False
         )
         result = surface.raycast(NOTHING, NOTHING)

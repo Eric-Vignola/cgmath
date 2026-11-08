@@ -4,6 +4,7 @@ import numpy as np
 from cgmath.data import Array, Data
 from cgmath.geometry.bspline import SampleData
 from cgmath.geometry.utils import compute_basis
+from cgmath.hierarchy import ShapeData
 from cgmath.geometry.utils._numba._bspline import (
     _compute_basis_parallel,
     _evaluate_bspline_surface,
@@ -125,7 +126,7 @@ class PatchRaycastData(Data):
 
 
 @dataclass
-class BSplinePatchData(Data):
+class NurbsSurfaceData(ShapeData):
     """
     B-spline tensor-product surface.
 
@@ -941,7 +942,7 @@ class BSplinePatchData(Data):
 
     def compute_fast(self, u, v, _native=False):
         """
-        Always-numba positions + tangents. Mirrors ``BSplineData.compute_fast``.
+        Always-numba positions + tangents. Mirrors ``NurbsCurveData.compute_fast``.
 
         Parameters
         ----------

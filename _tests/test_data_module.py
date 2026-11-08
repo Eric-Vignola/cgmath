@@ -33,8 +33,8 @@ from cgmath.data import (
     DataList,
     ImmutableArray,
 )
-from cgmath.geometry.bspline import BSplineData
-from cgmath.geometry.bspline_patch import BSplinePatchData
+from cgmath.geometry.bspline import NurbsCurveData
+from cgmath.geometry.bspline_patch import NurbsSurfaceData
 from cgmath.geometry.mesh import MeshData, MeshList
 from cgmath.hierarchy import HierarchyData, TransformData
 
@@ -313,7 +313,7 @@ class TestFilesSavedBy2(unittest.TestCase):
             """
         )
         keys, array, modules = out.splitlines()[-3:]
-        self.assertEqual(keys,    "['counts', 'indices', 'name', 'points']")
+        self.assertEqual(keys,    "['counts', 'indices', 'name', 'points', 'uuid']")
         self.assertEqual(array,   "['__array__']")  # an array: its dtype, shape and bytes
         self.assertEqual(modules, "[]")
 
@@ -331,12 +331,12 @@ class TestOldPickles(unittest.TestCase):
         self.assertEqual((mesh.point_count, mesh.counts.tolist()), (8, [4] * 6))
         np.testing.assert_allclose(np.abs(mesh.points), 0.5)
 
-        curve = BSplineData.load(self.path("test_data_module.curve.pkl"))
-        self.assertIs(type(curve), BSplineData)
+        curve = NurbsCurveData.load(self.path("test_data_module.curve.pkl"))
+        self.assertIs(type(curve), NurbsCurveData)
         self.assertEqual((curve.points.shape, curve.degree, curve.periodic), ((8, 3), 3, True))
 
-        patch = BSplinePatchData.load(self.path("test_data_module.patch.pkl"))
-        self.assertIs(type(patch), BSplinePatchData)
+        patch = NurbsSurfaceData.load(self.path("test_data_module.patch.pkl"))
+        self.assertIs(type(patch), NurbsSurfaceData)
         self.assertEqual(patch.points.shape, (4, 8, 3))
         self.assertEqual((patch.degree_u, patch.degree_v), (3, 3))
         self.assertEqual((patch.periodic_u, patch.periodic_v), (False, True))
@@ -364,8 +364,8 @@ class TestOldPickles(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         for cls, name in (
             (MeshData, "test_data_module.mesh.pkl"),
-            (BSplineData, "test_data_module.curve.pkl"),
-            (BSplinePatchData, "test_data_module.patch.pkl"),
+            (NurbsCurveData, "test_data_module.curve.pkl"),
+            (NurbsSurfaceData, "test_data_module.patch.pkl"),
             (HierarchyData, "test_hierarchy.legacy_parent_node.pkl"),
         ):
             with self.subTest(name):

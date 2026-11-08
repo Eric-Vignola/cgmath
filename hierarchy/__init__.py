@@ -9,6 +9,7 @@ import it from :mod:`transforms`.
 """
 
 from cgmath.hierarchy.hierarchy import *  # noqa: F401,F403
+from cgmath.hierarchy.shape import ShapeData  # noqa: F401
 from cgmath.hierarchy.hierarchy import (  # noqa: F401
     FBX,
     _fbx_axis_turn,
