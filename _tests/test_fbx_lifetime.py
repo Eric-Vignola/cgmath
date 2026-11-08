@@ -192,7 +192,8 @@ class TestReaders(FbxFixtures):
         )
         for load in loaders:
             with self.subTest(load=load), balanced(self):
-                self.assertEqual(load(self.rig).name, ["body_geo", "root", "tip"])
+                # the node readers leave the mesh node out
+                self.assertEqual(load(self.rig).name, ["root", "tip"])
 
     def test_mesh_loaders(self):
         loaders = (

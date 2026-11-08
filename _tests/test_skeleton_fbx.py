@@ -122,6 +122,13 @@ def at_float32(values) -> np.ndarray:
     return np.asarray(values, dtype=np.float64).astype(np.float32).astype(np.float64)
 
 
+def near(got, want, err_msg="") -> None:
+    """``got`` within 1e-6 of the largest magnitude in ``want`` (at least 1):
+    what Maya's float32 skinCluster, bind pose and export hold"""
+    want = np.asarray(want, dtype=np.float64)
+    np.testing.assert_allclose(got, want, rtol=0, atol=1e-6 * max(1.0, float(np.abs(want).max())), err_msg=err_msg)
+
+
 def user_values(node) -> dict:
     return {name: spec.get("value") for name, spec in node.user_defined_attributes.items()}
 
@@ -784,9 +791,11 @@ class TestMaya(_InMaya):
 # one mesh and one skin: a skeleton bound to a mesh, a clip moving it
 
 # (name, parent, node type, translate, rotate, scale, joint orient, rotate
-# axis, rotate order, segment scale compensate), parents first; the worlds
-# stay within 8 units: Maya's skinCluster deforms in float32, its error
-# grows with the distance from the origin
+# axis, rotate order, segment scale compensate), parents first; lengths in
+# UNIT, a character's size (about 90 units tall): Maya's skinCluster deforms
+# in float32, so its points are compared within 1e-6 of the farthest
+# (near())
+UNIT  = 15.0
 BOUND = (
     ("root", None, "transform", (0.25, 0.5, -0.25), (0.0, 15.0, 0.0), (1.25, 1.25, 1.25), (0, 0, 0), (0, 0, 0), 0, False),
     ("hips", "root", "joint", (0.0, 1.0, 0.0), (5.0, 0.0, 0.0), (1, 1, 1), (0.0, 0.0, 90.0), (10.0, 0.0, 0.0), 1, False),
@@ -817,7 +826,7 @@ def bound() -> HierarchyData:
             node_type=kind,
             uuid=generate_uuid(),
             parent_uuid=uuids.get(parent),
-            translate=t,
+            translate=tuple(v * UNIT for v in t),
             rotate=r,
             scale=s,
             joint_orient=jo,
@@ -839,13 +848,13 @@ def motion(rig: HierarchyData) -> ClipData:
     clip = ClipData(rig, frames=TAKE, start_frame=START, fps=FPS, take="bend")
     f    = np.arange(TAKE, dtype=np.float64)[:, None]
     one  = np.ones((1, 3))
-    clip.frames["root"].translate    = np.hstack([0.25 + f * 0.025, 0.5 + f * 0.0, -0.25 - f * 0.01])
+    clip.frames["root"].translate    = np.hstack([0.25 + f * 0.025, 0.5 + f * 0.0, -0.25 - f * 0.01]) * UNIT
     clip.frames["root"].scale        = (1.25 + f * 0.02) * one
-    clip.frames["hips"].translate    = np.hstack([np.sin(f / 3.0) * 0.15, 1.0 + f * 0.01, -f * 0.005])
+    clip.frames["hips"].translate    = np.hstack([np.sin(f / 3.0) * 0.15, 1.0 + f * 0.01, -f * 0.005]) * UNIT
     clip.frames["hips"].rotate       = np.hstack([5.0 + f * 2.0, f * -1.5, np.cos(f) * 4.0])
     clip.frames["spine"].rotate      = np.hstack([f * 0.5, f * 0.0 + 1.0, 12.0 + f])
     clip.frames["spine"].scale       = (1.1 - f * 0.015) * one
-    clip.frames["arm_grp"].translate = np.hstack([f * 0.015, 0.5 + f * 0.0, 0.25 - f * 0.01])
+    clip.frames["arm_grp"].translate = np.hstack([f * 0.015, 0.5 + f * 0.0, 0.25 - f * 0.01]) * UNIT
     clip.frames["arm"].rotate        = np.hstack([f * 3.0, 10.0 + f * 0.0, -f * 2.0])
     clip.frames["arm"].scale         = (1.0 + f * 0.03) * one
     clip.frames["leg"].rotate        = np.hstack([f * -2.0, f * 1.0, f * 2.5])
@@ -892,7 +901,7 @@ def body() -> MeshData:
     normals = np.vstack([radial, np.array(extra)])
     return MeshData(
         name           = "body",
-        points         = at_float32(points),
+        points         = at_float32(points * UNIT),
         counts         = np.array(counts, dtype=np.int32),
         indices        = np.array(indices, dtype=np.int32),
         normals        = at_float32(normals),
@@ -1218,8 +1227,10 @@ class TestSkinRefusals(_Skinned):
                 path = self.write_bad(f"{name}.fbx", edit)
                 with self.assertRaisesRegex(error, message):
                     load_fbx(path)
-                with self.assertRaisesRegex(error, message):
-                    ClipData.load_fbx(path)
+                # the clip and node readers leave the meshes and skins out
+                good = load_fbx(self.path("good.fbx"))
+                self.assertSameClip(ClipData.load_fbx(path), good.clip)
+                self.assertEqual(HierarchyData.load_fbx(path).name, [row[0] for row in BOUND])
 
 
 def _matrix(matrix) -> np.ndarray:
@@ -1275,7 +1286,7 @@ class TestMayaSkin(_InMaya, _Skinned):
             index    = skin.indexForInfluenceObject(joint)
             prebind  = np.array(cmds.getAttr(f"{clusters[0]}.bindPreMatrix[{index}]")).reshape(4, 4)
             expected = np.linalg.inv(worlds[source["skeleton"].name.index(influences[k])])
-            np.testing.assert_allclose(prebind, expected, rtol=0, atol=1e-6, err_msg=influences[k])
+            near(prebind, expected, err_msg=influences[k])
 
         # THE SKIN DEFORMATION: cgmath's linear blend skinning of the re-read
         # mesh, by the re-read clip, bound to the re-read skeleton
@@ -1285,9 +1296,9 @@ class TestMayaSkin(_InMaya, _Skinned):
         for f in range(TAKE):
             cmds.currentTime(START + f)
             got = np.array([tuple(p)[:3] for p in om.MFnMesh(path).getPoints(om.MSpace.kWorld)])
-            np.testing.assert_allclose(got, wanted[f], rtol=0, atol=1e-5, err_msg=f"frame {START + f}")
+            near(got, wanted[f], err_msg=f"frame {START + f}")
         # the deformation is no stand-still: the points move by whole units
-        self.assertGreater(float(np.abs(wanted[-1] - source["mesh"].points).max()), 2.0)
+        self.assertGreater(float(np.abs(wanted[-1] - source["mesh"].points).max()), 2.0 * UNIT)
 
     def test_maya_imports_the_unskinned_mesh_at_identity_with_its_normals(self):
         import maya.api.OpenMaya as om
@@ -1338,10 +1349,10 @@ class TestMayaSkin(_InMaya, _Skinned):
             got, want = np.asarray(getattr(first.skeleton, channel)), np.asarray(getattr(rig, channel))
             if channel in ("rotate", "joint_orient", "rotate_axis"):
                 got, want = np.radians(got), np.radians(want)
-            np.testing.assert_allclose(got, want, rtol=0, atol=1e-6, err_msg=channel)
-        np.testing.assert_allclose(first.skeleton.world_matrix, rig.world_matrix, rtol=0, atol=1e-6)
+            near(got, want, err_msg=channel)
+        near(first.skeleton.world_matrix, rig.world_matrix)
         self.assertEqual(sorted(first.skin.influences), sorted(INFLUENCES))
         columns = [list(first.skin.influences).index(x) for x in INFLUENCES]
         np.testing.assert_allclose(first.skin.weights[:, columns], source["skin"].weights, rtol=0, atol=1e-6)
-        np.testing.assert_allclose(first.mesh.points, source["mesh"].points, rtol=0, atol=1e-6)
+        near(first.mesh.points, source["mesh"].points)
         self.assertEqual((first.clip.start_frame, first.clip.frame_count, first.clip.fps), (START, TAKE, FPS))

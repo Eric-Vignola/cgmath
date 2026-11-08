@@ -14942,10 +14942,11 @@ class ClipData(HierarchyData):
     @classmethod
     def load_fbx(cls, filename) -> "ClipData":
         """the active take of an fbx file, as ``cgmath.formats.load_fbx``
-        reads it; ValueError for a file holding no take"""
-        from cgmath.formats._load import load_fbx
+        reads it, its meshes and skins left out; ValueError for a file
+        holding no take"""
+        from cgmath.formats._load import load_take
 
-        clip = load_fbx(filename).clip
+        clip = load_take(filename)
         if clip is None:
             raise ValueError(f"{filename} holds no take")
         return clip

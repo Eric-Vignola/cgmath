@@ -55,11 +55,25 @@ def load_fbx(filename) -> FbxContents:
 
 def load_nodes(filename):
     """the HierarchyData of an fbx file's nodes at their own values, whether
-    it holds a take or not (the take left unread), a mesh node a transform"""
-    return _build(_open(filename, False))[0]
+    it holds a take or not (the take left unread), its meshes left out"""
+    return _build(_open(filename, False, SKIP))[0]
 
 
-def _open(filename, take: bool, meshes: bool = False) -> dict:
+def load_take(filename):
+    """the ClipData of an fbx file's active take, its meshes and skins left
+    out; None for a file holding no take"""
+    read = _open(filename, True, SKIP)
+    if read["take"] is None:
+        return None
+    skeleton, order = _build(read)
+    return _build_clip(read, skeleton, order)
+
+
+# _read's ``meshes``: the meshes left out, not read
+SKIP = "skip"
+
+
+def _open(filename, take: bool, meshes=False) -> dict:
     # imported here: the classes' modules import this one
     from cgmath.formats._fbx_io import open_fbx
     from cgmath.hierarchy.hierarchy import FBX
@@ -108,6 +122,20 @@ def _mesh_apart(found, fbx) -> tuple:
     kept  = [i for i in range(len(found)) if i != shapes[0]]
     place = {old: new for new, old in enumerate(kept)}
     return [(found[i][0], place.get(found[i][1], -1)) for i in kept], node
+
+
+def _meshes_dropped(found, fbx) -> list:
+    """``found`` less every mesh node; ValueError for one holding children"""
+    kind = fbx.FbxNodeAttribute.EType.eMesh
+    kept = []
+    for i, (node, _) in enumerate(found):
+        attribute = node.GetNodeAttribute()
+        if attribute is None or attribute.GetAttributeType() != kind:
+            kept.append(i)
+        elif node.GetChildCount():
+            raise ValueError(f"load_fbx: mesh {str(node.GetName())!r} holds children, which {FORK} does not read")
+    place = {old: new for new, old in enumerate(kept)}
+    return [(found[i][0], place.get(found[i][1], -1)) for i in kept]
 
 
 def _amatrix(matrix) -> np.ndarray:
@@ -222,10 +250,11 @@ def _read_skin(scene, node, shape, found, fbx) -> dict:
     }
 
 
-def _read(scene, fbx, take: bool = True, meshes: bool = False) -> dict:
+def _read(scene, fbx, take: bool = True, meshes=False) -> dict:
     """everything the build needs, out of the scene as python and numpy; the
     active take's curves unless not ``take``; the one mesh and its skin set
-    apart from the nodes with ``meshes``, else a mesh node is a transform"""
+    apart from the nodes with ``meshes``, every mesh left out with SKIP,
+    else a mesh node is a transform"""
     from cgmath.formats._fbx_io import typed
     from cgmath.hierarchy.hierarchy import (
         _FBX_ROTATE_ORDERS,
@@ -245,7 +274,9 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False) -> dict:
     shape   = None
     mesh    = None
     skin    = None
-    if meshes:
+    if meshes == SKIP:
+        found = _meshes_dropped(found, fbx)
+    elif meshes:
         found, shape = _mesh_apart(found, fbx)
     if shape is not None:
         mesh = _read_mesh(shape, fbx)
