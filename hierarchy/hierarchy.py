@@ -14945,7 +14945,7 @@ class ClipData(HierarchyData):
         reads it; ValueError for a file holding no take"""
         from cgmath.formats._load import load_fbx
 
-        _, clip = load_fbx(filename)
+        clip = load_fbx(filename).clip
         if clip is None:
             raise ValueError(f"{filename} holds no take")
         return clip

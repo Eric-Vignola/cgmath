@@ -27,7 +27,7 @@ NODE_TYPES = ("joint", "transform")
 ORDER_PROPERTY = "cgmath:index"
 
 
-def save_fbx(filename, skeleton=None, clip=None, as_ascii: bool = False) -> None:
+def save_fbx(filename, skeleton=None, clip=None, mesh=None, skin=None, as_ascii: bool = False) -> None:
     """writes one of ``skeleton``, a HierarchyData of joints and transforms,
     or ``clip``, a ClipData of joints and transforms; binary unless
     ``as_ascii``
@@ -49,40 +49,63 @@ def save_fbx(filename, skeleton=None, clip=None, as_ascii: bool = False) -> None
     passed as ``clip``), a clip that is not a ClipData: TypeError.
     """
     # imported here: the classes' modules import this one
+    from cgmath.geometry.mesh import MeshData, UVData
+    from cgmath.geometry.skin_weights import SkinData
     from cgmath.hierarchy import hierarchy
 
-    if skeleton is not None and clip is not None:
-        raise NotImplementedError(
-            f"save_fbx on {FORK}: a skeleton given with a clip is a bind pose, which comes with skins; "
-            f"pass clip= alone, or a skeleton alone"
-        )
-    if skeleton is None and clip is None:
-        raise TypeError("save_fbx takes a skeleton (a HierarchyData) or clip= (a ClipData)")
     if skeleton is not None and type(skeleton) is not hierarchy.HierarchyData:
         hint = ", pass it as clip=" if isinstance(skeleton, hierarchy.ClipData) else ""
         raise TypeError(f"save_fbx: the skeleton is a HierarchyData, not a {type(skeleton).__name__}{hint}")
     if clip is not None and not isinstance(clip, hierarchy.ClipData):
         raise TypeError(f"save_fbx: the clip is a ClipData, not a {type(clip).__name__}")
+    if mesh is not None and (not isinstance(mesh, MeshData) or isinstance(mesh, UVData)):
+        raise TypeError(f"save_fbx: the mesh is a MeshData, not a {type(mesh).__name__}")
+    if skin is not None and not isinstance(skin, SkinData):
+        raise TypeError(f"save_fbx: the skin is a SkinData, not a {type(skin).__name__}")
+    if skin is not None:
+        missing = [what for what, given in (("skeleton (a HierarchyData, the bind pose)", skeleton), ("mesh=", mesh)) if given is None]
+        if missing:
+            raise TypeError(f"save_fbx: a skin is written with its skeleton and its mesh; missing: {' and '.join(missing)}")
+    elif skeleton is not None and clip is not None:
+        raise NotImplementedError(
+            f"save_fbx on {FORK}: a skeleton given with a clip is a bind pose, which comes with skins; "
+            f"pass mesh= and skin= with them, or clip= alone, or a skeleton alone"
+        )
+    if skeleton is None and clip is None and mesh is None:
+        raise TypeError("save_fbx takes a skeleton (a HierarchyData) or clip= (a ClipData), and mesh= (a MeshData)")
     if hierarchy.FBX is None or hierarchy.FbxExporter is None:
         raise ImportError("fbx module not found")
 
     filename = os.path.expanduser(filename)
-    if clip is None:
+    written  = skeleton
+    if skeleton is not None:
         _check_skeleton(skeleton)
-        written = skeleton
-    else:
+    if clip is not None:
         _check_clip(clip)
-        written = clip.at(clip.start_frame)
+        if skeleton is None:
+            written = clip.at(clip.start_frame)
+        else:
+            _check_same(skeleton, clip)
+    if mesh is not None:
+        _check_mesh(mesh, written)
+    if skin is not None:
+        _check_skin(skin, mesh, skeleton)
 
     fbx = hierarchy.FBX
     with hierarchy.FbxExporter() as exporter:
-        exporter.add_skeleton(written)
-        nodes = [exporter._fbx_nodes[id(node)] for node in written]
+        nodes = []
+        if written is not None:
+            exporter.add_skeleton(written)
+            nodes = [exporter._fbx_nodes[id(node)] for node in written]
         for index, fbx_node in enumerate(nodes):
             prop = fbx.FbxProperty.Create(fbx_node, fbx.FbxIntDT, ORDER_PROPERTY, "")
             prop.Set(index)
         if clip is not None:
             _write_take(exporter, nodes, clip)
+        if mesh is not None:
+            mesh_node, shape = _write_mesh(exporter, mesh)
+            if skin is not None:
+                _write_skin(exporter, mesh_node, shape, skin, skeleton, nodes)
         exporter.export(path=filename, as_ascii=as_ascii)
 
 
@@ -176,6 +199,196 @@ def _check_clip(clip) -> None:
                 f"{channel} a node, which no curve animates"
             )
     refuse_values("save_fbx, the clip", nodes, clip.frames.shear, clip.frames.scale, frames)
+
+
+def _user_kinds(node) -> dict:
+    return {name: spec.get("attributeType", spec.get("dataType")) for name, spec in node.user_defined_attributes.items()}
+
+
+def _check_same(skeleton, clip) -> None:
+    """a clip whose nodes are not the skeleton's: refused, naming the first
+    node and what differs"""
+    nodes, held = list(skeleton), list(clip)
+    if [node.name for node in nodes] != [node.name for node in held]:
+        raise ValueError(
+            f"save_fbx: the clip's nodes {[node.name for node in held]} are not the skeleton's "
+            f"{[node.name for node in nodes]}, in its order"
+        )
+    parents, kept = parents_of(nodes), parents_of(held)
+    first = {
+        "joint_orient": np.asarray(clip.frames.joint_orient, dtype=np.float64)[0],
+        "rotate_axis":  np.asarray(clip.frames.rotate_axis, dtype=np.float64)[0],
+    }
+    for column, (node, other) in enumerate(zip(nodes, held)):
+        for channel, mine, theirs in (
+            ("parent", parents[column], kept[column]),
+            ("node_type", node.node_type, other.node_type),
+            ("rotate_order", node.rotate_order, other.rotate_order),
+            ("segment_scale_compensate", bool(node.segment_scale_compensate), bool(other.segment_scale_compensate)),
+            ("joint_orient", np.asarray(node.joint_orient, dtype=np.float64).tolist(), first["joint_orient"][column].tolist()),
+            ("rotate_axis", np.asarray(node.rotate_axis, dtype=np.float64).tolist(), first["rotate_axis"][column].tolist()),
+            ("user attributes", _user_kinds(node), _user_kinds(other)),
+        ):
+            if mine != theirs:
+                raise ValueError(
+                    f"save_fbx: node {node.name!r} channel {channel!r} is {theirs!r} in the clip, {mine!r} in the "
+                    f"skeleton: a clip with a skin animates the skeleton's own nodes"
+                )
+
+
+def _check_mesh(mesh, nodes) -> None:
+    """a mesh off identity, holding holes, normals that fit no face corner,
+    faces naming points it does not hold, or named after a node: refused"""
+    from cgmath.geometry.mesh import _corner_normals
+
+    name   = mesh.name or "mesh"
+    matrix = mesh.matrix
+    if matrix is not None and not np.array_equal(np.asarray(matrix, dtype=np.float64), np.eye(4)):
+        raise ValueError(
+            f"save_fbx: mesh {name!r} channel 'matrix' is {np.round(np.asarray(matrix), 12).tolist()}: {FORK} "
+            f"writes a mesh at identity"
+        )
+    if mesh.hole_faces is not None and len(mesh.hole_faces):
+        raise ValueError(f"save_fbx: mesh {name!r} holds {len(mesh.hole_faces)} polygon holes, which {FORK} does not write")
+    counts  = np.asarray(mesh.counts, dtype=np.int64)
+    indices = np.asarray(mesh.indices, dtype=np.int64)
+    if counts.sum() != indices.size or (indices.size and (indices.min() < 0 or indices.max() >= mesh.point_count)):
+        raise ValueError(f"save_fbx: mesh {name!r} has faces that name points it does not hold")
+    _corner_normals(mesh)
+    if nodes is not None and name in [node.name for node in nodes]:
+        raise ValueError(f"save_fbx: mesh {name!r} is the name of a node of the skeleton; name the mesh apart")
+
+
+def _check_skin(skin, mesh, skeleton) -> None:
+    """a skin whose influences are not nodes of the skeleton, or whose
+    weights are not the mesh's points by its influences: refused"""
+    label      = f"skin {skin.name!r}"
+    influences = [str(x) for x in skin.influences]
+    names      = [node.name for node in skeleton]
+    for problem, found in (
+        ("lists twice", sorted({x for x in influences if influences.count(x) > 1})),
+        ("names no node of the skeleton", [x for x in influences if x not in names]),
+        ("names several nodes of the skeleton", [x for x in influences if names.count(x) > 1]),
+    ):
+        if found:
+            raise ValueError(f"save_fbx: {label} {problem}: influences {found}")
+    weights = np.asarray(skin.weights)
+    rows    = weights.shape[0] if weights.ndim == 2 else None
+    if rows != mesh.point_count:
+        raise ValueError(
+            f"save_fbx: {label} channel 'weights' holds {rows} rows, mesh {mesh.name or 'mesh'!r} holds "
+            f"{mesh.point_count} points"
+        )
+    if weights.shape[1] != len(influences):
+        raise ValueError(
+            f"save_fbx: {label} channel 'weights' holds {weights.shape[1]} columns for its {len(influences)} influences"
+        )
+
+
+def _fbx_matrix(matrix, fbx):
+    """an FbxMatrix holding the (4, 4) row-vector ``matrix`` element for
+    element"""
+    held = fbx.FbxMatrix()
+    for row, values in enumerate(np.asarray(matrix, dtype=np.float64).tolist()):
+        for column, value in enumerate(values):
+            held.Set(row, column, value)
+    return held
+
+
+def _fbx_affine(matrix, fbx):
+    """an FbxAMatrix of the (4, 4) row-vector ``matrix``, scaled, turned and
+    moved; the sdk's affine matrix takes no element"""
+    from cgmath.transforms import matrix_to_euler
+
+    matrix = np.asarray(matrix, dtype=np.float64)
+    scale  = np.linalg.norm(matrix[:3, :3], axis=1)
+    if np.linalg.det(matrix[:3, :3]) < 0.0:
+        scale[2] = -scale[2]
+    turn         = np.eye(4)
+    turn[:3, :3] = matrix[:3, :3] / scale[:, None]
+    rotate       = np.degrees(matrix_to_euler(turn, 0))[0]
+    held         = fbx.FbxAMatrix()
+    held.SetTRS(fbx.FbxVector4(*matrix[3, :3], 1.0), fbx.FbxVector4(*rotate, 0.0), fbx.FbxVector4(*scale, 0.0))
+    return held
+
+
+def _write_mesh(exporter, mesh) -> tuple:
+    """(the node, the FbxMesh): one node at identity at the scene root, its
+    points, faces and normals, one a face corner through their indices"""
+    from cgmath.geometry.mesh import _corner_normals
+    from cgmath.hierarchy.hierarchy import FBX as fbx
+
+    scene = exporter.scene
+    name  = mesh.name or "mesh"
+    node  = fbx.FbxNode.Create(scene, name)
+    node.SetTransformationInheritType(fbx.FbxTransform.EInheritType.eInheritRSrs)
+    scene.GetRootNode().AddChild(node)
+
+    shape  = fbx.FbxMesh.Create(scene, f"{name}Shape")
+    points = np.asarray(mesh.points, dtype=np.float64).tolist()
+    shape.InitControlPoints(len(points))
+    for index, point in enumerate(points):
+        shape.SetControlPointAt(fbx.FbxVector4(*point, 1.0), index)
+    indices = np.asarray(mesh.indices, dtype=np.int64).tolist()
+    start   = 0
+    for size in np.asarray(mesh.counts, dtype=np.int64).tolist():
+        shape.BeginPolygon(-1, -1, -1, False)
+        for vertex in indices[start : start + size]:
+            shape.AddPolygon(vertex)
+        shape.EndPolygon()
+        start += size
+
+    normals, ids = _corner_normals(mesh)
+    if normals is not None:
+        element = shape.CreateElementNormal()
+        element.SetMappingMode(fbx.FbxLayerElement.EMappingMode.eByPolygonVertex)
+        element.SetReferenceMode(fbx.FbxLayerElement.EReferenceMode.eIndexToDirect)
+        direct = element.GetDirectArray()
+        for normal in np.asarray(normals, dtype=np.float64).tolist():
+            direct.Add(fbx.FbxVector4(*normal, 0.0))
+        held = element.GetIndexArray()
+        for index in np.asarray(ids, dtype=np.int64).tolist():
+            held.Add(index)
+    node.SetNodeAttribute(shape)
+    return node, shape
+
+
+def _write_skin(exporter, mesh_node, shape, skin, skeleton, nodes) -> None:
+    """one FbxSkin on ``shape``, a cluster an influence, and one bind pose
+    listing the mesh and every node of the skeleton at its world"""
+    from cgmath.hierarchy.hierarchy import FBX as fbx
+
+    scene    = exporter.scene
+    worlds   = np.asarray(skeleton.world_matrix, dtype=np.float64)
+    place    = {node.name: column for column, node in enumerate(skeleton)}
+    weights  = np.asarray(skin.weights, dtype=np.float64)
+    deformer = fbx.FbxSkin.Create(scene, skin.name or "")
+    deformer.SetSkinningType(fbx.FbxSkin.EType.eLinear)
+    for column, influence in enumerate(skin.influences):
+        at      = place[str(influence)]
+        cluster = fbx.FbxCluster.Create(scene, str(influence))
+        cluster.SetLink(nodes[at])
+        cluster.SetLinkMode(fbx.FbxCluster.ELinkMode.eNormalize)
+        rows = np.flatnonzero(weights[:, column])
+        for vertex, weight in zip(rows.tolist(), weights[rows, column].tolist()):
+            cluster.AddControlPointIndex(vertex, weight)
+        cluster.SetTransformMatrix(fbx.FbxAMatrix())
+        cluster.SetTransformLinkMatrix(_fbx_affine(worlds[at], fbx))
+        deformer.AddCluster(cluster)
+    shape.AddDeformer(deformer)
+
+    pose = fbx.FbxPose.Create(scene, "BindPose")
+    pose.SetIsBindPose(True)
+    pose.Add(mesh_node, _fbx_matrix(np.eye(4), fbx))
+    for at, fbx_node in enumerate(nodes):
+        pose.Add(fbx_node, _fbx_matrix(worlds[at], fbx))
+    scene.AddPose(pose)
+
+    # Maya's FBXExport locks a skinned mesh's translate, rotate and scale
+    flags = fbx.FbxPropertyFlags.EFlags
+    for prop in (mesh_node.LclTranslation, mesh_node.LclRotation, mesh_node.LclScaling):
+        for member in (flags.eLockedMember0, flags.eLockedMember1, flags.eLockedMember2):
+            prop.ModifyFlag(member, True)
 
 
 def _keys(curve, times, values, mode, fbx) -> None:

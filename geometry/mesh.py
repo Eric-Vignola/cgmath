@@ -2967,7 +2967,9 @@ class MeshData(Data):
         a vertex coming back face-varying (``normal_indices`` the mesh's
         ``indices``). See :func:`cgmath.formats.save_fbx`.
         """
-        raise NotImplementedError(f"MeshData.save_fbx: {_FORK} writes one skeleton or one take, no mesh")
+        from cgmath.formats import save_fbx
+
+        save_fbx(filename, mesh=self, as_ascii=as_ascii)
 
     @classmethod
     def load_usd(cls, filename: str, name: str | None = None) -> "MeshData":
@@ -4804,7 +4806,7 @@ class MeshList(DataList[MeshData]):
         mesh node each, as :meth:`MeshData.save_fbx` writes one, in the
         list's order; ValueError for two meshes of one name, before anything
         is written. See :func:`cgmath.formats.save_fbx`."""
-        raise NotImplementedError(f"MeshList.save_fbx: {_FORK} writes one skeleton or one take, no mesh")
+        raise NotImplementedError(f"MeshList.save_fbx: {_FORK} writes one mesh, a MeshData")
 
     @classmethod
     def load_glb(cls, filename: str, scale_factor: float = 100.0) -> "MeshList":

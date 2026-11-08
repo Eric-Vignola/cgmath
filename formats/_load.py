@@ -7,6 +7,7 @@ values, a bind pose left out, or the active take animating them.
 """
 
 import os
+from collections import namedtuple
 
 import numpy as np
 
@@ -15,38 +16,50 @@ from cgmath.formats._write import FORK, ORDER_PROPERTY, refuse_values
 # a parent scale this close to 1 leaves an inherit type nothing to change
 UNIT_SCALE = 1e-6
 
+# a node whose own values place it this close to its bind matrix keeps them
+BIND_AGREE = 1e-8
 
-def load_fbx(filename) -> tuple:
-    """``(None, clip)`` for an fbx file holding a take: a ClipData of its
-    active take; ``(hierarchy, None)`` for one holding none: a HierarchyData
-    of its nodes, joints and transforms, at their own values
+# a mesh node whose world is this close to identity is at identity
+MESH_IDENTITY = 1e-12
 
-    The clip is the active take (``ActiveAnimStackName``, else the first):
-    its span and frame rate, each channel constant where it has no curve
-    (the node's own value) or a curve of one key, animated where a curve
-    holds more, sampled on every frame of the span. A bind pose is left
-    out: no node takes its values from one.
+# a bind matrix the solved channels place a node this far from: refused
+BIND_SOLVED = 1e-6
 
-    Refused, ValueError naming node, channel and frame: a shear, a scale
-    that is not uniform on a node with children (the nodes' own values and
-    any frame), an inherit type a joint or transform can not hold where the
-    parent's scale is not 1, a pre rotation on a transform, pivots and
-    offsets. Several animation layers: NotImplementedError.
+# a skin's matrices and its bind pose this far apart, relative to the
+# largest element, disagree; Maya's FBXExport writes the cluster's in
+# float32
+SKIN_AGREE  = 1e-5
+
+FbxContents = namedtuple("FbxContents", ("skeleton", "clip", "mesh", "skin"))
+
+
+def load_fbx(filename) -> FbxContents:
+    """``(skeleton, clip, mesh, skin)``, None where the file holds none
+
+    Without a skin: ``(None, clip, mesh, None)`` for a file holding a take,
+    ``(hierarchy, None, mesh, None)`` for one holding none. With a skin: the
+    skeleton is its bind pose, the clip the take if any.
     """
-    read = _open(filename, True)
+    read = _open(filename, True, True)
     skeleton, order = _build(read)
-    if read["take"] is None:
-        return skeleton, None
-    return None, _build_clip(read, skeleton, order)
+    clip = None if read["take"] is None else _build_clip(read, skeleton, order)
+    mesh = _build_mesh(read["mesh"])
+    if read["skin"] is not None:
+        bind, order = _build(read)
+        _settle_bind(read, bind, order)
+        return FbxContents(bind, clip, mesh, _build_skin(read))
+    if clip is not None:
+        return FbxContents(None, clip, mesh, None)
+    return FbxContents(skeleton if len(skeleton) else None, None, mesh, None)
 
 
 def load_nodes(filename):
     """the HierarchyData of an fbx file's nodes at their own values, whether
-    it holds a take or not (the take left unread)"""
+    it holds a take or not (the take left unread), a mesh node a transform"""
     return _build(_open(filename, False))[0]
 
 
-def _open(filename, take: bool) -> dict:
+def _open(filename, take: bool, meshes: bool = False) -> dict:
     # imported here: the classes' modules import this one
     from cgmath.formats._fbx_io import open_fbx
     from cgmath.hierarchy.hierarchy import FBX
@@ -58,7 +71,7 @@ def _open(filename, take: bool) -> dict:
         raise FileNotFoundError(filename)
 
     with open_fbx(filename, FBX) as scene:
-        return _read(scene, FBX, take)
+        return _read(scene, FBX, take, meshes)
 
 
 def _walk(scene) -> list:
@@ -76,9 +89,143 @@ def _walk(scene) -> list:
     return found
 
 
-def _read(scene, fbx, take: bool = True) -> dict:
+def _mesh_apart(found, fbx) -> tuple:
+    """(``found`` less its one mesh node, that node or None);
+    NotImplementedError for several, ValueError for one holding children"""
+    kind = fbx.FbxNodeAttribute.EType.eMesh
+    shapes = [
+        i for i, (node, _) in enumerate(found)
+        if node.GetNodeAttribute() is not None and node.GetNodeAttribute().GetAttributeType() == kind
+    ]
+    if not shapes:
+        return found, None
+    if len(shapes) > 1:
+        names = [str(found[i][0].GetName()) for i in shapes]
+        raise NotImplementedError(f"load_fbx: the file holds {len(shapes)} meshes {names}; {FORK} reads one")
+    node = found[shapes[0]][0]
+    if node.GetChildCount():
+        raise ValueError(f"load_fbx: mesh {str(node.GetName())!r} holds children, which {FORK} does not read")
+    kept  = [i for i in range(len(found)) if i != shapes[0]]
+    place = {old: new for new, old in enumerate(kept)}
+    return [(found[i][0], place.get(found[i][1], -1)) for i in kept], node
+
+
+def _amatrix(matrix) -> np.ndarray:
+    """an FbxAMatrix or FbxMatrix as its (4, 4) row-vector layout"""
+    return np.array([[matrix.Get(row, column) for column in range(4)] for row in range(4)], dtype=np.float64)
+
+
+def _read_mesh(node, fbx) -> dict:
+    """the mesh node's points, faces and normals, one a face corner;
+    ValueError for one off identity, its geometric transform included, or
+    holding holes"""
+    from cgmath.formats._fbx_io import typed
+    from cgmath.geometry.mesh import (
+        _fbx_control_points,
+        _fbx_direct_array_to_ndarray,
+        _fbx_face_varying_indices,
+        _fbx_polygon_streams,
+    )
+
+    name   = str(node.GetName())
+    source = fbx.FbxNode.EPivotSet.eSourcePivot
+    offset = fbx.FbxAMatrix(node.GetGeometricTranslation(source), node.GetGeometricRotation(source), node.GetGeometricScaling(source))
+    world  = _amatrix(node.EvaluateGlobalTransform() * offset)
+    if np.abs(world - np.eye(4)).max() > MESH_IDENTITY:
+        raise ValueError(
+            f"load_fbx: mesh {name!r} channel 'matrix' is {np.round(world, 12).tolist()} (its world, the geometric "
+            f"transform included): {FORK} reads a mesh at identity"
+        )
+    shape = typed(node.GetNodeAttribute(), fbx.FbxMesh, fbx)
+    holes = [i for i in range(shape.GetPolygonCount()) if shape.GetPolyHoleInfo(i)]
+    if holes:
+        raise ValueError(f"load_fbx: mesh {name!r} holds {len(holes)} polygon holes, which {FORK} does not read")
+    indices, counts = _fbx_polygon_streams(shape)
+    normals, ids = None, None
+    if shape.GetElementNormalCount():
+        element = shape.GetElementNormal(0)
+        normals = _fbx_direct_array_to_ndarray(element.GetDirectArray(), dim=3)
+        ids     = _fbx_face_varying_indices(shape, element, counts)
+    return {
+        "name":           name,
+        "points":         _fbx_control_points(shape),
+        "counts":         counts,
+        "indices":        indices,
+        "normals":        normals,
+        "normal_indices": ids,
+        "shape":          shape,
+    }
+
+
+def _read_skin(scene, node, shape, found, fbx) -> dict:
+    """the one skin on the mesh: its clusters' nodes (places in ``found``),
+    weights and matrices, and the bind pose listing the mesh; None for no
+    skin, ValueError for several skins or several bind poses"""
+    from cgmath.formats._fbx_io import typed
+
+    name  = str(node.GetName())
+    kind  = fbx.FbxDeformer.EDeformerType.eSkin
+    count = shape.GetDeformerCount(kind)
+    if count == 0:
+        return None
+    if count > 1:
+        raise ValueError(f"load_fbx: mesh {name!r} holds {count} skin deformers; {FORK} reads one")
+    place    = {entry.GetUniqueID(): i for i, (entry, _) in enumerate(found)}
+    deformer = typed(shape.GetDeformer(0, kind), fbx.FbxSkin, fbx)
+    clusters = []
+    for k in range(deformer.GetClusterCount()):
+        cluster = deformer.GetCluster(k)
+        link    = cluster.GetLink()
+        if link is None:
+            continue
+        at = place.get(link.GetUniqueID())
+        if at is None:
+            raise ValueError(
+                f"load_fbx: skin {str(deformer.GetName())!r} cluster {k} links {str(link.GetName())!r}, no node of the "
+                f"skeleton"
+            )
+        linked, placed = fbx.FbxAMatrix(), fbx.FbxAMatrix()
+        cluster.GetTransformLinkMatrix(linked)
+        cluster.GetTransformMatrix(placed)
+        clusters.append(
+            {
+                "node":    at,
+                "indices": np.asarray(cluster.GetControlPointIndices(), dtype=np.int64),
+                "weights": np.asarray(cluster.GetControlPointWeights(), dtype=np.float64),
+                "link":    _amatrix(linked),
+                "mesh":    _amatrix(placed),
+            }
+        )
+
+    poses = [scene.GetPose(i) for i in range(scene.GetPoseCount())]
+    poses = [pose for pose in poses if pose.IsBindPose() and pose.Find(node) >= 0]
+    if len(poses) > 1:
+        raise ValueError(f"load_fbx: mesh {name!r} is listed by {len(poses)} bind poses; {FORK} reads one")
+    binds, mesh_bind = {}, None
+    for pose in poses:
+        for k in range(pose.GetCount()):
+            target = pose.GetNode(k)
+            if target is None:
+                continue
+            matrix = _amatrix(pose.GetMatrix(k))
+            if target.GetUniqueID() == node.GetUniqueID():
+                mesh_bind = matrix
+            elif target.GetUniqueID() in place:
+                binds[place[target.GetUniqueID()]] = matrix
+    return {
+        "name":      str(deformer.GetName()),
+        "mesh":      name,
+        "count":     shape.GetControlPointsCount(),
+        "clusters":  clusters,
+        "binds":     binds,
+        "mesh_bind": mesh_bind,
+    }
+
+
+def _read(scene, fbx, take: bool = True, meshes: bool = False) -> dict:
     """everything the build needs, out of the scene as python and numpy; the
-    active take's curves unless not ``take``"""
+    active take's curves unless not ``take``; the one mesh and its skin set
+    apart from the nodes with ``meshes``, else a mesh node is a transform"""
     from cgmath.formats._fbx_io import typed
     from cgmath.hierarchy.hierarchy import (
         _FBX_ROTATE_ORDERS,
@@ -95,7 +242,15 @@ def _read(scene, fbx, take: bool = True) -> dict:
     source  = fbx.FbxNode.EPivotSet.eSourcePivot
     inherit = fbx.FbxTransform.EInheritType
     found   = _walk(scene)
-    nodes   = []
+    shape   = None
+    mesh    = None
+    skin    = None
+    if meshes:
+        found, shape = _mesh_apart(found, fbx)
+    if shape is not None:
+        mesh = _read_mesh(shape, fbx)
+        skin = _read_skin(scene, shape, mesh.pop("shape"), found, fbx)
+    nodes = []
     for node, parent in found:
         name      = str(node.GetName())
         attribute = node.GetNodeAttribute()
@@ -165,7 +320,7 @@ def _read(scene, fbx, take: bool = True) -> dict:
     # a bind pose (FbxPose) is left out: no node takes its values from one
     settings = scene.GetGlobalSettings()
     record   = (_axis_words(*_fbx_scene_axes(scene, fbx)), float(settings.GetSystemUnit().GetScaleFactor()))
-    read     = {"nodes": nodes, "record": record, "take": None}
+    read     = {"nodes": nodes, "record": record, "take": None, "mesh": mesh, "skin": skin}
 
     # the active take, else the first
     criteria = fbx.FbxCriteria.ObjectType(fbx.FbxAnimStack.ClassId)
@@ -194,7 +349,23 @@ def _read(scene, fbx, take: bool = True) -> dict:
     count  = stack.GetMemberCount(layers)
     if count > 1:
         raise NotImplementedError(f"load_fbx: the take {str(stack.GetName())!r} holds {count} animation layers; {FORK} reads one")
-    layer  = typed(stack.GetMember(layers, 0), fbx.FbxAnimLayer, fbx) if count else None
+    layer = typed(stack.GetMember(layers, 0), fbx.FbxAnimLayer, fbx) if count else None
+
+    # the mesh stays at identity: a key on it elsewhere is refused
+    if shape is not None and layer is not None:
+        for channel, prop, still in (
+            ("translate", shape.LclTranslation, 0.0),
+            ("rotate", shape.LclRotation, 0.0),
+            ("scale", shape.LclScaling, 1.0),
+        ):
+            for component in "XYZ":
+                curve = typed(prop.GetCurve(layer, component, False), fbx.FbxAnimCurve, fbx)
+                keys  = [curve.KeyGetValue(k) for k in range(curve.KeyGetCount())] if curve is not None else []
+                if any(abs(value - still) > MESH_IDENTITY for value in keys):
+                    raise ValueError(
+                        f"load_fbx: mesh {mesh['name']!r} channel {channel!r} is keyed off identity in the take; "
+                        f"{FORK} reads a mesh at identity"
+                    )
 
     curves = []
     for (node, _), entry in zip(found, nodes):
@@ -414,3 +585,103 @@ def _refuse_inherit(entries, parents, worlds, scales, frames) -> None:
                 f"load_fbx: node {entry['name']!r} channel 'inherit type'{when} is {what} is not 1, "
                 f"{np.round(scale[off[0]], 9).tolist()}, which a joint or transform can not hold"
             )
+
+
+def _build_mesh(read):
+    """the MeshData of the file's one mesh, or None"""
+    from cgmath.geometry.mesh import MeshData
+
+    if read is None:
+        return None
+    return MeshData(
+        name           = read["name"],
+        points         = read["points"],
+        counts         = read["counts"],
+        indices        = read["indices"],
+        normals        = read["normals"],
+        normal_indices = read["normal_indices"],
+    )
+
+
+def _build_skin(read):
+    """the SkinData of the mesh's skin: its points by its influences, in
+    cluster order, a node reached by two clusters one column"""
+    from cgmath.geometry.skin_weights import SkinData
+
+    skin    = read["skin"]
+    entries = read["nodes"]
+    places  = []
+    for cluster in skin["clusters"]:
+        if cluster["node"] not in places:
+            places.append(cluster["node"])
+    influences = [entries[at]["name"] for at in places]
+    shared     = sorted({x for x in influences if influences.count(x) > 1})
+    if shared:
+        raise ValueError(f"load_fbx: skin {skin['name']!r} links several nodes named {shared}")
+    weights = np.zeros((skin["count"], len(places)), dtype=np.float64)
+    for cluster in skin["clusters"]:
+        np.add.at(weights, (cluster["indices"], places.index(cluster["node"])), cluster["weights"])
+    return SkinData(weights=weights, influences=influences, name=skin["name"] or None)
+
+
+def _near(a, b, within: float) -> bool:
+    return float(np.abs(np.asarray(a) - np.asarray(b)).max()) <= within
+
+
+def _settle_bind(read, bind, order) -> None:
+    """``bind``, the file's nodes at their own values, moved to the bind
+    pose: a node the bind pose (or its cluster) places where its own values
+    do keeps them, any other its channels solved from the bind matrix,
+    parents first. ValueError for a skin whose clusters and bind pose
+    disagree, a mesh bound off identity, or a bind matrix no channels hold"""
+    skin    = read["skin"]
+    entries = read["nodes"]
+    label   = f"skin {skin['name']!r}"
+    eye     = np.eye(4)
+    links   = {}
+    for cluster in skin["clusters"]:
+        links.setdefault(cluster["node"], cluster["link"])
+        if not _near(cluster["mesh"], eye, SKIN_AGREE):
+            raise ValueError(
+                f"load_fbx: {label} binds mesh {skin['mesh']!r} at {np.round(cluster['mesh'], 9).tolist()}: {FORK} "
+                f"reads a mesh bound at identity"
+            )
+    if skin["mesh_bind"] is not None and not _near(skin["mesh_bind"], eye, BIND_AGREE):
+        raise ValueError(
+            f"load_fbx: the bind pose places mesh {skin['mesh']!r} at {np.round(skin['mesh_bind'], 9).tolist()}: "
+            f"{FORK} reads a mesh bound at identity"
+        )
+    for at, matrix in links.items():
+        held = skin["binds"].get(at)
+        if held is not None and not _near(held, matrix, SKIN_AGREE * max(1.0, float(np.abs(held).max()))):
+            raise ValueError(
+                f"load_fbx: node {entries[at]['name']!r} channel 'bind pose' is {np.round(held, 9).tolist()} in the "
+                f"bind pose, {np.round(matrix, 9).tolist()} in {label}'s cluster"
+            )
+    binds = dict(links)
+    binds.update(skin["binds"])
+    column = {at: i for i, at in enumerate(order)}
+    # the file's order is depth first, each parent ahead of its children
+    for at in range(len(entries)):
+        matrix = binds.get(at)
+        if matrix is None:
+            continue
+        node = bind[column[at]]
+        if _near(node.world_matrix, matrix, BIND_AGREE):
+            continue
+        node.world_matrix = matrix
+        # a transform takes the shear a matrix holds: a float32 one's
+        # rounding is none
+        if np.any(node.shear != 0.0) and np.abs(node.shear).max() <= BIND_SOLVED:
+            node.shear = np.zeros(3)
+        if not _near(node.world_matrix, matrix, BIND_SOLVED * max(1.0, float(np.abs(matrix).max()))):
+            raise ValueError(
+                f"load_fbx: node {node.name!r} channel 'bind pose' is {np.round(matrix, 9).tolist()}, which its "
+                f"channels can not hold (a shear)"
+            )
+    refuse_values(
+        "load_fbx, the bind pose",
+        bind,
+        np.array([node.shear for node in bind]).reshape(1, -1, 3),
+        np.array([node.scale for node in bind]).reshape(1, -1, 3),
+    )
