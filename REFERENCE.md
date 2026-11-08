@@ -1,6 +1,6 @@
 # `cgmath` Reference
 
-Generated from the live code by `gen_reference.py` (kept outside this repository, in the maintainer's own tools folder; the repository's `tools/` holds only the Maya fixture generator) on 2026-09-24. Do not edit by hand; re-run the script after any API change.
+Generated from the live code by `gen_reference.py` (kept in the `tools/` folder beside the packages, not in this repository) on 2026-11-08. Do not edit by hand; re-run the script after any API change.
 
 Every public class, property, method, function and constant of the modules below, with the real signature (`inspect.signature`) and the first line of its docstring. To *learn* a subpackage read its `README.md` and `CHEATSHEET.md`; this page is for looking things up.
 
@@ -21,7 +21,7 @@ Conventions: matrices are row-major with translation at `M[3, :3]`; quaternions 
 - [`cgmath.geometry.skin_weights`](#cgmathgeometryskin_weights)
 - [`cgmath.geometry.bspline`](#cgmathgeometrybspline)
 - [`cgmath.geometry.bspline_patch`](#cgmathgeometrybspline_patch)
-- [`cgmath.geometry._saddle_surface`](#cgmathgeometry_saddle_surface)
+- [`cgmath.geometry._bilinear_surface`](#cgmathgeometry_bilinear_surface)
 - [`cgmath.geometry._cdt`](#cgmathgeometry_cdt)
 - [`cgmath.geometry.sdf`](#cgmathgeometrysdf)
 - [`cgmath.geometry.pack`](#cgmathgeometrypack)
@@ -35,6 +35,7 @@ Conventions: matrices are row-major with translation at `M[3, :3]`; quaternions 
 - [`cgmath.render.camera`](#cgmathrendercamera)
 - [`cgmath.render.raytracer`](#cgmathrenderraytracer)
 - [`cgmath.render.texture`](#cgmathrendertexture)
+- [`cgmath.formats`](#cgmathformats)
 - [`cgmath.formats.glb`](#cgmathformatsglb)
 - [`cgmath.formats.fbx`](#cgmathformatsfbx)
 - [`cgmath.formats.usd.stage`](#cgmathformatsusdstage)
@@ -232,6 +233,7 @@ ClipData
 ClipList
 HierarchyData
 PerTake
+ShapeData
 TransformData
 TransformList
 ```
@@ -247,16 +249,13 @@ ClipData(iterable=None, frames: 'Optional[int]' = None, start_frame: 'int' = 0, 
 Properties:
 
 ```text
-axis_system                        the axis system the values are in, "maya_y_up" or one in words
 end_frame                          
 fps                                
 frame                              
 frame_count                        
 frames                             
-rest_pose                          the pose the clip's file holds outside its take, or None
 start_frame                        
 take                               the name of the take the clip holds, "" when built by hand
-unit                               the centimeters one unit of the values' lengths holds, 1.0 for cm
 ```
 
 Methods:
@@ -264,20 +263,20 @@ Methods:
 ```text
 add_delta(self, delta, by: 'str' = 'index', translate: 'bool' = True) -> "'ClipData'"
     Every frame with ``delta`` applied, as a clip.
+at(self, frame) -> 'HierarchyData'
+    the pose at frame number ``frame``, a HierarchyData: a constant
 copy(self) -> "'ClipData'"
     returns a deep copy, owning the nodes it holds.
 classmethod from_poses(cls, poses, start_frame: 'int' = 0, fps: 'float' = 24.0) -> "'ClipData'"
     builds a clip from a sequence of HierarchyData poses
 get_delta(self, other, by: 'str' = 'index', translate: 'bool' = True) -> "'ClipData'"
     The delta of every frame against ``other``, as a clip.
-classmethod load_fbx(cls, filename: 'str', scale_factor: 'Optional[float]' = None, take: 'Optional[Union[int, str]]' = None, fps: 'Optional[float]' = None, start_frame: 'Optional[int]' = None, end_frame: 'Optional[int]' = None, axis_system: 'Optional[str]' = 'maya_y_up', node_types: 'Optional[tuple]' = None) -> "'ClipData'"
-    builds a clip from an fbx's animation take
+classmethod load_fbx(cls, filename) -> "'ClipData'"
+    the active take of an fbx file over every node, as
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, animation: 'int' = 0, fps: 'float' = 24.0, start_frame: 'int' = 0) -> "'ClipData'"
     builds a clip from a glb's animation
-save_fbx(self, filename, zero_root=False, as_ascii=False)
-    saves the clip to a .fbx file, binary unless as_ascii is set
-strip_namespace(self, namespace: 'Optional[str]' = None) -> 'None'
-    ``strip_namespace()`` on every node and the rest pose's, all or nothing.
+save_fbx(self, filename, as_ascii=False)
+    the clip written as one take, as ``cgmath.formats.save_fbx(filename,
 to_dict(self) -> 'dict'
     The list as a tree. A view saves as the hierarchy :meth:`copy`
 ```
@@ -326,7 +325,6 @@ radius                             ``radius`` of every take, a PerTake; a write 
 rax                                ``rotate_axis_x`` of every take, a PerTake; a write reaches every take or none
 ray                                ``rotate_axis_y`` of every take, a PerTake; a write reaches every take or none
 raz                                ``rotate_axis_z`` of every take, a PerTake; a write reaches every take or none
-rest_pose                          ``rest_pose`` of every take, a PerTake; a write reaches every take or none, one value copied for each take
 ro                                 ``rotate_order`` of every take, a PerTake; a write reaches every take or none
 rotate                             ``rotate`` of every take, a PerTake; a write reaches every take or none
 rotate_axis                        ``rotate_axis`` of every take, a PerTake; a write reaches every take or none
@@ -389,14 +387,12 @@ get_delta(self, other, by: 'str' = 'index', translate: 'bool' = True) -> "'ClipL
     every take's :meth:`ClipData.get_delta`, against another
 index(self, value, start=0, stop=None) -> 'int'
     the position of the first take named ``value``, or of that clip,
-classmethod load_fbx(cls, filename: 'str', scale_factor: 'Optional[float]' = None, fps: 'Optional[float]' = None, axis_system: 'Optional[str]' = 'maya_y_up', node_types: 'Optional[tuple]' = None) -> "'ClipList'"
-    every take of an fbx file, one :class:`ClipData` each
+classmethod load_fbx(cls, filename, *args, **kwargs) -> "'ClipList'"
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, fps: 'float' = 24.0) -> "'ClipList'"
     every animation of a glb file, one :class:`ClipData` each
 match(self, *args, exclude: 'bool' = False, exact: 'bool' = True) -> '_Takes'
     every take's ``match``, the nodes it selects at the frame each take
-save_fbx(self, filename, zero_root: 'bool' = False, as_ascii: 'bool' = False) -> 'None'
-    writes every take to one fbx file, binary unless ``as_ascii``
+save_fbx(self, filename, *args, **kwargs) -> 'None'
 set_joint_orient_to_rotate(self) -> None
     TransformList.set_joint_orient_to_rotate() on every take, every take or none
 set_parent(self, parent: "Union['TransformData', str, None]", world_space: 'bool' = True) -> None
@@ -449,6 +445,30 @@ One value per take of a :class:`ClipList`, in take order.
 
 ```text
 PerTake(iterable=(), /)
+```
+
+#### `ShapeData(Data)`
+
+The base of every shape: a ``uuid`` of its own, made when none is given,
+
+```text
+ShapeData(*, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
+```
+
+Fields:
+
+```text
+uuid: Optional = None
+parent_uuid: Optional = None
+```
+
+Methods:
+
+```text
+transform(self, hierarchy) -> Optional[cgmath.hierarchy.hierarchy.TransformData]
+    The transform of ``hierarchy`` this shape sits under: the node whose
+world_matrix(self, hierarchy) -> numpy.ndarray
+    Where the shape sits: the world matrix of its transform in
 ```
 
 #### `TransformData(Data)`
@@ -716,6 +736,8 @@ copy(self) -> "'TransformList'"
     returns a deep copy, owning the nodes it holds.
 extend(self, iterable) -> 'None'
     appends every node in turn, exactly as append() would
+classmethod from_dict(cls, data: 'dict') -> "'TransformList'"
+    The list a tree describes. A view is not a file: a saved tree, one
 get_branch(self) -> "'TransformList'"
     returns every node in the view and all of their decendents
 get_children(self) -> "'TransformList'"
@@ -732,8 +754,8 @@ index(self, obj, start=0, stop=None) -> 'int'
     The position of a node, given as the node, its uuid or its name,
 insert(self, index: 'int', node: "'TransformData'") -> 'None'
     S.insert(index, value) -- insert value before index
-classmethod load_fbx(cls, filename: 'str', scale_factor: 'Optional[float]' = None, axis_system: 'Optional[str]' = 'maya_y_up', pose: 'str' = 'node', node_types: 'Optional[tuple]' = None)
-    primitive fbx joint loader
+classmethod load_fbx(cls, filename)
+    the nodes of an fbx file at their own values, whether it holds a
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, pose_frame: 'None | int' = None)
     primitive glb joint loader that supports style2 and momentum glbs
 match(self, *args, exclude: 'bool' = False, exact: 'bool' = True) -> "'TransformList'"
@@ -744,8 +766,8 @@ match_rotate(self, other) -> 'None'
     matches the world rotation of a node, a list of nodes or a rotation
 match_translate(self, other, x: 'bool' = True, y: 'bool' = True, z: 'bool' = True) -> 'None'
     matches the world position of a node, a list of nodes or a translation
-save_fbx(self, filename, zero_root=False, as_ascii=False)
-    saves the data to a .fbx file, binary unless as_ascii is set
+save_fbx(self, filename, as_ascii=False)
+    the nodes written as a skeleton, as ``cgmath.formats.save_fbx``
 set_joint_orient_to_rotate(self) -> 'None'
     sets joint_orient to 0 and applies all rotation to rotate
 set_parent(self, parent: "Union['TransformData', str, None]", world_space: 'bool' = True) -> 'None'
@@ -768,9 +790,9 @@ Functions:
 generate_uuid() -> 'str'
     generates a new unique uuid
 load(filename: 'str', mode: 'Optional[str]' = None, **kwargs) -> "'HierarchyData'"
-    Whatever hierarchy the file holds, read as ``mode`` says or as the file
-load_fbx(filename: 'str', scale_factor: 'Optional[float]' = None, axis_system: 'Optional[str]' = 'maya_y_up', pose: 'str' = 'node', node_types: 'Optional[tuple]' = None) -> "'HierarchyData'"
-    The fbx's node hierarchy, names as in the file: ``HierarchyData.load_fbx()``.
+    The hierarchy the file holds, read as ``mode`` says or as the file
+load_fbx(filename: 'str') -> "'HierarchyData'"
+    The fbx's skeleton: ``HierarchyData.load_fbx()``.
 load_glb(filename: 'str', scale_factor: 'float' = 100.0, pose_frame: 'Optional[int]' = None) -> "'HierarchyData'"
     The glb's joint hierarchy, names as in the file: ``HierarchyData.load_glb()``.
 validate_uuid(uuid_string: 'str') -> 'bool'
@@ -793,20 +815,19 @@ the re-exported public surface of the geometry package.
 Re-exported classes:
 
 ```text
-BSplineData
-BSplinePatchData
 CompactSkinData
 Data
 DataList
 DeltaMushData
 GeomSubsetData
 ImmutableArray
-LegacyFileError
 MapData
 MeshData
 MeshList
 MorphData
 MorphList
+NurbsCurveData
+NurbsSurfaceData
 PatchRelaxData
 PatchSampleData
 RaycastData
@@ -863,7 +884,7 @@ copy(self)
 classmethod from_bytes(cls, data: bytes) -> Any
     the object npz bytes hold, read as :meth:`from_dict` reads a tree
 classmethod from_dict(cls, data: dict) -> Any
-    The object a tree describes, which must be this class: a tree naming
+    The object a tree describes, built as this class, whatever class
 classmethod info(cls) -> str
     Returns this class's docstring as a string.
 classmethod load(cls, filename: str, mode: Optional[str] = None, **kwargs) -> Any
@@ -888,7 +909,7 @@ strip_namespace(self, namespace: Optional[str] = None) -> None
 to_bytes(self) -> bytes
     returns a bytes object from the zipped data
 to_dict(self) -> dict
-    The data as a tree: its class, then every field that differs from its
+    The data as a tree: every field that differs from its default (one
 to_json(self) -> str
     formats the data as human readable json
 ```
@@ -914,13 +935,13 @@ Methods:
 append(self, value)
     S.append(value) -- append value to the end of the sequence
 copy(self)
-    Returns a deep copy of self: the list a save and load gives back, an
+    returns a deep copy of self: the list a save and load gives back
 extend(self, iterable)
     S.extend(iterable) -- extend sequence by appending elements from the iterable
 classmethod from_bytes(cls, data: bytes) -> Any
     the list npz bytes hold, read as :meth:`from_dict` reads a tree
 classmethod from_dict(cls, data: dict) -> Any
-    The list a tree describes, which must be this class: a tree naming
+    The list a tree describes, built as this class, whatever class saved
 get(self, name: str, default: Any = None) -> Any
     the first item named ``name``, or ``default``
 index(self, value, start=0, stop=None)
@@ -952,7 +973,7 @@ strip_namespace(self, namespace: Optional[str] = None) -> None
 to_bytes(self) -> bytes
     returns a bytes object from the zipped data
 to_dict(self) -> dict
-    The list as a tree: its class, its items' trees, and its LIST_FIELDS.
+    The list as a tree: its items' trees under ``__items__``, and its
 to_json(self) -> str
     formats the data as human readable json
 ```
@@ -963,14 +984,6 @@ A hack used to bypass a python 3.10+ limitation with dataclasses fields and nump
 
 ```text
 ImmutableArray(input_array)
-```
-
-#### `LegacyFileError(ValueError)`
-
-a file saved by an older cgmath, whose files are no longer read
-
-```text
-LegacyFileError(...)
 ```
 
 Functions:
@@ -1000,12 +1013,10 @@ zip_to_dict(filename) -> dict
 Constants:
 
 ```text
-CLASS_KEY = '__class__'
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
-ID_KEY = '__id__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000001DC7F460F50>
+MISSING = <dataclasses._MISSING_TYPE object at 0x0000024A58B2DB90>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1029,15 +1040,12 @@ Create a collection of name/value pairs.
 Axis(value, names=None, *, module=None, qualname=None, type=None, start=1, boundary=None)
 ```
 
-#### `MeshData(Data)`
+#### `MeshData(ShapeData)`
 
 Polygonal descriptor representing an object with edges, faces and vertices.
 
 ```text
-MeshData(indices: "Array(np.int32, 'N')", counts: "Array(np.int32, 'N')", points: "Array(np.float64, 'N', 3)", name: 'Optional[str]' = None, matrix: 'Optional[Array(np.float64, 4, 4)]' = ImmutableArray([[1., 0., 0., 0.],
-                [0., 1., 0., 0.],
-                [0., 0., 1., 0.],
-                [0., 0., 0., 1.]]), hole_faces: "Optional[Array(np.int32, 'N')]" = None, hole_counts: "Optional[Array(np.int32, 'N')]" = None, hole_indices: "Optional[Array(np.int32, 'N')]" = None, normals: "Optional[Array(np.float64, 'N', 3)]" = None, normal_indices: "Optional[Array(np.int32, 'N')]" = None) -> None
+MeshData(indices: "Array(np.int32, 'N')", counts: "Array(np.int32, 'N')", points: "Array(np.float64, 'N', 3)", name: 'Optional[str]' = None, hole_faces: "Optional[Array(np.int32, 'N')]" = None, hole_counts: "Optional[Array(np.int32, 'N')]" = None, hole_indices: "Optional[Array(np.int32, 'N')]" = None, normals: "Optional[Array(np.float64, 'N', 3)]" = None, normal_indices: "Optional[Array(np.int32, 'N')]" = None, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
 ```
 
 Fields:
@@ -1047,8 +1055,6 @@ indices: Array(np.int32, 'N')
 counts: Array(np.int32, 'N')
 points: Array(np.float64, 'N', 3)
 name: Optional[str] = None
-matrix: Optional[Array(np.float64, 4, 4)] = ImmutableArray([[1., 0., 0., 0.],
-      
 hole_faces: Optional[Array(np.int32, 'N')] = None
 hole_counts: Optional[Array(np.int32, 'N')] = None
 hole_indices: Optional[Array(np.int32, 'N')] = None
@@ -1104,7 +1110,7 @@ delete_faces(self, faces, exclude=False)
     deletes faces at given face indices. The hole metadata (hole_faces)
 detach_faces(self, indices=None)
     detaches faces
-difference(self, *args, tolerance=1e-06, world_space=False)
+difference(self, *args, tolerance=1e-06)
     removes overlapping faces of given Mesh objects from self (this is not a boolean)
 edges_to_vertex_pairs(self, edges: 'np.ndarray') -> 'np.ndarray'
     returns the vertex pairs for a given set of edges
@@ -1171,8 +1177,6 @@ get_face_vertex_geodesic_neighborhood(self, n: 'int | None' = None, max_distance
     Compute the topological face vertex neighborhood with distances using Dijkstra's algorithm
 get_face_vertex_neighbors(self, n: 'int' = 0) -> 'np.ndarray'
     return a matrix of vertices neighboring connected faces to vertices
-get_inverse_matrix(self) -> 'np.ndarray'
-    computes the inverse matrix
 get_lamina_faces(self)
     returns lamina faces
 get_ngons(self)
@@ -1249,6 +1253,8 @@ rules_to_vertices(self, rules)
     returns the vertices a set of subset rules keeps
 sample(self, obj: "Union['MeshData', np.ndarray]", method: 'SampleMethod | str' = <SampleMethod.BILINEAR: 'bilinear'>, iteration_count: 'int' = 100, iteration_tolerance: 'float' = 1e-08)
     a humble saddle surface sampler
+save_fbx(self, filename: 'str', as_ascii: 'bool' = False) -> 'None'
+    writes the mesh to an fbx file, binary unless ``as_ascii``
 save_obj(self, filename: 'str') -> 'str'
     Writes the mesh as an obj file: its points, its faces and, when it
 set_normals(self, hard_edge_angle: 'float | None' = None, hard_edges: 'np.ndarray | None' = None, angle_weighted: 'bool' = True, area_weighted: 'bool' = True) -> 'None'
@@ -1270,16 +1276,14 @@ subdivide(self, steps: 'int' = 1, keep_borders: 'bool' = False, keep_edges: 'boo
 sum_vertex_normals(self, face_vertex_normals: 'np.ndarray') -> 'np.ndarray'
     Given a face-vertex normal array, sums the normals at of each unique
 symmetrical(self, pivot: 'float' = 0.0, axis: 'int' = 0, tolerance: 'float' = 1e-06, check_topology=True, check_normals=True) -> 'bool'
-to_identity(self) -> 'None'
-    sets the matrix to identity and transforms the points accordingly
 to_prim(self, prim: 'Any') -> 'None'
     Streams data into a prim.
 to_uvdata(self, name: 'str | None' = None, axis: 'str | Axis' = <Axis.Y: 'y'>, maintain_ratio=False, swap_uvs=False) -> 'UVData'
     creates an orthogonal projection of the mesh as a UVData object, with
 triangulate(self, rules: 'Union[np.ndarray, TriangulateRules]', preserve_order: 'bool' = True) -> 'None'
     triangulates the mesh according to the given method.
-union(self, *args, world_space=False)
-    combines faces of given Mesh objects to self (this is not a boolean)
+union(self, *args)
+    combines faces of given Mesh objects to self (this is not a boolean);
 vertex_pairs_to_edges(self, verts: 'np.ndarray') -> 'np.ndarray'
     returns the edges for a given set of vertex pairs
 vertices_to_edges(self, verts: 'np.ndarray') -> 'np.ndarray'
@@ -1311,8 +1315,8 @@ classmethod load_usd(cls, filename: 'str') -> "'MeshList'"
     loads all mesh prims from a usd file into a MeshList
 merge(self)
     applies merge to all elements
-to_identity(self)
-    sets all contained MeshData objects to identity
+save_fbx(self, filename: 'str', as_ascii: 'bool' = False) -> 'None'
+    writes every mesh to one fbx file, binary unless ``as_ascii``: each
 ```
 
 #### `RenderMethod(Enum)`
@@ -1359,10 +1363,7 @@ ngon_tris: dict
 UV map topology treated as a Mesh object for resampling purposes
 
 ```text
-UVData(indices: "Array(np.int32, 'N')", counts: "Array(np.int32, 'N')", points: "Array(np.float64, 'N', 2)", name: 'str' = 'map1', matrix: 'Optional[Array(np.float64, 4, 4)]' = ImmutableArray([[1., 0., 0., 0.],
-                [0., 1., 0., 0.],
-                [0., 0., 1., 0.],
-                [0., 0., 0., 1.]]), hole_faces: "Optional[Array(np.int32, 'N')]" = None, hole_counts: "Optional[Array(np.int32, 'N')]" = None, hole_indices: "Optional[Array(np.int32, 'N')]" = None, normals: "Optional[Array(np.float64, 'N', 3)]" = None, normal_indices: "Optional[Array(np.int32, 'N')]" = None, _resolution: 'Array(np.int32, 2)' = ImmutableArray([2048, 2048]), _antialias: 'bool' = False) -> None
+UVData(indices: "Array(np.int32, 'N')", counts: "Array(np.int32, 'N')", points: "Array(np.float64, 'N', 2)", name: 'str' = 'map1', hole_faces: "Optional[Array(np.int32, 'N')]" = None, hole_counts: "Optional[Array(np.int32, 'N')]" = None, hole_indices: "Optional[Array(np.int32, 'N')]" = None, normals: "Optional[Array(np.float64, 'N', 3)]" = None, normal_indices: "Optional[Array(np.int32, 'N')]" = None, _resolution: 'Array(np.int32, 2)' = ImmutableArray([2048, 2048], dtype=int32), _antialias: 'bool' = False, mesh_uuid: 'Optional[str]' = None, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
 ```
 
 Fields:
@@ -1370,6 +1371,7 @@ Fields:
 ```text
 points: Array(np.float64, 'N', 2)
 name: str = 'map1'
+mesh_uuid: Optional[str] = None
 ```
 
 Properties:
@@ -1727,7 +1729,7 @@ Patterns()
 Skin data class with optimized operations.
 
 ```text
-SkinData(weights: "Array(np.float64, 'N', 'J')", influences: 'List[str]', name: 'Optional[str]' = None, _patterns: 'dict' = <factory>) -> None
+SkinData(weights: "Array(np.float64, 'N', 'J')", influences: 'List[str]', name: 'Optional[str]' = None, mesh_uuid: 'Optional[str]' = None, _patterns: 'dict' = <factory>) -> None
 ```
 
 Fields:
@@ -1736,6 +1738,7 @@ Fields:
 weights: Array(np.float64, 'N', 'J')
 influences: List[str]
 name: Optional[str] = None
+mesh_uuid: Optional[str] = None
 ```
 
 Properties:
@@ -1850,12 +1853,39 @@ SKIN_PRIM_TYPE = 'SkinWeights'
 
 B-spline curves.
 
-#### `BSplineData(Data)`
+#### `CurveSampleData(Data)`
 
-BSpline data class.
+A dataclass to hold bspline sample data
 
 ```text
-BSplineData(points: typing.Annotated[numpy.ndarray, Array(float64 (N, D))] = ImmutableArray([], shape=(0, 3), dtype=float64), degree: int = 3, periodic: bool = False, uniform: bool = False, use_numba: bool = True, registered: bool = False, arc_length_samples: int = 1000, knots: Optional[Annotated[numpy.ndarray, Array(float64 (K,))]] = None) -> None
+CurveSampleData(points: typing.Annotated[numpy.ndarray, Array(float64 (N, D))], tangents: typing.Annotated[numpy.ndarray, Array(float64 (N, D))], distances: typing.Annotated[numpy.ndarray, Array(float64 (N,))], params: typing.Annotated[numpy.ndarray, Array(float64 (N,))], basis: typing.Annotated[numpy.ndarray, Array(float64 (N, C))]) -> None
+```
+
+Fields:
+
+```text
+points: Annotated
+tangents: Annotated
+distances: Annotated
+params: Annotated
+basis: Annotated
+```
+
+Methods:
+
+```text
+compute(self, values)
+    computes weighted values from given data
+copy(self)
+    returns a deep copy of self: the object a save and load gives back
+```
+
+#### `NurbsCurveData(ShapeData)`
+
+NURBS curve data class: a B-spline curve, non-rational (every weight 1),
+
+```text
+NurbsCurveData(points: typing.Annotated[numpy.ndarray, Array(float64 (N, D))] = ImmutableArray([], shape=(0, 3), dtype=float64), degree: int = 3, periodic: bool = False, uniform: bool = False, use_numba: bool = True, registered: bool = False, arc_length_samples: int = 1000, knots: Optional[Annotated[numpy.ndarray, Array(float64 (K,))]] = None, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
 ```
 
 Fields:
@@ -1899,7 +1929,7 @@ compute_fast(self, u)
     Compute points and tangents using the fastest available method (Numba).
 fit(self, points, count: Optional[int] = None, degree: Optional[int] = None, collapse: Optional[tuple] = None) -> numpy.ndarray
     Moves the control points so the curve passes through the points,
-classmethod from_edit_points(cls, points, degree: int = 3, periodic: bool = False, collapse: Optional[tuple] = None, **fields) -> 'BSplineData'
+classmethod from_edit_points(cls, points, degree: int = 3, periodic: bool = False, collapse: Optional[tuple] = None, **fields) -> 'NurbsCurveData'
     A new curve through the points, each one an edit point (where two
 get_collapsed_points(self, tol: float = 1e-06) -> list
     Groups of control points stacked on each other: every run of
@@ -1919,43 +1949,16 @@ smooth(self, n: int, polyorder: int = 3, lock_endpoints: bool = True, pad_endpoi
     smoothes the curve points via a savgol_filter
 ```
 
-#### `SampleData(Data)`
-
-A dataclass to hold bspline sample data
-
-```text
-SampleData(points: typing.Annotated[numpy.ndarray, Array(float64 (N, D))], tangents: typing.Annotated[numpy.ndarray, Array(float64 (N, D))], distances: typing.Annotated[numpy.ndarray, Array(float64 (N,))], params: typing.Annotated[numpy.ndarray, Array(float64 (N,))], basis: typing.Annotated[numpy.ndarray, Array(float64 (N, C))]) -> None
-```
-
-Fields:
-
-```text
-points: Annotated
-tangents: Annotated
-distances: Annotated
-params: Annotated
-basis: Annotated
-```
-
-Methods:
-
-```text
-compute(self, values)
-    computes weighted values from given data
-copy(self)
-    returns a deep copy of self: the object a save and load gives back
-```
-
 ## `cgmath.geometry.bspline_patch`
 
 tensor-product B-spline patches.
 
-#### `BSplinePatchData(Data)`
+#### `NurbsSurfaceData(ShapeData)`
 
 B-spline tensor-product surface.
 
 ```text
-BSplinePatchData(points: typing.Annotated[numpy.ndarray, Array(float64 (Nu, Nv, D))], degree_u: int, degree_v: int, periodic_u: bool, periodic_v: bool, uniform_u: bool = False, uniform_v: bool = False, use_numba: bool = True, registered_u: bool = False, registered_v: bool = False, arc_length_samples: int = 1000) -> None
+NurbsSurfaceData(points: typing.Annotated[numpy.ndarray, Array(float64 (Nu, Nv, D))], degree_u: int, degree_v: int, periodic_u: bool, periodic_v: bool, uniform_u: bool = False, uniform_v: bool = False, use_numba: bool = True, registered_u: bool = False, registered_v: bool = False, arc_length_samples: int = 1000, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
 ```
 
 Fields:
@@ -2006,7 +2009,7 @@ close_v(self)
 compute(self, u, v, _native=False)
     Compute surface points and first partial derivatives.
 compute_fast(self, u, v, _native=False)
-    Always-numba positions + tangents. Mirrors ``BSplineData.compute_fast``.
+    Always-numba positions + tangents. Mirrors ``NurbsCurveData.compute_fast``.
 evaluate(self, u, v, _native=False)
     Position-only fast path using the existing surface evaluation kernel.
 get_area(self, samples: int = 50) -> float
@@ -2066,7 +2069,7 @@ compute(self, values)
     Compute weighted values from basis. values can be (nu, nv, d) or (nu*nv, d).
 ```
 
-#### `PatchSampleData(SampleData)`
+#### `PatchSampleData(CurveSampleData)`
 
 Sample data for B-spline surface projections.
 
@@ -2094,9 +2097,39 @@ compute(self, values)
     Compute weighted values from basis. values can be (nu, nv, d) or (nu*nv, d).
 ```
 
-## `cgmath.geometry._saddle_surface`
+## `cgmath.geometry._bilinear_surface`
 
 bilinear / PN-Quad sampling, raycast and integration.
+
+#### `BilinearSampleData(Data)`
+
+A dataclass to hold saddle surface sample data
+
+```text
+BilinearSampleData(projections: typing.Annotated[numpy.ndarray, Array(float64 (N, D))], distances: typing.Annotated[numpy.ndarray, Array(float64 (N,))], weights: typing.Annotated[numpy.ndarray, Array(float64 (N, 4))], indices: typing.Annotated[numpy.ndarray, Array(int32 (N,))], normals: typing.Annotated[numpy.ndarray, Array(float64 (N, D))], occluded: typing.Annotated[numpy.ndarray, Array(bool (N,))], uvs: typing.Annotated[numpy.ndarray, Array(float64 (N, 2))], geometry: typing.Annotated[numpy.ndarray, Array(int32 (N, 4))]) -> None
+```
+
+Fields:
+
+```text
+projections: Annotated
+distances: Annotated
+weights: Annotated
+indices: Annotated
+normals: Annotated
+occluded: Annotated
+uvs: Annotated
+geometry: Annotated
+```
+
+Methods:
+
+```text
+compute(self, values)
+    computes weighted values from given data
+remap(self, src_mesh, dst_mesh, dst_uv)
+    saddle surface sampler where closest face index is returned
+```
 
 #### `RaycastData(Data)`
 
@@ -2125,36 +2158,6 @@ Methods:
 ```text
 compute(self, values)
     computes weighted values from given data
-```
-
-#### `SampleData(Data)`
-
-A dataclass to hold saddle surface sample data
-
-```text
-SampleData(projections: typing.Annotated[numpy.ndarray, Array(float64 (N, D))], distances: typing.Annotated[numpy.ndarray, Array(float64 (N,))], weights: typing.Annotated[numpy.ndarray, Array(float64 (N, 4))], indices: typing.Annotated[numpy.ndarray, Array(int32 (N,))], normals: typing.Annotated[numpy.ndarray, Array(float64 (N, D))], occluded: typing.Annotated[numpy.ndarray, Array(bool (N,))], uvs: typing.Annotated[numpy.ndarray, Array(float64 (N, 2))], geometry: typing.Annotated[numpy.ndarray, Array(int32 (N, 4))]) -> None
-```
-
-Fields:
-
-```text
-projections: Annotated
-distances: Annotated
-weights: Annotated
-indices: Annotated
-normals: Annotated
-occluded: Annotated
-uvs: Annotated
-geometry: Annotated
-```
-
-Methods:
-
-```text
-compute(self, values)
-    computes weighted values from given data
-remap(self, src_mesh, dst_mesh, dst_uv)
-    saddle surface sampler where closest face index is returned
 ```
 
 Functions:
@@ -2446,7 +2449,7 @@ uv_sample_data                     Cache and return a sample data object in UV s
 Methods:
 
 ```text
-get_sample_data(self, mode: 'ResampleMode', method: 'SampleMethod | str' = <SampleMethod.BILINEAR: 'bilinear'>) -> 'SampleData'
+get_sample_data(self, mode: 'ResampleMode', method: 'SampleMethod | str' = <SampleMethod.BILINEAR: 'bilinear'>) -> 'BilinearSampleData'
     Returns a cached sample data object based on mode and method.
 resample_map(self, map_data: 'MapData | GeomSubsetData', method: 'SampleMethod | str' = <SampleMethod.BILINEAR: 'bilinear'>, **kwargs) -> 'MapData | GeomSubsetData'
     Resamples a map data.
@@ -2524,9 +2527,9 @@ smooth_strength: float = 0.1
 Functions:
 
 ```text
-find_matches_closest_surface(sample_data: 'SampleData', dst_mesh: 'MeshData', src_skin_weights: 'np.ndarray', search_radius: 'float', normal_threshold_deg: 'float') -> 'tuple[np.ndarray, np.ndarray]'
+find_matches_closest_surface(sample_data: 'BilinearSampleData', dst_mesh: 'MeshData', src_skin_weights: 'np.ndarray', search_radius: 'float', normal_threshold_deg: 'float') -> 'tuple[np.ndarray, np.ndarray]'
     For each vertex on the target mesh find a match on the source mesh.
-robust_skinweights_transfer_bilinear(src_mesh: 'MeshData', src_skin_data: 'SkinData', dst_mesh: 'MeshData', transfer_options: 'RobustBilinearSkinTransferOptions | None' = None, sample_data: 'SampleData | None' = None) -> 'np.ndarray'
+robust_skinweights_transfer_bilinear(src_mesh: 'MeshData', src_skin_data: 'SkinData', dst_mesh: 'MeshData', transfer_options: 'RobustBilinearSkinTransferOptions | None' = None, sample_data: 'BilinearSampleData | None' = None) -> 'np.ndarray'
     Transfers skin weights from a source mesh onto a target mesh.
 ```
 
@@ -2989,6 +2992,27 @@ texture I/O and sampling.
 
 > Texture I/O + bilinear sampling helpers.
 
+## `cgmath.formats`
+
+the FBX round trip: `load_fbx`, `save_fbx`, `FbxContents` (needs the Autodesk FBX SDK at call time).
+
+> Readers and writers for external asset formats.
+
+Re-exported classes:
+
+```text
+FbxContents
+```
+
+Functions:
+
+```text
+load_fbx(filename) -> cgmath.formats._load.FbxContents
+    ``(hierarchy, clip, meshes, skins, uvs)``, None where the file holds none
+save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=None, as_ascii: bool = False) -> None
+    writes one of ``hierarchy``, a HierarchyData of joints and transforms,
+```
+
 ## `cgmath.formats.glb`
 
 glTF / GLB reading and payload blobs (needs `pygltflib`).
@@ -3204,10 +3228,16 @@ scene                              fbx.FbxScene: the fbx scene to export, labell
 Methods:
 
 ```text
-add_skeleton(self, skeleton_component, shear_warning: bool = True) -> None
+add_mesh(self, mesh, node=None)
+    Adds a ``MeshData`` as an ``FbxMesh`` and returns it.
+add_skeleton(self, skeleton_component) -> None
     Add a skeleton component to the scene.
-add_takes(self, clips, names, time_mode, zero_root: bool = False) -> None
+add_skin(self, shape, skin, links) -> None
+    Adds a ``SkinData`` to an ``FbxMesh`` :meth:`add_mesh` returned:
+add_takes(self, clips, names, time_mode, zero_root: bool = False, columns=None, active=None, ranges=None) -> None
     One animation stack per clip, after :meth:`add_skeleton`
+add_uvs(self, shape, uvs) -> None
+    Adds UV sets, ``UVData`` each, to an ``FbxMesh`` :meth:`add_mesh`
 close(self) -> None
     frees the manager, and with it the scene and every node added
 export(self, path: pathlib.Path, as_ascii=False, zero_root=False) -> None
@@ -3327,6 +3357,7 @@ Constants:
 ```text
 FBX_SDK_REQUIRED = "The Autodesk FBX SDK (the `fbx` module) is not installed...
 LOGGER = <Logger cgmath.formats.fbx (WARNING)>
+NEGATIVE_ZERO_CHANNELS = ('translate', 'rotate', 'joint_orient')
 ```
 
 ## `cgmath.formats.usd.stage`
@@ -3475,7 +3506,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001DC800E11C0>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000024A26A76FC0>, '...
 ```
 
 ## `cgmath.constraints`
