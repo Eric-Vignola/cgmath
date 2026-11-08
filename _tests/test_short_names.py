@@ -1141,41 +1141,6 @@ class TestUserAttributes(unittest.TestCase):
         self.assertGreater(small, 0)
         self.assertEqual(small, large)
 
-    def test_a_clip_with_a_rest_pose_warns_once_a_name(self):
-        # the rest pose loads inside the clip's load, and its nodes, the
-        # clip's again by their uuids, count once: the warnings a clip with
-        # no rest pose gives
-        rig            = self.carrying()
-        clip           = ClipData(rig, frames=3)
-        clip.rest_pose = rig.copy()
-        folder         = self.folder()
-        loaders        = {"ClipData.load": ClipData.load, "Data.load": Data.load, "hierarchy.load": hierarchy.load}
-        loads          = [("pickle", lambda: pickle.loads(pickle.dumps(clip)))]
-        loads.append(("from_bytes", lambda: ClipData.from_bytes(clip.to_bytes())))
-        for mode in ("json", "npz", "pkl"):
-            path = clip.save(os.path.join(folder, "clip." + mode))
-            for name, loader in loaders.items():
-                loads.append((f"{mode} {name}", lambda path=path, loader=loader: loader(path)))
-        for label, load in loads:
-            with self.subTest(load=label):
-                with warnings.catch_warnings(record=True) as caught:
-                    warnings.simplefilter("always")
-                    loaded = load()
-                self.assertEqual(self.hidden(caught), self.WARNED)
-                knee = loaded.rest_pose["knee"]
-                self.assertEqual(knee.tx, knee.translate_x)
-                self.assertEqual(knee.user_defined_attributes["tx"]["value"], 8.0)
-
-        # a rest pose node carrying one the clip's node does not counts
-        clip.rest_pose["root"].user_defined_attributes["tx"] = _spec(9.0)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            ClipData.from_bytes(clip.to_bytes())
-        self.assertEqual(
-            self.hidden(caught),
-            [self.WARNED[0].replace("1 other node", "2 other nodes")] + self.WARNED[1:],
-        )
-
     def test_a_load_that_raises_warns_of_nothing(self):
         # the warnings come once the load is done: a clip whose blocks are
         # the wrong shape raises, and its nodes warn of nothing
@@ -1269,75 +1234,6 @@ class TestUserAttributes(unittest.TestCase):
             scene.AddPose(pose)
 
         return cls.rewritten(static, path, edit)
-
-    @unittest.skipIf(FBX is None, "needs the Autodesk FBX SDK")
-    def test_an_fbx_file_loads_them_with_one_warning_a_name(self):
-        # a clip's rig and rest pose, both built from the file's nodes, are
-        # one load, with a take as without one, and a bind read poses the
-        # nodes inside their load
-        rig    = _rig(hip={"tx": _spec(7.0)}, knee={"tx": _spec(8.0), "v": _spec(0.5)})
-        folder = self.folder()
-        path   = os.path.join(folder, "rig.fbx")
-        # fbx has no shear, and save_fbx refuses one: the file the save of
-        # this rig wrote when it left shear out
-        for node in rig:
-            node.shear = (0.0, 0.0, 0.0)
-        rig.save_fbx(path)
-        taken = self.keyed(path, os.path.join(folder, "take.fbx"))
-        bound = self.bound(path, os.path.join(folder, "bind.fbx"), 1.0)
-        bind  = {"pose": "bind"}
-        loads = [(f"{owner.__name__}.load_fbx", owner.load_fbx, path, {}) for owner in (HierarchyData, TransformList)]
-        loads.append(("hierarchy.load_fbx", hierarchy.load_fbx, path, {}))
-        loads.append(("ClipData.load_fbx", ClipData.load_fbx, path, {}))
-        loads.append(("ClipData.load_fbx, a take", ClipData.load_fbx, taken, {}))
-        for owner in (HierarchyData, TransformList):
-            loads.append((f"{owner.__name__}.load_fbx, a bind pose", owner.load_fbx, bound, bind))
-        for label, loader, file, kwargs in loads:
-            with self.subTest(loader=label):
-                with warnings.catch_warnings(record=True) as caught:
-                    warnings.simplefilter("always")
-                    loaded = loader(file, **kwargs)
-                self.assertEqual(
-                    self.hidden(caught),
-                    [
-                        "user attribute 'tx' of 'hip' and 1 other node loaded into "
-                        "user_defined_attributes['tx']: node.tx is Maya's short name for "
-                        "translate_x, which hides it",
-                        "user attribute 'v' of 'knee' loaded into user_defined_attributes['v']: "
-                        "node.v is Maya's short name for visibility, which hides it",
-                    ],
-                )
-                rigs = [loaded] + ([loaded.rest_pose] if isinstance(loaded, ClipData) else [])
-                for knee in (each[2] for each in rigs):
-                    self.assertEqual(knee.name, "knee")
-                    self.assertEqual(knee.tx, knee.translate_x)
-                    self.assertIs(knee.v, knee.visibility)
-                    self.assertEqual(knee.user_defined_attributes["tx"]["value"], 8.0)
-                    self.assertEqual(knee.user_defined_attributes["v"]["value"], 0.5)
-                if file is taken:
-                    self.assertGreater(loaded.frame_count, 1)
-
-        # the warnings come once the file is read and its nodes posed: a
-        # take out of range, a frame past or before the take's, or a bind
-        # under hip's, which a zero scale flattens, raises, and the nodes
-        # warn of nothing
-        flat = self.bound(path, os.path.join(folder, "flat.fbx"), 0.0)
-        for loader, file, kwargs, error, message in (
-            (ClipData.load_fbx, taken, {"take": 5}, IndexError, "take 5 out of range"),
-            (ClipData.load_fbx, taken, {"take": -2}, IndexError, "take -2 out of range"),
-            (ClipData.load_fbx, taken, {"start_frame": 100}, ValueError, "start_frame 100 is past"),
-            (ClipData.load_fbx, taken, {"end_frame": -100}, ValueError, "end_frame -100 is before"),
-            (HierarchyData.load_fbx, flat, bind, np.linalg.LinAlgError, ""),
-            (TransformList.load_fbx, flat, bind, np.linalg.LinAlgError, ""),
-        ):
-            label = f"{loader.__self__.__name__}.load_fbx, {os.path.basename(file)}"
-            with self.subTest(loader=label, **kwargs):
-                with warnings.catch_warnings(record=True) as caught:
-                    warnings.simplefilter("always")
-                    with self.assertRaisesRegex(error, message):
-                        loader(file, **kwargs)
-                self.assertEqual(self.hidden(caught), [])
-
 
 if __name__ == "__main__":
     unittest.main()

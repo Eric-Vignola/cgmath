@@ -1617,11 +1617,11 @@ looped = ClipData(make_chain(), frames=7)
 for frame in range(7):
     looped.frame        = frame
     looped.world_matrix = W[frame]                   # this frame alone
-looped.frames["hip"].rotate_x[:, 0]                  # [0, 90, 180, -90, 0, 90, 180]
+looped.frames["hip"].rotate_x                        # [0, 90, 180, -90, 0, 90, 180]
 
 solved                     = ClipData(make_chain(), frames=7)
 solved.frames.world_matrix = W
-assert np.allclose(solved.frames["hip"].rotate_x[:, 0], np.linspace(0.0, 540.0, 7))
+assert np.allclose(solved.frames["hip"].rotate_x, np.linspace(0.0, 540.0, 7))
 ```
 
 ---
@@ -1743,7 +1743,7 @@ clips.frames.match("hip").rotate_y += 5             # every frame of every take
 assert np.allclose(walk.frames["hip"].rotate_y, 5.0)
 clips.frame = 2                                     # every take scrubbed to 2
 clips.match("knee").rotate_x += 10                  # frame 2 of every take
-assert np.allclose(idle.frames["knee"].rotate_x[:, 0], [0, 0, 10, 0, 0, 0])
+assert np.allclose(idle.frames["knee"].rotate_x, [0, 0, 10, 0, 0, 0])
 
 cuts = clips.frames[1:3]                            # each take's frames 1 and 2
 assert cuts.take == ["idle", "walk"] and cuts.frame_count == [2, 2]
@@ -1917,7 +1917,7 @@ among them, keep the list's order.
 by_name = make_chain()
 by_name.sort()                                  # hip, knee, root: children first
 by_name.save_fbx(path)
-assert HierarchyData.load_fbx(path).name == ["root", "hip", "knee"]
+assert HierarchyData.load_fbx(path).name == ["hip", "knee", "root"]
 
 by_name.match("knee", "root").save_fbx(path)    # knee's parent left out: a root
 assert HierarchyData.load_fbx(path).name == ["knee", "root"]

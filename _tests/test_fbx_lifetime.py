@@ -194,25 +194,6 @@ class TestReaders(FbxFixtures):
             with self.subTest(load=load), balanced(self):
                 self.assertEqual(load(self.rig).name, ["body_geo", "root", "tip"])
 
-    def test_clip(self):
-        with balanced(self):
-            clip = hierarchy_mod.ClipData.load_fbx(self.rig, fps=4.0)
-        self.assertEqual(clip.frame_count, 5)
-
-    def test_clip_without_a_take(self):
-        with balanced(self):
-            clip = hierarchy_mod.ClipData.load_fbx(self.static)
-        self.assertEqual(clip.frame_count, 1)
-
-    def test_clip_raising_after_the_read(self):
-        cases = (
-            (IndexError, {"take": 9}),
-            (ValueError, {"fps": 4.0, "start_frame": 5, "end_frame": 1}),
-        )
-        for error, kwargs in cases:
-            with self.subTest(**kwargs), balanced(self), self.assertRaises(error):
-                hierarchy_mod.ClipData.load_fbx(self.rig, **kwargs)
-
     def test_mesh_loaders(self):
         loaders = (
             mesh_mod.load_fbx,
@@ -278,33 +259,6 @@ class TestReaders(FbxFixtures):
         for kwargs in ({}, {"mesh_index": 99}):
             with self.subTest(**kwargs), balanced(self):
                 self.assertEqual(scene_mod._extract_fbx_textures(self.rig, **kwargs), {})
-
-    def test_nothing_read_holds_an_fbx_object(self):
-        from cgmath.render import Object
-
-        results = [
-            hierarchy_mod.HierarchyData.load_fbx(self.rig),
-            hierarchy_mod.ClipData.load_fbx(self.rig, fps=4.0),
-            mesh_mod.load_fbx(self.rig),
-            skin_mod._read_skins_fbx(self.rig, bind_matrices=True),
-            Object.load_fbx(self.rig),
-        ]
-
-        seen  = set()
-        stack = list(results)
-        while stack:
-            value = stack.pop()
-            if id(value) in seen:
-                continue
-            seen.add(id(value))
-            self.assertNotEqual(type(value).__module__, "fbx", repr(value))
-            if isinstance(value, dict):
-                stack.extend(value.values())
-            elif isinstance(value, (list, tuple, set)):
-                stack.extend(value)
-            elif hasattr(value, "__dict__") and not isinstance(value, type):
-                stack.extend(vars(value).values())
-
 
 @unittest.skipIf(Image is None, "PIL is not installed")
 class TestEmbeddedMedia(FbxFixtures):
@@ -533,7 +487,7 @@ class TestEmbeddedMedia(FbxFixtures):
             scene   = fbx.FbxScene.Create(manager, "")
             texture = fbx.FbxFileTexture.Create(scene, "tex")
             texture.SetFileName("C:/a/b.png")
-            base    = fbx.cast(texture, fbx.FbxObject)
+            base = fbx.cast(texture, fbx.FbxObject)
             self.assertNotIsInstance(base, fbx.FbxFileTexture)
 
             again = _fbx_io.typed(base, fbx.FbxFileTexture, fbx)
@@ -753,124 +707,6 @@ class TestFbxExporter(FbxFixtures):
         self.assertIsNone(exporter._manager)
         self.assertIsNone(exporter._scene)
         exporter.close()  # twice is fine
-
-    def test_zero_root(self):
-        from cgmath.hierarchy import HierarchyData, TransformData
-
-        rig = HierarchyData([
-            TransformData("root", node_type="joint", translate=(5, 0, 0), rotate=(0, 30, 0)),
-            TransformData("spine", translate=(0, 10, 0), node_type="joint"),
-        ])
-        rig["spine"].set_parent("root", world_space=False)
-        with balanced(self):
-            rig.save_fbx(self.out, zero_root=True)
-
-        back = hierarchy_mod.HierarchyData.load_fbx(self.out)
-        root, spine = back.get("root"), back.get("spine")
-        np.testing.assert_allclose(root.translate,  [0, 0, 0],  atol=1e-9)
-        np.testing.assert_allclose(root.rotate,     [0, 0, 0],  atol=1e-9)
-        np.testing.assert_allclose(root.scale,      [1, 1, 1],  atol=1e-9)
-        np.testing.assert_allclose(spine.translate, [0, 10, 0], atol=1e-9)
-
-    def test_zero_root_leaves_a_mesh_at_the_world_alone(self):
-        rig = hierarchy_mod.HierarchyData.load_fbx(self.rig)  # body_geo comes first
-        rig.get("body_geo").translate = (1, 2, 3)
-        rig.get("root").translate = (5, 0, 7)
-        rig.save_fbx(self.out, zero_root=True)
-
-        back = hierarchy_mod.HierarchyData.load_fbx(self.out)
-        np.testing.assert_allclose(back.get("root").translate, [0, 0, 0], atol=1e-9)
-        np.testing.assert_allclose(back.get("body_geo").translate, [1, 2, 3], atol=1e-9)
-
-    def test_zero_root_with_a_name_used_twice(self):
-        from cgmath.hierarchy import HierarchyData, TransformData, generate_uuid
-
-        group  = TransformData("grp", uuid=generate_uuid())
-        nested = TransformData("root", parent_uuid=group.uuid, translate=(1, 2, 3))
-        joint  = TransformData("root", node_type="joint", translate=(5, 0, 7))
-        HierarchyData([group, nested, joint]).save_fbx(self.out, zero_root=True)
-
-        back  = hierarchy_mod.HierarchyData.load_fbx(self.out)
-        roots = {x.node_type: x for x in back if x.name == "root"}
-        np.testing.assert_allclose(roots["joint"].translate, [0, 0, 0], atol=1e-9)
-        np.testing.assert_allclose(roots["transform"].translate, [1, 2, 3], atol=1e-9)
-
-    def test_zero_root_on_a_view(self):
-        # the view's top node, its parent left out, is the file's root, as
-        # a view's copy() roots it: zero_root zeroes it. The root was looked
-        # for at the world of the whole rig, which a view of knee and ankle
-        # holds none of: it raised ValueError
-        from cgmath.hierarchy import HierarchyData, TransformData
-
-        rig = HierarchyData(
-            [TransformData(name, node_type="joint", translate=(1, 0, 0)) for name in ("hip", "knee", "ankle")]
-        )
-        rig["knee"].set_parent("hip", world_space=False)
-        rig["ankle"].set_parent("knee", world_space=False)
-        rig.match("knee", "ankle").save_fbx(self.out, zero_root=True)
-
-        back = hierarchy_mod.HierarchyData.load_fbx(self.out)
-        self.assertEqual([(x.name, x.parent_name) for x in back], [("knee", None), ("ankle", "knee")])
-        np.testing.assert_allclose(back.get("knee").translate, [0, 0, 0], atol=1e-9)
-        np.testing.assert_allclose(back.get("ankle").translate, [1, 0, 0], atol=1e-9)
-
-    def test_zero_root_on_a_view_writes_its_roots_in_list_order(self):
-        # ankle, two levels down the rig, and prop, a root joint: each is a
-        # root of the file, written in the view's order, and zero_root zeroes
-        # the first. Written by depth in the whole rig, prop came first while
-        # ankle was zeroed
-        from cgmath.hierarchy import HierarchyData, TransformData, TransformList
-
-        rig = HierarchyData(
-            [TransformData(name, node_type="joint", translate=(1, 0, 0)) for name in ("hip", "knee", "ankle", "prop")]
-        )
-        rig["knee"].set_parent("hip", world_space=False)
-        rig["ankle"].set_parent("knee", world_space=False)
-        TransformList([rig["ankle"], rig["prop"]]).save_fbx(self.out, zero_root=True)
-
-        back = hierarchy_mod.HierarchyData.load_fbx(self.out)
-        self.assertEqual([(x.name, x.parent_name) for x in back], [("ankle", None), ("prop", None)])
-        np.testing.assert_allclose(back.get("ankle").translate, [0, 0, 0], atol=1e-9)
-        np.testing.assert_allclose(back.get("prop").translate, [1, 0, 0], atol=1e-9)
-
-    def test_zero_root_with_user_attributes(self):
-        # the user attributes, written as properties of each node, leave the
-        # roots zero_root reads alone: the root is found and zeroed, the
-        # attributes kept
-        from cgmath.hierarchy import HierarchyData, TransformData
-
-        rig = HierarchyData([
-            TransformData("root", node_type="joint", translate=(5, 0, 0)),
-            TransformData("spine", node_type="joint", translate=(0, 10, 0)),
-        ])
-        rig["spine"].set_parent("root", world_space=False)
-        rig["root"].add_user_attribute("weight", 0.5)
-        rig["spine"].add_user_attribute("mode", 1, attribute_type="enum", enum_names="a:b:c")
-        rig.save_fbx(self.out, zero_root=True)
-
-        back = hierarchy_mod.HierarchyData.load_fbx(self.out)
-        np.testing.assert_allclose(back.get("root").translate, [0, 0, 0], atol=1e-9)
-        np.testing.assert_allclose(back.get("spine").translate, [0, 10, 0], atol=1e-9)
-        self.assertEqual(back.get("root").weight, 0.5)
-
-    def test_zero_root_on_a_rig_listed_child_first(self):
-        # the joint zeroed is the file's root, not the first joint listed
-        from cgmath.hierarchy import HierarchyData, TransformData, generate_uuid
-
-        root  = TransformData("root", node_type="joint", translate=(5, 0, 0), uuid=generate_uuid())
-        spine = TransformData("spine", node_type="joint", translate=(0, 10, 0), parent_uuid=root.uuid)
-        HierarchyData([spine, root]).save_fbx(self.out, zero_root=True)
-
-        back = hierarchy_mod.HierarchyData.load_fbx(self.out)
-        self.assertEqual([(x.name, x.parent_name) for x in back], [("root", None), ("spine", "root")])
-        np.testing.assert_allclose(back.get("root").translate, [0, 0, 0], atol=1e-9)
-        np.testing.assert_allclose(back.get("spine").translate, [0, 10, 0], atol=1e-9)
-
-    def test_zero_root_without_a_root_joint(self):
-        from cgmath.hierarchy import HierarchyData, TransformData
-
-        with self.assertRaisesRegex(ValueError, "joint"):
-            HierarchyData([TransformData("grp")]).save_fbx(self.out, zero_root=True)
 
     def test_closed_exporter_refuses_work(self):
         from cgmath.formats.fbx import FbxExporter

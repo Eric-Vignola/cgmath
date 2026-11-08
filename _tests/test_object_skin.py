@@ -863,20 +863,6 @@ class TestFbxPosesInTheRigsUnitAndAxes(FbxCase):
             ("m Z-up", "m", zup, 100.0, self.TURN),
         )
 
-    def test_at_its_bind_pose_the_rig_leaves_the_mesh_where_it_is(self):
-        """a meters file posed by its own rig at rest moved the mesh 99 units
-        when the mesh stayed in meters and the rig loaded in cm, and a Z-up
-        file 1.2 units on a mesh 0.8 across when the rig alone turned"""
-        for label, unit, axes, _, _ in self.cases():
-            with self.subTest(file=label):
-                path = self.skinned(f"bind {label}.fbx", unit=unit, axes=axes)
-                obj  = Object.load_fbx(path)
-                bind = self.points(obj)
-                for loader in (HierarchyData.load_fbx, ClipData.load_fbx):
-                    obj.pose(loader(path))
-                    np.testing.assert_allclose(self.points(obj), bind, rtol=0.0, atol=1e-9)
-                    obj.restore_bind_pose()
-
     def test_the_mesh_loads_in_centimeters_and_the_object_in_maya_axes(self):
         """the points scale with the file's unit; the mesh readers keep the
         file's axes, and the Object turns its points and normals"""
@@ -899,25 +885,6 @@ class TestFbxPosesInTheRigsUnitAndAxes(FbxCase):
                 # a number is the caller's own factor on the list reader too
                 np.testing.assert_array_equal(MeshList.load_fbx(path, scale_factor=1.0)[0].points, raw.points)
                 np.testing.assert_array_equal(Object.load_fbx(path, **self.RAW).mesh.points, raw.points)
-
-    def test_posed_off_its_bind_the_mesh_is_the_files_posed_mesh_converted(self):
-        for label, unit, axes, cm, turn in self.cases():
-            with self.subTest(file=label):
-                path  = self.skinned(f"posed {label}.fbx", unit=unit, axes=axes, knee=50.0, moved_body=True)
-                posed = Object.load_fbx(path).pose(HierarchyData.load_fbx(path))
-                raw   = Object.load_fbx(path, **self.RAW)
-                bind  = self.points(raw)
-                raw.pose(HierarchyData.load_fbx(path, **self.RAW))
-
-                self.assertGreater(float(np.abs(self.points(raw) - bind).max()), 0.1)
-                want = self.points(raw) * cm @ turn
-                np.testing.assert_allclose(self.points(posed), want, rtol=0.0, atol=1e-9)
-
-                # a number is the caller's own factor, on the rig and the mesh alike
-                three = Object.load_fbx(path, scale_factor=3.0)
-                three.pose(HierarchyData.load_fbx(path, scale_factor=3.0))
-                want = self.points(raw) * 3.0 @ turn
-                np.testing.assert_allclose(self.points(three), want, rtol=0.0, atol=1e-9)
 
     def test_a_left_handed_file_raises_on_the_object_unless_its_axes_are_kept(self):
         """no rotation turns it into Maya's axes, so the Object, which turns
@@ -1174,53 +1141,6 @@ class TestFbxMeshesInTheirOwnSpace(FbxCase):
                     for mesh in (read[name], pairs[name], MeshData.load_fbx(path, name=name)):
                         np.testing.assert_array_equal(mesh.points, truth[name][0] * self.factor(name, cm, convert))
                         np.testing.assert_array_equal(np.asarray(mesh.normals)[mesh.normal_indices], normals)
-
-    def test_under_its_nodes_world_a_mesh_is_where_the_sdk_puts_it(self):
-        """each mesh's node, from HierarchyData.load_fbx and ClipData.load_fbx
-        of the same file, places its points where the sdk does; points turned
-        as well land elsewhere in a Z-up file"""
-        for label, unit, axes, cm, turn, convert in self.cases():
-            with self.subTest(file=label):
-                path  = self.scene_file(f"worlds {label}.fbx", unit, axes, convert)
-                truth = self.sdk_points(path, cm)
-                read  = {mesh.name: np.asarray(mesh.points) for mesh in MeshList.load_fbx(path)}
-
-                for loader in (HierarchyData.load_fbx, ClipData.load_fbx):
-                    rig = loader(path)
-                    for name in self.MESHES:
-                        world = np.asarray(rig[name].world_matrix)
-                        got   = read[name] @ world[:3, :3] + world[3, :3]
-                        np.testing.assert_allclose(got, truth[name][1], rtol=0.0, atol=1e-12)
-
-                        if turn is not self.TURN:
-                            continue
-                        twice = read[name] @ turn @ world[:3, :3] + world[3, :3]
-                        self.assertGreater(float(np.abs(twice - truth[name][1]).max()), 1.0)
-
-    def test_a_skinned_mesh_posed_by_the_rig_is_the_sdks_blend(self):
-        """the reader's points and _read_skins_fbx's inverse binds, both in the
-        mesh's own space, deformed by the rig or the clip of the same file; and
-        the Object, whose points and binds turn together"""
-        for label, unit, axes, cm, turn, convert in self.cases():
-            with self.subTest(file=label):
-                path  = self.scene_file(f"skin {label}.fbx", unit, axes, convert)
-                want  = self.sdk_blend(path, cm, turn)
-                mesh  = MeshData.load_fbx(path, name="body")
-                skins = {skin.name: (skin, binds) for skin, binds in _read_skins_fbx(path, bind_matrices=True)}
-
-                deformer = SkinDeformData(mesh, skins["body"][0], inverse_bind_matrices=skins["body"][1])
-                index    = [x.name for x in MeshList.load_fbx(path)].index("body")
-                obj      = Object.load_fbx(path, index=index, extract_texture=False)
-                for loader in (HierarchyData.load_fbx, ClipData.load_fbx):
-                    rig = loader(path)
-                    np.testing.assert_allclose(deformer.apply(rig), want, rtol=0.0, atol=1e-12)
-                    np.testing.assert_allclose(obj.pose(rig).mesh.points, want, rtol=0.0, atol=1e-12)
-                    obj.restore_bind_pose()
-
-                # the knee is off its bind, so the blend moved the mesh
-                world = np.asarray(HierarchyData.load_fbx(path)["body"].world_matrix)
-                rest  = np.asarray(mesh.points) @ world[:3, :3] + world[3, :3]
-                self.assertGreater(float(np.abs(want - rest).max()), 0.1 * self.factor("body", cm, convert))
 
     def test_the_object_turns_a_mesh_with_no_node(self):
         """Object.load_fbx shows each mesh's own points and normals turned,
@@ -1534,43 +1454,6 @@ class TestFbxGeometricTransform(FbxCase):
         np.testing.assert_allclose(normals["mirror"], -unflipped, rtol=0.0, atol=1e-9)
         self.assertEqual(self.faces(read["mirror"]), [list(face) for face in self.FACES])
 
-    def test_under_its_nodes_world_a_mesh_is_where_the_sdk_puts_it(self):
-        """each mesh's node, from HierarchyData.load_fbx and ClipData.load_fbx
-        of the same file, places its points where the sdk does, the offset
-        and the node's world"""
-        for label, unit, axes, cm, _ in self.cases():
-            with self.subTest(file=label):
-                path  = self.scene_file(f"worlds {label}.fbx", unit, axes)
-                truth = self.sdk_truth(path, cm)
-                read  = {mesh.name: np.asarray(mesh.points) for mesh in MeshList.load_fbx(path)}
-
-                for loader in (HierarchyData.load_fbx, ClipData.load_fbx):
-                    rig = loader(path)
-                    for name in self.OFFSETS:
-                        world = np.asarray(rig[name].world_matrix)
-                        got   = read[name] @ world[:3, :3] + world[3, :3]
-                        np.testing.assert_allclose(got, truth[name][3], rtol=0.0, atol=1e-9)
-
-    def test_a_skinned_mesh_posed_by_the_rig_is_the_sdks_blend(self):
-        """the reader's points, the offset baked, and _read_skins_fbx's
-        inverse binds as read, deformed by the rig or the clip of the same
-        file; and the Object, whose points and binds turn together"""
-        for label, unit, axes, cm, turn in self.cases():
-            with self.subTest(file=label):
-                path  = self.scene_file(f"skin {label}.fbx", unit, axes)
-                want  = self.sdk_blend(path, cm, turn)
-                mesh  = MeshData.load_fbx(path, name="body")
-                skins = {skin.name: (skin, binds) for skin, binds in _read_skins_fbx(path, bind_matrices=True)}
-
-                deformer = SkinDeformData(mesh, skins["body"][0], inverse_bind_matrices=skins["body"][1])
-                index    = [x.name for x in MeshList.load_fbx(path)].index("body")
-                obj      = Object.load_fbx(path, index=index, extract_texture=False)
-                for loader in (HierarchyData.load_fbx, ClipData.load_fbx):
-                    rig = loader(path)
-                    np.testing.assert_allclose(deformer.apply(rig), want, rtol=0.0, atol=1e-9)
-                    np.testing.assert_allclose(obj.pose(rig).mesh.points, want, rtol=0.0, atol=1e-9)
-                    obj.restore_bind_pose()
-
     def test_the_object_turns_the_mesh_with_its_offset(self):
         """Object.load_fbx shows each mesh as MeshList.load_fbx reads it, the
         offset baked, then turned into Maya's Y-up, points and normals"""
@@ -1608,52 +1491,6 @@ class TestFbxGeometricTransform(FbxCase):
                 scene.GetRootNode().AddChild(node)
 
         return self.write(name, populate)
-
-    def test_nodes_that_share_a_mesh_each_bake_their_own_offset(self):
-        """one mesh under two nodes, one offset and one not: every reader
-        reads it under each node with that node's own offset baked, the
-        control points through the node's own FbxAMatrix(T, R, S), as the
-        sdk puts it, and under each node's world from the rig where the sdk
-        puts it; under the node with none it reads as the file holds it, its
-        normals at unit length. Maya's FBXImport differs: it bakes one offset
-        into both, that of the first such node in the hierarchy"""
-        names = ("moved", "kept")
-        for label, unit, axes, cm, turn in self.cases():
-            for kept_first in (False, True):
-                with self.subTest(file=label, kept_first=kept_first):
-                    path = self.shared_file(f"shared {label} {kept_first}.fbx", unit, axes, kept_first)
-                    with open_fbx(path, fbx) as scene:
-                        # the premise: one mesh, which both nodes hold
-                        shapes = {_find(scene, name).GetNodeAttribute().GetUniqueID() for name in names}
-                        self.assertEqual(len(shapes), 1)
-                        self.assertEqual(_find(scene, "kept").GetNodeAttribute().GetNodeCount(), 2)
-
-                    truth  = self.sdk_truth(path, cm, names)
-                    meshes = MeshList.load_fbx(path)
-                    read   = {mesh.name: mesh for mesh in meshes}
-                    pairs  = {mesh.name: mesh for mesh, _ in mesh_load_fbx(path)}
-                    rig    = HierarchyData.load_fbx(path)
-                    self.assertEqual(sorted(read), sorted(names))
-                    self.assertGreater(float(np.abs(truth["moved"][0] - truth["kept"][0]).max()), 1.0)
-
-                    for name in names:
-                        local, normals, matrix, world = truth[name]
-                        node = np.asarray(rig[name].world_matrix)
-                        for mesh in (read[name], pairs[name], MeshData.load_fbx(path, name=name)):
-                            got = np.asarray(mesh.normals)[mesh.normal_indices]
-                            np.testing.assert_allclose(mesh.points, local, rtol=0.0, atol=1e-9)
-                            placed = np.asarray(mesh.points) @ node[:3, :3] + node[3, :3]
-                            np.testing.assert_allclose(placed, world, rtol=0.0, atol=1e-9)
-                            if name == "kept":
-                                unit_length = normals / np.linalg.norm(normals, axis=1, keepdims=True)
-                                np.testing.assert_allclose(got, unit_length, rtol=0.0, atol=1e-15)
-                            else:
-                                np.testing.assert_allclose(got, self.turned(normals, matrix), rtol=0.0, atol=1e-9)
-
-                    for index, mesh in enumerate(meshes):
-                        obj = Object.load_fbx(path, index=index, extract_texture=False, load_skin=False)
-                        self.assertEqual(obj.name, mesh.name)
-                        np.testing.assert_allclose(obj.mesh.points, truth[mesh.name][0] @ turn, rtol=0.0, atol=1e-9)
 
     def flat_file(self, name, unit, axes):
         """a file of the cubes ``FLAT`` and ``THIN`` offset, under the scene
@@ -1700,74 +1537,6 @@ class TestFbxGeometricTransform(FbxCase):
                         np.testing.assert_allclose(got, self.turned(normals, matrix) @ into, rtol=0.0, atol=1e-9)
                     np.testing.assert_allclose(mesh.points, local, rtol=0.0, atol=1e-9)
                     np.testing.assert_allclose(obj.mesh.points, local @ turn, rtol=0.0, atol=1e-9)
-
-    def test_maya_imports_the_mesh_where_the_readers_put_it(self):
-        """Maya's own FBXImport: its object-space points are the reader's,
-        over the cm one unit of the file holds (Maya keeps a file's unit in
-        its object space and scales the node), and under their node's world
-        from HierarchyData.load_fbx the points are where Maya puts the mesh,
-        both within the gap between Maya's points and the sdk's (Maya holds
-        a mesh's points in single precision) plus 1e-9; its face-vertex
-        normals are the reader's within 2e-7 (single precision: at most
-        1.2e-7 measured), its faces in the file's order. Needs mayapy with
-        the fbxmaya plug-in"""
-        try:
-            import maya.api.OpenMaya as om
-            import maya.cmds as cmds
-            import maya.mel as mel
-
-            cmds.loadPlugin("fbxmaya", quiet=True)
-        except Exception:  # not running in Maya, or no fbx plug-in
-            self.skipTest("needs Maya and its fbxmaya plug-in")
-
-        def shape(name):
-            selection = om.MSelectionList()
-            selection.add(name)
-            path = selection.getDagPath(0)
-            path.extendToShape()
-            return om.MFnMesh(path)
-
-        def rows(values):
-            return np.array([[value.x, value.y, value.z] for value in values])
-
-        self.addCleanup(cmds.file, new=True, force=True)
-        for label, unit, axes, cm, _ in self.cases():
-            path  = self.scene_file(f"maya {label}.fbx", unit, axes)
-            truth = self.sdk_truth(path, cm)
-            read  = {mesh.name: mesh for mesh in MeshList.load_fbx(path)}
-            rig   = HierarchyData.load_fbx(path)
-            cmds.file(new=True, force=True)
-            mel.eval("FBXResetImport")
-            mel.eval(f'FBXImport -f "{path.replace(os.sep, "/")}"')
-
-            for name in ("geo", "turned", "mirror", "plain", "scaled", "mirror2", "mirror3"):
-                with self.subTest(file=label, mesh=name):
-                    mesh  = read[name]
-                    maya  = shape(name)
-                    faces = [list(maya.getPolygonVertices(face)) for face in range(maya.numPolygons)]
-                    local = rows(maya.getPoints(om.MSpace.kObject))
-                    world = rows(maya.getPoints(om.MSpace.kWorld))
-                    normals = rows(
-                        normal
-                        for face in range(maya.numPolygons)
-                        for normal in maya.getFaceVertexNormals(face, om.MSpace.kObject)
-                    )
-                    self.assertEqual(faces, self.faces(mesh))
-
-                    gap = float(np.abs(local - truth[name][0] / cm).max())
-                    self.assertLess(gap, 1e-6)
-                    got = np.asarray(mesh.points) / cm
-                    self.assertLessEqual(float(np.abs(got - local).max()), gap + 1e-9)
-
-                    gap = float(np.abs(world - truth[name][3]).max())
-                    self.assertLess(gap, 1e-6 * max(1.0, float(np.abs(world).max())))
-                    node = np.asarray(rig[name].world_matrix)
-                    got  = np.asarray(mesh.points) @ node[:3, :3] + node[3, :3]
-                    self.assertLessEqual(float(np.abs(got - world).max()), gap + 1e-9)
-
-                    got = np.asarray(mesh.normals)[mesh.normal_indices]
-                    self.assertLess(float(np.abs(got - normals).max()), 2e-7)
-
 
 @unittest.skipIf(fbx is None, "Autodesk FBX Python SDK is not installed")
 class TestFbxNormalsAtUnitLength(unittest.TestCase):

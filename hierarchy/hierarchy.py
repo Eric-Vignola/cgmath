@@ -114,6 +114,9 @@ MAYA_ATTRIBUTE_MAP = {
 # it can't be rebuilt nor exported from this data and is skipped along with its children.
 SUPPORTED_NODE_TYPES = ("transform", "joint", "locator", "space_transform")
 
+# what no longer works names the fork it does not work on
+_FORK = "the r17-skeleton fork (one skeleton and one take, no skins or meshes)"
+
 # ---------------------------------------------------------------------------- #
 
 
@@ -1682,6 +1685,12 @@ class TransformData(Data):
             setattr(self, name, np.array(value, dtype=float))
         else:
             current[...] = value
+            # a channel bound to a clip's frame: a write at the playhead
+            # animates a constant channel
+            if current.base is not None:
+                owner = self._hierarchy
+                if isinstance(owner, ClipData):
+                    owner._played(self, name)
 
     @property
     def shear(self) -> np.ndarray:
@@ -2919,7 +2928,12 @@ class TransformData(Data):
 
             attrs = self.__dict__.get("user_defined_attributes")
             if attrs and name in attrs and not self._is_builtin_attr(name):
-                for spec, converted in _user_writes(attrs, name, value, self.name):
+                writes = _user_writes(attrs, name, value, self.name)
+                owner  = self._hierarchy
+                if isinstance(owner, ClipData) and owner._blocks:
+                    owner._user_played(self, name, writes)
+                    return
+                for spec, converted in writes:
                     spec["value"] = converted
                 return
 
@@ -7403,193 +7417,6 @@ def _fbx_stacks(scene) -> list:
     return [typed(scene.GetSrcObject(criteria, index), FBX.FbxAnimStack, FBX) for index in range(scene.GetSrcObjectCount(criteria))]
 
 
-def _fbx_clip_list(cls, filename, scale_factor=None, fps=None, axis_system="maya_y_up", node_types=None) -> tuple:
-    """``(clips, active)``: every take of an fbx file as ``cls``, a
-    ClipList, reads it (:meth:`ClipList.load_fbx`), and the name of the take
-    Maya's import opens on, the one the file's ActiveAnimStackName names,
-    else the first, None in a file with no take"""
-    if fps is not None and fps <= 0.0:
-        raise ValueError(f"fps must be positive, got {fps}")
-    if FBX is None:
-        raise ImportError("fbx module not found")
-    _fbx_check_scale_factor(scale_factor)
-    _fbx_check_axis_system(axis_system)
-    kinds = _fbx_check_node_types(node_types)
-
-    with _NodesLoad(), open_fbx(filename, FBX) as scene:
-        turn   = _fbx_axis_turn(scene, axis_system, filename)
-        units  = _fbx_units(scene, scale_factor)
-        record = _fbx_record(scene, axis_system, scale_factor)
-        hierarchy_data, nodes, tree = _walk_fbx(scene, units, kinds, turn is not None)
-
-        rest = copy.deepcopy(hierarchy_data)
-        if turn is not None:
-            _fbx_turn_walk(rest, turn)
-        rest   = _recorded(HierarchyData.from_dict(rest), record)
-
-        stacks = _fbx_stacks(scene)
-        names  = _take_names([stack.GetName() for stack in stacks])
-        rig    = HierarchyData.from_dict(hierarchy_data) if stacks else None
-        clips = [
-            _fbx_take_clip(
-                ClipData, scene, stack, rig, rest.copy(), hierarchy_data, nodes, tree, turn, record,
-                filename, fps, None, None, name,
-            )
-            for stack, name in zip(stacks, names)
-        ]
-        named  = str(scene.ActiveAnimStackName.Get())
-        active = next((name for stack, name in zip(stacks, names) if stack.GetName() == named), names[0] if names else None)
-
-        # each take's span as the file stores it, in the clip's frames
-        per_second = _fbx_ticks_per_second()
-        ranges     = {}
-        for stack, name, clip in zip(stacks, names, clips):
-            span         = stack.GetLocalTimeSpan()
-            ranges[name] = (span.GetStart().Get() * clip.fps / per_second, span.GetStop().Get() * clip.fps / per_second)
-    return cls(clips), active, ranges
-
-
-def _fbx_take_clip(
-    cls, scene, stack, rig, rest, hierarchy_data, nodes, tree, turn, record, filename, fps, start_frame, end_frame,
-    take="",
-):
-    """one take of an open scene as ``cls``, a ClipData named ``take``:
-    ``stack`` read as :meth:`ClipData.load_fbx` reads its take, the frames by
-    its frame rule, every node sampled, folded and its roots turned, on a clip
-    built from ``rig`` (the walk's dicts, in the file's own axes) holding
-    ``rest`` as its rest pose and the read's ``record``. ``hierarchy_data``,
-    ``nodes`` and ``tree`` are the walk's (:func:`_walk_fbx`), ``turn`` the
-    axis turn or None. The scene must still be open."""
-    # the evaluator reads whichever stack is current, not the one we hold
-    scene.SetCurrentAnimationStack(stack)
-
-    if fps is None:
-        fps = _fbx_frame_rate(scene.GetGlobalSettings().GetTimeMode())
-        if fps <= 0.0:
-            raise ValueError(
-                f"{filename!r} uses a time mode the fbx sdk reports no "
-                "frame rate for, so the frame rate has to be given: "
-                "load_fbx(..., fps=...)"
-            )
-
-    # the stored span and every key of the take: Unreal stores the
-    # span a frame short of its last key, and a Maya export can store
-    # one wider than its keys
-    per_second = _fbx_ticks_per_second()
-    span       = stack.GetLocalTimeSpan()
-    bounds     = [int(span.GetStart().Get()), int(span.GetStop().Get())]
-    keys       = _fbx_key_ticks(stack)
-    if keys is not None:
-        bounds = [min(bounds[0], keys[0]), max(bounds[1], keys[1])]
-    first, last = _fbx_whole_frames(bounds, fps, per_second).tolist()
-
-    # out to whole frames, so both ends are inside the grid rather
-    # than part of a frame past it
-    start = int(np.floor(first)) if start_frame is None else int(start_frame)
-    stop  = int(np.ceil(last)) if end_frame is None else int(end_frame)
-
-    # each end defaults on its own, so one passed alone can fall past
-    # the take's other end: the error names the end the take gave
-    if stop < start:
-        if end_frame is None:
-            raise ValueError(
-                f"start_frame {start} is past the take's last frame {stop}; "
-                "pass end_frame too"
-            )
-        if start_frame is None:
-            raise ValueError(
-                f"end_frame {stop} is before the take's first frame {start}; "
-                "pass start_frame too"
-            )
-        raise ValueError(f"end_frame {stop} is before start_frame {start}")
-
-    clip         = cls(rig, frames=stop - start + 1, start_frame=start, fps=fps)
-    column       = {uuid: index for index, uuid in enumerate(clip.uuid)}
-    scale        = np.array(clip.frames.scale)
-    rotate       = np.array(clip.frames.rotate)
-    translate    = np.array(clip.frames.translate)
-    joint_orient = np.array(clip.frames.joint_orient)
-
-    # every node of the tree, the kept ones through the objects the
-    # walk handed back and the dropped ones above them, sampled as the
-    # file holds them, then folded every frame at once, as the walk
-    # folds their static values
-    uuids = list(hierarchy_data)
-    sampled = [
-        (nodes[uuids[kept]] if kept >= 0 else tree.nodes[position], position)
-        for position, kept in enumerate(tree.kept.tolist())
-    ]
-    held = [
-        np.repeat(values[None], clip.frame_count, axis=0)
-        for values in (tree.translate, tree.rotate, tree.scale)
-    ]
-
-    # the frame grid in the sdk's ticks, every frame sampled at once
-    ticks = _fbx_ticks((start + np.arange(clip.frame_count)) / fps, per_second)
-    _fbx_sample_take(stack, sampled, ticks, tree, held)
-    sheared  = _fbx_sheared_cameras(tree, stack, ticks)
-    file_fps = _fbx_frame_rate(scene.GetGlobalSettings().GetTimeMode()) or fps
-    baked = _fbx_clip_bakes(
-        tree, stack, sampled, file_fps, (start + np.arange(clip.frame_count)) * file_fps / fps, held
-    )
-
-    # a joint's orient as the fold leaves it, every frame: a node a
-    # dropped node above moves only at its static values took the fold
-    # in the rig the clip was built from
-    folded = _fbx_fold(tree, *held, baked)
-    put    = np.array([column[uuid] for uuid in uuids], dtype=np.intp)
-    joints = tree.joint[tree.columns]
-    translate[:, put], rotate[:, put], scale[:, put] = folded[:3]
-    joint_orient[:, put[joints]] = folded[3][:, joints]
-
-    # what the fold works out holds no -0.0, as the walk's
-    moved = put[folded[4]]
-    if len(moved):
-        for block in (translate, rotate, scale):
-            block[:, moved] += 0.0
-        joint_orient[:, put[folded[4] & joints]] += 0.0
-
-    # every node holds the rotate axis the fold leaves it, on every frame,
-    # and one that is no joint the joint orient
-    axis                          = np.array(clip.frames.rotate_axis)
-    axis[:, put]                  = folded[6]
-    joint_orient[:, put[~joints]] = folded[3][:, ~joints]
-    clip.frames.rotate_axis       = axis
-    shear                         = np.zeros(translate.shape)
-    shear[:, put]                 = folded[5] + 0.0
-
-    if turn is not None:
-        roots  = [index for index, node in enumerate(clip) if node.parent_uuid is None]
-        joints = [clip[index].node_type == "joint" for index in roots]
-        orders = [clip[index].rotate_order for index in roots]
-
-        turned = _fbx_turn_roots(
-            turn, joints, orders, translate[:, roots], rotate[:, roots], joint_orient[:, roots]
-        )
-        translate[:, roots], rotate[:, roots], joint_orient[:, roots] = turned
-
-    clip.frames.joint_orient = joint_orient
-    clip.frames.scale        = scale
-    clip.frames.shear        = shear
-    clip.frames.rotate       = rotate
-    clip.frames.translate    = translate
-    clip.frame               = 0
-    clip._rest_pose          = rest
-    clip._take               = take
-
-    # visibility keyed in the take, frame by frame
-    shown = None
-    for uuid in uuids:
-        keyed = _fbx_take_visibility(stack, nodes[uuid], ticks)
-        if keyed is not None:
-            shown                  = clip._shown() if shown is None else shown
-            shown[:, column[uuid]] = keyed
-    if shown is not None:
-        clip._show(shown)
-    _fbx_warn_cameras(sheared)
-    return _recorded(clip, record)
-
-
 # a Visibility above this reads visible, as Maya's FBXImport reads one,
 # static or keyed: 1e-5 hidden, 1.0000001e-5 visible, any negative hidden
 # (vis_sweep.py)
@@ -8255,693 +8082,26 @@ class TransformList(DataList[TransformData]):
         return hierarchy_data
 
     @classmethod
-    def load_fbx(
-        cls,
-        filename:     str,
-        scale_factor: Optional[float] = None,
-        axis_system:  Optional[str]   = "maya_y_up",
-        pose:         str             = "node",
-        node_types:   Optional[tuple] = None,
-    ):
-        """primitive fbx joint loader
+    def load_fbx(cls, filename):
+        """the skeleton of an fbx file, as ``cgmath.formats.load_fbx`` reads
+        it: a HierarchyData, or a view of its nodes' copies"""
+        from cgmath.formats._load import load_fbx
 
-        ``scale_factor`` None, the default, converts the file's unit to
-        centimeters: translations are multiplied by the centimeters one unit of
-        the file holds (``GetSystemUnit().GetScaleFactor()``), s, 1.0 for a
-        file in cm, 100.0 for one in meters. Only lengths are converted;
-        rotations, scales and user defined attributes keep the file's values,
-        but for a unit held as a scale. The sdk's
-        ``FbxSystemUnit.ConvertScene`` and Maya's unit converting export
-        (``FBXExportConvertUnitString``) write a scene in another unit by
-        scaling each child of the scene root by 1/s, and each node that does
-        not inherit its parent's scale (a joint's segment scale compensate) by
-        1/s as well, over values left in the unit they were in, cm for a Maya
-        scene. A child of the scene root scaled 1/s on all three axes, within
-        1e-9 relative, is read as that unit, whether the read keeps it or drops
-        it (``node_types`` below): its scale is reset to 1 and divided out of
-        each node under it that does not inherit its parent's scale, and the
-        lengths under it are read as they are, on the rig, on every frame of a
-        clip, in the bind pose and by the mesh and skin readers. So such a file
-        loads as the cm file it was written from. A file only labelled in a
-        unit, its values in that unit, has every length multiplied as above,
-        and so does a root the export found scaled other than 1: its nodes load
-        as the sdk places them, where the cm file has them, scaled 1/s, and the
-        points of a mesh at or under it s times larger, right once posed. But
-        the export leaves the curves of a take's later layers in cm, and on
-        such a root and the nodes under it the read takes them as the sdk
-        places them. A translate the root keys on one is multiplied by s with
-        the rest: on a clip the root and every node under it are off by s - 1
-        times that layer's own translate times its weight, on each channel
-        its curve node holds: what an additive layer adds, an override or
-        passthrough layer's whole value, a channel it holds unkeyed too
-        (Maya's meters export of a group scaled 2 whose translate x and z an
-        override animLayer keys: 2475 cm off on frame 5, and 198 along y,
-        which the layer holds at the group's own value). A scale an override
-        or passthrough layer keys on the root, or on a node under it that does
-        not inherit its parent's scale, is read as the cm value it is, s
-        times what the rest of the read gives it, and every node under it is
-        off (that group's scale x on an override animLayer: its joints 792
-        and 1780 cm off); an additive layer's scale, which multiplies, loads
-        right. And a node there that compensates its parent's scale under a
-        parent that is neither the root nor compensating, as the second joint
-        of a Maya skeleton does when its first joint sits under such a root, is
-        scaled 1/s once more by the export, and every node under it with it.
-        Read by their own values (``pose`` "node", and a clip on every frame
-        and its rest pose), that node loads at its cm position scaled 1/s^2,
-        the nodes under it off their cm positions, and a mesh on or under it,
-        or skinned to it, is off once posed. Under ``pose`` "bind" a node a
-        bind pose lists takes its bind matrix, which the export converts as a
-        world matrix: it loads where the cm file has it, scaled 1/s like the
-        rest, and so do the nodes under it and the meshes on them or skinned to
-        them, posed at the bind. A node no bind pose lists keeps what its own
-        values give it under its parent's bind: the node the export scales once
-        more, and a compensating node under it, still loads scaled 1/s^2, and
-        the nodes under them that no bind pose lists are off, but for those
-        under a node one lists, which load right, as that node does; any other
-        loads scaled 1/s like the rest, as the joints of a skeleton whose root
-        joint is scaled other than 1 do, the end joints Maya's export leaves
-        out of the bind pose among them. Maya's export lists every skin
-        influence, the joints between them and the nodes above them. Maya's
-        importer scales every root by s whatever its scale, and every
-        compensating node, which brings all of these back but puts a file only
-        labelled in meters at scale 100. The one risk: a root authored at
-        exactly 1/s in a file labelled in that unit is read as the unit. A
-        number is the caller's own factor, and neither the file's unit nor a
-        unit held as a scale is read.
+        skeleton, _ = load_fbx(filename)
+        if issubclass(cls, HierarchyData):
+            if cls is not HierarchyData:
+                raise NotImplementedError(f"{cls.__name__}.load_fbx: {_FORK} reads a HierarchyData skeleton")
+            return skeleton
+        return _recorded(cls(node.copy() for node in skeleton), skeleton._records())
 
-        ``axis_system`` "maya_y_up", the default, loads the scene in Maya's
-        Y-up axes as ``FbxAxisSystem.MayaYUp.ConvertScene`` converts it:
-        every node's world matrix is the one Maya's FBXImport gives it, in
-        the file's axes times the turn from the file's axis system to Maya's
-        where the read turns, and that import parts from the sdk's own
-        evaluation on the nodes the inherit paragraph below names. Maya's FBX
-        importer puts a file whose up axis is x or z, an Unreal file among
-        them, in the same place as ConvertScene, but for a skeleton node at
-        the root of the file, eRoot or eEffector, that holds no eLimbNode
-        child, which it imports as a transform, 1.41 off ConvertScene's in
-        its 3x3 in a Z-up file and 1.28 in an X-up one, the nodes under it
-        up to 2.98 and 5.0 off in translate, where the read follows
-        ConvertScene: one that holds an eLimbNode, as an Unreal file's
-        skeleton root does, imports as a joint where ConvertScene puts it,
-        and save_fbx writes every joint as an eLimbNode. Maya's importer also
-        parts from the read on a node below the roots that is no camera or
-        light whose rotation is inactive, in another order than xyz, which it
-        turns by neither order (``node_types`` below). At the file's rate, with
-        FBXImportResamplingRateSource "File", or from a scene whose rate is a
-        whole multiple of the file's but 90 fps, Maya's import and the read are
-        up to 2.0 apart in the 3x3 on a node of world scale 1: on keys within
-        whole turns of the angles Maya's xyz solve returns (y between -90 and
-        90), less the less the node turns, up to about the square of that turn
-        in radians on turns under 20 degrees, and on keys off that branch, as
-        (180, 170, 180) is of (0, 10, 0), up to about twice the turn in radians
-        in xzy, yzx, yxz and zxy, zyx keeping the square; and on a take up to
-        3.9e-4 more where Maya holds the rotate it solves level
-        (:meth:`ClipData.load_fbx`). Against the same node under the same
-        parents with every scale 1, a scale multiplies that by the node's world
-        scale, by the largest axis of an uneven one at most, where the scales
-        above the node are even; by up to the product of the largest axes of
-        its own scale and those above it where no parent scaled unevenly is
-        turned or sits under a turned one; and otherwise by up to 1.19 times
-        that product on the files measured (a node scaled (3, 1, 1) under a
-        group scaled (1, 1, 3) and turned), 1.46 times it in a numpy scan of
-        the rule Maya follows and never more than 2.13 times it. Such a node
-        turns about its rotate pivot: a node under it is off in translate by up
-        to twice its world distance from that pivot, and so is the node itself
-        where it has one, times the largest over the smallest singular value of
-        the node's parent's world 3x3 (1 where the scales above it are even,
-        and that 3x3's longest row over its shortest only where no turned
-        parent sits under one scaled unevenly), and a node on the pivot agrees.
-        On the files measured, up to 3.0e-4 on turns of 1.1 degrees, 3.3e-2 on
-        11, 0.32 on 35, 1.1 on 72 and 2.0 on turns past 110, and off the branch
-        3.6e-2 on turns of 1.4 degrees, 7.1e-2 on 3 and 0.35 on 10; on turns of
-        up to 111 degrees, 5.1 on a node scaled 3, 4.9 on one scaled (1, 2, 3)
-        and 3.4 under one scaled 2; on turns of 11 degrees, a node scaled
-        (3, 1, 1) under one scaled (1, 1, 3) 8.2 times its gap at scale 1,
-        where the largest axis of its world 3x3 is 3.1 and the product of the
-        two largest axes 9; a locator 1.9 away up to 3.6 off, one 5.6 away
-        10.6, and one 0.1 away under a group scaled (1, 0.1, 1) up to 10.1
-        times that distance, as much with a group turned 45 degrees between
-        them, where that 3x3's rows give 2.8; with rotate pivots 0.5 to 7.1
-        away, the node itself up to 1.99 times that distance off (3.94 with a
-        pivot 2 away) and 3.96 times it under a group scaled (1, 0.5, 2), and
-        a node on the pivot within 5.9e-14. From another rate Maya keys such a
-        node at that rate (:meth:`ClipData.load_fbx`), and on the file's frames
-        between those keys it parts from the read by the gap above and by a
-        share of its own, the two adding or partly cancelling: that share grows
-        with how far the angles Maya solves bend between that rate's frames,
-        not with the gap, and is largest where they jump, as they do by 180
-        degrees where the node's turn passes y = 90 or -90 in xyz. On the files
-        measured, on nodes of world scale 1, from 24, 25 and 48 fps scenes for
-        a 30 fps file and 30 and 25 fps ones for a 24 fps file: a smooth turn
-        about one axis, which agrees at the file's rate, parts by 2.8e-3 to
-        5.3e-3 times the largest second difference of its keys in degrees
-        a frame squared from 24 and 25 fps scenes for a 30 fps file, 0.33
-        to 0.77 of that from 48, and by 1.9e-3 to 4.2e-3 times it from
-        30 and 25 fps scenes for a 24 fps file (on the files measured,
-        on second differences of 1e-2 or more, 2.9e-5 to 6.8e-1); keys
-        that turn back each frame, 4.1e-6 apart at the file's rate on a
-        0.14 degree turn and 3.1e-4 to 6.4e-4 from those scenes, 4.2e-4
-        and 3.2e-3 to 6.6e-3 on a 1.4 degree one, 1.1e-2 and 1.6e-2 to 3.9e-2
-        on a 7 degree one; keys linear in time, at their largest within 2
-        percent of the gap at the file's rate, but Maya's turn parting from its
-        own at the file's rate by up to 1.3e-3 on turns up to 45 degrees,
-        4.3e-2 on turns to 111 and 1.9 on frames where the angles it solves
-        jump. A scale multiplies the share as it does the gap: from a 25 fps
-        scene for a 24 fps file, the keys whose share is 1.85 at scale 1 have
-        one of 7.42 on a node scaled (1, 2, 3) under one scaled (2, 2, 2). On a
-        file whose up axis is x or z a clip parts from Maya's import also where
-        a layer blends the rotation of a root that is no joint, and in a file
-        of any axes where Maya's import keys what it solves or merges at
-        another frame rate than the file's (:meth:`ClipData.load_fbx`). Maya's
-        importer leaves a file whose up axis is y, pointing up or down, in its
-        own axes, so a y-up file whose front is not +z, or a -y-up one, loads
-        here turned 90 or 180 degrees from where Maya shows it. The turn comes
-        from the file's ``FbxAxisSystem`` (its up vector, front vector and
-        handedness) and goes on each root the read keeps, the way ConvertScene
-        puts it on the scene root's children: a joint root takes it in its
-        joint orient and its translate, keeping its rotate, any other root has
-        its rotate solved again in its rotate order and its translate turned.
-        An Unreal file, Z-up, turns (x, y, z) to (x, z, -y). A file already in
-        Maya's Y-up, such as one save_fbx wrote from a default read, loads as
-        it is. A left handed file raises ValueError, since no rotation turns it
-        into Maya's axes. ``axis_system=None`` keeps the file's own axes. Which
-        way the character faces is left as the file has it.
-
-        ``pose`` "node", the default, reads the nodes' own values. "bind"
-        reads the skin bind pose a skinned file stores, which the node
-        values can differ from: they hold whatever pose the scene was in at
-        export. Every node the read keeps that a bind pose (an ``FbxPose``
-        whose ``IsBindPose()`` is true) lists takes that pose's matrix as its
-        world matrix, in the unit and the axes above; a node no bind pose
-        lists keeps its own values under its parent, so it follows the
-        parent's bind. The world matrices are written parents first, each
-        solved into scale, rotate (in the node's rotate order), translate
-        and, on a node that is no joint, shear, the joint orient and rotate
-        axis kept, and a node its bind leaves where it is keeps its own
-        values: a file at its bind pose reads the same either way. A pose's
-        matrices are world matrices, but for one the pose holds local to the
-        parent (``IsLocalMatrix``), which is composed with the parent's world
-        as the read gives it. When two bind poses list one node the first
-        wins, and a later one more than 1e-6 off it warns, naming the node. A
-        file with no bind pose listing a node the read keeps, or one above a
-        kept node (which the read drops, ``node_types`` below), raises
-        ValueError.
-        ``TransformList.load_fbx``, whose nodes no rig owns, solves each
-        one's channels under its parent all the same, so a ``HierarchyData``
-        of them reads at the bind ``HierarchyData.load_fbx`` gives.
-
-        ``node_types`` None, the default, keeps the kinds of node the read
-        has always kept: joints, locators (an ``eMarker``, or a null drawn as
-        a cross), groups (any other null) and meshes, a mesh read as a
-        transform. A tuple of those names, "joint", "locator", "transform"
-        and "mesh", keeps those kinds alone: ``("joint",)`` reads a skeleton
-        without its meshes and groups. A node of a kind left out, one of a
-        kind the read can't keep (a camera, a light, an LOD group), one with
-        no node attribute and the scene root are dropped, and each node kept
-        goes under its nearest kept ancestor. A string, or anything that is
-        no collection of names, raises TypeError; an unknown name, or no
-        name at all, raises ValueError.
-
-        Every kept node's world matrix is the one Maya's FBXImport gives it
-        all the same: what the nodes dropped between it and its kept parent
-        hold is folded into its channels, on every frame for a clip, the way
-        the turn above goes on a root. A joint takes their turn in its joint
-        orient and their move in its translate, keeping its rotate (but for
-        the uneven scale below); any other node has its rotate solved again
-        in its rotate order. A uniform scale among them goes on the node's
-        scale, and on the scale of each joint under it that compensates its
-        parent's scale (segment scale compensate), which a joint compensating
-        a dropped parent divides out instead. An uneven one under a node
-        turned in it takes shear. A node that is no joint holds it, scale,
-        shear and rotate as the matrix setters split a matrix, so it sits on
-        Maya's world, within 2.71e-14 in the 3x3 on the test files. A joint
-        takes what ``xform -m`` gives one, no shear: the scale and rotate of
-        that split, its rotate solved again from the matrix, its position
-        Maya's, its axes off Maya's by the shear no joint holds, up to 22.8
-        on the 359 layouts measured read joints alone, where 3.0.2 was 25.4
-        in its axes and 33.3 in position. What it drops goes on the kept
-        nodes under it, so they stay where Maya puts them, under a scale
-        under 1e-12 too: a node that is no joint takes it in its channels,
-        with shear, and stops it, a joint that compensates its scale takes
-        it in its channels, split again, and any other joint keeps the
-        rotate and scale it holds without it, the file's where nothing else
-        moves it, takes the shear in its translate alone and hands it on.
-        Their positions are Maya's, but on a frame the node is scaled exactly
-        0 along an axis, which leaves the shear no inverse. A dropped camera,
-        light, LOD group or curve follows the rule as any node that is no
-        joint; one that shears under an unevenly scaled parent holds no node,
-        whatever its inherit type: the joints under it are off by what
-        they can't hold, up to 3.46 in the 3x3 on the files measured, their
-        positions Maya's. A scale under 1e-12 in size on a dropped node is read
-        as 1e-12, as Maya's evaluation holds a scale: a joint that compensates
-        a dropped node scaled to 0 keeps its axes and sits on that node's
-        position, and a node that does not collapses onto it, its axes 1e-12
-        long, the 1e-12 in its scale, where Maya 2025 puts them; the sdk's own
-        evaluation gives NaN there. A kept node's own scale keeps the
-        file's value, 0 included, which cgmath's evaluation divides by as
-        it is: ``world_matrix`` is NaN on a joint that compensates a kept
-        node scaled to 0 and on every node under it, its channels finite,
-        where Maya keeps that joint's axes. A joint that compensates a kept
-        node, kept or dropped, divides out that node's own scale, as
-        ``world_matrix`` multiplies by it, and a kept one keeps the scale
-        of a node dropped above that kept node, as Maya does: a joint under
-        a locator scaled 5e-13 under a dropped node scaled 2 takes that 2
-        in its scale. So the joints and nodes kept under a node scaled
-        under 1e-12 sit where Maya puts them, down to about 1e-154, under
-        which the read overflows; along an axis it is scaled exactly 0,
-        those under a joint the read drops collapse onto it: Maya holds
-        1e-12 there, which a kept node does not. Under a kept node the read
-        scales under 1e-12, its own scale times what its split takes from
-        the uneven dropped nodes above it (a locator scaled 1.5e-11 under a
-        dropped node scaled 0.05 reads 7.5e-13), ``world_matrix`` multiplies
-        by that scale where Maya, holding 1e-12, does not: such a frame
-        written with ``save_fbx`` imports into Maya off where Maya imports
-        the file by the rounding of that product (a locator under a kept
-        locator scaled (5e-13, 1, 1) under a dropped node scaled (1, 2, 0.5),
-        split to (6.6e-13, 1.8, 0.5): 6.97e-9 off in position, one under a
-        joint under it 1.56e-8; under that locator read 7.5e-13, 5.07e-9
-        off), and by the shear the save leaves out. Folded in the same way is
-        what a node's own channels can't hold: its rotate and scale pivots
-        and offsets, in its translate, rotation active or not, and, on a
-        node that is no joint, its pre and post rotation, which the sdk
-        reads only with rotation active, in its rotate (a joint holds them
-        as its joint orient and rotate axis). A node whose rotation is
-        inactive turns in xyz, as the sdk turns it, its rotate_order 0
-        whatever order the file stores, and its pre and post rotation left
-        out, and a bake reads it so. Maya's importer turns such a node by
-        neither order, keeping the stored order on the xyz angles of that
-        order's turn, but on a root of a file whose up axis is x or z, whose
-        rotation the sdk's ConvertScene turns on in xyz, so the rule below
-        holds with rotation active; Maya's exporter writes every node with
-        rotation active, as save_fbx does. A Maya group whose pivot is
-        centred on its children loads where Maya shows it. A light's post
-        rotation is fbx's view axis, which Maya places its children without,
-        and so does the read. A camera's turns its children by what it adds
-        to fbx's view axis, (0, -90, 0), the post rotation Maya's exporter
-        writes, which Maya's importer keeps as the camera's rotate axis:
-        nothing on Maya's own camera, (0, -90, 0) on one with no post
-        rotation. Maya's importer reads a camera's or a light's pre rotation
-        and rotate order, and a camera's post rotation, whether its rotation
-        is active or not, and so does the read, but on a root of a file whose
-        up axis is x or z with its rotation inactive: the sdk's ConvertScene,
-        which turns that file into Maya's Y-up for Maya's importer, drops
-        them and turns that root in xyz, so such a camera turns its children
-        by (0, -90, 0) whatever its post rotation. The sdk's own evaluation
-        puts those children elsewhere. A camera scaled unevenly or sheared, its
-        own three scale magnitudes apart or its world in the file's scene
-        holding a shear, two of its rows off square, each by more than
-        1.00001e-4 relative to their size (FBX_EVEN_BAND, the band of the even
-        test below), at the static pose or on any frame a clip reads, warns:
-        each read logs one warning through cgmath.formats.fbx's logger, as
-        save_fbx's warnings are logged, naming each such camera, and reads as
-        it would with none, its values the same; a later release refuses such a
-        file. A mirrored camera, its three scale magnitudes equal, is none, and
-        a read that raises warns of nothing. A node nothing moves keeps the
-        file's values to the bit, so a file whose dropped nodes, pivots and
-        offsets hold the identity, as Unreal's and Maya's skeleton exports do,
-        reads as it did, where it also holds no node the rule below bakes, no
-        node that is no joint with a pre rotation, or a root of an X- or Z-up
-        file, on a negative scale or, on a clip, keyed first before 0 off a
-        whole frame, no joint with both a pre or post rotation and pivots, nor
-        a joint root with pivots in an X- or Z-up file, no node with no
-        attribute under a joint with pivots or a pre rotation, no skinned mesh
-        under a camera root of an X- or Z-up file, and no keyed node of the
-        emptied axis below. Under ``pose="bind"`` a node the read drops follows
-        the bind rule above as a kept one would: it is folded in at its bind
-        when a bind pose lists it, so the nodes under it follow that bind, and
-        at its own values otherwise. A bind read that keeps fewer kinds puts
-        each node it keeps where a full bind read puts it.
-
-        A node's inherit type is read as Maya 2025's FBXImport reads it: every
-        node with its rotation active sits where that import puts it, with
-        animation off on a rig (a rig reads no take), and Maya 2027's is the
-        same. A joint is never baked: it keeps the file's channels, eInheritRrs
-        as segment scale compensate, any other type as eInheritRSrs. With a
-        pre or a post rotation and pivots its translate is Maya's, and so is a
-        joint root's with pivots in an X- or Z-up file, whose axis turn Maya
-        holds as a pre rotation. A node that is no joint, a root of the file
-        among them, its parent the scene root, goes by what it stores.
-        eInheritRSrs reads as it is, and so does eInheritRrSs where its
-        parent's world reads one scale and no shear, each within 1.00001e-4,
-        a root always, a mirrored node under such a parent keeping its
-        negative scale. Anywhere else eInheritRrSs bakes, and eInheritRrs
-        always does: Maya turns the type into the node's own channels, its
-        local matrix its world over its parent's with the parent's scale
-        taken out of eInheritRrs, negated where its determinant is negative,
-        held here as scale, shear, rotate and translate, pivots and rotate
-        axis 0, in the file's rotate order. So a node under a parent scaled
-        unevenly holds a shear, one under an even parent none, and the nodes
-        under it sit where Maya puts them. A unit root's scale counts as 1
-        there: the read divides its 1/s out of every node under it stored
-        eInheritRrs, joint or not. A mesh that bakes with a skin of at least
-        one cluster holds, at the static pose, the shear of its bake and the
-        rest read again with no curve anywhere, its own rotate the principal
-        solve of its rotate and pre rotation: of that block, the rows' lengths
-        as its scale and the sdk's GetR as its rotate, negated where it
-        mirrors, as Maya's skin read does, its points untouched; a keyed one
-        bakes on its frames as any node. A skinned mesh under a camera root
-        of an X- or Z-up file with a rotate axis (above), the camera baked or
-        not, sits where the sdk places it, which leaves that axis out, as far
-        as its local matrix holds it: the rows' lengths and the GetR of its
-        local matrix times its parent's world without that axis over Maya's,
-        the camera holding Maya's split of a mirrored scale or its bake, no
-        shear, its points untouched, its rotate Maya's own solve of that
-        GetR, but at an exact tie of the two solutions' sums of absolute
-        angles, where each picks by its own rounding, and under another
-        skinned mesh, where Maya places it off that rule's place
-        (ClipData.load_fbx's list). A rig works that out at the static pose,
-        as Maya's import with animation off does, and a clip at frame 0,
-        whatever the take's span, of the take it loads, where Maya's import
-        with animation on reads frame 0 of the file's active take, so the two
-        agree where the clip loads the active take (ClipData.load_fbx's
-        ``take``): on the channels there of the mesh and of every node above
-        it, the layers that are not muted blended in. On a clip one with no
-        curve holds that on every frame, and one with a curve holds the
-        translate, rotate and scale that gives, the translate less its
-        pivots' term, but on each axis a curve keys, which takes the mesh's
-        own, as do all three axes of a channel a later layer keys, muted or
-        not, and turns about its pivots by the rotate and scale it then
-        holds, unless it bakes, which it does as any node; one with a pre
-        rotation in another order than xyz, keyed on some rotate axes, holds
-        its own rotate on all three. A node with no attribute under a joint
-        is a joint in Maya's import: where it bakes, it holds the bake's scale
-        and rotate and no shear at the static pose, and stored eInheritRrs it
-        divides its parent's scale out once more, as a joint that compensates;
-        unbaked, it keeps no pivot or offset, and with a pre rotation it turns
-        by that pre rotation twice, folded into its rotate and kept as its
-        joint orient, and with its rotation inactive once, kept as its joint
-        orient. A clip's node whose keys the conversion leaves as they are
-        (ClipData.load_fbx) keeps its pre and post rotation there as its
-        joint orient and rotate axis.
-
-        Maya works a bake out in the sdk's conversion, ConvertScene and
-        ``ConvertPivotAnimationRecursive``, where a node that is no joint with
-        a pre rotation, and a root of a file whose up axis is x or z, whose
-        turn is a pre rotation, holds no pre and no post rotation and reads
-        its rotate in xyz: the file's r and S at the static pose, so such a
-        root stored eInheritRrs loses its turn, and on a frame the angles of
-        Sig R Rpre in its own order, Sig all three axes negative on a negative
-        determinant and all positive on a positive one. A mirrored node with
-        a pre rotation holds that scale unbaked too, and turns by Sig R.
-
-        Maya rounds to single precision what this read keeps in the file's
-        numbers: an unbaked node's static translate, a keyed baked node's
-        unkeyed one, a joint's pivots, a re-keyed rotate, a mesh's points, and
-        between keys a bake reads double where Maya reads the sdk's float32. So
-        on files whose numbers single precision does not hold nodes sit off
-        Maya's import, by up to 3.08e-5 in the 3x3 and 1.94e-6 in position on
-        the files measured, both on a keyed node with a pre rotation under
-        sheared parents, and within 2e-14 in position on 180 files whose
-        numbers it does hold (three named at their own gap, at most 1e-13). It
-        grows with the depth and the spread of a sheared chain, Maya's rounding
-        multiplied by each block's spread: of 72 chains of 16 nodes 33 sit past
-        1e-5, 22 of them under 1e-3, the worst 121 in the 3x3 and 0.174 in
-        position. Maya's conversion also filters each curve it re-keys,
-        ``FbxAnimCurveFilterConstantKeyReducer`` at its tolerance of 0.009, and
-        two things of that reach the read. On a node with a pre rotation, or a
-        root of an X- or Z-up file, a curve whose keys all sit within 0.009 of
-        its last key is no curve: a node left none holds its static bake on
-        every frame, whatever a single key says, and a level curve beside a
-        moving one adds no frames to the bake. And in an order other than xyz
-        an Euler axis that stays level can sit on the other solution in Maya's
-        import, the node off the file's own rotation; the read follows Maya.
-        What it leaves level inside a curve that moves under 0.009 a step is
-        not copied: on 80 files shaped as a baked export 66 sit within 1e-5,
-        the other 14 up to 0.0435 in the 3x3 and 0.0703 in position; a keyed
-        joint with pivots, whose pivot term Maya re-keys into its translate
-        and filters so, holds level there too, up to 0.0114 in position on the
-        files measured. A file written by an earlier save_fbx with a group or
-        a locator left eInheritRrSs reads where Maya reads it, not where it
-        was saved, and a group with segment_scale_compensate on, which
-        save_fbx writes eInheritRrs, reads back baked: Maya's world, not the
-        same channels, shear included.
-
-        The rig records what the read produced, which :meth:`save_fbx`
-        labels a file with: :attr:`HierarchyData.axis_system`, "maya_y_up",
-        or with ``axis_system=None`` the file's own axes in words ("z up, -y
-        front, right handed" for an Unreal file), and
-        :attr:`HierarchyData.unit`, 1.0 for cm, or with a number for
-        ``scale_factor`` the file's unit in cm over that number (100.0, meters,
-        for a cm file read with 0.01). ``scale_factor`` must be None or a
-        positive number, or ValueError is raised. The view
-        ``TransformList.load_fbx`` gives, whose nodes no rig owns, holds the
-        record as well (:attr:`axis_system`, :attr:`unit`), and so does a
-        view taken from it, a slice or an index of it, its :meth:`match`,
-        :meth:`get_roots` or ``TransformList(view)``; a
-        :class:`HierarchyData` built from either takes it.
-
-        User defined attributes come back as the specs save_fbx wrote; those
-        of a file from Maya's own FBX plugin, the way its importer reads them.
-        One whose name, string or enum field is not UTF-8, which the fbx
-        binding can't read, is left out, and so is an enum from another tool
-        with a field an enumName can't hold (one holding ":", or reading as a
-        field and its index, "k=2" or "k==2"), with a warning.
-        """
-        if FBX is None:
-            raise ImportError("fbx module not found")
-        _fbx_check_scale_factor(scale_factor)
-        _fbx_check_axis_system(axis_system)
-        _fbx_check_pose(pose)
-        kinds = _fbx_check_node_types(node_types)
-
-        with open_fbx(filename, FBX) as scene:
-            turn   = _fbx_axis_turn(scene, axis_system, filename)
-            units  = _fbx_units(scene, scale_factor)
-            record = _fbx_record(scene, axis_system, scale_factor)
-            hierarchy_data, _, tree = _walk_fbx(scene, units, kinds, turn is not None)
-            listed  = _fbx_bind_matrices(scene, tree, units, filename) if pose == "bind" else None
-            sheared = _fbx_sheared_cameras(tree)
-
-        # each kept node's bind, a dropped node a bind pose lists folded in
-        # at its bind, in the file's axes
-        binds = None if listed is None else _fbx_kept_binds(tree, listed, list(hierarchy_data))
-
-        if turn is not None:
-            _fbx_turn_walk(hierarchy_data, turn)
-
-        # build the TransformList; a camera scaled unevenly or sheared warns
-        # once the read is done, a read that raises of nothing
-        if binds is None:
-            built = cls.from_dict(hierarchy_data)
-            _fbx_warn_cameras(sheared)
-            return _recorded(built, record)
-
-        # a bind is a world matrix, solved under the node's parent, which a
-        # view's nodes, owned by no rig, can't find: they are posed in a rig
-        # that owns them, and the view holds copies, owned by none as a read
-        # gives them. One load of nodes, posed inside it: a bind that can't
-        # be solved under its parent's, one a zero scale flattens, raises,
-        # and the nodes warn of nothing
-        owns = issubclass(cls, HierarchyData)
-        with _NodesLoad():
-            rig = (cls if owns else HierarchyData).from_dict(hierarchy_data)
-            _fbx_pose_binds(rig, binds, turn)
-        built = rig if owns else cls(node.copy() for node in rig)
-        _fbx_warn_cameras(sheared)
-        return _recorded(built, record)
-
-    def save_fbx(self, filename, zero_root=False, as_ascii=False):
-        """saves the data to a .fbx file, binary unless as_ascii is set
-
-        Each node is written after its parent, whatever order the list holds
-        them in. A node whose parent the file does not hold -- left out of a
-        view, or a parent_uuid no node carries -- is a root of the file, as a
-        view's copy() roots it; siblings, the roots among them, keep the
-        list's order. zero_root writes the first joint the file holds as a
-        root with an identity transform.
-
-        The file is labelled with the axis system and the unit the values
-        are in, as the rig records them (:attr:`axis_system`, :attr:`unit`;
-        a view's are its rig's), the unit set explicitly, and holds the
-        values as they are, but for a node's shear and a scale under 1e-12.
-        FBX has no channel for shear and the save leaves it out, as Maya's
-        exporter does, with one warning naming the nodes holding one, so
-        that node and the nodes under it land where the rig with that shear
-        zeroed has them, in Maya's FBXImport and in :meth:`load_fbx` alike,
-        up to 4.20 off on a typed group read back from a file of its own; a
-        group read under an even parent holds none and saves as read. A
-        scale under 1e-12 in size, 0 and -0 among them, it holds as 1e-12,
-        positive, as Maya's own FBX export writes a static one and as Maya's
-        evaluation holds it: such a scale loads back as 1e-12, and, in a
-        save in cm of a rig labelled Maya's Y-up, the nodes under it where
-        Maya's FBXImport of the save puts them, but for a group or a locator
-        with segment_scale_compensate on and the nodes under that. A rig
-        :meth:`load_fbx` read with its defaults is saved in Maya's Y-up and
-        cm, one read with ``axis_system=None`` in the file's own axes, and
-        one read with a number for ``scale_factor`` in the unit that number
-        leaves its lengths in (a cm file read with 0.01, in meters). So a
-        save loads with :meth:`load_fbx`'s defaults where the file the rig
-        was read from does, in cm and Maya's Y-up, read as it is
-        (``axis_system=None, scale_factor=1.0``) gives the values back, a
-        scale under 1e-12 as 1e-12, and Maya's FBXImport, and the sdk's
-        ``ConvertScene`` to Maya's Y-up and cm, put it where they put that
-        file. Raises ValueError, before anything is written, for a view
-        holding nodes of rigs that record other axes or units, and for
-        :meth:`load_fbx`'s view, or one taken from it, holding nodes no rig
-        owns beside nodes of a rig that records another.
-
-        Where the read and Maya part, they part on the save too. A file whose
-        up axis is y and whose front is not +z, which the read turns into Maya's
-        Y-up and Maya's importer leaves in its own axes, saved from a
-        default read imports as the read turned it. A save in another unit
-        than cm holds its lengths in that unit, as a file authored in it
-        does, which Maya's importer and the sdk's cm conversion bring in
-        with its top nodes scaled by the unit (100 for meters), at the
-        positions the values say; :meth:`load_fbx` reads it at scale 1, in
-        cm. Both also multiply the scale of every node written eInheritRrs
-        by the unit, which a top node, one directly under it and one under a
-        node written eInheritRrs need: any other, a node written eInheritRrs
-        whose parent is below the top and is not, takes the unit twice, with
-        the nodes under it (in meters, a group with segment_scale_compensate
-        on turned (20, 40, 60) and scaled (1, 1.5, 0.75), under a group
-        turned (0, 30, 0) and scaled (1, 2, 3) under a top node, 9805 off in
-        its axes and a locator at (0.5, 1, -2) under it 2.01e+04 in position,
-        in cm; a joint compensating its scale with that group's channels
-        there the same, as in earlier versions), and the second of the three
-        cases of a group with segment_scale_compensate on, below, counts the
-        scale the conversion gives that group's parent: a joint compensating
-        its scale directly under such a group directly under a top node is
-        off in Maya's importer, the sdk's conversion exact, though that top
-        node's scale is 1 (in meters, on that case's rig, 9.70e+03 off in
-        their axes, the lower joint 8.92e+03 in position and the second
-        locator 1.86e+04, in cm). Maya's importer, as the sdk's ConvertScene,
-        converts a left handed file on its top nodes through their translate
-        and pre rotation alone, so a top joint the read folded a dropped
-        node's turn into, as its joint orient, written as its pre rotation,
-        imports elsewhere than the file it was read from does (20 cm off on
-        a fixture), the other nodes where they did. And a file holding its
-        unit as a scale on its top nodes, read with a number other than 1.0
-        for ``scale_factor``, keeps that scale, 1/s, which the unit it
-        records, s over the number, does not explain: its save loads and
-        imports off under those nodes.
-
-        No geometry is written: a mesh's node, which :meth:`load_fbx` reads
-        as a transform, is written as a group at its node's transform. A
-        mesh holds no record of its own. The fbx mesh readers keep its
-        points in its node's object space, which no axis system changes, in
-        the unit their ``scale_factor`` gives, the unit a rig read with the
-        same ``scale_factor`` records: under its node's world from that rig
-        it is where Maya's import puts it, and so under that node's world
-        from Maya's import of the rig's save, but for a mesh at or under a
-        node holding shear, which the save leaves out. Every joint is written
-        as a limb node, as Maya's exporter writes them: Maya's importer
-        brings a root written as a skeleton root (``eRoot``) with no child
-        in as a plain transform, without its joint orient.
-
-        rotate_axis and joint_orient are written for joints only. A
-        transform or locator holding a rotate_axis (a matrix write or
-        set_parent() keeps it) or a joint_orient loses it in the file, and
-        Maya's FBXImport and :meth:`load_fbx` read the node without it: a
-        group or a locator turned (5, 10, 15) with a rotate_axis of (10, 20,
-        30) reads back 0.42 off in its axes and a locator 4 below it 1.44 in
-        position, with that joint_orient 0.41 and 1.39. Fold it into rotate
-        first by writing node.matrix back with rotate_axis and joint_orient
-        zeroed; :meth:`ClipList.save_fbx` keys it in a take's rotate. Every
-        node is written with rotation active, as Maya's exporter writes it:
-        fbx turns a node without it in xyz, whatever its rotate order. A
-        file an earlier save_fbx wrote holds a group or a locator with its
-        rotation inactive, so one in another order than xyz now loads where
-        the sdk puts it, in xyz, rotate_order 0, not where it was saved (a
-        zxy group 0.49 off, a joint under it 1.26): load it with the version
-        that wrote it, save() it, then load that and save_fbx it with this
-        one.
-
-        Every node is written with the inherit type its
-        segment_scale_compensate says, eInheritRrs when on and eInheritRSrs
-        when off, a group and a locator too, as Maya's exporter writes a
-        group or a locator. An earlier save_fbx wrote a group or a locator
-        eInheritRrSs, which scales it along its own axes by its parent's
-        world scale: under an unevenly scaled parent the sdk and Maya's
-        importer put it and the nodes under it elsewhere than the rig had
-        them (a group at (1, 1, 0) turned (40, 10, -20) under a group turned
-        30 about z and scaled (1, 3, 0.5), 1.58 off in its 3x3, a locator at
-        (0, 2, 1) under it 3.17 in position), and load_fbx reads such a file
-        where they do, not where it was saved. A rig's own values are in a
-        ``save()`` file.
-
-        A group or a locator with segment_scale_compensate on, which a rig
-        built or edited by hand can hold and no reader sets, is written
-        eInheritRrs. In a save in cm of a rig labelled Maya's Y-up the sdk
-        places it and the nodes under it where the rig has them, its scale
-        or its parent's mirrored or not (a scale mirrors with an odd number
-        of negative axes), and Maya's importer does too. Three cases part,
-        Maya's importer in each and the sdk in the last. Their numbers are
-        one rig's, the largest over five turns, and grow with its scales
-        and offsets: a group at (2, 0.5, -0.5) scaled (1, 1.5, 0.75), turned
-        (20, 40, 60), (35, -10, 80), (-25, 50, 10), (60, 20, -40) and
-        (5, -70, 30), under a group at (0, 1, 0) turned (0, 30, 0), with a
-        locator at (0.5, 1, -2) under it and, for the second case, a joint
-        at (0, 0, 1) under it over a joint at (0, 1, 0) over a second
-        locator at (0.25, 1, 0), both joints compensating their scale.
-
-        - Where exactly one of its own scale and its parent's own scale
-          mirrors, Maya's importer can part from the sdk and the rig on it
-          and every node under it: 2.70 in the group's axes and 4.27 in the
-          locator's position under a parent scaled (-1, 2, 3) or
-          (-2, -2, -2), 8.03 and 8.38 under one scaled (-1, 1, 1) under a
-          group turned (10, 0, 20) and scaled (1, 2, 3). The group scaled
-          (-1, 1.5, 0.75) is 2.70 and 4.27 off under a parent scaled
-          (2, 2, 2) or (1, 2, 3), and also where an earlier save_fbx, which
-          wrote it eInheritRrSs, had it and the locator where the rig has
-          them: 2.70 and 4.27 under a parent scaled 1, 2.51 and 4.29 with no
-          parent. With both mirrored Maya's importer puts it where the rig
-          has it.
-        - A joint compensating its scale directly under it, and every node
-          under that joint, Maya's importer can put elsewhere than the sdk
-          and the rig, unless the group's scale is positive and its parent's
-          scale 1, or 1 in size with two negative axes, or it has no parent:
-          1.33 off in their axes under a parent scaled (1, 2, 3), the lower
-          joint 1.07 in position and the second locator 2.18; 0.98, 0.901
-          and 1.88 under (2, 2, 2). The group scaled (-1, -1.5, 0.75), which
-          does not mirror, stays where the rig has it, but its joints are
-          1.94, 1.67 and 3.40 off with no parent and 1.96, 1.80 and 3.75
-          under a parent scaled 1, where an earlier save_fbx, which wrote it
-          eInheritRrSs, had them where the rig has them.
-        - Under a parent whose scale is near 0, a scale written as 1e-12
-          among them, or far apart on its axes, or whose world is. Where the
-          product of that parent's own scale is under 2.22e-16 in size the
-          sdk and Maya's importer part from the rig: 1.35 in the group's
-          axes and 2.13 in the locator's position under a parent scaled
-          (s, s, s), s 6e-06 or less (within 9e-16 at 6.1e-06). Above it
-          Maya's importer alone can: in the group's axes 3.9e-10 under a
-          parent scaled (1.32, 1.8, z) at z 1e-03, 2.3e-08 at 1e-04, 0.171
-          at 3e-06 and 2.16 at 1e-06; in the group's axes and the locator's
-          position 3.85 and 3.23 under (1e4, 1, 1e-4), 3.32 and 7.34 under
-          (1, 1e8, 1), 5.42 and 21.2 under a parent scaled 1 under a group
-          at (0, 0.5, 0) turned (10, 0, 20) and scaled (1e6, 1, 1e-6), and
-          3.96e+04 and 7.27e+04 under (1e-12, 1, 3e-4). Near 0 it can bring
-          a node in not finite, where the sdk and load_fbx stay finite.
-
-        A rig labelled anything else, X-up, Z-up or left handed, has no such
-        promise: such a node, and every node under it, can import elsewhere
-        than the sdk and the rig. At a top node in a rotate order other than
-        xyz that is new: an earlier save_fbx, which wrote it eInheritRrSs,
-        had it where the rig has it. On the rig above with no parent, in cm,
-        labelled "z up, -y front, right handed", that is up to 2.53 in the
-        group's axes and 3.44 in the locator's position over rotate orders 1
-        to 5.
-
-        load_fbx reads such a group or locator back with the flag off, as
-        Maya reads an eInheritRrs node, baked: where Maya's FBXImport puts it
-        and the nodes under it, not the channels saved, with shear under a
-        parent scaled unevenly and none under an even one. Under a unit root
-        the read divides that root's scale out of the node first, as
-        :meth:`load_fbx` says. save() keeps the flag.
-
-        User defined numbers (double, float, doubleAngle, doubleLinear, long,
-        short, byte, char), bools, enums, strings, stringArrays and double3 or
-        float3 vectors of three numbers come back from load_fbx as they went
-        in, binary or ASCII. Any other (a doubleArray or other array, a
-        matrix, a multi, another compound) is skipped with a logged warning,
-        the children of a skipped compound written on their own. Raises
-        ValueError, before anything is written, when a string attribute's
-        value is not plain ASCII, the only text the fbx sdk takes. In an ASCII
-        file a string or enum field list over 4096 bytes holding a quote, line
-        break, tab, semicolon, brace, & or run of spaces is %-escaped, and
-        Maya reads the escaped text: the fbx sdk's ASCII reader changes it
-        otherwise, or loses the whole scene for a brace.
-        """
-        _save_fbx(filename, self, zero_root=zero_root, as_ascii=as_ascii)
+    def save_fbx(self, filename, as_ascii=False):
+        """the nodes written as a skeleton, as ``cgmath.formats.save_fbx``
+        writes one: a view's nodes copied into a HierarchyData first"""
+        skeleton = self
+        if not isinstance(self, HierarchyData):
+            skeleton = HierarchyData(node.copy() for node in self)
+            skeleton._axis_system, skeleton._unit = self._records()
+        _save_fbx(filename, skeleton, as_ascii=as_ascii)
 
     # --------- vectorized properties and methods --------- #
     def set_rotate_to_joint_orient(self) -> None:
@@ -9151,12 +8311,14 @@ class TransformList(DataList[TransformData]):
                 f"{type(self).__name__!r} has no attribute {name!r} and no node has "
                 f"a user attribute of that name; add_user_attribute() creates one"
             )
-        writes = []
-        for node in nodes:
-            attrs = node.user_defined_attributes
-            writes.extend(_user_writes(attrs, name, value, node.name))
-        for spec, converted in writes:
-            spec["value"] = converted
+        writes = [_user_writes(node.user_defined_attributes, name, value, node.name) for node in nodes]
+        for node, done in zip(nodes, writes):
+            owner = node._hierarchy
+            if isinstance(owner, ClipData) and owner._blocks:
+                owner._user_played(node, name, done)
+                continue
+            for spec, converted in done:
+                spec["value"] = converted
 
     def __dir__(self):
         names = set(super().__dir__())
@@ -13843,14 +13005,28 @@ def _reorder_rows(frames: _RigFrames, rows, orders) -> None:
 
 
 def _frame_property(channel: str) -> property:
-    """builds the read/write accessor for one framed channel"""
+    """builds the read/write accessor for one framed channel
+
+    On the axis of one node, ``clip.frames["name"]``, a read gives the rows
+    the channel holds, (1, 3) constant or (F, 3) animated, and a write of one
+    row makes it constant, of F rows animated. On the whole clip, or a
+    selection, a read gives every frame, (F, n, 3), constant channels
+    repeated; a write of one row, a value with no frame axis, makes the
+    channels constant, and one of F rows writes every frame, a constant
+    channel it leaves unequal animated.
+    """
 
     def getter(self) -> np.ndarray:
         # read only: an in place edit would land in the block without
         # rebinding the nodes, so half the write would be visible
         columns = self._columns
-        block   = self._clip._blocks[channel]
-        view    = block.view() if columns is None else block[:, columns]
+        clip    = self._clip
+        block   = clip._blocks[channel]
+        if self._single:
+            column = int(columns[0])
+            view   = block[:, column] if clip._keyed(channel)[column] else block[:1, column]
+        else:
+            view = block.view() if columns is None else block[:, columns]
         view.setflags(write=False)
         return view
 
@@ -13858,10 +13034,32 @@ def _frame_property(channel: str) -> property:
         clip    = self._clip
         columns = self._columns
         value   = np.asarray(value, dtype=float)
-        if columns is None:
-            clip._blocks[channel][...] = value
+        block   = clip._blocks[channel]
+        frames  = len(block)
+        if self._single:
+            column = int(columns[0])
+            if value.size == 1:
+                value = np.full((1, 3), float(value.reshape(())))
+            if value.ndim == 0 or value.shape[-1] != 3 or value.size not in (3, 3 * frames):
+                raise ValueError(
+                    f"clip.frames[name].{clip._channel_name(channel)} takes one row, (3,) or (1, 3), or one "
+                    f"a frame, ({frames}, 3); got {value.shape}"
+                )
+            rows             = value.reshape(-1, 3)
+            block[:, column] = rows
+            clip._keyed(channel)[column] = len(rows) == frames and frames > 1
         else:
-            clip._blocks[channel][:, columns] = value
+            framed = value.ndim == 3 and value.shape[0] == frames and frames > 1
+            if columns is None:
+                block[...] = value
+            else:
+                block[:, columns] = value
+            if not framed:
+                keyed = clip._keyed(channel)
+                if columns is None:
+                    keyed[:] = False
+                else:
+                    keyed[columns] = False
         clip._bind(clip._frame)
 
     return property(getter, setter)
@@ -13871,8 +13069,11 @@ def _frame_component(channel: str, axis: int) -> property:
     """builds the component accessor for one framed channel
 
     A read is a copy, a new array every time, so ``+=`` works on it and a
-    write to it changes nothing until it is assigned back. One node reads
-    back as (F, 1), and a flat list of F values writes it the same way.
+    write to it changes nothing until it is assigned back. On a selection of
+    one node it reads back as (F, 1), and a flat list of F values writes it
+    the same way; on the axis of one node, ``clip.frames["name"]``, as the
+    rows it holds, (1,) or (F,): a value written to a constant channel's
+    component keeps it constant, F values animate it.
     """
 
     def getter(self) -> np.ndarray:
@@ -13888,11 +13089,26 @@ def _frame_component(channel: str, axis: int) -> property:
         current = np.array(getattr(self, channel))
         value   = np.asarray(value, dtype=float)
 
+        if self._single:
+            frames = self._clip.frame_count
+            if value.size == 1:
+                current[:, axis] = float(value.reshape(()))
+            elif value.size == frames:
+                if len(current) == 1:
+                    current = np.repeat(current, frames, axis=0)
+                current[:, axis] = value.reshape(frames)
+            else:
+                raise ValueError(f"a component takes one value or {frames}, got {value.shape}")
+            setattr(self, channel, current)
+            return
+
         frames, count = current.shape[:2]
         if count == 1 and value.shape == (frames,):
             value = value[:, None]
 
         current[..., axis] = value
+        # every frame written: a constant channel stays constant where the
+        # value is one on every frame
         setattr(self, channel, current)
 
     return property(getter, setter)
@@ -13930,12 +13146,15 @@ class _FrameAxis:
     them on every read and write.
     """
 
-    __slots__ = ("_clip", "_uuids")
+    __slots__ = ("_clip", "_uuids", "_single")
 
-    def __init__(self, clip: "ClipData", columns=None):
-        # ``columns`` are positions in the clip's node list as it is now
-        self._clip  = clip
-        self._uuids = None
+    def __init__(self, clip: "ClipData", columns=None, single: bool = False):
+        # ``columns`` are positions in the clip's node list as it is now;
+        # ``single``, the axis of one node by its name, reads the rows a
+        # channel holds rather than every frame
+        self._clip   = clip
+        self._uuids  = None
+        self._single = bool(single)
         if columns is not None:
             nodes       = clip.list
             positions   = np.asarray(columns, dtype=int).reshape(-1)
@@ -13969,11 +13188,97 @@ class _FrameAxis:
 
     def __setattr__(self, name: str, value) -> None:
         if not hasattr(type(self), name):
+            if not name.startswith("_") and self._user_scope(name) is not None:
+                self._set_user(name, value)
+                return
             raise AttributeError(
                 f"clip.frames has no {name!r} to write; a value every frame "
                 f"shares, such as rotate_order, is set on the clip itself"
             )
         object.__setattr__(self, name, value)
+
+    # --- user channels: a numeric keyable user defined attribute --- #
+    def _scope_nodes(self) -> list:
+        columns = self._columns
+        nodes   = self._clip.list
+        return list(nodes) if columns is None else [nodes[int(i)] for i in columns]
+
+    def _user_scope(self, name: str) -> Optional[list]:
+        """[(node, children)] of the axis's nodes for the user channel
+        ``name``, None when no node has one of that name; ValueError naming
+        the nodes that lack it when some do"""
+        clip = self._clip
+        if not clip._blocks:
+            return None
+        nodes = self._scope_nodes()
+        found = [(node, _user_channels(node.user_defined_attributes)) for node in nodes]
+        held  = [(node, channels[name]) for node, channels in found if name in channels]
+        if not held:
+            return None
+        if len(held) != len(nodes):
+            lacking = [node.name for node, channels in found if name not in channels]
+            raise ValueError(f"clip.frames.{name}: the nodes {lacking} hold no animatable user attribute {name!r}")
+        return held
+
+    def _user_rows(self, node, name: str, children) -> np.ndarray:
+        """(F, k) animated rows, or (1, k) constant ones"""
+        rows = self._clip._user_keys.get(node.uuid, {}).get(name)
+        if rows is not None:
+            return rows
+        return _user_row(node.user_defined_attributes, name, children)[None]
+
+    def _get_user(self, name: str, held: list) -> np.ndarray:
+        clip = self._clip
+        if self._single:
+            node, children = held[0]
+            rows = np.array(self._user_rows(node, name, children))
+            rows.setflags(write=False)
+            return rows
+        frames = clip.frame_count
+        out = np.stack(
+            [np.broadcast_to(self._user_rows(node, name, children), (frames, 3 if children else 1)) for node, children in held],
+            axis=1,
+        )
+        out.setflags(write=False)
+        return out
+
+    def _set_user(self, name: str, value) -> None:
+        """one row makes a user channel constant, F rows animated; on a
+        selection or the whole clip (F, n, k) or (1, n, k), or a value
+        with no frame axis for every node"""
+        clip   = self._clip
+        held   = self._user_scope(name)
+        frames = clip.frame_count
+        width  = 3 if held[0][1] else 1
+        value  = np.asarray(value, dtype=np.float64)
+        if self._single:
+            if width == 1 and value.ndim <= 1:
+                value = value.reshape(-1, 1)
+            if value.ndim == 0 or value.shape[-1] != width or value.size not in (width, width * frames):
+                raise ValueError(
+                    f"clip.frames[name].{name} takes one row, ({width},) or (1, {width}), or one a frame, "
+                    f"({frames}, {width}); got {value.shape}"
+                )
+            blocks = [value.reshape(-1, width)]
+        else:
+            if value.ndim < 3:
+                value = np.broadcast_to(value, (1, len(held), width))
+            if value.ndim != 3 or value.shape[0] not in (1, frames):
+                raise ValueError(f"clip.frames.{name} takes (F, n, {width}) or (1, n, {width}), got {value.shape}")
+            value  = np.broadcast_to(value, (value.shape[0], len(held), width))
+            blocks = [value[:, i] for i in range(len(held))]
+        for (node, children), rows in zip(held, blocks):
+            _user_rows_checked(node.user_defined_attributes, name, children, rows, f"{node.name}.{name}")
+        for (node, children), rows in zip(held, blocks):
+            keys = clip._user_keys.setdefault(node.uuid, {})
+            if len(rows) == frames and frames > 1:
+                keys[name] = np.array(rows, dtype=np.float64)
+                _user_put(node.user_defined_attributes, name, children, rows[clip._frame])
+            else:
+                keys.pop(name, None)
+                _user_put(node.user_defined_attributes, name, children, rows[0])
+            if not keys:
+                del clip._user_keys[node.uuid]
 
     # the rig edits change what every frame shares, so they belong to the
     # clip and cover every frame wherever they are called
@@ -13996,6 +13301,10 @@ class _FrameAxis:
                 f"shares and covers every frame wherever it is called; use "
                 f"clip.{name}, or clip['node'].{name} for one node"
             )
+        if not name.startswith("_"):
+            held = self._user_scope(name)
+            if held is not None:
+                return self._get_user(name, held)
         raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     def __len__(self) -> int:
@@ -14010,7 +13319,7 @@ class _FrameAxis:
         clip = self._clip
 
         if isinstance(query, str):
-            return _FrameAxis(clip, [clip.index(query)])
+            return _FrameAxis(clip, [clip.index(query)], single=True)
 
         if _is_sequence(query):
             return _FrameAxis(clip, [self._column(item) for item in query])
@@ -14528,18 +13837,70 @@ class _FrameAxis:
 _add_short_names(_FrameAxis)
 
 
-def _check_rest_pose(value, clip: "ClipData") -> None:
-    """refuses a rest pose of ``clip`` that is not None or one pose: a
-    :class:`HierarchyData`, not a view and not a clip, recording the
-    clip's axes and unit"""
-    if value is None:
-        return
-    if not isinstance(value, HierarchyData) or isinstance(value, ClipData):
-        raise TypeError(
-            f"a clip's rest_pose is a HierarchyData or None, not a {type(value).__name__}"
-        )
-    if value._records() != clip._records():
-        _refuse_records("the clip and its rest pose", (clip._records(), value._records()))
+# the user defined attributes a clip animates: a number, a bool or an enum,
+# or a double3 / float3 of three float children, keyable
+_USER_CHANNEL_TYPES = _NUMBER_TYPES + ("bool", "enum")
+
+
+def _user_channels(attrs: dict) -> dict:
+    """{name: its three children, or None for a scalar} of the user defined
+    attributes ``attrs`` a clip animates; the rest (text, arrays, multis,
+    compounds of other kinds, attributes that are not keyable) are static"""
+    out = {}
+    for name, spec in attrs.items():
+        if spec.get("multi") or "parent" in spec or not spec.get("keyable"):
+            continue
+        kind = _user_attr_type(spec)
+        if kind in _USER_CHANNEL_TYPES and "numberOfChildren" not in spec:
+            if spec.get("value") is not None:
+                out[name] = None
+        elif kind in ("double3", "float3"):
+            children = _compound_children(attrs, name)
+            if len(children) == 3 and all(
+                _user_attr_type(attrs[child]) in _FLOAT_TYPES
+                and not attrs[child].get("multi")
+                and attrs[child].get("value") is not None
+                for child in children
+            ):
+                out[name] = children
+    return out
+
+
+def _user_row(attrs: dict, name: str, children) -> np.ndarray:
+    """(k,) float64, the value a user channel holds"""
+    if children is None:
+        return np.array([float(attrs[name]["value"])], dtype=np.float64)
+    return np.array([float(attrs[child]["value"]) for child in children], dtype=np.float64)
+
+
+def _user_typed(spec: dict, number: float):
+    """``number`` as the user defined attribute ``spec`` holds it"""
+    kind = _user_attr_type(spec)
+    if kind == "bool":
+        return bool(number != 0.0)
+    if kind in _INT_TYPES or kind == "enum":
+        return int(round(number))
+    return float(number)
+
+
+def _user_put(attrs: dict, name: str, children, row) -> None:
+    """a user channel's specs set to ``row``, (k,) numbers"""
+    for child, number in zip((name,) if children is None else children, np.asarray(row).tolist()):
+        attrs[child]["value"] = _user_typed(attrs[child], number)
+
+
+def _user_rows_checked(attrs: dict, name: str, children, rows: np.ndarray, label: str) -> None:
+    """refuses rows a user channel can not hold: a whole number type's
+    fraction, a bool other than 0 or 1, numbers that are not finite"""
+    for k, child in enumerate((name,) if children is None else children):
+        kind   = _user_attr_type(attrs[child])
+        column = rows[:, k]
+        if not np.all(np.isfinite(column)):
+            raise ValueError(f"{label} takes finite numbers")
+        if kind == "bool" and not np.all((column == 0.0) | (column == 1.0)):
+            raise ValueError(f"{label} takes True, False, 0 or 1")
+        if (kind in _INT_TYPES or kind == "enum") and not np.all(column == np.round(column)):
+            raise ValueError(f"{label} takes whole numbers")
 
 
 class ClipData(HierarchyData):
@@ -14627,17 +13988,22 @@ class ClipData(HierarchyData):
     # "rest_pose", one with no take name no "take", and a shear block all
     # zero is left out, so a clip holding no shear saves as one did before it
     # had any; a load fills it back with zeros
+    # a channel holds one row, constant on every frame number, or F rows,
+    # animated: "animated" keeps, per framed channel, an (N,) bool by block
+    # column, and "user_keys" the F rows of each animated user channel,
+    # {uuid: {name: (F, k)}}; a constant user channel is its spec's value
     LIST_FIELDS = (
         "_start_frame",
         "_fps",
         "_frame",
         "_blocks",
-        "_rest_pose",
+        "_animated",
+        "_user_keys",
         "_axis_system",
         "_unit",
         "_take",
     )
-    SAVED_NAMES = {"_blocks": "blocks"}
+    SAVED_NAMES = {"_blocks": "blocks", "_animated": "animated", "_user_keys": "user_keys"}
 
     # the private state a clip holds beside its list, its LIST_FIELDS and a
     # rig's: the uuid each block column stands for, and each uuid's column
@@ -14652,11 +14018,12 @@ class ClipData(HierarchyData):
         take:        str           = "",
     ):
         self._blocks      = {}
+        self._animated    = {}
+        self._user_keys   = {}
         self._columns     = []
         self._frame       = 0
         self._start_frame = int(start_frame)
         self._fps         = float(fps)
-        self._rest_pose   = None
         self._take        = _take_name(take)
 
         # a clip owns its nodes: adopting the caller's rig would empty it.
@@ -14688,13 +14055,92 @@ class ClipData(HierarchyData):
         return np.array(values, dtype=float).reshape(len(self.list), 3)
 
     def _allocate(self, frames: int) -> None:
-        """seeds every block with the pose the nodes currently hold"""
+        """seeds every block with the pose the nodes currently hold, every
+        channel constant"""
         for channel in self.FRAMED_CHANNELS:
             self._blocks[channel] = np.repeat(
                 self._pose(channel)[None, ...], frames, axis=0
             )
-        self._columns = [node.uuid for node in self.list]
+            self._animated[channel] = np.zeros(len(self.list), dtype=bool)
+        self._user_keys = {}
+        self._columns   = [node.uuid for node in self.list]
         self._bind(0)
+
+    # --- layout: one row, constant, or F rows, animated --- #
+    def _keyed(self, channel: str) -> np.ndarray:
+        """(N,) bool by block column, the channel's animated columns: a
+        constant column whose frames an edit left unequal is animated now"""
+        block = self._blocks[channel]
+        keyed = self._animated.get(channel)
+        if keyed is None or len(keyed) != block.shape[1]:
+            keyed = self._animated[channel] = np.zeros(block.shape[1], dtype=bool)
+        if len(block) > 1 and not keyed.all():
+            keyed |= np.any(block != block[:1], axis=(0, 2))
+        return keyed
+
+    def _settle(self) -> None:
+        """every channel's layout brought up to date (:meth:`_keyed`)"""
+        self._realign()
+        for channel in self._blocks:
+            self._keyed(channel)
+
+    def _played(self, node, channel: str) -> None:
+        """a write at the playhead to a constant channel animates it"""
+        keyed = self._animated.get(channel)
+        if keyed is not None:
+            column = self._column_place().get(node.uuid)
+            if column is not None and column < len(keyed):
+                keyed[column] = True
+
+    def _user_played(self, node, name: str, writes: list) -> None:
+        """a user attribute written at the playhead: a constant channel
+        becomes animated, its other frames keeping the value it held"""
+        attrs    = node.user_defined_attributes
+        channels = _user_channels(attrs)
+        channel  = name if name in channels else attrs[name].get("parent")
+        if channel not in channels or not self.frame_count:
+            for spec, converted in writes:
+                spec["value"] = converted
+            return
+        children = channels[channel]
+        before   = _user_row(attrs, channel, children)
+        for spec, converted in writes:
+            spec["value"] = converted
+        keys = self._user_keys.setdefault(node.uuid, {})
+        rows = keys.get(channel)
+        if rows is None:
+            rows = keys[channel] = np.repeat(before[None], self.frame_count, axis=0)
+        rows[self._frame] = _user_row(attrs, channel, children)
+
+    def at(self, frame) -> HierarchyData:
+        """the pose at frame number ``frame``, a HierarchyData: a constant
+        channel's one value at any frame number, an animated one's row at a
+        frame of the clip, its first before them and its last after"""
+        self._realign()
+        if not self._blocks:
+            raise ValueError("the clip holds no frames")
+        index = int(np.clip(int(round(float(frame))) - self._start_frame, 0, self.frame_count - 1))
+        nodes = [node.copy() for node in self.list]
+        for channel, block in self._blocks.items():
+            rows = block[index]
+            for i, node in enumerate(nodes):
+                node.__dict__[channel] = np.array(rows[i])
+        if self._visible is not None:
+            for node, shown in zip(nodes, self._visible[index].tolist()):
+                node.__dict__["_visibility"] = shown
+        place = self._column_place()
+        for uuid, keys in self._user_keys.items():
+            column = place.get(uuid)
+            if column is None:
+                continue
+            attrs    = nodes[column].user_defined_attributes
+            channels = _user_channels(attrs)
+            for name, rows in keys.items():
+                if name in channels:
+                    _user_put(attrs, name, channels[name], rows[index])
+        pose = HierarchyData(nodes)
+        pose._axis_system, pose._unit = self._records()
+        return pose
 
     # (the column list, each uuid's column in it)
     _column_place_cache = None
@@ -14730,13 +14176,22 @@ class ClipData(HierarchyData):
 
         for channel, block in self._blocks.items():
             rebuilt = np.empty((frames, len(wanted), 3), dtype=float)
+            held    = self._animated.get(channel)
+            keyed   = np.zeros(len(wanted), dtype=bool)
             for i, node in enumerate(self.list):
                 column = source.get(node.uuid)
                 if column is None:
                     rebuilt[:, i] = np.asarray(getattr(node, channel), dtype=float)
                 else:
                     rebuilt[:, i] = block[:, column]
-            self._blocks[channel] = rebuilt
+                    keyed[i]      = held is not None and column < len(held) and bool(held[column])
+            self._blocks[channel]   = rebuilt
+            self._animated[channel] = keyed
+
+        # an animated user channel of a node the clip no longer holds goes
+        kept = set(wanted)
+        for uuid in [uuid for uuid in self._user_keys if uuid not in kept]:
+            del self._user_keys[uuid]
 
         if self._visible is not None:
             shown = np.empty((frames, len(wanted)), dtype=bool)
@@ -14761,6 +14216,20 @@ class ClipData(HierarchyData):
             if self._visible is not None:
                 for node, shown in zip(self.list, self._visible[frame].tolist()):
                     node.__dict__["_visibility"] = shown
+            if self._user_keys:
+                place = self._column_place()
+                nodes = self.list
+                for uuid, keys in self._user_keys.items():
+                    column = place.get(uuid)
+                    if column is None or column >= len(nodes):
+                        continue
+                    attrs = nodes[column].user_defined_attributes
+                    for name, rows in keys.items():
+                        spec = attrs.get(name)
+                        if spec is None:
+                            continue
+                        children = _compound_children(attrs, name) if "numberOfChildren" in spec else None
+                        _user_put(attrs, name, children, rows[frame])
             self._frame = frame
 
         for node in self.list:
@@ -14836,61 +14305,6 @@ class ClipData(HierarchyData):
     def take(self, value: str) -> None:
         self._take = _take_name(value)
 
-    # --- rest pose --- #
-    @property
-    def rest_pose(self) -> Optional[HierarchyData]:
-        """the pose the clip's file holds outside its take, or None
-
-        A :class:`HierarchyData`, which :meth:`load_fbx` sets: the nodes'
-        own values, with the clip's names and node order and loaded as
-        :meth:`HierarchyData.load_fbx` loads the file, from the same read.
-        For an Unreal animation that is the skeleton's bind pose. It
-        records the clip's axes and unit (:attr:`axis_system`,
-        :attr:`unit`). It is saved with the clip, and a copy or a cut of
-        frames (``clip.frames[10:20]``) holds a copy of it. :meth:`load_glb`
-        sets the file's node pose, the pose the rig is built from. It is None
-        on a clip the constructor or :meth:`from_poses` builds, on one the
-        pose algebra builds (:meth:`get_delta`, :meth:`add_delta`), which
-        holds new animation, and on a saved clip that held none.
-        ``strip_namespace()`` on the clip strips its names too, and setting
-        the clip's :attr:`axis_system` or :attr:`unit` gives the clip a copy
-        of it relabelled with the clip, leaving the one set as it was; any
-        other edit of the clip leaves it as it is. A :class:`HierarchyData`
-        set here is held as it is, not copied, and must record the clip's
-        axes and unit, or ValueError is raised: when it is set, and when a
-        clip whose rest pose was relabelled since is saved, pickled, copied
-        or cut, before anything is written, as it is for a saved clip whose
-        rest pose records others.
-        """
-        return self._rest_pose
-
-    @rest_pose.setter
-    def rest_pose(self, value: Optional[HierarchyData]) -> None:
-        _check_rest_pose(value, self)
-        self._rest_pose = value
-
-    # --- the record: the rest pose is relabelled with the clip --- #
-    # The rest pose set is held as it is, and may be another clip's or the
-    # caller's rig: a relabel gives the clip a relabelled copy of it, and
-    # leaves the one set as it was
-    @HierarchyData.axis_system.setter
-    def axis_system(self, value: str) -> None:
-        HierarchyData.axis_system.fset(self, value)
-        rest = self._rest_pose
-        if rest is not None and rest._axis_system != self._axis_system:
-            rest              = rest.copy()
-            rest._axis_system = self._axis_system
-            self._rest_pose   = rest
-
-    @HierarchyData.unit.setter
-    def unit(self, value: float) -> None:
-        HierarchyData.unit.fset(self, value)
-        rest = self._rest_pose
-        if rest is not None and rest._unit != self._unit:
-            rest            = rest.copy()
-            rest._unit      = self._unit
-            self._rest_pose = rest
-
     # --- construction --- #
     @classmethod
     def from_poses(cls, poses, start_frame: int = 0, fps: float = 24.0) -> "ClipData":
@@ -14920,8 +14334,10 @@ class ClipData(HierarchyData):
             for channel, values in _FrameAxis._pose_rows(pose, count, channels).items():
                 blocks[channel][i] = values
 
-        clip._blocks  = blocks
-        clip._columns = [node.uuid for node in clip.list]
+        clip._blocks    = blocks
+        clip._animated  = {c: np.ones(count, dtype=bool) for c in channels}
+        clip._user_keys = {}
+        clip._columns   = [node.uuid for node in clip.list]
         clip._bind(0)
         return clip
 
@@ -14939,11 +14355,12 @@ class ClipData(HierarchyData):
         """
         clip              = cls.__new__(cls)
         clip._blocks      = {}
+        clip._animated    = {}
+        clip._user_keys   = {}
         clip._columns     = []
         clip._frame       = 0
         clip._start_frame = int(start_frame)
         clip._fps         = float(fps)
-        clip._rest_pose   = None
         clip._take        = ""
         clip._axis_system = hierarchy._axis_system
         clip._unit        = hierarchy._unit
@@ -15356,26 +14773,33 @@ class ClipData(HierarchyData):
         new = self.__class__(
             self, start_frame=self._start_frame + first, fps=self._fps
         )
-        new._blocks    = {c: np.array(b[span]) for c, b in self._blocks.items()}
-        new._columns   = list(self._columns)
-        new._rest_pose = self._rest_pose_copy()
-        new._take      = self._take
-        new._visible   = None if self._visible is None else np.array(self._visible[span])
+        self._settle()
+        new._blocks   = {c: np.array(b[span]) for c, b in self._blocks.items()}
+        new._animated = {c: np.array(k) for c, k in self._animated.items()}
+        new._user_keys = {
+            uuid: {name: np.array(rows[span]) for name, rows in keys.items()} for uuid, keys in self._user_keys.items()
+        }
+        new._columns = list(self._columns)
+        new._take    = self._take
+        new._visible = None if self._visible is None else np.array(self._visible[span])
         new._bind(0)
         return new
 
     def copy(self) -> "ClipData":
-        new            = self._copy_frames()
-        new._rest_pose = self._rest_pose_copy()
-        return new
+        return self._copy_frames()
 
     def _copy_frames(self) -> "ClipData":
         """a copy of the nodes, the timebase, every frame and the record of
         the axes and unit, with no rest pose"""
         self._realign()
         # the clip itself, not its list, as a cut of frames
-        new         = self.__class__(self, start_frame=self._start_frame, fps=self._fps)
-        new._blocks = {c: b.copy() for c, b in self._blocks.items()}
+        new = self.__class__(self, start_frame=self._start_frame, fps=self._fps)
+        self._settle()
+        new._blocks   = {c: b.copy() for c, b in self._blocks.items()}
+        new._animated = {c: np.array(k) for c, k in self._animated.items()}
+        new._user_keys = {
+            uuid: {name: np.array(rows) for name, rows in keys.items()} for uuid, keys in self._user_keys.items()
+        }
         # the blocks are installed behind __init__, so the column list has to
         # come with them: a copy left claiming no columns would have its next
         # realign reseed every frame from the one pose the nodes are bound to
@@ -15415,13 +14839,6 @@ class ClipData(HierarchyData):
             shown[:, column]             = value
             node.__dict__["_visibility"] = value
             self._show(shown)
-
-    def _rest_pose_copy(self) -> Optional[HierarchyData]:
-        """a copy of the rest pose, for a copy or a cut of the clip; None when
-        the clip holds none. ValueError for one recording other axes or
-        units than the clip, relabelled after it was set"""
-        _check_rest_pose(self._rest_pose, self)
-        return None if self._rest_pose is None else self._rest_pose.copy()
 
     def __deepcopy__(self, memo):
         # the blocks, columns and bound frame come only through copy()
@@ -15520,839 +14937,32 @@ class ClipData(HierarchyData):
             raw  = [x.name or "" for x in animations]
             take = _take_names(raw, read=[animation % len(animations)], blank=_blank_animation)[animation]
 
-        clip = _glb_take_clip(cls, model, rig, column, animations, animation, scale_factor, fps, start_frame, take)
-        # the file's node pose, which the rig is built from, as FBX's rest pose
-        clip._rest_pose = rig.copy()
-        return clip
+        return _glb_take_clip(cls, model, rig, column, animations, animation, scale_factor, fps, start_frame, take)
 
     @classmethod
-    def load_fbx(
-        cls,
-        filename:     str,
-        scale_factor: Optional[float]           = None,
-        take:         Optional[Union[int, str]] = None,
-        fps:          Optional[float]           = None,
-        start_frame:  Optional[int]             = None,
-        end_frame:    Optional[int]             = None,
-        axis_system:  Optional[str]             = "maya_y_up",
-        node_types:   Optional[tuple]           = None,
-    ) -> "ClipData":
-        """builds a clip from an fbx's animation take
+    def load_fbx(cls, filename) -> "ClipData":
+        """the active take of an fbx file, as ``cgmath.formats.load_fbx``
+        reads it; ValueError for a file holding no take"""
+        from cgmath.formats._load import load_fbx
 
-        ``scale_factor`` None, the default, converts the file's unit to
-        centimeters, a number is the caller's own factor, as in
-        :meth:`HierarchyData.load_fbx`: the static translations and the
-        translation curves are multiplied by it, rotations and scales are
-        not, and a file that holds its unit as a scale on the scene root's
-        children loads as the cm file it was written from, on every frame.
-        The export converts the curves of each take's first layer alone, so
-        on a root that holds the unit only that layer's translate is
-        multiplied, and only that layer's scale divided by the unit on the
-        root and on each node under it that does not inherit its parent's
-        scale, before the layers are blended; the later layers' curves are
-        read as they are. A root the export found scaled other than 1 holds
-        no unit: its translate is multiplied after the blend, the later
-        layers' cm values with the first layer's, so the root and every node
-        under it are off by s - 1 times each later layer's own translate
-        times its weight, s the cm one unit of the file holds, on each
-        channel its curve node holds: what an additive layer adds, an
-        override or passthrough layer's whole value; and a scale an override
-        or passthrough layer keys on that root, or on a node under it that
-        does not inherit its parent's scale, is read as the cm value it is,
-        every node under it off, as :meth:`HierarchyData.load_fbx` says.
+        _, clip = load_fbx(filename)
+        if clip is None:
+            raise ValueError(f"{filename} holds no take")
+        return clip
 
-        ``axis_system`` "maya_y_up", the default, loads the take in Maya's
-        Y-up axes, as :meth:`HierarchyData.load_fbx` loads the rig: every
-        node's world matrix, on every whole frame, is the one Maya's FBXImport
-        gives it, in the file's axes times the turn from the file's axis
-        system to Maya's where the read turns, the one ConvertScene gives,
-        root travel included. Maya's FBX importer agrees on that turn on a
-        file whose up axis is x or z, but on a skeleton root it imports as a
-        transform and on a node below the roots that is no camera or light
-        whose rotation is inactive, in another order than xyz, as
-        :meth:`HierarchyData.load_fbx` says, and where the list below says, a
-        root that is no joint whose rotation a layer blends among them, and
-        leaves one whose up axis is y in its own axes. In a file of any axes
-        it also parts from the clip where it keys at another frame rate than
-        the file's, as the list says. The clip parts from both on a root a
-        layer above the base translates, additive, override or passthrough:
-        it keeps that root's translate in the file's world turned, the motion
-        as the file authors it, where ConvertScene leaves that layer's
-        translate in the file's axes, and so does Maya's importer wherever
-        the base layer holds that translate (within 7.7e-7 of ConvertScene;
-        where the base layer holds no curve node for it, Maya parts from
-        ConvertScene as the first live layer item below says). The clip sits
-        2.8 to 49 off Maya's import of such a root on the files measured, a
-        gap that grows with how far the layer moves it; Maya's import of a
-        Z-up scene it exported, a group root an additive layer translates,
-        sits 45 off that scene turned, the clip 1.5 off it, as Maya's import
-        of the same scene exported Y-up does, and puts that group's 3x3, in
-        xyz, 1.41 off ConvertScene's and the clip's, as the list below says.
-        A root whose rotation is inactive still blends its rotation, blended
-        by layer, as ConvertScene's xyz node, as Maya's importer does a
-        group's, a locator's or a joint's: a zyx group root the layer also
-        translates and turns has its 3x3 1.70 off the file's world turned and
-        within 1.7e-7 of Maya's FBXImport into a scene at the file's frame
-        rate, and its translate the file's world turned, 49 off Maya's import
-        in a Z-up file and 30 in an X-up one. A joint root takes the turn in
-        its joint orient and its translate curves, keeping its rotate curves
-        as authored; any other root has its rotate solved again on every
-        frame in its rotate order, through euler_filter along the frames,
-        frame 0 as solved, and its translate turned. A file already in Maya's
-        Y-up loads as it is, a left handed one raises ValueError, and
-        ``axis_system=None`` keeps the file's own axes.
-
-        ``node_types`` keeps the kinds of node :meth:`HierarchyData.load_fbx`
-        keeps, and what that read folds into the nodes it keeps, the nodes
-        it drops and the pivots, offsets and pre and post rotations a node's
-        channels can't hold, is folded in on every frame: the dropped nodes
-        are sampled with the kept ones, every frame at once. A joint under a
-        dropped node the take moves keeps its rotate curves as authored and
-        takes that node in a joint orient that moves with it, but on a frame
-        the dropped nodes scale it unevenly under a turn, where its rotate
-        is solved again from the matrix and its whole rotate curve then goes
-        through euler_filter; any other node has its rotate solved again on
-        every frame, and takes the shear it needs, a frame at a time; a node
-        whose pivot its rotate or scale moves takes it in its translate on
-        every frame.
-
-        A node's inherit type is read as :meth:`HierarchyData.load_fbx` reads
-        it, a unit root's scale counting as 1: every node with its rotation
-        active sits where Maya's FBXImport puts it on every whole frame. A
-        clip decides on the static pose and the whole take together: a node
-        stored eInheritRrSs stays unbaked where its parent's world reads one
-        scale and no shear at the static pose, whatever it reads on the
-        frames, and no scale curve from the parent up leaves its first key's
-        value by more than 1e-5, so a flat curve counts for nothing and a
-        window of frames reads what the full read gives them. A node's rest
-        pose can be unbaked where its frames bake, as Maya's two imports
-        differ. A baked node holds its block in ``clip.frames``, scale, shear,
-        rotate and translate, (F, N, 3) each. A bake runs from the earlier of
-        0 and the node's first key, in whole frames of the file's rate, to the
-        later of 0 and its last key, and holds that last one after it while
-        its parent moves on; before its first key it holds that key's value,
-        and a node with no curve holds its static bake on every frame. A first
-        key before 0 off a whole frame steps from that key. So a
-        ``start_frame`` past every key reads the hold, and a read at another
-        ``fps`` steps a baked node on the bake's frames, as Maya's keys do,
-        where an unbaked one blends. On a node with a pre rotation, or a root
-        of an X- or Z-up file, the frames are the ones the sdk's key reducer
-        leaves (:meth:`HierarchyData.load_fbx`), a last key off a whole frame
-        holding to the whole frame after it, and the angles the sdk's
-        conversion re-keys, the solution nearest the frame before, a frame at
-        the gimbal of the node's order sharing what its outer axes moved. That
-        conversion re-keys such a node from the whole frame its first key
-        truncates to, towards 0, holding that frame's rotate and scale below
-        it, so its angles take their branch from there, and the read holds
-        them so, on the clip's frames and on the frames a bake reads; one
-        whose keys all sit before that frame, a lone key before 0 off a whole
-        frame among them, it leaves as keyed, and Maya then turns it by its
-        keys alone, its pre and post rotation lost (a node with no attribute
-        under a joint keeps them as its joint orient and rotate axis), which
-        the read follows. Maya runs that conversion on the take's first layer
-        alone, and so does the read, then merges the layers channel by
-        channel: a translate, rotate or scale with a key in a layer past the
-        first, muted or not, it keys on every whole frame of the take's span,
-        stepping from its start where that sits off a whole frame, with what
-        the layers that are not muted give over what the conversion left of
-        the first, a curve the conversion emptied holding its first key's
-        value and, below the whole frame the conversion re-keys a node from,
-        the first layer's rotate and scale held at that frame, and holds that
-        before and after the span; every other channel keeps what the
-        conversion leaves it. A node that bakes does so from the earlier of 0
-        and the first key of any of its channels to the later of 0 and the
-        last, and so does the read. A node that does not bake reads such a
-        channel as the file's layers give it, on every frame (the list below).
-        A layer above a bake bakes with it. On a file of two takes Maya bakes
-        a typed node from the first take's values; the read uses the take it
-        reads. A camera scaled unevenly or sheared warns as
-        :meth:`HierarchyData.load_fbx` says, at the static pose or on any of
-        the clip's frames, one warning a read.
-
-        The clip's :attr:`rest_pose` is the file's static pose, the nodes'
-        own values outside the take (the world matrices Maya's FBXImport gives
-        with animation off, :meth:`HierarchyData.load_fbx`'s), taken from
-        the same read: a :class:`HierarchyData` with the clip's names and
-        node order, loaded as :meth:`HierarchyData.load_fbx` loads the file,
-        in the same unit and axes. For an Unreal animation it is the
-        skeleton's bind pose, which frame 0 can be far from. The clip and
-        its rest pose record the axes and unit the read produced, as
-        :meth:`HierarchyData.load_fbx`'s rig does (:attr:`axis_system`,
-        :attr:`unit`), which :meth:`save_fbx` labels a frame's file with.
-
-        The three local channels are sampled separately rather than
-        decomposed out of ``EvaluateLocalTransform``: that matrix has already
-        folded in joint orient, rotate axis and the inherit type, so pulling
-        euler angles back out of it would not give the curves the file holds.
-
-        The curves the file holds are not euler filtered, unlike the glb
-        path. Fbx stores euler curves, so the branches are the ones the file
-        was authored with and rewriting them would change the animation. A
-        rotation an animation layer blends by layer is rebuilt from
-        quaternions frame by frame, by the sdk as here, so that curve goes
-        through euler_filter in the node's rotate order, frame 0 as the sdk
-        gives it. So does the rotate of a root that is not a joint, solved
-        again for Maya's axes (``axis_system``), the rotate of any node that
-        is no joint, solved again for a dropped node above it or its own
-        pre and post rotation, a joint's orient, solved again for a dropped
-        node above it, in xyz, the rotate of a joint a dropped node
-        above it scales unevenly under a turn, solved again on those frames
-        (``node_types``), and a baked node's rotate, solved again on every
-        frame, its shear beside it.
-
-        Every frame is sampled at once: each curve's keys are read once and
-        evaluated on the frame grid the way the sdk evaluates them, the same
-        values on keys and to the sdk's single precision rounding between
-        them, past them too where a curve repeats, mirrors or repeats with
-        an offset (Maya's cycle with offset); keep slope holds the end key,
-        or carries its slope on when its count is 2**32 - 1, as Maya writes
-        it, as this sdk evaluates it, which one evaluation of the curve
-        checks (an sdk that evaluates it otherwise raises ValueError). The
-        one exception between keys is a weighted span whose two handles
-        crowd one end (one weight at most about 0.01, the other about 0.88
-        or more, the smaller the one the lower the other), where the sdk's
-        own time solve stops short of the exact one taken here, by up to
-        0.55 of the curve's range; Maya's own import gives the values taken
-        here, and there the loader follows Maya, not the sdk. The take's
-        animation layers are blended here as the sdk blends them: from the
-        first layer that is not muted and holds anything, a channel it holds
-        no curve node for starting from 0, scaling too, then each later one
-        that is not muted by its weight (animated or not), blend mode,
-        rotation and scaling accumulation; a channel no live layer holds
-        keeps the rest pose. A rotation blended a hair off gimbal agrees to
-        a few times 1e-16 / cos(middle angle) radians, the rounding either
-        side loses there; within about 1e-15 of the cosine the sdk splits
-        the turn at, each side's rounding picks the branch, and the two can
-        be whole rotations apart. No frame is asked of the sdk.
-
-        Maya's own evaluation of a take differs from the sdk's, and so from
-        the clip, where:
-
-        - a rotation is blended by layer on a node whose rotate order is not
-          xyz, as the file stores it, rotation active or not, though a node
-          whose rotation is inactive loads with rotate_order 0 (a root of the
-          file whose rotation is inactive, kept or dropped, blends as an xyz
-          node in a file the clip turns into Maya's axes, as ConvertScene
-          turns its rotation on in xyz; a node kept under a dropped root is no
-          root of the file): the sdk hands the x, y and z angles to its euler
-          code as they are, so an even order (yzx, zxy) blends as an xyz node
-          does and an odd one (xzy, yxz, zyx) as the sdk blends a zyx node,
-          whose additive layer turns on the other side of what is below:
-          M(below) @ M(layer), both matrices of zyx angles, where Maya gives
-          M(layer) @ M(below) in the node's own order. Maya blends every node
-          in its own order the way it blends xyz. Additive layers agree only
-          on xyz (but for the sign cases below), passthrough layers on xyz and
-          zyx; the others are up to 2.0 apart as matrices;
-        - Maya's FBXImport merges the layers, as it does by default, on a node
-          that turns in xzy, yzx, yxz or zxy, a group or a joint, root or not
-          (but a root of the next item), in a Y-up and a Z-up file alike: on
-          some frames, by channel or by layer, the merged turn parts from the
-          sdk's, up to 2.0 apart as matrices. By channel such a frame holds the
-          sdk's angles with x and z turned by 180 degrees and y by 180 - y, the
-          same turn in xyz and zyx alone (a frame the sdk turns by
-          (-100, 68, -25), after one at (120, -54, 205), merges to
-          (80, 112, 155), 1.77 to 1.99 apart), where the layers kept agree; by
-          layer, keys of 120 to 128 degrees about y part on every frame, 1.23
-          to 1.99 apart. Merged, a node in xyz or zyx agrees, and so did every
-          order on the smaller turns measured, by layer too, which kept parts
-          as the item above says, but for the single precision values the
-          curves it merges, bakes or solves hold, the rotate's as well as the
-          scale's and the translate's, which part from the sdk's the more the
-          larger they are. The angles that count are, by channel, the sums of
-          the keys, which Maya rounds to single precision, or the angles its
-          curve holds where those are larger: it starts the curve on the take's
-          first frame at the angles nearest 0 that turn the node as the sums
-          do, whole turns off and on either branch (sums of (330, 89.7, 330)
-          held as (-30, 89.7, -30), of (3500, 89.7, 3500) as (80, 90.3, 80)),
-          and its continuity can carry the curve on past the sums where the
-          keys jump (random keys summing to under 245 degrees: curves holding
-          up to 1210); by layer, and where Maya solves the rotate (a root of
-          the next item, a node whose pre rotation it bakes), the angles it
-          solves, and more where that continuity carries them on. On the files
-          measured, as matrices on a node of world scale 1, within 3.7e-7 on
-          angles up to 250 degrees, 5.7e-7 up to 500, 1.4e-6 up to 1000
-          and 4.6e-6 up to 3600, by channel within 1.12 times the single
-          precision spacing of the largest such angle in degrees, taken
-          in radians, which bounds it (2.642e-7 on sums of 205 degrees
-          and 4.228e-6 on sums of 3505, 0.992 of it, where single precision
-          rounds the x and z sums by almost half of it each near y = 90;
-          4.508e-6 on sums to 3385, 1.058 of it, where it rounds all three
-          so away from y = 90), and within 2.8e-15 on keys in whole degrees up
-          to 1000 and 7.1e-15 up to 3600, whose sums single precision holds.
-          Against the same node under the same parents with every scale 1, a
-          scale on the node or above it multiplies that by up to the largest
-          axis of the node's world scale where the scales above it are even
-          (scales of 2 to 10 and (1, 2, 3): a node scaled 3.5, or under one
-          scaled 3.5, 7.0e-7 by channel and 8.2e-7 by layer on angles up to
-          250; one whose scale is keyed to 10, 9.0e-7 on angles to 193), by up
-          to the product of the largest axes of its own scale and those above
-          it where no parent scaled unevenly is turned or sits under a turned
-          one (a node scaled (3, 1, 1) under a group scaled (1, 1, 3), 9.0
-          times), and otherwise by up to 2.13 times that product (8.91
-          times on the files measured, on a node scaled (3, 1, 1) under
-          a group scaled (1, 1, 3) under one turned 45 degrees); a node
-          under it, and with a rotate pivot the node itself, is off in
-          translate by up to 2.13 times that gap at scale 1, times its
-          world distance from the node's rotate pivot, times the largest over
-          the smallest singular value of the node's parent's world 3x3: on
-          the files measured up to 1.7 times that gap times that distance
-          under even scales, 2.9 under a group scaled (1, 2, 3), 4.9 under
-          two uneven levels and 11.1 under a group scaled (1, 0.1, 1) with a
-          turned group between (a locator 19.7 from a node at scale 1, 3.7e-6
-          off on angles up to 250, the one under the node keyed to 10, 1.7e-6);
-          a translate both layers key is up to 6.0e-8 (2^-24) of its size off
-          (3.8e-6 at 71). But a frame whose blended y angle is 90 or -90, or a
-          whole number of turns from either (Maya holds 270 as -90 and -270 as
-          90), merges by channel to angles that hold its turn in xyz alone,
-          x - z kept at 90 and x + z at -90: those nearest the key before's
-          (the frame before's at the file's rate), and on a take's first frame,
-          which has none before it, those nearest 0 ((25, 90, 30) merges to
-          (-2.5, 90, 2.5)). Such a frame is up to 2 sin(c / 2) apart as
-          matrices in xzy, yzx, yxz and zxy and 2 abs(sin c) in zyx, c
-          half how far x + z (at 90) or x - z (at -90) has moved since the
-          last frame before its run of frames at that y, or from 0 where
-          the run starts the take: none where it has not moved (on the files
-          measured, y from -810 to 810, 0 to 1.41 and 0 to 1.97), and up to
-          2.0 where the merged angles also sit a half turn off the keys as
-          above, x and z turned by 180 degrees and y by 180 - y, as the frames
-          after such a first frame can go on doing (a take whose first frame,
-          (-150, -90, 170), merges to (10, -90, 10): 1.58 to 1.97 apart in
-          those four orders on every frame). A node that is no joint with a pre
-          rotation parts as the item on it below says;
-        - a layer blends the rotation of a root that is no joint in a file
-          whose up axis is x or z, which Maya's importer turns into its Y-up:
-          it can part from ConvertScene there in any rotate order, by channel
-          or by layer, the layers kept or merged, up to 2.0 apart as matrices
-          (Maya's own Z-up export of a group root in xyz, its default order,
-          under an additive animLayer, which it writes by channel: 1.41 apart,
-          the locator under it 2.25 off). On files the sdk wrote, by channel
-          0.40 to 1.96 apart, a root whose rotation is inactive as a root in
-          xyz, which ConvertScene makes it, in orders that hang on the file's
-          axes and on the turns: on the smaller turns measured and on a turn of
-          120 to 128 degrees about y, xyz, xzy, zxy and yxz in Maya's Z-up axes
-          and zyx, xzy, yzx and zxy in an X-up file whose front is z, the other
-          two agreeing; in a Z-up file whose front is x, in an X-up one whose
-          front is y, and on keys that turn far from one frame to the next (5
-          frames, up to 230 degrees apart on an axis), every order. By layer,
-          in every order but xyz, 0.40 to 1.93 apart, merged on the smaller
-          turns too, but yxz in that X-up file, and kept as the first item
-          says. On every file and turn measured, a root in xyz, or one whose
-          rotation is inactive, agrees by layer but for the single precision of
-          the curves Maya solves, as the second item says, and where it holds
-          one level (the next item); and a joint root parts only where any node
-          does (the two items above). The clip keeps ConvertScene's values
-          there, within 7.1e-15;
-        - Maya's FBXImport keys the curves it solves or merges at the rate its
-          FBXImportResamplingRateSource option names, by default "Scene", the
-          rate the scene runs at when the import starts; the import then sets
-          the scene to the file's rate. It solves the rotate of a root that is
-          no joint in a file whose up axis is x or z; the rotate of a node that
-          is no joint with a pre rotation it reads (rotation active, or on a
-          camera or a light), which it bakes into that rotate, in a y-up file
-          too; and the rotate of a node that is no camera or light whose
-          rotation is inactive, in another order than xyz, but a root of a file
-          whose up axis is x or z, which it turns by neither order
-          (``node_types``). It merges a take's layers, as it does by default,
-          into new curves on the nodes they hold, a joint's rotate and
-          translate too. The other curves keep the file's keys, of a single
-          layer or of kept layers: a joint's, its pre rotation kept as its
-          joint orient, a camera's or a light's with no pre rotation, a node's
-          whose post rotation it keeps as its rotate axis, translates, pivots
-          and offsets. From a scene at another rate, the keys it makes sit on
-          the frames of that rate, not the file's, and on the file's frames
-          between them Maya parts from the clip by amounts that hang on both
-          rates. On the files measured, a 30 fps file imported from Maya's
-          default 24 fps scene, its keys 1.25 of the file's frames apart: a
-          root that is no joint of an X- or Z-up file up to 0.17 apart as
-          matrices, the node under it up to 0.29 off; a node with a pre
-          rotation up to 6.9e-2, the locator under it up to 0.11; the nodes of
-          a merged take up to 1.6e-2, the locators under them up to 3.9e-2.
-          From a 25 fps scene: a group root of a Z-up file 0.16 apart, the
-          locator under it 0.19; the nodes of a merged take up to 6.4e-2, the
-          locators under them 9.8e-2. A node it turns by neither order parts
-          from the clip at another rate by its gap at the file's rate and by a
-          share of its own, which grows with how far the angles Maya solves
-          bend or jump between that rate's frames, not with that gap, as
-          :meth:`HierarchyData.load_fbx` says (a smooth turn about one axis,
-          which agrees at the file's rate, parts by 2.8e-3 to 5.3e-3 times the
-          largest second difference of its keys in degrees a frame squared from
-          24 and 25 fps scenes for a 30 fps file, 0.33 to 0.77 of that from 48,
-          and by 1.9e-3 to 4.2e-3 times it from 30 and 25 fps scenes for a 24
-          fps file (on the files measured, on second differences of 1e-2 or
-          more, 2.9e-5 to 6.8e-1)). With that option set to "File", or from a
-          scene at the file's rate or at a whole multiple of it, it keys every
-          frame of the file (on the files measured, from 60, 120, 150 and 240
-          fps scenes for a 30 fps file and 48, 120 and 240 fps ones for a 24
-          fps file) and agrees on them but for the single precision of the
-          curves it solves or merges, as the second item says (as matrices
-          within 3.7e-7 on a node of world scale 1 on angles up to 250 degrees,
-          more on larger angles, under a scale and on the nodes under it), and
-          where a curve it bakes or solves moves by less than about 1e-2
-          degrees a frame of the rate it keys at, which the sdk's constant key
-          reducer, at its 0.009, can hold level over runs of frames, at the
-          file's rate too on a node with a pre rotation, a faster scene holding
-          more: on the files measured, moving by 1e-4 to 6e-3 degrees a frame,
-          up to 4.2e-4 apart as matrices on a node of world scale 1 on takes of
-          11 and 101 frames, a scale multiplying it as the second item says
-          (1.3e-3 on a group scaled 3) and each held channel within 1.3e-2
-          degrees of its curve, and from 120 to 240 fps scenes up to 3.0e-4
-          more than at the file's rate on curves moving by about 1e-2 degrees a
-          frame of the file and 1.1e-4 on a root of an X-up file; and from a 60
-          fps scene one curve of the 3,372 it made lost its key on the take's
-          last frame, 1.3e-4 apart there. From a 90 fps scene, though, every
-          curve it made held a key only on each whole second, kept or on a
-          single layer counted from time 0, from the last at or before the
-          take's first frame, and also on its last frame, merged counted from
-          that first frame, up to the first at or after its last frame (a
-          41-frame take of a 30 fps file: frames 0, 30 and 40, merged 0, 30 and
-          60; of a 24 fps file 0, 24 and 40, merged 0, 24 and 48; an 11-frame
-          take: 0 and 10, merged 0 and 30, or 0 and 24 from a 24 fps file; a
-          31-frame take of a 30 fps file: 0 and 30, merged too; a take of
-          frames 37 to 77 of a 30 fps file: 30, 60 and 77, merged 37, 67 and
-          97): on the 30 and 24 fps files measured up to 2.0 apart as matrices
-          on nodes of world scale 1, a node under them up to twice its world
-          distance off in translate (3.72 at 1.87). On a node it turns by
-          neither order it is as far apart at the file's rate as
-          :meth:`HierarchyData.load_fbx` says, and it parts where another item
-          of this list says;
-        - a layer above the base turns a node that is no joint whose pre
-          rotation Maya's FBXImport bakes into its rotate (the item above),
-          leaving the layer's own angles as they are. An additive layer adds
-          them to the baked ones by channel, the layers kept or merged, where
-          the sdk adds them to the node's own under the pre rotation: that
-          parts in every rotate order, but for a pre rotation about one axis
-          alone in the two orders that turn about that axis last (xyz and yxz
-          for z, yzx and zyx for x, xzy and zxy for y), which agree on the
-          smaller turns (on the files measured, on turns of up to 77 degrees
-          under a pre rotation of up to 100 and 57 under a larger one within
-          1.2e-15 on keys single precision holds, in whole, half or quarter
-          degrees, and within 2.6e-7 on keys it does not, but where Maya
-          holds a curve level (the item above) or merges a frame at y = 90
-          or -90, the pre rotation counted (the second item); on larger
-          turns, on keys drawn at random, the same in 11,183 cases of 14,565,
-          the others up to 2.0 apart, growing with the layer's angles). By
-          layer it parts in every order but xyz, merged too, but for yxz
-          under a pre rotation about z alone merged on the smaller turns
-          measured (within 1.6e-7), where the same node with no pre rotation
-          agrees merged on the turns measured. On the files measured, pre
-          rotations about mixed axes that turn 7 to 161 degrees, by channel
-          4.3e-3 to 1.99 apart as matrices, by layer merged 6.5e-3 to 2.0,
-          more as the pre rotation and the turns grow; by layer, a node
-          in xyz agrees, kept or merged, but for the single precision of
-          the curve Maya bakes and where it holds that curve level (the item
-          above): within 4.5e-7 on keys of up to 330 degrees and 4.5e-6 on keys
-          to 3500 on a node of world scale 1, a scale multiplying these as the
-          second item says, and 1.2e-4 on a baked curve held level over three
-          frames; a post rotation, which Maya keeps as the rotate axis, parts
-          only where a node with none does. An override layer's angles take the
-          place of the baked ones in every order, by layer merged at every
-          weight measured or kept at 100, and by channel at 100, and so do a
-          passthrough layer's at weight 100: the pre rotation is lost where the
-          layer holds the rotate, Maya turning the node by the layer's angles
-          alone where the sdk turns it by them under the pre rotation, apart by
-          about what the pre rotation turns it. By channel under 100 the gap
-          stays near that one; kept by layer under 100 Maya weighs the
-          override, as the item on that says, so the gap holds both. On the
-          files measured, weights 10 to 100: by layer merged, at 100 and by
-          channel, 8.7e-2 to 0.12 as matrices for a pre rotation of 7 degrees,
-          0.42 to 0.68 for 36 to 43, 0.75 to 0.98 for 60 to 66 and 1.35 to 1.72
-          for 120 to 161, by channel under 100 within 0.21 of the gap the
-          layer's angles alone give; kept by layer under 100, 0.11 to 1.99, and
-          0.11 to 1.92 for 7 degrees. Under 100 a passthrough layer's angles
-          mix with the baked ones, which hold the pre rotation, so part of it
-          stays, the more the lower the weight: on the smaller pre rotations
-          and turns the gap is about the weight times the gap at 100 (by
-          channel, a pre rotation of 7 degrees on the smaller keys, 2.1e-2 to
-          2.6e-2 at 25, 4.5e-2 to 5.1e-2 at 50 and 6.9e-2 to 7.5e-2 at 75), and
-          over both modes and every pre rotation measured 2.1e-2 to 2.0 at 25,
-          4.5e-2 to 2.0 at 50 and 6.9e-2 to 2.0 at 75, where the same node with
-          no pre rotation agrees but where another item of this list says. In
-          every mode measured such a node turns about its rotate pivot, so a
-          node under it, and with a pivot the node itself, is off in translate
-          by up to twice its world distance from that pivot times the largest
-          over the smallest singular value of the parent's world 3x3, as
-          :meth:`HierarchyData.load_fbx` says, and a node on the pivot agrees:
-          on the files measured, under even scales, up to 2.0 times that
-          distance (3.72 at 1.87 and 38.9 at 19.7; with pivots 0.5 to 7.1 away,
-          the node itself 4.00 off with one 2 away), under a group scaled
-          (1, 0.5, 2) up to 3.48 times it, and a node on the pivot within
-          5.7e-14. Between keys a bake reads double where Maya reads the
-          sdk's float32;
-        - an additive layer blends a rotation by layer at a weight other than
-          0 or 100, and the quaternion Maya builds from the layer's angles
-          (qz qy qx of the half angles on an xyz node) has the other sign
-          from the one the sdk solves from its matrix: the scaled turn goes
-          round the other way (up to 2.0 apart as matrices, in every rotate
-          order, xyz included). The sdk's w is positive on every turn under
-          120 degrees, so such a turn parts whenever Maya's w is negative:
-          an angle keyed past 180 (a 20 degree turn keyed as (380, 0, 0) is
-          1.9 apart at weight 50) or all three angles near +-180 (a 40 degree
-          turn Maya keyed as (150.4, 154.1, -176.7) is 1.5 apart). Over 120
-          degrees either sign can come out;
-        - a rotation is overridden by layer at a weight under 100: the sdk
-          takes the layer's rotation whatever the weight, and Maya weighs it
-          (0.86 apart as matrices at weight 50);
-        - a negative scale is multiplied by a layer: the sdk takes every
-          term unsigned, and Maya keeps the sign (1.6 apart in scale on
-          Maya's own export);
-        - the first live layer holds no curve node for a channel a later layer
-          holds: the sdk starts it from 0, and Maya does not (0.82 units apart
-          in translation, 1.94 in scale), an additive layer there adding to
-          the node's static value, up to 3.21 apart as matrices and 5.49 in
-          position on the files measured, a bake above or below it with it;
-        - a layer is soloed: solo changes nothing here, and Maya honours it;
-        - the base layer is muted: it is skipped here, where Maya's import
-          plays it, up to 2.01 apart as matrices and 3.65 in position on the
-          files measured; Maya's exporter does not write that mute, so a
-          Maya take whose base layer is muted loads with it playing;
-        - a curve has weighted tangents: Maya's exporter does not write them
-          as the scene holds them, so between keys a Maya export loads up to
-          about 2.5e-2 of the curve's range off what Maya showed (over 5e-3 on
-          7 of 72 test exports, whatever the infinity); Maya's own import of
-          the file gives the clip's values;
-        - the curve has linear infinity: past the keys the clip carries on
-          along the end key's derivative as the file holds it, where Maya
-          follows the key's outer tangent. Unweighted spline, clamped, flat,
-          stepped, plateau and auto tangents agree; linear, fixed and every
-          weighted tangent do not (up to 158 units 48 frames out on Maya's
-          own exports). A weighted one on no layer is the export again:
-          Maya's own import of it carries on past the keys as the clip does,
-          but for linear and stepped tangents;
-        - a node has quaternion interpolation: Maya resamples it where the
-          clip reads its curves as keyed, Euler, up to 2.17 apart as matrices
-          and 4.90 in position on the node's own frames on the files measured,
-          a bake above or below it with it, the rig agreeing;
-        - a curve has mirror repetition past its keys: 1.33 apart as matrices
-          and 2.1 in position on the frames past them, on the file measured;
-        - a bake that steps from a first key before 0 off a whole frame reads
-          a node above it with a pre rotation, or a root of an X- or Z-up
-          file, between the whole frames Maya's conversion re-keyed that node
-          on, where the clip reads its own curves: up to 5.57 as matrices and
-          11.5 in position on 720 files drawn at random;
-        - a skinned mesh under a keyed node, in a take that does not start at
-          frame 0, before or after it, where that node stands otherwise at the
-          take's start than at frame 0: Maya's import holds a mesh with no
-          curve at its world at frame 0, as the clip reads it, taken as a local
-          under its parents as they stand at the take's start, under a group
-          root and a camera root alike (within 6.7e-8 on the layouts measured),
-          where the clip holds its local at frame 0 on every frame, and a keyed
-          mesh there parts too; the clip parts with no bound, growing with how
-          far the node above stands at the take's start from where it stands at
-          frame 0: 2.5 in position on a translate keyed 2.5 apart under a group
-          root, 1.87 as matrices and 1.03 in position under a camera root
-          scaled 2 with a group under it keyed before 0, 0.39 and 0.51 under a
-          camera, or a group under it, keyed from 0 in a take from 4 (a keyed
-          mesh there 0.43 and 0.47), on the layouts measured in xyz with no pre
-          or post rotation, the rig agreeing; within 8.9e-7 where the node
-          above stands at the take's start as at frame 0 and where the mesh
-          holds no skin; Maya's rule there in a later release;
-        - a node that does not bake, with a channel a layer past the take's
-          first keys, muted or not: Maya merges that channel over the take's
-          span and holds it before and after, where the clip reads the file's
-          layers on every frame, up to 2.05 as matrices and 3.94 in position
-          outside the span on the files measured; inside it a curve of the
-          first layer moving under 0.009, which Maya's conversion empties,
-          holds its first key's value in Maya, up to 0.0259 as matrices and
-          0.0129 in position, 0.477 and 0.239 on a unit root of a file in
-          metres; and on the one such node measured with a pre rotation, in
-          order xzy and keyed first before 0 off a whole frame, Maya's merged
-          rotate turns it off its own rotation, 5.01 as matrices and 9.61 in
-          position on every frame;
-        - a unit root of a file in metres, its scale 1/100, whose first-layer
-          translate curve Maya's conversion empties under a later layer: up
-          to 0.501 in position where the root does not bake and 0.8 where it
-          does, on the files measured;
-        - a node stored eInheritRrs under the root of a file in metres whose
-          first-layer scale curve, moving under 0.009, sits under a live later
-          layer: the clip holds that curve emptied, as Maya's conversion
-          empties one in a file in cm, and Maya keeps it, 0.475 as matrices
-          and 0.237 in position on the file measured;
-        - a take whose span starts off a whole frame, with a cubic later
-          layer: Maya re-keys a channel it merges on the span's own steps and
-          a bake reads between those keys, where the clip samples the layers
-          on whole frames, up to 0.132 and 0.191 in position on the two spans
-          measured; a linear layer agrees;
-        - a skinned mesh under a camera root of an X- or Z-up file with a
-          rotate axis, stored eInheritRrSs or eInheritRrs under a camera
-          scaled unevenly, rig and clip: up to 5.14 as matrices and 10.6 in
-          position on the files measured;
-        - a skinned mesh under a mirrored camera root with pivots, of an X-
-          or Z-up file: Maya's camera holds another rotate pivot translate
-          than the file's offsets give, and the mesh and every node under it
-          sit up to 1.39 off in position, 1.55 with a pre rotation on the
-          camera, rig and clip, on the files measured;
-        - a skinned mesh under a mirrored camera root of an X- or Z-up file
-          with a group stored eInheritRrs between them: Maya places the mesh
-          off the rule's place, up to 3.22 as matrices and 6.06 in position,
-          1.53 and 1.64 where no node is scaled unevenly, rig and clip, on the
-          files measured; Maya's rule there in a later release;
-        - a skinned mesh under another skinned mesh under a camera root of an
-          X- or Z-up file: Maya places the lower mesh off the rule's place, rig
-          and clip, by sizes that grow with the depth of the nest and the
-          camera's scale: up to 5.22 as matrices and 10.1 in position at rest
-          and 5.49 and 9.53 on a clip three deep under a camera scaled 2, 2.19
-          and 5.1 at rest three deep under one scaled 1, 3.63 and 3.9 at rest
-          two deep under one scaled 2, on the files measured in xyz with no pre
-          or post rotation and the meshes scaled evenly; Maya's rule there in a
-          later release;
-        - a skinned mesh under a camera root of an X- or Z-up file with a
-          rotate axis, with both a pre and a post rotation, under a camera
-          scaled unevenly, rig and clip: up to 9.31 as matrices and 9.25 in
-          position at rest, 3.56 and 4.54 on a clip keyed on one rotate axis,
-          on the files measured, growing with the camera's uneven scale;
-        - a keyed skinned mesh with a pre rotation, in xyz, under a camera root
-          of an X- or Z-up file with a rotate axis, by sizes that grow with the
-          camera's scale: keyed on rotate z, from its static value at frame 0
-          or not, up to 2.42 as matrices and 2.47 in position under a camera
-          scaled 1, 4.95 and 4.16 under one scaled 2; keyed flat on rotate z 90
-          off it, up to 2.07 and 1.52, 4.36 and 3.49 under a camera scaled 2;
-          keyed flat on translate x, 0.925 in position at its static value and
-          10.2 10 off it, 1.51 and 16.6 under a camera scaled 2; on the files
-          measured, with static rotates (20, 40, 60) and (20, -30, 45) and the
-          mesh scaled 1, 1.5 or (1, 1.5, 0.75), a translate keyed off its
-          static value at frame 0 agreeing;
-        - a keyed skinned mesh under a camera root of an X- or Z-up file with a
-          rotate axis whose static rotate, as the camera rule works it out,
-          sits at an exact tie of the two euler solutions' sums of absolute
-          angles (mesh rotations such as (90, 135, 0) or (-45, 45, -90) under a
-          turned camera): Maya's pick and the clip's each follow their own
-          rounding and part on 5 to 17 of the 44 tie rotations of a 45-degree
-          grid, by the camera's turn (8 under (10, 30, -20)); on the tie
-          layouts built, up to 1.98 as matrices and 4.39 in position, 3.61 and
-          8.36 under a camera scaled 2, the rig agreeing;
-        - a skinned mesh with a pre rotation in another order than xyz, rig and
-          clip: Maya holds the angles of its fold in the node's order, read in
-          xyz, where the read holds the file's rotation, up to 1.98 as
-          matrices and 1.93 in position on the nodes under it at rest and on a
-          clip, 1.86 and 2.26 on a keyed one, on the files measured with no
-          node scaled unevenly; under a camera root of an X- or Z-up file,
-          keyed on some rotate axes, the mesh holds its own rotate on all
-          three, up to 1.72 and 3.1, 4.16 and 6.36 under a camera scaled
-          (1, 2, 3); Maya's rule in a later release;
-        - a skinned mesh keyed on some of its rotate axes outside that camera
-          rule, under a group root or a camera root of a Y-up file, whose
-          static rotation is not Maya's own euler solve of it: Maya re-solves
-          its static rotate by that solve, as under a camera root of an X- or
-          Z-up file, where the clip holds the file's angles, up to 1.98 as
-          matrices and 3.96 in position under a group root, Y- and Z-up, and
-          1.97 and 4.90 under a camera root of a Y-up file, on the files
-          measured, as in 3.0.3, the rig agreeing;
-        - a keyed joint with pivots: Maya re-keys its pivot term into its
-          translate and filters it at 0.009 (the fourth item), holding it level
-          where the clip reads the file's curves: up to 0.0114 in position on
-          the files measured.
-
-        ``take`` defaults to the first one that holds a key rather than to
-        index 0, then, in a file with no key at all, to the first that holds
-        a curve node, with or without a curve, then to index 0. A file can
-        carry takes holding no curves, or curve nodes and curves with no key
-        on them (an empty "Take 001" ahead of the animation), and reading one
-        back gives that take's own static values on every frame, the rest
-        pose where its curve nodes hold the node's own -- a silent answer
-        that looks like a broken loader rather than an empty take. A curve with
-        no key reads at the curve's own default, as the sdk's evaluator reads
-        it, and so does Maya where the curve is in the file's active take and
-        the last take does not key its channel (a curve with no key in any
-        other take, the last included, Maya does not read): under a curve node
-        holding Y at 55, a Y curve with no key whose default is 99 reads 99. A
-        curve node's channel with no curve reads at the curve node's value.
-        The frames left out default to the take picked. Pass an index to
-        override, including onto an empty take, 0 the first and negatives from
-        the end, or a take's name: the take :meth:`ClipList.load_fbx` names so,
-        else the first, in file order, whose name matches outer whitespace
-        aside, as a save strips it (``take="Walk Forward"``; of two stacks
-        named ``idle`` the second as ``take="idle_1"``; of stacks ``" idle "``
-        and ``"idle"``, ``take="idle"`` the second and ``take=" idle "`` the
-        first). A name the file does not hold raises
-        KeyError, on a file with no take too, and an index out of range
-        IndexError, each naming the file's takes; on a file with no take an
-        index or None gives its static pose as a one frame clip.
-
-        Maya 2025's FBXImport, with its default settings, picks otherwise. It
-        loads its curves from the file's last take, keyed or not, so an empty
-        last take imports no curve. That is the last take the file's Takes
-        section lists, not the last take object, which ``take=-1`` loads; the
-        two are the same take wherever the file lists its takes in the order it
-        holds them, as the sdk and Maya write them, and only a file edited by
-        hand, its takes reordered or one left out of its Takes section, parts
-        them (of the test files with two or more takes imported in Maya 2025,
-        the 148 written with the sdk and the 6 exported by Maya list them in
-        that order, and the 23 that do not were edited by hand); in a file with
-        no Takes section Maya loads the last take object's curves, the take
-        ``take=-1`` loads. Its playback range is the span of the file's active
-        take: the take the file's ``ActiveAnimStackName`` names, or the first
-        take object, the one ``take=0`` loads, when that name is empty, missing
-        or names no take. A channel the last take does not key holds the value
-        the active take gives it at frame 0. So the clip's curves are Maya's
-        where the first take holding a key is the last take, or where no take
-        holds one, though its frames, and a channel no take keys, can still
-        differ there (Maya holds the active take's value at frame 0);
-        ``take=-1`` loads the last take's curves, over that take's own frames,
-        with a channel it does not key at that take's own value for it (its
-        curve node's, the rest pose where it holds none). The camera rule of a
-        skinned mesh under a camera root of an X- or Z-up file
-        (:meth:`TransformList.load_fbx`) reads frame 0 of the take the clip
-        loads, Maya's import frame 0 of the file's active take: where the clip
-        loads the active take and it is the last, they agree, and where the two
-        takes differ they part, in files that already part from Maya on every
-        node under the camera when the active take is not the last. On the
-        files of two and three takes measured, in xyz with no pre or post
-        rotation: the active take read, the last, within 3.2e-15 as matrices
-        and 8.1e-8 in position (3.1.0 up to 3.04 and 2.56); the last read with
-        ``take=-1`` where the active take is the first, by a gap that grows
-        with how far the takes stand apart at frame 0: up to 5.01 as matrices
-        and 11.1 in position on those files (5.01 and 10.6 at 3.1.0), up to
-        5.84 and 52.0 on 24 more test files (5.56 and 52.0 at 3.1.0), a node
-        no take keys up to 3.16 and 2.57 off at both. The clip's frames are the
-        picked take's, where Maya's playback range is the active take's. On 5
-        of 32 test files imported in Maya 2025, 3.0.1 moved the frames off
-        Maya's playback range: cgmath 3.0.0 loaded the empty first take, the
-        rest pose over Maya's playback range, and 3.0.1 loads the keyed take's
-        curves, as Maya does, over that take's frames:
-
-        - an empty first take over frames 0-48, holding a curve node and
-          recorded as the active take, then a take keyed over frames 0-10:
-          Maya 0-48, the clip 0-10;
-        - the same file, with no active take recorded: Maya 0-48, the clip
-          0-10;
-        - the same file, its empty take over frames 0-40: Maya 0-40, the clip
-          0-10;
-        - the same file, its empty take holding a curve with no key on it:
-          Maya 0-48, the clip 0-10;
-        - Maya's own export, split into an empty take over frames 100-110 and
-          a take keyed over frames 0-10 with its original take deleted, which
-          records "Take 001", a name neither take has, as active: Maya
-          100-110, the clip 0-10.
-
-        4.0.0 changes the default, a break: ``take=-1``, the last take, as
-        Maya's import loads it, becomes the default, and ``None`` the take
-        the file marks active (none marked, or a name the file does not
-        hold: the first take, as Maya's timeline). 3.3.0 keeps 3.2.0's
-        meaning for both, the first take holding a key; pass ``take=`` an
-        index or a name to read the same take under both.
-
-        ``start_frame`` and ``end_frame`` are frame numbers on the file's own
-        timeline, at the clip's frame rate. Each one left out covers both the
-        take's stored span and every key of every curve on every layer of the
-        take: ``start_frame`` is the earlier of the span's start and the first
-        key, ``end_frame`` the later of the span's end and the last key, out
-        to the whole frame where either falls between two. Unreal stores the
-        span a frame short of its last key, and a Maya export can store one
-        wider than its keys; the clip keeps both. A time within 1e-6 of a
-        frame of a whole frame is that frame, so float noise in a span or a
-        key adds no frame. A take with no key covers its stored span. Each
-        end defaults on its own: a ``start_frame`` passed alone ends the clip
-        on the take's last frame, not the take's length after it, and one past
-        that frame raises ValueError naming it; an ``end_frame`` passed alone
-        before the take's first frame raises the same way. A file with no
-        animation gives a one frame clip rather than an error, but for a
-        take asked by name, which raises KeyError as above.
-        """
-        if fps is not None and fps <= 0.0:
-            raise ValueError(f"fps must be positive, got {fps}")
-
-        if FBX is None:
-            raise ImportError("fbx module not found")
-        _fbx_check_scale_factor(scale_factor)
-        _fbx_check_axis_system(axis_system)
-        kinds = _fbx_check_node_types(node_types)
-
-        # everything read from the scene dies with it: copy out inside the
-        # block. One load of nodes, the whole read: the rest pose and the rig
-        # the clip is built from, the same nodes twice, warn of a user
-        # attribute a built-in name hides once a name, once the file is
-        # read, and a read that raises, a take out of range or a frame past
-        # or before the take's, warns of nothing
-        with _NodesLoad(), open_fbx(filename, FBX) as scene:
-            turn   = _fbx_axis_turn(scene, axis_system, filename)
-            units  = _fbx_units(scene, scale_factor)
-            record = _fbx_record(scene, axis_system, scale_factor)
-            hierarchy_data, nodes, tree = _walk_fbx(scene, units, kinds, turn is not None)
-
-            # the rest pose, the file's static pose from this same read, as
-            # HierarchyData.load_fbx loads it: turned on a copy of the dicts,
-            # since the clip's rig is built from them in the file's own axes
-            rest = copy.deepcopy(hierarchy_data)
-            if turn is not None:
-                _fbx_turn_walk(rest, turn)
-
-            stacks = _fbx_stacks(scene)
-            count  = len(stacks)
-
-            # the rest pose and, with a take, the rig the clip is built from,
-            # in the file's own axes, turned once every frame is sampled
-            rest = _recorded(HierarchyData.from_dict(rest), record)
-            rig  = HierarchyData.from_dict(hierarchy_data) if count else None
-
-            if not count:
-                if isinstance(take, str):
-                    raise KeyError(f"the file holds no take named {take!r}; its takes are []")
-                clip            = cls(rest, frames=1, start_frame=start_frame or 0, fps=fps or 24.0)
-                clip._rest_pose = rest
-                _fbx_warn_cameras(_fbx_sheared_cameras(tree))
-                return _recorded(clip, record)
-
-            # the first take holding a key, then the first holding a curve
-            # node, with or without a curve: a take can hold curve nodes,
-            # curves even, and not one key, and reads back as its own static
-            # values on every frame, the rest pose where its curve nodes hold
-            # the node's own (a curve with no key at the curve's own default,
-            # as the sdk and Maya read it: _fbx_held)
-            # every take's name, as ClipList.load_fbx names it, warned of
-            # below for the take read alone
-            raw = [x.GetName() for x in stacks]
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                named = _take_names(raw)
-            if take is None:
-                stack = next((x for x in stacks if _fbx_key_ticks(x) is not None), None)
-                if stack is None:
-                    stack = next((x for x in stacks if _fbx_has_curves(x)), stacks[0])
-            elif isinstance(take, str):
-                # the take the list names so, else the first whose name
-                # matches outer whitespace aside, as the save strips it
-                found = [i for i, name in enumerate(named) if name == take]
-                found = found or [i for i, name in enumerate(named) if name.strip() == take.strip()]
-                if not found:
-                    raise KeyError(f"the file holds no take named {take!r}; its takes are {named}")
-                stack = stacks[found[0]]
-            else:
-                if not -count <= take < count:
-                    raise IndexError(f"take {take} out of range, the file holds {count}: {named}")
-
-                stack = stacks[take % count]
-
-            index = next(i for i, x in enumerate(stacks) if x.GetUniqueID() == stack.GetUniqueID())
-            names = _take_names(raw, read=[index])
-            return _fbx_take_clip(
-                cls, scene, stack, rig, rest, hierarchy_data, nodes, tree, turn, record, filename, fps,
-                start_frame, end_frame, names[index],
-            )
-
-    def save_fbx(self, filename, zero_root=False, as_ascii=False):
-        """saves the clip to a .fbx file, binary unless as_ascii is set
-
-        A clip of two frames or more is written as one take, as
-        ``ClipList([clip]).save_fbx`` writes it: every frame keyed, float32.
-        A clip of one frame or none is one pose, written with no take, as
-        :meth:`HierarchyData.save_fbx` writes a rig. The file is labelled
-        with the clip's :attr:`axis_system` and :attr:`unit`, as
-        :meth:`HierarchyData.save_fbx` labels a rig's, and like it leaves a
-        node's shear out, FBX having no channel for it, with one warning
-        naming the nodes the clip holds one on, at its frame for a pose and
-        on any frame for a take: Maya's FBXImport and :meth:`load_fbx` read
-        the clip with that shear zeroed.
-
-        A pose holds a rotate_axis and a joint_orient on joints alone, as a
-        rig's save does: a node that is no joint loses its own, and Maya's
-        FBXImport and :meth:`load_fbx` read the node without it (a group or
-        a locator with a rotate_axis of (10, 20, 30), 0.42 off in its axes,
-        a locator 4 below it 1.44 in position, on the layout
-        :meth:`HierarchyData.save_fbx` gives). A take keys it in the node's
-        rotate on every frame, so a clip of two frames or more reads back
-        with it.
-        """
-        _save_fbx(filename, self, zero_root=zero_root, as_ascii=as_ascii)
+    def save_fbx(self, filename, skeleton=None, as_ascii=False):
+        """the clip written as one take over ``skeleton``, by default its pose
+        at its first frame, as ``cgmath.formats.save_fbx`` writes them"""
+        if not self.frame_count:
+            # a clip of no frame: its nodes, the skeleton alone
+            if skeleton is None:
+                skeleton = HierarchyData(node.copy() for node in self)
+                skeleton._axis_system, skeleton._unit = self._records()
+            _save_fbx(filename, skeleton, as_ascii=as_ascii)
+            return
+        if skeleton is None:
+            skeleton = self.at(self._start_frame)
+        _save_fbx(filename, skeleton, self, as_ascii=as_ascii)
 
     @classmethod
     def _channel_name(cls, channel: str) -> str:
@@ -16360,12 +14970,18 @@ class ClipData(HierarchyData):
         return cls.DATA_LIST_CLASS._saved_names()[0].get(channel, channel)
 
     def to_dict(self) -> dict:
-        # a rest pose relabelled after it was set refuses the save, and the
-        # pickle, before anything is written: the load would refuse the file
-        _check_rest_pose(self._rest_pose, self)
-        # the saved block columns follow the saved node order
-        self._realign()
-        tree   = super().to_dict()
+        # the saved block columns follow the saved node order, and the
+        # layout is brought up to date
+        self._settle()
+        tree  = super().to_dict()
+        keyed = tree.get("animated")
+        if isinstance(keyed, dict):
+            # as the shear block, a shear all zero leaves its layout out
+            tree["animated"] = {
+                self._channel_name(c): np.array(k, dtype=bool)
+                for c, k in keyed.items()
+                if c != "_shear" or np.any(self._blocks.get(c, 0.0))
+            }
         blocks = tree.get("blocks")
         if isinstance(blocks, dict):
             # a shear block all zero is left out, as a node leaves a zero
@@ -16378,10 +14994,7 @@ class ClipData(HierarchyData):
             # visibility held frame by frame, (F, N) bool, beside them
             if self._visible is not None:
                 tree["blocks"]["visibility"] = self._visible.copy()
-        # a clip with no rest pose, or no take name, saves as one did before
-        # it had any
-        if tree.get("rest_pose", ...) is None:
-            del tree["rest_pose"]
+        # a clip with no take name saves as one did before it had any
         if tree.get("take", None) == "":
             del tree["take"]
         return tree
@@ -16401,6 +15014,9 @@ class ClipData(HierarchyData):
                 except (TypeError, ValueError):
                     arrays[channel] = block  # _post_load names what is wrong with it
             data["_blocks"] = arrays
+        keyed = data.get("_animated")
+        if isinstance(keyed, dict):
+            data["_animated"] = cls.DATA_LIST_CLASS._as_fields(keyed, "the layout")
         return super()._from_state(data)
 
     def _post_load(self) -> None:
@@ -16422,7 +15038,6 @@ class ClipData(HierarchyData):
             The rest pose records other axes or units than the clip.
         """
         super()._post_load()
-        _check_rest_pose(self._rest_pose, self)
 
         # a channel is named as a file names it: "translate"; visibility
         # held frame by frame is no framed channel
@@ -16471,7 +15086,39 @@ class ClipData(HierarchyData):
                 )
             shown = shown.copy()
 
+        # each channel's layout, every channel animated in a file older
+        # than the layout, which held F rows of each
+        saved    = self.__dict__.get("_animated")
+        animated = {}
+        for channel in blocks:
+            keyed = saved.get(channel) if isinstance(saved, dict) else None
+            if keyed is None:
+                keyed = np.full(count, not saved, dtype=bool)
+            keyed = np.asarray(keyed)
+            if keyed.dtype.kind != "b" or keyed.shape != (count,):
+                raise ValueError(
+                    f"ClipData layout {self._channel_name(channel)} must be ({count},) bool, got {keyed.dtype} "
+                    f"{keyed.shape}"
+                )
+            animated[channel] = keyed.copy()
+
+        frames    = len(next(iter(blocks.values()))) if blocks else 0
+        user_keys = {}
+        saved     = self.__dict__.get("_user_keys")
+        for uuid, keys in (saved or {}).items():
+            if not isinstance(keys, dict):
+                raise ValueError(f"ClipData user_keys of {uuid!r} must be a dict of rows")
+            for name, rows in keys.items():
+                rows = np.asarray(rows, dtype=np.float64)
+                if rows.ndim != 2 or rows.shape[0] != frames or rows.shape[1] not in (1, 3):
+                    raise ValueError(
+                        f"ClipData user_keys {uuid!r} {name!r} must be ({frames}, 1) or ({frames}, 3), got {rows.shape}"
+                    )
+                user_keys.setdefault(str(uuid), {})[str(name)] = rows.copy()
+
         self._blocks      = blocks
+        self._animated    = animated
+        self._user_keys   = user_keys
         self._columns     = [node.uuid for node in self.list]
         self._start_frame = int(self._start_frame)
         self._fps         = float(self._fps)
@@ -16479,34 +15126,14 @@ class ClipData(HierarchyData):
         self._visible     = shown
         self._bind(self._frame)
 
-    def strip_namespace(self, namespace: Optional[str] = None) -> None:
-        """
-        ``strip_namespace()`` on every node and the rest pose's, all or nothing.
-
-        When either would give one name to two nodes, ValueError lists them
-        and neither is renamed.
-        """
-        rest = self._rest_pose
-        if rest is None:
-            return super().strip_namespace(namespace)
-
-        names = [(node, node.name) for node in rest.list]
-        rest.strip_namespace(namespace)
-        try:
-            super().strip_namespace(namespace)
-        except BaseException:
-            for node, name in names:
-                node.name = name
-            raise
-
     def __eq__(self, other) -> bool:
-        """the same nodes, timebase, loaded frame, blocks and rest pose"""
+        """the same nodes, timebase, loaded frame, blocks and layout"""
         if not isinstance(other, ClipData):
             return False
 
         # a column belongs to a uuid: line both clips up with their nodes
-        self._realign()
-        other._realign()
+        self._settle()
+        other._settle()
         return super().__eq__(other) and np.array_equal(self._shown(), other._shown())
 
     __hash__ = HierarchyData.__hash__
@@ -16832,6 +15459,12 @@ def _take_whole(clip) -> Optional[tuple]:
     own    = {name: value for name, value in clip.__dict__.items() if name not in _HOLD_CLIP_SKIP}
     if "_columns" in own:
         own["_columns"] = list(own["_columns"])
+    if "_animated" in own:
+        own["_animated"] = {channel: np.array(keyed) for channel, keyed in own["_animated"].items()}
+    if "_user_keys" in own:
+        own["_user_keys"] = {
+            uuid: {name: np.array(rows) for name, rows in keys.items()} for uuid, keys in own["_user_keys"].items()
+        }
     nodes = list(clip.list)
     fields = [
         {name: (value, _held_copy(value)) for name, value in node.__dict__.items() if name not in _HOLD_NODE_SKIP}
@@ -16884,20 +15517,17 @@ def _take_held(target, name: str) -> tuple:
     for member in _TAKE_CHANNELS if name in _TAKE_SOLVED else (name,):
         value = getattr(target, member)
         held.append((member, np.array(value) if isinstance(value, np.ndarray) else value))
-    return held, target._rest_pose if isinstance(target, ClipData) else None, None
+    return held, None, None
 
 
 def _put_back(target, held: tuple) -> None:
     """``target`` as :func:`_take_held` held it"""
-    values, rest, whole = held
+    values, _, whole = held
     if values is None:
         _put_whole(whole)
         return
     for member, value in values:
-        if member != "rest_pose":
-            setattr(target, member, value)
-    if isinstance(target, ClipData):
-        target._rest_pose = rest
+        setattr(target, member, value)
 
 
 def _per_take(name: str, writable: bool = True, copied: bool = False) -> property:
@@ -17219,22 +15849,16 @@ class ClipList(DataList[ClipData]):
         """``strip_namespace()`` on every take, every take or none: a take
         that refuses puts back the names of the takes stripped before it,
         their rest poses' too, and raises"""
-        held = []
-        for clip in self.list:
-            rest = clip.rest_pose
-            held.append(([node.name for node in clip], None if rest is None else [node.name for node in rest]))
+        held = [[node.name for node in clip] for clip in self.list]
         done = 0
         try:
             for clip in self.list:
                 clip.strip_namespace(namespace)
                 done += 1
         except ValueError:
-            for clip, (names, rest_names) in zip(self.list[: done + 1], held):
+            for clip, names in zip(self.list[: done + 1], held):
                 for node, name in zip(clip, names):
                     node.name = name
-                if rest_names is not None:
-                    for node, name in zip(clip.rest_pose, rest_names):
-                        node.name = name
             raise
 
     # --- every take's frames and selections --- #
@@ -17304,91 +15928,19 @@ class ClipList(DataList[ClipData]):
     set_joint_orient_to_rotate = _every_take(ClipData.set_joint_orient_to_rotate)
     set_parent                 = _every_take(ClipData.set_parent)
 
-    def save_fbx(self, filename, zero_root: bool = False, as_ascii: bool = False) -> None:
-        """writes every take to one fbx file, binary unless ``as_ascii``
-
-        The rig is written once, as the first take holds it at its bound frame,
-        then one animation stack per take: each node's translate, rotate and
-        scale keyed on every frame, linear, at ``(start_frame + f) / fps``, the
-        stack spanning the take's frames, named after its take (stripped of
-        outer whitespace; a blank one, empty or whitespace only, ``Take 001``,
-        ``Take 002`` ... by its position, as the readers name it). Keys are
-        float32, as fbx keeps them: a take
-        read back is its values rounded to float32, an ASCII file's as the
-        text its writer prints them, about 7 significant digits. A keyed
-        scale is written as it is, as Maya's own export writes it; only a
-        static scale under 1e-12 is raised to 1e-12. The file is labelled
-        with the takes' axes and unit. FBX has no channel for shear: it is
-        left out, as Maya's export leaves it, with one warning naming the
-        nodes holding one on any frame of any take, and Maya's FBXImport
-        and :meth:`load_fbx` read the takes with that shear zeroed, so a
-        sheared node and the nodes under it read back off the take (on the
-        camera-skin layouts measured, up to 25.1 in their axes and 19.9 in
-        position where the clip holds a shear, within 8.5e-7 and 1.8e-6
-        on the 643 that hold none). Maya 2025's FBXImport has no 72
-        or 96 fps time unit: it imports a take at 72, 96 or 119.88 fps into
-        a 24 fps scene, each key at its own second, so on a fractional
-        frame of the scene (a take's frame 1 at 0.333, 0.25 or 0.2002).
-        Read there, every node's world is the take's to float32 (within
-        5.3e-15 in its axes and 4.3e-14 in position on the takes measured);
-        read on the scene's frame of the take's own frame number, it is
-        where the take stands that many 24ths of a second in (up to 8.29
-        and 67.2 off on those takes). ``zero_root`` writes the first root
-        joint at identity, with no curves. ``filename`` may start with
-        ``~``, the home folder. Without the Autodesk SDK it raises
-        ImportError, before anything is checked.
-
-        FBX holds one pre and post rotation per node for the file, which
-        the save writes on a joint from its joint orient and rotate axis on
-        the first take's first frame, and on no other node. A joint orient or
-        rotate axis that changes within a take, or differs between takes, so
-        saves: every frame of every take keys its difference from those in its
-        rotate, solved in the node's rotate order, continuous along the frames,
-        and a node that is no joint keys its whole joint orient and rotate axis
-        there, so every node's world on every frame is the take's, to the keys'
-        float32 (within 1.05e-7 in its axes and 2.63e-7 in position on the
-        takes measured, rotate keys up to 240.2 degrees, the take's rotate of
-        150 to 220 with its joint orient's change folded in, which float32
-        holds to 7.6e-6, read back and in Maya 2025's FBXImport, in xyz;
-        1.32e-7 and 2.86e-7 in the six rotate orders and two mixes measured).
-        Such a take reads back with the file's joint orient and rotate axis
-        and those rotate keys.
-
-        Checked before anything is written, ValueError naming what fails:
-        a list with no take, a take with no frame, takes on other rigs (the
-        node count, then each node's name, parent, node_type, rotate_order
-        and segment_scale_compensate), takes at other frame rates or at one
-        no fbx time mode carries (``_FBX_FRAME_RATES``), takes in other axes
-        or units, and two takes written under one name.
-        """
-        _save_fbx(filename, self, zero_root=zero_root, as_ascii=as_ascii)
+    def save_fbx(self, filename, *args, **kwargs) -> None:
+        raise NotImplementedError(
+            f"ClipList.save_fbx: {_FORK} saves one skeleton and one take, "
+            "cgmath.formats.save_fbx(filename, skeleton, clip)"
+        )
 
     # --- reading a file's takes --- #
     @classmethod
-    def load_fbx(
-        cls,
-        filename:     str,
-        scale_factor: Optional[float] = None,
-        fps:          Optional[float] = None,
-        axis_system:  Optional[str]   = "maya_y_up",
-        node_types:   Optional[tuple] = None,
-    ) -> "ClipList":
-        """every take of an fbx file, one :class:`ClipData` each
-
-        One open, one walk of the nodes, one rig, rest pose and axis turn
-        for the whole file; every take, an animation stack, in file order,
-        read as ``ClipData.load_fbx(filename, take=i)`` reads it, with the
-        same keywords, and named as that names it (:attr:`ClipData.take`),
-        every take holding its own copy of the file's rest pose and sharing
-        the rig's uuids. It reads every take, so it takes no take argument:
-        pick one from the list (``clips["idle"]``, ``clips[1]``), or read
-        one alone with ``ClipData.load_fbx(filename, take=...)``. A file
-        with no take gives an empty list. A camera scaled unevenly or
-        sheared warns once for each take that shows one, as
-        ``ClipData.load_fbx(filename, take=i)`` warns of it: a file of
-        three such takes, three warnings.
-        """
-        return _fbx_clip_list(cls, filename, scale_factor, fps, axis_system, node_types)[0]
+    def load_fbx(cls, filename, *args, **kwargs) -> "ClipList":
+        raise NotImplementedError(
+            f"ClipList.load_fbx: {_FORK} reads one skeleton and its active take, "
+            "cgmath.formats.load_fbx(filename)"
+        )
 
     @classmethod
     def load_glb(
@@ -17421,9 +15973,7 @@ class ClipList(DataList[ClipData]):
         column     = _glb_columns(model, rig, filename)
         clips      = []
         for index, name in enumerate(names):
-            clip            = _glb_take_clip(ClipData, model, rig, column, animations, index, scale_factor, fps, 0, name)
-            clip._rest_pose = rig.copy()
-            clips.append(clip)
+            clips.append(_glb_take_clip(ClipData, model, rig, column, animations, index, scale_factor, fps, 0, name))
         return cls(clips)
 
     # --- every take's timebase and record --- #
@@ -17431,7 +15981,6 @@ class ClipList(DataList[ClipData]):
     start_frame = _per_take("start_frame")
     end_frame   = _per_take("end_frame",   writable=False)
     frame_count = _per_take("frame_count", writable=False)
-    rest_pose   = _per_take("rest_pose",   copied=True)
     axis_system = _per_take("axis_system")
     unit        = _per_take("unit")
 
@@ -17542,15 +16091,9 @@ def load(filename: str, mode: Optional[str] = None, **kwargs) -> "HierarchyData"
     return _load_derived(HierarchyData, filename, mode, kwargs)
 
 
-def load_fbx(
-    filename:     str,
-    scale_factor: Optional[float] = None,
-    axis_system:  Optional[str]   = "maya_y_up",
-    pose:         str             = "node",
-    node_types:   Optional[tuple] = None,
-) -> "HierarchyData":
-    """The fbx's node hierarchy, names as in the file: ``HierarchyData.load_fbx()``."""
-    return HierarchyData.load_fbx(filename, scale_factor, axis_system, pose, node_types)
+def load_fbx(filename: str) -> "HierarchyData":
+    """The fbx's skeleton: ``HierarchyData.load_fbx()``."""
+    return HierarchyData.load_fbx(filename)
 
 
 def load_glb(

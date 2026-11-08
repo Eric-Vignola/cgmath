@@ -1115,7 +1115,7 @@ FBX has no shear channel: a save of a node holding a shear over 1e-9
 raises ValueError naming it, before anything is written.
 
 ```python
-sheared = HierarchyData([TransformData("grp", shear=(0.5, 0.0, 0.0)), TransformData("loc", node_type="locator")])
+sheared = HierarchyData([TransformData("grp", shear=(0.5, 0.0, 0.0)), TransformData("loc")])
 try:
     sheared.save_fbx(os.path.join(WORK, "sheared.fbx"))
     raise AssertionError("a shear saved")

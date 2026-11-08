@@ -1571,14 +1571,6 @@ class TestLoadFbx(unittest.TestCase):
                 )
             )
 
-    def test_scale_factor_reaches_translation(self):
-        path   = self.saved(self.chain(), "scaled.fbx")
-
-        loaded = HierarchyData.load_fbx(path, scale_factor=2.0)
-
-        self.assertTrue(np.allclose(loaded["j1"].translate, [0.0, 20.0, 0.0]))
-
-
 @unittest.skipIf(FBX is None, "fbx sdk is not installed")
 class TestLoadFbxDroppedNodes(unittest.TestCase):
     """the reader keeps a subset of attribute types, and used to sever the
@@ -1647,60 +1639,6 @@ class TestLoadFbxDroppedNodes(unittest.TestCase):
         path = os.path.join(self.tmp.name, name)
         rig.save_fbx(path)
         return HierarchyData.load_fbx(path)
-
-    def test_a_locator_round_trips(self):
-        """save_fbx writes a locator as a null drawn as a cross, and the reader
-        brings it back as a locator, not a transform"""
-        rig = self.locator_rig()
-
-        loaded = self.load(rig, "loc.fbx")
-
-        self.assertEqual(list(loaded.name), list(rig.name))
-        self.assertEqual(loaded["loc"].node_type, "locator")
-        self.assertTrue(
-            np.allclose(
-                [rig[name].world_matrix for name in rig.name],
-                [loaded[name].world_matrix for name in rig.name],
-                atol=1e-9,
-            )
-        )
-
-    def test_a_marker_or_a_crossed_null_reads_as_a_locator(self):
-        """a bare null is a group, one drawn as a cross is a locator, a marker too"""
-
-        def null(look):
-            def create(scene, name):
-                attr = FBX.FbxNull.Create(scene, name)
-                attr.Look.Set(look.value)
-                return attr
-            return create
-
-        cases = (
-            (FBX.FbxMarker.Create, "locator"),
-            (null(FBX.FbxNull.ELook.eCross), "locator"),
-            (null(FBX.FbxNull.ELook.eNone), "transform"),
-        )
-        for middle, node_type in cases:
-            loaded = HierarchyData.load_fbx(self.three_deep(middle))
-            self.assertEqual(loaded["B"].node_type, node_type)
-
-    def test_a_locator_keeps_its_children(self):
-        loaded = self.load(self.locator_rig(), "loc_children.fbx")
-
-        self.assertEqual(loaded["tip"].get_parent().name, "loc")
-        self.assertEqual(loaded["tip_end"].get_parent().name, "tip")
-
-    def test_a_dropped_node_hands_its_children_to_the_nearest_kept_ancestor(self):
-        """a camera in the middle used to drop its child to the world"""
-        for middle in (FBX.FbxCamera.Create, FBX.FbxLight.Create, None):
-            loaded = HierarchyData.load_fbx(self.three_deep(middle))
-
-            self.assertEqual(list(loaded.name), ["A", "C"])
-            self.assertEqual(loaded["C"].get_parent().name, "A")
-
-            # A's 100 and B's, which C takes in its own translate as B goes
-            self.assertAlmostEqual(loaded["C"].world_matrix[3, 1], 300.0, places=6)
-            self.assertAlmostEqual(loaded["C"].translate[1], 200.0, places=6)
 
     def test_the_scene_root_still_produces_world_parented_roots(self):
         """the fbx root carries no attribute, so it is a dropped node too"""
@@ -1793,48 +1731,6 @@ class TestLoadFbxTransformReads(unittest.TestCase):
         self.assertTrue(np.allclose(rig["child"].joint_orient, 0.0))
         self.assertTrue(np.allclose(rig["child"].rotate_axis, 0.0))
         self.assertTrue(np.allclose(rig["child"].matrix, truth, atol=1e-9))
-
-    def test_segment_scale_compensate_follows_the_inherit_type(self):
-        inherit = FBX.FbxTransform.EInheritType
-        for kind, expected in (
-            (inherit.eInheritRrs, True),
-            (inherit.eInheritRSrs, False),
-            (inherit.eInheritRrSs, False),
-        ):
-            path, _ = self.authored(
-                f"ssc_{kind}.fbx", inherit=kind, parent_scale=(2.0, 3.0, 4.0)
-            )
-
-            rig = HierarchyData.load_fbx(path)
-
-            self.assertEqual(rig["child"].segment_scale_compensate, expected)
-
-    def test_eInheritRrSs_is_exact_when_the_parent_scale_is_uniform(self):
-        """the library has two states for three fbx ones, so pin the gap
-
-        eInheritRrSs is fbx's default and maps to False. That is only an
-        approximation, and this is where it stops being one.
-        """
-        inherit = FBX.FbxTransform.EInheritType.eInheritRrSs
-        path, _ = self.authored(
-            "rrss_uniform.fbx", inherit=inherit, parent_scale=(3.0, 3.0, 3.0)
-        )
-
-        rig      = HierarchyData.load_fbx(path)
-        manager  = FBX.FbxManager.Create()
-        scene    = FBX.FbxScene.Create(manager, "check")
-        importer = FBX.FbxImporter.Create(manager, "")
-        importer.Initialize(path, -1, manager.GetIOSettings())
-        importer.Import(scene)
-        importer.Destroy()
-        node  = scene.GetRootNode().GetChild(0).GetChild(0)
-        world = node.EvaluateGlobalTransform()
-        truth = np.array(
-            [[world.Get(row, col) for col in range(4)] for row in range(4)]
-        )
-        manager.Destroy()
-
-        self.assertTrue(np.allclose(rig["child"].world_matrix, truth, atol=1e-9))
 
     def test_rotate_axis_round_trips_through_save_fbx(self):
         """the writer stored it un-inverted, so a fixed reader would flip it"""
@@ -4433,9 +4329,9 @@ class TestRigIndex(unittest.TestCase):
         # index standing. By a node and by a view, local and world
         for view, world_space in itertools.product((False, True), (False, True)):
             with self.subTest(view=view, world_space=world_space):
-                rig           = HierarchyData([TransformData(name) for name in "abc"])
+                rig = HierarchyData([TransformData(name) for name in "abc"])
                 a, b          = rig.list[0], rig.list[1]
-                other         = HierarchyData([TransformData("x"), TransformData("y")])
+                other = HierarchyData([TransformData("x"), TransformData("y")])
                 x, y          = other.list
                 y.parent_uuid = x.uuid
                 x.parent_uuid = a.uuid  # a node the other rig does not hold

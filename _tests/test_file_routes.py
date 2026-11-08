@@ -257,13 +257,6 @@ class TestSave(_Files):
             uv.save_obj(self.path("uv.obj"))
         self.assertFalse(os.path.exists(self.path("uv.obj")))
 
-    @unittest.skipIf(fbx is None, "Autodesk FBX Python SDK is not installed")
-    def test_a_clip_of_many_frames_saves_as_one_take(self):
-        clip = ClipData(HierarchyData([TransformData("root", node_type="joint")]), frames=3)
-        path = clip.save(self.path("clip.fbx"))
-        self.assertEqual(ClipList.load(path).frame_count, [3])
-
-
 class TestLoad(_Files):
     def test_mode_still_goes_by_position(self):
         path = quad().save(self.path("q.npz"))
@@ -722,27 +715,6 @@ class TestFbx(_Files):
         hip = TransformData("hip", node_type="joint", uuid=str(uuid.uuid4()).upper(),
                             parent_uuid=root.uuid, translate=[0.0, 10.0, 0.0])
         return HierarchyData([root, hip])
-
-    def test_a_rig_saves_and_loads_through_the_fbx_routes(self):
-        path = self.rig().save(self.path("rig.fbx"), as_ascii=True)
-        with open(path, "rb") as f:
-            head = f.read(64)
-        # an ASCII fbx starts with its comment line, "; FBX <version> project file"
-        self.assertNotIn(b"Kaydara FBX Binary", head)
-        self.assertTrue(head.lstrip().startswith(b"; FBX "), head)
-        rig = HierarchyData.load(path, pose="node", scale_factor=1.0)
-        self.assertEqual(rig.name, ["root", "hip"])
-        clip = ClipData.load(path, scale_factor=2.0)
-        self.assertIsInstance(clip, ClipData)
-        np.testing.assert_allclose(np.asarray(clip.frames.translate)[0, 1], [0.0, 20.0, 0.0])
-        self.assertEqual(hierarchy.load(path, pose="node").name, ["root", "hip"])
-        with self.assertRaisesRegex(TypeError, r"HierarchyData\.load_fbx: .*'pse'"):
-            HierarchyData.load(path, pse="bind")
-        with self.assertRaisesRegex(TypeError, r"SkinList\.load_fbx: .*'pse'.*takes no argument"):
-            skin_weights.load(path, pse="bind")
-        with self.assertRaisesRegex(TypeError, r"HierarchyData\.save_fbx: .*'ascii'"):
-            self.rig().save(self.path("again.fbx"), ascii=True)
-        self.assertFalse(os.path.exists(self.path("again.fbx")))
 
     def test_a_scene_refuses_the_fbx_routes(self):
         path  = self.rig().save(self.path("rig.fbx"))

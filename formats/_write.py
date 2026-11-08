@@ -1,419 +1,293 @@
-"""``cgmath.formats.save_fbx``: one fbx file from cgmath's objects
+"""``cgmath.formats.save_fbx``: one skeleton, and one take animating it
 
-Each class's ``save_fbx`` is a one-line call to :func:`save_fbx`. Nothing
-here imports the fbx sdk, nor the classes, until a file is written: the
-classes' modules import this one.
+The r17-skeleton fork writes a skeleton of joints and transforms at its bind
+pose and, with a clip, one take of it. Nothing here imports the fbx sdk, nor
+the classes, until a file is written: the classes' modules import this one.
 """
 
 import logging
 import os
-import sys
 
 import numpy as np
 
 # the fbx writer's logger: its warnings and save_fbx's are one stream
 LOGGER = logging.getLogger("cgmath.formats.fbx")
 
-# fbx has no channel for shear: a node holding more than this is refused
-SHEAR_LIMIT = 1e-9
+FORK   = "the r17-skeleton fork"
 
-# a node that is no joint holding a joint orient over this is refused: Maya
-# has no channel for it, and folds the pre rotation it would be into rotate
-ORIENT_LIMIT = 1e-9
+# a scale whose components differ by more than this, relative to the
+# largest, is not uniform
+UNIFORM_SCALE = 1e-6
+
+# the node kinds a skeleton holds
+NODE_TYPES = ("joint", "transform")
+
+# the hidden property keeping each node's place in the skeleton's list
+ORDER_PROPERTY = "cgmath:index"
 
 
-def save_fbx(filename, *objects, zero_root: bool = False, as_ascii: bool = False) -> None:
-    """writes ``objects`` to one fbx file, binary unless ``as_ascii``
+def save_fbx(filename, skeleton, clip=None, as_ascii: bool = False) -> None:
+    """writes ``skeleton``, a HierarchyData of joints and transforms, at its
+    bind pose, and ``clip``, a ClipData of its nodes, as one take; binary
+    unless ``as_ascii``
 
-    ``objects``, in any order, are paired by name:
+    The file's nodes hold the skeleton's own values: static Lcl Translation,
+    Rotation and Scaling, the joint orient as the pre rotation, the rotate
+    axis as the post rotation (its inverse), the rotate order, segment scale
+    compensate as the inherit type (eInheritRrs on, eInheritRSrs off), the
+    user defined attributes as user properties; and one bind pose (FbxPose)
+    lists every node at its world matrix. The take, named ``clip.take`` or
+    "Take 001", spans the clip's frames at its fps; every channel of every
+    node has its curves, one a component: a constant channel one key on the
+    clip's first frame, an animated one a key a frame.
 
-    - one rig (a ``TransformList``, ``HierarchyData`` among them, or a
-      ``ClipData`` of one frame, its pose), written as
-      :meth:`TransformList.save_fbx` says, its label the file's (Maya's
-      Y-up and cm when nothing labels it). Without one, the first take's
-      rig at its frame is written, as :meth:`ClipList.save_fbx` writes it.
-      The rig as passed in is the bind pose of the skins, the one
-      ``HierarchyData.load_fbx(path, pose="bind")`` reads;
-    - takes: ``ClipData`` of two frames or more and ``ClipList``, every
-      one checked before anything is written (:meth:`ClipList.save_fbx`)
-      and keyed on every frame, each node on the rig's node of its name.
-      With a rig passed beside them, every node of a take must be the
-      rig's and the takes the rig's axes and unit; a joint orient or rotate
-      axis other than the rig's is keyed in the rotate, as
-      :meth:`ClipList.save_fbx` keys one that moves; a rig's node no take
-      holds is not keyed;
-    - meshes (``MeshData``, ``MeshList``), each as
-      :meth:`FbxExporter.add_mesh` writes it, on the rig's group of its
-      name, else on a node of its own at the scene root named after it;
-    - UV sets (``UVData``, ``UVList``), as :meth:`FbxExporter.add_uvs`
-      writes them: a ``UVList`` holds one mesh's sets and pairs as one, a
-      ``UVData`` alone, with the mesh its name or a name of the list's sets
-      matches, else with the one mesh whose faces are its own (the same
-      vertex count, face by face);
-    - skins (``SkinData``, ``SkinList``), as :meth:`FbxExporter.add_skin`
-      writes them, each influence the rig's node of its name, each skin
-      paired with the mesh of its name, else with the one mesh of as many
-      vertices as it has rows;
-    - blend shapes (``MorphData``, ``MorphList``), cameras and lights
-      (``Camera``, ``Light``) are left out, with one warning naming them.
-
-    ``zero_root`` writes the first root joint at identity, unkeyed. ``~``
-    in ``filename`` is expanded. Raises ImportError without the fbx sdk,
-    before anything is checked; then, before anything is written,
-    TypeError for an object of another kind (a render ``Scene`` among
-    them), for UV sets or skins with no mesh, a skin with no rig and a call
-    with nothing to write; ValueError for two rigs, node names that repeat
-    where the file pairs by name (meshes of one name; a rig's, beside
-    meshes, skins or takes), a mesh named after a rig node that is no group
-    or with a matrix on a group of its name, a UV set or a skin that no
-    mesh or two meshes fit (naming the candidates), a mesh given two sets
-    of one name or two skins, a skin whose rows are not its mesh's
-    vertices, an influence or a take's node the rig lacks, and each refusal
-    of :meth:`ClipList.save_fbx`.
+    Refused, ValueError naming node, channel and frame, before anything is
+    written: a node that is no joint or transform, a transform holding
+    segment scale compensate, a shear, a scale that is not uniform on a node
+    with children, in the skeleton or on any frame of the clip, and a clip
+    whose nodes are not the skeleton's (names, parents, order, node types,
+    joint orient, rotate axis, rotate order, segment scale compensate, user
+    attributes and their types). Any other object: NotImplementedError.
     """
     # imported here: the classes' modules import this one
     from cgmath.hierarchy import hierarchy
 
     if hierarchy.FBX is None or hierarchy.FbxExporter is None:
         raise ImportError("fbx module not found")
+    if not isinstance(skeleton, hierarchy.HierarchyData) or isinstance(skeleton, hierarchy.ClipData):
+        raise NotImplementedError(
+            f"save_fbx on {FORK} writes a HierarchyData skeleton and a ClipData clip, "
+            f"not a {type(skeleton).__name__} skeleton"
+        )
+    if clip is not None and not isinstance(clip, hierarchy.ClipData):
+        raise NotImplementedError(
+            f"save_fbx on {FORK} writes one ClipData take, not a {type(clip).__name__}"
+        )
 
-    # expand ~, consistent with the other IO paths
     filename = os.path.expanduser(filename)
-    active   = _active_take(objects)
-    ranges   = _take_ranges(objects)
-    meshes, groups, skins, rigs, takes = _sort(_opened(objects))
-    if (groups or skins) and not meshes:
-        raise TypeError("save_fbx writes a UV set or a skin with its mesh: pass the mesh too")
+    _check_skeleton(skeleton)
+    if clip is not None:
+        _check_clip(skeleton, clip)
 
-    # every take checked before the sdk is reached, then against the rig;
-    # takes is None when no clip was passed, [] for an empty ClipList
-    names = hierarchy._takes_to_save(takes) if takes is not None else None
-    if names:
-        picked = [k for k, clip in enumerate(takes) if active is not None and clip.take == active]
-        active = names[picked[0]] if picked else names[0]
-        ranges = [ranges.get(clip.take) for clip in takes]
-    if not (meshes or rigs or takes):
-        held = ", ".join(type(x).__name__ for x in objects) or "nothing"
-        raise TypeError(f"save_fbx: nothing to write, got {held}")
-    if len(rigs) > 1:
-        raise ValueError(f"save_fbx: {len(rigs)} rigs, a file holds one")
-    if skins and not (rigs or takes):
-        raise TypeError("save_fbx writes a skin with the rig its influences name: pass the rig too")
-    _refuse_shear(rigs[0] if rigs else None, takes)
-    _refuse_orient(rigs[0] if rigs else None, takes)
-
-    columns = None
-    if rigs:
-        rig = rigs[0]
-        if meshes or takes:
-            _refuse_repeats([node.name for node in rig])
-        if takes:
-            columns, held = _takes_on_rig(takes, rig)
-            takes = hierarchy._takes_written(takes, held)
-    elif takes:
-        takes = hierarchy._takes_written(takes)
-        rig   = takes[0]
-    else:
-        rig = None
-
-    _refuse_repeats([mesh.name or "mesh" for mesh in meshes])
-    sets  = _pair_uvs(meshes, groups)
-    owner = _pair_skins(meshes, skins)
-    homes = _homes(meshes, owner, rig)
-
+    fbx = hierarchy.FBX
     with hierarchy.FbxExporter() as exporter:
-        if rig is not None:
-            exporter.add_skeleton(rig)
-        nodes = {node.name: exporter._fbx_nodes.get(id(node)) for node in (rig if rig is not None else ())}
-        for mesh, uvs, skin, home in zip(meshes, sets, owner, homes):
-            shape = exporter.add_mesh(mesh, nodes[home] if home is not None else None)
-            exporter.add_uvs(shape, uvs)
-            if skin is not None:
-                exporter.add_skin(shape, skin, [nodes[name] for name in skin.influences])
-        if takes:
-            mode = getattr(hierarchy.FBX.FbxTime.EMode, hierarchy._fbx_rate_mode(float(takes[0].fps)))
-            exporter.add_takes(takes, names, mode, zero_root=zero_root, columns=columns, active=active, ranges=ranges)
-        exporter.export(path=filename, as_ascii=as_ascii, zero_root=zero_root)
+        exporter.add_skeleton(skeleton)
+        nodes = [exporter._fbx_nodes[id(node)] for node in skeleton]
+        for index, fbx_node in enumerate(nodes):
+            prop = fbx.FbxProperty.Create(fbx_node, fbx.FbxIntDT, ORDER_PROPERTY, "")
+            prop.Set(index)
+
+        # the bind pose: every node at its world matrix
+        pose = fbx.FbxPose.Create(exporter.scene, "BindPose")
+        pose.SetIsBindPose(True)
+        for fbx_node, world in zip(nodes, np.asarray(skeleton.world_matrix, dtype=np.float64)):
+            matrix = fbx.FbxMatrix()
+            for row in range(4):
+                for column in range(4):
+                    matrix.Set(row, column, float(world[row, column]))
+            pose.Add(fbx_node, matrix)
+        exporter.scene.AddPose(pose)
+
+        if clip is not None:
+            _write_take(exporter, nodes, clip)
+        exporter.export(path=filename, as_ascii=as_ascii)
 
 
-def _active_take(objects):
-    """the active take of the first FbxContents among ``objects``, None
-    without one"""
-    from cgmath.formats._load import FbxContents
-
-    return next((item.active_take for item in objects if isinstance(item, FbxContents)), None)
-
-
-def _take_ranges(objects) -> dict:
-    from cgmath.formats._load import FbxContents
-
-    return next((item.take_ranges for item in objects if isinstance(item, FbxContents)), {})
+def nonuniform(scale: np.ndarray) -> np.ndarray:
+    """(...) bool, the (..., 3) scales whose components differ by more than
+    UNIFORM_SCALE of the largest"""
+    scale  = np.asarray(scale, dtype=np.float64)
+    spread = scale.max(axis=-1) - scale.min(axis=-1)
+    return spread > UNIFORM_SCALE * np.abs(scale).max(axis=-1)
 
 
-def _opened(objects) -> list:
-    """``objects``, each FbxContents among them in its parts"""
-    from cgmath.formats._load import FbxContents
-
-    opened = []
-    for item in objects:
-        opened.extend(item.objects() if isinstance(item, FbxContents) else (item,))
-    return opened
+def parents_of(nodes) -> np.ndarray:
+    """(N,) the position of each node's parent among ``nodes``, -1 for a root"""
+    place = {node.uuid: i for i, node in enumerate(nodes)}
+    return np.array([place.get(node.parent_uuid, -1) for node in nodes], dtype=np.intp)
 
 
-def _sort(objects) -> tuple:
-    """``(meshes, groups, skins, rigs, takes)`` of ``objects``: MeshLists,
-    SkinLists and ClipLists opened, each UVList a group of its sets and each
-    UVData one of its own, a ClipData of one frame a rig and one of more a
-    take, ``takes`` None when no clip is among them; blend shapes, cameras
-    and lights left out with one warning; TypeError for any other object"""
-    from cgmath.geometry.mesh import MeshData, MeshList, UVData, UVList
-    from cgmath.geometry.morph_target import MorphData, MorphList
-    from cgmath.geometry.skin_weights import SkinData, SkinList
-    from cgmath.hierarchy.hierarchy import ClipData, ClipList, TransformList
-
-    # an object of render's is one only once render is imported: a save
-    # does not import it
-    scene  = sys.modules.get("cgmath.render.scene")
-    unread = (scene.Camera, scene.Light) if scene is not None else ()
-    whole  = (scene.Scene,) if scene is not None else ()
-    meshes, groups, skins, rigs, takes, left = [], [], [], [], None, {}
-    for item in objects:
-        if isinstance(item, UVData):
-            groups.append([item])
-        elif isinstance(item, UVList):
-            groups.append(list(item))
-        elif isinstance(item, MeshData):
-            meshes.append(item)
-        elif isinstance(item, MeshList):
-            meshes.extend(item)
-        elif isinstance(item, SkinData):
-            skins.append(item)
-        elif isinstance(item, SkinList):
-            skins.extend(item)
-        elif isinstance(item, ClipList):
-            takes = (takes or []) + item.list
-        elif isinstance(item, ClipData) and item.frame_count > 1:
-            takes = (takes or []) + [item]
-        elif isinstance(item, (MorphData, MorphList) + unread):
-            kind       = type(item).__name__
-            left[kind] = left.get(kind, 0) + 1
-        elif isinstance(item, TransformList) and not isinstance(item, whole):
-            rigs.append(item)
-        else:
-            raise TypeError(
-                f"save_fbx writes rigs, takes, meshes, UV sets and skins, not a {type(item).__name__}"
+def refuse_values(what: str, nodes, shear, scale, frames=None) -> None:
+    """ValueError naming the first node, channel and frame holding a shear
+    other than 0, or a scale that is not uniform on a node with children;
+    ``shear`` and ``scale`` (F, N, 3), ``frames`` the frame numbers, None
+    for one pose"""
+    nodes   = list(nodes)
+    parents = parents_of(nodes)
+    held    = np.zeros(len(nodes), dtype=bool)
+    held[parents[parents >= 0]] = True
+    for channel, bad, why in (
+        ("shear", np.any(np.asarray(shear) != 0.0, axis=-1), "a shear, which fbx and Maya's joints hold none of"),
+        ("scale", nonuniform(scale) & held[None], "a scale that is not uniform on a node with children"),
+    ):
+        found = np.argwhere(bad)
+        if len(found):
+            frame, column = (int(x) for x in found[0])
+            value = np.asarray(shear if channel == "shear" else scale)[frame, column]
+            when  = "" if frames is None else f" frame {int(frames[frame])}"
+            raise ValueError(
+                f"{what}: node {nodes[column].name!r} channel {channel!r}{when} holds {why}: "
+                f"{np.round(value, 12).tolist()} ({len(np.unique(found[:, 1]))} nodes, {len(found)} values)"
             )
-    if left:
-        counts = ", ".join(f"{count} {kind}" for kind, count in sorted(left.items()))
-        LOGGER.warning(f"save_fbx left out what it does not write (blend shapes, cameras, lights): {counts}")
-    return meshes, groups, skins, rigs, takes
 
 
-def _takes_on_rig(takes, rig) -> tuple:
-    """``(columns, held)``: the take column each node of ``rig`` is keyed
-    from, by name, None for a node no take holds, and the joint orient and
-    rotate axis the file holds for each take column, the rig's; ValueError for a take's node the rig lacks
-    and takes labelled other than the rig"""
-    from cgmath.hierarchy.hierarchy import TransformList
+def _check_skeleton(skeleton) -> None:
+    for node in skeleton:
+        if node.node_type not in NODE_TYPES:
+            raise ValueError(
+                f"save_fbx: node {node.name!r} is a {node.node_type!r}; a skeleton on {FORK} holds joints and "
+                f"transforms"
+            )
+        if node.node_type == "transform" and node.segment_scale_compensate:
+            raise ValueError(
+                f"save_fbx: node {node.name!r} channel 'segment_scale_compensate' is on a transform, which Maya "
+                f"holds on joints only"
+            )
+        if node.node_type == "transform" and np.any(np.asarray(node.joint_orient) != 0.0):
+            raise ValueError(
+                f"save_fbx: node {node.name!r} channel 'joint_orient' is on a transform, which Maya holds on "
+                f"joints only"
+            )
+    shear = np.array([node.shear for node in skeleton], dtype=np.float64).reshape(1, -1, 3)
+    scale = np.array([node.scale for node in skeleton], dtype=np.float64).reshape(1, -1, 3)
+    refuse_values("save_fbx, the skeleton", skeleton, shear, scale)
 
-    first  = takes[0]
-    whole  = rig if isinstance(rig, TransformList) else TransformList(list(rig))
-    record = whole._records()
-    if tuple(first._records()) != tuple(record):
-        raise ValueError(
-            f"save_fbx: the takes are in {first._records()}, the rig in {record}: one file holds one up axis "
-            f"and one unit"
+
+def _user_types(node) -> dict:
+    from cgmath.hierarchy.hierarchy import _user_attr_type
+
+    return {name: _user_attr_type(spec) for name, spec in node.user_defined_attributes.items()}
+
+
+def _check_clip(skeleton, clip) -> None:
+    from cgmath.hierarchy.hierarchy import _fbx_rate_mode
+
+    if not clip.frame_count:
+        raise ValueError("save_fbx: the clip holds no frame")
+    if _fbx_rate_mode(float(clip.fps)) is None:
+        raise ValueError(f"save_fbx: no fbx time mode carries {clip.fps} fps")
+    if len(clip) != len(skeleton):
+        raise ValueError(f"save_fbx: the clip holds {len(clip)} nodes, the skeleton {len(skeleton)}")
+
+    mine   = parents_of(list(skeleton))
+    theirs = parents_of(list(clip))
+    for column, (node, held) in enumerate(zip(skeleton, clip)):
+        checks = (
+            ("name", node.name, held.name),
+            ("parent", int(mine[column]), int(theirs[column])),
+            ("node_type", node.node_type, held.node_type),
+            ("rotate_order", node.rotate_order, held.rotate_order),
+            ("segment_scale_compensate", bool(node.segment_scale_compensate), bool(held.segment_scale_compensate)),
+            ("user_defined_attributes", _user_types(node), _user_types(held)),
         )
-    on_rig  = {node.name: node for node in rig}
-    missing = [node.name for node in first if node.name not in on_rig]
-    if missing:
-        raise ValueError(f"save_fbx: the takes hold nodes the rig does not: {missing}")
+        for channel, want, got in checks:
+            if want != got:
+                raise ValueError(
+                    f"save_fbx: the clip's node {column} {held.name!r} channel {channel!r} differs from the "
+                    f"skeleton's {node.name!r}: {got!r}, the skeleton {want!r}"
+                )
 
-    orient = np.zeros((len(first), 3))
-    axis   = np.zeros((len(first), 3))
-    for index, node in enumerate(first):
-        held          = on_rig[node.name]
-        orient[index] = np.asarray(held.joint_orient, dtype=np.float64)
-        axis[index]   = np.asarray(held.rotate_axis, dtype=np.float64)
-    column = {node.name: index for index, node in enumerate(first)}
-    return [column.get(node.name) for node in rig], (orient, axis)
+    frames = clip.start_frame + np.arange(clip.frame_count)
+    for channel in ("joint_orient", "rotate_axis"):
+        want = np.array([getattr(node, channel) for node in skeleton], dtype=np.float64)
+        got  = np.asarray(getattr(clip.frames, channel), dtype=np.float64)
+        bad  = np.argwhere(np.any(got != want[None], axis=-1))
+        if len(bad):
+            frame, column = (int(x) for x in bad[0])
+            raise ValueError(
+                f"save_fbx: the clip's node {clip[column].name!r} channel {channel!r} frame {int(frames[frame])} "
+                f"is {got[frame, column].tolist()}, the skeleton's {want[column].tolist()}"
+            )
+    refuse_values("save_fbx, the clip", clip, clip.frames.shear, clip.frames.scale, frames)
 
 
-def _pair_uvs(meshes, groups) -> list:
-    """the UV sets each of ``meshes`` holds, ``groups`` paired by name, else
-    by face layout; ValueError, naming the candidates, for a group no mesh or
-    two meshes fit, and for a mesh given two sets of one name"""
-    names = [mesh.name or "mesh" for mesh in meshes]
-    sets  = [[] for _ in meshes]
-    where = {name: index for index, name in enumerate(names)}
-    for whole in groups:
-        # a set that names its mesh pairs with it, each set on its own
-        group = []
-        for uv in whole:
-            index = where.get(uv.mesh_name) if uv.mesh_name is not None else None
-            if index is None:
-                group.append(uv)
+def _keys(curve, times, values, mode, fbx) -> None:
+    """every key of ``curve`` replaced by one at each of ``times``"""
+    key = fbx.FbxAnimCurveKey()
+    key.SetInterpolation(mode)
+    curve.KeyModifyBegin()
+    try:
+        curve.KeyClear()
+        for when, value in zip(times, np.asarray(values, dtype=np.float64).tolist()):
+            key.SetValue(value)
+            curve.KeyAdd(when, key)
+    finally:
+        curve.KeyModifyEnd()
+
+
+def _write_take(exporter, nodes, clip) -> None:
+    """one take: a stack spanning the clip's frames, a BaseLayer, and the
+    curves of every channel of every node"""
+    from cgmath.formats._fbx_io import typed
+    from cgmath.formats.fbx import _user_property_value
+    from cgmath.hierarchy.hierarchy import FBX as fbx
+    from cgmath.hierarchy.hierarchy import _fbx_rate_mode, _user_channels
+
+    scene = exporter.scene
+    mode  = getattr(fbx.FbxTime.EMode, _fbx_rate_mode(float(clip.fps)))
+    scene.GetGlobalSettings().SetTimeMode(mode)
+
+    frames = clip.start_frame + np.arange(clip.frame_count)
+    times  = []
+    for frame in frames.tolist():
+        when = fbx.FbxTime()
+        when.SetFrame(int(frame), mode)
+        times.append(when)
+    first, last = fbx.FbxTime(times[0].Get()), fbx.FbxTime(times[-1].Get())
+    # the sdk writes no span (0, 0) and reads another in its place: one tick
+    # past 0, which a read puts on frame 0
+    if first.Get() == 0 and last.Get() == 0:
+        last.Set(1)
+
+    name  = clip.take.strip() or "Take 001"
+    stack = fbx.FbxAnimStack.Create(scene, name)
+    stack.SetLocalTimeSpan(fbx.FbxTimeSpan(first, last))
+    stack.SetReferenceTimeSpan(fbx.FbxTimeSpan(first, last))
+    layer = fbx.FbxAnimLayer.Create(scene, "BaseLayer")
+    stack.AddMember(layer)
+    scene.SetCurrentAnimationStack(stack)
+    scene.ActiveAnimStackName.Set(fbx.FbxString(name))
+
+    linear = fbx.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear
+    clip._settle()
+    blocks = {
+        "_translate": "LclTranslation",
+        "_rotate":    "LclRotation",
+        "_scale":     "LclScaling",
+    }
+    for channel, prop_name in blocks.items():
+        block = np.asarray(clip._blocks[channel], dtype=np.float64)
+        keyed = clip._keyed(channel)
+        for column, fbx_node in enumerate(nodes):
+            prop = getattr(fbx_node, prop_name)
+            prop.GetCurveNode(layer, True)
+            rows = block[:, column] if keyed[column] else block[:1, column]
+            for axis, component in enumerate("XYZ"):
+                curve = typed(prop.GetCurve(layer, component, True), fbx.FbxAnimCurve, fbx)
+                _keys(curve, times[: len(rows)], rows[:, axis], linear, fbx)
+
+    # each animatable user property: one curve, or three for a vector
+    flag = fbx.FbxPropertyFlags.EFlags.eAnimatable
+    for node, fbx_node in zip(clip, nodes):
+        attrs = node.user_defined_attributes
+        keys  = clip._user_keys.get(node.uuid, {})
+        for attr, children in _user_channels(attrs).items():
+            prop = fbx_node.FindProperty(attr)
+            if not prop.IsValid():
                 continue
-            if not np.array_equal(uv.counts, meshes[index].counts):
-                raise ValueError(f"save_fbx: the UV set {uv.name!r} holds other faces than mesh {names[index]!r}")
-            sets[index].append(uv)
-        if not group:
-            continue
-        labels = [uv.name for uv in group]
-        named  = sorted({i for i, name in enumerate(names) if name in labels})
-        if not named:
-            layout = np.asarray(group[0].counts)
-            if any(not np.array_equal(uv.counts, layout) for uv in group):
-                raise ValueError(f"save_fbx: the UV sets {labels} hold other faces than each other: one mesh's sets")
-            named = [i for i, mesh in enumerate(meshes) if np.array_equal(mesh.counts, layout)]
-        if len(named) != 1:
-            found = [names[i] for i in named]
-            raise ValueError(
-                f"save_fbx: the UV sets {labels} fit {'no mesh' if not found else f'meshes {found}'} by name or "
-                f"by their faces: name a set after its mesh, or save them apart"
-            )
-        (index,) = named
-        if not np.array_equal(group[0].counts, meshes[index].counts):
-            raise ValueError(f"save_fbx: the UV sets {labels} hold other faces than mesh {names[index]!r}")
-        sets[index].extend(group)
-    for name, held in zip(names, sets):
-        seen  = [uv.name for uv in held]
-        twice = sorted({x for x in seen if seen.count(x) > 1})
-        if twice:
-            raise ValueError(f"save_fbx: mesh {name!r} would hold two UV sets named {twice}")
-    return sets
-
-
-def _pair_skins(meshes, skins) -> list:
-    """the skin each of ``meshes`` holds, or None: each skin paired with the
-    mesh of its name, else with the one mesh of as many vertices as it has
-    rows; ValueError naming the candidates when two fit, or none, for two
-    skins on one mesh and for a skin whose rows are not its mesh's vertices"""
-    names = [mesh.name or "mesh" for mesh in meshes]
-    owner = [None] * len(meshes)
-    for skin in skins:
-        rows  = np.asarray(skin.weights).shape[0]
-        named = [i for i, name in enumerate(names) if name == skin.name]
-        if not named:
-            named = [i for i, mesh in enumerate(meshes) if mesh.point_count == rows]
-        if len(named) != 1:
-            found = [names[i] for i in named]
-            raise ValueError(
-                f"save_fbx: skin {skin.name!r} fits {'no mesh' if not found else f'meshes {found}'} by name or by "
-                f"its {rows} rows: name the skin after its mesh, or save them apart"
-            )
-        (index,) = named
-        if meshes[index].point_count != rows:
-            raise ValueError(
-                f"save_fbx: skin {skin.name!r} weighs {rows} vertices, mesh {names[index]!r} holds "
-                f"{meshes[index].point_count}"
-            )
-        if owner[index] is not None:
-            raise ValueError(f"save_fbx: two skins on mesh {names[index]!r}")
-        owner[index] = skin
-    return owner
-
-
-def _homes(meshes, owner, rig) -> list:
-    """the rig node each mesh goes on, by name, or None for a node of its
-    own; ValueError for a mesh named after a rig node that is no group, or
-    with a matrix on a group of its name, and a skin's influence the rig
-    lacks"""
-    if rig is None or not meshes:
-        return [None] * len(meshes)
-    from cgmath.hierarchy import SUPPORTED_NODE_TYPES
-
-    kinds = {node.name: node.node_type for node in rig if node.node_type in SUPPORTED_NODE_TYPES}
-    homes = []
-    for mesh, skin in zip(meshes, owner):
-        name = mesh.name or "mesh"
-        kind = kinds.get(name)
-        if kind is not None and kind != "transform":
-            raise ValueError(f"save_fbx: mesh {name!r} is named after the rig's {kind}, which holds no mesh")
-        if kind is not None and not np.array_equal(mesh.matrix, np.eye(4)):
-            raise ValueError(
-                f"save_fbx: mesh {name!r} has a matrix and a group of its name in the rig, whose transform it "
-                f"takes: bake the matrix in (to_identity) or rename the mesh"
-            )
-        homes.append(name if kind is not None else None)
-        missing = [x for x in (skin.influences if skin is not None else ()) if x not in kinds]
-        if missing:
-            raise ValueError(f"save_fbx: skin {skin.name!r} names influences the rig does not write: {missing}")
-    return homes
-
-
-def _refuse_repeats(names) -> None:
-    """ValueError naming the names that repeat: fbx pairs objects by name"""
-    seen, repeated = set(), []
-    for name in names:
-        if name in seen and name not in repeated:
-            repeated.append(name)
-        seen.add(name)
-    if repeated:
-        raise ValueError(f"save_fbx: node names repeat, which a file pairs by: {repeated}")
-
-
-def _refuse_shear(rig, takes, what: str = "save_fbx") -> None:
-    """ValueError naming the nodes of ``rig`` and of each of ``takes`` that
-    hold a shear over :data:`SHEAR_LIMIT` on any frame: fbx has no channel
-    for it, and a save without it moves them and every node under them"""
-    found, most = [], 0.0
-    if rig is not None and len(rig):
-        shear = np.abs(np.array([node.shear for node in rig], dtype=np.float64))
-        bad   = np.flatnonzero(shear.max(axis=1) > SHEAR_LIMIT)
-        if bad.size:
-            found.append(f"the rig's {[rig[int(i)].name for i in bad]}")
-            most = max(most, float(shear.max()))
-    for index, clip in enumerate(takes or ()):
-        if not clip.frame_count or not len(clip):
-            continue
-        shear = np.abs(np.asarray(clip.frames.shear, dtype=np.float64))
-        held  = shear.max(axis=(0, 2)) > SHEAR_LIMIT
-        if not held.any():
-            continue
-        frames = np.flatnonzero(shear.max(axis=(1, 2)) > SHEAR_LIMIT) + clip.start_frame
-        most   = max(most, float(shear.max()))
-        label  = clip.take.strip() or f"take {index}"
-        found.append(
-            f"take {label!r}'s {[clip[int(i)].name for i in np.flatnonzero(held)]} "
-            f"(frames {int(frames[0])} to {int(frames[-1])})"
-        )
-    if found:
-        raise ValueError(
-            f"{what}: fbx has no shear, and these nodes hold one over {SHEAR_LIMIT:g}, up to {most:.3g}: "
-            + "; ".join(found)
-        )
-
-
-def _refuse_orient(rig, takes, what: str = "save_fbx") -> None:
-    """ValueError naming the nodes of ``rig`` and of each of ``takes`` that
-    are no joint and hold a joint orient over :data:`ORIENT_LIMIT` on any
-    frame: Maya has no joint orient on a group or a locator"""
-    found, most = [], 0.0
-    if rig is not None and len(rig):
-        others = np.array([node.node_type != "joint" for node in rig], dtype=bool)
-        orient = np.abs(np.array([node.joint_orient for node in rig], dtype=np.float64)).max(axis=1)
-        bad    = np.flatnonzero(others & (orient > ORIENT_LIMIT))
-        if bad.size:
-            found.append(f"the rig's {[rig[int(i)].name for i in bad]}")
-            most = max(most, float(orient[bad].max()))
-    for index, clip in enumerate(takes or ()):
-        if not clip.frame_count or not len(clip):
-            continue
-        others = np.array([node.node_type != "joint" for node in clip], dtype=bool)
-        orient = np.abs(np.asarray(clip.frames.joint_orient, dtype=np.float64)).max(axis=2) * others
-        held   = orient.max(axis=0) > ORIENT_LIMIT
-        if not held.any():
-            continue
-        frames = np.flatnonzero(orient.max(axis=1) > ORIENT_LIMIT) + clip.start_frame
-        most   = max(most, float(orient.max()))
-        label  = clip.take.strip() or f"take {index}"
-        found.append(
-            f"take {label!r}'s {[clip[int(i)].name for i in np.flatnonzero(held)]} "
-            f"(frames {int(frames[0])} to {int(frames[-1])})"
-        )
-    if found:
-        raise ValueError(
-            f"{what}: a group or locator holds no joint orient in fbx or Maya, and these nodes that are no "
-            f"joint hold one over {ORIENT_LIMIT:g}, up to {most:.3g}: " + "; ".join(found)
-        )
+            prop.ModifyFlag(flag, True)
+            rows = keys.get(attr)
+            if rows is None:
+                rows = np.array([[float(attrs[x]["value"]) for x in ((attr,) if children is None else children)]])
+            rows = np.asarray(rows, dtype=np.float64)
+            prop.GetCurveNode(layer, True)
+            if children is None:
+                # an enum keys its field's place in the list, as its property holds it
+                if attrs[attr].get("attributeType") == "enum":
+                    rows = np.array([[float(_user_property_value(attrs[attr], int(x)))] for x in rows[:, 0]])
+                curve = typed(prop.GetCurve(layer, True), fbx.FbxAnimCurve, fbx)
+                _keys(curve, times[: len(rows)], rows[:, 0], linear, fbx)
+                continue
+            for axis, component in enumerate("XYZ"):
+                curve = typed(prop.GetCurve(layer, component, True), fbx.FbxAnimCurve, fbx)
+                _keys(curve, times[: len(rows)], rows[:, axis], linear, fbx)
