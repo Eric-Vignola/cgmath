@@ -27,7 +27,7 @@ NODE_TYPES = ("joint", "transform")
 ORDER_PROPERTY = "cgmath:index"
 
 
-def save_fbx(filename, skeleton=None, clip=None, mesh=None, skin=None, as_ascii: bool = False) -> None:
+def save_fbx(filename, skeleton=None, clip=None, mesh=None, skin=None, uvs=None, as_ascii: bool = False) -> None:
     """writes one of ``skeleton``, a HierarchyData of joints and transforms,
     or ``clip``, a ClipData of joints and transforms; binary unless
     ``as_ascii``
@@ -40,16 +40,21 @@ def save_fbx(filename, skeleton=None, clip=None, mesh=None, skin=None, as_ascii:
     frame. No bind pose is written: a skeleton given with a clip is a bind
     pose, which comes with skins (NotImplementedError).
 
+    ``uvs``, the mesh's UV sets: a UVList, a UVData its one set, written in
+    their order, each named after its set; an empty UVList writes none.
+
     Refused, ValueError naming node, channel and frame, before anything is
     written: a node that is no joint or transform, a transform holding
     segment scale compensate or a joint orient, a shear, a scale that is not
     uniform on a node with children, in the skeleton or on any frame of the
-    clip, a joint orient or rotate axis the clip changes over its frames.
-    Neither given, a skeleton that is not a HierarchyData (a ClipData is
+    clip, a joint orient or rotate axis the clip changes over its frames; a
+    UV set of no name, of a name another set holds or that is not ASCII,
+    whose faces are not the mesh's, or naming UVs it does not hold. UVs
+    given without a mesh, neither given, a skeleton that is not a HierarchyData (a ClipData is
     passed as ``clip``), a clip that is not a ClipData: TypeError.
     """
     # imported here: the classes' modules import this one
-    from cgmath.geometry.mesh import MeshData, UVData
+    from cgmath.geometry.mesh import MeshData, UVData, UVList
     from cgmath.geometry.skin_weights import SkinData
     from cgmath.hierarchy import hierarchy
 
@@ -62,6 +67,12 @@ def save_fbx(filename, skeleton=None, clip=None, mesh=None, skin=None, as_ascii:
         raise TypeError(f"save_fbx: the mesh is a MeshData, not a {type(mesh).__name__}")
     if skin is not None and not isinstance(skin, SkinData):
         raise TypeError(f"save_fbx: the skin is a SkinData, not a {type(skin).__name__}")
+    if isinstance(uvs, UVData):
+        uvs = UVList([uvs])
+    if uvs is not None and not isinstance(uvs, UVList):
+        raise TypeError(f"save_fbx: the uvs are a UVList or a UVData, not a {type(uvs).__name__}")
+    if uvs is not None and mesh is None:
+        raise TypeError("save_fbx: UV sets are written on their mesh; missing: mesh=")
     if skin is not None:
         missing = [what for what, given in (("skeleton (a HierarchyData, the bind pose)", skeleton), ("mesh=", mesh)) if given is None]
         if missing:
@@ -88,6 +99,8 @@ def save_fbx(filename, skeleton=None, clip=None, mesh=None, skin=None, as_ascii:
             _check_same(skeleton, clip)
     if mesh is not None:
         _check_mesh(mesh, written)
+    if uvs is not None:
+        _check_uvs(uvs, mesh)
     if skin is not None:
         _check_skin(skin, mesh, skeleton)
 
@@ -104,6 +117,8 @@ def save_fbx(filename, skeleton=None, clip=None, mesh=None, skin=None, as_ascii:
             _write_take(exporter, nodes, clip)
         if mesh is not None:
             mesh_node, shape = _write_mesh(exporter, mesh)
+            if uvs is not None and len(uvs):
+                exporter.add_uvs(shape, uvs)
             if skin is not None:
                 _write_skin(exporter, mesh_node, shape, skin, skeleton, nodes)
         exporter.export(path=filename, as_ascii=as_ascii)
@@ -257,6 +272,39 @@ def _check_mesh(mesh, nodes) -> None:
     _corner_normals(mesh)
     if nodes is not None and name in [node.name for node in nodes]:
         raise ValueError(f"save_fbx: mesh {name!r} is the name of a node of the skeleton; name the mesh apart")
+
+
+def _check_uvs(uvs, mesh) -> None:
+    """a UV set of no name, of a name another set holds or that is not
+    ASCII, whose faces are not the mesh's, or naming UVs it does not hold:
+    refused"""
+    counts = np.asarray(mesh.counts, dtype=np.int64)
+    names  = []
+    for place, uv in enumerate(uvs):
+        name  = uv.name
+        label = f"UV set {place} {name!r}"
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"save_fbx: {label} has no name; name each set")
+        if not name.isascii():
+            raise ValueError(f"save_fbx: {label} has a name that is not ASCII, which the fbx sdk does not write")
+        if name in names:
+            raise ValueError(f"save_fbx: {label} has the name of set {names.index(name)}; name each set apart")
+        names.append(name)
+        held = np.asarray(uv.counts, dtype=np.int64)
+        if not np.array_equal(held, counts):
+            unmapped = int(np.count_nonzero(held == 0)) if held.shape == counts.shape else None
+            why = (
+                f"leaves {unmapped} faces without UVs" if unmapped
+                else f"holds {held.size} faces of {held.sum()} corners, mesh {mesh.name or 'mesh'!r} {counts.size} "
+                f"of {counts.sum()}"
+            )
+            raise ValueError(f"save_fbx: {label} channel 'counts' {why}; a set maps every face of its mesh")
+        indices = np.asarray(uv.indices, dtype=np.int64)
+        points  = np.asarray(uv.points)
+        if points.ndim != 2 or points.shape[1] != 2:
+            raise ValueError(f"save_fbx: {label} channel 'points' is {points.shape}, not (N, 2)")
+        if indices.size != counts.sum() or (indices.size and (indices.min() < 0 or indices.max() >= len(points))):
+            raise ValueError(f"save_fbx: {label} channel 'indices' names UVs the set does not hold")
 
 
 def _check_skin(skin, mesh, skeleton) -> None:

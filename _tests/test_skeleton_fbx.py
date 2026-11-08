@@ -17,6 +17,7 @@ import numpy as np
 from cgmath.formats import load_fbx, save_fbx
 from cgmath.formats._fbx_io import load_sdk, open_fbx, typed
 from cgmath.geometry import MeshData, SkinData
+from cgmath.geometry.mesh import UVData, UVList
 from cgmath.hierarchy import ClipData, ClipList, HierarchyData, TransformData, generate_uuid
 
 FBX = load_sdk()
@@ -795,7 +796,7 @@ class TestMaya(_InMaya):
 # UNIT, a character's size (about 90 units tall): Maya's skinCluster deforms
 # in float32, so its points are compared within 1e-6 of the farthest
 # (near())
-UNIT  = 15.0
+UNIT = 15.0
 BOUND = (
     ("root", None, "transform", (0.25, 0.5, -0.25), (0.0, 15.0, 0.0), (1.25, 1.25, 1.25), (0, 0, 0), (0, 0, 0), 0, False),
     ("hips", "root", "joint", (0.0, 1.0, 0.0), (5.0, 0.0, 0.0), (1, 1, 1), (0.0, 0.0, 90.0), (10.0, 0.0, 0.0), 1, False),
@@ -1000,7 +1001,7 @@ class TestSkin(_Skinned):
         found = counts(self.path("a.fbx"))
         self.assertEqual((found["poses"], found["stacks"], found["curves"]), (1, 1, curve_count(source["clip"])))
         first = load_fbx(self.path("a.fbx"))
-        self.assertEqual(first._fields, ("skeleton", "clip", "mesh", "skin"))
+        self.assertEqual(first._fields, ("skeleton", "clip", "mesh", "skin", "uvs"))
         self.assertSameSkeleton(first.skeleton, source["skeleton"])
         self.assertSameMesh(first.mesh, source["mesh"])
         self.assertSameSkin(first.skin, source["skin"])
@@ -1056,8 +1057,8 @@ class TestSkin(_Skinned):
         del source["clip"]
         save_fbx(self.path("a.fbx"), **source)
         self.assertEqual(counts(self.path("a.fbx"))["curves"], 0)
-        rig, clip, mesh, skin = load_fbx(self.path("a.fbx"))
-        self.assertIsNone(clip)
+        rig, clip, mesh, skin, uvs = load_fbx(self.path("a.fbx"))
+        self.assertEqual((clip, uvs), (None, None))
         self.assertSameSkeleton(rig, source["skeleton"])
         self.assertSameMesh(mesh, source["mesh"])
         self.assertSameSkin(skin, source["skin"])
@@ -1094,8 +1095,8 @@ class TestSkin(_Skinned):
         save_fbx(self.path("clip.fbx"), clip=clip, mesh=mesh)
         found = counts(self.path("clip.fbx"))
         self.assertEqual((found["poses"], found["curves"]), (0, curve_count(clip)))
-        rig, back, held, skin = load_fbx(self.path("clip.fbx"))
-        self.assertEqual((rig, skin), (None, None))
+        rig, back, held, skin, uvs = load_fbx(self.path("clip.fbx"))
+        self.assertEqual((rig, skin, uvs), (None, None, None))
         self.assertFloat32Clip(back, clip)
         self.assertSameMesh(held, mesh)
         self.assertEqual(ClipData.load_fbx(self.path("clip.fbx")).name, back.name)
@@ -1356,3 +1357,219 @@ class TestMayaSkin(_InMaya, _Skinned):
         np.testing.assert_allclose(first.skin.weights[:, columns], source["skin"].weights, rtol=0, atol=1e-6)
         near(first.mesh.points, source["mesh"].points)
         self.assertEqual((first.clip.start_frame, first.clip.frame_count, first.clip.fps), (START, TAKE, FPS))
+
+
+# --------------------------------- UV sets --------------------------------- #
+
+
+def maps(mesh: MeshData) -> UVList:
+    """two UV sets on body(): "map1" a cylinder unrolled, a seam column
+    where the tube closes, "lightmap" an island a face, its UVs shuffled;
+    float64 UVs, which fbx holds as they are"""
+    rings, around = 24, 12
+    columns = around + 1
+    grid = np.stack(
+        [np.tile(np.arange(columns) / around, rings), np.repeat(np.linspace(0.0, 1.0, rings), columns)], axis=1
+    ) + 1.0 / 3.0e5
+    corners = (mesh.indices // around) * columns + mesh.indices % around
+    # a face spanning the closing edge takes the seam column for its
+    # corners on the first column
+    start = 0
+    for size in mesh.counts:
+        face = corners[start : start + size]
+        if (face % columns).max() == around - 1 and (face % columns).min() == 0:
+            face[face % columns == 0] += around
+        start += size
+    first  = UVData(name="map1", points=grid, counts=mesh.counts.copy(), indices=corners.astype(np.int32))
+
+    rng    = np.random.default_rng(11)
+    total  = int(mesh.counts.sum())
+    order  = rng.permutation(total)
+    points = rng.random((total, 2)) * np.array([0.98, 0.97]) + 0.01
+    second = UVData(name="lightmap", points=points, counts=mesh.counts.copy(), indices=order.astype(np.int32))
+    return UVList([first, second])
+
+
+def per_corner(uv: UVData) -> np.ndarray:
+    """(corners, 2) the UV at each face corner"""
+    return np.asarray(uv.points)[np.asarray(uv.indices)]
+
+
+class _Mapped(_Skinned):
+    def assertSameUVs(self, got, want, mesh_name="body"):
+        self.assertIsInstance(got, UVList)
+        self.assertEqual([uv.name for uv in got], [uv.name for uv in want])
+        for a, b in zip(got, want):
+            self.assertIsInstance(a, UVData)
+            self.assertEqual(a.mesh_name, mesh_name)
+            for field in ("points", "counts", "indices"):
+                x, y = getattr(a, field), getattr(b, field)
+                self.assertEqual(x.dtype, y.dtype, f"{a.name} {field}")
+                np.testing.assert_array_equal(x, y, err_msg=f"{a.name} {field}")
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestUVs(_Mapped):
+    """save_fbx(..., mesh, uvs=): the mesh's UV sets, a UVList or one UVData;
+    load_fbx gives them back as FbxContents.uvs, None for none"""
+
+    def test_round_trip_beside_a_skin(self):
+        source = bundle()
+        uvs    = maps(source["mesh"])
+        # the seam: map1 holds more UVs than the mesh points; lightmap's
+        # indices are shuffled
+        self.assertFalse(np.array_equal(uvs[0].indices, source["mesh"].indices))
+        self.assertGreater(len(uvs[0].points), source["mesh"].point_count)
+        self.assertFalse(np.array_equal(uvs[1].indices, np.arange(len(uvs[1].indices))))
+        save_fbx(self.path("a.fbx"), **source, uvs=uvs)
+        first = load_fbx(self.path("a.fbx"))
+        self.assertSameUVs(first.uvs, uvs)
+        self.assertSameMesh(first.mesh, source["mesh"])
+        self.assertSameSkin(first.skin, source["skin"])
+        # the five fields are save_fbx's arguments in their order
+        save_fbx(self.path("b.fbx"), *first)
+        self.assertSameUVs(load_fbx(self.path("b.fbx")).uvs, first.uvs)
+
+    def test_a_uvdata_is_one_set_and_none_reads_none(self):
+        mesh = body()
+        uv   = maps(mesh)[1]
+        save_fbx(self.path("one.fbx"), mesh=mesh, uvs=uv)
+        self.assertSameUVs(load_fbx(self.path("one.fbx")).uvs, UVList([uv]))
+        for name, kwargs in (
+            ("mesh", {"mesh": mesh}),
+            ("empty", {"mesh": mesh, "uvs": UVList([])}),
+            ("clip", {"clip": motion(bound())}),
+            ("rig", {"skeleton": bound()}),
+        ):
+            with self.subTest(name):
+                save_fbx(self.path(f"{name}.fbx"), **kwargs)
+                self.assertIsNone(load_fbx(self.path(f"{name}.fbx")).uvs)
+
+    def refused(self, error, message, **kwargs):
+        with self.assertRaisesRegex(error, message):
+            save_fbx(self.path("refused.fbx"), **kwargs)
+        self.assertFalse(os.path.exists(self.path("refused.fbx")))
+
+    def test_save_refusals(self):
+        mesh = body()
+        good = maps(mesh)
+
+        def edited(place, **fields):
+            sets = [uv.copy() for uv in good]
+            for key, value in fields.items():
+                setattr(sets[place], key, value)
+            return UVList(sets)
+
+        fewer      = mesh.counts[:-1].copy()
+        holes      = mesh.counts.copy()
+        holes[5]   = 0
+        outside    = good[0].indices.copy()
+        outside[7] = len(good[0].points)
+        self.refused(TypeError, "missing: mesh=", uvs=good, clip=motion(bound()))
+        self.refused(TypeError, "a UVList or a UVData, not a list", mesh=mesh, uvs=list(good))
+        self.refused(TypeError, "a UVList or a UVData, not a MeshData", mesh=mesh, uvs=mesh)
+        self.refused(ValueError, "UV set 1 '' has no name", mesh=mesh, uvs=edited(1, name=""))
+        self.refused(ValueError, "UV set 1 'map1' has the name of set 0", mesh=mesh, uvs=edited(1, name="map1"))
+        self.refused(ValueError, "not ASCII", mesh=mesh, uvs=edited(1, name="carteé"))
+        self.refused(ValueError, "UV set 0 'map1' channel 'counts' holds", mesh=mesh, uvs=edited(0, counts=fewer))
+        self.refused(ValueError, "leaves 1 faces without UVs", mesh=mesh, uvs=edited(0, counts=holes))
+        self.refused(ValueError, "channel 'indices' names UVs", mesh=mesh, uvs=edited(0, indices=outside))
+
+    def test_load_reads_no_empty_set_and_refuses_unmapped_corners(self):
+        mesh = body()
+        save_fbx(self.path("good.fbx"), mesh=mesh, uvs=maps(mesh))
+
+        def shape_of(scene):
+            return typed(_named(scene, "body").GetNodeAttribute(), FBX.FbxMesh, FBX)
+
+        def empty(scene):
+            element = shape_of(scene).CreateElementUV("empty")
+            element.SetMappingMode(FBX.FbxLayerElement.EMappingMode.eByPolygonVertex)
+            element.SetReferenceMode(FBX.FbxLayerElement.EReferenceMode.eIndexToDirect)
+
+        def unmapped(scene):
+            shape_of(scene).GetElementUV(1).GetIndexArray().SetAt(4, -1)
+
+        got = load_fbx(_edited(self.path("good.fbx"), self.path("empty.fbx"), empty)).uvs
+        self.assertSameUVs(got, maps(mesh))
+        bad = _edited(self.path("good.fbx"), self.path("unmapped.fbx"), unmapped)
+        with self.assertRaisesRegex(ValueError, "UV set 'lightmap' leaves 1 face corners without UVs"):
+            load_fbx(bad)
+        # a mesh whose one set is empty reads None
+        save_fbx(self.path("bare.fbx"), mesh=mesh)
+        path = _edited(self.path("bare.fbx"), self.path("only_empty.fbx"), empty)
+        with open_fbx(path, FBX) as scene:
+            self.assertEqual(shape_of(scene).GetElementUVCount(), 1)
+        self.assertIsNone(load_fbx(path).uvs)
+
+
+def _dag(name: str):
+    import maya.api.OpenMaya as om
+    import maya.cmds as cmds
+
+    shapes = cmds.listRelatives(name, shapes=True, noIntermediate=True, fullPath=True)
+    chosen = om.MSelectionList()
+    chosen.add(shapes[0])
+    return chosen.getDagPath(0)
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestMayaUVs(_InMaya, _Mapped):
+    """Maya 2025's FBXImport of a save's UV sets, and its FBXExport read back"""
+
+    def maya_uvs(self, name: str) -> dict:
+        """{set: (face counts, (corners, 2) UVs)} of the mesh, in Maya's set
+        order"""
+        import maya.api.OpenMaya as om
+
+        shape = om.MFnMesh(_dag(name))
+        found = {}
+        for uv_set in shape.getUVSetNames():
+            us, vs     = shape.getUVs(uv_set)
+            sizes, ids = shape.getAssignedUVs(uv_set)
+            held          = np.stack([np.array(us), np.array(vs)], axis=1) if len(us) else np.zeros((0, 2))
+            found[uv_set] = (np.array(sizes), held[np.array(ids, dtype=np.intp)])
+        return found
+
+    def test_maya_imports_every_set_on_every_face(self):
+        mesh = body()
+        uvs  = maps(mesh)
+        save_fbx(self.path("a.fbx"), mesh=mesh, uvs=uvs)
+        self.imported(self.path("a.fbx"))
+        found = self.maya_uvs("body")
+        self.assertEqual(list(found), [uv.name for uv in uvs])
+        for uv in uvs:
+            sizes, corners = found[uv.name]
+            np.testing.assert_array_equal(sizes, mesh.counts, err_msg=uv.name)
+            near(corners, per_corner(uv), err_msg=uv.name)
+
+    def test_maya_export_reads_back(self):
+        """Maya's FBXExport of the import: its sets within 1e-6 (Maya holds
+        UVs in float32); load, save, load bit for bit"""
+        source = bundle()
+        uvs    = maps(source["mesh"])
+        save_fbx(self.path("a.fbx"), **source, uvs=uvs)
+        self.imported(self.path("a.fbx"))
+        first = load_fbx(self.exported("maya.fbx"))
+        self.assertEqual([uv.name for uv in first.uvs], [uv.name for uv in uvs])
+        for got, want in zip(first.uvs, uvs):
+            np.testing.assert_array_equal(got.counts, source["mesh"].counts, err_msg=got.name)
+            near(per_corner(got), per_corner(want), err_msg=got.name)
+        save_fbx(self.path("again.fbx"), *first)
+        self.assertSameUVs(load_fbx(self.path("again.fbx")).uvs, first.uvs)
+
+    def test_maya_export_of_a_mesh_with_no_uvs_reads_none(self):
+        cmds = self.cmds
+        # a save of no UVs, imported
+        save_fbx(self.path("a.fbx"), mesh=body())
+        self.imported(self.path("a.fbx"))
+        sets = self.maya_uvs("body")
+        self.assertTrue(all(not len(corners) for _, corners in sets.values()), list(sets))
+        self.assertIsNone(load_fbx(self.exported("maya.fbx")).uvs)
+        # a mesh Maya makes with no UVs
+        cmds.file(new=True, force=True)
+        cmds.polyCube(name="box", createUVs=0)
+        self.assertTrue(all(not len(corners) for _, corners in self.maya_uvs("box").values()))
+        got = load_fbx(self.exported("box.fbx"))
+        self.assertEqual(got.mesh.name, "box")
+        self.assertIsNone(got.uvs)

@@ -30,27 +30,34 @@ BIND_SOLVED = 1e-6
 # float32
 SKIN_AGREE  = 1e-5
 
-FbxContents = namedtuple("FbxContents", ("skeleton", "clip", "mesh", "skin"))
+FbxContents = namedtuple("FbxContents", ("skeleton", "clip", "mesh", "skin", "uvs"))
 
 
 def load_fbx(filename) -> FbxContents:
-    """``(skeleton, clip, mesh, skin)``, None where the file holds none
+    """``(skeleton, clip, mesh, skin, uvs)``, None where the file holds none
 
-    Without a skin: ``(None, clip, mesh, None)`` for a file holding a take,
-    ``(hierarchy, None, mesh, None)`` for one holding none. With a skin: the
-    skeleton is its bind pose, the clip the take if any.
+    Without a skin: ``(None, clip, mesh, None, uvs)`` for a file holding a
+    take, ``(hierarchy, None, mesh, None, uvs)`` for one holding none. With a
+    skin: the skeleton is its bind pose, the clip the take if any. ``uvs``
+    the mesh's UV sets, a UVList in the file's order, None for a file with
+    no mesh or whose mesh holds no UVs (a set of no UVs, as Maya's
+    FBXExport writes an empty one, is no set); ValueError for a set leaving
+    faces without UVs.
     """
     read = _open(filename, True, True)
     skeleton, order = _build(read)
-    clip = None if read["take"] is None else _build_clip(read, skeleton, order)
+    # Maya's FBXExport writes a take whether anything moves or not: a take
+    # over no node is no clip
+    clip = None if read["take"] is None or not len(skeleton) else _build_clip(read, skeleton, order)
     mesh = _build_mesh(read["mesh"])
+    uvs  = _build_uvs(read["mesh"])
     if read["skin"] is not None:
         bind, order = _build(read)
         _settle_bind(read, bind, order)
-        return FbxContents(bind, clip, mesh, _build_skin(read))
+        return FbxContents(bind, clip, mesh, _build_skin(read), uvs)
     if clip is not None:
-        return FbxContents(None, clip, mesh, None)
-    return FbxContents(skeleton if len(skeleton) else None, None, mesh, None)
+        return FbxContents(None, clip, mesh, None, uvs)
+    return FbxContents(skeleton if len(skeleton) else None, None, mesh, None, uvs)
 
 
 def load_nodes(filename):
@@ -175,6 +182,7 @@ def _read_mesh(node, fbx) -> dict:
         normals = _fbx_direct_array_to_ndarray(element.GetDirectArray(), dim=3)
         ids     = _fbx_face_varying_indices(shape, element, counts)
     return {
+        "uvs":            _read_uvs(name, shape, counts, fbx),
         "name":           name,
         "points":         _fbx_control_points(shape),
         "counts":         counts,
@@ -183,6 +191,43 @@ def _read_mesh(node, fbx) -> dict:
         "normal_indices": ids,
         "shape":          shape,
     }
+
+
+def _read_uvs(name, shape, counts, fbx) -> list:
+    """the mesh's UV sets, (name, points, indices) each, in the file's
+    order, one index a face corner; a set of no UVs left out, ValueError for
+    one leaving faces without UVs"""
+    from cgmath.geometry.mesh import _fbx_direct_array_to_ndarray, _fbx_face_varying_indices
+
+    mapping = fbx.FbxLayerElement.EMappingMode
+    refs    = fbx.FbxLayerElement.EReferenceMode
+    total   = int(np.sum(counts))
+    found   = []
+    for place in range(shape.GetElementUVCount()):
+        element = shape.GetElementUV(place)
+        if element is None:
+            continue
+        label  = str(element.GetName()) or f"map{place + 1}"
+        points = _fbx_direct_array_to_ndarray(element.GetDirectArray(), dim=2)
+        if not len(points):
+            continue
+        held = element.GetIndexArray().GetCount()
+        if (
+            element.GetMappingMode() == mapping.eByPolygonVertex
+            and element.GetReferenceMode() == refs.eIndexToDirect
+            and held != total
+        ):
+            raise ValueError(
+                f"load_fbx: mesh {name!r} UV set {label!r} maps {held} face corners of {total}; {FORK} reads a set "
+                f"mapping every face"
+            )
+        indices = _fbx_face_varying_indices(shape, element, counts)
+        if indices.size and (indices.min() < 0 or indices.max() >= len(points)):
+            unmapped = int(np.count_nonzero(indices < 0))
+            why      = f"leaves {unmapped} face corners without UVs" if unmapped else "names UVs it does not hold"
+            raise ValueError(f"load_fbx: mesh {name!r} UV set {label!r} {why}; {FORK} reads a set mapping every face")
+        found.append((label, points, indices))
+    return found
 
 
 def _read_skin(scene, node, shape, found, fbx) -> dict:
@@ -631,6 +676,27 @@ def _build_mesh(read):
         indices        = read["indices"],
         normals        = read["normals"],
         normal_indices = read["normal_indices"],
+    )
+
+
+def _build_uvs(read):
+    """the UVList of the file's one mesh, in the file's order; None for no
+    mesh or no UV set"""
+    from cgmath.geometry.mesh import UVData, UVList
+
+    if read is None or not read["uvs"]:
+        return None
+    return UVList(
+        [
+            UVData(
+                name      = label,
+                points    = points,
+                counts    = np.asarray(read["counts"], dtype=np.int32).copy(),
+                indices   = indices,
+                mesh_name = read["name"],
+            )
+            for label, points, indices in read["uvs"]
+        ]
     )
 
 
