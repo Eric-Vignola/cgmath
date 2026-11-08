@@ -58,7 +58,7 @@ from cgmath.data import (
     DataList,
     ImmutableArray as numpy_array,
 )
-from cgmath.formats import save_fbx as _save_fbx
+from cgmath.formats._write import FORK as _FORK
 from cgmath.formats._fbx_io import load_sdk, open_fbx
 from cgmath.formats.glb import _trimesh_scene
 from cgmath.geometry._saddle_surface import integrate, sample
@@ -2967,7 +2967,7 @@ class MeshData(Data):
         a vertex coming back face-varying (``normal_indices`` the mesh's
         ``indices``). See :func:`cgmath.formats.save_fbx`.
         """
-        _save_fbx(filename, self, as_ascii=as_ascii)
+        raise NotImplementedError(f"MeshData.save_fbx: {_FORK} writes one skeleton or one take, no mesh")
 
     @classmethod
     def load_usd(cls, filename: str, name: str | None = None) -> "MeshData":
@@ -3950,7 +3950,7 @@ class UVData(MeshData):
     @buffer.setter
     def buffer(self, buffer) -> None:
         """sets _buffer"""
-        self._buffer     = np.asarray(buffer, dtype=np.uint8)
+        self._buffer = np.asarray(buffer, dtype=np.uint8)
         self._resolution = np.array(
             [self._buffer.shape[1], self._buffer.shape[0]], dtype=np.int32
         )
@@ -4804,7 +4804,7 @@ class MeshList(DataList[MeshData]):
         mesh node each, as :meth:`MeshData.save_fbx` writes one, in the
         list's order; ValueError for two meshes of one name, before anything
         is written. See :func:`cgmath.formats.save_fbx`."""
-        _save_fbx(filename, self, as_ascii=as_ascii)
+        raise NotImplementedError(f"MeshList.save_fbx: {_FORK} writes one skeleton or one take, no mesh")
 
     @classmethod
     def load_glb(cls, filename: str, scale_factor: float = 100.0) -> "MeshList":

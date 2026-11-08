@@ -8083,11 +8083,11 @@ class TransformList(DataList[TransformData]):
 
     @classmethod
     def load_fbx(cls, filename):
-        """the skeleton of an fbx file, as ``cgmath.formats.load_fbx`` reads
-        it: a HierarchyData, or a view of its nodes' copies"""
-        from cgmath.formats._load import load_fbx
+        """the nodes of an fbx file at their own values, whether it holds a
+        take or not: a HierarchyData, or a view of its nodes' copies"""
+        from cgmath.formats._load import load_nodes
 
-        skeleton, _ = load_fbx(filename)
+        skeleton = load_nodes(filename)
         if issubclass(cls, HierarchyData):
             if cls is not HierarchyData:
                 raise NotImplementedError(f"{cls.__name__}.load_fbx: {_FORK} reads a HierarchyData skeleton")
@@ -8098,7 +8098,7 @@ class TransformList(DataList[TransformData]):
         """the nodes written as a skeleton, as ``cgmath.formats.save_fbx``
         writes one: a view's nodes copied into a HierarchyData first"""
         skeleton = self
-        if not isinstance(self, HierarchyData):
+        if type(self) is not HierarchyData:
             skeleton = HierarchyData(node.copy() for node in self)
             skeleton._axis_system, skeleton._unit = self._records()
         _save_fbx(filename, skeleton, as_ascii=as_ascii)
@@ -14950,19 +14950,15 @@ class ClipData(HierarchyData):
             raise ValueError(f"{filename} holds no take")
         return clip
 
-    def save_fbx(self, filename, skeleton=None, as_ascii=False):
-        """the clip written as one take over ``skeleton``, by default its pose
-        at its first frame, as ``cgmath.formats.save_fbx`` writes them"""
+    def save_fbx(self, filename, as_ascii=False):
+        """the clip written as one take, as ``cgmath.formats.save_fbx(filename,
+        clip=clip)`` writes it; a clip of no frame writes its nodes alone"""
         if not self.frame_count:
-            # a clip of no frame: its nodes, the skeleton alone
-            if skeleton is None:
-                skeleton = HierarchyData(node.copy() for node in self)
-                skeleton._axis_system, skeleton._unit = self._records()
+            skeleton = HierarchyData(node.copy() for node in self)
+            skeleton._axis_system, skeleton._unit = self._records()
             _save_fbx(filename, skeleton, as_ascii=as_ascii)
             return
-        if skeleton is None:
-            skeleton = self.at(self._start_frame)
-        _save_fbx(filename, skeleton, self, as_ascii=as_ascii)
+        _save_fbx(filename, clip=self, as_ascii=as_ascii)
 
     @classmethod
     def _channel_name(cls, channel: str) -> str:
@@ -15931,7 +15927,7 @@ class ClipList(DataList[ClipData]):
     def save_fbx(self, filename, *args, **kwargs) -> None:
         raise NotImplementedError(
             f"ClipList.save_fbx: {_FORK} saves one skeleton and one take, "
-            "cgmath.formats.save_fbx(filename, skeleton, clip)"
+            "cgmath.formats.save_fbx(filename, clip=clip)"
         )
 
     # --- reading a file's takes --- #

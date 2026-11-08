@@ -1,9 +1,9 @@
-"""``cgmath.formats.load_fbx``: one skeleton, and its active take
+"""``cgmath.formats.load_fbx``: one skeleton, or one take
 
 The r17-skeleton fork reads every node of a file as a joint (a skeleton
 node) or a transform (any other: a group, or a transform holding a shape, a
-mesh, a camera, a light or a locator, the shape left out), at the bind pose,
-and the active take animating them.
+mesh, a camera, a light or a locator, the shape left out), at their own
+values, a bind pose left out, or the active take animating them.
 """
 
 import os
@@ -12,36 +12,41 @@ import numpy as np
 
 from cgmath.formats._write import FORK, ORDER_PROPERTY, refuse_values
 
-# a bind pose world this close to the node's own, relative to the matrix's
-# largest entry (1 at least), places the node where its own values do
-BIND_AGREE = 1e-8
-
-# a shear a bind pose's solve leaves under this is rounding, read as 0
-BIND_SHEAR = 1e-9
-
 # a parent scale this close to 1 leaves an inherit type nothing to change
 UNIT_SCALE = 1e-6
 
 
 def load_fbx(filename) -> tuple:
-    """``(skeleton, clip)`` an fbx file holds: a HierarchyData of its nodes,
-    joints and transforms, at the bind pose, and a ClipData of its active
-    take, or None for a file with no take
+    """``(None, clip)`` for an fbx file holding a take: a ClipData of its
+    active take; ``(hierarchy, None)`` for one holding none: a HierarchyData
+    of its nodes, joints and transforms, at their own values
 
-    The skeleton holds the nodes' own values, but where the file's bind
-    pose places a node elsewhere than they do (by more than 1e-8): there it
-    takes the bind pose, its channels solved from it. The clip is the active
-    take (``ActiveAnimStackName``, else the first): its span and frame rate,
-    each channel constant where it has no curve (the node's own value) or a
-    curve of one key, animated where a curve holds more, sampled on every
-    frame of the span.
+    The clip is the active take (``ActiveAnimStackName``, else the first):
+    its span and frame rate, each channel constant where it has no curve
+    (the node's own value) or a curve of one key, animated where a curve
+    holds more, sampled on every frame of the span. A bind pose is left
+    out: no node takes its values from one.
 
     Refused, ValueError naming node, channel and frame: a shear, a scale
-    that is not uniform on a node with children (at the bind pose and on any
-    frame), an inherit type a joint or transform can not hold where the
+    that is not uniform on a node with children (the nodes' own values and
+    any frame), an inherit type a joint or transform can not hold where the
     parent's scale is not 1, a pre rotation on a transform, pivots and
     offsets. Several animation layers: NotImplementedError.
     """
+    read = _open(filename, True)
+    skeleton, order = _build(read)
+    if read["take"] is None:
+        return skeleton, None
+    return None, _build_clip(read, skeleton, order)
+
+
+def load_nodes(filename):
+    """the HierarchyData of an fbx file's nodes at their own values, whether
+    it holds a take or not (the take left unread)"""
+    return _build(_open(filename, False))[0]
+
+
+def _open(filename, take: bool) -> dict:
     # imported here: the classes' modules import this one
     from cgmath.formats._fbx_io import open_fbx
     from cgmath.hierarchy.hierarchy import FBX
@@ -53,12 +58,7 @@ def load_fbx(filename) -> tuple:
         raise FileNotFoundError(filename)
 
     with open_fbx(filename, FBX) as scene:
-        read = _read(scene, FBX)
-    return _build(read)
-
-
-def _matrix(matrix) -> np.ndarray:
-    return np.array([[matrix.Get(row, column) for column in range(4)] for row in range(4)], dtype=np.float64)
+        return _read(scene, FBX, take)
 
 
 def _walk(scene) -> list:
@@ -76,8 +76,9 @@ def _walk(scene) -> list:
     return found
 
 
-def _read(scene, fbx) -> dict:
-    """everything the build needs, out of the scene as python and numpy"""
+def _read(scene, fbx, take: bool = True) -> dict:
+    """everything the build needs, out of the scene as python and numpy; the
+    active take's curves unless not ``take``"""
     from cgmath.formats._fbx_io import typed
     from cgmath.hierarchy.hierarchy import (
         _FBX_ROTATE_ORDERS,
@@ -161,27 +162,15 @@ def _read(scene, fbx) -> dict:
             entry["index"] = int(fbx.FbxPropertyInteger1(kept).Get())
         nodes.append(entry)
 
-    # the bind pose: the first bind pose listing a node gives its world
-    place = {entry["id"]: i for i, entry in enumerate(nodes)}
-    binds = {}
-    for i in range(scene.GetPoseCount()):
-        pose = scene.GetPose(i)
-        if not pose.IsBindPose():
-            continue
-        for k in range(pose.GetCount()):
-            listed = pose.GetNode(k)
-            at     = place.get(listed.GetUniqueID()) if listed is not None else None
-            if at is not None and at not in binds:
-                binds[at] = _matrix(pose.GetMatrix(k))
-
+    # a bind pose (FbxPose) is left out: no node takes its values from one
     settings = scene.GetGlobalSettings()
     record   = (_axis_words(*_fbx_scene_axes(scene, fbx)), float(settings.GetSystemUnit().GetScaleFactor()))
-    read     = {"nodes": nodes, "binds": binds, "record": record, "take": None}
+    read     = {"nodes": nodes, "record": record, "take": None}
 
     # the active take, else the first
     criteria = fbx.FbxCriteria.ObjectType(fbx.FbxAnimStack.ClassId)
     stacks   = [typed(scene.GetSrcObject(criteria, i), fbx.FbxAnimStack, fbx) for i in range(scene.GetSrcObjectCount(criteria))]
-    if not stacks:
+    if not take or not stacks:
         return read
     active = str(scene.ActiveAnimStackName.Get())
     stack  = next((x for x in stacks if str(x.GetName()) == active), stacks[0])
@@ -268,7 +257,9 @@ def _sampled(curves, ticks, per_second) -> list:
 
 
 def _build(read: dict) -> tuple:
-    from cgmath.hierarchy.hierarchy import ClipData, HierarchyData, TransformData, _enum_fields, _user_channels, generate_uuid
+    """(the HierarchyData of the file's nodes at their own values, the
+    file's place of each of its nodes)"""
+    from cgmath.hierarchy.hierarchy import HierarchyData, TransformData, generate_uuid
 
     entries = read["nodes"]
     uuids   = [generate_uuid() for _ in entries]
@@ -303,24 +294,10 @@ def _build(read: dict) -> tuple:
     skeleton = HierarchyData([made[i] for i in order])
     skeleton._axis_system, skeleton._unit = read["record"]
 
-    # the bind pose, where it places a node elsewhere than its own values
-    worlds = np.asarray(skeleton.world_matrix, dtype=np.float64)
-    at     = {i: k for k, i in enumerate(order)}
-    moved  = []
-    for i, bind in sorted(read["binds"].items()):
-        own   = worlds[at[i]]
-        scale = max(1.0, float(np.abs(bind).max()))
-        if np.abs(own - bind).max() > BIND_AGREE * scale:
-            moved.append(i)
-    for i in moved:
-        made[i].world_matrix = read["binds"][i]
-    if moved:
-        _settle_binds(made, entries, read["binds"], moved)
-
     parents  = np.array([entry["parent"] for entry in entries], dtype=np.intp)
     in_order = [made[i] for i in order]
     refuse_values(
-        "load_fbx, the bind pose",
+        "load_fbx, the nodes",
         in_order,
         np.array([node.shear for node in in_order]).reshape(1, -1, 3),
         np.array([node.scale for node in in_order]).reshape(1, -1, 3),
@@ -333,14 +310,19 @@ def _build(read: dict) -> tuple:
         np.array([node.scale for node in made], dtype=np.float64)[None],
         None,
     )
+    return skeleton, order
 
-    take = read["take"]
-    if take is None:
-        return skeleton, None
 
-    frames = take["frames"]
-    count  = len(frames)
-    clip   = ClipData(skeleton, frames=count, start_frame=int(frames[0]), fps=take["fps"], take=take["name"])
+def _build_clip(read: dict, skeleton, order):
+    """the ClipData of the file's take over ``skeleton``, its nodes"""
+    from cgmath.hierarchy.hierarchy import ClipData, _enum_fields, _user_channels
+
+    entries = read["nodes"]
+    parents = np.array([entry["parent"] for entry in entries], dtype=np.intp)
+    take    = read["take"]
+    frames  = take["frames"]
+    count   = len(frames)
+    clip    = ClipData(skeleton, frames=count, start_frame=int(frames[0]), fps=take["fps"], take=take["name"])
     clip._realign()
     for channel in ("translate", "rotate", "scale"):
         field = "_" + channel
@@ -402,32 +384,7 @@ def _build(read: dict) -> tuple:
     _refuse_inherit(
         entries, parents, np.asarray(clip.frames.world_matrix)[:, back], np.asarray(clip.frames.scale)[:, back], shown
     )
-    return skeleton, clip
-
-
-def _settle_binds(made, entries, binds, moved) -> None:
-    """a bind pose's solve: a shear it leaves under BIND_SHEAR is rounding,
-    one over it, or a world the node can not hold, refused"""
-    for i in moved:
-        node  = made[i]
-        shear = np.asarray(node.shear, dtype=np.float64)
-        if np.abs(shear).max() <= BIND_SHEAR:
-            if shear.any():
-                node.shear = np.zeros(3)
-            continue
-        raise ValueError(
-            f"load_fbx, the bind pose: node {node.name!r} channel 'shear' holds a shear, which fbx and Maya's "
-            f"joints hold none of: {np.round(shear, 12).tolist()}"
-        )
-    for i in moved:
-        node  = made[i]
-        bind  = binds[i]
-        world = np.asarray(node.world_matrix, dtype=np.float64)
-        if np.abs(world - bind).max() > 1e-6 * max(1.0, float(np.abs(bind).max())):
-            raise ValueError(
-                f"load_fbx, the bind pose: node {node.name!r} channel 'shear' is placed by the bind pose where "
-                f"its channels can not put it (a shear, off by {np.abs(world - bind).max():.3g})"
-            )
+    return clip
 
 
 def _scales(worlds: np.ndarray) -> np.ndarray:

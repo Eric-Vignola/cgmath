@@ -1,8 +1,9 @@
-"""``cgmath.formats.save_fbx``: one skeleton, and one take animating it
+"""``cgmath.formats.save_fbx``: one skeleton, or one take
 
-The r17-skeleton fork writes a skeleton of joints and transforms at its bind
-pose and, with a clip, one take of it. Nothing here imports the fbx sdk, nor
-the classes, until a file is written: the classes' modules import this one.
+The r17-skeleton fork writes a skeleton of joints and transforms, or a
+clip's nodes and its take; no bind pose. Nothing here imports the fbx sdk,
+nor the classes, until a file is written: the classes' modules import this
+one.
 """
 
 import logging
@@ -26,68 +27,60 @@ NODE_TYPES = ("joint", "transform")
 ORDER_PROPERTY = "cgmath:index"
 
 
-def save_fbx(filename, skeleton, clip=None, as_ascii: bool = False) -> None:
-    """writes ``skeleton``, a HierarchyData of joints and transforms, at its
-    bind pose, and ``clip``, a ClipData of its nodes, as one take; binary
-    unless ``as_ascii``
+def save_fbx(filename, skeleton=None, clip=None, as_ascii: bool = False) -> None:
+    """writes one of ``skeleton``, a HierarchyData of joints and transforms,
+    or ``clip``, a ClipData of joints and transforms; binary unless
+    ``as_ascii``
 
-    The file's nodes hold the skeleton's own values: static Lcl Translation,
-    Rotation and Scaling, the joint orient as the pre rotation, the rotate
-    axis as the post rotation (its inverse), the rotate order, segment scale
-    compensate as the inherit type (eInheritRrs on, eInheritRSrs off), the
-    user defined attributes as user properties; and one bind pose (FbxPose)
-    lists every node at its world matrix. The take, named ``clip.take`` or
-    "Take 001", spans the clip's frames at its fps; every channel of every
-    node has its curves, one a component: a constant channel one key on the
-    clip's first frame, an animated one a key a frame.
+    A skeleton alone: its nodes and their own values, no take. A clip alone:
+    its nodes, their static values its pose at its first frame, and one take,
+    named ``clip.take`` or "Take 001", spanning the clip's frames at its fps;
+    every channel of every node has its curves, one a component: a constant
+    channel one key on the clip's first frame, an animated one a key a
+    frame. No bind pose is written: a skeleton given with a clip is a bind
+    pose, which comes with skins (NotImplementedError).
 
     Refused, ValueError naming node, channel and frame, before anything is
     written: a node that is no joint or transform, a transform holding
-    segment scale compensate, a shear, a scale that is not uniform on a node
-    with children, in the skeleton or on any frame of the clip, and a clip
-    whose nodes are not the skeleton's (names, parents, order, node types,
-    joint orient, rotate axis, rotate order, segment scale compensate, user
-    attributes and their types). Any other object: NotImplementedError.
+    segment scale compensate or a joint orient, a shear, a scale that is not
+    uniform on a node with children, in the skeleton or on any frame of the
+    clip, a joint orient or rotate axis the clip changes over its frames.
+    Neither given, a skeleton that is not a HierarchyData (a ClipData is
+    passed as ``clip``), a clip that is not a ClipData: TypeError.
     """
     # imported here: the classes' modules import this one
     from cgmath.hierarchy import hierarchy
 
+    if skeleton is not None and clip is not None:
+        raise NotImplementedError(
+            f"save_fbx on {FORK}: a skeleton given with a clip is a bind pose, which comes with skins; "
+            f"pass clip= alone, or a skeleton alone"
+        )
+    if skeleton is None and clip is None:
+        raise TypeError("save_fbx takes a skeleton (a HierarchyData) or clip= (a ClipData)")
+    if skeleton is not None and type(skeleton) is not hierarchy.HierarchyData:
+        hint = ", pass it as clip=" if isinstance(skeleton, hierarchy.ClipData) else ""
+        raise TypeError(f"save_fbx: the skeleton is a HierarchyData, not a {type(skeleton).__name__}{hint}")
+    if clip is not None and not isinstance(clip, hierarchy.ClipData):
+        raise TypeError(f"save_fbx: the clip is a ClipData, not a {type(clip).__name__}")
     if hierarchy.FBX is None or hierarchy.FbxExporter is None:
         raise ImportError("fbx module not found")
-    if not isinstance(skeleton, hierarchy.HierarchyData) or isinstance(skeleton, hierarchy.ClipData):
-        raise NotImplementedError(
-            f"save_fbx on {FORK} writes a HierarchyData skeleton and a ClipData clip, "
-            f"not a {type(skeleton).__name__} skeleton"
-        )
-    if clip is not None and not isinstance(clip, hierarchy.ClipData):
-        raise NotImplementedError(
-            f"save_fbx on {FORK} writes one ClipData take, not a {type(clip).__name__}"
-        )
 
     filename = os.path.expanduser(filename)
-    _check_skeleton(skeleton)
-    if clip is not None:
-        _check_clip(skeleton, clip)
+    if clip is None:
+        _check_skeleton(skeleton)
+        written = skeleton
+    else:
+        _check_clip(clip)
+        written = clip.at(clip.start_frame)
 
     fbx = hierarchy.FBX
     with hierarchy.FbxExporter() as exporter:
-        exporter.add_skeleton(skeleton)
-        nodes = [exporter._fbx_nodes[id(node)] for node in skeleton]
+        exporter.add_skeleton(written)
+        nodes = [exporter._fbx_nodes[id(node)] for node in written]
         for index, fbx_node in enumerate(nodes):
             prop = fbx.FbxProperty.Create(fbx_node, fbx.FbxIntDT, ORDER_PROPERTY, "")
             prop.Set(index)
-
-        # the bind pose: every node at its world matrix
-        pose = fbx.FbxPose.Create(exporter.scene, "BindPose")
-        pose.SetIsBindPose(True)
-        for fbx_node, world in zip(nodes, np.asarray(skeleton.world_matrix, dtype=np.float64)):
-            matrix = fbx.FbxMatrix()
-            for row in range(4):
-                for column in range(4):
-                    matrix.Set(row, column, float(world[row, column]))
-            pose.Add(fbx_node, matrix)
-        exporter.scene.AddPose(pose)
-
         if clip is not None:
             _write_take(exporter, nodes, clip)
         exporter.export(path=filename, as_ascii=as_ascii)
@@ -131,74 +124,58 @@ def refuse_values(what: str, nodes, shear, scale, frames=None) -> None:
             )
 
 
-def _check_skeleton(skeleton) -> None:
-    for node in skeleton:
+def _check_kinds(nodes, orients) -> None:
+    """a node that is no joint or transform, a transform holding segment
+    scale compensate, or a joint orient (``orients`` (F, N, 3)): refused"""
+    for column, node in enumerate(nodes):
         if node.node_type not in NODE_TYPES:
             raise ValueError(
-                f"save_fbx: node {node.name!r} is a {node.node_type!r}; a skeleton on {FORK} holds joints and "
-                f"transforms"
+                f"save_fbx: node {node.name!r} is a {node.node_type!r}; {FORK} writes joints and transforms"
             )
         if node.node_type == "transform" and node.segment_scale_compensate:
             raise ValueError(
                 f"save_fbx: node {node.name!r} channel 'segment_scale_compensate' is on a transform, which Maya "
                 f"holds on joints only"
             )
-        if node.node_type == "transform" and np.any(np.asarray(node.joint_orient) != 0.0):
+        if node.node_type == "transform" and np.any(orients[:, column] != 0.0):
             raise ValueError(
                 f"save_fbx: node {node.name!r} channel 'joint_orient' is on a transform, which Maya holds on "
                 f"joints only"
             )
-    shear = np.array([node.shear for node in skeleton], dtype=np.float64).reshape(1, -1, 3)
-    scale = np.array([node.scale for node in skeleton], dtype=np.float64).reshape(1, -1, 3)
-    refuse_values("save_fbx, the skeleton", skeleton, shear, scale)
 
 
-def _user_types(node) -> dict:
-    from cgmath.hierarchy.hierarchy import _user_attr_type
+def _check_skeleton(skeleton) -> None:
+    nodes = list(skeleton)
+    _check_kinds(nodes, np.array([node.joint_orient for node in nodes], dtype=np.float64).reshape(1, -1, 3))
+    shear = np.array([node.shear for node in nodes], dtype=np.float64).reshape(1, -1, 3)
+    scale = np.array([node.scale for node in nodes], dtype=np.float64).reshape(1, -1, 3)
+    refuse_values("save_fbx, the skeleton", nodes, shear, scale)
 
-    return {name: _user_attr_type(spec) for name, spec in node.user_defined_attributes.items()}
 
-
-def _check_clip(skeleton, clip) -> None:
+def _check_clip(clip) -> None:
     from cgmath.hierarchy.hierarchy import _fbx_rate_mode
 
     if not clip.frame_count:
         raise ValueError("save_fbx: the clip holds no frame")
     if _fbx_rate_mode(float(clip.fps)) is None:
         raise ValueError(f"save_fbx: no fbx time mode carries {clip.fps} fps")
-    if len(clip) != len(skeleton):
-        raise ValueError(f"save_fbx: the clip holds {len(clip)} nodes, the skeleton {len(skeleton)}")
 
-    mine   = parents_of(list(skeleton))
-    theirs = parents_of(list(clip))
-    for column, (node, held) in enumerate(zip(skeleton, clip)):
-        checks = (
-            ("name", node.name, held.name),
-            ("parent", int(mine[column]), int(theirs[column])),
-            ("node_type", node.node_type, held.node_type),
-            ("rotate_order", node.rotate_order, held.rotate_order),
-            ("segment_scale_compensate", bool(node.segment_scale_compensate), bool(held.segment_scale_compensate)),
-            ("user_defined_attributes", _user_types(node), _user_types(held)),
-        )
-        for channel, want, got in checks:
-            if want != got:
-                raise ValueError(
-                    f"save_fbx: the clip's node {column} {held.name!r} channel {channel!r} differs from the "
-                    f"skeleton's {node.name!r}: {got!r}, the skeleton {want!r}"
-                )
-
+    nodes  = list(clip)
     frames = clip.start_frame + np.arange(clip.frame_count)
+    _check_kinds(nodes, np.asarray(clip.frames.joint_orient, dtype=np.float64))
+
+    # a file holds one joint orient and one rotate axis a node, unkeyed
     for channel in ("joint_orient", "rotate_axis"):
-        want = np.array([getattr(node, channel) for node in skeleton], dtype=np.float64)
-        got  = np.asarray(getattr(clip.frames, channel), dtype=np.float64)
-        bad  = np.argwhere(np.any(got != want[None], axis=-1))
+        held = np.asarray(getattr(clip.frames, channel), dtype=np.float64)
+        bad  = np.argwhere(np.any(held != held[:1], axis=-1))
         if len(bad):
             frame, column = (int(x) for x in bad[0])
             raise ValueError(
-                f"save_fbx: the clip's node {clip[column].name!r} channel {channel!r} frame {int(frames[frame])} "
-                f"is {got[frame, column].tolist()}, the skeleton's {want[column].tolist()}"
+                f"save_fbx, the clip: node {nodes[column].name!r} channel {channel!r} frame {int(frames[frame])} "
+                f"is {held[frame, column].tolist()}, its first frame {held[0, column].tolist()}: a file holds one "
+                f"{channel} a node, which no curve animates"
             )
-    refuse_values("save_fbx, the clip", clip, clip.frames.shear, clip.frames.scale, frames)
+    refuse_values("save_fbx, the clip", nodes, clip.frames.shear, clip.frames.scale, frames)
 
 
 def _keys(curve, times, values, mode, fbx) -> None:
