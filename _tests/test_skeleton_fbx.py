@@ -1,11 +1,13 @@
-"""The r17-skeleton fork: one skeleton or one take, saved, read back, and
-read by Maya's own FBXImport.
+"""The r17-skeleton fork: one hierarchy or one take, the meshes on its
+nodes, saved, read back, and read by Maya's own FBXImport.
 
-``cgmath.formats.save_fbx(path, skeleton)`` writes a HierarchyData of joints
-and transforms, ``save_fbx(path, clip=clip)`` a ClipData's nodes and its
-take; ``cgmath.formats.load_fbx(path)`` gives ``(hierarchy, None)`` or
-``(None, clip)`` back. No bind pose is written or read. The FBX tests need
-the Autodesk SDK (mayapy), the Maya ones a Maya with its fbxmaya plug-in.
+``cgmath.formats.save_fbx(path, hierarchy)`` writes a HierarchyData of
+joints and transforms, ``save_fbx(path, clip=clip)`` a ClipData's nodes and
+its take, ``meshes=`` each mesh as the shape of the node its ``parent_uuid``
+names; ``cgmath.formats.load_fbx(path)`` gives ``(hierarchy, clip, meshes,
+skins, uvs)`` back, None for what the file holds none of. A bind pose comes
+with skins only. The FBX tests need the Autodesk SDK (mayapy), the Maya
+ones a Maya with its fbxmaya plug-in.
 """
 
 import os
@@ -17,7 +19,8 @@ import numpy as np
 from cgmath.formats import load_fbx, save_fbx
 from cgmath.formats._fbx_io import load_sdk, open_fbx, typed
 from cgmath.geometry import MeshData, SkinData
-from cgmath.geometry.mesh import UVData, UVList
+from cgmath.geometry.mesh import MeshList, UVData, UVList
+from cgmath.geometry.skin_weights import SkinList
 from cgmath.hierarchy import ClipData, ClipList, HierarchyData, TransformData, generate_uuid
 
 FBX = load_sdk()
@@ -303,25 +306,26 @@ class TestArguments(_Files):
 
     def test_a_skeleton_and_a_clip_together(self):
         self.refused(NotImplementedError, "comes with skins", skeleton(), take(skeleton()))
-        self.refused(NotImplementedError, "comes with skins", skeleton=skeleton(), clip=take(skeleton()))
+        self.refused(NotImplementedError, "comes with skins", hierarchy=skeleton(), clip=take(skeleton()))
 
     def test_neither(self):
-        self.refused(TypeError, r"takes a skeleton \(a HierarchyData\) or clip=")
-        self.refused(TypeError, r"takes a skeleton \(a HierarchyData\) or clip=", None, None)
+        self.refused(TypeError, r"takes a hierarchy \(a HierarchyData\) or clip=")
+        self.refused(TypeError, r"takes a hierarchy \(a HierarchyData\) or clip=", None, None)
+        self.refused(TypeError, r"takes a hierarchy \(a HierarchyData\) or clip=", meshes=MeshList([]))
 
-    def test_a_clip_as_the_skeleton(self):
-        self.refused(TypeError, "the skeleton is a HierarchyData, not a ClipData, pass it as clip=", take(skeleton()))
-        self.refused(TypeError, "not a ClipData, pass it as clip=", skeleton=take(skeleton()))
+    def test_a_clip_as_the_hierarchy(self):
+        self.refused(TypeError, "the hierarchy is a HierarchyData, not a ClipData, pass it as clip=", take(skeleton()))
+        self.refused(TypeError, "not a ClipData, pass it as clip=", hierarchy=take(skeleton()))
 
     def test_anything_else(self):
-        self.refused(TypeError, "the clip is a ClipData, not a HierarchyData",     clip=skeleton())
-        self.refused(TypeError, "the clip is a ClipData, not a ClipList",          clip=ClipList([take(skeleton())]))
-        self.refused(TypeError, "the skeleton is a HierarchyData, not a ClipList", ClipList([take(skeleton())]))
-        self.refused(TypeError, "the skeleton is a HierarchyData, not a list",     list(skeleton()))
+        self.refused(TypeError, "the clip is a ClipData, not a HierarchyData",      clip=skeleton())
+        self.refused(TypeError, "the clip is a ClipData, not a ClipList",           clip=ClipList([take(skeleton())]))
+        self.refused(TypeError, "the hierarchy is a HierarchyData, not a ClipList", ClipList([take(skeleton())]))
+        self.refused(TypeError, "the hierarchy is a HierarchyData, not a list",     list(skeleton()))
         with self.assertRaisesRegex(NotImplementedError, "r17-skeleton"):
             ClipList([take(skeleton())]).save_fbx(self.path("x.fbx"))
         with self.assertRaises(TypeError):
-            take(skeleton()).save_fbx(self.path("x.fbx"), skeleton=skeleton())
+            take(skeleton()).save_fbx(self.path("x.fbx"), hierarchy=skeleton())
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
@@ -399,7 +403,7 @@ class TestSkeletonAlone(_Files):
         got, clip = load_fbx(self.path("a.fbx"))[:2]
         self.assertIsNone(clip)
         self.assertSameSkeleton(got, rig)
-        save_fbx(self.path("b.fbx"), skeleton=got)
+        save_fbx(self.path("b.fbx"), hierarchy=got)
         again, clip = load_fbx(self.path("b.fbx"))[:2]
         self.assertIsNone(clip)
         self.assertSameSkeleton(again, rig)
@@ -581,7 +585,7 @@ class TestPoses(_Files):
     """no save writes a pose; a file's bind pose places no node"""
 
     def test_no_save_writes_a_pose(self):
-        for label, kwargs in (("skeleton", {"skeleton": skeleton()}), ("clip", {"clip": take(skeleton())})):
+        for label, kwargs in (("hierarchy", {"hierarchy": skeleton()}), ("clip", {"clip": take(skeleton())})):
             for as_ascii in (False, True):
                 with self.subTest(label, as_ascii=as_ascii):
                     save_fbx(self.path("a.fbx"), as_ascii=as_ascii, **kwargs)
@@ -806,8 +810,10 @@ BOUND = (
     ("arm_grp", "chest", "transform", (0.0, 0.5, 0.25), (10.0, 20.0, 30.0), (1, 1, 1), (0, 0, 0), (0, 0, 0), 5, False),
     ("arm", "arm_grp", "joint", (0.5, 0.0, 0.0), (0, 0, 0), (1, 1, 1), (0.0, 90.0, 0.0), (0.0, 0.0, 10.0), 0, False),
     ("hand", "arm", "joint", (0.75, 0.0, 0.0), (0, 0, 0), (0.9, 1.1, 1.0), (0, 0, 0), (0, 0, 0), 5, True),
+    ("prop", "arm_grp", "transform", (0.0, 0.5, 0.0), (0.0, 10.0, 0.0), (1, 1, 1), (0, 0, 0), (0, 0, 0), 3, False),
     ("leg", "hips", "joint", (0.0, -0.5, 0.5), (0, 0, 0), (1, 1, 1), (0.0, 0.0, -90.0), (0, 0, 0), 4, False),
     ("foot", "leg", "joint", (1.0, 0.0, 0.0), (0, 0, 0), (1.3, 0.7, 1.0), (0, 0, 0), (0, 0, 0), 2, False),
+    ("geo", None, "transform", (0, 0, 0), (0, 0, 0), (1, 1, 1), (0, 0, 0), (0, 0, 0), 0, False),
 )
 
 # the skin's influences, leaves among them
@@ -818,7 +824,9 @@ TAKE       = 15
 
 def bound() -> HierarchyData:
     """joints and transforms, joint orients, rotate axes, every rotate order,
-    segment scale compensate on and off, uneven scales on the leaves"""
+    segment scale compensate on and off, uneven scales on the leaves; geo, a
+    root transform at identity, the skinned mesh's node; prop, a leaf
+    transform under arm_grp, a mesh's node the clip moves"""
     uuids = {}
     nodes = []
     for name, parent, kind, t, r, s, jo, ra, order, ssc in BOUND:
@@ -844,7 +852,7 @@ def bound() -> HierarchyData:
 
 def motion(rig: HierarchyData) -> ClipData:
     """15 frames: uniform scale on root, spine and arm (each with children),
-    uneven scale on the leaves head, hand and foot, rotation and
+    uneven scale on the leaves head, hand, foot and prop, rotation and
     translation"""
     clip = ClipData(rig, frames=TAKE, start_frame=START, fps=FPS, take="bend")
     f    = np.arange(TAKE, dtype=np.float64)[:, None]
@@ -862,15 +870,21 @@ def motion(rig: HierarchyData) -> ClipData:
     clip.frames["head"].scale        = np.hstack([1.0 + f * 0.01, 1.2 - f * 0.02, 0.8 + f * 0.005])
     clip.frames["hand"].scale        = np.hstack([0.9 + f * 0.02, 1.1 + f * 0.0, 1.0 - f * 0.03])
     clip.frames["foot"].scale        = np.hstack([1.3 - f * 0.01, 0.7 + f * 0.02, 1.0 + f * 0.01])
-    clip.frames["hips"].weight       = 0.5 + f * 0.05
-    clip.frame = 0
+    # prop's first frame is its bind value: Maya's dagPose lists the
+    # influences and their parents only, so Maya's FBXExport writes a leaf
+    # transform at the playhead (measured)
+    clip.frames["prop"].rotate = np.hstack([f * 4.0, 10.0 + f * 0.0, -f * 1.5])
+    clip.frames["prop"].scale  = np.hstack([1.0 + f * 0.02, 1.0 - f * 0.01, 1.0 + f * 0.015])
+    clip.frames["hips"].weight = 0.5 + f * 0.05
+    clip.frame                 = 0
     return clip
 
 
-def body() -> MeshData:
+def body(parent=None) -> MeshData:
     """a tube of 24 rings of 12 points up the skeleton, quads and, every
     third quad split in two, triangles; float32 points, as Maya holds them;
-    each corner's normal its point's, a triangle's corners their face's"""
+    each corner's normal its point's, a triangle's corners their face's; on
+    the node of uuid ``parent``"""
     rings, around = 24, 12
     turn   = np.linspace(0.0, 2.0 * np.pi, around, endpoint=False)
     height = np.linspace(0.5, 6.0, rings)
@@ -907,25 +921,49 @@ def body() -> MeshData:
         indices        = np.array(indices, dtype=np.int32),
         normals        = at_float32(normals),
         normal_indices = np.array(ids, dtype=np.int32),
+        parent_uuid    = parent,
+    )
+
+
+def tetra(parent=None) -> MeshData:
+    """four triangles over four points, a normal a face, a tenth of UNIT
+    across; on the node of uuid ``parent``"""
+    points  = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float64) * (UNIT / 10.0)
+    faces   = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], dtype=np.int32)
+    normals = []
+    for face in faces:
+        p      = points[face]
+        normal = np.cross(p[1] - p[0], p[2] - p[0])
+        normals.append(normal / np.linalg.norm(normal))
+    return MeshData(
+        name           = "tetra",
+        points         = at_float32(points),
+        counts         = np.full(4, 3, dtype=np.int32),
+        indices        = faces.ravel(),
+        normals        = at_float32(np.array(normals)),
+        normal_indices = np.repeat(np.arange(4, dtype=np.int32), 3),
+        parent_uuid    = parent,
     )
 
 
 def weighed(mesh: MeshData) -> SkinData:
     """1 to 4 influences a point, 0.1 and over before normalizing; zeros
-    elsewhere"""
+    elsewhere; naming ``mesh`` by its uuid"""
     rng     = np.random.default_rng(7)
     weights = np.zeros((mesh.point_count, len(INFLUENCES)))
     for row in range(mesh.point_count):
         picked               = rng.choice(len(INFLUENCES), size=rng.integers(1, 5), replace=False)
         values               = 0.1 + rng.random(len(picked))
         weights[row, picked] = values / values.sum()
-    return SkinData(weights=weights, influences=list(INFLUENCES), name="bodySkin")
+    return SkinData(weights=weights, influences=list(INFLUENCES), name="bodySkin", mesh_uuid=mesh.uuid)
 
 
 def bundle() -> dict:
+    """save_fbx's arguments: the bind pose, its clip, body() on geo and its
+    skin"""
     rig  = bound()
-    mesh = body()
-    return {"skeleton": rig, "clip": motion(bound()), "mesh": mesh, "skin": weighed(mesh)}
+    mesh = body(rig["geo"].uuid)
+    return {"hierarchy": rig, "clip": motion(bound()), "meshes": mesh, "skins": weighed(mesh)}
 
 
 def _named(scene, name):
@@ -960,6 +998,11 @@ class _Skinned(_Files):
             self.assertEqual(a.dtype, b.dtype, field)
             np.testing.assert_array_equal(a, b, err_msg=field)
 
+    def assertOn(self, mesh, nodes, name):
+        """``mesh`` names, by ``parent_uuid``, the node of ``nodes`` called ``name``"""
+        self.assertEqual(nodes[mesh.parent_uuid].name, name)
+        self.assertIs(mesh.transform(nodes), nodes[name])
+
     def assertSameSkin(self, got, want):
         self.assertEqual(got.name, want.name)
         self.assertEqual(list(got.influences), list(want.influences))
@@ -978,8 +1021,9 @@ class _Skinned(_Files):
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
 class TestSkin(_Skinned):
-    """save_fbx(path, skeleton, clip, mesh, skin): the skeleton the bind pose,
-    one skin, one bind pose; load_fbx gives the four back"""
+    """save_fbx(path, hierarchy, clip, meshes, skins): the hierarchy the bind
+    pose, the mesh on its node geo, one skin, one bind pose; load_fbx gives
+    the four back"""
 
     def test_round_trip(self):
         source = bundle()
@@ -1000,28 +1044,39 @@ class TestSkin(_Skinned):
         found = counts(self.path("a.fbx"))
         self.assertEqual((found["poses"], found["stacks"], found["curves"]), (1, 1, curve_count(source["clip"])))
         first = load_fbx(self.path("a.fbx"))
-        self.assertEqual(first._fields, ("skeleton", "clip", "mesh", "skin", "uvs"))
-        self.assertSameSkeleton(first.skeleton, source["skeleton"])
-        self.assertSameMesh(first.mesh, source["mesh"])
-        self.assertSameSkin(first.skin, source["skin"])
+        self.assertEqual(first._fields, ("hierarchy", "clip", "meshes", "skins", "uvs"))
+        self.assertSameSkeleton(first.hierarchy, source["hierarchy"])
+        self.assertIsInstance(first.meshes, MeshList)
+        self.assertIsInstance(first.skins, SkinList)
+        self.assertEqual((len(first.meshes), len(first.skins), first.uvs), (1, 1, None))
+        self.assertSameMesh(first.meshes[0], source["meshes"])
+        self.assertSameSkin(first.skins[0], source["skins"])
         self.assertFloat32Clip(first.clip, source["clip"])
+        # the mesh on geo, in the bind pose and in the clip alike; its skin
+        # naming it
+        self.assertOn(first.meshes[0], first.hierarchy, "geo")
+        self.assertOn(first.meshes[0], first.clip, "geo")
+        self.assertEqual(first.skins[0].mesh_uuid, first.meshes[0].uuid)
 
         save_fbx(self.path("b.fbx"), *first)
         second = load_fbx(self.path("b.fbx"))
-        self.assertSameSkeleton(second.skeleton, first.skeleton)
-        self.assertSameMesh(second.mesh, first.mesh)
-        self.assertSameSkin(second.skin, first.skin)
+        self.assertSameSkeleton(second.hierarchy, first.hierarchy)
+        self.assertSameMesh(second.meshes[0], first.meshes[0])
+        self.assertSameSkin(second.skins[0], first.skins[0])
         self.assertSameClip(second.clip, first.clip)
+        self.assertOn(second.meshes[0], second.hierarchy, "geo")
 
     def test_the_file_holds_one_skin_its_clusters_and_one_bind_pose(self):
         source = bundle()
         save_fbx(self.path("a.fbx"), **source)
-        worlds = np.asarray(source["skeleton"].world_matrix)
-        place  = {name: i for i, name in enumerate(source["skeleton"].name)}
+        worlds = np.asarray(source["hierarchy"].world_matrix)
+        place  = {name: i for i, name in enumerate(source["hierarchy"].name)}
         with open_fbx(self.path("a.fbx"), FBX) as scene:
-            node  = _named(scene, "body")
+            # the mesh is the shape of geo, named after the mesh
+            node  = _named(scene, "geo")
             shape = typed(node.GetNodeAttribute(), FBX.FbxMesh, FBX)
-            kind  = FBX.FbxDeformer.EDeformerType.eSkin
+            self.assertEqual(str(shape.GetName()), "body")
+            kind = FBX.FbxDeformer.EDeformerType.eSkin
             self.assertEqual(shape.GetDeformerCount(kind), 1)
             skin = typed(shape.GetDeformer(0, kind), FBX.FbxSkin, FBX)
             self.assertEqual(str(skin.GetName()), "bodySkin")
@@ -1029,7 +1084,7 @@ class TestSkin(_Skinned):
             for k, name in enumerate(INFLUENCES):
                 cluster = skin.GetCluster(k)
                 self.assertEqual(str(cluster.GetLink().GetName()), name)
-                column = source["skin"].weights[:, k]
+                column = source["skins"].weights[:, k]
                 np.testing.assert_array_equal(cluster.GetControlPointIndices(), np.flatnonzero(column))
                 np.testing.assert_array_equal(cluster.GetControlPointWeights(), column[column != 0.0])
                 linked, placed = FBX.FbxAMatrix(), FBX.FbxAMatrix()
@@ -1040,15 +1095,15 @@ class TestSkin(_Skinned):
             self.assertEqual(scene.GetPoseCount(), 1)
             pose = scene.GetPose(0)
             self.assertTrue(pose.IsBindPose())
-            self.assertEqual(pose.GetCount(), len(BOUND) + 1)
+            self.assertEqual(pose.GetCount(), len(BOUND))
             held = {str(pose.GetNode(k).GetName()): _matrix(pose.GetMatrix(k)) for k in range(pose.GetCount())}
-            np.testing.assert_array_equal(held.pop("body"), np.eye(4))
+            self.assertEqual(sorted(held), sorted(place))
             for name, matrix in held.items():
                 np.testing.assert_array_equal(matrix, worlds[place[name]], err_msg=name)
-            # the nodes hold the skeleton's own values, the take moves them
+            # the nodes hold the hierarchy's own values, the take moves them
             for name, *_ in BOUND:
                 np.testing.assert_array_equal(
-                    tuple(_named(scene, name).LclTranslation.Get()), source["skeleton"][name].translate
+                    tuple(_named(scene, name).LclTranslation.Get()), source["hierarchy"][name].translate
                 )
 
     def test_a_skin_without_a_take(self):
@@ -1056,15 +1111,16 @@ class TestSkin(_Skinned):
         del source["clip"]
         save_fbx(self.path("a.fbx"), **source)
         self.assertEqual(counts(self.path("a.fbx"))["curves"], 0)
-        rig, clip, mesh, skin, uvs = load_fbx(self.path("a.fbx"))
+        rig, clip, meshes, skins, uvs = load_fbx(self.path("a.fbx"))
         self.assertEqual((clip, uvs), (None, None))
-        self.assertSameSkeleton(rig, source["skeleton"])
-        self.assertSameMesh(mesh, source["mesh"])
-        self.assertSameSkin(skin, source["skin"])
+        self.assertSameSkeleton(rig, source["hierarchy"])
+        self.assertSameMesh(meshes[0], source["meshes"])
+        self.assertSameSkin(skins[0], source["skins"])
+        self.assertOn(meshes[0], rig, "geo")
 
     def test_the_bind_pose_places_nodes_their_own_values_do_not(self):
         """Maya's FBXExport writes the nodes at the playhead: the bind pose's
-        matrices give the skeleton back"""
+        matrices give the hierarchy back, the skinned mesh's node at identity"""
         source = bundle()
         save_fbx(self.path("a.fbx"), **source)
 
@@ -1072,44 +1128,100 @@ class TestSkin(_Skinned):
             _named(scene, "spine").LclRotation.Set(FBX.FbxDouble3(40.0, -20.0, 7.0))
             _named(scene, "root").LclScaling.Set(FBX.FbxDouble3(2.0, 2.0, 2.0))
             _named(scene, "hand").LclScaling.Set(FBX.FbxDouble3(3.0, 1.0, 1.0))
+            _named(scene, "geo").LclTranslation.Set(FBX.FbxDouble3(0.0, 1.0, 0.0))
 
-        rig = load_fbx(_edited(self.path("a.fbx"), self.path("moved.fbx"), moved)).skeleton
-        self.assertSameSkeleton(rig, source["skeleton"], exact=False, atol=1e-9)
-        np.testing.assert_allclose(rig.world_matrix, source["skeleton"].world_matrix, rtol=0, atol=1e-12)
+        got = load_fbx(_edited(self.path("a.fbx"), self.path("moved.fbx"), moved))
+        self.assertSameSkeleton(got.hierarchy, source["hierarchy"], exact=False, atol=1e-9)
+        np.testing.assert_allclose(got.hierarchy.world_matrix, source["hierarchy"].world_matrix, rtol=0, atol=1e-12)
+        np.testing.assert_array_equal(got.meshes[0].world_matrix(got.hierarchy), np.eye(4))
 
-    def test_mesh_alone_and_beside_a_clip_or_a_skeleton(self):
+    def test_mesh_alone_and_beside_a_clip_or_a_hierarchy(self):
+        # a mesh on no node: the shape of a root node at identity named after it
         mesh = body()
-        save_fbx(self.path("mesh.fbx"), mesh=mesh)
+        self.assertIsNone(mesh.parent_uuid)
+        save_fbx(self.path("mesh.fbx"), meshes=mesh)
         self.assertEqual(counts(self.path("mesh.fbx")), {"poses": 0, "stacks": 0, "layers": 0, "curve nodes": 0, "curves": 0})
         got = load_fbx(self.path("mesh.fbx"))
-        self.assertEqual((got.skeleton, got.clip, got.skin), (None, None, None))
-        self.assertSameMesh(got.mesh, mesh)
-        save_fbx(self.path("again.fbx"), mesh=got.mesh)
-        self.assertSameMesh(load_fbx(self.path("again.fbx")).mesh, got.mesh)
+        self.assertEqual((got.clip, got.skins, got.uvs), (None, None, None))
+        self.assertEqual(got.hierarchy.name, ["body"])
+        node = got.hierarchy["body"]
+        self.assertEqual((node.node_type, node.parent_name), ("transform", None))
+        np.testing.assert_array_equal(node.world_matrix, np.eye(4))
+        self.assertSameMesh(got.meshes[0], mesh)
+        self.assertOn(got.meshes[0], got.hierarchy, "body")
+        np.testing.assert_array_equal(got.meshes[0].world_matrix(got.hierarchy), np.eye(4))
+        save_fbx(self.path("again.fbx"), *got)
+        again = load_fbx(self.path("again.fbx"))
+        self.assertSameMesh(again.meshes[0], got.meshes[0])
+        self.assertOn(again.meshes[0], again.hierarchy, "body")
         # the class routes
         mesh.save_fbx(self.path("route.fbx"))
-        self.assertSameMesh(load_fbx(self.path("route.fbx")).mesh, mesh)
+        self.assertSameMesh(load_fbx(self.path("route.fbx")).meshes[0], mesh)
+        MeshList([mesh, tetra()]).save_fbx(self.path("routes.fbx"))
+        got = load_fbx(self.path("routes.fbx"))
+        self.assertEqual((got.hierarchy.name, [m.name for m in got.meshes]), (["body", "tetra"], ["body", "tetra"]))
 
+        # on a node of the clip
         clip = motion(bound())
-        save_fbx(self.path("clip.fbx"), clip=clip, mesh=mesh)
+        mesh = body(clip["geo"].uuid)
+        save_fbx(self.path("clip.fbx"), clip=clip, meshes=mesh)
         found = counts(self.path("clip.fbx"))
         self.assertEqual((found["poses"], found["curves"]), (0, curve_count(clip)))
-        rig, back, held, skin, uvs = load_fbx(self.path("clip.fbx"))
-        self.assertEqual((rig, skin, uvs), (None, None, None))
+        rig, back, held, skins, uvs = load_fbx(self.path("clip.fbx"))
+        self.assertEqual((rig, skins, uvs), (None, None, None))
         self.assertFloat32Clip(back, clip)
-        self.assertSameMesh(held, mesh)
+        self.assertSameMesh(held[0], mesh)
+        self.assertOn(held[0], back, "geo")
         self.assertEqual(ClipData.load_fbx(self.path("clip.fbx")).name, back.name)
-        save_fbx(self.path("clip2.fbx"), clip=back, mesh=held)
+        save_fbx(self.path("clip2.fbx"), clip=back, meshes=held)
         again = load_fbx(self.path("clip2.fbx"))
         self.assertSameClip(again.clip, back)
-        self.assertSameMesh(again.mesh, held)
+        self.assertSameMesh(again.meshes[0], held[0])
+        self.assertOn(again.meshes[0], again.clip, "geo")
 
-        rig = bound()
-        save_fbx(self.path("rig.fbx"), rig, mesh=mesh)
+        # on a node of the hierarchy
+        rig  = bound()
+        mesh = body(rig["geo"].uuid)
+        save_fbx(self.path("rig.fbx"), rig, meshes=mesh)
         got = load_fbx(self.path("rig.fbx"))
-        self.assertEqual((got.clip, got.skin), (None, None))
-        self.assertSameSkeleton(got.skeleton, rig)
-        self.assertSameMesh(got.mesh, mesh)
+        self.assertEqual((got.clip, got.skins), (None, None))
+        self.assertSameSkeleton(got.hierarchy, rig)
+        self.assertSameMesh(got.meshes[0], mesh)
+        self.assertOn(got.meshes[0], got.hierarchy, "geo")
+
+    def test_two_meshes_on_two_nodes_one_animated(self):
+        """body() on geo and tetra() on prop, a leaf transform the clip turns
+        and scales unevenly: both back on their nodes, the second cycle bit
+        for bit; a mesh naming a node the file does not hold goes on a root"""
+        clip   = motion(bound())
+        meshes = MeshList([body(clip["geo"].uuid), tetra(clip["prop"].uuid)])
+        self.assertGreater(np.ptp(np.asarray(clip.frames.world_matrix)[:, clip.name.index("prop")]), UNIT)
+        save_fbx(self.path("a.fbx"), clip=clip, meshes=meshes)
+        first = load_fbx(self.path("a.fbx"))
+        self.assertEqual((first.hierarchy, first.skins, first.uvs), (None, None, None))
+        self.assertFloat32Clip(first.clip, clip)
+        # the meshes come back in their nodes' order: prop ahead of geo
+        self.assertEqual([mesh.name for mesh in first.meshes], ["tetra", "body"])
+        for got, want, name in zip(first.meshes, meshes[::-1], ("prop", "geo")):
+            self.assertSameMesh(got, want)
+            self.assertOn(got, first.clip, name)
+        save_fbx(self.path("b.fbx"), *first)
+        second = load_fbx(self.path("b.fbx"))
+        self.assertSameClip(second.clip, first.clip)
+        for got, want, name in zip(second.meshes, first.meshes, ("prop", "geo")):
+            self.assertSameMesh(got, want)
+            self.assertOn(got, second.clip, name)
+        # the node readers keep the meshes' nodes
+        self.assertEqual(HierarchyData.load_fbx(self.path("a.fbx")).name, clip.name)
+        self.assertEqual(ClipData.load_fbx(self.path("a.fbx")).name, clip.name)
+        # a mesh naming a node of another rig: a root node of its own
+        stray = MeshList([body(clip["geo"].uuid), tetra(bound()["prop"].uuid)])
+        save_fbx(self.path("stray.fbx"), clip=clip, meshes=stray)
+        got = load_fbx(self.path("stray.fbx"))
+        self.assertEqual(got.clip.name, clip.name + ["tetra"])
+        self.assertOn(got.meshes[0], got.clip, "geo")
+        self.assertOn(got.meshes[1], got.clip, "tetra")
+        np.testing.assert_array_equal(got.meshes[1].world_matrix(got.clip), np.eye(4))
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
@@ -1119,34 +1231,74 @@ class TestSkinRefusals(_Skinned):
             save_fbx(self.path("refused.fbx"), **kwargs)
         self.assertFalse(os.path.exists(self.path("refused.fbx")))
 
-    def test_a_skin_needs_its_skeleton_and_its_mesh(self):
+    def test_a_skin_needs_its_hierarchy_and_its_mesh(self):
         source = bundle()
-        self.refused(TypeError, r"missing: skeleton \(a HierarchyData, the bind pose\)$", mesh=source["mesh"], skin=source["skin"])
-        self.refused(TypeError, r"missing: mesh=$", skeleton=source["skeleton"], skin=source["skin"])
-        self.refused(TypeError, "missing: skeleton .* and mesh=", clip=source["clip"], skin=source["skin"])
-        self.refused(TypeError, "the mesh is a MeshData, not a list", mesh=[source["mesh"]])
-        self.refused(TypeError, "the skin is a SkinData, not a MeshData", skeleton=source["skeleton"], mesh=source["mesh"], skin=source["mesh"])
-        # a skeleton and a clip without a skin
-        self.refused(NotImplementedError, "comes with skins", skeleton=source["skeleton"], clip=source["clip"], mesh=source["mesh"])
+        self.refused(TypeError, r"missing: hierarchy \(a HierarchyData, the bind pose\)$", meshes=source["meshes"], skins=source["skins"])
+        self.refused(TypeError, r"missing: meshes=$", hierarchy=source["hierarchy"], skins=source["skins"])
+        self.refused(TypeError, "missing: hierarchy .* and meshes=", clip=source["clip"], skins=source["skins"])
+        self.refused(TypeError, "the meshes are a MeshList or a MeshData, not a list",   meshes=[source["meshes"]])
+        self.refused(TypeError, "the meshes are a MeshList or a MeshData, not a UVList", meshes=maps(source["meshes"]))
+        self.refused(TypeError, "the meshes are a MeshList or a MeshData, not a UVData", meshes=maps(source["meshes"])[0])
+        self.refused(TypeError, "the skins are a SkinList or a SkinData, not a MeshData", hierarchy=source["hierarchy"], meshes=source["meshes"], skins=source["meshes"])
+        self.refused(TypeError, "the skins are a SkinList or a SkinData, not a list", hierarchy=source["hierarchy"], meshes=source["meshes"], skins=[source["skins"]])
+        # a hierarchy and a clip without a skin
+        self.refused(NotImplementedError, "comes with skins", hierarchy=source["hierarchy"], clip=source["clip"], meshes=source["meshes"])
+        self.refused(NotImplementedError, "comes with skins", hierarchy=source["hierarchy"], clip=source["clip"], meshes=source["meshes"], skins=SkinList([]))
 
     def test_influences_and_weights(self):
         source          = bundle()
-        skin            = source["skin"]
+        skin            = source["skins"]
         skin.influences = ["hips", "spine", "chest", "head", "arm", "hand", "leg", "toe"]
-        self.refused(ValueError, r"skin 'bodySkin' names no node of the skeleton: influences \['toe'\]", **source)
-        source                 = bundle()
-        source["skin"].weights = source["skin"].weights[:-1]
+        self.refused(ValueError, r"skin 'bodySkin' names no node of the hierarchy: influences \['toe'\]", **source)
+        source                  = bundle()
+        source["skins"].weights = source["skins"].weights[:-1]
         self.refused(ValueError, "skin 'bodySkin' channel 'weights' holds 287 rows, mesh 'body' holds 288 points", **source)
-        source                 = bundle()
-        source["skin"].weights = source["skin"].weights[:, :-1]
+        source                  = bundle()
+        source["skins"].weights = source["skins"].weights[:, :-1]
         self.refused(ValueError, "holds 7 columns for its 8 influences", **source)
+
+    def test_the_skin_s_mesh_and_node(self):
+        source                    = bundle()
+        source["skins"].mesh_uuid = None
+        self.refused(ValueError, "skin 'bodySkin' names no mesh of meshes=: mesh_uuid None", **source)
+        source                    = bundle()
+        source["skins"].mesh_uuid = generate_uuid()
+        self.refused(ValueError, "skin 'bodySkin' names no mesh of meshes=: mesh_uuid '", **source)
+        # one skin a mesh
+        source          = bundle()
+        source["skins"] = SkinList([source["skins"], weighed(source["meshes"])])
+        self.refused(ValueError, "skins 'bodySkin' and 'bodySkin' both name mesh 'body'; a mesh holds one skin", **source)
+        # a skinned mesh on a node that is not at identity
+        source           = bundle()
+        source["meshes"] = body(source["hierarchy"]["arm_grp"].uuid)
+        source["skins"]  = weighed(source["meshes"])
+        self.refused(ValueError, "skin 'bodySkin' binds mesh 'body' on node 'arm_grp', whose world is", **source)
+        # on no node: a root node at identity, bound
+        source           = bundle()
+        source["meshes"] = body()
+        source["skins"]  = weighed(source["meshes"])
+        save_fbx(self.path("rooted.fbx"), **source)
+        got = load_fbx(self.path("rooted.fbx"))
+        self.assertEqual(got.hierarchy.name, [row[0] for row in BOUND] + ["body"])
+        self.assertOn(got.meshes[0], got.hierarchy, "body")
+        self.assertSameSkin(got.skins[0], source["skins"])
+        self.assertEqual(counts(self.path("rooted.fbx"))["poses"], 1)
 
     def test_the_mesh(self):
         mesh              = body()
         mesh.hole_faces   = np.array([0],       dtype=np.int32)
         mesh.hole_counts  = np.array([3],       dtype=np.int32)
         mesh.hole_indices = np.array([0, 1, 2], dtype=np.int32)
-        self.refused(ValueError, "mesh 'body' holds 1 polygon holes", mesh=mesh)
+        self.refused(ValueError, "mesh 'body' holds 1 polygon holes", meshes=mesh)
+        # a node holds one mesh, and a joint none (measured: Maya's FBXExport
+        # and FBXImport both drop a mesh on a joint)
+        rig = bound()
+        self.refused(ValueError, "mesh 'body' and mesh 'tetra' sit on node 'geo'; a node holds one mesh", hierarchy=rig, meshes=MeshList([body(rig["geo"].uuid), tetra(rig["geo"].uuid)]))
+        self.refused(ValueError, "mesh 'tetra' sits on joint 'hand'; Maya's FBX holds a mesh on a transform only", hierarchy=rig, meshes=tetra(rig["hand"].uuid))
+        self.refused(ValueError, "the unnamed mesh on node 'hand' sits on joint 'hand'", clip=motion(rig), meshes=MeshData(points=tetra().points, counts=tetra().counts, indices=tetra().indices, parent_uuid=rig["hand"].uuid))
+        # two meshes on no node are two root nodes
+        save_fbx(self.path("two.fbx"), hierarchy=rig, meshes=MeshList([body(), tetra()]))
+        self.assertEqual(load_fbx(self.path("two.fbx")).hierarchy.name, [row[0] for row in BOUND] + ["body", "tetra"])
 
     def test_a_clip_that_is_not_the_skeleton_s(self):
         def other(edit):
@@ -1169,34 +1321,21 @@ class TestSkinRefusals(_Skinned):
                 self.refused(ValueError, f"node '{node}' channel '{channel}'", **other(edit))
         source                     = bundle()
         source["clip"]["leg"].name = "thigh"
-        self.refused(ValueError, "the clip's nodes .* are not the skeleton's", **source)
+        self.refused(ValueError, "the clip's nodes .* are not the hierarchy's", **source)
 
     def write_bad(self, name: str, edit) -> str:
         save_fbx(self.path("good.fbx"), **bundle())
         return _edited(self.path("good.fbx"), self.path(name), edit)
 
     def test_load_refusals(self):
-        def two_meshes(scene):
-            node  = FBX.FbxNode.Create(scene, "other")
-            shape = FBX.FbxMesh.Create(scene, "otherShape")
-            shape.InitControlPoints(3)
-            for i in range(3):
-                shape.SetControlPointAt(FBX.FbxVector4(float(i), float(i % 2), 0.0, 1.0), i)
-            shape.BeginPolygon(-1, -1, -1, False)
-            for i in range(3):
-                shape.AddPolygon(i)
-            shape.EndPolygon()
-            node.SetNodeAttribute(shape)
-            scene.GetRootNode().AddChild(node)
-
         def two_poses(scene):
             pose = FBX.FbxPose.Create(scene, "again")
             pose.SetIsBindPose(True)
-            pose.Add(_named(scene, "body"), FBX.FbxMatrix())
+            pose.Add(_named(scene, "geo"), FBX.FbxMatrix())
             scene.AddPose(pose)
 
         def two_skins(scene):
-            shape   = typed(_named(scene, "body").GetNodeAttribute(), FBX.FbxMesh, FBX)
+            shape   = typed(_named(scene, "geo").GetNodeAttribute(), FBX.FbxMesh, FBX)
             skin    = FBX.FbxSkin.Create(scene, "again")
             cluster = FBX.FbxCluster.Create(scene, "again")
             cluster.SetLink(_named(scene, "hips"))
@@ -1204,24 +1343,42 @@ class TestSkinRefusals(_Skinned):
             skin.AddCluster(cluster)
             shape.AddDeformer(skin)
 
-        def moved(scene):
-            _named(scene, "body").LclTranslation.Set(FBX.FbxDouble3(0.0, 1.0, 0.0))
+        def bound_off(scene):
+            """the bind pose lists geo, the skinned mesh's node, elsewhere"""
+            old  = scene.GetPose(0)
+            pose = FBX.FbxPose.Create(scene, "bind")
+            pose.SetIsBindPose(True)
+            for k in range(old.GetCount()):
+                node   = old.GetNode(k)
+                matrix = old.GetMatrix(k)
+                if str(node.GetName()) == "geo":
+                    matrix.Set(3, 1, 1.0)
+                pose.Add(node, matrix)
+            self.assertTrue(scene.RemovePose(0))
+            scene.AddPose(pose)
+
+        def cluster_off(scene):
+            shape = typed(_named(scene, "geo").GetNodeAttribute(), FBX.FbxMesh, FBX)
+            skin  = typed(shape.GetDeformer(0, FBX.FbxDeformer.EDeformerType.eSkin), FBX.FbxSkin, FBX)
+            moved = FBX.FbxAMatrix()
+            moved.SetT(FBX.FbxVector4(0.0, 1.0, 0.0, 1.0))
+            skin.GetCluster(2).SetTransformMatrix(moved)
 
         def offset(scene):
-            _named(scene, "body").SetGeometricRotation(FBX.FbxNode.EPivotSet.eSourcePivot, FBX.FbxVector4(0.0, 90.0, 0.0))
+            _named(scene, "geo").SetGeometricRotation(FBX.FbxNode.EPivotSet.eSourcePivot, FBX.FbxVector4(0.0, 90.0, 0.0))
 
-        for name, edit, error, message in (
-            ("two_meshes", two_meshes, NotImplementedError, r"holds 2 meshes \['body', 'other'\]"),
-            ("two_poses", two_poses, ValueError, "mesh 'body' is listed by 2 bind poses"),
-            ("two_skins", two_skins, ValueError, "mesh 'body' holds 2 skin deformers"),
-            ("moved", moved, ValueError, "mesh 'body' channel 'matrix'"),
-            ("offset", offset, ValueError, "mesh 'body' channel 'matrix'"),
+        for name, edit, message in (
+            ("two_poses", two_poses, "mesh 'body' is listed by 2 bind poses"),
+            ("two_skins", two_skins, "mesh 'body' holds 2 skin deformers"),
+            ("bound_off", bound_off, "the bind pose places node 'geo', which holds mesh 'body', at"),
+            ("cluster_off", cluster_off, "skin 'bodySkin' binds mesh 'body' at"),
+            ("offset", offset, "mesh 'body' channel 'geometric transform'"),
         ):
             with self.subTest(name):
                 path = self.write_bad(f"{name}.fbx", edit)
-                with self.assertRaisesRegex(error, message):
+                with self.assertRaisesRegex(ValueError, message):
                     load_fbx(path)
-                # the clip and node readers leave the meshes and skins out
+                # the clip and node readers leave the meshes and skins unread
                 good = load_fbx(self.path("good.fbx"))
                 self.assertSameClip(ClipData.load_fbx(path), good.clip)
                 self.assertEqual(HierarchyData.load_fbx(path).name, [row[0] for row in BOUND])
@@ -1256,7 +1413,8 @@ class TestMayaSkin(_InMaya, _Skinned):
         back = load_fbx(self.path("a.fbx"))
         self.imported(self.path("a.fbx"))
 
-        path     = self.mesh_path("body")
+        # the mesh is geo's shape
+        path     = self.mesh_path("geo")
         clusters = cmds.ls(type="skinCluster")
         self.assertEqual(len(clusters), 1)
         self.assertEqual(cmds.ls(cmds.listHistory(path.fullPathName()), type="skinCluster"), clusters)
@@ -1268,56 +1426,70 @@ class TestMayaSkin(_InMaya, _Skinned):
         chosen.add(clusters[0])
         skin       = oma.MFnSkinCluster(chosen.getDependNode(0))
         influences = [x.partialPathName() for x in skin.influenceObjects()]
-        self.assertEqual(influences, list(source["skin"].influences))
+        self.assertEqual(influences, list(source["skins"].influences))
         every = om.MFnSingleIndexedComponent()
         part  = every.create(om.MFn.kMeshVertComponent)
-        every.setCompleteData(source["mesh"].point_count)
+        every.setCompleteData(source["meshes"].point_count)
         weights, _ = skin.getWeights(path, part)
-        weights = np.array(weights).reshape(source["mesh"].point_count, len(influences))
-        np.testing.assert_allclose(weights, source["skin"].weights, rtol=0, atol=1e-6)
-        worlds = np.asarray(source["skeleton"].world_matrix)
+        weights = np.array(weights).reshape(source["meshes"].point_count, len(influences))
+        np.testing.assert_allclose(weights, source["skins"].weights, rtol=0, atol=1e-6)
+        worlds = np.asarray(source["hierarchy"].world_matrix)
         for k, joint in enumerate(skin.influenceObjects()):
             index    = skin.indexForInfluenceObject(joint)
             prebind  = np.array(cmds.getAttr(f"{clusters[0]}.bindPreMatrix[{index}]")).reshape(4, 4)
-            expected = np.linalg.inv(worlds[source["skeleton"].name.index(influences[k])])
+            expected = np.linalg.inv(worlds[source["hierarchy"].name.index(influences[k])])
             near(prebind, expected, err_msg=influences[k])
 
         # THE SKIN DEFORMATION: cgmath's linear blend skinning of the re-read
-        # mesh, by the re-read clip, bound to the re-read skeleton
-        deformer = SkinDeformData(back.mesh, back.skin, bind_rig=back.skeleton)
+        # mesh, by the re-read clip, bound to the re-read hierarchy
+        deformer = SkinDeformData(back.meshes[0], back.skins[0], bind_rig=back.hierarchy)
         wanted   = deformer.apply(back.clip.frames)
-        self.assertEqual(wanted.shape, (TAKE, source["mesh"].point_count, 3))
+        self.assertEqual(wanted.shape, (TAKE, source["meshes"].point_count, 3))
         for f in range(TAKE):
             cmds.currentTime(START + f)
             got = np.array([tuple(p)[:3] for p in om.MFnMesh(path).getPoints(om.MSpace.kWorld)])
             near(got, wanted[f], err_msg=f"frame {START + f}")
         # the deformation is no stand-still: the points move by whole units
-        self.assertGreater(float(np.abs(wanted[-1] - source["mesh"].points).max()), 2.0 * UNIT)
+        self.assertGreater(float(np.abs(wanted[-1] - source["meshes"].points).max()), 2.0 * UNIT)
 
-    def test_maya_imports_the_unskinned_mesh_at_identity_with_its_normals(self):
+    def test_maya_imports_two_meshes_on_their_nodes(self):
+        """body() on geo, still, and tetra() on prop, which the clip turns
+        and scales unevenly: each the shape of its node, its points and
+        normals as the mesh holds them, in the world where its node's frame
+        puts them, within 1e-6 of load_fbx's read of the same file"""
         import maya.api.OpenMaya as om
 
-        cmds = self.cmds
-        mesh = body()
-        clip = motion(bound())
-        save_fbx(self.path("a.fbx"), clip=clip, mesh=mesh)
+        cmds   = self.cmds
+        clip   = motion(bound())
+        meshes = MeshList([body(clip["geo"].uuid), tetra(clip["prop"].uuid)])
+        save_fbx(self.path("a.fbx"), clip=clip, meshes=meshes)
+        back = load_fbx(self.path("a.fbx"))
         self.imported(self.path("a.fbx"))
         self.assertEqual(cmds.ls(type="skinCluster"),    [])
         self.assertEqual(cmds.ls(type="dagPose"),        [])
         self.assertEqual(len(cmds.ls(type="animCurve")), curve_count(clip))
-        path = self.mesh_path("body")
-        self.assertIsNone(cmds.listConnections("body", type="animCurve"))
-        self.assertIsNone(cmds.listConnections(path.fullPathName(), type="animCurve"))
-        for frame in (START, START + TAKE - 1):
-            cmds.currentTime(frame)
-            np.testing.assert_array_equal(np.array(cmds.xform("body", q=True, ws=True, matrix=True)).reshape(4, 4), np.eye(4))
-        shape  = om.MFnMesh(path)
-        points = np.array([tuple(p)[:3] for p in shape.getPoints(om.MSpace.kWorld)])
-        np.testing.assert_allclose(points, mesh.points, rtol=0, atol=1e-6)
-        counts_, ids = shape.getNormalIds()
-        normals = np.array([tuple(n) for n in shape.getNormals()])
-        np.testing.assert_array_equal(np.array(counts_), mesh.counts)
-        np.testing.assert_allclose(normals[np.array(ids)], mesh.normals[mesh.normal_indices], rtol=0, atol=1e-6)
+        worlds = np.asarray(back.clip.frames.world_matrix)
+        column = {name: i for i, name in enumerate(back.clip.name)}
+        self.assertEqual([mesh.name for mesh in back.meshes], ["tetra", "body"])
+        for mesh, name in zip(meshes, ("geo", "prop")):
+            path  = self.mesh_path(name)
+            shape = om.MFnMesh(path)
+            self.assertIsNone(cmds.listConnections(path.fullPathName(), type="animCurve"))
+            points = np.array([tuple(p)[:3] for p in shape.getPoints(om.MSpace.kObject)])
+            np.testing.assert_allclose(points, mesh.points, rtol=0, atol=1e-6, err_msg=name)
+            counts_, ids = shape.getNormalIds()
+            normals = np.array([tuple(n) for n in shape.getNormals()])
+            np.testing.assert_array_equal(np.array(counts_), mesh.counts, err_msg=name)
+            np.testing.assert_allclose(normals[np.array(ids)], mesh.normals[mesh.normal_indices], rtol=0, atol=1e-6, err_msg=name)
+            for f in (0, TAKE - 1):
+                cmds.currentTime(START + f)
+                got  = np.array([tuple(p)[:3] for p in om.MFnMesh(path).getPoints(om.MSpace.kWorld)])
+                want = (np.c_[mesh.points, np.ones(len(mesh.points))] @ worlds[f, column[name]])[:, :3]
+                near(got, want, err_msg=(name, START + f))
+        # prop moves: its mesh is elsewhere on the last frame
+        prop = worlds[:, column["prop"]]
+        self.assertGreater(float(np.abs(prop[-1] - prop[0]).max()), 0.1 * UNIT)
+        np.testing.assert_array_equal(worlds[:, column["geo"]], np.broadcast_to(np.eye(4), (TAKE, 4, 4)))
 
     def test_maya_export_of_the_skin_reads_back(self):
         """Maya's FBXExport of the skinned import: load, save, load gives the
@@ -1330,25 +1502,27 @@ class TestMayaSkin(_InMaya, _Skinned):
         first = load_fbx(out)
         save_fbx(self.path("again.fbx"), *first)
         second = load_fbx(self.path("again.fbx"))
-        self.assertSameSkeleton(second.skeleton, first.skeleton)
+        self.assertSameSkeleton(second.hierarchy, first.hierarchy)
         self.assertSameClip(second.clip, first.clip)
-        self.assertSameMesh(second.mesh, first.mesh)
-        self.assertSameSkin(second.skin, first.skin)
+        self.assertSameMesh(second.meshes[0], first.meshes[0])
+        self.assertSameSkin(second.skins[0], first.skins[0])
+        self.assertOn(first.meshes[0], first.hierarchy, "geo")
+        self.assertOn(second.meshes[0], second.hierarchy, "geo")
 
         # Maya writes its bind pose in float32: the angles within 1e-6
         # radians
-        rig = source["skeleton"]
-        self.assertEqual([n.name for n in first.skeleton], [n.name for n in rig])
+        rig = source["hierarchy"]
+        self.assertEqual([n.name for n in first.hierarchy], [n.name for n in rig])
         for channel in ("translate", "rotate", "scale", "joint_orient", "rotate_axis"):
-            got, want = np.asarray(getattr(first.skeleton, channel)), np.asarray(getattr(rig, channel))
+            got, want = np.asarray(getattr(first.hierarchy, channel)), np.asarray(getattr(rig, channel))
             if channel in ("rotate", "joint_orient", "rotate_axis"):
                 got, want = np.radians(got), np.radians(want)
             near(got, want, err_msg=channel)
-        near(first.skeleton.world_matrix, rig.world_matrix)
-        self.assertEqual(sorted(first.skin.influences), sorted(INFLUENCES))
-        columns = [list(first.skin.influences).index(x) for x in INFLUENCES]
-        np.testing.assert_allclose(first.skin.weights[:, columns], source["skin"].weights, rtol=0, atol=1e-6)
-        near(first.mesh.points, source["mesh"].points)
+        near(first.hierarchy.world_matrix, rig.world_matrix)
+        self.assertEqual(sorted(first.skins[0].influences), sorted(INFLUENCES))
+        columns = [list(first.skins[0].influences).index(x) for x in INFLUENCES]
+        np.testing.assert_allclose(first.skins[0].weights[:, columns], source["skins"].weights, rtol=0, atol=1e-6)
+        near(first.meshes[0].points, source["meshes"].points)
         self.assertEqual((first.clip.start_frame, first.clip.frame_count, first.clip.fps), (START, TAKE, FPS))
 
 
@@ -1358,7 +1532,8 @@ class TestMayaSkin(_InMaya, _Skinned):
 def maps(mesh: MeshData) -> UVList:
     """two UV sets on body(): "map1" a cylinder unrolled, a seam column
     where the tube closes, "lightmap" an island a face, its UVs shuffled;
-    float64 UVs, which fbx holds as they are"""
+    float64 UVs, which fbx holds as they are; each naming ``mesh`` by its
+    uuid"""
     rings, around = 24, 12
     columns = around + 1
     grid = np.stack(
@@ -1373,14 +1548,23 @@ def maps(mesh: MeshData) -> UVList:
         if (face % columns).max() == around - 1 and (face % columns).min() == 0:
             face[face % columns == 0] += around
         start += size
-    first  = UVData(name="map1", points=grid, counts=mesh.counts.copy(), indices=corners.astype(np.int32))
+    first  = UVData(name="map1", points=grid, counts=mesh.counts.copy(), indices=corners.astype(np.int32), mesh_uuid=mesh.uuid)
 
     rng    = np.random.default_rng(11)
     total  = int(mesh.counts.sum())
     order  = rng.permutation(total)
     points = rng.random((total, 2)) * np.array([0.98, 0.97]) + 0.01
-    second = UVData(name="lightmap", points=points, counts=mesh.counts.copy(), indices=order.astype(np.int32))
+    second = UVData(name="lightmap", points=points, counts=mesh.counts.copy(), indices=order.astype(np.int32), mesh_uuid=mesh.uuid)
     return UVList([first, second])
+
+
+def islands(mesh: MeshData) -> UVData:
+    """one UV set "map1" on any mesh: an island a face, its UVs in corner
+    order; naming ``mesh`` by its uuid"""
+    total  = int(mesh.counts.sum())
+    rng    = np.random.default_rng(13)
+    points = rng.random((total, 2)) * 0.9 + 0.05
+    return UVData(name="map1", points=points, counts=mesh.counts.copy(), indices=np.arange(total, dtype=np.int32), mesh_uuid=mesh.uuid)
 
 
 def per_corner(uv: UVData) -> np.ndarray:
@@ -1404,43 +1588,59 @@ class _Mapped(_Skinned):
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
 class TestUVs(_Mapped):
-    """save_fbx(..., mesh, uvs=): the mesh's UV sets, a UVList or one UVData;
-    load_fbx gives them back as FbxContents.uvs, None for none"""
+    """save_fbx(..., meshes, uvs=): each mesh's UV sets, a UVList or one
+    UVData, naming their mesh; load_fbx gives them back as FbxContents.uvs,
+    None for none"""
 
     def test_round_trip_beside_a_skin(self):
         source = bundle()
-        uvs    = maps(source["mesh"])
+        uvs    = maps(source["meshes"])
         # the seam: map1 holds more UVs than the mesh points; lightmap's
         # indices are shuffled
-        self.assertFalse(np.array_equal(uvs[0].indices, source["mesh"].indices))
-        self.assertGreater(len(uvs[0].points), source["mesh"].point_count)
+        self.assertFalse(np.array_equal(uvs[0].indices, source["meshes"].indices))
+        self.assertGreater(len(uvs[0].points), source["meshes"].point_count)
         self.assertFalse(np.array_equal(uvs[1].indices, np.arange(len(uvs[1].indices))))
         save_fbx(self.path("a.fbx"), **source, uvs=uvs)
         first = load_fbx(self.path("a.fbx"))
-        self.assertSameUVs(first.uvs, uvs, first.mesh)
-        self.assertSameMesh(first.mesh, source["mesh"])
-        self.assertSameSkin(first.skin, source["skin"])
-        self.assertEqual(first.skin.mesh_uuid, first.mesh.uuid)
+        self.assertSameUVs(first.uvs, uvs, first.meshes[0])
+        self.assertSameMesh(first.meshes[0], source["meshes"])
+        self.assertSameSkin(first.skins[0], source["skins"])
+        self.assertEqual(first.skins[0].mesh_uuid, first.meshes[0].uuid)
         # the five fields are save_fbx's arguments in their order
         save_fbx(self.path("b.fbx"), *first)
         second = load_fbx(self.path("b.fbx"))
-        self.assertSameUVs(second.uvs, first.uvs, second.mesh)
+        self.assertSameUVs(second.uvs, first.uvs, second.meshes[0])
 
     def test_a_uvdata_is_one_set_and_none_reads_none(self):
         mesh = body()
         uv   = maps(mesh)[1]
-        save_fbx(self.path("one.fbx"), mesh=mesh, uvs=uv)
+        save_fbx(self.path("one.fbx"), meshes=mesh, uvs=uv)
         got = load_fbx(self.path("one.fbx"))
-        self.assertSameUVs(got.uvs, UVList([uv]), got.mesh)
+        self.assertSameUVs(got.uvs, UVList([uv]), got.meshes[0])
         for name, kwargs in (
-            ("mesh", {"mesh": mesh}),
-            ("empty", {"mesh": mesh, "uvs": UVList([])}),
+            ("mesh", {"meshes": mesh}),
+            ("empty", {"meshes": mesh, "uvs": UVList([])}),
             ("clip", {"clip": motion(bound())}),
-            ("rig", {"skeleton": bound()}),
+            ("rig", {"hierarchy": bound()}),
         ):
             with self.subTest(name):
                 save_fbx(self.path(f"{name}.fbx"), **kwargs)
                 self.assertIsNone(load_fbx(self.path(f"{name}.fbx")).uvs)
+
+    def test_sets_on_two_meshes(self):
+        """body()'s two sets and tetra()'s one, "map1" on both meshes: back
+        in the file's order, each naming its mesh"""
+        meshes = MeshList([body(), tetra()])
+        uvs    = UVList([islands(meshes[1]), *maps(meshes[0])])
+        save_fbx(self.path("a.fbx"), meshes=meshes, uvs=uvs)
+        got = load_fbx(self.path("a.fbx"))
+        self.assertEqual([uv.name for uv in got.uvs], ["map1", "lightmap", "map1"])
+        self.assertSameUVs(got.uvs[:2], maps(meshes[0]), got.meshes[0])
+        self.assertSameUVs(got.uvs[2:], UVList([islands(meshes[1])]), got.meshes[1])
+        save_fbx(self.path("b.fbx"), *got)
+        again = load_fbx(self.path("b.fbx"))
+        self.assertSameUVs(again.uvs[:2], got.uvs[:2], again.meshes[0])
+        self.assertSameUVs(again.uvs[2:], got.uvs[2:], again.meshes[1])
 
     def refused(self, error, message, **kwargs):
         with self.assertRaisesRegex(error, message):
@@ -1462,19 +1662,21 @@ class TestUVs(_Mapped):
         holes[5]   = 0
         outside    = good[0].indices.copy()
         outside[7] = len(good[0].points)
-        self.refused(TypeError, "missing: mesh=", uvs=good, clip=motion(bound()))
-        self.refused(TypeError, "a UVList or a UVData, not a list", mesh=mesh, uvs=list(good))
-        self.refused(TypeError, "a UVList or a UVData, not a MeshData", mesh=mesh, uvs=mesh)
-        self.refused(ValueError, "UV set 1 '' has no name", mesh=mesh, uvs=edited(1, name=""))
-        self.refused(ValueError, "UV set 1 'map1' has the name of set 0", mesh=mesh, uvs=edited(1, name="map1"))
-        self.refused(ValueError, "not ASCII", mesh=mesh, uvs=edited(1, name="carteé"))
-        self.refused(ValueError, "UV set 0 'map1' channel 'counts' holds", mesh=mesh, uvs=edited(0, counts=fewer))
-        self.refused(ValueError, "leaves 1 faces without UVs", mesh=mesh, uvs=edited(0, counts=holes))
-        self.refused(ValueError, "channel 'indices' names UVs", mesh=mesh, uvs=edited(0, indices=outside))
+        self.refused(TypeError, "missing: meshes=", uvs=good, clip=motion(bound()))
+        self.refused(TypeError, "a UVList or a UVData, not a list", meshes=mesh, uvs=list(good))
+        self.refused(TypeError, "a UVList or a UVData, not a MeshData", meshes=mesh, uvs=mesh)
+        self.refused(ValueError, "UV set 1 'lightmap' names no mesh of meshes=: mesh_uuid None", meshes=mesh, uvs=edited(1, mesh_uuid=None))
+        self.refused(ValueError, "UV set 0 'map1' names no mesh of meshes=: mesh_uuid '", meshes=mesh, uvs=edited(0, mesh_uuid=generate_uuid()))
+        self.refused(ValueError, "UV set 1 '' has no name", meshes=mesh, uvs=edited(1, name=""))
+        self.refused(ValueError, "UV set 1 'map1' has the name of set 0 of mesh 'body'", meshes=mesh, uvs=edited(1, name="map1"))
+        self.refused(ValueError, "not ASCII", meshes=mesh, uvs=edited(1, name="carteé"))
+        self.refused(ValueError, "UV set 0 'map1' channel 'counts' holds", meshes=mesh, uvs=edited(0, counts=fewer))
+        self.refused(ValueError, "leaves 1 faces without UVs", meshes=mesh, uvs=edited(0, counts=holes))
+        self.refused(ValueError, "channel 'indices' names UVs", meshes=mesh, uvs=edited(0, indices=outside))
 
     def test_load_reads_no_empty_set_and_refuses_unmapped_corners(self):
         mesh = body()
-        save_fbx(self.path("good.fbx"), mesh=mesh, uvs=maps(mesh))
+        save_fbx(self.path("good.fbx"), meshes=mesh, uvs=maps(mesh))
 
         def shape_of(scene):
             return typed(_named(scene, "body").GetNodeAttribute(), FBX.FbxMesh, FBX)
@@ -1488,12 +1690,12 @@ class TestUVs(_Mapped):
             shape_of(scene).GetElementUV(1).GetIndexArray().SetAt(4, -1)
 
         got = load_fbx(_edited(self.path("good.fbx"), self.path("empty.fbx"), empty))
-        self.assertSameUVs(got.uvs, maps(mesh), got.mesh)
+        self.assertSameUVs(got.uvs, maps(mesh), got.meshes[0])
         bad = _edited(self.path("good.fbx"), self.path("unmapped.fbx"), unmapped)
         with self.assertRaisesRegex(ValueError, "UV set 'lightmap' leaves 1 face corners without UVs"):
             load_fbx(bad)
         # a mesh whose one set is empty reads None
-        save_fbx(self.path("bare.fbx"), mesh=mesh)
+        save_fbx(self.path("bare.fbx"), meshes=mesh)
         path = _edited(self.path("bare.fbx"), self.path("only_empty.fbx"), empty)
         with open_fbx(path, FBX) as scene:
             self.assertEqual(shape_of(scene).GetElementUVCount(), 1)
@@ -1531,7 +1733,7 @@ class TestMayaUVs(_InMaya, _Mapped):
     def test_maya_imports_every_set_on_every_face(self):
         mesh = body()
         uvs  = maps(mesh)
-        save_fbx(self.path("a.fbx"), mesh=mesh, uvs=uvs)
+        save_fbx(self.path("a.fbx"), meshes=mesh, uvs=uvs)
         self.imported(self.path("a.fbx"))
         found = self.maya_uvs("body")
         self.assertEqual(list(found), [uv.name for uv in uvs])
@@ -1544,30 +1746,33 @@ class TestMayaUVs(_InMaya, _Mapped):
         """Maya's FBXExport of the import: its sets within 1e-6 (Maya holds
         UVs in float32); load, save, load bit for bit"""
         source = bundle()
-        uvs    = maps(source["mesh"])
+        uvs    = maps(source["meshes"])
         save_fbx(self.path("a.fbx"), **source, uvs=uvs)
         self.imported(self.path("a.fbx"))
         first = load_fbx(self.exported("maya.fbx"))
         self.assertEqual([uv.name for uv in first.uvs], [uv.name for uv in uvs])
         for got, want in zip(first.uvs, uvs):
-            np.testing.assert_array_equal(got.counts, source["mesh"].counts, err_msg=got.name)
+            np.testing.assert_array_equal(got.counts, source["meshes"].counts, err_msg=got.name)
             near(per_corner(got), per_corner(want), err_msg=got.name)
+            self.assertEqual(got.mesh_uuid, first.meshes[0].uuid)
         save_fbx(self.path("again.fbx"), *first)
         again = load_fbx(self.path("again.fbx"))
-        self.assertSameUVs(again.uvs, first.uvs, again.mesh)
+        self.assertSameUVs(again.uvs, first.uvs, again.meshes[0])
 
     def test_maya_export_of_a_mesh_with_no_uvs_reads_none(self):
         cmds = self.cmds
         # a save of no UVs, imported
-        save_fbx(self.path("a.fbx"), mesh=body())
+        save_fbx(self.path("a.fbx"), meshes=body())
         self.imported(self.path("a.fbx"))
         sets = self.maya_uvs("body")
         self.assertTrue(all(not len(corners) for _, corners in sets.values()), list(sets))
         self.assertIsNone(load_fbx(self.exported("maya.fbx")).uvs)
-        # a mesh Maya makes with no UVs
+        # a mesh Maya makes with no UVs: on its transform, of no name (Maya's
+        # FBXExport leaves the FbxMesh unnamed; measured)
         cmds.file(new=True, force=True)
         cmds.polyCube(name="box", createUVs=0)
         self.assertTrue(all(not len(corners) for _, corners in self.maya_uvs("box").values()))
         got = load_fbx(self.exported("box.fbx"))
-        self.assertEqual(got.mesh.name, "box")
+        self.assertIsNone(got.meshes[0].name)
+        self.assertOn(got.meshes[0], got.clip, "box")
         self.assertIsNone(got.uvs)

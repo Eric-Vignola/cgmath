@@ -1,9 +1,9 @@
-"""``cgmath.formats.save_fbx``: one skeleton, or one take
+"""``cgmath.formats.save_fbx``: a hierarchy or a take, the meshes on its nodes
 
-The r17-skeleton fork writes a skeleton of joints and transforms, or a
-clip's nodes and its take; no bind pose. Nothing here imports the fbx sdk,
-nor the classes, until a file is written: the classes' modules import this
-one.
+The r17-skeleton fork writes a hierarchy of joints and transforms, or a
+clip's nodes and its take, each mesh as the shape of its node, a bind pose
+with skins only. Nothing here imports the fbx sdk, nor the classes, until a
+file is written: the classes' modules import this one.
 """
 
 import logging
@@ -20,107 +20,152 @@ FORK   = "the r17-skeleton fork"
 # largest, is not uniform
 UNIFORM_SCALE = 1e-6
 
-# the node kinds a skeleton holds
+# a skinned mesh's node this far from identity is not at identity
+MESH_BOUND = 1e-8
+
+# the node kinds a hierarchy holds
 NODE_TYPES = ("joint", "transform")
 
-# the hidden property keeping each node's place in the skeleton's list
+# the hidden property keeping each node's place in the hierarchy's list
 ORDER_PROPERTY = "cgmath:index"
 
 
-def save_fbx(filename, skeleton=None, clip=None, mesh=None, skin=None, uvs=None, as_ascii: bool = False) -> None:
-    """writes one of ``skeleton``, a HierarchyData of joints and transforms,
-    or ``clip``, a ClipData of joints and transforms; binary unless
-    ``as_ascii``
+def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=None, as_ascii: bool = False) -> None:
+    """writes one of ``hierarchy``, a HierarchyData of joints and transforms,
+    or ``clip``, a ClipData of joints and transforms, and ``meshes`` on their
+    nodes; binary unless ``as_ascii``
 
-    A skeleton alone: its nodes and their own values, no take. A clip alone:
+    A hierarchy alone: its nodes and their own values, no take. A clip alone:
     its nodes, their static values its pose at its first frame, and one take,
     named ``clip.take`` or "Take 001", spanning the clip's frames at its fps;
     every channel of every node has its curves, one a component: a constant
     channel one key on the clip's first frame, an animated one a key a
-    frame. No bind pose is written: a skeleton given with a clip is a bind
-    pose, which comes with skins (NotImplementedError).
+    frame. A hierarchy given with a clip is a bind pose, which comes with
+    skins (NotImplementedError without them).
 
-    ``uvs``, the mesh's UV sets: a UVList, a UVData its one set, written in
-    their order, each named after its set; an empty UVList writes none.
+    ``meshes``, a MeshList or one MeshData: each the shape of the transform
+    its ``parent_uuid`` names, named after the mesh (unnamed for a mesh of
+    no name, as Maya's FBXExport leaves one); a mesh naming no node of the
+    hierarchy or the clip goes on a new root node at identity, named after
+    it (``"mesh"`` for one of no name). ``uvs``, a UVList
+    or one UVData: each set on the mesh its ``mesh_uuid`` names, in their
+    order, named after the set; an empty UVList writes none. ``skins``, a
+    SkinList or one SkinData: each on the mesh its ``mesh_uuid`` names, a
+    cluster an influence, a node of the hierarchy found by name, and one
+    bind pose listing every node at its world; a skinned mesh's node is at
+    identity.
 
     Refused, ValueError naming node, channel and frame, before anything is
     written: a node that is no joint or transform, a transform holding
     segment scale compensate or a joint orient, a shear, a scale that is not
-    uniform on a node with children, in the skeleton or on any frame of the
+    uniform on a node with children, in the hierarchy or on any frame of the
     clip, a joint orient or rotate axis the clip changes over its frames; a
-    UV set of no name, of a name another set holds or that is not ASCII,
-    whose faces are not the mesh's, or naming UVs it does not hold. UVs
-    given without a mesh, neither given, a skeleton that is not a HierarchyData (a ClipData is
-    passed as ``clip``), a clip that is not a ClipData: TypeError.
+    mesh holding holes or faces naming points it does not hold, two meshes
+    on one node, a mesh on a joint (Maya's FBX drops one); a UV set or a
+    skin naming no mesh; a UV set of no name, of
+    a name another set of its mesh holds or that is not ASCII, whose faces
+    are not its mesh's, or naming UVs it does not hold; a skin naming no
+    node of the hierarchy, whose weights are not its mesh's points by its
+    influences, a second skin on a mesh, a skinned mesh whose node is not at
+    identity. UV sets given without meshes, skins without the hierarchy and
+    the meshes, nothing given, a hierarchy that is not a HierarchyData (a
+    ClipData is passed as ``clip``), a clip that is not a ClipData, meshes,
+    skins or uvs of another class: TypeError.
     """
     # imported here: the classes' modules import this one
-    from cgmath.geometry.mesh import MeshData, UVData, UVList
-    from cgmath.geometry.skin_weights import SkinData
-    from cgmath.hierarchy import hierarchy
+    from cgmath.geometry.mesh import MeshData, MeshList, UVData, UVList
+    from cgmath.geometry.skin_weights import SkinData, SkinList
+    from cgmath.hierarchy.hierarchy import FBX, ClipData, FbxExporter, HierarchyData
 
-    if skeleton is not None and type(skeleton) is not hierarchy.HierarchyData:
-        hint = ", pass it as clip=" if isinstance(skeleton, hierarchy.ClipData) else ""
-        raise TypeError(f"save_fbx: the skeleton is a HierarchyData, not a {type(skeleton).__name__}{hint}")
-    if clip is not None and not isinstance(clip, hierarchy.ClipData):
+    if hierarchy is not None and type(hierarchy) is not HierarchyData:
+        hint = ", pass it as clip=" if isinstance(hierarchy, ClipData) else ""
+        raise TypeError(f"save_fbx: the hierarchy is a HierarchyData, not a {type(hierarchy).__name__}{hint}")
+    if clip is not None and not isinstance(clip, ClipData):
         raise TypeError(f"save_fbx: the clip is a ClipData, not a {type(clip).__name__}")
-    if mesh is not None and (not isinstance(mesh, MeshData) or isinstance(mesh, UVData)):
-        raise TypeError(f"save_fbx: the mesh is a MeshData, not a {type(mesh).__name__}")
-    if skin is not None and not isinstance(skin, SkinData):
-        raise TypeError(f"save_fbx: the skin is a SkinData, not a {type(skin).__name__}")
+    if isinstance(meshes, MeshData) and not isinstance(meshes, UVData):
+        meshes = MeshList([meshes])
+    if meshes is not None and (not isinstance(meshes, MeshList) or isinstance(meshes, UVList)):
+        raise TypeError(f"save_fbx: the meshes are a MeshList or a MeshData, not a {type(meshes).__name__}")
+    if isinstance(skins, SkinData):
+        skins = SkinList([skins])
+    if skins is not None and not isinstance(skins, SkinList):
+        raise TypeError(f"save_fbx: the skins are a SkinList or a SkinData, not a {type(skins).__name__}")
     if isinstance(uvs, UVData):
         uvs = UVList([uvs])
     if uvs is not None and not isinstance(uvs, UVList):
         raise TypeError(f"save_fbx: the uvs are a UVList or a UVData, not a {type(uvs).__name__}")
-    if uvs is not None and mesh is None:
-        raise TypeError("save_fbx: UV sets are written on their mesh; missing: mesh=")
-    if skin is not None:
-        missing = [what for what, given in (("skeleton (a HierarchyData, the bind pose)", skeleton), ("mesh=", mesh)) if given is None]
+    meshes = meshes if meshes is not None and len(meshes) else None
+    skins  = skins if skins is not None and len(skins) else None
+    uvs    = uvs if uvs is not None and len(uvs) else None
+    if uvs is not None and meshes is None:
+        raise TypeError("save_fbx: UV sets are written on their mesh; missing: meshes=")
+    if skins is not None:
+        missing = [
+            what for what, given in (("hierarchy (a HierarchyData, the bind pose)", hierarchy), ("meshes=", meshes))
+            if given is None
+        ]
         if missing:
-            raise TypeError(f"save_fbx: a skin is written with its skeleton and its mesh; missing: {' and '.join(missing)}")
-    elif skeleton is not None and clip is not None:
+            raise TypeError(f"save_fbx: a skin is written with its hierarchy and its mesh; missing: {' and '.join(missing)}")
+    elif hierarchy is not None and clip is not None:
         raise NotImplementedError(
-            f"save_fbx on {FORK}: a skeleton given with a clip is a bind pose, which comes with skins; "
-            f"pass mesh= and skin= with them, or clip= alone, or a skeleton alone"
+            f"save_fbx on {FORK}: a hierarchy given with a clip is a bind pose, which comes with skins; "
+            f"pass meshes= and skins= with them, or clip= alone, or a hierarchy alone"
         )
-    if skeleton is None and clip is None and mesh is None:
-        raise TypeError("save_fbx takes a skeleton (a HierarchyData) or clip= (a ClipData), and mesh= (a MeshData)")
-    if hierarchy.FBX is None or hierarchy.FbxExporter is None:
+    if hierarchy is None and clip is None and meshes is None:
+        raise TypeError(
+            "save_fbx takes a hierarchy (a HierarchyData) or clip= (a ClipData), and meshes= (a MeshList or a MeshData)"
+        )
+    if FBX is None or FbxExporter is None:
         raise ImportError("fbx module not found")
 
     filename = os.path.expanduser(filename)
-    written  = skeleton
-    if skeleton is not None:
-        _check_skeleton(skeleton)
+    written  = hierarchy
+    if hierarchy is not None:
+        _check_hierarchy(hierarchy)
     if clip is not None:
         _check_clip(clip)
-        if skeleton is None:
+        if hierarchy is None:
             written = clip.at(clip.start_frame)
         else:
-            _check_same(skeleton, clip)
-    if mesh is not None:
-        _check_mesh(mesh, written)
+            _check_same(hierarchy, clip)
+    if meshes is not None:
+        _check_meshes(meshes, written)
     if uvs is not None:
-        _check_uvs(uvs, mesh)
-    if skin is not None:
-        _check_skin(skin, mesh, skeleton)
+        _check_uvs(uvs, meshes)
+    if skins is not None:
+        _check_skins(skins, meshes, hierarchy)
 
-    fbx = hierarchy.FBX
-    with hierarchy.FbxExporter() as exporter:
+    fbx = FBX
+    with FbxExporter() as exporter:
         nodes = []
         if written is not None:
             exporter.add_skeleton(written)
             nodes = [exporter._fbx_nodes[id(node)] for node in written]
         for index, fbx_node in enumerate(nodes):
-            prop = fbx.FbxProperty.Create(fbx_node, fbx.FbxIntDT, ORDER_PROPERTY, "")
-            prop.Set(index)
+            _index(fbx_node, index, fbx)
         if clip is not None:
             _write_take(exporter, nodes, clip)
-        if mesh is not None:
-            mesh_node, shape = _write_mesh(exporter, mesh)
-            if uvs is not None and len(uvs):
-                exporter.add_uvs(shape, uvs)
-            if skin is not None:
-                _write_skin(exporter, mesh_node, shape, skin, skeleton, nodes)
+        if meshes is not None:
+            by_uuid = {node.uuid: fbx_node for node, fbx_node in zip(written, nodes)} if written is not None else {}
+            shapes  = {}
+            made    = {}
+            for mesh in meshes:
+                fbx_node = by_uuid.get(mesh.parent_uuid)
+                fbx_node, shape = _write_mesh(exporter, mesh, fbx_node)
+                if mesh.parent_uuid not in by_uuid:
+                    _index(fbx_node, len(nodes) + len(made), fbx)
+                    made[mesh.uuid] = fbx_node
+                shapes[mesh.uuid] = (fbx_node, shape)
+            if uvs is not None:
+                for mesh in meshes:
+                    sets = [uv for uv in uvs if uv.mesh_uuid == mesh.uuid]
+                    if sets:
+                        exporter.add_uvs(shapes[mesh.uuid][1], sets)
+            if skins is not None:
+                for skin in skins:
+                    _write_skin(exporter, *shapes[skin.mesh_uuid], skin, hierarchy, nodes)
+                roots = [made[skin.mesh_uuid] for skin in skins if skin.mesh_uuid in made]
+                _write_bind_pose(exporter, nodes, hierarchy, roots)
         exporter.export(path=filename, as_ascii=as_ascii)
 
 
@@ -182,12 +227,12 @@ def _check_kinds(nodes, orients) -> None:
             )
 
 
-def _check_skeleton(skeleton) -> None:
-    nodes = list(skeleton)
+def _check_hierarchy(hierarchy) -> None:
+    nodes = list(hierarchy)
     _check_kinds(nodes, np.array([node.joint_orient for node in nodes], dtype=np.float64).reshape(1, -1, 3))
     shear = np.array([node.shear for node in nodes], dtype=np.float64).reshape(1, -1, 3)
     scale = np.array([node.scale for node in nodes], dtype=np.float64).reshape(1, -1, 3)
-    refuse_values("save_fbx, the skeleton", nodes, shear, scale)
+    refuse_values("save_fbx, the hierarchy", nodes, shear, scale)
 
 
 def _check_clip(clip) -> None:
@@ -220,13 +265,13 @@ def _user_kinds(node) -> dict:
     return {name: spec.get("attributeType", spec.get("dataType")) for name, spec in node.user_defined_attributes.items()}
 
 
-def _check_same(skeleton, clip) -> None:
-    """a clip whose nodes are not the skeleton's: refused, naming the first
+def _check_same(hierarchy, clip) -> None:
+    """a clip whose nodes are not the hierarchy's: refused, naming the first
     node and what differs"""
-    nodes, held = list(skeleton), list(clip)
+    nodes, held = list(hierarchy), list(clip)
     if [node.name for node in nodes] != [node.name for node in held]:
         raise ValueError(
-            f"save_fbx: the clip's nodes {[node.name for node in held]} are not the skeleton's "
+            f"save_fbx: the clip's nodes {[node.name for node in held]} are not the hierarchy's "
             f"{[node.name for node in nodes]}, in its order"
         )
     parents, kept = parents_of(nodes), parents_of(held)
@@ -247,50 +292,87 @@ def _check_same(skeleton, clip) -> None:
             if mine != theirs:
                 raise ValueError(
                     f"save_fbx: node {node.name!r} channel {channel!r} is {theirs!r} in the clip, {mine!r} in the "
-                    f"skeleton: a clip with a skin animates the skeleton's own nodes"
+                    f"hierarchy: a clip with a skin animates the hierarchy's own nodes"
                 )
 
 
-def _check_mesh(mesh, nodes) -> None:
-    """a mesh holding holes, normals that fit no face corner, faces naming
-    points it does not hold, or named after a node: refused"""
+def _mesh_label(mesh, nodes=None) -> str:
+    """"mesh 'body'", or for a mesh of no name the node of ``nodes`` (uuid to
+    node) it sits on"""
+    if mesh.name:
+        return f"mesh {mesh.name!r}"
+    node = None if nodes is None else nodes.get(mesh.parent_uuid)
+    return "the unnamed mesh" if node is None else f"the unnamed mesh on node {node.name!r}"
+
+
+def _check_meshes(meshes, nodes) -> None:
+    """each mesh checked; two meshes on one node of ``nodes``, the ones
+    written, or a mesh on a joint (Maya's FBXExport and FBXImport both drop
+    one; measured): refused"""
+    held = {} if nodes is None else {node.uuid: node for node in nodes}
+    on   = {}
+    for mesh in meshes:
+        _check_mesh(mesh)
+        node = held.get(mesh.parent_uuid)
+        if node is None:
+            continue
+        if node.node_type == "joint":
+            raise ValueError(
+                f"save_fbx: {_mesh_label(mesh, held)} sits on joint {node.name!r}; Maya's FBX holds a mesh on a "
+                f"transform only"
+            )
+        if node.uuid in on:
+            raise ValueError(
+                f"save_fbx: {_mesh_label(on[node.uuid], held)} and {_mesh_label(mesh, held)} sit on node "
+                f"{node.name!r}; a node holds one mesh"
+            )
+        on[node.uuid] = mesh
+
+
+def _check_mesh(mesh) -> None:
+    """a mesh holding holes, normals that fit no face corner, or faces
+    naming points it does not hold: refused"""
     from cgmath.geometry.mesh import _corner_normals
 
-    name = mesh.name or "mesh"
+    label = _mesh_label(mesh)
     if mesh.hole_faces is not None and len(mesh.hole_faces):
-        raise ValueError(f"save_fbx: mesh {name!r} holds {len(mesh.hole_faces)} polygon holes, which {FORK} does not write")
+        raise ValueError(f"save_fbx: {label} holds {len(mesh.hole_faces)} polygon holes, which {FORK} does not write")
     counts  = np.asarray(mesh.counts, dtype=np.int64)
     indices = np.asarray(mesh.indices, dtype=np.int64)
     if counts.sum() != indices.size or (indices.size and (indices.min() < 0 or indices.max() >= mesh.point_count)):
-        raise ValueError(f"save_fbx: mesh {name!r} has faces that name points it does not hold")
+        raise ValueError(f"save_fbx: {label} has faces that name points it does not hold")
     _corner_normals(mesh)
-    if nodes is not None and name in [node.name for node in nodes]:
-        raise ValueError(f"save_fbx: mesh {name!r} is the name of a node of the skeleton; name the mesh apart")
 
 
-def _check_uvs(uvs, mesh) -> None:
-    """a UV set of no name, of a name another set holds or that is not
-    ASCII, whose faces are not the mesh's, or naming UVs it does not hold:
-    refused"""
-    counts = np.asarray(mesh.counts, dtype=np.int64)
-    names  = []
+def _check_uvs(uvs, meshes) -> None:
+    """a UV set naming no mesh, of no name, of a name another set of its
+    mesh holds or that is not ASCII, whose faces are not its mesh's, or
+    naming UVs it does not hold: refused"""
+    by_uuid = {mesh.uuid: mesh for mesh in meshes}
+    names   = {}
     for place, uv in enumerate(uvs):
         name  = uv.name
         label = f"UV set {place} {name!r}"
+        mesh  = by_uuid.get(uv.mesh_uuid)
+        if mesh is None:
+            raise ValueError(
+                f"save_fbx: {label} names no mesh of meshes=: mesh_uuid {uv.mesh_uuid!r}; set it to its mesh's uuid"
+            )
         if not isinstance(name, str) or not name:
             raise ValueError(f"save_fbx: {label} has no name; name each set")
         if not name.isascii():
             raise ValueError(f"save_fbx: {label} has a name that is not ASCII, which the fbx sdk does not write")
-        if name in names:
-            raise ValueError(f"save_fbx: {label} has the name of set {names.index(name)}; name each set apart")
-        names.append(name)
-        held = np.asarray(uv.counts, dtype=np.int64)
-        if not np.array_equal(held, counts):
-            unmapped = int(np.count_nonzero(held == 0)) if held.shape == counts.shape else None
+        held = names.setdefault(mesh.uuid, [])
+        if name in held:
+            raise ValueError(f"save_fbx: {label} has the name of set {held.index(name)} of {_mesh_label(mesh)}; name each set apart")
+        held.append(name)
+        counts = np.asarray(mesh.counts, dtype=np.int64)
+        got    = np.asarray(uv.counts, dtype=np.int64)
+        if not np.array_equal(got, counts):
+            unmapped = int(np.count_nonzero(got == 0)) if got.shape == counts.shape else None
             why = (
                 f"leaves {unmapped} faces without UVs" if unmapped
-                else f"holds {held.size} faces of {held.sum()} corners, mesh {mesh.name or 'mesh'!r} {counts.size} "
-                f"of {counts.sum()}"
+                else f"holds {got.size} faces of {got.sum()} corners, {_mesh_label(mesh)} {counts.size} of {counts.sum()}"
             )
             raise ValueError(f"save_fbx: {label} channel 'counts' {why}; a set maps every face of its mesh")
         indices = np.asarray(uv.indices, dtype=np.int64)
@@ -301,16 +383,46 @@ def _check_uvs(uvs, mesh) -> None:
             raise ValueError(f"save_fbx: {label} channel 'indices' names UVs the set does not hold")
 
 
-def _check_skin(skin, mesh, skeleton) -> None:
-    """a skin whose influences are not nodes of the skeleton, or whose
+def _check_skins(skins, meshes, hierarchy) -> None:
+    """a skin naming no mesh, a second skin on a mesh, a skinned mesh whose
+    node is not at identity, a skin whose influences are not nodes of the
+    hierarchy, or whose weights are not its mesh's points by its
+    influences: refused"""
+    by_uuid = {mesh.uuid: mesh for mesh in meshes}
+    worlds  = np.asarray(hierarchy.world_matrix, dtype=np.float64)
+    column  = {node.uuid: i for i, node in enumerate(hierarchy)}
+    on      = {}
+    for skin in skins:
+        label = f"skin {skin.name!r}"
+        mesh  = by_uuid.get(skin.mesh_uuid)
+        if mesh is None:
+            raise ValueError(
+                f"save_fbx: {label} names no mesh of meshes=: mesh_uuid {skin.mesh_uuid!r}; set it to its mesh's uuid"
+            )
+        if mesh.uuid in on:
+            raise ValueError(
+                f"save_fbx: skins {on[mesh.uuid]!r} and {skin.name!r} both name {_mesh_label(mesh)}; a mesh holds one skin"
+            )
+        on[mesh.uuid] = skin.name
+        at            = column.get(mesh.parent_uuid)
+        if at is not None and np.abs(worlds[at] - np.eye(4)).max() > MESH_BOUND:
+            raise ValueError(
+                f"save_fbx: {label} binds {_mesh_label(mesh)} on node {hierarchy[at].name!r}, whose world is "
+                f"{np.round(worlds[at], 9).tolist()}: {FORK} binds a mesh at identity"
+            )
+        _check_skin(skin, mesh, hierarchy)
+
+
+def _check_skin(skin, mesh, hierarchy) -> None:
+    """a skin whose influences are not nodes of the hierarchy, or whose
     weights are not the mesh's points by its influences: refused"""
     label      = f"skin {skin.name!r}"
     influences = [str(x) for x in skin.influences]
-    names      = [node.name for node in skeleton]
+    names      = [node.name for node in hierarchy]
     for problem, found in (
         ("lists twice", sorted({x for x in influences if influences.count(x) > 1})),
-        ("names no node of the skeleton", [x for x in influences if x not in names]),
-        ("names several nodes of the skeleton", [x for x in influences if names.count(x) > 1]),
+        ("names no node of the hierarchy", [x for x in influences if x not in names]),
+        ("names several nodes of the hierarchy", [x for x in influences if names.count(x) > 1]),
     ):
         if found:
             raise ValueError(f"save_fbx: {label} {problem}: influences {found}")
@@ -318,13 +430,18 @@ def _check_skin(skin, mesh, skeleton) -> None:
     rows    = weights.shape[0] if weights.ndim == 2 else None
     if rows != mesh.point_count:
         raise ValueError(
-            f"save_fbx: {label} channel 'weights' holds {rows} rows, mesh {mesh.name or 'mesh'!r} holds "
-            f"{mesh.point_count} points"
+            f"save_fbx: {label} channel 'weights' holds {rows} rows, {_mesh_label(mesh)} holds {mesh.point_count} points"
         )
     if weights.shape[1] != len(influences):
         raise ValueError(
             f"save_fbx: {label} channel 'weights' holds {weights.shape[1]} columns for its {len(influences)} influences"
         )
+
+
+def _index(fbx_node, index: int, fbx) -> None:
+    """the node's place in the hierarchy's list, kept on it"""
+    prop = fbx.FbxProperty.Create(fbx_node, fbx.FbxIntDT, ORDER_PROPERTY, "")
+    prop.Set(index)
 
 
 def _fbx_matrix(matrix, fbx):
@@ -354,19 +471,24 @@ def _fbx_affine(matrix, fbx):
     return held
 
 
-def _write_mesh(exporter, mesh) -> tuple:
-    """(the node, the FbxMesh): one node at identity at the scene root, its
-    points, faces and normals, one a face corner through their indices"""
+def _write_mesh(exporter, mesh, node) -> tuple:
+    """(the node, the FbxMesh): the mesh as the shape of ``node``, the
+    FbxNode of the transform its ``parent_uuid`` names, or of a new root
+    node at identity named after the mesh for None; its points, faces and
+    normals, one a face corner through their indices; the FbxMesh named
+    after the mesh, unnamed for a mesh of no name"""
     from cgmath.geometry.mesh import _corner_normals
     from cgmath.hierarchy.hierarchy import FBX as fbx
 
     scene = exporter.scene
-    name  = mesh.name or "mesh"
-    node  = fbx.FbxNode.Create(scene, name)
-    node.SetTransformationInheritType(fbx.FbxTransform.EInheritType.eInheritRSrs)
-    scene.GetRootNode().AddChild(node)
+    if node is None:
+        node = fbx.FbxNode.Create(scene, mesh.name or "mesh")
+        node.SetTransformationInheritType(fbx.FbxTransform.EInheritType.eInheritRSrs)
+        scene.GetRootNode().AddChild(node)
 
-    shape  = fbx.FbxMesh.Create(scene, f"{name}Shape")
+    # Maya's FBXExport leaves the FbxMesh unnamed: a mesh of no name reads back
+    # with none
+    shape  = fbx.FbxMesh.Create(scene, mesh.name or "")
     points = np.asarray(mesh.points, dtype=np.float64).tolist()
     shape.InitControlPoints(len(points))
     for index, point in enumerate(points):
@@ -395,14 +517,15 @@ def _write_mesh(exporter, mesh) -> tuple:
     return node, shape
 
 
-def _write_skin(exporter, mesh_node, shape, skin, skeleton, nodes) -> None:
-    """one FbxSkin on ``shape``, a cluster an influence, and one bind pose
-    listing the mesh and every node of the skeleton at its world"""
+def _write_skin(exporter, mesh_node, shape, skin, hierarchy, nodes) -> None:
+    """one FbxSkin on ``shape``, a cluster an influence, linked to its node
+    at its world in the hierarchy; the mesh node's channels locked, as
+    Maya's FBXExport locks a skinned mesh's"""
     from cgmath.hierarchy.hierarchy import FBX as fbx
 
     scene    = exporter.scene
-    worlds   = np.asarray(skeleton.world_matrix, dtype=np.float64)
-    place    = {node.name: column for column, node in enumerate(skeleton)}
+    worlds   = np.asarray(hierarchy.world_matrix, dtype=np.float64)
+    place    = {node.name: column for column, node in enumerate(hierarchy)}
     weights  = np.asarray(skin.weights, dtype=np.float64)
     deformer = fbx.FbxSkin.Create(scene, skin.name or "")
     deformer.SetSkinningType(fbx.FbxSkin.EType.eLinear)
@@ -419,18 +542,26 @@ def _write_skin(exporter, mesh_node, shape, skin, skeleton, nodes) -> None:
         deformer.AddCluster(cluster)
     shape.AddDeformer(deformer)
 
-    pose = fbx.FbxPose.Create(scene, "BindPose")
-    pose.SetIsBindPose(True)
-    pose.Add(mesh_node, _fbx_matrix(np.eye(4), fbx))
-    for at, fbx_node in enumerate(nodes):
-        pose.Add(fbx_node, _fbx_matrix(worlds[at], fbx))
-    scene.AddPose(pose)
-
-    # Maya's FBXExport locks a skinned mesh's translate, rotate and scale
     flags = fbx.FbxPropertyFlags.EFlags
     for prop in (mesh_node.LclTranslation, mesh_node.LclRotation, mesh_node.LclScaling):
         for member in (flags.eLockedMember0, flags.eLockedMember1, flags.eLockedMember2):
             prop.ModifyFlag(member, True)
+
+
+def _write_bind_pose(exporter, nodes, hierarchy, roots) -> None:
+    """one bind pose listing every node of the hierarchy at its world, and
+    ``roots``, the nodes made for skinned meshes on no node, at identity"""
+    from cgmath.hierarchy.hierarchy import FBX as fbx
+
+    scene  = exporter.scene
+    worlds = np.asarray(hierarchy.world_matrix, dtype=np.float64)
+    pose   = fbx.FbxPose.Create(scene, "BindPose")
+    pose.SetIsBindPose(True)
+    for at, fbx_node in enumerate(nodes):
+        pose.Add(fbx_node, _fbx_matrix(worlds[at], fbx))
+    for fbx_node in roots:
+        pose.Add(fbx_node, _fbx_matrix(np.eye(4), fbx))
+    scene.AddPose(pose)
 
 
 def _keys(curve, times, values, mode, fbx) -> None:

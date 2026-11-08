@@ -111,7 +111,7 @@ MAYA_ATTRIBUTE_MAP = {
 SUPPORTED_NODE_TYPES = ("transform", "joint", "locator", "space_transform")
 
 # what no longer works names the fork it does not work on
-_FORK = "the r17-skeleton fork (one skeleton and one take, no skins or meshes)"
+_FORK = "the r17-skeleton fork (one hierarchy and one take)"
 
 # ---------------------------------------------------------------------------- #
 
@@ -8080,7 +8080,8 @@ class TransformList(DataList[TransformData]):
     @classmethod
     def load_fbx(cls, filename):
         """the nodes of an fbx file at their own values, whether it holds a
-        take or not: a HierarchyData, or a view of its nodes' copies"""
+        take or not, a mesh's node among them (its shape left out): a
+        HierarchyData, or a view of its nodes' copies"""
         from cgmath.formats._load import load_nodes
 
         skeleton = load_nodes(filename)
@@ -14935,9 +14936,9 @@ class ClipData(HierarchyData):
 
     @classmethod
     def load_fbx(cls, filename) -> "ClipData":
-        """the active take of an fbx file, as ``cgmath.formats.load_fbx``
-        reads it, its meshes and skins left out; ValueError for a file
-        holding no take"""
+        """the active take of an fbx file over every node, as
+        ``cgmath.formats.load_fbx`` reads it, the meshes and skins left out;
+        ValueError for a file holding no take"""
         from cgmath.formats._load import load_take
 
         clip = load_take(filename)
