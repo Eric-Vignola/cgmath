@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Generic, List, Optional, TypeVar, Union
 
 import numpy as np
-from cgmath.data import _CLASSES, _class_tag, _Item, _List, Data, DataList
+from cgmath.data import _Item, _List, Data, DataList
 from cgmath.geometry import (
     MeshData,
     MeshList,
@@ -109,7 +109,6 @@ class TestTheBracketsNameTheItemClass(unittest.TestCase):
         pins = _Pins([_Pin(name="a")])
         with self.assertRaises(TypeError):
             pins.append(_Bolt(name="b"))
-        self.assertIs(_CLASSES[_class_tag(_Pins)], _Pins)
 
     def test_a_class_setting_DATA_LIST_CLASS_too_must_name_the_same_class(self):
         self.assertIs(_declare(DataList[_Pin], DATA_LIST_CLASS=_Pin).DATA_LIST_CLASS, _Pin)
@@ -240,12 +239,15 @@ class TestAGenericListChangesNothingElse(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             for ext in ("pkl", "npz", "json"):
                 path = pins.save(os.path.join(tmp, f"pins.{ext}"))
-                for loader in (_Pins, Data, DataList):
-                    with self.subTest(ext=ext, loader=loader.__name__):
-                        back = loader.load(path)
-                        self.assertIs(type(back), _Pins)
-                        self.assertEqual(back, pins)
-        self.assertEqual(pins.to_dict()["__class__"], f"{_Pins.__module__}._Pins")
+                with self.subTest(ext=ext):
+                    back = _Pins.load(path)
+                    self.assertIs(type(back), _Pins)
+                    self.assertEqual(back, pins)
+                    # the base classes build nothing: a file names no class
+                    for loader in (Data, DataList):
+                        with self.assertRaisesRegex(TypeError, "builds nothing: a file names no class"):
+                            loader.load(path)
+        self.assertNotIn("__class__", pins.to_dict())
         for label, made in (
             ("pickle", pickle.loads(pickle.dumps(pins))),
             ("deepcopy", copy.deepcopy(pins)),

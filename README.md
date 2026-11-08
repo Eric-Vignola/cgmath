@@ -158,9 +158,8 @@ If you know Maya, nothing below will surprise you.
 - **Arrays have fixed dtypes.** Indices and counts are `int32`; points,
   normals, offsets, weights and values are `float64`; masks are `bool`. A
   value is converted when it is set or loaded.
-- **One saved form.** `.pkl`, `.npz` and `.json` hold the same tree and
-  load as the class they name. A file written by an older cgmath raises
-  `LegacyFileError` — details in
+- **One saved form.** `.pkl`, `.npz` and `.json` hold the same tree, the
+  fields and no class: the class you load a file with builds it — details in
   [`geometry/README.md`](https://github.com/Eric-Vignola/cgmath/blob/main/geometry/README.md#saving-and-loading).
 - **Camera is OpenGL**: `-Z` forward, `+Y` up, `+X` right. `look_at()`
   and `Frame.camera_matrix` are **column**-major (eye at `M[:3, 3]`)

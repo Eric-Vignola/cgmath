@@ -28,7 +28,7 @@ from unittest import mock
 
 import numpy as np
 from cgmath import hierarchy
-from cgmath.data import Data, DataList, LegacyFileError, get_file_type
+from cgmath.data import Data, DataList, get_file_type
 from cgmath.formats._fbx_io import load_sdk
 from cgmath.formats.glb import GlbData
 from cgmath.geometry import mesh as mesh_module
@@ -158,11 +158,16 @@ class TestInheritedRoutes(unittest.TestCase):
     }
 
     def test_every_inherited_asset_route_fits_or_is_refused(self):
-        from cgmath.data import _CLASSES, _FORMATS, _OWN_FORMATS, _route_of
+        from cgmath.data import _FORMATS, _OWN_FORMATS, _route_of
+
+        def classes(base):
+            for cls in base.__subclasses__():
+                yield cls
+                yield from classes(cls)
 
         found = set()
-        for tag, cls in _CLASSES.items():
-            if not tag.startswith("cgmath.") or "._tests" in tag:
+        for cls in (*classes(Data), *classes(DataList)):
+            if not cls.__module__.startswith("cgmath.") or "._tests" in cls.__module__:
                 continue
             for verb in ("load", "save"):
                 for fmt in set(_FORMATS) - set(_OWN_FORMATS):
@@ -170,23 +175,6 @@ class TestInheritedRoutes(unittest.TestCase):
                     if _route_of(cls, verb, fmt) is not None and name not in vars(cls):
                         found.add((cls.__name__, name))
         self.assertEqual(found, self.FIT)
-
-    @unittest.skipIf("maya" in sys.modules, "starts a plain interpreter, not a second mayapy")
-    def test_the_factory_names_readers_it_has_not_imported(self):
-        code = (
-            "import cgmath; from cgmath.data import _readers_of; "
-            "print(cgmath.__file__); print(','.join(_readers_of('fbx')))"
-        )
-        root  = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        out   = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True)
-        lines = out.stdout.splitlines()
-        self.assertEqual(len(lines), 2, out.stderr[-500:])
-        self.assertTrue(os.path.abspath(lines[0]).startswith(root), lines[0])
-        self.assertEqual(
-            lines[1].split(","),
-            ["ClipData", "ClipList", "HierarchyData", "MeshData", "MeshList", "Object", "SkinData", "SkinList",
-             "TransformList", "UVData", "UVList"],
-        )
 
 
 class TestOwnFormats(_Files):
@@ -265,7 +253,7 @@ class TestLoad(_Files):
 
     def test_an_own_file_takes_no_argument(self):
         path = quad().save(self.path("q.npz"))
-        with self.assertRaisesRegex(TypeError, r"MeshData\.load_npz: .*'name'.*takes no argument"):
+        with self.assertRaisesRegex(TypeError, "^an npz file takes no argument but its name: got name$"):
             MeshData.load(path, name="x")
         # in the module loaders too, whichever of cgmath's three files
         with self.assertRaisesRegex(TypeError, "^an npz file takes no argument but its name: got pose$"):
@@ -310,13 +298,11 @@ class TestLoad(_Files):
             "Scene.save_fbx: HierarchyData's fbx writer writes joints only: a Scene's meshes would be lost",
         )
 
-    def test_the_factory_refuses_an_asset_naming_the_readers(self):
+    def test_the_base_classes_build_nothing_from_an_asset(self):
         path = quad().save(self.path("q.obj"))
-        for factory in (Data, DataList):
-            with self.assertRaisesRegex(
-                ValueError, r"is an obj file, which names none: read it with the class wanted \(MeshData, MeshList, Object, Scene"
-            ):
-                factory.load(path)
+        for base in (Data, DataList):
+            with self.assertRaisesRegex(TypeError, rf"^{base.__name__}\.load\(\) builds nothing: a file names no class"):
+                base.load(path)
 
     def test_a_class_without_that_reader_names_those_there_are(self):
         path = quad().save(self.path("q.obj"))
@@ -333,7 +319,7 @@ class TestLoad(_Files):
             with self.subTest(name=name):
                 with self.assertRaisesRegex(ValueError, f"MeshData has no reader for {kind}.*loads fbx, glb, json, npz, obj, pickle, usd$"):
                     MeshData.load(self.path(name))
-                with self.assertRaisesRegex(ValueError, f"Data has no reader for {kind}.*loads json, npz, pickle$"):
+                with self.assertRaisesRegex(TypeError, r"^Data\.load\(\) builds nothing"):
                     Data.load(self.path(name))
                 with self.assertRaisesRegex(ValueError, f"no reader for {kind}"):
                     hierarchy.load(self.path(name))
@@ -528,15 +514,13 @@ class TestLoad(_Files):
             )
             loads = (
                 ("MeshData.load", MeshData.load),
-                ("Data.load", Data.load),
                 ("hierarchy.load", hierarchy.load),
                 (f"MeshData.load_{ext}", getattr(MeshData, f"load_{ext}")),
             )
             for label, load in loads:
                 with self.subTest(ext=ext, load=label):
-                    with self.assertRaisesRegex(ValueError, refused) as caught:
+                    with self.assertRaisesRegex(ValueError, refused):
                         load(path)
-                    self.assertNotIsInstance(caught.exception, LegacyFileError)
             self.assertEqual(MeshData.load(path, mode="pkl"), quad())
         # an npz read as json, a json read as npz: neither starts as the
         # other, so neither is an older cgmath's file nor a broken zip
@@ -548,9 +532,8 @@ class TestLoad(_Files):
             reads = ((f"MeshData.load_{ext}", load), (f"mode={ext}", lambda path: MeshData.load(path, mode=ext)))
             for label, read in reads:
                 with self.subTest(read_as=ext, load=label):
-                    with self.assertRaisesRegex(ValueError, rf"does not start as an? {ext} file does; load\(\) reads it with mode=") as caught:
+                    with self.assertRaisesRegex(ValueError, rf"does not start as an? {ext} file does; load\(\) reads it with mode="):
                         read(path)
-                    self.assertNotIsInstance(caught.exception, LegacyFileError)
         # a pickle save() writes under a .json name, as mode= allows
         path = quad().save(self.path("x.json"), mode="pkl")
         with self.assertRaisesRegex(ValueError, r"x\.json does not start as a json file does"):
@@ -582,7 +565,6 @@ class TestLoad(_Files):
             ("MeshData.load", MeshData.load),
             ("MeshData.load_json", MeshData.load_json),
             ("mode=json", lambda path: MeshData.load(path, mode="json")),
-            ("Data.load", Data.load),
             ("hierarchy.load", hierarchy.load),
         )
         for label, read in reads:
@@ -727,9 +709,9 @@ class TestFbx(_Files):
             Scene.load_fbx(path)
         self.assertFalse(os.path.exists(self.path("scene.fbx")))
 
-    def test_the_factory_refuses_an_fbx(self):
+    def test_the_base_class_builds_nothing_from_an_fbx(self):
         path = self.rig().save(self.path("rig.fbx"))
-        with self.assertRaisesRegex(ValueError, r"is an fbx file, which names none.*ClipData, ClipList, HierarchyData"):
+        with self.assertRaisesRegex(TypeError, r"^Data\.load\(\) builds nothing: a file names no class"):
             Data.load(path)
 
 

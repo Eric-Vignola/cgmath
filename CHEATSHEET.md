@@ -696,18 +696,17 @@ readers tell a glb from a gltf by them under any name (a gltf, which starts
 as a json does, reads by its `.gltf` name or with `mode="glb"`); it goes by
 the extension for an obj, a pickle (`.pkl` or `.pickle`, under any other
 name `mode="pkl"`) and a usd (`.usd`, `.usda`, `.usdc`, `.usdz`). cgmath's
-own three, npz, json and pickle, hold the same tree, `to_dict()`: the class,
-then every field that differs from its default, each named as a caller sets
-it (a node's private `_translate` as `translate`; a load takes either name).
-A class's loader gives back that class and refuses a file holding any other,
-a subclass too; `Data.load` gives back whatever a file holds. A file written
-by an older cgmath raises `LegacyFileError`. An asset, an obj, fbx, glb or
-usd file, goes the same way to the class's own `load_<format>` /
-`save_<format>`, its arguments by keyword (`MeshData.load("hero.fbx",
-name="body")`, `rig.save("rig.fbx", as_ascii=True)`), and keeps only what its
-writer writes; a format the class has no route for, an unknown extension too,
-raises `ValueError` naming the ones it has, and `Data.load` refuses an asset,
-which names no class.
+own three, npz, json and pickle, hold the same tree, `to_dict()`: every
+field that differs from its default, each named as a caller sets it (a
+node's private `_translate` as `translate`; a load takes either name), and
+no class. The class you load a file with builds it from the fields it
+holds, so a file is loaded with the class expected, and `Data.load` itself
+raises `TypeError`. An asset, an obj, fbx, glb or usd file, goes the same
+way to the class's own `load_<format>` / `save_<format>`, its arguments by
+keyword (`MeshData.load("hero.fbx", name="body")`, `rig.save("rig.fbx",
+as_ascii=True)`), and keeps only what its writer writes; a format the class
+has no route for, an unknown extension too, raises `ValueError` naming the
+ones it has.
 
 ```python
 cube.save(os.path.join(tmp, "cube.npz"))
@@ -716,7 +715,7 @@ cube.save(os.path.join(tmp, "cube.pkl"))
 
 for ext in ("npz", "json", "pkl"):
     print(ext, MeshData.load(os.path.join(tmp, f"cube.{ext}")) == cube)
-print(sorted(cube.to_dict()))                  # '__class__', fields not at their default -- no caches
+print(sorted(cube.to_dict()))                  # the fields not at their default -- no caches, no class
 ```
 
 Caches are never persisted and `name` is excluded from equality.
@@ -731,23 +730,21 @@ except AttributeError as err:
 ```
 
 Rigs and clips save the same way, and add FBX of their own (section 23). A
-clip loads back through `ClipData.load`, `Data.load` or
-`cgmath.hierarchy.load`, which gives back whatever hierarchy a file holds;
-`HierarchyData.load` refuses it:
+file names no class, so a clip loads back through `ClipData.load`, a rig
+through `HierarchyData.load` or `cgmath.hierarchy.load`; `Data.load` itself
+builds nothing:
 
 ```python
-from cgmath import hierarchy
 from cgmath.geometry import Data
 
 path     = clip.save(os.path.join(tmp, "clip.json"))
 reloaded = ClipData.load(path)
 print(reloaded.name, len(reloaded.frames))
-print(type(Data.load(path)).__name__, type(hierarchy.load(path)).__name__)  # ClipData ClipData
 
 try:
-    HierarchyData.load(path)
+    Data.load(path)
 except TypeError as err:
-    print(err)  # .../clip.json holds a ClipData; load it with ClipData.load() or Data.load()
+    print(err)  # Data.load() builds nothing: a file names no class; load it with the class you expect, ...
 ```
 
 ---

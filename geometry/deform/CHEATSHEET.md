@@ -1107,8 +1107,8 @@ deforms like the original, without the mesh it was built from.
 | `SkinDeformData` | bind points, `joints`, inverse bind matrices, compacted weights, `method`, `name` | nothing |
 | `WrapData` | source, target, connectivity, kernel, radii, the pseudo-inverse | the right-hand side, on the first `deform()` |
 
-Files written by an older cgmath raise `LegacyFileError` and no longer load:
-rebuild the operator from its rest geometry and save it again.
+A file names no class: an operator's file is loaded with its class,
+`SkinDeformData.load(path)`.
 
 ```python
 import pickle, tempfile, os
@@ -1197,7 +1197,6 @@ print(DeltaMushData.info().splitlines()[0])
 | `UserWarning` about ill-conditioning | `geodesic_radius` with a non-compact kernel | use `wendland_c2` and friends |
 | Loaded `SkinDeformData` raises `no skin to bind` | it was saved before `bind()`; its `SkinData` is not saved | `bind()` before saving |
 | Loaded `FFDData.update()` returns an array, not a mesh | the bound mesh is not saved | set the points on your own copy of the mesh |
-| `LegacyFileError` on load | the file was written by an older cgmath | rebuild the operator and save it again |
 
 ---
 

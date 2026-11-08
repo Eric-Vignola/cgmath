@@ -7,7 +7,6 @@ import textwrap
 import unittest
 
 import numpy as np
-from cgmath.data import LegacyFileError
 from cgmath.geometry.mesh import MeshData
 from cgmath.geometry.skin_weights import CompactSkinData, Patterns, SkinData, SkinList
 
@@ -21,6 +20,11 @@ PROJECTS = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 
 
 EPSILON  = np.finfo(np.float32).eps
+
+
+def _rebuild_of_1_x(state):
+    """how cgmath 1.x rebuilt a pickled skin: a function a pickle names, which no cgmath pickle may"""
+    return state
 
 
 def allclose(x, y, atol=EPSILON):
@@ -404,7 +408,7 @@ class TestSkinData(unittest.TestCase):
             skin.weights = np.ones(2)
 
     def test_pickle_keeps_every_field(self):
-        """the sparse pickle keeps the name and the symmetry patterns"""
+        """a pickle keeps the name and the symmetry patterns"""
         skin          = self.skin_cube.copy()
         skin.patterns = Patterns.SHORT
 
@@ -415,32 +419,40 @@ class TestSkinData(unittest.TestCase):
         self.assertEqual(loaded.weights.dtype, np.float64)
         self.assertTrue(np.array_equal(loaded.weights, skin.weights))
 
-    def test_pickle_is_sparse(self):
-        """zero weights are left out of a pickle"""
-        weights       = np.zeros((1000, 50))
+    def test_a_sparse_pickle_of_cgmath_3_still_reads(self):
+        """up to cgmath 3.2 a pickle held the weights as their nonzero entries"""
+        weights       = np.zeros((10, 5))
         weights[:, 0] = 1.0
-        skin          = SkinData(weights=weights, influences=[f"joint{i}" for i in range(50)])
+        weights[3, 2] = 0.5
+        rows, cols = np.nonzero(weights)
+        tree = {
+            "influences": [f"joint{i}" for i in range(5)],
+            "__sparse_weights__": {
+                "values": weights[rows, cols],
+                "rows":   rows.astype(np.int32),
+                "cols":   cols.astype(np.int32),
+                "shape":  [10, 5],
+            },
+        }
+        skin = SkinData.from_dict(tree)
+        self.assertTrue(np.array_equal(skin.weights, weights))
+        # a save now holds them dense, as npz and json always did
+        self.assertNotIn("__sparse_weights__", skin.to_dict())
+        self.assertTrue(np.array_equal(pickle.loads(pickle.dumps(skin)).weights, weights))
 
-        data = pickle.dumps(skin)
-        self.assertLess(len(data), weights.nbytes // 10)
-        self.assertTrue(np.array_equal(pickle.loads(data).weights, weights))
-
-        # and wherever the skin sits: in a list
-        skins = SkinList([skin, skin.copy()])
-        data  = pickle.dumps(skins)
-        self.assertLess(len(data), 2 * weights.nbytes // 10)
-        self.assertTrue(all(np.array_equal(x.weights, weights) for x in pickle.loads(data)))
-
-    def test_older_pickle_refused(self):
-        """a pickle an older cgmath wrote raises LegacyFileError"""
+    def test_a_pickle_naming_code_is_refused(self):
+        """a cgmath pickle holds plain data: one naming a function, as a pickle of cgmath 1.x did, is refused"""
 
         class Older:
             def __reduce__(self):
                 state = (["joint1"], np.ones(1), np.zeros(1, int), np.zeros(1, int), (1, 1))
-                return (SkinData._reconstruct, (state,))
+                return (_rebuild_of_1_x, (state,))
 
-        with self.assertRaises(LegacyFileError):
-            pickle.loads(pickle.dumps(Older()))
+        path = os.path.join(tempfile.mkdtemp(), "older.pkl")
+        with open(path, "wb") as f:
+            pickle.dump(Older(), f)
+        with self.assertRaisesRegex(pickle.UnpicklingError, "plain data"):
+            SkinData.load(path)
 
     def test_subdivide_any_influence_count(self):
         """weights subdivide the way points do, whatever their column count"""
@@ -645,17 +657,6 @@ class TestCompactSkinData(unittest.TestCase):
         self.assertTrue(loaded == self.compact_skin)
         self.assertEqual(loaded.max_influences, self.compact_skin.max_influences)
         self.assertEqual(loaded.influence_indices.dtype, np.int32)
-
-    def test_compact_older_pickle_refused(self):
-        """a pickle an older cgmath wrote raises LegacyFileError"""
-
-        class Older:
-            def __reduce__(self):
-                state = (1, np.zeros(1, int), np.ones(1), ["joint1"])
-                return (CompactSkinData._reconstruct, (state,))
-
-        with self.assertRaises(LegacyFileError):
-            pickle.loads(pickle.dumps(Older()))
 
     @unittest.skipIf(Usd is None, "USD is not installed")
     def test_compact_prim_round_trip(self):

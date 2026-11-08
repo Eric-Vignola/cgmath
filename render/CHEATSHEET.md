@@ -427,7 +427,7 @@ private field, `_mesh`; a tree naming the field still loads.
 
 ```python
 payload = cube.to_dict()
-print(payload["__class__"], payload["mesh"]["__class__"])
+print("__class__" in payload, sorted(payload["mesh"])[:2])  # False ['counts', 'indices']: the fields, no class
 clone = Object.from_dict(payload)
 print(clone.name, clone.mesh.points.shape, clone.texture.dtype)
 

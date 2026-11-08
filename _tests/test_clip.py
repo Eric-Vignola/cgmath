@@ -387,15 +387,19 @@ class TestClipFiles(unittest.TestCase):
                     self.assertEqual(block.dtype, np.float64)
                     self.assertEqual(block.shape, (3, 4, 3))
 
-    def test_the_module_loader_hands_back_a_clip(self):
-        # cgmath.hierarchy.load() used to rebuild every file as a HierarchyData
+    def test_the_module_loader_reads_a_clip_as_a_hierarchy(self):
+        # cgmath.hierarchy.load() gives a HierarchyData, whatever class saved
+        # the file: a clip's nodes, the clip's own entries dropped with a
+        # warning; the clip itself loads with ClipData.load()
         for mode in ("json", "npz", "pkl"):
             with self.subTest(mode):
-                path   = self.clip.save(os.path.join(self.tmp.name, f"clip.{mode}"))
-                loaded = hierarchy.load(path)
+                path = self.clip.save(os.path.join(self.tmp.name, f"clip.{mode}"))
+                with self.assertWarnsRegex(UserWarning, "^HierarchyData: the data names 'blocks'"):
+                    loaded = hierarchy.load(path)
 
-                self.assertIsInstance(loaded, ClipData)
-                self.assertEqual(loaded, self.clip)
+                self.assertIs(type(loaded), HierarchyData)
+                self.assertEqual(loaded.name, self.clip.name)
+                self.assertEqual(ClipData.load(path), self.clip)
 
     def test_a_block_of_the_wrong_shape_is_refused(self):
         # each error names the block as the file does

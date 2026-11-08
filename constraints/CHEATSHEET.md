@@ -533,17 +533,16 @@ print(np.allclose(batch.translate, (1.0, 0.0, 0.0)))
 through dicts, bytes and files. Cached results and the deformed cloud
 are **not** serialized — re-`update()` after loading.
 
-`to_dict()` names the class under `"__class__"` and leaves out a field
-equal to its default, so `scale_offset` appears only when it is `False`. It
-is saved under the property's name; a tree naming the field, `_scale_offset`,
-still loads.
+`to_dict()` leaves out a field equal to its default, so `scale_offset`
+appears only when it is `False`, and names no class. It is saved under the
+property's name; a tree naming the field, `_scale_offset`, still loads.
 
 ```python
 import os
 import tempfile
 
 state = solve.to_dict()
-print(sorted(state))                 # ['__class__', 'clusters', 'points', 'transforms']
+print(sorted(state))                 # ['clusters', 'points', 'transforms']
 
 restored = ProcrustesData.from_dict(state)
 print(restored.valid)                # True
@@ -552,7 +551,7 @@ print(np.allclose(restored.matrix, solve.matrix))
 
 no_scale = solve.copy()
 no_scale.scale_offset = False
-print(sorted(no_scale.to_dict()))  # ['__class__', 'clusters', 'points', 'scale_offset', 'transforms']
+print(sorted(no_scale.to_dict()))  # ['clusters', 'points', 'scale_offset', 'transforms']
 print(ProcrustesData.from_dict(no_scale.to_dict()).scale_offset)  # False
 ```
 
@@ -576,16 +575,16 @@ for ext in ("npz", "json", "pkl"):
     print(ext, back.valid, back.points.shape, back.transforms.shape, back.clusters.dtype)
 ```
 
-A class's `load()` gives back that class, the one the file names.
-Loading the file through any other class, a subclass too, raises
-`TypeError` naming the class to use; `Data.load()` gives back whatever a
-file holds. A file saved by an older cgmath raises `LegacyFileError`.
+A file names no class: the class you load it with builds it from the
+fields the file holds, so a file is loaded with the class expected. A
+field the class requires and the file lacks raises `ValueError` naming it;
+one the class lacks is dropped with a warning.
 
 ```python
 try:
     MeshData.load(os.path.join(tmp, "rivet.npz"))
-except TypeError as err:
-    print(err)  # .../rivet.npz holds a ProcrustesData; load it with ProcrustesData.load() or Data.load()
+except ValueError as err:
+    print(err)  # MeshData.from_dict: the data lacks indices, counts
 ```
 
 The explicit per-format methods work too.
@@ -669,5 +668,5 @@ except AttributeError as err:
 | Expecting shear or non-uniform scale back | not recoverable — orthogonal solve, uniform scale only |
 | `rotate` in degrees | it is **radians**; wrap in `np.degrees()` |
 | Loading a saved object and reading `matrix` | `None` until you `update()` or `compute()` again |
-| Loading a file saved by an older cgmath | `LegacyFileError` (a `ValueError`); rebuild the object and save it again |
+| Loading a file with the wrong class | `ValueError` naming the fields the class lacks; a field it has no use for is dropped with a warning |
 | Needing to remove a cluster | no `detach()`; rebuild, or assign `transforms` / `clusters` in bulk |

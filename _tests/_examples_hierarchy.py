@@ -28,7 +28,6 @@ from __future__ import annotations
 import uuid
 
 import numpy as np
-from cgmath.geometry.sdf import SDFBox, SDFCylinder, SDFSphere
 from cgmath.hierarchy import ClipData, ClipList, HierarchyData, TransformData, TransformList
 
 _NAMESPACE = uuid.UUID("6f1c2a9e-3b7d-4e55-9a0c-2d8e4f6b1a37")
@@ -142,11 +141,11 @@ def transform_data() -> TransformData:
 
 def rig() -> HierarchyData:
     """
-    A namespaced rig: a joint chain, a locator, a group, a space transform,
-    and an SDF sphere, box and cylinder used as colliders, parented by uuid.
-    The hip carries a user attribute of every type; the group a user
-    attribute named like a built-in, which the built-in hides but a save
-    keeps. Its values are recorded in Unreal's axes and in meters.
+    A namespaced rig: a joint chain, a locator, a group and a space
+    transform, parented by uuid. The hip carries a user attribute of every
+    type; the group a user attribute named like a built-in, which the
+    built-in hides but a save keeps; the space transform an enum. Its values
+    are recorded in Unreal's axes and in meters.
     """
     root = TransformData(
         "VLR:root",
@@ -197,34 +196,13 @@ def rig() -> HierarchyData:
         rotate_order = 5,
     )
 
-    head            = SDFSphere(radius=11.5, translate=[0.0, 70.0, 0.0], name="VLR:head_collider")
-    head.uuid       = _uuid("VLR:head_collider")
-    head.visibility = False
-
-    foot = SDFBox(
-        half_extents = [4.0, 1.5, 12.0],
-        translate    = [10.0, -90.0, 5.0],
-        rotate       = [0.0, 15.0, 0.0],
-        name         = "VLR:foot_collider",
-    )
-    foot.uuid         = _uuid("VLR:foot_collider")
-    foot.rotate_order = 2
-
-    thigh = SDFCylinder(
-        radius = 7.5,
-        height = 42.0,
-        axis   = 0,
-        scale  = [1.0, 1.1, 0.9],
-        name   = "VLR:thigh_collider",
-    )
-    thigh.uuid = _uuid("VLR:thigh_collider")
-    thigh.add_user_attribute(
+    # a hierarchy holds transforms: a shape, an SDF primitive, is its own
+    # record, placed by the transform it names
+    space.add_user_attribute(
         "collisionLayer", "limbs", attribute_type="enum", enum_names="body:limbs:props"
     )
 
-    h = HierarchyData([root, pelvis, hip, aim, group, space, head, foot, thigh])
-    head.set_parent("VLR:pelvis", world_space=False)
-    thigh.set_parent("VLR:hip_L", world_space=False)
+    h             = HierarchyData([root, pelvis, hip, aim, group, space])
     h.axis_system = "z up, -y front, right handed"
     h.unit        = 100.0
     return h
@@ -235,9 +213,9 @@ def hierarchy_data() -> HierarchyData:
 
 
 def transform_list() -> TransformList:
-    """a selection of the rig: the hip, its locator and its collider, the
-    hip's parent left out of it"""
-    view = rig().match("VLR:hip_L*", "VLR:thigh_*")
+    """a selection of the rig: the hip, its locator and the space transform,
+    the hip's parent left out of it"""
+    view = rig().match("VLR:hip_L*", "VLR:world_space")
     assert type(view) is TransformList and len(view) == 3
     return view
 

@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import warnings
 import zipfile
 from dataclasses import dataclass, field
 from enum import Enum
@@ -17,13 +18,10 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 from cgmath.data import (
     _as_declared,
-    _CLASSES,
     _is_numeric_or_boolean,
     _is_numeric_sequence,
     _is_sequence,
-    _register,
     Array,
-    CLASS_KEY,
     Data,
     DataList,
     dict_to_zip,
@@ -32,7 +30,6 @@ from cgmath.data import (
     get_file_type,
     ImmutableArray,
     is_ndarray_annotation,
-    LegacyFileError,
     zip_to_dict,
 )
 
@@ -102,7 +99,7 @@ class TypedDataClass(Data):
     image:   Optional[Array((np.uint8, np.uint16, np.float32))] = None
     pair:    Tuple[int, int] = (1, 2)
     payload: Optional[dict] = None
-    child:   Optional[Data] = None
+    child:   Optional[ParentClass] = None  # a class, which builds the field's tree; Data itself builds nothing
 
     # a cache it holds beside its fields
     _STATE = ("_cache",)
@@ -272,13 +269,13 @@ class TestData(unittest.TestCase):
         parent = ParentClass()
         child  = ChildClass()
 
-        # fields left at their defaults are left out
-        self.assertEqual(sorted(parent.to_dict()), [CLASS_KEY])
+        # fields left at their defaults are left out, and nothing names the class
+        self.assertEqual(sorted(parent.to_dict()), [])
 
         parent = ParentClass(foo=2, bar=3.0)
         child  = ChildClass(foo=2, bar=3.0, baz=True)
-        self.assertEqual(sorted(parent.to_dict()), sorted([CLASS_KEY, "bar", "foo"]))
-        self.assertEqual(sorted(child.to_dict()), sorted([CLASS_KEY, "bar", "baz", "foo"]))
+        self.assertEqual(sorted(parent.to_dict()), ["bar", "foo"])
+        self.assertEqual(sorted(child.to_dict()), ["bar", "baz", "foo"])
 
     def test_from_dict_preserves_array_containers(self):
         """A list of arrays must survive from_dict() as a list, not be merged
@@ -624,38 +621,65 @@ class TestFiles(unittest.TestCase):
                 self.assertEqual(back.label, "kept")
                 self.assertEqual(back,       items)
 
-    def test_another_class_is_refused(self):
-        path = os.path.join(self.tmp, "parent.json")
+    def test_a_file_is_built_as_the_class_asked(self):
+        # a file names no class: the class loading it builds it from the
+        # fields it holds. A field the class lacks is dropped, with a warning
+        path = os.path.join(self.tmp, "child.json")
+        ChildClass(foo=2, baz=True).save(path)
+        with self.assertWarnsRegex(
+            UserWarning, r"^ParentClass: the data names 'baz', which is no field of it; dropped$"
+        ):
+            back = ParentClass.load(path)
+        self.assertIs(type(back), ParentClass)
+        self.assertEqual(back.foo, 2)
+        self.assertNotIn("baz", vars(back))
+
+        # the other way, a field the file lacks takes its default
         ParentClass(foo=2).save(path)
-        with self.assertRaisesRegex(TypeError, "holds a ParentClass; load it with ParentClass.load"):
-            TestDataClass.load(path)
+        back = ChildClass.load(path)
+        self.assertIs(type(back), ChildClass)
+        self.assertEqual((back.foo, back.baz), (2, ChildClass().baz))
 
-        # a subclass too: Data's own load gives back whatever the file holds
-        ChildClass(baz=True).save(path)
-        with self.assertRaisesRegex(TypeError, "holds a ChildClass; load it with ChildClass.load"):
-            ParentClass.load(path)
-        self.assertIs(type(ChildClass.load(path)), ChildClass)
-        self.assertIs(type(Data.load(path)), ChildClass)
+        # the base class itself builds nothing
+        with self.assertRaisesRegex(TypeError, r"^Data\.load\(\) builds nothing: a file names no class"):
+            Data.load(path)
 
-    def test_older_files_are_refused(self):
-        json_path = os.path.join(self.tmp, "old.json")
+        # a stale class name, as a file saved up to 3.2 holds, is skipped in silence
+        with open(path, "w") as f:
+            std_json.dump({"__class__": "cgmath.nowhere.Gone", "foo": 3}, f)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            self.assertEqual(ParentClass.load(path).foo, 3)
+
+    def test_a_required_field_the_file_lacks_is_refused(self):
+        path = os.path.join(self.tmp, "bare.json")
+        with open(path, "w") as f:
+            std_json.dump({"indices": [0, 1, 2]}, f)
+        with self.assertRaisesRegex(ValueError, r"^TypedDataClass\.from_dict: the data lacks points$"):
+            TypedDataClass.load(path)
+
+    def test_a_file_with_no_class_loads_as_the_class_asked(self):
+        json_path = os.path.join(self.tmp, "plain.json")
         with open(json_path, "w") as f:
             std_json.dump({"foo": 2}, f)
 
-        npz_path = os.path.join(self.tmp, "old.npz")
+        npz_path = os.path.join(self.tmp, "plain.npz")
         with zipfile.ZipFile(npz_path, "w") as zipf:
             with zipf.open("foo.npy", "w") as f:
                 np.save(f, np.asarray(2))
 
-        # how an older cgmath pickled data
-        pkl_path = os.path.join(self.tmp, "old.pkl")
-        with open(pkl_path, "wb") as f:
-            pickle.dump(_OldPickle(), f)
-
-        for path in (json_path, npz_path, pkl_path):
+        for path in (json_path, npz_path):
             with self.subTest(path=os.path.basename(path)):
-                with self.assertRaisesRegex(LegacyFileError, "older cgmath"):
-                    ParentClass.load(path)
+                self.assertEqual(ParentClass.load(path).foo, 2)
+
+    def test_a_pickle_of_cgmath_1_is_refused(self):
+        # cgmath 1.x pickled a function that rebuilt the object: a cgmath
+        # pickle holds plain data, so a name is refused
+        path = os.path.join(self.tmp, "old.pkl")
+        with open(path, "wb") as f:
+            pickle.dump(_OldPickle(), f)
+        with self.assertRaisesRegex(pickle.UnpicklingError, "holds plain data"):
+            ParentClass.load(path)
 
     def test_npz_holds_no_pickles(self):
         path = os.path.join(self.tmp, "data.npz")
@@ -763,19 +787,20 @@ class TestFiles(unittest.TestCase):
         self.assertEqual(back["mixed"], [[1, 2.0]])
         self.assertIs(type(back["mixed"][0][0]), int)
 
-    def test_an_older_json_in_another_encoding_is_refused(self):
+    def test_a_json_in_another_encoding_is_refused(self):
         path = os.path.join(self.tmp, "old_cp1252.json")
         with open(path, "wb") as f:
             f.write(b'{"name": "caf\xe9"}')
-        with self.assertRaisesRegex(LegacyFileError, "older cgmath"):
+        with self.assertRaisesRegex(ValueError, "is not json in utf-8"):
             ParentClass.load(path)
 
-    def test_an_older_pickle_of_nested_data_is_refused(self):
-        # an older cgmath pickled through from_dict, nested data as bare fields
-        path = os.path.join(self.tmp, "old_nested.pkl")
+    def test_a_pickle_naming_code_is_refused(self):
+        # a pickle calling a class's from_dict names a builtin, getattr, to
+        # reach it: no name at all is allowed in a cgmath pickle
+        path = os.path.join(self.tmp, "named.pkl")
         with open(path, "wb") as f:
             pickle.dump(_OldNestedPickle(), f)
-        with self.assertRaisesRegex(LegacyFileError, "older cgmath"):
+        with self.assertRaisesRegex(pickle.UnpicklingError, "holds plain data"):
             TypedDataClass.load(path)
 
     def test_a_pickle_holds_no_numpy_object(self):
@@ -825,20 +850,22 @@ class TestFiles(unittest.TestCase):
         backs["copy"] = obj.copy()
         return backs
 
-    def test_an_object_held_twice_loads_as_one(self):
-        # a field, a dict and a tuple in it hold one leaf: it is saved once
+    def test_an_object_in_a_typed_field_is_built_and_one_in_a_dict_stays_a_tree(self):
+        # a field declared as a class builds its tree as that class; a dict,
+        # which declares nothing, keeps the tree: a file names no class
         leaf = ParentClass(foo=7)
         obj  = typed(child=leaf, payload={"first": leaf, "pair": (leaf, ChildClass(baz=True))})
         for ext, back in self.loads_and_copy(obj).items():
             with self.subTest(ext=ext):
+                self.assertIs(type(back.child), ParentClass)
                 self.assertEqual(back.child.foo, 7)
                 self.assertIsNot(back.child, leaf)
-                self.assertIs(back.payload["first"],         back.child)
-                self.assertIs(back.payload["pair"][0],       back.child)
-                self.assertIs(type(back.payload["pair"][1]), ChildClass)
+                self.assertEqual(back.payload["first"], {"foo": 7})
+                self.assertEqual(list(back.payload["pair"]), [{"foo": 7}, {"baz": True}])
 
-    def test_an_object_held_twice_in_a_list_loads_as_one(self):
-        # one item twice, a leaf in two items, and both again in a LIST_FIELD
+    def test_an_object_held_twice_in_a_list_loads_as_two(self):
+        # one item twice, a leaf in two items, and both again in a LIST_FIELD:
+        # each place gets a copy of its own, equal to the others
         leaf        = ParentClass(foo=3)
         first       = typed(child=leaf)
         items       = TypedDataList([first, typed(payload={"leaf": leaf}), first])
@@ -846,48 +873,28 @@ class TestFiles(unittest.TestCase):
         for ext, back in self.loads_and_copy(items).items():
             with self.subTest(ext=ext):
                 self.assertEqual(len(back), 3)
-                self.assertIsNot(back[0], first)
-                self.assertIs(back[2], back[0])
-                self.assertIs(back[1].payload["leaf"], back[0].child)
-                self.assertIs(back.label["leaf"], back[0].child)
-                self.assertIs(back.label["first"], back[0])
+                self.assertIsNot(back[2], back[0])
+                self.assertEqual(back[2], back[0])
+                self.assertEqual(back[0].child.foo, 3)
+                self.assertEqual(back[1].payload["leaf"], {"foo": 3})
+                self.assertEqual(back.label["leaf"], {"foo": 3})
+                self.assertEqual(back.label["first"]["child"], {"foo": 3})
 
-    def test_a_shared_object_under_a_field_compared_with_its_default(self):
-        # a nested Data under a Data default keeps what it shares
+    def test_a_nested_object_under_a_field_with_a_default(self):
+        # a nested Data under a Data default is saved when it differs from it
         leaf      = ParentClass(foo=5)
         obj       = _WithDefaultChild()
-        obj.child = typed(name="other", payload={"a": leaf, "b": leaf})
+        obj.child = typed(name="other", payload={"a": leaf})
         for ext, back in self.loads_and_copy(obj).items():
             with self.subTest(ext=ext):
-                self.assertEqual(back.child.payload["a"].foo, 5)
-                self.assertIs(back.child.payload["b"], back.child.payload["a"])
+                self.assertEqual(back.child.name, "other")
+                self.assertEqual(back.child.payload["a"], {"foo": 5})
 
-        # the save compares a field with its default by their trees, built
-        # apart: a default holding an object the save shares takes none of
-        # the save's numbers
-        obj = _WithHeldDefault(child=typed(name="mine"), other=typed(payload={"a": _HELD, "b": _HELD}))
-        for ext, back in self.loads_and_copy(obj).items():
-            with self.subTest(ext=ext, default="holds a shared object"):
-                self.assertEqual(back.child.name, "mine")
-                self.assertIs(back.other.payload["b"], back.other.payload["a"])
-
-    def test_a_reference_before_its_object_is_refused(self):
-        leaf = ParentClass(foo=7)
-        path = typed(payload={"a": leaf}, child=leaf).save(os.path.join(self.tmp, "ref.json"))
-        with open(path, encoding="utf-8") as f:
-            tree = std_json.load(f)
-        # payload is read before child: put the reference there
-        tree["payload"]["a"], tree["child"] = tree["child"], tree["payload"]["a"]
-        with open(path, "w", encoding="utf-8") as f:
-            std_json.dump(tree, f)
-        with self.assertRaisesRegex(ValueError, "refers to object 0 before saving it"):
-            TypedDataClass.load(path)
-
-    def test_an_object_that_holds_itself_is_refused(self):
-        # a load builds an object after what it holds: no file could keep it
+    def test_an_object_that_holds_itself_cannot_be_saved(self):
+        # a save walks what an object holds: one that holds itself never ends
         obj         = typed()
         obj.payload = {"self": obj}
-        with self.assertRaisesRegex(ValueError, "TypedDataClass that holds itself"):
+        with self.assertRaises(RecursionError):
             obj.to_dict()
 
     def test_sharing_leaves_the_hash_as_it_was(self):
@@ -908,26 +915,6 @@ class TestFiles(unittest.TestCase):
         self.assertEqual(shared, apart)
         self.assertEqual(hash(shared), hash(apart))
 
-    def test_an_object_held_twice_at_its_default_loads_as_one(self):
-        # a field equal to its default is left out, but not when it holds an
-        # object saved twice: a load's fresh default would share nothing
-        leaf  = ParentClass()                           # equal to the defaults of first and second
-        twice = [_WithDataDefaults(first=leaf), _WithDataDefaults(first=leaf)]
-        pair  = typed(child=leaf, payload={"a": leaf})  # pair's default, but for its one leaf
-        cases = [
-            (_WithDataDefaults(first=leaf, second=leaf), lambda x: (x.first, x.second)),
-            (_WithDataDefaults(second=leaf, other=leaf), lambda x: (x.second, x.other)),
-            (_WithDataDefaultsList(twice), lambda x: (x[0].first, x[1].first)),
-            (_WithDataDefaults(pair=pair), lambda x: (x.pair.child, x.pair.payload["a"])),
-        ]
-        for case, (obj, held) in enumerate(cases):
-            for how, back in self.loads_and_copy(obj).items():
-                with self.subTest(case=case, how=how):
-                    one, two = held(back)
-                    self.assertIs(type(one), ParentClass)
-                    self.assertIsNot(one, leaf)
-                    self.assertIs(two, one)
-
     def test_a_file_loads_after_its_class_reorders_its_fields(self):
         # a load builds objects in the order the file holds them, whatever
         # order the class declares its fields in now
@@ -944,7 +931,7 @@ class TestFiles(unittest.TestCase):
         # each class as a later version declares it, its two fields swapped,
         # in the module in its place, where a pickle finds it
         namespace = {"__module__": _Ordered.__module__, "__qualname__": _Ordered.__qualname__}
-        namespace.update(__annotations__={"second": Optional[Data], "first": Optional[Data]})
+        namespace.update(__annotations__={"second": Optional[ParentClass], "first": Optional[ParentClass]})
         namespace.update(second=None, first=None)
         listspace = {"__module__": _OrderedList.__module__, "__qualname__": _OrderedList.__qualname__}
         listspace.update(LIST_FIELDS=("second", "first"))
@@ -954,7 +941,6 @@ class TestFiles(unittest.TestCase):
         }
         module = sys.modules[_Ordered.__module__]
         for cls, version in later.items():
-            self.addCleanup(_register, cls)
             self.addCleanup(setattr, module, cls.__name__, cls)
             setattr(module, cls.__name__, version)
 
@@ -963,11 +949,10 @@ class TestFiles(unittest.TestCase):
                 back = later[cls].load(path)
                 self.assertIs(type(back), later[cls])
                 self.assertEqual(back.first.foo, 5)
-                self.assertIs(back.second, back.first)
+                self.assertEqual(back.second, back.first)
 
     def test_a_file_loads_after_its_list_drops_a_field(self):
-        # a part the class no longer declares is left out, as before, but an
-        # object first saved there is built still: a later part refers to it
+        # a part the class no longer declares is dropped, with a warning
         leaf          = ParentClass(foo=5)
         shared        = _OrderedList([ParentClass(foo=1)])
         shared.first  = leaf
@@ -981,7 +966,7 @@ class TestFiles(unittest.TestCase):
             for ext in ("pkl", "npz", "json")
         ]
 
-        # a part holding a class no cgmath has is left out unread, as before
+        # a part naming a class, as a file of 3.2 does, is dropped the same
         with open(paths[-1], encoding="utf-8") as f:
             tree = std_json.load(f)
         tree["first"] = {"__class__": "cgmath.nowhere.Gone", "foo": 1}
@@ -1000,22 +985,24 @@ class TestFiles(unittest.TestCase):
         listspace.update(LIST_FIELDS=("second",), __init__=__init__)
         later  = type("_OrderedList", (_OrderedList,), listspace)
         module = sys.modules[_OrderedList.__module__]
-        self.addCleanup(_register, _OrderedList)
         self.addCleanup(setattr, module, "_OrderedList", _OrderedList)
         setattr(module, "_OrderedList", later)
 
         for path in paths:
             with self.subTest(path=os.path.basename(path)):
-                back = later.load(path)
+                with self.assertWarnsRegex(
+                    UserWarning, r"^_OrderedList: the data names 'first', which is no field of it; dropped$"
+                ):
+                    back = later.load(path)
                 self.assertIs(type(back), later)
                 self.assertEqual(back[0].foo, 1)
                 self.assertEqual(back.second.foo, 5)
-                self.assertNotIn("first", vars(back))  # left out
+                self.assertNotIn("first", vars(back))  # dropped
 
-    def test_a_dict_or_list_that_holds_itself_is_refused(self):
-        # a save walks dicts and lists for the objects they hold: one that
-        # holds itself is refused, as an object that holds itself is. In a
-        # thread, so a walk that never ends fails the test, not the suite
+    def test_a_dict_or_list_that_holds_itself_cannot_be_saved(self):
+        # a save walks dicts and lists for what they hold: one that holds
+        # itself never ends, as an object that holds itself. In a thread, so
+        # a walk that never ends fails the test, not the suite
         loop       = {}
         loop["me"] = loop
         ring       = [1]
@@ -1028,13 +1015,12 @@ class TestFiles(unittest.TestCase):
                 worker.start()
                 worker.join(30)
                 self.assertFalse(worker.is_alive(), f"the save of a {kind} that holds itself never ends")
-                self.assertEqual([type(x) for x in errors], [ValueError])
-                self.assertIn(f"cannot save a {kind} that holds itself", str(errors[0]))
+                self.assertEqual([type(x) for x in errors], [RecursionError])
 
     def test_a_deep_tree_saves_and_loads(self):
         # a save costs each nested object two frames, its to_dict() and
-        # _encode(): numbering what is shared adds none. A load costs it
-        # three, so a tree loads less deep than it saves
+        # _encode(), and a load two, its from_dict() and _from_state(), which
+        # builds a field declared as a class by calling that class straight
         limit = sys.getrecursionlimit()
         deep  = None
         for _ in range(limit * 2 // 5):  # 400 objects at the default limit
@@ -1173,7 +1159,6 @@ class TestFiles(unittest.TestCase):
         Slotted = dataclass(repr=False, eq=False, slots=True)(
             type("Slotted", (Data,), {"__annotations__": {"a": int}, "a": 0})
         )
-        self.addCleanup(_CLASSES.pop, f"{__name__}.Slotted", None)
         obj = Slotted(a=5)
         self.assertEqual(copy.copy(obj).a, 5)
         self.assertEqual(copy.deepcopy(obj).a, 5)
@@ -1214,13 +1199,13 @@ class TestFiles(unittest.TestCase):
                     typed(name="new").save(path)
                 self.assertEqual(TypedDataClass.load(path).name, "new")
 
-    def test_an_older_empty_list_pickle_is_refused(self):
-        # an older cgmath pickled a list as its attributes: an empty one has
-        # no item to refuse it
+    def test_an_older_list_pickle_is_refused(self):
+        # an older cgmath pickled a list as its attributes, through copyreg:
+        # a name a cgmath pickle may not hold
         path = os.path.join(self.tmp, "old_list.pkl")
         with open(path, "wb") as f:
             pickle.dump(_OldListPickle(), f)
-        with self.assertRaisesRegex(LegacyFileError, "older cgmath"):
+        with self.assertRaisesRegex(pickle.UnpicklingError, "holds plain data"):
             TypedDataList.load(path)
 
     def test_a_reloaded_class_loads_and_copies(self):
@@ -1228,7 +1213,6 @@ class TestFiles(unittest.TestCase):
         # copies keep to the class asked for
         namespace = {"__module__": ParentClass.__module__, "__qualname__": ParentClass.__qualname__}
         namespace.update(__annotations__={"foo": int, "bar": float}, foo=1, bar=1.0)
-        self.addCleanup(_register, ParentClass)
         twin = dataclass(repr=False, eq=False)(type("ParentClass", (Data,), namespace))
 
         for ext in ("pkl", "npz", "json"):
@@ -1286,11 +1270,18 @@ if __name__ == "__main__":
 '''
 
 
+def _reconstruct_of_1_x(cls, state):
+    """how cgmath 1.x rebuilt a pickled object: a function a pickle names"""
+    obj = cls.__new__(cls)
+    obj.__dict__.update(state)
+    return obj
+
+
 class _OldPickle:
-    """unpickles the way an older cgmath's data did"""
+    """unpickles the way cgmath 1.x's data did"""
 
     def __reduce__(self):
-        return (Data._reconstruct, (ParentClass, {"foo": 2}))
+        return (_reconstruct_of_1_x, (ParentClass, {"foo": 2}))
 
 
 class _OldListPickle:
@@ -1359,23 +1350,12 @@ class _WithDataDefaultsList(DataList):
     DATA_LIST_CLASS = _WithDataDefaults
 
 
-_HELD = ParentClass(foo=9)  # one object that every _WithHeldDefault default holds
-
-
-@dataclass(repr=False, eq=False)
-class _WithHeldDefault(Data):
-    """a Data field whose default holds an object a save may hold elsewhere"""
-
-    child: TypedDataClass = field(default_factory=lambda: typed(child=_HELD))
-    other: Optional[Data] = None
-
-
 @dataclass(repr=False, eq=False)
 class _Ordered(Data):
     """two fields, which a later version of the class swaps"""
 
-    first:  Optional[Data] = None
-    second: Optional[Data] = None
+    first:  Optional[ParentClass] = None
+    second: Optional[ParentClass] = None
 
 
 class _OrderedList(DataList):
@@ -1383,6 +1363,9 @@ class _OrderedList(DataList):
 
     DATA_LIST_CLASS = ParentClass
     LIST_FIELDS     = ("first", "second")
+
+    first:  Optional[ParentClass]
+    second: Optional[ParentClass]
 
     def __init__(self, iterable=None):
         super().__init__(iterable)
@@ -1394,7 +1377,7 @@ class _OrderedList(DataList):
 class _Link(Data):
     """one link of a chain as deep as a test needs"""
 
-    child: Optional[Data] = None
+    child: Optional["_Link"] = None
 
 
 def _record_error(call, errors: list) -> None:

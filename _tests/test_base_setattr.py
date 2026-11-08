@@ -205,7 +205,6 @@ class TestDataStrictSetattr(unittest.TestCase):
             ("_rebuilt", "a method"),
             ("load", "a class method"),
             ("from_dict", "a class method"),
-            ("_reconstruct", "a static method"),
         ):
             with self.subTest(name=name), self.assertRaisesRegex(
                 AttributeError, f"^'{name}' is {what} of _Leaf, not a setting$"
@@ -263,9 +262,10 @@ class TestDataStrictSetattr(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, r"^TypoList\._STATE is a str"):
             TypoList()
 
-    def test_a_tree_naming_private_state_raises(self):
+    def test_a_tree_naming_private_state_warns_and_drops_it(self):
         # a file holds fields and public properties: a cache, a link, a name
-        # _STATE declares, one it does not, or a dunder is never loaded
+        # _STATE declares, one it does not, or a dunder is never loaded; the
+        # key warns and is dropped
         node = TransformData(name="a")
         mesh = MeshData(indices=np.arange(3), counts=np.array([3]), points=np.eye(3))
         for obj, key, value in (
@@ -278,11 +278,11 @@ class TestDataStrictSetattr(unittest.TestCase):
             what      = type(obj).__name__
             tree      = obj.to_dict()
             tree[key] = value
-            with self.subTest(cls=what, key=key), self.assertRaisesRegex(
-                AttributeError,
-                f"^the data names '{key}', which is no field of {what}: a file holds no private state$",
+            with self.subTest(cls=what, key=key), self.assertWarnsRegex(
+                UserWarning, f"^{what}: the data names '{key}', which is no field of it; dropped$"
             ):
-                type(obj).from_dict(tree)
+                back = type(obj).from_dict(tree)
+            self.assertNotEqual(getattr(back, key, None), value)
 
         # and a file on disk, a dict written over the instance's
         with tempfile.TemporaryDirectory() as tmp:
@@ -292,7 +292,7 @@ class TestDataStrictSetattr(unittest.TestCase):
             tree["__dict__"] = {"junk": 1}
             with open(path, "w") as f:
                 json.dump(tree, f)
-            with self.assertRaisesRegex(AttributeError, "^the data names '__dict__'"):
+            with self.assertWarnsRegex(UserWarning, "^MeshData: the data names '__dict__'"):
                 MeshData.load(path)
 
     # -- the actual typo guard ----------------------------------------

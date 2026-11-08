@@ -215,9 +215,10 @@ class TestSceneRoundTrip(RoundTripCase):
         scene = _scene()
         self.assert_same(scene, scene.copy(), "scene")
 
-    def test_objects_sharing_a_mesh_share_it_again(self):
-        """instancing: two Objects over one MeshData and UVData loaded back,
-        or copied, as two Objects over one, not over two copies"""
+    def test_objects_sharing_a_mesh_load_as_two(self):
+        """two Objects over one MeshData and UVData save them with each, and
+        load back, or copy, as two Objects over equal copies: a file holds
+        no link between its trees"""
         mesh, uv = _cube()
         scene = Scene("instances")
         scene.append(Object(name="a", mesh=mesh, uv=uv))
@@ -229,17 +230,18 @@ class TestSceneRoundTrip(RoundTripCase):
         for how, loaded in loads.items():
             with self.subTest(how):
                 a, b, c = loaded.objects
-                self.assertIs(b.mesh, a.mesh)
-                self.assertIs(b.uv,   a.uv)
-                self.assertIs(c.uv,   a.uv)
-                self.assertIsNot(c.mesh, a.mesh)
+                self.assertIsNot(b.mesh, a.mesh)
+                self.assertIsNot(b.uv,   a.uv)
                 self.assertIsNot(a.mesh, mesh)
-                self.assert_same(mesh, a.mesh, "mesh")
-                self.assert_same(mesh, c.mesh, "mesh")
+                for node in (a, b, c):
+                    self.assert_same(mesh, node.mesh, "mesh")
+                    self.assert_same(uv, node.uv, "uv")
 
-    def test_a_selection_keeps_its_instancing(self):
-        """a view over Objects sharing a mesh saves and copies as a hierarchy
-        whose Objects share one, and leaves the scene's nodes as they were"""
+    def test_a_selection_saves_and_copies_as_a_hierarchy(self):
+        """a view over Objects sharing a mesh saves as a hierarchy, which a
+        Scene loads back by node_type, its Objects over equal meshes, and
+        copies the same way: a copy is the save and load, in memory. The
+        scene's nodes are left as they were"""
         mesh, uv = _cube()
         scene = Scene("instances")
         group = TransformData(name="group")
@@ -249,27 +251,36 @@ class TestSceneRoundTrip(RoundTripCase):
             scene[name].set_parent(group)
         view = scene[1:4]
 
-        loads             = {suffix: _round_trip(view, suffix, HierarchyData) for suffix in FORMATS}
-        loads["copy"]     = view.copy()
-        loads["deepcopy"] = copy.deepcopy(view)
-        for how, loaded in loads.items():
+        for suffix in FORMATS:
+            with self.subTest(suffix):
+                loaded = _round_trip(view, suffix, Scene)
+                self.assertIs(type(loaded), Scene)
+                a, b, c = loaded
+                self.assertIs(type(a), Object)
+                self.assertIsNot(b.mesh, a.mesh)   # a file holds no link
+                self.assert_same(mesh, a.mesh, "mesh")
+                self.assert_same(mesh, b.mesh, "mesh")
+                self.assertIsNone(a.get_parent())  # the group was left behind
+
+        for how, loaded in (("copy", view.copy()), ("deepcopy", copy.deepcopy(view))):
             with self.subTest(how):
                 self.assertIs(type(loaded), HierarchyData)
                 a, b, c = loaded
-                self.assertIs(b.mesh, a.mesh)
-                self.assertIs(c.uv, a.uv)
-                self.assertIsNot(c.mesh, a.mesh)
+                self.assertIs(type(a), Object)
+                self.assertIsNot(b.mesh, a.mesh)
                 self.assertIsNot(a.mesh, mesh)
                 self.assert_same(mesh, a.mesh, "mesh")
-                self.assertIsNone(a.get_parent())  # the group was left behind
+                self.assert_same(mesh, b.mesh, "mesh")
+                self.assertIsNone(a.get_parent())
 
         # the scene's own nodes keep their owner and their parent
         for name in "abc":
             self.assertIs(scene[name]._hierarchy, scene)
             self.assertIs(scene[name].get_parent(), group)
 
-    def test_a_selection_inside_other_data_keeps_its_instancing(self):
-        """a view a field holds shares its mesh with the field's other values"""
+    def test_a_selection_inside_a_dict_field_saves_as_its_tree(self):
+        """a view a dict field holds saves as the hierarchy's tree, and loads
+        back as that tree: a field typed dict builds no object"""
         mesh, uv = _cube()
         scene = Scene("instances")
         scene.append(Object(name="a", mesh=mesh, uv=uv))
@@ -280,11 +291,11 @@ class TestSceneRoundTrip(RoundTripCase):
         loads["copy"] = holder.copy()
         for how, loaded in loads.items():
             with self.subTest(how):
-                a, b = loaded.payload["view"]
-                self.assertIs(type(loaded.payload["view"]), HierarchyData)
-                self.assertIs(b.mesh, a.mesh)
-                self.assertIs(loaded.payload["mesh"], a.mesh)
-                self.assertIsNot(a.mesh, mesh)
+                view = loaded.payload["view"]
+                self.assertIsInstance(view, dict)
+                self.assertEqual([item["name"] for item in view["__items__"]], ["a", "b"])
+                self.assertEqual(sorted(loaded.payload["mesh"]), sorted(mesh.to_dict()))
+                np.testing.assert_array_equal(loaded.payload["mesh"]["points"], mesh.points)
 
     def test_none_settings_round_trip(self):
         scene = Scene("bare", resolution=None)

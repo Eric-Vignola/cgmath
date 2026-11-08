@@ -119,30 +119,28 @@ becomes a property (`uuid = forward("uuid", returns="list")` in a
 
 ### Saving and loading
 
-`pkl`, `npz` and `json` hold one tree, the dict `to_dict()` returns:
-`"__class__"` (module and class, `"cgmath.geometry.mesh.MeshData"`), then every
-field that differs from its default. A field exactly equal to its default is
-left out and loads back as a fresh copy of the default. A `DataList` saves
-`"__class__"`, `"__items__"` (one tree per item) and its `LIST_FIELDS`.
-`copy()` is the same round trip, in memory.
+`pkl`, `npz` and `json` hold one tree, the dict `to_dict()` returns: every
+field that differs from its default, and nothing about the class. A field
+exactly equal to its default is left out and loads back as a fresh copy of
+the default. A `DataList` saves `"__items__"` (one tree per item) and its
+`LIST_FIELDS`. `copy()` is the same round trip, in memory.
 
-- **A class's loader gives back that class.** `load`, `load_json`, `load_npz`,
-  `load_pickle`, `from_dict` and `from_bytes` called on a class need the file
-  or tree to hold exactly that class, under any name it is reached by: a
-  script's `"__main__.PinData"` loads through the `PinData` another script
-  imports from its module, and `"cgmath.geometry.MeshData"` is `MeshData`. Any
-  other raises `TypeError`, a subclass too: `MeshData.load()` on a saved
-  `UVData`, whose points are `(N, 2)` where a mesh's are `(N, 3)`, raises
-  "*file* holds a UVData; load it with UVData.load() or Data.load()". `Data`'s
-  own loaders give back whatever class the file holds, and `DataList`'s any
-  list. A module's `load` gives back whatever its file holds:
-  `cgmath.hierarchy.load` any `HierarchyData` or class deriving from it, a
-  `ClipData` for a saved clip; `skin_weights.load` any `SkinList`. Only the
-  whole file is held to its class: what it holds, a field's object or a list's
-  items, comes back as the classes they name, which may derive from the one
-  declared (a `MeshList`'s `UVData`, a `Scene`'s `Object`, `Camera` and
-  `Light` nodes). A tree built by hand, with no `"__class__"`, is read as the
-  class called.
+- **The class you load with builds the file.** `load`, `load_json`,
+  `load_npz`, `load_pickle`, `from_dict` and `from_bytes` called on a class
+  build that class from the fields the file holds, whatever class saved it: a
+  file names none. A field the class lacks is dropped with a warning; one the
+  class requires and the file lacks raises `ValueError` naming it, and so does
+  a value a field refuses (`MeshData.load()` on a saved `UVData`, whose points
+  are `(N, 2)` where a mesh's are `(N, 3)`). `Data.load()` and
+  `DataList.load()` themselves build nothing and raise `TypeError`. A module's
+  `load` reads its main class: `cgmath.hierarchy.load` a `HierarchyData` (a
+  saved clip is loaded with `ClipData.load`), `skin_weights.load` a
+  `SkinList`. What a file holds, a field's object or a list's items, is built
+  as the class the field or the list declares: a `MeshList`'s items as
+  `MeshData`, a field declared `Optional[MeshData]` as a `MeshData`; a `Scene`
+  tells its `Object`, `Camera` and `Light` nodes apart by their saved
+  `node_type`. A file saved up to cgmath 3.2 names its class under
+  `"__class__"`, a key a load skips.
 - **A field is saved under the name a caller sets it by.** A private field
   behind a public property of its own name is saved as the property:
   `UVData._resolution` as `resolution`, a node's `_translate` as `translate`,
@@ -150,16 +148,11 @@ left out and loads back as a fresh copy of the default. A `DataList` saves
   `DataList`'s `LIST_FIELDS` follow the same rule. A load takes either name,
   so a file that names the private field still loads, and a tree that names
   one field both ways raises `ValueError`. A field with no such property
-  keeps its own name. A tree built by hand, with no `"__class__"`, as
-  `from_dict` takes one, sets a property's name through the property's
-  setter, which checks the value; a property with no setter, such as
-  `FFDData.cells`, and a `DataList`'s settings are read as the field.
+  keeps its own name. A load sets the field itself, as a file holds the
+  value the field keeps; a tree built by hand is read the same way.
 - **A file saved from this version on needs this cgmath or newer.** An older
-  cgmath expects the private names: it refuses an `FFDData` from such a file
-  with an `AttributeError`, and reads a `ClipData` as its nodes with none of
-  their frames (start frame 0, 24 fps), without raising.
-- **Older files are refused.** A file written by an older cgmath has no
-  `"__class__"` and raises `LegacyFileError`, a `ValueError`.
+  cgmath expects a `"__class__"` entry and the private names: it refuses a
+  file saved now as one of an older cgmath.
 - **npz holds no pickles.** One `.npy` member per array or value, read with
   `allow_pickle=False`. A 1M-point mesh loads in about 0.2 s.
 - **json is utf-8 and plain lists.** NaN and the infinities are written as the
@@ -167,27 +160,24 @@ left out and loads back as a fresh copy of the default. A `DataList` saves
   declarations restore the dtypes; a small `"__dtypes__"` / `"__shapes__"` note
   covers what a list cannot say (an `Object` texture's own dtype, the shape of
   an empty array).
-- **A pickle carries the same tree**, its arrays as their dtype, shape and raw
-  bytes, so it holds no numpy objects: a pickle written under numpy 2 reads
-  under Maya's numpy 1.24. `SkinData` pickles its weights as their nonzero
-  entries, alone or inside a list or an `Object`; npz and json keep them dense.
+- **A pickle carries the same tree as plain data**, dicts, lists, scalars and
+  bytes, an array as its dtype, shape and raw bytes under `"__array__"`, so it
+  holds no numpy object and no cgmath name: a pickle written under numpy 2
+  reads under Maya's numpy 1.24, a bare `pickle.load` gives the tree, and a
+  class moved to another module breaks no file. A pickle saved up to cgmath
+  3.2 names `cgmath.data`'s functions and the class by module; `load` still
+  reads one.
 - **Any dict key comes back.** An int or tuple key, or text a zip member name
   cannot hold, is saved as a list of keys beside a list of values. Text with a
   NUL, an int past 64 bits and bytes come back too.
 - **A failed save leaves the file as it was.** The whole file is written to
   scratch first, then over the target in place, so a reader holding it open,
   a link or a read-only file behave as with any plain write.
-- **An object held twice is saved once.** Two `Object`s over one `MeshData`,
-  or one `Data` in two fields, a dict or a list's items: its first tree
-  carries `"__id__"`, a number, and each later one is only
-  `{"__class__": "~ref", "id": number}`. Every format and `copy()` give back
-  one object, held in each place again, even in a field equal to its
-  default: that field is then saved, not left out. A load builds the objects
-  in the order the file holds them, so a class that reorders its fields
-  still loads its files. Only an object reached twice is numbered, so a file
-  that shares nothing is as before. A file whose reference comes before its
-  object raises `ValueError`, and so does saving an object, a dict or a list
-  that holds itself.
+- **An object held twice is saved twice.** Two `Object`s over one `MeshData`
+  save the mesh with each and load as two meshes. A load builds the fields in
+  the order the file holds them, so a class that reorders its fields still
+  loads its files. An object, a dict or a list that holds itself cannot be
+  saved.
 - **Copies.** `copy()` is the save and load round trip, in memory. `copy.copy`
   is shallow: the same field values, caches and links rebuilt; a list's is a
   new list over the same items, but a hierarchy, which owns its nodes, gets
@@ -276,7 +266,7 @@ pins = PinData(name="lips", indices=[4, 9], targets=[[0, 1, 0], [0, 1, 0.5]])
 print(pins.indices.dtype, pins.targets.dtype)  # int32 float64
 
 # weight is at its default and lookup is transient: neither is saved
-print(sorted(pins.to_dict()))  # ['__class__', 'indices', 'name', 'targets']
+print(sorted(pins.to_dict()))  # ['indices', 'name', 'targets']
 
 tmp = tempfile.mkdtemp()
 path = PinList([pins], label="mouth").save(os.path.join(tmp, "pins.json"))

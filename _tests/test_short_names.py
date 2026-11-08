@@ -26,7 +26,6 @@ from unittest import mock
 
 import numpy as np
 from cgmath import hierarchy
-from cgmath.geometry import Data
 from cgmath.geometry.sdf import SDFSphere
 from cgmath.hierarchy import FBX, ClipData, HierarchyData, TransformData, TransformList
 from cgmath.hierarchy import hierarchy as hierarchy_mod
@@ -1053,7 +1052,7 @@ class TestUserAttributes(unittest.TestCase):
         folder                                   = self.folder()
         for mode in ("json", "npz", "pkl"):
             path = rig.save(os.path.join(folder, "rig." + mode))
-            for loader in (HierarchyData.load, Data.load, hierarchy.load):
+            for loader in (HierarchyData.load, hierarchy.load):
                 with self.subTest(mode=mode, loader=loader.__qualname__):
                     with warnings.catch_warnings(record=True) as caught:
                         warnings.simplefilter("always")

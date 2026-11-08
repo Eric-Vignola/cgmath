@@ -2,7 +2,7 @@
 Move all data types into the same namespace
 """
 
-from cgmath.data import Data, DataList, ImmutableArray, LegacyFileError
+from cgmath.data import Data, DataList, ImmutableArray
 from cgmath.geometry._saddle_surface import RaycastData
 from cgmath.geometry.bspline import BSplineData
 from cgmath.geometry.bspline_patch import BSplinePatchData, PatchSampleData

@@ -27,17 +27,13 @@ from cgmath.data import (
     Data,
     DataList,
     ImmutableArray as numpy_array,
+    _as_declared,
     _class_attribute,
-    _decode,
+    _dropped,
     _forward_doc,
-    _from_tagged,
-    _holds_numbered,
-    _load_derived,
     _mask_to_indices,
     _NO_DEFAULT,
-    _reached_twice,
     _refusal,
-    _save_shares,
     forward,
 )
 from cgmath.formats import save_fbx as _save_fbx
@@ -9029,8 +9025,8 @@ class TransformList(DataList[TransformData]):
         rebuilding from it gets a flat list. A copy therefore has to own what
         it holds, the same reason ``get_delta`` hands back a
         :class:`HierarchyData` when it is called on a view. An object two
-        nodes hold, a mesh two Objects instance, is one object in the copy
-        too, as in any copy().
+        nodes hold, a mesh two Objects instance, is two objects in the copy,
+        as in a file: a copy is the save and load, in memory.
 
         Subclasses already own their nodes and keep their own class. A copy
         warns of nothing its load would: the original's load did.
@@ -9065,14 +9061,10 @@ class TransformList(DataList[TransformData]):
         A copied node keeps its ``parent_uuid``. When that parent is not part
         of the copy -- a selection, a slice, a partial rig -- the reference
         would dangle: the copy joins its hierarchy as any node does, a root
-        of the result (:meth:`HierarchyData._join`).
-
-        Nodes that share nothing are copied one by one. When two of them hold
-        one object, a mesh two Objects instance, they are copied together, as
-        one save and load, so that object is one object in the copy too.
+        of the result (:meth:`HierarchyData._join`). Each node is copied as
+        its save and load gives it: an object two of them hold, a mesh two
+        Objects instance, is two objects in the copy, as in a file.
         """
-        if _reached_twice(self):
-            return self._owned([copy.copy(node) for node in self]).copy()
         return self._owned([node.copy() for node in self])
 
     def _owned(self, nodes: list) -> "HierarchyData":
@@ -9591,25 +9583,23 @@ class TransformList(DataList[TransformData]):
         gives: its own nodes, owned, a node whose parent the view left out
         made a root. A view on its own has no hierarchy to point its nodes
         at, so loading one back as a view would read every node as a root.
-        An object two of its nodes hold, a mesh two Objects instance, is
-        saved once, as in any tree. Inside another save that reaches an
-        object they hold twice, a mesh the view and a field both hold, the
-        view saves its nodes over the very objects they hold, not over
-        copies, so that object is saved once too.
         """
         if type(self) is TransformList:
-            if _save_shares(self):
-                return self._owned([copy.copy(node) for node in self]).to_dict()
             return self._owned_copy().to_dict()
-
         return super().to_dict()
 
-    def _saved_parts(self) -> list:
-        # a view saves copies of its nodes: a save reaches what its nodes
-        # hold, never the nodes themselves
-        if type(self) is TransformList:
-            return [part for node in self for part in node._saved_parts()]
-        return super()._saved_parts()
+    @classmethod
+    def from_dict(cls, data: dict) -> "TransformList":
+        """
+        The list a tree describes. A view is not a file: a saved tree, one
+        holding ``__items__``, read as ``TransformList`` itself gives the
+        :class:`HierarchyData` it holds, as a view saves, so a pickle of a
+        view reads back one too. A dict of node dicts, as the asset readers
+        build one, gives a list of the class called.
+        """
+        if cls is TransformList and ITEMS_KEY in data:
+            return HierarchyData.from_dict(data)
+        return super().from_dict(data)
 
     @classmethod
     def _from_state(cls, data: dict) -> "TransformList":
@@ -10364,6 +10354,11 @@ class HierarchyData(TransformList):
             items = data.pop(ITEMS_KEY)
         else:
             # a dict of item dicts, as the asset readers build them
+            if not all(isinstance(x, dict) for x in data.values()):
+                raise TypeError(
+                    f"{cls.__name__}.from_dict takes a tree holding '__items__', or a dict of node "
+                    f"dicts, not the fields of one node"
+                )
             items, data = list(data.values()), {}
 
         # one load of nodes, a clip's rest pose with them, which warns of a
@@ -10376,7 +10371,7 @@ class HierarchyData(TransformList):
                 # object one more frame
                 nodes = []
                 for item in items:
-                    nodes.append(_from_tagged(item, cls.DATA_LIST_CLASS))
+                    nodes.append(cls._item_class(item).from_dict(item))
             finally:
                 named = pending.pop()
 
@@ -10386,14 +10381,13 @@ class HierarchyData(TransformList):
                 _parent_by_name(obj, named)
 
             # in the order the tree holds them, as DataList._from_state reads
-            # them. A part the class no longer declares is left out, but an
-            # object first saved there is built still: a later part may refer
-            # to it
+            # them; a part the class no longer declares warns and is dropped
+            hints = cls._list_hints()
             for name, value in data.items():
                 if name in cls.LIST_FIELDS:
-                    setattr(obj, name, _decode(value))
-                elif _holds_numbered(value):
-                    _decode(value)
+                    setattr(obj, name, _as_declared(value, hints.get(name)))
+                else:
+                    _dropped(cls, name)
 
             obj._post_load()
         return obj
@@ -16076,16 +16070,15 @@ _every_take_text(ClipList)
 
 def load(filename: str, mode: Optional[str] = None, **kwargs) -> "HierarchyData":
     """
-    Whatever hierarchy the file holds, read as ``mode`` says or as the file
-    reads (fbx, glb, or cgmath's own npz / json / pickle). An fbx or a glb
-    gives the rig, a :class:`HierarchyData`, ``kwargs`` going to
-    ``HierarchyData.load_fbx`` / ``load_glb``: ``load("rig.fbx",
-    pose="bind")``. A cgmath file takes none; it gives the class it holds,
-    a :class:`HierarchyData` or one deriving from it: a saved
-    :class:`ClipData` comes back a clip, where ``HierarchyData.load()``
-    refuses one. Any other class, a lone node, raises TypeError.
+    The hierarchy the file holds, read as ``mode`` says or as the file
+    reads (fbx, glb, or cgmath's own npz / json / pickle), as
+    ``HierarchyData.load()`` reads it: an fbx or a glb gives the rig,
+    ``kwargs`` going to ``HierarchyData.load_fbx`` / ``load_glb``:
+    ``load("rig.fbx", pose="bind")``. A cgmath file takes none and gives a
+    :class:`HierarchyData`, whatever class saved it; a saved
+    :class:`ClipData` is loaded with ``ClipData.load()``.
     """
-    return _load_derived(HierarchyData, filename, mode, kwargs)
+    return HierarchyData.load(filename, mode, **kwargs)
 
 
 def load_fbx(filename: str) -> "HierarchyData":

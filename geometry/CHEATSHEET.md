@@ -194,7 +194,7 @@ values, `bool` masks. A value is converted when it is set or loaded.
 from cgmath.geometry import Data, DataList, ImmutableArray
 
 print(sorted(MeshData._dataclass_field_names()))
-print(cube.to_dict().keys())  # '__class__', then the fields that differ from their defaults
+print(cube.to_dict().keys())  # the fields that differ from their defaults, and no class
 print(str(cube), repr(cube))  # __str__ is the name when one is set
 print(cube.indices.dtype, cube.points.dtype)  # int32 float64, whatever was passed in
 ```
@@ -203,8 +203,7 @@ print(cube.indices.dtype, cube.points.dtype)  # int32 float64, whatever was pass
 
 `to_dict` / `from_dict` is the canonical form; every other format goes through
 it. A field exactly equal to its default is left out and loads back as a fresh
-copy of the default, unless it holds an object the data holds twice: then it
-is saved, and loads back as that one object.
+copy of the default.
 
 ```python
 d = cube.to_dict()
@@ -291,8 +290,8 @@ for bad in ("cube.stl", "cube"):
         print(err)  # MeshData has no writer for stl files: .../cube.stl; it saves json, npz, obj, pickle
 try:
     Data.load(path)
-except ValueError as err:
-    print(err)  # ...: read it with the class wanted (MeshData, MeshList, Object, Scene, UVData, UVList)
+except TypeError as err:
+    print(err)  # Data.load() builds nothing: a file names no class; load it with the class you expect, ...
 try:
     MeshData.load(path, nme="cube")
 except TypeError as err:
@@ -306,44 +305,34 @@ HierarchyData.load("hero.fbx", pose="bind")  # TransformList.load_fbx, a Hierarc
 rig.save("rig.fbx", as_ascii=True)           # HierarchyData.save_fbx
 ```
 
-A class's loader gives back that class: a file holding any other raises
-`TypeError`, a subclass too, as a `UVData`'s points are `(N, 2)` where a
-`MeshData`'s are `(N, 3)`. `Data.load` gives back whatever the file holds. A
-file without `"__class__"` was written by an older cgmath: it raises
-`LegacyFileError` and no longer loads.
+A file names no class: the class you load it with builds it from the fields
+the file holds, so a file is loaded with the class expected. A field the
+class lacks is dropped with a warning; one the class requires and the file
+lacks raises `ValueError` naming it, and so does a value a field refuses, a
+`UVData`'s `(N, 2)` points read as a `MeshData`'s `(N, 3)`. A file saved up
+to cgmath 3.2 names its class under `"__class__"`, a key a load skips.
 
 ```python
-from cgmath.geometry import LegacyFileError
-
 path = cube_uv.save(os.path.join(tmp, "map1.npz"))
 try:
     MeshData.load(path)
-except TypeError as err:
-    print(err)  # .../map1.npz holds a UVData; load it with UVData.load() or Data.load()
-print(type(Data.load(path)).__name__)  # UVData
-
-try:
-    UVData.load(os.path.join(tmp, "cube.npz"))
-except TypeError as err:
-    print(err)  # .../cube.npz holds a MeshData; load it with MeshData.load() or Data.load()
+except ValueError as err:
+    print(err)  # MeshData.points must have shape (N, 3), got (..., 2)
+print(type(UVData.load(path)).__name__)  # UVData
 
 old = os.path.join(tmp, "old.json")
 with open(old, "w") as f:
-    f.write('{"points": [], "indices": [], "counts": []}')
-try:
-    MeshData.load(old)
-except LegacyFileError as err:  # a ValueError
-    print(type(err).__name__)
+    f.write('{"__class__": "cgmath.geometry.mesh.MeshData", "points": [], "indices": [], "counts": []}')
+print(MeshData.load(old).point_count)  # 0: the class a file of 3.2 names is skipped
 ```
 
-Up to cgmath 2.x `Data` and `DataList` lived in `cgmath.geometry._base`, a
-module that is gone. A file saved then loads all the same: its tag for a plain
-`Data` or `DataList` reads as `cgmath.data`'s, and `load` reads a pickle with
-an unpickler that finds the names it holds in `cgmath.data`. A bare
-`pickle.load` of such a pickle raises `ModuleNotFoundError: No module named
-'cgmath.geometry._base'`: load it with `load()`, and save it again for a pickle
-that `pickle.load` reads. cgmath 2.x, which has no `cgmath.data`, reads none of
-the pickles saved now, nor a file holding a plain `Data` or `DataList`.
+A pickle holds plain data, dicts, lists, scalars and bytes, an array as its
+dtype, shape and bytes: `pickle.load` gives the tree, and nothing of cgmath's
+layout is in the file, so a class moved to another module breaks none. A
+pickle saved up to cgmath 3.2 names `cgmath.data`'s functions and the class
+by module, under the module's older name `cgmath.geometry._base` as well:
+`load` still reads one, with an unpickler that finds those names, where a
+bare `pickle.load` raises `ModuleNotFoundError` for a 2.x pickle.
 
 Cached topology is never written — a reloaded object recomputes lazily.
 
@@ -438,15 +427,16 @@ meshes.append(cube.copy())                      # type-checked against DATA_LIST
 print(MeshList.DATA_LIST_CLASS.__name__, MeshList.UNIQUE_LIST)
 ```
 
-`DataList` saves and loads exactly like `Data`. Its tree is `"__class__"`,
-`"__items__"` (one tree per item) and the class's own `LIST_FIELDS`, named by
-the same rule (a `ClipData` saves `_start_frame` as `start_frame`).
+`DataList` saves and loads exactly like `Data`. Its tree is `"__items__"`
+(one tree per item, each loaded as the list's item class) and the class's
+own `LIST_FIELDS`, named by the same rule (a `ClipData` saves `_start_frame`
+as `start_frame`).
 
 ```python
 path = meshes.save(os.path.join(tmp, "meshes.npz"))
 assert MeshList.load(path) == meshes
 assert MeshList.from_bytes(meshes.to_bytes()) == meshes
-print(sorted(meshes.to_dict()), MeshList.LIST_FIELDS)  # ['__class__', '__items__'] ()
+print(sorted(meshes.to_dict()), MeshList.LIST_FIELDS)  # ['__items__'] ()
 ```
 
 A list passes a member of its items on in one line of its class body,

@@ -141,14 +141,18 @@ class TestHierarchyFiles(unittest.TestCase):
                 self.assertIs(type(loaded), HierarchyData)
                 self.assertEqual(loaded, source)
 
-    def test_a_file_names_its_class(self):
-        tree = rig().to_dict()
+    def test_a_file_names_no_class(self):
+        source = rig()
+        tree   = source.to_dict()
 
-        self.assertEqual(tree["__class__"], "cgmath.hierarchy.hierarchy.HierarchyData")
+        self.assertNotIn("__class__", tree)
         self.assertEqual(len(tree["__items__"]), 3)
-        self.assertEqual(
-            tree["__items__"][0]["__class__"], "cgmath.hierarchy.hierarchy.TransformData"
-        )
+        self.assertNotIn("__class__", tree["__items__"][0])
+
+        # a file saved up to cgmath 3.2 names its class: the key is skipped
+        tree["__class__"]                 = "cgmath.hierarchy.hierarchy.HierarchyData"
+        tree["__items__"][0]["__class__"] = "cgmath.hierarchy.hierarchy.TransformData"
+        self.assertEqual(HierarchyData.from_dict(tree), source)
 
     def test_a_view_saves_as_its_copy(self):
         # a view owns nothing, so it saves as the hierarchy copy() gives: its
@@ -165,16 +169,15 @@ class TestHierarchyFiles(unittest.TestCase):
                 self.assertIs(loaded["loc"].get_parent(), loaded["hip"])
                 self.assertTrue(all(node._hierarchy is loaded for node in loaded))
 
-        # a file holds the hierarchy, which Data.load and hierarchy.load give
-        # back too, and TransformList's own load refuses
-        refused = r"holds a HierarchyData; load it with HierarchyData\.load\(\)"
+        # a file holds the hierarchy, which hierarchy.load and TransformList's
+        # own load give back too: a view is not a file. Data.load builds nothing
         for mode in ("json", "npz", "pkl"):
             path = os.path.join(self.tmp.name, f"view.{mode}")
             with self.subTest(mode=mode):
-                self.assertIs(type(Data.load(path)), HierarchyData)
                 self.assertIs(type(hierarchy.load(path)), HierarchyData)
-                with self.assertRaisesRegex(TypeError, refused):
-                    TransformList.load(path)
+                self.assertIs(type(TransformList.load(path)), HierarchyData)
+                with self.assertRaisesRegex(TypeError, r"^Data\.load\(\) builds nothing"):
+                    Data.load(path)
 
         # the view and its rig are left as they were
         self.assertIs(type(view), TransformList)

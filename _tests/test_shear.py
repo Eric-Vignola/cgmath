@@ -1083,7 +1083,7 @@ class TestShearFiles(unittest.TestCase):
                 self.assertEqual(pickle.loads(pickle.dumps(held)).shear.tolist(), list(SHEAR))
                 self.assertEqual(copy.deepcopy(held).shear.tolist(), list(SHEAR))
 
-                back = HierarchyData.from_dict(HierarchyData([held]).to_dict())[0]
+                back = cls.from_dict(held.to_dict())  # a file is built as the class loading it
                 self.assertIsInstance(back, cls)
                 self.assertEqual(back.shear.tolist(), list(SHEAR))
                 self.assertGreater(np.abs(held.matrix - plain.matrix).max(), 0.1)

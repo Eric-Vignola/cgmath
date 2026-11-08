@@ -7,13 +7,17 @@ fields, and the pkl / npz / json files they save and load. ``load()`` and
 own ``load_<format>`` / ``save_<format>``. Nothing here is about geometry:
 ``import cgmath.data`` loads no ``cgmath.geometry``, numba or scipy.
 
-Up to cgmath 2.x this module was ``cgmath.geometry._base``. A file saved then
-names a plain ``Data`` or ``DataList`` there, and a pickle names its functions
-there too: :meth:`Data.load` and :meth:`DataList.load` read both, while a bare
-``pickle.load`` of such a pickle raises ``ModuleNotFoundError``.
+A file names no class: it holds the fields, and the class the caller loads it
+with builds them (``MeshData.load``, ``HierarchyData.load``). A pickle holds
+plain data, dicts, lists, scalars and bytes, an array as its dtype, shape and
+bytes, so no cgmath name is in it and a bare ``pickle.load`` gives the tree.
+A pickle saved up to cgmath 3.2 names this module's functions, under the
+module's older name ``cgmath.geometry._base`` as well; cgmath's own reader
+still reads one.
 """
 
 import base64
+import builtins
 import copy
 import fnmatch
 import importlib
@@ -25,7 +29,7 @@ import pickle
 import shutil
 import sys
 import tempfile
-import threading
+import warnings
 import zipfile
 from collections.abc import Iterable, Iterator, MutableSequence
 from dataclasses import dataclass, fields, is_dataclass, MISSING
@@ -122,421 +126,85 @@ def _mask_to_indices(query, length: int):
 
 # --------------------------------- FILES ------------------------------------ #
 #
-# A cgmath file, pkl, npz or json, holds one tree: the dict to_dict() returns.
-# Its "__class__" names the class to rebuild. A file without one was written by
-# an older cgmath and is refused.
+# A cgmath file, pkl, npz or json, holds one tree: the dict to_dict() returns,
+# the fields of the object under their saved names, and nothing about its
+# class: the class the caller loads the file with builds it. A file saved up to
+# cgmath 3.2 names its class under "__class__", a key a load skips.
 
-CLASS_KEY   = "__class__"
-ITEMS_KEY   = "__items__"
-DTYPES_KEY  = "__dtypes__"
-SHAPES_KEY  = "__shapes__"
-ID_KEY      = "__id__"
+ITEMS_KEY  = "__items__"
+DTYPES_KEY = "__dtypes__"
+SHAPES_KEY = "__shapes__"
 
-_CLASSES    = {}  # every Data / DataList class, by its tag
-
-_OLDER_FILE = "{} was saved by an older cgmath, whose files this version no longer reads"
+_OLD_CLASS_KEY = "__class__"  # the class a file saved up to 3.2 names: skipped
+_ARRAY_KEY     = "__array__"  # an array in a pickle: [dtype descr, shape, bytes]
 
 
-class LegacyFileError(ValueError):
-    """a file saved by an older cgmath, whose files are no longer read"""
-
-
-def _class_tag(cls) -> str:
-    """the name a class is saved under: its module and qualified name"""
-    # a spawned worker runs the script as __mp_main__; the script is __main__
-    module = "__main__" if cls.__module__ == "__mp_main__" else cls.__module__
-    return f"{module}.{cls.__qualname__}"
-
-
-def _register(cls) -> None:
-    _CLASSES[_class_tag(cls)] = cls
-
-
-def _derives(cls, base) -> bool:
+def _concrete(cls, method: str) -> None:
     """
-    Whether ``cls`` is ``base`` or derives from it, by name: a class and its
-    copy from a reloaded module are one class to a file.
+    Raises TypeError for ``Data.<method>()`` / ``DataList.<method>()`` on the
+    base classes themselves: a file names no class, so the class wanted
+    loads it.
     """
-    tag = _class_tag(base)
-    return any(_class_tag(x) == tag for x in cls.__mro__)
+    if cls is Data or cls is DataList:
+        raise TypeError(
+            f"{cls.__name__}.{method}() builds nothing: a file names no class; load it "
+            f"with the class you expect, MeshData.{method}(...), HierarchyData.{method}(...)"
+        )
 
 
-def _imported_class(tag: str):
-    """the class a tag names in a module already imported, or None"""
-    parts = tag.split(".")
-    for split in range(len(parts) - 1, 0, -1):
-        # a spawned worker runs the script as __mp_main__, also known as __main__
-        found = sys.modules.get(".".join(parts[:split]))
-        if found is None:
-            continue
-        for name in parts[split:]:
-            found = getattr(found, name, None)
-        if isinstance(found, type) and issubclass(found, (Data, DataList)):
-            return found
-        return None
-    return None
+def _dropped(cls, key) -> None:
+    """warns of a key of the data that names no field of ``cls``: it is dropped"""
+    warnings.warn(
+        f"{cls.__name__}: the data names {key!r}, which is no field of it; dropped", stacklevel=2
+    )
 
 
-def _resolve_class(tag: Optional[str], expected=None):
+# pickle: the tree to_dict() returns as plain data. An array is a dict under
+# _ARRAY_KEY, its dtype, shape and bytes, and a numpy scalar a python one, so
+# the file holds no numpy object and no cgmath name: one written under any
+# numpy, any layout of cgmath, reads under another. A pickle saved up to 3.2
+# names _unpickle and _unpickle_array instead, which _Unpickler still finds.
+
+
+def _plain(value):
     """
-    The class a saved tree names, which must be ``expected`` or derive from
-    it; ``expected`` itself when the tree names it. Only cgmath modules are
-    imported to find one: a class from anywhere else must already be imported.
-    """
-    if tag is None:
-        if expected is None:
-            raise ValueError("the data names no class")
-        return expected
-    if expected is not None and tag == _class_tag(expected):
-        return expected  # even when a reload has registered a newer copy
-
-    found = _CLASSES.get(tag)
-    if found is None:
-        module = tag.rpartition(".")[0]
-        if module == "cgmath" or module.startswith("cgmath."):
-            importlib.import_module(module)
-            found = _CLASSES.get(tag)
-    if found is None:
-        found = _imported_class(tag)
-
-    if found is None:
-        raise TypeError(f"the data names {tag!r}, which is not a known cgmath data class")
-    if expected is not None and not _derives(found, expected):
-        raise TypeError(f"the data holds a {found.__name__}, not a {expected.__name__}")
-    return found
-
-
-def _loaded_class(cls, tag, source: str, method: str, derived: bool = False):
-    """
-    The class ``cls.<method>()`` builds a whole tree naming ``tag`` as. A
-    class's loader gives back that class, never a subclass: ``MeshData``'s
-    refuses a ``UVData``, whose points are (N, 2), not (N, 3). Data's own
-    loaders give back whatever class the tree names, and DataList's any
-    list; with ``derived``, as a module's own load() asks, any class
-    deriving from ``cls``. A tree that names no class, one built by hand, is
-    read as ``cls``, and so is one naming ``cls`` under another name: a
-    script's ``__main__.Foo`` read by a script that imports ``Foo`` from its
-    module, or ``cgmath.geometry.MeshData``. Only the whole tree is held to
-    this: what it holds, a field's object or a list's items, may derive
-    from what declares it.
+    A tree as a pickle holds it: an array as [dtype descr, shape, bytes] under
+    _ARRAY_KEY, a numpy scalar as a python one, as npz and json give them
+    back; dicts, lists and tuples walked.
 
     Raises
     ------
     TypeError
-        The tree names any other class; ``source`` names the file or data.
+        An object array, which holds python objects, not data.
     """
-    if tag is None or tag == _REF or tag == _class_tag(cls):
-        return cls
-
-    found = _resolve_class(tag)
-    asked = _class_tag(cls)
-    if _class_tag(found) == asked:
-        return cls  # this class, under another name: __main__'s, a package's
-    if asked == _class_tag(Data):
-        return found  # the factory: whatever the tree holds
-    if (derived or asked == _class_tag(DataList)) and _derives(found, cls):
-        return found
-
-    name = found.__name__
-    raise TypeError(f"{source} holds a {name}; load it with {name}.{method}() or Data.{method}()")
-
-
-# an object a tree reaches twice, a mesh two Objects share, is saved once: its
-# first tree carries ID_KEY, a number, and every later one is a reference to
-# that number, {"__class__": "~ref", "id": number}. A load builds the object
-# at its first tree and gives that same object for each reference. Only the
-# objects reached twice are numbered: a tree that shares nothing is unchanged.
-_REF = "~ref"
+    if isinstance(value, np.ndarray):
+        if value.dtype.hasobject:
+            raise TypeError("cannot pickle an object array as data")
+        array = value if value.flags.c_contiguous else value.copy(order="C")
+        return {_ARRAY_KEY: [np.lib.format.dtype_to_descr(array.dtype), list(array.shape), array.tobytes()]}
+    if isinstance(value, dict):
+        return {_plain(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_plain(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_plain(item) for item in value)
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
-class _Running(threading.local):
-    """the saves and loads running on this thread, innermost last"""
-
-    def __init__(self):
-        self.saves = []  # a _Save, or None where a save of its own starts
-        self.loads = []  # each load's objects so far, by number
-
-
-_RUNNING = _Running()
-
-
-# the values that hold no object, skipped by their type alone: a row of
-# numbers, or a node's arrays, is walked quickly
-_LEAVES = frozenset((bool, int, float, complex, str, bytes, type(None), np.ndarray))
-
-
-def _reached_twice(root) -> dict:
-    """
-    The Data and DataList objects the tree of ``root`` reaches more than
-    once, by id.
-
-    Raises
-    ------
-    ValueError
-        A dict, list or tuple holds itself: its tree would never end.
-    """
-    seen  = set()  # the Data and DataList objects walked
-    open_ = set()  # the dicts, lists and tuples being walked
-    twice = {}
-    stack = [root]
-    while stack:
-        value = stack.pop()
-        if type(value) is int:
-            # a container's id, pushed below what it holds (no int is walked):
-            # all of that is walked now
-            open_.discard(value)
-            continue
-
-        if isinstance(value, (Data, DataList)):
-            if id(value) in seen:
-                twice[id(value)] = value
-                continue  # what it holds is walked already
-            seen.add(id(value))
-            values = value._saved_parts()
-        elif isinstance(value, (dict, list, tuple)):
-            # one held twice is walked twice: what it holds is in the tree twice
-            if id(value) in open_:
-                raise ValueError(f"cannot save a {type(value).__name__} that holds itself")
-            open_.add(id(value))
-            stack.append(id(value))
-            values = value.values() if isinstance(value, dict) else value
-        else:
-            continue  # an array, a numpy scalar: a save keeps it as it is
-        stack.extend([x for x in values if type(x) not in _LEAVES])
-    return twice
-
-
-def _holds_shared(value, shared: dict) -> bool:
-    """
-    Whether ``value`` holds one of ``shared``, the objects a save reaches
-    twice: then a field equal to its default is saved still, as a load's
-    fresh default would share nothing.
-    """
-    if type(value) in _LEAVES:
-        return False
-
-    walked = set()  # each value once: one that holds none of them still holds none
-    stack  = [value]
-    while stack:
-        value = stack.pop()
-        if id(value) in shared:
-            return True
-        if id(value) in walked:
-            continue
-        walked.add(id(value))
-
-        if isinstance(value, (Data, DataList)):
-            values = value._saved_parts()
-        elif isinstance(value, (dict, list, tuple)):
-            values = value.values() if isinstance(value, dict) else value
-        else:
-            continue
-        stack.extend([x for x in values if type(x) not in _LEAVES])
-    return False
-
-
-class _Save:
-    """
-    One save: the objects its tree reaches more than once, and the number
-    each takes when its tree is written.
-    """
-
-    __slots__ = ("shared", "numbers", "writing")
-
-    def __init__(self, root=None):
-        # with no root, nothing is shared: every object is written in full
-        self.shared  = {} if root is None else _reached_twice(root)
-        self.numbers = {}
-        self.writing = set() if root is None else {id(root)}  # the trees being written
-
-
-class _Saving:
-    """
-    ``with _Saving(obj) as save:`` around what a base to_dict() writes. The
-    outermost one on a thread, or the first inside an _OwnSave block, is a
-    save of its own, which first finds what the tree of ``obj`` reaches
-    twice; the to_dict() calls inside join that save. A with block, not a
-    wrapper around to_dict(), which would cost each nested object two more
-    frames: a deep tree would reach the recursion limit at half the depth.
-    """
-
-    __slots__ = ("root", "starts")
-
-    def __init__(self, root):
-        self.root = root
-
-    def __enter__(self) -> _Save:
-        saves       = _RUNNING.saves
-        self.starts = not saves or saves[-1] is None
-        if self.starts:
-            saves.append(_Save(self.root))
-        return saves[-1]
-
-    def __exit__(self, *exc) -> None:
-        if self.starts:
-            _RUNNING.saves.pop()
-
-
-class _OwnSave:
-    """
-    ``with _OwnSave():`` a to_dict() inside is a save of its own, whatever
-    save is running. Not ``numbered``, an object held twice is written in
-    full each time. A with block, as _Saving is, so it costs no frame.
-    """
-
-    __slots__ = ("numbered",)
-
-    def __init__(self, numbered: bool = True):
-        self.numbered = numbered
-
-    def __enter__(self) -> None:
-        _RUNNING.saves.append(None if self.numbered else _Save())
-
-    def __exit__(self, *exc) -> None:
-        _RUNNING.saves.pop()
-
-
-def _numbered_tree(obj, save: _Save) -> dict:
-    """
-    The tree of ``obj``, an object ``save`` reaches twice: in full, numbered,
-    the first time, and a reference to that number after.
-
-    Raises
-    ------
-    ValueError
-        The object holds itself: a load builds an object after what it holds.
-    """
-    key = id(obj)
-    if key in save.writing:
-        raise ValueError(f"cannot save a {type(obj).__name__} that holds itself")
-    if key in save.numbers:
-        return {CLASS_KEY: _REF, "id": save.numbers[key]}
-
-    number = save.numbers[key] = len(save.numbers)
-    save.writing.add(key)
-    try:
-        tree = obj.to_dict()
-    finally:
-        save.writing.discard(key)
-    return {CLASS_KEY: tree.pop(CLASS_KEY), ID_KEY: number, **tree}
-
-
-def _save_shares(obj) -> bool:
-    """
-    Whether ``obj`` is being written in a save that reaches twice an object
-    its tree holds; False with no save running.
-    """
-    saves = _RUNNING.saves
-    save  = saves[-1] if saves else None
-    return save is not None and bool(save.shared) and _holds_shared(obj._saved_parts(), save.shared)
-
-
-def _load(data: dict, cls):
-    """
-    ``cls.from_dict()``: the object a whole tree describes, as the class
-    _loaded_class allows; its numbers are its own, whatever load is running.
-    """
-    cls   = _loaded_class(cls, data.get(CLASS_KEY), "the data", "from_dict")
-    loads = _RUNNING.loads
-    loads.append({})
-    try:
-        return _from_tagged(data, cls)
-    finally:
-        loads.pop()
-
-
-def _from_tagged(data: dict, expected=None):
-    """
-    The object a tagged tree describes, in the running load: a numbered tree
-    is kept under its number, and a reference to it gives that object back.
-    A tree may name a field as its property or by its own name. One that
-    names no class is built by hand, and a property's name in it goes
-    through the property's setter, which checks the value, unless the
-    property has none; a list's settings, which no setter checks, are read
-    as the fields whether the tree names its class or not.
-
-    Raises
-    ------
-    ValueError
-        A reference comes before the tree it refers to, or the tree names
-        one field both ways.
-    """
-    loads = _RUNNING.loads
-    built = loads[-1] if loads else {}
-    tag   = data.get(CLASS_KEY)
-    if tag == _REF:
-        number = data.get("id")
-        if number not in built:
-            raise ValueError(f"the data refers to object {number!r} before saving it")
-        obj = built[number]
-        if expected is not None and not _derives(type(obj), expected):
-            raise TypeError(f"the data holds a {type(obj).__name__}, not a {expected.__name__}")
-        return obj
-
-    data = dict(data)
-    data.pop(CLASS_KEY, None)
-    number = data.pop(ID_KEY, None)
-    cls    = _resolve_class(tag, expected)
-    if tag is not None:
-        # each field under its own name from here on, as _from_state reads it
-        data = cls._as_fields(data)
-    elif issubclass(cls, Data):
-        # a property's name stays, for _from_state to set through the
-        # property, but not beside the field's own name, and one with no
-        # setter, FFDData's cells, is read as the field
-        data = cls._as_fields(data, by_hand=True)
-    elif ITEMS_KEY in data:
-        # a list's settings have no setter to go through: each under its own
-        # name too. A dict of item dicts holds no setting to rename
-        data = cls._as_fields(data)
-
-    obj = cls._from_state(data)
-    if number is not None:
-        built[number] = obj
-    return obj
-
-
-def _holds_numbered(value) -> bool:
-    """whether a saved value holds a numbered tree, the one a later reference to its object needs"""
-    stack = [value]
-    while stack:
-        value = stack.pop()
-        if isinstance(value, dict):
-            if CLASS_KEY in value and ID_KEY in value:
-                return True
-            values = value.values()
-        elif isinstance(value, (list, tuple)):
-            values = value
-        else:
-            continue
-        stack.extend([x for x in values if isinstance(x, (dict, list, tuple))])
-    return False
-
-
-# pickle: the tree to_dict() returns, its arrays as their raw bytes. A pickle
-# then holds no numpy object, so one written under a numpy reads under another,
-# and the class comes by reference, so pickle imports its module.
-
-
-class _PickledArray:
-    """an array going into a pickle, as its dtype, shape and bytes"""
-
-    __slots__ = ("array",)
-
-    def __init__(self, array: np.ndarray):
-        self.array = array
-
-    def __reduce_ex__(self, protocol):
-        array = self.array
-        if not array.flags.c_contiguous:
-            array = array.copy(order="C")  # np.ascontiguousarray makes a 0-d array 1-d
-
-        if protocol >= 5:
-            # as bytes, which every dtype can give (a datetime64 has no buffer)
-            data = pickle.PickleBuffer(array.reshape(-1).view(np.uint8))
-        else:
-            data = array.tobytes()
-        return (_unpickle_array, (np.lib.format.dtype_to_descr(array.dtype), array.shape, data))
+def _arrays_back(value):
+    """the tree _plain() made, its arrays back"""
+    if isinstance(value, dict):
+        if len(value) == 1 and _ARRAY_KEY in value:
+            descr, shape, data = value[_ARRAY_KEY]
+            return _unpickle_array(descr, tuple(shape), data)
+        return {key: _arrays_back(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_arrays_back(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_arrays_back(item) for item in value)
+    return value
 
 
 def _unpickle_array(descr, shape: tuple, data) -> np.ndarray:
@@ -551,58 +219,23 @@ def _unpickle_array(descr, shape: tuple, data) -> np.ndarray:
     return array.reshape(shape)
 
 
-def _pickled(value):
-    """
-    A tree ready to pickle: arrays as _PickledArray, numpy scalars as python
-    ones, as npz and json give them back, and each tagged tree in its class's
-    own pickle form (a skin keeps only its nonzero weights).
-    """
-    if isinstance(value, np.ndarray):
-        return value if value.dtype.hasobject else _PickledArray(value)
-    if isinstance(value, dict):
-        tag = value.get(CLASS_KEY)
-        cls = _CLASSES.get(tag) if isinstance(tag, str) else None
-        if cls is not None:
-            value = cls._pickle_tree(dict(value))
-        return {_pickled(key): _pickled(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_pickled(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_pickled(item) for item in value)
-    if isinstance(value, np.generic):
-        return value.item()
-    return value
-
-
 def _unpickle(cls, tree: dict):
     """
-    Unpickles a Data or DataList from its tree, as the class the tree names:
-    a hierarchy's view pickles as the hierarchy it saves as.
+    Builds ``cls`` from the tree its pickle holds: what __reduce__ names for
+    an object pickled in memory, and what a pickle saved up to cgmath 3.2
+    names, its tree tagged with a class the load skips.
     """
-    return _loaded_class(cls, tree.get(CLASS_KEY), "the pickle", "load", derived=True).from_dict(tree)
-
-
-# a plain dict that holds a "__class__" key of its own is saved as its pairs,
-# under this tag, so a load does not take it for a saved object
-_PLAIN_DICT = "~dict"
+    return cls.from_dict(_arrays_back(tree))
 
 
 def _encode(value):
     """``value`` as plain data: a nested Data or DataList becomes its tree"""
     if isinstance(value, (Data, DataList)):
-        # an object the running save reaches twice is numbered. Any other is
-        # asked for its tree here, not through a helper, which would cost
-        # each nested object one more frame
-        saves = _RUNNING.saves
-        if saves and saves[-1] is not None and id(value) in saves[-1].shared:
-            return _numbered_tree(value, saves[-1])
         return value.to_dict()
     if isinstance(value, Enum):
         # its value, in every format alike; a field declaring the Enum restores it
         return _encode(value.value)
     if isinstance(value, dict):
-        if CLASS_KEY in value:
-            return {CLASS_KEY: _PLAIN_DICT, "pairs": [[key, _encode(item)] for key, item in value.items()]}
         return {key: _encode(item) for key, item in value.items()}
     if isinstance(value, tuple):
         return tuple(_encode(item) for item in value)
@@ -631,24 +264,6 @@ def _tree_copy(value):
 def _hashable(key):
     """a key read back: json gives a tuple key back as a list"""
     return tuple(_hashable(x) for x in key) if isinstance(key, list) else key
-
-
-def _decode(value):
-    """a saved value back as objects: a tagged dict becomes its class"""
-    if isinstance(value, dict):
-        if CLASS_KEY in value:
-            if value[CLASS_KEY] == _PLAIN_DICT:
-                return {_hashable(key): _decode(item) for key, item in value["pairs"]}
-            return _from_tagged(value)
-        return {key: _decode(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return tuple(_decode(item) for item in value)
-    if isinstance(value, list):
-        for item in value:
-            if isinstance(item, (dict, list, tuple)):
-                return [_decode(item) for item in value]
-        return list(value)  # plain values, a json row of numbers: nothing to rebuild
-    return value
 
 
 # npz: one .npy member per array or scalar, at the path of its keys. Nothing is
@@ -963,13 +578,6 @@ def bytes_to_dict(data: bytes) -> dict:
     return zip_to_dict(io.BytesIO(data))
 
 
-def _tagged(data, filename: str) -> dict:
-    """``data`` read from ``filename``, refused unless it names its class"""
-    if not isinstance(data, dict) or CLASS_KEY not in data:
-        raise LegacyFileError(_OLDER_FILE.format(filename))
-    return data
-
-
 def _json_tree(value):
     """
     A tree as json writes it: a dict whose keys json would turn into text (an
@@ -1036,63 +644,77 @@ def _read_json(filename: str) -> dict:
         if _header_format(filename) != "json":
             raise _misnamed(filename, "json") from None
         if isinstance(error, UnicodeDecodeError):
-            raise LegacyFileError(_OLDER_FILE.format(filename)) from None
+            raise ValueError(
+                f"{filename} is not json in utf-8; cgmath reads a json file in utf-8, as save() writes one"
+            ) from None
         raise
-    return _tagged(tree, filename)
+    return tree
 
 
 def _read_npz(filename: str) -> dict:
     filename = os.path.expanduser(filename)
     try:
-        zipf = zipfile.ZipFile(filename, "r")
+        zipfile.ZipFile(filename, "r").close()
     except zipfile.BadZipFile:
         if _header_format(filename) != "npz":
             raise _misnamed(filename, "npz") from None
         raise
-    with zipf:
-        if CLASS_KEY + ".npy" not in zipf.namelist():
-            raise LegacyFileError(_OLDER_FILE.format(filename))
     return zip_to_dict(filename)
 
 
-# up to cgmath 2.x this module was cgmath.geometry._base, and every pickle
-# saved then names it: _unpickle, _unpickle_array, a plain Data or DataList.
-# cgmath's own reader finds those names here; a bare pickle.load does not
-_MOVED_FROM = "cgmath.geometry._base"
+# a pickle saved up to cgmath 3.2 names _unpickle, _unpickle_array and the
+# class by module, this module under its older name cgmath.geometry._base
+# as well; a pickle saved now holds plain data and names nothing but the
+# builtins pickle itself names for a few plain values
+_MOVED_FROM     = "cgmath.geometry._base"
+_PLAIN_BUILTINS = frozenset(("complex", "set", "frozenset", "bytearray", "range", "slice"))
 
 
 class _Unpickler(pickle.Unpickler):
-    """pickle's reader, which finds a name in cgmath.geometry._base in this module"""
+    """
+    pickle's reader for a cgmath pickle: plain data, so no name at all, or
+    the names a pickle saved up to 3.2 holds, this module's two functions
+    and a cgmath Data or DataList class; any other name is refused.
+    """
 
     def find_class(self, module, name):
+        if module == "builtins" and name in _PLAIN_BUILTINS:
+            return getattr(builtins, name)  # a complex, a set: plain data pickle names
         if module == _MOVED_FROM:
             module = __name__
-        return super().find_class(module, name)
+        if module == __name__ and name in ("_unpickle", "_unpickle_array", "Data", "DataList"):
+            return globals()[name]
+        found = None
+        if module.partition(".")[0] == "cgmath":
+            found = importlib.import_module(module)
+            for part in name.split("."):
+                found = getattr(found, part, None)
+        if isinstance(found, type) and issubclass(found, (Data, DataList)):
+            return found
+        raise pickle.UnpicklingError(
+            f"a cgmath pickle holds plain data, not {module}.{name}: this is no cgmath file, "
+            f"or one of cgmath 1.x"
+        )
 
 
-def _read_pickle(cls, filename: str, derived: bool = False):
-    """``cls.load_pickle()``: the file's object, as the class _loaded_class allows"""
+def _read_pickle(cls, filename: str):
+    """``cls.load_pickle()``: the file's object, built by ``cls`` from the tree the pickle holds"""
     filename = os.path.expanduser(filename)
-    try:
-        with open(filename, "rb") as f:
-            obj = _Unpickler(f).load()
-    except LegacyFileError:
-        raise LegacyFileError(_OLDER_FILE.format(filename)) from None
+    with open(filename, "rb") as f:
+        held = _Unpickler(f).load()
+    if isinstance(held, dict):
+        return cls.from_dict(_arrays_back(held))
+    if type(held) is cls:
+        return held  # a pickle saved up to 3.2, built by _unpickle
+    if isinstance(held, (Data, DataList)):
+        name = type(held).__name__
+        raise TypeError(f"{filename} holds a {name}; load it with {name}.load()")
+    raise TypeError(f"{filename} holds a {type(held).__name__}, not a {cls.__name__}")
 
-    if not (_derives(type(obj), Data) or _derives(type(obj), DataList)):
-        raise TypeError(f"{filename} holds a {type(obj).__name__}, not a {cls.__name__}")
-    _loaded_class(cls, _class_tag(type(obj)), filename, "load", derived)
-    return obj
 
-
-def _load_file(cls, filename: str, read, derived: bool = False):
-    """
-    ``cls.load_json()`` or ``load_npz()``: the tree ``read`` gives, as the
-    class _loaded_class allows, which builds it through its own from_dict().
-    """
-    filename = os.path.expanduser(filename)
-    tree     = read(filename)
-    return _loaded_class(cls, tree.get(CLASS_KEY), filename, "load", derived).from_dict(tree)
+def _load_file(cls, filename: str, read):
+    """``cls.load_json()`` or ``load_npz()``: the tree ``read`` gives, built by ``cls``"""
+    return cls.from_dict(read(os.path.expanduser(filename)))
 
 
 def _save_file(obj, filename: str, mode: str, compression=zipfile.ZIP_DEFLATED) -> str:
@@ -1103,7 +725,8 @@ def _save_file(obj, filename: str, mode: str, compression=zipfile.ZIP_DEFLATED) 
     """
     filename = os.path.expanduser(filename)
     if mode == "pkl":
-        _write_whole(filename, lambda f: pickle.dump(obj, f))
+        tree = _plain(obj.to_dict())
+        _write_whole(filename, lambda f: pickle.dump(tree, f, protocol=4))
     elif mode == "json":
         # utf-8 and LF whatever the platform: the same file everywhere
         text = obj.to_json().encode("utf-8")
@@ -1222,12 +845,30 @@ def _is_union(annotation) -> bool:
     return getattr(annotation, "__origin__", None) is Union or type(annotation).__name__ == "UnionType"
 
 
+def _data_class(annotation):
+    """
+    The Data or DataList subclass a field's annotation declares, ``X`` or
+    ``Optional[X]``, which builds the field's tree; None for any other
+    annotation, the base classes too, which build nothing: a tree there
+    stays a tree.
+    """
+    if _is_union(annotation):
+        arms = [x for x in annotation.__args__ if x is not type(None)]
+        if len(arms) != 1:
+            return None
+        annotation = arms[0]
+    if isinstance(annotation, type) and issubclass(annotation, (Data, DataList)):
+        return None if annotation is Data or annotation is DataList else annotation
+    return None
+
+
 def _as_declared(value, annotation):
     """
     A loaded value as its field declares it, where a file cannot say: a tuple
     (json reads one back as a list), an Enum member (every file keeps its
-    value), an array (json reads one back as lists), each nested in tuples
-    and lists as declared. Anything else is left as it is.
+    value), an array (json reads one back as lists), a Data or DataList (a
+    file holds its tree, which the declared class builds), each nested in
+    tuples and lists as declared. Anything else is left as it is.
     """
     if value is None or annotation is None:
         return value
@@ -1258,6 +899,11 @@ def _as_declared(value, annotation):
             return annotation(value)
         except (TypeError, ValueError):
             return value
+
+    nested = _data_class(annotation)
+    if nested is not None:
+        # a nested object, saved as its tree: the class the field declares builds it
+        return nested.from_dict(value) if isinstance(value, dict) else value
 
     origin = getattr(annotation, "__origin__", None)
     args   = getattr(annotation, "__args__", None) or ()
@@ -1291,15 +937,6 @@ def _fits(value, annotation) -> bool:
         return False
 
 
-def _holds_data(annotation) -> bool:
-    """whether a field is declared a Data or DataList (or None) and nothing else"""
-    if getattr(annotation, "__origin__", None) is Union or type(annotation).__name__ == "UnionType":
-        kinds = [x for x in annotation.__args__ if x is not type(None)]
-    else:
-        kinds = [annotation]
-    return bool(kinds) and all(isinstance(x, type) and issubclass(x, (Data, DataList)) for x in kinds)
-
-
 _NO_DEFAULT = object()
 
 
@@ -1317,14 +954,11 @@ def _same_value(a, b) -> bool:
     if a is b:
         return True
     if isinstance(a, (Data, DataList)) or isinstance(b, (Data, DataList)):
-        # == on data is within tolerance and skips EQUALITY_TEST_IGNORE (a name).
-        # Trees of their own, numbering nothing: what a value shares is for
-        # the save to ask (_holds_shared), and the hash asks nothing of it
+        # == on data is within tolerance and skips EQUALITY_TEST_IGNORE (a
+        # name): their trees are compared instead
         if type(a) is not type(b):
             return False
-        with _OwnSave(numbered=False):
-            a, b = a.to_dict(), b.to_dict()
-        return _same_value(a, b)
+        return _same_value(a.to_dict(), b.to_dict())
     if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
         if not (isinstance(a, np.ndarray) and isinstance(b, np.ndarray)):
             return False
@@ -1483,15 +1117,6 @@ _FORMAT_NAMES = {
     "usdz": "usd",
 }
 
-# the modules whose classes read assets, imported when the factory names them
-_READER_MODULES = (
-    "cgmath.geometry.mesh",
-    "cgmath.geometry.skin_weights",
-    "cgmath.hierarchy",
-    "cgmath.render.scene",
-)
-
-
 class _NoRoute:
     """
     A route a class refuses where the one it would inherit reads or writes
@@ -1580,22 +1205,6 @@ def _save_mode(filename: str, mode: Optional[str]) -> str:
     return _format_name(os.path.splitext(filename)[1] if mode is None else mode)
 
 
-def _readers_of(fmt: str) -> list:
-    """every cgmath class that reads ``fmt`` files itself, by name"""
-    # the error path only: the modules with readers, whatever the caller imported
-    for module in _READER_MODULES:
-        try:
-            importlib.import_module(module)
-        except ImportError:
-            pass
-    return sorted({
-        cls.__name__
-        for tag, cls in _CLASSES.items()
-        if tag.startswith("cgmath.") and "._tests" not in tag
-        and cls not in (Data, DataList) and _route_of(cls, "load", fmt) is not None
-    })
-
-
 def _load_as(cls, filename: str, mode: Optional[str] = None, kwargs: Optional[dict] = None) -> Any:
     """
     ``cls.load()``: the class's ``load_<format>`` for ``mode``, or for the
@@ -1605,8 +1214,7 @@ def _load_as(cls, filename: str, mode: Optional[str] = None, kwargs: Optional[di
     Raises
     ------
     ValueError
-        The class has no reader for that format; ``Data.load()`` /
-        ``DataList.load()`` for an asset, which names no class.
+        The class has no reader for that format.
     TypeError
         The reader takes no such argument, or gave back another class.
     """
@@ -1614,14 +1222,9 @@ def _load_as(cls, filename: str, mode: Optional[str] = None, kwargs: Optional[di
     fmt      = _file_mode(filename, mode)
     route    = _route_of(cls, "load", fmt)
     if route is None:
-        if cls in (Data, DataList) and fmt in _FORMATS:
-            readers = ", ".join(_readers_of(fmt)) or "none is imported"
-            raise ValueError(
-                f"{cls.__name__}.load() reads cgmath's own files, which name the class "
-                f"they hold; {filename} is {_article(fmt)} {fmt} file, which names none: read "
-                f"it with the class wanted ({readers})"
-            )
         raise _no_route(cls, "load", fmt, filename)
+    if fmt in _OWN_FORMATS and kwargs:
+        raise TypeError(f"{_article(fmt)} {fmt} file takes no argument but its name: got {', '.join(kwargs)}")
 
     data = _call_route(route, f"{cls.__name__}.load_{fmt}", filename, kwargs or {})
     if fmt not in _OWN_FORMATS and type(data) is not cls:
@@ -1644,24 +1247,6 @@ def _save_as(obj, filename: str, mode: Optional[str] = None, kwargs: Optional[di
         raise _no_route(type(obj), "save", fmt, filename)
     written = _call_route(route, f"{type(obj).__name__}.save_{fmt}", filename, kwargs or {})
     return written if isinstance(written, str) else filename
-
-
-def _load_derived(cls, filename: str, mode: Optional[str] = None, kwargs: Optional[dict] = None) -> Any:
-    """
-    A module's own ``load()``: ``cls.load()``, but a cgmath file gives back
-    whatever it holds that is ``cls`` or derives from it, a hierarchy's
-    file a ClipData; any other class raises TypeError. An asset goes to
-    ``cls.load_<format>``, given ``kwargs``.
-    """
-    filename = os.path.expanduser(filename)
-    fmt      = _file_mode(filename, mode)
-    if fmt in _OWN_FORMATS and kwargs:
-        raise TypeError(f"{_article(fmt)} {fmt} file takes no argument but its name: got {', '.join(kwargs)}")
-    if fmt == "pickle":
-        return _read_pickle(cls, filename, derived=True)
-    if fmt in ("json", "npz"):
-        return _load_file(cls, filename, _read_json if fmt == "json" else _read_npz, derived=True)
-    return _load_as(cls, filename, fmt, kwargs)
 
 
 # -------------------------------- NAMESPACES -------------------------------- #
@@ -1865,18 +1450,17 @@ def _saved_name_maps(cls, names, explicit: dict) -> tuple:
     return saved, {public: name for name, public in saved.items()}
 
 
-def _by_field(data: dict, fields: dict, label, what: str, keep=()) -> dict:
+def _by_field(data: dict, fields: dict, label, what: str) -> dict:
     """
     ``data`` keyed by field: each key that is a saved name in ``fields`` (a
-    saved name to its field) back to the field's own name, in order, but
-    for those in ``keep``, and any other key as it is. ``data`` itself when
-    it holds no saved name.
+    saved name to its field) back to the field's own name, in order, and
+    any other key as it is. ``data`` itself when it holds no saved name.
 
     Raises
     ------
     ValueError
-        ``data`` holds one field under both names, a name in ``keep`` too;
-        ``label(field)`` names it and ``what`` names ``data``.
+        ``data`` holds one field under both names; ``label(field)`` names it
+        and ``what`` names ``data``.
     """
     if not fields or fields.keys().isdisjoint(data):
         return data
@@ -1886,7 +1470,7 @@ def _by_field(data: dict, fields: dict, label, what: str, keep=()) -> dict:
         name = fields.get(key, key)
         if name != key and name in data:
             raise ValueError(f"{label(name)} is given twice in {what}, as {key!r} and {name!r}")
-        out[key if key in keep else name] = value
+        out[name] = value
     return out
 
 
@@ -2066,10 +1650,6 @@ class Data:
     # MRO: an instance takes a write to nothing else
     _STATE = ()
 
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        _register(cls)
-
     def __setattr__(self, name: str, value) -> None:
         """Strict attribute setter: an instance holds only what its class
         declares, so a typo raises instead of silently creating new state,
@@ -2212,9 +1792,10 @@ class Data:
     @classmethod
     def _setter_names(cls) -> frozenset:
         """
-        The saved names a tree built by hand sets through a property: those
-        of a property with a setter, which checks the value. Any other, such
-        as FFDData's read-only cells, is read as its field. Cached per class.
+        The saved names a load sets through a property: those of a property
+        with a setter, which checks and converts the value, as it does for a
+        caller. Any other, such as FFDData's read-only cells, is set as its
+        field. Cached per class.
         """
         cached = cls.__dict__.get("_SETTER_NAMES_CACHE")
         if cached is None:
@@ -2228,20 +1809,17 @@ class Data:
         return cached
 
     @classmethod
-    def _as_fields(cls, data: dict, what: str = "the data", by_hand: bool = False) -> dict:
+    def _as_fields(cls, data: dict, what: str = "the data") -> dict:
         """
         ``data``, a tree or a mapping keyed by field, with each field under
         its own name, whether it holds the saved name or the field's own.
-        ``by_hand``, for a tree that names no class, keeps the name of a
-        property with a setter, for the load to set the value through it.
 
         Raises
         ------
         ValueError
             ``data`` holds one field under both names.
         """
-        keep = cls._setter_names() if by_hand else ()
-        return _by_field(data, cls._saved_names()[1], cls._field_label, what, keep)
+        return _by_field(data, cls._saved_names()[1], cls._field_label, what)
 
     @classmethod
     def _field_label(cls, name: str) -> str:
@@ -2295,15 +1873,11 @@ class Data:
 
     def __hash__(self):
         # the tree as a pickle holds it, numpy scalars as python ones and
-        # arrays as their bytes: a loaded copy hashes the same. With no memo,
-        # and no numbers, a value held twice is written twice, shared or not,
-        # as == compares it
+        # arrays as their bytes: a loaded copy hashes the same
         buffer       = io.BytesIO()
         pickler      = pickle.Pickler(buffer, protocol=4)
         pickler.fast = True
-        with _OwnSave(numbered=False):
-            tree = self.to_dict()
-        pickler.dump(_pickled(tree))
+        pickler.dump(_plain(self.to_dict()))
         return hash(buffer.getvalue())
 
     def __eq__(self, other) -> bool:
@@ -2344,9 +1918,7 @@ class Data:
 
     def copy(self):
         """returns a deep copy of self: the object a save and load gives back"""
-        with _OwnSave():
-            tree = self.to_dict()
-        return type(self).from_dict(_tree_copy(tree))
+        return type(self).from_dict(_tree_copy(self.to_dict()))
 
     def __copy__(self):
         """
@@ -2461,21 +2033,15 @@ class Data:
 
         return any(matched)
 
-    @staticmethod
-    def _reconstruct(cls, state: dict):
-        """how an older cgmath pickled data, refused now"""
-        raise LegacyFileError(_OLDER_FILE.format("the file"))
-
     def __reduce__(self):
-        """pickles the tree to_dict() returns, as npz and json save it"""
+        """
+        Pickles the tree to_dict() returns, as plain data, under this class:
+        what pickle.dumps() and multiprocessing hand across, where the same
+        code runs at both ends. A file holds the tree alone (save_pickle).
+        """
         if is_dataclass(self):
-            return (_unpickle, (type(self), _pickled(self.to_dict())))
+            return (_unpickle, (type(self), _plain(self.to_dict())))
         return super().__reduce__()
-
-    @classmethod
-    def _pickle_tree(cls, tree: dict) -> dict:
-        """this class's tree as a pickle holds it; _from_state reads it back"""
-        return tree
 
     def save_json(self, filename: str) -> str:
         return _save_file(self, filename, "json")
@@ -2505,55 +2071,52 @@ class Data:
     @classmethod
     def from_dict(cls, data: dict) -> Any:
         """
-        The object a tree describes, which must be this class: a tree naming
-        any other raises TypeError, a subclass too, so ``MeshData`` refuses
-        a ``UVData``. ``Data.from_dict()`` itself gives back whatever class
-        the tree names. A tree that names no class is read as this one.
-        What the tree holds, a field's object or a list's items, comes back
-        as the class it names, which may derive from the one declared.
-        Fields the tree leaves out take fresh copies of their defaults. An
-        object the tree saves once and refers to after is one object again.
-
-        A field is read under its property's name, as a file saves it, or
-        its own. A tree that names no class is one built by hand: a
-        property's name in it goes through the property's setter, which
-        checks the value, and is read as the field only when the property
-        has no setter. Either way a tree naming one field both ways raises
-        ValueError.
+        The object a tree describes, built as this class, whatever class
+        saved it: a tree holds no class. A field is read under its saved
+        name, a property's for a private field behind one, or its own; a
+        tree naming one both ways raises ValueError. A field holding a Data
+        or DataList is built from its tree as the class the field declares.
+        A field the tree leaves out takes a fresh copy of its default; one
+        with no default left out raises ValueError naming it. A key naming
+        no field warns and is dropped, but ``"__class__"``, which a file
+        saved up to cgmath 3.2 holds, skipped in silence.
         """
-        return _load(data, cls)
+        _concrete(cls, "from_dict")
+        data = dict(data)
+        data.pop(_OLD_CLASS_KEY, None)
+        return cls._from_state(cls._as_fields(data))
 
     @classmethod
     def _from_state(cls, data: dict) -> Any:
-        # the tree names each field by its own name, but for a property with
-        # a setter, which a tree built by hand sets by name; its notes may
-        # name a field either way
+        # the tree's values, each field under its own name (_as_fields), set
+        # in the order the tree holds them, the order they were saved in,
+        # whatever order the class declares its fields in now
         obj    = cls.__new__(cls)
         dtypes = cls._as_fields(data.pop(DTYPES_KEY, None) or {})
         shapes = cls._as_fields(data.pop(SHAPES_KEY, None) or {})
         hints  = cls._field_hints()
-
         specs  = cls._array_specs()
+        # a field behind a property with a setter is set through it, as a
+        # caller sets it: the setter checks and converts the value, for the
+        # dicts the asset readers build by hand as for a file
+        names   = cls._saved_names()[0]
+        setters = cls._setter_names()
 
-        # every value rebuilt in the order the tree holds it, the order it was
-        # saved in, whatever order the class declares its fields in now: an
-        # object saved once is built before what refers to it. An array's
-        # lists hold no object. A loop, not a comprehension, which would cost
-        # each nested object one more frame
-        for key in list(data):
-            if key not in specs:
-                data[key] = _decode(data[key])
-
+        missing = []
         for field in fields(cls):
+            saved  = names.get(field.name)
+            setter = saved in setters
             if field.name in data:
-                hint  = hints.get(field.name)
-                value = data.pop(field.name)
-                if isinstance(value, (dict, list)) and _holds_data(hint):
-                    # an older cgmath saved a nested object as its bare fields
-                    raise LegacyFileError(_OLDER_FILE.format("the data"))
+                hint   = hints.get(field.name)
+                value  = data.pop(field.name)
 
-                if field.name in dtypes and value is not None:
+                nested = _data_class(hint)
+                if nested is not None and isinstance(value, dict):
+                    value = nested.from_dict(value)  # two frames a level: a deep tree loads
+                elif field.name in dtypes and value is not None:
                     value = np.asarray(value, dtype=dtypes[field.name])
+                elif setter:
+                    pass  # the value as given: the setter converts it, as it does a caller's
                 elif (
                     isinstance(value, (list, tuple, bool, int, float, complex))
                     and is_ndarray_annotation(hint)
@@ -2564,24 +2127,34 @@ class Data:
 
                 if field.name in shapes and value is not None:
                     value = np.asarray(value).reshape(shapes[field.name])
+                if setter:
+                    # the field's own default first: a setter that compares the
+                    # value with the field's would otherwise read the class's
+                    # default, and leave the instance pointing at it
+                    default = _field_default(field)
+                    if default is not _NO_DEFAULT:
+                        setattr(obj, field.name, np.array(default) if isinstance(default, ImmutableArray) else default)
+                    setattr(obj, saved, value)
+                else:
+                    setattr(obj, field.name, value)
             else:
                 value = _field_default(field)
                 if value is _NO_DEFAULT:
+                    if field.name not in cls.TRANSIENT_FIELDS:
+                        missing.append(field.name)
                     continue
                 if isinstance(value, ImmutableArray):
                     value = np.array(value)  # the class default: this object's own copy
-            setattr(obj, field.name, value)
+                setattr(obj, field.name, value)
 
-        # what a class saves beside its fields, and a property set by name,
-        # both public: private state -- a cache, a link, a _STATE name -- is
-        # rebuilt after a load, never read from one
-        for key, value in data.items():
-            if key.startswith("_"):
-                raise AttributeError(
-                    f"the data names {key!r}, which is no field of {cls.__name__}: "
-                    f"a file holds no private state"
-                )
-            setattr(obj, key, value)
+        if missing:
+            raise ValueError(f"{cls.__name__}.from_dict: the data lacks {', '.join(missing)}")
+
+        # a key naming no field: one a class no longer has, or a typo in a
+        # tree built by hand. Private state -- a cache, a link, a _STATE
+        # name -- is rebuilt after a load, never read from one
+        for key in data:
+            _dropped(cls, key)
 
         obj._post_load()
         return obj
@@ -2592,22 +2165,25 @@ class Data:
     @classmethod
     def from_bytes(cls, data: bytes) -> Any:
         """the object npz bytes hold, read as :meth:`from_dict` reads a tree"""
-        tree = bytes_to_dict(data)
-        return _loaded_class(cls, tree.get(CLASS_KEY), "the data", "from_bytes").from_dict(tree)
+        _concrete(cls, "from_bytes")
+        return cls.from_dict(bytes_to_dict(data))
 
     @classmethod
     def load_pickle(cls, filename: str) -> Any:
         """the object a pickle holds, read as :meth:`load` reads one"""
+        _concrete(cls, "load_pickle")
         return _read_pickle(cls, filename)
 
     @classmethod
     def load_json(cls, filename: str) -> Any:
         """the object a json file holds, read as :meth:`load` reads one"""
+        _concrete(cls, "load_json")
         return _load_file(cls, filename, _read_json)
 
     @classmethod
     def load_npz(cls, filename: str) -> Any:
         """the object an npz file holds, read as :meth:`load` reads one"""
+        _concrete(cls, "load_npz")
         return _load_file(cls, filename, _read_npz)
 
     @classmethod
@@ -2627,77 +2203,58 @@ class Data:
         ``MeshData.load_fbx("a.fbx", name="body")``. A reader argument named
         ``filename`` or ``mode`` cannot be reached this way.
 
-        A cgmath file must hold this class: any other raises TypeError, a
-        subclass too, so ``MeshData.load()`` refuses a saved ``UVData``,
-        whose points are (N, 2), not (N, 3). ``Data.load()`` itself gives
-        back whatever class the file holds, a list too, and refuses an
-        asset, which names no class, naming the classes that read it. What
-        the file's object holds, a field's object or a list's items, comes
-        back as the class it names, which may derive from the one declared.
-
-        A file saved by cgmath 2.x, when this module was
-        ``cgmath.geometry._base``, loads too, a pickle as well, which a bare
-        ``pickle.load`` no longer reads.
+        A cgmath file names no class: it is built as this class, whatever
+        class saved it, as :meth:`from_dict` builds a tree, so the class
+        wanted loads the file, and ``Data.load()`` itself raises TypeError.
+        A file saved up to cgmath 3.2, under ``cgmath.geometry._base`` too,
+        loads the same, a pickle as well.
         """
+        _concrete(cls, "load")
         return _load_as(cls, filename, mode, kwargs)
-
-    def _saved_parts(self) -> list:
-        """the values this object's tree is built from, walked by a save for what it reaches twice"""
-        cls = type(self)
-        return [
-            getattr(self, name, None)
-            for name in cls._dataclass_field_names()
-            if name not in cls.TRANSIENT_FIELDS
-        ]
 
     def to_dict(self) -> dict:
         """
-        The data as a tree: its class, then every field that differs from its
-        default (one exactly equal to it is left out, and a load gives it a
-        fresh copy back), a private field behind a property of its own name
-        under the property's name. Pickle, npz and json all save this. A Data
-        or DataList the tree reaches twice is written once, and referred to
-        after, even in a field equal to its default.
+        The data as a tree: every field that differs from its default (one
+        exactly equal to it is left out, and a load gives it a fresh copy
+        back), a private field behind a property of its own name under the
+        property's name, a field holding a Data or DataList as its tree.
+        Nothing names the class: the class the tree is loaded with builds
+        it. Pickle, npz and json all save this.
         """
         cls    = type(self)
-        data   = {CLASS_KEY: _class_tag(cls)}
+        data   = {}
         specs  = cls._array_specs()
         names  = cls._saved_names()[0]
         dtypes = {}
         shapes = {}
 
-        # in the running save, or one this starts
-        with _Saving(self) as save:
-            shared = save.shared  # what the save reaches twice
+        for field in fields(self):
+            if field.name in cls.TRANSIENT_FIELDS:
+                continue
 
-            for field in fields(self):
-                if field.name in cls.TRANSIENT_FIELDS:
+            value = getattr(self, field.name, _NO_DEFAULT)
+            if value is _NO_DEFAULT:
+                continue  # never set: nothing to save
+
+            # left at its default, the field is left out
+            default = _field_default(field)
+            if default is not _NO_DEFAULT:
+                if isinstance(default, ImmutableArray):
+                    default = np.asarray(default)
+                if _same_value(value, default):
                     continue
 
-                value = getattr(self, field.name, _NO_DEFAULT)
-                if value is _NO_DEFAULT:
-                    continue  # never set: nothing to save
+            name       = names.get(field.name, field.name)
+            data[name] = _encode(value)
 
-                # left at its default, the field is left out, but not when it holds
-                # an object the tree reaches twice: a fresh default shares nothing
-                default = _field_default(field)
-                if default is not _NO_DEFAULT and not (shared and _holds_shared(value, shared)):
-                    if isinstance(default, ImmutableArray):
-                        default = np.asarray(default)
-                    if _same_value(value, default):
-                        continue
+            # json keeps no dtype: a field that may hold more than one notes it
+            spec = specs.get(field.name)
+            if spec is not None and len(spec.dtypes) > 1 and isinstance(value, np.ndarray):
+                dtypes[name] = value.dtype.name
 
-                name       = names.get(field.name, field.name)
-                data[name] = _encode(value)
-
-                # json keeps no dtype: a field that may hold more than one notes it
-                spec = specs.get(field.name)
-                if spec is not None and len(spec.dtypes) > 1 and isinstance(value, np.ndarray):
-                    dtypes[name] = value.dtype.name
-
-                # nor the shape of an empty array: [] could be (0,), (0, 3) or (0, 0)
-                if isinstance(value, np.ndarray) and value.size == 0 and value.ndim > 1:
-                    shapes[name] = list(value.shape)
+            # nor the shape of an empty array: [] could be (0,), (0, 3) or (0, 0)
+            if isinstance(value, np.ndarray) and value.size == 0 and value.ndim > 1:
+                shapes[name] = list(value.shape)
 
         if dtypes:
             data[DTYPES_KEY] = dtypes
@@ -3087,8 +2644,7 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
 
     def __init_subclass__(cls, **kwargs):
         """
-        Sets ``DATA_LIST_CLASS`` to the class the brackets name, and registers
-        the class for files.
+        Sets ``DATA_LIST_CLASS`` to the class the brackets name.
 
         Raises
         ------
@@ -3117,7 +2673,6 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
                 )
             cls.DATA_LIST_CLASS = item
         _forward_lines(cls)
-        _register(cls)
 
     def __setattr__(self, name: str, value) -> None:
         """
@@ -3180,6 +2735,33 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
         return _by_field(
             data, cls._saved_names()[1], lambda name: f"{cls.__name__}.{saved[name]}", what
         )
+
+    @classmethod
+    def _item_class(cls, item: dict) -> type:
+        """
+        The class an item's tree is built as: ``DATA_LIST_CLASS``. A list
+        whose items are of several classes tells them apart by a field the
+        tree holds, a Scene its nodes by ``node_type``.
+        """
+        return cls.DATA_LIST_CLASS
+
+    @classmethod
+    def _list_hints(cls) -> dict:
+        """the annotation each class up the MRO gives a LIST_FIELDS name, resolved; cached per class"""
+        cached = cls.__dict__.get("_LIST_HINTS_CACHE")
+        if cached is None:
+            cached = {}
+            for base in reversed(cls.__mro__):
+                scope = vars(sys.modules.get(base.__module__, object))
+                for name, hint in vars(base).get("__annotations__", {}).items():
+                    if isinstance(hint, str):
+                        try:
+                            hint = eval(hint, dict(scope))
+                        except Exception:
+                            pass
+                    cached[name] = hint
+            cls._LIST_HINTS_CACHE = cached
+        return cached
 
     def __init__(self, iterable=None):
         self.list = []
@@ -3324,13 +2906,8 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
         return hash(tuple(self.list))
 
     def copy(self):
-        """
-        Returns a deep copy of self: the list a save and load gives back, an
-        item or part held twice copied once.
-        """
-        with _OwnSave():
-            tree = self.to_dict()
-        return type(self).from_dict(_tree_copy(tree))
+        """returns a deep copy of self: the list a save and load gives back"""
+        return type(self).from_dict(_tree_copy(self.to_dict()))
 
     def __copy__(self):
         """a shallow copy: a new list over the same items"""
@@ -3352,10 +2929,6 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
         for name in self.LIST_FIELDS:
             setattr(new, name, copy.deepcopy(getattr(self, name), memo))
         return new
-
-    def __setstate__(self, state):
-        """how an older cgmath's lists unpickled, refused now"""
-        raise LegacyFileError(_OLDER_FILE.format("the file"))
 
     def reset_cached_data(self):
         """resets cached data"""
@@ -3401,31 +2974,17 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
 
     # --------------------------------- FILE I/O --------------------------------- #
 
-    def _saved_parts(self) -> list:
-        """the values this list's tree is built from: its items and LIST_FIELDS"""
-        return self.list + [getattr(self, name) for name in self.LIST_FIELDS]
-
     def to_dict(self) -> dict:
         """
-        The list as a tree: its class, its items' trees, and its LIST_FIELDS.
-        One of those behind a property of its own name is saved as the
-        property, ``_start_frame`` as ``start_frame``. A Data or DataList the
-        tree reaches twice is written once, and referred to after.
+        The list as a tree: its items' trees under ``__items__``, and its
+        LIST_FIELDS, one behind a property of its own name saved as the
+        property, ``_start_frame`` as ``start_frame``. Nothing names the
+        class: the class the tree is loaded with builds it.
         """
         names = type(self)._saved_names()[0]
-
-        # in the running save, or one this starts
-        with _Saving(self) as save:
-            shared = save.shared  # what the save reaches twice
-            data = {
-                CLASS_KEY: _class_tag(type(self)),
-                ITEMS_KEY: [
-                    _numbered_tree(item, save) if id(item) in shared else item.to_dict()
-                    for item in self.list
-                ],
-            }
-            for name in self.LIST_FIELDS:
-                data[names.get(name, name)] = _encode(getattr(self, name))
+        data  = {ITEMS_KEY: [item.to_dict() for item in self.list]}
+        for name in self.LIST_FIELDS:
+            data[names.get(name, name)] = _encode(getattr(self, name))
         return data
 
     def to_json(self) -> str:
@@ -3437,13 +2996,8 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
         return dict_to_bytes(self.to_dict())
 
     def __reduce__(self):
-        """pickles the tree to_dict() returns, as npz and json save it"""
-        return (_unpickle, (type(self), _pickled(self.to_dict())))
-
-    @classmethod
-    def _pickle_tree(cls, tree: dict) -> dict:
-        """this class's tree as a pickle holds it; _from_state reads it back"""
-        return tree
+        """pickles the tree to_dict() returns, as plain data, under this class (see Data.__reduce__)"""
+        return (_unpickle, (type(self), _plain(self.to_dict())))
 
     def save_json(self, filename: str) -> str:
         return _save_file(self, filename, "json")
@@ -3467,21 +3021,21 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
     @classmethod
     def from_dict(cls, data: dict) -> Any:
         """
-        The list a tree describes, which must be this class: a tree naming
-        any other raises TypeError, a subclass too, so ``HierarchyData``
-        refuses a ``ClipData``. ``DataList.from_dict()`` itself gives back
-        whatever list class the tree names, and ``Data.from_dict()`` any
-        class. A tree that names no class is read as this one. Each item
-        comes back as the class it names, which may derive from
-        ``DATA_LIST_CLASS``: a ``Scene``'s Object, Camera and Light nodes.
-        An object the tree saves once and refers to after is one object
-        again.
-
-        One of LIST_FIELDS is read under its property's name, as a file saves
-        it, or its own, whether the tree names its class or not, and a tree
-        naming one both ways raises ValueError.
+        The list a tree describes, built as this class, whatever class saved
+        it: a tree holds no class. Each item under ``__items__`` is built as
+        :meth:`_item_class` says, ``DATA_LIST_CLASS``; a dict of item dicts,
+        as the asset readers build one, is read the same. One of
+        LIST_FIELDS is read under its property's name, as a file saves it,
+        or its own, and a tree naming one both ways raises ValueError. A
+        key naming neither warns and is dropped, but ``"__class__"``, which
+        a file saved up to cgmath 3.2 holds, skipped in silence.
         """
-        return _load(data, cls)
+        _concrete(cls, "from_dict")
+        data = dict(data)
+        data.pop(_OLD_CLASS_KEY, None)
+        if ITEMS_KEY in data:
+            data = cls._as_fields(data)
+        return cls._from_state(data)
 
     @classmethod
     def _from_state(cls, data: dict) -> Any:
@@ -3490,18 +3044,23 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
             items = data.pop(ITEMS_KEY)
         else:
             # a dict of item dicts, as the asset readers build them
+            if not all(isinstance(x, dict) for x in data.values()):
+                raise TypeError(
+                    f"{cls.__name__}.from_dict takes a tree holding '__items__', or a dict of item "
+                    f"dicts, not the fields of one object"
+                )
             items, data = list(data.values()), {}
 
         for item in items:
-            obj.append(_from_tagged(item, cls.DATA_LIST_CLASS))
-        # in the order the tree holds them, as a Data's fields. A part the
-        # class no longer declares is left out, but an object first saved
-        # there is built still: a later part may refer to it
+            obj.append(cls._item_class(item).from_dict(item))
+        # in the order the tree holds them, as a Data's fields; a part the
+        # class no longer declares warns and is dropped
+        hints = cls._list_hints()
         for name, value in data.items():
             if name in cls.LIST_FIELDS:
-                setattr(obj, name, _decode(value))
-            elif _holds_numbered(value):
-                _decode(value)
+                setattr(obj, name, _as_declared(value, hints.get(name)))
+            else:
+                _dropped(cls, name)
 
         obj._post_load()
         return obj
@@ -3512,22 +3071,25 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
     @classmethod
     def from_bytes(cls, data: bytes) -> Any:
         """the list npz bytes hold, read as :meth:`from_dict` reads a tree"""
-        tree = bytes_to_dict(data)
-        return _loaded_class(cls, tree.get(CLASS_KEY), "the data", "from_bytes").from_dict(tree)
+        _concrete(cls, "from_bytes")
+        return cls.from_dict(bytes_to_dict(data))
 
     @classmethod
     def load_json(cls, filename: str) -> Any:
         """the list a json file holds, read as :meth:`load` reads one"""
+        _concrete(cls, "load_json")
         return _load_file(cls, filename, _read_json)
 
     @classmethod
     def load_npz(cls, filename: str) -> Any:
         """the list an npz file holds, read as :meth:`load` reads one"""
+        _concrete(cls, "load_npz")
         return _load_file(cls, filename, _read_npz)
 
     @classmethod
     def load_pickle(cls, filename: str) -> Any:
         """the list a pickle holds, read as :meth:`load` reads one"""
+        _concrete(cls, "load_pickle")
         return _read_pickle(cls, filename)
 
     @classmethod
@@ -3540,26 +3102,11 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
         ``kwargs`` go to the reader by keyword, ``HierarchyData.load("rig.fbx",
         pose="bind")``.
 
-        A cgmath file must hold this class: any other raises TypeError, a
-        subclass too, so ``HierarchyData.load()`` refuses a saved
-        ``ClipData``. ``DataList.load()`` itself gives back whatever list
-        class the file holds, and ``Data.load()`` any class; both refuse an
-        asset, which names no class. Each item comes back as the class it
-        names, which may derive from ``DATA_LIST_CLASS``: a ``Scene``'s
-        Object, Camera and Light nodes.
-
-        A file saved by cgmath 2.x, when this module was
-        ``cgmath.geometry._base``, loads too, a pickle as well, which a bare
-        ``pickle.load`` no longer reads.
+        A cgmath file names no class: it is built as this class, whatever
+        class saved it, each item as :meth:`_item_class` says, so the class
+        wanted loads the file, and ``DataList.load()`` itself raises
+        TypeError. A file saved up to cgmath 3.2, under
+        ``cgmath.geometry._base`` too, loads the same, a pickle as well.
         """
+        _concrete(cls, "load")
         return _load_as(cls, filename, mode, kwargs)
-
-
-_register(Data)
-_register(DataList)
-
-# a file saved up to cgmath 2.x tags a plain Data or DataList with this
-# module's old name: the tag reads as the class, and a json or npz file
-# loads without importing cgmath.geometry
-_CLASSES[_MOVED_FROM + ".Data"]     = Data
-_CLASSES[_MOVED_FROM + ".DataList"] = DataList

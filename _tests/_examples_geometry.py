@@ -175,8 +175,8 @@ def _empty_uv_set() -> UVData:
 
 
 def mesh_list() -> MeshList:
-    """the panel, a UVData (a MeshData subclass) and an empty mesh"""
-    return MeshList([mesh_data(), uv_data(), _empty_mesh()])
+    """the panel and an empty mesh: a list holds one kind, which a load builds every item as"""
+    return MeshList([mesh_data(), _empty_mesh()])
 
 
 def uv_list() -> UVList:

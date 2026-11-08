@@ -1,9 +1,10 @@
 """Data and DataList live in cgmath.data, and what cgmath 2.x saved still loads.
 
 Up to cgmath 2.x the module was cgmath.geometry._base, which is gone. A file
-saved then tags a plain Data or DataList with that name, and every pickle
-names _unpickle and _unpickle_array there, a plain Data or DataList too.
+saved then names its class, a plain Data or DataList under that module, a key
+a load skips, and every pickle names _unpickle and _unpickle_array there.
 cgmath's own loaders read them all; a bare pickle.load of such a pickle fails.
+A pickle saved now holds plain data, which a bare pickle.load reads as a dict.
 
 test_assets holds what 2.0.0 saved, one object of every class the module
 defines and a few that derive from them, in every format, under numpy 1 and
@@ -28,11 +29,9 @@ from cgmath import geometry
 from cgmath.data import (
     _Unpickler,
     Array,
-    CLASS_KEY,
     Data,
     DataList,
     ImmutableArray,
-    LegacyFileError,
 )
 from cgmath.geometry.bspline import BSplineData
 from cgmath.geometry.bspline_patch import BSplinePatchData
@@ -109,13 +108,17 @@ def _saved_by_2_0_0() -> dict:
         "hierarchy":       HierarchyData(nodes),
         "immutable_array": ImmutableArray(np.arange(4.0)),
         "array_spec":      Array(np.float64, "N", 3),
-        "legacy_error":    LegacyFileError("old file"),
+        "legacy_error":    None,  # a class the module no longer has: its pickle is refused
     }
 
 
 # the classes of the module that are no data: a pickle of one is no file a
 # loader gives back
 NOT_DATA = ("immutable_array", "array_spec", "legacy_error")
+
+# files of the base classes themselves, which build nothing: a file names no
+# class, so the class wanted loads it
+BARE = ("bare_data", "bare_datalist", "empty_datalist", "plain_datalist")
 
 
 class TestTheModule(unittest.TestCase):
@@ -155,31 +158,30 @@ class TestTheModule(unittest.TestCase):
         self.assertEqual(Data.__module__, "cgmath.data")
         self.assertEqual(DataList.__module__, "cgmath.data")
         # cgmath.geometry exports them still, the same objects
-        self.assertIs(geometry.Data,            Data)
-        self.assertIs(geometry.DataList,        DataList)
-        self.assertIs(geometry.ImmutableArray,  ImmutableArray)
-        self.assertIs(geometry.LegacyFileError, LegacyFileError)
+        self.assertIs(geometry.Data,           Data)
+        self.assertIs(geometry.DataList,       DataList)
+        self.assertIs(geometry.ImmutableArray, ImmutableArray)
         # no module is left behind under the old name
         self.assertIsNone(util.find_spec(OLD))
 
-    def test_plain_data_saves_under_the_new_name(self):
-        self.assertEqual(Data().to_dict()[CLASS_KEY], "cgmath.data.Data")
-        self.assertEqual(DataList([Data()]).to_dict()[CLASS_KEY], "cgmath.data.DataList")
-        self.assertEqual(
-            DataList([Data()]).to_dict()["__items__"][0][CLASS_KEY], "cgmath.data.Data"
-        )
+    def test_a_save_names_no_class_and_no_module(self):
+        saved = _saved_by_2_0_0()
+        self.assertNotIn("__class__", saved["meshlist"].to_dict())
+        self.assertNotIn("__class__", saved["meshlist"].to_dict()["__items__"][0])
 
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
-        saved = _saved_by_2_0_0()
-        for stem in ("bare_data", "bare_datalist", "mesh", "hierarchy"):
+        for stem in ("mesh", "meshlist", "hierarchy"):
             with self.subTest(stem):
                 path = saved[stem].save(os.path.join(tmp, stem + ".pkl"))
-                self.assertNotIn(OLD, _modules_named(path))
-                self.assertIn("cgmath.data", _modules_named(path))
-                # a bare pickle.load reads what is saved now
+                # plain data: no global at all, no cgmath name in the bytes
+                self.assertEqual(_modules_named(path), set())
                 with open(path, "rb") as f:
-                    self.assertEqual(pickle.load(f), saved[stem])
+                    self.assertNotIn(b"cgmath", f.read())
+                # a bare pickle.load reads the tree; the class builds it
+                with open(path, "rb") as f:
+                    self.assertIsInstance(pickle.load(f), dict)
+                self.assertEqual(type(saved[stem]).load(path), saved[stem])
 
 
 class TestFilesSavedBy2(unittest.TestCase):
@@ -247,23 +249,25 @@ class TestFilesSavedBy2(unittest.TestCase):
     def test_every_file_loads(self):
         for name in self.files:
             stem = self.stem(name)
-            if stem in NOT_DATA:
+            if stem in NOT_DATA or stem in BARE:
                 continue
             want = self.expected[stem]
             with self.subTest(name):
-                # Data.load, the factory, and the class's own loader
-                self.assertSame(Data.load(self.path(name)), want, name)
+                # the class's own loader: the file's class, named under the
+                # old module, is skipped
                 self.assertSame(type(want).load(self.path(name)), want, name)
                 if name.endswith((".pkl", ".pickle")):
                     self.assertSame(type(want).load_pickle(self.path(name)), want, name)
 
-    def test_a_list_loads_through_datalist_load(self):
+    def test_the_base_classes_build_nothing(self):
         for folder in self.sets:
-            for stem in ("bare_datalist", "empty_datalist", "plain_datalist", "meshlist"):
+            for stem in BARE:
                 for ext in (".pkl", ".json", ".npz"):
-                    name = f"{folder}/{stem}{ext}"
+                    name   = f"{folder}/{stem}{ext}"
+                    loader = DataList if "list" in stem else Data
                     with self.subTest(name):
-                        self.assertSame(DataList.load(self.path(name)), self.expected[stem], name)
+                        with self.assertRaisesRegex(TypeError, r"builds nothing: a file names no class"):
+                            loader.load(self.path(name))
 
     def test_a_hierarchy_loads_through_its_module(self):
         for folder in self.sets:
@@ -273,18 +277,16 @@ class TestFilesSavedBy2(unittest.TestCase):
                     got = cgmath.hierarchy.load(self.path(name))
                     self.assertSame(got, self.expected["hierarchy"], name)
 
-    def test_the_other_classes_unpickle_through_cgmath(self):
+    def test_the_other_classes_pickles_are_refused(self):
+        # an ImmutableArray, an ArraySpec, an error: no data, and no name a
+        # cgmath pickle may hold
         for folder in self.sets:
             for stem in NOT_DATA:
                 name = f"{folder}/raw_{stem}.pickle"
-                if not self.numpy_reads(name):
-                    continue
                 with self.subTest(name):
                     with open(self.path(name), "rb") as f:
-                        self.assertSame(_Unpickler(f).load(), self.expected[stem], name)
-                    # read, then refused: no data
-                    with self.assertRaisesRegex(TypeError, "holds a .*, not a Data$"):
-                        Data.load(self.path(name))
+                        with self.assertRaisesRegex(pickle.UnpicklingError, "plain data"):
+                            _Unpickler(f).load()
 
     def test_a_bare_pickle_load_fails(self):
         for name in self.files:
@@ -297,30 +299,23 @@ class TestFilesSavedBy2(unittest.TestCase):
                 self.assertEqual(caught.exception.name, OLD)
                 self.assertEqual(str(caught.exception), f"No module named '{OLD}'")
 
-    def test_plain_data_loads_without_geometry(self):
-        plain = ("bare_data", "empty_datalist", "plain_datalist")
-        names = [
-            f"{folder}/{stem}{ext}"
-            for folder in self.sets
-            for stem in plain
-            for ext in (".pkl", ".json", ".npz")
-        ]
-        names += [f"{folder}/raw_{stem}.pickle" for folder in self.sets for stem in plain]
+    def test_a_pickle_saved_now_needs_no_cgmath_to_read_its_tree(self):
+        path = self.expected["mesh"].save(os.path.join(self.tmp, "mesh_now.pkl"))
         out = _fresh(
             f"""
-            import os, sys
-            from cgmath.data import Data, DataList
+            import pickle, sys
 
-            for name in {names!r}:
-                obj = Data.load(os.path.join({self.tmp!r}, name))
-                print(name, type(obj).__module__, type(obj).__name__, len(obj) if isinstance(obj, DataList) else "-")
-            print("geometry", "cgmath.geometry" in sys.modules)
+            with open({path!r}, "rb") as f:
+                tree = pickle.load(f)
+            print(sorted(tree))
+            print(sorted(tree["points"]))
+            print([x for x in sys.modules if x.startswith("cgmath")])
             """
         )
-        lines = out.splitlines()
-        self.assertEqual(lines[-1], "geometry False")
-        want = {"bare_data": "Data -", "empty_datalist": "DataList 0", "plain_datalist": "DataList 2"}
-        self.assertEqual(lines[:-1], [f"{x} cgmath.data {want[self.stem(x)]}" for x in names])
+        keys, array, modules = out.splitlines()[-3:]
+        self.assertEqual(keys,    "['counts', 'indices', 'name', 'points']")
+        self.assertEqual(array,   "['__array__']")  # an array: its dtype, shape and bytes
+        self.assertEqual(modules, "[]")
 
 
 class TestOldPickles(unittest.TestCase):
@@ -330,23 +325,23 @@ class TestOldPickles(unittest.TestCase):
         return os.path.join(ASSETS, name)
 
     def test_each_loads(self):
-        mesh = Data.load(self.path("test_data_module.mesh.pkl"))
+        mesh = MeshData.load(self.path("test_data_module.mesh.pkl"))
         self.assertIs(type(mesh), MeshData)
         self.assertEqual(mesh.name, "pCubeShape1")
         self.assertEqual((mesh.point_count, mesh.counts.tolist()), (8, [4] * 6))
         np.testing.assert_allclose(np.abs(mesh.points), 0.5)
 
-        curve = Data.load(self.path("test_data_module.curve.pkl"))
+        curve = BSplineData.load(self.path("test_data_module.curve.pkl"))
         self.assertIs(type(curve), BSplineData)
         self.assertEqual((curve.points.shape, curve.degree, curve.periodic), ((8, 3), 3, True))
 
-        patch = Data.load(self.path("test_data_module.patch.pkl"))
+        patch = BSplinePatchData.load(self.path("test_data_module.patch.pkl"))
         self.assertIs(type(patch), BSplinePatchData)
         self.assertEqual(patch.points.shape, (4, 8, 3))
         self.assertEqual((patch.degree_u, patch.degree_v), (3, 3))
         self.assertEqual((patch.periodic_u, patch.periodic_v), (False, True))
 
-        rig = Data.load(self.path("test_hierarchy.legacy_parent_node.pkl"))
+        rig = HierarchyData.load(self.path("test_hierarchy.legacy_parent_node.pkl"))
         self.assertIs(type(rig), HierarchyData)
         self.assertEqual(len(rig), 12)
         self.assertEqual(cgmath.hierarchy.load(self.path("test_hierarchy.legacy_parent_node.pkl")), rig)
@@ -364,14 +359,14 @@ class TestOldPickles(unittest.TestCase):
                 with open(self.path(name), "rb") as f:
                     self.assertIn(OLD.encode(), f.read())
 
-    def test_saved_again_a_bare_pickle_load_reads_it(self):
+    def test_saved_again_a_bare_pickle_load_reads_its_tree(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
-        for name in (
-            "test_data_module.mesh.pkl",
-            "test_data_module.curve.pkl",
-            "test_data_module.patch.pkl",
-            "test_hierarchy.legacy_parent_node.pkl",
+        for cls, name in (
+            (MeshData, "test_data_module.mesh.pkl"),
+            (BSplineData, "test_data_module.curve.pkl"),
+            (BSplinePatchData, "test_data_module.patch.pkl"),
+            (HierarchyData, "test_hierarchy.legacy_parent_node.pkl"),
         ):
             with self.subTest(name):
                 with open(self.path(name), "rb") as f:
@@ -379,11 +374,12 @@ class TestOldPickles(unittest.TestCase):
                         pickle.load(f)
                 self.assertEqual(caught.exception.name, OLD)
 
-                obj  = Data.load(self.path(name))
+                obj  = cls.load(self.path(name))
                 path = obj.save(os.path.join(tmp, name))
-                self.assertNotIn(OLD, _modules_named(path))
+                self.assertEqual(_modules_named(path), set())  # plain data names nothing
                 with open(path, "rb") as f:
-                    self.assertEqual(pickle.load(f), obj)
+                    self.assertIsInstance(pickle.load(f), dict)
+                self.assertEqual(cls.load(path), obj)
 
 
 if __name__ == "__main__":

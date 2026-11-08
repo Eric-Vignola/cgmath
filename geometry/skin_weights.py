@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Tuple, Union
 
 import numpy as np
-from cgmath.data import Array, Data, DataList, _load_derived
+from cgmath.data import Array, Data, DataList
 from cgmath.formats._fbx_io import load_sdk, open_fbx
 from cgmath.formats.glb import load_model
 from cgmath.geometry.mesh import _walk_fbx_mesh_nodes
@@ -118,11 +118,6 @@ class CompactSkinData(Data):
             weights    = weights,
             influences = list(self.influences),
         )
-
-    @staticmethod
-    def _reconstruct(state):
-        """how an older cgmath pickled a compact skin, refused now"""
-        return Data._reconstruct(CompactSkinData, state)
 
     @classmethod
     def from_prim(cls, prim: Any) -> "CompactSkinData":
@@ -914,36 +909,15 @@ class SkinData(Data):
     # ------------------ serialization ------------------ #
 
     @classmethod
-    def _pickle_tree(cls, tree: dict) -> dict:
-        """
-        A pickle holds the weights as their nonzero entries, for a smaller
-        file, wherever the skin sits (alone, in a SkinList, on an Object).
-        npz and json save them dense.
-        """
-        weights = tree.pop("weights", None)
-        if weights is not None:
-            sparse = coo_matrix(weights)
-            tree[_SPARSE_WEIGHTS] = {
-                "values": sparse.data,
-                "rows":   sparse.row.astype(np.int32),
-                "cols":   sparse.col.astype(np.int32),
-                "shape":  list(sparse.shape),
-            }
-        return tree
-
-    @classmethod
     def _from_state(cls, data: dict) -> "SkinData":
+        # a pickle saved up to cgmath 3.2 holds the weights as their nonzero
+        # entries; a save now holds them dense, as npz and json always did
         sparse = data.pop(_SPARSE_WEIGHTS, None)
         if sparse is not None:
             data["weights"] = coo_matrix(
                 (sparse["values"], (sparse["rows"], sparse["cols"])), shape=tuple(sparse["shape"])
             ).toarray()
         return super()._from_state(data)
-
-    @staticmethod
-    def _reconstruct(state):
-        """how an older cgmath pickled a skin, refused now"""
-        return Data._reconstruct(SkinData, state)
 
 
 _SPARSE_WEIGHTS = "__sparse_weights__"
@@ -1252,12 +1226,12 @@ def _read_skins_glb(filename: str, bind_matrices: bool = False) -> list:
 def load(filename: str, mode: Optional[str] = None, **kwargs) -> SkinList:
     """
     The file's skins, read as ``mode`` says or as the file reads (fbx, glb,
-    or cgmath's own npz / json / pickle). An fbx or a glb gives a
-    :class:`SkinList`, ``kwargs`` going to its reader. A cgmath file takes
-    none; it gives whatever list it holds, a SkinList or a class deriving
-    from it; any other class raises TypeError.
+    or cgmath's own npz / json / pickle), as ``SkinList.load()`` reads it:
+    an fbx or a glb gives a :class:`SkinList`, ``kwargs`` going to its
+    reader. A cgmath file takes none and gives a SkinList, whatever class
+    saved it; a file holding one skin is loaded with ``SkinData.load()``.
     """
-    return _load_derived(SkinList, filename, mode, kwargs)
+    return SkinList.load(filename, mode, **kwargs)
 
 
 def load_fbx(filename: str) -> SkinList:

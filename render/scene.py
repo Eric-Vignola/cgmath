@@ -1866,11 +1866,12 @@ class Scene(HierarchyData):
       See :meth:`_compute_render_signature` for the full per-node
       signature spec.
 
-    Saving (pkl / npz / json) keeps every node, as its own type, with its
-    parenting, and every setting below; a loaded Scene has no cached
-    render.  A MeshData several Objects share is saved once and loads
-    shared again.  ``resolution`` is int32 ``(2,)`` and ``background``
-    float64 ``(4,)``, either one ``None``.
+    Saving (pkl / npz / json) keeps every node, as its own type (its
+    ``node_type`` names it), with its parenting, and every setting below;
+    a loaded Scene has no cached render.  A MeshData several Objects share
+    is saved with each of them and loads as one mesh an Object.
+    ``resolution`` is int32 ``(2,)`` and ``background`` float64 ``(4,)``,
+    either one ``None``.
     """
 
     # render settings __init__ and configure() set on the instance, declared so
@@ -1910,6 +1911,15 @@ class Scene(HierarchyData):
         "_render_signature",
         "_render_cache_owner",
     )
+
+    @classmethod
+    def _item_class(cls, item: dict) -> type:
+        """
+        The class a saved node is built as: its ``node_type``, which each
+        constructor sets, names it; any other, a group or a joint, is a
+        TransformData. Until shapes leave the hierarchy, when Object goes.
+        """
+        return {"object": Object, "camera": Camera, "light": Light}.get(item.get("node_type"), TransformData)
 
     def __init__(
         self,

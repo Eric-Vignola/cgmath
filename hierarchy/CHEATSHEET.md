@@ -3327,19 +3327,18 @@ loaded                = ClipData.load(path)
 assert loaded == clip and loaded.frame_count == 4 and loaded.fps == 30.0
 ```
 
-A file names its class, and a class's `load` gives back that class: a
-file holding any other raises `TypeError`, a subclass too, so
-`HierarchyData.load` refuses a clip. `cgmath.hierarchy.load` gives back
-whatever hierarchy the file holds, and `Data.load` whatever class. A file
-saved by an older cgmath names no class: it raises `LegacyFileError` (a
-`ValueError`) and no longer loads.
+A file names no class, and the class you load it with builds it: a clip is
+loaded with `ClipData.load`, a rig with `HierarchyData.load` or
+`cgmath.hierarchy.load`; `Data.load` itself builds nothing and raises
+`TypeError`. A file saved up to cgmath 3.2 names its class under
+`"__class__"`, a key a load skips.
 
 An fbx or a glb goes the same way to the class's own `load_fbx` /
 `load_glb` / `save_fbx`, the arguments after `mode` with it, by keyword:
 one it does not take raises `TypeError` before the file is read or
 written. An fbx keeps what `save_fbx` writes: a rig's pose, a clip's
 frames as a take, a `ClipList`'s takes, each keyed on every frame as
-float32. `Data.load` refuses an fbx, which names no class.
+float32.
 
 <!-- notest -->
 ```python
@@ -3353,18 +3352,13 @@ ClipData.load("walk.fbx", take=0, fps=30.0)    # ClipData.load_fbx(..., take=0, 
 from cgmath import hierarchy
 from cgmath.geometry import Data
 
-assert type(hierarchy.load(path)) is ClipData       # the file says clip
-assert type(Data.load(path)) is ClipData
+assert type(ClipData.load(path)) is ClipData
+assert type(hierarchy.load(os.path.join(WORKDIR, "rig.json"))) is HierarchyData
 
 try:
-    HierarchyData.load(path)
+    Data.load(path)
 except TypeError as error:
-    print(error)                                # .../clip.json holds a ClipData; load it with ClipData.load() or Data.load()
-
-try:
-    ClipData.load(os.path.join(WORKDIR, "rig.json"))
-except TypeError as error:
-    print(error)                                # .../rig.json holds a HierarchyData; load it with HierarchyData.load() or Data.load()
+    print(error)                                # Data.load() builds nothing: a file names no class; load it with the class you expect, ...
 ```
 
 The explicit pairs work too, on both the node and the list.
@@ -3392,9 +3386,9 @@ assert TransformData.from_dict(rig["hip"].to_dict()).name == "hip"
 ```
 
 pkl, npz and json all save the one tree `to_dict` returns. A list's tree
-is `{"__class__": ..., "__items__": [...]}`, its nodes' trees in order (so
-duplicate names are safe). A node's tree holds its class and only the fields that
-differ from their default; a field left out loads back as the default. A
+is `{"__items__": [...]}` and its settings, its nodes' trees in order (so
+duplicate names are safe). A node's tree holds only the fields that differ
+from their default, and no class; a field left out loads back as the default. A
 channel is saved under its property's name, `translate`, though the node
 keeps it in the private field `_translate`. A load takes either name, so a
 file that names `_translate` still loads; one naming both raises
@@ -3402,11 +3396,10 @@ file that names `_translate` still loads; one naming both raises
 
 ```python
 tree = rig.to_dict()
-tree["__class__"]                               # 'cgmath.hierarchy.hierarchy.HierarchyData'
 sorted(tree["__items__"][0])                    # root: everything else is default
-# ['__class__', 'name', 'node_type', 'uuid']
+# ['name', 'node_type', 'uuid']
 sorted(tree["__items__"][1])
-# ['__class__', 'name', 'node_type', 'parent_uuid', 'translate', 'uuid']
+# ['name', 'node_type', 'parent_uuid', 'translate', 'uuid']
 ```
 
 A `HierarchyData` saves beside the items the record of the axes and the
@@ -3421,7 +3414,7 @@ hierarchy's tree; one holding none saves no such entry.
 
 ```python
 sorted(clip.to_dict())
-# ['__class__', '__items__', 'axis_system', 'blocks', 'fps', 'frame', 'start_frame', 'unit']
+# ['__items__', 'axis_system', 'blocks', 'fps', 'frame', 'start_frame', 'unit']
 clip.to_dict()["blocks"]["translate"].shape     # (4, 3, 3)
 ```
 

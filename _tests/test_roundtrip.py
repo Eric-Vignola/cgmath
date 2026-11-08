@@ -17,7 +17,6 @@ import json
 import os
 import pickle
 import pkgutil
-import re
 import subprocess
 import sys
 import tempfile
@@ -30,17 +29,15 @@ from unittest import mock
 import numpy as np
 import cgmath
 from cgmath.data import (
-    _CLASSES,
+    _data_class,
     _json_tree,
-    _pickled,
+    _plain,
     _unpickle,
-    CLASS_KEY,
     Data,
     DataList,
     dict_to_bytes,
     dict_to_zip,
     DTYPES_KEY,
-    ID_KEY,
     ITEMS_KEY,
     SHAPES_KEY,
 )
@@ -216,16 +213,14 @@ class TestEveryClass(unittest.TestCase):
                 obj = builder()
                 assert_same(self, self.saves_as.get(cls, lambda x: x)(obj), obj.copy(), f"{cls.__name__}.copy()")
 
-    def test_a_tree_that_shares_nothing_numbers_nothing(self):
-        # only an object reached twice is numbered: an object that shares
-        # nothing saves the same file as before numbers existed
-        def numbered(value):
+    def test_no_tree_names_a_class(self):
+        # a file names no class, nowhere in its tree: the class loading it
+        # builds it, and the classes its fields declare build what it holds
+        def names_a_class(value):
             if isinstance(value, dict):
-                if ID_KEY in value or value.get(CLASS_KEY) == "~ref":
-                    return True
-                return any(numbered(x) for x in value.values())
+                return "__class__" in value or any(names_a_class(x) for x in value.values())
             if isinstance(value, (list, tuple)):
-                return any(numbered(x) for x in value)
+                return any(names_a_class(x) for x in value)
             return False
 
         for name, cls in sorted(self.classes.items()):
@@ -233,15 +228,16 @@ class TestEveryClass(unittest.TestCase):
             if builder is None:
                 continue
             with self.subTest(cls=name):
-                self.assertFalse(numbered(builder().to_dict()))
+                self.assertFalse(names_a_class(builder().to_dict()))
 
 
-class TestALoaderGivesBackItsClass(unittest.TestCase):
+class TestAFileIsBuiltAsTheClassAsked(unittest.TestCase):
     """
-    A class's loader gives back that class, never a subclass: a UVData's
-    points are (N, 2), where a MeshData's are (N, 3). Data's own loaders,
-    and a module's load(), give back whatever the file holds; what an
-    object holds, a list's items, may still derive from what declares it.
+    A file names no class: the class loading it builds it from the fields
+    the file holds. A field the class lacks is dropped with a warning, one
+    it requires and the file lacks raises ValueError, and so does a value a
+    field refuses; the base classes themselves build nothing, and a list
+    builds every item as its item class.
     """
 
     # (the class asked for, the subclass a file holds)
@@ -262,137 +258,118 @@ class TestALoaderGivesBackItsClass(unittest.TestCase):
         paths = {ext: obj.save(os.path.join(self.tmp, f"{cls.__name__}.{ext}")) for ext in FORMATS}
         return obj, paths
 
-    def test_a_file_holding_a_subclass_is_refused(self):
-        for asked, held in self.CASES:
-            readers = {"pkl": asked.load_pickle, "npz": asked.load_npz, "json": asked.load_json}
-            for ext, path in self.saved(held)[1].items():
-                message = (
-                    f"^{re.escape(path)} holds a {held.__name__}; "
-                    rf"load it with {held.__name__}\.load\(\) or Data\.load\(\)$"
-                )
-                for load in (asked.load, readers[ext]):
-                    with self.subTest(asked=asked.__name__, ext=ext, load=load.__name__):
-                        with self.assertRaisesRegex(TypeError, message):
-                            load(path)
+    def test_a_file_holding_a_subclass_is_built_as_the_class_asked(self):
+        # a UVData read as a MeshData: its (N, 2) points are refused by the field
+        for ext, path in self.saved(UVData)[1].items():
+            with self.subTest(held="UVData", ext=ext):
+                with self.assertRaisesRegex(ValueError, r"^MeshData\.points must have shape \(N, 3\)"):
+                    MeshData.load(path)
 
-    def test_a_tree_holding_a_subclass_is_refused(self):
-        for asked, held in self.CASES:
-            obj = self.builders[held]()
-            for method, value in (("from_dict", obj.to_dict()), ("from_bytes", obj.to_bytes())):
-                with self.subTest(asked=asked.__name__, method=method):
-                    message = (
-                        f"^the data holds a {held.__name__}; load it with "
-                        rf"{held.__name__}\.{method}\(\) or Data\.{method}\(\)$"
-                    )
-                    with self.assertRaisesRegex(TypeError, message):
-                        getattr(asked, method)(value)
+        # a ClipData read as a HierarchyData: its nodes, the clip's own
+        # settings dropped with a warning
+        clip, paths = self.saved(ClipData)
+        for ext, path in paths.items():
+            with self.subTest(held="ClipData", ext=ext):
+                with self.assertWarnsRegex(UserWarning, r"^HierarchyData: the data names '\w+', which is no field of it"):
+                    rig = HierarchyData.load(path)
+                self.assertIs(type(rig), HierarchyData)
+                self.assertEqual(rig.name, clip.name)
 
-    def test_data_loads_whatever_a_file_holds(self):
+        # an Object read as a TransformData: the shape's settings dropped
+        obj, paths = self.saved(Object)
+        for ext, path in paths.items():
+            with self.subTest(held="Object", ext=ext):
+                with self.assertWarnsRegex(UserWarning, r"^TransformData: the data names '\w+', which is no field of it"):
+                    node = TransformData.load(path)
+                self.assertIs(type(node), TransformData)
+                self.assertEqual(node.name, obj.name)
+
+    def test_the_base_classes_build_nothing(self):
         for _, held in self.CASES:
             obj, paths = self.saved(held)
             for ext, path in paths.items():
                 with self.subTest(held=held.__name__, ext=ext):
                     assert_same(self, obj, held.load(path))
-                    assert_same(self, obj, Data.load(path))
+                    with self.assertRaisesRegex(TypeError, r"^Data\.load\(\) builds nothing: a file names no class"):
+                        Data.load(path)
             with self.subTest(held=held.__name__, ext="tree"):
-                assert_same(self, obj, Data.from_dict(obj.to_dict()))
-                assert_same(self, obj, Data.from_bytes(obj.to_bytes()))
+                with self.assertRaisesRegex(TypeError, r"^Data\.from_dict\(\) builds nothing"):
+                    Data.from_dict(obj.to_dict())
+                with self.assertRaisesRegex(TypeError, r"^Data\.from_bytes\(\) builds nothing"):
+                    Data.from_bytes(obj.to_bytes())
 
-    def test_datalist_loads_whatever_list_a_file_holds(self):
-        clip, paths = self.saved(ClipData)
-        for ext, path in paths.items():
+        for ext, path in self.saved(ClipData)[1].items():
+            with self.subTest(held="ClipData", ext=ext, loader="DataList"):
+                with self.assertRaisesRegex(TypeError, r"^DataList\.load\(\) builds nothing"):
+                    DataList.load(path)
+
+    def test_a_list_builds_every_item_as_its_item_class(self):
+        # a UVData in a MeshList saves as its fields; read back as a MeshData,
+        # its (N, 2) points are refused: a list holds one kind
+        meshes = MeshList([self.builders[MeshData](), self.builders[UVData]()])
+        for ext in FORMATS:
+            path = meshes.save(os.path.join(self.tmp, f"mixed.{ext}"))
             with self.subTest(ext=ext):
-                assert_same(self, clip, DataList.load(path))
+                with self.assertRaisesRegex(ValueError, r"^MeshData\.points must have shape \(N, 3\)"):
+                    MeshList.load(path)
 
-        path = self.saved(UVData)[1]["json"]
-        with self.assertRaisesRegex(TypeError, r"holds a UVData; load it with UVData\.load\(\) or Data\.load\(\)$"):
-            DataList.load(path)
-
-    def test_a_list_still_loads_items_deriving_from_its_item_class(self):
-        meshes, paths = self.saved(MeshList)
-        self.assertIn(UVData, [type(mesh) for mesh in meshes])
-        for ext, path in paths.items():
-            with self.subTest(ext=ext):
-                assert_same(self, meshes, MeshList.load(path))
-
-    def test_a_scene_still_rebuilds_its_objects_cameras_and_lights(self):
+    def test_a_scene_rebuilds_its_objects_cameras_and_lights_by_node_type(self):
         scene, paths = self.saved(Scene)
         kinds = {node.name: type(node) for node in scene}
         self.assertEqual({Object, Camera, Light, TransformData}, set(kinds.values()))
         for ext, path in paths.items():
-            for load in (Scene.load, Data.load):
-                with self.subTest(ext=ext, load=load.__self__.__name__):
-                    back = load(path)
-                    self.assertEqual({node.name: type(node) for node in back}, kinds)
-                    assert_same(self, scene, back)
+            with self.subTest(ext=ext):
+                back = Scene.load(path)
+                self.assertEqual({node.name: type(node) for node in back}, kinds)
+                assert_same(self, scene, back)
         assert_same(self, scene, Scene.from_dict(scene.to_dict()))
 
-    def test_hierarchy_load_gives_back_whatever_hierarchy_a_file_holds(self):
-        for cls in (ClipData, HierarchyData, Scene):
-            obj, paths = self.saved(cls)
-            for ext, path in paths.items():
-                for mode in (ext, None):
-                    with self.subTest(cls=cls.__name__, ext=ext, mode=mode):
-                        assert_same(self, obj, hierarchy.load(path, mode))
+    def test_a_module_s_load_reads_its_main_class(self):
+        # cgmath.hierarchy.load gives a HierarchyData, whatever class saved the file
+        obj, paths = self.saved(HierarchyData)
+        for ext, path in paths.items():
+            for mode in (ext, None):
+                with self.subTest(ext=ext, mode=mode):
+                    assert_same(self, obj, hierarchy.load(path, mode))
 
         # a lone node is no hierarchy
         for ext, path in self.saved(TransformData)[1].items():
             with self.subTest(cls="TransformData", ext=ext):
-                with self.assertRaisesRegex(TypeError, r"holds a TransformData; load it with TransformData\.load\(\)"):
+                with self.assertRaisesRegex(TypeError, r"takes a tree holding '__items__', or a dict of node dicts"):
                     hierarchy.load(path)
 
-    def test_skin_weights_load_gives_back_whatever_skin_list_a_file_holds(self):
+        # skin_weights.load gives a SkinList; a lone skin is no list
         skins, paths = self.saved(SkinList)
         for ext, path in paths.items():
-            with self.subTest(ext=ext):
+            with self.subTest(cls="SkinList", ext=ext):
                 assert_same(self, skins, skin_weights.load(path))
-
         path = self.saved(SkinData)[1]["npz"]
-        with self.assertRaisesRegex(TypeError, r"holds a SkinData; load it with SkinData\.load\(\)"):
+        with self.assertRaisesRegex(TypeError, r"takes a tree holding '__items__', or a dict of item dicts"):
             skin_weights.load(path)
 
-    def test_a_tree_naming_no_class_is_read_as_the_class_asked_for(self):
+    def test_a_stale_class_name_is_skipped(self):
+        # a file saved up to cgmath 3.2 names its class: the key is skipped,
+        # whatever it says, in an item too
         mesh = self.builders[MeshData]()
-        tree = mesh.to_dict()
-        del tree[CLASS_KEY]
-        assert_same(self, mesh, MeshData.from_dict(tree))
+        for tag in ("cgmath.geometry.mesh.MeshData", "cgmath.geometry.MeshData", "cgmath.nowhere.Gone"):
+            with self.subTest(tag=tag):
+                assert_same(self, mesh, MeshData.from_dict({"__class__": tag, **mesh.to_dict()}))
 
-    def test_a_tree_naming_its_class_by_a_package_s_name_is_that_class(self):
-        # cgmath.geometry and cgmath.hierarchy give their modules' classes
-        tags = {MeshData: "cgmath.geometry.MeshData", HierarchyData: "cgmath.hierarchy.HierarchyData"}
-        for cls, tag in tags.items():
-            obj  = self.builders[cls]()
-            tree = dict(obj.to_dict(), **{CLASS_KEY: tag})
-            for load in (cls.from_dict, Data.from_dict):
-                with self.subTest(tag=tag, load=f"{load.__self__.__name__}.from_dict"):
-                    assert_same(self, obj, load(tree))
-            with self.subTest(tag=tag, load=f"{cls.__name__}.from_bytes"):
-                assert_same(self, obj, cls.from_bytes(dict_to_bytes(tree)))
-
-            for ext in FORMATS:
-                path = os.path.join(self.tmp, f"{cls.__name__}.{ext}")
-                _write_tree(cls, tree, path)
-                for load in (cls.load, Data.load):
-                    with self.subTest(tag=tag, ext=ext, load=load.__self__.__name__):
-                        assert_same(self, obj, load(path))
-
-        # another class under a package's name is still another class
-        uv   = self.builders[UVData]()
-        tree = dict(uv.to_dict(), **{CLASS_KEY: "cgmath.geometry.UVData"})
-        assert_same(self, uv, Data.from_dict(tree))
-        with self.assertRaisesRegex(TypeError, r"^the data holds a UVData; load it with UVData\.from_dict\(\)"):
-            MeshData.from_dict(tree)
-        message = r"holds a UVData; load it with UVData\.load\(\) or Data\.load\(\)$"
+        meshes                          = MeshList([mesh])
+        tree                            = meshes.to_dict()
+        tree["__class__"]               = "cgmath.geometry.mesh.MeshList"
+        tree[ITEMS_KEY][0]["__class__"] = "cgmath.geometry.mesh.MeshData"
+        assert_same(self, meshes, MeshList.from_dict(tree))
         for ext in FORMATS:
-            path = os.path.join(self.tmp, f"UVData.{ext}")
-            _write_tree(UVData, tree, path)
-            with self.subTest(tag="cgmath.geometry.UVData", ext=ext):
-                with self.assertRaisesRegex(TypeError, message):
-                    MeshData.load(path)
+            path = os.path.join(self.tmp, f"tagged.{ext}")
+            _write_tree(MeshList, tree, path)
+            with self.subTest(ext=ext):
+                assert_same(self, meshes, MeshList.load(path))
 
     def test_a_script_s_class_loads_where_its_module_is_imported(self):
-        # a class a script defines saves as "__main__.Pin"; a script importing
-        # it from its module, "from pins import Pin", reads those files back
+        # a class a script defines saves its fields, nothing of the script; a
+        # script importing it from its module, "from pins import Pin", reads
+        # those files back
         script = os.path.join(self.tmp, "pins.py")
         with open(script, "w") as f:
             f.write(_PIN_SCRIPT)
@@ -406,11 +383,10 @@ class TestALoaderGivesBackItsClass(unittest.TestCase):
         with mock.patch.object(sys.modules["__main__"], "Pin", _Pin, create=True):
             for ext in FORMATS:
                 path = os.path.join(self.tmp, f"pin.{ext}")
-                for load in (_Pin.load, Data.load):
-                    with self.subTest(ext=ext, load=load.__self__.__name__):
-                        back = load(path)
-                        self.assertIs(type(back), _Pin)
-                        self.assertEqual(back.count, 3)
+                with self.subTest(ext=ext):
+                    back = _Pin.load(path)
+                    self.assertIs(type(back), _Pin)
+                    self.assertEqual(back.count, 3)
 
 
 @dataclass(repr=False, eq=False)
@@ -438,41 +414,63 @@ for ext in ("pkl", "npz", "json"):
 '''
 
 
-def _private_spelling(value):
+def _nested_classes(cls) -> dict:
     """
-    A tree as cgmath wrote it before a file named fields as their
+    The class each key of a tree of ``cls`` holds, by its saved name and its
+    field's own name alike: the class a field or a list setting declares,
+    None where it declares none.
+    """
+    found = {}
+    names = cls._saved_names()[0]
+    if issubclass(cls, DataList):
+        hints = cls._list_hints()
+        for name in cls.LIST_FIELDS:
+            found[name] = found[names.get(name, name)] = _data_class(hints.get(name))
+        return found
+    hints = cls._field_hints()
+    for field in fields(cls):
+        found[field.name] = found[names.get(field.name, field.name)] = _data_class(hints.get(field.name))
+    return found
+
+
+def _private_spelling(value, cls):
+    """
+    A tree of ``cls`` as cgmath wrote it before a file named fields as their
     properties: every field, setting and clip channel under its own name,
-    ``_translate``, ``_blocks``.
+    ``_translate``, ``_blocks``; what the tree holds is spelled by the class
+    its field, or its list, declares.
     """
     if isinstance(value, (list, tuple)):
-        return type(value)(_private_spelling(x) for x in value)
-    if not isinstance(value, dict):
+        return type(value)(_private_spelling(x, cls) for x in value)
+    if not isinstance(value, dict) or cls is None:
         return value
 
-    tag    = value.get(CLASS_KEY)
-    cls    = _CLASSES.get(tag) if isinstance(tag, str) else None
-    fields = {} if cls is None else cls._saved_names()[1]
+    fields = cls._saved_names()[1]
+    nested = _nested_classes(cls)
     out    = {}
     for key, item in value.items():
         if key in (DTYPES_KEY, SHAPES_KEY):
-            item = {fields.get(name, name): x for name, x in item.items()}
-        out[fields.get(key, key)] = _private_spelling(item)
+            out[key] = {fields.get(name, name): x for name, x in item.items()}
+        elif key == ITEMS_KEY and issubclass(cls, DataList):
+            out[key] = [_private_spelling(x, cls._item_class(x)) for x in item]
+        else:
+            out[fields.get(key, key)] = _private_spelling(item, nested.get(key))
 
-    if cls is not None and "_blocks" in out and hasattr(cls, "FRAMED_CHANNELS"):
+    if "_blocks" in out and hasattr(cls, "FRAMED_CHANNELS"):
         channels       = cls.DATA_LIST_CLASS._saved_names()[1]
         out["_blocks"] = {channels.get(name, name): x for name, x in out["_blocks"].items()}
     return out
 
 
 class _SavedTree:
-    """pickles as a cgmath pkl file holding ``tree``, the way Data.__reduce__ writes one"""
+    """pickles as a cgmath pkl file holding ``tree``, as plain data, the way save_pickle writes one"""
 
     def __init__(self, cls, tree: dict):
         self.cls  = cls
         self.tree = tree
 
     def __reduce__(self):
-        return (_unpickle, (self.cls, _pickled(self.tree)))
+        return (_unpickle, (self.cls, _plain(self.tree)))
 
 
 def _write_tree(cls, tree: dict, path: str) -> None:
@@ -599,18 +597,17 @@ class TestPublicSavedNames(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.tmp = tmp.name
 
-    def private_keys(self, tree, path="tree"):
-        """every key of ``tree``, nested trees too, that names a field by its private name"""
+    def private_keys(self, tree, cls, path="tree"):
+        """every key of ``tree``, a tree of ``cls``, nested trees too, that names a field by its private name"""
         found = []
         if isinstance(tree, (list, tuple)):
             for index, item in enumerate(tree):
-                found += self.private_keys(item, f"{path}[{index}]")
+                found += self.private_keys(item, cls, f"{path}[{index}]")
             return found
-        if not isinstance(tree, dict):
+        if not isinstance(tree, dict) or cls is None:
             return found
 
-        tag = tree.get(CLASS_KEY)
-        cls = _CLASSES.get(tag) if isinstance(tag, str) else None
+        nested = _nested_classes(cls)
         for key, item in tree.items():
             keys = [key]
             if key in (DTYPES_KEY, SHAPES_KEY):
@@ -618,8 +615,7 @@ class TestPublicSavedNames(unittest.TestCase):
             for name in keys:
                 public = name[1:]
                 if (
-                    cls is not None
-                    and name.startswith("_")
+                    name.startswith("_")
                     and not name.startswith("__")
                     and isinstance(getattr(cls, public, None), property)
                     # a field the property does not read: an SDF primitive's
@@ -627,17 +623,21 @@ class TestPublicSavedNames(unittest.TestCase):
                     and cls._saved_names()[1].get(public, name) == name
                 ):
                     found.append(f"{path}.{name}")
-            if key not in (DTYPES_KEY, SHAPES_KEY):
-                found += self.private_keys(item, f"{path}.{key}")
+            if key == ITEMS_KEY and issubclass(cls, DataList):
+                for index, item_tree in enumerate(item):
+                    found += self.private_keys(item_tree, cls._item_class(item_tree), f"{path}.{key}[{index}]")
+            elif key not in (DTYPES_KEY, SHAPES_KEY):
+                found += self.private_keys(item, nested.get(key), f"{path}.{key}")
 
-        if cls is not None and isinstance(tree.get("blocks"), dict):
+        if isinstance(tree.get("blocks"), dict):
             found += [f"{path}.blocks.{x}" for x in tree["blocks"] if x.startswith("_")]
         return found
 
     def test_no_saved_name_is_a_private_field_behind_its_property(self):
         for name, builder in sorted(self.builders.items()):
             with self.subTest(cls=name):
-                self.assertEqual(self.private_keys(builder().to_dict()), [])
+                obj = builder()
+                self.assertEqual(self.private_keys(obj.to_dict(), type(obj)), [])
 
     def test_the_fields_behind_properties_are_saved_as_the_properties(self):
         for name, (cls, builder) in sorted(self.listed.items()):
@@ -677,8 +677,8 @@ class TestPublicSavedNames(unittest.TestCase):
         # as cgmath wrote every file before: "_translate", "_blocks"
         for name, (cls, builder) in sorted(self.listed.items()):
             obj = builder()
-            old = _private_spelling(obj.to_dict())
-            self.assertNotEqual(self.private_keys(old), [])
+            old = _private_spelling(obj.to_dict(), cls)
+            self.assertNotEqual(self.private_keys(old, cls), [])
             self.assertIn("_" + self.PUBLIC[name][0], old)
 
             with self.subTest(cls=name, file="tree"):
@@ -703,7 +703,7 @@ class TestPublicSavedNames(unittest.TestCase):
         tree = obj.to_dict()
         self.assertEqual(tree[SHAPES_KEY], {"texture": [0, 4, 3]})
 
-        old = _private_spelling(tree)
+        old = _private_spelling(tree, Object)
         self.assertEqual(old[SHAPES_KEY], {"_texture": [0, 4, 3]})
 
         for ext in FORMATS:
@@ -809,7 +809,8 @@ class TestPublicSavedNames(unittest.TestCase):
             mush.from_dict({"smooth_iterations": -1})
         with self.assertRaisesRegex(ValueError, "Unknown outside mode"):
             classes["FFDData"].from_dict({"outside": "bogus"})
-        self.assertEqual(classes["UVData"].from_dict({"resolution": 64}).resolution.tolist(), [64, 64])
+        bare = {"indices": [], "counts": [], "points": [], "resolution": 64}  # the required fields, empty
+        self.assertEqual(classes["UVData"].from_dict(bare).resolution.tolist(), [64, 64])
         self.assertEqual(
             Object.from_dict({"background": (0.1, 0.2, 0.3)}).background.tolist(),
             [0.1, 0.2, 0.3, 1.0],
@@ -826,13 +827,12 @@ class TestPublicSavedNames(unittest.TestCase):
 
         # a property with no setter, FFDData's cells and uvw, and a list's
         # settings, which have none, are read as the fields: a saved tree
-        # with no "__class__" loads the same object
+        # loads the same object
         for name in ("FFDData", "ClipData"):
             cls, builder = self.listed[name]
-            obj  = builder()
-            tree = {key: x for key, x in obj.to_dict().items() if key != CLASS_KEY}
+            obj = builder()
             with self.subTest(cls=name, how="by hand"):
-                assert_same(self, obj, cls.from_dict(tree), f"{name} with no class")
+                assert_same(self, obj, cls.from_dict(obj.to_dict()), f"{name} from its tree")
 
         # and neither a tree built by hand nor a saved one names a field both ways
         for how, tree in (("by hand", {}), ("saved", TransformData("a").to_dict())):
@@ -847,7 +847,7 @@ class TestPublicSavedNames(unittest.TestCase):
         ffd  = self.listed["FFDData"][1]().to_dict()
         clip = self.listed["ClipData"][1]().to_dict()
         cases = (
-            ("FFDData", "cells", {key: x for key, x in ffd.items() if key != CLASS_KEY}),
+            ("FFDData", "cells", ffd),
             ("ClipData", "fps", {ITEMS_KEY: clip[ITEMS_KEY], "fps": clip["fps"]}),
         )
         for name, public, tree in cases:
@@ -948,8 +948,8 @@ class TestPublicSavedNames(unittest.TestCase):
         labelled.label = "mouth"
         tree           = labelled.to_dict()
         old            = {"_label" if key == "label" else key: x for key, x in tree.items()}
-        self.assertEqual(sorted(tree), [CLASS_KEY, ITEMS_KEY, "label"])
-        self.assertEqual(sorted(old), [CLASS_KEY, ITEMS_KEY, "_label"])
+        self.assertEqual(sorted(tree), [ITEMS_KEY, "label"])
+        self.assertEqual(sorted(old), [ITEMS_KEY, "_label"])
 
         for how, data in (("saved", tree), ("private", old)):
             with self.subTest(how):
@@ -984,7 +984,7 @@ class TestPublicSavedNames(unittest.TestCase):
         # it, beside a property of its public name that does not read it
         obj  = _KeepsItsName(_count=3)
         tree = obj.to_dict()
-        self.assertEqual(sorted(tree), [CLASS_KEY, "_count"])
+        self.assertEqual(sorted(tree), ["_count"])
         self.assertEqual(_KeepsItsName.from_dict(tree)._count, 3)
         self.assertEqual(_KeepsItsName._field_label("_count"), "_KeepsItsName._count")
         for ext in FORMATS:
