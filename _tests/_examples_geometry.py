@@ -23,6 +23,8 @@ target equal to its base, a skin with no vertices.
 from __future__ import annotations
 
 import numpy as np
+from cgmath.geometry.camera import CameraData, CameraList
+from cgmath.geometry.light import LightData, LightList
 from cgmath.geometry.map import GeomSubsetData, MapData
 from cgmath.geometry.mesh import MeshData, MeshList, UVData, UVList
 from cgmath.geometry.morph_target import MorphData, MorphList
@@ -334,11 +336,65 @@ def sdf_cylinder() -> SDFCylinder:
     return cylinder
 
 
+# ------------------------------ CAMERAS, LIGHTS ----------------------------- #
+
+
+def camera_data() -> CameraData:
+    """an orthographic 50 mm camera on a non-default film back, under the
+    primitives' group"""
+    return CameraData(
+        name="shotShape",
+        focal_length=50.0,
+        horizontal_film_aperture = 1.0,
+        vertical_film_aperture=0.6,
+        film_fit="vertical",
+        film_offset=[0.1, -0.05],
+        lens_squeeze_ratio=1.5,
+        camera_scale=2.0,
+        near_clip_plane=1.0,
+        far_clip_plane=5000.0,
+        orthographic=True,
+        orthographic_width=50.0,
+        uuid="9C4F5E31-6D70-4182-BDCE-3F4A5B6C7D8E",
+        parent_uuid=_SDF_GROUP,
+    )
+
+
+def camera_list() -> CameraList:
+    """the shot camera and a fresh one with no name and no transform"""
+    return CameraList([camera_data(), CameraData()])
+
+
+def light_data() -> LightData:
+    """a blue quadratic spot light, under the primitives' group"""
+    return LightData(
+        name           = "keyShape",
+        kind           = "spot",
+        color          = [0.25, 0.5, 1.0],
+        intensity      = 2.5,
+        decay_rate     = 2,
+        cone_angle     = 50.0,
+        penumbra_angle = 5.0,
+        dropoff        = 3.0,
+        uuid           = "AD506F42-7E81-4293-8EDF-4A5B6C7D8E9F",
+        parent_uuid    = _SDF_GROUP,
+    )
+
+
+def light_list() -> LightList:
+    """the spot, a directional light and a fresh point light"""
+    return LightList([light_data(), LightData(name="sunShape", kind="directional", intensity=0.5), LightData()])
+
+
 EXAMPLES = {
     MeshData:        mesh_data,
     UVData:          uv_data,
     MeshList:        mesh_list,
     UVList:          uv_list,
+    CameraData:      camera_data,
+    CameraList:      camera_list,
+    LightData:       light_data,
+    LightList:       light_list,
     MapData:         map_data,
     GeomSubsetData:  geom_subset_data,
     MorphData:       morph_data,
