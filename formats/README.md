@@ -4,27 +4,30 @@ Thin, numpy-facing wrappers over the two binary formats this library reads
 and writes: **glTF/GLB** (via `pygltflib`) and **FBX** (via the Autodesk FBX
 Python SDK), plus stage and prim helpers for **USD** (via `pxr`).
 
-This package is **curve / take / layer / accessor** focused. It is what you
-reach for to read animation off a file, walk a node hierarchy, decode a raw
-accessor, or stash a payload blob inside a `.glb`.
-
-For **mesh** loading go elsewhere — see [Where mesh loading lives](#where-mesh-loading-lives).
+The fbx half is one read and one write: `load_fbx(path)` gives everything a
+file holds that cgmath has a class for, as one `FbxContents` — the
+hierarchy or its takes, the meshes on the nodes, their UV sets, skins,
+materials and blend shape targets, the cameras and lights — and
+`save_fbx(path, ...)` writes the same fields back, in Maya's Y-up and cm.
+Every other fbx reader in the library (`HierarchyData.load_fbx`,
+`MeshData.load_fbx`, `SkinList.load_fbx`, `cgmath.render.Scene.load_fbx`
+...) is a slice of that read. The glb half is **accessor** focused: decode a
+raw accessor, walk a node hierarchy, stash a payload blob inside a `.glb`.
+For mesh classes see [Where mesh loading lives](#where-mesh-loading-lives).
 
 ---
 
-## The `__init__.py` re-exports nothing
-
-`cgmath/formats/__init__.py` is a docstring. Import the submodules directly:
+## The `__init__.py` re-exports the fbx read and write
 
 ```python
+from cgmath.formats import FbxContents, load_fbx, save_fbx
 from cgmath.formats.glb import load_model, GlbData
-from cgmath.formats.fbx import SceneData, FbxExporter
+from cgmath.formats.fbx import FbxExporter
 from cgmath.formats.usd import prim as usd_prim, stage as usd_stage
 ```
 
-`usd/` is a regular subpackage whose `__init__.py` is likewise only a
-docstring, so import `prim` and `stage` from it directly.
-`from cgmath.formats import *` gives you nothing.
+`usd/` is a regular subpackage whose `__init__.py` is only a docstring, so
+import `prim` and `stage` from it directly.
 
 ---
 
@@ -32,8 +35,10 @@ docstring, so import `prim` and `stage` from it directly.
 
 | File | Holds |
 |---|---|
+| `_load.py` / `_write.py` | `load_fbx` / `save_fbx`, the fbx read and write of every cgmath class |
+| `_fbx_io.py` | the one place an `FbxManager` is made: `open_fbx`, the sdk lookup, the media folder |
 | `glb.py` | glTF/GLB reading, accessor decode, payload blobs, `GlbData` |
-| `fbx.py` | FBX scene/take/layer/curve editing, `SceneData`, `FbxExporter` |
+| `fbx.py` | `FbxExporter`, the writer `save_fbx` and `HierarchyData.save_fbx` stand on |
 | `usd/stage.py` | open / create / write stages, sublayer editing, a throw-away stage cache |
 | `usd/prim.py` | prim search and type tests, duplication, references, inherits, API schemas, property copies |
 
@@ -45,7 +50,7 @@ docstring, so import `prim` and `stage` from it directly.
 |---|---|---|
 | `glb` | `pygltflib` | Imports fine. Every entry point raises `RuntimeError("pygltflib is not installed")` |
 | `glb` | `trimesh` (optional) | Imports fine. `GlbData.mesh_list` is `None` |
-| `fbx` | Autodesk FBX Python SDK — not on PyPI, a manual install | Imports fine, with one `UserWarning` naming the SDK and where to get it. The FBX readers and `save_fbx` raise `ImportError` at call time; `cgmath.formats.fbx`'s own `SceneData(path)`, an `FbxExporter`'s methods (all but `close`) and any call on its placeholder `fbx` object raise `RuntimeError`, with that same message |
+| `fbx` | Autodesk FBX Python SDK — not on PyPI, a manual install | Imports fine, with one `UserWarning` naming the SDK and where to get it. The FBX readers and `save_fbx` raise `ImportError` at call time; an `FbxExporter`'s methods (all but `close`) and any call on `cgmath.formats.fbx`'s placeholder `fbx` object raise `RuntimeError`, with that same message |
 | `usd.prim`, `usd.stage` | `pxr`, from `usd-core` (the `usd` extra) or the host DCC's own USD | **`import cgmath.formats.usd.prim` raises `ImportError`** — `from pxr import Usd` is unguarded |
 
 So `glb` and `fbx` degrade at call time, while `usd` needs `pxr` at import
@@ -79,32 +84,26 @@ glTF makes no ordering promise, so a child can precede its parent.
 before its children, and stamps a `parent_index` attribute on each node as
 a side effect (`-1` for roots).
 
-### fbx: names are translated to Maya conventions
+### fbx: everything comes back in Maya's axes and units
 
-`BaseData.name` rewrites FBX property names on the way out:
+`load_fbx` reads a file whose up axis is X or Z the way Maya's importer
+turns it, leaves a Y-up file in its own axes, refuses a left-handed one, and
+converts the file's unit to centimetres: every cgmath value is in Maya's
+Y-up, right-handed, cm. A take is a `ClipData` of one `ClipList`, keyed on
+every frame, the file's active stack the active take.
 
-| FBX | Reported as |
-|---|---|
-| `pCube1.Lcl TranslationX` | `pCube1.translateX` |
-| `pCube1.Lcl RotationY` | `pCube1.rotateY` |
-| `pCube1.Lcl ScalingZ` | `pCube1.scaleZ` |
-| `face.smile.DeformPercent` | `face.smile` |
+### fbx: a shape names its node, a skin or a set names its mesh
 
-`create_curve` translates the other way, so you pass Maya names in
-(`"translateX"`) and get Maya names back. `CurveList` lookup accepts either
-spelling.
-
-### fbx: seconds and frames are both first class
-
-Every time-bearing property comes in two flavours — `times`/`frames`,
-`start_time`/`start_frame`, `duration`/`frame_count`. The frame variants
-divide by `SceneData.fps` and return `None` when no scene (or no known fps)
-is available.
+A mesh's `parent_uuid` is the uuid of its node in the hierarchy (or the
+clip) the same read gives; a UV set's, a skin's, a material's or a target's
+`mesh_uuid` is its mesh's. The uuids are minted by the read: two loads of
+one file do not share them. A skin's influences are joint names.
 
 ### fbx: blendshape weights are rescaled
 
-FBX stores `DeformPercent` in `0..100`. `CurveData.values` divides by 100 on
-read and multiplies by 100 on write, so you work in `0..1` throughout.
+FBX stores `DeformPercent` and a target's full weight in `0..100`.
+`MorphData.weight` and `at` divide by 100 on read and multiply on write, so
+you work in `0..1` throughout, as Maya's blendShape does.
 
 ---
 
@@ -131,25 +130,24 @@ with FbxExporter() as exporter:            # the block frees the FBX SDK's memor
     exporter.export(os.path.join(tempfile.mkdtemp(), "skeleton.fbx"))
 ```
 
-### Read animation curves back out
+### Read a file whole, write it back
 
-<!-- notest: no .fbx asset ships with this repo; CHEATSHEET.md builds one inline first -->
+<!-- notest: no .fbx asset ships with this repo -->
 ```python
-from cgmath.formats.fbx import SceneData
+from cgmath.formats import load_fbx, save_fbx
 
-with SceneData("hero.fbx") as scene:          # constructor loads; there is no from_file
-    for take in scene.takes:                  # TakeList
-        for layer in take.layers:             # LayerList
-            for curve in layer.curves:        # CurveList
-                print(curve.name, curve.times, curve.values)
+held = load_fbx("hero.fbx")                   # FbxContents: hierarchy, clip, meshes, skins, uvs, cameras, lights, materials, morphs
+for mesh in held.meshes or []:
+    print(mesh.name, mesh.points.shape, held.hierarchy[mesh.parent_uuid].name if held.hierarchy else None)
+for take in held.clip or []:                  # a ClipList, one ClipData per take
+    print(take.take, take.frame_count, take.fps)
+save_fbx("copy.fbx", *held)                   # the same fields, the same file
 ```
 
-The FBX SDK frees what it read only when told to, so `SceneData` and
-`FbxExporter` hold their memory until `close()`; a `with` block calls it.
-Takes, layers and curves read from a closed `SceneData` raise
-`RuntimeError` rather than reaching into freed memory. Every other FBX
-reader in cgmath (rigs, clips, meshes, skins, render objects) frees its
-memory before it returns, and none of them writes anything next to the file.
+The FBX SDK frees what it read only when told to; every FBX reader in
+cgmath frees its memory before it returns, and none of them writes anything
+next to the file. An `FbxExporter` holds its scene until `close()`; a `with`
+block calls it.
 
 Textures packed inside a file are extracted to a temporary folder, which
 Maya's fbx binding can only name to the SDK by a plain ASCII path. A temp
@@ -251,7 +249,8 @@ in `geometry`:
 
 | Want | Call |
 |---|---|
-| Meshes + UVs from FBX | `cgmath.geometry.mesh.load_fbx(path)` → `[(MeshData, UVList), ...]`, in cm, each mesh in its own space, its node's geometric transform baked in as Maya's importer bakes it (its node's world from the rig places it) |
+| Everything an FBX holds | `cgmath.formats.load_fbx(path)` → `FbxContents`; `cgmath.render.Scene.load_fbx(path)` holds the same, ready to render |
+| Meshes + UVs from FBX | `cgmath.geometry.mesh.load_fbx(path)` → `[(MeshData, UVList), ...]`, as `load_fbx` reads them, each mesh's `parent_uuid` naming its node |
 | Meshes + UVs from GLB | `cgmath.geometry.mesh.load_glb(path, scale_factor=100.0)` |
 | Meshes, any format | `cgmath.geometry.mesh.load(path)` / `MeshList.load(path)` |
 | One named mesh | `MeshData.load_fbx(path, name=...)` / `MeshData.load_glb(path, name=...)` |

@@ -6,7 +6,8 @@ runs, in order, as one script — the fixtures are built inline because no
 [`README.md`](README.md); for the rest of the library see
 [`../CHEATSHEET.md`](../CHEATSHEET.md).
 
-`__init__.py` is a docstring only. Import the submodules directly.
+`cgmath.formats` exports `load_fbx`, `save_fbx` and `FbxContents`; the glb
+and usd helpers are imported from their submodules.
 
 - [Setup](#setup)
 - [`glb` — build a fixture](#glb--build-a-fixture)
@@ -21,17 +22,11 @@ runs, in order, as one script — the fixtures are built inline because no
 - [`glb` — repair_null_skin_joints](#glb--repair_null_skin_joints)
 - [`glb` — get_binary / set_binary](#glb--get_binary--set_binary)
 - [`glb` — GlbData](#glb--glbdata)
-- [`fbx` — build a fixture](#fbx--build-a-fixture)
-- [`fbx` — SceneData](#fbx--scenedata)
-- [`fbx` — TakeData](#fbx--takedata)
-- [`fbx` — LayerData](#fbx--layerdata)
-- [`fbx` — CurveData](#fbx--curvedata)
-- [`fbx` — the List helpers](#fbx--the-list-helpers)
-- [`fbx` — BaseData / BaseList](#fbx--basedata--baselist)
+- [`fbx` — load_fbx / save_fbx](#fbx--load_fbx--save_fbx)
 - [`usd.stage` — stages, caches, sublayers](#usdstage--stages-caches-sublayers)
 - [`usd.prim` — search, duplicate, compose](#usdprim--search-duplicate-compose)
 - [`fbx` — FbxExporter](#fbx--fbxexporter)
-- [Mesh loading lives in geometry](#mesh-loading-lives-in-geometry)
+- [The class routes slice the same read](#the-class-routes-slice-the-same-read)
 - [Gotchas](#gotchas)
 
 ---
@@ -590,459 +585,68 @@ glb.save(os.path.join(WORK, "glbdata_out.glb"))
 
 ---
 
-## `fbx` — build a fixture
+## `fbx` — load_fbx / save_fbx
 
 Needs the Autodesk FBX Python SDK. Without it `import cgmath.formats.fbx`
 still works, with one `UserWarning`; the FBX readers and `save_fbx` raise
-`ImportError` at call time, and the module's own `SceneData(path)`, an
-`FbxExporter`'s methods (all but `close`) and any call on its placeholder
-`fbx` object raise `RuntimeError`, with the warning's message. A module
-that imports as `fbx` but holds not all of the SDK's five classes
-(`FbxManager`, `FbxScene`, `FbxImporter`, `FbxExporter`, `FbxNode`), such
-as a folder named `fbx` on the path, counts as no SDK.
+`ImportError` at call time, and an `FbxExporter`'s methods (all but `close`)
+and any call on the module's placeholder `fbx` object raise `RuntimeError`,
+with the warning's message. A module that imports as `fbx` but holds not
+all of the SDK's five classes (`FbxManager`, `FbxScene`, `FbxImporter`,
+`FbxExporter`, `FbxNode`), such as a folder named `fbx` on the path, counts
+as no SDK.
 
-Two nulls, one take, one keyed translate curve.
+One read and one write of everything cgmath has a class for: a hierarchy at
+rest or its takes, the meshes on the nodes, their UV sets, skins, materials
+and blend shape targets, the cameras and lights. Everything is in Maya's
+Y-up and cm; a file's unit and axes are converted at the boundary. Each
+shape names its node or its mesh by uuid, so build the nodes first.
 
 ```python
-import fbx                                   # the Autodesk SDK
+from cgmath.formats import FbxContents, load_fbx, save_fbx
+from cgmath.geometry import CameraData, CameraList, LightData, LightList, MaterialData, MaterialList, MeshData, UVData
+from cgmath.hierarchy import ClipData, HierarchyData, TransformData
+
+rig = HierarchyData([TransformData("grp"), TransformData("cam"), TransformData("lamp")])
+quad = MeshData(
+    points      = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]),
+    indices     = np.arange(4),
+    counts      = np.array([4]),
+    name        = "quad",
+    parent_uuid = rig["grp"].uuid,            # the node it sits on
+)
+uvs  = UVData(points=np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]), indices=np.arange(4), counts=np.array([4]), name="map1", mesh_uuid=quad.uuid)
+mat  = MaterialData(name="paint", mesh_uuid=quad.uuid, color=(0.8, 0.2, 0.1), diffuse=1.0)
+cam  = CameraData(name="cam", focal_length=50.0, parent_uuid=rig["cam"].uuid)
+lamp = LightData(name="lamp", kind="point", intensity=2.0, parent_uuid=rig["lamp"].uuid)
 
 DEMO_FBX = os.path.join(WORK, "demo.fbx")
+save_fbx(DEMO_FBX, hierarchy=rig, meshes=quad, uvs=uvs, materials=MaterialList([mat]), cameras=CameraList([cam]), lights=LightList([lamp]))
 
-manager  = fbx.FbxManager.Create()
-manager.SetIOSettings(fbx.FbxIOSettings.Create(manager, fbx.IOSROOT))
-scene = fbx.FbxScene.Create(manager, "demo")
-scene.GetGlobalSettings().SetTimeMode(fbx.FbxTime.EMode.eFrames24)
-
-parent = fbx.FbxNode.Create(scene, "pCube1")
-parent.SetNodeAttribute(fbx.FbxNull.Create(manager, ""))
-scene.GetRootNode().AddChild(parent)
-
-child = fbx.FbxNode.Create(scene, "pCube2")
-child.SetNodeAttribute(fbx.FbxNull.Create(manager, ""))
-parent.AddChild(child)
-
-stack = fbx.FbxAnimStack.Create(scene, "walk")
-layer = fbx.FbxAnimLayer.Create(scene, "BaseLayer")
-stack.AddMember(layer)
-
-start, stop = fbx.FbxTime(), fbx.FbxTime()
-start.SetSecondDouble(0.0)
-stop.SetSecondDouble(1.0)
-stack.SetLocalTimeSpan(fbx.FbxTimeSpan(start, stop))
-
-curve = parent.LclTranslation.GetCurve(layer, "X", True)
-curve.KeyModifyBegin()
-for seconds, value in [(0.0, 0.0), (0.5, 5.0), (1.0, 10.0)]:
-    moment = fbx.FbxTime()
-    moment.SetSecondDouble(seconds)
-    added = curve.KeyAdd(moment)
-    curve.KeySetValue(added[0] if isinstance(added, tuple) else added, value)
-curve.KeyModifyEnd()
-
-exporter = fbx.FbxExporter.Create(manager, "")
-exporter.Initialize(
-    DEMO_FBX,
-    manager.GetIOPluginRegistry().GetNativeWriterFormat(),
-    manager.GetIOSettings(),
-)
-exporter.Export(scene)
-exporter.Destroy()
-manager.Destroy()
-# the destroyed objects' Python names go too: the binding hands an object
-# made later at the same address its stale wrapper, of the old type
-del manager, scene, parent, child, stack, layer, curve, exporter
+held = load_fbx(DEMO_FBX)
+print(FbxContents._fields)
+print(held.hierarchy.name, held.meshes.name, held.uvs.name, held.materials.name, held.cameras.name, held.lights.name)
+print(held.hierarchy[held.meshes[0].parent_uuid].name, held.clip, held.skins, held.morphs)   # grp None None None
 ```
 
----
-
-## `fbx` — SceneData
-
-The entry point. **The constructor loads** — there is no `from_file`
-classmethod.
+The fields are `save_fbx`'s arguments, in order, so `save_fbx(b, *load_fbx(a))`
+writes a file back. A take is a `ClipData` over the nodes; a file holding
+takes comes back with `hierarchy` None and the nodes in `clip`:
 
 ```python
-from cgmath.formats.fbx import SceneData
+clip                      = ClipData(rig, frames=3, fps=24.0, take="spin")
+clip.frames["grp"].rotate = np.array([[0.0, 0.0, 0.0], [0.0, 45.0, 0.0], [0.0, 90.0, 0.0]])
+save_fbx(os.path.join(WORK, "spin.fbx"), clip=clip)
 
-data = SceneData(DEMO_FBX)          # ~ is expanded; FileNotFoundError if absent
-print(data.name)                    # 'demo' — set from the file stem on load
+back = load_fbx(os.path.join(WORK, "spin.fbx"))
+print(back.hierarchy, [take.take for take in back.clip], back.clip.active.frame_count)   # None ['spin'] 3
 ```
 
-The scene holds the FBX SDK's memory until `.close()` (or `.destroy()`,
-the same call). A `with` block closes it for you:
-
-```python
-with SceneData(DEMO_FBX) as scoped:
-    print(len(scoped.takes))
-print(scoped.name)                  # 'No Scene' — closed
-```
-
-Empty first, load later:
-
-```python
-later = SceneData()
-print(later.name, later.fps, later.takes, later.nodes)   # 'No Scene' None TakeList([]) []
-later.load(DEMO_FBX)
-print(later.name)
-later.close()
-```
-
-| Member | Type | Notes |
-|---|---|---|
-| `.name` | `str` | `"No Scene"` when nothing is loaded |
-| `.rename(name)` | — | `RuntimeError` if unloaded, `ValueError` if empty |
-| `.load(filename)` | — | `FileNotFoundError` / `RuntimeError` on a bad file; loading again frees the previous scene |
-| `.save(filename=None, embed_media=True, file_format=-1)` | `str` | returns the expanded path |
-| `.scene` | `fbx.FbxScene` | the raw SDK scene, or `None` |
-| `.fps` | `float` | get/set; `None` for an unknown time mode |
-| `.linear_units` | `str` | get/set; `"centimeters"`, `"meters"`, … |
-| `.scale_factor` | `float` | read-only, from the system unit |
-| `.takes` | `TakeList` | rebuilt on every access |
-| `.nodes` | `list[str]` | hierarchy + `"blendshape.channel"` names, root excluded |
-| `.create_take(name)` | `TakeData` | also creates a `"BaseLayer"` |
-| `.close()` / `.destroy()` | — | frees the FBX manager; `with` calls it; safe twice |
-
-Global settings:
-
-```python
-print(data.fps, data.linear_units, data.scale_factor)   # 24.0 centimeters 1.0
-
-data.fps          = 30        # accepts a number or a numeric string
-data.linear_units = "meters"  # long or short form: 'm', 'meter', 'meters'
-print(data.fps, data.linear_units, data.scale_factor)   # 30.0 meters 100.0
-```
-
-Supported `fps`: 24, 29.97, 30, 48, 50, 59.94, 60, 72, 96, 100, 120, 1000.
-Supported units: mm, cm, dm, m, km, in, ft, mi, yd (and their long forms).
-Anything else raises `ValueError` listing the accepted values.
-
-```python
-for bad, kind in [(17, "fps"), ("furlongs", "linear_units")]:
-    try:
-        setattr(data, kind, bad)
-    except ValueError as error:
-        print(kind, "->", str(error)[:45])
-```
-
-Nodes and renaming:
-
-```python
-print(data.nodes)                   # ['pCube1', 'pCube2'] — the root is dropped
-data.rename("hero")
-print(data.name)
-```
-
-Saving. `embed_media=False` with the default `file_format=-1` auto-selects
-ASCII FBX.
-
-```python
-saved      = data.save(os.path.join(WORK, "out.fbx"))              # binary, media embedded
-ascii_path = data.save(os.path.join(WORK, "out_ascii.fbx"), embed_media=False)
-print(os.path.basename(saved), os.path.basename(ascii_path))
-print(open(ascii_path, "rb").read(6))                         # b'; FBX '
-```
-
-The `.fbx` extension is appended if you leave it off, and `save()` with no
-argument overwrites the file that was loaded.
-
----
-
-## `fbx` — TakeData
-
-A take is an FBX animation stack.
-
-```python
-take = data.takes[0]                # by index, or data.takes["walk"] by name
-print(take.name, repr(take), str(take))
-```
-
-| Member | Type | Notes |
-|---|---|---|
-| `.name` | `str` | Maya-translated |
-| `.rename(name)` | — | `ValueError` if another take already owns the name |
-| `.layers` | `LayerList` | |
-| `.create_layer(name)` | `LayerData` | `ValueError` on a duplicate name |
-| `.curves` | `CurveList` | single-layer shortcut — `RuntimeError` if >1 layer |
-| `.create_curve(node, property)` | `CurveData` | same shortcut; creates `"BaseLayer"` if none |
-| `.start_time` / `.end_time` | `float` | seconds, get/set |
-| `.start_frame` / `.end_frame` | `float` | frames, get/set — needs `fps` |
-| `.duration` | `float` | `end_time - start_time`, read-only |
-| `.frame_count` | `float` | `duration * fps`, read-only |
-
-Renaming is validated against the other takes in the scene:
-
-```python
-take.rename("walk_v2")
-print(data.takes)
-take.rename("walk")
-```
-
-Timing:
-
-```python
-print(take.start_time, take.end_time, take.duration)       # 0.0 1.0 1.0
-print(take.start_frame, take.end_frame, take.frame_count)  # at 30 fps: 0.0 30.0 30.0
-
-take.end_frame = 60                 # frames in, seconds stored
-print(take.end_time, take.duration)
-take.start_time = 0.5               # seconds also work
-print(take.start_frame)
-```
-
-Layers, and the single-layer `curves` shortcut:
-
-```python
-print(take.layers)  # LayerList(['BaseLayer'])
-print(take.curves)  # CurveList(['pCube1.translateX'])
-
-take.create_layer("Additive")
-try:
-    take.curves                     # ambiguous now
-except RuntimeError as error:
-    print(str(error)[:52])
-take.layers.delete("Additive")
-```
-
-Create a take (a `"BaseLayer"` comes with it) and key something on it:
-
-```python
-run = data.create_take("run")
-print(run.layers)                             # LayerList(['BaseLayer'])
-
-bounce        = run.create_curve("pCube2", "translateY")   # Maya property names
-bounce.times  = [0.0, 0.5, 1.0]
-bounce.values = [0.0, 4.0, 0.0]
-print(run.curves)
-```
-
----
-
-## `fbx` — LayerData
-
-A layer is an FBX animation layer inside a take.
-
-| Member | Type | Notes |
-|---|---|---|
-| `.name` | `str` | |
-| `.rename(name)` | — | `ValueError` if a sibling layer owns the name |
-| `.curves` | `CurveList` | rebuilt by walking the layer's curve nodes |
-| `.create_curve(node, property)` | `CurveData` | Maya or FBX property names |
-
-```python
-base = take.layers[0]
-print(base.name, base.curves)
-
-base.rename("Base")
-print(take.layers)                  # LayerList(['Base'])
-base.rename("BaseLayer")
-```
-
-`create_curve` accepts either naming convention and returns a curve with no
-keys yet:
-
-```python
-spin = base.create_curve("pCube2", "rotateZ")     # -> 'Lcl RotationZ'
-print(spin.name, spin.key_count)                  # pCube2.rotateZ 0
-```
-
-| You pass | FBX gets |
-|---|---|
-| `"translateX"` / `"rotateY"` / `"scaleZ"` | `"Lcl TranslationX"` / `"Lcl RotationY"` / `"Lcl ScalingZ"` |
-| `"visibility"` | `"Visibility"` |
-| node=`"face_blend.smile"`, property=`"DeformPercent"`: the blend shape's name, not the mesh's | the `"DeformPercent"` of blend shape `face_blend`'s channel `smile` |
-| node=`"face_blend"`, property=`"smile"` | the same, only where the file names the channel `"face_blend.smile"`, as Maya's export does |
-| an FBX name already | passed straight through |
-
-An unknown node raises `ValueError`:
-
-```python
-try:
-    base.create_curve("ghost", "translateX")
-except ValueError as error:
-    print(error)
-```
-
----
-
-## `fbx` — CurveData
-
-One animation curve. Times are seconds, frames are `times * fps`.
-
-| Member | Type | Notes |
-|---|---|---|
-| `.name` | `str` | Maya-translated `"node.attribute"` |
-| `.key_count` | `int` | |
-| `.times` | `np.ndarray` | get/set — **the setter clears and re-creates every key** |
-| `.frames` | `np.ndarray` | get/set — same, in frames; `None` if no fps |
-| `.values` | `np.ndarray` | get/set — the setter needs a matching key count |
-| `.clear()` | — | removes keys one by one, keeping the attribute connection |
-
-```python
-curve_data = take.curves["pCube1.translateX"]
-print(curve_data.name, curve_data.key_count)
-print(curve_data.times)   # [0.  0.5 1. ]
-print(curve_data.values)  # [ 0.  5. 10.]
-print(curve_data.frames)  # times * fps
-```
-
-Retiming and re-valuing. Order matters — set times first, values second,
-because assigning `times` (or `frames`) wipes the values to `0.0`.
-
-```python
-curve_data.times = [0.0, 1.0, 2.0]
-print(curve_data.values)             # [0. 0. 0.] — reset by the times setter
-curve_data.values = [0.0, 7.5, 15.0]
-print(curve_data.times, curve_data.values)
-```
-
-Frames are the same door:
-
-```python
-curve_data.frames = [0.0, 15.0, 30.0]
-print(curve_data.times)              # /fps
-curve_data.values = [0.0, 5.0, 10.0]
-```
-
-Guard rails:
-
-```python
-empty = base.create_curve("pCube2", "scaleY")
-try:
-    empty.values = [1.0]             # nothing to write onto
-except RuntimeError as error:
-    print(str(error)[:48])
-
-try:
-    curve_data.values = [1.0]        # 1 value, 3 keys
-except ValueError as error:
-    print(str(error)[:48])
-```
-
-Clearing keeps the curve connected to its attribute, unlike `KeyClear()`:
-
-```python
-curve_data.clear()
-print(curve_data.key_count, take.curves)    # 0, curve still listed
-```
-
-Blendshape curves are rescaled for you: FBX stores `DeformPercent` in
-`0..100`, `.values` reads and writes `0..1`.
-
----
-
-## `fbx` — the List helpers
-
-`TakeList`, `LayerList` and `CurveList` all share one container. Index by
-position or by name, iterate, measure, and substring-test.
-
-```python
-from cgmath.formats.fbx import CurveList, LayerList, TakeList
-
-takes = data.takes
-print(takes)                    # TakeList(['walk', 'run'])
-print(len(takes))
-print(takes[0].name)            # by index
-print(takes["run"].name)        # by name
-print("run" in takes)           # substring match against every name
-print([t.name for t in takes])  # iterable
-```
-
-Missing names and bad key types raise:
-
-```python
-try:
-    takes["nope"]
-except KeyError as error:
-    print(error)
-
-try:
-    takes[1.5]
-except TypeError as error:
-    print(error)
-```
-
-`CurveList` additionally accepts **either** naming convention on lookup:
-
-```python
-curves = run.curves
-print(curves["pCube2.translateY"].name)     # Maya spelling
-print(curves[0].name)
-```
-
-Each list is type-checked on construction and on `append`:
-
-```python
-print(TakeList(), LayerList(), CurveList())      # all empty
-try:
-    TakeList([1])
-except TypeError as error:
-    print(error)
-```
-
-`delete(name)` removes the object from the list **and destroys it in the
-scene**. It works for takes and layers that hold no curves:
-
-```python
-scratch = data.create_take("scratch")
-data.takes.delete("scratch")
-print(data.takes)
-```
-
-<!-- notest: CurveList.delete calls DisconnectFromChannel(j) with one argument; the SDK wants (FbxAnimCurve, int), so this raises TypeError -->
-```python
-run.curves.delete("pCube2.translateY")  # TypeError against the real FBX SDK
-data.takes.delete("run")                # same, via TakeList -> LayerList -> CurveList
-```
-
-Deleting a curve — and therefore any take or layer that still owns one — is
-currently broken against the SDK. Use `CurveData.clear()` to empty a curve
-instead.
-
----
-
-## `fbx` — BaseData / BaseList
-
-The shared bases. You rarely construct them, but every wrapper inherits
-their behaviour.
-
-`BaseData(scene, data_object)` gives you `.name` (Maya-translated),
-`in` (substring against the name), `str()` and `repr()`:
-
-```python
-from cgmath.formats.fbx import BaseData
-
-print(isinstance(take, BaseData))
-print("Cube" in take.curves[0])  # substring, not equality
-print(str(take), repr(take))     # walk  TakeData('walk')
-```
-
-`BaseList(data_objects=None)` gives the container behaviour above plus
-`append`, and leaves `_delete_object_from_scene` to the subclass — a bare
-`BaseList` raises `NotImplementedError` on `delete`.
-
-```python
-from cgmath.formats.fbx import BaseList
-
-bare = BaseList()
-print(len(bare), list(bare))         # 0 [] — no _allowed_type, so it takes anything
-
-hand_rolled = TakeList()
-hand_rolled.append(data.takes[0])    # type-checked on the way in
-print(hand_rolled, len(hand_rolled))
-```
-
-Clean up when you are done — `SceneData.close()` tears down the FBX
-manager and everything under it. A take, layer or curve read from it raises
-from then on, instead of reaching into freed memory:
-
-```python
-take = data.takes[0]
-data.close()
-print(data.scene)                          # None
-try:
-    take.name
-except RuntimeError as error:
-    print(str(error)[:44])                 # this TakeData was read from an FBX scene
-```
+The measured conventions, the refusals (shear, non-uniform scale off a
+leaf, a geometric transform on a mesh node, two deformers on one mesh ...)
+and each shape's fields are in the hierarchy cheatsheet's "Importers and
+exporters" and the geometry cheatsheet's `MaterialData` and `MorphData`
+sections.
 
 ---
 
@@ -1085,8 +689,7 @@ print(os.path.exists(skel_path))
 Read it straight back:
 
 ```python
-with SceneData(skel_path) as check:
-    print(check.nodes)               # ['root', 'spine', 'head']
+print(load_fbx(skel_path).hierarchy.name)   # ['root', 'spine', 'head']
 ```
 
 ASCII output, and the one-skeleton rule:
@@ -1201,13 +804,15 @@ except ValueError as error:
     print(str(error)[:45])               # user defined attr root.label can't be written
 ```
 
-`zero_root=True` resets the root joint's translate, rotate and scale before
-writing, so the file carries the skeleton at the origin. The root joint is
-the first joint the file writes as a root: one at the world, or a view's
-top joint, whose parent the view leaves out:
+`export(path, zero_root=True)` resets the root joint's translate, rotate and
+scale before writing, so the file carries the skeleton at the origin. The
+root joint is the first joint the file writes as a root: one at the world,
+or a view's top joint, whose parent the view leaves out:
 
 ```python
-skeleton.save_fbx(os.path.join(WORK, "skeleton_zeroed.fbx"), zero_root=True)
+with FbxExporter() as exporter:
+    exporter.add_skeleton(skeleton)
+    exporter.export(os.path.join(WORK, "skeleton_zeroed.fbx"), zero_root=True)
 ```
 
 It takes a `HierarchyData` or a view of one, or a pipeline skeleton
@@ -1215,10 +820,12 @@ component holding one as `.data`.
 
 ---
 
-## Mesh loading lives in geometry
+## The class routes slice the same read
 
-`formats` never hands you a `MeshData` (the one exception being
-`GlbData.mesh_list`).
+`cgmath.formats.load_fbx` hands back every class at once; each class's own
+`load_fbx` is one field of it, read the same way. GLB has no such bundle:
+its readers live in `geometry` and `hierarchy` (`GlbData.mesh_list` is the
+one `MeshData` this package gives).
 
 <!-- notest: illustrative import map; the loaders need real asset files -->
 ```python
@@ -1226,11 +833,14 @@ from cgmath.geometry.mesh import load_fbx, load_glb          # [(MeshData, UVLis
 from cgmath.geometry.skin_weights import load_fbx as skin_fbx
 from cgmath.geometry.skin_weights import load_glb as skin_glb
 from cgmath.hierarchy import load_fbx as rig_fbx
+from cgmath.render import Scene
 
-load_fbx("hero.fbx")
+load_fbx("hero.fbx")        # the meshes field, each with its UV sets
 load_glb("hero.glb", scale_factor=100.0)
-skin_glb("hero.glb")  # -> SkinList
-rig_fbx("hero.fbx")   # -> HierarchyData
+skin_fbx("hero.fbx")        # -> SkinList, the skins field
+skin_glb("hero.glb")        # -> SkinList
+rig_fbx("hero.fbx")         # -> HierarchyData, the hierarchy field (a take's nodes for a file of takes)
+Scene.load_fbx("hero.fbx")  # -> every field, ready to render
 ```
 
 ---
@@ -1240,19 +850,16 @@ rig_fbx("hero.fbx")   # -> HierarchyData
 | Gotcha | What to do |
 |---|---|
 | `import cgmath.formats.fbx` fails without the SDK | Wrap the import; `glb` only fails at call time |
-| `SceneData.from_file` does not exist | `SceneData(path)` or `SceneData().load(path)` |
 | `FbxExporter.save` / `.add_scene` do not exist | `.export(path)` / `.add_skeleton(component)` |
-| `CurveData.keys` does not exist | `.times`, `.values`, `.frames`, `.key_count` |
-| Setting `.times` wipes `.values` | Set `times` first, then `values` |
-| `CurveList.delete` raises `TypeError` | Use `CurveData.clear()`; take/layer delete inherits the break |
+| `load_fbx` gives `hierarchy` None | the file holds takes: the nodes are in `clip`, every take's |
+| A shape's `parent_uuid` / `mesh_uuid` matches nothing | it came from another load: each read mints its own uuids |
 | `set_binary` on a `GLTF2()` with no blob | `TypeError` — `binary_blob()` is `None`; load a real file first |
 | `GlbData.mesh_list` is `None` | `trimesh` is not installed |
 | `GlbData` mesh points look 100× too big | They are — trimesh metres are scaled to centimetres |
 | `Primitive.triangles` is 1-D | `.reshape(-1, 3)` yourself |
 | `JOINTS_0` slots look like node indices | They index `Skin.joints`, which then indexes the nodes |
 | `Model.nodes` order surprises you | Use `Model.ordered_node_indexes` |
-| `SceneData` / `FbxExporter` hold memory | `.close()` them, or use a `with` block |
-| A take / layer / curve raises `RuntimeError` | Its `SceneData` was closed or reloaded; read it again |
+| `FbxExporter` holds memory | `.close()` it, or use a `with` block |
 
 ---
 
