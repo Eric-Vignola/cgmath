@@ -1832,16 +1832,19 @@ active take's first frame, then one animation stack per take, in the
 list's order, named after it (a blank name by position), the active
 take's stack the file's current one: every node's translate, rotate and
 scale keyed on every frame of the take, linear, as float32 (an ASCII
-file holds about 7 significant digits), a constant channel one key. It
-refuses, before anything is written, a list of no take, a take of no
-frame, takes at two frame rates or at one no fbx time mode carries, two
-takes written under one name, a joint orient or rotate axis a take
-changes over its frames or holds other than the active take's (a file
-holds one a node), and, as every save, a shear, a scale that is not
-uniform on a node with children and a node that is no joint or
-transform. Maya's FBXImport picks a take by position (`FBXImport -f file
--t 2`) and gives that take's curves alone, every node's world on every
-frame within 1e-6 of the take.
+file holds about 7 significant digits), a constant channel one key, and
+a node's visibility, where the take changes it, one stepped key a frame,
+as Maya keys one (a locator, a transform drawn as a cross, is written as
+Maya writes one and read back as a locator). It refuses, before anything
+is written, a list of no take, a take of no frame, takes at two frame
+rates or at one no fbx time mode carries, two takes written under one
+name, a joint orient or rotate axis a take changes over its frames or
+holds other than the active take's (a file holds one a node), and, as
+every save, a shear, a scale that is not uniform on a node with children
+and a node that is no joint, transform or locator. Maya's FBXImport
+picks a take by position (`FBXImport -f file -t 2`) and gives that
+take's curves alone, every node's world and visibility on every frame as
+the take's (worlds within 1e-6).
 
 ```python
 path         = os.path.join(WORKDIR, "takes.fbx")
