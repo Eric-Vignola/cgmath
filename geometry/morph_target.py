@@ -90,31 +90,75 @@ def _refused(left, op: str, right) -> TypeError:
 @dataclass(repr=False, eq=False)
 class MorphData(Data):
     """
-    Morph target data class.
+    Morph target data class: a blend shape target, as Maya's blendShape
+    holds one, on the mesh it deforms.
+
+    Parameters
+    ----------
+    name : str
+        The target's name, Maya's weight alias.
+    offsets : (N, 3) float64
+        The points' offsets from the base mesh, in its space.
+    indices : (N,) int32, optional
+        The points the offsets move, None for every point in order.
+    mesh_uuid : str, optional
+        The uuid of the mesh it deforms, None for none yet.
+    weight : float
+        The target's weight, Maya's, 1 the target reached; FBX holds it
+        times 100 (DeformPercent). Default 0.
+    at : float
+        The weight the target is reached at: 1 for a full target, below 1
+        for an in-between, Maya's inBetween weight. Targets of one name
+        under one deformer are one channel, its shapes by ``at``. Must be
+        above 0. Default 1.
+    deformer : str, optional
+        The blendShape node's name, grouping the targets of one mesh; None
+        for none, which a file names "blendShape".
 
     Arithmetic: ``a + b`` and ``a - b`` add or subtract another MorphData,
     merging the two index sets; ``0 + a`` is a copy of ``a`` and ``0 - a``
     is ``a * -1``, so builtin sum() works; ``a * 2``, ``2 * a`` and
     ``a / 2`` scale the offsets, and ``a * [1, 1, 2]`` and
-    ``a / [1, 1, 2]`` their x, y and z each by its own number. Nothing else
+    ``a / [1, 1, 2]`` their x, y and z each by its own number. A result
+    keeps the left shape's mesh, weight, ``at`` and deformer. Nothing else
     has a meaning and raises TypeError: a number added or subtracted (which
     shifted the indices), a morph times or over a morph, a number over or
     less a morph, a power.
     """
 
-    EQUALITY_TEST_IGNORE = ["name"]
+    EQUALITY_TEST_IGNORE = ["name", "mesh_uuid", "deformer"]
 
-    name:    str
-    offsets: Array(np.float64, "N", 3)
-    indices: Optional[Array(np.int32, "N")] = None
+    name:      str
+    offsets:   Array(np.float64, "N", 3)
+    indices:   Optional[Array(np.int32, "N")] = None
+    mesh_uuid: Optional[str] = None
+    weight:    float = 0.0
+    at:        float = 1.0
+    deformer:  Optional[str] = None
 
     def __init__(
-        self, name: str, offsets: np.ndarray, indices: Optional[np.ndarray] = None
+        self,
+        name:      str,
+        offsets:   np.ndarray,
+        indices:   Optional[np.ndarray] = None,
+        mesh_uuid: Optional[str]        = None,
+        weight:    float                = 0.0,
+        at:        float                = 1.0,
+        deformer:  Optional[str]        = None,
     ):
-        self.name    = name
-        self.offsets = offsets
-        self.indices = indices
+        self.name      = name
+        self.offsets   = offsets
+        self.indices   = indices
+        self.mesh_uuid = mesh_uuid
+        self.weight    = weight
+        self.at        = at
+        self.deformer  = deformer
         self._post_load()
+
+    def __setattr__(self, name: str, value) -> None:
+        if name == "at" and not (isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0.0):
+            raise ValueError(f"MorphData.at is the weight the target is reached at, above 0, not {value!r}")
+        super().__setattr__(name, value)
 
     def _post_load(self) -> None:
         """no indices means every point, in order"""
