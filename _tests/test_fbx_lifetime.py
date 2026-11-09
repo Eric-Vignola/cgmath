@@ -73,6 +73,17 @@ def scratch_folders():
     return {x for x in os.listdir(root) if x.startswith("cgmath_fbm_")}
 
 
+def base_color(path):
+    """the first material's colour map, (H, W, C) uint8 as formats.load_fbx
+    reads it; None for no material or no map"""
+    from cgmath.formats import load_fbx
+
+    materials = load_fbx(path).materials
+    if not materials or materials[0].texture is None:
+        return None
+    return np.asarray(materials[0].texture)
+
+
 def write_fixture(path, populate, embed=False):
     """populate(scene) builds the file; the manager dies with the export"""
     from cgmath._tests.test_skin_fbx import build_scene
@@ -216,12 +227,12 @@ class TestReaders(FbxFixtures):
             with self.subTest(load=load), balanced(self):
                 load(self.rig)
 
-    def test_render_object(self):
-        from cgmath.render import Object
+    def test_render_scene(self):
+        from cgmath.render import Scene
 
         with balanced(self):
-            obj = Object.load_fbx(self.rig)
-        self.assertIsNotNone(obj.skin)
+            scene = Scene.load_fbx(self.rig)
+        self.assertIsNotNone(scene.skins)
 
     def test_save(self):
         rig = hierarchy_mod.HierarchyData.load_fbx(self.rig)
@@ -254,12 +265,9 @@ class TestReaders(FbxFixtures):
             with self.subTest(load=load), self.assertRaises(FileNotFoundError):
                 load(missing)
 
-    def test_texture_misses(self):
-        from cgmath.render import scene as scene_mod
-
-        for kwargs in ({}, {"mesh_index": 99}):
-            with self.subTest(**kwargs), balanced(self):
-                self.assertEqual(scene_mod._extract_fbx_textures(self.rig, **kwargs), {})
+    def test_a_mesh_without_a_material_has_no_colour_map(self):
+        with balanced(self):
+            self.assertIsNone(base_color(self.rig))
 
 @unittest.skipIf(Image is None, "PIL is not installed")
 class TestEmbeddedMedia(FbxFixtures):
@@ -283,19 +291,17 @@ class TestEmbeddedMedia(FbxFixtures):
         self.assertEqual(scratch_folders(), before)
 
     def test_texture_is_read_from_inside_the_file(self):
-        from cgmath.render import scene as scene_mod
-
         before = scratch_folders()
         with balanced(self):
-            textures = scene_mod._extract_fbx_textures(self.quad)
-        np.testing.assert_array_equal(textures["base_color"][0, 0, :3], [0, 255, 0])
+            texture = base_color(self.quad)
+        np.testing.assert_array_equal(texture[0, 0, :3], [0, 255, 0])
         self.assert_nothing_written(before)
 
-    def test_object(self):
-        from cgmath.render import Object
+    def test_scene(self):
+        from cgmath.render import Scene
 
         before = scratch_folders()
-        self.assertIsNotNone(Object.load_fbx(self.quad).texture)
+        self.assertIsNotNone(Scene.load_fbx(self.quad).materials[0].texture)
         self.assert_nothing_written(before)
 
     def test_readers_extract_nothing(self):
@@ -306,7 +312,6 @@ class TestEmbeddedMedia(FbxFixtures):
 
     def test_a_failed_copy_puts_the_scene_back(self):
         from cgmath.formats import fbx as fbx_mod
-        from cgmath.render import scene as scene_mod
 
         broken = self.file("broken")
         later  = self.file("later")
@@ -321,8 +326,7 @@ class TestEmbeddedMedia(FbxFixtures):
             # the next save still finds the textures where the scene keeps them
             saved = data.save(os.path.join(later, "copy.fbx"), embed_media=False)
 
-        textures = scene_mod._extract_fbx_textures(saved)
-        np.testing.assert_array_equal(textures["base_color"][0, 0, :3], [0, 255, 0])
+        np.testing.assert_array_equal(base_color(saved)[0, 0, :3], [0, 255, 0])
 
     def test_a_failed_export_copies_nothing(self):
         from cgmath.formats.fbx import SceneData
@@ -335,7 +339,6 @@ class TestEmbeddedMedia(FbxFixtures):
 
     def test_a_non_ascii_temp_folder_falls_back_beside_the_file(self):
         from cgmath.formats.fbx import SceneData
-        from cgmath.render import scene as scene_mod
 
         # the fbx binding cannot hand a non-ASCII path to the SDK
         folder = self.file("fallback")
@@ -358,11 +361,11 @@ class TestEmbeddedMedia(FbxFixtures):
             _fbx_io, "short_path", no_short_name, create=True
         ):
             with self.assertWarnsRegex(RuntimeWarning, "ASCII"):
-                textures = scene_mod._extract_fbx_textures(source)
+                texture = base_color(source)
             with self.assertWarnsRegex(RuntimeWarning, "ASCII"), SceneData(source) as data:
                 self.assertEqual(data.name, "quad")
 
-        np.testing.assert_array_equal(textures["base_color"][0, 0, :3], [0, 255, 0])
+        np.testing.assert_array_equal(texture[0, 0, :3], [0, 255, 0])
         self.assertEqual(sorted(os.listdir(folder)), ["quad.fbm", "quad.fbx"])
 
     @unittest.skipUnless(os.name == "nt", "short (8.3) names and junctions are Windows'")
@@ -371,7 +374,6 @@ class TestEmbeddedMedia(FbxFixtures):
         import warnings
 
         from cgmath.formats.fbx import SceneData
-        from cgmath.render import scene as scene_mod
 
         # a temp folder by a non-ASCII path, and an ASCII path to the same
         # folder standing in for its short name: giving it a real one takes
@@ -399,13 +401,13 @@ class TestEmbeddedMedia(FbxFixtures):
             _fbx_io, "short_path", short_name, create=True
         ), warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            textures = scene_mod._extract_fbx_textures(source)
+            texture = base_color(source)
             with SceneData(source) as data:
                 self.assertEqual(os.path.dirname(data._media), alias)
                 self.assertTrue(os.path.isdir(data._media))
 
         self.assertEqual([str(x.message) for x in caught if "ASCII" in str(x.message)], [])
-        np.testing.assert_array_equal(textures["base_color"][0, 0, :3], [0, 255, 0])
+        np.testing.assert_array_equal(texture[0, 0, :3], [0, 255, 0])
 
         # nothing beside the file, and the media folders are gone
         self.assertEqual(sorted(os.listdir(folder)), ["TEMP~1", "quad.fbx", "temp \u00e9"])
@@ -433,7 +435,6 @@ class TestEmbeddedMedia(FbxFixtures):
 
     def test_a_relative_save_path_is_made_absolute(self):
         from cgmath.formats.fbx import SceneData
-        from cgmath.render import scene as scene_mod
 
         folder = self.file("relative")
         decoy  = self.file("decoy")
@@ -450,14 +451,13 @@ class TestEmbeddedMedia(FbxFixtures):
 
             # read from somewhere holding the same relative layout
             os.chdir(decoy)
-            textures = scene_mod._extract_fbx_textures(os.path.join(folder, "sub", "copy.fbx"))
+            texture = base_color(os.path.join(folder, "sub", "copy.fbx"))
         finally:
             os.chdir(here)
-        np.testing.assert_array_equal(textures["base_color"][0, 0, :3], [0, 255, 0])
+        np.testing.assert_array_equal(texture[0, 0, :3], [0, 255, 0])
 
     def test_a_wrapper_of_the_wrong_type_is_re_typed(self):
         from cgmath.formats.fbx import SceneData
-        from cgmath.render import scene as scene_mod
 
         folder = self.file("re_typed")
         os.makedirs(folder)
@@ -479,8 +479,7 @@ class TestEmbeddedMedia(FbxFixtures):
 
         # wrappers of the closed scene, dropped before the next read
         del handed, scene, get_object, base_typed
-        textures = scene_mod._extract_fbx_textures(saved)
-        np.testing.assert_array_equal(textures["base_color"][0, 0, :3], [0, 255, 0])
+        np.testing.assert_array_equal(base_color(saved)[0, 0, :3], [0, 255, 0])
 
     def test_typed(self):
         manager = fbx.FbxManager.Create()
@@ -502,7 +501,6 @@ class TestEmbeddedMedia(FbxFixtures):
 
     def test_a_save_without_embedding_brings_its_textures(self):
         from cgmath.formats.fbx import SceneData
-        from cgmath.render import scene as scene_mod
 
         plain    = self.file("plain")
         embedded = self.file("embedded_again")
@@ -521,8 +519,7 @@ class TestEmbeddedMedia(FbxFixtures):
         # and the scene was pointed back: the next save still embeds them
         for path in (linked, packed):
             with self.subTest(path=path):
-                textures = scene_mod._extract_fbx_textures(path)
-                np.testing.assert_array_equal(textures["base_color"][0, 0, :3], [0, 255, 0])
+                np.testing.assert_array_equal(base_color(path)[0, 0, :3], [0, 255, 0])
 
 
 class TestSceneData(FbxFixtures):

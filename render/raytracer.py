@@ -16,19 +16,17 @@ Three ways to call :func:`render`:
 
   3. ``Scene`` instance (preferred)::
 
-       from cgmath.render.scene import Camera, Light, Object, Scene
-       scene = Scene("my_scene")
-       scene.append(Object(name="hero", mesh=m, uv=uv, texture="hero.png"))
-       scene.append(Camera(name="cam"))
-       scene.append(Light(name="key", kind="point", intensity=1e5))
-       img = render(scene=scene, resolution=(640, 480))
+       from cgmath.render import Scene
+       scene = Scene.load_fbx("hero.fbx")
+       img   = render(scene=scene, resolution=(640, 480))
 
 Internally:
   1. Generate per-pixel rays from a 4x4 ``camera_matrix`` (camera-to-world,
      OpenGL/Maya: -Z is forward, +Y is up, +X is right).
   2. For each scene entry: cast rays (object-local space if the entry has
-     a non-identity world_matrix), interpolate UVs, sample texture,
-     shade with all scene lights, accumulate per-sample.
+     a non-identity world_matrix), interpolate UVs, sample each material's
+     texture on the faces it covers, shade with all scene lights,
+     accumulate per-sample.
   3. Z-merge across entries per sub-pixel sample, then MSAA resolve to
      final image.
 
@@ -60,7 +58,7 @@ from cgmath.render.camera import (
     look_at,
 )
 from cgmath.render.frame import Frame
-from cgmath.render.scene import Scene
+from cgmath.render.scene import RenderInputs, Scene
 from cgmath.render.texture import _load_texture, _sample_texture_bilinear
 
 # Re-exports kept for backward compatibility.  ``look_at`` and the autofit /
@@ -107,6 +105,7 @@ def render(
     scene:             Optional[Union[List[dict], "Scene"]] = None,
     default_light:     bool                                 = True,
     threads:           Optional[int]                        = None,
+    frame:             Optional[int]                        = None,
 ) -> Frame:
     """Render a textured mesh / scene to a :class:`Frame`.
 
@@ -117,7 +116,10 @@ def render(
         camera_matrix: ``(4, 4)`` camera-to-world OpenGL-style matrix.
             When ``None``, a default 3/4 elevated view is built and
             ``autofit`` is forced ``True``.  When a Scene is given,
-            this argument (if set) overrides the scene's active Camera.
+            this argument (if set) overrides the scene's camera.
+        frame: With a Scene holding a clip, the frame of its active take the
+            shapes are posed at (the take's first for None); ignored
+            otherwise.
         angle_of_view: Vertical full FOV in degrees.
         resolution: ``(width, height)``.
         point_light: A single dict or list of dicts.  Each dict has
@@ -130,9 +132,9 @@ def render(
             which yields a 4-channel image with coverage alpha ready
             for downstream compositing.  Pass an opaque value (e.g.
             ``(0, 0, 0, 1)``) to flatten misses to a solid color.  For
-            convenience, :class:`Scene` and :class:`Object` accept RGB
-            triples and auto-promote them to opaque RGBA; this function
-            requires RGBA directly.
+            convenience, :class:`Scene` accepts RGB triples and
+            auto-promotes them to opaque RGBA; this function requires
+            RGBA directly.
         sample_method: ``"bilinear"`` or ``"bezier"``.  Per-mesh override
             via ``scene[i]["sample_method"]``.
         ambient: Ambient term in [0, 1] added once after all lights.
@@ -187,9 +189,9 @@ def render(
         ValueError: A bad ``threads``, before any work.  A background
             that is not RGBA in [0, 1], an unknown ``sample_method``, a
             light without its position or direction.
-        numpy.linalg.LinAlgError: A singular world matrix (an Object
-            scaled to 0).  numpy 2 makes it a ValueError; numpy 1.24,
-            Maya 2025's, does not.
+        numpy.linalg.LinAlgError: A singular world matrix (a mesh on a
+            node scaled to 0).  numpy 2 makes it a ValueError; numpy
+            1.24, Maya 2025's, does not.
         NotImplementedError: A mesh with n-gon faces (triangulate first).
         KeyboardInterrupt: Ctrl-C, once the bands in flight finish.
 
@@ -204,6 +206,7 @@ def render(
     # ---- normalize scene input -> entries + camera + lights ----
     scene_entries, scene_camera, scene_lights = _build_scene_entries_dispatch(
         scene=scene,
+        frame=frame,
         single_mesh=mesh,
         single_uv=uv,
         single_texture=texture,
@@ -267,6 +270,9 @@ def render(
             height,
         )
 
+    if is_orthographic and ortho_height is None and scene_camera and scene_camera.get("ortho_width") is not None:
+        # a CameraData's orthographic width, over the frame's aspect
+        ortho_height = float(scene_camera["ortho_width"]) * height / width
     if is_orthographic and ortho_height is None:
         ortho_height = _derive_ortho_height(union_points, cam) * 1.05
 
@@ -337,6 +343,7 @@ def render(
 
 def _build_scene_entries_dispatch(
     scene,
+    frame,
     single_mesh,
     single_uv,
     single_texture,
@@ -351,17 +358,14 @@ def _build_scene_entries_dispatch(
     Returns ``(entries, camera_dict_or_None, lights_list)`` where:
       - entries is the per-mesh list[dict] consumed by _render_scene
       - camera_dict has keys ``world_matrix`` / ``angle_of_view`` /
-        ``is_orthographic`` / ``ortho_height``, or None if no Scene Camera
-      - lights_list is the list of light dicts from Scene Lights, or []
+        ``is_orthographic`` / ``ortho_height`` (``ortho_width`` from a
+        Scene), or None if the Scene has no camera
+      - lights_list is the list of light dicts from the Scene's lights, or []
     """
+    if isinstance(scene, RenderInputs):
+        return scene
     if isinstance(scene, Scene):
-        return _build_scene_entries_from_scene(
-            scene_obj            = scene,
-            single_sample_method = single_sample_method,
-            single_wrap          = single_wrap,
-            single_ambient       = single_ambient,
-            single_twosided      = single_twosided,
-        )
+        return scene._render_inputs(frame)
 
     # Legacy paths: list-of-dicts OR positional single-mesh args
     entries = _build_scene_entries(
@@ -447,72 +451,30 @@ def _build_scene_entries(
     return entries
 
 
-def _build_scene_entries_from_scene(
-    scene_obj,
-    single_sample_method,
-    single_wrap,
-    single_ambient,
-    single_twosided,
-):
-    """Convert a :class:`Scene` to ``(entries, camera_dict, lights_list)``.
-
-    Each visible :class:`Object` becomes an entry dict.  The active
-    :class:`Camera` (or first if none designated) becomes the camera
-    dict.  All :class:`Light` nodes become light dicts.
-
-    Object/Camera world matrices come from TransformData in **row-major**
-    Maya convention; we transpose them to **column-major** OpenGL form
-    here so the renderer's downstream code (which is column-major
-    throughout) sees the convention it expects.
-    """
-    entries: List[dict] = []
-    for obj in scene_obj.objects:
-        if not obj.visibility or obj.mesh is None:
+def _sample_colors(entry: dict, hit_idx: np.ndarray, hit_w: np.ndarray) -> np.ndarray:
+    """the surface colour at each hit, (n, 3) float32: an entry's materials
+    (``"materials"``: each the faces it covers, None for all, its
+    ``base_color``, ``tex`` and ``wrap``, the ``uv`` its texture reads)
+    sample the hits on the faces they cover, in order, over the entry's
+    ``base_color``; an entry with no materials is one of its own ``tex``,
+    ``base_color``, ``wrap`` and ``uv`` over every face"""
+    n_hit     = hit_idx.shape[0]
+    sampled   = np.tile(np.asarray(entry["base_color"], dtype=np.float32), (n_hit, 1))
+    materials = entry.get("materials")
+    if materials is None:
+        materials = [{"faces": None, "tex": entry["tex"], "base_color": entry["base_color"], "wrap": entry["wrap"], "uv": entry["uv"]}]
+    for material in materials:
+        faces = material["faces"]
+        rows  = slice(None) if faces is None else np.flatnonzero(np.asarray(faces, dtype=bool)[hit_idx])
+        if faces is not None and not len(rows):
             continue
-        if obj.texture is not None and obj.uv is None:
-            raise ValueError(
-                f"Object {obj.name!r}: uv is required when texture is provided"
-            )
-        if obj.uv is not None:
-            if obj.mesh.face_count != obj.uv.face_count:
-                raise ValueError(
-                    f"Object {obj.name!r}: mesh.face_count != uv.face_count"
-                )
-            if not np.array_equal(obj.mesh.counts, obj.uv.counts):
-                raise ValueError(f"Object {obj.name!r}: mesh.counts != uv.counts")
-
-        # Row-major (TransformData) -> column-major (renderer) for the
-        # Object's world transform.  The downstream raycast uses M @ vec
-        # math in column-major form so this transpose is required.
-        wm_row = np.asarray(obj.world_matrix, dtype=np.float64)
-        entries.append(
-            {
-                "mesh":          obj.mesh,
-                "uv":            obj.uv,
-                "tex":           obj.get_loaded_texture(),
-                "base_color":    obj.base_color,
-                "sample_method": obj.sample_method,
-                "wrap":          obj.wrap,
-                "ambient":       obj.ambient,
-                "twosided":      obj.twosided,
-                "world_matrix":  wm_row.T,
-            }
-        )
-
-    cam_dict = None
-    cam      = scene_obj.get_camera()
-    if cam is not None:
-        # Same row->col convention bridge for the camera.
-        cam_world_row = np.asarray(cam.world_matrix, dtype=np.float64)
-        cam_dict = {
-            "world_matrix":    cam_world_row.T,
-            "angle_of_view":   float(cam.angle_of_view),
-            "is_orthographic": bool(cam.is_orthographic),
-            "ortho_height":    cam.ortho_height,
-        }
-
-    lights = [light.as_dict() for light in scene_obj.lights]
-    return entries, cam_dict, lights
+        tex = material["tex"]
+        if tex is None:
+            sampled[rows] = np.asarray(material["base_color"], dtype=np.float32)
+            continue
+        uvs           = _interpolate_uvs(material["uv"], hit_idx[rows], hit_w[rows])
+        sampled[rows] = _sample_texture_bilinear(tex, uvs, material["wrap"] == "repeat")
+    return sampled
 
 
 def _union_world_points(scene_entries: List[dict]) -> np.ndarray:
@@ -697,15 +659,7 @@ def _shade_mesh_per_sample(
     if not np.any(sample_hit):
         return sample_color, sample_hit, sample_distance
 
-    n_hit = int(np.sum(sample_hit))
-    tex   = entry["tex"]
-    if tex is None:
-        sampled = np.tile(np.asarray(entry["base_color"], dtype=np.float32), (n_hit, 1))
-    else:
-        interp_uvs = _interpolate_uvs(
-            entry["uv"], raycast.indices[sample_hit], raycast.weights[sample_hit]
-        )
-        sampled = _sample_texture_bilinear(tex, interp_uvs, entry["wrap"] == "repeat")
+    sampled = _sample_colors(entry, raycast.indices[sample_hit], raycast.weights[sample_hit])
 
     # ---- back-transform projections + normals to world space ----
     hit_proj = raycast.projections[sample_hit]

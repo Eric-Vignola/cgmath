@@ -43,11 +43,12 @@ from cgmath.data import (
 )
 from cgmath import hierarchy
 from cgmath.geometry import skin_weights
-from cgmath.geometry.mesh import MeshData, MeshList, UVData
+from cgmath.geometry import CameraList, LightList, MaterialList, MorphList
+from cgmath.geometry.mesh import MeshData, MeshList, UVData, UVList
 from cgmath.geometry.sdf import SDFCylinder, SDFSphere
 from cgmath.geometry.skin_weights import SkinData, SkinList
-from cgmath.hierarchy import ClipData, HierarchyData, TransformData, generate_uuid
-from cgmath.render.scene import Camera, Light, Object, Scene
+from cgmath.hierarchy import ClipData, ClipList, HierarchyData, TransformData, generate_uuid
+from cgmath.render.scene import Scene
 from cgmath.utils import pretty_json
 
 # the builder modules: each holds EXAMPLES = {class: builder}, and may hold
@@ -241,7 +242,7 @@ class TestAFileIsBuiltAsTheClassAsked(unittest.TestCase):
     """
 
     # (the class asked for, the subclass a file holds)
-    CASES = ((MeshData, UVData), (HierarchyData, ClipData), (TransformData, Object))
+    CASES = ((MeshData, UVData), (HierarchyData, ClipData))
 
     @classmethod
     def setUpClass(cls):
@@ -275,15 +276,6 @@ class TestAFileIsBuiltAsTheClassAsked(unittest.TestCase):
                 self.assertIs(type(rig), HierarchyData)
                 self.assertEqual(rig.name, clip.name)
 
-        # an Object read as a TransformData: the shape's settings dropped
-        obj, paths = self.saved(Object)
-        for ext, path in paths.items():
-            with self.subTest(held="Object", ext=ext):
-                with self.assertWarnsRegex(UserWarning, r"^TransformData: the data names '\w+', which is no field of it"):
-                    node = TransformData.load(path)
-                self.assertIs(type(node), TransformData)
-                self.assertEqual(node.name, obj.name)
-
     def test_the_base_classes_build_nothing(self):
         for _, held in self.CASES:
             obj, paths = self.saved(held)
@@ -313,14 +305,18 @@ class TestAFileIsBuiltAsTheClassAsked(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, r"^MeshData\.points must have shape \(N, 3\)"):
                     MeshList.load(path)
 
-    def test_a_scene_rebuilds_its_objects_cameras_and_lights_by_node_type(self):
+    def test_a_scene_rebuilds_each_list_as_its_class(self):
         scene, paths = self.saved(Scene)
-        kinds = {node.name: type(node) for node in scene}
-        self.assertEqual({Object, Camera, Light, TransformData}, set(kinds.values()))
+        lists = ("hierarchy", "clip", "meshes", "uvs", "skins", "materials", "cameras", "lights", "morphs")
+        kinds = {name: type(getattr(scene, name)) for name in lists}
+        self.assertEqual(
+            set(kinds.values()),
+            {HierarchyData, ClipList, MeshList, UVList, SkinList, MaterialList, CameraList, LightList, MorphList},
+        )
         for ext, path in paths.items():
             with self.subTest(ext=ext):
                 back = Scene.load(path)
-                self.assertEqual({node.name: type(node) for node in back}, kinds)
+                self.assertEqual({name: type(getattr(back, name)) for name in lists}, kinds)
                 assert_same(self, scene, back)
         assert_same(self, scene, Scene.from_dict(scene.to_dict()))
 
@@ -566,9 +562,6 @@ class TestPublicSavedNames(unittest.TestCase):
     # the classes holding such fields, and names each example saves publicly
     PUBLIC = {
         "TransformData":  ("translate", "rotate_order", "joint_orient", "radius", "shear"),
-        "Camera":         ("translate", "rotate"),
-        "Light":          ("translate", "visibility"),
-        "Object":         ("mesh", "uv", "texture", "skin", "base_color", "wireframe"),
         "DeltaMushData":  ("smooth_iterations", "method", "weight"),
         "FFDData":        ("outside", "local_influence", "cells", "uvw"),
         "PatchRelaxData": ("iterations", "alpha", "surface_blend"),
@@ -689,30 +682,28 @@ class TestPublicSavedNames(unittest.TestCase):
                     assert_same(self, obj, cls.load(path), f"{name} from {ext}")
 
     @staticmethod
-    def flat_object() -> Object:
-        """an Object whose texture is an empty (0, 4, 3) array, which json writes as []"""
-        obj         = Object(name="flat")
-        obj.texture = np.zeros((0, 4, 3), np.float32)
-        return obj
+    def flat_mesh() -> MeshData:
+        """a mesh of no point: its (0, 3) points json writes as []"""
+        return MeshData(
+            points  = np.zeros((0, 3)),
+            indices = np.zeros(0, np.int32),
+            counts  = np.zeros(0, np.int32),
+            name    = "flat",
+        )
 
     def test_an_empty_array_notes_its_shape_under_the_saved_name(self):
-        # json keeps no shape for an empty array: the __shapes__ note does, keyed
-        # as the field is saved, and a note keyed by the private field still loads
-        obj  = self.flat_object()
-        tree = obj.to_dict()
-        self.assertEqual(tree[SHAPES_KEY], {"texture": [0, 4, 3]})
-
-        old = _private_spelling(tree, Object)
-        self.assertEqual(old[SHAPES_KEY], {"_texture": [0, 4, 3]})
+        # json keeps no shape for an empty array: the __shapes__ note does,
+        # keyed as the field is saved
+        mesh = self.flat_mesh()
+        tree = mesh.to_dict()
+        self.assertEqual(tree[SHAPES_KEY], {"points": [0, 3]})
 
         for ext in FORMATS:
             with self.subTest(ext=ext):
-                path = obj.save(os.path.join(self.tmp, f"flat.{ext}"))
-                assert_same(self, obj, Object.load(path), f"flat.{ext}")
-            with self.subTest(ext=ext, file="old"):
-                path = os.path.join(self.tmp, f"flat_old.{ext}")
-                _write_tree(Object, old, path)
-                assert_same(self, obj, Object.load(path), f"flat_old.{ext}")
+                path = mesh.save(os.path.join(self.tmp, f"flat.{ext}"))
+                back = MeshData.load(path)
+                assert_same(self, mesh, back, f"flat.{ext}")
+                self.assertEqual(back.points.shape, (0, 3))
 
     def test_a_tree_naming_a_field_both_ways_is_refused(self):
         for name, (cls, builder) in sorted(self.listed.items()):
@@ -734,12 +725,12 @@ class TestPublicSavedNames(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, rf"^{name}\.{key} is given twice"):
                         cls.from_dict(both)
 
-        # and an empty array's __shapes__ note
-        tree             = self.flat_object().to_dict()
-        tree[SHAPES_KEY] = {**tree[SHAPES_KEY], "_texture": [0, 4, 3]}
-        with self.subTest(cls="Object", part=SHAPES_KEY):
-            with self.assertRaisesRegex(ValueError, r"^Object\.texture is given twice"):
-                Object.from_dict(tree)
+        # and a __shapes__ note naming a field both ways
+        tree             = TransformData("a").to_dict()
+        tree[SHAPES_KEY] = {"translate": [3], "_translate": [3]}
+        with self.subTest(cls="TransformData", part=SHAPES_KEY):
+            with self.assertRaisesRegex(ValueError, r"^TransformData\.translate is given twice"):
+                TransformData.from_dict(tree)
 
         # and a clip's channel, named both ways in its blocks
         cls, builder = self.listed["ClipData"]
@@ -810,8 +801,9 @@ class TestPublicSavedNames(unittest.TestCase):
             classes["FFDData"].from_dict({"outside": "bogus"})
         bare = {"indices": [], "counts": [], "points": [], "resolution": 64}  # the required fields, empty
         self.assertEqual(classes["UVData"].from_dict(bare).resolution.tolist(), [64, 64])
+        # a Scene's background, taken opaque by its __setattr__
         self.assertEqual(
-            Object.from_dict({"background": (0.1, 0.2, 0.3)}).background.tolist(),
+            Scene.from_dict({"background": (0.1, 0.2, 0.3)}).background.tolist(),
             [0.1, 0.2, 0.3, 1.0],
         )
 

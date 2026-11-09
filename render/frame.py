@@ -255,10 +255,8 @@ class Frame:
 
         Args:
             source: Where to get edges from.  May be a
-                :class:`cgmath.render.scene.Scene` (every visible
-                Object's mesh contributes), a single
-                :class:`cgmath.render.scene.Object` (its mesh's edges
-                in world space), or a
+                :class:`cgmath.render.scene.Scene` (every shown mesh,
+                placed and posed as the scene renders it) or a
                 :class:`cgmath.geometry.mesh.MeshData` (uses the mesh's
                 own ``points`` directly, treated as world-space).
             color: RGBA tuple in 0-255 range.  Default is dark with
@@ -282,7 +280,7 @@ class Frame:
             ValueError: If this frame has no ``camera_matrix`` or
                 ``angle_of_view`` (e.g., it was constructed manually
                 rather than coming from :func:`render`).
-            TypeError: If ``source`` is not a Scene / Object / MeshData.
+            TypeError: If ``source`` is not a Scene or a MeshData.
 
         Example::
 
@@ -297,7 +295,7 @@ class Frame:
             raise ValueError(
                 "Frame.wireframe: this Frame has no camera_matrix / "
                 "angle_of_view (was it constructed manually?).  Render "
-                "via Scene.render() / Object.render() to populate them."
+                "via Scene.render() to populate them."
             )
         if Image is None or ImageDraw is None:
             raise RuntimeError(
@@ -480,7 +478,7 @@ class Frame:
         is a no-op for already-opaque pixels and gives the user-chosen
         miss colour back for transparent pixels.
 
-        :meth:`Scene.turntable` and :meth:`Object.turntable` forward
+        :meth:`Scene.turntable` and :meth:`Scene.animate` forward
         their parent's :attr:`Scene.background` (RGB part) here
         automatically when the output extension is mp4 / mov / m4v, so
         videos respect the background you set on the Scene.
@@ -980,9 +978,10 @@ def _iter_wireframe_primitives(
 ) -> Iterable[dict]:
     """Yield wireframe primitive dicts from various source types.
 
-    ``source`` may be a :class:`Scene`, :class:`Object`, or :class:`MeshData`.
-    Imports of these classes are lazy to avoid a circular dependency
-    (``scene.py`` imports :class:`Frame`).
+    ``source`` may be a :class:`Scene` (every shown mesh, placed and posed as
+    the scene renders it) or a :class:`MeshData`. Imports of these classes
+    are lazy to avoid a circular dependency (``scene.py`` imports
+    :class:`Frame`).
 
     Each yielded dict carries:
 
@@ -1005,7 +1004,7 @@ def _iter_wireframe_primitives(
     # Lazy imports break the frame -> scene cycle (scene.py already
     # imports Frame for its own encoding methods).
     from cgmath.geometry.mesh import MeshData
-    from cgmath.render.scene import Object, Scene
+    from cgmath.render.scene import Scene
 
     def _edges(mesh) -> np.ndarray:
         # Counter-intuitive naming in MeshData:
@@ -1043,7 +1042,7 @@ def _iter_wireframe_primitives(
         """Local-space face normals transformed to world space.
 
         For row vectors and the row-major TransformData convention used by
-        ``Object.world_matrix``, the right multiply is
+        a node's ``world_matrix``, the right multiply is
         ``local @ world_matrix[:3, :3]``.  Re-normalise after the transform
         so any non-uniform scale embedded in the matrix doesn't bias the
         sign-of-dot test for back-face culling.
@@ -1073,18 +1072,11 @@ def _iter_wireframe_primitives(
         return prim
 
     if isinstance(source, Scene):
-        for obj in source.objects:
-            if not obj.visibility or obj.mesh is None:
-                continue
-            wm = np.asarray(obj.world_matrix, dtype=np.float64)
-            yield _emit(obj.world_points, obj.mesh, wm[:3, :3])
-        return
-
-    if isinstance(source, Object):
-        if source.mesh is None:
-            return
-        wm = np.asarray(source.world_matrix, dtype=np.float64)
-        yield _emit(source.world_points, source.mesh, wm[:3, :3])
+        for mesh, world in source.placed_meshes():
+            wm = np.asarray(world, dtype=np.float64)
+            with np.errstate(all="ignore"):
+                world_pts = np.asarray(mesh.points, dtype=np.float64) @ wm[:3, :3] + wm[3, :3]
+            yield _emit(world_pts, mesh, wm[:3, :3])
         return
 
     if isinstance(source, MeshData):
@@ -1098,6 +1090,6 @@ def _iter_wireframe_primitives(
         return
 
     raise TypeError(
-        f"Frame.wireframe: source must be Scene, Object, or MeshData "
+        f"Frame.wireframe: source must be Scene or MeshData "
         f"(got {type(source).__name__})"
     )

@@ -5,10 +5,9 @@ reads as (get_file_type), for a save, its extension; an extension no route
 has is refused, naming the routes there are. Arguments past the file name
 and the mode go to the route, which checks them before anything is read or
 written. A route a class inherits but refuses (a _NoRoute) raises with its
-reason; an asset's reader gives back the class itself. The obj writers:
-MeshData.save_obj writes the normals a mesh has, Object.save_obj its mesh
-where the Object puts it, with its UVs and normals, both in utf-8, which the
-obj readers read first.
+reason; an asset's reader gives back the class itself. The obj writer,
+MeshData.save_obj, writes the normals a mesh has, in utf-8, which the obj
+readers read first.
 """
 
 import locale
@@ -36,7 +35,7 @@ from cgmath.geometry import skin_weights
 from cgmath.geometry.mesh import MeshData, MeshList, UVData, UVList
 from cgmath.geometry.skin_weights import SkinList
 from cgmath.hierarchy import ClipData, ClipList, HierarchyData, TransformData
-from cgmath.render.scene import Object, Scene
+from cgmath.render.scene import Scene
 
 fbx = load_sdk()
 
@@ -52,7 +51,7 @@ except ImportError:
 
 try:
     import pygltflib
-    from cgmath._tests.test_object_skin import write_glb
+    from cgmath._tests.test_scene_skin import write_glb
 except ImportError:
     pygltflib = None
 
@@ -270,33 +269,32 @@ class TestLoad(_Files):
 
     def test_arguments_go_to_the_reader(self):
         path = quad().save(self.path("q.obj"))
-        self.assertEqual(Object.load(path, index=0, name="hero").name, "hero")
+        self.assertEqual(Scene.load(path, name="set").name, "set")
         self.assertIsInstance(Scene.load(path, name="set"), Scene)
         with self.assertRaisesRegex(TypeError, r"Scene\.load_obj: .*'nme'.*takes name$"):
             Scene.load(path, nme="set")
 
-    # what Scene's refusal of an fbx file says to read one with today
-    SCENE_FBX = "Scene reads FBX files from 4.0.0; today use Object.load_fbx(path, index=i) per mesh, or Scene.load_glb"
-
-    def test_a_scene_says_what_reads_an_fbx_today(self):
-        """Scene reads no fbx file before 4.0.0: its refusal, a direct
-        call's TypeError and a load's ValueError alike, names what reads an
-        fbx's meshes today; the refusal to write one is as it was"""
-        path = self.path("x.fbx")
-        open(path, "wb").close()
-        with self.assertRaises(TypeError) as caught:
-            Scene.load_fbx(path)
-        self.assertEqual(str(caught.exception), f"Scene.load_fbx: {self.SCENE_FBX}")
-        with self.assertRaises(ValueError) as caught:
-            Scene.load(path)
-        refusal = str(caught.exception).split("; it loads ")[0]
-        self.assertEqual(refusal, f"Scene has no reader for fbx files ({self.SCENE_FBX}): {path}")
-        with self.assertRaises(TypeError) as caught:
-            Scene().save_fbx(self.path("y.fbx"))
-        self.assertEqual(
-            str(caught.exception),
-            "Scene.save_fbx: HierarchyData's fbx writer writes joints only: a Scene's meshes would be lost",
-        )
+    @unittest.skipIf(fbx is None, "Autodesk FBX Python SDK is not installed")
+    def test_a_scene_reads_and_writes_an_fbx(self):
+        """an fbx goes to Scene.load_fbx and Scene.save_fbx: the nodes, and
+        the meshes under them, come back"""
+        node             = TransformData("box", uuid=str(uuid.uuid4()))
+        mesh             = quad()
+        scene            = Scene("set").add(node)
+        mesh.parent_uuid = node.uuid
+        scene.add(mesh)
+        path = scene.save(self.path("set.fbx"))
+        self.assertEqual(path, self.path("set.fbx"))
+        for label, back in (
+            ("load", Scene.load(path)),
+            ("load_fbx", Scene.load_fbx(path)),
+            ("mode", Scene.load(path, mode="fbx")),
+        ):
+            with self.subTest(label):
+                self.assertEqual(back.name, "set")
+                self.assertEqual(back.hierarchy.name, ["box"])
+                self.assertEqual(back.meshes[0].parent_uuid, back.hierarchy[0].uuid)
+                np.testing.assert_allclose(back.meshes[0].points, mesh.points)
 
     def test_the_base_classes_build_nothing_from_an_asset(self):
         path = quad().save(self.path("q.obj"))
@@ -370,8 +368,8 @@ class TestLoad(_Files):
                 self.assertEqual(get_file_type(path),             "glb")
                 self.assertEqual(MeshData.load(path),             MeshData.load(glb))
                 self.assertEqual(MeshData.load(path, mode="glb"), MeshData.load(glb))
-                self.assertEqual(Object.load(path).mesh,          Object.load(glb).mesh)
-                self.assertEqual(Object.load(path).skin,          Object.load(glb).skin)
+                self.assertEqual(Scene.load(path).meshes,         Scene.load(glb).meshes)
+                self.assertEqual(Scene.load(path).skins,          Scene.load(glb).skins)
                 rig, named = HierarchyData.load(path), HierarchyData.load(glb)  # each load its own uuids
                 self.assertEqual(rig.name, named.name)
                 np.testing.assert_array_equal(rig.world_matrix, named.world_matrix)
@@ -389,7 +387,7 @@ class TestLoad(_Files):
             with self.subTest(gltf_as=name):
                 self.assertEqual(MeshData.load(text, mode="glb"), MeshData.load(glb))
                 self.assertEqual(MeshData.load_glb(text), MeshData.load(glb))
-                self.assertEqual(Object.load(text, mode="glb").mesh, Object.load(glb).mesh)
+                self.assertEqual(Scene.load(text, mode="glb").meshes, Scene.load(glb).meshes)
                 self.assertEqual(HierarchyData.load(text, mode="glb").name, named.name)
                 self.assertEqual(HierarchyData.load_glb(text).name, named.name)
                 self.assertEqual(SkinList.load(text, mode="glb"), SkinList.load(glb))
@@ -424,7 +422,7 @@ class TestLoad(_Files):
         reads = (
             ("MeshData.load_glb", MeshData.load_glb, trimesh_says),
             ("mesh.load_glb", mesh_module.load_glb, trimesh_says),
-            ("Object.load_glb", Object.load_glb, trimesh_says),
+            ("Scene.load_glb", Scene.load_glb, trimesh_says),
             ("HierarchyData.load_glb", HierarchyData.load_glb, pygltflib_says),
             ("SkinList.load_glb", SkinList.load_glb, pygltflib_says),
             ("GlbData", GlbData, pygltflib_says),
@@ -432,7 +430,7 @@ class TestLoad(_Files):
         # load() takes a .glb or a .gltf name to them too
         routed = (
             ("MeshData.load", MeshData.load, trimesh_says),
-            ("Object.load", Object.load, trimesh_says),
+            ("Scene.load", Scene.load, trimesh_says),
             ("HierarchyData.load", HierarchyData.load, pygltflib_says),
         )
         for name in ("hero.glb", "hero.gltf", "hero.dat", "hero"):
@@ -469,7 +467,7 @@ class TestLoad(_Files):
             ("mesh.load_glb", mesh_module.load_glb),
             ("MeshData.load_glb", MeshData.load_glb),
             ("MeshList.load_glb", MeshList.load_glb),
-            ("Object.load_glb", Object.load_glb),
+            ("Scene.load_glb", Scene.load_glb),
             ("mode=glb", lambda path: MeshData.load(path, mode="glb")),
         )
         with mock.patch.dict(sys.modules, {"charset_normalizer": None}):
@@ -698,16 +696,15 @@ class TestFbx(_Files):
                             parent_uuid=root.uuid, translate=[0.0, 10.0, 0.0])
         return HierarchyData([root, hip])
 
-    def test_a_scene_refuses_the_fbx_routes(self):
-        path  = self.rig().save(self.path("rig.fbx"))
-        today = re.escape(TestLoad.SCENE_FBX)
-        with self.assertRaisesRegex(ValueError, rf"^Scene has no reader for fbx files \({today}\): "):
-            Scene.load(path)
-        with self.assertRaisesRegex(ValueError, "Scene has no writer for fbx files .*meshes"):
-            Scene().save(self.path("scene.fbx"))
-        with self.assertRaisesRegex(TypeError, rf"^Scene\.load_fbx: {today}$"):
-            Scene.load_fbx(path)
-        self.assertFalse(os.path.exists(self.path("scene.fbx")))
+    def test_a_scene_takes_the_fbx_routes(self):
+        rig   = self.rig()
+        path  = rig.save(self.path("rig.fbx"))
+        scene = Scene.load(path)
+        self.assertEqual(scene.hierarchy.name, ["root", "hip"])
+        self.assertIsNone(scene.meshes)
+        saved = Scene("rig", hierarchy=rig).save(self.path("scene.fbx"))
+        self.assertEqual(saved, self.path("scene.fbx"))
+        self.assertEqual(Scene.load_fbx(saved).hierarchy.name, ["root", "hip"])
 
     def test_the_base_class_builds_nothing_from_an_fbx(self):
         path = self.rig().save(self.path("rig.fbx"))
@@ -800,9 +797,7 @@ class TestMeshObj(_Files):
                     self.assertIn(group, f.read())
                 self.assertEqual(ascii(MeshData.load(path).name), ascii(name))
                 self.assertEqual(ascii(mesh_module.load_obj(path)[0][0].name), ascii(name))
-
-                path = Object(name=name[:-len("Shape")], mesh=quad()).save(self.path("o.obj"))
-                self.assertEqual(ascii(Object.load(path).name), ascii(name))
+                self.assertEqual(ascii(Scene.load(path).meshes[0].name), ascii(name))
 
                 # the module's writer of (MeshData, UVList) pairs too
                 path = self.path("pairs.obj")
@@ -828,178 +823,6 @@ class TestMeshObj(_Files):
                 f.write(text.replace(b"\x9c", b"\x81"))
             self.assertEqual(ascii(MeshData.load(path).name), ascii(f"c{chr(0x81)}ur{chr(0xE9)}Shape"))
             self.assertEqual(mesh_module.load_obj(path)[0][0].points.shape, (3, 3))
-
-
-class TestObjectObj(_Files):
-    """Object.save_obj writes its mesh where the Object puts it, with its UVs and normals"""
-
-    def hero(self, **transform):
-        """a cube turned off the axes, its normals of 24 lengths, under a uv"""
-        mesh = cube()
-        turn = np.array([[0.6, 0.8, 0.0], [-0.8, 0.6, 0.0], [0.0, 0.0, 1.0]]) @ np.array(
-            [[1.0, 0.0, 0.0], [0.0, 0.6, 0.8], [0.0, -0.8, 0.6]]
-        )
-        mesh.points = mesh.points @ turn
-        mesh.set_normals(hard_edge_angle=30.0)
-        mesh.normals = mesh.normals * np.linspace(0.5, 2.0, 24)[:, None]
-        return Object(name="hero", mesh=mesh, uv=cube_uv(), **transform)
-
-    def placed(self):
-        """an Object under a parent, turned and scaled unevenly: its points, corner normals and the Object"""
-        scene = Scene("s")
-        group = Object(name="group", translate=(3.0, -1.0, 2.0), rotate=(10.0, 20.0, 30.0))
-        hero  = self.hero(translate=(0.5, 1.5, -2.0), rotate=(30.0, 45.0, -60.0), scale=(2.0, 0.5, 1.5))
-        scene.extend([group, hero])
-        hero.set_parent(group, world_space=False)
-        world = np.asarray(hero.world_matrix)
-        np.testing.assert_allclose(world, hero.matrix @ group.matrix)  # the parent's transform applies
-        return hero, world
-
-    def test_points_uvs_and_normals_in_the_objects_world(self):
-        hero, world = self.placed()
-        path = hero.save(self.path("hero.obj"))
-        back = Object.load(path)
-        mesh = hero.mesh
-        np.testing.assert_allclose(back.mesh.points, mesh.points @ world[:3, :3] + world[3, :3], rtol=0, atol=1e-14)
-        np.testing.assert_array_equal(back.mesh.counts, mesh.counts)
-        np.testing.assert_array_equal(back.uv.points,   hero.uv.points)
-        np.testing.assert_array_equal(back.uv.indices,  hero.uv.indices)
-
-        # each normal turned by the inverse transpose, keeping its length,
-        # so it stays at right angles to the faces the points now make
-        normals = corner_normals(back.mesh)
-        before  = corner_normals(mesh)
-        turned  = before @ np.linalg.inv(world[:3, :3]).T
-        lengths = np.linalg.norm(before, axis=1, keepdims=True) / np.linalg.norm(turned, axis=1, keepdims=True)
-        np.testing.assert_allclose(normals, turned * lengths, rtol=0, atol=1e-14)
-        np.testing.assert_allclose(np.linalg.norm(normals, axis=1), np.linalg.norm(before, axis=1), rtol=1e-15)
-        faces = back.mesh.points[back.mesh.indices].reshape(6, 4, 3)
-        edges = np.concatenate([faces[:, 1] - faces[:, 0], faces[:, 3] - faces[:, 0]])
-        self.assertLess(np.abs(np.einsum("ij,ij->i", edges, np.concatenate([normals[::4], normals[::4]]))).max(), 1e-14)
-
-        # the Object read back sits at the origin, its transform in the points
-        np.testing.assert_array_equal(back.world_matrix, np.eye(4))
-        self.assertEqual(back.name, "heroShape")
-
-    def test_every_obj_reader_reads_it(self):
-        hero, _ = self.placed()
-        path = hero.save_obj(self.path("hero.obj"))
-        self.assertEqual(path, self.path("hero.obj"))
-        loaded = Object.load_obj(path)
-        for mesh in (MeshData.load(path), Scene.load(path).objects[0].mesh, mesh_module.load(path)[0][0]):
-            np.testing.assert_array_equal(mesh.points, loaded.mesh.points)
-            np.testing.assert_array_equal(corner_normals(mesh), corner_normals(loaded.mesh))
-        self.assertEqual(UVData.load(path), loaded.uv)
-        with open(path, "rb") as f:
-            text = f.read()
-        self.assertNotIn(b"\r", text)
-        self.assertEqual(text.count(b"\nf "), 6)
-        self.assertIn(b"\ng hero\n", text)
-
-    def test_an_object_at_the_origin_writes_its_mesh_as_it_is(self):
-        hero = self.hero()
-        back = Object.load(hero.save(self.path("hero.obj")))
-        np.testing.assert_array_equal(back.mesh.points,         hero.mesh.points)
-        np.testing.assert_array_equal(back.mesh.normals,        hero.mesh.normals)
-        np.testing.assert_array_equal(back.mesh.normal_indices, hero.mesh.normal_indices)
-        self.assertEqual(back.uv, hero.uv)
-
-        # no uv, no normals: points and faces
-        plain = Object(name="plain", mesh=cube())
-        back  = Object.load(plain.save(self.path("plain.obj")))
-        self.assertIsNone(back.uv)
-        self.assertIsNone(back.mesh.normals)
-        np.testing.assert_array_equal(back.mesh.points, plain.mesh.points)
-
-    def test_a_uv_without_normals(self):
-        # each corner names its point and its UV, f v/vt
-        uvonly = Object(name="uvonly", mesh=cube(), uv=cube_uv())
-        path   = uvonly.save(self.path("uvonly.obj"))
-        with open(path, "rb") as f:
-            faces = [line for line in f.read().split(b"\n") if line.startswith(b"f ")]
-        self.assertEqual(faces[0], b"f 1/24 4/23 3/22 2/21")
-        back = Object.load(path)
-        self.assertIsNone(back.mesh.normals)
-        np.testing.assert_array_equal(back.mesh.points, uvonly.mesh.points)
-        np.testing.assert_array_equal(back.mesh.indices, uvonly.mesh.indices)
-        self.assertEqual(back.uv, cube_uv())
-        np.testing.assert_array_equal(back.uv.points[back.uv.indices], cube_uv().points[cube_uv().indices])
-
-    def test_a_zero_normal_stays_zero(self):
-        # a normal of no length has no direction to turn: it is written as it is, never nan
-        normals      = np.repeat(np.eye(3), 8, axis=0)
-        normals[0]   = 0.0
-        mesh         = cube()
-        mesh.normals = normals
-        dim          = Object(name="dim", mesh=mesh, rotate=(30.0, 0.0, 0.0), scale=(2.0, 1.0, 1.0))
-        path         = dim.save(self.path("dim.obj"))
-        with open(path, "rb") as f:
-            self.assertNotIn(b"nan", f.read())
-        back = corner_normals(Object.load(path).mesh)
-        np.testing.assert_array_equal(back[0], [0.0, 0.0, 0.0])
-        np.testing.assert_allclose(np.linalg.norm(back[1:], axis=1), 1.0, rtol=1e-15)
-
-    def test_what_it_cannot_write_raises_before_writing(self):
-        with self.assertRaisesRegex(ValueError, "Object 'empty' has no mesh to write"):
-            Object(name="empty").save(self.path("x.obj"))
-        triangles = UVData(points=np.zeros((3, 2)), indices=np.arange(3), counts=np.array([3]))
-        with self.assertRaisesRegex(ValueError, r"Object 'hero': its uv's 1 faces are not its mesh's 6"):
-            Object(name="hero", mesh=cube(), uv=triangles).save(self.path("x.obj"))
-        with self.assertRaisesRegex(ValueError, "world matrix cannot be inverted"):
-            self.hero(scale=(1.0, 0.0, 1.0)).save(self.path("x.obj"))
-        self.assertFalse(os.path.exists(self.path("x.obj")))
-        # without normals a flat world matrix has nothing to turn
-        flat = Object(name="flat", mesh=cube(), scale=(1.0, 0.0, 1.0)).save(self.path("flat.obj"))
-        self.assertEqual(MeshData.load(flat).points[:, 1].tolist(), [0.0] * 8)
-
-    def test_maya_imports_it(self):
-        """Maya's OBJ import gives the points, UVs and normals written, in
-        float, the normals made unit, and keeps them as locked user
-        normals. Needs mayapy with the objExport plug-in"""
-        try:
-            import maya.cmds as cmds
-            from maya.api import OpenMaya
-
-            cmds.loadPlugin("objExport", quiet=True)
-        except Exception:  # not running in Maya, or no objExport plug-in
-            self.skipTest("needs Maya and its objExport plug-in")
-        self.addCleanup(cmds.file, new=True, force=True)
-
-        hero, world = self.placed()
-        path = hero.save(self.path("hero.obj"))
-        cmds.file(new=True, force=True)
-        nodes  = cmds.file(path, i=True, type="OBJ", returnNewNodes=True, ignoreVersion=True, options="mo=1")
-        shapes = cmds.ls(nodes, type="mesh", long=True)
-        self.assertEqual(len(shapes), 1)
-        self.assertEqual(cmds.listRelatives(shapes[0], parent=True)[0], "hero")
-        selection = OpenMaya.MSelectionList()
-        selection.add(shapes[0])
-        fn = OpenMaya.MFnMesh(selection.getDagPath(0))
-
-        points = np.array([[p.x, p.y, p.z] for p in fn.getPoints(OpenMaya.MSpace.kWorld)])
-        np.testing.assert_allclose(points, hero.mesh.points @ world[:3, :3] + world[3, :3], rtol=0, atol=1e-6)
-        counts, indices = fn.getVertices()
-        np.testing.assert_array_equal(np.array(counts), hero.mesh.counts)
-        np.testing.assert_array_equal(np.array(indices), hero.mesh.indices)
-
-        # Maya numbers the UVs as the faces first name them: each corner's UV
-        us, vs = fn.getUVs()
-        corners = [(face, k) for face, count in enumerate(counts) for k in range(count)]
-        uv_ids  = [fn.getPolygonUVid(face, k) for face, k in corners]
-        self.assertEqual(fn.numUVs(), len(hero.uv.points))
-        np.testing.assert_allclose(
-            np.column_stack([us, vs])[uv_ids], hero.uv.points[hero.uv.indices], rtol=0, atol=1e-7
-        )
-
-        normals = [fn.getFaceVertexNormal(face, fn.getPolygonVertices(face)[k], OpenMaya.MSpace.kWorld) for face, k in corners]
-        turned  = corner_normals(hero.mesh) @ np.linalg.inv(world[:3, :3]).T
-        np.testing.assert_allclose(
-            np.array([[n.x, n.y, n.z] for n in normals]),
-            turned / np.linalg.norm(turned, axis=1, keepdims=True),
-            rtol = 0,
-            atol = 1e-6,
-        )
-        self.assertEqual((fn.numNormals, sum(fn.isNormalLocked(i) for i in range(fn.numNormals))), (24, 24))
 
 
 if __name__ == "__main__":

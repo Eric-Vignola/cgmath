@@ -101,44 +101,26 @@ class TestSkins(unittest.TestCase):
         self.assertEqual((deformer.name, deformer.joints), ("body", ["root", "tip"]))
         self.assertEqual((weights.name, weights.influences), ("body", ["root", "tip"]))
 
-    def test_an_object_strips_its_mesh_and_its_skin(self):
-        from cgmath.render import Object
+    def test_a_scene_strips_its_nodes_its_shapes_and_its_skins(self):
+        # a skinned mesh placed after the strip is a copy of the stripped mesh
+        from cgmath.hierarchy import TransformData
+        from cgmath.render import Scene
 
-        weights = skin("A:body", ["A:root"])
-        deformer = SkinDeformData(
-            mesh=triangle("A:body"),
-            skin=weights,
-            inverse_bind_matrices = np.eye(4)[None],
-            name="A:body",
-        )
-        obj = Object(name="A:body", mesh=triangle("A:body"), skin=deformer)
-        obj.strip_namespace()
+        root              = TransformData(name="A:root", node_type="joint")
+        scene             = Scene("s").add(root)
+        mesh              = triangle("A:body")
+        mesh.parent_uuid  = root.uuid
+        weights           = skin("A:body", ["A:root"])
+        weights.mesh_uuid = mesh.uuid
+        scene.add(mesh, weights)
+
+        scene.strip_namespace()
         self.assertEqual(
-            (obj.name, obj.mesh.name, obj.skin.name, obj.skin.joints, weights.influences),
-            ("body", "body", "body", ["root"], ["root"]),
+            (scene.hierarchy[0].name, scene.meshes[0].name, scene.skins[0].name, scene.skins[0].influences),
+            ("root", "body", "body", ["root"]),
         )
-
-    def test_posing_after_a_strip_keeps_the_stripped_name(self):
-        # posing deforms a cached copy of the bind-pose mesh: it is stripped too
-        from cgmath.hierarchy import HierarchyData, TransformData
-        from cgmath.render import Object
-
-        deformer = SkinDeformData(
-            mesh=triangle("A:body"),
-            skin=skin("A:body", ["A:root"]),
-            inverse_bind_matrices = np.eye(4)[None],
-            name="A:body",
-        )
-        obj = Object(name="A:body", mesh=triangle("A:body"), skin=deformer)
-        rig = HierarchyData([TransformData(name="A:root", node_type="joint")])
-        obj.pose(rig)
-
-        obj.strip_namespace()
-        rig.strip_namespace()
-        obj.pose(rig)
-        self.assertEqual(obj.mesh.name, "body")
-        obj.restore_bind_pose()
-        self.assertEqual(obj.mesh.name, "body")
+        placed, _ = scene.placed_meshes()[0]
+        self.assertEqual(placed.name, "body")
 
 
 class TestLists(unittest.TestCase):

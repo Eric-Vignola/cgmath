@@ -80,8 +80,7 @@ class TestNotTheFbxSdk(unittest.TestCase):
         "from cgmath.formats import fbx as module\n"
         "from cgmath.hierarchy import hierarchy\n"
         "from cgmath.geometry import mesh, skin_weights\n"
-        "from cgmath.render import scene\n"
-        "print(bool(module.fbx), hierarchy.FBX, hierarchy.FbxExporter, mesh.fbx, skin_weights.fbx, scene._fbx)\n"
+        "print(bool(module.fbx), hierarchy.FBX, hierarchy.FbxExporter, mesh.fbx, skin_weights.fbx)\n"
     )
 
     def run_beside(self, make):
@@ -122,7 +121,7 @@ class TestNotTheFbxSdk(unittest.TestCase):
                 if label == "namespace folder" and installed:
                     self.assertTrue(report.startswith("True <module 'fbx'"), report)
                 else:
-                    self.assertEqual(report, "False None None None None None")
+                    self.assertEqual(report, "False None None None None")
 
     def test_a_stranger_holding_some_of_the_sdk_classes_is_no_sdk(self):
         """the SDK holds all five of SDK_NAMES: a module named fbx, first on
@@ -138,7 +137,7 @@ class TestNotTheFbxSdk(unittest.TestCase):
 
                 done = self.run_beside(partial)
                 self.assertEqual(done.returncode, 0, done.stderr[-1500:])
-                self.assertEqual(done.stdout.split("\n")[-2], "False None None None None None")
+                self.assertEqual(done.stdout.split("\n")[-2], "False None None None None")
 
     @unittest.skipIf(_installed_sdk() is None, "Autodesk FBX Python SDK is not installed")
     def test_the_sdk_is_told_by_its_own_classes(self):

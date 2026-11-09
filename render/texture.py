@@ -1,8 +1,8 @@
 """
 Texture I/O + bilinear sampling helpers.
 
-These are renderer-agnostic so both :mod:`cgmath.render.scene` (for
-``Object.get_loaded_texture`` lazy loading) and
+These are renderer-agnostic so both :mod:`cgmath.render.scene` (for a
+material's colour map, loaded once and kept) and
 :mod:`cgmath.render.raytracer` (for per-hit shading) can import them
 without forming a circular dependency on the renderer.
 """

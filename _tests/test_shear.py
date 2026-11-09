@@ -33,7 +33,7 @@ from cgmath.hierarchy import ClipData, HierarchyData, TransformData, TransformLi
 from cgmath.hierarchy import hierarchy as H
 from cgmath.hierarchy.hierarchy import _diagonal, _pose_matrices, _scale_shears, _span_world
 from cgmath.transforms import matrix_local, matrix_multiply, matrix_to_euler
-from cgmath.render.scene import Camera, Light, Object, Scene
+from cgmath.render.scene import Scene
 
 ASSETS = os.path.join(os.path.dirname(__file__), "test_assets")
 SHEAR  = (0.5, -0.25, 0.75)
@@ -1099,45 +1099,33 @@ class TestShearFiles(unittest.TestCase):
 
 
 class TestShearInARender(unittest.TestCase):
-    """the render caches key on the raw channel: a write past the setter
-    leaves the cached world as it was, so only the raw key sees it"""
-
-    def _object(self) -> Object:
-        return Object("o", scale=(1.0, 2.0, 3.0), rotate=(10.0, 20.0, 30.0))
-
-    def test_every_render_node_takes_it(self):
-        for cls in (Object, Camera, Light):
-            with self.subTest(cls.__name__):
-                self.assertEqual(cls(name="a", shear=SHEAR).shear.tolist(), list(SHEAR))
-
-    def test_an_objects_snapshot(self):
-        node = self._object()
-        node.world_matrix  # cached
-        before = node._capture_transform_state()
-
-        node._shear[...] = SHEAR
-        self.assertNotEqual(node._capture_transform_state(), before)
-
-        node       = self._object()
-        before     = node._capture_transform_state()
-        node.shear = SHEAR
-        self.assertNotEqual(node._capture_transform_state(), before)
+    """the render signature keys on the world of every node a shape sits
+    on: a shear set moves that world, so a frame kept before it goes"""
 
     def test_a_scenes_signature(self):
-        scene = Scene()
-        scene.append(Camera("c"))
-        scene.append(self._object())
-        node = scene["o"]
-        node.world_matrix  # cached
-        before = scene._compute_render_signature()
+        from cgmath.geometry import MeshData
 
-        node._shear[...] = SHEAR
-        self.assertNotEqual(scene._compute_render_signature(), before)
+        node = TransformData("o", uuid=generate_uuid(), scale=(1.0, 2.0, 3.0), rotate=(10.0, 20.0, 30.0))
+        mesh = MeshData(
+            points      = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+            indices     = np.arange(3),
+            counts      = np.array([3]),
+            parent_uuid = node.uuid,
+        )
+        scene  = Scene().add(node, mesh)
+        before = scene._signature()
+
+        node.shear = SHEAR
+        self.assertNotEqual(scene._signature(), before)
+        np.testing.assert_allclose(scene.placed_meshes()[0][1], node.world_matrix)
 
         node.shear = (0.0, 0.0, 0.0)
-        before     = scene._compute_render_signature()
-        node.shear = SHEAR
-        self.assertNotEqual(scene._compute_render_signature(), before)
+        self.assertEqual(scene._signature(), before)
+
+        # a frame kept before the shear is dropped by it
+        scene.frame = object()
+        node.shear  = SHEAR
+        self.assertIsNone(scene.frame)
 
 
 def _sh3(shear) -> np.ndarray:

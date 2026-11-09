@@ -25,10 +25,13 @@ from unittest import mock
 
 import numba
 import numpy as np
+from cgmath.geometry import CameraData, LightData, MaterialData
 from cgmath.geometry.mesh import MeshData, UVData, UVList
+from cgmath.hierarchy import generate_uuid, TransformData
 from cgmath.render import _tiles, raytracer, render
+from cgmath.render.camera import _default_camera_for_points
 from cgmath.render.raytracer import _generate_camera_rays, look_at
-from cgmath.render.scene import Camera, Light, Object, Scene
+from cgmath.render.scene import Scene
 
 try:
     from PIL import Image
@@ -72,6 +75,23 @@ def _checker(n=128, cells=8):
     return tex
 
 
+def _node(name, **channels):
+    """a node with its uuid already, so a shape can name it before it joins
+    a scene"""
+    return TransformData(name, uuid=generate_uuid(), **channels)
+
+
+def _textured(mesh, tex):
+    """a material putting ``tex`` on every face of ``mesh``, as it is"""
+    return MaterialData(mesh_uuid=mesh.uuid, texture=tex, color=(1.0, 1.0, 1.0), diffuse=1.0)
+
+
+def _camera(angle_of_view, **fields):
+    """a CameraData whose vertical angle of view is ``angle_of_view``"""
+    aperture = CameraData.vertical_film_aperture * 25.4
+    return CameraData(focal_length=aperture / (2.0 * np.tan(np.radians(angle_of_view) / 2.0)), **fields)
+
+
 def _cube():
     """12 triangles (no BVH: 64 faces or fewer), one UV square per side."""
     points = np.array(
@@ -94,9 +114,10 @@ def _cube():
         points  = points,
     )
     uv = UVData(
-        indices = np.array(uv_indices, np.int32),
-        counts  = np.array(counts, np.int32),
-        points  = np.array(uv_points, float),
+        indices   = np.array(uv_indices, np.int32),
+        counts    = np.array(counts, np.int32),
+        points    = np.array(uv_points, float),
+        mesh_uuid = mesh.uuid,
     )
     return mesh, uv
 
@@ -104,9 +125,10 @@ def _cube():
 @functools.lru_cache(maxsize=None)
 def _assets():
     """the 15k-face textured character (BVH), and the igloo"""
-    head = MeshData.load(os.path.join(ASSETS, "test_resample.src_mesh_data.npz"))
-    uv   = UVList.load(os.path.join(ASSETS, "test_resample.src_uv_data.npz"))[0]
-    igl  = MeshData.load(os.path.join(ASSETS, "test_sdf.igloo.npz"))
+    head         = MeshData.load(os.path.join(ASSETS, "test_resample.src_mesh_data.npz"))
+    uv           = UVList.load(os.path.join(ASSETS, "test_resample.src_uv_data.npz"))[0]
+    igl          = MeshData.load(os.path.join(ASSETS, "test_sdf.igloo.npz"))
+    uv.mesh_uuid = head.uuid
     return head, uv, igl
 
 
@@ -117,65 +139,57 @@ def _scene(name):
     s   = Scene(name)
     if name == "cube":
         mesh, uv = _cube()
-        s.append(Object(name="cube", mesh=mesh, uv=uv, texture=tex))
+        s.add(mesh, uv, _textured(mesh, tex))
     elif name in ("head", "bezier"):
-        o = Object(name="head", mesh=head, uv=head_uv, texture=tex)
+        s.add(head, head_uv, _textured(head, tex))
         if name == "bezier":
-            o.sample_method = "bezier"
-        s.append(o)
+            s.sample_method = "bezier"
     elif name == "multi":
-        # transformed Objects (rotation, non-uniform scale, translation),
-        # a point and an infinite light, a Camera, an opaque background
+        # placed meshes (rotation, non-uniform scale, translation), a point
+        # and a directional light, a camera, an opaque background; the head
+        # a copy, so the other scenes' head stays on no node
         size = float(np.max(head.points.max(0) - head.points.min(0)))
         isz  = float(np.max(igl.points.max(0) - igl.points.min(0)))
         crate, crate_uv = _cube()
-        s.append(
-            Object(
-                name      = "head",
-                mesh      = head,
-                uv        = head_uv,
-                texture   = tex,
-                rotate    = (0.0, -20.0, 5.0),
-                translate = (0.0, 0.1 * size, 0.0),
-            )
-        )
-        igloo = Object(
-            name      = "igloo",
-            mesh      = igl,
+        head_node = _node("head", rotate=(0.0, -20.0, 5.0), translate=(0.0, 0.1 * size, 0.0))
+        igloo_node = _node(
+            "igloo",
             translate = (size * 1.1, 0.0, 0.0),
             scale     = (size / isz, 0.6 * size / isz, 1.3 * size / isz),
             rotate    = (0.0, 30.0, 0.0),
         )
-        igloo.base_color = (0.3, 0.6, 0.9)
-        s.append(igloo)
-        s.append(
-            Object(
-                name      = "crate",
-                mesh      = crate,
-                uv        = crate_uv,
-                texture   = tex,
-                translate = (-size * 0.9, 0.0, size * 0.2),
-                scale     = (size * 0.5, size * 0.3, size * 0.7),
-                rotate    = (15.0, 40.0, 0.0),
-            )
+        crate_node = _node(
+            "crate",
+            translate = (-size * 0.9, 0.0, size * 0.2),
+            scale     = (size * 0.5, size * 0.3, size * 0.7),
+            rotate    = (15.0, 40.0, 0.0),
         )
-        s.append(
-            Light(
-                name      = "key",
-                kind      = "point",
-                translate = (size * 3, size * 3, size * 3),
-                intensity = (size * 5) ** 2,
-            )
+        key_node              = _node("key", translate=(size * 3, size * 3, size * 3))
+        sun_node              = _node("sun", rotate=(-45.0, 30.0, 0.0))
+        cam_node              = _node("cam")
+        pts                   = np.concatenate([head.points, head.points + (size * 1.1, 0, 0)])
+        cam_node.world_matrix = _default_camera_for_points(pts).T
+        s.add(head_node, igloo_node, crate_node, key_node, sun_node, cam_node)
+
+        placed_head             = head.copy()
+        placed_head.parent_uuid = head_node.uuid
+        igl.parent_uuid         = igloo_node.uuid
+        crate.parent_uuid       = crate_node.uuid
+        s.add(placed_head, head_uv, _textured(placed_head, tex))
+        s.add(igl, MaterialData(mesh_uuid=igl.uuid, color=(0.3, 0.6, 0.9), diffuse=1.0))
+        s.add(crate, crate_uv, _textured(crate, tex))
+        s.add(
+            LightData(name="key", kind="point", intensity=(size * 5) ** 2, decay_rate=2, parent_uuid=key_node.uuid),
+            LightData(name="sun", kind="directional", intensity=0.6, parent_uuid=sun_node.uuid),
+            _camera(40.0, name="cam", parent_uuid=cam_node.uuid),
         )
-        s.append(Light(name="sun", kind="infinite", rotate=(-45.0, 30.0, 0.0), intensity=0.6))
-        pts = np.concatenate([head.points, head.points + (size * 1.1, 0, 0)])
-        s.append(Camera.default_view(pts, name="cam", angle_of_view=40.0))
         s.background = (0.1, 0.1, 0.12, 1.0)
     elif name == "ortho":
-        s.append(Object(name="head", mesh=head, uv=head_uv, texture=tex))
-        cam                 = Camera.default_view(head.points, name="ortho_cam")
-        cam.is_orthographic = True
-        s.append(cam)
+        cam_node              = _node("ortho_cam")
+        cam_node.world_matrix = _default_camera_for_points(head.points).T
+        width                 = float(np.linalg.norm(head.points.max(0) - head.points.min(0)))
+        s.add(cam_node, head, head_uv, _textured(head, tex))
+        s.add(CameraData(name="ortho_cam", orthographic=True, orthographic_width=width, parent_uuid=cam_node.uuid))
     else:
         raise KeyError(name)
     return s
@@ -278,7 +292,7 @@ class TestIdentity(BandCase):
                 self.assertEqual(n_bands, [1, 1])
 
     def test_cube_no_bvh(self):
-        self.assertIsNone(_scene("cube").objects[0].mesh.bvh_bilinear)
+        self.assertIsNone(_scene("cube").meshes[0].bvh_bilinear)
         self.run_scene("cube")
 
     def test_textured_character_bvh(self):
@@ -358,27 +372,25 @@ class TestIdentity(BandCase):
         with _Bands(997):
             self.assertIsNone(call().depth)
 
-    def test_coincident_objects_tie_to_the_first(self):
+    def test_coincident_meshes_tie_to_the_first(self):
         # one mesh twice at one place, two colours: every hit is an exact
-        # tie of depth, which the first Object wins; at the world's origin,
+        # tie of depth, which the first mesh wins; at the world's origin,
         # and both through the same transform
-        mesh, uv = _cube()
+        mesh, _ = _cube()
         for moved in (False, True):
             s = Scene("tie")
             for name, colour in (("red", (0.9, 0.1, 0.1)), ("blue", (0.1, 0.1, 0.9))):
+                copy = MeshData(indices=mesh.indices, counts=mesh.counts, points=mesh.points, name=name)
                 if moved:
-                    o = Object(
-                        name      = name,
-                        mesh      = mesh,
-                        uv        = uv,
+                    node = _node(
+                        name,
                         translate = (0.1, -0.2, 0.3),
                         rotate    = (10.0, 20.0, 30.0),
                         scale     = (1.0, 1.3, 0.8),
                     )
-                else:
-                    o = Object(name=name, mesh=mesh, uv=uv)
-                o.base_color = colour
-                s.append(o)
+                    copy.parent_uuid = node.uuid
+                    s.add(node)
+                s.add(copy, MaterialData(mesh_uuid=copy.uuid, color=colour, diffuse=1.0))
             call = functools.partial(
                 s.render, resolution=(120, 90), samples_per_pixel=4, return_depth=True
             )
@@ -409,13 +421,9 @@ class TestIdentity(BandCase):
             samples_per_pixel = 4,
             return_depth      = True,
         )
-        ref   = _whole(functools.partial(render, scene=[{"mesh": mesh}], **kw))
-        alone = Scene("cube")
-        alone.append(Object(name="cube", mesh=mesh, uv=uv))
-        beside = Scene("beside")
-        beside.append(Object(name="cube", mesh=mesh, uv=uv))
-        beside.append(Object(name="empty", mesh=empty))
-        beside.append(Object(name="points", mesh=points_only))
+        ref       = _whole(functools.partial(render, scene=[{"mesh": mesh}], **kw))
+        alone     = Scene("cube").add(mesh, uv)
+        beside    = Scene("beside").add(mesh, uv, empty, points_only)
         scene_kw  = dict(resolution=(96, 64), samples_per_pixel=4, return_depth=True)
         scene_ref = _whole(functools.partial(alone.render, **scene_kw))
         for samples, threads in ((None, None), (None, 1), (37, None), (37, 1)):
@@ -486,8 +494,9 @@ def _sample_dir(px, py, spp):
 
 
 def _boxes(name, pixels, spp):
-    """ONE Object: a tiny box on the first sample ray of each of *pixels*,
-    5 units out, its points in object space under SKEW and SHIFT"""
+    """ONE mesh on a node, its UV set and its texture: a tiny box on the
+    first sample ray of each of *pixels*, 5 units out, its points in object
+    space under SKEW and SHIFT"""
     cube, cube_uv = _cube()
     pts, idx, cnt, upts, uidx = [], [], [], [], []
     for k, (px, py) in enumerate(pixels):
@@ -503,19 +512,21 @@ def _boxes(name, pixels, spp):
         points  = np.concatenate(pts),
     )
     uv = UVData(
-        indices = np.concatenate(uidx).astype(np.int32),
-        counts  = np.concatenate(cnt),
-        points  = np.concatenate(upts),
+        indices   = np.concatenate(uidx).astype(np.int32),
+        counts    = np.concatenate(cnt),
+        points    = np.concatenate(upts),
+        mesh_uuid = mesh.uuid,
     )
-    M              = np.eye(4)
-    M[:3, :3]      = SKEW
-    M[:3, 3]       = SHIFT
-    o              = Object(name=name, mesh=mesh, uv=uv, texture=_checker())
-    o.world_matrix = M.T  # row-major for TransformData
-    return o
+    M                 = np.eye(4)
+    M[:3, :3]         = SKEW
+    M[:3, 3]          = SHIFT
+    node              = _node(name)
+    node.world_matrix = M.T  # row-major for TransformData
+    mesh.parent_uuid  = node.uuid
+    return node, mesh, uv, _textured(mesh, _checker())
 
 
-# a case: the pixels each Object is hit in. In the last, the first Object's
+# a case: the pixels each mesh is hit in. In the last, the first mesh's
 # band is redone, and the second's one hit there stays padded: the frame
 # hits it twice
 SINGLE_HIT_CASES = {
@@ -548,12 +559,12 @@ class TestSingleHit(BandCase):
             for spp in (1, 4):
                 sc = Scene(name)
                 for i, pixels in enumerate(objects):
-                    sc.append(_boxes(f"boxes{i}", pixels, spp))
+                    sc.add(*_boxes(f"boxes{i}", pixels, spp))
                 if name == "one hit and a big box":
                     box, box_uv = _cube()
-                    sc.append(
-                        Object(name="box", mesh=box, uv=box_uv, translate=(-1.5, -0.5, 0.0))
-                    )
+                    box_node        = _node("box", translate=(-1.5, -0.5, 0.0))
+                    box.parent_uuid = box_node.uuid
+                    sc.add(box_node, box, box_uv)
                 call = functools.partial(
                     render,
                     scene             = sc,
@@ -757,15 +768,15 @@ class TestBlasGuard(unittest.TestCase):
             if isinstance(n, ast.Attribute) and getattr(n.value, "id", None) == "_rt"
         }
         free = {
-            "_interpolate_uvs",
-            "_sample_texture_bilinear",
+            "_sample_colors",
             "_resolve_msaa",
             "_resolve_msaa_depth",
             "_composite_over",
             "_to_uint8_image",
         }
         self.assertEqual(used, free | {"_shade_one_light"})
-        for name in free:
+        # _sample_colors reads the UVs and the texture through these two
+        for name in free | {"_interpolate_uvs", "_sample_texture_bilinear"}:
             source = textwrap.dedent(inspect.getsource(getattr(raytracer, name)))
             self.assertEqual(_blas_calls(ast.parse(source)), [], name)
         from cgmath.render._numba._texture import _sample_texture_bilinear_fast
@@ -1139,9 +1150,9 @@ class TestErrors(BandCase):
                     self.assertIn(text, str(got.exception), (kw, threads, samples))
 
     def test_a_singular_world_matrix(self):
-        # an Object scaled to 0 raises the whole frame's error, numpy's
-        # LinAlgError (a ValueError only under numpy 2), and before its own
-        # n-gon faces (render()'s Raises)
+        # a mesh on a node scaled to 0 raises the whole frame's error,
+        # numpy's LinAlgError (a ValueError only under numpy 2), and before
+        # its own n-gon faces (render()'s Raises)
         cube, uv = _cube()
         points = [[0, 0, 0], [1, 0, 0], [1.3, 1, 0], [0.5, 1.6, 0], [-0.3, 1, 0]]
         ngon = MeshData(
@@ -1150,10 +1161,11 @@ class TestErrors(BandCase):
             points  = np.array(points, float),
         )
         for other in (cube, ngon):
-            s = Scene("singular")
-            s.append(Object(name="cube", mesh=cube, uv=uv))
-            s.append(Object(name="flat", mesh=other, scale=(0.0, 1.0, 1.0)))
-            call = functools.partial(s.render, resolution=(64, 48), samples_per_pixel=4)
+            flat             = MeshData(indices=other.indices, counts=other.counts, points=other.points, name="flat")
+            node             = _node("flat", scale=(0.0, 1.0, 1.0))
+            flat.parent_uuid = node.uuid
+            s                = Scene("singular").add(node, cube, uv, flat)
+            call             = functools.partial(s.render, resolution=(64, 48), samples_per_pixel=4)
             with self.assertRaises(np.linalg.LinAlgError) as ref:
                 _whole(call)
             for threads in (None, 1):
@@ -1637,23 +1649,23 @@ class TestSequenceCache(unittest.TestCase):
 
     def test_turntable_on_one_thread_replays_for_every_core(self):
         mesh, uv = _cube()
-        obj = Object(name="cube", mesh=mesh, uv=uv, texture=_checker())
+        scene = Scene("cube").add(mesh, uv, _textured(mesh, _checker()))
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "t.{frame:04d}.png")
             kw  = dict(n_frames=2, resolution=(32, 32), samples_per_pixel=1)
-            obj.turntable(out, threads=1, **kw)
+            scene.turntable(out, threads=1, **kw)
             original = Scene.render
             with mock.patch.object(Scene, "render", autospec=True, side_effect=original) as spy:
-                obj.turntable(out, **kw)
-                obj.turntable(out, threads=3, **kw)
+                scene.turntable(out, **kw)
+                scene.turntable(out, threads=3, **kw)
             self.assertEqual(spy.call_count, 0)
             # a bad threads raises, kept frames or not
             with self.assertRaises(ValueError):
-                obj.turntable(out, threads=0, **kw)
+                scene.turntable(out, threads=0, **kw)
 
     @unittest.skipIf(pygltflib is None or trimesh is None, "pygltflib / trimesh are not installed")
     def test_an_animation_on_one_thread_replays_for_every_core(self):
-        from cgmath._tests.test_object_skin import write_glb
+        from cgmath._tests.test_scene_skin import write_glb
         from cgmath.hierarchy import ClipData, HierarchyData
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1665,19 +1677,18 @@ class TestSequenceCache(unittest.TestCase):
             for index in range(clip.frame_count):
                 clip.frame         = index
                 clip[spine].rotate = np.array([0.0, 0.0, 15.0 * index])
-            scene = Scene("s")
-            scene.append(Object.load_glb(glb))
-            out = os.path.join(tmp, "a.{frame:04d}.png")
-            kw  = dict(resolution=(32, 32), samples_per_pixel=1)
-            scene.animate(clip, out, threads=1, **kw)
+            scene = Scene.load_glb(glb)
+            out   = os.path.join(tmp, "a.{frame:04d}.png")
+            kw    = dict(resolution=(32, 32), samples_per_pixel=1)
+            scene.animate(out, clip=clip, threads=1, **kw)
             original = Scene.render
             with mock.patch.object(Scene, "render", autospec=True, side_effect=original) as spy:
-                scene.animate(clip, out, **kw)
-                scene.animate(clip, out, threads=3, **kw)
+                scene.animate(out, clip=clip, **kw)
+                scene.animate(out, clip=clip, threads=3, **kw)
             self.assertEqual(spy.call_count, 0)
             # a bad threads raises, kept frames or not
             with self.assertRaises(ValueError):
-                scene.animate(clip, out, threads=0, **kw)
+                scene.animate(out, clip=clip, threads=0, **kw)
 
 
 if __name__ == "__main__":
