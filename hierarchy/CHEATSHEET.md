@@ -1796,21 +1796,24 @@ path = clips.save(os.path.join(WORKDIR, "takes.npz"))
 assert ClipList.load(path).active.take == "walk"
 ```
 
-`ClipList.load_fbx(path)` reads every take of a file from one open, each
-as `ClipData.load_fbx(path, take=i)` reads it and named as that names it,
-with the same keywords; `ClipList.load_glb(path)` reads every glTF
-animation from one parse. Neither takes a take argument: pick a take from
-the list, or read one alone with `ClipData.load_fbx(path, take=...)` or
-`ClipData.load_glb(path, animation=i)`. Each take holds its own copy of
-the file's rest pose, a glb's node pose for a glb; editing one leaves the
-others. `ClipList.load(path)` routes by extension.
+`ClipList.load_fbx(path)` reads every take of a file from one open: one
+`ClipData` per animation stack, in file order, each over every node of
+the file, named as the stack is (a blank name "Take 001", "Take 002" ...
+by position, a name two stacks share told apart as `idle_1`, with one
+warning), the stack the file marks active the active take, else the
+first. `ClipData.load_fbx(path)` is that active take alone, and
+`cgmath.formats.load_fbx(path)` gives the same list as its `clip`, the
+meshes, skins and UV sets beside it. A file holding no take gives an
+empty list (`ClipData.load_fbx` raises). `ClipList.load_glb(path)` reads
+every glTF animation from one parse. Neither takes a take argument: pick
+a take from the list. `ClipList.load(path)` routes by extension.
 
 <!-- notest -->
 ```python
-clips = ClipList.load_fbx("anim.fbx")         # every take, in file order
+clips = ClipList.load_fbx("anim.fbx")         # every take, in file order, the file's active one active
 idle  = clips["idle"]                         # one of them, by its name
+clips.active = "run"                          # another one active
 run   = ClipList.load_glb("anim.glb")["run"]  # every animation, then one by its name
-assert clips[0].rest_pose is not clips[1].rest_pose
 ```
 
 The rig edits, `clips.set_rotate_order("zyx")` say, run on every take or
@@ -1820,33 +1823,36 @@ an item assignment, `clips.frames[1:3] = other` or
 `clips.frames[2] = pose`, one value for every take or a `PerTake` of one
 each. `sort` orders by take. `get_delta` and `add_delta` pair another
 `ClipList` by take name, and send anything else to every take. `save`
-keeps every take's tree, its name included, and `animate` plays a
-`ClipList` of one take.
+keeps every take's tree, its name and the active take included, and
+`animate` plays a `ClipList`'s active take.
 
-`ClipList.save_fbx(path)` writes the rig once, as the first take holds
-it, then one animation stack per take, named after it: every node's
-translate, rotate and scale keyed on every frame, linear, as float32 (an
-ASCII file holds about 7 significant digits). A keyed scale is written as
-it is, as Maya's own export writes it; only a static scale under 1e-12 is
-raised to 1e-12. FBX has no channel for shear: it is left out, with one
-warning naming the nodes holding one on any frame of any take, as Maya's
-export leaves it out. FBX holds one joint orient and rotate axis per
-joint for the file, the first take's first frame's: one that changes
-within a take, or differs between takes, is keyed in that frame's rotate,
-so every node's world on every frame is the take's, to float32 (a node
-that is no joint keys its whole joint orient and rotate axis there). It
-refuses, before anything is written, a list with no take, a take with no
-frame, takes on other rigs, takes at other frame rates or at one no fbx
-time mode carries, takes in other axes or units, and two takes of one
-name.
+`ClipList.save_fbx(path)`, and `cgmath.formats.save_fbx(path, clip=clips)`,
+which takes one `ClipData` as a list of one, write the nodes once, at the
+active take's first frame, then one animation stack per take, in the
+list's order, named after it (a blank name by position), the active
+take's stack the file's current one: every node's translate, rotate and
+scale keyed on every frame of the take, linear, as float32 (an ASCII
+file holds about 7 significant digits), a constant channel one key. It
+refuses, before anything is written, a list of no take, a take of no
+frame, takes at two frame rates or at one no fbx time mode carries, two
+takes written under one name, a joint orient or rotate axis a take
+changes over its frames or holds other than the active take's (a file
+holds one a node), and, as every save, a shear, a scale that is not
+uniform on a node with children and a node that is no joint or
+transform. Maya's FBXImport picks a take by position (`FBXImport -f file
+-t 2`) and gives that take's curves alone, every node's world on every
+frame within 1e-6 of the take.
 
 ```python
-path      = os.path.join(WORKDIR, "takes.fbx")
-clips.fps = 24.0                                    # one file, one frame rate
+path         = os.path.join(WORKDIR, "takes.fbx")
+clips.fps    = 24.0                                 # one file, one frame rate
+clips.active = "walk"
 clips.save_fbx(path)                                # also clips.save(path)
 back = ClipList.load_fbx(path)
 assert back.take == ["idle", "walk"] and back.frame_count == [6, 4]
+assert back.active.take == "walk"
 assert np.allclose(back["walk"].frames.rotate, walk.frames.rotate, atol=1e-5)
+assert HierarchyData.load_fbx(path).name == idle.name  # the nodes, at walk's first frame
 
 rest  = ClipList([ClipData(make_chain(), frames=4, take="walk"), ClipData(make_chain(), frames=6, take="idle")])
 delta = clips.get_delta(rest)                       # idle against idle, walk against walk
@@ -1856,16 +1862,12 @@ path = clips.save(os.path.join(WORKDIR, "takes.npz"))
 assert ClipList.load(path) == clips
 ```
 
-FBX keeps no shear, so a sheared node and the nodes under it read back,
-and import in Maya, off the take, as Maya's own export leaves them: on
-the camera-skin layouts measured, up to 25.1 in their axes and 19.9 in
-position where the clip holds a shear, within 8.5e-7 and 1.8e-6 where it
-holds none. Maya 2025's `FBXImport` has no 72 or 96 fps time unit: a take
-saved at 72, 96 or 119.88 fps imports into a 24 fps scene, each key at
-its own second, so on a fractional frame (the take's frame 1 at 0.333,
-0.25 or 0.2002), where every node's world is the take's to float32; read
-on the scene frame of the take's frame number, the take stands that many
-24ths of a second in (up to 8.29 and 67.2 off on the takes measured).
+Maya 2025's `FBXImport` has no 72 or 96 fps time unit: a take saved at
+72, 96 or 119.88 fps imports into a 24 fps scene, each key at its own
+second, so on a fractional frame (the take's frame 1 at 0.333, 0.25 or
+0.2002), where every node's world is the take's to float32; read on the
+scene frame of the take's frame number, the take stands that many 24ths
+of a second in (up to 8.29 and 67.2 off on the takes measured).
 
 ---
 
