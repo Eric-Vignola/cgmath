@@ -1,12 +1,13 @@
-"""The r17-skeleton fork: one hierarchy or one take, the meshes on its
+"""The r17-skeleton fork: one hierarchy or its takes, the meshes on its
 nodes, saved, read back, and read by Maya's own FBXImport.
 
 ``cgmath.formats.save_fbx(path, hierarchy)`` writes a HierarchyData of
-joints and transforms, ``save_fbx(path, clip=clip)`` a ClipData's nodes and
-its take, ``meshes=`` each mesh as the shape of the node its ``parent_uuid``
-names; ``cgmath.formats.load_fbx(path)`` gives ``(hierarchy, clip, meshes,
-skins, uvs)`` back, None for what the file holds none of. A bind pose comes
-with skins only. The FBX tests need the Autodesk SDK (mayapy), the Maya
+joints and transforms, ``save_fbx(path, clip=clips)`` a ClipList's nodes and
+its takes (a ClipData as a list of one), ``meshes=`` each mesh as the shape
+of the node its ``parent_uuid`` names; ``cgmath.formats.load_fbx(path)``
+gives ``(hierarchy, clip, meshes, skins, uvs)`` back, ``clip`` a ClipList of
+every take, None for what the file holds none of. A bind pose comes with
+skins only. The FBX tests need the Autodesk SDK (mayapy), the Maya
 ones a Maya with its fbxmaya plug-in.
 """
 
@@ -122,6 +123,21 @@ def take(rig: HierarchyData) -> ClipData:
     return clip
 
 
+def takes() -> ClipList:
+    """three takes over skeleton(): walk, take(); run, a cut of 6 of its
+    frames from 1003, every rotate turned 3 degrees; and a take of no name,
+    3 frames from 1001; run active"""
+    walk              = take(skeleton())
+    run               = walk.frames[2:8]
+    run.take          = "run"
+    run.frames.rotate = np.asarray(run.frames.rotate) + 3.0
+    blank             = walk.frames[0:3]
+    blank.take        = ""
+    clips             = ClipList([walk, run, blank])
+    clips.active      = "run"
+    return clips
+
+
 def at_float32(values) -> np.ndarray:
     return np.asarray(values, dtype=np.float64).astype(np.float32).astype(np.float64)
 
@@ -226,6 +242,14 @@ class _Files(unittest.TestCase):
             self.assertEqual(a[key].shape, b[key].shape, key)
             np.testing.assert_array_equal(a[key], b[key], err_msg=str(key))
 
+    def assertSameClips(self, got, want):
+        """two ClipLists: the same takes by name, in order, the same one
+        active, each take the same clip"""
+        self.assertEqual(got.take, want.take)
+        self.assertEqual(got._active, want._active)
+        for a, b in zip(got, want):
+            self.assertSameClip(a, b)
+
 
 class TestClipLayout(unittest.TestCase):
     """a channel holds one row, constant on every frame number, or F rows"""
@@ -318,12 +342,11 @@ class TestArguments(_Files):
         self.refused(TypeError, "not a ClipData, pass it as clip=", hierarchy=take(skeleton()))
 
     def test_anything_else(self):
-        self.refused(TypeError, "the clip is a ClipData, not a HierarchyData",      clip=skeleton())
-        self.refused(TypeError, "the clip is a ClipData, not a ClipList",           clip=ClipList([take(skeleton())]))
-        self.refused(TypeError, "the hierarchy is a HierarchyData, not a ClipList", ClipList([take(skeleton())]))
+        self.refused(TypeError, "the clip is a ClipData or a ClipList, not a HierarchyData", clip=skeleton())
+        self.refused(TypeError, "the clip is a ClipData or a ClipList, not a list", clip=[take(skeleton())])
+        self.refused(TypeError, "the hierarchy is a HierarchyData, not a ClipList, pass it as clip=", ClipList([take(skeleton())]))
         self.refused(TypeError, "the hierarchy is a HierarchyData, not a list",     list(skeleton()))
-        with self.assertRaisesRegex(NotImplementedError, "r17-skeleton"):
-            ClipList([take(skeleton())]).save_fbx(self.path("x.fbx"))
+        self.refused(ValueError, "the ClipList holds no take", clip=ClipList())
         with self.assertRaises(TypeError):
             take(skeleton()).save_fbx(self.path("x.fbx"), hierarchy=skeleton())
 
@@ -336,8 +359,12 @@ class TestClipAlone(_Files):
     def test_save_load_gives_no_skeleton_and_the_clip_in_float32(self):
         clip = take(skeleton())
         save_fbx(self.path("a.fbx"), clip=clip)
-        rig, back = load_fbx(self.path("a.fbx"))[:2]
+        rig, clips = load_fbx(self.path("a.fbx"))[:2]
         self.assertIsNone(rig)
+        self.assertIsInstance(clips, ClipList)
+        self.assertEqual(clips.take, ["walk"])
+        back = clips.active
+        self.assertIs(back, clips[0])
         self.assertEqual(back.take, "walk")
         self.assertEqual((back.start_frame, back.frame_count, back.fps), (START, FRAMES, FPS))
         self.assertEqual(structure(back), structure(clip))
@@ -353,10 +380,11 @@ class TestClipAlone(_Files):
 
     def test_a_second_save_and_load_is_bit_for_bit(self):
         save_fbx(self.path("a.fbx"), clip=take(skeleton()))
-        first = load_fbx(self.path("a.fbx")).clip
+        first = load_fbx(self.path("a.fbx")).clip.active
         save_fbx(self.path("b.fbx"), clip=first)
-        rig, second = load_fbx(self.path("b.fbx"))[:2]
+        rig, clips = load_fbx(self.path("b.fbx"))[:2]
         self.assertIsNone(rig)
+        second = clips.active
         self.assertEqual(second.take, first.take)
         self.assertSameClip(second, first)
         for frame in (START, START + 5, START + FRAMES - 1):
@@ -364,7 +392,7 @@ class TestClipAlone(_Files):
 
     def test_constant_channels_read_back_at_every_frame_number(self):
         save_fbx(self.path("a.fbx"), clip=take(skeleton()))
-        clip = load_fbx(self.path("a.fbx")).clip
+        clip = load_fbx(self.path("a.fbx")).clip.active
         for frame in FAR:
             pose = clip.at(frame)
             np.testing.assert_array_equal(pose["chest"].rotate, [1.0, 2.0, 3.0])
@@ -389,6 +417,90 @@ class TestClipAlone(_Files):
         found = counts(self.path("a.fbx"))
         self.assertEqual((found["poses"], found["stacks"], found["layers"]), (0, 1, 1))
         self.assertEqual(found["curves"], curve_count(clip))
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestTakes(_Files):
+    """save_fbx(path, clip=clips): every take of a ClipList, one animation
+    stack each, the active take the file's; load_fbx gives the list back"""
+
+    def test_every_take_round_trips_the_active_one_active(self):
+        clips = takes()
+        save_fbx(self.path("a.fbx"), clip=clips)
+        found = counts(self.path("a.fbx"))
+        self.assertEqual((found["poses"], found["stacks"], found["layers"]), (0, 3, 3))
+        self.assertEqual(found["curves"], sum(curve_count(clip) for clip in clips))
+
+        rig, back = load_fbx(self.path("a.fbx"))[:2]
+        self.assertIsNone(rig)
+        self.assertIsInstance(back, ClipList)
+        self.assertEqual(back.take, ["walk", "run", "Take 003"])
+        self.assertIs(back.active, back["run"])
+        self.assertEqual((back.start_frame, back.frame_count, back.fps), ([START, START + 2, START], [FRAMES, 6, 3], [FPS] * 3))
+        self.assertEqual(len({tuple(uuids) for uuids in back.uuid}), 1)  # one skeleton, one set of uuids
+        for got, want in zip(back, clips):
+            self.assertEqual(structure(got), structure(want))
+            self.assertEqual(got.keyed.tolist(), want.keyed.tolist())
+            a, b = layout(got), layout(want)
+            self.assertEqual(list(a), list(b))
+            for key in b:
+                self.assertEqual(a[key].shape, b[key].shape, key)
+                np.testing.assert_array_equal(a[key], at_float32(b[key]), err_msg=str(key))
+
+        # the class routes: every take, the active take, the nodes at the
+        # active take's first frame
+        self.assertSameClips(ClipList.load_fbx(self.path("a.fbx")), back)
+        self.assertSameClip(ClipData.load_fbx(self.path("a.fbx")), back["run"])
+        self.assertSameSkeleton(HierarchyData.load_fbx(self.path("a.fbx")), clips["run"].at(START + 2))
+
+        # a second cycle, bit for bit, through save_fbx and ClipList.save_fbx
+        save_fbx(self.path("b.fbx"), clip=back)
+        self.assertSameClips(load_fbx(self.path("b.fbx")).clip, back)
+        back.save_fbx(self.path("c.fbx"))
+        self.assertSameClips(load_fbx(self.path("c.fbx")).clip, back)
+
+    def test_a_clip_is_written_as_a_list_of_one(self):
+        clip = take(skeleton())
+        save_fbx(self.path("a.fbx"), clip=clip)
+        save_fbx(self.path("b.fbx"), clip=ClipList([clip]))
+        one, other = load_fbx(self.path("a.fbx")).clip, load_fbx(self.path("b.fbx")).clip
+        self.assertIsInstance(one, ClipList)
+        self.assertEqual((one.take, one._active), (["walk"], 0))
+        self.assertIs(one.active, one[0])
+        self.assertSameClips(one, other)
+        self.assertEqual(ClipList.load_fbx(self.path("a.fbx")).take, ["walk"])
+
+    def test_a_file_of_no_take(self):
+        skeleton().save_fbx(self.path("rig.fbx"))
+        self.assertEqual(len(ClipList.load_fbx(self.path("rig.fbx"))), 0)
+        self.assertIsNone(load_fbx(self.path("rig.fbx")).clip)
+
+    def test_refused_before_anything_is_written(self):
+        def refused(error, message, **kwargs):
+            with self.assertRaisesRegex(error, message):
+                save_fbx(self.path("refused.fbx"), **kwargs)
+            self.assertFalse(os.path.exists(self.path("refused.fbx")))
+
+        rates        = takes()
+        rates[1].fps = 24.0
+        refused(ValueError, r"the takes play at \[24\.0, 30\.0\] fps; a file holds one frame rate", clip=rates)
+        twice         = takes()
+        twice[2].take = "walk"
+        refused(ValueError, r"two takes would be written as \['walk'\]; take names must differ", clip=twice)
+        orient                                = takes()
+        orient[0].frames["hips"].joint_orient = (0.0, 0.0, 91.0)
+        refused(
+            ValueError,
+            r"node 'hips' channel 'joint_orient' is \[0\.0, 0\.0, 91\.0\] in take 0 \('walk'\) and \[0\.0, 0\.0, 90\.0\] "
+            r"in the active take 1 \('run'\): a file holds one joint_orient a node, the active take's",
+            clip=orient,
+        )
+        axis                                = takes()
+        axis[2].frames["spine"].rotate_axis = (0.0, 6.0, 0.0)
+        refused(ValueError, r"node 'spine' channel 'rotate_axis' is \[0\.0, 6\.0, 0\.0\] in take 2 and", clip=axis)
+        moving                                = takes()
+        moving[1].frames["hips"].joint_orient = np.array([[0.0, 0.0, 90.0 + f] for f in range(6)])
+        refused(ValueError, "node 'hips' channel 'joint_orient' frame 1004", clip=moving)
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
@@ -436,10 +548,12 @@ class TestClassRoutes(_Files):
         clip.save_fbx(self.path("clip.fbx"))
         rig, back = load_fbx(self.path("clip.fbx"))[:2]
         self.assertIsNone(rig)
-        self.assertSameClip(ClipData.load_fbx(self.path("clip.fbx")), back)
+        self.assertSameClip(ClipData.load_fbx(self.path("clip.fbx")), back.active)
+        self.assertSameClips(ClipList.load_fbx(self.path("clip.fbx")), back)
         skeleton().save_fbx(self.path("rig.fbx"))
         with self.assertRaisesRegex(ValueError, "holds no take"):
             ClipData.load_fbx(self.path("rig.fbx"))
+        self.assertEqual(ClipList.load_fbx(self.path("rig.fbx")), ClipList())
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
@@ -609,8 +723,9 @@ class TestPoses(_Files):
                     np.testing.assert_array_equal(rig["c"].rotate,    [10.0, 20.0, 30.0])
                     np.testing.assert_array_equal(rig["c"].shear,     [0.0, 0.0, 0.0])
         path = _written(self.path("take.fbx"), bind="moved", keys=[(1.0, 1.0, 1.0), (2.0, 2.0, 2.0)])
-        rig, clip = load_fbx(path)[:2]
+        rig, clips = load_fbx(path)[:2]
         self.assertIsNone(rig)
+        clip = clips.active
         np.testing.assert_array_equal(clip.frames["c"].translate, [[1.0, 2.0, 3.0]])
         np.testing.assert_array_equal(clip.frames["c"].rotate,    [[10.0, 20.0, 30.0]])
         np.testing.assert_array_equal(clip.frames["p"].scale,     [[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]])
@@ -654,13 +769,16 @@ class _InMaya(_Files):
         self.cmds, self.mel = maya
         self.addCleanup(self.cmds.file, new=True, force=True)
 
-    def imported(self, path: str) -> None:
+    def imported(self, path: str, take=None) -> None:
+        """a fresh ntsc Y-up scene with the file imported; ``take`` picks one
+        of the file's takes by its 1-based position (FBXImport -t)"""
         cmds, mel = self.cmds, self.mel
         cmds.file(new=True, force=True)
         cmds.currentUnit(time="ntsc", linear="cm", angle="deg")
         cmds.upAxis(axis="y")
         mel.eval("FBXResetImport")
-        mel.eval(f'FBXImport -f "{path.replace(os.sep, "/")}"')
+        flag = "" if take is None else f" -t {int(take)}"
+        mel.eval(f'FBXImport -f "{path.replace(os.sep, "/")}"{flag}')
 
     def exported(self, name: str) -> str:
         """Maya's FBXExport of the scene at the clip's first frame"""
@@ -707,8 +825,9 @@ class TestMaya(_InMaya):
         world matrix, within 1e-6 of load_fbx's read of the same file"""
         cmds = self.cmds
         save_fbx(self.path("a.fbx"), clip=take(skeleton()))
-        rig, back = load_fbx(self.path("a.fbx"))[:2]
+        rig, clips = load_fbx(self.path("a.fbx"))[:2]
         self.assertIsNone(rig)
+        back = clips.active
         self.imported(self.path("a.fbx"))
         self.assertEqual(cmds.ls(type="dagPose"), [])
         self.assertEqual(len(cmds.ls(type="animCurve")), curve_count(back))
@@ -726,6 +845,26 @@ class TestMaya(_InMaya):
                 world = np.array(cmds.getAttr(f"{node.name}.worldMatrix", time=frame)).reshape(4, 4)
                 np.testing.assert_allclose(world, wanted[f, column], rtol=0, atol=1e-6, err_msg=(node.name, frame))
                 self.maya_user(node, frame)
+
+    def test_maya_imports_each_take(self):
+        """a file of three takes: FBXImport -t picks one by position, and
+        gives that take's curves alone, every node's world on every frame of
+        it within 1e-6 of load_fbx's read of the take"""
+        cmds  = self.cmds
+        clips = takes()
+        save_fbx(self.path("a.fbx"), clip=clips)
+        back = load_fbx(self.path("a.fbx")).clip
+        self.assertEqual(back.take, ["walk", "run", "Take 003"])
+        for index, clip in enumerate(back):
+            with self.subTest(take=clip.take):
+                self.imported(self.path("a.fbx"), take=index + 1)
+                self.assertEqual(len(cmds.ls(type="animCurve")), curve_count(clip))
+                wanted = np.asarray(clip.frames.world_matrix)
+                for f in range(clip.frame_count):
+                    frame = clip.start_frame + f
+                    for column, node in enumerate(clip):
+                        world = np.array(cmds.getAttr(f"{node.name}.worldMatrix", time=frame)).reshape(4, 4)
+                        np.testing.assert_allclose(world, wanted[f, column], rtol=0, atol=1e-6, err_msg=(clip.take, node.name, frame))
 
     def test_maya_imports_the_skeleton_as_a_still_hierarchy(self):
         """no curve; every node's attributes and world matrix within 1e-6 of
@@ -762,16 +901,19 @@ class TestMaya(_InMaya):
         out = self.path("maya.fbx").replace(os.sep, "/")
         mel.eval(f'FBXExport -f "{out}"')
 
-        rig, first = load_fbx(out)[:2]
+        rig, clips = load_fbx(out)[:2]
         self.assertIsNone(rig)
+        self.assertEqual(clips.take, ["Take 001"])  # Maya's export names the one take
+        first = clips.active
         save_fbx(self.path("again.fbx"), clip=first)
-        rig, second = load_fbx(self.path("again.fbx"))[:2]
+        rig, again = load_fbx(self.path("again.fbx"))[:2]
         self.assertIsNone(rig)
+        second = again.active
         self.assertSameClip(second, first)
         for frame in (START, START + FRAMES - 1):
             self.assertSameSkeleton(second.at(frame), first.at(frame))
 
-        source = load_fbx(self.path("a.fbx")).clip
+        source = load_fbx(self.path("a.fbx")).clip.active
         self.assertEqual((first.start_frame, first.frame_count, first.fps), (START, FRAMES, FPS))
         self.assertEqual([n.name for n in first], [n.name for n in source])
         for a, b in zip(first, source):
@@ -1071,11 +1213,11 @@ class TestSkin(_Skinned):
         self.assertEqual((len(first.meshes), len(first.skins), first.uvs), (1, 1, None))
         self.assertSameMesh(first.meshes[0], source["meshes"])
         self.assertSameSkin(first.skins[0], source["skins"])
-        self.assertFloat32Clip(first.clip, source["clip"])
+        self.assertFloat32Clip(first.clip.active, source["clip"])
         # the mesh on geo, in the bind pose and in the clip alike; its skin
         # naming it
         self.assertOn(first.meshes[0], first.hierarchy, "geo")
-        self.assertOn(first.meshes[0], first.clip, "geo")
+        self.assertOn(first.meshes[0], first.clip.active, "geo")
         self.assertEqual(first.skins[0].mesh_uuid, first.meshes[0].uuid)
 
         save_fbx(self.path("b.fbx"), *first)
@@ -1083,7 +1225,7 @@ class TestSkin(_Skinned):
         self.assertSameSkeleton(second.hierarchy, first.hierarchy)
         self.assertSameMesh(second.meshes[0], first.meshes[0])
         self.assertSameSkin(second.skins[0], first.skins[0])
-        self.assertSameClip(second.clip, first.clip)
+        self.assertSameClips(second.clip, first.clip)
         self.assertOn(second.meshes[0], second.hierarchy, "geo")
 
     def test_the_file_holds_one_skin_its_clusters_and_one_bind_pose(self):
@@ -1191,15 +1333,15 @@ class TestSkin(_Skinned):
         self.assertEqual((found["poses"], found["curves"]), (0, curve_count(clip)))
         rig, back, held, skins, uvs = load_fbx(self.path("clip.fbx"))
         self.assertEqual((rig, skins, uvs), (None, None, None))
-        self.assertFloat32Clip(back, clip)
+        self.assertFloat32Clip(back.active, clip)
         self.assertSameMesh(held[0], mesh)
-        self.assertOn(held[0], back, "geo")
-        self.assertEqual(ClipData.load_fbx(self.path("clip.fbx")).name, back.name)
+        self.assertOn(held[0], back.active, "geo")
+        self.assertEqual(ClipData.load_fbx(self.path("clip.fbx")).name, back.active.name)
         save_fbx(self.path("clip2.fbx"), clip=back, meshes=held)
         again = load_fbx(self.path("clip2.fbx"))
-        self.assertSameClip(again.clip, back)
+        self.assertSameClips(again.clip, back)
         self.assertSameMesh(again.meshes[0], held[0])
-        self.assertOn(again.meshes[0], again.clip, "geo")
+        self.assertOn(again.meshes[0], again.clip.active, "geo")
 
         # on a node of the hierarchy
         rig  = bound()
@@ -1221,18 +1363,18 @@ class TestSkin(_Skinned):
         save_fbx(self.path("a.fbx"), clip=clip, meshes=meshes)
         first = load_fbx(self.path("a.fbx"))
         self.assertEqual((first.hierarchy, first.skins, first.uvs), (None, None, None))
-        self.assertFloat32Clip(first.clip, clip)
+        self.assertFloat32Clip(first.clip.active, clip)
         # the meshes come back in their nodes' order: prop ahead of geo
         self.assertEqual([mesh.name for mesh in first.meshes], ["tetra", "body"])
         for got, want, name in zip(first.meshes, meshes[::-1], ("prop", "geo")):
             self.assertSameMesh(got, want)
-            self.assertOn(got, first.clip, name)
+            self.assertOn(got, first.clip.active, name)
         save_fbx(self.path("b.fbx"), *first)
         second = load_fbx(self.path("b.fbx"))
-        self.assertSameClip(second.clip, first.clip)
+        self.assertSameClips(second.clip, first.clip)
         for got, want, name in zip(second.meshes, first.meshes, ("prop", "geo")):
             self.assertSameMesh(got, want)
-            self.assertOn(got, second.clip, name)
+            self.assertOn(got, second.clip.active, name)
         # the node readers keep the meshes' nodes
         self.assertEqual(HierarchyData.load_fbx(self.path("a.fbx")).name, clip.name)
         self.assertEqual(ClipData.load_fbx(self.path("a.fbx")).name, clip.name)
@@ -1240,10 +1382,10 @@ class TestSkin(_Skinned):
         stray = MeshList([body(clip["geo"].uuid), tetra(bound()["prop"].uuid)])
         save_fbx(self.path("stray.fbx"), clip=clip, meshes=stray)
         got = load_fbx(self.path("stray.fbx"))
-        self.assertEqual(got.clip.name, clip.name + ["tetra"])
-        self.assertOn(got.meshes[0], got.clip, "geo")
-        self.assertOn(got.meshes[1], got.clip, "tetra")
-        np.testing.assert_array_equal(got.meshes[1].world_matrix(got.clip), np.eye(4))
+        self.assertEqual(got.clip.active.name, clip.name + ["tetra"])
+        self.assertOn(got.meshes[0], got.clip.active, "geo")
+        self.assertOn(got.meshes[1], got.clip.active, "tetra")
+        np.testing.assert_array_equal(got.meshes[1].world_matrix(got.clip.active), np.eye(4))
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
@@ -1328,7 +1470,7 @@ class TestSkinRefusals(_Skinned):
         first = load_fbx(self.path("a.fbx"))
         self.assertSameSkeleton(first.hierarchy, rig)
         self.assertOn(first.meshes[0], first.hierarchy, "placed")
-        self.assertOn(first.meshes[0], first.clip, "placed")
+        self.assertOn(first.meshes[0], first.clip.active, "placed")
         self.assertSameMesh(first.meshes[0], mesh)
         self.assertSameSkin(first.skins[0], source["skins"])
         np.testing.assert_allclose(first.meshes[0].world_matrix(first.hierarchy), world, rtol=0, atol=1e-12)
@@ -1344,7 +1486,7 @@ class TestSkinRefusals(_Skinned):
         save_fbx(self.path("b.fbx"), *first)
         second = load_fbx(self.path("b.fbx"))
         self.assertSameSkeleton(second.hierarchy, first.hierarchy)
-        self.assertSameClip(second.clip, first.clip)
+        self.assertSameClips(second.clip, first.clip)
         self.assertSameMesh(second.meshes[0], first.meshes[0])
         self.assertSameSkin(second.skins[0], first.skins[0])
         self.assertOn(second.meshes[0], second.hierarchy, "placed")
@@ -1460,7 +1602,7 @@ class TestSkinRefusals(_Skinned):
                     load_fbx(path)
                 # the clip and node readers leave the meshes and skins unread
                 good = load_fbx(self.path("good.fbx"))
-                self.assertSameClip(ClipData.load_fbx(path), good.clip)
+                self.assertSameClip(ClipData.load_fbx(path), good.clip.active)
                 self.assertEqual(HierarchyData.load_fbx(path).name, [row[0] for row in BOUND])
 
 
@@ -1545,7 +1687,7 @@ class TestMayaSkin(_InMaya, _Skinned):
         # mesh, by the re-read clip, bound to the re-read hierarchy, which
         # places the mesh's node
         deformer = SkinDeformData(back.meshes[0], back.skins[0], bind_rig=back.hierarchy)
-        wanted   = deformer.apply(back.clip.frames)
+        wanted   = deformer.apply(back.clip.active.frames)
         self.assertEqual(wanted.shape, (TAKE, source["meshes"].point_count, 3))
         for f in range(TAKE):
             cmds.currentTime(START + f)
@@ -1570,8 +1712,8 @@ class TestMayaSkin(_InMaya, _Skinned):
         self.assertEqual(cmds.ls(type="skinCluster"),    [])
         self.assertEqual(cmds.ls(type="dagPose"),        [])
         self.assertEqual(len(cmds.ls(type="animCurve")), curve_count(clip))
-        worlds = np.asarray(back.clip.frames.world_matrix)
-        column = {name: i for i, name in enumerate(back.clip.name)}
+        worlds = np.asarray(back.clip.active.frames.world_matrix)
+        column = {name: i for i, name in enumerate(back.clip.active.name)}
         self.assertEqual([mesh.name for mesh in back.meshes], ["tetra", "body"])
         for mesh, name in zip(meshes, ("geo", "prop")):
             path  = self.mesh_path(name)
@@ -1612,7 +1754,7 @@ class TestMayaSkin(_InMaya, _Skinned):
         save_fbx(self.path("again.fbx"), *first)
         second = load_fbx(self.path("again.fbx"))
         self.assertSameSkeleton(second.hierarchy, first.hierarchy)
-        self.assertSameClip(second.clip, first.clip)
+        self.assertSameClips(second.clip, first.clip)
         self.assertSameMesh(second.meshes[0], first.meshes[0])
         self.assertSameSkin(second.skins[0], first.skins[0])
         self.assertOn(first.meshes[0], first.hierarchy, on)
@@ -1632,7 +1774,7 @@ class TestMayaSkin(_InMaya, _Skinned):
         columns = [list(first.skins[0].influences).index(x) for x in INFLUENCES]
         np.testing.assert_allclose(first.skins[0].weights[:, columns], source["skins"].weights, rtol=0, atol=1e-6)
         near(first.meshes[0].points, source["meshes"].points)
-        self.assertEqual((first.clip.start_frame, first.clip.frame_count, first.clip.fps), (START, TAKE, FPS))
+        self.assertEqual((first.clip.start_frame, first.clip.frame_count, first.clip.fps), ([START], [TAKE], [FPS]))
 
 
 # --------------------------------- UV sets --------------------------------- #
@@ -1883,5 +2025,5 @@ class TestMayaUVs(_InMaya, _Mapped):
         self.assertTrue(all(not len(corners) for _, corners in self.maya_uvs("box").values()))
         got = load_fbx(self.exported("box.fbx"))
         self.assertIsNone(got.meshes[0].name)
-        self.assertOn(got.meshes[0], got.clip, "box")
+        self.assertOn(got.meshes[0], got.clip.active, "box")
         self.assertIsNone(got.uvs)

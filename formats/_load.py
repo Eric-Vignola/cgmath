@@ -1,9 +1,11 @@
-"""``cgmath.formats.load_fbx``: a hierarchy or a take, the meshes on its nodes
+"""``cgmath.formats.load_fbx``: a hierarchy or its takes, the meshes on its nodes
 
 The r17-skeleton fork reads every node of a file as a joint (a skeleton
 node) or a transform (any other: a group, or a node holding a shape, a
 mesh, a camera, a light or a locator), at their own values, a bind pose left
-out, or the active take animating them; each mesh as a MeshData on its node,
+out, or the file's takes animating them, every animation stack a ClipData
+of one ClipList, the file's active stack the active take; each mesh as a
+MeshData on its node,
 the mesh's UV sets and its skin naming it by uuid. Everything comes back in
 Maya's Y-up and cm, the axes and unit every cgmath value is in: a file
 whose up axis is X or Z is turned as Maya's importer turns it, one whose up
@@ -43,8 +45,13 @@ def load_fbx(filename) -> FbxContents:
 
     ``hierarchy`` every node of the file at its own values, a mesh's node
     among them; None for a file holding a take, whose nodes ``clip`` holds at
-    the take's frames. With a skin, ``hierarchy`` is the bind pose and
-    ``clip`` the take, if any. ``meshes`` a MeshList of the file's meshes in
+    the takes' frames: a ClipList, one ClipData per animation stack in file
+    order, each over every node, named as the stack is (a blank name "Take
+    001", "Take 002" ... by position, a name two stacks share told apart as
+    ``name_1``, with one warning), the stack the file marks active
+    (``ActiveAnimStackName``) its active take, else the first. With a skin,
+    ``hierarchy`` is the bind pose and ``clip`` the takes, if any. ``meshes``
+    a MeshList of the file's meshes in
     their nodes' order, each ``parent_uuid`` the uuid of its node in
     ``hierarchy`` or ``clip``; ``skins`` a SkinList, one a skinned mesh, in
     that order; ``uvs`` a UVList of every mesh's UV sets, mesh by mesh in the
@@ -77,7 +84,7 @@ def load_fbx(filename) -> FbxContents:
     hierarchy, order = _build(read)
     # Maya's FBXExport writes a take whether anything moves or not: a take
     # over no node is no clip
-    clip = None if read["take"] is None or not len(hierarchy) else _build_clip(read, hierarchy, order)
+    clip = None if read["takes"] is None or not len(hierarchy) else _build_clips(read, hierarchy, order)
     # the meshes in their nodes' order, the hierarchy's
     rank = {at: column for column, at in enumerate(order)}
     read["meshes"].sort(key=lambda held: rank[held["node"]])
@@ -99,14 +106,15 @@ def load_nodes(filename):
     return _build(_open(filename, False, False))[0]
 
 
-def load_take(filename):
-    """the ClipData of an fbx file's active take over every node, a mesh's
-    among them, its shape and skin left out; None for a file holding no take"""
+def load_takes(filename):
+    """the ClipList of an fbx file's takes over every node, a mesh's among
+    them, its shape and skin left out, the file's active take active; None
+    for a file holding no take, or no node"""
     read = _open(filename, True, False)
-    if read["take"] is None:
+    if read["takes"] is None or not read["nodes"]:
         return None
     hierarchy, order = _build(read)
-    return _build_clip(read, hierarchy, order)
+    return _build_clips(read, hierarchy, order)
 
 
 def _open(filename, take: bool, meshes: bool = False) -> dict:
@@ -290,9 +298,9 @@ def _read_skin(scene, node, at: int, label: str, shape, found, fbx) -> dict:
 
 def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "") -> dict:
     """everything the build needs, out of the scene as python and numpy, in
-    Maya's Y-up and cm (:func:`_convert`): every node, one uuid each, the
-    active take's curves unless not ``take``, and with ``meshes`` each mesh
-    and its skin, else the meshes left unread"""
+    Maya's Y-up and cm (:func:`_convert`): every node, one uuid each, every
+    take's curves and the active take's position unless not ``take``, and
+    with ``meshes`` each mesh and its skin, else the meshes left unread"""
     from cgmath.hierarchy.hierarchy import (
         _FBX_ROTATE_ORDERS,
         _FBX_VISIBLE,
@@ -385,26 +393,31 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "
         nodes.append(entry)
 
     # a bind pose (FbxPose) is left out: no node takes its values from one
-    read = {"nodes": nodes, "take": None, "meshes": shapes}
+    read = {"nodes": nodes, "takes": None, "active": 0, "meshes": shapes}
     if take:
-        read["take"] = _take(scene, fbx, found, nodes)
+        read["takes"], read["active"] = _takes(scene, fbx, found, nodes)
     _convert(read, *_axes(scene, fbx, filename))
     return read
 
 
-def _take(scene, fbx, found, nodes):
-    """the active take, else the first, sampled on every frame of its span:
-    its name, fps, frame numbers and values (:func:`_sampled`); None for a
-    file holding none"""
+def _takes(scene, fbx, found, nodes) -> tuple:
+    """``(takes, active)``: every animation stack of the file, in its order,
+    each sampled on every frame of its own span, its name (:func:`_take_names`:
+    a blank one named by its position, a repeat told apart), fps, frame
+    numbers and values (:func:`_sampled`); and the position of the active
+    one, the stack ``ActiveAnimStackName`` names, else the first.
+    ``(None, 0)`` for a file holding no stack"""
     from cgmath.formats._fbx_io import typed
-    from cgmath.hierarchy.hierarchy import _fbx_frame_rate
+    from cgmath.hierarchy.hierarchy import _fbx_frame_rate, _take_names
 
     criteria = fbx.FbxCriteria.ObjectType(fbx.FbxAnimStack.ClassId)
     stacks   = [typed(scene.GetSrcObject(criteria, i), fbx.FbxAnimStack, fbx) for i in range(scene.GetSrcObjectCount(criteria))]
     if not stacks:
-        return None
-    active   = str(scene.ActiveAnimStackName.Get())
-    stack    = next((x for x in stacks if str(x.GetName()) == active), stacks[0])
+        return None, 0
+    raw      = [str(stack.GetName()) for stack in stacks]
+    names    = _take_names(raw)
+    marked   = str(scene.ActiveAnimStackName.Get())
+    active   = next((i for i, name in enumerate(raw) if name == marked), 0)
 
     settings = scene.GetGlobalSettings()
     mode     = settings.GetTimeMode()
@@ -414,45 +427,49 @@ def _take(scene, fbx, found, nodes):
     second = fbx.FbxTime()
     second.SetSecondDouble(1.0)
     per_second = int(second.Get())
-    span       = stack.GetLocalTimeSpan()
-    first      = int(round(span.GetStart().Get() * fps / per_second))
-    last       = int(round(span.GetStop().Get() * fps / per_second))
-    if last < first:
-        first, last = last, first
-    frames = np.arange(first, last + 1)
-    ticks  = np.round(frames * (per_second / fps)).astype(np.int64)
+    layers     = fbx.FbxCriteria.ObjectType(fbx.FbxAnimLayer.ClassId)
 
-    layers = fbx.FbxCriteria.ObjectType(fbx.FbxAnimLayer.ClassId)
-    count  = stack.GetMemberCount(layers)
-    if count > 1:
-        raise NotImplementedError(f"load_fbx: the take {str(stack.GetName())!r} holds {count} animation layers; {FORK} reads one")
-    layer  = typed(stack.GetMember(layers, 0), fbx.FbxAnimLayer, fbx) if count else None
+    takes = []
+    for stack, name in zip(stacks, names):
+        span  = stack.GetLocalTimeSpan()
+        first = int(round(span.GetStart().Get() * fps / per_second))
+        last  = int(round(span.GetStop().Get() * fps / per_second))
+        if last < first:
+            first, last = last, first
+        frames = np.arange(first, last + 1)
+        ticks  = np.round(frames * (per_second / fps)).astype(np.int64)
 
-    curves = []
-    for (node, _), entry in zip(found, nodes):
-        held = {}
-        for channel, prop in (("translate", node.LclTranslation), ("rotate", node.LclRotation), ("scale", node.LclScaling)):
-            held[channel] = [
-                typed(prop.GetCurve(layer, component, False), fbx.FbxAnimCurve, fbx) if layer is not None else None
-                for component in "XYZ"
-            ]
-        users = {}
-        for name, spec in entry["attrs"].items():
-            prop = node.FindProperty(name)
-            if layer is None or not prop.IsValid():
-                continue
-            if spec.get("attributeType") in ("double3", "float3"):
-                users[name] = [typed(prop.GetCurve(layer, component, False), fbx.FbxAnimCurve, fbx) for component in "XYZ"]
-            elif "numberOfChildren" not in spec:
-                users[name] = [typed(prop.GetCurve(layer, False), fbx.FbxAnimCurve, fbx)]
-        curves.append((held, users))
+        count  = stack.GetMemberCount(layers)
+        if count > 1:
+            raise NotImplementedError(f"load_fbx: the take {str(stack.GetName())!r} holds {count} animation layers; {FORK} reads one")
+        layer  = typed(stack.GetMember(layers, 0), fbx.FbxAnimLayer, fbx) if count else None
 
-    return {
-        "name":   str(stack.GetName()),
-        "fps":    fps,
-        "frames": frames,
-        "values": _sampled(curves, ticks, per_second),
-    }
+        curves = []
+        for (node, _), entry in zip(found, nodes):
+            held = {}
+            for channel, prop in (("translate", node.LclTranslation), ("rotate", node.LclRotation), ("scale", node.LclScaling)):
+                held[channel] = [
+                    typed(prop.GetCurve(layer, component, False), fbx.FbxAnimCurve, fbx) if layer is not None else None
+                    for component in "XYZ"
+                ]
+            users = {}
+            for attr, spec in entry["attrs"].items():
+                prop = node.FindProperty(attr)
+                if layer is None or not prop.IsValid():
+                    continue
+                if spec.get("attributeType") in ("double3", "float3"):
+                    users[attr] = [typed(prop.GetCurve(layer, component, False), fbx.FbxAnimCurve, fbx) for component in "XYZ"]
+                elif "numberOfChildren" not in spec:
+                    users[attr] = [typed(prop.GetCurve(layer, False), fbx.FbxAnimCurve, fbx)]
+            curves.append((held, users))
+
+        takes.append({
+            "name":   name,
+            "fps":    fps,
+            "frames": frames,
+            "values": _sampled(curves, ticks, per_second),
+        })
+    return takes, active
 
 
 def _sampled(curves, ticks, per_second) -> list:
@@ -519,11 +536,11 @@ def _convert(read: dict, turn, cm: float) -> None:
     from cgmath.hierarchy.hierarchy import _fbx_turn_roots
 
     entries = read["nodes"]
-    take    = read["take"]
+    takes   = read["takes"] or []
     if cm != 1.0:
         for entry in entries:
             entry["translate"] = entry["translate"] * cm
-        if take is not None:
+        for take in takes:
             for held, _ in take["values"]:
                 held["translate"] = [None if value is None else value * cm for value in held["translate"]]
         for held in read["meshes"]:
@@ -571,37 +588,36 @@ def _convert(read: dict, turn, cm: float) -> None:
             entries[i]["joint_orient"] = turned[2][0, column]
         else:
             entries[i]["rotate"] = turned[1][0, column]
-    if take is None:
-        return
 
-    frames = len(take["frames"])
-    blocks = []
-    for static, channel in zip(statics, channels):
-        block = np.empty((frames, len(roots), 3))
-        for column, i in enumerate(roots):
-            values = take["values"][i][0].get(channel)
-            for k in range(3):
-                value               = None if values is None else values[k]
-                block[:, column, k] = static[0, column, k] if value is None else value
-        blocks.append(block)
-    translate, rotate, _ = _fbx_turn_roots(turn, joints, orders, *blocks)
     sends = [int(np.flatnonzero(turn[k])[0]) for k in range(3)]
-    for column, i in enumerate(roots):
-        values = take["values"][i][0]
-        was    = values["translate"]
-        moved  = [None, None, None]
-        for k in range(3):
-            if was[k] is not None:
-                row             = translate[:, column, sends[k]]
-                moved[sends[k]] = row if isinstance(was[k], np.ndarray) else float(row[0])
-        values["translate"] = moved
-        if joints[column]:
-            continue
-        was = values["rotate"]
-        if any(isinstance(value, np.ndarray) for value in was):
-            values["rotate"] = [rotate[:, column, k] for k in range(3)]
-        elif any(value is not None for value in was):
-            values["rotate"] = [float(rotate[0, column, k]) for k in range(3)]
+    for take in takes:
+        frames = len(take["frames"])
+        blocks = []
+        for static, channel in zip(statics, channels):
+            block = np.empty((frames, len(roots), 3))
+            for column, i in enumerate(roots):
+                values = take["values"][i][0].get(channel)
+                for k in range(3):
+                    value               = None if values is None else values[k]
+                    block[:, column, k] = static[0, column, k] if value is None else value
+            blocks.append(block)
+        translate, rotate, _ = _fbx_turn_roots(turn, joints, orders, *blocks)
+        for column, i in enumerate(roots):
+            values = take["values"][i][0]
+            was    = values["translate"]
+            moved  = [None, None, None]
+            for k in range(3):
+                if was[k] is not None:
+                    row             = translate[:, column, sends[k]]
+                    moved[sends[k]] = row if isinstance(was[k], np.ndarray) else float(row[0])
+            values["translate"] = moved
+            if joints[column]:
+                continue
+            was = values["rotate"]
+            if any(isinstance(value, np.ndarray) for value in was):
+                values["rotate"] = [rotate[:, column, k] for k in range(3)]
+            elif any(value is not None for value in was):
+                values["rotate"] = [float(rotate[0, column, k]) for k in range(3)]
 
 
 def _build(read: dict) -> tuple:
@@ -659,13 +675,25 @@ def _build(read: dict) -> tuple:
     return hierarchy, order
 
 
-def _build_clip(read: dict, hierarchy, order):
-    """the ClipData of the file's take over ``hierarchy``, its nodes"""
+def _build_clips(read: dict, hierarchy, order):
+    """the ClipList of the file's takes over ``hierarchy``, its nodes: one
+    ClipData per take (:func:`_build_clip`), each over copies of the same
+    nodes, so the takes share their uuids and the list admits them as one
+    skeleton; the file's active take active"""
+    from cgmath.hierarchy.hierarchy import ClipList
+
+    clips        = ClipList([_build_clip(read, hierarchy, order, take) for take in read["takes"]])
+    clips.active = read["active"]
+    return clips
+
+
+def _build_clip(read: dict, hierarchy, order, take: dict):
+    """the ClipData of one of the file's takes, ``take`` as :func:`_takes`
+    read it, over ``hierarchy``, its nodes"""
     from cgmath.hierarchy.hierarchy import ClipData, _enum_fields, _user_channels
 
     entries = read["nodes"]
     parents = np.array([entry["parent"] for entry in entries], dtype=np.intp)
-    take    = read["take"]
     frames  = take["frames"]
     count   = len(frames)
     clip    = ClipData(hierarchy, frames=count, start_frame=int(frames[0]), fps=take["fps"], take=take["name"])
