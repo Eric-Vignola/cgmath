@@ -26,8 +26,8 @@ UNIFORM_SCALE = 1e-6
 # float32
 STILL = 1e-5
 
-# the node kinds a hierarchy holds
-NODE_TYPES = ("joint", "transform")
+# the node kinds a hierarchy holds: a locator is a transform drawn as a cross
+NODE_TYPES = ("joint", "transform", "locator")
 
 # the hidden property keeping each node's place in the hierarchy's list
 ORDER_PROPERTY = "cgmath:index"
@@ -46,9 +46,10 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
     take's frames at the takes' one fps, the active take's stack the file's
     current one (``ActiveAnimStackName``); every channel of every node has
     its curves in every stack, one a component: a constant channel one key
-    on the take's first frame, an animated one a key a frame. A hierarchy
-    given with a clip is a bind pose, which comes with skins
-    (NotImplementedError without them).
+    on the take's first frame, an animated one a key a frame; a node's
+    visibility, where a take changes it, a stepped key a frame, as Maya keys
+    one. A hierarchy given with a clip is a bind pose, which comes with
+    skins (NotImplementedError without them).
 
     ``meshes``, a MeshList or one MeshData: each the shape of the transform
     its ``parent_uuid`` names, named after the mesh (unnamed for a mesh of
@@ -63,8 +64,9 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
     one bind pose listing every node at its world.
 
     Refused, ValueError naming node, channel and frame, before anything is
-    written: a node that is no joint or transform, a transform holding
-    segment scale compensate or a joint orient, a shear, a scale that is not
+    written: a node that is no joint, transform or locator, a transform or
+    locator holding segment scale compensate or a joint orient, a shear, a
+    scale that is not
     uniform on a node with children, in the hierarchy or on any frame of any
     take, a joint orient or rotate axis a take changes over its frames or
     holds other than the active take's (a file holds one a node), takes at
@@ -231,21 +233,22 @@ def refuse_values(what: str, nodes, shear, scale, frames=None) -> None:
 
 
 def _check_kinds(nodes, orients) -> None:
-    """a node that is no joint or transform, a transform holding segment
-    scale compensate, or a joint orient (``orients`` (F, N, 3)): refused"""
+    """a node that is no joint, transform or locator, a transform or locator
+    holding segment scale compensate, or a joint orient (``orients`` (F, N,
+    3)): refused"""
     for column, node in enumerate(nodes):
         if node.node_type not in NODE_TYPES:
             raise ValueError(
-                f"save_fbx: node {node.name!r} is a {node.node_type!r}; {FORK} writes joints and transforms"
+                f"save_fbx: node {node.name!r} is a {node.node_type!r}; {FORK} writes joints, transforms and locators"
             )
-        if node.node_type == "transform" and node.segment_scale_compensate:
+        if node.node_type != "joint" and node.segment_scale_compensate:
             raise ValueError(
-                f"save_fbx: node {node.name!r} channel 'segment_scale_compensate' is on a transform, which Maya "
-                f"holds on joints only"
+                f"save_fbx: node {node.name!r} channel 'segment_scale_compensate' is on a {node.node_type}, which "
+                f"Maya holds on joints only"
             )
-        if node.node_type == "transform" and np.any(orients[:, column] != 0.0):
+        if node.node_type != "joint" and np.any(orients[:, column] != 0.0):
             raise ValueError(
-                f"save_fbx: node {node.name!r} channel 'joint_orient' is on a transform, which Maya holds on "
+                f"save_fbx: node {node.name!r} channel 'joint_orient' is on a {node.node_type}, which Maya holds on "
                 f"joints only"
             )
 
@@ -657,6 +660,28 @@ def _keys(curve, times, values, mode, fbx) -> None:
         curve.KeyModifyEnd()
 
 
+def _visibility_keys(fbx_node, layer, times, shown, fbx) -> None:
+    """``fbx_node``'s Visibility keyed in ``layer`` at each of ``times``, 1
+    where ``shown`` else 0, constant interpolation in its standard mode: each
+    key holds to the next, as Maya keys a visibility"""
+    from cgmath.formats._fbx_io import typed
+
+    fbx_node.Visibility.ModifyFlag(fbx.FbxPropertyFlags.EFlags.eAnimatable, True)
+    curve    = typed(fbx_node.Visibility.GetCurve(layer, True), fbx.FbxAnimCurve, fbx)
+    constant = fbx.FbxAnimCurveDef.EInterpolationType.eInterpolationConstant
+    standard = fbx.FbxAnimCurveDef.EConstantMode.eConstantStandard
+    curve.KeyModifyBegin()
+    try:
+        curve.KeyClear()
+        for when, value in zip(times, np.asarray(shown, dtype=bool).tolist()):
+            key = curve.KeyAdd(when)
+            key = key[0] if isinstance(key, tuple) else key
+            curve.KeySet(key, when, 1.0 if value else 0.0, constant)
+            curve.KeySetConstantMode(key, standard)
+    finally:
+        curve.KeyModifyEnd()
+
+
 def _write_takes(exporter, nodes, clips) -> None:
     """every take of ``clips``, one animation stack each (:func:`_write_take`)
     in the list's order, named ``take`` or by position, the file's time mode
@@ -722,6 +747,14 @@ def _write_take(exporter, nodes, clip, name: str, mode):
             for axis, component in enumerate("XYZ"):
                 curve = typed(prop.GetCurve(layer, component, True), fbx.FbxAnimCurve, fbx)
                 _keys(curve, times[: len(rows)], rows[:, axis], linear, fbx)
+
+    # a node's visibility, where the take changes it: one stepped key a
+    # frame, 1 or 0, as Maya's own export keys it; a constant one is the
+    # node's own value, written with the nodes
+    shown = clip._shown()
+    for column, fbx_node in enumerate(nodes):
+        if not np.all(shown[:, column] == shown[0, column]):
+            _visibility_keys(fbx_node, layer, times, shown[:, column], fbx)
 
     # each animatable user property: one curve, or three for a vector
     flag = fbx.FbxPropertyFlags.EFlags.eAnimatable

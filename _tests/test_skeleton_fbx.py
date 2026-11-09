@@ -503,6 +503,56 @@ class TestTakes(_Files):
         refused(ValueError, "node 'hips' channel 'joint_orient' frame 1004", clip=moving)
 
 
+def hidden(clip: ClipData) -> ClipData:
+    """``clip`` with prop hidden on frames 3 to 5 and head hidden throughout"""
+    shown                          = np.ones((clip.frame_count, 1), dtype=bool)
+    shown[3:6]                     = False
+    clip.frames["prop"].visibility = shown
+    clip.frames["head"].visibility = False
+    return clip
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestVisibilityAndLocators(_Files):
+    """a node's visibility over the take, and locators, round trip"""
+
+    def test_visibility_keyed_over_the_take(self):
+        plain = take(skeleton())
+        clip  = hidden(take(skeleton()))
+        self.assertEqual(clip.keyed.tolist(), [k or n == "prop" for k, n in zip(plain.keyed.tolist(), plain.name)])
+        save_fbx(self.path("plain.fbx"), clip=plain)
+        save_fbx(self.path("a.fbx"), clip=clip)
+        self.assertEqual(counts(self.path("a.fbx"))["curves"], counts(self.path("plain.fbx"))["curves"] + 1)  # prop's Visibility
+
+        back = load_fbx(self.path("a.fbx")).clip.active
+        np.testing.assert_array_equal(back.frames.visibility, clip.frames.visibility)
+        self.assertEqual(back.keyed.tolist(), clip.keyed.tolist())
+        self.assertFalse(back["head"].visibility)
+        self.assertIsNotNone(back._visible)
+        # the nodes alone: the first frame's values
+        self.assertEqual([n.visibility for n in HierarchyData.load_fbx(self.path("a.fbx"))], [n.visibility for n in clip.at(START)])
+        # a second cycle, bit for bit, visibility included
+        save_fbx(self.path("b.fbx"), clip=back)
+        again = load_fbx(self.path("b.fbx")).clip.active
+        self.assertSameClip(again, back)
+        np.testing.assert_array_equal(again.frames.visibility, back.frames.visibility)
+
+    def test_a_locator_round_trips(self):
+        rig                   = skeleton()
+        rig["prop"].node_type = "locator"
+        save_fbx(self.path("rig.fbx"), rig)
+        back = load_fbx(self.path("rig.fbx")).hierarchy
+        self.assertEqual(back["prop"].node_type, "locator")
+        self.assertSameSkeleton(back, rig)
+        clip = take(rig)
+        save_fbx(self.path("clip.fbx"), clip=clip)
+        got = load_fbx(self.path("clip.fbx")).clip.active
+        self.assertEqual(got["prop"].node_type, "locator")
+        self.assertEqual(structure(got), structure(clip))
+        # a bare null stays a transform
+        self.assertEqual(back["base"].node_type, "transform")
+
+
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
 class TestSkeletonAlone(_Files):
     """save_fbx(path, skeleton): the nodes and their own values, no take;
@@ -601,9 +651,14 @@ class TestRefusals(_Files):
 
     def test_other_node_kinds(self):
         rig                   = skeleton()
-        rig["prop"].node_type = "locator"
-        self.refused("node 'prop' is a 'locator'", rig)
-        self.refused("node 'prop' is a 'locator'", clip=take(rig))
+        rig["prop"].node_type = "space_transform"
+        self.refused("node 'prop' is a 'space_transform'", rig)
+        self.refused("node 'prop' is a 'space_transform'", clip=take(rig))
+        # a locator is a transform with a look: no joint orient, no compensate
+        rig                                  = skeleton()
+        rig["prop"].node_type                = "locator"
+        rig["prop"].segment_scale_compensate = True
+        self.refused("node 'prop' channel 'segment_scale_compensate' is on a locator", rig)
 
     def written(self, name="sdk.fbx", parent_scale=(1.0, 1.0, 1.0), inherit=None, keys=None) -> str:
         """a file the sdk writes: a group p scaled ``parent_scale`` over a
@@ -624,8 +679,16 @@ class TestRefusals(_Files):
             load_fbx(keyed)
         # the nodes alone, the take left unread
         self.assertEqual(HierarchyData.load_fbx(keyed).name, ["p", "c"])
-        with self.assertRaisesRegex(ValueError, "node 'c' channel 'inherit type'"):
-            load_fbx(self.written(parent_scale=(2.0, 2.0, 2.0), inherit=FBX.FbxTransform.EInheritType.eInheritRrSs))
+        # RrSs under a uniformly scaled parent is the standard product: the
+        # same rig as the RSrs file's
+        standard = load_fbx(self.written("rsrs.fbx", parent_scale=(2.0, 2.0, 2.0))).hierarchy
+        own_axes = load_fbx(self.written("rrss.fbx", parent_scale=(2.0, 2.0, 2.0), inherit=FBX.FbxTransform.EInheritType.eInheritRrSs)).hierarchy
+        self.assertSameSkeleton(own_axes, standard)
+        np.testing.assert_allclose(own_axes["c"].world_matrix, standard["c"].world_matrix, rtol=0, atol=1e-12)
+        self.assertNotEqual(float(own_axes["c"].world_matrix[3, 0]), 1.0)  # p's scale reaches c
+        # under an uneven parent the scale rule speaks first
+        with self.assertRaisesRegex(ValueError, "node 'p' channel 'scale'"):
+            load_fbx(self.written(parent_scale=(1.0, 2.0, 1.0), inherit=FBX.FbxTransform.EInheritType.eInheritRrSs))
 
 
 def _written(path, parent_scale=(1.0, 1.0, 1.0), bind=None, inherit=None, keys=None) -> str:
@@ -801,7 +864,13 @@ class TestMaya(_InMaya):
         """the imported node's name, type, parent and static attributes"""
         cmds = self.cmds
         self.assertEqual(len(cmds.ls(node.name, long=True)), 1, node.name)
-        self.assertEqual(cmds.nodeType(node.name), node.node_type)
+        if node.node_type == "locator":
+            # Maya's locator: a transform holding a locator shape
+            self.assertEqual(cmds.nodeType(node.name), "transform")
+            self.assertEqual(len(cmds.listRelatives(node.name, shapes=True, type="locator") or []), 1, node.name)
+        else:
+            self.assertEqual(cmds.nodeType(node.name), node.node_type)
+            self.assertEqual(cmds.listRelatives(node.name, shapes=True), None, node.name)
         parent = cmds.listRelatives(node.name, parent=True)
         self.assertEqual(parent[0] if parent else None, node.parent_name)
         self.assertEqual(cmds.getAttr(f"{node.name}.rotateOrder"), node.rotate_order)
@@ -845,6 +914,41 @@ class TestMaya(_InMaya):
                 world = np.array(cmds.getAttr(f"{node.name}.worldMatrix", time=frame)).reshape(4, 4)
                 np.testing.assert_allclose(world, wanted[f, column], rtol=0, atol=1e-6, err_msg=(node.name, frame))
                 self.maya_user(node, frame)
+
+    def test_maya_imports_visibility_keys_and_a_locator_and_exports_them_back(self):
+        """prop, a locator hidden on frames 3 to 5, head hidden throughout:
+        Maya's import keys prop's visibility as ours on every frame, gives
+        prop a locator shape, and its export reads back as the save"""
+        cmds = self.cmds
+        rig  = skeleton()
+        rig["prop"].node_type = "locator"
+        clip = hidden(take(rig))
+        save_fbx(self.path("a.fbx"), clip=clip)
+        self.imported(self.path("a.fbx"))
+        for node in clip:
+            self.maya_node(node)
+        shown = np.asarray(clip.frames.visibility)
+        for f in range(clip.frame_count):
+            for column, node in enumerate(clip):
+                self.assertEqual(bool(cmds.getAttr(f"{node.name}.visibility", time=START + f)), bool(shown[f, column]), (node.name, f))
+        self.assertEqual(len(cmds.listConnections("prop.visibility", type="animCurve") or []), 1)
+
+        out  = self.exported("maya.fbx")
+        back = load_fbx(out).clip.active
+        self.assertEqual(back["prop"].node_type, "locator")
+        np.testing.assert_array_equal(np.asarray(back.frames.visibility), shown)
+        self.assertFalse(back["head"].visibility)
+
+    def test_maya_reads_rrss_under_a_uniform_parent_as_we_do(self):
+        """an sdk file with eInheritRrSs under a parent scaled 2 uniformly:
+        Maya's import and load_fbx agree on every world within 1e-6"""
+        cmds = self.cmds
+        path = _written(self.path("rrss.fbx"), parent_scale=(2.0, 2.0, 2.0), inherit=FBX.FbxTransform.EInheritType.eInheritRrSs)
+        rig  = load_fbx(path).hierarchy
+        self.imported(path)
+        for column, node in enumerate(rig):
+            world = np.array(cmds.getAttr(f"{node.name}.worldMatrix")).reshape(4, 4)
+            np.testing.assert_allclose(world, np.asarray(rig.world_matrix)[column], rtol=0, atol=1e-6, err_msg=node.name)
 
     def test_maya_imports_each_take(self):
         """a file of three takes: FBXImport -t picks one by position, and

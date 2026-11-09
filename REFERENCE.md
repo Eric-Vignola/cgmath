@@ -1014,7 +1014,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000002527CE0E1D0>
+MISSING = <dataclasses._MISSING_TYPE object at 0x0000021E95B8E1D0>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -3510,7 +3510,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000002524AD877E0>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000021EE3AC7740>, '...
 ```
 
 ## `cgmath.constraints`
