@@ -1020,7 +1020,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000002BEF437AED0>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000002397EE3AED0>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1604,10 +1604,10 @@ sparse point offsets.
 
 #### `MorphData(Data)`
 
-Morph target data class.
+Morph target data class: a blend shape target, as Maya's blendShape
 
 ```text
-MorphData(name: 'str', offsets: 'np.ndarray', indices: 'Optional[np.ndarray]' = None)
+MorphData(name: 'str', offsets: 'np.ndarray', indices: 'Optional[np.ndarray]' = None, mesh_uuid: 'Optional[str]' = None, weight: 'float' = 0.0, at: 'float' = 1.0, deformer: 'Optional[str]' = None)
 ```
 
 Fields:
@@ -1616,6 +1616,10 @@ Fields:
 name: str
 offsets: Array(np.float64, 'N', 3)
 indices: Optional[Array(np.int32, 'N')] = None
+mesh_uuid: Optional[str] = None
+weight: float = 0.0
+at: float = 1.0
+deformer: Optional[str] = None
 ```
 
 Properties:
@@ -3018,8 +3022,8 @@ Functions:
 
 ```text
 load_fbx(filename) -> cgmath.formats._load.FbxContents
-    ``(hierarchy, clip, meshes, skins, uvs, cameras, lights, materials)``,
-save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=None, cameras=None, lights=None, materials=None, as_ascii: bool = False) -> None
+    ``(hierarchy, clip, meshes, skins, uvs, cameras, lights, materials,
+save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=None, cameras=None, lights=None, materials=None, morphs=None, as_ascii: bool = False) -> None
     writes one of ``hierarchy``, a HierarchyData of joints and transforms,
 ```
 
@@ -3516,7 +3520,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000002BEC221D440>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000023968131A80>, '...
 ```
 
 ## `cgmath.constraints`
