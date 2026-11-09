@@ -13637,6 +13637,33 @@ class ClipData(HierarchyData):
                     _user_put(attrs, name, channels[name], rows[index])
         return HierarchyData(nodes)
 
+    @property
+    def keyed(self) -> np.ndarray:
+        """(N,) bool, one per node: True where a channel of the node is
+        animated, a framed channel (translate, rotate, scale, rotate axis,
+        joint orient, shear), its visibility frame by frame or a user
+        channel; False where every channel of it holds one value on every
+        frame. What a take says of a node: a take keying 12 of 60 joints is
+        a clip over all 60, 48 of them False here, held at one value, as an
+        fbx take leaves a node it has no curve for. A clip of one frame or
+        none keys nothing. Read only"""
+        self._settle()
+        keyed = np.zeros(len(self.list), dtype=bool)
+        if self.frame_count <= 1:
+            return keyed
+        for channel in self._blocks:
+            flags = self._animated.get(channel)
+            if flags is not None and len(flags) == len(keyed):
+                keyed |= flags
+        if self._visible is not None and len(self._visible) > 1 and self._visible.shape[1] == len(keyed):
+            keyed |= np.any(self._visible != self._visible[:1], axis=0)
+        place = self._column_place()
+        for uuid in self._user_keys:
+            column = place.get(uuid)
+            if column is not None and column < len(keyed):
+                keyed[column] = True
+        return keyed
+
     # (the column list, each uuid's column in it)
     _column_place_cache = None
 
@@ -15095,7 +15122,10 @@ class _Takes:
             _scrub(self._targets, int(query))
             return self._owner
         if isinstance(query, slice):
-            return ClipList(target[query] for target in self._targets)
+            cuts = ClipList(target[query] for target in self._targets)
+            if isinstance(self._owner, ClipList) and len(cuts) == len(self._owner):
+                cuts._active = self._owner._active  # the cut of the active take is active
+            return cuts
         return _Takes([target[query] for target in self._targets], self._owner)
 
     def __setitem__(self, query, value) -> None:
@@ -15227,22 +15257,80 @@ def _every_take_text(cls) -> None:
             raw.__doc__ = _forward_doc(spec, f"{spec.label}() on every take, every take or none")
 
 
-class ClipList(DataList[ClipData]):
-    """Every take of a file: one :class:`ClipData` per take, in file order.
+# what one rig is made of, per node, as _take_rig lists it
+_RIG_PARTS = ("name", "parent", "node_type", "rotate_order", "segment_scale_compensate")
 
-    ``ClipList.load_fbx`` and ``load_glb`` read a file's takes, each a clip
-    of its own, holding its own copy of the file's rest pose; a take is
-    found by its name (``clips["idle"]``, ``"idle" in clips``,
-    ``clips.get("idle")``, ``clips.index("idle")``) or its position, and
-    ``clips.take`` lists the names.
+
+def _same_rig(first, clip, label: str, kept: str) -> None:
+    """``clip`` is over ``first``'s skeleton, or ValueError says where it is
+    not: the node count, then node by node, by position, what one rig is
+    made of (:func:`_take_rig`): name, parent's name, node_type,
+    rotate_order and segment_scale_compensate. ``label`` names the take
+    checked, ``kept`` the take it is checked against"""
+    rule = "every take of a ClipList is over one skeleton, the first take's"
+    if len(clip) != len(first):
+        raise ValueError(f"{label} holds {len(clip)} nodes, {kept} {len(first)}: {rule}")
+    for column, (a, b) in enumerate(zip(_take_rig(first), _take_rig(clip))):
+        if a != b:
+            part, mine, theirs = next((part, x, y) for part, x, y in zip(_RIG_PARTS, a, b) if x != y)
+            node = f"node {column}" if part == "name" else f"node {column} ({a[0]!r})"
+            raise ValueError(f"{node}'s {part} is {theirs!r} in {label} and {mine!r} in {kept}: {rule}")
+
+
+def _adopt_uuids(first, clip) -> None:
+    """``clip``'s nodes take ``first``'s uuids, position by position, where
+    they differ: each node, its parent link, its block column and its user
+    keys move together, so every frame stays with its node, and nothing
+    else changes; the clip's caches are retired. A uuid read off the clip
+    before it joined is stale"""
+    moved = {b.uuid: a.uuid for a, b in zip(first.list, clip.list) if a.uuid != b.uuid}
+    if not moved:
+        return
+    clip._realign()
+    clip._columns   = [moved.get(uuid, uuid) for uuid in clip._columns]
+    clip._user_keys = {moved.get(uuid, uuid): keys for uuid, keys in clip._user_keys.items()}
+    for node in clip.list:
+        if node.uuid in moved:
+            object.__setattr__(node, "uuid", moved[node.uuid])
+        if node.parent_uuid in moved:
+            object.__setattr__(node, "parent_uuid", moved[node.parent_uuid])
+        for lister in node._listers:
+            _structure_changed(lister())
+    _structure_changed(clip)
+
+
+class ClipList(DataList[ClipData]):
+    """Every take of a file, one :class:`ClipData` each, over one skeleton.
+
+    The takes are in file order, one of them active. ``ClipList.load_glb``
+    reads a file's animations, each a clip of its own; a take is found by
+    its name (``clips["idle"]``, ``"idle" in clips``, ``clips.get("idle")``,
+    ``clips.index("idle")``) or its position, and ``clips.take`` lists the
+    names.
+
+    Every take is over the skeleton of the first take appended: the same
+    nodes, by position, in name, parent, node_type, rotate_order and
+    segment_scale_compensate. A clip over any other rig is refused by
+    ``append``, ``insert``, ``extend``, an item assignment and a load,
+    ValueError naming the first difference, and the list stays as it was.
+    A take that joins takes the skeleton's uuids, node by node, its parent
+    links, block columns and user keys with them, so one uuid names one
+    joint in every take (two loads of one rig, or two rigs built by hand,
+    come with their own); its frames and names are as they were. A take
+    keys the nodes it moves and holds the others at one value,
+    ``clip.keyed`` says which.
+
+    One take is active, ``clips.active``, the ClipData itself: the first
+    take until set, by a take's name, its position or the take itself;
+    ``Scene.animate(clips)`` plays it, and a save keeps its position as
+    ``active``.
 
     A member of the takes is passed on by a line of its own in the class: a
     value reads as a :class:`PerTake`, one per take (``clips.fps``,
     ``clips.translate``, ``clips.t``), and a write gives every take that value,
     or each its own from a PerTake, every take or none: a value one take cannot
     hold, by its shape or by that take's own setter, changes no take, a
-    ``node_type`` that folds a joint's orient into its rotate among them. One
-    rest pose written is copied for each take, so each holds its own.
+    ``node_type`` that folds a joint's orient into its rotate among them.
     ``clips.frames`` and ``clips.match(...)`` give the same for every take's
     frame axis or selection, an item assignment (``clips.frames[1:3] = other``)
     among them, and chain. A name the class does not declare raises
@@ -15262,8 +15350,114 @@ class ClipList(DataList[ClipData]):
     and REFERENCE.md (a later release gives editors the real ones).
     """
 
+    # saved beside the takes: the active take's position, as "active"
+    LIST_FIELDS = ("_active",)
+
+    # the take set active, or None: the first take
+    _STATE       = ("_active_clip",)
+    _active_clip = None
+
     def _take_targets(self) -> list:
         return list(self.list)
+
+    # --- one skeleton --- #
+    def _admit(self, clip, kept=None) -> None:
+        """``clip`` may join the takes ``kept`` (the list's, unless given):
+        a ClipData over their skeleton (:func:`_same_rig`), which then
+        takes their uuids (:func:`_adopt_uuids`); the first take of an
+        empty list defines the skeleton. TypeError for anything else"""
+        if not isinstance(clip, ClipData):
+            raise TypeError(f"a ClipList holds ClipData objects, not {type(clip).__name__}: {clip!r}")
+        kept = self.list if kept is None else kept
+        if not kept:
+            return
+        first = kept[0]
+        at    = next((i for i, c in enumerate(self.list) if c is first), 0)
+        label = f"take {clip._take!r}" if clip._take else "the take"
+        _same_rig(first, clip, label, _take_label(first, at))
+        _adopt_uuids(first, clip)
+
+    def append(self, clip) -> None:
+        """appends a take over the list's skeleton, the first take's, its
+        nodes taking the skeleton's uuids; the first take appended defines
+        the skeleton. ValueError names the first difference, TypeError
+        anything but a ClipData"""
+        self._admit(clip)
+        super().append(clip)
+
+    def insert(self, index, clip) -> None:
+        """inserts a take, as :meth:`append` admits one"""
+        self._admit(clip)
+        super().insert(index, clip)
+
+    def __setitem__(self, index, value) -> None:
+        """an item assignment, as :meth:`append` admits one, against the
+        takes that stay: a take replaced says nothing"""
+        if isinstance(index, slice):
+            gone   = set(range(*index.indices(len(self.list))))
+            kept   = [clip for i, clip in enumerate(self.list) if i not in gone]
+            values = list(value)
+            for clip in values:
+                self._admit(clip, kept)
+                kept.append(clip)
+            super().__setitem__(index, values)
+            return
+        at = int(index)
+        if at < 0:
+            at += len(self.list)
+        if not 0 <= at < len(self.list):
+            raise IndexError("list assignment index out of range")
+        self._admit(value, [clip for i, clip in enumerate(self.list) if i != at])
+        super().__setitem__(at, value)
+
+    # --- the active take --- #
+    @property
+    def active(self) -> Optional[ClipData]:
+        """the active take, a ClipData: the one set, while it is in the list,
+        else the first take; None for an empty list. Set by a take's name,
+        its position or the take itself; None makes the first take active
+        again. ``Scene.animate(clips)`` plays it, and a save keeps its
+        position as ``active``. ValueError for a name no take holds or two
+        share, a position out of range or a clip not in the list"""
+        clip = self._active_clip
+        if clip is not None and any(c is clip for c in self.list):
+            return clip
+        return self.list[0] if self.list else None
+
+    @active.setter
+    def active(self, value) -> None:
+        if value is None:
+            self._active_clip = None
+        elif isinstance(value, ClipData):
+            if not any(c is value for c in self.list):
+                raise ValueError(f"active: the clip is not a take of the list; the takes are {self.take}")
+            self._active_clip = value
+        elif isinstance(value, str):
+            found = [c for c in self.list if c._take == value]
+            if not found:
+                raise ValueError(f"active: no take named {value!r}; the takes are {self.take}")
+            if len(found) > 1:
+                raise ValueError(f"active: {len(found)} takes are named {value!r}; set it by position")
+            self._active_clip = found[0]
+        elif isinstance(value, (int, np.integer)) and not isinstance(value, bool):
+            if not -len(self.list) <= int(value) < len(self.list):
+                raise ValueError(f"active: take {int(value)} is out of range for {len(self.list)} takes")
+            self._active_clip = self.list[int(value)]
+        else:
+            raise TypeError(
+                f"active takes a take's name, its position or the take itself, not {type(value).__name__}: {value!r}"
+            )
+
+    @property
+    def _active(self) -> Optional[int]:
+        """the active take's position, what a file keeps as ``active``; None
+        for an empty list"""
+        clip = self.active
+        return None if clip is None else next(i for i, c in enumerate(self.list) if c is clip)
+
+    @_active.setter
+    def _active(self, value) -> None:
+        self.active = None if value is None else int(value)
 
     # --- lookup by take --- #
     def __getitem__(self, query):
@@ -15385,13 +15579,19 @@ class ClipList(DataList[ClipData]):
 
     def get_delta(self, other, by: str = "index", translate: bool = True) -> "ClipList":
         """every take's :meth:`ClipData.get_delta`, against another
-        ClipList's take of its name or against ``other`` itself"""
-        return ClipList(clip.get_delta(item, by=by, translate=translate) for clip, item in self._paired(other))
+        ClipList's take of its name or against ``other`` itself; the active
+        take's delta is active"""
+        new         = ClipList(clip.get_delta(item, by=by, translate=translate) for clip, item in self._paired(other))
+        new._active = self._active
+        return new
 
     def add_delta(self, delta, by: str = "index", translate: bool = True) -> "ClipList":
         """every take's :meth:`ClipData.add_delta`, with another ClipList's
-        take of its name or with ``delta`` itself"""
-        return ClipList(clip.add_delta(item, by=by, translate=translate) for clip, item in self._paired(delta))
+        take of its name or with ``delta`` itself; the active take's result
+        is active"""
+        new         = ClipList(clip.add_delta(item, by=by, translate=translate) for clip, item in self._paired(delta))
+        new._active = self._active
+        return new
 
     # --- the rig edits, on every take or none --- #
     set_rotate_order           = _every_take(ClipData.set_rotate_order)
@@ -15491,7 +15691,8 @@ class ClipList(DataList[ClipData]):
     inverse_matrix        = _per_take("inverse_matrix", writable=False)
     world_inverse_matrix  = _per_take("world_inverse_matrix", writable=False)
     parent_inverse_matrix = _per_take("parent_inverse_matrix", writable=False)
-    uuid = _per_take("uuid", writable=False)
+    uuid  = _per_take("uuid", writable=False)
+    keyed = _per_take("keyed", writable=False)
     node_type = _per_take("node_type")
     t    = _per_take("translate")
     r    = _per_take("rotate")
