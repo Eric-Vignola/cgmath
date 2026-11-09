@@ -22,6 +22,7 @@ Concepts, conventions and the file map live in [`README.md`](README.md).
 | [`UVData` and `UVList`](#uvdata-and-uvlist) | projections, holes, layout, rasterising, channels |
 | [`MeshList`](#meshlist) | the mesh collection |
 | [`camera` and `light` — `CameraData`, `LightData`](#camera-and-light--cameradata-lightdata) | Maya's camera and light attributes as shapes under transforms |
+| [`material` — `MaterialData`](#material--materialdata) | Maya's lambert and phong attributes, a colour map, on the faces of one mesh |
 | [File loaders and savers](#file-loaders-and-savers) | OBJ round trip, and which GLB / FBX / USD entry points exist |
 | [`map` — `MapData` and `GeomSubsetData`](#map--mapdata-and-geomsubsetdata) | painted weight maps and component selections |
 | [`morph_target` — `MorphData` and `MorphList`](#morph_target--morphdata-and-morphlist) | sparse offsets, arithmetic, pruning |
@@ -1176,6 +1177,62 @@ width over 30 as the ortho zoom, a light's intensity times 100, a spot's
 cone and penumbra as the inner and outer angles (the hierarchy cheatsheet's
 `ClipList` section, and `formats/_load.py`). The render package's `Camera`
 and `Light` are `TransformData` subclasses still, to become these.
+
+---
+
+## `material` — `MaterialData`
+
+A material is what Maya's lambert and phong shaders hold, on the faces of
+one mesh: `color`, `transparency`, `ambient_color`, `incandescence` and
+`diffuse`; a phong's `specular_color`, `cosine_power` and `reflectivity`;
+the colour map's pixels in `texture`, `(H, W, C)` uint8, uint16 or float32
+as given, rows top down, with `texture_file` (the name it came from or goes
+to), `uv_set` (None for the mesh's first) and `wrap_u` / `wrap_v` (repeat or
+clamp). It names its mesh by `mesh_uuid`, as a skin does, and the faces it
+covers in `faces`, None for the whole mesh. The defaults are a fresh Maya
+2025 lambert's and phong's (measured): 0.5 grey, diffuse 0.8, specular 0.5
+grey, cosine power 20, reflectivity 0.5. `kind` is lambert or phong: Maya's
+own FBX export writes a blinn as a phong (its eccentricity converted to the
+shininess) and a standardSurface as a bare material, which loads as a
+default lambert with a warning.
+
+```python
+from cgmath.geometry import MaterialData, MaterialList
+
+skin = MaterialData(name="skinLambert", mesh_uuid=cube.uuid, faces=[0, 1, 2], diffuse=0.6, transparency=[0.1, 0.1, 0.1])
+pixels = np.zeros((4, 8, 3), dtype=np.uint8)
+pixels[..., 0] = np.linspace(0, 255, 8, dtype=np.uint8)[None, :]  # red along u
+pixels[..., 1] = np.linspace(0, 255, 4, dtype=np.uint8)[:, None]  # green along v
+skin.texture, skin.texture_file, skin.uv_set = pixels, "grad.png", "map1"
+shiny = MaterialData(name="shinyPhong", mesh_uuid=cube.uuid, faces=[3, 4, 5], kind="phong", color=[0.9, 0.2, 0.1], cosine_power=35.0)
+print(skin.textured, shiny.textured, skin.covers(cube), shiny.covers(cube))
+
+materials = MaterialList([skin, shiny])
+path      = materials.save(os.path.join(tmp, "materials.npz"))
+back      = MaterialList.load(path)
+print(back == materials, back[0].texture.dtype, back[0].texture.shape, [m.kind for m in back])
+
+try:
+    MaterialData(kind="blinn")  # lambert or phong
+except ValueError as error:
+    print(error)
+```
+
+`cgmath.formats.load_fbx` reads a file's materials as these, each on its
+mesh with the faces its material element gives it, and `save_fbx(...,
+materials=)` writes them as Maya's own exporter does (measured): an
+`FbxSurfaceLambert` or `FbxSurfacePhong`, the colour as the diffuse colour
+and the diffuse as its factor, the other colours with factors of 1, the
+cosine power as the shininess, the reflectivity as the reflection factor;
+one material covering the whole mesh as an all-same element, materials
+covering faces by polygon (every face covered, or the save refuses); the
+texture as an 8 bit PNG embedded in the file (a uint16 or float32 map is
+refused: scale it to uint8), feeding the diffuse colour, extracted to a
+temporary folder on load. Maya's exporter writes the texture's wrap modes
+as repeat and its importer leaves them on whatever the file says, and
+writes a textured colour white; a texture on any other slot is left out
+with a warning. The render package's `Object` holds its own texture still,
+to become this.
 
 ---
 
