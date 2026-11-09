@@ -20,8 +20,10 @@ FORK   = "the r17-skeleton fork"
 # largest, is not uniform
 UNIFORM_SCALE = 1e-6
 
-# a skinned mesh's node this far from identity is not at identity
-MESH_BOUND = 1e-8
+# a skinned mesh's node this far from its bind world on a frame, relative to
+# the largest element, has moved; Maya's FBXExport writes the bind pose in
+# float32
+STILL = 1e-5
 
 # the node kinds a hierarchy holds
 NODE_TYPES = ("joint", "transform")
@@ -51,9 +53,9 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
     or one UVData: each set on the mesh its ``mesh_uuid`` names, in their
     order, named after the set; an empty UVList writes none. ``skins``, a
     SkinList or one SkinData: each on the mesh its ``mesh_uuid`` names, a
-    cluster an influence, a node of the hierarchy found by name, and one
-    bind pose listing every node at its world; a skinned mesh's node is at
-    identity.
+    cluster an influence, a node of the hierarchy found by name, the mesh's
+    node at its world as every cluster's transform (Maya's geomMatrix), and
+    one bind pose listing every node at its world.
 
     Refused, ValueError naming node, channel and frame, before anything is
     written: a node that is no joint or transform, a transform holding
@@ -66,11 +68,12 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
     a name another set of its mesh holds or that is not ASCII, whose faces
     are not its mesh's, or naming UVs it does not hold; a skin naming no
     node of the hierarchy, whose weights are not its mesh's points by its
-    influences, a second skin on a mesh, a skinned mesh whose node is not at
-    identity. UV sets given without meshes, skins without the hierarchy and
-    the meshes, nothing given, a hierarchy that is not a HierarchyData (a
-    ClipData is passed as ``clip``), a clip that is not a ClipData, meshes,
-    skins or uvs of another class: TypeError.
+    influences, a second skin on a mesh, a clip moving a skinned mesh's node
+    off its bind world (Maya's skinCluster applies the node's own transform
+    on top of the skin; measured). UV sets given without meshes, skins
+    without the hierarchy and the meshes, nothing given, a hierarchy that is
+    not a HierarchyData (a ClipData is passed as ``clip``), a clip that is
+    not a ClipData, meshes, skins or uvs of another class: TypeError.
     """
     # imported here: the classes' modules import this one
     from cgmath.geometry.mesh import MeshData, MeshList, UVData, UVList
@@ -134,6 +137,8 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
         _check_uvs(uvs, meshes)
     if skins is not None:
         _check_skins(skins, meshes, hierarchy)
+        if clip is not None:
+            _check_still(skins, meshes, hierarchy, clip)
 
     fbx = FBX
     with FbxExporter() as exporter:
@@ -162,8 +167,10 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
                     if sets:
                         exporter.add_uvs(shapes[mesh.uuid][1], sets)
             if skins is not None:
+                column = {node.uuid: i for i, node in enumerate(hierarchy)}
+                placed = {mesh.uuid: column.get(mesh.parent_uuid) for mesh in meshes}
                 for skin in skins:
-                    _write_skin(exporter, *shapes[skin.mesh_uuid], skin, hierarchy, nodes)
+                    _write_skin(exporter, *shapes[skin.mesh_uuid], skin, hierarchy, nodes, placed[skin.mesh_uuid])
                 roots = [made[skin.mesh_uuid] for skin in skins if skin.mesh_uuid in made]
                 _write_bind_pose(exporter, nodes, hierarchy, roots)
         exporter.export(path=filename, as_ascii=as_ascii)
@@ -384,13 +391,10 @@ def _check_uvs(uvs, meshes) -> None:
 
 
 def _check_skins(skins, meshes, hierarchy) -> None:
-    """a skin naming no mesh, a second skin on a mesh, a skinned mesh whose
-    node is not at identity, a skin whose influences are not nodes of the
-    hierarchy, or whose weights are not its mesh's points by its
-    influences: refused"""
+    """a skin naming no mesh, a second skin on a mesh, a skin whose
+    influences are not nodes of the hierarchy, or whose weights are not its
+    mesh's points by its influences: refused"""
     by_uuid = {mesh.uuid: mesh for mesh in meshes}
-    worlds  = np.asarray(hierarchy.world_matrix, dtype=np.float64)
-    column  = {node.uuid: i for i, node in enumerate(hierarchy)}
     on      = {}
     for skin in skins:
         label = f"skin {skin.name!r}"
@@ -404,13 +408,32 @@ def _check_skins(skins, meshes, hierarchy) -> None:
                 f"save_fbx: skins {on[mesh.uuid]!r} and {skin.name!r} both name {_mesh_label(mesh)}; a mesh holds one skin"
             )
         on[mesh.uuid] = skin.name
-        at            = column.get(mesh.parent_uuid)
-        if at is not None and np.abs(worlds[at] - np.eye(4)).max() > MESH_BOUND:
-            raise ValueError(
-                f"save_fbx: {label} binds {_mesh_label(mesh)} on node {hierarchy[at].name!r}, whose world is "
-                f"{np.round(worlds[at], 9).tolist()}: {FORK} binds a mesh at identity"
-            )
         _check_skin(skin, mesh, hierarchy)
+
+
+def _check_still(skins, meshes, hierarchy, clip) -> None:
+    """a clip moving a skinned mesh's node off its bind world: refused.
+    Maya's skinCluster deforms in world space and the node's own transform
+    applies on top (measured: the mesh lands at the skin's result times the
+    node's bind inverse times its world), so a node the clip moves moves the
+    mesh twice; cgmath's deformer leaves the node's motion out"""
+    by_uuid = {mesh.uuid: mesh for mesh in meshes}
+    column  = {node.uuid: i for i, node in enumerate(hierarchy)}
+    bind    = np.asarray(hierarchy.world_matrix, dtype=np.float64)
+    worlds  = np.asarray(clip.frames.world_matrix, dtype=np.float64)
+    frames  = clip.start_frame + np.arange(clip.frame_count)
+    for skin in skins:
+        mesh = by_uuid[skin.mesh_uuid]
+        at   = column.get(mesh.parent_uuid)
+        if at is None:
+            continue
+        off = np.flatnonzero(np.abs(worlds[:, at] - bind[at]).max(axis=(1, 2)) > STILL * max(1.0, float(np.abs(bind[at]).max())))
+        if len(off):
+            raise ValueError(
+                f"save_fbx: the clip moves node {hierarchy[at].name!r}, which holds skinned {_mesh_label(mesh)}, off "
+                f"its bind world on frame {int(frames[off[0]])}: Maya's skinCluster applies the node's own transform on "
+                f"top of the skin, so the mesh would move twice"
+            )
 
 
 def _check_skin(skin, mesh, hierarchy) -> None:
@@ -517,28 +540,31 @@ def _write_mesh(exporter, mesh, node) -> tuple:
     return node, shape
 
 
-def _write_skin(exporter, mesh_node, shape, skin, hierarchy, nodes) -> None:
+def _write_skin(exporter, mesh_node, shape, skin, hierarchy, nodes, at) -> None:
     """one FbxSkin on ``shape``, a cluster an influence, linked to its node
-    at its world in the hierarchy; the mesh node's channels locked, as
-    Maya's FBXExport locks a skinned mesh's"""
+    at its world in the hierarchy, every cluster's transform the mesh's node
+    at its world (column ``at`` of the hierarchy; identity for None, a root
+    made for the mesh); the mesh node's channels locked, as Maya's FBXExport
+    locks a skinned mesh's"""
     from cgmath.hierarchy.hierarchy import FBX as fbx
 
     scene    = exporter.scene
     worlds   = np.asarray(hierarchy.world_matrix, dtype=np.float64)
+    bound    = _fbx_affine(np.eye(4) if at is None else worlds[at], fbx)
     place    = {node.name: column for column, node in enumerate(hierarchy)}
     weights  = np.asarray(skin.weights, dtype=np.float64)
     deformer = fbx.FbxSkin.Create(scene, skin.name or "")
     deformer.SetSkinningType(fbx.FbxSkin.EType.eLinear)
     for column, influence in enumerate(skin.influences):
-        at      = place[str(influence)]
+        linked  = place[str(influence)]
         cluster = fbx.FbxCluster.Create(scene, str(influence))
-        cluster.SetLink(nodes[at])
+        cluster.SetLink(nodes[linked])
         cluster.SetLinkMode(fbx.FbxCluster.ELinkMode.eNormalize)
         rows = np.flatnonzero(weights[:, column])
         for vertex, weight in zip(rows.tolist(), weights[rows, column].tolist()):
             cluster.AddControlPointIndex(vertex, weight)
-        cluster.SetTransformMatrix(fbx.FbxAMatrix())
-        cluster.SetTransformLinkMatrix(_fbx_affine(worlds[at], fbx))
+        cluster.SetTransformMatrix(bound)
+        cluster.SetTransformLinkMatrix(_fbx_affine(worlds[linked], fbx))
         deformer.AddCluster(cluster)
     shape.AddDeformer(deformer)
 

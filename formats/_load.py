@@ -720,10 +720,12 @@ def _settle_bind(read: dict, bind, order) -> None:
     """``bind``, the file's nodes at their own values, moved to the bind
     pose: a node the bind pose (or a cluster) places where its own values
     do keeps them, any other its channels solved from the bind matrix,
-    parents first. ValueError for skins whose clusters and bind poses
-    disagree, a mesh bound off identity, or a bind matrix no channels hold"""
+    parents first. A skinned mesh's node is placed by its skin's cluster
+    transform, the mesh's world at the bind (Maya's geomMatrix), one on
+    every cluster, which the bind pose agrees with. ValueError for skins
+    whose clusters and bind poses disagree, or a bind matrix no channels
+    hold"""
     entries = read["nodes"]
-    eye     = np.eye(4)
     links   = {}
     binds   = {}
     for held in read["meshes"]:
@@ -731,21 +733,13 @@ def _settle_bind(read: dict, bind, order) -> None:
         if skin is None:
             continue
         label = f"skin {skin['name']!r}"
-        for cluster in skin["clusters"]:
-            if not _near(cluster["mesh"], eye, SKIN_AGREE):
-                raise ValueError(
-                    f"load_fbx: {label} binds {skin['mesh']} at {np.round(cluster['mesh'], 9).tolist()}: {FORK} "
-                    f"reads a mesh bound at identity"
-                )
-            _agree(links, cluster["node"], cluster["link"], f"{label}'s cluster", entries)
+        # the pose first: its matrices are written element by element, a
+        # cluster's through the sdk's affine matrix, within 1e-15 of them
         for at, matrix in skin["binds"].items():
             _agree(binds, at, matrix, f"the bind pose of {skin['mesh']}", entries)
-        placed = skin["binds"].get(skin["node"])
-        if placed is not None and not _near(placed, eye, BIND_AGREE):
-            raise ValueError(
-                f"load_fbx: the bind pose places node {entries[skin['node']]['name']!r}, which holds {skin['mesh']}, "
-                f"at {np.round(placed, 9).tolist()}: {FORK} reads a mesh bound at identity"
-            )
+        for cluster in skin["clusters"]:
+            _agree(links, cluster["node"], cluster["link"], f"{label}'s cluster", entries)
+            _agree(binds, skin["node"], cluster["mesh"], f"{label}'s cluster transform", entries)
     for at, (matrix, where) in links.items():
         held = binds.get(at)
         if held is not None and not _near(held[0], matrix, SKIN_AGREE * max(1.0, float(np.abs(held[0]).max()))):

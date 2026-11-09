@@ -850,6 +850,24 @@ def bound() -> HierarchyData:
     return rig
 
 
+def placed() -> HierarchyData:
+    """bound() and one more root transform, placed: off the origin, turned
+    and scaled, still over motion(): a skinned mesh's node that is not at
+    identity (one the clip moved would move Maya's skinned mesh twice)"""
+    rig = bound()
+    rig.append(
+        TransformData(
+            "placed",
+            node_type = "transform",
+            uuid      = generate_uuid(),
+            translate = (3.0 * UNIT, 2.0 * UNIT, -1.0 * UNIT),
+            rotate    = (0.0, 25.0, 0.0),
+            scale     = (1.5, 1.5, 1.5),
+        )
+    )
+    return rig
+
+
 def motion(rig: HierarchyData) -> ClipData:
     """15 frames: uniform scale on root, spine and arm (each with children),
     uneven scale on the leaves head, hand, foot and prop, rotation and
@@ -1091,7 +1109,8 @@ class TestSkin(_Skinned):
                 cluster.GetTransformLinkMatrix(linked)
                 cluster.GetTransformMatrix(placed)
                 np.testing.assert_allclose(_matrix(linked), worlds[place[name]], rtol=0, atol=1e-12)
-                np.testing.assert_allclose(_matrix(placed), np.eye(4), rtol=0, atol=1e-12)
+                # the cluster transform: the mesh's node, geo, at its world
+                np.testing.assert_allclose(_matrix(placed), worlds[place["geo"]], rtol=0, atol=1e-12)
             self.assertEqual(scene.GetPoseCount(), 1)
             pose = scene.GetPose(0)
             self.assertTrue(pose.IsBindPose())
@@ -1120,7 +1139,8 @@ class TestSkin(_Skinned):
 
     def test_the_bind_pose_places_nodes_their_own_values_do_not(self):
         """Maya's FBXExport writes the nodes at the playhead: the bind pose's
-        matrices give the hierarchy back, the skinned mesh's node at identity"""
+        matrices give the hierarchy back, the skinned mesh's node where the
+        pose and the clusters' transform put it (identity, for geo)"""
         source = bundle()
         save_fbx(self.path("a.fbx"), **source)
 
@@ -1268,11 +1288,6 @@ class TestSkinRefusals(_Skinned):
         source          = bundle()
         source["skins"] = SkinList([source["skins"], weighed(source["meshes"])])
         self.refused(ValueError, "skins 'bodySkin' and 'bodySkin' both name mesh 'body'; a mesh holds one skin", **source)
-        # a skinned mesh on a node that is not at identity
-        source           = bundle()
-        source["meshes"] = body(source["hierarchy"]["arm_grp"].uuid)
-        source["skins"]  = weighed(source["meshes"])
-        self.refused(ValueError, "skin 'bodySkin' binds mesh 'body' on node 'arm_grp', whose world is", **source)
         # on no node: a root node at identity, bound
         source           = bundle()
         source["meshes"] = body()
@@ -1283,6 +1298,67 @@ class TestSkinRefusals(_Skinned):
         self.assertOn(got.meshes[0], got.hierarchy, "body")
         self.assertSameSkin(got.skins[0], source["skins"])
         self.assertEqual(counts(self.path("rooted.fbx"))["poses"], 1)
+
+    def test_a_skinned_mesh_on_a_node_anywhere(self):
+        """body() on placed, a root transform off the origin, turned and
+        scaled, still over the clip: every cluster's transform and the bind
+        pose's entry are its world, the read puts the mesh back on it, the
+        bind pose places the node whatever its own values say, and the
+        second cycle is bit for bit"""
+        rig    = placed()
+        mesh   = body(rig["placed"].uuid)
+        source = {"hierarchy": rig, "clip": motion(rig), "meshes": mesh, "skins": weighed(mesh)}
+        world  = np.asarray(rig["placed"].world_matrix)
+        self.assertGreater(float(np.abs(world - np.eye(4)).max()), 1.0)
+        save_fbx(self.path("a.fbx"), **source)
+        with open_fbx(self.path("a.fbx"), FBX) as scene:
+            shape = typed(_named(scene, "placed").GetNodeAttribute(), FBX.FbxMesh, FBX)
+            skin  = typed(shape.GetDeformer(0, FBX.FbxDeformer.EDeformerType.eSkin), FBX.FbxSkin, FBX)
+            self.assertEqual(skin.GetClusterCount(), len(INFLUENCES))
+            for k in range(skin.GetClusterCount()):
+                bound_at = FBX.FbxAMatrix()
+                skin.GetCluster(k).GetTransformMatrix(bound_at)
+                np.testing.assert_allclose(_matrix(bound_at), world, rtol=0, atol=1e-9, err_msg=str(k))
+            pose = scene.GetPose(0)
+            held = {str(pose.GetNode(k).GetName()): _matrix(pose.GetMatrix(k)) for k in range(pose.GetCount())}
+            np.testing.assert_allclose(held["placed"], world, rtol=0, atol=1e-12)
+
+        first = load_fbx(self.path("a.fbx"))
+        self.assertSameSkeleton(first.hierarchy, rig)
+        self.assertOn(first.meshes[0], first.hierarchy, "placed")
+        self.assertOn(first.meshes[0], first.clip, "placed")
+        self.assertSameMesh(first.meshes[0], mesh)
+        self.assertSameSkin(first.skins[0], source["skins"])
+        np.testing.assert_allclose(first.meshes[0].world_matrix(first.hierarchy), world, rtol=0, atol=1e-12)
+
+        def moved(scene):
+            _named(scene, "placed").LclTranslation.Set(FBX.FbxDouble3(0.0, 1.0, 0.0))
+            _named(scene, "chest").LclRotation.Set(FBX.FbxDouble3(40.0, -20.0, 7.0))
+
+        got = load_fbx(_edited(self.path("a.fbx"), self.path("moved.fbx"), moved))
+        self.assertSameSkeleton(got.hierarchy, rig, exact=False, atol=1e-9)
+        np.testing.assert_allclose(got.meshes[0].world_matrix(got.hierarchy), world, rtol=0, atol=1e-9)
+
+        save_fbx(self.path("b.fbx"), *first)
+        second = load_fbx(self.path("b.fbx"))
+        self.assertSameSkeleton(second.hierarchy, first.hierarchy)
+        self.assertSameClip(second.clip, first.clip)
+        self.assertSameMesh(second.meshes[0], first.meshes[0])
+        self.assertSameSkin(second.skins[0], first.skins[0])
+        self.assertOn(second.meshes[0], second.hierarchy, "placed")
+
+        # on arm_grp, under the joints the clip moves: bound without a clip,
+        # refused with one (measured: Maya's skinCluster applies the node's
+        # own transform on top of the skin)
+        source           = bundle()
+        source["meshes"] = body(source["hierarchy"]["arm_grp"].uuid)
+        source["skins"]  = weighed(source["meshes"])
+        self.refused(ValueError, "the clip moves node 'arm_grp', which holds skinned mesh 'body', off its bind world on frame 1001", **source)
+        del source["clip"]
+        save_fbx(self.path("still.fbx"), **source)
+        got = load_fbx(self.path("still.fbx"))
+        self.assertOn(got.meshes[0], got.hierarchy, "arm_grp")
+        self.assertSameSkeleton(got.hierarchy, source["hierarchy"])
 
     def test_the_mesh(self):
         mesh              = body()
@@ -1344,7 +1420,8 @@ class TestSkinRefusals(_Skinned):
             shape.AddDeformer(skin)
 
         def bound_off(scene):
-            """the bind pose lists geo, the skinned mesh's node, elsewhere"""
+            """the bind pose lists geo, the skinned mesh's node, elsewhere
+            than the clusters' transform does"""
             old  = scene.GetPose(0)
             pose = FBX.FbxPose.Create(scene, "bind")
             pose.SetIsBindPose(True)
@@ -1358,6 +1435,7 @@ class TestSkinRefusals(_Skinned):
             scene.AddPose(pose)
 
         def cluster_off(scene):
+            """one cluster's transform elsewhere than the others'"""
             shape = typed(_named(scene, "geo").GetNodeAttribute(), FBX.FbxMesh, FBX)
             skin  = typed(shape.GetDeformer(0, FBX.FbxDeformer.EDeformerType.eSkin), FBX.FbxSkin, FBX)
             moved = FBX.FbxAMatrix()
@@ -1370,8 +1448,8 @@ class TestSkinRefusals(_Skinned):
         for name, edit, message in (
             ("two_poses", two_poses, "mesh 'body' is listed by 2 bind poses"),
             ("two_skins", two_skins, "mesh 'body' holds 2 skin deformers"),
-            ("bound_off", bound_off, "the bind pose places node 'geo', which holds mesh 'body', at"),
-            ("cluster_off", cluster_off, "skin 'bodySkin' binds mesh 'body' at"),
+            ("bound_off", bound_off, "node 'geo' channel 'bind pose' is .* in the bind pose of mesh 'body', .* in skin 'bodySkin''s cluster transform"),
+            ("cluster_off", cluster_off, "node 'geo' channel 'bind pose' is .* in the bind pose of mesh 'body', .* in skin 'bodySkin''s cluster transform"),
             ("offset", offset, "mesh 'body' channel 'geometric transform'"),
         ):
             with self.subTest(name):
@@ -1402,19 +1480,36 @@ class TestMayaSkin(_InMaya, _Skinned):
         chosen.add(shapes[0])
         return chosen.getDagPath(0)
 
+    @staticmethod
+    def skinned(on: str) -> dict:
+        """save_fbx's arguments: body() on node ``on`` of placed(), geo at
+        identity or placed off it, and its skin"""
+        rig  = placed()
+        mesh = body(rig[on].uuid)
+        return {"hierarchy": rig, "clip": motion(rig), "meshes": mesh, "skins": weighed(mesh)}
+
     def test_maya_imports_one_skin_that_deforms_as_cgmath(self):
+        self.deforms_as_cgmath("geo")
+
+    def test_maya_imports_a_skin_on_a_placed_node_that_deforms_as_cgmath(self):
+        """the mesh on placed, off the origin, turned and scaled at the bind:
+        Maya's skinCluster takes the bind placement as its geomMatrix and
+        deforms as cgmath's, which takes it from the node"""
+        self.deforms_as_cgmath("placed")
+
+    def deforms_as_cgmath(self, on: str) -> None:
         import maya.api.OpenMaya as om
         import maya.api.OpenMayaAnim as oma
         from cgmath.geometry.deform import SkinDeformData
 
         cmds   = self.cmds
-        source = bundle()
+        source = self.skinned(on)
         save_fbx(self.path("a.fbx"), **source)
         back = load_fbx(self.path("a.fbx"))
         self.imported(self.path("a.fbx"))
 
-        # the mesh is geo's shape
-        path     = self.mesh_path("geo")
+        # the mesh is the node's shape
+        path     = self.mesh_path(on)
         clusters = cmds.ls(type="skinCluster")
         self.assertEqual(len(clusters), 1)
         self.assertEqual(cmds.ls(cmds.listHistory(path.fullPathName()), type="skinCluster"), clusters)
@@ -1439,9 +1534,14 @@ class TestMayaSkin(_InMaya, _Skinned):
             prebind  = np.array(cmds.getAttr(f"{clusters[0]}.bindPreMatrix[{index}]")).reshape(4, 4)
             expected = np.linalg.inv(worlds[source["hierarchy"].name.index(influences[k])])
             near(prebind, expected, err_msg=influences[k])
+        # the bind placement: the mesh node's world as the cluster's geomMatrix
+        geom = np.array(cmds.getAttr(f"{clusters[0]}.geomMatrix")).reshape(4, 4)
+        near(geom, worlds[source["hierarchy"].name.index(on)], err_msg="geomMatrix")
+        self.assertOn(back.meshes[0], back.hierarchy, on)
 
         # THE SKIN DEFORMATION: cgmath's linear blend skinning of the re-read
-        # mesh, by the re-read clip, bound to the re-read hierarchy
+        # mesh, by the re-read clip, bound to the re-read hierarchy, which
+        # places the mesh's node
         deformer = SkinDeformData(back.meshes[0], back.skins[0], bind_rig=back.hierarchy)
         wanted   = deformer.apply(back.clip.frames)
         self.assertEqual(wanted.shape, (TAKE, source["meshes"].point_count, 3))
@@ -1492,9 +1592,16 @@ class TestMayaSkin(_InMaya, _Skinned):
         np.testing.assert_array_equal(worlds[:, column["geo"]], np.broadcast_to(np.eye(4), (TAKE, 4, 4)))
 
     def test_maya_export_of_the_skin_reads_back(self):
+        self.export_reads_back("geo")
+
+    def test_maya_export_of_a_skin_on_a_placed_node_reads_back(self):
+        self.export_reads_back("placed")
+
+    def export_reads_back(self, on: str) -> None:
         """Maya's FBXExport of the skinned import: load, save, load gives the
-        first load back bit for bit; the first is the source within 1e-6"""
-        source = bundle()
+        first load back bit for bit; the first is the source within 1e-6,
+        the mesh on its node"""
+        source = self.skinned(on)
         save_fbx(self.path("a.fbx"), **source)
         self.imported(self.path("a.fbx"))
         out   = self.exported("maya.fbx")
@@ -1506,8 +1613,8 @@ class TestMayaSkin(_InMaya, _Skinned):
         self.assertSameClip(second.clip, first.clip)
         self.assertSameMesh(second.meshes[0], first.meshes[0])
         self.assertSameSkin(second.skins[0], first.skins[0])
-        self.assertOn(first.meshes[0], first.hierarchy, "geo")
-        self.assertOn(second.meshes[0], second.hierarchy, "geo")
+        self.assertOn(first.meshes[0], first.hierarchy, on)
+        self.assertOn(second.meshes[0], second.hierarchy, on)
 
         # Maya writes its bind pose in float32: the angles within 1e-6
         # radians

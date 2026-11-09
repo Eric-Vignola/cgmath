@@ -219,7 +219,11 @@ class SkinDeformData(Data):
                 per-vertex weights and their influence names.
             bind_rig: Bind-pose skeleton, used to derive the inverse bind
                 matrices when *inverse_bind_matrices* is not supplied.  A
-                :class:`ClipData` binds at the frame it is on.
+                :class:`ClipData` binds at the frame it is on.  A mesh on a
+                node of it (its ``parent_uuid``) is bound where that node's
+                world puts its points, as a file's cluster transform binds
+                one (Maya's geomMatrix): the derived matrices carry the
+                placement, and the deformed points come back in world space.
             inverse_bind_matrices: ``(J, 4, 4)`` authored matrices, ordered to
                 *joints*.  Preferred over *bind_rig*: a file's matrices can
                 encode a transform the bind pose alone cannot reproduce.
@@ -267,6 +271,14 @@ class SkinDeformData(Data):
                     "bind frame, not every frame of a clip"
                 )
             self.inverse_bind_matrices = np.ascontiguousarray(np.linalg.inv(world))
+            # a mesh on a node of the bind rig is bound where that node's
+            # world puts its points (fbx's cluster transform, Maya's
+            # geomMatrix): the derived matrices take the placement, as
+            # authored ones may
+            if isinstance(bind_rig, HierarchyData) and getattr(mesh, "parent_uuid", None) is not None:
+                placed = mesh.world_matrix(bind_rig)
+                if not np.array_equal(placed, np.eye(4)):
+                    self.inverse_bind_matrices = np.ascontiguousarray(placed[None] @ self.inverse_bind_matrices)
         else:
             raise ValueError(
                 "one of inverse_bind_matrices or bind_rig is required -- there "

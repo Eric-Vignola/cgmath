@@ -724,6 +724,11 @@ print(type(deformer.apply(posed_rig)).__name__, deformer.apply(posed_rig).shape)
 Prefer the file's matrices when you have them — glTF stores them explicitly
 because they need not equal `inv(bind_rig.world_matrix)`.
 
+A mesh on a node of the bind rig (its `parent_uuid`) is bound where that
+node's world puts its points — FBX's cluster transform, Maya's geomMatrix —
+so the matrices derived from `bind_rig` carry that placement, as authored
+ones may; the deformed points come back in world space either way.
+
 ```python
 identity_ibm = np.stack([np.eye(4), np.eye(4)])
 authored     = SkinDeformData(mesh=bar, skin=skin, inverse_bind_matrices=identity_ibm)
