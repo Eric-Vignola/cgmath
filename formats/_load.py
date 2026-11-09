@@ -38,14 +38,16 @@ BIND_SOLVED = 1e-6
 # a skin's matrices and its bind pose this far apart, relative to the
 # largest element, disagree; Maya's FBXExport writes the cluster's in
 # float32
-SKIN_AGREE  = 1e-5
+SKIN_AGREE = 1e-5
 
-FbxContents = namedtuple("FbxContents", ("hierarchy", "clip", "meshes", "skins", "uvs", "cameras", "lights", "materials"))
+FbxContents = namedtuple(
+    "FbxContents", ("hierarchy", "clip", "meshes", "skins", "uvs", "cameras", "lights", "materials", "morphs")
+)
 
 
 def load_fbx(filename) -> FbxContents:
-    """``(hierarchy, clip, meshes, skins, uvs, cameras, lights, materials)``,
-    None where the file holds none
+    """``(hierarchy, clip, meshes, skins, uvs, cameras, lights, materials,
+    morphs)``, None where the file holds none
 
     ``hierarchy`` every node of the file at its own values, a mesh's node
     among them; None for a file holding a take, whose nodes ``clip`` holds at
@@ -116,6 +118,22 @@ def load_fbx(filename) -> FbxContents:
     material element mapping other than all-same or by-polygon, or leaving
     faces without a material.
 
+    ``morphs`` a MorphList of the meshes' blend shape targets, mesh by mesh
+    in the meshes' order, deformer by deformer, channel by channel, shape by
+    shape as the file orders them, each a MorphData naming its mesh by
+    ``mesh_uuid``, as Maya's own import would hold them (measured on Maya's
+    export): ``deformer`` the FbxBlendShape's name (Maya's blendShape node),
+    ``name`` the channel's name less the deformer's name and a dot, which
+    Maya's export prefixes and its import strips, ``weight`` the channel's
+    DeformPercent over 100, ``at`` the shape's full weight over 100 (1 for
+    a full target, below 1 for an in-between: a channel's shapes are the
+    targets of one name), ``offsets`` the shape's points less the mesh's at
+    the points that differ (a file holds every point of a target, absolute;
+    its normals are not read). A channel the active take keys is read at
+    the take's first frame, with one warning naming its targets. ValueError
+    for a target of another point count than its mesh, or one reached at a
+    weight that is not above 0.
+
     The values are in Maya's Y-up and cm, as every cgmath value is. A file
     whose up axis is X or Z is turned the way Maya's importer turns it
     (measured): its roots take the turn, a joint root in its joint orient and
@@ -147,13 +165,14 @@ def load_fbx(filename) -> FbxContents:
     cameras   = _build_cameras(read)
     lights    = _build_lights(read)
     materials = _build_materials(read, meshes)
+    morphs    = _build_morphs(read, meshes)
     if any(held["skin"] is not None for held in read["meshes"]):
         bind, order = _build(read)
         _settle_bind(read, bind, order)
-        return FbxContents(bind, clip, meshes, _build_skins(read, meshes), uvs, cameras, lights, materials)
+        return FbxContents(bind, clip, meshes, _build_skins(read, meshes), uvs, cameras, lights, materials, morphs)
     if clip is not None:
-        return FbxContents(None, clip, meshes, None, uvs, cameras, lights, materials)
-    return FbxContents(hierarchy if len(hierarchy) else None, None, meshes, None, uvs, cameras, lights, materials)
+        return FbxContents(None, clip, meshes, None, uvs, cameras, lights, materials, morphs)
+    return FbxContents(hierarchy if len(hierarchy) else None, None, meshes, None, uvs, cameras, lights, materials, morphs)
 
 
 def load_nodes(filename):
@@ -244,19 +263,117 @@ def _read_mesh(node, at: int, filename: str, fbx) -> dict:
         element = shape.GetElementNormal(0)
         normals = _fbx_direct_array_to_ndarray(element.GetDirectArray(), dim=3)
         ids     = _fbx_face_varying_indices(shape, element, counts)
+    points = _fbx_control_points(shape)
     return {
         "uvs":            _read_uvs(label, shape, counts, fbx),
         "materials":      _read_materials(node, shape, counts, label, filename, fbx),
+        "morphs":         _read_morphs(shape, points, label, fbx),
         "name":           name,
         "label":          label,
         "node":           at,
-        "points":         _fbx_control_points(shape),
+        "points":         points,
         "counts":         counts,
         "indices":        indices,
         "normals":        normals,
         "normal_indices": ids,
         "shape":          shape,
     }
+
+
+# fbx's DeformPercent and full weights are Maya's weights times this
+WEIGHT_UNIT = 100.0
+
+
+def _read_morphs(shape, points, label: str, fbx) -> list:
+    """the blend shape targets on the mesh (``label``), deformer by deformer,
+    channel by channel, shape by shape in the file's order: each its name
+    (the channel's, less the deformer's name and a dot where Maya's export
+    prefixes it), its deformer's name, its weight (the channel's
+    DeformPercent over ``WEIGHT_UNIT``), the weight it is reached at (its
+    full weight over ``WEIGHT_UNIT``), and its offsets from ``points``, the
+    mesh's, at the points it moves; the channel kept for :func:`_morph_keys`.
+    ValueError for a target of another point count, or one reached at a
+    weight that is not above 0"""
+    from cgmath.formats._fbx_io import typed
+    from cgmath.geometry.mesh import _fbx_control_points
+
+    kind  = fbx.FbxDeformer.EDeformerType.eBlendShape
+    found = []
+    for d in range(shape.GetDeformerCount(kind)):
+        deformer = typed(shape.GetDeformer(d, kind), fbx.FbxBlendShape, fbx)
+        dname    = str(deformer.GetName()) or None
+        for c in range(deformer.GetBlendShapeChannelCount()):
+            channel = deformer.GetBlendShapeChannel(c)
+            cname   = str(channel.GetName())
+            if dname and cname.startswith(dname + "."):
+                cname = cname[len(dname) + 1:]
+            weights = [float(w) for w in channel.GetTargetShapeFullWeights()]
+            weight  = float(channel.DeformPercent.Get()) / WEIGHT_UNIT
+            for s in range(channel.GetTargetShapeCount()):
+                target = channel.GetTargetShape(s)
+                name   = cname or str(target.GetName()) or f"target{c + 1}"
+                count  = target.GetControlPointsCount()
+                if count != len(points):
+                    raise ValueError(
+                        f"load_fbx: {label} blend shape target {name!r} holds {count} points, the mesh {len(points)}; "
+                        f"{FORK} reads a target over every point of its mesh"
+                    )
+                at = weights[s] / WEIGHT_UNIT if s < len(weights) else 1.0
+                if not at > 0.0:
+                    raise ValueError(
+                        f"load_fbx: {label} blend shape target {name!r} is reached at weight {at}, which no target is; "
+                        f"{FORK} reads a target reached above 0"
+                    )
+                diff  = np.asarray(_fbx_control_points(target), dtype=np.float64) - points
+                moved = np.flatnonzero(np.any(diff != 0.0, axis=1))
+                found.append({
+                    "name":     name,
+                    "label":    f"blend shape target {name!r} of {label}",
+                    "deformer": dname,
+                    "channel":  channel,
+                    "weight":   weight,
+                    "at":       at,
+                    "offsets":  diff[moved],
+                    "indices":  moved.astype(np.int32),
+                })
+    return found
+
+
+def _morph_keys(read: dict, fbx) -> None:
+    """a blend shape channel's DeformPercent the active take keys: every
+    target of the channel takes the take's first frame's value, and one
+    warning names them; the fork reads a weight static"""
+    import warnings
+
+    from cgmath.formats._fbx_io import typed
+
+    takes = read["takes"]
+    if not takes:
+        return
+    take  = takes[read["active"]]
+    layer = take["layer"]
+    if layer is None:
+        return
+    when  = fbx.FbxTime(int(take["ticks"][0]))
+    keyed = []
+    for held in read["meshes"]:
+        for morph in held["morphs"]:
+            prop = morph["channel"].DeformPercent
+            if prop.GetCurveNode(layer, False) is None:
+                continue
+            curve = prop.GetCurve(layer, False)
+            if curve is None:
+                continue
+            value           = typed(curve, fbx.FbxAnimCurve, fbx).Evaluate(when)
+            morph["weight"] = float(value[0] if isinstance(value, tuple) else value) / WEIGHT_UNIT
+            if morph["at"] == 1.0:
+                keyed.append(morph["label"])
+    if keyed:
+        warnings.warn(
+            f"load_fbx: {', '.join(keyed)}: the weight is keyed in take {take['name']!r}; {FORK} reads a blend shape "
+            f"weight static, at the take's first frame",
+            stacklevel=2,
+        )
 
 
 # the material property a texture feeds that the fork reads: the colour map
@@ -666,6 +783,7 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "
         read["takes"], read["active"] = _takes(scene, fbx, found, nodes)
     _turn_views(read)
     _view_keys(read, fbx)
+    _morph_keys(read, fbx)
     _convert(read, *_axes(scene, fbx, filename))
     return read
 
@@ -1109,7 +1227,9 @@ def _convert(read: dict, turn, cm: float) -> None:
                 held["fields"][name] = held["fields"][name] * cm
         for held in read["meshes"]:
             held["points"] = held["points"] * cm
-            skin           = held["skin"]
+            for morph in held["morphs"]:
+                morph["offsets"] = morph["offsets"] * cm
+            skin = held["skin"]
             if skin is None:
                 continue
             for cluster in skin["clusters"]:
@@ -1458,6 +1578,29 @@ def _build_materials(read: dict, meshes):
             stacklevel=2,
         )
     return MaterialList(materials) if materials else None
+
+
+def _build_morphs(read: dict, meshes):
+    """the MorphList of the meshes' blend shape targets, mesh by mesh in the
+    meshes' order, each naming its mesh by uuid; None for none"""
+    from cgmath.geometry.morph_target import MorphData, MorphList
+
+    if meshes is None:
+        return None
+    morphs = [
+        MorphData(
+            name      = held["name"],
+            offsets   = held["offsets"],
+            indices   = held["indices"],
+            mesh_uuid = mesh.uuid,
+            weight    = held["weight"],
+            at        = held["at"],
+            deformer  = held["deformer"],
+        )
+        for entry, mesh in zip(read["meshes"], meshes)
+        for held in entry["morphs"]
+    ]
+    return MorphList(morphs) if morphs else None
 
 
 def _build_meshes(read: dict):
