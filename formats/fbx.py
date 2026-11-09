@@ -3059,7 +3059,7 @@ class FbxExporter:
             # a null's look is what tells a locator from a group, the same way
             # Maya's own FBX plugin writes them. the binding's Look.Set() only
             # takes the enum's integer value.
-            elif item.node_type == "transform" or item.node_type == "space_transform":
+            elif item.node_type == "transform":
                 node_attr = fbx.FbxNull.Create(self.manager, "")
                 node_attr.Look.Set(fbx.FbxNull.ELook.eNone.value)
             elif item.node_type == "locator":

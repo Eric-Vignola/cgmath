@@ -1107,7 +1107,7 @@ Each `TransformData` maps onto FBX like this:
 | `node_type` | FBX attribute | Inherit type | Extras applied |
 |---|---|---|---|
 | `"joint"` | `FbxSkeleton`, `eLimbNode` at the top too, as Maya writes every joint (Maya's importer reads an `eRoot` with no child as a plain transform) | `eInheritRrs` with `segment_scale_compensate` on, `eInheritRSrs` with it off | `joint_orient` → pre-rotation, `rotate_axis` → inverted post-rotation |
-| `"transform"`, `"space_transform"` | `FbxNull`, look `eNone` | the same | — |
+| `"transform"` | `FbxNull`, look `eNone` | the same | — |
 | `"locator"` | `FbxNull`, look `eCross`, as Maya writes a locator | the same | — |
 | anything else | not written, nor any node under it; one warning names how many of each type were skipped | — | — |
 
