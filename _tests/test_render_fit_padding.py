@@ -8,26 +8,22 @@ center to add a margin.  These tests cover:
 * ``_inflate_points_about_center`` (camera.py) -- the geometric primitive.
 * ``_scene_uses_bezier`` / ``_resolve_fit_padding`` (raytracer.py) -- the
   per-call resolution policy used by ``render()``.
-* ``_scene_objects_use_bezier`` / ``_resolve_turntable_fit_padding``
-  (scene.py) -- the same policy on the turntable path.
-* ``Scene`` config plumbing (the new ``fit_padding`` attr + ``_RENDER_CONFIG_KEYS``).
+* ``_resolve_turntable_fit_padding`` (scene.py) -- the same policy on the
+  turntable path, from the scene's sample method.
+* ``Scene`` config plumbing (the ``fit_padding`` setting + ``_RENDER_CONFIG_KEYS``).
 * End-to-end: a bezier render's autofit camera sits further back than
   the same scene rendered with bilinear sampling.
 """
 
 import unittest
 from typing import Optional, Tuple
-from unittest.mock import MagicMock
 
 import numpy as np
 from cgmath.geometry.mesh import MeshData, SampleMethod, UVData
-from cgmath.render import Object, render, Scene
+from cgmath.render import render, Scene
 from cgmath.render.camera import _inflate_points_about_center
 from cgmath.render.raytracer import _resolve_fit_padding, _scene_uses_bezier
-from cgmath.render.scene import (
-    _resolve_turntable_fit_padding,
-    _scene_objects_use_bezier,
-)
+from cgmath.render.scene import _RENDER_CONFIG_KEYS, _resolve_turntable_fit_padding
 
 
 def _make_unit_cube() -> Tuple[MeshData, UVData]:
@@ -57,12 +53,10 @@ def _make_unit_cube() -> Tuple[MeshData, UVData]:
     uv_points = np.array(
         [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]], dtype=np.float64
     )
-    # Mirror cube indices into UV space (every face uses the same 4 UV
-    # corners).  Counts match.
     uv_indices = np.array(
         [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]
     )
-    uv = UVData(points=uv_points, indices=uv_indices, counts=counts)
+    uv = UVData(points=uv_points, indices=uv_indices, counts=counts, mesh_uuid=mesh.uuid)
     return mesh, uv
 
 
@@ -89,7 +83,6 @@ class TestInflatePointsAboutCenter(unittest.TestCase):
         np.testing.assert_allclose(out, [[-1.0, -2.0, -3.0], [3.0, 6.0, 9.0]])
 
     def test_preserves_aabb_center(self):
-        # After inflation the AABB center must be unchanged.
         rng           = np.random.default_rng(0)
         pts           = rng.standard_normal((100, 3))
         center_before = 0.5 * (pts.min(0) + pts.max(0))
@@ -140,6 +133,13 @@ class TestSceneUsesBezier(unittest.TestCase):
         ]
         self.assertTrue(_scene_uses_bezier(entries))
 
+    def test_a_scenes_entries_carry_its_sample_method(self):
+        mesh, uv = _make_unit_cube()
+        scene = Scene("s", sample_method="bezier").add(mesh, uv)
+        self.assertTrue(_scene_uses_bezier(scene._render_inputs().entries))
+        scene.sample_method = "bilinear"
+        self.assertFalse(_scene_uses_bezier(scene._render_inputs().entries))
+
 
 # -- raytracer._resolve_fit_padding ------------------------------------------
 
@@ -167,66 +167,12 @@ class TestResolveFitPadding(unittest.TestCase):
         self.assertEqual(_resolve_fit_padding(None, []), 1.0)
 
 
-# -- scene._scene_objects_use_bezier -----------------------------------------
-
-
-class TestSceneObjectsUseBezier(unittest.TestCase):
-    def setUp(self):
-        self.mesh, self.uv = _make_unit_cube()
-
-    def test_empty_scene_returns_false(self):
-        scene = Scene("empty")
-        self.assertFalse(_scene_objects_use_bezier(scene))
-
-    def test_bilinear_object_returns_false(self):
-        scene = Scene("s")
-        scene.append(Object(name="o", mesh=self.mesh, uv=self.uv))
-        self.assertFalse(_scene_objects_use_bezier(scene))
-
-    def test_bezier_object_returns_true(self):
-        scene = Scene("s")
-        scene.append(
-            Object(name="o", mesh=self.mesh, uv=self.uv, sample_method="bezier")
-        )
-        self.assertTrue(_scene_objects_use_bezier(scene))
-
-    def test_skips_invisible_object(self):
-        # An invisible bezier Object shouldn't trigger inflation; the
-        # autofit ignores invisible objects too.
-        scene          = Scene("s")
-        obj            = Object(name="o", mesh=self.mesh, uv=self.uv, sample_method="bezier")
-        obj.visibility = False
-        scene.append(obj)
-        self.assertFalse(_scene_objects_use_bezier(scene))
-
-    def test_skips_meshless_object(self):
-        scene = Scene("s")
-        scene.append(Object(name="o", sample_method="bezier"))  # mesh=None
-        self.assertFalse(_scene_objects_use_bezier(scene))
-
-    def test_enum_valued_sample_method(self):
-        # Tolerate enum-valued sample_method on an Object via name fallback.
-        scene = Scene("s")
-        obj   = Object(name="o", mesh=self.mesh, uv=self.uv)
-        # Simulate an enum-shaped object with a .name attr equal to "BEZIER".
-        obj.sample_method      = MagicMock(name="enum-mock", spec=[])
-        obj.sample_method.name = "BEZIER"
-        scene.append(obj)
-        self.assertTrue(_scene_objects_use_bezier(scene))
-
-
 # -- scene._resolve_turntable_fit_padding ------------------------------------
 
 
 class TestResolveTurntableFitPadding(unittest.TestCase):
-    def setUp(self):
-        self.mesh, self.uv = _make_unit_cube()
-
     def test_pops_explicit_kwarg(self):
-        scene = Scene("s")
-        scene.append(
-            Object(name="o", mesh=self.mesh, uv=self.uv, sample_method="bezier")
-        )
+        scene  = Scene("s", sample_method="bezier")
         kwargs = {"fit_padding": 1.4, "other": "untouched"}
         pad    = _resolve_turntable_fit_padding(kwargs, scene)
         self.assertEqual(pad, 1.4)
@@ -235,26 +181,17 @@ class TestResolveTurntableFitPadding(unittest.TestCase):
         self.assertEqual(kwargs, {"other": "untouched"})
 
     def test_default_one_for_bilinear_scene(self):
-        scene = Scene("s")
-        scene.append(Object(name="o", mesh=self.mesh, uv=self.uv))
         kwargs: dict = {}
-        self.assertEqual(_resolve_turntable_fit_padding(kwargs, scene), 1.0)
+        self.assertEqual(_resolve_turntable_fit_padding(kwargs, Scene("s")), 1.0)
 
     def test_default_one_one_five_for_bezier_scene(self):
-        scene = Scene("s")
-        scene.append(
-            Object(name="o", mesh=self.mesh, uv=self.uv, sample_method="bezier")
-        )
         kwargs: dict = {}
-        self.assertAlmostEqual(_resolve_turntable_fit_padding(kwargs, scene), 1.15)
+        self.assertAlmostEqual(_resolve_turntable_fit_padding(kwargs, Scene("s", sample_method="bezier")), 1.15)
+        self.assertAlmostEqual(_resolve_turntable_fit_padding({}, Scene("s", sample_method=SampleMethod.BEZIER)), 1.15)
 
     def test_explicit_one_overrides_bezier_default(self):
-        scene = Scene("s")
-        scene.append(
-            Object(name="o", mesh=self.mesh, uv=self.uv, sample_method="bezier")
-        )
         kwargs: dict = {"fit_padding": 1.0}
-        self.assertEqual(_resolve_turntable_fit_padding(kwargs, scene), 1.0)
+        self.assertEqual(_resolve_turntable_fit_padding(kwargs, Scene("s", sample_method="bezier")), 1.0)
 
 
 # -- Scene config plumbing --------------------------------------------------
@@ -270,7 +207,7 @@ class TestSceneFitPaddingConfig(unittest.TestCase):
         self.assertIsNone(scene.fit_padding)
 
     def test_fit_padding_in_render_config_keys(self):
-        self.assertIn("fit_padding", Scene._RENDER_CONFIG_KEYS)
+        self.assertIn("fit_padding", _RENDER_CONFIG_KEYS)
 
     def test_configure_sets_fit_padding(self):
         scene = Scene("s")
@@ -302,7 +239,7 @@ class TestBezierAutofitPullsCameraBack(unittest.TestCase):
     """
 
     def setUp(self):
-        self.mesh, _ = _make_unit_cube()
+        self.mesh, self.uv = _make_unit_cube()
 
     def _render_and_get_camera_distance(
         self,
@@ -322,11 +259,19 @@ class TestBezierAutofitPullsCameraBack(unittest.TestCase):
         cam_pos = frame.camera_matrix[:3, 3]
         return float(np.linalg.norm(cam_pos))
 
+    def _scene_camera_distance(self, sample_method: str) -> float:
+        scene = Scene("s", sample_method=sample_method, resolution=(64, 64), samples_per_pixel=1).add(self.mesh)
+        frame = scene.render(default_light=False)
+        return float(np.linalg.norm(frame.camera_matrix[:3, 3]))
+
     def test_bezier_default_pulls_back_more_than_bilinear(self):
         d_bilinear = self._render_and_get_camera_distance("bilinear")
         d_bezier   = self._render_and_get_camera_distance("bezier")
         # Bezier auto-defaults to 1.15 -> camera ~15% further back.
         self.assertGreater(d_bezier, d_bilinear)
+
+    def test_a_bezier_scene_pulls_back_too(self):
+        self.assertGreater(self._scene_camera_distance("bezier"), self._scene_camera_distance("bilinear"))
 
     def test_explicit_padding_one_disables_inflation(self):
         # Explicitly setting fit_padding=1.0 must match the bilinear path

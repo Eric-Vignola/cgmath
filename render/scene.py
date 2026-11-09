@@ -1,40 +1,44 @@
 """
-Scene-graph primitives for the raytracer.
+A scene for the raytracer: what an fbx holds, and the render settings.
 
-A :class:`Scene` is a :class:`HierarchyData` of :class:`Object`,
-:class:`Camera`, and :class:`Light` nodes (plus optional plain
-:class:`TransformData` group nodes for hierarchy).  Each renderable node
-inherits Maya-style transforms (translate / rotate / scale / parenting)
-from :class:`TransformData`, so:
-
-  - parent a Camera under an Object -> orbit camera
-  - parent a Light under a Camera -> headlight
-  - same MeshData under multiple Objects -> free instancing (BVH shared),
-    kept by save, load and copy(), which hold the mesh once
+A :class:`Scene` is the record ``cgmath.formats.load_fbx`` reads and
+``save_fbx`` writes, in one object: the nodes, as a ``hierarchy`` at rest or
+as their takes, a ``clip``; the ``meshes`` on the nodes; the ``uvs``,
+``skins``, ``materials`` and blend shape targets (``morphs``) on the meshes;
+the ``cameras`` and ``lights`` on their nodes; and the settings a render
+takes. Every shape sits where the node its ``parent_uuid`` names puts it, at
+identity when it names none; a skinned mesh is deformed by the pose, from
+the bind pose ``hierarchy`` holds; a target moves the mesh's points by its
+weight.
 
 Minimum viable scene::
 
-    from cgmath.geometry.mesh import MeshData, UVData
-    from cgmath.render.scene import Camera, Light, Object, Scene
-    from cgmath.render.raytracer import render
+    from cgmath.render import Scene
 
-    scene = Scene("scene")
-    scene.append(Object(name="hero", mesh=mesh, uv=uv, texture="hero.png"))
-    scene.append(Camera(name="cam"))
-    scene.append(Light(name="key", kind="point", intensity=1e5))
-    img = render(scene=scene, resolution=(640, 480))
+    scene = Scene.load_fbx("hero.fbx")
+    frame = scene.render(resolution=(640, 480))
+    frame.save("hero.png")
 
-If no Camera is in the scene, a default 3/4 elevated camera is built and
-autofit to the scene.  If no Light is in the scene and ``default_light``
-is not disabled, a "headlight" is added parented to the camera.
+Built by hand, shape by shape::
+
+    from cgmath.geometry import CameraData, LightData, MaterialData
+    from cgmath.hierarchy import TransformData
+    from cgmath.render import Scene, aim
+
+    scene = Scene("scene", resolution=(640, 480))
+    scene.add(mesh, MaterialData(mesh_uuid=mesh.uuid, color=(0.8, 0.2, 0.1)))
+    cam = TransformData("cam", translate=(0.0, 150.0, 400.0))
+    aim(cam, (0.0, 80.0, 0.0))
+    scene.add(cam, CameraData(parent_uuid=cam.uuid, focal_length=50.0))
+    scene.render().save("scene.png")
+
+If the scene has no camera, a default 3/4 elevated view is built and fit to
+the scene. If it has no light and ``default_light`` is not False, a 3-point
+rig sized to the scene lights it for the render.
 """
-
-from __future__ import annotations
 
 import atexit
 import base64
-import contextlib
-import copy
 import hashlib
 import io
 import json
@@ -47,2859 +51,671 @@ import warnings
 import weakref
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Tuple, Union
+from typing import List, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
-from cgmath.data import (
-    _NoRoute,
-    _strip_namespace,
-    Array,
-    ArraySpec,
-    DTYPES_KEY,
-    ImmutableArray as numpy_array,
-)
-from cgmath.formats._fbx_io import FbxReadError, load_sdk, open_fbx, typed
+from cgmath.data import _strip_namespace, Array, Data, ImmutableArray as numpy_array
+from cgmath.formats import FbxContents, load_fbx as _load_fbx, save_fbx as _save_fbx
+from cgmath.geometry.camera import CameraData, CameraList
 from cgmath.geometry.deform import SkinDeformData
-from cgmath.geometry.mesh import (
-    _corner_normals,
-    _load_fbx,
-    _write_obj,
-    load_glb as _load_glb,
-    load_obj as _load_obj,
-    MeshData,
-    UVData,
-)
-from cgmath.geometry.skin_weights import _read_skins_fbx, _read_skins_glb
+from cgmath.geometry.light import LightData, LightList
+from cgmath.geometry.material import MaterialData, MaterialList
+from cgmath.geometry.mesh import load_glb as _load_glb, load_obj as _load_obj, MeshData, MeshList, UVData, UVList
+from cgmath.geometry.morph_target import MorphData, MorphList
+from cgmath.geometry.skin_weights import _read_skins_glb, SkinData, SkinList
+from cgmath.hierarchy import ClipData, ClipList, HierarchyData, TransformData
 from cgmath.render.camera import (
-    _autofit_camera_for_points,
     _default_camera_for_points,
     _inflate_points_about_center,
     look_at as _look_at,
 )
 from cgmath.render.texture import _load_texture
-from cgmath.hierarchy import HierarchyData, TransformData, generate_uuid
 
-# opencv (optional) -- required by :meth:`Object.imshow` / :meth:`Scene.imshow`.
-# Lazy-import pattern matching ``cgmath.geometry.mesh`` so the module loads
-# fine in headless / no-cv2 environments; the imshow methods raise a clear
-# RuntimeError when actually invoked without cv2.
+# opencv (optional) -- required by :meth:`Scene.imshow`
 try:
     import cv2
 except ImportError:
     cv2 = None
 
-# PIL (optional) -- required by :meth:`Object.to_image` / :meth:`Scene.to_image`.
-# Mirrors the lazy-import pattern in ``cgmath.geometry.mesh`` so the module
-# loads fine in environments without PIL; the to_image methods raise a clear
-# RuntimeError when actually invoked without PIL.
+# PIL (optional) -- required by :meth:`Scene.to_image` and the glb textures
 try:
     from PIL import Image
 except ImportError:
     Image = None
 
-# Autodesk FBX SDK (optional) -- only required by :meth:`Object.load_fbx` and
-# :meth:`Object.extract_texture_from_fbx`. Lazy-import keeps the module
-# loadable in environments without the FBX SDK installed.
-_fbx = load_sdk()
+
+class RenderInputs(NamedTuple):
+    """what the raytracer renders: the per-mesh entries, the camera dict or
+    None, the light dicts (:meth:`Scene._render_inputs`)"""
+
+    entries: list
+    camera:  Optional[dict]
+    lights:  list
 
 
-# -- Object --------------------------------------------------------------------
+# the settings merged into render() / turntable() / animate() kwargs
+_RENDER_CONFIG_KEYS = (
+    "resolution",
+    "samples_per_pixel",
+    "background",
+    "autofit",
+    "default_light",
+    "return_depth",
+    "angle_of_view",
+    "fit_padding",
+)
 
-# the caches an Object builds from its texture, mesh and skin, which the
-# stand-in a preview renders shares with it (Object._previewed)
-_PREVIEW_CACHES = ("_loaded_texture", "_wired_texture_cache", "_bind_mesh")
+# the shading settings, one value for every mesh of the scene
+_SHADING_KEYS = (
+    "base_color",
+    "sample_method",
+    "ambient",
+    "twosided",
+    "cast_shadows",
+    "wireframe",
+    "wireframe_color",
+    "wireframe_thickness",
+)
+
+# a shape's list field, by the class of what it holds
+_LISTS = (
+    ("meshes", MeshData, MeshList),
+    ("uvs", UVData, UVList),
+    ("skins", SkinData, SkinList),
+    ("materials", MaterialData, MaterialList),
+    ("cameras", CameraData, CameraList),
+    ("lights", LightData, LightList),
+    ("morphs", MorphData, MorphList),
+)
 
 
 @dataclass(repr=False, eq=False)
-class Object(TransformData):
-    """A renderable mesh with attached UVs, texture and shader options.
+class Scene(Data):
+    """
+    What an fbx holds, and the render settings: nodes, meshes, UV sets,
+    skins, materials, cameras, lights and blend shape targets, each shape
+    placed by the node its ``parent_uuid`` names.
 
-    Domain fields are declared as ``@dataclass`` defaults so that the
-    inherited :meth:`Data.to_dict` / :meth:`Data.from_dict` round-trip
-    them automatically, the mesh, UVs and skin nested as their own data.
+    Parameters
+    ----------
+    name : str, optional
+        The scene's name. Default "scene".
+    hierarchy : HierarchyData, optional
+        The nodes at rest; with a clip, the bind pose the skins deform from.
+    clip : ClipList, optional
+        The takes over the nodes; the active one plays. A ClipData is taken
+        as a list of one.
+    meshes, uvs, skins, materials, cameras, lights, morphs : lists, optional
+        The shapes, as ``cgmath.formats.load_fbx`` gives them: a MeshList,
+        UVList, SkinList, MaterialList, CameraList, LightList, MorphList. One
+        shape, or a list of them, is taken as the list.
+    default_camera : str, optional
+        The name of the camera a render looks through; None for the first.
+    aspect_ratio : float, optional
+        Reserved; the resolution gives the aspect.
+    resolution : (2,) int32, optional
+        The frame's width and height. Default (500, 500); None falls through
+        to the per-call keyword and the renderer's default.
+    samples_per_pixel : int, optional
+        1 or a perfect square (4, 9, 16 ...); None for the renderer's default.
+    background : (4,) float64, optional
+        RGBA in 0 to 1 behind the scene; RGB is taken opaque; None for
+        transparent black.
+    autofit, default_light, return_depth : bool, optional
+        Fit the camera to the scene, light an unlit scene with the 3-point
+        rig, keep a depth buffer; None for the renderer's defaults.
+    angle_of_view : float, optional
+        The vertical angle of view, in degrees, of the default camera a
+        scene without a camera is seen through.
+    fit_padding : float, optional
+        The margin autofit leaves around the scene, 1 none; None picks 1.15
+        for bezier sampling, else 1.
+    base_color : (3,) float64
+        The colour of a face no material covers. Default 0.7 grey.
+    sample_method : str
+        "bilinear" or "bezier" (PN quads), every mesh. Default bilinear.
+    ambient : float
+        The ambient term, added once after the lights. Default 0.8.
+    twosided : bool
+        Back faces hit when True. Default True.
+    cast_shadows : bool
+        Reserved. Default True.
+    wireframe : bool
+        Edges baked over every textured mesh's colour map, or over its base
+        colour on its first UV set. Default False.
+    wireframe_color : (3,) int32
+        The edges' colour, 0 to 255. Default black.
+    wireframe_thickness : int
+        The edges' width, in texels. Default 1.
 
-    The ``texture`` attribute may be a path to an image or a pre-loaded
-    ``(H, W, C)`` array, uint8, uint16 or float32 in [0, 1], kept in its
-    own dtype (any other float array becomes float32).  When it's a path,
-    the renderer loads it lazily on first render and caches the result on
-    the Object via the (non-serialized) ``_loaded_texture`` attribute, and
-    a save writes the image's pixels, as uint8, in its place.
-
-    ``base_color``, ``background``, ``resolution`` and ``wireframe_color``
-    are small arrays: float64 ``(3,)``, float64 ``(4,)`` (or ``None``),
-    int32 ``(2,)`` and int32 ``(3,)``.  A value of another size raises
-    ValueError.
-
-    Render cache (``frame`` / ``buffer``):
-      :meth:`render`, :meth:`imshow`, and :meth:`to_image` populate a
-      :attr:`frame` cache so repeated display calls don't re-run the
-      raytracer.  The cache auto-invalidates lazily on access when:
-
-        - any tracked visual attribute is reassigned (``mesh`` /
-          ``uv`` / ``texture`` / ``base_color`` / ``wireframe*`` /
-          ``sample_method`` / ``wrap`` / ``ambient`` / ``twosided`` /
-          ``cast_shadows`` / ``resolution`` / ``samples_per_pixel``)
-          -- via the existing setter -> :meth:`_mark_render_dirty`
-          plumbing, OR
-        - the Object's local transform (``translate`` / ``rotate`` /
-          ``scale``) OR any ancestor's transform has changed since
-          the cached frame was rendered -- detected via the
-          transform-state snapshot taken in the :attr:`frame` setter
-          (see :meth:`_capture_transform_state`).
-
-      In-place mutation of ``mesh.points`` or texture pixel arrays
-      still requires an explicit :meth:`render` call to refresh.
+    A render through :meth:`render`, :meth:`to_image` or :meth:`imshow`
+    keeps its :attr:`frame`, dropped when a setting, a shape, a node or the
+    frame rendered changes (:meth:`_signature`); an edit in place of
+    a mesh's points or a texture's pixels is not seen: render again. A
+    turntable or an animation keeps its frames on disk for a second encode
+    (:meth:`clear_render_cache`).
     """
 
-    # Renderable payload.  A texture path stays a str (see __setattr__).
-    _mesh:    Optional[MeshData] = None
-    _uv:      Optional[UVData] = None
-    _texture: Optional[Union[str, Array((np.uint8, np.uint16, np.float32))]] = None
+    name:                Optional[str] = "scene"
+    hierarchy:           Optional[HierarchyData] = None
+    clip:                Optional[ClipList] = None
+    meshes:              Optional[MeshList] = None
+    uvs:                 Optional[UVList] = None
+    skins:               Optional[SkinList] = None
+    materials:           Optional[MaterialList] = None
+    cameras:             Optional[CameraList] = None
+    lights:              Optional[LightList] = None
+    morphs:              Optional[MorphList] = None
+    default_camera:      Optional[str] = None
+    aspect_ratio:        Optional[float] = None
+    resolution:          Optional[Array(np.int32, 2)] = numpy_array(np.array([500, 500], dtype=np.int32))
+    samples_per_pixel:   Optional[int] = None
+    background:          Optional[Array(np.float64, 4)] = None
+    autofit:             Optional[bool] = None
+    default_light:       Optional[bool] = None
+    return_depth:        Optional[bool] = None
+    angle_of_view:       Optional[float] = None
+    fit_padding:         Optional[float] = None
+    base_color:          Array(np.float64, 3) = numpy_array([0.7, 0.7, 0.7])
+    sample_method:       str = "bilinear"
+    ambient:             float = 0.8
+    twosided:            bool = True
+    cast_shadows:        bool = True
+    wireframe:           bool = False
+    wireframe_color:     Array(np.int32, 3) = numpy_array(np.zeros(3, dtype=np.int32))
+    wireframe_thickness: int = 1
 
-    # Skeletal deformer driving ``_mesh`` -- see :meth:`pose`.  Not a render
-    # input: attaching one changes nothing on screen until ``pose()`` runs,
-    # and that assigns ``mesh``, which invalidates through the usual setter.
-    _skin: Optional[SkinDeformData] = None
+    # the render caches: class defaults, never saved, a loaded Scene starts without
+    _frame              = None
+    _render_signature   = None
+    _rendered_frame     = None
+    _render_cache_owner = None
+    _deformers          = None
+    _textures           = None
 
-    # Per-Object shader knobs (override Scene/render() defaults)
-    _base_color:    Array(np.float64, 3) = numpy_array([0.7, 0.7, 0.7])
-    _sample_method: str = "bilinear"  # or "bezier"
-    _wrap:          str = "repeat"    # or "clamp"
-    _ambient:       float = 0.8
-    _twosided:      bool = True
-    _cast_shadows:  bool = True       # reserved for shadow-ray pass
-
-    # Per-Object preview RGBA background.  Used only when this Object
-    # is rendered via :meth:`render` / :meth:`to_image` / :meth:`imshow`
-    # / :meth:`turntable` standalone.  IGNORED when parented to a
-    # :class:`Scene` -- ``Scene.background`` wins there, matching the
-    # ``resolution`` / ``samples_per_pixel`` precedence pattern.  RGB
-    # 3-tuples are auto-promoted to opaque ``(R, G, B, 1)`` by the
-    # :func:`_normalize_rgba` helper; ``None`` falls through to the
-    # renderer's own default ``(0, 0, 0, 0)`` (transparent black).
-    _background: Optional[Array(np.float64, 4)] = None
-
-    # Per-Object frame-level render config -- only consulted by the
-    # standalone preview entry points (:meth:`render` / :meth:`turntable`
-    # / :meth:`imshow` / :meth:`to_image`).  Renders that go through a
-    # user-built parent :class:`Scene` IGNORE these -- frame settings on
-    # the Scene win there (see :attr:`Scene._RENDER_CONFIG_KEYS`).
-    # Settable via property setters that invalidate the cached frame.
-    _resolution:        Array(np.int32, 2) = numpy_array(np.array([500, 500], dtype=np.int32))
-    _samples_per_pixel: Optional[int] = 4
-
-    # Per-Object wireframe overlay (baked into a copy of the diffuse via
-    # ``UVData.draw_edges()``).  Settable via property setters that
-    # invalidate the bake cache when any of these or ``texture`` / ``uv``
-    # change.  Default off; opt in per Object.
-    _wireframe:           bool = False
-    _wireframe_color:     Array(np.int32, 3) = numpy_array(np.zeros(3, dtype=np.int32))
-    _wireframe_thickness: int = 1
-
-    # -- render caches: class-level defaults, NOT dataclass fields, so they
-    # are never saved and a loaded Object starts without them --
-    #
-    # Lazy-loaded texture.
-    _loaded_texture = None
-    # Lazy-baked wireframe-on-diffuse.
-    _wired_texture_cache = None
-    # Lazy-built bind-pose mesh handed to the deformer each frame, rebuilt
-    # from ``_skin.rest_points``, which persists.
-    _bind_mesh = None
-    # Most-recent render output, accessed via the ``frame`` property below.
-    # ``None`` until :meth:`render` (or :meth:`imshow`) has been called.
-    _frame = None
-    # Snapshot of the local transform state + composed world matrix
-    # at the time ``frame`` was populated.  ``None`` whenever the cache
-    # is empty -- used by the ``frame`` getter to lazy-invalidate when
-    # transforms (``translate`` / ``rotate`` / ``scale`` on self OR any
-    # ancestor) have changed since the last render.  We snapshot the
-    # raw local SRT values (NOT just ``world_matrix``) because
-    # ``TransformData``'s ``_world_matrix`` cache can lag local-transform
-    # mutations on standalone nodes; raw SRT is always current.  We also
-    # include the composed ``world_matrix`` bytes so ancestor mutations
-    # (which DO propagate through ``_reset_branch_world_matrices``) are
-    # caught even when our own SRT hasn't changed.
-    _render_transform_state = None
-
-    # the private state an Object holds beside its fields and a node's: the
-    # render caches above
-    _STATE = (
-        "_loaded_texture",
-        "_wired_texture_cache",
-        "_bind_mesh",
-        "_frame",
-        "_render_transform_state",
-    )
-
-    def __init__(
-        self,
-        name:                str                                             = "object",
-        mesh:                Optional[MeshData]                              = None,
-        uv:                  Optional[UVData]                                = None,
-        texture:             Optional[Union[str, np.ndarray]]                = None,
-        skin:                Optional[SkinDeformData]                        = None,
-        base_color:          Tuple[float, float, float]                      = (0.7, 0.7, 0.7),
-        sample_method:       str                                             = "bilinear",
-        wrap:                str                                             = "repeat",
-        ambient:             float                                           = 0.8,
-        twosided:            bool                                            = True,
-        cast_shadows:        bool                                            = True,
-        resolution:          Tuple[int, int]                                 = (500, 500),
-        samples_per_pixel:   Optional[int]                                   = 4,
-        wireframe:           bool                                            = False,
-        wireframe_color:     Tuple[int, int, int]                            = (0, 0, 0),
-        wireframe_thickness: int                                             = 1,
-        background:          Optional[Union[Tuple[float, ...], List[float]]] = None,
-        **transform_kwargs,
-    ) -> None:
-        super().__init__(name=name, node_type="object", **transform_kwargs)
-        # Use private storage so the property setters below can validate
-        # and invalidate the wired-texture cache.  The array settings are
-        # copied: a caller's array edited later must not edit them.
-        self._mesh          = mesh
-        self._uv            = uv
-        self._texture       = texture
-        self._skin          = skin
-        self._base_color    = np.array(base_color, dtype=np.float64)
-        self._sample_method = str(_enum_value(sample_method))
-        self._wrap          = str(wrap)
-        self._ambient       = float(ambient)
-        self._twosided      = bool(twosided)
-        self._cast_shadows  = bool(cast_shadows)
-        self._resolution    = np.array(resolution, dtype=np.int32)
-        self._samples_per_pixel = _validate_samples_per_pixel(
-            samples_per_pixel, field_name="Object.samples_per_pixel"
-        )
-        self._wireframe           = bool(wireframe)
-        self._wireframe_color     = np.array(wireframe_color, dtype=np.int32)
-        self._wireframe_thickness = int(wireframe_thickness)
-        self._background          = _normalize_rgba(background, "Object.background")
+    # the private state a Scene holds beside its fields: the caches above
+    _STATE = ("_frame", "_render_signature", "_rendered_frame", "_render_cache_owner", "_deformers", "_textures")
 
     def __setattr__(self, name: str, value) -> None:
-        # a texture path is kept as given, and read when the Object renders
-        # or saves; every other value goes through the field's conversion
-        if name == "_texture" and isinstance(value, str):
-            object.__setattr__(self, name, value)
-            return
+        if name == "hierarchy" and value is not None:
+            if isinstance(value, (ClipData, ClipList)):
+                raise TypeError(f"Scene.hierarchy is a HierarchyData at rest; pass a {type(value).__name__} as clip=")
+            if isinstance(value, TransformData):
+                value = HierarchyData([value])
+            elif not isinstance(value, HierarchyData):
+                value = HierarchyData(list(value))
+        elif name == "clip" and value is not None:
+            if isinstance(value, ClipData):
+                value = ClipList([value])
+            elif not isinstance(value, ClipList):
+                raise TypeError(f"Scene.clip is a ClipList or a ClipData, not a {type(value).__name__}")
+        elif name == "background":
+            value = _normalize_rgba(value, "Scene.background")
+        elif name == "samples_per_pixel":
+            value = _validate_samples_per_pixel(value, field_name="Scene.samples_per_pixel")
+        elif name == "sample_method":
+            value = str(_enum_value(value))
+        elif name == "default_camera" and value is not None:
+            value = str(value)
+        else:
+            for field, item, cls in _LISTS:
+                if name == field and value is not None:
+                    value = _as_list(value, item, cls, f"Scene.{field}")
+                    break
         super().__setattr__(name, value)
 
-    def _replace(self, name: str, value) -> bool:
-        """sets the setting ``name`` to ``value``, True when that changed it"""
-        if _same_setting(getattr(self, name), value):
-            return False
-        setattr(self, name, value)
-        return True
+    # -- building --------------------------------------------------------------------
 
-    # -- file IO: load an Object from disk -----------------------------
-
-    @classmethod
-    def load_obj(cls, filename: str, index: int = 0, **object_kwargs) -> "Object":
-        """Load a mesh from an OBJ file as an :class:`Object`.
-
-        Convenience wrapper around :func:`cgmath.geometry.mesh.load_obj`.
-        Picks the ``index``-th mesh in the file (default: first) and wraps
-        it in an Object with its associated UV (if any).  ``object_kwargs``
-        are forwarded to :class:`Object` so callers can override
-        ``texture``, ``base_color``, transforms, etc.
-
-        Args:
-            filename: Path to the ``.obj`` file (``~`` and env vars OK).
-            index: Which mesh to load when the file contains multiple
-                ``g`` groups.  Negative indices count from the end.
-            **object_kwargs: Forwarded to :class:`Object` (``name``,
-                ``texture``, ``base_color``, ``translate``, ...).
-
-        Returns:
-            A new Object with ``mesh`` and ``uv`` populated.
+    def add(self, *items) -> "Scene":
         """
-        data = _load_obj(filename)
-        if not data:
-            raise ValueError(f"{filename}: contains no meshes")
-        if not -len(data) <= index < len(data):
-            raise IndexError(
-                f"{filename}: index {index} out of range (file has {len(data)} meshes)"
-            )
-        mesh, uv_list = data[index]
-        uv = uv_list[0] if len(uv_list) > 0 else None
-        object_kwargs.setdefault("name", mesh.name or "object")
-        return cls(mesh=mesh, uv=uv, **object_kwargs)
-
-    @classmethod
-    def load_glb(
-        cls,
-        filename:        str,
-        index:           int   = 0,
-        scale_factor:    float = 100.0,
-        extract_texture: bool  = True,
-        load_skin:       bool  = True,
-        **object_kwargs,
-    ) -> "Object":
-        """Load a mesh from a GLB file as an :class:`Object`.
-
-        Convenience wrapper around :func:`cgmath.geometry.mesh.load_glb`.
-        See :meth:`load_obj` for parameter semantics.
-
-        Args:
-            filename: Path to the ``.glb`` file (``~`` and env vars OK).
-            index: Which mesh to load when the file contains multiple
-                geometries.  Negative indices count from the end.
-            scale_factor: Multiplier applied to vertex positions (GLB
-                files are typically authored in metres; the default of
-                100 matches :meth:`MeshData.load_glb`).
-            extract_texture: When True (default), also extract the
-                mesh's own material's base color map from the GLB and
-                assign it to the returned Object's :attr:`texture` via
-                :meth:`extract_texture_from_glb`.  An explicit
-                ``texture=`` in ``object_kwargs`` always wins -- auto-
-                extraction is suppressed so caller-supplied textures are
-                honoured.
-            load_skin: When True (default), also read this mesh's skin
-                weights and bind pose and attach a :class:`SkinDeformData`
-                to :attr:`skin`, ready for :meth:`pose`.  A file with no
-                skinning simply yields ``None``.  When the file's meshes
-                and skins cannot be paired up confidently this warns and
-                leaves :attr:`skin` unset rather than mis-binding.
-            **object_kwargs: Forwarded to :class:`Object`.
-
-        Returns:
-            A new Object with ``mesh``, ``uv`` and (when available and
-            not overridden) ``texture`` populated.
-
-        Raises:
-            ImportError: If ``trimesh`` is not installed.
+        Adds each item to the list it belongs in, by its class: a
+        TransformData to the hierarchy (made when the scene has none), a
+        ClipData or ClipList as the clip, a MeshData, UVData, SkinData,
+        MaterialData, CameraData, LightData or MorphData to its list, and a
+        list of any of them item by item. Returns the scene, so calls chain.
+        TypeError for anything else.
         """
-        data = _load_glb(filename, scale_factor=scale_factor)
-        if not data:
-            raise ValueError(f"{filename}: contains no meshes")
-        if not -len(data) <= index < len(data):
-            raise IndexError(
-                f"{filename}: index {index} out of range (file has {len(data)} meshes)"
-            )
-        mesh, uv_list = data[index]
-        uv = uv_list[0] if len(uv_list) > 0 else None
-        object_kwargs.setdefault("name", mesh.name or "object")
-
-        if load_skin and object_kwargs.get("skin") is None:
-            meshes                = [m for m, _ in data]
-            object_kwargs["skin"] = _glb_skins(filename, meshes, scale_factor)[index]
-
-        obj = cls(mesh=mesh, uv=uv, **object_kwargs)
-        # Only auto-extract when the caller didn't supply an explicit
-        # texture; explicit always wins.  No-op when the mesh has no
-        # material, the material no base color map, or PIL is unavailable.
-        if extract_texture and obj.texture is None:
-            material = _glb_material_indices(filename, len(data))[index]
-            if material is not None:
-                obj.extract_texture_from_glb(filename, material_index=material)
-        return obj
-
-    @classmethod
-    def load_fbx(
-        cls,
-        filename:        str,
-        index:           int             = 0,
-        extract_texture: bool            = True,
-        load_skin:       bool            = True,
-        scale_factor:    Optional[float] = None,
-        axis_system:     Optional[str]   = "maya_y_up",
-        **object_kwargs,
-    ) -> "Object":
-        """Load a mesh from an FBX file as an :class:`Object`.
-
-        Convenience wrapper around :func:`cgmath.geometry.mesh.load_fbx`.
-        See :meth:`load_obj` for parameter semantics. The Object is the
-        mesh alone, with no node above it: the mesh reader leaves the
-        mesh's node out, and with it the turn ``HierarchyData.load_fbx``
-        and ``ClipData.load_fbx`` put on a rig's roots to load a file in
-        Maya's Y-up, so the Object takes that turn on its points, normals
-        and skin bind matrices instead (``axis_system``). It shows the
-        mesh's own points, its node's geometric transform baked in as
-        :func:`cgmath.geometry.mesh.load_fbx` says, turned into Maya's
-        Y-up, where the file puts a mesh whose node has no other transform
-        and nothing above it, and :meth:`pose` with a rig or a clip read
-        from the same file, with the same ``scale_factor`` and
-        ``axis_system``, puts a skinned mesh where the file has it.
-
-        Args:
-            filename: Path to the ``.fbx`` file (``~`` and env vars OK).
-            index: Which mesh to load when the file contains multiple
-                geometries.  Negative indices count from the end.
-            extract_texture: When True (default), also extract the
-                material's diffuse (base color) map from the FBX and
-                assign it to the returned Object's :attr:`texture` via
-                :meth:`extract_texture_from_fbx`.  Embedded media is
-                read through a temporary folder; nothing is written
-                next to the file.  An explicit ``texture=`` in
-                ``object_kwargs`` always wins -- auto-extraction is
-                suppressed so caller-supplied textures are honoured.
-            load_skin: When True (default), also read this mesh's skin
-                weights and bind pose and attach a :class:`SkinDeformData`
-                to :attr:`skin`, ready for :meth:`pose`.  A mesh with no
-                skin simply yields ``None``.
-            scale_factor: None (default) converts the file's unit to
-                centimeters, the points and the bind matrices alike, as
-                the rig loaders do; a number is the caller's own factor
-                and the file's unit is not read.  A file that holds its
-                unit as a scale on the scene root's children loads as the
-                cm file it was written from, as ``HierarchyData.load_fbx``
-                says, but for a mesh at or under a root the export found
-                scaled other than 1, which it scales by 1/s all the same
-                (s the cm one unit holds): its points load s times larger
-                and its node, in the rig loaders, scaled 1/s, so it is
-                right once posed, but on the frames of a clip where a
-                later layer of a take keys that root's translate, or an
-                override or passthrough one a scale there. On or under a
-                node the export scales by 1/s once more, or skinned to one,
-                from the second joint of a Maya skeleton down, it is off
-                once posed by a rig of the nodes' own values
-                (``pose="node"``) or by a clip, and right posed at the bind
-                by a ``pose="bind"`` rig when a bind pose lists those
-                nodes, as ``HierarchyData.load_fbx`` says.
-            axis_system: "maya_y_up" (default) turns the points, the
-                normals and the bind matrices from the file's axis
-                system into Maya's Y-up, by the turn the rig loaders
-                put on a rig's roots; ``None`` keeps the file's own
-                axes.  A left handed file raises ``ValueError`` unless
-                it is ``None``.  The mesh readers take no
-                ``axis_system``: they keep the mesh's own space.
-            **object_kwargs: Forwarded to :class:`Object`.
-
-        Returns:
-            A new Object with ``mesh``, ``uv`` (first UV channel) and
-            (when available and not overridden) ``texture`` populated.
-
-        Raises:
-            ImportError: If the Autodesk FBX Python SDK is not installed.
-        """
-        data = _load_fbx(filename, scale_factor, axis_system)
-        if not data:
-            raise ValueError(f"{filename}: contains no meshes")
-        if not -len(data) <= index < len(data):
-            raise IndexError(
-                f"{filename}: index {index} out of range (file has {len(data)} meshes)"
-            )
-        mesh, uv_list = data[index]
-        uv = uv_list[0] if len(uv_list) > 0 else None
-        object_kwargs.setdefault("name", mesh.name or "object")
-
-        if load_skin and object_kwargs.get("skin") is None:
-            object_kwargs["skin"] = _fbx_skin(filename, mesh, scale_factor, axis_system)
-
-        obj = cls(mesh=mesh, uv=uv, **object_kwargs)
-        if extract_texture and obj.texture is None:
-            obj.extract_texture_from_fbx(filename, mesh_index=index)
-        return obj
-
-    # -- file IO: write an Object to disk ------------------------------
-
-    def save_obj(self, filename: str) -> str:
-        """Write the Object's mesh as an OBJ file, where the Object puts it.
-
-        The points, and the mesh's normals when it has them, go through
-        :attr:`world_matrix`, as the renderer places them: the normals by
-        its inverse transpose, each keeping its length. The UVs, when the
-        Object has a :attr:`uv`, are ``vt`` lines, and each face corner
-        names its point, its UV and its normal. One group, named after the
-        Object without a ``Shape`` suffix, which the readers put back.
-        :meth:`load_obj`, :meth:`Scene.load_obj`, :meth:`MeshData.load_obj`
-        and Maya's OBJ import read it.
-
-        An OBJ keeps only that: the texture, the skin, the shading settings
-        and the mesh's own ``matrix`` and holes are not written, and the
-        transform is in the points, so the Object read back sits at the
-        origin. Save an npz, json or pkl to keep everything.
-
-        Args:
-            filename: Path to the ``.obj`` file (``~`` OK).
-
-        Returns:
-            The file's path.
-
-        Raises:
-            ValueError: The Object has no mesh, its uv's faces are not its
-                mesh's, the mesh's normals do not fit it (as
-                :meth:`MeshData.save_obj` says), or a world matrix that
-                cannot be inverted would turn them; before anything is
-                written.
-        """
-        mesh = self.mesh
-        if mesh is None:
-            raise ValueError(f"Object {self.name!r} has no mesh to write")
-        uv = self.uv
-        if uv is not None and not np.array_equal(uv.counts, mesh.counts):
-            raise ValueError(
-                f"Object {self.name!r}: its uv's {uv.face_count} faces are not its "
-                f"mesh's {mesh.face_count}"
-            )
-
-        matrix = np.asarray(self.world_matrix, dtype=np.float64)
-        points = np.asarray(mesh.points, dtype=np.float64) @ matrix[:3, :3] + matrix[3, :3]
-        normals, normal_ids = _corner_normals(mesh)
-        if normals is not None:
-            try:
-                turn = np.linalg.inv(matrix[:3, :3]).T
-            except np.linalg.LinAlgError:
-                raise ValueError(
-                    f"Object {self.name!r}: its world matrix cannot be inverted, "
-                    "which turns its normals"
-                ) from None
-            turned  = normals @ turn
-            before  = np.linalg.norm(normals, axis=1, keepdims=True)
-            after   = np.linalg.norm(turned, axis=1, keepdims=True)
-            normals = turned * np.divide(before, after, out=np.zeros_like(after), where=after > 0)
-
-        return _write_obj(
-            filename,
-            self.name,
-            points,
-            mesh.counts,
-            mesh.indices,
-            uvs        = None if uv is None else uv.points,
-            uv_ids     = None if uv is None else uv.indices,
-            normals    = normals,
-            normal_ids = normal_ids,
-        )
-
-    def extract_texture_from_glb(
-        self,
-        file_path:      str,
-        material_index: int = 0,
-    ) -> bool:
-        """Extract the PBR base color (diffuse / albedo) texture from a
-        GLB file and wire it into this Object's :attr:`texture`.
-
-        Uses :func:`_extract_glb_textures` internally, which also
-        extracts the other standard PBR slots (``metallic_roughness`` /
-        ``normal`` / ``occlusion`` / ``emissive``).  Those are discarded
-        here but the parser is ready for a future multi-texture shader
-        upgrade.
-
-        Args:
-            file_path: Path to the ``.glb`` file (``~`` and env vars OK).
-            material_index: Which material to pull the base color from.
-                Defaults to the first material.  Negative indices count
-                from the end.
-
-        Returns:
-            True when a base color map was found and assigned (and the
-            texture / wireframe caches were invalidated via the existing
-            :attr:`texture` setter).  False when the GLB had no base
-            color slot, no embedded image bytes, or PIL isn't available
-            to decode them -- in that case this Object's existing
-            :attr:`texture` is preserved unchanged.
-        """
-        textures = _extract_glb_textures(file_path, material_index=material_index)
-        color    = textures.get("base_color")
-        if color is None:
-            return False
-        # The texture setter invalidates ``_loaded_texture`` and
-        # ``_wired_texture_cache`` -- assigning by attribute is enough.
-        self.texture = color
-        return True
-
-    def extract_texture_from_fbx(
-        self,
-        file_path:      str,
-        mesh_index:     int = 0,
-        material_index: int = 0,
-    ) -> bool:
-        """Extract the diffuse (base color) texture from an FBX file and
-        wire it into this Object's :attr:`texture`.
-
-        Uses :func:`_extract_fbx_textures` internally, which reads
-        textures packed inside the FBX container through a temporary
-        folder deleted after the read.  Also extracts the other standard
-        PBR-ish slots (``normal`` / ``specular`` / ``emissive`` /
-        ``occlusion``); those are discarded here but the parser is ready
-        for a future multi-texture shader upgrade.
-
-        Args:
-            file_path: Path to the ``.fbx`` file (``~`` and env vars OK).
-            mesh_index: Which mesh node to pull the material from
-                (default first).  Negative indices count from the end.
-            material_index: Which material on that mesh node to pull
-                textures from.  Defaults to the first material.
-
-        Returns:
-            True when a diffuse map was found and assigned (and the
-            texture / wireframe caches were invalidated via the existing
-            :attr:`texture` setter).  False when the FBX had no diffuse
-            slot, the connected texture file couldn't be resolved on
-            disk, the FBX SDK isn't installed, or PIL isn't available to
-            decode the image -- in that case this Object's existing
-            :attr:`texture` is preserved unchanged.
-        """
-        textures = _extract_fbx_textures(
-            file_path, mesh_index=mesh_index, material_index=material_index
-        )
-        color = textures.get("base_color")
-        if color is None:
-            return False
-        self.texture = color
-        return True
-
-    # -- mesh / uv / texture: invalidate caches on assignment ----------
-
-    def _mark_render_dirty(self) -> None:
-        """Drop the cached render frame so :meth:`imshow` / :meth:`to_image`
-        rebuild on next call.  Invoked from setters of attributes that
-        affect the rendered output (``mesh`` / ``uv`` / ``texture`` /
-        ``base_color`` / ``wireframe*`` / ``sample_method`` / ``wrap`` /
-        ``ambient`` / ``twosided`` / ``cast_shadows`` / ``resolution`` /
-        ``samples_per_pixel``).  Cheap by design -- never re-renders
-        eagerly; the next display call lazy-renders fresh.
-
-        Transform-driven invalidation (``translate`` / ``rotate`` /
-        ``scale`` on self or any ancestor) is NOT routed through here
-        -- it's handled lazily by the :attr:`frame` getter via the
-        transform-state snapshot.
-        """
-        self._frame                  = None
-        self._render_transform_state = None
-
-    def _namespace_parts(self) -> list:
-        """the mesh, the cached bind-pose mesh posing copies, and the skin"""
-        return [self._mesh, self._bind_mesh, self._skin]
-
-    @property
-    def mesh(self) -> Optional[MeshData]:
-        return self._mesh
-
-    @mesh.setter
-    def mesh(self, value: Optional[MeshData]) -> None:
-        self._mesh = value
-        # Wireframe bake depends on mesh edges -> invalidate.
-        self._wired_texture_cache = None
-        # The bind pose borrows this mesh's topology, so a swap invalidates
-        # it.  :meth:`pose` reinstates it straight after -- it is the one
-        # caller that knows the topology did not actually change.
-        self._bind_mesh = None
-        self._mark_render_dirty()
-
-    @property
-    def uv(self) -> Optional[UVData]:
-        return self._uv
-
-    @uv.setter
-    def uv(self, value: Optional[UVData]) -> None:
-        self._uv = value
-        # UV layout drives where wires get baked -> invalidate both caches.
-        self._loaded_texture      = None
-        self._wired_texture_cache = None
-        self._mark_render_dirty()
-
-    @property
-    def texture(self) -> Optional[Union[str, np.ndarray]]:
-        return self._texture
-
-    @texture.setter
-    def texture(self, value: Optional[Union[str, np.ndarray]]) -> None:
-        self._texture = value
-        # Diffuse changed -> invalidate both the loaded copy and the wired
-        # bake (which composites onto the diffuse).
-        self._loaded_texture      = None
-        self._wired_texture_cache = None
-        self._mark_render_dirty()
-
-    @property
-    def skin(self) -> Optional[SkinDeformData]:
-        return self._skin
-
-    @skin.setter
-    def skin(self, value: Optional[SkinDeformData]) -> None:
-        self._skin = value
-        # Deliberately NOT _mark_render_dirty(): a deformer changes nothing
-        # on screen until :meth:`pose` runs, and that assigns ``mesh``.
-        # Drop the bind pose -- it is derived from the deformer.
-        self._bind_mesh = None
-
-    def _bind_target(self) -> MeshData:
-        """The bind-pose mesh to hand the deformer, built once and cached.
-
-        Topology comes from ``_mesh`` and points from ``_skin.rest_points``:
-        the deformer keeps the bind points but no mesh, and ``rest_points``
-        is a real field, so it survives a save/load.  Rebuilding it also
-        means this stays correct when ``_mesh`` currently holds a POSED mesh,
-        which it does from the second frame onward.
-        """
-        if self._bind_mesh is None:
-            mesh        = self._mesh.copy()
-            mesh.points = np.asarray(self._skin.rest_points, dtype=float).copy()
-            if getattr(mesh, "normals", None) is not None:
-                mesh.normals = None
-            self._bind_mesh = mesh
-        return self._bind_mesh
-
-    def pose(self, pose) -> "Object":
-        """Deform :attr:`mesh` for a posed skeleton, in place on this Object.
-
-        Every call deforms the BIND pose, never the current :attr:`mesh` --
-        feeding the last frame's result back in would compound the
-        deformation and melt the geometry over a sequence.
-
-        Args:
-            pose: A posed skeleton (:class:`HierarchyData`, or a
-                :class:`ClipData` at the frame it is on), or raw world
-                matrices shaped ``(J, 4, 4)`` ordered to the deformer's
-                joints.  Batched ``(F, J, 4, 4)`` poses are rejected -- an
-                Object holds one mesh, not F of them.
-
-        Returns:
-            ``self``, so a render can be chained off it.
-
-        Raises:
-            ValueError: If no skin is attached, or there is no mesh to deform.
-        """
-        self._require_poseable()
-
-        target    = self._bind_target()
-        self.mesh = self._skin.apply(pose, target)
-        # The mesh setter just dropped the bind pose; hand it back rather
-        # than rebuild it next frame -- we only replaced the points.
-        self._bind_mesh = target
-        return self
-
-    def _require_poseable(self) -> None:
-        """Raises the ValueError :meth:`pose` documents: no skin, or no mesh."""
-        if self._skin is None:
-            raise ValueError(
-                f"Object {self.name!r} has no skin to pose -- load it with "
-                f"load_skin=True, or assign one to .skin"
-            )
-        if self._mesh is None:
-            raise ValueError(f"Object {self.name!r} has no mesh to deform")
-
-    def _deformed_frames(self, world: np.ndarray) -> np.ndarray:
-        """What :meth:`pose` would put in :attr:`mesh`, for many frames at once.
-
-        Args:
-            world: ``(F, J, 4, 4)`` world matrices ordered to the deformer's
-                joints.
-
-        Returns:
-            ``(F, V, 3)`` deformed bind points, from one deformer call.
-            :attr:`mesh` is not touched; :meth:`_show_deformed` puts one
-            frame of them there.
-        """
-        self._require_poseable()
-        return self._skin.apply(world, self._bind_target().points)
-
-    def _show_deformed(self, points: np.ndarray) -> "Object":
-        """Puts one frame of :meth:`_deformed_frames` in :attr:`mesh`, leaving
-        the Object as :meth:`pose` would for that frame."""
-        target      = self._bind_target()
-        mesh        = target.copy()
-        mesh.points = np.array(points, dtype=np.float64)
-        if getattr(mesh, "normals", None) is not None:
-            mesh.normals = None
-        self.mesh       = mesh
-        self._bind_mesh = target
-        return self
-
-    def _posed_world_points(self, world: np.ndarray) -> np.ndarray:
-        """:attr:`world_points` as :meth:`pose` would leave them, for many
-        frames at once: ``(F, V, 3)`` for ``(F, J, 4, 4)`` world matrices.
-        :attr:`mesh` is not touched."""
-        points = self._deformed_frames(world)
-        M      = self.world_matrix
-        # Silence spurious BLAS warnings on Apple Accelerate (matmul on arm64).
-        with np.errstate(all="ignore"):
-            return points @ M[:3, :3] + M[3, :3]
-
-    def restore_bind_pose(self) -> "Object":
-        """Put :attr:`mesh` back to the undeformed bind pose.
-
-        The inverse of :meth:`pose`, and what :meth:`Scene.animate` calls when
-        it finishes so a render does not leave the scene deformed.  A copy is
-        assigned rather than the cached bind mesh itself, so a later
-        :meth:`pose` cannot write through :attr:`mesh` into the bind pose.
-
-        Returns:
-            ``self``.  A no-op with no skin or no mesh.
-        """
-        if self._skin is None or self._mesh is None:
-            return self
-
-        target          = self._bind_target()
-        self.mesh       = target.copy()
-        self._bind_mesh = target
-        return self
-
-    @property
-    def base_color(self) -> np.ndarray:
-        """Surface color in [0, 1] when there is no texture, float64 ``(3,)``."""
-        return _read_only(self._base_color)
-
-    @base_color.setter
-    def base_color(self, value) -> None:
-        if self._replace("_base_color", np.array(value, dtype=np.float64)):
-            # base_color participates in the wireframe bake when there is
-            # no diffuse texture (it fills the buffer before edges are
-            # drawn), so invalidate the cache.
-            self._wired_texture_cache = None
-            self._mark_render_dirty()
-
-    @property
-    def background(self) -> Optional[np.ndarray]:
-        """Per-Object preview RGBA background in [0, 1], float64 ``(4,)``.
-
-        Used only by :meth:`render` / :meth:`to_image` / :meth:`imshow`
-        / :meth:`turntable` standalone preview.  IGNORED when this
-        Object is rendered via a parent :class:`Scene`
-        (``Scene.background`` wins there).
-
-        Accepts:
-          - ``None`` -> renderer falls through to ``(0, 0, 0, 0)``
-            (transparent black).
-          - 3 values ``(R, G, B)`` -> auto-promoted to ``(R, G, B, 1)``
-            (opaque) for convenience.
-          - 4 values ``(R, G, B, A)`` -> stored as-is.
-
-        See :class:`Scene.background` for the alpha semantics in the
-        renderer (bg.alpha=0 transparent miss, bg.alpha=1 opaque, in
-        between yields a Porter-Duff "over" composite).
-        """
-        return _read_only(self._background)
-
-    @background.setter
-    def background(self, value) -> None:
-        if self._replace("_background", _normalize_rgba(value, "Object.background")):
-            self._mark_render_dirty()
-
-    # -- wireframe attributes: setters invalidate the bake cache -------
-
-    @property
-    def wireframe(self) -> bool:
-        return self._wireframe
-
-    @wireframe.setter
-    def wireframe(self, value: bool) -> None:
-        new = bool(value)
-        if new != self._wireframe:
-            self._wireframe           = new
-            self._wired_texture_cache = None
-            self._mark_render_dirty()
-
-    @property
-    def wireframe_color(self) -> np.ndarray:
-        """Edge color in 0..255, int32 ``(3,)``."""
-        return _read_only(self._wireframe_color)
-
-    @wireframe_color.setter
-    def wireframe_color(self, value) -> None:
-        if self._replace("_wireframe_color", np.array(value, dtype=np.int32)):
-            self._wired_texture_cache = None
-            self._mark_render_dirty()
-
-    @property
-    def wireframe_thickness(self) -> int:
-        return self._wireframe_thickness
-
-    @wireframe_thickness.setter
-    def wireframe_thickness(self, value: int) -> None:
-        new = int(value)
-        if new != self._wireframe_thickness:
-            self._wireframe_thickness = new
-            self._wired_texture_cache = None
-            self._mark_render_dirty()
-
-    # -- shader knobs: setters invalidate the cached frame -------------
-
-    @property
-    def sample_method(self) -> str:
-        return self._sample_method
-
-    @sample_method.setter
-    def sample_method(self, value: str) -> None:
-        # A real enum (``SampleMethod.BEZIER``) is stored as its value,
-        # ``"bezier"``: an Enum field saves to no file.  Numeric scalars
-        # become str (the legacy ``sample_method = 42`` contract that
-        # ``test_sample_method_setter_coerces_to_str`` pins down); anything
-        # else (str, an enum-shaped mock) is kept, so
-        # ``_scene_objects_use_bezier`` can still read ``.name`` as a
-        # fallback.
-        value = _enum_value(value)
-        if isinstance(value, str):
-            new = value
-        elif isinstance(value, (int, float, bool)):
-            new = str(value)
-        else:
-            new = value
-        if new != self._sample_method:
-            self._sample_method = new
-            self._mark_render_dirty()
-
-    @property
-    def wrap(self) -> str:
-        return self._wrap
-
-    @wrap.setter
-    def wrap(self, value: str) -> None:
-        new = str(value)
-        if new != self._wrap:
-            self._wrap = new
-            self._mark_render_dirty()
-
-    @property
-    def ambient(self) -> float:
-        return self._ambient
-
-    @ambient.setter
-    def ambient(self, value: float) -> None:
-        new = float(value)
-        if new != self._ambient:
-            self._ambient = new
-            self._mark_render_dirty()
-
-    @property
-    def twosided(self) -> bool:
-        return self._twosided
-
-    @twosided.setter
-    def twosided(self, value: bool) -> None:
-        new = bool(value)
-        if new != self._twosided:
-            self._twosided = new
-            self._mark_render_dirty()
-
-    @property
-    def cast_shadows(self) -> bool:
-        return self._cast_shadows
-
-    @cast_shadows.setter
-    def cast_shadows(self, value: bool) -> None:
-        new = bool(value)
-        if new != self._cast_shadows:
-            self._cast_shadows = new
-            self._mark_render_dirty()
-
-    # -- frame-level render config: setters invalidate the cached frame --
-
-    @property
-    def resolution(self) -> np.ndarray:
-        """Per-Object preview render resolution ``(width, height)``, int32.
-
-        Used as the default by :meth:`render` / :meth:`turntable` /
-        :meth:`imshow` / :meth:`to_image` when no explicit ``resolution``
-        kwarg is supplied.  IGNORED when this Object is rendered via a
-        parent :class:`Scene` (Scene-level resolution wins there).
-        """
-        return _read_only(self._resolution)
-
-    @resolution.setter
-    def resolution(self, value) -> None:
-        if self._replace("_resolution", np.array(value, dtype=np.int32)):
-            self._mark_render_dirty()
-
-    @property
-    def samples_per_pixel(self) -> Optional[int]:
-        """Per-Object preview MSAA sample count.
-
-        Used as the default by :meth:`render` / :meth:`turntable` /
-        :meth:`imshow` / :meth:`to_image` when no explicit
-        ``samples_per_pixel`` kwarg is supplied.  Default is ``4``
-        (2x2 MSAA -- the smallest perfect square greater than 1).
-        Set to ``None`` to defer to the renderer's own internal
-        default.  IGNORED when this Object is rendered via a parent
-        :class:`Scene`.
-
-        The renderer requires the value to be ``1`` or a perfect
-        square (``1, 4, 9, 16, ...``) because it lays samples out on
-        a regular ``n_axis x n_axis`` sub-pixel grid.  Invalid values
-        are rejected here at assignment time -- not deferred to the
-        next render call -- so typos surface immediately.
-        """
-        return self._samples_per_pixel
-
-    @samples_per_pixel.setter
-    def samples_per_pixel(self, value: Optional[int]) -> None:
-        new = _validate_samples_per_pixel(value, field_name="Object.samples_per_pixel")
-        if new != self._samples_per_pixel:
-            self._samples_per_pixel = new
-            self._mark_render_dirty()
-
-    # -- frame cache: lazy invalidation via transform-state snapshot ---
-
-    def _capture_transform_state(self) -> tuple:
-        """Snapshot of the local SRT values + composed world_matrix.
-
-        The local SRT tuples (``_translate`` / ``_rotate`` / ``_scale`` /
-        ``_shear``) are read from the dataclass storage directly, so
-        they're always current -- they don't depend on ``TransformData``'s
-        ``_world_matrix`` cache (which has a known lag bug for direct
-        local mutations on standalone, parent-less nodes: the rotate /
-        translate / scale setter calls ``_reset_branch_world_matrices``
-        BEFORE assigning the new private value, so anything that re-
-        reads ``world_matrix`` between the reset and the assignment
-        will repopulate the cache with stale data).
-
-        Including the composed ``world_matrix`` bytes catches ancestor
-        mutations that propagate through ``_reset_branch_world_matrices``
-        and DO update the child's ``world_matrix`` correctly (because
-        the child's own SRT hasn't changed but its world position has).
-        """
-        return (
-            tuple(np.asarray(self._translate, dtype=float).ravel()),
-            tuple(np.asarray(self._rotate, dtype=float).ravel()),
-            tuple(np.asarray(self._scale, dtype=float).ravel()),
-            tuple(np.asarray(self._shear, dtype=float).ravel()),
-            np.asarray(self.world_matrix).tobytes(),
-        )
-
-    @property
-    def frame(self) -> Optional["Frame"]:
-        """Cached most-recent render output, or ``None`` when the cache
-        is invalid.  Auto-invalidates when:
-
-        - any tracked visual attribute is reassigned (``mesh`` / ``uv``
-          / ``texture`` / ``base_color`` / ``wireframe*`` /
-          ``sample_method`` / ``wrap`` / ``ambient`` / ``twosided`` /
-          ``cast_shadows`` / ``resolution`` / ``samples_per_pixel``)
-          -- via the existing setter -> :meth:`_mark_render_dirty`
-          plumbing, OR
-        - the Object's local transform values OR composed
-          ``world_matrix`` have changed since the cached frame was
-          rendered, i.e., ``translate`` / ``rotate`` / ``scale`` on self
-          OR any ancestor was mutated.  Detected lazily here by
-          comparing the live transform-state to the snapshot taken in
-          the setter below.
-
-        In-place mutation of ``mesh.points`` / texture pixel arrays
-        still requires an explicit :meth:`render` call to refresh.
-        """
-        if self._frame is None:
-            return None
-        if (
-            self._render_transform_state is not None
-            and self._capture_transform_state() != self._render_transform_state
-        ):
-            self._frame                  = None
-            self._render_transform_state = None
-            return None
-        return self._frame
-
-    @frame.setter
-    def frame(self, value: Optional["Frame"]) -> None:
-        self._frame = value
-        if value is None:
-            self._render_transform_state = None
-        else:
-            # Snapshot the transform state at cache-population time so
-            # the getter can detect later transform mutations.
-            self._render_transform_state = self._capture_transform_state()
-
-    @property
-    def buffer(self) -> Optional[np.ndarray]:
-        """Convenience accessor for ``self.frame.array`` -- the pixel
-        buffer of the most recent render (``None`` until rendered).
-        Matches the ``buffer`` vocabulary used by :class:`UVData`.
-        """
-        return self.frame.array if self.frame is not None else None
-
-    def get_loaded_texture(self) -> Optional[np.ndarray]:
-        """Returns the texture as a contiguous ``(H, W, 3) float32`` array,
-        loading from disk on first call.  Returns ``None`` if no texture
-        is set AND the wireframe bake is not enabled.
-
-        When :attr:`wireframe` is True AND :attr:`uv` is non-None, returns
-        a copy of the diffuse with the mesh wireframe baked on top via
-        :meth:`UVData.draw_edges` (cached after first build; invalidated
-        when ``texture`` / ``uv`` / ``base_color`` / ``wireframe*`` change).
-        When :attr:`texture` is None in this mode the bake fills the
-        buffer with :attr:`base_color` first, so wireframe-only Objects
-        render as edges over their flat-shading color.
-        """
-        # Wireframe takes precedence: an Object can be wireframe-only
-        # (no diffuse texture) -- the bake fills the buffer with
-        # base_color before drawing edges.
-        if self._wireframe and self._uv is not None:
-            if self._wired_texture_cache is None:
-                self._wired_texture_cache = self._bake_wired_texture()
-            return self._wired_texture_cache
-        if self._texture is None:
-            return None
-        if self._loaded_texture is not None:
-            return self._loaded_texture
-        self._loaded_texture = _load_texture(self._texture)
-        return self._loaded_texture
-
-    def _bake_wired_texture(self) -> np.ndarray:
-        """Bake the mesh wireframe (in UV space) onto a copy of the
-        diffuse and return the wired texture as float32 ``(H, W, 3)``
-        in [0, 1] (matches the format ``_load_texture`` returns).
-
-        Mirrors the 4-step recipe documented in render_test.py:
-          1. Load the diffuse into the UV render buffer.  When
-             :attr:`texture` is None, fill the buffer with
-             :attr:`base_color` (uint8) instead -- buffer dimensions
-             come from the existing ``UVData._resolution`` (default
-             2048x2048 when no buffer has been set yet).
-          2. Turn on anti-aliasing for nicer line edges.
-          3. Rasterise the unique mesh edges via ``UVData.draw_edges``.
-          4. Snapshot + flip the buffer (UVData is bottom-up; renderer
-             wants top-down) and convert to float32 [0, 1].
-        """
-        if self._uv is None:
-            raise RuntimeError(
-                "Object._bake_wired_texture: cannot bake wireframe without a UV"
-            )
-        self._uv.antialias = True
-        # Resolve texture to a uint8 (H, W, 3) numpy array.  We load file
-        # paths via PIL (matching ``_load_texture``) instead of routing
-        # through ``UVData.buffer_from_file``, which requires cv2 or a full
-        # skimage install (transitively pulling in tifffile).
-        if self._texture is None:
-            # No diffuse: fill the UV buffer with the per-Object
-            # base_color (matches the renderer's flat-shading fallback
-            # for textureless Objects).  Reading ``self._uv.buffer``
-            # lazily allocates the buffer at the UV's current
-            # ``_resolution`` if none was set, giving us H/W to match.
-            # No flip needed -- a uniform colour is direction-agnostic.
-            existing = self._uv.buffer
-            h, w = existing.shape[:2]
-            bg_uint8 = (
-                (np.asarray(self._base_color, dtype=np.float64) * 255.0)
-                .clip(0, 255)
-                .astype(np.uint8)
-            )
-            self._uv.buffer = np.broadcast_to(bg_uint8, (h, w, 3)).copy()
-        else:
-            if isinstance(self._texture, str):
-                if Image is None:
-                    raise RuntimeError(
-                        "PIL required to bake wireframe from a texture path; "
-                        "pass a numpy array instead, or install Pillow."
+        for item in items:
+            if isinstance(item, (ClipData, ClipList)):
+                self.clip = item
+            elif isinstance(item, (HierarchyData, TransformData)):
+                nodes = [item] if isinstance(item, TransformData) else list(item)
+                if self.hierarchy is None:
+                    self.hierarchy = HierarchyData()
+                for node in nodes:
+                    self.hierarchy.append(node)
+            elif isinstance(item, UVData):
+                self.uvs = (list(self.uvs) if self.uvs is not None else []) + [item]
+            else:
+                for field, kind, _ in _LISTS:
+                    if isinstance(item, kind) and kind is not UVData:
+                        held = getattr(self, field)
+                        setattr(self, field, (list(held) if held is not None else []) + [item])
+                        break
+                else:
+                    if isinstance(item, (list, tuple)) or type(item).__name__.endswith("List"):
+                        for held in item:
+                            self.add(held)
+                        continue
+                    raise TypeError(
+                        f"Scene.add takes nodes, a clip, meshes, UV sets, skins, materials, cameras, lights and blend "
+                        f"shape targets, not a {type(item).__name__}"
                     )
-                path = os.path.expandvars(os.path.expanduser(self._texture))
-                with Image.open(path) as img:
-                    tex_uint8 = np.asarray(img.convert("RGB"), dtype=np.uint8)
-            else:
-                tex_uint8 = _texture_as_uint8(self._texture)
-            # UVData buffer is bottom-up; flip top-down -> bottom-up.
-            self._uv.buffer = np.flipud(tex_uint8).copy()
-        # a tuple: draw_edges reads an array as one color per edge
-        self._uv.draw_edges(
-            color     = tuple(int(c) for c in self._wireframe_color),
-            thickness = self._wireframe_thickness,
-        )
-        wired_uint8 = np.flipud(self._uv.buffer).copy()
-        # Match _load_texture's output format: float32 [0, 1], (H, W, 3).
-        return wired_uint8.astype(np.float32) / 255.0
+        return self
 
-    @property
-    def world_points(self) -> np.ndarray:
-        """Mesh points transformed to world space via :attr:`world_matrix`.
+    # -- placement -------------------------------------------------------------------
 
-        TransformData stores transforms in row-major / Maya convention.
-        For a row-vector ``p`` and row-major ``M``, world = ``p_row @ M``
-        which is equivalent to extracting ``M[:3, :3]`` (rows are basis
-        vectors) and ``M[3, :3]`` (translation).
+    def pose(self, frame: Optional[int] = None) -> Optional[HierarchyData]:
         """
-        if self.mesh is None:
-            return np.empty((0, 3), dtype=np.float64)
-        pts = np.asarray(self.mesh.points, dtype=np.float64)
-        if pts.shape[1] != 3:
-            return pts
-        M = self.world_matrix
-        # Silence spurious BLAS warnings on Apple Accelerate (matmul on arm64).
-        with np.errstate(all="ignore"):
-            return pts @ M[:3, :3] + M[3, :3]
-
-    # -- topology ops --------------------------------------------------
-
-    def quadrangulate(self, source: str = "uv") -> None:
-        """Merges pairs of triangles into quads, in-place, on this
-        Object's mesh and (when present) its UV.
-
-        Convenience wrapper around :meth:`MeshData.quadrangulate` /
-        :meth:`UVData.quadrangulate` that keeps the mesh and UV in sync:
-        a single :class:`~numpy.ndarray` of merge rules is generated once
-        and applied to both.  This is safe because the rule format is
-        purely face-local (``(fa, fb, oa_slot, ob_slot)`` tuples), so
-        the same rules apply to a :class:`MeshData` and to its
-        corresponding :class:`UVData` even though they may have
-        different vertex indices due to UV seams.
-
-        Args:
-            source: When this Object has a UV (``self.uv is not None``),
-                controls which topology drives rule generation:
-
-                * ``"uv"`` (default) -- rules from
-                  :meth:`UVData.get_quadrangulate_rules`.  Useful when
-                  the UV layout's topology should dictate the merge
-                  pattern (e.g. preserves UV-island shapes).
-                * ``"mesh"`` -- rules from
-                  :meth:`MeshData.get_quadrangulate_rules`.  Useful when
-                  the 3D mesh quality (planarity, squareness) should
-                  dictate the merge pattern.
-
-                In both cases the resulting rules are applied to BOTH
-                the mesh and the UV so they stay in sync.
-
-                When ``self.uv is None`` this argument is ignored and
-                rules are always taken from the mesh.
-
-        Raises:
-            ValueError: If ``self.mesh`` is None, or if ``source`` is
-                not ``"uv"`` or ``"mesh"``.
+        The nodes a render places the shapes by: the active take at
+        ``frame`` (its first frame for None) when the scene has a clip, else
+        the hierarchy; None without either.
         """
-        if self.mesh is None:
-            raise ValueError("Object.quadrangulate: self.mesh is None")
-        if source not in ("uv", "mesh"):
+        if self.clip is not None and len(self.clip):
+            take = self.clip.active
+            return take.at(take.start_frame if frame is None else frame)
+        return self.hierarchy
+
+    def camera(self, name: Optional[str] = None) -> Tuple[Optional[CameraData], Optional[str]]:
+        """
+        ``(camera, node uuid)``: the camera named ``name``, else the one
+        :attr:`default_camera` names, else the first; its node's uuid, None
+        for a camera on no node. ``(None, None)`` for a scene with no camera.
+        """
+        if not self.cameras:
+            return None, None
+        chosen = name or self.default_camera
+        if chosen is not None:
+            for camera in self.cameras:
+                if camera.name == chosen:
+                    return camera, camera.parent_uuid
+        return self.cameras[0], self.cameras[0].parent_uuid
+
+    def placed_meshes(self, frame: Optional[int] = None) -> List[Tuple[MeshData, np.ndarray]]:
+        """
+        ``[(mesh, world)]`` of every shown mesh at ``frame``: a mesh on a
+        hidden node is left out; a skinned or morphed mesh is a copy moved
+        to its pose, in world space, its world identity; any other is itself
+        with its node's world (4, 4), row vectors, identity for a mesh on no
+        node.
+        """
+        pose = self.pose(frame)
+        return [(mesh, world) for mesh, world, _ in self._placed(pose)]
+
+    def union_points(self, frame: Optional[int] = None) -> np.ndarray:
+        """every shown mesh's points at ``frame``, in world space, as one
+        (N, 3) array, (0, 3) for none"""
+        chunks = [_world_points(mesh, world) for mesh, world in self.placed_meshes(frame)]
+        return np.concatenate(chunks, axis=0) if chunks else np.zeros((0, 3))
+
+    def union_aabb(self, frame: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
+        """``(min corner, max corner)`` of :meth:`union_points`, zeros for none"""
+        points = self.union_points(frame)
+        if not len(points):
+            return np.zeros(3), np.zeros(3)
+        return points.min(axis=0), points.max(axis=0)
+
+    def _placed(self, pose) -> list:
+        """``[(mesh, world, shown mesh's materials)]`` of every shown mesh
+        placed by ``pose`` (:meth:`placed_meshes`)"""
+        worlds, shown = _worlds(pose)
+        found = []
+        for mesh in self.meshes or []:
+            if mesh.parent_uuid is not None and mesh.parent_uuid in shown and not shown[mesh.parent_uuid]:
+                continue
+            world  = worlds.get(mesh.parent_uuid, np.eye(4))
+            points = self._morphed_points(mesh)
+            skin   = self._skin_of(mesh)
+            if skin is not None:
+                deformer = self._deformer(mesh, skin)
+                if pose is None:
+                    raise ValueError(f"Scene: {_mesh_label(mesh)} is skinned, which takes a pose: the scene holds no nodes")
+                points = deformer.apply(pose, mesh.points if points is None else points)
+                world  = np.eye(4)
+            if points is None:
+                found.append((mesh, world, None))
+                continue
+            moved        = mesh.copy()
+            moved.points = np.asarray(points, dtype=np.float64)
+            if moved.normals is not None:
+                moved.normals = None
+            found.append((moved, world, mesh))
+        return [(shown_mesh, world, original if original is not None else shown_mesh) for shown_mesh, world, original in found]
+
+    def _skin_of(self, mesh) -> Optional[SkinData]:
+        for skin in self.skins or []:
+            if skin.mesh_uuid == mesh.uuid:
+                return skin
+        return None
+
+    def _deformer(self, mesh, skin) -> SkinDeformData:
+        """the deformer of a skinned mesh, bound from the bind pose
+        (:attr:`hierarchy`), kept while mesh, skin and hierarchy stay"""
+        if self.hierarchy is None:
             raise ValueError(
-                f"Object.quadrangulate: source must be 'uv' or 'mesh', got {source!r}"
+                f"Scene: {_mesh_label(mesh)} is skinned, which takes the bind pose; set scene.hierarchy to it (a file's "
+                f"load_fbx gives it with the skins)"
             )
-
-        if self.uv is None:
-            rules = self.mesh.get_quadrangulate_rules()
-            self.mesh.quadrangulate(rules)
-        else:
-            if source == "uv":
-                rules = self.uv.get_quadrangulate_rules()
-            else:
-                rules = self.mesh.get_quadrangulate_rules()
-            self.uv.quadrangulate(rules)
-            self.mesh.quadrangulate(rules)
-
-        # Mesh / UV topology changed in place (the setters did NOT fire),
-        # so manually invalidate the wireframe bake which depends on
-        # mesh edges and UV layout.
-        self._wired_texture_cache = None
-        self._mark_render_dirty()
-
-    def triangulate(self, ngons_only=False) -> None:
-        """Triangulates polygons (quads / n-gons) into triangles, in-place,
-        on this Object's mesh and (when present) its UV.
-
-        Convenience wrapper around :meth:`MeshData.triangulate` /
-        :meth:`UVData.triangulate` that keeps the mesh and UV in sync:
-        a single :class:`~numpy.ndarray` of triangulation rules is
-        generated once via :meth:`MeshData.get_triangulate_rules` on
-        ``self.mesh`` and applied to both.  This is safe because the
-        rule format is purely face-local, so the same rules apply to
-        a :class:`MeshData` and to its corresponding :class:`UVData`
-        even though they may have different vertex indices due to
-        UV seams.
-
-        Always uses the mesh's topology to drive rule generation
-        (unlike :meth:`quadrangulate`, which can be driven by either
-        mesh or UV topology) -- triangulation is local enough that
-        the choice doesn't change the resulting partition.
-
-        Raises:
-            ValueError: If ``self.mesh`` is None.
-        """
-        if self.mesh is None:
-            raise ValueError("Object.triangulate: self.mesh is None")
-
-        rules = self.mesh.get_triangulate_rules(ngons_only=ngons_only)
-        self.mesh.triangulate(rules)
-        if self.uv is not None:
-            self.uv.triangulate(rules)
-
-        # Mesh / UV topology changed in place (the setters did NOT fire),
-        # so manually invalidate the wireframe bake (depends on mesh edges
-        # and UV layout) and the render cache.
-        self._wired_texture_cache = None
-        self._mark_render_dirty()
-
-    def merge(self) -> None:
-        """Merges overlapping points (and resulting overlapping faces),
-        in-place, on this Object's mesh and (when present) its UV.
-
-        Thin convenience wrapper that calls :meth:`MeshData.merge` and
-        :meth:`UVData.merge` so callers don't have to remember to merge
-        the UV separately.  Each underlying ``merge()`` deduplicates its
-        own ``points`` array independently -- the mesh merges in 3D and
-        the UV merges in 2D -- so the two are NOT guaranteed to share
-        face counts after the call (e.g. the mesh may merge a seam
-        across UV islands while the UV keeps the seam's two distinct
-        UV-vertices).
-
-        Raises:
-            ValueError: If ``self.mesh`` is None.
-        """
-        if self.mesh is None:
-            raise ValueError("Object.merge: self.mesh is None")
-        self.mesh.merge()
-        if self.uv is not None:
-            self.uv.merge()
-        # Mesh / UV topology changed in place (the setters did NOT fire),
-        # so manually invalidate the wireframe bake which depends on
-        # mesh edges and UV layout.
-        self._wired_texture_cache = None
-        self._mark_render_dirty()
-
-    # -- one-call preview / turntable shims ----------------------------
-
-    @contextlib.contextmanager
-    def _previewed(self):
-        """the one-Object Scene a preview renders: :meth:`render`'s,
-        :meth:`turntable`'s and :meth:`animate`'s
-
-        It holds a stand-in, a shallow copy over this Object's mesh, skin,
-        texture and channels, as a root. This Object stays in its own
-        hierarchy, under its own parent: appended to the preview scene it
-        would leave its rig, and joining the scene without its parent would
-        clear its parent_uuid. The stand-in starts from the texture this
-        Object loaded, the wireframe it baked and the bind pose it built,
-        and hands back those it makes that this Object lacks. An Object with
-        no uuid takes one, as it did when it was appended itself: the stand-in
-        carries it, so that a turntable's kept frames are found again.
-        """
-        if self.uuid is None:
-            self.uuid = generate_uuid()
-        stand_in = copy.copy(self)
-        for name in _PREVIEW_CACHES:
-            setattr(stand_in, name, getattr(self, name))
-        scene = Scene(f"preview:{self.name}")
-        scene.append(stand_in)
-        # Forward this Object's preview background (if any) to the
-        # one-Object Scene, so obj.to_image(), each turntable frame and the
-        # encoder dispatch (mp4 bg flatten) see the user-chosen colour.
-        if self._background is not None:
-            scene.background = self._background
-        try:
-            yield scene
-        finally:
-            for name in _PREVIEW_CACHES:
-                if getattr(self, name) is None:
-                    setattr(self, name, getattr(stand_in, name))
-
-    def render(
-        self,
-        output:            Optional[str]             = None,
-        resolution:        Optional[Tuple[int, int]] = None,
-        samples_per_pixel: Optional[int]             = None,
-        **render_kwargs,
-    ) -> "Frame":
-        """Quick standalone preview render of this Object.
-
-        Builds a one-Object scene with a 3-point default lighting rig
-        sized to the Object's AABB, runs the renderer, and (optionally)
-        saves the image to disk.  Default ``resolution`` falls back to
-        :attr:`resolution` (500x500 unless overridden) which is
-        convenient for asset spreadsheets / asset thumbnails.
-
-        For more control (multi-Object scenes, custom lighting, specific
-        camera placement) build a :class:`Scene` directly.
-
-        Args:
-            output: If given, save the rendered :class:`Frame` to this
-                path.  Path supports ``~`` and env vars.  When ``None``,
-                only the Frame is returned.
-            resolution: ``(width, height)`` in pixels.  When ``None``
-                (default), falls back to :attr:`resolution`.
-            samples_per_pixel: MSAA sample count for this preview render.
-                When ``None`` (default), falls back to
-                :attr:`samples_per_pixel` (which itself defaults to ``2``).
-            **render_kwargs: Forwarded to :func:`render`, ``threads=``
-                (how many CPU threads a frame uses) among them.
-
-        Returns:
-            The rendered :class:`Frame` (saved to ``output`` if given).
-
-        Note:
-            The preview scene holds a stand-in for this Object, a root:
-            its OWN matrix is rendered, and a parent's transform is NOT
-            applied. This Object stays where it is, under its parent.
-        """
-        if resolution is None:
-            resolution = self.resolution
-        if samples_per_pixel is None:
-            samples_per_pixel = self.samples_per_pixel
-        # Lighting is auto-injected by Scene.render()'s default-rig path
-        # (sized to the scene's union AABB), so a one-Object preview
-        # here gets the same 3-point rig as scene.to_image().
-        if samples_per_pixel is not None:
-            render_kwargs.setdefault("samples_per_pixel", samples_per_pixel)
-        with self._previewed() as scene:
-            frame = scene.render(resolution=resolution, **render_kwargs)
-        if output is not None:
-            frame.save(output)
-        # Cache the rendered Frame so callers can :meth:`imshow` it later
-        # without re-rendering.
-        self.frame = frame
-        return frame
-
-    def to_image(self) -> "Image":
-        """Returns the rendered frame as a PIL Image.
-
-        Mirrors :meth:`cgmath.geometry.mesh.UVData.to_image`.  Lazy-renders
-        with this Object's :meth:`render` defaults (500x500 + a 3-point
-        lighting rig) when no frame is cached yet, so ``obj.to_image()`` is
-        a single-call "give me a PIL image" shortcut suitable for
-        notebooks, tests, and image pipelines.
-
-        Raises:
-            RuntimeError: If PIL is not available.
-
-        Note:
-            Unlike :meth:`UVData.to_image` (which flips its bottom-up
-            buffer), no flip is needed here because ``Frame.array`` is
-            already top-down RGB uint8.
-
-            Mutating tracked visual attributes (``mesh`` / ``uv`` /
-            ``texture`` / ``base_color`` / ``wireframe*`` /
-            ``sample_method`` / ``wrap`` / ``ambient`` / ``twosided`` /
-            ``cast_shadows`` / ``resolution`` / ``samples_per_pixel``)
-            auto-invalidates the cached frame, AND mutating the Object's
-            transform (``translate`` / ``rotate`` / ``scale`` on self OR
-            any ancestor) ALSO auto-invalidates via the lazy transform-
-            state check on :attr:`frame`.  In-place mutation of
-            ``mesh.points`` / texture pixels still requires an explicit
-            :meth:`render` call to refresh.
-        """
-        if Image is None:
-            raise RuntimeError("PIL required to generate PIL.Image data")
-        if self.frame is None:
-            self.render()  # uses defaults; sets ``self.frame``
-        return Image.fromarray(self.frame.array)
-
-    def imshow(self) -> None:
-        """Show the rendered frame in a window via OpenCV.
-
-        Mirrors :meth:`cgmath.geometry.mesh.UVData.imshow`.  Lazy-renders
-        with this Object's :meth:`render` defaults (500x500 + a 3-point
-        lighting rig) when no frame is cached yet, so ``obj.imshow()`` is a
-        single-call "show me the asset" shortcut.
-
-        Raises:
-            RuntimeError: If OpenCV is not available (it's required to
-                show the image in a window).
-
-        Note:
-            Mutating tracked visual attributes (``mesh`` / ``uv`` /
-            ``texture`` / ``base_color`` / ``wireframe*`` /
-            ``sample_method`` / ``wrap`` / ``ambient`` / ``twosided`` /
-            ``cast_shadows`` / ``resolution`` / ``samples_per_pixel``)
-            auto-invalidates the cached frame, AND mutating the Object's
-            transform (``translate`` / ``rotate`` / ``scale`` on self OR
-            any ancestor) ALSO auto-invalidates via the lazy transform-
-            state check on :attr:`frame`.  In-place mutation of
-            ``mesh.points`` / texture pixels still requires an explicit
-            :meth:`render` call to refresh.
-        """
-        if cv2 is None:
-            raise RuntimeError("opencv required to show images")
-        if self.frame is None:
-            self.render()  # uses defaults; sets ``self.frame``
-        # Frame.array is top-down RGB; cv2 wants BGR.  No vertical flip
-        # needed (UVData flips because its buffer is bottom-up).
-        buffer = cv2.cvtColor(self.frame.array, cv2.COLOR_RGB2BGR)
-        cv2.imshow(self.name, buffer)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-
-    def turntable(
-        self,
-        output:            str                       = "turntable.{frame:04d}.png",
-        n_frames:          int                       = 120,
-        resolution:        Optional[Tuple[int, int]] = None,
-        samples_per_pixel: Optional[int]             = None,
-        fps:               int                       = 30,
-        **render_kwargs,
-    ) -> Union[str, List[str]]:
-        """Quick standalone turntable of this Object.
-
-        Same convenience as :meth:`render`: builds a one-Object scene
-        with a default 3-point lighting rig and orbits the camera.
-        Output extension picks the encoder (``.mp4`` / ``.gif`` / image
-        sequence) -- see :meth:`Scene.turntable`.
-
-        Default ``resolution`` falls back to :attr:`resolution`
-        (500x500 unless overridden) -- useful for asset spreadsheet
-        thumbnails or per-asset turntable tiles.
-
-        Args:
-            output: Output file path (or ``{frame}`` pattern for image
-                sequences).  Defaults to ``"turntable.{frame:04d}.png"``
-                in the current directory.
-            n_frames: Number of frames in the loop.  Default 120.
-            resolution: ``(width, height)`` in pixels.  When ``None``
-                (default), falls back to :attr:`resolution`.
-            samples_per_pixel: MSAA sample count for this turntable.
-                When ``None`` (default), falls back to
-                :attr:`samples_per_pixel`.
-            fps: Frames per second for video / gif outputs.  Default 30.
-            **render_kwargs: Forwarded to :func:`render`, ``threads=``
-                (how many CPU threads a frame uses) among them.
-
-        Returns:
-            Single output path (``str``) for video / gif, or a list of
-            frame paths (``list[str]``) for image sequences.
-
-        Note:
-            As with :meth:`render`, the preview scene holds a stand-in for
-            this Object, a root: its OWN matrix is rendered, and a parent's
-            transform is NOT applied. This Object stays under its parent.
-        """
-        if resolution is None:
-            resolution = self.resolution
-        if samples_per_pixel is None:
-            samples_per_pixel = self.samples_per_pixel
-        # Lighting is auto-injected by Scene.render() per frame (sized
-        # to the scene's union AABB) -- same rig as Object.render().
-        if samples_per_pixel is not None:
-            render_kwargs.setdefault("samples_per_pixel", samples_per_pixel)
-        with self._previewed() as scene:
-            # the preview scene is new every call; the frames belong to this Object
-            scene._render_cache_owner = self
-            return scene.turntable(
-                output_pattern = output,
-                n_frames       = n_frames,
-                resolution     = resolution,
-                fps            = fps,
-                **render_kwargs,
-            )
-
-    def animate(
-        self,
-        clip,
-        output:            str                       = "animation.{frame:04d}.png",
-        resolution:        Optional[Tuple[int, int]] = None,
-        samples_per_pixel: Optional[int]             = None,
-        fps:               Optional[int]             = None,
-        **animate_kwargs,
-    ) -> Union[str, List[str]]:
-        """Quick standalone render of this Object animated by *clip*.
-
-        Same convenience as :meth:`turntable`: builds a one-Object scene with
-        a default lighting rig and hands off to :meth:`Scene.animate`, which
-        is where the arguments and the output-format rules are documented.
-
-        Args:
-            clip: A :class:`ClipData` holding the animation, or a
-                :class:`ClipList`, whose active take plays.
-            output: Output file path, or a ``{frame}`` pattern for sequences.
-            resolution: ``(width, height)``.  Defaults to :attr:`resolution`.
-            samples_per_pixel: MSAA count.  Defaults to
-                :attr:`samples_per_pixel`.
-            fps: Frames per second.  Defaults to the clip's own ``fps``.
-            **animate_kwargs: Forwarded to :meth:`Scene.animate` (``fit``,
-                ``end_angle``, ``verbose``, ...); ``threads=`` reaches
-                :func:`render`.
-
-        Returns:
-            A single output path for video / gif, or the list of frame paths.
-
-        Raises:
-            ValueError: If this Object has no skin to animate, or if *clip*
-                is a ClipList of no take.
-            TypeError: If *clip* is neither a ClipData nor a ClipList.
-
-        Note:
-            As with :meth:`turntable`, the preview scene holds a stand-in
-            for this Object, a root: its OWN matrix is rendered, and a
-            parent's transform is NOT applied. The stand-in is what the clip
-            deforms: this Object keeps its mesh and stays under its parent.
-        """
-        clip = _one_take(clip)
-        if self._skin is None:
-            raise ValueError(
-                f"Object {self.name!r} has no skin to animate -- load it with "
-                f"load_skin=True, or assign one to .skin"
-            )
-        if resolution is None:
-            resolution = self.resolution
-        if samples_per_pixel is None:
-            samples_per_pixel = self.samples_per_pixel
-        if samples_per_pixel is not None:
-            animate_kwargs.setdefault("samples_per_pixel", samples_per_pixel)
-
-        with self._previewed() as scene:
-            scene._render_cache_owner = self
-            return scene.animate(
-                clip,
-                output_pattern = output,
-                resolution     = resolution,
-                fps            = fps,
-                **animate_kwargs,
-            )
-
-    def clear_render_cache(self) -> None:
-        """
-        Deletes the frames kept from this Object's last :meth:`turntable` or
-        :meth:`animate`, so the next one renders again. Needed only after an
-        in-place edit of mesh points or texture pixels, which the cache does
-        not notice.
-        """
-        _clear_render_cache(self)
-
-    # -- serialization: a texture path is saved as its pixels -----------
-
-    def to_dict(self) -> dict:
-        """The tree :meth:`Data.to_dict` builds, with a texture given as a
-        file path read now and written as its ``(H, W, C)`` uint8 pixels,
-        so the saved file does not depend on the image.  It loads back as
-        that array: the path itself is not kept.
-
-        Raises:
-            RuntimeError: If the texture is a path and PIL is not available.
-        """
-        # the texture is saved as its property, "texture"
-        data = super().to_dict()
-        if isinstance(self._texture, str):
-            data["texture"] = _load_texture_path_to_uint8(self._texture)
-            data.setdefault(DTYPES_KEY, {})["texture"] = "uint8"
-        return data
-
-
-# -- Camera -------------------------------------------------------------------------
-
-
-@dataclass(repr=False, eq=False)
-class Camera(TransformData):
-    """Maya/OpenGL-style camera: looks down its own -Z axis.
-
-    Uses :attr:`world_matrix` (inherited from TransformData) for
-    position + orientation.  Domain knobs:
-
-    Attributes:
-        angle_of_view: Vertical full FOV in degrees (perspective only).
-        is_orthographic: When True, emits parallel rays.
-        ortho_height: World-space frustum height when orthographic.
-            When ``None``, derived at render time from the scene AABB.
-        near_plane / far_plane: Reserved for future clipping; unused in v1.
-        aspect_ratio: When ``None``, derived from render() resolution.
-    """
-
-    angle_of_view:   float = 35.0
-    is_orthographic: bool = False
-    ortho_height:    Optional[float] = None
-    near_plane:      float = 0.0
-    far_plane:       float = float("inf")
-    aspect_ratio:    Optional[float] = None
-
-    def __init__(
-        self,
-        name:            str             = "camera",
-        angle_of_view:   float           = 35.0,
-        is_orthographic: bool            = False,
-        ortho_height:    Optional[float] = None,
-        near_plane:      float           = 0.0,
-        far_plane:       float           = float("inf"),
-        aspect_ratio:    Optional[float] = None,
-        **transform_kwargs,
-    ) -> None:
-        super().__init__(name=name, node_type="camera", **transform_kwargs)
-        self.angle_of_view   = float(angle_of_view)
-        self.is_orthographic = bool(is_orthographic)
-        self.ortho_height    = ortho_height
-        self.near_plane      = float(near_plane)
-        self.far_plane       = float(far_plane)
-        self.aspect_ratio    = aspect_ratio
-
-    def look_at(
-        self,
-        target: Union[Tuple[float, float, float], np.ndarray],
-        up:     Tuple[float, float, float]                    = (0.0, 1.0, 0.0),
-    ) -> None:
-        """Aim this camera at ``target`` from its current world position.
-
-        Preserves the camera's world-space translation and overwrites the
-        rotation so its -Z axis points at ``target``.
-
-        Internally bridges the renderer's column-major / OpenGL matrix
-        convention with TransformData's row-major / Maya convention by
-        transposing.
-        """
-        # Read the eye position from the row-major TransformData world matrix.
-        eye = self.world_matrix[3, :3]
-        opengl_world = _look_at(
-            tuple(eye), tuple(np.asarray(target).ravel()), tuple(up)
-        )
-        # Transpose into row-major form before storing.
-        self.world_matrix = opengl_world.T
-
-    def autofit(
-        self,
-        points: np.ndarray,
-        width:  int,
-        height: int,
-    ) -> None:
-        """Override this camera's position so that ``points`` fit the frustum.
-
-        Preserves orientation; uses the shift/slide/center algorithm.
-        Only valid for cameras at world root - parented cameras raise.
-        """
-        if self.get_parent() is not None:
-            raise ValueError(
-                "Camera.autofit only works for cameras parented to world root"
-            )
-
-        # Convert row-major world_matrix to column-major OpenGL form for
-        # the autofit helper, then transpose the result back to row-major.
-        opengl_world_in = self.world_matrix.T
-        opengl_world_out = _autofit_camera_for_points(
-            np.asarray(points, dtype=np.float64),
-            opengl_world_in,
-            float(self.angle_of_view),
-            int(width),
-            int(height),
-        )
-        self.world_matrix = opengl_world_out.T
-
-    @classmethod
-    def default_view(
-        cls,
-        points:        np.ndarray,
-        name:          str        = "camera",
-        angle_of_view: float      = 35.0,
-    ) -> "Camera":
-        """Build a 3/4 elevated view Camera looking at the points' bbox center."""
-        cam          = cls(name=name, angle_of_view=angle_of_view)
-        opengl_world = _default_camera_for_points(np.asarray(points, dtype=np.float64))
-        # Transpose into row-major form for TransformData.
-        cam.world_matrix = opengl_world.T
-        return cam
-
-
-# -- Light ---------------------------------------------------------------------
-
-
-@dataclass(repr=False, eq=False)
-class Light(TransformData):
-    """A scene light.
-
-    ``kind="point"`` uses :attr:`world_matrix` translation as the light
-    position with 1/r^2 falloff.  ``kind="infinite"`` uses the camera-style
-    forward axis (``-world_matrix[:3, 2]``) as the parallel-ray direction
-    with no falloff (useful as a "sun" light).  ``color`` is float64
-    ``(3,)``; a value of another size raises ValueError.
-    """
-
-    kind:      str = "point"  # "point" or "infinite"
-    color:     Array(np.float64, 3) = numpy_array([1.0, 1.0, 1.0])
-    intensity: float = 1.0
-    falloff:   bool = True    # only meaningful for kind=="point"
-
-    def __init__(
-        self,
-        name:      str                        = "light",
-        kind:      str                        = "point",
-        color:     Tuple[float, float, float] = (1.0, 1.0, 1.0),
-        intensity: float                      = 1.0,
-        falloff:   bool                       = True,
-        **transform_kwargs,
-    ) -> None:
-        super().__init__(name=name, node_type="light", **transform_kwargs)
-        if kind not in ("point", "infinite"):
-            raise ValueError(f"Light.kind must be 'point' or 'infinite', got {kind!r}")
-        self.kind      = kind
-        self.color     = np.array(color, dtype=np.float64)
-        self.intensity = float(intensity)
-        self.falloff   = bool(falloff)
-
-    @property
-    def position(self) -> np.ndarray:
-        """World-space position derived from :attr:`world_matrix`.
-
-        TransformData stores transforms in row-major / Maya convention,
-        so the translation lives in ``world_matrix[3, :3]``.
-        """
-        return np.asarray(self.world_matrix[3, :3], dtype=np.float64)
-
-    @property
-    def direction(self) -> np.ndarray:
-        """World-space forward direction (-Z axis) for infinite lights.
-
-        In row-major TransformData convention, the matrix's rows are
-        the basis vectors, so the local -Z axis maps to row 2 (negated).
-        """
-        d = -np.asarray(self.world_matrix[2, :3], dtype=np.float64)
-        n = float(np.linalg.norm(d))
-        return d / max(n, 1e-12)
-
-    def as_dict(self) -> dict:
-        """Returns a dict matching the renderer's existing point_light shape."""
+        key = (mesh.uuid, id(skin), id(skin.weights), id(self.hierarchy), id(mesh.points))
+        if self._deformers is None:
+            self._deformers = {}
+        held = self._deformers.get(mesh.uuid)
+        if held is not None and held[0] == key:
+            return held[1]
+        deformer = SkinDeformData(mesh, skin, bind_rig=self.hierarchy, name=skin.name)
+        deformer.bind()
+        self._deformers[mesh.uuid] = (key, deformer)
+        return deformer
+
+    def _morphed_points(self, mesh) -> Optional[np.ndarray]:
+        """the mesh's points moved by its blend shape targets at their
+        weights, Maya's way (a weight between two targets of a channel
+        blends them, beyond the last continues its slope); None for a mesh
+        with no target weighing anything"""
+        channels = {}
+        for morph in self.morphs or []:
+            if morph.mesh_uuid == mesh.uuid:
+                channels.setdefault((morph.deformer, morph.name), []).append(morph)
+        points = None
+        for targets in channels.values():
+            weight = float(targets[0].weight)
+            if weight == 0.0:
+                continue
+            if points is None:
+                points = np.array(mesh.points, dtype=np.float64)
+            points += _channel_offsets(targets, weight, len(points))
+        return points
+
+    # -- what the raytracer takes ---------------------------------------------------
+
+    def _render_inputs(self, frame: Optional[int] = None) -> RenderInputs:
+        """the entries, camera dict and light dicts :func:`cgmath.render.raytracer.render`
+        consumes for the scene at ``frame``"""
+        pose = self.pose(frame)
+        worlds, shown = _worlds(pose)
+        entries = []
+        for mesh, world, original in self._placed(pose):
+            entries.append(self._entry(mesh, original, world))
+        return RenderInputs(entries, self._camera_dict(worlds), self._light_dicts(worlds, shown))
+
+    def _entry(self, mesh, original, world) -> dict:
+        """one mesh's entry: its materials, each the faces it covers (None
+        for all), its colour times its diffuse, its colour map through the UV
+        set it names (the mesh's first for None) and its wrap; a mesh with
+        no material takes the scene's base colour on every face"""
+        sets      = [uv for uv in self.uvs or [] if uv.mesh_uuid == original.uuid]
+        materials = []
+        for material in self.materials or []:
+            if material.mesh_uuid != original.uuid:
+                continue
+            uv = next((x for x in sets if x.name == material.uv_set), sets[0] if sets else None)
+            materials.append({
+                "faces":      None if material.faces is None else material.covers(original),
+                "base_color": np.asarray(material.color, dtype=np.float64) * float(material.diffuse),
+                "tex":        self._texture(material, uv),
+                "wrap":       material.wrap_u,
+                "uv":         uv,
+            })
+        if not materials:
+            uv = sets[0] if sets else None
+            materials.append({
+                "faces":      None,
+                "base_color": np.asarray(self.base_color, dtype=np.float64),
+                "tex":        self._texture(None, uv),
+                "wrap":       "repeat",
+                "uv":         uv,
+            })
+        for material in materials:
+            if material["tex"] is not None and material["uv"] is None:
+                raise ValueError(f"Scene: {_mesh_label(original)} has a texture but no UV set to map it")
         return {
-            "kind":      self.kind,
-            "position":  tuple(self.position),
-            "direction": tuple(self.direction),
-            "color":     tuple(float(c) for c in self.color),
-            "intensity": float(self.intensity),
-            "falloff":   bool(self.falloff),
+            "mesh":          mesh,
+            "uv":            materials[0]["uv"],
+            "tex":           materials[0]["tex"],
+            "base_color":    np.asarray(self.base_color, dtype=np.float64),
+            "sample_method": self.sample_method,
+            "wrap":          materials[0]["wrap"],
+            "ambient":       float(self.ambient),
+            "twosided":      bool(self.twosided),
+            "world_matrix":  np.asarray(world, dtype=np.float64).T,
+            "materials":     materials,
         }
 
-
-# -- Scene ---------------------------------------------------------------------
-
-
-class Scene(HierarchyData):
-    """A hierarchical container of Objects, Cameras and Lights.
-
-    Inherits all of :class:`HierarchyData`'s list-like + uuid lookup +
-    parenting machinery.  Validates that appended nodes are renderer
-    primitives (or plain ``TransformData`` group nodes).
-
-    Render cache (``frame`` / ``buffer``):
-      :meth:`render`, :meth:`imshow`, and :meth:`to_image` populate a
-      :attr:`frame` cache so repeated display calls don't re-run the
-      raytracer.  The cache auto-invalidates lazily on access when ANY
-      render input on this Scene OR any of its child Object / Camera /
-      Light nodes has changed since the last :meth:`render` call --
-      including:
-
-        - transforms (``translate`` / ``rotate`` / ``scale``) on any
-          node, including ancestors of nodes inside the Scene,
-        - Camera domain attrs (``angle_of_view``, ``is_orthographic``,
-          ``ortho_height``, ``near_plane``, ``far_plane``,
-          ``aspect_ratio``),
-        - Light domain attrs (``kind``, ``color``, ``intensity``,
-          ``falloff``),
-        - Object visual attrs (``mesh`` / ``uv`` / ``texture`` /
-          ``base_color`` / ``wireframe*`` / ``visibility`` /
-          shader knobs),
-        - scene topology (nodes added or removed),
-        - Scene-level render config (every key in
-          :attr:`_RENDER_CONFIG_KEYS`: ``resolution``,
-          ``samples_per_pixel``, ``background``, ``autofit``,
-          ``default_light``, ``return_depth``, ``angle_of_view``,
-          ``fit_padding``) plus ``aspect_ratio`` and
-          ``default_camera_name``.
-
-      In-place mutation of ``mesh.points`` / ``uv.points`` / texture
-      pixel arrays is the only common case that does NOT trigger
-      auto-invalidation -- call :meth:`render` again to refresh.
-      See :meth:`_compute_render_signature` for the full per-node
-      signature spec.
-
-    Saving (pkl / npz / json) keeps every node, as its own type (its
-    ``node_type`` names it), with its parenting, and every setting below;
-    a loaded Scene has no cached render.  A MeshData several Objects share
-    is saved with each of them and loads as one mesh an Object.
-    ``resolution`` is int32 ``(2,)`` and ``background`` float64 ``(4,)``,
-    either one ``None``.
-    """
-
-    # render settings __init__ and configure() set on the instance, declared so
-    # the hierarchy lists' strict setter accepts them
-    aspect_ratio:        Optional[float]
-    default_camera_name: Optional[str]
-    samples_per_pixel:   Optional[int]
-    autofit:             Optional[bool]
-    default_light:       Optional[bool]
-    return_depth:        Optional[bool]
-    angle_of_view:       Optional[float]
-    fit_padding:         Optional[float]
-
-    # the settings saved with the nodes
-    LIST_FIELDS = HierarchyData.LIST_FIELDS + (
-        "scene_name",
-        "aspect_ratio",
-        "default_camera_name",
-        "resolution",
-        "samples_per_pixel",
-        "background",
-        "autofit",
-        "default_light",
-        "return_depth",
-        "angle_of_view",
-        "fit_padding",
-    )
-
-    # the private state a Scene holds beside its list and a rig's: the storage
-    # behind scene_name, resolution and background, the cached render and the
-    # inputs it was rendered from, and the Object a preview scene renders for
-    _STATE = (
-        "_scene_name",
-        "_resolution",
-        "_background",
-        "_frame",
-        "_render_signature",
-        "_render_cache_owner",
-    )
-
-    @classmethod
-    def _item_class(cls, item: dict) -> type:
-        """
-        The class a saved node is built as: its ``node_type``, which each
-        constructor sets, names it; any other, a group or a joint, is a
-        TransformData. Until shapes leave the hierarchy, when Object goes.
-        """
-        return {"object": Object, "camera": Camera, "light": Light}.get(item.get("node_type"), TransformData)
-
-    def __init__(
-        self,
-        name:                str                                             = "scene",
-        aspect_ratio:        Optional[float]                                 = None,
-        default_camera_name: Optional[str]                                   = None,
-        resolution:          Optional[Tuple[int, int]]                       = (500, 500),
-        samples_per_pixel:   Optional[int]                                   = None,
-        background:          Optional[Union[Tuple[float, ...], List[float]]] = None,
-        autofit:             Optional[bool]                                  = None,
-        default_light:       Optional[bool]                                  = None,
-        return_depth:        Optional[bool]                                  = None,
-        angle_of_view:       Optional[float]                                 = None,
-        fit_padding:         Optional[float]                                 = None,
-    ) -> None:
-        super().__init__()
-        # NB: HierarchyData inherits a ``name`` property from TransformList
-        # that returns the list of child names, with no setter.  We store
-        # the scene's own label under a different attribute name.
-        self._scene_name         = str(name) if name is not None else None
-        self.aspect_ratio        = aspect_ratio
-        self.default_camera_name = default_camera_name
-        # Cached most-recent render output, accessed via the ``frame``
-        # property below.  Use private storage so the property setter
-        # can snapshot a full render-input signature for lazy
-        # invalidation when any child node attribute changes.
-        self._frame:            Optional["Frame"] = None
-        self._render_signature: Optional[tuple] = None
-        # Persistent render-config attrs.  Each ``None`` means "fall through
-        # to the per-call kwarg or render()'s internal default".  Per-call
-        # kwargs always win; these are the Scene-level defaults that flow
-        # through render() and turntable() without being repeated.
-        # ``resolution`` and ``background`` go through their property
-        # setters below: int32 (2,), and RGB or RGBA promoted to RGBA.
-        self.resolution = resolution
-        self.samples_per_pixel: Optional[int] = samples_per_pixel
-        self.background = background
-        self.autofit:       Optional[bool] = autofit
-        self.default_light: Optional[bool] = default_light
-        self.return_depth:  Optional[bool] = return_depth
-        self.angle_of_view: Optional[float] = angle_of_view
-        # Safety margin for autofit (>= 1.0).  ``None`` lets the renderer
-        # auto-pick (1.15 for bezier-sampled meshes, 1.0 otherwise).
-        self.fit_padding: Optional[float] = fit_padding
-
-    # -- file IO: build a Scene from disk -----------------------------
-
-    # HierarchyData's fbx reader and writer know joints only: a Scene read
-    # through them would hold no Object, and one written would lose its meshes
-    load_fbx = _NoRoute(
-        "Scene reads FBX files from 4.0.0; today use Object.load_fbx(path, index=i) per mesh, "
-        "or Scene.load_glb"
-    )
-    save_fbx = _NoRoute("HierarchyData's fbx writer writes joints only: a Scene's meshes would be lost")
-
-    @classmethod
-    def load_obj(cls, filename: str, name: Optional[str] = None) -> "Scene":
-        """Load every mesh in an OBJ file into a new :class:`Scene` as
-        :class:`Object` nodes.
-
-        Convenience wrapper around :func:`cgmath.geometry.mesh.load_obj`.
-        Each mesh in the file becomes one Object in the returned Scene.
-        Lights and cameras are NOT added -- :meth:`render` / :meth:`imshow`
-        will lazy-build a default lighting rig and camera if none are
-        present.
-
-        Args:
-            filename: Path to the ``.obj`` file (``~`` and env vars OK).
-            name: Optional name for the Scene (defaults to ``"scene"``).
-
-        Returns:
-            A Scene populated with one Object per ``g`` group in the file.
-        """
-        scene = cls(name=name or "scene")
-        for mesh, uv_list in _load_obj(filename):
-            uv = uv_list[0] if len(uv_list) > 0 else None
-            scene.append(Object(name=mesh.name or "object", mesh=mesh, uv=uv))
-        return scene
-
-    @classmethod
-    def load_glb(
-        cls,
-        filename:        str,
-        name:            Optional[str] = None,
-        scale_factor:    float         = 100.0,
-        load_skin:       bool          = True,
-        extract_texture: bool          = True,
-    ) -> "Scene":
-        """Load every mesh in a GLB file into a new :class:`Scene` as
-        :class:`Object` nodes.  See :meth:`load_obj`.
-
-        Args:
-            filename: Path to the ``.glb`` file (``~`` and env vars OK).
-            name: Optional name for the Scene (defaults to ``"scene"``).
-            scale_factor: Multiplier applied to vertex positions (matches
-                :meth:`MeshData.load_glb`'s default of 100).
-            load_skin: When True (default), attach a
-                :class:`SkinDeformData` to each Object that has skin
-                weights, ready for :meth:`Object.pose`.  The file is read
-                once for the whole Scene, not once per Object.
-            extract_texture: When True (default), also extract each
-                mesh's own material's base color map and assign it to that
-                Object's :attr:`texture` via
-                :meth:`Object.extract_texture_from_glb`, matching
-                :meth:`Object.load_glb`.  A mesh with no material, or a
-                material with no base color map, leaves :attr:`texture`
-                unset rather than raising.
-
-        Returns:
-            A Scene populated with one Object per geometry in the file.
-
-        Raises:
-            ImportError: If ``trimesh`` is not installed.
-        """
-        scene  = cls(name=name or "scene")
-        data   = _load_glb(filename, scale_factor=scale_factor)
-        meshes = [m for m, _ in data]
-        skins = (
-            _glb_skins(filename, meshes, scale_factor)
-            if load_skin
-            else [None] * len(meshes)
-        )
-        materials = (
-            _glb_material_indices(filename, len(meshes))
-            if extract_texture
-            else [None] * len(meshes)
-        )
-        for (mesh, uv_list), skin, material in zip(data, skins, materials):
-            uv  = uv_list[0] if len(uv_list) > 0 else None
-            obj = Object(name=mesh.name or "object", mesh=mesh, uv=uv, skin=skin)
-            if extract_texture and material is not None:
-                obj.extract_texture_from_glb(filename, material_index=material)
-            scene.append(obj)
-        return scene
-
-    # -- render-config helpers --------------------------------------------
-
-    # The Scene-level keys we merge into render() / turntable() kwargs.
-    _RENDER_CONFIG_KEYS = (
-        "resolution",
-        "samples_per_pixel",
-        "background",
-        "autofit",
-        "default_light",
-        "return_depth",
-        "angle_of_view",
-        "fit_padding",
-    )
-
-    def configure(self, **kwargs) -> "Scene":
-        """Bulk-set persistent render defaults; ``None`` values are ignored.
-        Returns ``self`` so it's chainable::
-
-            scene.configure(samples_per_pixel=4, resolution=(1280, 720)).imshow()
-
-        Raises:
-            AttributeError: If any kwarg isn't a known render-config attribute.
-        """
-        for name, val in kwargs.items():
-            if val is None:
-                continue
-            if name not in self._RENDER_CONFIG_KEYS:
-                raise AttributeError(
-                    f"Scene.configure: unknown render-config attribute "
-                    f"{name!r}; allowed: {self._RENDER_CONFIG_KEYS}"
-                )
-            setattr(self, name, val)
-        return self
-
-    def _visible_world_points(self, context: str) -> np.ndarray:
-        """Every visible Object's world points as one cloud, for camera fitting.
-
-        Args:
-            context: Name of the calling entry point, used in the error so a
-                caller knows which of their calls found nothing to frame.
-        """
-        chunks = [
-            o.world_points for o in self.objects if o.visibility and o.mesh is not None
-        ]
-        if not chunks:
-            raise ValueError(f"{context}: scene has no visible Objects with meshes")
-        return np.concatenate(chunks, axis=0)
-
-    def _base_camera(self, all_pts: np.ndarray, camera_name, render_kwargs: dict):
-        """Orientation and lens a sequence render should fit to.
-
-        Uses an existing Camera when the scene has one, else a default 3/4
-        elevated view.  Nothing is appended to the scene -- the matrix is
-        handed to :func:`render` per frame instead, so the scene is left
-        exactly as the caller set it up.
-
-        Returns:
-            ``(base_cam_col, R_cam, aov, width, height)``, the camera matrix
-            column-major (OpenGL), its camera-to-world rotation part, the
-            angle of view in degrees and the pixel resolution to fit.
-        """
-        existing = self.get_camera(camera_name)
-        if existing is not None:
-            # row-major -> column-major
-            base_cam_col = np.asarray(existing.world_matrix, dtype=np.float64).T
-            base_aov     = float(existing.angle_of_view)
+    def _texture(self, material, uv) -> Optional[np.ndarray]:
+        """a material's colour map as the renderer samples it, (H, W, 3)
+        float32 in 0 to 1, with the wireframe baked over it (or over the
+        base colour) when the scene draws one and ``uv`` maps the mesh;
+        None for no map and no wireframe. Kept by the pixels' identity"""
+        pixels = None if material is None else material.texture
+        wired  = bool(self.wireframe) and uv is not None
+        if pixels is None and not wired:
+            return None
+        color = np.asarray(self.base_color if material is None else material.color, dtype=np.float64)
+        key = (id(pixels), id(uv) if wired else None, tuple(color.tolist()) if wired else None,
+               tuple(np.asarray(self.wireframe_color).tolist()) if wired else None, int(self.wireframe_thickness) if wired else None)
+        if self._textures is None:
+            self._textures = {}
+        held = self._textures.get(key)
+        if held is not None and held[0] is pixels:
+            return held[1]
+        if wired:
+            loaded = _bake_wireframe(uv, pixels, color, self.wireframe_color, self.wireframe_thickness)
         else:
-            base_cam_col = _default_camera_for_points(all_pts)
-            base_aov     = 35.0
+            loaded = _load_texture(_three_channels(pixels))
+        self._textures[key] = (pixels, loaded)
+        return loaded
 
-        res = render_kwargs.get("resolution", (512, 384))
-        aov = float(render_kwargs.get("angle_of_view", base_aov))
-        return base_cam_col, base_cam_col[:3, :3], aov, int(res[0]), int(res[1])
+    def _camera_dict(self, worlds: dict) -> Optional[dict]:
+        camera, node = self.camera()
+        if camera is None:
+            return None
+        world = worlds.get(node, np.eye(4))
+        return {
+            "world_matrix":    np.asarray(world, dtype=np.float64).T,
+            "angle_of_view":   float(camera.vertical_angle_of_view),
+            "is_orthographic": bool(camera.orthographic),
+            "ortho_height":    None,
+            "ortho_width":     float(camera.orthographic_width),
+        }
 
-    def _resolve_mp4_background(self, background=None) -> Tuple[float, float, float]:
-        """Opaque RGB for formats that carry no alpha, notably H.264.
+    def _light_dicts(self, worlds: dict, shown: dict) -> list:
+        """the lights as the renderer takes them: a point light with falloff
+        when its decay is not none, a directional light infinite, a spot a
+        point light with one warning (the cone is not rendered); a light on
+        a hidden node left out"""
+        found = []
+        spots = []
+        for light in self.lights or []:
+            node = light.parent_uuid
+            if node is not None and node in shown and not shown[node]:
+                continue
+            world = np.asarray(worlds.get(node, np.eye(4)), dtype=np.float64)
+            if light.kind == "spot":
+                spots.append(light.name or "a spot light")
+            direction = -world[2, :3]
+            found.append({
+                "kind":      "infinite" if light.kind == "directional" else "point",
+                "position":  tuple(float(x) for x in world[3, :3]),
+                "direction": tuple(float(x) for x in direction / max(float(np.linalg.norm(direction)), 1e-12)),
+                "color":     tuple(float(x) for x in light.color),
+                "intensity": float(light.intensity),
+                "falloff":   int(light.decay_rate) != 0,
+            })
+        if spots:
+            warnings.warn(f"Scene: {', '.join(spots)} rendered as point lights; the raytracer draws no cone", stacklevel=3)
+        return found
 
-        Explicit argument first, then this Scene's own background, then black,
-        so a chosen miss colour survives into the video instead of turning up
-        as an unexpected black surround.
-        """
-        if background is not None:
-            return tuple(float(v) for v in background)
-        if self._background is not None:
-            return tuple(float(v) for v in self._background[:3])
-        return (0.0, 0.0, 0.0)
+    # -- rendering --------------------------------------------------------------------
 
     def _merge_render_config(self, kwargs: dict) -> dict:
-        """Resolve render-config defaults: per-call kwarg > Scene attr.
-
-        Per-Object render-config does NOT participate -- frame-level
-        settings (resolution, samples_per_pixel, background, etc.) are
-        inherently uniform across the whole render and live on the Scene.
-        Per-Object visualisation tweaks (e.g., ``Object.wireframe``) are
-        handled by the Object's own attributes / its texture loader.
-        """
-        defaults = {k: getattr(self, k) for k in self._RENDER_CONFIG_KEYS}
+        """per-call keyword, else the scene's setting, else nothing"""
+        defaults = {k: getattr(self, k) for k in _RENDER_CONFIG_KEYS}
         merged   = {k: v for k, v in defaults.items() if v is not None}
         merged.update(kwargs)
         return merged
 
-    # -- frame cache: lazy invalidation via render-signature snapshot ---
-
-    def _compute_render_signature(self, mesh_token=None) -> tuple:
-        """Build a hashable snapshot of every render-affecting attribute
-        on this Scene and its child Object/Camera/Light nodes.  Used by
-        the :attr:`frame` getter to lazy-invalidate the cache when any
-        render input has changed since the last :meth:`render` call.
-
-        Captures:
-          - Scene-level render config (every key in
-            :attr:`_RENDER_CONFIG_KEYS`) plus :attr:`aspect_ratio` and
-            :attr:`default_camera_name` (these affect render output but
-            are not forwarded as render() kwargs).
-          - Per-node: type, uuid, visibility, raw local SRT
-            (``_translate`` / ``_rotate`` / ``_scale`` / ``_shear``) AND
-            composed ``world_matrix`` bytes -- the local SRT catches direct
-            mutations even when ``TransformData``'s ``_world_matrix``
-            cache lags (see :meth:`Object._capture_transform_state`),
-            and ``world_matrix`` bytes catch ancestor mutations.
-          - Per-Object: shader knobs + wireframe attrs + per-Object
-            ``resolution`` / ``samples_per_pixel`` + ``id()`` of
-            ``mesh`` / ``uv`` / ``texture`` (identity, not contents --
-            matches the existing setter-based invalidation semantics).
-          - Per-Camera: ``angle_of_view``, ``is_orthographic``,
-            ``ortho_height``, ``near_plane``, ``far_plane``,
-            ``aspect_ratio``.
-          - Per-Light: ``kind``, ``color``, ``intensity``, ``falloff``.
-
-        NOT captured (won't trigger invalidation):
-          - In-place mutation of ``mesh.points`` / ``uv.points`` /
-            ``texture`` array contents.  We use ``id()`` -- if the user
-            replaces the array via the setter, ``id`` changes and we
-            invalidate; if they mutate in place, neither this signature
-            nor the existing setter-based invalidation fires (matches
-            the documented texture-setter behavior).
-          - In-place topology mutation via ``mesh.indices`` /
-            ``mesh.counts``.
-
-        Array settings (``resolution``, ``background``, ``base_color``,
-        ``wireframe_color``, a Light's ``color``) enter as tuples, so the
-        signature compares by value and hashes.
-
-        Cost: O(num_children) per check; ~one tuple build + a few attr
-        reads per child.  Negligible for typical scenes.
+    def render(self, frame: Optional[int] = None, output: Optional[str] = None, **kwargs):
         """
-        # _RENDER_CONFIG_KEYS covers the attrs forwarded into render()
-        # kwargs.  ``aspect_ratio`` and ``default_camera_name`` are NOT
-        # forwarded (the renderer derives aspect from the resolution and
-        # we resolve the camera by name in :meth:`get_camera` internally)
-        # but they DO affect the final render output, so we include them
-        # in the signature -- mutating either invalidates ``self.frame``
-        # / ``self.buffer`` on the next access.
-        scene_part = (
-            tuple(_frozen(getattr(self, k)) for k in self._RENDER_CONFIG_KEYS),
-            self.aspect_ratio,
-            self.default_camera_name,
-        )
-        children = []
-        for node in self:
-            transform_state = (
-                tuple(np.asarray(node._translate, dtype=float).ravel()),
-                tuple(np.asarray(node._rotate, dtype=float).ravel()),
-                tuple(np.asarray(node._scale, dtype=float).ravel()),
-                tuple(np.asarray(node._shear, dtype=float).ravel()),
-                np.asarray(node.world_matrix).tobytes(),
-            )
-            if isinstance(node, Object):
-                children.append(
-                    (
-                        "object",
-                        node.uuid,
-                        node.visibility,
-                        transform_state,
-                        id(node._mesh) if mesh_token is None else mesh_token(node),
-                        id(node._uv),
-                        id(node._texture),
-                        _frozen(node._base_color),
-                        node._wireframe,
-                        _frozen(node._wireframe_color),
-                        node._wireframe_thickness,
-                        _frozen(node._resolution),
-                        node._samples_per_pixel,
-                        node.sample_method,
-                        node.wrap,
-                        node.ambient,
-                        node.twosided,
-                        node.cast_shadows,
-                    )
-                )
-            elif isinstance(node, Camera):
-                children.append(
-                    (
-                        "camera",
-                        node.uuid,
-                        node.visibility,
-                        transform_state,
-                        node.angle_of_view,
-                        node.is_orthographic,
-                        node.ortho_height,
-                        node.near_plane,
-                        node.far_plane,
-                        node.aspect_ratio,
-                    )
-                )
-            elif isinstance(node, Light):
-                children.append(
-                    (
-                        "light",
-                        node.uuid,
-                        node.visibility,
-                        transform_state,
-                        node.kind,
-                        _frozen(node.color),
-                        node.intensity,
-                        node.falloff,
-                    )
-                )
-            else:
-                # Plain TransformData group node -- only transform matters.
-                children.append(("group", node.uuid, node.visibility, transform_state))
-        return (scene_part, tuple(children))
+        The scene rendered as a :class:`Frame`: the shapes placed by
+        :meth:`pose` at ``frame`` (the active take's first frame, or the
+        hierarchy), seen through :meth:`camera` or a default view fit to the
+        scene, lit by its lights or, with none and ``default_light`` not
+        False, a 3-point rig sized to the scene. The scene's settings fill
+        the keywords of :func:`cgmath.render.raytracer.render` not given;
+        ``threads=`` reaches it. Saved to ``output`` when given. The frame
+        is kept as :attr:`frame`.
+        """
+        from cgmath.render.raytracer import render
+
+        merged = self._merge_render_config(kwargs)
+        if "background" in merged:
+            merged["background"] = _normalize_rgba(merged["background"], "render(background=...)")
+        if merged.get("default_light", True) is not False and not self.lights:
+            points = self.union_points(frame)
+            if points.size:
+                merged.setdefault("point_light", _default_lighting_rig_for(points))
+                merged["default_light"] = False
+        result = render(scene=self, frame=frame, **merged)
+        if output is not None:
+            result.save(output)
+        self._rendered_frame = frame
+        self.frame           = result
+        return result
+
+    def to_image(self, resolution: Tuple[int, int] = (500, 500)) -> "Image":
+        """the frame as a PIL image, rendered at ``resolution`` when none is kept"""
+        if Image is None:
+            raise RuntimeError("PIL required to generate PIL.Image data")
+        if self.frame is None:
+            self.render(resolution=resolution)
+        return Image.fromarray(self.frame.array)
+
+    def imshow(self, resolution: Tuple[int, int] = (500, 500)) -> None:
+        """the frame in an OpenCV window, rendered at ``resolution`` when none is kept"""
+        if cv2 is None:
+            raise RuntimeError("opencv required to show images")
+        if self.frame is None:
+            self.render(resolution=resolution)
+        buffer = cv2.cvtColor(self.frame.array, cv2.COLOR_RGB2BGR)
+        cv2.imshow(self.name or "Scene", buffer)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    # -- the frame cache --------------------------------------------------------------
+
+    def _signature(self, frame: Optional[int] = None) -> tuple:
+        """
+        What the frame rendered depends on, as a hashable tuple: every
+        setting's value, each shape's fields and the identity of its arrays,
+        each node's world at ``frame`` and whether it is shown. An edit in
+        place of an array is not seen.
+        """
+        pose = self.pose(frame)
+        worlds, shown = _worlds(pose)
+
+        def placed(uuid):
+            return (None if uuid is None else _frozen(worlds.get(uuid)), shown.get(uuid, True))
+
+        settings = tuple(_frozen(getattr(self, k)) for k in _RENDER_CONFIG_KEYS + _SHADING_KEYS)
+        parts    = [settings, self.default_camera, self.aspect_ratio, frame, len(pose) if pose is not None else None]
+        parts.append(tuple(
+            (m.uuid, id(m.points), id(m.indices), id(m.counts), placed(m.parent_uuid)) for m in self.meshes or []
+        ))
+        parts.append(tuple((uv.name, uv.mesh_uuid, id(uv.points), id(uv.indices)) for uv in self.uvs or []))
+        parts.append(tuple((s.mesh_uuid, id(s.weights), tuple(s.influences)) for s in self.skins or []))
+        if self.skins:
+            # a skinned mesh follows every joint: the whole pose
+            parts.append(tuple((uuid, _frozen(worlds[uuid])) for uuid in sorted(worlds)))
+        parts.append(tuple(
+            (m.name, m.mesh_uuid, None if m.faces is None else id(m.faces), m.kind, _frozen(m.color), m.diffuse,
+             id(m.texture), m.uv_set, m.wrap_u, m.wrap_v)
+            for m in self.materials or []
+        ))
+        parts.append(tuple(
+            (c.name, c.focal_length, c.horizontal_film_aperture, c.vertical_film_aperture, c.orthographic,
+             c.orthographic_width, placed(c.parent_uuid))
+            for c in self.cameras or []
+        ))
+        parts.append(tuple(
+            (x.name, x.kind, _frozen(x.color), x.intensity, x.decay_rate, placed(x.parent_uuid)) for x in self.lights or []
+        ))
+        parts.append(tuple(
+            (m.name, m.deformer, m.mesh_uuid, m.weight, m.at, id(m.offsets), id(m.indices)) for m in self.morphs or []
+        ))
+        return tuple(parts)
 
     @property
-    def frame(self) -> Optional["Frame"]:
-        """Cached most-recent render output, or ``None`` when the cache
-        is invalid.  Auto-invalidates when ANY render-affecting attribute
-        of this Scene or its child Objects/Cameras/Lights has changed
-        since the last :meth:`render` call -- including transforms
-        (``translate`` / ``rotate`` / ``scale`` on any node), Camera
-        domain attrs (e.g., ``angle_of_view``), Light domain attrs
-        (e.g., ``intensity``), Object visual attrs, scene topology
-        (nodes added / removed), and Scene-level render config (e.g.,
-        ``resolution``).  See :meth:`_compute_render_signature` for the
-        full list of tracked attributes.
-        """
+    def frame(self):
+        """the last render, None when none is kept or a render input changed since"""
         if self._frame is None:
             return None
-        if (
-            self._render_signature is not None
-            and self._compute_render_signature() != self._render_signature
-        ):
+        if self._render_signature is not None and self._render_signature != self._render_signature_now():
             self._frame            = None
             self._render_signature = None
             return None
         return self._frame
 
     @frame.setter
-    def frame(self, value: Optional["Frame"]) -> None:
-        self._frame = value
-        if value is None:
-            self._render_signature = None
-        else:
-            self._render_signature = self._compute_render_signature()
+    def frame(self, value) -> None:
+        self._frame            = value
+        self._render_signature = None if value is None else self._render_signature_now()
+
+    def _render_signature_now(self) -> tuple:
+        return self._render_signature_of(self._rendered_frame)
+
+    def _render_signature_of(self, frame) -> tuple:
+        try:
+            return self._signature(frame)
+        except ValueError:
+            # a scene that can not be posed renders nothing: no frame to keep
+            return ("unposed",)
 
     @property
     def buffer(self) -> Optional[np.ndarray]:
-        """Convenience accessor for ``self.frame.array`` -- the pixel
-        buffer of the most recent render (``None`` until rendered).
-        Matches the ``buffer`` vocabulary used by :class:`UVData`.
-        """
+        """the kept frame's pixels, None for none"""
         return self.frame.array if self.frame is not None else None
 
-    @property
-    def scene_name(self) -> Optional[str]:
-        """Returns the scene's own label (distinct from the inherited
-        :attr:`name` property which lists child node names)."""
-        return self._scene_name
-
-    @scene_name.setter
-    def scene_name(self, value: Optional[str]) -> None:
-        self._scene_name = str(value) if value is not None else None
-
-    @property
-    def resolution(self) -> Optional[np.ndarray]:
-        """Render resolution ``(width, height)``, int32, or ``None`` to fall
-        through to the per-call kwarg or render()'s own default."""
-        return _read_only(self._resolution)
-
-    @resolution.setter
-    def resolution(self, value) -> None:
-        self._resolution = (
-            None if value is None else _SCENE_RESOLUTION.coerce(np.array(value), "Scene.resolution")
-        )
-
-    @property
-    def background(self) -> Optional[np.ndarray]:
-        """Optional RGBA background color in [0, 1] used by :meth:`render`,
-        float64 ``(4,)``.
-
-        ``None`` (default) -> renderer falls through to its own default
-        ``(0, 0, 0, 0)`` (transparent black).  RGB values passed to
-        the constructor or this setter are auto-promoted to opaque
-        ``(R, G, B, 1.0)`` via :func:`_normalize_rgba`.
-
-        Mapping to the renderer:
-          - ``alpha == 0`` -> transparent miss pixels (compositing-friendly).
-          - ``alpha == 1`` -> opaque miss fill in the chosen RGB.
-          - ``0 < alpha < 1`` -> Porter-Duff "over" composite at miss.
-        """
-        return _read_only(self._background)
-
-    @background.setter
-    def background(self, value) -> None:
-        self._background = _normalize_rgba(value, "Scene.background")
-
-    # ---- type-checked add ----
-    def append(self, node: TransformData) -> None:
-        self._validate(node)
-        # Work around a pre-existing bug in TransformList.append: when
-        # node.uuid is None, the actual list-append is unreachable
-        # (sits inside a `while True` after `break`).  Pre-assigning a
-        # uuid here sidesteps the bug entirely.
-        if node.uuid is None:
-            from cgmath.hierarchy import generate_uuid
-
-            node.uuid = generate_uuid()
-        super().append(node)
-
-    def insert(self, index: int, node: TransformData) -> None:
-        self._validate(node)
-        if node.uuid is None:
-            from cgmath.hierarchy import generate_uuid
-
-            node.uuid = generate_uuid()
-        super().insert(index, node)
-
-    @staticmethod
-    def _validate(node) -> None:
-        if not isinstance(node, TransformData):
-            raise TypeError(
-                f"Scene only accepts TransformData (got {type(node).__name__}); "
-                "wrap your data in Object/Camera/Light"
-            )
-
-    def strip_namespace(self, namespace: Optional[str] = None) -> None:
-        """
-        ``strip_namespace()`` on every node, all or nothing, and on
-        :attr:`default_camera_name`, so it still names its Camera. Nothing
-        is renamed when two nodes would share a name.
-        """
-        super().strip_namespace(namespace)
-        self.default_camera_name = _strip_namespace(self.default_camera_name, namespace)
-
-    # ---- typed views ----
-    @property
-    def objects(self) -> List[Object]:
-        return [n for n in self if isinstance(n, Object)]
-
-    @property
-    def cameras(self) -> List[Camera]:
-        return [n for n in self if isinstance(n, Camera)]
-
-    @property
-    def lights(self) -> List[Light]:
-        return [n for n in self if isinstance(n, Light)]
-
-    # ---- camera selection ----
-    def get_camera(self, name: Optional[str] = None) -> Optional[Camera]:
-        """Returns the named Camera, the default Camera, or the first one.
-
-        Returns ``None`` if there are no Cameras in the scene.
-        """
-        cams = self.cameras
-        if not cams:
-            return None
-        chosen = name or self.default_camera_name
-        if chosen is not None:
-            for c in cams:
-                if c.name == chosen:
-                    return c
-        return cams[0]
-
-    # ---- bbox helpers ----
-    def union_aabb(
-        self, objects: Optional[List[Object]] = None
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Returns ``(min_corner, max_corner)`` of the world-space AABB
-        across the requested Objects (or all visible Objects)."""
-        if objects is None:
-            objects = [o for o in self.objects if o.visibility]
-        if not objects:
-            return np.zeros(3), np.zeros(3)
-        pts_chunks = [o.world_points for o in objects if o.mesh is not None]
-        if not pts_chunks:
-            return np.zeros(3), np.zeros(3)
-        all_pts = np.concatenate(pts_chunks, axis=0)
-        return all_pts.min(axis=0), all_pts.max(axis=0)
-
-    def union_points(self, objects: Optional[List[Object]] = None) -> np.ndarray:
-        """Returns the concatenation of all visible Objects' world-space
-        points, suitable for autofit / default-camera calls."""
-        if objects is None:
-            objects = [o for o in self.objects if o.visibility]
-        chunks = [o.world_points for o in objects if o.mesh is not None]
-        if not chunks:
-            return np.zeros((0, 3))
-        return np.concatenate(chunks, axis=0)
-
-    # ---- convenience: scene.render(...) ----
-    def render(self, **kwargs):
-        """Convenience wrapper around the module-level ``render(scene=self, ...)``.
-
-        Persistent render-config attributes set on this Scene
-        (:attr:`resolution`, :attr:`samples_per_pixel`, etc.) are merged
-        into ``kwargs`` here.  Per-call kwargs always win.  ``threads=``
-        is forwarded to :func:`render` too: how many CPU threads the
-        frame uses.
-
-        Default lighting:
-          When the Scene has no :class:`Light` children and
-          ``default_light`` is not disabled, a 3-point key/fill/rim rig
-          is auto-injected for the duration of this render call (sized
-          to the union AABB of all visible Objects via
-          :func:`_default_lighting_rig_for`, so it scales with the
-          scene's bounding box and is independent of mesh topology /
-          vertex density).  The raytracer's built-in single-headlight
-          fallback is suppressed when the auto-rig fires, so we don't
-          double-light.  The auto-rig is removed before this method
-          returns -- the user's Scene is left untouched.
-
-          This is the SAME rig that :meth:`Object.render` ends up using
-          (since :meth:`Object.render` builds a one-Object Scene and
-          calls :meth:`Scene.render`), so ``obj.to_image()`` and a
-          one-Object ``scene.to_image()`` produce matching lighting
-          (modulo resolution / SPP).
-
-        The import of :func:`cgmath.render.raytracer.render` stays lazy
-        because raytracer imports :class:`Scene` at top level -- this is the
-        one legitimate forward reference (model -> renderer convenience
-        shim) and the only remaining lazy import in this module.
-        """
-        from cgmath.render.raytracer import render
-
-        merged = self._merge_render_config(kwargs)
-
-        # Promote any per-call ``background=`` from RGB / list to RGBA
-        # so the renderer (which requires RGBA) sees a 4-tuple.  This
-        # mirrors the :class:`Scene.background` setter's normalization
-        # for the kwargs path.
-        if "background" in merged:
-            merged["background"] = _normalize_rgba(
-                merged["background"], "render(background=...)"
-            )
-
-        # Auto-inject the 3-point default rig when (a) the user hasn't
-        # disabled it via default_light=False and (b) no Lights are in
-        # the scene.  Sized to the full scene's union AABB so multi-
-        # object scenes get a rig fitted to the whole composition.
-        auto_lights: List[Light] = []
-        if merged.get("default_light", True) is not False and not self.lights:
-            pts = self.union_points()
-            if pts.size > 0:
-                auto_lights = _default_lighting_rig_for(pts)
-
-        try:
-            for light in auto_lights:
-                self.append(light)
-            if auto_lights:
-                # Suppress the raytracer's single-headlight fallback so
-                # the auto-rig isn't doubled up with a camera headlight.
-                merged["default_light"] = False
-            frame = render(scene=self, **merged)
-        finally:
-            # Pop the auto-rig back off so the user's Scene isn't
-            # mutated.  We always appended at the end of the list, so
-            # a plain pop() N times is the inverse.
-            for _ in range(len(auto_lights)):
-                self.pop()
-
-        # Cache the rendered Frame so callers can :meth:`imshow` it later.
-        self.frame = frame
-        return frame
-
-    def to_image(self, resolution: Tuple[int, int] = (500, 500)) -> "Image":
-        """Returns the rendered frame as a PIL Image.
-
-        Mirrors :meth:`cgmath.geometry.mesh.UVData.to_image`.  Lazy-renders
-        at ``resolution`` (default 500x500 -- a fast preview) when no
-        frame is cached.  For a full-quality preview, call :meth:`render`
-        explicitly first then :meth:`to_image`.
-
-        Args:
-            resolution: Resolution to use when lazy-rendering (only when
-                ``self.frame`` is ``None``).  Defaults to a quick
-                500x500 preview.
-
-        Raises:
-            RuntimeError: If PIL is not available.
-
-        Note:
-            Unlike :meth:`UVData.to_image` (which flips its bottom-up
-            buffer), no flip is needed here because ``Frame.array`` is
-            already top-down RGB uint8.
-
-            Mutating any render input on this Scene or its child
-            Objects/Cameras/Lights -- transforms, Camera FOV, Light
-            intensity, Object texture/wireframe, scene topology, or
-            Scene-level config -- auto-invalidates the cache via the
-            lazy signature check on :attr:`frame`.  In-place mutation
-            of mesh / UV / texture array contents is the only common
-            case that still requires an explicit :meth:`render` call.
-        """
-        if Image is None:
-            raise RuntimeError("PIL required to generate PIL.Image data")
-        if self.frame is None:
-            self.render(resolution=resolution)  # sets ``self.frame``
-        return Image.fromarray(self.frame.array)
-
-    def imshow(self, resolution: Tuple[int, int] = (500, 500)) -> None:
-        """Show the rendered frame in a window via OpenCV.
-
-        Mirrors :meth:`cgmath.geometry.mesh.UVData.imshow`.  Lazy-renders
-        at ``resolution`` (default 500x500 -- a fast preview) when no
-        frame is cached.  For a full-quality preview, call :meth:`render`
-        explicitly first then :meth:`imshow`.
-
-        Args:
-            resolution: Resolution to use when lazy-rendering (only when
-                ``self.frame`` is ``None``).  Defaults to a quick
-                500x500 preview.
-
-        Raises:
-            RuntimeError: If OpenCV is not available (it's required to
-                show the image in a window).
-
-        Note:
-            Mutating any render input on this Scene or its child
-            Objects/Cameras/Lights -- transforms, Camera FOV, Light
-            intensity, Object texture/wireframe, scene topology, or
-            Scene-level config -- auto-invalidates the cache via the
-            lazy signature check on :attr:`frame`.  In-place mutation
-            of mesh / UV / texture array contents is the only common
-            case that still requires an explicit :meth:`render` call.
-        """
-        if cv2 is None:
-            raise RuntimeError("opencv required to show images")
-        if self.frame is None:
-            self.render(resolution=resolution)  # sets ``self.frame``
-        # Frame.array is top-down RGB; cv2 wants BGR.  No vertical flip
-        # needed (UVData flips because its buffer is bottom-up).
-        buffer = cv2.cvtColor(self.frame.array, cv2.COLOR_RGB2BGR)
-        cv2.imshow(self.scene_name or "Scene", buffer)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-
-    # ---- turntable ----
-    def _skinned_objects(self, clip) -> Tuple[list, list]:
-        """Visible skinned Objects and the joint columns each needs from *clip*.
-
-        Resolving the columns once here is the difference between an animation
-        loop that re-matches joint NAMES every frame and one that does not.
-        """
-        skinned = [o for o in self.objects if o.visibility and o.skin is not None]
-        if not skinned:
-            raise ValueError(
-                "animate: scene has no visible skinned Objects -- load them "
-                "with load_skin=True, or use turntable() for a static scene"
-            )
-
-        columns = []
-        for obj in skinned:
-            try:
-                columns.append(obj.skin.pose_indices(clip))
-            except Exception as exc:
-                raise ValueError(
-                    f"animate: {obj.name!r} is skinned to joints the clip does "
-                    f"not hold ({exc})"
-                ) from exc
-        return skinned, columns
-
-    def animate(
-        self,
-        clip,
-        output_pattern: str                                  = "animation.{frame:04d}.png",
-        fit:            str                                  = "auto",
-        rotation_axis:  str                                  = "y",
-        start_angle:    float                                = 0.0,
-        end_angle:      float                                = 0.0,
-        camera_name:    Optional[str]                        = None,
-        fps:            Optional[int]                        = None,
-        background:     Optional[Tuple[float, float, float]] = None,
-        n_pose_samples: Optional[int]                        = None,
-        n_fit_samples:  Optional[int]                        = None,
-        verbose:        bool                                 = False,
-        **render_kwargs,
-    ) -> Union[str, List[str]]:
-        """Render a :class:`ClipData` frame by frame, deforming as it goes.
-
-        The complement of :meth:`turntable`, which moves the camera and holds
-        the scene still.  This moves the scene and, by default, holds the
-        camera still -- but the same orbit arguments are here, so passing
-        ``end_angle=360`` gives a turntable OF an animation.
-
-        Every visible Object carrying a :attr:`~Object.skin` is posed to the
-        clip each frame; Objects without one render as static props.  The work
-        that does not change per frame -- binding, resolving joint columns and
-        evaluating the clip's world matrices -- is hoisted out of the loop.
-
-        The scene is returned to its bind pose when this finishes, so an
-        animate call does not leave your Objects deformed and calling it twice
-        gives the same answer.
-
-        Output format is detected from ``output_pattern``'s extension exactly
-        as in :meth:`turntable`: ``.mp4`` / ``.mov`` / ``.m4v`` / ``.avi`` /
-        ``.gif`` encode to one file, anything else writes an image sequence.
-
-        Args:
-            clip: A :class:`ClipData` holding the animation, or a
-                :class:`ClipList`, whose active take plays.  Its joints are
-                matched to each Object's skin by name, once, up front.
-            output_pattern: Output filename.  Image sequences support a
-                ``{frame[:NNd]}`` placeholder and get one if absent.
-            fit: ``"auto"`` (default) samples poses across the clip and
-                positions the camera to fit all of them, so a character that
-                travels does not walk out of frame.  ``"static"`` uses the
-                scene's Camera as-is.
-            rotation_axis / start_angle / end_angle: Optional camera orbit
-                over the length of the clip, same meaning as in
-                :meth:`turntable`.  Defaults describe no orbit at all.
-            camera_name: Which Scene Camera to use as the base orientation.
-            fps: Frames per second for video / gif.  Defaults to the clip's
-                own ``fps``.
-            background: Opaque RGB to composite over for formats with no
-                alpha.  Falls back to the Scene's background, then black.
-            n_pose_samples: How many poses to sample when fitting.  See
-                :meth:`_pose_sample_frames` for the default.
-            n_fit_samples: How many orbit angles to sample when fitting.
-                Defaults to the frame count.  Irrelevant without an orbit.
-            verbose: Print a line per frame.
-            **render_kwargs: Forwarded to :func:`render`, ``threads=``
-                (how many CPU threads a frame uses) among them.
-
-        Returns:
-            A single output path for video / gif, or the list of frame paths.
-
-        Raises:
-            ValueError: If the scene holds no visible skinned Objects, if the
-                clip has no frames, if an Object is skinned to joints the clip
-                does not hold, if *fit* is not one of the two options, or if
-                *clip* is a ClipList of no take.
-            TypeError: If *clip* is neither a ClipData nor a ClipList.
-        """
-        clip          = _one_take(clip)
-        render_kwargs = self._merge_render_config(render_kwargs)
-
-        frame_count   = int(clip.frame_count)
-        if frame_count <= 0:
-            raise ValueError("animate: the clip has no frames")
-
-        skinned, columns = self._skinned_objects(clip)
-
-        # One evaluation for the whole clip rather than one per frame.
-        world = np.asarray(clip.frames.world_matrix, dtype=np.float64)
-
-        if fps is None:
-            fps = int(round(float(getattr(clip, "fps", 30.0)) or 30.0))
-
-        # ---- an identical earlier animation's frames come off disk ----
-        owner = getattr(self, "_render_cache_owner", None) or self
-        key = _sequence_key(
-            self,
-            (
-                "animate", world, [np.asarray(c) for c in columns],
-                [obj.uuid for obj in skinned], fit, rotation_axis, start_angle,
-                end_angle, camera_name, n_pose_samples, n_fit_samples,
-                _key_render_kwargs(render_kwargs),
-            ),
-        )
-        frames = _cached_sequence(owner, key)
-        if frames is None:
-            frames = _record_sequence(
-                owner,
-                key,
-                self._animate_frames(
-                    skinned, columns, world, frame_count, fit, rotation_axis,
-                    start_angle, end_angle, camera_name, n_pose_samples,
-                    n_fit_samples, render_kwargs, verbose,
-                ),
-            )
-
-        return _encode_frame_stream(
-            frames,
-            output_pattern,
-            fps            = int(fps),
-            mp4_background = self._resolve_mp4_background(background),
-            verbose        = verbose,
-        )
-
-    def _animate_frames(
-        self, skinned, columns, world, frame_count, fit, rotation_axis,
-        start_angle, end_angle, camera_name, n_pose_samples, n_fit_samples,
-        render_kwargs, verbose,
-    ):
-        """
-        The animation's frames, rendered one by one as they are taken: the
-        camera framing is worked out now. The skinned Objects are deformed
-        a chunk of frames per call (every frame, unless that many points
-        would pass ``_ANIMATE_CHUNK_BYTES``), then shown a frame at a time.
-        The scene goes back to its bind pose when the frames run out or are
-        abandoned.
-        """
-        render_kwargs = dict(render_kwargs)
-
-        try:
-            chosen_cam_col, centroid = self._fit_animated_camera(
-                skinned,
-                columns,
-                world,
-                frame_count,
-                fit,
-                rotation_axis,
-                start_angle,
-                end_angle,
-                camera_name,
-                n_pose_samples,
-                n_fit_samples,
-                render_kwargs,
-                verbose,
-            )
-        finally:
-            # The fit pass reads posed points without showing them; the
-            # scene still starts the frames from its bind pose, as it ends.
-            for obj in skinned:
-                obj.restore_bind_pose()
-
-        render_kwargs.setdefault("autofit", False)
-        span  = float(end_angle - start_angle)
-        chunk = _animate_chunk(skinned, frame_count)
-
-        def _frame_stream():
-            try:
-                for start in range(0, frame_count, chunk):
-                    stop = min(start + chunk, frame_count)
-                    deformed = [
-                        obj._deformed_frames(world[start:stop, column])
-                        for obj, column in zip(skinned, columns)
-                    ]
-                    for index in range(start, stop):
-                        for obj, points in zip(skinned, deformed):
-                            obj._show_deformed(points[index - start])
-                        angle = start_angle + span * index / max(frame_count, 1)
-                        render_kwargs["camera_matrix"] = _orbit_camera_col(
-                            chosen_cam_col, centroid, rotation_axis, angle
-                        )
-                        yield self.render(**render_kwargs)
-            finally:
-                # Runs on early close too, so an encoder that dies part way
-                # through still hands the scene back undeformed.
-                for obj in skinned:
-                    obj.restore_bind_pose()
-
-        return _frame_stream()
-
-    def _fit_animated_camera(
-        self,
-        skinned,
-        columns,
-        world,
-        frame_count,
-        fit,
-        rotation_axis,
-        start_angle,
-        end_angle,
-        camera_name,
-        n_pose_samples,
-        n_fit_samples,
-        render_kwargs,
-        verbose,
-    ):
-        """Camera matrix and orbit centroid for :meth:`animate`.
-
-        Poses are sampled and their clouds CONCATENATED, then the orbit sweep
-        runs once over the union.  Sweeping per pose instead would multiply
-        the angle work by the pose count for the same answer.
-        """
-        if fit not in ("auto", "static"):
-            raise ValueError(f"animate: fit must be 'auto' or 'static', got {fit!r}")
-
-        samples  = _pose_sample_frames_for(frame_count, n_pose_samples)
-        all_pts  = self._posed_cloud(skinned, columns, world[samples])
-
-        centroid = 0.5 * (all_pts.min(axis=0) + all_pts.max(axis=0))
-        base_cam_col, R_cam, aov, width, height = self._base_camera(
-            all_pts, camera_name, render_kwargs
-        )
-        render_kwargs.setdefault("angle_of_view", aov)
-
-        if fit == "static":
-            return base_cam_col, centroid
-
-        pts_centered = _inflate_points_about_center(
-            all_pts - centroid,
-            _resolve_turntable_fit_padding(render_kwargs, self),
-        )
-        n_samples = (
-            int(n_fit_samples) if n_fit_samples is not None else int(frame_count)
-        )
-        if end_angle == start_angle:
-            # no orbit: every sample is the same angle, and so the same box
-            n_samples = 1
-        chosen = _fit_camera_over_orbit(
-            pts_centered,
-            R_cam,
-            base_cam_col,
-            centroid,
-            aov,
-            width,
-            height,
-            rotation_axis,
-            start_angle,
-            end_angle,
-            max(n_samples, 1),
-            verbose=verbose,
-        )
-        return chosen, centroid
-
-    def _posed_cloud(self, skinned, columns, world) -> np.ndarray:
-        """The cloud :meth:`_visible_world_points` gives with the skinned
-        Objects posed to each frame of *world*, frame after frame, as one
-        array.
-
-        Each skinned Object deforms every frame in one call, and no mesh is
-        touched.  Static Objects contribute the same points to every frame.
-
-        Args:
-            skinned / columns: From :meth:`_skinned_objects`.
-            world: ``(F, N, 4, 4)`` world matrices of the frames to pose.
-        """
-        posed = {
-            id(obj): obj._posed_world_points(world[:, column])
-            for obj, column in zip(skinned, columns)
-        }
-
-        frames = len(world)
-        chunks = []
-        for o in self.objects:
-            if id(o) in posed:
-                chunks.append(posed[id(o)])
-            elif o.visibility and o.mesh is not None:
-                still = o.world_points
-                chunks.append(np.broadcast_to(still, (frames,) + still.shape))
-        if not chunks:
-            raise ValueError("animate: scene has no visible Objects with meshes")
-        return np.concatenate(chunks, axis=1).reshape(-1, 3)
+    def clear_render_cache(self) -> None:
+        """drops the frames kept from the last turntable or animation, so the
+        next one renders again: needed after an edit in place of points or
+        pixels, which the cache does not see"""
+        _clear_render_cache(self)
+
+    def configure(self, **kwargs) -> "Scene":
+        """sets the render and shading settings given, None values skipped;
+        returns the scene. AttributeError for a name that is no setting"""
+        allowed = _RENDER_CONFIG_KEYS + _SHADING_KEYS + ("default_camera", "aspect_ratio")
+        for name, value in kwargs.items():
+            if value is None:
+                continue
+            if name not in allowed:
+                raise AttributeError(f"Scene.configure: unknown setting {name!r}; the settings are {allowed}")
+            setattr(self, name, value)
+        return self
+
+    # -- sequences ---------------------------------------------------------------------
+
+    def _base_camera(self, all_pts: np.ndarray, camera_name, render_kwargs: dict, worlds: dict):
+        """the orientation and lens a sequence fits to: the scene's camera
+        at ``worlds``, else a default 3/4 view; ``(camera matrix column
+        major, its rotation, the angle of view, width, height)``"""
+        camera, node = self.camera(camera_name)
+        if camera is not None:
+            base_cam_col = np.asarray(worlds.get(node, np.eye(4)), dtype=np.float64).T
+            base_aov     = float(camera.vertical_angle_of_view)
+        else:
+            base_cam_col = _default_camera_for_points(all_pts)
+            base_aov     = 35.0
+        res = render_kwargs.get("resolution", (512, 384))
+        aov = float(render_kwargs.get("angle_of_view", base_aov))
+        return base_cam_col, base_cam_col[:3, :3], aov, int(res[0]), int(res[1])
+
+    def _resolve_mp4_background(self, background=None) -> Tuple[float, float, float]:
+        if background is not None:
+            return tuple(float(v) for v in background)
+        if self.background is not None:
+            return tuple(float(v) for v in np.asarray(self.background)[:3])
+        return (0.0, 0.0, 0.0)
 
     def turntable(
         self,
@@ -2916,90 +732,21 @@ class Scene(HierarchyData):
         verbose:        bool                                 = False,
         **render_kwargs,
     ) -> Union[str, List[str]]:
-        """Render a turntable animation: orbit a camera around the scene.
-
-        The whole scene is treated as a single rigid point cloud and the
-        camera orbits the world ``rotation_axis`` (``"y"`` by default)
-        around the scene's centroid (AABB midpoint).  Per frame, the
-        chosen base camera is rotated by the frame's angle around that
-        pivot -- nothing in the scene is mutated, so all Object
-        transforms stay exactly as you set them.
-
-        Camera framing is computed once before the render loop:
-
-        1. Concatenate every visible Object's world points into one cloud.
-        2. Choose a base camera *orientation* (existing Camera in the
-           scene, or a default 3/4 elevated view).
-        3. Express the points in a *centroid-centered, camera-oriented*
-           frame (X right, Y up, Z behind the camera).
-        4. For each of N sampled angles, rotate the centred point cloud
-           around the world rotation_axis (= around the centroid) and
-           accumulate the union AABB in that camera-oriented frame.
-        5. Solve analytically for the camera position that exactly fits
-           the union AABB into the FOV: lateral X/Y to centre the box on
-           the optical axis, and Z to push back just enough that the box
-           edges touch the frustum walls.
-
-        This single pass replaces the older per-sample autofit + max
-        pull-back heuristic and gives pixel-perfect framing at every
-        angle (no off-centre clipping).
-
-        The output format is detected from ``output_pattern``'s extension:
-
-        * ``.mp4`` / ``.mov`` / ``.m4v`` -> H.264 video via ffmpeg.  Frames
-          are streamed to ffmpeg's stdin so no temporary PNGs hit disk.
-          Returns a single file path (string).
-        * ``.gif`` -> high-quality GIF via gifski (when installed) or
-          ffmpeg's two-pass palettegen + paletteuse.  Frames are written
-          to a temp directory for palette analysis, then encoded.  Returns
-          a single file path (string).
-        * any other extension (default ``.png``) -> per-frame image
-          sequence as before.  Returns a list of file paths.
-
-        Args:
-            output_pattern: Output filename.  For image sequences, supports
-                a ``{frame[:NNd]}`` placeholder (defaults to
-                ``<stem>.{frame:04d}<ext>`` if no placeholder is present).
-                For video / gif, this is just the output file path.
-            n_frames: Number of frames in the loop.
-            rotation_axis: ``"x"``, ``"y"`` (default), or ``"z"``.
-            start_angle / end_angle: Rotation range in degrees.  Last
-                frame is at ``end_angle - (end_angle - start_angle)/N``
-                so the loop seamlessly repeats.
-            fit: ``"auto"`` (default) runs the BBX-based framing pass and
-                positions the camera to exactly fit the worst-case
-                silhouette across all sampled angles.  ``"static"`` uses
-                the scene's existing Camera as-is (no autofit) -- the
-                camera still orbits the centroid, just at the user's
-                supplied position.
-            camera_name: Which Scene Camera to use as the base orientation
-                (default = first / named).  When the scene has no Camera,
-                a default 3/4 elevated view is built.
-            fps: Frames per second for video / gif outputs (ignored for
-                image sequences).  Defaults to 30.
-            n_fit_samples: How many angles to sample when computing the
-                union AABB.  ``None`` (default) uses ``n_frames`` -- exact
-                coverage, still cheap.  Set lower for very high frame counts.
-            verbose: When True, print a progress line per frame.
-            **render_kwargs: Forwarded to :func:`render`, ``threads=``
-                (how many CPU threads a frame uses) among them.
-
-        Returns:
-            A single output path (``str``) for video / gif outputs, or a
-            list of frame paths (``list[str]``) for image sequences.
         """
-
-        import os
-
-        # ---- merge persistent Scene render-config into kwargs ----
-        # Per-call kwargs always win; Scene attrs fill the gaps.  This
-        # mirrors what :meth:`render` does so persistent settings (e.g.
-        # ``scene.samples_per_pixel = 1``) propagate to every turntable
-        # frame without being repeated.
+        The camera orbiting the scene, ``n_frames`` frames from
+        ``start_angle`` to ``end_angle`` about the world ``rotation_axis``
+        through the scene's centroid, the scene itself untouched. With
+        ``fit`` "auto" the camera is placed once so the scene fits the frame
+        at every sampled angle (``n_fit_samples``, the frame count by
+        default); "static" keeps the camera where it is. The base camera is
+        the scene's (``camera_name``, the default, the first), else a 3/4
+        view. ``output_pattern`` picks the encoder by its extension: .mp4,
+        .mov, .m4v, .avi, .gif one file, anything else an image sequence
+        with a ``{frame:04d}`` placeholder. The frames are kept for a second
+        encode. Returns the file's path, or the frames' paths.
+        """
         render_kwargs = self._merge_render_config(render_kwargs)
-
-        # ---- an identical earlier turntable's frames come off disk ----
-        owner = getattr(self, "_render_cache_owner", None) or self
+        owner         = self._render_cache_owner or self
         key = _sequence_key(
             self,
             (
@@ -3013,108 +760,368 @@ class Scene(HierarchyData):
                 owner,
                 key,
                 self._turntable_frames(
-                    render_kwargs, n_frames, rotation_axis, start_angle, end_angle,
-                    fit, camera_name, n_fit_samples, verbose,
+                    render_kwargs, n_frames, rotation_axis, start_angle, end_angle, fit, camera_name, n_fit_samples, verbose,
                 ),
             )
-
         return _encode_frame_stream(
-            frames,
-            output_pattern,
-            fps            = int(fps),
-            mp4_background = self._resolve_mp4_background(background),
-            verbose        = verbose,
+            frames, output_pattern, fps=int(fps), mp4_background=self._resolve_mp4_background(background), verbose=verbose,
         )
 
     def _turntable_frames(
-        self, render_kwargs, n_frames, rotation_axis, start_angle, end_angle,
-        fit, camera_name, n_fit_samples, verbose,
+        self, render_kwargs, n_frames, rotation_axis, start_angle, end_angle, fit, camera_name, n_fit_samples, verbose,
     ):
-        """
-        The turntable's frames, rendered one by one as they are taken: the
-        camera framing is worked out now, each frame when it is asked for.
-        """
         render_kwargs = dict(render_kwargs)
-
-        # ---- gather all visible world-space points (one cloud) ----
-        all_pts = self._visible_world_points("turntable")
-
-        # Centroid = AABB midpoint.  More robust than a vertex mean for
-        # meshes with uneven vertex density.
+        all_pts       = self.union_points()
+        if not len(all_pts):
+            raise ValueError("turntable: scene has no shown mesh")
         centroid = 0.5 * (all_pts.min(axis=0) + all_pts.max(axis=0))
+        worlds, _ = _worlds(self.pose())
+        base_cam_col, R_cam, aov, width, height = self._base_camera(all_pts, camera_name, render_kwargs, worlds)
 
-        # ---- pick / build a base camera (orientation only) ----
-        base_cam_col, R_cam, aov, width, height = self._base_camera(
-            all_pts, camera_name, render_kwargs
-        )
-
-        # ---- compute chosen camera position ----
         if fit == "auto":
-            # Express points in a centroid-centered, camera-oriented frame.
-            # In OpenGL convention the camera looks down -Z; with the camera
-            # at the centroid, points in front of the camera have negative
-            # local Z.  For row vectors: pts_local = (pts - centroid) @ R_cam
-            # (R_cam is column-major camera-to-world; transposing implicitly
-            # via row-vector convention takes world -> camera-local).
-            # Inflation about the AABB center: ``pts_centered`` already has
-            # its AABB center at the origin (centroid is the AABB midpoint),
-            # so this is just a uniform scale.  See _resolve_turntable_fit_padding
-            # for the explicit-vs-default policy (matches single-frame render()).
-            pts_centered = _inflate_points_about_center(
-                all_pts - centroid,
-                _resolve_turntable_fit_padding(render_kwargs, self),
-            )
-
-            n_samples = (
-                int(n_fit_samples) if n_fit_samples is not None else int(n_frames)
-            )
+            pts_centered = _inflate_points_about_center(all_pts - centroid, _resolve_turntable_fit_padding(render_kwargs, self))
+            n_samples    = int(n_fit_samples) if n_fit_samples is not None else int(n_frames)
             chosen_cam_col = _fit_camera_over_orbit(
-                pts_centered,
-                R_cam,
-                base_cam_col,
-                centroid,
-                aov,
-                width,
-                height,
-                rotation_axis,
-                start_angle,
-                end_angle,
-                max(n_samples, 1),
-                verbose=verbose,
+                pts_centered, R_cam, base_cam_col, centroid, aov, width, height, rotation_axis, start_angle, end_angle,
+                max(n_samples, 1), verbose=verbose,
             )
         elif fit == "static":
             chosen_cam_col = base_cam_col
         else:
             raise ValueError(f"fit must be 'auto' or 'static', got {fit!r}")
 
-        # Suppress per-frame autofit on top of our chosen camera, and
-        # keep the FOV consistent with what we just fit to.
         render_kwargs.setdefault("autofit", False)
         render_kwargs.setdefault("angle_of_view", aov)
-
         span = float(end_angle - start_angle)
 
         def _frame_stream():
             for fi in range(int(n_frames)):
-                angle = start_angle + span * fi / max(int(n_frames), 1)
-                render_kwargs["camera_matrix"] = _orbit_camera_col(
-                    chosen_cam_col, centroid, rotation_axis, angle
-                )
+                angle                          = start_angle + span * fi / max(int(n_frames), 1)
+                render_kwargs["camera_matrix"] = _orbit_camera_col(chosen_cam_col, centroid, rotation_axis, angle)
                 yield self.render(**render_kwargs)
 
         return _frame_stream()
 
-    def clear_render_cache(self) -> None:
+    def animate(
+        self,
+        output_pattern: str                                  = "animation.{frame:04d}.png",
+        clip                                                 = None,
+        fit:            str                                  = "auto",
+        rotation_axis:  str                                  = "y",
+        start_angle:    float                                = 0.0,
+        end_angle:      float                                = 0.0,
+        camera_name:    Optional[str]                        = None,
+        fps:            Optional[int]                        = None,
+        background:     Optional[Tuple[float, float, float]] = None,
+        n_pose_samples: Optional[int]                        = None,
+        n_fit_samples:  Optional[int]                        = None,
+        verbose:        bool                                 = False,
+        **render_kwargs,
+    ) -> Union[str, List[str]]:
         """
-        Deletes the frames kept from this Scene's last :meth:`turntable` or
-        :meth:`animate`, so the next one renders again. Needed only after an
-        in-place edit of mesh points or texture pixels, which the cache does
-        not notice.
+        The scene's clip rendered frame by frame: the active take of
+        ``clip`` (a ClipData or ClipList), or of the scene's own, poses the
+        nodes at each frame; skinned meshes deform to it, any other mesh,
+        camera and light rides its node. With ``fit`` "auto" the camera is
+        placed once to hold every sampled pose (``n_pose_samples``, 10 or a
+        tenth of the clip by default); "static" keeps the scene's camera.
+        The orbit arguments turn the camera over the clip as
+        :meth:`turntable` does. ``fps`` defaults to the clip's. The output
+        and the kept frames are as :meth:`turntable`'s. ValueError for no
+        clip, a clip of no frame or a skin naming joints the clip lacks.
         """
-        _clear_render_cache(self)
+        if clip is None:
+            if self.clip is None or not len(self.clip):
+                raise ValueError("animate: the scene holds no clip; pass clip= or set scene.clip")
+            clip = self.clip
+        take          = _one_take(clip)
+        render_kwargs = self._merge_render_config(render_kwargs)
+        frame_count   = int(take.frame_count)
+        if frame_count <= 0:
+            raise ValueError("animate: the clip has no frames")
+        if not self.meshes:
+            raise ValueError("animate: the scene holds no mesh")
+        for mesh in self.meshes:
+            skin = self._skin_of(mesh)
+            if skin is not None:
+                try:
+                    self._deformer(mesh, skin).pose_indices(take)
+                except ValueError as exc:
+                    raise ValueError(f"animate: {_mesh_label(mesh)} is skinned to joints the clip does not hold ({exc})") from exc
+        if fps is None:
+            fps = int(round(float(getattr(take, "fps", 30.0)) or 30.0))
+
+        world = np.asarray(take.frames.world_matrix, dtype=np.float64)
+        owner = self._render_cache_owner or self
+        key = _sequence_key(
+            self,
+            (
+                "animate", world, take.take, int(take.start_frame), fit, rotation_axis, start_angle, end_angle, camera_name,
+                n_pose_samples, n_fit_samples, _key_render_kwargs(render_kwargs),
+            ),
+        )
+        frames = _cached_sequence(owner, key)
+        if frames is None:
+            frames = _record_sequence(
+                owner,
+                key,
+                self._animate_frames(
+                    take, frame_count, fit, rotation_axis, start_angle, end_angle, camera_name, n_pose_samples,
+                    n_fit_samples, render_kwargs, verbose,
+                ),
+            )
+        return _encode_frame_stream(
+            frames, output_pattern, fps=int(fps), mp4_background=self._resolve_mp4_background(background), verbose=verbose,
+        )
+
+    def _animate_frames(
+        self, take, frame_count, fit, rotation_axis, start_angle, end_angle, camera_name, n_pose_samples, n_fit_samples,
+        render_kwargs, verbose,
+    ):
+        render_kwargs = dict(render_kwargs)
+        frames        = int(take.start_frame) + np.arange(frame_count)
+        chosen_cam_col, centroid = self._fit_animated_camera(
+            take, frames, fit, rotation_axis, start_angle, end_angle, camera_name, n_pose_samples, n_fit_samples,
+            render_kwargs, verbose,
+        )
+        render_kwargs.setdefault("autofit", False)
+        span = float(end_angle - start_angle)
+
+        def _frame_stream():
+            for index, frame in enumerate(frames.tolist()):
+                angle                          = start_angle + span * index / max(frame_count, 1)
+                render_kwargs["camera_matrix"] = _orbit_camera_col(chosen_cam_col, centroid, rotation_axis, angle)
+                yield self._render_take_frame(take, frame, render_kwargs)
+
+        return _frame_stream()
+
+    def _render_take_frame(self, take, frame, render_kwargs):
+        """one frame of an animation: the scene at ``frame`` of ``take``,
+        whatever clip the scene holds, through :meth:`render`"""
+        held      = self.clip
+        self.clip = ClipList([take])
+        try:
+            return self.render(frame=frame, **render_kwargs)
+        finally:
+            self.clip = held
+
+    def _fit_animated_camera(
+        self, take, frames, fit, rotation_axis, start_angle, end_angle, camera_name, n_pose_samples, n_fit_samples,
+        render_kwargs, verbose,
+    ):
+        """the camera matrix and orbit centroid of :meth:`animate`: the
+        shown meshes' points at the sampled frames, as one cloud, fit once"""
+        if fit not in ("auto", "static"):
+            raise ValueError(f"animate: fit must be 'auto' or 'static', got {fit!r}")
+        held      = self.clip
+        self.clip = ClipList([take])
+        try:
+            samples = frames[_pose_sample_frames_for(len(frames), n_pose_samples)]
+            clouds  = [self.union_points(int(frame)) for frame in samples.tolist()]
+            all_pts = np.concatenate([c for c in clouds if len(c)], axis=0) if any(len(c) for c in clouds) else np.zeros((0, 3))
+            if not len(all_pts):
+                raise ValueError("animate: scene has no shown mesh")
+            centroid = 0.5 * (all_pts.min(axis=0) + all_pts.max(axis=0))
+            worlds, _ = _worlds(self.pose(int(frames[0])))
+        finally:
+            self.clip = held
+        base_cam_col, R_cam, aov, width, height = self._base_camera(all_pts, camera_name, render_kwargs, worlds)
+        render_kwargs.setdefault("angle_of_view", aov)
+        if fit == "static":
+            return base_cam_col, centroid
+        pts_centered = _inflate_points_about_center(all_pts - centroid, _resolve_turntable_fit_padding(render_kwargs, self))
+        n_samples    = int(n_fit_samples) if n_fit_samples is not None else len(frames)
+        if end_angle == start_angle:
+            n_samples = 1
+        chosen = _fit_camera_over_orbit(
+            pts_centered, R_cam, base_cam_col, centroid, aov, width, height, rotation_axis, start_angle, end_angle,
+            max(n_samples, 1), verbose=verbose,
+        )
+        return chosen, centroid
+
+    # -- files --------------------------------------------------------------------------
+
+    @classmethod
+    def load_fbx(cls, filename: str, name: Optional[str] = None) -> "Scene":
+        """the file's nodes or takes, meshes, UV sets, skins, materials,
+        cameras, lights and blend shape targets, as :func:`cgmath.formats.load_fbx`
+        reads them, named after the file unless ``name`` says"""
+        contents = _load_fbx(filename)
+        stem     = os.path.splitext(os.path.basename(os.path.expanduser(filename)))[0]
+        return cls(name=name or stem, **contents._asdict())
+
+    def save_fbx(self, filename: str, as_ascii: bool = False) -> str:
+        """the scene written as :func:`cgmath.formats.save_fbx` writes its
+        fields; the render settings are not in a file. Returns the path"""
+        _save_fbx(filename, as_ascii=as_ascii, **{field: getattr(self, field) for field in FbxContents._fields})
+        return filename
+
+    @classmethod
+    def load_obj(cls, filename: str, name: Optional[str] = None) -> "Scene":
+        """every mesh of an OBJ file, with its UV sets, at identity (an OBJ
+        holds no nodes)"""
+        scene = cls(name=name or os.path.splitext(os.path.basename(os.path.expanduser(filename)))[0])
+        for mesh, uv_list in _load_obj(filename):
+            scene.add(mesh)
+            for uv in uv_list:
+                uv.mesh_uuid = mesh.uuid
+                scene.add(uv)
+        return scene
+
+    @classmethod
+    def load_glb(
+        cls,
+        filename:        str,
+        name:            Optional[str] = None,
+        scale_factor:    float         = 100.0,
+        load_skin:       bool          = True,
+        extract_texture: bool          = True,
+    ) -> "Scene":
+        """
+        Every mesh of a GLB file, with its UV sets, at identity, its points
+        times ``scale_factor`` (a glb is in metres; 100 gives cm). With
+        ``load_skin`` the skins, paired to the meshes by position as the glb
+        holds them (a warning and no skin when they can not be paired), and
+        the file's nodes as the bind pose, each joint moved to the world its
+        inverse bind matrix holds; with ``extract_texture`` a material per
+        mesh holding its base colour map (none for a mesh with no map). A
+        file's animations are the clip. Requires trimesh.
+        """
+        scene = cls(name=name or os.path.splitext(os.path.basename(os.path.expanduser(filename)))[0])
+        data  = _load_glb(filename, scale_factor=scale_factor)
+        for mesh, uv_list in data:
+            scene.add(mesh)
+            for uv in uv_list:
+                uv.mesh_uuid = mesh.uuid
+                scene.add(uv)
+        meshes = [mesh for mesh, _ in data]
+        if load_skin:
+            _glb_skins(scene, filename, meshes, scale_factor)
+        if extract_texture:
+            for mesh, index in zip(meshes, _glb_material_indices(filename, len(meshes))):
+                if index is None:
+                    continue
+                color = _extract_glb_textures(filename, material_index=index).get("base_color")
+                if color is not None:
+                    sets = [uv for uv in scene.uvs or [] if uv.mesh_uuid == mesh.uuid]
+                    scene.add(MaterialData(mesh_uuid=mesh.uuid, texture=color, uv_set=sets[0].name if sets else None))
+        return scene
+
+    def strip_namespace(self, namespace: Optional[str] = None) -> None:
+        """``strip_namespace()`` on the nodes, the clip and every shape list
+        that has one, and on :attr:`default_camera`"""
+        for field in ("hierarchy", "clip", "meshes", "uvs", "skins", "materials", "cameras", "lights", "morphs"):
+            held = getattr(self, field)
+            if held is not None and hasattr(held, "strip_namespace"):
+                held.strip_namespace(namespace)
+        self.default_camera = _strip_namespace(self.default_camera, namespace)
 
 
 # -- helpers ---------------------------------------------------------------------------
+
+
+def aim(node: TransformData, target, up=(0.0, 1.0, 0.0)) -> TransformData:
+    """``node`` turned to look down its -Z at ``target`` from where it is,
+    its +Y toward ``up``, as a camera or a directed light looks; the node"""
+    eye               = np.asarray(node.world_matrix, dtype=np.float64)[3, :3]
+    node.world_matrix = _look_at(tuple(eye), tuple(np.asarray(target, dtype=np.float64).ravel()), tuple(up)).T
+    return node
+
+
+def _as_list(value, item, cls, where: str):
+    """``value`` as a ``cls``: one ``item``, a ``cls``, or an iterable of items"""
+    if isinstance(value, cls):
+        return value
+    if isinstance(value, item) and not (item is MeshData and isinstance(value, UVData)):
+        return cls([value])
+    if isinstance(value, Data):
+        raise TypeError(f"{where} holds {item.__name__}, not a {type(value).__name__}")
+    try:
+        held = list(value)
+    except TypeError:
+        raise TypeError(f"{where} is a {cls.__name__}, not a {type(value).__name__}") from None
+    for x in held:
+        if not isinstance(x, item) or (item is MeshData and isinstance(x, UVData)):
+            raise TypeError(f"{where} holds {item.__name__}, not a {type(x).__name__}")
+    return cls(held)
+
+
+def _mesh_label(mesh) -> str:
+    return f"mesh {mesh.name!r}" if mesh.name else f"the mesh {mesh.uuid}"
+
+
+def _worlds(pose) -> Tuple[dict, dict]:
+    """``({uuid: world (4, 4)}, {uuid: shown})`` of a pose's nodes; a node
+    under a hidden node is hidden"""
+    if pose is None:
+        return {}, {}
+    worlds = {node.uuid: np.asarray(node.world_matrix, dtype=np.float64) for node in pose}
+    shown  = {}
+    for node in pose:
+        visible = bool(node.visibility)
+        parent  = node
+        while visible:
+            parent = parent.get_parent()
+            if parent is None:
+                break
+            visible = bool(parent.visibility)
+        shown[node.uuid] = visible
+    return worlds, shown
+
+
+def _world_points(mesh, world) -> np.ndarray:
+    points = np.asarray(mesh.points, dtype=np.float64)
+    if points.shape[1] != 3:
+        return points
+    world = np.asarray(world, dtype=np.float64)
+    with np.errstate(all="ignore"):
+        return points @ world[:3, :3] + world[3, :3]
+
+
+def _channel_offsets(targets, weight: float, count: int) -> np.ndarray:
+    """a channel's offsets at ``weight`` over ``count`` points: its targets
+    by ``at`` are knots after the rest at 0; a weight between two blends
+    them linearly, past the last continues the last slope, as Maya's
+    blendShape blends in-betweens"""
+    knots = sorted(targets, key=lambda m: float(m.at))
+    ats   = [0.0] + [float(m.at) for m in knots]
+    dense = [np.zeros((count, 3))]
+    for morph in knots:
+        held = np.zeros((count, 3))
+        held[np.asarray(morph.indices, dtype=np.int64)] += np.asarray(morph.offsets, dtype=np.float64)
+        dense.append(held)
+    if weight >= ats[-1]:
+        i = len(ats) - 2
+    else:
+        i = max(0, next(k for k in range(len(ats) - 1) if weight < ats[k + 1]))
+    t = (weight - ats[i]) / (ats[i + 1] - ats[i])
+    return dense[i] + t * (dense[i + 1] - dense[i])
+
+
+def _three_channels(pixels) -> np.ndarray:
+    """a (H, W, C) map as the loader takes it: a grey map as (H, W), a grey
+    and alpha one as its grey"""
+    array = np.asarray(pixels)
+    if array.ndim == 3 and array.shape[2] in (1, 2):
+        return array[:, :, 0]
+    return array
+
+
+def _bake_wireframe(uv, pixels, color, wire_color, thickness: int) -> np.ndarray:
+    """the mesh's edges drawn in UV space over the colour map (or over
+    ``color`` with no map), through a copy of ``uv``'s buffer; (H, W, 3)
+    float32 in 0 to 1"""
+    held           = uv.copy()
+    held.antialias = True
+    if pixels is None:
+        existing = held.buffer
+        h, w = existing.shape[:2]
+        fill        = (np.asarray(color, dtype=np.float64) * 255.0).clip(0, 255).astype(np.uint8)
+        held.buffer = np.broadcast_to(fill, (h, w, 3)).copy()
+    else:
+        held.buffer = np.flipud(_texture_as_uint8(_load_texture(_three_channels(pixels)) * 255.0)).copy()
+    held.draw_edges(color=tuple(int(c) for c in wire_color), thickness=int(thickness))
+    return np.flipud(held.buffer).copy().astype(np.float32) / 255.0
 
 
 def _one_take(clip):
@@ -3128,8 +1135,6 @@ def _one_take(clip):
     TypeError
         Anything else, a take's name included.
     """
-    from cgmath.hierarchy import ClipData, ClipList
-
     if isinstance(clip, ClipList):
         if not len(clip):
             raise ValueError("animate: the ClipList holds no take")
@@ -3144,24 +1149,9 @@ def _validate_samples_per_pixel(
     *,
     field_name: str           = "samples_per_pixel",
 ) -> Optional[int]:
-    """Validate ``samples_per_pixel`` against the renderer's contract.
-
-    The raytracer lays samples out on a regular ``n_axis x n_axis``
-    sub-pixel grid, so the value must be ``1`` or a perfect square
-    (``1, 4, 9, 16, 25, ...``).  Anything else raises
-    :class:`ValueError` with a message naming ``field_name`` so the
-    user knows which attribute or kwarg was bad.
-
-    ``None`` is accepted (returned as-is) -- it means "defer to the
-    renderer's internal default".
-
-    Returns the validated ``int`` (or ``None``) so callers can use
-    this both as a guard and as a normalizing converter::
-
-        self._samples_per_pixel = _validate_samples_per_pixel(
-            value, field_name="Object.samples_per_pixel"
-        )
-    """
+    """``value`` as the renderer takes it: None, or 1 or a perfect square
+    (1, 4, 9, 16 ...), the sub-pixel grid's side squared; ValueError naming
+    ``field_name`` otherwise"""
     if value is None:
         return None
     try:
@@ -3183,22 +1173,9 @@ def _normalize_rgba(
     value:      Optional[Union[Tuple[float, ...], List[float], np.ndarray]],
     field_name: str,
 ) -> Optional[np.ndarray]:
-    """Normalize an optional RGB / RGBA color into a float64 ``(4,)`` array.
-
-    Accepts:
-      - ``None`` -> returns ``None`` (caller falls through to the
-        renderer's own default ``(0, 0, 0, 0)`` transparent black).
-      - 3 values ``(R, G, B)`` -> returns ``(R, G, B, 1.0)``
-        (opaque).  Convenience for callers passing RGB.
-      - 4 values ``(R, G, B, A)`` -> kept as-is.
-
-    Each component must be a float in ``[0, 1]``.  Anything else raises
-    :class:`ValueError` with a message naming ``field_name`` (e.g.
-    ``"Object.background"``) so the user knows which attribute was bad.
-
-    The array is new, never ``value`` itself, so a caller editing its own
-    array later does not edit the setting.
-    """
+    """an optional RGB or RGBA colour as float64 (4,): RGB taken opaque,
+    None kept; ValueError naming ``field_name`` for anything else. A new
+    array, never ``value`` itself"""
     if value is None:
         return None
     try:
@@ -3219,41 +1196,17 @@ def _normalize_rgba(
     return np.array(seq, dtype=np.float64)
 
 
-# Scene.resolution, converted as Object's resolution field is
-_SCENE_RESOLUTION = ArraySpec(np.int32, (2,))
-
-
 def _enum_value(value):
     """an Enum setting as its value (``SampleMethod.BEZIER`` as ``"bezier"``),
-    anything else as given: ``str()`` of an enum is its name, and an Enum
-    field saves to no file"""
+    anything else as given"""
     return value.value if isinstance(value, Enum) else value
-
-
-def _same_setting(old, new) -> bool:
-    """whether a setting keeps its value: arrays by content, ``None`` only as ``None``"""
-    if old is None or new is None:
-        return old is new
-    return bool(np.array_equal(old, new))
-
-
-def _read_only(array: Optional[np.ndarray]) -> Optional[np.ndarray]:
-    """
-    A setting as its getter hands it out: a read-only view, since an edit in
-    place would skip the setter, and with it the re-render it triggers.
-    """
-    if array is None:
-        return None
-    view                 = array.view()
-    view.flags.writeable = False
-    return view
 
 
 def _frozen(value):
     """a setting as a hashable value for the render signature: an array
     becomes the tuple of its values"""
     if isinstance(value, np.ndarray):
-        return tuple(value.tolist())
+        return tuple(value.ravel().tolist())
     return value
 
 
@@ -3266,113 +1219,101 @@ def _texture_as_uint8(texture: np.ndarray) -> np.ndarray:
     if texture.dtype == np.uint16:
         return (texture // 257).astype(np.uint8)
     if texture.dtype.kind == "f":
-        return np.rint(texture.clip(0.0, 1.0) * 255.0).astype(np.uint8)
+        return np.rint(texture.clip(0.0, 255.0 if texture.max() > 1.0 else 1.0) * (1.0 if texture.max() > 1.0 else 255.0)).astype(np.uint8)
     return texture.astype(np.uint8)
 
 
-def _scene_objects_use_bezier(scene: "Scene") -> bool:
-    """True if any visible Object in ``scene`` uses bezier sampling.
-
-    Mirrors :func:`cgmath.render.raytracer._scene_uses_bezier` but
-    operates on Scene Objects rather than per-render entry dicts.  Used
-    by :meth:`Scene.turntable` to pick the same default ``fit_padding``
-    (1.15 for bezier, 1.0 otherwise) as a single-frame
-    :func:`render` call.
-    """
-    for obj in scene.objects:
-        if not obj.visibility or obj.mesh is None:
-            continue
-        sm = obj.sample_method
-        if isinstance(sm, str) and sm.lower() == "bezier":
-            return True
-        # Tolerate enum-valued sample_method without importing the enum
-        # here (avoids a hard dependency on cgmath.geometry.mesh in this
-        # leaf helper).  Fall back to name-equality.
-        if getattr(sm, "name", "").lower() == "bezier":
-            return True
-    return False
-
-
 def _resolve_turntable_fit_padding(render_kwargs: dict, scene: "Scene") -> float:
-    """Pick the autofit safety-margin factor for :meth:`Scene.turntable`.
-
-    Pops ``fit_padding`` from ``render_kwargs`` (so it doesn't leak into
-    per-frame :func:`render` calls and double-inflate an already inflated
-    point cloud).  Explicit kwarg wins; bezier auto-defaults to 1.15.
-    """
+    """the autofit margin of a sequence: ``fit_padding`` popped from the
+    keywords (so a frame does not inflate again), else 1.15 for bezier
+    sampling, else 1"""
     pad = render_kwargs.pop("fit_padding", None)
     if pad is not None:
         return float(pad)
-    return 1.15 if _scene_objects_use_bezier(scene) else 1.0
+    return 1.15 if str(scene.sample_method).lower() == "bezier" else 1.0
 
 
-def _glb_skins(
-    file_path:    str,
-    meshes:       List[MeshData],
-    scale_factor: float,
-) -> List[Optional[SkinDeformData]]:
-    """One :class:`SkinDeformData` per entry of *meshes*, ``None`` where the
-    mesh carries no skin.  Used by both :meth:`Object.load_glb` and
-    :meth:`Scene.load_glb`, so the file is read once here rather than once
-    per mesh.
+# -- glb -----------------------------------------------------------------------------
 
-    The two lists are paired POSITIONALLY, not by name.  Both readers walk
-    the same file, but they get their names from different libraries:
-    ``mesh.load_glb`` uses trimesh's ``scene.geometry`` keys while the
-    skin reader uses the glb's own mesh names.  Trimesh has to keep its keys
-    unique, so a file holding two meshes both called ``part`` reads back as
-    ``part`` and ``part_1`` on one side and ``part`` twice on the other --
-    a name lookup would miss the second mesh and double-bind the first.
-    The same split happens to a mesh with two primitives.
 
-    The lists only diverge in length when trimesh drops a primitive it
-    cannot read (anything that is not triangles), and that is exactly the
-    case this cannot pair.  Rather than guess, or raise on a file that
-    loaded fine before skinning existed, it warns and skins nothing.
-    """
+def _glb_skins(scene: "Scene", filename: str, meshes: list, scale_factor: float) -> None:
+    """the file's skins on ``scene``'s meshes, paired by position (trimesh
+    and the skin reader name a mesh differently, and both walk the file in
+    order), and the bind pose: the file's nodes with each joint at the world
+    its inverse bind matrix holds, scaled with the points. A file whose
+    skins and meshes can not be paired, or whose skin can not be read, warns
+    and skins nothing"""
     try:
-        skins = _read_skins_glb(file_path, bind_matrices=True)
+        entries = _read_skins_glb(filename, bind_matrices=True)
     except Exception as exc:
-        warnings.warn(f"{file_path}: could not read skin weights ({exc})", stacklevel=2)
-        return [None] * len(meshes)
-
-    # Checked before the length test on purpose: an unskinned file has
-    # nothing that could be mis-bound, so it is not worth a warning, and
-    # most glbs are unskinned.
-    if not any(x is not None for x in skins):
-        return [None] * len(meshes)
-
-    if len(skins) != len(meshes):
+        warnings.warn(f"{filename}: could not read skin weights ({exc})", stacklevel=3)
+        return
+    if not any(x is not None for x in entries):
+        return
+    if len(entries) != len(meshes):
         warnings.warn(
-            f"{file_path}: {len(meshes)} meshes but {len(skins)} skin entries, "
-            f"so they cannot be paired up -- loading without skinning. This "
-            f"usually means the file holds a primitive that is not triangles.",
-            stacklevel=2,
+            f"{filename}: {len(meshes)} meshes but {len(entries)} skin entries, so they cannot be paired up -- "
+            f"loading without skinning. This usually means the file holds a primitive that is not triangles.",
+            stacklevel=3,
         )
-        return [None] * len(meshes)
+        return
+    rig = HierarchyData.load_glb(filename, scale_factor=scale_factor)
+    try:
+        binds = {}
+        for mesh, entry in zip(meshes, entries):
+            if entry is None:
+                continue
+            skin, matrices = entry
+            skin.mesh_uuid = mesh.uuid
+            for joint, inverse in zip(skin.influences, _scaled_binds(matrices, scale_factor)):
+                binds.setdefault(str(joint), np.linalg.inv(inverse))
+            scene.add(skin)
+        _settle_glb_bind(rig, binds)
+    except Exception as exc:
+        warnings.warn(f"{filename}: could not bind the skins ({exc}) -- loading without skinning.", stacklevel=3)
+        scene.skins = None
+        return
+    scene.hierarchy = rig
 
-    return [
-        None
-        if entry is None
-        else _bound_deformer(
-            file_path, mesh, entry[0], _scaled_binds(entry[1], scale_factor)
-        )
-        for mesh, entry in zip(meshes, skins)
-    ]
+
+def _settle_glb_bind(rig: HierarchyData, binds: dict) -> None:
+    """each joint of ``rig`` named in ``binds`` moved to the world matrix
+    its inverse bind matrix inverts to, parents first; ValueError for a
+    joint ``rig`` lacks or a world its channels can not hold"""
+    names = list(rig.name)
+    for joint in binds:
+        if joint not in names:
+            raise ValueError(f"the skins name joint {joint!r}, which the file's nodes do not hold")
+
+    def depth(node) -> int:
+        count, parent = 0, node.get_parent()
+        while parent is not None:
+            count, parent = count + 1, parent.get_parent()
+        return count
+
+    for node in sorted(rig, key=depth):
+        world = binds.get(str(node.name))
+        if world is None:
+            continue
+        node.world_matrix = world
+        if np.abs(np.asarray(node.world_matrix) - world).max() > 1e-6 * max(1.0, float(np.abs(world).max())):
+            raise ValueError(f"joint {node.name!r}: its channels can not hold the bind world {np.round(world, 6).tolist()}")
+
+
+def _scaled_binds(matrices: np.ndarray, scale_factor: float) -> np.ndarray:
+    """a glb's inverse bind matrices in the unit its points were read in:
+    the translation row moves, the rotation stays"""
+    if scale_factor == 1.0:
+        return np.asarray(matrices, dtype=np.float64)
+    scaled = np.array(matrices, dtype=np.float64, copy=True)
+    scaled[:, 3, :3] *= scale_factor
+    return scaled
 
 
 def _glb_material_indices(file_path: str, count: int) -> List[Optional[int]]:
-    """The material index of each of the ``count`` meshes ``mesh.load_glb``
-    reads from the file, ``None`` where a mesh has no material.
-
-    Paired by position, as :func:`_glb_skins` pairs skins: the file holds one
-    entry per primitive, in file order, and trimesh reads them in that order,
-    skipping every primitive that is not triangles or a triangle strip (an
-    older trimesh keeps triangles alone). The mode is in the file, so the
-    same primitives are skipped here. Should the counts still differ, a file
-    whose primitives all use its one material gives it to every mesh, and
-    any other warns and gives none rather than guess.
-    """
+    """the material index of each of the ``count`` meshes ``mesh.load_glb``
+    reads from the file, None where a mesh has no material; paired by
+    position as the skins are, the primitives trimesh skips skipped here"""
     json_chunk, _ = _parse_glb(file_path)
     if json_chunk is None:
         return [None] * count
@@ -3390,119 +1331,146 @@ def _glb_material_indices(file_path: str, count: int) -> List[Optional[int]]:
     indices = [m for _, m in primitives]
     if len(json_chunk.get("materials", [])) == 1 and set(indices) <= {0}:
         return [0] * count
-
-    # nothing to mis-pair in a file without materials: not worth a warning
     if not any(x is not None for x in indices):
         return [None] * count
-
     warnings.warn(
-        f"{file_path}: {count} meshes but {len(indices)} primitives, so their "
-        f"materials cannot be paired up -- loading without textures.",
+        f"{file_path}: {count} meshes but {len(indices)} primitives, so their materials cannot be paired up -- "
+        f"loading without textures.",
         stacklevel=3,
     )
     return [None] * count
 
 
-def _scaled_binds(matrices: np.ndarray, scale_factor: float) -> np.ndarray:
-    """A glb's inverse bind matrices in the units its points were read in.
+# GLB container constants (binary-glTF 2.0 spec).
+_GLB_MAGIC      = 0x46546C67  # ASCII 'glTF' little-endian
+_GLB_JSON_CHUNK = 0x4E4F534A
+_GLB_BIN_CHUNK  = 0x004E4942
 
-    The file authors them in its own units while :meth:`MeshData.load_glb`
-    scales the points it reads, so the two only line up once the bind is
-    scaled to match.  Only the translation row moves: scaling a rig scales
-    its local translations and leaves rotation alone, and for a bind world
-    ``[[R, 0], [t, 1]]`` scaled to ``[[R, 0], [t s, 1]]`` the inverse goes
-    from ``[[R', 0], [-t R', 1]]`` to ``[[R', 0], [-t s R', 1]]``.
-    """
-    if scale_factor == 1.0:
-        return matrices
-    scaled = np.array(matrices, dtype=np.float64, copy=True)
-    scaled[:, 3, :3] *= scale_factor
-    return scaled
+# Material shader-slot paths (dotted) to our internal short names.
+_GLB_TEXTURE_SLOTS = {
+    "pbrMetallicRoughness.baseColorTexture": "base_color",
+    "pbrMetallicRoughness.metallicRoughnessTexture": "metallic_roughness",
+    "normalTexture": "normal",
+    "occlusionTexture": "occlusion",
+    "emissiveTexture": "emissive",
+}
 
 
-def _bound_deformer(
-    file_path:             str,
-    mesh:                  MeshData,
-    skin,
-    inverse_bind_matrices: np.ndarray,
-) -> Optional[SkinDeformData]:
-    """Build a deformer for *mesh* and bind it, or warn and give back ``None``.
+def _parse_glb(glb_path: str) -> Tuple[Optional[dict], Optional[bytes]]:
+    """``(json chunk, bin chunk)`` of a GLB container, ``(None, None)`` for a
+    file that is none"""
+    with open(os.path.expanduser(glb_path), "rb") as f:
+        data = f.read()
 
-    Bound here rather than left for the first :meth:`Object.pose` because
-    binding is what turns the influence NAMES into joint columns, and it is
-    those columns that persist.  The raw ``SkinData`` behind them is only a
-    cache, so an unbound deformer that gets saved comes back unable to bind
-    at all.  Binding now also means a bad skin is reported while the file is
-    being read, rather than part way through an animation.
+    if len(data) < 12:
+        return None, None
 
-    The matrices come from the file rather than from ``inv`` of a rig read
-    back out of it: those node transforms are wherever the take left them,
-    which for an animated file is not the pose the mesh was bound in.
+    magic, _version, _total_length = struct.unpack_from("<III", data, 0)
+    if magic != _GLB_MAGIC:
+        return None, None
 
-    Nothing in here is allowed to be fatal: reading a file without skinning
-    worked before this argument existed and has to keep working.
-    """
-    try:
-        deformer = SkinDeformData(
-            mesh, skin, inverse_bind_matrices=inverse_bind_matrices, name=mesh.name
-        )
-        deformer.bind()
-    except Exception as exc:
-        warnings.warn(
-            f"{file_path}: could not bind the skin for {mesh.name!r} ({exc}) "
-            f"-- loading it without skinning.",
-            stacklevel=2,
-        )
+    offset = 12
+    json_chunk: Optional[dict] = None
+    bin_chunk:  Optional[bytes] = None
+    while offset + 8 <= len(data):
+        chunk_length, chunk_type = struct.unpack_from("<II", data, offset)
+        chunk_data = data[offset + 8 : offset + 8 + chunk_length]
+        if chunk_type == _GLB_JSON_CHUNK:
+            json_chunk = json.loads(chunk_data)
+        elif chunk_type == _GLB_BIN_CHUNK:
+            bin_chunk = chunk_data
+        offset += 8 + chunk_length
+        offset += (4 - (offset % 4)) % 4
+
+    return json_chunk, bin_chunk
+
+
+def _extract_glb_image_bytes(
+    json_chunk:  dict,
+    bin_chunk:   Optional[bytes],
+    image_index: int,
+) -> Optional[bytes]:
+    """the encoded bytes of ``json_chunk["images"][image_index]``: a buffer
+    view of the bin chunk or a base64 data URI; None for an external file or
+    a bad index"""
+    images       = json_chunk.get("images", [])
+    buffer_views = json_chunk.get("bufferViews", [])
+    if not 0 <= image_index < len(images):
         return None
-    return deformer
+    img = images[image_index]
+
+    if "bufferView" in img:
+        bv_idx = img["bufferView"]
+        if not 0 <= bv_idx < len(buffer_views) or bin_chunk is None:
+            return None
+        bv        = buffer_views[bv_idx]
+        bv_offset = bv.get("byteOffset", 0)
+        bv_length = bv["byteLength"]
+        return bin_chunk[bv_offset : bv_offset + bv_length]
+
+    uri = img.get("uri")
+    if uri is not None and uri.startswith("data:"):
+        _, encoded = uri.split(",", 1)
+        return base64.b64decode(encoded)
+    return None
 
 
-def _fbx_skin(
-    file_path:    str,
-    mesh:         MeshData,
-    scale_factor: Optional[float] = None,
-    axis_system:  Optional[str]   = "maya_y_up",
-) -> Optional[SkinDeformData]:
-    """The :class:`SkinDeformData` for *mesh*, or ``None`` if it has no skin.
-
-    Matched BY NAME, which is the opposite of what :func:`_glb_skins` does,
-    because the fbx readers fail the other way round.  Both of them name a
-    mesh from the same ``FbxNode``, so the names are trustworthy here -- but
-    the skin reader only yields an entry for a mesh that actually has a
-    deformer, while the mesh reader yields every mesh.  One static prop in
-    the file is enough to shift the lists out of step, so a positional pair
-    would quietly bind a mesh to some other mesh's weights.
-
-    The bind matrices are read with the *scale_factor* and the *axis_system*
-    the mesh was read with, so the two stay in one unit and one set of axes.
-    """
-    try:
-        entries = _read_skins_fbx(
-            file_path, bind_matrices=True, scale_factor=scale_factor, axis_system=axis_system
-        )
-    except Exception as exc:
-        warnings.warn(f"{file_path}: could not read skin weights ({exc})", stacklevel=2)
+def _decode_image_bytes(image_bytes: bytes) -> Optional[np.ndarray]:
+    """encoded image bytes as (H, W, C) uint8 through PIL, RGB or RGBA; None
+    without PIL"""
+    if Image is None:
         return None
-
-    matches = [entry for entry in entries if entry[0].name == mesh.name]
-    if not matches:
-        return None
-    if len(matches) > 1:
-        warnings.warn(
-            f"{file_path}: {len(matches)} skinned meshes are named "
-            f"{mesh.name!r}, so the right one cannot be told apart -- "
-            f"loading without skinning.",
-            stacklevel=2,
-        )
-        return None
-
-    return _bound_deformer(file_path, mesh, *matches[0])
+    pil_img = Image.open(io.BytesIO(image_bytes))
+    if pil_img.mode not in ("RGB", "RGBA"):
+        pil_img = pil_img.convert("RGBA" if "A" in pil_img.mode else "RGB")
+    return np.asarray(pil_img, dtype=np.uint8)
 
 
-# -- render cache ----------------------------------------------------------------------
+def _extract_glb_textures(
+    file_path:      str,
+    material_index: int = 0,
+) -> dict:
+    """every PBR texture of ``materials[material_index]`` of a GLB, by slot
+    name (base_color, metallic_roughness, normal, occlusion, emissive), each
+    (H, W, C) uint8; a slot absent, external or undecodable left out"""
+    json_chunk, bin_chunk = _parse_glb(file_path)
+    if json_chunk is None:
+        return {}
+
+    materials = json_chunk.get("materials", [])
+    textures  = json_chunk.get("textures", [])
+    if not materials or not -len(materials) <= material_index < len(materials):
+        return {}
+    mat = materials[material_index]
+
+    result: dict = {}
+    for slot_path, slot_name in _GLB_TEXTURE_SLOTS.items():
+        parts = slot_path.split(".")
+        node  = mat
+        for p in parts[:-1]:
+            node = node.get(p, {})
+        tex_info = node.get(parts[-1])
+        if tex_info is None:
+            continue
+        tex_idx = tex_info.get("index")
+        if tex_idx is None or not 0 <= tex_idx < len(textures):
+            continue
+        img_idx = textures[tex_idx].get("source")
+        if img_idx is None:
+            continue
+        img_bytes = _extract_glb_image_bytes(json_chunk, bin_chunk, img_idx)
+        if img_bytes is None:
+            continue
+        decoded = _decode_image_bytes(img_bytes)
+        if decoded is not None:
+            result[slot_name] = decoded
+    return result
+
+
+# -- the render cache ------------------------------------------------------------------
 #
-# Each Scene / Object keeps the frames of its last turntable / animate in its
-# own folder, under one scratch folder per process, so a second encode of the
+# Each Scene keeps the frames of its last turntable / animate in its own
+# folder, under one scratch folder per process, so a second encode of the
 # same frames (a .gif, then an .mp4) reads them back instead of rendering. The
 # key is everything the frames depend on: the scene's render signature and the
 # sequence's own settings. A different key wipes the folder first.
@@ -3561,8 +1529,6 @@ def _canonical(value):
         return tuple(_canonical(v) for v in value)
     if isinstance(value, np.ndarray):
         if value.size <= 64 and value.dtype.kind in "biuf":
-            # a setting (a resolution, a colour): keyed as the tuple a caller
-            # may pass for it, so (40, 30) and the stored array match
             return _canonical(value.tolist())
         array = np.ascontiguousarray(value)
         return ("ndarray", array.dtype.str, array.shape, hashlib.sha1(array.tobytes()).hexdigest())
@@ -3570,30 +1536,12 @@ def _canonical(value):
         return value.item()
     if value is None or isinstance(value, (bool, int, float, str, bytes)):
         return value
-    # anything else by identity, like the render signature's meshes
     return (type(value).__name__, id(value))
 
 
-def _sequence_mesh_token(node):
-    """
-    An Object's mesh in a sequence key. Posing swaps a skinned Object's mesh
-    for a new one every frame and puts a copy back after, so it goes by its
-    points; any other mesh goes by identity.
-    """
-    mesh = node._mesh
-    if node._skin is None or mesh is None:
-        return id(mesh)
-    points = np.ascontiguousarray(mesh.points, dtype=np.float64)
-    return (id(node._skin), points.shape, hashlib.sha1(points.tobytes()).hexdigest())
-
-
 def _key_render_kwargs(render_kwargs: dict) -> dict:
-    """
-    *render_kwargs* as a sequence key holds them: ``threads`` sets how many
-    CPU threads render a frame, not the frame, so a turntable rendered on
-    one thread replays one rendered on every core. A bad ``threads`` raises
-    here, kept frames or not
-    """
+    """*render_kwargs* as a sequence key holds them: ``threads`` sets how many
+    CPU threads render a frame, not the frame. A bad ``threads`` raises here"""
     from cgmath.render._tiles import check_threads
 
     check_threads(render_kwargs.get("threads"))
@@ -3602,7 +1550,7 @@ def _key_render_kwargs(render_kwargs: dict) -> dict:
 
 def _sequence_key(scene: "Scene", settings) -> str:
     """the cache key of a turntable / animate on *scene* with *settings*"""
-    signature = scene._compute_render_signature(mesh_token=_sequence_mesh_token)
+    signature = scene._render_signature_of(None)
     payload   = pickle.dumps(_canonical((signature, settings)), protocol=4)
     return hashlib.sha1(payload).hexdigest()
 
@@ -3635,11 +1583,8 @@ def _replay_sequence(folder: str, frames: list):
 
 
 def _record_sequence(owner, key: str, frames):
-    """
-    *frames*, passed on as they render, each saved to *owner*'s wiped folder.
-    The sequence is kept only once the last frame is through: an encode that
-    stops part way leaves nothing to reuse.
-    """
+    """*frames*, passed on as they render, each saved to *owner*'s wiped
+    folder; kept only once the last frame is through"""
     folder = _render_cache_dir(owner)
     _wipe_folder(folder)
     kept = []
@@ -3660,7 +1605,6 @@ def _record_sequence(owner, key: str, frames):
             )
             yield frame
     finally:
-        # hands an abandoned animation back to its bind pose straight away
         frames.close()
 
     with open(os.path.join(folder, "sequence.json"), "w") as f:
@@ -3674,20 +1618,11 @@ def _encode_frame_stream(
     mp4_background: Tuple[float, float, float] = (0.0, 0.0, 0.0),
     verbose:        bool                       = False,
 ) -> Union[str, List[str]]:
-    """Write a stream of rendered frames out, encoder chosen by extension.
-
-    * ``.mp4`` / ``.mov`` / ``.m4v`` -> H.264 via ffmpeg.  Frames are fed to
-      ffmpeg's stdin, so no temporary PNGs hit disk.  Returns the path.
-    * ``.avi`` -> avi.  Returns the path.
-    * ``.gif`` -> gif via gifski when installed, else ffmpeg's two pass
-      palettegen / paletteuse.  Returns the path.
-    * anything else -> a numbered image sequence, honouring a
-      ``{frame[:NNd]}`` placeholder and inventing one when absent.  Returns
-      the list of frame paths.
-
-    *frames* is consumed lazily, so a caller rendering frame by frame never
-    holds more than one frame in memory at a time.
-    """
+    """a stream of frames written out, the encoder chosen by the extension:
+    .mp4 / .mov / .m4v H.264 through ffmpeg, .avi, .gif (gifski, else
+    ffmpeg's two passes), anything else a numbered image sequence honouring
+    a ``{frame[:NNd]}`` placeholder and inventing one when absent. Returns
+    the file's path, or the frames' paths. The frames are consumed lazily"""
     from cgmath.render.frame import Frame
 
     ext = os.path.splitext(output_pattern)[1].lower()
@@ -3706,10 +1641,7 @@ def _encode_frame_stream(
             return Frame.encode_gif(announced(), out_path, fps=int(fps))
         if ext == ".avi":
             return Frame.encode_avi(announced(), out_path, fps=int(fps))
-        # H.264 carries no alpha, so it composites over an opaque RGB.
-        return Frame.encode_mp4(
-            announced(), out_path, fps=int(fps), background=mp4_background
-        )
+        return Frame.encode_mp4(announced(), out_path, fps=int(fps), background=mp4_background)
 
     out = output_pattern
     if "{frame" not in out:
@@ -3727,42 +1659,13 @@ def _encode_frame_stream(
     return saved
 
 
-def _pose_sample_frames_for(
-    frame_count: int, n_pose_samples: Optional[int]
-) -> np.ndarray:
-    """Which frames :meth:`Scene.animate` should pose to work out its framing.
-
-    Sampling rather than posing every frame keeps the cost of aiming the
-    camera bounded on a long clip: 10 frames by default, rising to a tenth of
-    the clip once that is more than 10, and never more than the clip has.
-    Deforming is the expensive part, which is why this is the number that
-    matters -- sweeping the orbit angles afterwards is a matmul per angle and
-    no deformation at all.
-
-    The trade is that a pose falling between samples can poke slightly outside
-    the frame.  Pass ``n_pose_samples=frame_count`` for an exact fit.
-    """
+def _pose_sample_frames_for(frame_count: int, n_pose_samples: Optional[int]) -> np.ndarray:
+    """the frame indices :meth:`Scene.animate` poses to fit its camera: 10,
+    or a tenth of the clip once that is more, never more than the clip has"""
     if n_pose_samples is None:
         n_pose_samples = max(10, -(-frame_count // 10))
-    # Clamping to frame_count cannot change what comes back -- np.unique
-    # already collapses a longer linspace onto the same frames -- but it does
-    # stop an over-large request allocating a huge intermediate first.
     count = max(1, min(int(n_pose_samples), frame_count))
     return np.unique(np.linspace(0, frame_count - 1, count).astype(int))
-
-
-# How many deformed points :meth:`Scene.animate` holds at once: it deforms a
-# chunk of frames per deformer call rather than one frame per call.
-_ANIMATE_CHUNK_BYTES = 64 * 1024 * 1024
-
-
-def _animate_chunk(skinned, frame_count: int) -> int:
-    """Frames :meth:`Scene.animate` deforms per call: every frame, unless
-    the skinned Objects' points for that many would pass
-    ``_ANIMATE_CHUNK_BYTES``."""
-    vertices  = sum(0 if o.mesh is None else len(o.mesh.points) for o in skinned)
-    per_frame = max(vertices, 1) * 3 * np.dtype(np.float64).itemsize
-    return int(max(1, min(frame_count, _ANIMATE_CHUNK_BYTES // per_frame)))
 
 
 def _orbit_camera_col(
@@ -3771,12 +1674,8 @@ def _orbit_camera_col(
     rotation_axis: str,
     angle:         float,
 ) -> np.ndarray:
-    """*cam_col* orbited by *angle* about *rotation_axis* through *centroid*.
-
-    Rotation around an arbitrary world point is the standard translate ->
-    rotate -> translate-back composition.  Column-major (OpenGL) in, column
-    major out, ready to hand to :func:`render` as ``camera_matrix``.
-    """
+    """*cam_col* orbited by *angle* about *rotation_axis* through *centroid*,
+    column major in and out"""
     R                = _rotation_matrix_col(rotation_axis, angle)
     to_origin        = np.eye(4, dtype=np.float64)
     to_origin[:3, 3] = -centroid
@@ -3799,43 +1698,23 @@ def _fit_camera_over_orbit(
     n_samples:     int,
     verbose:       bool       = False,
 ) -> np.ndarray:
-    """Camera matrix that exactly fits *pts_centered* at every sampled angle.
-
-    *pts_centered* is the cloud already centred on the AABB midpoint and
-    already inflated by the fit padding.  For an animation it is the union of
-    several posed clouds, so a pose that only appears mid-clip still gets
-    framed; for a turntable it is the single static cloud.  Either way the
-    solve below is the same, which is the reason this is shared.
-
-    Sweeping the angles costs one matmul per sample over the whole cloud and
-    no deformation at all, so a caller that has already paid to pose the mesh
-    should concatenate its poses and sweep once rather than sweep per pose.
-    """
+    """the camera matrix that fits *pts_centered* (centred on the AABB
+    midpoint, inflated by the fit padding) at every sampled angle of the
+    orbit: the union box in the camera's frame, centred laterally and pushed
+    back along +Z until it fits the field of view"""
     bbx_min = np.full(3, np.inf, dtype=np.float64)
     bbx_max = np.full(3, -np.inf, dtype=np.float64)
     span    = float(end_angle - start_angle)
 
-    # Silence spurious BLAS warnings on Apple Accelerate (matmul on arm64):
-    # two matmuls per sample, neither does anything dodgy.
     with np.errstate(all="ignore"):
         for i in range(n_samples):
-            angle = start_angle + span * i / max(n_samples, 1)
-            # World-axis rotation around the centroid.  pts_centered are
-            # already centered, so rotating about the local origin IS
-            # rotating about the centroid in world.
-            R_world_3 = _rotation_matrix_col(rotation_axis, angle)[:3, :3]
-            # Row-vector convention for column-major R: pts @ R.T
+            angle         = start_angle + span * i / max(n_samples, 1)
+            R_world_3     = _rotation_matrix_col(rotation_axis, angle)[:3, :3]
             rotated_world = pts_centered @ R_world_3.T
-            # Transform to camera-oriented (camera at centroid) frame.
             rotated_local = rotated_world @ R_cam
             bbx_min       = np.minimum(bbx_min, rotated_local.min(axis=0))
             bbx_max       = np.maximum(bbx_max, rotated_local.max(axis=0))
 
-    # Solve for the camera position in the centroid-centered camera-oriented
-    # frame.  The BBX extends in [bbx_min, bbx_max].
-    #   - centre laterally so the BBX midpoint sits on the optical axis
-    #   - push back along +Z so the closest BBX corner (at z=bbx_max[2]) is
-    #     far enough away that the half-extents fit the FOV.
     half_aov_v = 0.5 * np.deg2rad(aov)
     half_aov_h = np.arctan(np.tan(half_aov_v) * (width / height))
     half_w     = 0.5 * (bbx_max[0] - bbx_min[0])
@@ -3848,9 +1727,7 @@ def _fit_camera_over_orbit(
     )
     cz               = float(bbx_max[2]) + required_dist
     cam_local_offset = np.array([cx, cy, cz], dtype=np.float64)
-
-    # World-space camera position: centroid + R_cam @ offset_col
-    cam_world_pos = centroid + R_cam @ cam_local_offset
+    cam_world_pos    = centroid + R_cam @ cam_local_offset
 
     if verbose:
         print(
@@ -3866,14 +1743,7 @@ def _fit_camera_over_orbit(
 
 
 def _rotation_matrix_col(axis: str, angle_deg: float) -> np.ndarray:
-    """4x4 column-major (OpenGL) rotation matrix about a world axis.
-
-    Right-hand rule: positive angle about ``+Y`` sends ``+X`` toward ``+Z``
-    (and the cyclic equivalents for ``X`` and ``Z``).
-
-    Use ``R.T`` when feeding row-vector multiplication routines
-    (e.g. ``transforms.matrix.point``).
-    """
+    """4x4 column-major rotation about a world axis, right-hand rule"""
     rad = float(np.deg2rad(angle_deg))
     c, s = np.cos(rad), np.sin(rad)
     R = np.eye(4, dtype=np.float64)
@@ -3897,442 +1767,30 @@ def _rotation_matrix_col(axis: str, angle_deg: float) -> np.ndarray:
     return R
 
 
-def _default_lighting_rig_for(points: np.ndarray) -> List[Light]:
-    """Returns a 3-point (key / fill / rim) :class:`Light` rig sized to
-    fit the AABB of ``points``.
-
-    Distances scale with the points' diagonal extent so a 1-unit cube
-    and a 100-unit spaceship both light up reasonably without manual
-    tuning.  Intensities are tuned for the renderer's 1/r^2 point-light
-    falloff so the surface receives roughly unit-bright illumination
-    at the rig's distance.
-
-    Layout (centroid-relative, classic CG portrait):
-
-    * **key** -- front-upper-right, full intensity
-    * **fill** -- front-upper-left, ~40% intensity (softens shadows)
-    * **rim** -- behind-upper, ~30% intensity (silhouette pop)
-
-    Used internally by :meth:`Object.render` and :meth:`Object.turntable`
-    to give one-call previews sensible default lighting.  Power users can
-    call this directly to seed a Scene::
-
-        scene.extend(_default_lighting_rig_for(scene.union_points()))
-    """
+def _default_lighting_rig_for(points: np.ndarray) -> List[dict]:
+    """a 3-point rig (key, fill, rim) as the renderer's light dicts, sized
+    to the AABB of ``points``: the distances scale with the diagonal and the
+    intensities with its square, for the 1/r^2 falloff, so a unit cube and a
+    100-unit ship both light up"""
     pts = np.asarray(points, dtype=np.float64)
     if pts.size == 0:
-        # Degenerate: place a single key light at a unit distance so the
-        # scene isn't pitch black for empty / point-only geometry.
-        return [
-            Light(
-                name      = "key",
-                kind      = "point",
-                translate = [1.0, 1.0, 1.0],
-                intensity = 1.0,
-            )
-        ]
+        return [{"kind": "point", "position": (1.0, 1.0, 1.0), "color": (1.0, 1.0, 1.0), "intensity": 1.0, "falloff": True}]
 
-    mn       = pts.min(axis=0)
-    mx       = pts.max(axis=0)
-    centroid = 0.5 * (mn + mx)
-    extent   = max(float(np.linalg.norm(mx - mn)), 1e-6)
+    mn        = pts.min(axis=0)
+    mx        = pts.max(axis=0)
+    centroid  = 0.5 * (mn + mx)
+    extent    = max(float(np.linalg.norm(mx - mn)), 1e-6)
 
-    distance = extent * 1.5
-    # 1/r^2 falloff: distance^2 gives ~unit-bright at this distance.
+    distance  = extent * 1.5
     intensity = distance * distance
-
-    key_pos   = centroid + np.array([1.0, 1.0, 1.0]) * distance
-    fill_pos  = centroid + np.array([-1.0, 0.5, 1.0]) * distance
-    rim_pos   = centroid + np.array([0.0, 0.5, -1.0]) * distance
-
-    return [
-        Light(
-            name      = "key",
-            kind      = "point",
-            translate = key_pos.tolist(),
-            intensity = intensity,
-            falloff   = True,
-        ),
-        Light(
-            name      = "fill",
-            kind      = "point",
-            translate = fill_pos.tolist(),
-            intensity = intensity * 0.4,
-            falloff   = True,
-        ),
-        Light(
-            name      = "rim",
-            kind      = "point",
-            translate = rim_pos.tolist(),
-            intensity = intensity * 0.3,
-            falloff   = True,
-        ),
-    ]
-
-
-# -- GLB texture extraction -----------------------------------------------------
-#
-# Full glTF (PBR metallic-roughness) texture extraction from a GLB
-# container.  Only the ``"base_color"`` slot is wired into the renderer
-# today (see :meth:`Object.extract_texture_from_glb`) but the helper
-# extracts all 5 standard PBR slots so a future multi-texture shader
-# upgrade can pick up metallic-roughness / normal / occlusion / emissive
-# without rewriting the GLB walk.
-
-
-# GLB container constants (binary-glTF 2.0 spec).
-_GLB_MAGIC      = 0x46546C67  # ASCII 'glTF' little-endian
-_GLB_JSON_CHUNK = 0x4E4F534A
-_GLB_BIN_CHUNK  = 0x004E4942
-
-# Material shader-slot paths (dotted) to our internal short names.
-# Ordered so ``base_color`` (the only one wired today) is first.
-_GLB_TEXTURE_SLOTS = {
-    "pbrMetallicRoughness.baseColorTexture": "base_color",
-    "pbrMetallicRoughness.metallicRoughnessTexture": "metallic_roughness",
-    "normalTexture": "normal",
-    "occlusionTexture": "occlusion",
-    "emissiveTexture": "emissive",
-}
-
-
-def _parse_glb(glb_path: str) -> Tuple[Optional[dict], Optional[bytes]]:
-    """Parse a GLB binary-glTF container into ``(json_chunk, bin_chunk)``.
-
-    The GLB layout:
-
-      - 12-byte header: magic (``'glTF'``) | version | total length
-      - Chunk 0 (JSON):  chunk_length | ``0x4E4F534A`` | JSON payload
-      - Chunk 1 (BIN):   chunk_length | ``0x004E4942`` | binary buffer
-
-    Returns ``(None, None)`` if the file isn't a valid GLB.  Callers can
-    handle missing BIN chunks gracefully (e.g., GLBs that reference only
-    external image URIs).
-    """
-    with open(os.path.expanduser(glb_path), "rb") as f:
-        data = f.read()
-
-    if len(data) < 12:
-        return None, None
-
-    magic, _version, _total_length = struct.unpack_from("<III", data, 0)
-    if magic != _GLB_MAGIC:
-        return None, None
-
-    offset = 12
-    json_chunk: Optional[dict] = None
-    bin_chunk:  Optional[bytes] = None
-    while offset + 8 <= len(data):
-        chunk_length, chunk_type = struct.unpack_from("<II", data, offset)
-        chunk_data = data[offset + 8 : offset + 8 + chunk_length]
-        if chunk_type == _GLB_JSON_CHUNK:
-            json_chunk = json.loads(chunk_data)
-        elif chunk_type == _GLB_BIN_CHUNK:
-            bin_chunk = chunk_data
-        # Chunks are 4-byte aligned.
-        offset += 8 + chunk_length
-        offset += (4 - (offset % 4)) % 4
-
-    return json_chunk, bin_chunk
-
-
-def _extract_glb_image_bytes(
-    json_chunk:  dict,
-    bin_chunk:   Optional[bytes],
-    image_index: int,
-) -> Optional[bytes]:
-    """Resolve the encoded image bytes for ``json_chunk["images"][image_index]``.
-
-    Handles all three glTF image sources:
-
-      * embedded via ``bufferView`` (bytes from ``bin_chunk``),
-      * base64-encoded ``data:`` URI,
-      * external ``uri`` (not extractable from the GLB alone - returns None).
-
-    Returns None on any lookup failure so callers can skip the slot.
-    """
-    images       = json_chunk.get("images", [])
-    buffer_views = json_chunk.get("bufferViews", [])
-    if not 0 <= image_index < len(images):
-        return None
-    img = images[image_index]
-
-    # Path A: embedded in the BIN chunk via bufferView.
-    if "bufferView" in img:
-        bv_idx = img["bufferView"]
-        if not 0 <= bv_idx < len(buffer_views) or bin_chunk is None:
-            return None
-        bv        = buffer_views[bv_idx]
-        bv_offset = bv.get("byteOffset", 0)
-        bv_length = bv["byteLength"]
-        return bin_chunk[bv_offset : bv_offset + bv_length]
-
-    # Path B: base64 data URI.
-    uri = img.get("uri")
-    if uri is not None and uri.startswith("data:"):
-        _, encoded = uri.split(",", 1)
-        return base64.b64decode(encoded)
-
-    # Path C: external file reference - not resolvable from the GLB alone.
-    return None
-
-
-def _decode_image_bytes(image_bytes: bytes) -> Optional[np.ndarray]:
-    """Decode encoded image bytes (PNG/JPEG/WebP/...) into a ``(H, W, C)``
-    ``uint8`` numpy array via PIL.  Returns None when PIL is not available
-    or when the bytes can't be decoded.
-
-    Normalises exotic PIL modes (palette, L, LA, ...) into RGB or RGBA.
-    """
-    if Image is None:
-        return None
-    pil_img = Image.open(io.BytesIO(image_bytes))
-    if pil_img.mode not in ("RGB", "RGBA"):
-        pil_img = pil_img.convert("RGBA" if "A" in pil_img.mode else "RGB")
-    return np.asarray(pil_img, dtype=np.uint8)
-
-
-def _load_texture_path_to_uint8(path: str) -> np.ndarray:
-    """Load an image file into a ``(H, W, C) uint8`` numpy array via PIL.
-
-    Used by :meth:`Object.to_dict` to materialize path-loaded textures
-    into the saved file so the result is self-contained.  Mirrors the
-    PIL-based path in :meth:`Object._bake_wired_texture` -- normalises
-    palette / L / LA modes into RGB or RGBA.
-
-    Raises:
-        RuntimeError: If PIL is not available.
-        FileNotFoundError: If the path does not resolve to an existing
-            image file (raised by ``Image.open``).
-    """
-    if Image is None:
-        raise RuntimeError(
-            "PIL required to serialize texture paths via Object.to_dict; "
-            "install Pillow or assign a numpy array to obj.texture before saving."
-        )
-    resolved = os.path.expandvars(os.path.expanduser(path))
-    with Image.open(resolved) as img:
-        if img.mode not in ("RGB", "RGBA"):
-            img = img.convert("RGBA" if "A" in img.mode else "RGB")
-        return np.asarray(img, dtype=np.uint8)
-
-
-def _extract_glb_textures(
-    file_path:      str,
-    material_index: int = 0,
-) -> dict:
-    """Extract every PBR texture referenced by ``materials[material_index]``.
-
-    Walks the canonical glTF metallic-roughness slots and returns a dict
-    keyed by short slot name, mapping to a ``(H, W, C)`` ``uint8``
-    numpy array (``C`` is 3 for RGB images, 4 for RGBA):
-
-      * ``"base_color"`` -- ``pbrMetallicRoughness.baseColorTexture``
-      * ``"metallic_roughness"`` -- ``pbrMetallicRoughness.metallicRoughnessTexture``
-        (R = occlusion when combined, G = roughness, B = metallic)
-      * ``"normal"`` -- ``normalTexture`` (tangent-space)
-      * ``"occlusion"`` -- ``occlusionTexture``
-      * ``"emissive"`` -- ``emissiveTexture``
-
-    Slots absent from the material are omitted from the returned dict.
-    Returns an empty dict on any parse / decode failure (e.g., invalid
-    GLB, missing material, externally-referenced images, PIL not
-    installed).
-
-    Args:
-        file_path: Path to the ``.glb`` file (``~`` and env vars OK).
-        material_index: Which material to pull textures from (default
-            first).  Negative indices count from the end.
-
-    Note:
-        Only the ``"base_color"`` slot is wired into the renderer today
-        (see :meth:`Object.extract_texture_from_glb`).  The other slots
-        are extracted here so a future multi-texture shader upgrade can
-        consume them without rewriting this parser.
-    """
-    json_chunk, bin_chunk = _parse_glb(file_path)
-    if json_chunk is None:
-        return {}
-
-    materials = json_chunk.get("materials", [])
-    textures  = json_chunk.get("textures", [])
-    if not materials or not -len(materials) <= material_index < len(materials):
-        return {}
-    mat = materials[material_index]
-
-    result: dict = {}
-    for slot_path, slot_name in _GLB_TEXTURE_SLOTS.items():
-        parts = slot_path.split(".")
-        node  = mat
-        for p in parts[:-1]:
-            node = node.get(p, {})
-        tex_info = node.get(parts[-1])
-        if tex_info is None:
-            continue
-        tex_idx = tex_info.get("index")
-        if tex_idx is None or not 0 <= tex_idx < len(textures):
-            continue
-        img_idx = textures[tex_idx].get("source")
-        if img_idx is None:
-            continue
-        img_bytes = _extract_glb_image_bytes(json_chunk, bin_chunk, img_idx)
-        if img_bytes is None:
-            continue
-        decoded = _decode_image_bytes(img_bytes)
-        if decoded is not None:
-            result[slot_name] = decoded
-    return result
-
-
-# FBX material property name -> GLB-style slot name. Shares the vocabulary
-# of ``_GLB_TEXTURE_SLOTS`` so a future multi-texture shader can consume
-# both extractors uniformly. ``Bump`` and ``NormalMap`` both map to
-# ``"normal"``; later wins are skipped via ``dict.setdefault`` so the
-# more modern ``NormalMap`` takes precedence when both are authored.
-_FBX_TEXTURE_SLOTS = {
-    "DiffuseColor":  "base_color",
-    "NormalMap":     "normal",
-    "Bump":          "normal",
-    "SpecularColor": "specular",
-    "EmissiveColor": "emissive",
-    "AmbientColor":  "occlusion",
-}
-
-
-def _walk_fbx_mesh_nodes(node, out: list) -> None:
-    """Recursively collect FbxNode objects whose attribute is a mesh.
-
-    Local copy of the helper in ``cgmath.geometry.mesh`` so this module
-    keeps its FBX dependency self-contained on the texture-extraction
-    side (the mesh helper is module-private and not part of any public
-    API contract).
-    """
-    attr = node.GetNodeAttribute()
-    if (
-        attr is not None
-        and attr.GetAttributeType() == _fbx.FbxNodeAttribute.EType.eMesh
-    ):
-        out.append(node)
-    for i in range(node.GetChildCount()):
-        _walk_fbx_mesh_nodes(node.GetChild(i), out)
-
-
-def _find_fbx_file_texture(prop):
-    """Return the first ``FbxFileTexture`` connected to an FBX material
-    property, or None if no file texture is connected.
-
-    Handles direct ``FbxFileTexture`` connections plus one level of
-    ``FbxLayeredTexture`` indirection (common when materials author a
-    stack of textures with blend modes).
-    """
-    # the class id is the object's own; the wrapper's type may not be, so
-    # every match is re-typed before use
-    for i in range(prop.GetSrcObjectCount()):
-        obj = prop.GetSrcObject(i)
-        cid = obj.GetClassId()
-        if cid == _fbx.FbxFileTexture.ClassId:
-            return typed(obj, _fbx.FbxFileTexture, _fbx)
-        if cid == _fbx.FbxLayeredTexture.ClassId:
-            for j in range(obj.GetSrcObjectCount()):
-                sub = obj.GetSrcObject(j)
-                if sub.GetClassId() == _fbx.FbxFileTexture.ClassId:
-                    return typed(sub, _fbx.FbxFileTexture, _fbx)
-    return None
-
-
-def _load_fbx_texture_to_array(file_texture, fbx_path: str) -> Optional[np.ndarray]:
-    """Resolve an FbxFileTexture to a ``(H, W, C) uint8`` numpy array.
-
-    Tries the absolute path first (this is what the SDK populates after it
-    extracts embedded media to disk), then falls back to the relative path
-    resolved against the FBX file's directory.  Returns None when neither
-    resolves to a readable file.
-    """
-    path = file_texture.GetFileName()
-    if not path or not os.path.exists(path):
-        rel = file_texture.GetRelativeFileName()
-        if rel:
-            path = os.path.join(os.path.dirname(fbx_path), rel)
-    if not path or not os.path.exists(path):
-        return None
-    with open(path, "rb") as f:
-        img_bytes = f.read()
-    return _decode_image_bytes(img_bytes)
-
-
-def _extract_fbx_textures(
-    file_path:      str,
-    mesh_index:     int = 0,
-    material_index: int = 0,
-) -> dict:
-    """Extract every texture referenced by ``mesh_index``'s
-    ``material_index``-th material.
-
-    Walks the FBX material-property slots known to map onto the GLB
-    metallic-roughness vocabulary and returns a dict keyed by the same
-    short slot name as :func:`_extract_glb_textures`:
-
-      * ``"base_color"`` -- ``DiffuseColor``
-      * ``"normal"`` -- ``NormalMap`` (preferred) or ``Bump``
-      * ``"specular"`` -- ``SpecularColor``
-      * ``"emissive"`` -- ``EmissiveColor``
-      * ``"occlusion"`` -- ``AmbientColor``
-
-    Slots absent from the material are omitted from the returned dict.
-    Returns an empty dict on any failure (FBX SDK missing, PIL missing,
-    bad indices, no materials, unresolvable texture path).
-
-    Args:
-        file_path: Path to the ``.fbx`` file (``~`` and env vars OK).
-        mesh_index: Which mesh node to pull the material from. Negative
-            indices count from the end.
-        material_index: Which material on that mesh node. Negative
-            indices count from the end.
-
-    Note:
-        Only the ``"base_color"`` slot is wired into the renderer today
-        (see :meth:`Object.extract_texture_from_fbx`).  The other slots
-        are extracted here so a future multi-texture shader upgrade can
-        consume them without rewriting this parser.
-
-        Textures packed inside the FBX container are extracted to a
-        temporary folder, read, and deleted with it: nothing is written
-        next to the FBX.
-    """
-    if _fbx is None or Image is None:
-        return {}
-
-    file_path = os.path.expanduser(file_path)
-    if not os.path.exists(file_path):
-        return {}
-
-    try:
-        # embedded media go to a temporary folder that dies with the scene,
-        # so every texture is decoded inside the block
-        with open_fbx(file_path, _fbx, media=True) as scene:
-            mesh_nodes: list = []
-            _walk_fbx_mesh_nodes(scene.GetRootNode(), mesh_nodes)
-            if not mesh_nodes or not -len(mesh_nodes) <= mesh_index < len(mesh_nodes):
-                return {}
-            node = mesh_nodes[mesh_index]
-
-            n_materials = node.GetMaterialCount()
-            if n_materials == 0 or not -n_materials <= material_index < n_materials:
-                return {}
-            material = node.GetMaterial(material_index)
-
-            result: dict = {}
-            for fbx_prop, slot_name in _FBX_TEXTURE_SLOTS.items():
-                prop = material.FindProperty(fbx_prop)
-                if not prop.IsValid():
-                    continue
-                tex = _find_fbx_file_texture(prop)
-                if tex is None:
-                    continue
-                decoded = _load_fbx_texture_to_array(tex, file_path)
-                if decoded is not None:
-                    # setdefault so NormalMap wins over a later Bump entry
-                    result.setdefault(slot_name, decoded)
-            return result
-    except FbxReadError:
-        return {}
+    rig       = []
+    for offset, scale in (((1.0, 1.0, 1.0), 1.0), ((-1.0, 0.5, 1.0), 0.4), ((0.0, 0.5, -1.0), 0.3)):
+        position = centroid + np.array(offset) * distance
+        rig.append({
+            "kind":      "point",
+            "position":  tuple(float(x) for x in position),
+            "color":     (1.0, 1.0, 1.0),
+            "intensity": intensity * scale,
+            "falloff":   True,
+        })
+    return rig

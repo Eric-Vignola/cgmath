@@ -881,9 +881,11 @@ class TestClipList(unittest.TestCase):
         clips.active = "walk"
         self.assertIs(_one_take(clips), clips[1])
         with self.assertRaisesRegex(ValueError, "holds no take"):
-            Scene().animate(ClipList())
+            Scene().animate("x.{frame:04d}.png", clip=ClipList())
         with self.assertRaisesRegex(TypeError, "not str"):
-            Scene().animate("idle")
+            Scene().animate("x.{frame:04d}.png", clip="idle")
+        with self.assertRaisesRegex(ValueError, "holds no clip"):
+            Scene().animate("x.{frame:04d}.png")
 
     def test_forwarded_members_are_listed(self):
         """every member a ClipList passes on is a line of its own

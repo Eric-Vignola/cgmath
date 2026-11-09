@@ -214,6 +214,9 @@ def _prepare(entry: dict) -> _Prepared:
     # built lazily: built here, before the bands read it
     if entry["uv"] is not None:
         entry["uv"].geometry
+    for material in entry.get("materials") or []:
+        if material["uv"] is not None:
+            material["uv"].geometry
     return prep
 
 
@@ -421,14 +424,7 @@ def _shade_band(
             np.concatenate([a, a]) for a in (hit_idx, hit_w, hit_proj, hit_norm, hit_dist)
         )
 
-    tex = entry["tex"]
-    if tex is None:
-        sampled = np.tile(
-            np.asarray(entry["base_color"], dtype=np.float32), (hit_idx.shape[0], 1)
-        )
-    else:
-        interp_uvs = _rt._interpolate_uvs(entry["uv"], hit_idx, hit_w)
-        sampled    = _rt._sample_texture_bilinear(tex, interp_uvs, entry["wrap"] == "repeat")
+    sampled = _rt._sample_colors(entry, hit_idx, hit_w)
 
     # ---- back-transform projections + normals to world space ----
     if not prep.is_world:

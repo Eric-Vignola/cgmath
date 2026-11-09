@@ -1,9 +1,9 @@
-"""Each Object loaded from a glb gets its own primitive's material.
+"""Each mesh loaded from a glb gets its own primitive's material.
 
-Scene.load_glb and Object.load_glb used to give every Object material 0's
-texture, whatever its primitive pointed at. The fixture crosses them: the
-first mesh uses material 1 and the second material 0, so material-0-for-all
-and an off-by-one pairing both fail.
+Scene.load_glb used to give every mesh material 0's texture, whatever its
+primitive pointed at. The fixture crosses them: the first mesh uses material
+1 and the second material 0, so material-0-for-all and an off-by-one pairing
+both fail.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import warnings
 from unittest.mock import patch
 
 import numpy as np
-from cgmath.render.scene import Object, Scene, _glb_material_indices
+from cgmath.render.scene import _glb_material_indices, Scene
 
 try:
     import pygltflib
@@ -109,12 +109,18 @@ def write_glb(path, materials, palette=(RED, BLUE), modes=None):
     return path
 
 
-def color(obj):
-    """the first texel of the Object's texture, as 0-255 RGB"""
-    texture = np.asarray(obj.texture)
+def color(material):
+    """the first texel of the material's texture, as 0-255 RGB"""
+    texture = np.asarray(material.texture)
     if texture.dtype.kind == "f":
         texture = np.round(texture * 255)
     return tuple(int(x) for x in texture[0, 0, :3])
+
+
+def by_mesh(scene):
+    """each mesh's material, by the mesh's name, None for a mesh with none"""
+    held = {material.mesh_uuid: material for material in scene.materials or []}
+    return {mesh.name: held.get(mesh.uuid) for mesh in scene.meshes}
 
 
 @unittest.skipIf(
@@ -128,17 +134,17 @@ class TestGlbMaterials(unittest.TestCase):
         self.path = write_glb(os.path.join(tmp.name, "parts.glb"), [1, 0, None])
 
     def test_scene(self):
-        objects = Scene.load_glb(self.path).objects
-        self.assertEqual([x.name for x in objects], ["part0", "part1", "part2"])
-        self.assertEqual(color(objects[0]),         BLUE)
-        self.assertEqual(color(objects[1]),         RED)
-        self.assertIsNone(objects[2].texture)
-
-    def test_object(self):
-        self.assertEqual(color(Object.load_glb(self.path, index=0)), BLUE)
-        self.assertEqual(color(Object.load_glb(self.path, index=1)), RED)
-        self.assertIsNone(Object.load_glb(self.path, index=2).texture)
-        self.assertIsNone(Object.load_glb(self.path, index=-1).texture)
+        scene     = Scene.load_glb(self.path)
+        materials = by_mesh(scene)
+        self.assertEqual([x.name for x in scene.meshes], ["part0", "part1", "part2"])
+        self.assertEqual(color(materials["part0"]),      BLUE)
+        self.assertEqual(color(materials["part1"]),      RED)
+        self.assertIsNone(materials["part2"])
+        self.assertEqual(len(scene.materials), 2)
+        # each material reads the mesh's own UV set
+        sets = {uv.mesh_uuid: uv.name for uv in scene.uvs}
+        for material in scene.materials:
+            self.assertEqual(material.uv_set, sets[material.mesh_uuid])
 
     def test_pairing(self):
         self.assertEqual(_glb_material_indices(self.path, 3), [1, 0, None])
@@ -152,26 +158,26 @@ class TestGlbMaterials(unittest.TestCase):
         path = write_glb(self.path.replace("parts", "fan"), [1, 0, 0], modes=[4, 6, 4])
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            objects = Scene.load_glb(path).objects
-        self.assertEqual([x.name for x in objects], ["part0", "part2"])
-        self.assertEqual([color(x) for x in objects], [BLUE, RED])
+            scene = Scene.load_glb(path)
+        materials = by_mesh(scene)
+        self.assertEqual([x.name for x in scene.meshes], ["part0", "part2"])
+        self.assertEqual([color(materials[x]) for x in ("part0", "part2")], [BLUE, RED])
 
     def test_no_textures_asked_for_reads_no_materials(self):
         path = write_glb(self.path.replace("parts", "fan"), [1, 0, 0], modes=[4, 6, 4])
         with patch("cgmath.render.scene._glb_material_indices") as pairing:
             scene = Scene.load_glb(path, extract_texture=False)
-            obj   = Object.load_glb(path, extract_texture=False)
         pairing.assert_not_called()
-        self.assertIsNone(scene.objects[0].texture)
-        self.assertIsNone(obj.texture)
+        self.assertIsNone(scene.materials)
+        self.assertEqual(len(scene.meshes), 2)
 
     def test_one_material_is_not_given_to_a_primitive_without_one(self):
         path = write_glb(
             self.path.replace("parts", "single_fan"), [0, 0, None], palette=(RED,), modes=[4, 6, 4]
         )
-        objects = Scene.load_glb(path).objects
-        self.assertEqual(color(objects[0]), RED)
-        self.assertIsNone(objects[1].texture)
+        materials = by_mesh(Scene.load_glb(path))
+        self.assertEqual(color(materials["part0"]), RED)
+        self.assertIsNone(materials["part2"])
 
     def test_a_single_material_still_pairs(self):
         path = write_glb(self.path.replace("parts", "single"), [0, 0], palette=(RED,))

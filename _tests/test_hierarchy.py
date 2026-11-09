@@ -5779,13 +5779,12 @@ class TestParentUuid(unittest.TestCase):
     def test_reading_parent_node_raises(self):
         # parent_node, parent_uuid's name before 2.0.0, went in 3.0.0: read,
         # it raises as any name a node does not have does, on a node of a
-        # rig, a lone node, a render node and an SDF primitive. On b23cc42
-        # it read parent_uuid
+        # rig, a lone node and an SDF primitive. On b23cc42 it read
+        # parent_uuid
         from cgmath.geometry.sdf import SDFSphere
-        from cgmath.render import Object
 
         rig = _chain()
-        for node in (rig["head"], TransformData("loose"), Object(name="n"), SDFSphere()):
+        for node in (rig["head"], TransformData("loose"), SDFSphere()):
             name = type(node).__name__
             with self.subTest(name):
                 with self.assertRaisesRegex(AttributeError, rf"^'{name}' object has no attribute 'parent_node'$"):
@@ -5817,19 +5816,13 @@ class TestParentUuid(unittest.TestCase):
                 self.assertNotIn("parent_node", head.__dict__)
 
     def test_the_constructor_refuses_parent_node(self):
-        # the keyword is gone from TransformData's constructor, and so from
-        # an Object's, a Camera's and a Light's, which hand theirs on to it:
-        # an unknown keyword's TypeError, None and parent_uuid beside it too
-        # (Python 3.13 adds "Did you mean 'parent_uuid'?" to its message).
-        # On b23cc42 each took it as parent_uuid
-        from cgmath.render import Camera, Light, Object
-
+        # the keyword is gone from TransformData's constructor: an unknown
+        # keyword's TypeError, None and parent_uuid beside it too (Python
+        # 3.13 adds "Did you mean 'parent_uuid'?" to its message). On
+        # b23cc42 it took it as parent_uuid
         root = generate_uuid()
         for cls, made in (
             (TransformData, lambda **given: TransformData("x", **given)),
-            (Object, lambda **given: Object(name="x", **given)),
-            (Camera, lambda **given: Camera(name="x", **given)),
-            (Light, lambda **given: Light(name="x", **given)),
         ):
             for given in ({"parent_node": root}, {"parent_node": None}, {"parent_node": root, "parent_uuid": root}):
                 with self.subTest(cls.__name__, given=sorted(given)):

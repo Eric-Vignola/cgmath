@@ -3,10 +3,10 @@ Camera math helpers (look-at, default 3/4 view, perspective autofit,
 orthographic height derivation).
 
 These helpers are renderer-agnostic so both
-:mod:`cgmath.render.scene` (for Camera.look_at / Camera.autofit /
-Camera.default_view) and :mod:`cgmath.render.raytracer` (for the
-default-camera / autofit paths inside ``render()``) can import them
-without forming a circular dependency on the renderer.
+:mod:`cgmath.render.scene` (for ``aim`` and the default view a sequence
+fits to) and :mod:`cgmath.render.raytracer` (for the default-camera /
+autofit paths inside ``render()``) can import them without forming a
+circular dependency on the renderer.
 
 All camera-to-world matrices here follow OpenGL/Maya convention:
 column 0 = right, column 1 = up, column 2 = -forward, column 3 = eye.

@@ -1,4 +1,4 @@
-"""Scene / Object turntables and animations keep their frames for the next encode.
+"""A Scene's turntables and animations keep their frames for the next encode.
 
 A turntable or animation renders once; encoding the same frames again (a
 .gif, then an .mp4) reads them back from a scratch folder. Anything the frames
@@ -18,9 +18,9 @@ from unittest.mock import patch
 
 import numpy as np
 from cgmath.geometry import MeshData
-from cgmath.hierarchy import ClipData, HierarchyData
+from cgmath.hierarchy import ClipData, generate_uuid, HierarchyData, TransformData
 from cgmath.render import scene as scene_module
-from cgmath.render.scene import Object, Scene
+from cgmath.render.scene import Scene
 
 try:
     from PIL import Image
@@ -62,9 +62,11 @@ class RenderCacheCase(unittest.TestCase):
         return spy.call_count
 
     def scene(self):
-        scene = Scene("s")
-        scene.append(Object(name="tri", mesh=triangle()))
-        return scene
+        """a triangle on a node"""
+        node             = TransformData("tri", uuid=generate_uuid())
+        mesh             = triangle()
+        mesh.parent_uuid = node.uuid
+        return Scene("s").add(node, mesh)
 
 
 class TestTurntable(RenderCacheCase):
@@ -98,10 +100,16 @@ class TestTurntable(RenderCacheCase):
             with self.subTest(settings=settings):
                 self.assertGreater(self.renders(lambda: scene.turntable(self.out("x"), **settings)), 0)
 
-    def test_moving_an_object_renders_again(self):
+    def test_moving_a_node_renders_again(self):
         scene = self.scene()
         scene.turntable(self.out("a"), n_frames=3, **RES)
-        scene[0].translate = [0.5, 0.0, 0.0]
+        scene.hierarchy[0].translate = [0.5, 0.0, 0.0]
+        self.assertEqual(self.renders(lambda: scene.turntable(self.out("b"), n_frames=3, **RES)), 3)
+
+    def test_a_shading_setting_renders_again(self):
+        scene = self.scene()
+        scene.turntable(self.out("a"), n_frames=3, **RES)
+        scene.base_color = (1.0, 0.0, 0.0)
         self.assertEqual(self.renders(lambda: scene.turntable(self.out("b"), n_frames=3, **RES)), 3)
 
     def test_clear_render_cache(self):
@@ -109,14 +117,6 @@ class TestTurntable(RenderCacheCase):
         scene.turntable(self.out("a"), n_frames=3, **RES)
         scene.clear_render_cache()
         self.assertEqual(self.renders(lambda: scene.turntable(self.out("b"), n_frames=3, **RES)), 3)
-
-    def test_an_object_keeps_its_own_frames(self):
-        # Object.turntable builds a new preview scene every call
-        obj = Object(name="tri", mesh=triangle())
-        obj.turntable(self.out("a"), n_frames=3, **RES)
-        self.assertEqual(self.renders(lambda: obj.turntable(self.out("b"), n_frames=3, **RES)), 0)
-        obj.clear_render_cache()
-        self.assertEqual(self.renders(lambda: obj.turntable(self.out("c"), n_frames=3, **RES)), 3)
 
     def test_an_interrupted_encode_is_not_reused(self):
         scene = self.scene()
@@ -148,11 +148,10 @@ class TestTurntable(RenderCacheCase):
         code = (
             "import sys; sys.path[:0] = {path!r}; import numpy as np; "
             "from cgmath.geometry import MeshData; "
-            "from cgmath.render.scene import Object, Scene; "
+            "from cgmath.render.scene import Scene; "
             "import cgmath.render.scene as S; "
             "s = Scene('s'); "
-            "s.append(Object(name='t', mesh=MeshData(points=np.eye(3), "
-            "indices=np.arange(3), counts=np.array([3]), name='t'))); "
+            "s.add(MeshData(points=np.eye(3), indices=np.arange(3), counts=np.array([3]), name='t')); "
             "s.turntable({out!r}, n_frames=2, resolution=(16, 16), samples_per_pixel=1); "
             "print(S._CACHE_ROOT)"
         ).format(path=sys.path, out=self.out("child"))
@@ -167,7 +166,7 @@ class TestTurntable(RenderCacheCase):
 class TestAnimate(RenderCacheCase):
     def setUp(self):
         super().setUp()
-        from cgmath._tests.test_object_skin import write_glb
+        from cgmath._tests.test_scene_skin import write_glb
 
         self.glb = os.path.join(self.tmp.name, "hero.glb")
         write_glb(self.glb, ["body"])
@@ -182,38 +181,22 @@ class TestAnimate(RenderCacheCase):
         return clip
 
     def test_a_second_encode_reads_the_frames_back(self):
-        # posing swaps a skinned mesh every frame: the key still matches
-        scene = Scene("s")
-        scene.append(Object.load_glb(self.glb))
-        clip = self.clip()
-        scene.animate(clip, self.out("a"), **RES)
-        bind = scene[0].mesh.points.copy()
+        # posing places a deformed copy every frame: the key still matches
+        scene = Scene.load_glb(self.glb)
+        clip  = self.clip()
+        scene.animate(self.out("a"), clip=clip, **RES)
+        bind = scene.meshes[0].points.copy()
 
-        self.assertEqual(self.renders(lambda: scene.animate(clip, self.out("b"), **RES)), 0)
-        np.testing.assert_array_equal(scene[0].mesh.points, bind)
+        self.assertEqual(self.renders(lambda: scene.animate(self.out("b"), clip=clip, **RES)), 0)
+        np.testing.assert_array_equal(scene.meshes[0].points, bind)
 
-        self.assertEqual(self.renders(lambda: scene.animate(self.clip(30.0), self.out("c"), **RES)), 4)
+        self.assertEqual(self.renders(lambda: scene.animate(self.out("c"), clip=self.clip(30.0), **RES)), 4)
 
-    def test_an_object_keeps_its_own_frames(self):
-        obj  = Object.load_glb(self.glb)
-        clip = self.clip()
-        obj.animate(clip, self.out("a"), **RES)
-        self.assertEqual(self.renders(lambda: obj.animate(clip, self.out("b"), **RES)), 0)
-
-    def test_the_object_animated_stays_under_its_parent(self):
-        # the clip deforms a stand-in, a root of the preview scene: the Object
-        # keeps its mesh, its scene and its parent, where a preview scene it
-        # joined took it out of its scene and cleared its parent_uuid
-        scene = Scene("s")
-        group = Object(name="group")
-        obj   = Object.load_glb(self.glb)
-        scene.extend([group, obj])
-        obj.set_parent(group, world_space=False)
-        mesh = obj.mesh
-        obj.animate(self.clip(), self.out("a"), **RES)
-        self.assertIs(obj.mesh,         mesh)
-        self.assertIs(obj._hierarchy,   scene)
-        self.assertIs(obj.get_parent(), group)
+    def test_the_scenes_own_clip_keeps_its_frames_too(self):
+        scene      = Scene.load_glb(self.glb)
+        scene.clip = self.clip()
+        scene.animate(self.out("a"), **RES)
+        self.assertEqual(self.renders(lambda: scene.animate(self.out("b"), **RES)), 0)
 
 
 if __name__ == "__main__":

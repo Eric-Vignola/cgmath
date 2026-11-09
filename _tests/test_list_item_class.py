@@ -35,7 +35,6 @@ from cgmath.geometry import (
     UVList,
 )
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData, TransformList
-from cgmath.render import Scene
 
 try:
     import jedi
@@ -63,7 +62,6 @@ SHIPPED = {
     TransformList: TransformData,
     HierarchyData: TransformData,
     ClipData:      TransformData,
-    Scene:         TransformData,
 }
 
 
@@ -220,7 +218,7 @@ class TestTheBracketsNameTheItemClass(unittest.TestCase):
         for cls in (MeshList, MorphList, SkinList, TransformList):
             self.assertEqual(vars(cls)["__orig_bases__"], (DataList[SHIPPED[cls]],))
         self.assertEqual(vars(UVList)["__orig_bases__"], (MeshList, DataList[UVData]))
-        for cls in (HierarchyData, ClipData, Scene):
+        for cls in (HierarchyData, ClipData):
             self.assertNotIn("__orig_bases__", vars(cls), "TransformList's brackets hold for it")
 
 
@@ -340,7 +338,6 @@ class TestAnEditorReadsTheItemClass(unittest.TestCase):
             TransformList: "cgmath.hierarchy",
             HierarchyData: "cgmath.hierarchy",
             ClipData:      "cgmath.hierarchy",
-            Scene:         "cgmath.render",
         }
         for cls, module in modules.items():
             name = cls.__name__
