@@ -33,11 +33,21 @@ NODE_TYPES = ("joint", "transform", "locator")
 ORDER_PROPERTY = "cgmath:index"
 
 
-def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=None, as_ascii: bool = False) -> None:
+def save_fbx(
+    filename,
+    hierarchy      = None,
+    clip           = None,
+    meshes         = None,
+    skins          = None,
+    uvs            = None,
+    cameras        = None,
+    lights         = None,
+    as_ascii: bool = False,
+) -> None:
     """writes one of ``hierarchy``, a HierarchyData of joints and transforms,
     or ``clip``, a ClipList of ClipData over joints and transforms (one
-    ClipData is written as a ClipList of one), and ``meshes`` on their
-    nodes; binary unless ``as_ascii``
+    ClipData is written as a ClipList of one), and ``meshes``, ``cameras``
+    and ``lights`` on their nodes; binary unless ``as_ascii``
 
     A hierarchy alone: its nodes and their own values, no take. A clip
     alone: its nodes, their static values the active take's pose at its
@@ -63,6 +73,21 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
     node at its world as every cluster's transform (Maya's geomMatrix), and
     one bind pose listing every node at its world.
 
+    ``cameras``, a CameraList or one CameraData, and ``lights``, a LightList
+    or one LightData: each the shape of the transform its ``parent_uuid``
+    names, or of a new root node at identity named after it, written as
+    Maya's exporter writes them (measured): the node turned to fbx's camera
+    and light axes with a post rotation, (0, -90, 0) on a camera, (-90, 0,
+    0) on a directional or spot light; the camera's focal length and film
+    back as they are (``ApertureMode`` eFocalLength), its film fit as the
+    gate fit, its orthographic width over 30 as the ortho zoom, its
+    position, up vector and interest 5 units down its view; a light's
+    intensity times 100, its decay rate as the decay type, a spot's cone as
+    the inner angle and its cone plus twice its penumbra as the outer. Fbx
+    holds no camera scale and no dropoff: one warning names a value that is
+    not 1, or not 0, and the file holds neither, as Maya's own export drops
+    them.
+
     Refused, ValueError naming node, channel and frame, before anything is
     written: a node that is no joint, transform or locator, a transform or
     locator holding segment scale compensate or a joint orient, a shear, a
@@ -80,13 +105,17 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
     node of the hierarchy, whose weights are not its mesh's points by its
     influences, a second skin on a mesh, a clip moving a skinned mesh's node
     off its bind world (Maya's skinCluster applies the node's own transform
-    on top of the skin; measured). UV sets given without meshes, skins
-    without the hierarchy and the meshes, nothing given, a hierarchy that is
-    not a HierarchyData (a ClipData or a ClipList is passed as ``clip``), a
-    clip that is not a ClipData or a ClipList, meshes, skins or uvs of
-    another class: TypeError.
+    on top of the skin; measured); a camera or light on a joint, on a node
+    holding another shape, on a node holding a rotate axis or children (the
+    turn is the node's own). UV sets given without meshes, skins without
+    the hierarchy and the meshes, nothing given, a hierarchy that is not a
+    HierarchyData (a ClipData or a ClipList is passed as ``clip``), a clip
+    that is not a ClipData or a ClipList, meshes, skins, uvs, cameras or
+    lights of another class: TypeError.
     """
     # imported here: the classes' modules import this one
+    from cgmath.geometry.camera import CameraData, CameraList
+    from cgmath.geometry.light import LightData, LightList
     from cgmath.geometry.mesh import MeshData, MeshList, UVData, UVList
     from cgmath.geometry.skin_weights import SkinData, SkinList
     from cgmath.hierarchy.hierarchy import FBX, ClipData, ClipList, FbxExporter, HierarchyData
@@ -112,9 +141,19 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
         uvs = UVList([uvs])
     if uvs is not None and not isinstance(uvs, UVList):
         raise TypeError(f"save_fbx: the uvs are a UVList or a UVData, not a {type(uvs).__name__}")
-    meshes = meshes if meshes is not None and len(meshes) else None
-    skins  = skins if skins is not None and len(skins) else None
-    uvs    = uvs if uvs is not None and len(uvs) else None
+    if isinstance(cameras, CameraData):
+        cameras = CameraList([cameras])
+    if cameras is not None and not isinstance(cameras, CameraList):
+        raise TypeError(f"save_fbx: the cameras are a CameraList or a CameraData, not a {type(cameras).__name__}")
+    if isinstance(lights, LightData):
+        lights = LightList([lights])
+    if lights is not None and not isinstance(lights, LightList):
+        raise TypeError(f"save_fbx: the lights are a LightList or a LightData, not a {type(lights).__name__}")
+    meshes  = meshes if meshes is not None and len(meshes) else None
+    skins   = skins if skins is not None and len(skins) else None
+    uvs     = uvs if uvs is not None and len(uvs) else None
+    cameras = cameras if cameras is not None and len(cameras) else None
+    lights  = lights if lights is not None and len(lights) else None
     if uvs is not None and meshes is None:
         raise TypeError("save_fbx: UV sets are written on their mesh; missing: meshes=")
     if skins is not None:
@@ -129,10 +168,10 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
             f"save_fbx on {FORK}: a hierarchy given with a clip is a bind pose, which comes with skins; "
             f"pass meshes= and skins= with them, or clip= alone, or a hierarchy alone"
         )
-    if hierarchy is None and clip is None and meshes is None:
+    if hierarchy is None and clip is None and meshes is None and cameras is None and lights is None:
         raise TypeError(
             "save_fbx takes a hierarchy (a HierarchyData) or clip= (a ClipData or a ClipList), and meshes= (a MeshList "
-            "or a MeshData)"
+            "or a MeshData), cameras= (a CameraList or a CameraData), lights= (a LightList or a LightData)"
         )
     if FBX is None or FbxExporter is None:
         raise ImportError("fbx module not found")
@@ -157,6 +196,8 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
         if clip is not None:
             for take in clip:
                 _check_still(skins, meshes, hierarchy, take)
+    if cameras is not None or lights is not None:
+        _check_views(cameras, lights, meshes, written)
 
     fbx = FBX
     with FbxExporter() as exporter:
@@ -168,10 +209,10 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
             _index(fbx_node, index, fbx)
         if clip is not None:
             _write_takes(exporter, nodes, clip)
+        by_uuid = {node.uuid: fbx_node for node, fbx_node in zip(written, nodes)} if written is not None else {}
+        made    = {}
         if meshes is not None:
-            by_uuid = {node.uuid: fbx_node for node, fbx_node in zip(written, nodes)} if written is not None else {}
-            shapes  = {}
-            made    = {}
+            shapes = {}
             for mesh in meshes:
                 fbx_node = by_uuid.get(mesh.parent_uuid)
                 fbx_node, shape = _write_mesh(exporter, mesh, fbx_node)
@@ -191,6 +232,13 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
                     _write_skin(exporter, *shapes[skin.mesh_uuid], skin, hierarchy, nodes, placed[skin.mesh_uuid])
                 roots = [made[skin.mesh_uuid] for skin in skins if skin.mesh_uuid in made]
                 _write_bind_pose(exporter, nodes, hierarchy, roots)
+        if cameras is not None or lights is not None:
+            worlds = {node.uuid: np.asarray(node.world_matrix, dtype=np.float64) for node in written} if written is not None else {}
+            for shape, write in [(camera, _write_camera) for camera in cameras or []] + [(light, _write_light) for light in lights or []]:
+                fbx_node = write(exporter, shape, by_uuid.get(shape.parent_uuid), worlds.get(shape.parent_uuid, np.eye(4)))
+                if shape.parent_uuid not in by_uuid:
+                    _index(fbx_node, len(nodes) + len(made), fbx)
+                    made[shape.uuid] = fbx_node
         exporter.export(path=filename, as_ascii=as_ascii)
 
 
@@ -407,6 +455,61 @@ def _check_mesh(mesh) -> None:
     _corner_normals(mesh)
 
 
+def _view_label(shape, nodes=None) -> str:
+    """"camera 'shot'", "spot light 'key'", or for one of no name the node it
+    sits on"""
+    kind = "camera" if type(shape).__name__ == "CameraData" else f"{shape.kind} light"
+    if shape.name:
+        return f"{kind} {shape.name!r}"
+    node = None if nodes is None else nodes.get(shape.parent_uuid)
+    return f"the unnamed {kind}" if node is None else f"the unnamed {kind} on node {node.name!r}"
+
+
+def _check_views(cameras, lights, meshes, nodes) -> None:
+    """a camera or light on a joint, on a node holding a mesh or another
+    camera or light, on a node holding a rotate axis or children (the turn
+    Maya's exporter writes is the node's own, and a child would move with
+    it): refused. A camera scale that is not 1, a dropoff that is not 0:
+    one warning each, fbx holds neither"""
+    import warnings
+
+    held   = {} if nodes is None else {node.uuid: node for node in nodes}
+    on     = {}
+    scaled = []
+    drops  = []
+    for mesh in meshes or []:
+        if mesh.parent_uuid in held:
+            on[mesh.parent_uuid] = _mesh_label(mesh, held)
+    for shape in list(cameras or []) + list(lights or []):
+        label = _view_label(shape, held)
+        if type(shape).__name__ == "CameraData" and shape.camera_scale != 1.0:
+            scaled.append(label)
+        if type(shape).__name__ == "LightData" and shape.dropoff != 0.0:
+            drops.append(label)
+        node = held.get(shape.parent_uuid)
+        if node is None:
+            continue
+        if node.node_type == "joint":
+            raise ValueError(f"save_fbx: {label} sits on joint {node.name!r}; Maya holds a camera or light on a transform")
+        if node.uuid in on:
+            raise ValueError(f"save_fbx: {on[node.uuid]} and {label} sit on node {node.name!r}; a node holds one shape")
+        if np.any(np.asarray(node.rotate_axis, dtype=np.float64) != 0.0):
+            raise ValueError(
+                f"save_fbx: {label} sits on node {node.name!r}, which holds a rotate axis; the turn to fbx's camera and "
+                f"light axes is the node's post rotation, so {FORK} writes a camera or light on a node with none"
+            )
+        if any(other.parent_uuid == node.uuid for other in nodes):
+            raise ValueError(
+                f"save_fbx: {label} sits on node {node.name!r}, which has children; they would turn with the node, so "
+                f"{FORK} writes a camera or light on a leaf node"
+            )
+        on[node.uuid] = label
+    if scaled:
+        warnings.warn(f"save_fbx: {', '.join(scaled)}: fbx holds no camera scale; the file holds none, as Maya's own export", stacklevel=3)
+    if drops:
+        warnings.warn(f"save_fbx: {', '.join(drops)}: fbx holds no dropoff; the file holds none, as Maya's own export", stacklevel=3)
+
+
 def _check_uvs(uvs, meshes) -> None:
     """a UV set naming no mesh, of no name, of a name another set of its
     mesh holds or that is not ASCII, whose faces are not its mesh's, or
@@ -594,6 +697,94 @@ def _write_mesh(exporter, mesh, node) -> tuple:
             held.Add(index)
     node.SetNodeAttribute(shape)
     return node, shape
+
+
+def _enum(owner, scope: str, name: str) -> int:
+    """an fbx enum's int, which the binding's property setters take"""
+    from cgmath.hierarchy.hierarchy import _fbx_enum
+
+    value = _fbx_enum(owner, scope, name)
+    return int(getattr(value, "value", value))
+
+
+def _view_node(exporter, shape, node, axis, fbx):
+    """the FbxNode a camera or light goes on: ``node``, or a new root node at
+    identity named after the shape for None; turned to fbx's camera or light
+    axes with the post rotation Maya's exporter writes, the inverse of the
+    rotate axis ``axis`` (:data:`_VIEW_AXES` of the reader), None for none"""
+    from cgmath.formats.fbx import _post_rotation
+
+    scene = exporter.scene
+    if node is None:
+        node = fbx.FbxNode.Create(scene, shape.name or ("camera" if type(shape).__name__ == "CameraData" else "light"))
+        node.SetTransformationInheritType(fbx.FbxTransform.EInheritType.eInheritRSrs)
+        node.SetRotationActive(True)
+        scene.GetRootNode().AddChild(node)
+    if axis is not None:
+        node.SetPostRotation(fbx.FbxNode.EPivotSet.eSourcePivot, _post_rotation(axis))
+    return node
+
+
+def _write_camera(exporter, camera, node, world):
+    """``camera`` as the shape of ``node`` (see :func:`_view_node`), its
+    attributes as Maya's exporter writes a camera (measured): the focal
+    length and film back as they are, the gate fit for the film fit, the
+    ortho zoom as the orthographic width over 30, the position, up vector
+    and interest 5 units down the view from ``world``, the node's; the
+    FbxNode"""
+    from cgmath.hierarchy.hierarchy import FBX as fbx
+
+    node  = _view_node(exporter, camera, node, (0.0, 90.0, 0.0), fbx)
+    shape = fbx.FbxCamera.Create(exporter.scene, camera.name or "")
+    fits  = {"fill": "eFitFill", "horizontal": "eFitHorizontal", "vertical": "eFitVertical", "overscan": "eFitOverscan"}
+    shape.FocalLength.Set(float(camera.focal_length))
+    shape.FilmWidth.Set(float(camera.horizontal_film_aperture))
+    shape.FilmHeight.Set(float(camera.vertical_film_aperture))
+    shape.FilmAspectRatio.Set(float(camera.horizontal_film_aperture / camera.vertical_film_aperture))
+    shape.FilmOffsetX.Set(float(camera.film_offset[0]))
+    shape.FilmOffsetY.Set(float(camera.film_offset[1]))
+    shape.FilmSqueezeRatio.Set(float(camera.lens_squeeze_ratio))
+    shape.ApertureMode.Set(_enum(fbx.FbxCamera, "EApertureMode", "eFocalLength"))
+    shape.GateFit.Set(_enum(fbx.FbxCamera, "EGateFit", fits[camera.film_fit]))
+    shape.NearPlane.Set(float(camera.near_clip_plane))
+    shape.FarPlane.Set(float(camera.far_clip_plane))
+    shape.ProjectionType.Set(_enum(fbx.FbxCamera, "EProjectionType", "eOrthogonal" if camera.orthographic else "ePerspective"))
+    if camera.orthographic:
+        # Maya writes the ortho zoom of an orthographic camera alone (measured)
+        shape.OrthoZoom.Set(float(camera.orthographic_width) / 30.0)
+    eye      = np.asarray(world, dtype=np.float64)[3, :3]
+    up       = np.asarray(world, dtype=np.float64)[1, :3]
+    forward  = -np.asarray(world, dtype=np.float64)[2, :3]
+    interest = eye + 5.0 * forward / max(float(np.linalg.norm(forward)), 1e-12)
+    shape.Position.Set(fbx.FbxDouble3(*eye.tolist()))
+    shape.UpVector.Set(fbx.FbxDouble3(*(up / max(float(np.linalg.norm(up)), 1e-12)).tolist()))
+    shape.InterestPosition.Set(fbx.FbxDouble3(*interest.tolist()))
+    node.SetNodeAttribute(shape)
+    return node
+
+
+def _write_light(exporter, light, node, world):
+    """``light`` as the shape of ``node`` (see :func:`_view_node`), its
+    attributes as Maya's exporter writes a light (measured): the type, the
+    colour, the intensity times 100, the decay rate as the decay type, a
+    spot's cone as the inner angle and its cone plus twice its penumbra as
+    the outer; the FbxNode"""
+    from cgmath.hierarchy.hierarchy import FBX as fbx
+
+    kinds = {"point": "ePoint", "directional": "eDirectional", "spot": "eSpot"}
+    decay = {0: "eNone", 1: "eLinear", 2: "eQuadratic", 3: "eCubic"}
+    node  = _view_node(exporter, light, node, None if light.kind == "point" else (90.0, 0.0, 0.0), fbx)
+    shape = fbx.FbxLight.Create(exporter.scene, light.name or "")
+    shape.LightType.Set(_enum(fbx.FbxLight, "EType", kinds[light.kind]))
+    shape.Color.Set(fbx.FbxDouble3(*[float(x) for x in light.color]))
+    shape.Intensity.Set(float(light.intensity) * 100.0)
+    shape.DecayType.Set(_enum(fbx.FbxLight, "EDecayType", decay[int(light.decay_rate)]))
+    shape.CastLight.Set(True)
+    if light.kind == "spot":
+        shape.InnerAngle.Set(float(light.cone_angle))
+        shape.OuterAngle.Set(float(light.cone_angle) + 2.0 * float(light.penumbra_angle))
+    node.SetNodeAttribute(shape)
+    return node
 
 
 def _write_skin(exporter, mesh_node, shape, skin, hierarchy, nodes, at) -> None:

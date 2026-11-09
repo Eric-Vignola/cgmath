@@ -6,7 +6,9 @@ or a transform (any other: a group, or a node holding a shape, a mesh, a
 camera or a light), at their own values, a bind pose left out, or the
 file's takes animating them, every animation stack a ClipData
 of one ClipList, the file's active stack the active take; each mesh as a
-MeshData on its node,
+MeshData on its node, each camera and light as a CameraData or LightData on
+its node, in Maya's attributes, the node turned back from fbx's camera and
+light axes to Maya's,
 the mesh's UV sets and its skin naming it by uuid. Everything comes back in
 Maya's Y-up and cm, the axes and unit every cgmath value is in: a file
 whose up axis is X or Z is turned as Maya's importer turns it, one whose up
@@ -38,11 +40,12 @@ BIND_SOLVED = 1e-6
 # float32
 SKIN_AGREE  = 1e-5
 
-FbxContents = namedtuple("FbxContents", ("hierarchy", "clip", "meshes", "skins", "uvs"))
+FbxContents = namedtuple("FbxContents", ("hierarchy", "clip", "meshes", "skins", "uvs", "cameras", "lights"))
 
 
 def load_fbx(filename) -> FbxContents:
-    """``(hierarchy, clip, meshes, skins, uvs)``, None where the file holds none
+    """``(hierarchy, clip, meshes, skins, uvs, cameras, lights)``, None where
+    the file holds none
 
     ``hierarchy`` every node of the file at its own values, a mesh's node
     among them; None for a file holding a take, whose nodes ``clip`` holds at
@@ -63,6 +66,27 @@ def load_fbx(filename) -> FbxContents:
     without UVs. A node holding a shape that is no mesh is a transform, the
     shape left out; a joint is a joint whatever else it holds (Maya's FBX
     holds no mesh on one).
+
+    ``cameras`` a CameraList and ``lights`` a LightList, in their nodes'
+    order, each ``parent_uuid`` its node's, each in Maya's attributes as
+    Maya's own import would hold them (measured): a camera's focal length
+    as the file holds it, or the one its field of view gives on its film
+    back where the file holds the view (``ApertureMode``), the film back and
+    offsets in inches, the gate fit as the film fit (fill for fbx's none and
+    stretch), the clip planes and, on an orthographic camera, the
+    orthographic width (the ortho zoom times 30) in cm, a perspective
+    camera's being Maya's default 10; a light's kind, colour, intensity (the file's over
+    100), decay rate, and a spot's cone (the inner angle) and penumbra (half
+    the outer angle's excess). Fbx holds no camera scale and no dropoff: 1
+    and 0. A node holding a camera or a directed light is turned from fbx's
+    camera and light axes to Maya's (fbx's camera looks down its node's +X,
+    its light shines down -Y, Maya's both down -Z): a node Maya wrote, whose
+    post rotation is the turn, keeps its rotate to the bit; any other's
+    rotate is solved for the turn, frame by frame through euler_filter on a
+    clip. A node under one raises ValueError. An ambient, area or volume
+    light is no LightData: one warning names them, the node a transform. A
+    camera or light property a take keys is read at the active take's
+    first frame, with one warning naming shape and properties.
 
     The values are in Maya's Y-up and cm, as every cgmath value is. A file
     whose up axis is X or Z is turned the way Maya's importer turns it
@@ -86,18 +110,21 @@ def load_fbx(filename) -> FbxContents:
     # Maya's FBXExport writes a take whether anything moves or not: a take
     # over no node is no clip
     clip = None if read["takes"] is None or not len(hierarchy) else _build_clips(read, hierarchy, order)
-    # the meshes in their nodes' order, the hierarchy's
+    # the shapes in their nodes' order, the hierarchy's
     rank = {at: column for column, at in enumerate(order)}
-    read["meshes"].sort(key=lambda held: rank[held["node"]])
-    meshes = _build_meshes(read)
-    uvs    = _build_uvs(read, meshes)
+    for kind in ("meshes", "cameras", "lights"):
+        read[kind].sort(key=lambda held: rank[held["node"]])
+    meshes  = _build_meshes(read)
+    uvs     = _build_uvs(read, meshes)
+    cameras = _build_cameras(read)
+    lights  = _build_lights(read)
     if any(held["skin"] is not None for held in read["meshes"]):
         bind, order = _build(read)
         _settle_bind(read, bind, order)
-        return FbxContents(bind, clip, meshes, _build_skins(read, meshes), uvs)
+        return FbxContents(bind, clip, meshes, _build_skins(read, meshes), uvs, cameras, lights)
     if clip is not None:
-        return FbxContents(None, clip, meshes, None, uvs)
-    return FbxContents(hierarchy if len(hierarchy) else None, None, meshes, None, uvs)
+        return FbxContents(None, clip, meshes, None, uvs, cameras, lights)
+    return FbxContents(hierarchy if len(hierarchy) else None, None, meshes, None, uvs, cameras, lights)
 
 
 def load_nodes(filename):
@@ -318,29 +345,42 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "
     inherit = fbx.FbxTransform.EInheritType
     cross   = _fbx_enum(fbx.FbxNull, "ELook", "eCross")
     found   = _walk(scene)
+    kinds   = fbx.FbxNodeAttribute.EType
     shapes  = []
+    cameras = []
+    lights  = []
     if meshes:
-        kind = fbx.FbxNodeAttribute.EType.eMesh
         for at, (node, _) in enumerate(found):
             attribute = node.GetNodeAttribute()
-            if attribute is None or attribute.GetAttributeType() != kind:
-                continue
-            mesh         = _read_mesh(node, at, fbx)
-            mesh["skin"] = _read_skin(scene, node, at, mesh["label"], mesh.pop("shape"), found, fbx)
-            shapes.append(mesh)
+            kind      = None if attribute is None else attribute.GetAttributeType()
+            if kind == kinds.eMesh:
+                mesh         = _read_mesh(node, at, fbx)
+                mesh["skin"] = _read_skin(scene, node, at, mesh["label"], mesh.pop("shape"), found, fbx)
+                shapes.append(mesh)
+            elif kind == kinds.eCamera:
+                cameras.append(_read_camera(node, at, fbx))
+            elif kind == kinds.eLight:
+                lights.append(_read_light(node, at, fbx))
     nodes = []
     for node, parent in found:
         name      = str(node.GetName())
         attribute = node.GetNodeAttribute()
         kind      = None if attribute is None else attribute.GetAttributeType()
-        joint     = kind == fbx.FbxNodeAttribute.EType.eSkeleton
+        joint     = kind == kinds.eSkeleton
         # a null drawn as a cross is a locator, as Maya's own export writes
         # one; a bare null is a group
-        locator   = kind == fbx.FbxNodeAttribute.EType.eNull and typed(attribute, fbx.FbxNull, fbx).Look.Get() == cross
-        active    = bool(node.GetRotationActive())
-        stored    = node.GetRotationOrder(source)
-        stored    = int(getattr(stored, "value", stored))
-        signs     = _fbx_negative_zeros(node)
+        locator = kind == kinds.eNull and typed(attribute, fbx.FbxNull, fbx).Look.Get() == cross
+        # a camera or a light on the node: its transform is turned into
+        # Maya's (_turn_views), whether the shape is read or not
+        view = None
+        if kind == kinds.eCamera:
+            view = "camera"
+        elif kind == kinds.eLight:
+            view = _light_kind(typed(attribute, fbx.FbxLight, fbx), fbx)
+        active = bool(node.GetRotationActive())
+        stored = node.GetRotationOrder(source)
+        stored = int(getattr(stored, "value", stored))
+        signs  = _fbx_negative_zeros(node)
 
         translate = np.array(tuple(node.LclTranslation.Get())[:3], dtype=np.float64)
         rotate    = np.array(tuple(node.LclRotation.Get())[:3],    dtype=np.float64)
@@ -381,6 +421,7 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "
             "parent":       parent,
             "uuid":         generate_uuid(),
             "node_type":    "joint" if joint else "locator" if locator else "transform",
+            "view":         view,
             "translate":    translate,
             "rotate":       rotate,
             "scale":        scale,
@@ -401,11 +442,297 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "
         nodes.append(entry)
 
     # a bind pose (FbxPose) is left out: no node takes its values from one
-    read = {"nodes": nodes, "takes": None, "active": 0, "meshes": shapes}
+    read = {"nodes": nodes, "takes": None, "active": 0, "meshes": shapes, "cameras": cameras, "lights": lights}
     if take:
         read["takes"], read["active"] = _takes(scene, fbx, found, nodes)
+    _turn_views(read)
+    _view_keys(read, fbx)
     _convert(read, *_axes(scene, fbx, filename))
     return read
+
+
+# Maya's exporter turns a camera's node and a directed light's node to fbx's
+# axes with a post rotation (measured): fbx's camera looks down its node's
+# +X and its light shines down -Y, Maya's both down -Z. The walk reads a post
+# rotation as a rotate axis; these are the rotate axes it reads on a node Maya
+# wrote, by what the node holds
+_VIEW_AXES = {
+    "camera":      (0.0, 90.0, 0.0),
+    "directional": (90.0, 0.0, 0.0),
+    "spot":        (90.0, 0.0, 0.0),
+    "area":        (90.0, 0.0, 0.0),
+}
+
+# Maya's orthographic width is fbx's OrthoZoom times this (measured: a width
+# of 50 is written as 1.6667)
+ORTHO_UNIT = 30.0
+
+# fbx's light Intensity is Maya's times this (measured: 2.5 is written as 250)
+INTENSITY_UNIT = 100.0
+
+
+def _enum_int(value) -> int:
+    """an fbx enum read off a property, as its int, whichever spelling the
+    binding gives"""
+    return int(getattr(value, "value", value))
+
+
+def _read_camera(node, at: int, fbx) -> dict:
+    """the camera on the node at place ``at`` of the file's nodes, as Maya's
+    camera attributes: the focal length as the file holds it, or the one its
+    field of view gives for a file holding the view rather than the lens
+    (``ApertureMode``), the film back and offsets in inches, the gate fit as
+    the film fit (fill for fbx's none and stretch), the clip planes, and the
+    orthographic width as ``ORTHO_UNIT`` times the ortho zoom; fbx holds no
+    camera scale, so 1"""
+    import math
+
+    from cgmath.formats._fbx_io import typed
+    from cgmath.hierarchy.hierarchy import _fbx_enum
+
+    camera = typed(node.GetNodeAttribute(), fbx.FbxCamera, fbx)
+    name   = str(camera.GetName()) or None
+    label  = f"camera {name!r}" if name else f"the camera on node {str(node.GetName())!r}"
+    modes  = {_enum_int(_fbx_enum(fbx.FbxCamera, "EApertureMode", x)): x for x in ("eHorizAndVert", "eHorizontal", "eVertical", "eFocalLength")}
+    fits = {
+        _enum_int(_fbx_enum(fbx.FbxCamera, "EGateFit", x)): fit
+        for x, fit in (
+            ("eFitNone", "fill"), ("eFitVertical", "vertical"), ("eFitHorizontal", "horizontal"), ("eFitFill", "fill"),
+            ("eFitOverscan", "overscan"), ("eFitStretch", "fill"),
+        )
+    }
+    width  = float(camera.FilmWidth.Get())
+    height = float(camera.FilmHeight.Get())
+    focal  = float(camera.FocalLength.Get())
+    mode   = modes.get(_enum_int(camera.ApertureMode.Get()), "eFocalLength")
+    if mode != "eFocalLength":
+        # the view is the file's word: the lens that gives it on the film back
+        if mode == "eVertical":
+            view, aperture = float(camera.FieldOfView.Get()), height
+        elif mode == "eHorizontal":
+            view, aperture = float(camera.FieldOfView.Get()), width
+        else:
+            view, aperture = float(camera.FieldOfViewX.Get()), width
+        focal = aperture * 25.4 / (2.0 * math.tan(math.radians(view) / 2.0))
+    ortho = _enum_int(camera.ProjectionType.Get()) == _enum_int(_fbx_enum(fbx.FbxCamera, "EProjectionType", "eOrthogonal"))
+    return {
+        "node":      at,
+        "name":      name,
+        "label":     label,
+        "attribute": camera,
+        "fields": {
+            "focal_length": focal,
+            "horizontal_film_aperture": width,
+            "vertical_film_aperture": height,
+            "film_fit": fits.get(_enum_int(camera.GateFit.Get()), "fill"),
+            "film_offset": [float(camera.FilmOffsetX.Get()), float(camera.FilmOffsetY.Get())],
+            "lens_squeeze_ratio": float(camera.FilmSqueezeRatio.Get()),
+            "camera_scale": 1.0,
+            "near_clip_plane": float(camera.NearPlane.Get()),
+            "far_clip_plane": float(camera.FarPlane.Get()),
+            "orthographic": ortho,
+            # the ortho zoom means nothing on a perspective camera, where
+            # Maya's export leaves it 1: Maya's default width then
+            "orthographic_width": float(camera.OrthoZoom.Get()) * ORTHO_UNIT if ortho else 10.0,
+        },
+    }
+
+
+def _light_kind(light, fbx) -> str:
+    """what an FbxLight is: point, directional, spot, area or volume by its
+    type, ambient for a point light that casts no light, which is how Maya's
+    exporter writes an ambient light (measured)"""
+    from cgmath.hierarchy.hierarchy import _fbx_enum
+
+    names = {
+        _enum_int(_fbx_enum(fbx.FbxLight, "EType", x)): kind
+        for x, kind in (("ePoint", "point"), ("eDirectional", "directional"), ("eSpot", "spot"), ("eArea", "area"), ("eVolume", "volume"))
+    }
+    kind = names.get(_enum_int(light.LightType.Get()), "point")
+    if kind == "point" and not bool(light.CastLight.Get()):
+        return "ambient"
+    return kind
+
+
+def _read_light(node, at: int, fbx) -> dict:
+    """the light on the node at place ``at`` of the file's nodes, as Maya's
+    light attributes: its kind (:func:`_light_kind`), colour, the intensity
+    as the file's over ``INTENSITY_UNIT``, the decay type as the decay rate,
+    and a spot's inner angle as its cone, half the outer angle's excess as
+    its penumbra; fbx holds no dropoff, so 0"""
+    from cgmath.formats._fbx_io import typed
+
+    light = typed(node.GetNodeAttribute(), fbx.FbxLight, fbx)
+    name  = str(light.GetName()) or None
+    kind  = _light_kind(light, fbx)
+    # the cone is a spot's; any other kind keeps Maya's defaults
+    inner = float(light.InnerAngle.Get()) if kind == "spot" else 40.0
+    outer = float(light.OuterAngle.Get()) if kind == "spot" else 40.0
+    return {
+        "node":      at,
+        "name":      name,
+        "label":     f"{kind} light {name!r}" if name else f"the {kind} light on node {str(node.GetName())!r}",
+        "attribute": light,
+        "kind":      kind,
+        "fields": {
+            "kind":           kind,
+            "color":          [float(x) for x in tuple(light.Color.Get())[:3]],
+            "intensity":      float(light.Intensity.Get()) / INTENSITY_UNIT,
+            "decay_rate":     min(max(_enum_int(light.DecayType.Get()), 0), 3),
+            "cone_angle":     inner,
+            "penumbra_angle": (outer - inner) / 2.0,
+            "dropoff":        0.0,
+        },
+    }
+
+
+def _turn_views(read: dict) -> None:
+    """every node holding a camera or a directed light turned into Maya's
+    camera or light transform, in place. Fbx's camera looks down its node's
+    +X and its light shines down -Y, Maya's both down -Z, and Maya's
+    exporter bridges them with a post rotation on the node, (0, -90, 0) on a
+    camera and (-90, 0, 0) on a directional, spot or area light (measured),
+    which the walk reads as a rotate axis (``_VIEW_AXES``). A node holding
+    that rotate axis, Maya's own, keeps its rotate to the bit and loses the
+    axis; any other node's rotation, rotate axis and rotate together, is
+    turned by the inverse of Maya's axis and solved into its rotate, every
+    frame of every take at once through euler_filter where a take keys it,
+    its rotate axis zeroed, so the camera looks, or the light shines, where
+    the file points it. ValueError for a node under one: a child's place
+    would move with the turn"""
+    from cgmath.hierarchy.hierarchy import _filtered
+    from cgmath.transforms import euler_to_matrix, matrix_to_euler
+
+    entries = read["nodes"]
+    views   = [i for i, entry in enumerate(entries) if entry["view"] in _VIEW_AXES]
+    if not views:
+        return
+    held = set(views)
+    for entry in entries:
+        if entry["parent"] in held:
+            above = entries[entry["parent"]]
+            raise ValueError(
+                f"load_fbx: node {entry['name']!r} sits under node {above['name']!r}, which holds a "
+                f"{above['view'] if above['view'] == 'camera' else above['view'] + ' light'}; {FORK} reads a camera or "
+                f"light on a leaf node"
+            )
+
+    def rotation(angles, order):
+        """(F, 3, 3) of (F, 3) degrees in ``order``"""
+        return euler_to_matrix(np.radians(np.asarray(angles, dtype=np.float64).reshape(-1, 3)), order)[:, :3, :3]
+
+    def solved(matrices, order):
+        """(F, 3) degrees of (F, 3, 3) in ``order``"""
+        whole            = np.zeros((len(matrices), 4, 4))
+        whole[:, :3, :3] = matrices
+        whole[:, 3, 3]   = 1.0
+        return np.degrees(matrix_to_euler(whole, order)).reshape(-1, 3)
+
+    for i in views:
+        entry = entries[i]
+        axis0 = np.array(_VIEW_AXES[entry["view"]], dtype=np.float64)
+        order = int(entry["rotate_order"])
+        if np.allclose(entry["rotate_axis"], axis0, rtol=0, atol=1e-9):
+            entry["rotate_axis"] = np.zeros(3)
+            continue
+        turn                 = rotation(-axis0, 0)[0] @ rotation(entry["rotate_axis"], 0)[0]  # inv(RA0) @ RA, xyz both
+        static               = entry["rotate"].copy()
+        entry["rotate"]      = solved((turn @ rotation(static, order))[None], order)[0] + 0.0
+        entry["rotate_axis"] = np.zeros(3)
+        for take in read["takes"] or []:
+            values = take["values"][i][0]["rotate"]
+            if all(value is None for value in values):
+                continue
+            frames = len(take["frames"])
+            rows   = np.empty((frames, 3))
+            for k in range(3):
+                rows[:, k] = static[k] if values[k] is None else values[k]
+            turned = solved(turn @ rotation(rows, order), order)
+            if any(isinstance(value, np.ndarray) for value in values):
+                turned                         = _filtered(np.concatenate([entry["rotate"][None], turned])[:, None], [order])[1:, 0] + 0.0
+                take["values"][i][0]["rotate"] = [turned[:, k] for k in range(3)]
+            else:
+                take["values"][i][0]["rotate"] = [float(turned[0, k]) for k in range(3)]
+
+
+# the camera and light properties a take may key, each as the field it
+# fills: read at the active take's first frame, static, with one warning
+_CAMERA_KEYS = {
+    "FocalLength":      "focal_length",
+    "FilmWidth":        "horizontal_film_aperture",
+    "FilmHeight":       "vertical_film_aperture",
+    "FilmOffsetX":      "film_offset",
+    "FilmOffsetY":      "film_offset",
+    "FilmSqueezeRatio": "lens_squeeze_ratio",
+    "NearPlane":        "near_clip_plane",
+    "FarPlane":         "far_clip_plane",
+    "OrthoZoom":        "orthographic_width",
+}
+_LIGHT_KEYS = {"Color": "color", "Intensity": "intensity", "InnerAngle": "cone_angle", "OuterAngle": "penumbra_angle"}
+
+
+def _view_keys(read: dict, fbx) -> None:
+    """a camera or light property the active take keys: the shape takes the
+    take's first frame's value, and one warning names the shape and its
+    keyed properties; the fork reads cameras and lights static"""
+    import warnings
+
+    from cgmath.formats._fbx_io import typed
+
+    takes = read["takes"]
+    if not takes:
+        return
+    take  = takes[read["active"]]
+    layer = take["layer"]
+    if layer is None:
+        return
+    when = fbx.FbxTime(int(take["ticks"][0]))
+
+    def evaluated(curve) -> float:
+        """the curve's value at ``when``; the binding may hand back (value, index)"""
+        value = typed(curve, fbx.FbxAnimCurve, fbx).Evaluate(when)
+        return float(value[0] if isinstance(value, tuple) else value)
+
+    for held, keys in ((read["cameras"], _CAMERA_KEYS), (read["lights"], _LIGHT_KEYS)):
+        for shape in held:
+            attribute = shape["attribute"]
+            keyed     = []
+            for prop_name, field in keys.items():
+                prop = getattr(attribute, prop_name)
+                if prop.GetCurveNode(layer, False) is None:
+                    continue
+                keyed.append(prop_name)
+                if prop_name == "Color":
+                    shape["fields"]["color"] = [
+                        evaluated(prop.GetCurve(layer, component, False)) if prop.GetCurve(layer, component, False) is not None else old
+                        for component, old in zip("XYZ", shape["fields"]["color"])
+                    ]
+                    continue
+                curve = prop.GetCurve(layer, False)
+                if curve is None:
+                    continue
+                value = evaluated(curve)
+                if prop_name == "FilmOffsetX":
+                    shape["fields"]["film_offset"][0] = value
+                elif prop_name == "FilmOffsetY":
+                    shape["fields"]["film_offset"][1] = value
+                elif prop_name == "OrthoZoom":
+                    shape["fields"]["orthographic_width"] = value * ORTHO_UNIT
+                elif prop_name == "Intensity":
+                    shape["fields"]["intensity"] = value / INTENSITY_UNIT
+                elif prop_name == "InnerAngle":
+                    shape["fields"]["penumbra_angle"] += (shape["fields"]["cone_angle"] - value) / 2.0
+                    shape["fields"]["cone_angle"] = value
+                elif prop_name == "OuterAngle":
+                    shape["fields"]["penumbra_angle"] = (value - shape["fields"]["cone_angle"]) / 2.0
+                else:
+                    shape["fields"][field] = value
+            if keyed:
+                warnings.warn(
+                    f"load_fbx: {shape['label']} keys {keyed} in take {take['name']!r}; {FORK} reads a camera or "
+                    f"light static, at the take's first frame",
+                    stacklevel=2,
+                )
 
 
 def _takes(scene, fbx, found, nodes) -> tuple:
@@ -479,6 +806,8 @@ def _takes(scene, fbx, found, nodes) -> tuple:
             "name":   name,
             "fps":    fps,
             "frames": frames,
+            "ticks":  ticks,
+            "layer":  layer,
             "values": _sampled(curves, ticks, per_second),
         })
     return takes, active
@@ -555,6 +884,10 @@ def _convert(read: dict, turn, cm: float) -> None:
         for take in takes:
             for held, _ in take["values"]:
                 held["translate"] = [None if value is None else value * cm for value in held["translate"]]
+        # a camera's lengths: its clip planes and its orthographic width
+        for held in read["cameras"]:
+            for name in ("near_clip_plane", "far_clip_plane", "orthographic_width"):
+                held["fields"][name] = held["fields"][name] * cm
         for held in read["meshes"]:
             held["points"] = held["points"] * cm
             skin           = held["skin"]
@@ -815,6 +1148,43 @@ def _refuse_inherit(entries, parents, worlds, scales, frames) -> None:
                 f"load_fbx: node {entry['name']!r} channel 'inherit type'{when} is {what}, "
                 f"{np.round(scale[off[0]], 9).tolist()}, which a joint or transform can not hold"
             )
+
+
+def _build_cameras(read: dict):
+    """the CameraList of the file's cameras, as ``read`` orders them, each
+    on its node by uuid; None for none"""
+    from cgmath.geometry.camera import CameraData, CameraList
+
+    entries = read["nodes"]
+    if not read["cameras"]:
+        return None
+    return CameraList(
+        [CameraData(name=held["name"], parent_uuid=entries[held["node"]]["uuid"], **held["fields"]) for held in read["cameras"]]
+    )
+
+
+def _build_lights(read: dict):
+    """the LightList of the file's point, directional and spot lights, as
+    ``read`` orders them, each on its node by uuid; None for none. An
+    ambient, area or volume light is no LightData: one warning names them,
+    and each one's node is a transform"""
+    import warnings
+
+    from cgmath.geometry.light import LIGHT_KINDS, LightData, LightList
+
+    entries = read["nodes"]
+    skipped = [held["label"] for held in read["lights"] if held["kind"] not in LIGHT_KINDS]
+    if skipped:
+        warnings.warn(
+            f"load_fbx: {', '.join(skipped)}: {FORK} reads point, directional and spot lights; the node is a transform",
+            stacklevel=2,
+        )
+    lights = [
+        LightData(name=held["name"], parent_uuid=entries[held["node"]]["uuid"], **held["fields"])
+        for held in read["lights"]
+        if held["kind"] in LIGHT_KINDS
+    ]
+    return LightList(lights) if lights else None
 
 
 def _build_meshes(read: dict):

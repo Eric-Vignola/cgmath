@@ -813,12 +813,16 @@ the re-exported public surface of the geometry package.
 Re-exported classes:
 
 ```text
+CameraData
+CameraList
 CompactSkinData
 Data
 DataList
 DeltaMushData
 GeomSubsetData
 ImmutableArray
+LightData
+LightList
 MapData
 MeshData
 MeshList
@@ -1014,7 +1018,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x00000233E8F1E1D0>
+MISSING = <dataclasses._MISSING_TYPE object at 0x00000185D038E1D0>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -3012,8 +3016,8 @@ Functions:
 
 ```text
 load_fbx(filename) -> cgmath.formats._load.FbxContents
-    ``(hierarchy, clip, meshes, skins, uvs)``, None where the file holds none
-save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=None, as_ascii: bool = False) -> None
+    ``(hierarchy, clip, meshes, skins, uvs, cameras, lights)``, None where
+save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=None, cameras=None, lights=None, as_ascii: bool = False) -> None
     writes one of ``hierarchy``, a HierarchyData of joints and transforms,
 ```
 
@@ -3510,7 +3514,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x00000233B6E37740>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001859E2CC9A0>, '...
 ```
 
 ## `cgmath.constraints`
