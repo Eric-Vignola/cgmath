@@ -10,6 +10,7 @@ import tempfile
 import unittest
 
 import numpy as np
+from cgmath.constraints import ProcrustesData
 from cgmath.data import _strip_namespace, get_file_type
 from cgmath.geometry import NurbsCurveData, MeshData, MeshList
 from cgmath.geometry.deform import SkinDeformData

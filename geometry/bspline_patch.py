@@ -1,8 +1,9 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 import numpy as np
 from cgmath.data import Array, Data
-from cgmath.geometry.bspline import CurveSampleData
+from cgmath.geometry.bspline import CurveSampleData, _knot_vector
 from cgmath.geometry.utils import compute_basis
 from cgmath.hierarchy import ShapeData
 from cgmath.geometry.utils._numba._bspline import (
@@ -84,7 +85,8 @@ class PatchRaycastData(Data):
     distances : np.ndarray, (n,)
         Ray ``t`` values at hits, NaN for misses.
     params : np.ndarray, (n, 2)
-        ``params[:, 0]`` = u, ``params[:, 1]`` = v at hits (user space).
+        ``params[:, 0]`` = u, ``params[:, 1]`` = v at hits (user space:
+        each direction's [min_param, max_param], or [0, 1] when uniform).
     basis : np.ndarray, (n, count_u * count_v)
         Flattened tensor-product basis values at hits.
     occluded : np.ndarray, (n,)
@@ -147,6 +149,24 @@ class NurbsSurfaceData(ShapeData):
         Registration offset per direction.
     arc_length_samples : int
         Samples for arc-length lookup tables.
+    knots_u, knots_v : np.ndarray, optional
+        Knot vector per direction (K,), float64, in Maya's layout, the one
+        ``kv_u`` / ``kv_v`` return (``MFnNurbsSurface.knotsInU()`` /
+        ``knotsInV()``): count + degree - 1 values on an open direction,
+        count + 2 * degree - 1 on a periodic one, count without the
+        periodic wrap. None (default) gives uniform knots on [0, spans].
+        As with ``NurbsCurveData.knots``, their range is the direction's
+        parameter range, as in Maya: ``min_param_u`` to ``max_param_u``, so
+        a (u, v) names the same point here and on a Maya surface built from
+        ``cv``, ``kv_u`` and ``kv_v``, and tangents are derivatives with
+        respect to it. A periodic direction rebuilds the knots outside that
+        range from the ones inside it, so the seam stays smooth. No value
+        may repeat more than the direction's degree times, and a degree-1
+        direction's knots are its rows' parameters, so they must increase.
+        A value repeated ``degree`` times in a direction of degree 2 or
+        more creases the patch there (it is only C0). Cleared by
+        ``open_u()`` / ``close_u()`` (``open_v()`` / ``close_v()``); call
+        ``invalidate()`` after changing them by hand.
     """
 
     points:             Array(np.float64, "Nu", "Nv", "D")
@@ -160,6 +180,8 @@ class NurbsSurfaceData(ShapeData):
     registered_u:       bool = field(default=False)
     registered_v:       bool = field(default=False)
     arc_length_samples: int = field(default=1000)
+    knots_u:            Optional[Array(np.float64, "K")] = None
+    knots_v:            Optional[Array(np.float64, "K")] = None
 
     _kv_u               = None
     _kv_v               = None
@@ -179,6 +201,16 @@ class NurbsSurfaceData(ShapeData):
     _total_length_v     = None
     _cp_params_u        = None
     _cp_params_v        = None
+    _lo_u               = None  # start of the U parameter range (the knots')
+    _hi_u               = None  # end of the U parameter range
+    _scale_u            = None  # U parameter units per native unit
+    _edges_u            = None  # degree-1 U knots: the parameter span by span
+    _offset_u           = None  # U registration offset of periodic patches
+    _lo_v               = None  # the same along V
+    _hi_v               = None
+    _scale_v            = None
+    _edges_v            = None
+    _offset_v           = None
 
     # the private state an instance holds beside its fields: the caches above
     _STATE = (
@@ -200,6 +232,16 @@ class NurbsSurfaceData(ShapeData):
         "_total_length_v",
         "_cp_params_u",
         "_cp_params_v",
+        "_lo_u",
+        "_hi_u",
+        "_scale_u",
+        "_edges_u",
+        "_offset_u",
+        "_lo_v",
+        "_hi_v",
+        "_scale_v",
+        "_edges_v",
+        "_offset_v",
     )
 
     __repr__ = Data.__repr__
@@ -209,7 +251,8 @@ class NurbsSurfaceData(ShapeData):
             return False
 
         # The fields first: another grid shape, degree or wrap is another
-        # patch, whose control points would not line up with these
+        # patch, whose control points would not line up with these; so are
+        # other knots
         return bool(
             self.points.shape == other.points.shape
             and self.degree_u == other.degree_u
@@ -221,6 +264,10 @@ class NurbsSurfaceData(ShapeData):
             and self.registered_u == other.registered_u
             and self.registered_v == other.registered_v
             and np.allclose(self.cv, other.cv)
+            and self.kv_u.shape == other.kv_u.shape
+            and np.allclose(self.kv_u, other.kv_u)
+            and self.kv_v.shape == other.kv_v.shape
+            and np.allclose(self.kv_v, other.kv_v)
         )
 
     # ------------------------------------------------------------------ #
@@ -228,7 +275,14 @@ class NurbsSurfaceData(ShapeData):
     # ------------------------------------------------------------------ #
 
     def _init_bspline(self) -> None:
-        """Build knot vectors, geometry indices, and optional arc-length tables."""
+        """
+        Build knot vectors, geometry indices, and optional arc-length tables.
+
+        With ``knots_u`` / ``knots_v`` set, a direction's knot vector comes
+        from them instead, rescaled to the same native range [0, spans]; on
+        a degree-1 direction it stays unit-spaced and the knots map the
+        parameter span by span (``_direction_knots``).
+        """
         self._count_u = self.points.shape[0]
         self._count_v = self.points.shape[1]
 
@@ -270,6 +324,29 @@ class NurbsSurfaceData(ShapeData):
             )
             self._geometry_v = np.arange(self._count_v)
 
+        # Custom knots replace the uniform ones. Inside, the patch still
+        # runs on [0, spans] each way; the knots' own range is the parameter
+        # range users see, mapped in _normalize_* / _denormalize_*
+        self._kv_u, self._lo_u, self._hi_u, self._scale_u, self._edges_u = _direction_knots(
+            self.knots_u, self._kv_u, self._count_u, self.degree_u, self.periodic_u,
+            "NurbsSurfaceData.knots_u",
+        )
+        self._kv_v, self._lo_v, self._hi_v, self._scale_v, self._edges_v = _direction_knots(
+            self.knots_v, self._kv_v, self._count_v, self.degree_v, self.periodic_v,
+            "NurbsSurfaceData.knots_v",
+        )
+
+        # Registration offsets (periodic): CV 0's Greville abscissa, the
+        # average of the knots under its basis function
+        if self.knots_u is None:
+            self._offset_u = self._max_param_u - (self.degree_u - 1) / 2.0
+        else:
+            self._offset_u = self._max_param_u + np.mean(self._kv_u[1 : self.degree_u + 1])
+        if self.knots_v is None:
+            self._offset_v = self._max_param_v - (self.degree_v - 1) / 2.0
+        else:
+            self._offset_v = self._max_param_v + np.mean(self._kv_v[1 : self.degree_v + 1])
+
         # Cache float64 control vertices (with periodic wrap) for hot paths
         self._cv_f64 = self.cv.astype(np.float64)
 
@@ -295,7 +372,7 @@ class NurbsSurfaceData(ShapeData):
         v_mid = self._max_param_v / 2.0
 
         if self.registered_u and self.periodic_u:
-            offset = self._max_param_u - (self.degree_u - 1) / 2.0
+            offset = self._offset_u
             self._u_table_u = np.linspace(
                 offset, offset + self._max_param_u, n, dtype=np.float64
             )
@@ -329,7 +406,7 @@ class NurbsSurfaceData(ShapeData):
         u_mid = self._max_param_u / 2.0
 
         if self.registered_v and self.periodic_v:
-            offset = self._max_param_v - (self.degree_v - 1) / 2.0
+            offset = self._offset_v
             self._u_table_v = np.linspace(
                 offset, offset + self._max_param_v, n, dtype=np.float64
             )
@@ -362,11 +439,16 @@ class NurbsSurfaceData(ShapeData):
     # ------------------------------------------------------------------ #
 
     def _normalize_u(self, u):
-        """User -> native parameter space for U."""
+        """
+        User -> native parameter space for U. With ``knots_u`` (and not
+        ``uniform_u``), maps the knots' range onto the native [0, spans]
+        first.
+        """
         u = np.asarray(u, dtype=np.float64)
+        if self.knots_u is not None and not self.uniform_u:
+            u = _to_native(u, self._lo_u, self._scale_u, self._edges_u, self.periodic_u)
         if self.registered_u and self.periodic_u and not self.uniform_u:
-            offset = self._max_param_u - (self.degree_u - 1) / 2.0
-            u      = u + offset
+            u = u + self._offset_u
         if self.uniform_u:
             u = np.interp(
                 u % 1.0 if self.periodic_u else u,
@@ -376,11 +458,12 @@ class NurbsSurfaceData(ShapeData):
         return u
 
     def _normalize_v(self, v):
-        """User -> native parameter space for V."""
+        """User -> native parameter space for V (see ``_normalize_u``)."""
         v = np.asarray(v, dtype=np.float64)
+        if self.knots_v is not None and not self.uniform_v:
+            v = _to_native(v, self._lo_v, self._scale_v, self._edges_v, self.periodic_v)
         if self.registered_v and self.periodic_v and not self.uniform_v:
-            offset = self._max_param_v - (self.degree_v - 1) / 2.0
-            v      = v + offset
+            v = v + self._offset_v
         if self.uniform_v:
             v = np.interp(
                 v % 1.0 if self.periodic_v else v,
@@ -390,30 +473,55 @@ class NurbsSurfaceData(ShapeData):
         return v
 
     def _denormalize_u(self, u):
-        """Native -> user parameter space for U."""
+        """
+        Native -> user parameter space for U. Registered and periodic (not
+        ``uniform_u``), the offset comes off and u wraps into the range, as
+        on a curve. With ``knots_u`` (and not ``uniform_u``), maps the
+        native [0, spans] onto the knots' range last.
+        """
         u = np.asarray(u, dtype=np.float64)
         if self.uniform_u:
             if self.registered_u and self.periodic_u:
-                offset = self._max_param_u - (self.degree_u - 1) / 2.0
-                u      = np.where(u < offset, u + self._max_param_u, u)
+                u = np.where(u < self._offset_u, u + self._max_param_u, u)
             u = np.interp(u, self._u_table_u, self._arc_length_table_u)
-        elif self.registered_u and self.periodic_u:
-            offset = self._max_param_u - (self.degree_u - 1) / 2.0
-            u      = u - offset
+        else:
+            if self.registered_u and self.periodic_u:
+                # A value a hair below 0 wraps to max_param itself; that is 0
+                u = (u - self._offset_u) % self._max_param_u
+                u = np.where(u >= self._max_param_u, 0.0, u)
+            if self.knots_u is not None:
+                u = _to_user(u, self._lo_u, self._scale_u, self._edges_u, self.periodic_u)
         return u
 
     def _denormalize_v(self, v):
-        """Native -> user parameter space for V."""
+        """Native -> user parameter space for V (see ``_denormalize_u``)."""
         v = np.asarray(v, dtype=np.float64)
         if self.uniform_v:
             if self.registered_v and self.periodic_v:
-                offset = self._max_param_v - (self.degree_v - 1) / 2.0
-                v      = np.where(v < offset, v + self._max_param_v, v)
+                v = np.where(v < self._offset_v, v + self._max_param_v, v)
             v = np.interp(v, self._u_table_v, self._arc_length_table_v)
-        elif self.registered_v and self.periodic_v:
-            offset = self._max_param_v - (self.degree_v - 1) / 2.0
-            v      = v - offset
+        else:
+            if self.registered_v and self.periodic_v:
+                v = (v - self._offset_v) % self._max_param_v
+                v = np.where(v >= self._max_param_v, 0.0, v)
+            if self.knots_v is not None:
+                v = _to_user(v, self._lo_v, self._scale_v, self._edges_v, self.periodic_v)
         return v
+
+    def _knot_tangents(self, u, v, tangents_u, tangents_v):
+        """
+        Partial derivatives at native (u, v), each (n, dims), as derivatives
+        with respect to the knots' parameters, as in Maya: the native ones
+        over each direction's parameter units per native unit (``_rate``).
+        A direction without knots is left as it is.
+        """
+        if self.knots_u is not None:
+            rate       = _rate(u, self._scale_u, self._edges_u)
+            tangents_u = tangents_u / np.reshape(rate, (-1, 1))
+        if self.knots_v is not None:
+            rate       = _rate(v, self._scale_v, self._edges_v)
+            tangents_v = tangents_v / np.reshape(rate, (-1, 1))
+        return tangents_u, tangents_v
 
     # ------------------------------------------------------------------ #
     #  Properties                                                         #
@@ -440,16 +548,28 @@ class NurbsSurfaceData(ShapeData):
 
     @property
     def kv_u(self) -> np.ndarray:
-        """Unpadded U knot vector."""
+        """Unpadded U knot vector.
+
+        Maya's layout (``MFnNurbsSurface.knotsInU()``), the one ``knots_u``
+        takes, and with ``knots_u`` set it gives them back in their own range.
+        """
         if self._max_param_u is None:
             self._init_bspline()
+        if self.knots_u is not None:
+            return _to_user(self._kv_u[1:-1], self._lo_u, self._scale_u, self._edges_u, self.periodic_u)
         return self._kv_u[1:-1]
 
     @property
     def kv_v(self) -> np.ndarray:
-        """Unpadded V knot vector."""
+        """Unpadded V knot vector.
+
+        Maya's layout (``MFnNurbsSurface.knotsInV()``), the one ``knots_v``
+        takes, and with ``knots_v`` set it gives them back in their own range.
+        """
         if self._max_param_u is None:
             self._init_bspline()
+        if self.knots_v is not None:
+            return _to_user(self._kv_v[1:-1], self._lo_v, self._scale_v, self._edges_v, self.periodic_v)
         return self._kv_v[1:-1]
 
     @property
@@ -467,16 +587,60 @@ class NurbsSurfaceData(ShapeData):
         return self._geometry_v
 
     @property
-    def max_param_u(self) -> int:
+    def max_param_u(self) -> float:
+        """
+        End of the U parameter range: the end of the knots' range, or the
+        span count without ``knots_u``. Ignores ``uniform_u`` and
+        ``registered_u``.
+        """
         if self._max_param_u is None:
             self._init_bspline()
+        if self.knots_u is not None:
+            return self._hi_u
         return self._max_param_u
 
     @property
-    def max_param_v(self) -> int:
+    def max_param_v(self) -> float:
+        """
+        End of the V parameter range: the end of the knots' range, or the
+        span count without ``knots_v``. Ignores ``uniform_v`` and
+        ``registered_v``.
+        """
         if self._max_param_u is None:
             self._init_bspline()
+        if self.knots_v is not None:
+            return self._hi_v
         return self._max_param_v
+
+    @property
+    def min_param_u(self) -> float:
+        """
+        Start of the U parameter range: the start of the knots' range, or 0
+        without ``knots_u``. Ignores ``uniform_u`` and ``registered_u``.
+        """
+        if self._max_param_u is None:
+            self._init_bspline()
+        return self._lo_u
+
+    @property
+    def min_param_v(self) -> float:
+        """
+        Start of the V parameter range: the start of the knots' range, or 0
+        without ``knots_v``. Ignores ``uniform_v`` and ``registered_v``.
+        """
+        if self._max_param_u is None:
+            self._init_bspline()
+        return self._lo_v
+
+    @property
+    def domain_u(self) -> tuple:
+        """The U parameter range, (min_param_u, max_param_u), like Maya's knotDomainInU."""
+        return (self.min_param_u, self.max_param_u)
+
+    @property
+    def domain_v(self) -> tuple:
+        """The V parameter range, (min_param_v, max_param_v), like Maya's knotDomainInV."""
+        return (self.min_param_v, self.max_param_v)
 
     @property
     def length_u(self) -> float:
@@ -532,13 +696,13 @@ class NurbsSurfaceData(ShapeData):
         from midpoints between adjacent Greville points.
 
         For periodic directions, returns count + 1 values where the
-        last value is the first + max_param (closing the loop).
+        last value is the first plus the period (closing the loop).
 
         For open directions, the first and last values are clamped at
-        0 and max_param respectively.
+        min_param and max_param respectively.
 
         Returns are in user parameter space (denormalized for uniform
-        and registered).
+        and registered; the knots' range with knots).
 
         Returns
         -------
@@ -551,6 +715,10 @@ class NurbsSurfaceData(ShapeData):
         if self._max_param_u is None:
             self._init_bspline()
 
+        # Each direction's user range, where periodic values start and wrap
+        start_u, period_u = (0.0, 1.0) if self.uniform_u else (self._lo_u, self._hi_u - self._lo_u)
+        start_v, period_v = (0.0, 1.0) if self.uniform_v else (self._lo_v, self._hi_v - self._lo_v)
+
         # Compute U params along iso-curve at v=mid
         v_mid = self._max_param_v / 2.0
         self._cp_params_u = self._cp_params_axis(
@@ -559,7 +727,8 @@ class NurbsSurfaceData(ShapeData):
             kv          = self._kv_u,
             max_param   = self._max_param_u,
             periodic    = self.periodic_u,
-            uniform     = self.uniform_u,
+            start       = start_u,
+            period      = period_u,
             registered  = self.registered_u,
             denormalize = self._denormalize_u,
             iso_value   = v_mid,
@@ -574,7 +743,8 @@ class NurbsSurfaceData(ShapeData):
             kv          = self._kv_v,
             max_param   = self._max_param_v,
             periodic    = self.periodic_v,
-            uniform     = self.uniform_v,
+            start       = start_v,
+            period      = period_v,
             registered  = self.registered_v,
             denormalize = self._denormalize_v,
             iso_value   = u_mid,
@@ -590,7 +760,8 @@ class NurbsSurfaceData(ShapeData):
         kv,
         max_param,
         periodic,
-        uniform,
+        start,
+        period,
         registered,
         denormalize,
         iso_value,
@@ -599,13 +770,14 @@ class NurbsSurfaceData(ShapeData):
         """
         Compute control-point parameters along one direction by Newton
         refinement of Greville abscissae against the representative
-        iso-curve at the orthogonal direction's midpoint.
+        iso-curve at the orthogonal direction's midpoint. start and period:
+        where the direction's user parameters start and how far a periodic
+        one runs before it wraps.
         """
-        # Degree 1: parameters map directly to integer indices
+        # Degree 1: parameters map directly to integer indices (a degree-1
+        # direction's native knots are unit-spaced, with knots or without)
         if d <= 1:
-            return self._cp_params_degree_one(
-                n, max_param, periodic, uniform, denormalize
-            )
+            return self._cp_params_degree_one(n, max_param, periodic, period, denormalize)
 
         # Greville abscissae and search bounds
         greville, u_min, u_max = self._cp_greville_bounds(n, d, kv, max_param, periodic)
@@ -635,15 +807,14 @@ class NurbsSurfaceData(ShapeData):
 
         # Convert to user space and close periodic loop
         return self._finalize_cp_params(
-            u, n, max_param, periodic, uniform, registered, denormalize
+            u, n, max_param, periodic, start, period, registered, denormalize
         )
 
-    def _cp_params_degree_one(self, n, max_param, periodic, uniform, denormalize):
+    def _cp_params_degree_one(self, n, max_param, periodic, period, denormalize):
         """Closed-form CP params for degree <= 1."""
         if periodic:
             u_native = np.arange(n, dtype=np.float64)
             u_user   = denormalize(u_native % max_param)
-            period   = 1.0 if uniform else float(max_param)
             for i in range(1, n):
                 if u_user[i] < u_user[i - 1]:
                     u_user[i:] += period
@@ -655,7 +826,11 @@ class NurbsSurfaceData(ShapeData):
         """Greville abscissae and non-overlapping Newton search bounds."""
         cumsum   = np.concatenate([[0], np.cumsum(kv)])
         greville = (cumsum[d + 1 : d + 1 + n] - cumsum[1 : 1 + n]) / d
+
+        # Open: the ends on the ends; unclamped knots put the inner ones
+        # near an end outside the range, where the patch is not
         if not periodic:
+            greville     = np.clip(greville, 0.0, float(max_param))
             greville[0]  = 0.0
             greville[-1] = float(max_param)
 
@@ -733,7 +908,8 @@ class NurbsSurfaceData(ShapeData):
         n,
         max_param,
         periodic,
-        uniform,
+        start,
+        period,
         registered,
         denormalize,
     ):
@@ -741,12 +917,11 @@ class NurbsSurfaceData(ShapeData):
         if not periodic:
             return denormalize(u)
 
-        u      = u % max_param
-        u      = denormalize(u)
-        period = 1.0 if uniform else float(max_param)
+        u = u % max_param
+        u = denormalize(u)
 
         # For registered curves, CP 0 sits at the registration boundary.
-        if registered and u[0] > period / 2:
+        if registered and u[0] - start > period / 2:
             u[0] -= period
 
         # Restore monotonicity in user space
@@ -768,7 +943,8 @@ class NurbsSurfaceData(ShapeData):
         Parameters
         ----------
         u, v : float or np.ndarray
-            Parameter values.
+            Parameter values: each direction's [min_param, max_param]
+            (the knots' range, or [0, spans]), or [0, 1] when uniform.
         _native : bool
             If True, skip normalization (params already in native space).
 
@@ -797,11 +973,11 @@ class NurbsSurfaceData(ShapeData):
             v_arr   = np.atleast_1d(np.asarray(v, dtype=np.float64))
             any_out = False
             if not self.periodic_u:
-                u_high  = 1.0 if self.uniform_u else float(self._max_param_u)
-                any_out = any_out or bool((u_arr < 0.0).any() or (u_arr > u_high).any())
+                u_low, u_high = (0.0, 1.0) if self.uniform_u else (self._lo_u, self._hi_u)
+                any_out = any_out or bool((u_arr < u_low).any() or (u_arr > u_high).any())
             if not self.periodic_v:
-                v_high  = 1.0 if self.uniform_v else float(self._max_param_v)
-                any_out = any_out or bool((v_arr < 0.0).any() or (v_arr > v_high).any())
+                v_low, v_high = (0.0, 1.0) if self.uniform_v else (self._lo_v, self._hi_v)
+                any_out = any_out or bool((v_arr < v_low).any() or (v_arr > v_high).any())
             if any_out:
                 pts, _, _ = self.compute(u, v, _native=_native)
                 return pts
@@ -837,7 +1013,8 @@ class NurbsSurfaceData(ShapeData):
         Parameters
         ----------
         u, v : float or np.ndarray
-            Parameter values.
+            Parameter values: each direction's [min_param, max_param]
+            (the knots' range, or [0, spans]), or [0, 1] when uniform.
         _native : bool
             If True, skip normalization (params already in native space)
             AND skip linear extrapolation for out-of-domain queries.
@@ -846,7 +1023,9 @@ class NurbsSurfaceData(ShapeData):
         -------
         tuple
             (points, tangent_u, tangent_v) arrays, each (n, dims),
-            or (dims,) shaped for scalar input.
+            or (dims,) shaped for scalar input. The tangents are the
+            partial derivatives with respect to the patch's parameters:
+            the knots' ones in a direction with knots, which match Maya's.
 
         Notes
         -----
@@ -854,7 +1033,7 @@ class NurbsSurfaceData(ShapeData):
         domain are linearly extrapolated along the boundary tangent:
 
           - Per direction, the natural domain is [0, 1] for ``uniform=True``
-            and [0, max_param] for ``uniform=False``.
+            and [min_param, max_param] for ``uniform=False``.
           - For each query (u_q, v_q), let (u_c, v_c) be that query clamped
             to the natural domain. Position is::
 
@@ -931,6 +1110,9 @@ class NurbsSurfaceData(ShapeData):
                 self.degree_v,
             )
 
+        # derivatives with respect to the knots' parameters, as in Maya
+        tu, tv = self._knot_tangents(u, v, tu, tv)
+
         if extrapolate:
             pts, tu, tv = self._apply_open_extrapolation(
                 u_user_arr, v_user_arr, pts, tu, tv
@@ -947,14 +1129,16 @@ class NurbsSurfaceData(ShapeData):
         Parameters
         ----------
         u, v : float or np.ndarray
-            Parameter values.
+            Parameter values: each direction's [min_param, max_param]
+            (the knots' range, or [0, spans]), or [0, 1] when uniform.
         _native : bool
             If True, skip normalization AND skip linear extrapolation.
 
         Returns
         -------
         tuple
-            (points, tangent_u, tangent_v).
+            (points, tangent_u, tangent_v), the tangents as ``compute()``
+            gives them.
 
         Notes
         -----
@@ -992,6 +1176,9 @@ class NurbsSurfaceData(ShapeData):
             u, v, self._kv_u, self._kv_v, self._cv_f64, self.degree_u, self.degree_v
         )
 
+        # derivatives with respect to the knots' parameters, as in Maya
+        tu, tv = self._knot_tangents(u, v, tu, tv)
+
         if extrapolate:
             pts, tu, tv = self._apply_open_extrapolation(
                 u_user_arr, v_user_arr, pts, tu, tv
@@ -1022,7 +1209,8 @@ class NurbsSurfaceData(ShapeData):
         points : np.ndarray
             Surface positions, (n, dims).
         tangents_u, tangents_v : np.ndarray
-            Native partial derivatives dS/du, dS/dv, each (n, dims).
+            Partial derivatives dS/du, dS/dv with respect to the patch's
+            parameters (``_knot_tangents``), each (n, dims).
 
         Returns
         -------
@@ -1035,23 +1223,20 @@ class NurbsSurfaceData(ShapeData):
         if not (open_u or open_v):
             return points, tangents_u, tangents_v
 
-        u_high = (
-            (1.0 if self.uniform_u else float(self._max_param_u)) if open_u else None
-        )
-        v_high = (
-            (1.0 if self.uniform_v else float(self._max_param_v)) if open_v else None
-        )
+        # Each open direction's natural domain
+        u_low, u_high = (0.0, 1.0) if self.uniform_u else (self._lo_u, self._hi_u)
+        v_low, v_high = (0.0, 1.0) if self.uniform_v else (self._lo_v, self._hi_v)
 
         # Per-query domain breach indicators
         if open_u:
-            u_below = u_user < 0.0
+            u_below = u_user < u_low
             u_above = u_user > u_high
             u_out   = u_below | u_above
         else:
             u_out = np.zeros(u_user.shape, dtype=bool)
 
         if open_v:
-            v_below = v_user < 0.0
+            v_below = v_user < v_low
             v_above = v_user > v_high
             v_out   = v_below | v_above
         else:
@@ -1064,19 +1249,20 @@ class NurbsSurfaceData(ShapeData):
         # User-space deltas past the boundary (zero when in-range).
         delta_u = np.zeros_like(u_user)
         if open_u:
-            delta_u = np.where(u_below, u_user, delta_u)
+            delta_u = np.where(u_below, u_user - u_low, delta_u)
             delta_u = np.where(u_above, u_user - u_high, delta_u)
 
         delta_v = np.zeros_like(v_user)
         if open_v:
-            delta_v = np.where(v_below, v_user, delta_v)
+            delta_v = np.where(v_below, v_user - v_low, delta_v)
             delta_v = np.where(v_above, v_user - v_high, delta_v)
 
         idx = np.where(out_any)[0]
 
         # Per-query velocity vectors. For uniform mode along an axis, scale
         # by total_length / |tangent| so du=1 covers one full curve length.
-        # For non-uniform, the native tangent itself is the velocity.
+        # For non-uniform, the tangent itself is the velocity: it is the
+        # derivative with respect to the user parameter already.
         if open_u and self.uniform_u:
             tu_idx  = tangents_u[idx]
             tu_norm = np.linalg.norm(tu_idx, axis=1, keepdims=True)
@@ -1118,7 +1304,8 @@ class NurbsSurfaceData(ShapeData):
         Parameters
         ----------
         u, v : float or np.ndarray
-            Parameter values.
+            Parameter values: each direction's [min_param, max_param]
+            (the knots' range, or [0, spans]), or [0, 1] when uniform.
         collapse : bool
             Fold periodic wrap columns into original control points.
         use_numba : bool or None
@@ -1216,6 +1403,12 @@ class NurbsSurfaceData(ShapeData):
         it closest to the query. The closest result wins, so none is farther
         than its nearest grid sample.
 
+        A knot repeated ``degree`` times in a direction of degree 2 or more
+        (``knots_u`` / ``knots_v`` make one) creases the patch there too: the
+        search runs on each smooth piece between such creases, a patch of
+        its own whose edges hold it as the patch's do, and the closest of
+        their results wins.
+
         Parameters
         ----------
         obj : array-like or object with .points attribute
@@ -1234,6 +1427,9 @@ class NurbsSurfaceData(ShapeData):
         Returns
         -------
         PatchSampleData
+            params in each direction's [min_param, max_param] (the knots'
+            range with knots), or [0, 1] when uniform; tangents the partial
+            derivatives with respect to them, as ``compute()`` gives.
         """
         if self._max_param_u is None:
             self._init_bspline()
@@ -1244,6 +1440,15 @@ class NurbsSurfaceData(ShapeData):
             queries = np.asarray(obj, dtype=np.float64)
         if queries.ndim == 1:
             queries = queries.reshape(1, -1)
+
+        # A crease (a knot repeated degree times in a direction of degree 2
+        # or more): the same search on each smooth piece instead
+        pieces_u = _direction_pieces(self._kv_u, self._count_u, self.degree_u, self.periodic_u)
+        pieces_v = _direction_pieces(self._kv_v, self._count_v, self.degree_v, self.periodic_v)
+        if pieces_u is not None or pieces_v is not None:
+            return self._sample_pieces(
+                queries, pieces_u, pieces_v, initial_samples, max_newton_iters, tolerance
+            )
 
         # --- Coarse sampling ---
         nu_coarse = max(initial_samples * self._count_u, 10)
@@ -1309,7 +1514,10 @@ class NurbsSurfaceData(ShapeData):
             )
 
         distances = np.linalg.norm(queries - points, axis=1)
-        tangents  = np.stack([tang_u, tang_v], axis=1)
+
+        # derivatives with respect to the knots' parameters, as in Maya
+        tang_u, tang_v = self._knot_tangents(u_out, v_out, tang_u, tang_v)
+        tangents = np.stack([tang_u, tang_v], axis=1)
 
         # Convert to user params
         params_u = self._denormalize_u(u_out)
@@ -1325,6 +1533,86 @@ class NurbsSurfaceData(ShapeData):
             distances = distances,
             params    = params,
             basis     = b,
+        )
+
+    def _sample_pieces(
+        self, queries, pieces_u, pieces_v, initial_samples, max_newton_iters, tolerance
+    ):
+        """
+        sample() on a creased patch: its search on each smooth piece between
+        the creases (``_direction_pieces``), a patch of its own on the
+        native parameters, whose open edges hold the search as the patch's
+        do. The closest result wins, the first piece's on a tie. A direction
+        without a crease is one piece, the whole direction, as it is.
+
+        Parameters
+        ----------
+        queries : np.ndarray
+            Query points (n, dims).
+        pieces_u, pieces_v : list or None
+            ``_direction_pieces``' per direction, None for no crease.
+        initial_samples, max_newton_iters, tolerance
+            As sample()'s.
+
+        Returns
+        -------
+        PatchSampleData
+            As sample()'s, with points, tangents and basis from compute()
+            and basis() at the params found, the side a crease's tangents
+            take included.
+        """
+        # Per direction, each piece's control point rows, native knots and wrap
+        splits = []
+        for pieces, count, degree, knots, kv, periodic in (
+            (pieces_u, self._count_u, self.degree_u, self.knots_u, self._kv_u, self.periodic_u),
+            (pieces_v, self._count_v, self.degree_v, self.knots_v, self._kv_v, self.periodic_v),
+        ):
+            if pieces is None:
+                # its native knots: a degree-1 direction's are unit-spaced
+                native = None if knots is None or degree == 1 else kv[1:-1]
+                splits.append([(np.arange(count), native, periodic)])
+            else:
+                splits.append([(rows, piece, False) for rows, piece in pieces])
+
+        n    = queries.shape[0]
+        u    = np.zeros(n)
+        v    = np.zeros(n)
+        best = np.full(n, np.inf)
+        for rows_u, knots_u, periodic_u in splits[0]:
+            for rows_v, knots_v, periodic_v in splits[1]:
+                piece = NurbsSurfaceData(
+                    points     = self.points[np.ix_(rows_u, rows_v)],
+                    degree_u   = self.degree_u,
+                    degree_v   = self.degree_v,
+                    periodic_u = periodic_u,
+                    periodic_v = periodic_v,
+                    use_numba  = self.use_numba,
+                    knots_u    = knots_u,
+                    knots_v    = knots_v,
+                )
+                found        = piece.sample(queries, initial_samples, max_newton_iters, tolerance)
+                closer       = found.distances < best
+                u[closer]    = found.params[closer, 0]
+                v[closer]    = found.params[closer, 1]
+                best[closer] = found.distances[closer]
+
+        # A periodic direction's last piece runs on through the seam
+        if self.periodic_u:
+            u = u % self._max_param_u
+            u = np.where(u >= self._max_param_u, 0.0, u)
+        if self.periodic_v:
+            v = v % self._max_param_v
+            v = np.where(v >= self._max_param_v, 0.0, v)
+
+        params_u = self._denormalize_u(u)
+        params_v = self._denormalize_v(v)
+        points, tangents_u, tangents_v = self.compute(params_u, params_v)
+        return PatchSampleData(
+            points    = points,
+            tangents  = np.stack([tangents_u, tangents_v], axis=1),
+            distances = np.linalg.norm(queries - points, axis=1),
+            params    = np.stack([params_u, params_v], axis=1),
+            basis     = self.basis(params_u, params_v, collapse=True),
         )
 
     def _newton_fallback(
@@ -2093,13 +2381,19 @@ class NurbsSurfaceData(ShapeData):
         Returns
         -------
         PatchRaycastData
+            params in each direction's [min_param, max_param] (the knots'
+            range with knots), or [0, 1] when uniform; tangents the partial
+            derivatives with respect to them, as ``compute()`` gives.
 
         Notes
         -----
         Requires a 3D control-point grid (``points.shape[2] == 3``).
         Algorithm matches the bilinear / Bezier mesh raycast pattern in
         ``MeshData.raycast``: precompute coarse samples, find best initial
-        (u, v) per ray, then Gauss-Newton refine.
+        (u, v) per ray, then Gauss-Newton refine. The best start is the
+        sample nearest the ray's line, wherever along it, so a ray that
+        crosses the patch more than once gets the hit its search lands on,
+        not always the first along it.
         """
         if self._max_param_u is None:
             self._init_bspline()
@@ -2242,7 +2536,10 @@ class NurbsSurfaceData(ShapeData):
             self.degree_v,
         )
 
-        # --- normals & occlusion (computed from native tangents) ---
+        # derivatives with respect to the knots' parameters, as in Maya
+        tang_u, tang_v = self._knot_tangents(safe_u, safe_v, tang_u, tang_v)
+
+        # --- normals & occlusion (computed from the tangents) ---
         n      = np.cross(tang_u, tang_v)
         n_norm = np.linalg.norm(n, axis=1, keepdims=True)
         n_norm = np.maximum(n_norm, 1e-14)
@@ -2302,6 +2599,16 @@ class NurbsSurfaceData(ShapeData):
         self._total_length_v     = None
         self._cp_params_u        = None
         self._cp_params_v        = None
+        self._lo_u               = None
+        self._hi_u               = None
+        self._scale_u            = None
+        self._edges_u            = None
+        self._offset_u           = None
+        self._lo_v               = None
+        self._hi_v               = None
+        self._scale_v            = None
+        self._edges_v            = None
+        self._offset_v           = None
 
     def rebuild(self) -> None:
         """Full cache rebuild."""
@@ -2342,35 +2649,55 @@ class NurbsSurfaceData(ShapeData):
     # ------------------------------------------------------------------ #
 
     def open_u(self):
-        """Make U direction non-periodic."""
+        """
+        Make U direction non-periodic.
+
+        Custom ``knots_u`` are dropped: U goes back to uniform knots.
+        """
         if self._max_param_u is None:
             self._init_bspline()
         if self.periodic_u:
             self.periodic_u = False
+            self.knots_u    = None
             self.rebuild()
 
     def close_u(self):
-        """Make U direction periodic."""
+        """
+        Make U direction periodic.
+
+        Custom ``knots_u`` are dropped: U goes back to uniform knots.
+        """
         if self._max_param_u is None:
             self._init_bspline()
         if not self.periodic_u:
             self.periodic_u = True
+            self.knots_u    = None
             self.rebuild()
 
     def open_v(self):
-        """Make V direction non-periodic."""
+        """
+        Make V direction non-periodic.
+
+        Custom ``knots_v`` are dropped: V goes back to uniform knots.
+        """
         if self._max_param_u is None:
             self._init_bspline()
         if self.periodic_v:
             self.periodic_v = False
+            self.knots_v    = None
             self.rebuild()
 
     def close_v(self):
-        """Make V direction periodic."""
+        """
+        Make V direction periodic.
+
+        Custom ``knots_v`` are dropped: V goes back to uniform knots.
+        """
         if self._max_param_u is None:
             self._init_bspline()
         if not self.periodic_v:
             self.periodic_v = True
+            self.knots_v    = None
             self.rebuild()
 
     # ------------------------------------------------------------------ #
@@ -2571,7 +2898,10 @@ class NurbsSurfaceData(ShapeData):
         ``||S_u x S_v||`` over the parameter rectangle.
 
         Falls back to a Riemann sum when ``samples`` is even (Simpson
-        requires an odd number of points per direction).
+        requires an odd number of points per direction). The samples are
+        evenly spaced in the native parameters, not lined up with the knots:
+        uneven knots (``knots_u`` / ``knots_v``), short end spans most of
+        all, need more of them for the same accuracy.
 
         Parameters
         ----------
@@ -2621,6 +2951,188 @@ class NurbsSurfaceData(ShapeData):
             return float(np.sum(weights * norms) * du * dv / 9.0)
 
         return float(np.sum(norms) * du * dv)
+
+
+def _direction_knots(knots, kv, count, degree, periodic, label):
+    """
+    One direction's knot vector and parameter map, from its ``knots_u`` or
+    ``knots_v``, checked as ``NurbsCurveData.knots`` is.
+
+    The patch runs on the native [0, spans] each way, as with uniform knots.
+    A direction of degree 2 or more takes the knots rescaled to it, as a
+    curve does, and one scale maps its parameter. A degree-1 direction keeps
+    its unit-spaced knots, and its knots map the parameter span by span
+    instead: there it is the same patch, and the closest point search's
+    degree-1 spans stay unit ones.
+
+    Parameters
+    ----------
+    knots : array-like or None
+        The field: Maya's layout, count + degree - 1 values (open) or
+        count + 2 * degree - 1 (periodic); None for uniform knots.
+    kv : np.ndarray
+        The direction's uniform knot vector, scipy's layout.
+    count : int
+        Control points along the direction, without the periodic wrap.
+    degree : int
+        Degree of the direction.
+    periodic : bool
+        Whether the direction wraps.
+    label : str
+        The field, as errors name it: ``"NurbsSurfaceData.knots_u"``.
+
+    Returns
+    -------
+    tuple
+        (kv, lo, hi, scale, edges): the knot vector the patch runs on; its
+        parameter range; parameter units per native unit; and on a degree-1
+        direction with knots, the knots (spans + 1,), one per span join,
+        else None.
+
+    Raises
+    ------
+    ValueError
+        As ``NurbsCurveData.knots``, the field named: the wrong count, knots
+        that are not finite or that decrease, a range of length zero, too
+        few control points for the degree, a value repeated more than
+        ``degree`` times (on a degree-1 direction, any value repeated: its
+        knots are its rows' parameters).
+    """
+    spans = count if periodic else count - degree
+    if knots is None:
+        return kv, 0.0, float(spans), 1.0, None
+
+    try:
+        full, lo, hi = _knot_vector(knots, count, degree, periodic, "direction")
+    except ValueError as error:
+        raise ValueError(f"{label}: {error}") from None
+    if degree > 1:
+        return full, lo, hi, (hi - lo) / spans, None
+
+    # degree 1: count + 2 * degree - 1 (periodic) or count + degree - 1
+    # (open) values are spans + 1 either way, one per span join, and they
+    # increase (no value repeats more than the degree)
+    edges = np.asarray(knots, dtype=np.float64).ravel()
+    return kv, lo, hi, (hi - lo) / spans, edges
+
+
+def _direction_pieces(kv, count, degree, periodic):
+    """
+    One direction's smooth pieces: the patch split at each knot repeated
+    ``degree`` times inside the direction's range, where it is only C0 (a
+    crease; ``knots_u`` / ``knots_v`` make one). On its own control points
+    and knots a piece is the same patch: no basis function crosses a
+    crease, and the knot before a crease's run counts nowhere after it.
+
+    Parameters
+    ----------
+    kv : np.ndarray
+        The direction's knot vector, scipy's layout, native.
+    count : int
+        Control points along the direction, without the periodic wrap.
+    degree : int
+        Degree of the direction.
+    periodic : bool
+        Whether the direction wraps.
+
+    Returns
+    -------
+    list or None
+        None on a degree-1 direction (the search keeps its folds itself) or
+        one without a crease. Else per piece, in order, (rows, knots): its
+        control points' indices along the direction, into the unwrapped
+        ones, and its knots in Maya's layout, native. A periodic
+        direction's last piece runs on through the seam, past the end of
+        its range.
+    """
+    if degree < 2:
+        return None
+
+    # The knots in a row: a periodic direction's over two periods on (a
+    # period on, each knot is the period further)
+    if periodic:
+        index = np.arange(2 * count + 2 * degree + 1)
+        knots = kv[index % count] + (index // count) * count
+    else:
+        knots = kv
+
+    # Runs of one value, and the creases among them: degree long, inside the
+    # range (on a periodic direction, starting within its first period)
+    starts = np.flatnonzero(np.r_[True, knots[1:] != knots[:-1]])
+    ends   = np.r_[starts[1:], knots.shape[0]] - 1
+    if periodic:
+        inside = (starts >= degree) & (starts < degree + count)
+    else:
+        inside = (knots[starts] > knots[degree]) & (knots[starts] < knots[count])
+    crease = inside & (ends - starts + 1 >= degree)
+    if not crease.any():
+        return None
+
+    # From each crease to the next: an open direction's ends are its first
+    # and last, a periodic one's last goes round to its first. A piece's
+    # control points are those whose basis functions reach inside it
+    runs = list(zip(starts[crease], ends[crease]))
+    if periodic:
+        runs.append((runs[0][0] + count, runs[0][1] + count))
+    else:
+        runs = [(degree, degree)] + runs + [(count, count)]
+    return [
+        (np.arange(last - degree, first) % count, knots[last - degree + 1 : first + degree])
+        for (_, last), (first, _) in zip(runs[:-1], runs[1:])
+    ]
+
+
+def _to_native(x, lo, scale, edges, periodic):
+    """
+    A direction's parameters (the knots' range) as native ones ([0, spans]):
+    one scale, or with edges (a degree-1 direction's knots) span by span.
+    Past an open direction's range the end span's map goes on; a periodic
+    one wraps, whole periods added back.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if edges is None:
+        return (x - lo) / scale
+
+    spans  = edges.shape[0] - 1
+    native = np.arange(spans + 1, dtype=np.float64)
+    if periodic:
+        period = edges[-1] - edges[0]
+        laps   = np.where((x >= edges[0]) & (x <= edges[-1]), 0.0, np.floor((x - edges[0]) / period))
+        return np.interp(x - laps * period, edges, native) + laps * spans
+
+    s = np.interp(x, edges, native)
+    s = np.where(x < edges[0], (x - edges[0]) / (edges[1] - edges[0]), s)
+    return np.where(x > edges[-1], spans + (x - edges[-1]) / (edges[-1] - edges[-2]), s)
+
+
+def _to_user(s, lo, scale, edges, periodic):
+    """``_to_native``'s inverse: native parameters as the direction's own."""
+    s = np.asarray(s, dtype=np.float64)
+    if edges is None:
+        return lo + s * scale
+
+    spans  = edges.shape[0] - 1
+    native = np.arange(spans + 1, dtype=np.float64)
+    if periodic:
+        laps = np.where((s >= 0.0) & (s <= spans), 0.0, np.floor(s / spans))
+        return np.interp(s - laps * spans, native, edges) + laps * (edges[-1] - edges[0])
+
+    x = np.interp(s, native, edges)
+    x = np.where(s < 0.0, edges[0] + s * (edges[1] - edges[0]), x)
+    return np.where(s > spans, edges[-1] + (s - spans) * (edges[-1] - edges[-2]), x)
+
+
+def _rate(s, scale, edges):
+    """
+    Parameter units per native unit at native s: the direction's scale, or
+    with edges the width of the span s lies on, the one the kernels pick
+    (the one above a knot, the last at the end).
+    """
+    if edges is None:
+        return scale
+    widths = np.diff(edges)
+    span   = np.clip(np.floor(np.asarray(s, dtype=np.float64)), 0, widths.shape[0] - 1)
+    return widths[np.nan_to_num(span).astype(np.intp)]  # a nan's span: the first, as the kernels'
 
 
 def _slopes(queries, derivs):

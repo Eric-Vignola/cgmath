@@ -407,18 +407,24 @@ populate it; the `MeshData` wrappers pass their own vertex normals for you.
 
 ### Curves and patches live in knot space
 
-`u` runs `[0, max_param]`, where `max_param` is `count - degree` for an open
-curve and `count` for a periodic one. It is **not** normalised — pass
-`uniform=True` for arc-length parameterization, where `u` runs `[0, 1]` and
-equal steps in `u` are equal steps *along* the curve. Patches carry the flag per
-direction (`uniform_u`, `uniform_v`), and every parameter, degree and periodic
-flag comes in a `_u` / `_v` pair because a patch is a tensor product.
+`u` runs `[min_param, max_param]`. Without `knots` that is `[0, spans]`,
+`spans` being `count - degree` for an open curve and `count` for a periodic
+one. With `knots`, in Maya's layout (`MFnNurbsCurve.knots()`), it is the
+knots' own range, Maya's `knotDomain`: a parameter names the same point here
+and in Maya, and tangents are derivatives with respect to it. It is **not**
+normalised — pass `uniform=True` for arc-length parameterization, where `u`
+runs `[0, 1]` and equal steps in `u` are equal steps *along* the curve.
+Patches carry these per direction (`uniform_u`, `uniform_v`, `knots_u` and
+`knots_v` from `MFnNurbsSurface.knotsInU()` / `knotsInV()`), and every
+parameter, degree and periodic flag comes in a `_u` / `_v` pair because a
+patch is a tensor product.
 
 Open curves **extrapolate** outside the domain along the endpoint tangent; they
 do not clamp. A periodic curve wraps *control points*, not parameters: `cv` is
 `points` with the first `degree` control points appended, and
 `basis(u, collapse=True)` folds them back. `registered=True` (periodic only)
-moves `u = 0` onto the curve point nearest `points[0]`.
+moves the start of the range (`min_param`) onto the curve point nearest
+`points[0]`, and parameters still come back inside the range.
 
 `basis` is the transfer operator. Every sample and raycast result carries a
 `basis` (or `weights`) matrix plus `compute(values)` and an `__call__` alias —
@@ -663,6 +669,9 @@ Real behaviour, verified — not bugs to work around blindly.
 - `NurbsSurfaceData.area` is less accurate than it looks. `get_area()` only uses
   composite Simpson when `samples` is **odd**, and `area` calls it with the even
   default `samples=50`, so it falls back to a Riemann sum. Pass an odd count.
+  Its samples are evenly spaced in the native parameters, not lined up with
+  the knots, so uneven `knots_u` / `knots_v`, short end spans most of all, need
+  more of them for the same accuracy.
 - The `sdf` module docstring advertises
   `from cgmath.geometry import dual_marching_cubes`, which raises
   `ImportError`. The working path is `from cgmath.geometry.sdf import …`.

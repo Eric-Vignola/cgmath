@@ -386,6 +386,9 @@ class TestData(unittest.TestCase):
         self.assertTrue(obj.match("test_*", "other_*"))
         self.assertFalse(obj.match("other_*", "another_*"))
 
+        # No name (None) matches nothing, as no name field does
+        self.assertFalse(TestDataClass(name=None).match("*"))
+
     def test_serialization_pickle(self):
         """Test pickle serialization"""
         obj = TestDataClass(name="test", values=np.array([1.0, 2.0, 3.0]), count=5)

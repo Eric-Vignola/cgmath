@@ -348,11 +348,7 @@ def _evaluate_bspline_surface(u, v, kv_u, kv_v, control_points, du, dv):
         v_k = v[k]
 
         # Compute U basis
-        left_u = int(np.floor(u_k))
-        if left_u < 0:
-            left_u = 0
-        elif left_u > limit_u:
-            left_u = limit_u
+        left_u  = _find_span(u_k, kv_u, du, limit_u)
         right_u = left_u + du1
 
         basis_u    = np.zeros(du1 + 1, dtype=u.dtype)
@@ -374,11 +370,7 @@ def _evaluate_bspline_surface(u, v, kv_u, kv_v, control_points, du, dv):
                 basis_u[i + 1] = f * (u_k - kv_u[ri - j])
 
         # Compute V basis
-        left_v = int(np.floor(v_k))
-        if left_v < 0:
-            left_v = 0
-        elif left_v > limit_v:
-            left_v = limit_v
+        left_v  = _find_span(v_k, kv_v, dv, limit_v)
         right_v = left_v + dv1
 
         basis_v    = np.zeros(dv1 + 1, dtype=v.dtype)
@@ -471,11 +463,7 @@ def _evaluate_bspline_surface_derivatives(u, v, kv_u, kv_v, control_points, du, 
         v_k = v[k]
 
         # === U basis at degree du ===
-        left_u = int(np.floor(u_k))
-        if left_u < 0:
-            left_u = 0
-        elif left_u > limit_u:
-            left_u = limit_u
+        left_u  = _find_span(u_k, kv_u, du, limit_u)
         right_u = left_u + du1
 
         basis_u    = np.zeros(du1 + 1, dtype=u.dtype)
@@ -516,11 +504,7 @@ def _evaluate_bspline_surface_derivatives(u, v, kv_u, kv_v, control_points, du, 
                     basis_u_d1[i + 1] = f * (u_k - kv_u[ri - j])
 
         # === V basis at degree dv ===
-        left_v = int(np.floor(v_k))
-        if left_v < 0:
-            left_v = 0
-        elif left_v > limit_v:
-            left_v = limit_v
+        left_v  = _find_span(v_k, kv_v, dv, limit_v)
         right_v = left_v + dv1
 
         basis_v    = np.zeros(dv1 + 1, dtype=v.dtype)
@@ -2504,7 +2488,9 @@ def _closest_points(points, kv, cv, degree, periodic, origin, chunk=16):
 #
 # Parameters are native: each direction runs on [0, max_param], periodic ones
 # modulo it. The basis functions come from scipy's own de Boor recursion, as
-# in _curve_derivatives.
+# in _curve_derivatives, on any knots; but a degree-1 direction's spans are
+# (lo, lo + 1): its knots are unit-spaced, as BSplinePatchData keeps them
+# (given ones map its parameter instead, the same patch).
 #
 # fastmath stays off: every step is kept only when it is strictly closer.
 
@@ -3771,18 +3757,10 @@ def _raycast_bspline_surface_parallel(
 
         for _ in range(max_iters):
             # --- Find spans ---
-            left_u = int(np.floor(ui))
-            if left_u < 0:
-                left_u = 0
-            elif left_u > limit_u:
-                left_u = limit_u
+            left_u  = _find_span(ui, kv_u, du, limit_u)
             right_u = left_u + order_u
 
-            left_v  = int(np.floor(vi))
-            if left_v < 0:
-                left_v = 0
-            elif left_v > limit_v:
-                left_v = limit_v
+            left_v  = _find_span(vi, kv_v, dv, limit_v)
             right_v = left_v + order_v
 
             # --- U basis at degree du ---
@@ -3988,18 +3966,10 @@ def _raycast_bspline_surface_parallel(
         # S/S_u/S_v above are at the (ui, vi) BEFORE the last update
         # if Newton converged, or at the previous iteration if iter limit
         # was hit. For correctness, do one final evaluation pass.
-        left_u = int(np.floor(ui))
-        if left_u < 0:
-            left_u = 0
-        elif left_u > limit_u:
-            left_u = limit_u
+        left_u  = _find_span(ui, kv_u, du, limit_u)
         right_u = left_u + order_u
 
-        left_v  = int(np.floor(vi))
-        if left_v < 0:
-            left_v = 0
-        elif left_v > limit_v:
-            left_v = limit_v
+        left_v  = _find_span(vi, kv_v, dv, limit_v)
         right_v = left_v + order_v
 
         # U basis at degree du

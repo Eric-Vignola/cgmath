@@ -24,6 +24,7 @@ from cgmath.geometry.mesh import (
     UVList,
 )
 from cgmath.geometry.utils import compute_topological_neighborhood, ordered_closest_params
+from scipy.interpolate import BSpline
 from scipy.spatial import cKDTree
 
 EPSILON = np.finfo(np.float32).eps
@@ -3771,6 +3772,36 @@ class TestBSplineFit(unittest.TestCase):
         with self.assertRaises(ValueError):
             NurbsCurveData(points=self.MAYA_CVS, knots=self.MAYA_KNOTS[::-1]).kv
 
+    def test_knots_checks(self):
+        # not finite; a value repeated more than degree times (the curve
+        # would come apart: scipy's derivative() refuses it too); too few
+        # control points, the words for an open curve
+        points = np.random.default_rng(0).uniform(-1, 1, size=(6, 3))
+        for degree, knots, words in (
+            (1, [0, np.nan, 2, 3, 4, 5.0], "knots must be finite"),
+            (3, [0, 0, 0, 1, np.inf, 2, 2, 2.0], "knots must be finite"),
+            (1, [0, 1, 1, 2, 3, 4.0], r"more than degree \(1\) times: the curve would come apart"),
+            (2, [0, 0, 1, 1, 1, 2, 2.0], r"more than degree \(2\) times: the curve would come apart"),
+            (6, np.arange(11.0), "too few for an open curve of degree 6"),
+        ):
+            with self.assertRaisesRegex(ValueError, words, msg=(degree, knots)):
+                NurbsCurveData(points=points, degree=degree, knots=knots).kv
+
+        # a value repeated degree times is a crease: the curve passes
+        # through the control point there
+        crease = NurbsCurveData(points=points[:5], degree=2, knots=[0, 0, 1, 1, 2, 2.0])
+        self.assertTrue(np.allclose(crease.compute(1.0)[0], points[2], atol=1e-12))
+
+    def test_control_point_params_unclamped(self):
+        # open, unclamped knots: the inner control points' Greville abscissae
+        # fall outside the range, where the curve is not; they stay in it
+        points = np.random.default_rng(1).uniform(-1, 1, size=(5, 3))
+        curve  = NurbsCurveData(points=points, degree=3, knots=[0, 0.5, 1.5, 3, 3.2, 4.6, 7.0])
+        params = curve.control_point_params
+        self.assertEqual(curve.domain, (1.5, 3.2))
+        self.assertTrue(np.all(np.diff(params) >= 0.0), params)
+        self.assertTrue(np.isclose(params[0], 1.5) and np.isclose(params[-1], 3.2), params)
+
     def test_explicit_uniform_knots_change_nothing(self):
         for periodic in (False, True):
             for degree in (1, 2, 3):
@@ -7382,3 +7413,657 @@ class TestBSplinePatchSample(unittest.TestCase):
                 b = slow.sample(queries)
                 np.testing.assert_allclose(a.distances, b.distances, rtol=0, atol=1e-12)
                 self.check(slow, queries)
+
+
+def uneven_knots(rng, count, degree, periodic, start=0.0):
+    """
+    knots in Maya's layout with spans of random lengths, their range from
+    start: clamped on an open direction, wrapped around on a periodic one
+    (the knots outside the range repeat the spans inside it, as Maya's do)
+    """
+    spans = count if periodic else count - degree
+    edges = start + np.r_[0.0, np.cumsum(rng.uniform(0.3, 2.0, spans))]
+    if periodic:
+        period = edges[-1] - edges[0]
+        return np.r_[edges[spans - degree + 1 : spans] - period, edges, edges[1:degree] + period]
+    return np.r_[np.full(degree - 1, edges[0]), edges, np.full(degree - 1, edges[-1])]
+
+
+def scipy_patch(patch, knots_u, knots_v, u, v, nu=0, nv=0):
+    """
+    the patch, or its partial derivative (nu, nv), at (u, v) in its knots'
+    range, from scipy's B-splines on the knots given (Maya's layout, its
+    first and last knot padded: no point inside the range uses them)
+    """
+    cv    = patch.cv
+    low_u = knots_u[patch.degree_u - 1]
+    low_v = knots_v[patch.degree_v - 1]
+    if patch.periodic_u:
+        u = low_u + (np.asarray(u) - low_u) % (patch.max_param_u - low_u)
+    if patch.periodic_v:
+        v = low_v + (np.asarray(v) - low_v) % (patch.max_param_v - low_v)
+    full_u = np.r_[knots_u[:1], knots_u, knots_u[-1:]]
+    full_v = np.r_[knots_v[:1], knots_v, knots_v[-1:]]
+    bu     = BSpline(full_u, np.eye(cv.shape[0]), patch.degree_u)(u, nu)
+    bv     = BSpline(full_v, np.eye(cv.shape[1]), patch.degree_v)(v, nv)
+    return np.einsum("ki,kj,ijd->kd", np.atleast_2d(bu), np.atleast_2d(bv), cv)
+
+
+class TestBSplinePatchKnotRange(unittest.TestCase):
+    """
+    A patch with knots_u / knots_v uses each one's range as that direction's
+    parameter range, as Maya does, as a curve with knots does. Checked
+    against five Maya 2025 surfaces with uneven knots:
+
+        cmds.cylinder(spans=2), then insertKnotSurface at v=0.37
+        cmds.loft through circles of radius 1, 3, 1 at z = 0, 2, 5, uniform=False
+        the same with degree=1, radius 1, 2, 2.5, 1.5 at z = 0, 0.5, 2, 2.2
+        cmds.surface(degreeU=2, degreeV=1, knotU=[5, 5, 5.5, 7, 8, 8],
+                     knotV=[0, 0.4, 1.5, 2])
+        cmds.torus(sections=8, spans=4), then insertKnotSurface at u=0.6, v=2.3
+
+    and read with MFnNurbsSurface: knotsInU() / knotsInV(), knotDomainInU /
+    knotDomainInV, and getDerivativesAtParam() on a 6 x 6 grid of each
+    domain. tools/make_maya_bspline_surface_fixture.py writes the fixture.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        path = os.path.join(
+            os.path.dirname(__file__), "test_assets", "test_geometry.bspline_maya_surfaces.json"
+        )
+        with open(path) as f:
+            cls.MAYA = json.load(f)["surfaces"]
+
+    def patches(self, **kwargs):
+        for name, maya in self.MAYA.items():
+            patch = NurbsSurfaceData(
+                points     = np.array(maya["points"]),
+                degree_u   = maya["degree_u"],
+                degree_v   = maya["degree_v"],
+                periodic_u = maya["periodic_u"],
+                periodic_v = maya["periodic_v"],
+                knots_u    = maya["maya_knots_u"],
+                knots_v    = maya["maya_knots_v"],
+                **kwargs,
+            )
+            yield name, maya, patch
+
+    @staticmethod
+    def on_c0_knot(maya):
+        """which of Maya's parameters sit on a knot inside a degree-1 direction's range"""
+        params = np.array(maya["params"])
+        on     = np.zeros(len(params), dtype=bool)
+        for axis, key in ((0, "u"), (1, "v")):
+            if maya["degree_" + key] == 1:
+                inner = np.array(maya["maya_knots_" + key])[1:-1]
+                on |= np.isin(params[:, axis], inner)
+        return on
+
+    def test_kv_and_domain_are_mayas(self):
+        for name, maya, patch in self.patches():
+            self.assertTrue(np.allclose(patch.kv_u, maya["maya_knots_u"], atol=1e-12),      name)
+            self.assertTrue(np.allclose(patch.kv_v, maya["maya_knots_v"], atol=1e-12),      name)
+            self.assertTrue(np.allclose(patch.domain_u, maya["maya_domain_u"], atol=1e-12), name)
+            self.assertTrue(np.allclose(patch.domain_v, maya["maya_domain_v"], atol=1e-12), name)
+
+            # and they travel: the same knots build the same patch
+            again = NurbsSurfaceData(
+                patch.points, patch.degree_u, patch.degree_v, patch.periodic_u,
+                patch.periodic_v, knots_u=patch.kv_u, knots_v=patch.kv_v,
+            )
+            self.assertTrue(again == patch, name)
+
+    def test_points_and_derivatives_at_mayas_parameters(self):
+        for use_numba in (True, False):
+            for name, maya, patch in self.patches(use_numba=use_numba):
+                u, v = np.array(maya["params"]).T
+                points, tangents_u, tangents_v = patch.compute(u, v)
+                tag = (name, use_numba)
+                self.assertTrue(np.allclose(points, maya["maya_points"], atol=1e-9), tag)
+
+                # on a degree-1 direction's knot the patch is only C0: Maya
+                # gives either span's derivative there, the side of its
+                # previous query (the span below's along this fixture's
+                # ascending sweep); compute() always the span above's
+                # (TestBSplinePatchKnots.test_degree_one_derivative_on_a_knot)
+                keep = ~self.on_c0_knot(maya)
+                for got, key in ((tangents_u, "maya_derivatives_u"), (tangents_v, "maya_derivatives_v")):
+                    want = np.array(maya[key])
+                    self.assertTrue(np.allclose(got[keep], want[keep], atol=1e-9), tag)
+
+    def test_every_evaluation_agrees(self):
+        for name, maya, patch in self.patches():
+            u, v = np.array(maya["params"]).T
+            want = np.array(maya["maya_points"])
+            self.assertTrue(np.allclose(patch.evaluate(u, v), want, atol=1e-9), name)
+            self.assertTrue(np.allclose(patch.compute_fast(u, v)[0], want, atol=1e-9), name)
+            for use_numba in (True, False):
+                basis  = patch.basis(u, v, use_numba=use_numba)
+                folded = patch.basis(u, v, collapse=True, use_numba=use_numba)
+                self.assertTrue(np.allclose(basis @ patch.cv.reshape(-1, 3), want, atol=1e-9), name)
+                self.assertTrue(np.allclose(folded @ patch.points.reshape(-1, 3), want, atol=1e-9), name)
+
+    def test_sample_returns_mayas_parameters(self):
+        for use_numba in (True, False):
+            for name, maya, patch in self.patches(use_numba=use_numba):
+                found = patch.sample(np.array(maya["maya_points"]))
+                gap   = found.params - np.array(maya["params"])
+                for axis, key in ((0, "u"), (1, "v")):
+                    if maya["periodic_" + key]:
+                        low, high = maya["maya_domain_" + key]
+                        period       = high - low
+                        gap[:, axis] = (gap[:, axis] + period / 2) % period - period / 2
+                tag = (name, use_numba)
+                self.assertTrue(np.allclose(gap, 0.0, atol=1e-9), tag)
+                self.assertLess(float(found.distances.max()), 1e-9, tag)
+
+                # its tangents are compute()'s there
+                _, tangents_u, tangents_v = patch.compute(*found.params.T)
+                self.assertTrue(np.allclose(found.tangents[:, 0], tangents_u, atol=1e-9), tag)
+                self.assertTrue(np.allclose(found.tangents[:, 1], tangents_v, atol=1e-9), tag)
+
+    def test_raycast_hits_are_on_the_patch_at_their_parameters(self):
+        for name, maya, patch in self.patches():
+            params = np.array(maya["params"])
+            points, tangents_u, tangents_v = patch.compute(*params.T)
+            normals = np.cross(tangents_u, tangents_v)
+            length  = np.linalg.norm(normals, axis=1)
+            normals = normals / length[:, None]
+            origins = points + 0.25 * normals
+            cast    = patch.raycast(origins, -normals)
+            hit     = cast.hit
+            self.assertGreater(int(hit.sum()), len(points) // 2, name)
+
+            # every hit is where its ray meets the patch, at its parameters
+            along = origins[hit] - cast.distances[hit, None] * normals[hit]
+            self.assertTrue(np.allclose(along, cast.points[hit], atol=1e-9), name)
+            back, back_u, back_v = patch.compute(*cast.params[hit].T)
+            self.assertTrue(np.allclose(back, cast.points[hit], atol=1e-7),        name)
+            self.assertTrue(np.allclose(back_u, cast.tangents[hit, 0], atol=1e-7), name)
+            self.assertTrue(np.allclose(back_v, cast.tangents[hit, 1], atol=1e-7), name)
+
+            # most land on the spot they were cast at, with Maya's parameters
+            # there; a ray through the patch twice can get its other hit
+            # (raycast()'s notes: 2 of the cylinder's 36 do)
+            spot = hit & np.isclose(cast.distances, 0.25, atol=1e-9)
+            gap  = cast.params[spot] - params[spot]
+            for axis, key in ((0, "u"), (1, "v")):
+                if maya["periodic_" + key]:
+                    low, high = maya["maya_domain_" + key]
+                    period       = high - low
+                    gap[:, axis] = (gap[:, axis] + period / 2) % period - period / 2
+            self.assertGreaterEqual(int(spot.sum()), 3 * len(points) // 4, name)
+            self.assertTrue(np.allclose(gap, 0.0, atol=1e-9), name)
+
+    def test_registered_periodic_directions_stay_in_the_range(self):
+        # as a curve's: registered, a periodic direction's parameters come
+        # back inside its range, [min_param, max_param)
+        for name, maya, patch in self.patches(registered_u=True, registered_v=True):
+            found = patch.sample(np.array(maya["maya_points"]))
+            for axis, key in ((0, "u"), (1, "v")):
+                if maya["periodic_" + key]:
+                    low, high = patch.domain_u if axis == 0 else patch.domain_v
+                    self.assertTrue(np.all(found.params[:, axis] >= low), (name, key))
+                    self.assertTrue(np.all(found.params[:, axis] < high), (name, key))
+            back, _, _ = patch.compute(*found.params.T)
+            self.assertTrue(np.allclose(back, found.points, atol=1e-9), name)
+            self.assertLess(float(found.distances.max()), 1e-9, name)
+
+    def test_open_directions_extrapolate_from_the_range(self):
+        patch = next(p for name, _, p in self.patches() if name == "own_knots_degree2_by_degree1")
+        self.assertEqual(patch.domain_u, (5.0, 8.0))
+        start, tangent_u, _ = patch.compute(5.0, 1.0)
+        before, _, _ = patch.compute(4.0, 1.0)
+        self.assertTrue(np.allclose(before, start - tangent_u, atol=1e-12))
+        self.assertTrue(np.allclose(patch.evaluate(4.0, 1.0), before, atol=1e-12))
+
+        end, _, tangent_v = patch.compute(6.0, 2.0)
+        after, _, _ = patch.compute(6.0, 2.5)
+        self.assertTrue(np.allclose(after, end + 0.5 * tangent_v, atol=1e-12))
+
+    def test_control_point_params_in_the_range(self):
+        for name, maya, patch in self.patches():
+            for axis, key in ((0, "u"), (1, "v")):
+                params = patch.control_point_params[axis]
+                low, high = maya["maya_domain_" + key]
+                tag = (name, key)
+                self.assertTrue(np.all(np.diff(params) >= 0.0), tag)
+                if maya["periodic_" + key]:
+                    self.assertTrue(np.isclose(params[-1] - params[0], high - low), tag)
+                else:
+                    self.assertTrue(np.isclose(params[0], low) and np.isclose(params[-1], high), tag)
+
+    def test_patches_without_knots_keep_spans(self):
+        maya  = self.MAYA["own_knots_degree2_by_degree1"]
+        patch = NurbsSurfaceData(np.array(maya["points"]), 2, 1, False, False)
+        self.assertEqual(patch.domain_u,    (0.0, 3))
+        self.assertEqual(patch.domain_v,    (0.0, 3))
+        self.assertEqual(patch.max_param_u, 3)
+
+
+class TestBSplinePatchKnots(unittest.TestCase):
+    """
+    knots_u and knots_v: the same layout, checks and meaning as
+    NurbsCurveData.knots, through every evaluation of the patch. A direction of
+    degree 2 or more runs on its knots rescaled to [0, spans]; a degree-1
+    direction keeps unit-spaced knots and its knots map its parameter span
+    by span, the same patch.
+    """
+
+    SETUPS = [
+        (periodic_u, degree_u, degree_v)
+        for periodic_u in (False, True)
+        for degree_u in (1, 2, 3)
+        for degree_v in (1, 3)
+    ]
+
+    def make(self, rng, periodic_u, degree_u, degree_v, periodic_v=False, points=None, **kwargs):
+        """
+        a patch of random control points (or points), uneven knots both ways
+        (u's range from 2.5), and its knots
+        """
+        count_u, count_v = 7, 6
+        knots_u = uneven_knots(rng, count_u, degree_u, periodic_u, start=2.5)
+        knots_v = uneven_knots(rng, count_v, degree_v, periodic_v)
+        patch = NurbsSurfaceData(
+            points     = rng.uniform(-1, 1, size=(count_u, count_v, 3)) if points is None else points,
+            degree_u   = degree_u,
+            degree_v   = degree_v,
+            periodic_u = periodic_u,
+            periodic_v = periodic_v,
+            knots_u    = knots_u,
+            knots_v    = knots_v,
+            **kwargs,
+        )
+        return patch, knots_u, knots_v
+
+    @staticmethod
+    def bumpy(rng, periodic_u, count_u=7, count_v=6):
+        """
+        the control points of a bumpy tube around z (periodic u) or sheet
+        over xy (open u): u runs around or across it, v along it. Neither
+        folds back onto itself, where the 8 seeds of sample() could all sit
+        on the wrong part (its docstring)
+        """
+        along = np.linspace(-1.5, 1.5, count_v)[None, :]
+        bumps = 0.25 * rng.uniform(-1, 1, (count_u, count_v))
+        if periodic_u:
+            angle = 2 * np.pi * np.arange(count_u)[:, None] / count_u
+            parts = ((1 + bumps) * np.cos(angle), (1 + bumps) * np.sin(angle), along)
+        else:
+            parts = (np.linspace(-1.5, 1.5, count_u)[:, None], along, bumps)
+        return np.stack(np.broadcast_arrays(*parts), axis=-1)
+
+    @staticmethod
+    def grid(patch, knots_u, knots_v, n=9):
+        """(u, v) over the whole range, every knot inside it included"""
+        inner_u = knots_u[patch.degree_u - 1 : len(knots_u) - patch.degree_u + 1]
+        inner_v = knots_v[patch.degree_v - 1 : len(knots_v) - patch.degree_v + 1]
+        uu, vv = np.meshgrid(
+            np.r_[np.linspace(*patch.domain_u, n), inner_u],
+            np.r_[np.linspace(*patch.domain_v, n), inner_v],
+            indexing = "ij",
+        )
+        return uu.ravel(), vv.ravel()
+
+    def test_matches_scipy_on_the_knots_given(self):
+        rng = np.random.default_rng(11)
+        for periodic_u, degree_u, degree_v in self.SETUPS:
+            for use_numba in (True, False):
+                patch, knots_u, knots_v = self.make(rng, periodic_u, degree_u, degree_v, use_numba=use_numba)
+                u, v = self.grid(patch, knots_u, knots_v)
+                tag = str((periodic_u, degree_u, degree_v, use_numba))
+
+                points, tangents_u, tangents_v = patch.compute(u, v)
+                for got, order in ((points, (0, 0)), (tangents_u, (1, 0)), (tangents_v, (0, 1))):
+                    want = scipy_patch(patch, knots_u, knots_v, u, v, *order)
+                    np.testing.assert_allclose(got, want, rtol=0, atol=1e-11, err_msg=f"{tag} {order}")
+
+                self.assertTrue(np.allclose(patch.kv_u, knots_u, atol=1e-12), tag)
+                self.assertTrue(np.allclose(patch.kv_v, knots_v, atol=1e-12), tag)
+                self.assertEqual(patch.domain_u, (knots_u[degree_u - 1], knots_u[len(knots_u) - degree_u]), tag)
+
+    def test_explicit_uniform_knots_change_nothing(self):
+        rng = np.random.default_rng(2)
+        for periodic_u, degree_u, degree_v in self.SETUPS:
+            settings = dict(
+                points       = rng.uniform(-1, 1, size=(7, 6, 3)),
+                degree_u     = degree_u,
+                degree_v     = degree_v,
+                periodic_u   = periodic_u,
+                periodic_v   = not periodic_u,
+                registered_u = True,
+                registered_v = True,
+            )
+            plain   = NurbsSurfaceData(**settings)
+            knots   = NurbsSurfaceData(**settings, knots_u=plain.kv_u, knots_v=plain.kv_v)
+            u       = np.linspace(0, 1, 23) * plain.max_param_u
+            v       = np.linspace(0, 1, 23) * plain.max_param_v
+            queries = plain.evaluate(u, v) + rng.normal(scale=0.05, size=(23, 3))
+            tag     = (periodic_u, degree_u, degree_v)
+
+            for a, b in (
+                (plain.compute(u, v), knots.compute(u, v)),
+                (plain.basis(u, v), knots.basis(u, v)),
+                (plain.control_point_params[0], knots.control_point_params[0]),
+                (plain.control_point_params[1], knots.control_point_params[1]),
+                (plain.sample(queries).params, knots.sample(queries).params),
+            ):
+                self.assertTrue(np.allclose(a, b, atol=1e-12), tag)
+
+            # the registration offset only applies to periodic directions
+            if periodic_u:
+                self.assertTrue(np.isclose(plain._offset_u, knots._offset_u), tag)
+            else:
+                self.assertTrue(np.isclose(plain._offset_v, knots._offset_v), tag)
+
+    def test_tangents_are_derivatives_in_the_knots_parameters(self):
+        rng = np.random.default_rng(4)
+        h   = 1e-6
+        for periodic_u, degree_u, degree_v in self.SETUPS:
+            patch, knots_u, knots_v = self.make(rng, periodic_u, degree_u, degree_v)
+            u = rng.uniform(*patch.domain_u, 40)
+            v = rng.uniform(*patch.domain_v, 40)
+            _, tangents_u, tangents_v = patch.compute(u, v)
+            step_u = (patch.evaluate(u + h, v) - patch.evaluate(u - h, v)) / (2 * h)
+            step_v = (patch.evaluate(u, v + h) - patch.evaluate(u, v - h)) / (2 * h)
+
+            # a degree-1 direction's derivative jumps across its knots
+            near = np.zeros(40, dtype=bool)
+            for x, knots in ((u, knots_u), (v, knots_v)):
+                near |= np.min(np.abs(x[:, None] - knots[None, :]), axis=1) < 2 * h
+            tag = (periodic_u, degree_u, degree_v)
+            self.assertTrue(np.allclose(tangents_u[~near], step_u[~near], atol=1e-6), tag)
+            self.assertTrue(np.allclose(tangents_v[~near], step_v[~near], atol=1e-6), tag)
+
+    def test_degree_one_derivative_on_a_knot(self):
+        # the span above's, as compute() gives on any knot without knots_u
+        # and NurbsCurveData on its own; Maya's getDerivativesAtParam gives
+        # either span's, the side of its previous query
+        rng = np.random.default_rng(6)
+        patch, knots_u, _ = self.make(rng, False, 1, 3)
+        knot = knots_u[2]
+        v    = np.mean(patch.domain_v)
+        _, at, _ = patch.compute(knot, v)
+        _, above, _ = patch.compute(knot + 1e-9, v)
+        _, below, _ = patch.compute(knot - 1e-9, v)
+        self.assertTrue(np.allclose(at, above, atol=1e-6))
+        self.assertFalse(np.allclose(at, below, atol=1e-3))
+
+    def test_sample_never_farther_than_a_dense_grid(self):
+        rng = np.random.default_rng(7)
+        for periodic_u, degree_u, degree_v in self.SETUPS:
+            for use_numba in (True, False):
+                points = self.bumpy(rng, periodic_u)
+                patch, _, _ = self.make(rng, periodic_u, degree_u, degree_v, points=points, use_numba=use_numba)
+                queries = rng.uniform(-2.0, 2.0, size=(120, 3))
+                uu, vv = np.meshgrid(
+                    np.linspace(*patch.domain_u, 300, endpoint=not periodic_u),
+                    np.linspace(*patch.domain_v, 300),
+                    indexing = "ij",
+                )
+                reference = cKDTree(patch.evaluate(uu.ravel(), vv.ravel())).query(queries)[0]
+                result    = patch.sample(queries)
+                tag       = str((periodic_u, degree_u, degree_v, use_numba))
+                self.assertLessEqual(float((result.distances - reference).max()), 1e-9, tag)
+
+                # v is open: inside its range, to within rounding (the end of
+                # the range is lo + spans * scale, as on a curve)
+                self.assertTrue(np.all(result.params[:, 1] >= patch.min_param_v - 1e-12), tag)
+                self.assertTrue(np.all(result.params[:, 1] <= patch.max_param_v + 1e-12), tag)
+
+                # the point, tangents and basis are the patch's at the params
+                points, tangents_u, tangents_v = patch.compute(*result.params.T)
+                folded = result.basis @ patch.points.reshape(-1, 3)
+                np.testing.assert_allclose(points,     result.points,         rtol=0, atol=1e-12, err_msg=tag)
+                np.testing.assert_allclose(tangents_u, result.tangents[:, 0], rtol=0, atol=1e-9,  err_msg=tag)
+                np.testing.assert_allclose(tangents_v, result.tangents[:, 1], rtol=0, atol=1e-9,  err_msg=tag)
+                np.testing.assert_allclose(folded,     result.points,         rtol=0, atol=1e-9,  err_msg=tag)
+
+    def test_sample_on_creases_never_farther_than_a_dense_grid(self):
+        # a knot repeated degree times creases the patch (it is only C0
+        # there): sample() searches each smooth piece between creases on its
+        # own, so it finds the closest point on a crease too. Open and
+        # periodic, a crease at the seam, in v beside a degree-1 u
+        rng = np.random.default_rng(13)
+        cases = (
+            (False, 2, 5, [0, 0, 1, 1, 2.5, 2.5]),
+            (False, 3, 7, [0.5, 0.5, 0.5, 1.2, 1.2, 1.2, 3, 3, 3.0]),
+            (True, 2, 8, [-1, 0, 1, 1, 3, 4, 5, 5, 7, 8, 9.0]),
+            (True, 3, 8, [-3, -2, 0, 0, 0, 2, 3, 4, 5, 6, 8, 8, 8.0]),
+        )
+        for periodic_u, degree_u, count_u, knots_u in cases:
+            for use_numba in (True, False):
+                knots_v = uneven_knots(rng, 6, 3, False)
+                patch = NurbsSurfaceData(
+                    points     = self.bumpy(rng, periodic_u, count_u, 6),
+                    degree_u   = degree_u,
+                    degree_v   = 3,
+                    periodic_u = periodic_u,
+                    periodic_v = False,
+                    use_numba  = use_numba,
+                    knots_u    = knots_u,
+                    knots_v    = knots_v,
+                )
+                self.check_creased(patch, np.asarray(knots_u), knots_v, rng, (periodic_u, degree_u, use_numba))
+
+        # a crease in v, a degree-1 u
+        for use_numba in (True, False):
+            knots_u = np.array([0.0, 0.5, 1.7, 2.0, 3.1, 3.3])
+            knots_v = np.array([0.0, 0.0, 1.0, 1.0, 2.0, 2.0])
+            patch = NurbsSurfaceData(
+                points     = self.bumpy(rng, False, 6, 5)[:, :, [1, 0, 2]],
+                degree_u   = 1,
+                degree_v   = 2,
+                periodic_u = False,
+                periodic_v = False,
+                use_numba  = use_numba,
+                knots_u    = knots_u,
+                knots_v    = knots_v,
+            )
+            self.check_creased(patch, knots_u, knots_v, rng, ("v", use_numba))
+
+    def check_creased(self, patch, knots_u, knots_v, rng, tag):
+        """sample() no farther than a dense grid with every knot in it, and compute()'s there"""
+        tag = str(tag)
+
+        # the grid, a periodic u short of its end
+        u, v = self.grid(patch, knots_u, knots_v, n=300)
+        keep  = (u < patch.max_param_u) if patch.periodic_u else np.ones(u.shape, dtype=bool)
+        dense = patch.evaluate(u[keep], v[keep])
+
+        queries   = rng.uniform(dense.min(axis=0) - 0.5, dense.max(axis=0) + 0.5, size=(150, 3))
+        reference = cKDTree(dense).query(queries)[0]
+        result    = patch.sample(queries)
+        self.assertLessEqual(float((result.distances - reference).max()), 1e-9, tag)
+
+        # inside the range, periodic u short of its end
+        self.assertTrue(np.all(result.params[:, 0] >= patch.min_param_u - 1e-12), tag)
+        self.assertTrue(np.all(result.params[:, 0] <= patch.max_param_u + 1e-12), tag)
+        if patch.periodic_u:
+            self.assertTrue(np.all(result.params[:, 0] < patch.max_param_u), tag)
+
+        # the point, tangents and basis are the patch's at the params, the
+        # side of a crease compute() takes included
+        points, tangents_u, tangents_v = patch.compute(*result.params.T)
+        folded = result.basis @ patch.points.reshape(-1, 3)
+        np.testing.assert_allclose(points,     result.points,         rtol=0, atol=1e-12, err_msg=tag)
+        np.testing.assert_allclose(tangents_u, result.tangents[:, 0], rtol=0, atol=1e-12, err_msg=tag)
+        np.testing.assert_allclose(tangents_v, result.tangents[:, 1], rtol=0, atol=1e-12, err_msg=tag)
+        np.testing.assert_allclose(folded,     result.points,         rtol=0, atol=1e-9,  err_msg=tag)
+
+    def test_control_point_params_unclamped(self):
+        # open, unclamped knots: the inner control points' Greville abscissae
+        # fall outside the range, where the patch is not; they stay in it
+        rng = np.random.default_rng(14)
+        patch = NurbsSurfaceData(
+            points     = self.bumpy(rng, False, 6, 5),
+            degree_u   = 3,
+            degree_v   = 3,
+            periodic_u = False,
+            periodic_v = False,
+            knots_v    = [0, 0.5, 1.5, 3, 3.2, 4.6, 7.0],
+        )
+        params = patch.control_point_params[1]
+        self.assertEqual(patch.domain_v, (1.5, 3.2))
+        self.assertTrue(np.all(np.diff(params) >= 0.0), params)
+        self.assertTrue(np.isclose(params[0], 1.5) and np.isclose(params[-1], 3.2), params)
+
+    def test_lengths_and_area_on_the_knots(self):
+        # the arc length along u (the iso-curve at the middle of v's range)
+        # and the area are the patch's the knots shape: against scipy's
+        # B-splines on the same knots, integrated span by span
+        rng = np.random.default_rng(15)
+        patch, knots_u, knots_v = self.make(rng, False, 3, 3, points=self.bumpy(rng, False))
+        middle = np.mean(patch.domain_v)
+        nodes, weights = np.polynomial.legendre.leggauss(12)
+
+        def gauss(knots):
+            """Gauss-Legendre nodes and weights over each span of a cubic's range"""
+            edges = np.unique(knots[2:-2])
+            mid   = (edges[1:] + edges[:-1]) / 2
+            half  = (edges[1:] - edges[:-1]) / 2
+            return (mid[:, None] + half[:, None] * nodes).ravel(), (half[:, None] * weights).ravel()
+
+        def speed(u):
+            """how fast the iso-curve at the middle of v's range runs at u"""
+            tangents = scipy_patch(patch, knots_u, knots_v, u, np.full(u.shape, middle), 1, 0)
+            return np.linalg.norm(tangents, axis=1)
+
+        x_u, w_u = gauss(knots_u)
+        x_v, w_v = gauss(knots_v)
+        length = float(speed(x_u) @ w_u)
+        self.assertAlmostEqual(patch.get_length_u(fast=False), length, delta=1e-7 * length)
+        self.assertAlmostEqual(patch.length_u, length, delta=1e-4 * length)
+
+        uu, vv = np.meshgrid(x_u, x_v, indexing="ij")
+        cross = np.cross(
+            scipy_patch(patch, knots_u, knots_v, uu.ravel(), vv.ravel(), 1, 0),
+            scipy_patch(patch, knots_u, knots_v, uu.ravel(), vv.ravel(), 0, 1),
+        )
+        area = float(np.linalg.norm(cross, axis=1) @ np.outer(w_u, w_v).ravel())
+        self.assertAlmostEqual(patch.get_area(301), area, delta=1e-5 * area)
+
+        # uniform_u: u = 0.5 is half that length along the iso-curve
+        even = NurbsSurfaceData(
+            patch.points, 3, 3, False, False, uniform_u=True, knots_u=knots_u, knots_v=knots_v
+        )
+        x    = np.linspace(*patch.domain_u, 20001)
+        fast = speed(x)
+        part = np.r_[0.0, np.cumsum((fast[1:] + fast[:-1]) / 2 * np.diff(x))]
+        at   = np.interp(part[-1] / 2, part, x)
+        self.assertTrue(np.allclose(even.evaluate(0.5, middle), patch.evaluate(at, middle), atol=1e-5))
+
+    def test_registered_and_uniform_directions(self):
+        rng = np.random.default_rng(8)
+        for degree_u in (1, 3):
+            for kwargs in (dict(registered_u=True), dict(uniform_u=True, uniform_v=True)):
+                patch, knots_u, knots_v = self.make(rng, True, degree_u, 3, **kwargs)
+                plain = NurbsSurfaceData(patch.points, degree_u, 3, True, False, knots_u=knots_u, knots_v=knots_v)
+                tag   = (degree_u, sorted(kwargs))
+
+                # every parameter names a spot of the patch the knots shape,
+                # and sample() gives back the parameter of the spot it finds
+                if "uniform_u" in kwargs:
+                    u, v = rng.uniform(0, 1, (2, 30))
+                else:
+                    u = rng.uniform(*patch.domain_u, 30)
+                    v = rng.uniform(*patch.domain_v, 30)
+                spots = patch.evaluate(u, v)
+                found = patch.sample(spots)
+                self.assertLess(float(plain.sample(spots).distances.max()), 1e-9, tag)
+                self.assertLess(float(found.distances.max()), 1e-9, tag)
+                self.assertTrue(np.allclose(patch.evaluate(*found.params.T), spots, atol=1e-9), tag)
+
+                # registered, u's range starts at control point 0's Greville
+                # abscissa: the average of the knots under its basis function
+                if "registered_u" in kwargs:
+                    low, high = patch.domain_u
+                    greville = np.mean(knots_u[:degree_u])
+                    greville = low + (greville - low) % (high - low)
+                    self.assertTrue(np.allclose(patch.evaluate(low, v), plain.evaluate(greville, v), atol=1e-12), tag)
+
+    def test_checks_name_the_field(self):
+        points = np.random.default_rng(0).uniform(-1, 1, size=(5, 4, 3))
+        cases = (
+            ("knots_u", dict(knots_u=[0, 0, 1, 2, 2.0])),  # 7 for 5 CVs
+            ("knots_u", dict(knots_u=[0, 0, 0, 1, 2, 2, 2.0][::-1])),  # decreasing
+            ("knots_v", dict(knots_v=[1, 1, 1, 1, 1, 1.0])),  # no range
+            ("knots_v", dict(degree_v=1, knots_v=[0, 1, 1, 2.0])),  # degree 1, repeated
+            ("knots_u", dict(degree_u=6, knots_u=np.arange(10.0))),  # too few CVs
+            ("knots_v", dict(degree_v=1, knots_v=[0, np.nan, 2, 2.5])),  # not finite
+            ("knots_v", dict(degree_v=1, knots_v=[0, 0.5, 2, np.inf])),  # not finite
+            ("knots_u", dict(knots_u=[0, 0, 0, 0, 1, 2, 2.0])),  # 0 four times at degree 3
+            ("knots_u", dict(degree_u=2, knots_u=[0, 1, 1, 1, 2, 3.0])),  # 1 three times at degree 2
+        )
+        for field, kwargs in cases:
+            settings = dict(points=points, degree_u=3, degree_v=3, periodic_u=False, periodic_v=False)
+            settings.update(kwargs)
+            patch = NurbsSurfaceData(**settings)
+            with self.assertRaisesRegex(ValueError, "NurbsSurfaceData." + field, msg=str(kwargs)):
+                patch.kv_u
+
+        # the curve's checks and words, for a direction
+        for knots, words in (
+            ([0, np.nan, 2, 2.5], "knots must be finite"),
+            ([0, 1, 1, 2.0], r"more than degree \(1\) times: the direction would come apart"),
+        ):
+            with self.assertRaisesRegex(ValueError, words):
+                NurbsSurfaceData(points, 3, 1, False, False, knots_v=knots).kv_v
+        with self.assertRaisesRegex(ValueError, "too few for an open direction of degree 6"):
+            NurbsSurfaceData(points, 6, 3, False, False, knots_u=np.arange(10.0)).kv_u
+
+        # periodic: count + 2 * degree - 1 values, those outside the range
+        # rebuilt from those inside it
+        patch = NurbsSurfaceData(points, 3, 1, True, False, knots_u=np.arange(10.0) * 2)
+        self.assertEqual(patch.domain_u, (4.0, 14.0))
+        self.assertTrue(np.allclose(patch.kv_u, np.arange(10.0) * 2))
+
+    def test_knots_save_and_load(self):
+        rng = np.random.default_rng(9)
+        patch, _, _ = self.make(rng, True, 3, 1)
+        self.assertIn("knots_u", patch.to_dict())
+        self.assertIn("knots_v", patch.to_dict())
+        self.assertNotIn("knots_u", NurbsSurfaceData(patch.points, 3, 1, True, False).to_dict())
+
+        u    = np.linspace(*patch.domain_u, 7)
+        v    = np.linspace(*patch.domain_v, 7)
+        want = np.array(patch.compute(u, v))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for mode in ("pkl", "json", "npz"):
+                loaded = NurbsSurfaceData.load(patch.save(os.path.join(temp_dir, "patch." + mode)))
+                self.assertTrue(patch == loaded, mode)
+                self.assertTrue(np.array_equal(loaded.knots_u, patch.knots_u), mode)
+                self.assertTrue(np.array_equal(np.array(loaded.compute(u, v)), want), mode)
+
+        self.assertTrue(patch == NurbsSurfaceData.from_bytes(patch.to_bytes()))
+        self.assertTrue(patch == patch.copy())
+        self.assertTrue(patch == pickle.loads(pickle.dumps(patch)))
+
+    def test_eq_compares_knots(self):
+        rng = np.random.default_rng(10)
+        patch, knots_u, knots_v = self.make(rng, False, 3, 3)
+        self.assertFalse(patch == NurbsSurfaceData(patch.points, 3, 3, False, False))
+        self.assertFalse(patch == NurbsSurfaceData(patch.points, 3, 3, False, False, knots_u=knots_u))
+        self.assertTrue(patch == NurbsSurfaceData(patch.points, 3, 3, False, False, knots_u=knots_u, knots_v=knots_v))
+
+    def test_open_close_drop_knots(self):
+        rng = np.random.default_rng(12)
+        patch, _, knots_v = self.make(rng, False, 3, 3)
+        patch.close_u()
+        self.assertIsNone(patch.knots_u)
+        self.assertTrue(np.array_equal(patch.knots_v, knots_v))
+        self.assertTrue(np.allclose(patch.kv_u, NurbsSurfaceData(patch.points, 3, 3, True, False).kv_u))
+
+        patch.open_v()  # already open: nothing changes
+        self.assertTrue(np.array_equal(patch.knots_v, knots_v))
+        patch.close_v()
+        self.assertIsNone(patch.knots_v)
+
+        patch.knots_u = uneven_knots(rng, 7, 3, True)
+        patch.invalidate()
+        patch.open_u()
+        self.assertIsNone(patch.knots_u)
+        self.assertEqual(patch.domain_u, (0.0, 4))
+

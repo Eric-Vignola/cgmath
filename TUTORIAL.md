@@ -735,9 +735,10 @@ print(round(float(np.abs(bent.points - cube.points).max()), 4))
 
 ## 9. Sample a B-spline curve
 
-`u` runs over knot space, `[0, max_param]`, **not** `[0, 1]` — unless you
-pass `uniform=True`, which switches to arc-length parameterisation where
-equal steps in `u` are equal steps *along* the curve.
+`u` runs over knot space, `[min_param, max_param]` (`[0, spans]`, or the
+knots' own range when the curve has Maya's `knots`), **not** `[0, 1]` —
+unless you pass `uniform=True`, which switches to arc-length
+parameterisation where equal steps in `u` are equal steps *along* the curve.
 
 ```python
 from cgmath.geometry import NurbsCurveData

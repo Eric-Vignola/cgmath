@@ -63,7 +63,7 @@ for it) and a **CHEATSHEET** (every public name, with a runnable example).
 [`REFERENCE.md`](https://github.com/Eric-Vignola/cgmath/blob/main/REFERENCE.md), a flat API listing, also sits in this
 directory. It is generated from the live code by `gen_reference.py` (kept
 outside this repository, in the maintainer's own tools folder; the
-repository's `tools/` holds only the Maya fixture generator): every public
+repository's `tools/` holds only the Maya fixture generators): every public
 name with its real signature and first docstring line.
 
 ---

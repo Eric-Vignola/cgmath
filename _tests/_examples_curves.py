@@ -106,7 +106,7 @@ def curve_sample() -> CurveSampleData:
 
 
 def patch() -> NurbsSurfaceData:
-    """a tube closed in u, open in v, every setting changed"""
+    """a tube closed in u, open in v, uneven knots both ways, every setting changed"""
     return NurbsSurfaceData(
         points             = tube(),
         degree_u           = 2,
@@ -119,6 +119,8 @@ def patch() -> NurbsSurfaceData:
         registered_u       = True,
         registered_v       = True,
         arc_length_samples = 300,
+        knots_u            = np.array([-1.5, 0.0, 1.0, 1.5, 3.0, 4.0, 4.5, 6.0, 7.0]),
+        knots_v            = np.array([0.0, 0.0, 0.0, 2.5, 6.0, 6.0, 6.0]),
     )
 
 

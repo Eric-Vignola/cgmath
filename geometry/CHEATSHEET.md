@@ -27,7 +27,7 @@ Concepts, conventions and the file map live in [`README.md`](README.md).
 | [`skin_weights` — `SkinData`, `SkinList`, `CompactSkinData`](#skin_weights--skindata-skinlist-compactskindata) | dense weights, cleanup, influence editing, smoothing, top-k |
 | [`pack` — UV island packing](#pack--uv-island-packing) | `UVData.pack`, `pack_islands`, resolution / padding / rotations |
 | [`bspline` — curves](#bspline--curves) | knot space, periodic, `from_edit_points`/`fit`, stacked ends, `rebuild`, arc length, basis, `sample()` |
-| [`bspline_patch` — surfaces](#bspline_patch--surfaces) | tensor products, `compute`/`evaluate`, `sample`, `raycast`, area |
+| [`bspline_patch` — surfaces](#bspline_patch--surfaces) | tensor products, `knots_u`/`knots_v` (Maya's knots), `compute`/`evaluate`, `sample`, `raycast`, area |
 | [`_bilinear_surface` — quad-aware surface queries](#_bilinear_surface--quad-aware-surface-queries) | `integrate`, `sample`, `remap`, `raycast`, the `MeshData` wrappers |
 | [`sdf` — signed distance fields, functional API](#sdf--signed-distance-fields-functional-api) | `make_grid`, `eval_*`, CSG, `dual_marching_cubes` |
 | [`sdf` — signed distance fields, OOP API](#sdf--signed-distance-fields-oop-api) | `SDFSphere` / `SDFBox` / `SDFCylinder`, `DMCField` |
@@ -1854,7 +1854,10 @@ Tool builds, which is also the spline IK curve `ikHandle` builds with
 spaced by the distance between the points (kept in `knots`), and an open
 curve gets `points + degree - 1` control points. Those distances are the
 curve's parameters, as in Maya: `kv` is Maya's knots and `domain` its
-`knotDomain`.
+`knotDomain`. Knots given by hand are checked on first use: finite, never
+decreasing, a range longer than zero, and no value repeated more than
+`degree` times (the curve would come apart there); others raise
+`ValueError`.
 
 `fit()` does the same to an existing curve, in place, and returns each
 point's `u`: in order, each on its own stretch of the curve. On a smooth
@@ -1987,9 +1990,9 @@ print(curve.get_length(fast=True, samples=500))
 
 ### `uniform=True` — arc-length parameterization
 
-With `uniform=False` (default) `u` runs `[0, max_param]` in native knot
-space. With `uniform=True` `u` runs `[0, 1]` and equal steps in `u` are
-equal steps *along the curve*.
+With `uniform=False` (default) `u` runs `[min_param, max_param]`: the
+knots' own range, or `[0, spans]` without `knots`. With `uniform=True` `u`
+runs `[0, 1]` and equal steps in `u` are equal steps *along the curve*.
 
 ```python
 arc  = NurbsCurveData(points=cvs.copy(), degree=3, periodic=False, uniform=True)
@@ -2154,6 +2157,47 @@ print(patch.cv.shape)                        # (5, 5, 3)
 print(patch.kv_u.shape, patch.kv_v.shape)
 ```
 
+### Knots — `knots_u` / `knots_v`, Maya's layout
+
+A Maya surface's knots load as they are: `MFnNurbsSurface.knotsInU()` and
+`knotsInV()`, the layout `kv_u` / `kv_v` give back (count + degree - 1
+values on an open direction, count + 2 * degree - 1 on a periodic one,
+count without the periodic wrap). Each takes the same checks and meaning as
+`NurbsCurveData.knots`: its range is that direction's parameter range, Maya's
+`knotDomainInU` / `knotDomainInV`, so a `(u, v)` names the same point here
+and in Maya, tangents are derivatives with respect to it, and `sample()` and
+`raycast()` give parameters in it. A periodic direction rebuilds the knots
+outside its range from the ones inside, so the seam stays smooth.
+`open_u()` / `close_u()` (`_v`) drop that direction's knots.
+
+No value may repeat more than the direction's degree times, so a degree-1
+direction's knots, its rows' parameters, must increase (a repeated one
+raises `ValueError`). There, as on any knot where a direction is only C0,
+the tangent is the span above's. Maya's `getDerivativesAtParam` gives
+either span's there: the side of its previous query (the span below's along
+an ascending sweep). A knot repeated `degree` times in a direction of degree
+2 or more creases the patch, and `sample()` searches each smooth piece
+between such creases on its own, so a closest point on a crease is exact.
+
+```python
+sheet = NurbsSurfaceData(
+    points     = grid,                                 # the 5 x 5 saddle above
+    degree_u   = 3,
+    degree_v   = 1,
+    periodic_u = False,
+    periodic_v = False,
+    knots_u    = [0.0, 0.0, 0.0, 1.2, 3.0, 3.0, 3.0],  # knotsInU()
+    knots_v    = [0.0, 0.5, 2.0, 2.5, 4.0],            # knotsInV(): one per row
+)
+print(sheet.domain_u, sheet.domain_v)  # (0.0, 3.0) (0.0, 4.0): knotDomainInU / InV
+print(sheet.kv_v)                      # [0.  0.5 2.  2.5 4. ]
+p, du, dv = sheet.compute(1.2, 2.0)    # the point on a knot line of each direction
+```
+
+`knots_u` and `knots_v` are the last fields, after `arc_length_samples`,
+and each is saved only when set; `==` compares them (the same control points
+on other knots are another surface).
+
 ### Evaluate: positions and partial derivatives
 
 ```python
@@ -2206,7 +2250,9 @@ assert np.allclose(b @ flat_cv, patch.evaluate(uu, vv))
 
 Each query's closest point on the patch: its edges and corners, the knot
 lines a degree-1 patch folds on (a row repeated within roundoff makes a
-span of no width, one more such line), poles (an edge collapsed to one
+span of no width, one more such line), the creases of knots repeated
+`degree` times (each smooth piece between them searched on its own),
+poles (an edge collapsed to one
 point as on a sphere, or nearly, as a small hole or a tapered tip) and a
 patch collapsed onto a curve (every row the same) included. The 8 samples of a
 coarse grid nearest to a query (`initial_samples` per control point per

@@ -224,6 +224,23 @@ class TestBSplinePatchTypes(_Same):
         with self.assertRaises(ValueError):
             NurbsSurfaceData(points=grid()[0], degree_u=3, degree_v=3, periodic_u=False, periodic_v=False)
 
+    def test_knots_convert(self):
+        patch = NurbsSurfaceData(
+            points     = grid(),
+            degree_u   = 3,
+            degree_v   = 1,
+            periodic_u = False,
+            periodic_v = False,
+            knots_u    = [0, 0, 0, 1, 2, 3, 3, 3],
+            knots_v    = np.arange(6, dtype=np.int32),
+        )
+        self.assertArray(patch.knots_u, np.float64, (8,))
+        self.assertArray(patch.knots_v, np.float64, (6,))
+        self.assertIsNone(NurbsSurfaceData(grid(), 3, 3, False, False).knots_u)
+
+        with self.assertRaises(ValueError):
+            patch.knots_u = np.zeros((2, 4))
+
     def test_round_trips(self):
         patches = {
             "open": NurbsSurfaceData(
@@ -241,6 +258,15 @@ class TestBSplinePatchTypes(_Same):
             ),
             "2d": NurbsSurfaceData(
                 points=grid()[..., :2], degree_u=3, degree_v=3, periodic_u=False, periodic_v=True
+            ),
+            "knots": NurbsSurfaceData(
+                points     = grid(),
+                degree_u   = 3,
+                degree_v   = 1,
+                periodic_u = True,
+                periodic_v = False,
+                knots_u    = np.array([-2.0, -0.5, 0.0, 0.5, 2.0, 3.0, 4.5, 6.0, 6.5, 7.0, 8.5]),
+                knots_v    = np.array([0.0, 0.25, 1.0, 1.5, 3.0, 3.25]),
             ),
         }
         for tag, patch in patches.items():
@@ -271,6 +297,10 @@ class TestBSplinePatchTypes(_Same):
                 periodic_v = False,
             )
             self.assertFalse(patch == other)
+
+        # nor other knots
+        knots = NurbsSurfaceData(grid(), 3, 3, False, False, knots_u=[0, 0, 0, 0.5, 2, 3, 3, 3.0])
+        self.assertFalse(patch == knots)
 
     def test_normals(self):
         queries = np.array([[0.0, 0.0, 2.0], [1.0, -2.0, 1.0]])

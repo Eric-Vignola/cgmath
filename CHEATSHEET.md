@@ -603,8 +603,9 @@ re-exported at `cgmath.geometry` level.
 
 ## 19. Sample a B-spline
 
-`u` runs `[0, max_param]` in knot space unless you pass `uniform=True`,
-which switches to arc length on `[0, 1]`.
+`u` runs `[min_param, max_param]` in knot space (`[0, spans]`, or the
+knots' own range when the curve has Maya's `knots`) unless you pass
+`uniform=True`, which switches to arc length on `[0, 1]`.
 
 ```python
 from cgmath.geometry import NurbsCurveData

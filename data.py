@@ -2036,8 +2036,8 @@ class Data:
         return []
 
     def match(self, *args, exact: bool = True) -> bool:
-        """returns True if name matches any arguments"""
-        if not hasattr(self, "name"):
+        """returns True if name matches any arguments; False without a name (None or no field)"""
+        if getattr(self, "name", None) is None:
             return False
 
         matched = []

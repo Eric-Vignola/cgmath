@@ -341,6 +341,11 @@ class TestOldPickles(unittest.TestCase):
         self.assertEqual((patch.degree_u, patch.degree_v), (3, 3))
         self.assertEqual((patch.periodic_u, patch.periodic_v), (False, True))
 
+        # the knots the curve and the surface gained since load at their defaults
+        self.assertIsNone(curve.knots)
+        self.assertIsNone(patch.knots_u)
+        self.assertIsNone(patch.knots_v)
+
         rig = HierarchyData.load(self.path("test_hierarchy.legacy_parent_node.pkl"))
         self.assertIs(type(rig), HierarchyData)
         self.assertEqual(len(rig), 12)

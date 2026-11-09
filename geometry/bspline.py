@@ -91,8 +91,10 @@ class NurbsCurveData(ShapeData):
         here and on a Maya curve built from ``points`` and ``kv``, and
         tangents are derivatives with respect to it. Periodic curves
         rebuild the knots outside that range from the ones inside it, so
-        the seam stays smooth. Set by ``fit()``, cleared by ``open()`` and
-        ``close()``; call ``invalidate()`` after changing it by hand.
+        the seam stays smooth. No value may repeat more than ``degree``
+        times: the curve would come apart there. Set by ``fit()``, cleared
+        by ``open()`` and ``close()``; call ``invalidate()`` after changing
+        it by hand.
     """
 
     points:             Array(np.float64, "N", "D") = numpy_array(np.zeros((0, 3)))
@@ -1567,8 +1569,10 @@ class NurbsCurveData(ShapeData):
         cumsum   = np.concatenate([[0], np.cumsum(kv)])
         greville = (cumsum[d + 1 : d + 1 + n] - cumsum[1 : 1 + n]) / d
 
-        # For open curves, clamp endpoints
+        # For open curves, clamp endpoints; unclamped knots put the inner
+        # ones near an end outside the range, where the curve is not
         if not self.periodic:
+            greville     = np.clip(greville, 0.0, float(self._max_param))
             greville[0]  = 0.0
             greville[-1] = float(self._max_param)
 
@@ -1911,7 +1915,7 @@ class NurbsCurveData(ShapeData):
 # ------------------------------- Knots and fit ------------------------------- #
 
 
-def _knot_vector(knots, count, degree, periodic):
+def _knot_vector(knots, count, degree, periodic, kind="curve"):
     """
     Knot vector in scipy's layout from knots in Maya's layout, and the
     knots' own parameter range.
@@ -1932,12 +1936,23 @@ def _knot_vector(knots, count, degree, periodic):
         Degree of the curve.
     periodic : bool
         Whether the curve is closed.
+    kind : str
+        What the knots shape, as errors name it: ``"curve"``, or
+        ``"direction"`` for one direction of a patch.
 
     Returns
     -------
     tuple
         (knot vector (count + degree + 1,) for open curves or
         (count + 2 * degree + 1,) for periodic ones, range start, range end).
+
+    Raises
+    ------
+    ValueError
+        A degree under 1, too few control points for the degree, the wrong
+        count, knots that are not finite or that decrease, a range of
+        length zero, and a value repeated more than ``degree`` times: the
+        curve comes apart there (scipy's ``derivative()`` refuses it too).
     """
     knots = np.asarray(knots, dtype=np.float64).ravel()
     if degree < 1:
@@ -1945,9 +1960,9 @@ def _knot_vector(knots, count, degree, periodic):
 
     spans = count if periodic else count - degree
     if spans < (degree if periodic else 1):
-        kind = "periodic" if periodic else "open"
+        form = "a periodic" if periodic else "an open"
         raise ValueError(
-            f"{count} control points are too few for a {kind} curve of "
+            f"{count} control points are too few for {form} {kind} of "
             f"degree {degree}"
         )
 
@@ -1957,6 +1972,8 @@ def _knot_vector(knots, count, degree, periodic):
             f"{count} control points of degree {degree} take {size} knots, "
             f"got {knots.shape[0]}"
         )
+    if not np.isfinite(knots).all():
+        raise ValueError("knots must be finite")
     if np.any(np.diff(knots) < 0.0):
         raise ValueError("knots must never decrease")
 
@@ -1970,6 +1987,16 @@ def _knot_vector(knots, count, degree, periodic):
         full = _knots_from_edges(knots[degree - 1 : degree + spans], degree, True)
     else:
         full = np.concatenate([knots[:1], knots, knots[-1:]])
+
+    # A value repeated more than degree times leaves a basis function with
+    # no span: the curve comes apart there (Maya's layout is full[1:-1])
+    inner = full[1:-1]
+    runs  = np.diff(np.flatnonzero(np.r_[True, inner[1:] != inner[:-1], True]))
+    if runs.max() > degree:
+        raise ValueError(
+            f"knots must not repeat a value more than degree ({degree}) "
+            f"times: the {kind} would come apart there; got {runs.max()}"
+        )
     return full, float(lo), float(hi)
 
 

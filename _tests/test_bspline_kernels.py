@@ -9,7 +9,11 @@ best-fit parameter repair evaluates the curve with, is checked against
 scipy's curve derivatives. ``_bezier_pieces``, which cuts a curve into the
 pieces sample() searches, is checked to end each piece exactly on the
 curve's own spots, and ``_piece_closest``, which searches each piece, to
-stop Newton's method at each root.
+stop Newton's method at each root. ``_evaluate_bspline_surface``,
+``_evaluate_bspline_surface_derivatives`` and
+``_raycast_bspline_surface_parallel``, which a patch evaluates and
+raycasts with, are checked on uneven knots: against scipy, and a ray
+landing where it was cast.
 """
 
 import unittest
@@ -261,6 +265,83 @@ class TestCurveDerivativesKernel(unittest.TestCase):
             cv = rng.normal(size=(6, 3))
             with self.subTest(d=d):
                 self.assert_matches_scipy(kv, d, np.vstack([cv, cv[:d]]))
+
+
+# A clamped quadratic knot vector with uneven spans, for a patch's v
+UNEVEN_QUADRATIC = np.r_[[0.0] * 3, 0.4, 1.9, 2.0, 3.6, [4.2] * 3]
+
+
+def height_field(kv_u, d_u, kv_v, d_v, seed=3):
+    """
+    the control points of a gently bumpy sheet over xy, its CVs climbing x
+    along u and y along v: one hit for a ray straight down, anywhere on it
+    """
+    rng = np.random.default_rng(seed)
+    n_u = len(kv_u) - d_u - 1
+    n_v = len(kv_v) - d_v - 1
+    x, y = np.meshgrid(np.arange(n_u, dtype=float), np.arange(n_v, dtype=float), indexing="ij")
+    return np.stack([x, y, rng.uniform(-0.3, 0.3, (n_u, n_v))], axis=-1)
+
+
+def scipy_surface(kv_u, d_u, kv_v, d_v, cvs, u, v, nu=0, nv=0):
+    """a tensor-product patch, or its partial derivative, at each (u, v), from scipy"""
+    bu = BSpline(kv_u, np.eye(cvs.shape[0]), d_u)(u, nu)
+    bv = BSpline(kv_v, np.eye(cvs.shape[1]), d_v)(v, nv)
+    return np.einsum("ki,kj,ijd->kd", bu, bv, cvs)
+
+
+class TestSurfaceKernelsOnAnyKnots(unittest.TestCase):
+    """
+    The surface kernels NurbsSurfaceData evaluates, raycasts and seeds its
+    closest point search with find each parameter's knot span on any knot
+    vector, as the curve kernels do (_find_span), not floor(u), which only
+    holds on unit-spaced knots: on uneven ones, positions and derivatives
+    match scipy's, and a ray lands on the spot it was cast at.
+    """
+
+    KNOTS_U = (NON_UNIFORM, DOUBLE_KNOT, TRIPLE_KNOT)
+
+    def test_positions_and_derivatives_match_scipy(self):
+        for kv_u in self.KNOTS_U:
+            cvs = height_field(kv_u, 3, UNEVEN_QUADRATIC, 2)
+            u, v = np.meshgrid(
+                np.r_[inside_domain(kv_u, 3, 11), domain_knots(kv_u, 3)],
+                np.r_[inside_domain(UNEVEN_QUADRATIC, 2, 7), domain_knots(UNEVEN_QUADRATIC, 2)],
+                indexing = "ij",
+            )
+            u, v = u.ravel(), v.ravel()
+
+            points = _bspline._evaluate_bspline_surface(u, v, kv_u, UNEVEN_QUADRATIC, cvs, 3, 2)
+            pts, tangents_u, tangents_v = _bspline._evaluate_bspline_surface_derivatives(
+                u, v, kv_u, UNEVEN_QUADRATIC, cvs, 3, 2
+            )
+            for got, order in ((points, (0, 0)), (pts, (0, 0)), (tangents_u, (1, 0)), (tangents_v, (0, 1))):
+                want = scipy_surface(kv_u, 3, UNEVEN_QUADRATIC, 2, cvs, u, v, *order)
+                np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-12, err_msg=f"{kv_u} {order}")
+
+    def test_a_ray_lands_where_it_was_cast(self):
+        for kv_u in self.KNOTS_U:
+            cvs   = height_field(kv_u, 3, UNEVEN_QUADRATIC, 2)
+            max_u = float(kv_u[-1])
+            max_v = float(UNEVEN_QUADRATIC[-1])
+            u, v = np.meshgrid(inside_domain(kv_u, 3, 9), inside_domain(UNEVEN_QUADRATIC, 2, 7), indexing="ij")
+            u, v = u.ravel(), v.ravel()
+            spots = scipy_surface(kv_u, 3, UNEVEN_QUADRATIC, 2, cvs, u, v)
+
+            # the coarse grid the kernel seeds each ray from
+            grid_u, grid_v = np.meshgrid(np.linspace(0, max_u, 60), np.linspace(0, max_v, 60), indexing="ij")
+            grid_u, grid_v = grid_u.ravel(), grid_v.ravel()
+            grid_pts = scipy_surface(kv_u, 3, UNEVEN_QUADRATIC, 2, cvs, grid_u, grid_v)
+
+            down = np.tile([0.0, 0.0, -1.0], (len(u), 1))
+            u_out, v_out, t_out, hit = _bspline._raycast_bspline_surface_parallel(
+                spots + [0.0, 0.0, 5.0], down, grid_u, grid_v, grid_pts, kv_u, UNEVEN_QUADRATIC,
+                cvs, 3, 2, max_u, max_v, False, False, True, True, 30, 1e-12, 1e-6,
+            )
+            self.assertTrue(hit.all(), kv_u)
+            np.testing.assert_allclose(u_out, u,   rtol=0, atol=1e-8, err_msg=str(kv_u))
+            np.testing.assert_allclose(v_out, v,   rtol=0, atol=1e-8, err_msg=str(kv_u))
+            np.testing.assert_allclose(t_out, 5.0, rtol=0, atol=1e-8, err_msg=str(kv_u))
 
 
 class TestBezierPiecesKernel(unittest.TestCase):
