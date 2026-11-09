@@ -341,6 +341,8 @@ class TestClipAlone(_Files):
         self.assertEqual(back.take, "walk")
         self.assertEqual((back.start_frame, back.frame_count, back.fps), (START, FRAMES, FPS))
         self.assertEqual(structure(back), structure(clip))
+        self.assertEqual(back.keyed.tolist(), clip.keyed.tolist())  # a constant channel is one key in the file
+        self.assertIn(False, clip.keyed.tolist())
         self.assertEqual(back["hips"].label, "hello")
         want = layout(clip)
         read = layout(back)

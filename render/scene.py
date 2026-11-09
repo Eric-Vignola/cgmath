@@ -1571,7 +1571,7 @@ class Object(TransformData):
 
         Args:
             clip: A :class:`ClipData` holding the animation, or a
-                :class:`ClipList` of one take.
+                :class:`ClipList`, whose active take plays.
             output: Output file path, or a ``{frame}`` pattern for sequences.
             resolution: ``(width, height)``.  Defaults to :attr:`resolution`.
             samples_per_pixel: MSAA count.  Defaults to
@@ -1586,7 +1586,7 @@ class Object(TransformData):
 
         Raises:
             ValueError: If this Object has no skin to animate, or if *clip*
-                is a ClipList of no take or of more than one.
+                is a ClipList of no take.
             TypeError: If *clip* is neither a ClipData nor a ClipList.
 
         Note:
@@ -2664,8 +2664,8 @@ class Scene(HierarchyData):
 
         Args:
             clip: A :class:`ClipData` holding the animation, or a
-                :class:`ClipList` of one take.  Its joints are matched to
-                each Object's skin by name, once, up front.
+                :class:`ClipList`, whose active take plays.  Its joints are
+                matched to each Object's skin by name, once, up front.
             output_pattern: Output filename.  Image sequences support a
                 ``{frame[:NNd]}`` placeholder and get one if absent.
             fit: ``"auto"`` (default) samples poses across the clip and
@@ -2695,7 +2695,7 @@ class Scene(HierarchyData):
             ValueError: If the scene holds no visible skinned Objects, if the
                 clip has no frames, if an Object is skinned to joints the clip
                 does not hold, if *fit* is not one of the two options, or if
-                *clip* is a ClipList of no take or of more than one.
+                *clip* is a ClipList of no take.
             TypeError: If *clip* is neither a ClipData nor a ClipList.
         """
         clip          = _one_take(clip)
@@ -3118,31 +3118,25 @@ class Scene(HierarchyData):
 
 
 def _one_take(clip):
-    """the one take ``animate`` plays: a ClipData as it is, a ClipList of one
-    take that take
+    """the one take ``animate`` plays: a ClipData as it is, a ClipList's
+    active take (``clips.active``, the first take until set)
 
     Raises
     ------
     ValueError
-        A ClipList of no take, or of two or more, naming them and how to
-        pick one.
+        A ClipList of no take.
     TypeError
         Anything else, a take's name included.
     """
     from cgmath.hierarchy import ClipData, ClipList
 
     if isinstance(clip, ClipList):
-        if len(clip) == 1:
-            return clip[0]
         if not len(clip):
             raise ValueError("animate: the ClipList holds no take")
-        raise ValueError(
-            f"animate plays one take, and the ClipList holds {len(clip)}: {clip.take}; "
-            f"pick one, animate(clips[{clip.take[0]!r}])"
-        )
+        return clip.active
     if isinstance(clip, ClipData):
         return clip
-    raise TypeError(f"animate plays a ClipData or a ClipList of one take, not {type(clip).__name__}: {clip!r}")
+    raise TypeError(f"animate plays a ClipData or a ClipList's active take, not {type(clip).__name__}: {clip!r}")
 
 
 def _validate_samples_per_pixel(

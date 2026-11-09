@@ -254,6 +254,7 @@ fps
 frame                              
 frame_count                        
 frames                             
+keyed                              (N,) bool, one per node: True where a channel of the node is
 start_frame                        
 take                               the name of the take the clip holds, "" when built by hand
 ```
@@ -283,7 +284,7 @@ to_dict(self) -> 'dict'
 
 #### `ClipList(DataList)`
 
-Every take of a file: one :class:`ClipData` per take, in file order.
+Every take of a file, one :class:`ClipData` each, over one skeleton.
 
 ```text
 ClipList(iterable=None)
@@ -292,6 +293,7 @@ ClipList(iterable=None)
 Properties:
 
 ```text
+active                             the active take, a ClipData: the one set, while it is in the list,
 draw_style                         ``draw_style`` of every take, a PerTake; a write reaches every take or none
 ds                                 ``draw_style`` of every take, a PerTake; a write reaches every take or none
 end_frame                          ``end_frame`` of every take, a PerTake
@@ -309,6 +311,7 @@ joint_orient_z                     ``joint_orient_z`` of every take, a PerTake; 
 jox                                ``joint_orient_x`` of every take, a PerTake; a write reaches every take or none
 joy                                ``joint_orient_y`` of every take, a PerTake; a write reaches every take or none
 joz                                ``joint_orient_z`` of every take, a PerTake; a write reaches every take or none
+keyed                              ``keyed`` of every take, a PerTake
 m                                  ``matrix`` of every take, a PerTake; a write reaches every take or none
 matrix                             ``matrix`` of every take, a PerTake; a write reaches every take or none
 node_type                          ``node_type`` of every take, a PerTake; a write reaches every take or none
@@ -379,12 +382,16 @@ Methods:
 ```text
 add_delta(self, delta, by: 'str' = 'index', translate: 'bool' = True) -> "'ClipList'"
     every take's :meth:`ClipData.add_delta`, with another ClipList's
+append(self, clip) -> 'None'
+    appends a take over the list's skeleton, the first take's, its
 get(self, take: 'str', default=None)
     the first take named ``take``, or ``default``
 get_delta(self, other, by: 'str' = 'index', translate: 'bool' = True) -> "'ClipList'"
     every take's :meth:`ClipData.get_delta`, against another
 index(self, value, start=0, stop=None) -> 'int'
     the position of the first take named ``value``, or of that clip,
+insert(self, index, clip) -> 'None'
+    inserts a take, as :meth:`append` admits one
 classmethod load_fbx(cls, filename, *args, **kwargs) -> "'ClipList'"
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, fps: 'float' = 24.0) -> "'ClipList'"
     every animation of a glb file, one :class:`ClipData` each
@@ -1005,7 +1012,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x0000025FF0ECA910>
+MISSING = <dataclasses._MISSING_TYPE object at 0x00000270FFE9E1D0>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -3501,7 +3508,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000025FBEE68A40>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x00000270D7EA85E0>, '...
 ```
 
 ## `cgmath.constraints`
