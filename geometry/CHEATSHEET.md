@@ -21,6 +21,7 @@ Concepts, conventions and the file map live in [`README.md`](README.md).
 | [Mutating ops — triangulate, quadrangulate, merge](#mutating-ops--triangulate-quadrangulate-merge) | rules objects, merge/detach, subdivide, smooth |
 | [`UVData` and `UVList`](#uvdata-and-uvlist) | projections, holes, layout, rasterising, channels |
 | [`MeshList`](#meshlist) | the mesh collection |
+| [`camera` and `light` — `CameraData`, `LightData`](#camera-and-light--cameradata-lightdata) | Maya's camera and light attributes as shapes under transforms |
 | [File loaders and savers](#file-loaders-and-savers) | OBJ round trip, and which GLB / FBX / USD entry points exist |
 | [`map` — `MapData` and `GeomSubsetData`](#map--mapdata-and-geomsubsetdata) | painted weight maps and component selections |
 | [`morph_target` — `MorphData` and `MorphList`](#morph_target--morphdata-and-morphlist) | sparse offsets, arithmetic, pruning |
@@ -1121,6 +1122,60 @@ print([m.name for m in meshes], [m.point_count for m in meshes])
 meshes.merge()        # weld each mesh in place
 print([m.point_count for m in meshes])
 ```
+
+---
+
+## `camera` and `light` — `CameraData`, `LightData`
+
+A camera and a light are shapes like a mesh: a record of Maya's own
+attributes, placed by the transform `parent_uuid` names, looking (a camera)
+or shining (a directional or spot light) down that transform's -Z, +Y up.
+The defaults are a fresh Maya 2025 camera's and light's (measured): 35 mm
+on a 1.41732 by 0.94488 inch film back, horizontal fit, clip planes 0.1 and
+10000 cm, orthographic width 10; a white light of intensity 1 with no
+decay, a spot's cone 40 degrees. The angle of view is derived as Maya's own
+query derives it (neither the camera scale nor the lens squeeze enters it,
+measured). `camera_scale` and a spot's `dropoff` are Maya's, which FBX
+cannot hold (Maya's own export drops them too), and FBX holds an
+orthographic width for an orthographic camera only. A light is a point, a
+directional or a spot light: Maya's ambient, area and volume lights are
+none of them.
+
+```python
+from cgmath.geometry import CameraData, CameraList, LightData, LightList
+from cgmath.hierarchy import HierarchyData, TransformData
+
+rig = HierarchyData()
+rig.append(TransformData("shotCam", translate=(0.0, 150.0, 400.0), rotate=(-15.0, 0.0, 0.0)))
+rig.append(TransformData("key", translate=(200.0, 300.0, 200.0), rotate=(-45.0, 45.0, 0.0)))
+
+camera = CameraData(name="shotShape", focal_length=50.0, parent_uuid=rig["shotCam"].uuid)
+print(round(camera.angle_of_view, 3), round(camera.vertical_angle_of_view, 3))  # horizontal, vertical, in degrees
+print(camera.transform(rig).name, np.allclose(camera.world_matrix(rig), rig["shotCam"].world_matrix))
+
+key = LightData(name="keyShape", kind="spot", intensity=2.5, decay_rate=2, cone_angle=50.0, penumbra_angle=5.0,
+                parent_uuid=rig["key"].uuid)
+print(key.decay, (-key.world_matrix(rig)[2, :3]).round(3))  # quadratic, and where it shines
+
+cameras = CameraList([camera, CameraData(name="top", orthographic=True, orthographic_width=500.0)])
+lights  = LightList([key, LightData(name="sunShape", kind="directional", intensity=0.5)])
+path    = cameras.save(os.path.join(tmp, "cameras.json"))
+print(CameraList.load(path) == cameras, [c.film_fit for c in cameras], [x.kind for x in lights])
+
+try:
+    LightData(kind="ambient")  # point, directional or spot
+except ValueError as error:
+    print(error)
+```
+
+`cgmath.formats.load_fbx` reads a file's cameras and lights as these, on
+their nodes, and `save_fbx(..., cameras=, lights=)` writes them as Maya's
+own exporter does: the node turned to FBX's camera and light axes with a
+post rotation, the focal length and film back as they are, the orthographic
+width over 30 as the ortho zoom, a light's intensity times 100, a spot's
+cone and penumbra as the inner and outer angles (the hierarchy cheatsheet's
+`ClipList` section, and `formats/_load.py`). The render package's `Camera`
+and `Light` are `TransformData` subclasses still, to become these.
 
 ---
 

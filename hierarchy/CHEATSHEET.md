@@ -1803,7 +1803,8 @@ by position, a name two stacks share told apart as `idle_1`, with one
 warning), the stack the file marks active the active take, else the
 first. `ClipData.load_fbx(path)` is that active take alone, and
 `cgmath.formats.load_fbx(path)` gives the same list as its `clip`, the
-meshes, skins and UV sets beside it. A file holding no take gives an
+meshes, skins, UV sets, cameras and lights beside it, each shape on its
+node. A file holding no take gives an
 empty list (`ClipData.load_fbx` raises). `ClipList.load_glb(path)` reads
 every glTF animation from one parse. Neither takes a take argument: pick
 a take from the list. `ClipList.load(path)` routes by extension.
