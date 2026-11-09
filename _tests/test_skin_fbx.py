@@ -117,7 +117,8 @@ class TestReading(FbxSkinTest):
         self.assertEqual(len(data), 1)
         skin = data[0]
 
-        self.assertEqual(skin.name, "body_geo")
+        self.assertEqual(skin.name, "skin")  # the deformer's name; the mesh is named by uuid
+        self.assertIsNotNone(skin.mesh_uuid)
         self.assertEqual(skin.influences, ["root", "tip"])
         np.testing.assert_allclose(skin.weights, [[1, 0], [1, 0], [0, 1], [0, 1]])
 
@@ -165,9 +166,15 @@ class TestReading(FbxSkinTest):
             root = add_joint(scene, "root")
             bind(scene, mesh, [(root, {0: 1.0, 1: 1.0})])
 
-        data = load_fbx(self.write("partial.fbx", populate))
+        path = self.write("partial.fbx", populate)
+        data = load_fbx(path)
 
-        self.assertEqual(data.name, ["body_geo"])
+        self.assertEqual(len(data), 1)
+        # by the node's name or the mesh's own; the meshes there are listed by their own
+        self.assertEqual(SkinData.load_fbx(path, name="body_geo").influences, ["root"])
+        self.assertEqual(SkinData.load_fbx(path, name="body_geoShape").influences, ["root"])
+        with self.assertRaisesRegex(ValueError, r"Skin of mesh 'prop_geo' not found; available: \['body_geoShape'\]"):
+            SkinData.load_fbx(path, name="prop_geo")
 
     def test_two_skinned_meshes_both_come_back(self):
         def populate(scene):
@@ -177,9 +184,13 @@ class TestReading(FbxSkinTest):
             bind(scene, first, [(root, {0: 1.0, 1: 1.0})])
             bind(scene, second, [(root, {0: 1.0, 1: 1.0})])
 
-        data = load_fbx(self.write("two.fbx", populate))
+        path = self.write("two.fbx", populate)
+        data = load_fbx(path)
 
-        self.assertEqual(sorted(data.name), ["a_geo", "b_geo"])
+        self.assertEqual(len(data), 2)
+        self.assertEqual(len({skin.mesh_uuid for skin in data}), 2)
+        for mesh in ("a_geo", "b_geo"):
+            self.assertEqual(SkinData.load_fbx(path, name=mesh).influences, ["root"])
 
     def test_rows_match_the_meshs_control_point_count(self):
         skin = load_fbx(self.simple())[0]
@@ -276,10 +287,11 @@ class TestOneConvention(FbxSkinTest):
         self.assertIsInstance(rig, hierarchy.HierarchyData)
         self.assertEqual(hierarchy.load(path).name, rig.name)
         self.assertEqual(rig.namespace[-1], "ns")
-        self.assertEqual(skin_weights.load(path).name, ["ns:body_geo"])
-        self.assertEqual(SkinList.load(path).name, ["ns:body_geo"])
-        self.assertEqual([m.name for m, _ in mesh.load(path)], ["ns:body_geo"])
-        self.assertEqual(MeshList.load(path).name, ["ns:body_geo"])
+        self.assertEqual(skin_weights.load(path).name, ["skin"])
+        self.assertEqual(SkinList.load(path).name, ["skin"])
+        self.assertEqual(SkinList.load(path)[0].influences, ["ns:root", "ns:tip"])
+        self.assertEqual([m.name for m, _ in mesh.load(path)], ["ns:body_geoShape"])
+        self.assertEqual(MeshList.load(path).name, ["ns:body_geoShape"])
 
     def test_strip_the_rig_then_its_skins(self):
         from cgmath.geometry.deform import SkinDeformData
@@ -291,7 +303,7 @@ class TestOneConvention(FbxSkinTest):
         rig.strip_namespace()
         skins.strip_namespace()
 
-        self.assertEqual(skins.name, ["body_geo"])
+        self.assertEqual(skins.name, ["skin"])
         self.assertEqual(skins[0].influences, ["root", "tip"])
 
         points = np.array(
@@ -306,7 +318,8 @@ class TestGuards(FbxSkinTest):
     """these run with or without the sdk"""
 
     def test_a_missing_sdk_raises_import_error(self):
-        with patch("cgmath.geometry.skin_weights.fbx", None):
+        # every fbx reader opens its file with the sdk cgmath.hierarchy holds
+        with patch("cgmath.hierarchy.hierarchy.FBX", None):
             with self.assertRaises(ImportError):
                 load_fbx("whatever.fbx")
 

@@ -19,7 +19,7 @@ import unittest
 import numpy as np
 from cgmath.formats import load_fbx, save_fbx
 from cgmath.formats._fbx_io import load_sdk, open_fbx, typed
-from cgmath.geometry import MeshData, SkinData
+from cgmath.geometry import mesh as mesh_module, MeshData, skin_weights as skin_module, SkinData
 from cgmath.geometry.mesh import MeshList, UVData, UVList
 from cgmath.geometry.skin_weights import SkinList
 from cgmath.hierarchy import ClipData, ClipList, HierarchyData, TransformData, generate_uuid
@@ -1941,6 +1941,82 @@ class _Mapped(_Skinned):
                 x, y = getattr(a, field), getattr(b, field)
                 self.assertEqual(x.dtype, y.dtype, f"{a.name} {field}")
                 np.testing.assert_array_equal(x, y, err_msg=f"{a.name} {field}")
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestShapeRoutes(_Mapped):
+    """the mesh, UV and skin classes' fbx routes read what load_fbx reads"""
+
+    def test_mesh_routes(self):
+        path = self.path("bundle.fbx")
+        save_fbx(path, **bundle())
+        held = load_fbx(path)
+        self.assertEqual(MeshList.load_fbx(path), held.meshes)
+        self.assertEqual(MeshData.load_fbx(path), held.meshes[0])
+        self.assertEqual(MeshData.load_fbx(path, name="body"), held.meshes[0])
+        self.assertIsNotNone(MeshData.load_fbx(path).parent_uuid)  # its node's, in the hierarchy load_fbx gives
+        with self.assertRaisesRegex(ValueError, r"^Mesh 'nope' not found; available: \['body'\]$"):
+            MeshData.load_fbx(path, name="nope")
+        pairs = mesh_module.load_fbx(path)
+        self.assertEqual([mesh for mesh, _ in pairs], list(held.meshes))
+        self.assertEqual(pairs[0][1], UVList())  # body() has no UV set
+        # load() routes an fbx here
+        self.assertEqual(MeshData.load(path), held.meshes[0])
+        self.assertEqual(MeshList.load(path), held.meshes)
+
+    def test_skin_routes(self):
+        path = self.path("bundle.fbx")
+        save_fbx(path, **bundle())
+        held = load_fbx(path)
+        self.assertEqual(SkinList.load_fbx(path), held.skins)
+        self.assertEqual(skin_module.load_fbx(path), held.skins)
+        self.assertEqual(SkinList.load(path), held.skins)
+        self.assertEqual(SkinData.load_fbx(path), held.skins[0])
+        self.assertEqual(SkinData.load_fbx(path, name="body"), held.skins[0])  # by the mesh's name
+        self.assertEqual(SkinData.load_fbx(path).name, "bodySkin")             # the deformer's
+        with self.assertRaisesRegex(ValueError, r"^Skin of mesh 'nope' not found; available: \['body'\]$"):
+            SkinData.load_fbx(path, name="nope")
+
+    def same_sets(self, got, want):
+        """``got`` the sets ``want`` holds, all on one mesh (each load mints
+        its own uuids, so the mesh is not compared across loads)"""
+        self.assertIsInstance(got, UVList)
+        self.assertEqual([uv.name for uv in got], [uv.name for uv in want])
+        self.assertEqual(len({uv.mesh_uuid for uv in got}), 1 if len(got) else 0)
+        for a, b in zip(got, want):
+            for field in ("points", "counts", "indices"):
+                np.testing.assert_array_equal(getattr(a, field), getattr(b, field), err_msg=f"{a.name} {field}")
+
+    def test_uv_routes_read_one_meshs_sets(self):
+        mesh = body()
+        path = self.path("mapped.fbx")
+        save_fbx(path, meshes=mesh, uvs=maps(mesh))
+        held = load_fbx(path)
+        self.same_sets(UVList.load_fbx(path), held.uvs)
+        self.same_sets(UVList.load_fbx(path, name="body"), held.uvs)
+        self.same_sets(UVList([UVData.load_fbx(path)]), held.uvs[:1])
+        self.assertEqual(UVData.load_fbx(path, channel=1).name, "lightmap")
+        self.same_sets(UVList([UVData.load_fbx(path, channel=1)]), held.uvs[1:])
+        with self.assertRaises(IndexError):
+            UVData.load_fbx(path, channel=2)
+        with self.assertRaisesRegex(ValueError, "^Mesh 'nope' not found"):
+            UVList.load_fbx(path, name="nope")
+        # the module reader pairs each mesh with its sets, from one load
+        pair_mesh, pair_sets = mesh_module.load_fbx(path)[0]
+        self.assertSameUVs(pair_sets, held.uvs, pair_mesh)
+
+    def test_routes_on_a_file_of_no_mesh(self):
+        path = self.path("rig.fbx")
+        skeleton().save_fbx(path)
+        self.assertEqual(MeshList.load_fbx(path),    MeshList())
+        self.assertEqual(SkinList.load_fbx(path),    SkinList())
+        self.assertEqual(mesh_module.load_fbx(path), [])
+        with self.assertRaisesRegex(RuntimeError, "^No meshes found in FBX file$"):
+            MeshData.load_fbx(path)
+        with self.assertRaisesRegex(RuntimeError, "^No meshes found in FBX file$"):
+            UVList.load_fbx(path)
+        with self.assertRaisesRegex(RuntimeError, "^No skinned meshes found in FBX file$"):
+            SkinData.load_fbx(path)
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")

@@ -18,9 +18,7 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 
 import numpy as np
 from cgmath.data import Array, Data, DataList
-from cgmath.formats._fbx_io import load_sdk, open_fbx
 from cgmath.formats.glb import load_model
-from cgmath.geometry.mesh import _walk_fbx_mesh_nodes
 from cgmath.geometry.utils import (
     balance_center_weights,
     blur,
@@ -28,19 +26,9 @@ from cgmath.geometry.utils import (
     pxr,
     subdivide_catmull_clark,
 )
-from cgmath.hierarchy import (
-    HierarchyData,
-    _fbx_axis_turn,
-    _fbx_check_axis_system,
-    _fbx_enum,
-    _fbx_units,
-    _glb_columns,
-    _walk_fbx,
-)
+from cgmath.hierarchy import HierarchyData, _glb_columns
 from scipy.sparse import coo_matrix
 
-# autodesk fbx sdk, None without it, or for a module named fbx that is not it
-fbx = load_sdk()
 
 JOINT_NAMES_ATTR = "skel:jointNames"
 SKIN_PRIM_TYPE   = "SkinWeights"
@@ -499,11 +487,21 @@ class SkinData(Data):
 
     @classmethod
     def load_fbx(cls, filename: str, name: str | None = None) -> "SkinData":
-        """returns a single SkinData from an fbx file (first skinned mesh if name is None)"""
-        skins = SkinList.load_fbx(filename)
-        if not skins:
+        """the skin of the first skinned mesh of an fbx file, or of the mesh
+        named ``name``, as :func:`cgmath.formats.load_fbx` reads it: named as
+        its deformer is, naming its mesh by ``mesh_uuid``, its influences the
+        joints' names. RuntimeError for a file with no skin, ValueError for a
+        name no skinned mesh has.
+        """
+        from cgmath.formats import load_fbx
+        from cgmath.geometry.mesh import _fbx_select
+
+        held = load_fbx(filename)
+        if not held.skins:
             raise RuntimeError("No skinned meshes found in FBX file")
-        return _one_skin(skins, name)
+        skinned = {skin.mesh_uuid: skin for skin in held.skins}
+        mesh    = _fbx_select(held, name, [m for m in held.meshes if m.uuid in skinned], "Skin of mesh")
+        return skinned[mesh.uuid]
 
     @staticmethod
     def conform(*objects: "SkinData") -> "SkinData":
@@ -931,11 +929,14 @@ class SkinList(DataList[SkinData]):
     @classmethod
     def load_fbx(cls, filename: str) -> "SkinList":
         """
-        Every skinned mesh of an fbx, in file order, named after its mesh.
-        Names and influences are as in the file; ``strip_namespace()``
-        removes namespaces afterwards.
+        Every skinned mesh's skin, in file order, as
+        :func:`cgmath.formats.load_fbx` reads them (:meth:`SkinData.load_fbx`);
+        empty for a file with none. Names and influences are as in the file;
+        ``strip_namespace()`` removes namespaces afterwards.
         """
-        return cls(skin for skin, _ in _read_skins_fbx(filename))
+        from cgmath.formats import load_fbx
+
+        return load_fbx(filename).skins or cls()
 
     @classmethod
     def load_glb(cls, filename: str) -> "SkinList":
@@ -986,156 +987,6 @@ def _dense_weights(vertex_count: int, columns: list) -> Tuple[np.ndarray, List[s
             np.add.at(weights, (indices, lookup[name]), values)
 
     return weights, influences
-
-
-def _fbx_matrix(matrix) -> np.ndarray:
-    """an ``FbxAMatrix`` as a row-vector 4x4
-
-    ``Get(row, column)`` already indexes the row-vector layout cgmath uses --
-    the translation lands in row 3 -- so nothing is transposed on the way in.
-    """
-    return np.array(
-        [[matrix.Get(row, col) for col in range(4)] for row in range(4)],
-        dtype=np.float64,
-    )
-
-
-def _read_skins_fbx(
-    filename:      str,
-    bind_matrices: bool            = False,
-    scale_factor:  Optional[float] = None,
-    axis_system:   Optional[str]   = None,
-) -> list:
-    """an fbx's skins as ``(SkinData, inverse bind matrices or None)`` pairs
-
-    Each ``SkinData`` is named after its mesh. Influences carry the names
-    ``HierarchyData.load_fbx`` gives the same file.
-    They are resolved through the ``FbxNode`` behind each cluster rather than
-    by name, because fbx lets two nodes share a name and a name lookup could
-    not then say which one a cluster meant.
-
-    Meshes carrying no skin deformer are left out, so the result is not
-    positionally parallel to ``cgmath.geometry.mesh.load_fbx``.
-
-    With *bind_matrices*, the second item is the ``(J, 4, 4)`` inverse bind
-    matrices the file authored for that mesh, ordered to the ``SkinData``'s
-    influences; without, it is ``None``. A rig read back out of an animated
-    file carries the take's pose rather than the pose the mesh was bound in,
-    so these are the only trustworthy source for it. ``render`` reads them;
-    the public loaders return a ``SkinList``.
-
-    The matrices are in the unit ``cgmath.geometry.mesh.load_fbx`` reads the
-    points in, given the same ``scale_factor``: None, the default, the file's
-    unit in centimeters, a number the caller's own factor. A rig read with it
-    too (``HierarchyData.load_fbx``) then poses the mesh where the file has
-    it. Points read ``s`` times larger pose under joint worlds ``[[R, 0],
-    [t s, 1]]``, and the inverse bind ``[[A, 0], [b, 1]]`` that keeps them
-    where the file has them is ``[[A, 0], [b s, 1]]``: only its translation
-    row scales. The weights are unitless. A mesh or a joint at or under a
-    child of the scene root that holds the file's unit as a scale
-    (``HierarchyData.load_fbx``) holds cm already and reads at 1, so where
-    the mesh reads ``m`` times larger and the joint ``j`` times, one of them
-    inside such a root and the other outside, the inverse bind is
-    ``[[A j / m, 0], [b j, 1]]``.
-
-    They take the mesh's points from its own object space, where
-    ``cgmath.geometry.mesh.load_fbx`` reads them, its node's geometric
-    transform baked in: the sdk's skin blend applies that offset before the
-    cluster's matrices, so the matrices as the file holds them pose the
-    baked points. ``axis_system`` None, the default, leaves them so: a rig
-    read in Maya's Y-up, ``HierarchyData.load_fbx``'s default, has joint
-    worlds ``W K``, ``K`` the turn its roots take as a 4x4, so ``p B W K``
-    is the file's posed point, turned. "maya_y_up" is for points turned as
-    ``render.Object.load_fbx`` turns them, ``p C``: the inverse bind becomes
-    ``K^-1 B`` (its first three rows ``C^T`` times the file's), and ``p C
-    K^-1 B W K`` is the same point. Only the matrices turn, so a left handed
-    file raises only when they are asked for turned.
-    """
-    if fbx is None:
-        raise ImportError("Autodesk FBX Python SDK is not installed")
-
-    _fbx_check_axis_system(axis_system)
-    filename = os.path.expanduser(filename)
-
-    # everything read from the scene dies with it: copy out inside the block
-    with open_fbx(filename, fbx) as scene:
-        units = _fbx_units(scene, scale_factor, fbx)
-        turn  = _fbx_axis_turn(scene, axis_system, filename, fbx) if bind_matrices else None
-        hierarchy_data, nodes, _ = _walk_fbx(scene, units, bakes=False)
-
-        named = {
-            node.GetUniqueID(): hierarchy_data[unique_id]["name"]
-            for unique_id, node in nodes.items()
-        }
-
-        skin_type  = _fbx_enum(fbx.FbxDeformer, "EDeformerType", "eSkin")
-
-        mesh_nodes = []
-        _walk_fbx_mesh_nodes(scene.GetRootNode(), mesh_nodes)
-
-        data = []
-        for node in mesh_nodes:
-            mesh    = node.GetNodeAttribute()
-            columns = []
-            binds   = {}
-
-            for index in range(mesh.GetDeformerCount(skin_type)):
-                skin = mesh.GetDeformer(index, skin_type)
-
-                for cluster_index in range(skin.GetClusterCount()):
-                    cluster = skin.GetCluster(cluster_index)
-                    link    = cluster.GetLink()
-                    if link is None:
-                        continue
-
-                    joint = named.get(link.GetUniqueID())
-                    if joint is None:
-                        raise ValueError(
-                            f"cluster {cluster.GetName()!r} links {link.GetName()!r}, "
-                            f"which the rig read from {filename!r} does not hold"
-                        )
-
-                    columns.append(
-                        (
-                            joint,
-                            np.asarray(cluster.GetControlPointIndices(), dtype=np.int64),
-                            np.asarray(cluster.GetControlPointWeights(), dtype=np.float64),
-                        )
-                    )
-
-                    if bind_matrices:
-                        link_bind, mesh_bind = fbx.FbxAMatrix(), fbx.FbxAMatrix()
-                        cluster.GetTransformLinkMatrix(link_bind)
-                        cluster.GetTransformMatrix(mesh_bind)
-                        # first cluster wins, the way _dense_weights collapses a
-                        # joint reached twice onto its first column
-                        binds.setdefault(
-                            joint,
-                            (
-                                _fbx_matrix(mesh_bind) @ np.linalg.inv(_fbx_matrix(link_bind)),
-                                units.space(link),
-                            ),
-                        )
-
-            if not columns:
-                continue
-
-            weights, influences = _dense_weights(mesh.GetControlPointsCount(), columns)
-            skin  = SkinData(weights=weights, influences=influences, name=node.GetName())
-            bound = None
-            if bind_matrices:
-                # from the mesh's own space to the joint's, each in cm
-                bound  = np.asarray([binds[x][0] for x in influences])
-                spaces = np.asarray([binds[x][1] for x in influences])
-                own    = units.space(node)
-                if np.any(spaces != own):
-                    bound[:, :3, :3] *= (spaces / own)[:, None, None]
-                bound[:, 3, :3] *= spaces[:, None]
-                if turn is not None:
-                    bound[:, :3] = turn.T @ bound[:, :3]
-            data.append((skin, bound))
-
-    return data
 
 
 def _read_skins_glb(filename: str, bind_matrices: bool = False) -> list:
