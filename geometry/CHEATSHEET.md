@@ -13,7 +13,7 @@ Concepts, conventions and the file map live in [`README.md`](README.md).
 | [Setup](#setup) | fixtures: a unit cube, its UVs, two quad grids |
 | [Import surface](#import-surface) | what the package re-exports, and what it does not |
 | [`cgmath.data` — the `Data` contract](#cgmathdata--the-data-contract) | fields, round trips, `save`/`load`, equality, `DataList` |
-| [`MeshData` — the polygonal mesh](#meshdata--the-polygonal-mesh) | construction, counts, extents, object matrix, booleans |
+| [`MeshData` — the polygonal mesh](#meshdata--the-polygonal-mesh) | construction, counts, extents, placement, booleans |
 | [Topology maps](#topology-maps) | `f2v` / `v2f` / `e2v` / `ue2v` …, `-1` padding, face census |
 | [Diagnostics](#diagnostics) | borders, shells, non-manifold, lamina, degenerate, unused |
 | [Normals, areas, curvature](#normals-areas-curvature) | geometric vs shading normals, `AreaMethod`, curvature, tangents |
@@ -536,13 +536,15 @@ print(mesh.points.shape, mesh.points.dtype)  # (0, 3) float64
 ```
 
 `ImmutableArray` exists so a numpy array can be a dataclass *default*
-(`MeshData.matrix`). `__post_init__` converts it back to a plain `ndarray`,
-so instances never hold one.
+(`NurbsCurveData.points`, an empty `(0, 3)`). `__post_init__` converts it
+back to a plain `ndarray`, so instances never hold one.
 
 ```python
+from cgmath.geometry import NurbsCurveData
+
 arr = ImmutableArray(np.eye(4))
 print(isinstance(arr, np.ndarray), hash(arr) is not None)
-print(type(cube.matrix).__name__)     # ndarray, not ImmutableArray
+print(type(NurbsCurveData().points).__name__)  # ndarray, not ImmutableArray
 ```
 
 ---
@@ -557,8 +559,8 @@ Three required fields describe any polygon soup:
 | `indices` | `(sum(counts),)` | flat face-vertex stream |
 | `counts` | `(F,)` | vertices per face — mixed tri/quad/n-gon is fine |
 
-Optional fields: `name`, `matrix` `(4, 4)` row-major object transform,
-`normals` / `normal_indices` (shading normals), and `hole_faces` /
+Optional fields: `name`, `uuid` / `parent_uuid` (the node the mesh sits
+under), `normals` / `normal_indices` (shading normals), and `hole_faces` /
 `hole_counts` / `hole_indices` (n-gon hole bookkeeping).
 
 ```python
@@ -572,7 +574,7 @@ print(quad.point_count, quad.face_count, quad.edge_count)
 print(quad.valid)                     # indices dense, counts consistent, no degenerates
 ```
 
-### Counts, extents and the object matrix
+### Counts, extents and placement
 
 ```python
 print(cube.point_count, cube.face_count, cube.edge_count, cube.shell_count)

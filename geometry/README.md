@@ -100,7 +100,7 @@ else.
   error names for what it is. A `DataList` holds the same rule: its `list`,
   `LIST_FIELDS`, annotated names, settable properties and `_STATE`.
 - **`ImmutableArray`** is a hashable `ndarray` subclass that exists only so a
-  numpy array can be a dataclass *default* (`MeshData.matrix`). `__post_init__`
+  numpy array can be a dataclass *default* (`NurbsCurveData.points`). `__post_init__`
   converts it back, so instances never hold one.
 
 `DataList` is the list counterpart (`MeshList`, `UVList`, `MorphList`,
