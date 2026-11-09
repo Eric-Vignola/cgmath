@@ -51,9 +51,9 @@ def _node(name, parent=None, node_type="transform", **kwargs):
 
 def scaled_rig():
     """probe_save.py's scaled rig: a group scaled (1, 3, 0.5) turned 30 over
-    a turned group with a locator under it, a joint and a turned
-    space_transform, and beside them a group, a locator and a joint with
-    segment_scale_compensate on"""
+    a turned group with a locator under it, a joint and a turned group, and
+    beside them a group, a locator and a joint with segment_scale_compensate
+    on"""
     top = _node("sc", rotate=(0.0, 0.0, 30.0), scale=(1.0, 3.0, 0.5))
     kid = _node("sc_kid", top, rotate=(40.0, 10.0, -20.0), translate=(1.0, 1.0, 0.0))
     return HierarchyData([
@@ -61,7 +61,7 @@ def scaled_rig():
         kid,
         _node("sc_loc", kid, "locator", translate=(0.0, 2.0, 1.0)),
         _node("sc_jnt", top, "joint", rotate=(40.0, 10.0, -20.0), translate=(-1.0, 1.0, 0.0)),
-        _node("sc_spc", top, "space_transform", rotate=(40.0, 10.0, -20.0), translate=(-1.0, -1.0, 0.0)),
+        _node("sc_spc", top, rotate=(40.0, 10.0, -20.0), translate=(-1.0, -1.0, 0.0)),
         _node("sc_grp", top, rotate=(10.0, 20.0, 30.0), translate=(1.0, 0.0, 1.0), scale=(1.0, 1.5, 0.75),
               segment_scale_compensate=True),
         _node("sc_lcf", top, "locator", translate=(0.5, 1.0, -2.0), segment_scale_compensate=True),

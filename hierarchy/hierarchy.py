@@ -108,7 +108,7 @@ MAYA_ATTRIBUTE_MAP = {
 # the node types a TransformData can describe.
 # anything else (constraints, ikHandles, etc.) is only a transform by inheritance,
 # it can't be rebuilt nor exported from this data and is skipped along with its children.
-SUPPORTED_NODE_TYPES = ("transform", "joint", "locator", "space_transform")
+SUPPORTED_NODE_TYPES = ("transform", "joint", "locator")
 
 # what no longer works names the fork it does not work on
 _FORK = "the r17-skeleton fork (one hierarchy and its takes)"

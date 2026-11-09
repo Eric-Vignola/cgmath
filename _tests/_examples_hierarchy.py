@@ -190,7 +190,7 @@ def rig() -> HierarchyData:
     )
     space = TransformData(
         "VLR:world_space",
-        node_type    = "space_transform",
+        node_type    = "transform",
         uuid         = _uuid("VLR:world_space"),
         rotate       = [0.0, 180.0, 0.0],
         rotate_order = 5,

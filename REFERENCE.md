@@ -801,7 +801,7 @@ Constants:
 
 ```text
 MAYA_ATTRIBUTE_MAP = {'_scale': 'scale', '_shear': 'shear', '_rotate': 'rotate...
-SUPPORTED_NODE_TYPES = ('transform', 'joint', 'locator', 'space_transform')
+SUPPORTED_NODE_TYPES = ('transform', 'joint', 'locator')
 ```
 
 ## `cgmath.geometry`
@@ -1014,7 +1014,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x0000021E95B8E1D0>
+MISSING = <dataclasses._MISSING_TYPE object at 0x00000233E8F1E1D0>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -3510,7 +3510,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000021EE3AC7740>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x00000233B6E37740>, '...
 ```
 
 ## `cgmath.constraints`

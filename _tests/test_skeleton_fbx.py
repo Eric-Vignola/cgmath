@@ -651,9 +651,9 @@ class TestRefusals(_Files):
 
     def test_other_node_kinds(self):
         rig                   = skeleton()
-        rig["prop"].node_type = "space_transform"
-        self.refused("node 'prop' is a 'space_transform'", rig)
-        self.refused("node 'prop' is a 'space_transform'", clip=take(rig))
+        rig["prop"].node_type = "camera"  # a kind the writer does not know
+        self.refused("node 'prop' is a 'camera'", rig)
+        self.refused("node 'prop' is a 'camera'", clip=take(rig))
         # a locator is a transform with a look: no joint orient, no compensate
         rig                                  = skeleton()
         rig["prop"].node_type                = "locator"
