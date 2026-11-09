@@ -1080,6 +1080,44 @@ class TestMorphData(unittest.TestCase):
         self.assertEqual(shape.indices.dtype, np.int32)
         self.assertTrue(np.array_equal(shape.indices, [0, 1]))
 
+    def test_mesh_weight_at_and_deformer(self):
+        """a target names no mesh and no deformer until told, weighs 0 and is
+        reached at 1; a file saved before these fields loads the same; ``at``
+        is above 0"""
+        shape = self.shape
+        self.assertEqual((shape.mesh_uuid, shape.weight, shape.at, shape.deformer), (None, 0.0, 1.0, None))
+        old = MorphData.from_dict({"name": "target", "offsets": [[0, 0, 1]]})
+        self.assertEqual((old.mesh_uuid, old.weight, old.at, old.deformer), (None, 0.0, 1.0, None))
+        full = MorphData(name="smile", offsets=[[0.0, 1.0, 0.0]], indices=[2], mesh_uuid=self.box.uuid, weight=0.3, at=1.0, deformer="face")
+        self.assertEqual((full.mesh_uuid, full.weight, full.at, full.deformer), (self.box.uuid, 0.3, 1.0, "face"))
+        between    = full.copy()
+        between.at = 0.5
+        for bad in (0.0, -0.5, True, None, "half"):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "at is the weight the target is reached at, above 0"):
+                between.at = bad
+        with self.assertRaises(ValueError):
+            MorphData(name="x", offsets=[[0.0, 0.0, 0.0]], at=0)
+        with tempfile.TemporaryDirectory() as folder:
+            for ext in ("json", "npz", "pkl"):
+                with self.subTest(ext):
+                    back = MorphData.load(between.save(os.path.join(folder, f"m.{ext}")))
+                    self.assertEqual(back, between)
+                    self.assertEqual((back.name, back.mesh_uuid, back.weight, back.at, back.deformer), ("smile", self.box.uuid, 0.3, 0.5, "face"))
+
+    def test_equality_and_arithmetic_with_the_fields(self):
+        """== ignores the name, the mesh and the deformer and compares the
+        weight and ``at``; a result keeps the left shape's fields"""
+        a = MorphData(name="a", offsets=[[1.0, 0.0, 0.0]], indices=[0], mesh_uuid=self.box.uuid, weight=0.5, at=0.5, deformer="face")
+        b = MorphData(name="b", offsets=[[1.0, 0.0, 0.0]], indices=[0])
+        self.assertNotEqual(a, b)
+        b.weight, b.at = 0.5, 0.5
+        self.assertEqual(a, b)
+        c = MorphData(name="c", offsets=[[0.0, 1.0, 0.0]], indices=[1])
+        for result in (a + c, a - c, a * 2.0, a / 2.0, 0 + a, 0 - a, sum([a, c])):
+            self.assertEqual((result.mesh_uuid, result.weight, result.at, result.deformer), (self.box.uuid, 0.5, 0.5, "face"))
+        self.assertEqual(((c + a).mesh_uuid, (c + a).weight, (c + a).at, (c + a).deformer), (None, 0.0, 1.0, None))
+        self.assertEqual(MorphData.from_mesh_data(self.box, self.box, target_name="same").weight, 0.0)
+
     @unittest.skipIf(Usd is None, "USD is not installed")
     def test_prim_round_trip_without_usd_skel_imported(self):
         """to_prim / from_prim import pxr.UsdSkel themselves"""

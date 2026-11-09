@@ -61,6 +61,9 @@ _HOLE_FACES   = (0,)
 _HOLE_COUNTS  = (4,)
 _HOLE_INDICES = (4, 5, 6, 7)
 
+# the panel's uuid, which the materials and morph targets name
+_PANEL_UUID = "B1E2D3C4-5F60-4718-9A2B-3C4D5E6F7A8B"
+
 
 def _plain_panel() -> MeshData:
     """the panel's topology and points, nothing else"""
@@ -205,24 +208,39 @@ def geom_subset_data() -> GeomSubsetData:
 
 
 def morph_data() -> MorphData:
-    """the hole's rim pushed out and the triangle's tip lifted: sparse indices"""
+    """the hole's rim pushed out and the triangle's tip lifted: sparse
+    indices, on the panel under the "face" deformer, weighted 0.3"""
     base   = _plain_panel()
     target = _plain_panel()
     target.points[[4, 5, 6, 7]] += (0.0, 0.0, 0.2)
     target.points[10]           += (0.0, 0.1, 0.3)
-    return MorphData.from_mesh_data(base, target, target_name="panel_bulge")
+    morph           = MorphData.from_mesh_data(base, target, target_name="panel_bulge")
+    morph.mesh_uuid = _PANEL_UUID
+    morph.weight    = 0.3
+    morph.deformer  = "face"
+    return morph
 
 
 def morph_list() -> MorphList:
-    """the bulge, a fold of the quad, and a target equal to its base"""
-    base   = _plain_panel()
+    """the bulge, its in-between half way, a fold of the quad, and a target
+    equal to its base"""
+    base = _plain_panel()
+
+    half = _plain_panel()
+    half.points[[4, 5, 6, 7]] += (0.0, 0.0, 0.08)
 
     folded = _plain_panel()
     folded.points[[8, 9]] += (-0.25, 0.0, 0.75)
 
+    between           = MorphData.from_mesh_data(base, half, target_name="panel_bulge")
+    between.mesh_uuid = _PANEL_UUID
+    between.weight    = 0.3
+    between.at        = 0.5
+    between.deformer  = "face"
     return MorphList(
         [
             morph_data(),
+            between,
             MorphData.from_mesh_data(base, folded, target_name="panel_fold"),
             # an unchanged target: no offsets, no indices
             MorphData.from_mesh_data(base, _plain_panel(), target_name="panel_rest"),
@@ -388,9 +406,6 @@ def light_list() -> LightList:
 
 
 # --------------------------------- MATERIALS -------------------------------- #
-
-# the mesh the materials cover
-_PANEL_UUID = "B1E2D3C4-5F60-4718-9A2B-3C4D5E6F7A8B"
 
 
 def _gradient() -> np.ndarray:
