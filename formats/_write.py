@@ -7,8 +7,11 @@ the fbx sdk, nor the classes, until a file is written: the classes' modules
 import this one.
 """
 
+import contextlib
 import logging
 import os
+import shutil
+import tempfile
 
 import numpy as np
 
@@ -42,12 +45,14 @@ def save_fbx(
     uvs            = None,
     cameras        = None,
     lights         = None,
+    materials      = None,
     as_ascii: bool = False,
 ) -> None:
     """writes one of ``hierarchy``, a HierarchyData of joints and transforms,
     or ``clip``, a ClipList of ClipData over joints and transforms (one
     ClipData is written as a ClipList of one), and ``meshes``, ``cameras``
-    and ``lights`` on their nodes; binary unless ``as_ascii``
+    and ``lights`` on their nodes, ``materials`` on their meshes; binary
+    unless ``as_ascii``
 
     A hierarchy alone: its nodes and their own values, no take. A clip
     alone: its nodes, their static values the active take's pose at its
@@ -88,6 +93,21 @@ def save_fbx(
     not 1, or not 0, and the file holds neither, as Maya's own export drops
     them.
 
+    ``materials``, a MaterialList or one MaterialData: each on the mesh its
+    ``mesh_uuid`` names, written as Maya's exporter writes a lambert or a
+    phong (measured): an FbxSurfaceLambert or FbxSurfacePhong named after
+    it, its colour as the diffuse colour and its diffuse as the diffuse
+    factor, its ambient colour, incandescence and transparency as the
+    ambient, emissive and transparent colours with factors of 1, a phong's
+    specular colour as the specular with a factor of 1, its cosine power as
+    the shininess and its reflectivity as the reflection factor; the mesh's
+    material element all-same for one material covering the whole mesh,
+    by-polygon for materials covering faces (``faces``); a texture as a PNG
+    embedded in the file, binary or ASCII, feeding the diffuse colour
+    through an FbxFileTexture named after its file, reading the UV set and
+    wrapping as the material says (Maya's import takes the UV set and
+    leaves both wraps on; measured).
+
     Refused, ValueError naming node, channel and frame, before anything is
     written: a node that is no joint, transform or locator, a transform or
     locator holding segment scale compensate or a joint orient, a shear, a
@@ -107,15 +127,22 @@ def save_fbx(
     off its bind world (Maya's skinCluster applies the node's own transform
     on top of the skin; measured); a camera or light on a joint, on a node
     holding another shape, on a node holding a rotate axis or children (the
-    turn is the node's own). UV sets given without meshes, skins without
-    the hierarchy and the meshes, nothing given, a hierarchy that is not a
-    HierarchyData (a ClipData or a ClipList is passed as ``clip``), a clip
-    that is not a ClipData or a ClipList, meshes, skins, uvs, cameras or
-    lights of another class: TypeError.
+    turn is the node's own); a material naming no mesh, covering faces its
+    mesh does not hold or a face twice, two materials covering one face,
+    materials leaving faces of their mesh uncovered (a mesh is covered whole
+    or not at all), a material covering the whole mesh beside another on
+    it, a texture that is not (H, W, C) uint8 with 1 to 4 channels (a .fbx
+    embeds an 8 bit PNG). UV sets or materials given without meshes, skins
+    without the hierarchy and the meshes, nothing given, a hierarchy that is
+    not a HierarchyData (a ClipData or a ClipList is passed as ``clip``), a
+    clip that is not a ClipData or a ClipList, meshes, skins, uvs, cameras,
+    lights or materials of another class: TypeError. A texture with no PIL
+    (pillow) to encode it: ImportError.
     """
     # imported here: the classes' modules import this one
     from cgmath.geometry.camera import CameraData, CameraList
     from cgmath.geometry.light import LightData, LightList
+    from cgmath.geometry.material import MaterialData, MaterialList
     from cgmath.geometry.mesh import MeshData, MeshList, UVData, UVList
     from cgmath.geometry.skin_weights import SkinData, SkinList
     from cgmath.hierarchy.hierarchy import FBX, ClipData, ClipList, FbxExporter, HierarchyData
@@ -149,13 +176,20 @@ def save_fbx(
         lights = LightList([lights])
     if lights is not None and not isinstance(lights, LightList):
         raise TypeError(f"save_fbx: the lights are a LightList or a LightData, not a {type(lights).__name__}")
-    meshes  = meshes if meshes is not None and len(meshes) else None
-    skins   = skins if skins is not None and len(skins) else None
-    uvs     = uvs if uvs is not None and len(uvs) else None
-    cameras = cameras if cameras is not None and len(cameras) else None
-    lights  = lights if lights is not None and len(lights) else None
+    if isinstance(materials, MaterialData):
+        materials = MaterialList([materials])
+    if materials is not None and not isinstance(materials, MaterialList):
+        raise TypeError(f"save_fbx: the materials are a MaterialList or a MaterialData, not a {type(materials).__name__}")
+    meshes    = meshes if meshes is not None and len(meshes) else None
+    skins     = skins if skins is not None and len(skins) else None
+    uvs       = uvs if uvs is not None and len(uvs) else None
+    cameras   = cameras if cameras is not None and len(cameras) else None
+    lights    = lights if lights is not None and len(lights) else None
+    materials = materials if materials is not None and len(materials) else None
     if uvs is not None and meshes is None:
         raise TypeError("save_fbx: UV sets are written on their mesh; missing: meshes=")
+    if materials is not None and meshes is None:
+        raise TypeError("save_fbx: materials are written on their mesh; missing: meshes=")
     if skins is not None:
         missing = [
             what for what, given in (("hierarchy (a HierarchyData, the bind pose)", hierarchy), ("meshes=", meshes))
@@ -198,9 +232,11 @@ def save_fbx(
                 _check_still(skins, meshes, hierarchy, take)
     if cameras is not None or lights is not None:
         _check_views(cameras, lights, meshes, written)
+    if materials is not None:
+        _check_materials(materials, meshes)
 
     fbx = FBX
-    with FbxExporter() as exporter:
+    with FbxExporter() as exporter, _texture_folder(materials) as folder:
         nodes = []
         if written is not None:
             exporter.add_skeleton(written)
@@ -225,6 +261,14 @@ def save_fbx(
                     sets = [uv for uv in uvs if uv.mesh_uuid == mesh.uuid]
                     if sets:
                         exporter.add_uvs(shapes[mesh.uuid][1], sets)
+            if materials is not None:
+                for mesh in meshes:
+                    held = [material for material in materials if material.mesh_uuid == mesh.uuid]
+                    if held:
+                        _write_materials(exporter, mesh, held, *shapes[mesh.uuid], folder)
+                if any(material.texture is not None for material in materials):
+                    # the PNGs go into the file, as Maya's Embed Media writes them
+                    exporter.manager.GetIOSettings().SetBoolProp(fbx.EXP_FBX_EMBEDDED, True)
             if skins is not None:
                 column = {node.uuid: i for i, node in enumerate(hierarchy)}
                 placed = {mesh.uuid: column.get(mesh.parent_uuid) for mesh in meshes}
@@ -510,6 +554,112 @@ def _check_views(cameras, lights, meshes, nodes) -> None:
         warnings.warn(f"save_fbx: {', '.join(drops)}: fbx holds no dropoff; the file holds none, as Maya's own export", stacklevel=3)
 
 
+def _pil():
+    """PIL's Image module, or None where pillow is not installed"""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    return Image
+
+
+def _material_label(material, meshes=None) -> str:
+    """"material 'skin'", or for one of no name the mesh of ``meshes`` (uuid
+    to mesh) it covers"""
+    if material.name:
+        return f"material {material.name!r}"
+    mesh = None if meshes is None else meshes.get(material.mesh_uuid)
+    return "the unnamed material" if mesh is None else f"the unnamed material on {_mesh_label(mesh)}"
+
+
+def _check_materials(materials, meshes) -> None:
+    """a material naming no mesh, covering faces its mesh does not hold or a
+    face twice, two materials covering one face, materials leaving faces of
+    their mesh uncovered, a material covering the whole mesh beside another
+    on it, a texture that is not (H, W, C) uint8 with 1 to 4 channels:
+    refused. A texture with no PIL to encode it: ImportError"""
+    by_uuid = {mesh.uuid: mesh for mesh in meshes}
+    covered = {}
+    for material in materials:
+        label = _material_label(material, by_uuid)
+        mesh  = by_uuid.get(material.mesh_uuid)
+        if mesh is None:
+            raise ValueError(
+                f"save_fbx: {label} names no mesh of meshes=: mesh_uuid {material.mesh_uuid!r}; set it to its mesh's uuid"
+            )
+        texture = material.texture
+        if texture is not None:
+            pixels = np.asarray(texture)
+            if pixels.dtype != np.uint8:
+                raise ValueError(
+                    f"save_fbx: {label} channel 'texture' is {pixels.dtype.name}; a .fbx embeds an 8 bit PNG, so {FORK} "
+                    f"writes a uint8 texture: scale it to 0..255"
+                )
+            if pixels.ndim != 3 or pixels.shape[2] not in (1, 2, 3, 4) or not pixels.shape[0] or not pixels.shape[1]:
+                raise ValueError(
+                    f"save_fbx: {label} channel 'texture' is {pixels.shape}, not (H, W, C) with 1 to 4 channels"
+                )
+            if _pil() is None:
+                raise ImportError(f"save_fbx: {label} holds a texture, written as a PNG through PIL (pillow), which is not installed")
+        count = len(mesh.counts)
+        held  = covered.setdefault(mesh.uuid, [])
+        if material.faces is None:
+            held.append((label, None))
+            continue
+        faces = np.asarray(material.faces, dtype=np.int64)
+        if faces.size and (faces.min() < 0 or faces.max() >= count):
+            raise ValueError(f"save_fbx: {label} channel 'faces' names faces {_mesh_label(mesh)} of {count} faces does not hold")
+        if np.unique(faces).size != faces.size:
+            raise ValueError(f"save_fbx: {label} channel 'faces' names a face twice")
+        held.append((label, faces))
+    for uuid, held in covered.items():
+        mesh  = by_uuid[uuid]
+        count = len(mesh.counts)
+        whole = [label for label, faces in held if faces is None]
+        if whole and len(held) > 1:
+            others = [label for label, faces in held if label != whole[0]] if len(whole) == 1 else whole[1:]
+            raise ValueError(
+                f"save_fbx: {whole[0]} covers the whole {_mesh_label(mesh)} while {', '.join(others)} "
+                f"{'covers' if len(others) == 1 else 'cover'} it too; a face holds one material"
+            )
+        if whole:
+            continue
+        owner = np.full(count, -1, dtype=np.int64)
+        for place, (label, faces) in enumerate(held):
+            twice = faces[owner[faces] >= 0]
+            if twice.size:
+                raise ValueError(
+                    f"save_fbx: {held[int(owner[twice[0]])][0]} and {label} both cover face {int(twice[0])} of "
+                    f"{_mesh_label(mesh)}; a face holds one material"
+                )
+            owner[faces] = place
+        left = int(np.count_nonzero(owner < 0))
+        if left:
+            raise ValueError(
+                f"save_fbx: {', '.join(label for label, _ in held)} {'leaves' if len(held) == 1 else 'leave'} {left} "
+                f"faces of {_mesh_label(mesh)} without a material; a mesh is covered whole or not at all"
+            )
+
+
+@contextlib.contextmanager
+def _texture_folder(materials):
+    """a folder for the PNGs the textures of ``materials`` are written to on
+    their way into the file, gone when the block ends; None for no texture"""
+    if materials is None or all(material.texture is None for material in materials):
+        yield None
+        return
+    from cgmath.formats._fbx_io import media_folder
+
+    # an ASCII path: the sdk takes no other
+    folder = media_folder()
+    if folder is None:
+        folder = tempfile.mkdtemp(prefix="cgmath_fbx_textures_")
+    try:
+        yield folder
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def _check_uvs(uvs, meshes) -> None:
     """a UV set naming no mesh, of no name, of a name another set of its
     mesh holds or that is not ASCII, whose faces are not its mesh's, or
@@ -705,6 +855,100 @@ def _enum(owner, scope: str, name: str) -> int:
 
     value = _fbx_enum(owner, scope, name)
     return int(getattr(value, "value", value))
+
+
+def _png_name(material, taken: set) -> str:
+    """the file name a material's texture is embedded under: its texture
+    file's stem, else its name, else "texture", as a .png, told apart from
+    the names ``taken`` by a number"""
+    stem = os.path.splitext(os.path.basename(material.texture_file or ""))[0] or material.name or "texture"
+    stem = "".join(x if x.isascii() and (x.isalnum() or x in "-_.") else "_" for x in stem)
+    name = stem + ".png"
+    k    = 1
+    while name in taken:
+        name = f"{stem}_{k}.png"
+        k += 1
+    taken.add(name)
+    return name
+
+
+def _write_png(material, folder: str, taken: set) -> str:
+    """the material's texture written as a PNG into ``folder``: an (H, W, C)
+    uint8 array as L, LA, RGB or RGBA by its channels; the path"""
+    Image  = _pil()
+    pixels = np.ascontiguousarray(np.asarray(material.texture, dtype=np.uint8))
+    modes  = {1: "L", 2: "LA", 3: "RGB", 4: "RGBA"}
+    mode   = modes[pixels.shape[2]]
+    image  = Image.fromarray(pixels[:, :, 0] if mode == "L" else pixels, mode)
+    path   = os.path.join(folder, _png_name(material, taken))
+    image.save(path, format="PNG")
+    return path
+
+
+def _write_materials(exporter, mesh, materials, node, shape, folder) -> None:
+    """``materials``, the ones covering ``mesh``, on ``node`` (its FbxNode)
+    in their order, and the material element of ``shape`` (its FbxMesh):
+    all-same for one material covering the whole mesh, by-polygon for
+    materials covering faces; each as Maya's exporter writes a lambert or a
+    phong (measured): the colour as the diffuse colour, the diffuse as the
+    diffuse factor, the ambient colour, incandescence and transparency as
+    the ambient, emissive and transparent colours with factors of 1, a
+    phong's specular colour with a factor of 1, its cosine power as the
+    shininess, its reflectivity as the reflection factor with a reflection
+    colour of 0; a texture as a PNG in ``folder`` (embedded by the export)
+    feeding the diffuse colour through an FbxFileTexture reading the UV set
+    and wrapping as the material says"""
+    from cgmath.hierarchy.hierarchy import FBX as fbx
+
+    scene = exporter.scene
+    taken = set()
+    wraps = {"repeat": _enum(fbx.FbxTexture, "EWrapMode", "eRepeat"), "clamp": _enum(fbx.FbxTexture, "EWrapMode", "eClamp")}
+    for material in materials:
+        phong = material.kind == "phong"
+        made  = (fbx.FbxSurfacePhong if phong else fbx.FbxSurfaceLambert).Create(scene, material.name or "")
+        made.Diffuse.Set(fbx.FbxDouble3(*[float(x) for x in material.color]))
+        made.DiffuseFactor.Set(float(material.diffuse))
+        made.Ambient.Set(fbx.FbxDouble3(*[float(x) for x in material.ambient_color]))
+        made.AmbientFactor.Set(1.0)
+        made.Emissive.Set(fbx.FbxDouble3(*[float(x) for x in material.incandescence]))
+        made.EmissiveFactor.Set(1.0)
+        made.TransparentColor.Set(fbx.FbxDouble3(*[float(x) for x in material.transparency]))
+        made.TransparencyFactor.Set(1.0)
+        if phong:
+            made.Specular.Set(fbx.FbxDouble3(*[float(x) for x in material.specular_color]))
+            made.SpecularFactor.Set(1.0)
+            made.Shininess.Set(float(material.cosine_power))
+            made.Reflection.Set(fbx.FbxDouble3(0.0, 0.0, 0.0))
+            made.ReflectionFactor.Set(float(material.reflectivity))
+        node.AddMaterial(made)
+        if material.texture is None:
+            continue
+        path    = _write_png(material, folder, taken)
+        texture = fbx.FbxFileTexture.Create(scene, os.path.splitext(os.path.basename(path))[0])
+        texture.SetFileName(path)
+        texture.SetRelativeFileName(os.path.basename(path))
+        texture.SetTextureUse(fbx.FbxTexture.ETextureUse.eStandard)
+        texture.SetMappingType(fbx.FbxTexture.EMappingType.eUV)
+        texture.SetMaterialUse(fbx.FbxFileTexture.EMaterialUse.eModelMaterial)
+        if material.uv_set:
+            texture.UVSet.Set(fbx.FbxString(material.uv_set))
+        texture.WrapModeU.Set(wraps[material.wrap_u])
+        texture.WrapModeV.Set(wraps[material.wrap_v])
+        made.Diffuse.ConnectSrcObject(texture)
+
+    element = shape.CreateElementMaterial()
+    element.SetReferenceMode(fbx.FbxLayerElement.EReferenceMode.eIndexToDirect)
+    indices = element.GetIndexArray()
+    if len(materials) == 1 and materials[0].faces is None:
+        element.SetMappingMode(fbx.FbxLayerElement.EMappingMode.eAllSame)
+        indices.Add(0)
+        return
+    element.SetMappingMode(fbx.FbxLayerElement.EMappingMode.eByPolygon)
+    owner = np.zeros(len(mesh.counts), dtype=np.int64)
+    for place, material in enumerate(materials):
+        owner[np.asarray(material.faces, dtype=np.int64)] = place
+    for index in owner.tolist():
+        indices.Add(index)
 
 
 def _view_node(exporter, shape, node, axis, fbx):
