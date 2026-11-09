@@ -36,7 +36,7 @@ overview see [`README.md`](README.md); for the rest of the library see
 | [Batched evaluation](#batched-evaluation) | `frames.matrix`, `frames.world_matrix`, the factor matrices, `parent_matrix`, `to_attributes()` |
 | [Solving every frame](#solving-every-frame) | `frames.world_matrix =`, `frames.matrix =`, `frames.quaternion`, `frames.match_*` |
 | [Clip deltas](#clip-deltas) | retargeting a whole clip |
-| [`ClipList` — takes](#cliplist--takes) | a file's takes, one clip each, read and written per take |
+| [`ClipList` — takes](#cliplist--takes) | a file's takes, one clip each, over one skeleton, one of them active |
 | [Rig edits on a clip](#rig-edits-on-a-clip) | every frame at once, the curves filtered |
 | [Importers and exporters](#importers-and-exporters) | fbx, glb, auto-detect |
 | [Serialization](#serialization) | json / npz / pkl, dict, bytes |
@@ -1715,12 +1715,12 @@ assert np.allclose(bound.frames.rotate[0], clip.frames.rotate[0])
 ## `ClipList` — takes
 
 A file can hold several takes. A `ClipList` holds them, one `ClipData`
-each, in file order; `clip.take` names each (a clip built by hand holds
-`""`). A take is found by its name or its position, and every member the
-takes share is a line of `ClipList`'s own: a value reads as a `PerTake`,
-one per take, and a write reaches every take, one value for all or a
-`PerTake` of one each, or none: a value one take cannot hold changes no
-take, and one rest pose written is copied for each take. A misspelt name
+each, in file order, every take over one skeleton, one of them active;
+`clip.take` names each (a clip built by hand holds `""`). A take is found
+by its name or its position, and every member the takes share is a line
+of `ClipList`'s own: a value reads as a `PerTake`, one per take, and a
+write reaches every take, one value for all or a `PerTake` of one each,
+or none: a value one take cannot hold changes no take. A misspelt name
 raises.
 
 ```python
@@ -1752,6 +1752,48 @@ try:
     clips.frame = 5                                 # walk holds 4 frames: no take moves
 except IndexError as error:
     assert "take 1 ('walk')" in str(error) and clips.frame == [2, 2]
+```
+
+The skeleton is the first take's: every take appended, inserted, assigned
+or loaded holds the same nodes, by position, in name, parent, node type,
+rotate order and segment scale compensate, or is refused, `ValueError`
+naming the first difference, the list as it was. A take that joins takes
+the skeleton's uuids, node by node, its parent links, block columns and
+user keys with them, so one uuid names one joint in every take; two loads
+of one rig, or two rigs built by hand, come with their own, and their
+frames and names are as they were. A take keys the nodes it moves and
+holds the others at one value, as an fbx take leaves a node it has no
+curve for: `clip.keyed`, an `(N,)` bool, says which, `False` on every
+node of a clip of one frame.
+
+```python
+assert clips.uuid[0] == clips.uuid[1]               # walk took idle's uuids when it joined
+
+other = make_chain()
+other["knee"].set_parent("root")                    # the knee off the hip: another rig
+try:
+    clips.append(ClipData(other, frames=2, take="odd"))
+except ValueError as error:
+    assert "every take of a ClipList is over one skeleton" in str(error)
+assert clips.take == ["idle", "walk"]
+
+still = ClipData(make_chain(), frames=4)
+still.frames["knee"].rotate_x = [0.0, 5.0, 10.0, 15.0]
+assert still.keyed.tolist() == [False, False, True]
+```
+
+One take is active, `clips.active`, the `ClipData` itself: the first take
+until set, by a take's name, its position or the take itself (`None` makes
+the first active again), and the first again once the active take is
+removed. `Scene.animate(clips)` plays it, and a save keeps its position
+as `active`.
+
+```python
+assert clips.active is idle
+clips.active = "walk"
+assert clips.active is walk and clips.frames[1:3].active.take == "walk"
+path = clips.save(os.path.join(WORKDIR, "takes.npz"))
+assert ClipList.load(path).active.take == "walk"
 ```
 
 `ClipList.load_fbx(path)` reads every take of a file from one open, each
