@@ -248,7 +248,7 @@ class TestViews(_Files):
         self.assertEqual([back.hierarchy[c.parent_uuid].name for c in back.cameras], ["shotCam", "orthoCam"])
         self.assertEqual([back.hierarchy[x.parent_uuid].name for x in back.lights], ["key", "sun", "fill"])
         self.assertEqual([x.kind for x in back.lights], ["spot", "directional", "point"])
-        self.assertEqual((back.clip, back.meshes, back.skins, back.uvs), (None, None, None, None))
+        self.assertEqual((back.clip, back.meshes, back.skins, back.uvs, back.materials), (None, None, None, None, None))
         # the nodes are Maya's transforms, no rotate axis, their worlds as before
         np.testing.assert_array_equal(np.asarray(back.hierarchy.rotate_axis), 0.0)
         np.testing.assert_allclose(np.asarray(back.hierarchy.world_matrix), np.asarray(rig.world_matrix), rtol=0, atol=1e-12)

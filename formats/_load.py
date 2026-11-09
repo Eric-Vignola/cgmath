@@ -40,12 +40,12 @@ BIND_SOLVED = 1e-6
 # float32
 SKIN_AGREE  = 1e-5
 
-FbxContents = namedtuple("FbxContents", ("hierarchy", "clip", "meshes", "skins", "uvs", "cameras", "lights"))
+FbxContents = namedtuple("FbxContents", ("hierarchy", "clip", "meshes", "skins", "uvs", "cameras", "lights", "materials"))
 
 
 def load_fbx(filename) -> FbxContents:
-    """``(hierarchy, clip, meshes, skins, uvs, cameras, lights)``, None where
-    the file holds none
+    """``(hierarchy, clip, meshes, skins, uvs, cameras, lights, materials)``,
+    None where the file holds none
 
     ``hierarchy`` every node of the file at its own values, a mesh's node
     among them; None for a file holding a take, whose nodes ``clip`` holds at
@@ -88,6 +88,34 @@ def load_fbx(filename) -> FbxContents:
     camera or light property a take keys is read at the active take's
     first frame, with one warning naming shape and properties.
 
+    ``materials`` a MaterialList of the materials the meshes' material
+    elements assign faces to, mesh by mesh in the meshes' order, each
+    naming its mesh by ``mesh_uuid``, its ``faces`` the mesh's faces it
+    covers, None for the whole mesh (an all-same element, or a by-polygon
+    one giving it every face), as Maya's own import would hold them
+    (measured on Maya's export): an FbxSurfacePhong a phong, any other
+    FbxSurfaceLambert a lambert, its colour the diffuse colour and its
+    diffuse the diffuse factor, its ambient colour, incandescence,
+    transparency and specular colour the ambient, emissive, transparent and
+    specular colours times their factors, a phong's cosine power the
+    shininess and its reflectivity the reflection factor; a material of
+    another shading model (Maya writes a standardSurface as one, bare) a
+    default lambert of its name, with one warning naming them. The file
+    texture feeding the diffuse colour, through one layered texture if so,
+    gives the material its texture: the pixels decoded through PIL, 8 bit
+    unless the file holds 16, rows top down, as (H, W, C); ``texture_file``
+    the file's name; the UV set it reads (None for the default) and its wrap
+    modes (repeat from a file Maya wrote, whatever its place2dTexture held:
+    Maya's export writes no other, measured). An embedded texture is
+    extracted to a temporary folder while the
+    file is read; a linked one is read at its path, or by its relative name
+    beside the file. A texture whose file is not found, or with no PIL to
+    decode it, is None, its file name kept, with one warning; a texture on
+    any other slot (specular, bump, emissive ...) or that is no file texture
+    is left out with one warning naming slot and material. ValueError for a
+    material element mapping other than all-same or by-polygon, or leaving
+    faces without a material.
+
     The values are in Maya's Y-up and cm, as every cgmath value is. A file
     whose up axis is X or Z is turned the way Maya's importer turns it
     (measured): its roots take the turn, a joint root in its joint orient and
@@ -114,17 +142,18 @@ def load_fbx(filename) -> FbxContents:
     rank = {at: column for column, at in enumerate(order)}
     for kind in ("meshes", "cameras", "lights"):
         read[kind].sort(key=lambda held: rank[held["node"]])
-    meshes  = _build_meshes(read)
-    uvs     = _build_uvs(read, meshes)
-    cameras = _build_cameras(read)
-    lights  = _build_lights(read)
+    meshes    = _build_meshes(read)
+    uvs       = _build_uvs(read, meshes)
+    cameras   = _build_cameras(read)
+    lights    = _build_lights(read)
+    materials = _build_materials(read, meshes)
     if any(held["skin"] is not None for held in read["meshes"]):
         bind, order = _build(read)
         _settle_bind(read, bind, order)
-        return FbxContents(bind, clip, meshes, _build_skins(read, meshes), uvs, cameras, lights)
+        return FbxContents(bind, clip, meshes, _build_skins(read, meshes), uvs, cameras, lights, materials)
     if clip is not None:
-        return FbxContents(None, clip, meshes, None, uvs, cameras, lights)
-    return FbxContents(hierarchy if len(hierarchy) else None, None, meshes, None, uvs, cameras, lights)
+        return FbxContents(None, clip, meshes, None, uvs, cameras, lights, materials)
+    return FbxContents(hierarchy if len(hierarchy) else None, None, meshes, None, uvs, cameras, lights, materials)
 
 
 def load_nodes(filename):
@@ -156,7 +185,9 @@ def _open(filename, take: bool, meshes: bool = False) -> dict:
     if not os.path.isfile(filename):
         raise FileNotFoundError(filename)
 
-    with open_fbx(filename, FBX) as scene:
+    # with the meshes come their materials, whose embedded textures are
+    # extracted to a temporary folder for the read
+    with open_fbx(filename, FBX, media=meshes) as scene:
         return _read(scene, FBX, take, meshes, filename)
 
 
@@ -180,11 +211,11 @@ def _amatrix(matrix) -> np.ndarray:
     return np.array([[matrix.Get(row, column) for column in range(4)] for row in range(4)], dtype=np.float64)
 
 
-def _read_mesh(node, at: int, fbx) -> dict:
+def _read_mesh(node, at: int, filename: str, fbx) -> dict:
     """the mesh on the node at place ``at`` of the file's nodes: its name,
-    points, faces, normals, one a face corner, and UV sets; ValueError for a
-    node holding a geometric transform, which no field holds, or a mesh
-    holding holes"""
+    points, faces, normals, one a face corner, UV sets and materials;
+    ValueError for a node holding a geometric transform, which no field
+    holds, or a mesh holding holes"""
     from cgmath.formats._fbx_io import typed
     from cgmath.geometry.mesh import (
         _fbx_control_points,
@@ -215,6 +246,7 @@ def _read_mesh(node, at: int, fbx) -> dict:
         ids     = _fbx_face_varying_indices(shape, element, counts)
     return {
         "uvs":            _read_uvs(label, shape, counts, fbx),
+        "materials":      _read_materials(node, shape, counts, label, filename, fbx),
         "name":           name,
         "label":          label,
         "node":           at,
@@ -225,6 +257,193 @@ def _read_mesh(node, at: int, fbx) -> dict:
         "normal_indices": ids,
         "shape":          shape,
     }
+
+
+# the material property a texture feeds that the fork reads: the colour map
+COLOUR_SLOT = "DiffuseColor"
+
+# fbx's texture UVSet meaning the mesh's first set
+DEFAULT_UV_SET = "default"
+
+
+def _material_faces(shape, count: int, faces: int, label: str, fbx) -> list:
+    """[(material index, faces or None)] of the mesh's material element, in
+    material order: an all-same element, or none, gives its one material
+    the whole mesh; a by-polygon one gives each material the polygons that
+    name it, every face as None, no face left out. ValueError for another
+    mapping, or polygons naming no material of the node's ``count``"""
+    mapping = fbx.FbxLayerElement.EMappingMode
+    if not shape.GetElementMaterialCount():
+        return [(0, None)]
+    element = shape.GetElementMaterial(0)
+    held    = element.GetIndexArray()
+    indices = np.array([int(held.GetAt(k)) for k in range(held.GetCount())], dtype=np.int64)
+    mode    = element.GetMappingMode()
+    if mode == mapping.eAllSame:
+        index = int(indices[0]) if indices.size else 0
+        if not 0 <= index < count:
+            raise ValueError(f"load_fbx: {label} names material {index} of its node's {count}")
+        return [(index, None)]
+    if mode != mapping.eByPolygon:
+        raise ValueError(
+            f"load_fbx: {label} channel 'materials' is mapped {str(mode).rsplit('.', 1)[-1]}, which {FORK} does not read; "
+            f"a material covers the whole mesh or faces of it"
+        )
+    if indices.size != faces:
+        raise ValueError(f"load_fbx: {label} channel 'materials' names a material for {indices.size} faces of {faces}")
+    off = np.flatnonzero((indices < 0) | (indices >= count))
+    if off.size:
+        left = int(np.count_nonzero(indices < 0))
+        why  = f"leaves {left} faces without a material" if left else f"names material {int(indices[off[0]])} of its node's {count}"
+        raise ValueError(f"load_fbx: {label} channel 'materials' {why}; {FORK} reads a mesh covered whole")
+    found = []
+    for index in range(count):
+        covered = np.flatnonzero(indices == index)
+        if covered.size == faces:
+            found.append((index, None))
+        elif covered.size:
+            found.append((index, covered.astype(np.int32)))
+    return found
+
+
+def _pixels(image) -> np.ndarray:
+    """a PIL image as (H, W, C): L, LA, RGB, RGBA, a 16 bit grey (I;16) and a
+    float (F) image as they are, any other mode as RGB or RGBA"""
+    mode = image.mode
+    if mode not in ("L", "LA", "RGB", "RGBA", "I;16", "F"):
+        image = image.convert("RGBA" if "A" in mode or "transparency" in image.info else "RGB")
+    pixels = np.asarray(image)
+    if pixels.dtype == np.int32:
+        pixels = pixels.astype(np.uint16)  # PIL hands a 16 bit grey as int32 on some builds
+    return pixels[:, :, None] if pixels.ndim == 2 else pixels
+
+
+def _read_texture(texture, filename: str, fbx) -> dict:
+    """a file texture, as the fields of a material: its pixels through PIL,
+    its file name, UV set and wrap modes; ``pixels`` None with ``missing``
+    the path when the file is not found, at its own path, by its relative
+    name beside ``filename`` (the .fbx) or by its own name there, and
+    ``no_pil`` True when PIL is not installed"""
+    from cgmath.formats._write import _pil
+
+    path     = str(texture.GetFileName())
+    relative = str(texture.GetRelativeFileName())
+    beside   = os.path.dirname(os.path.abspath(filename))
+    tried    = [x for x in (path, os.path.join(beside, relative) if relative else "", os.path.join(beside, os.path.basename(path)) if path else "") if x]
+    found    = next((x for x in tried if os.path.isfile(x)), None)
+    wraps    = {_enum_int(_fbx_enum_of(fbx.FbxTexture, "EWrapMode", x)): mode for x, mode in (("eRepeat", "repeat"), ("eClamp", "clamp"))}
+    uv_set   = str(texture.UVSet.Get())
+    held = {
+        "file":    os.path.basename(path or relative) or None,
+        "uv_set":  None if uv_set in ("", DEFAULT_UV_SET) else uv_set,
+        "wrap_u":  wraps.get(_enum_int(texture.WrapModeU.Get()), "repeat"),
+        "wrap_v":  wraps.get(_enum_int(texture.WrapModeV.Get()), "repeat"),
+        "pixels":  None,
+        "missing": None,
+        "no_pil":  False,
+    }
+    if found is None:
+        held["missing"] = path or relative
+        return held
+    Image = _pil()
+    if Image is None:
+        held["no_pil"] = True
+        return held
+    with Image.open(found) as image:
+        held["pixels"] = np.array(_pixels(image))
+    return held
+
+
+def _fbx_enum_of(owner, scope: str, name: str):
+    from cgmath.hierarchy.hierarchy import _fbx_enum
+
+    return _fbx_enum(owner, scope, name)
+
+
+def _file_texture(prop, fbx):
+    """the first FbxFileTexture feeding ``prop``, directly or inside a
+    layered texture, or None; ``others`` True in the second slot when a
+    texture of another kind feeds it alone"""
+    from cgmath.formats._fbx_io import typed
+
+    other = False
+    for i in range(prop.GetSrcObjectCount()):
+        obj = prop.GetSrcObject(i)
+        cid = obj.GetClassId()
+        if cid.Is(fbx.FbxFileTexture.ClassId):
+            return typed(obj, fbx.FbxFileTexture, fbx), False
+        if cid.Is(fbx.FbxLayeredTexture.ClassId):
+            for j in range(obj.GetSrcObjectCount()):
+                sub = obj.GetSrcObject(j)
+                if sub.GetClassId().Is(fbx.FbxFileTexture.ClassId):
+                    return typed(sub, fbx.FbxFileTexture, fbx), False
+            other = True
+        elif cid.Is(fbx.FbxTexture.ClassId):
+            other = True
+    return None, other
+
+
+def _read_materials(node, shape, counts, label: str, filename: str, fbx) -> list:
+    """the materials the mesh's material element assigns faces to, in the
+    node's order: each its name, kind, Maya's attributes off the file's
+    properties (a colour times its factor, the diffuse colour and factor
+    apart, which are Maya's color and diffuse), its faces, and its colour
+    map through :func:`_read_texture`; a material of another shading model
+    a default lambert, flagged ``bare``; textures on other slots, or that
+    are no file texture, listed in ``left`` by slot"""
+    from cgmath.formats._fbx_io import typed
+
+    count = node.GetMaterialCount()
+    if not count:
+        return []
+    found = []
+    for index, faces in _material_faces(shape, count, len(counts), label, fbx):
+        material = typed(node.GetMaterial(index), fbx.FbxSurfaceMaterial, fbx)
+        name     = str(material.GetName()) or None
+        cid      = material.GetClassId()
+        phong    = cid.Is(fbx.FbxSurfacePhong.ClassId)
+        lambert  = phong or cid.Is(fbx.FbxSurfaceLambert.ClassId)
+        fields   = {"kind": "phong" if phong else "lambert"}
+        if lambert:
+            held = typed(material, fbx.FbxSurfacePhong if phong else fbx.FbxSurfaceLambert, fbx)
+
+            def colour(prop, factor=None):
+                values = np.array(tuple(prop.Get())[:3], dtype=np.float64)
+                return values if factor is None else values * float(factor.Get())
+
+            fields["color"]         = colour(held.Diffuse)
+            fields["diffuse"]       = float(held.DiffuseFactor.Get())
+            fields["ambient_color"] = colour(held.Ambient,          held.AmbientFactor)
+            fields["incandescence"] = colour(held.Emissive,         held.EmissiveFactor)
+            fields["transparency"]  = colour(held.TransparentColor, held.TransparencyFactor)
+            if phong:
+                fields["specular_color"] = colour(held.Specular, held.SpecularFactor)
+                fields["cosine_power"]   = float(held.Shininess.Get())
+                fields["reflectivity"]   = float(held.ReflectionFactor.Get())
+        # the textures: the colour map read, any other slot's noted
+        texture = None
+        left    = []
+        prop    = material.GetFirstProperty()
+        while prop.IsValid():
+            if prop.GetSrcObjectCount():
+                file, other = _file_texture(prop, fbx)
+                slot = str(prop.GetName())
+                if slot == COLOUR_SLOT and file is not None:
+                    texture = _read_texture(file, filename, fbx)
+                elif file is not None or other:
+                    left.append(slot)
+            prop = material.GetNextProperty(prop)
+        found.append({
+            "name":    name,
+            "label":   f"material {name!r}" if name else f"the unnamed material on {label}",
+            "model":   str(material.ShadingModel.Get()),
+            "bare":    not lambert,
+            "fields":  fields,
+            "faces":   faces,
+            "texture": texture,
+            "left":    left,
+        })
+    return found
 
 
 def _read_uvs(label, shape, counts, fbx) -> list:
@@ -354,7 +573,7 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "
             attribute = node.GetNodeAttribute()
             kind      = None if attribute is None else attribute.GetAttributeType()
             if kind == kinds.eMesh:
-                mesh         = _read_mesh(node, at, fbx)
+                mesh         = _read_mesh(node, at, filename, fbx)
                 mesh["skin"] = _read_skin(scene, node, at, mesh["label"], mesh.pop("shape"), found, fbx)
                 shapes.append(mesh)
             elif kind == kinds.eCamera:
@@ -1185,6 +1404,60 @@ def _build_lights(read: dict):
         if held["kind"] in LIGHT_KINDS
     ]
     return LightList(lights) if lights else None
+
+
+def _build_materials(read: dict, meshes):
+    """the MaterialList of the meshes' materials, mesh by mesh in the
+    meshes' order, each naming its mesh by uuid; None for none. One warning
+    each for: materials of another shading model, read as default lamberts;
+    textures on slots the fork does not read, or that are no file texture;
+    texture files not found; textures with no PIL to decode them"""
+    import warnings
+
+    from cgmath.geometry.material import MaterialData, MaterialList
+
+    if meshes is None:
+        return None
+    materials = []
+    bare      = []
+    left      = []
+    missing   = []
+    no_pil    = []
+    for held, mesh in zip(read["meshes"], meshes):
+        for entry in held["materials"]:
+            fields  = dict(entry["fields"])
+            texture = entry["texture"]
+            if entry["bare"]:
+                bare.append(f"{entry['label']} (shading model {entry['model']!r})")
+            left.extend(f"{entry['label']} {slot}" for slot in entry["left"])
+            if texture is not None:
+                fields.update(
+                    texture      = texture["pixels"],
+                    texture_file = texture["file"],
+                    uv_set       = texture["uv_set"],
+                    wrap_u       = texture["wrap_u"],
+                    wrap_v       = texture["wrap_v"],
+                )
+                if texture["missing"] is not None:
+                    missing.append(f"{entry['label']} {texture['missing']}")
+                if texture["no_pil"]:
+                    no_pil.append(entry["label"])
+            materials.append(MaterialData(name=entry["name"], mesh_uuid=mesh.uuid, faces=entry["faces"], **fields))
+    if bare:
+        warnings.warn(
+            f"load_fbx: {', '.join(bare)}: {FORK} reads lambert and phong materials; read as a default lambert of its name",
+            stacklevel=2,
+        )
+    if left:
+        warnings.warn(f"load_fbx: textures on slots {FORK} does not read, left out: {', '.join(left)}", stacklevel=2)
+    if missing:
+        warnings.warn(f"load_fbx: texture files not found, the texture None: {', '.join(missing)}", stacklevel=2)
+    if no_pil:
+        warnings.warn(
+            f"load_fbx: {', '.join(no_pil)}: a texture is decoded through PIL (pillow), which is not installed; the texture is None",
+            stacklevel=2,
+        )
+    return MaterialList(materials) if materials else None
 
 
 def _build_meshes(read: dict):

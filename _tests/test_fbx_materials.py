@@ -1,0 +1,688 @@
+"""Materials and textures through load_fbx and save_fbx: Maya's conventions, measured.
+
+Maya's exporter (2025) writes a lambert as an FbxSurfaceLambert and a phong
+(a blinn too) as an FbxSurfacePhong: the colour as DiffuseColor and the
+diffuse as DiffuseFactor, the ambient colour, incandescence and transparency
+as AmbientColor, EmissiveColor and TransparentColor with factors of 1, the
+specular colour as SpecularColor with a factor of 1, the cosine power as
+ShininessExponent (a blinn's eccentricity converted), the reflectivity as
+ReflectionFactor with a ReflectionColor of 0; a standardSurface as a bare
+FbxSurfaceMaterial with no shading model; a file texture on the colour as an
+FbxFileTexture feeding DiffuseColor, the colour itself white, naming the UV
+set and the wrap modes; two shading groups on a mesh as a by-polygon material
+element, one as all-same; Embed Media as the file's bytes, extracted on read.
+The fork reads and writes the same. The SDK tests need the Autodesk SDK, the
+Maya ones a Maya with its fbxmaya plug-in.
+"""
+
+import os
+import re
+import shutil
+import unittest
+import warnings
+from unittest import mock
+
+import numpy as np
+from cgmath._tests.test_skeleton_fbx import _Files, _InMaya
+from cgmath.formats import load_fbx, save_fbx
+from cgmath.formats._fbx_io import load_sdk, open_fbx, typed
+from cgmath.formats._write import _enum
+from cgmath.geometry import MaterialData, MaterialList, MeshData, MeshList, UVData, UVList
+from cgmath.hierarchy import HierarchyData, TransformData
+
+FBX = load_sdk()
+
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover - pillow is a dependency
+    Image = None
+
+
+def gradient() -> np.ndarray:
+    """an 8 by 4 RGB gradient: red along u, green along v, blue 128"""
+    pixels         = np.zeros((4, 8, 3), dtype=np.uint8)
+    pixels[..., 0] = np.linspace(0, 255, 8, dtype=np.uint8)[None, :]
+    pixels[..., 1] = np.linspace(0, 255, 4, dtype=np.uint8)[:, None]
+    pixels[..., 2] = 128
+    return pixels
+
+
+def plane(parent_uuid=None) -> MeshData:
+    """a 2 by 2 plane of four quads in xz, 2 units wide"""
+    points = [(x, 0.0, z) for z in (-1.0, 0.0, 1.0) for x in (-1.0, 0.0, 1.0)]
+    return MeshData(
+        indices=[0, 1, 4, 3, 1, 2, 5, 4, 3, 4, 7, 6, 4, 5, 8, 7], counts=[4, 4, 4, 4], points=points, name="planeShape",
+        parent_uuid=parent_uuid,
+    )
+
+
+def plane_uvs(mesh) -> UVData:
+    points = np.asarray(mesh.points)
+    return UVData(
+        name="map1", points=np.stack([(points[:, 0] + 1.0) / 2.0, (points[:, 2] + 1.0) / 2.0], axis=1), counts=mesh.counts,
+        indices=mesh.indices, mesh_uuid=mesh.uuid,
+    )
+
+
+def box(parent_uuid=None) -> MeshData:
+    """a cube of six quads"""
+    points = [(x, y, z) for z in (-1.0, 1.0) for y in (-1.0, 1.0) for x in (-1.0, 1.0)]
+    faces  = [(0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4), (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5)]
+    return MeshData(indices=[i for face in faces for i in face], counts=[4] * 6, points=points, name="boxShape", parent_uuid=parent_uuid)
+
+
+def rig() -> HierarchyData:
+    nodes = HierarchyData()
+    nodes.append(TransformData("plane"))
+    nodes.append(TransformData("box", translate=(3.0, 0.0, 0.0)))
+    return nodes
+
+
+def meshes(nodes) -> MeshList:
+    return MeshList([plane(nodes["plane"].uuid), box(nodes["box"].uuid)])
+
+
+def skin_lambert(mesh) -> MaterialData:
+    """a textured lambert on the plane's first two faces, every attribute
+    off its default"""
+    return MaterialData(
+        name="skinLambert", mesh_uuid=mesh.uuid, faces=[0, 1], color=[1.0, 1.0, 1.0], transparency=[0.1, 0.2, 0.3],
+        ambient_color=[0.05, 0.1, 0.15], incandescence=[0.2, 0.0, 0.1], diffuse=0.6, texture=gradient(), texture_file="grad.png",
+        uv_set="map1", wrap_u="repeat", wrap_v="clamp",
+    )
+
+
+def shiny_phong(mesh) -> MaterialData:
+    return MaterialData(
+        name="shinyPhong", mesh_uuid=mesh.uuid, faces=[2, 3], kind="phong", color=[0.9, 0.2, 0.1], specular_color=[0.3, 0.4, 0.5],
+        cosine_power=35.0, reflectivity=0.25,
+    )
+
+
+def box_phong(mesh) -> MaterialData:
+    return MaterialData(name="boxPhong", mesh_uuid=mesh.uuid, kind="phong", color=[0.1, 0.8, 0.2], reflectivity=0.1)
+
+
+def materials(held) -> MaterialList:
+    return MaterialList([skin_lambert(held[0]), shiny_phong(held[0]), box_phong(held[1])])
+
+
+def same_materials(test, got, want, got_meshes, want_meshes) -> None:
+    """``got``, a MaterialList read back, holds ``want``'s materials in
+    order: every field equal, the texture to the byte, each on the mesh of
+    ``got_meshes`` at the place its original has in ``want_meshes``"""
+    test.assertEqual(type(got), MaterialList)
+    test.assertEqual(len(got), len(want))
+    for a, b in zip(got, want):
+        test.assertEqual(a, b, a.name)
+        test.assertEqual((a.name, a.kind, a.texture_file, a.uv_set, a.wrap_u, a.wrap_v), (b.name, b.kind, b.texture_file, b.uv_set, b.wrap_u, b.wrap_v))
+        if b.faces is None:
+            test.assertIsNone(a.faces, a.name)
+        else:
+            np.testing.assert_array_equal(a.faces, b.faces, err_msg=a.name)
+        if b.texture is None:
+            test.assertIsNone(a.texture, a.name)
+        else:
+            test.assertEqual(a.texture.dtype, b.texture.dtype, a.name)
+            np.testing.assert_array_equal(a.texture, b.texture, err_msg=a.name)
+        place = [mesh.uuid for mesh in want_meshes].index(b.mesh_uuid)
+        test.assertEqual(a.mesh_uuid, got_meshes[place].uuid, a.name)
+
+
+def fbx_materials(path: str) -> dict:
+    """{node name: {materials: [(name, class, shading model, {property:
+    value})], mapping, indices, textures: {material: (file exists, file
+    name, uv set, wrap u, wrap v, slot)}}} of a file's mesh nodes, through
+    the sdk, the embedded media extracted"""
+    out = {}
+    with open_fbx(path, FBX, media=True) as scene:
+        stack = [scene.GetRootNode()]
+        while stack:
+            node = stack.pop()
+            for i in range(node.GetChildCount()):
+                stack.append(node.GetChild(i))
+            attribute = node.GetNodeAttribute()
+            if attribute is None or attribute.GetAttributeType() != FBX.FbxNodeAttribute.EType.eMesh:
+                continue
+            mesh  = typed(attribute, FBX.FbxMesh, FBX)
+            entry = {"materials": [], "mapping": None, "indices": [], "textures": {}}
+            if mesh.GetElementMaterialCount():
+                element          = mesh.GetElementMaterial(0)
+                held             = element.GetIndexArray()
+                entry["mapping"] = int(getattr(element.GetMappingMode(), "value", element.GetMappingMode()))
+                entry["indices"] = [int(held.GetAt(k)) for k in range(held.GetCount())]
+            for m in range(node.GetMaterialCount()):
+                material = typed(node.GetMaterial(m), FBX.FbxSurfaceMaterial, FBX)
+                cid      = material.GetClassId()
+                props    = {}
+                if cid.Is(FBX.FbxSurfaceLambert.ClassId):
+                    lambert = typed(material, FBX.FbxSurfacePhong if cid.Is(FBX.FbxSurfacePhong.ClassId) else FBX.FbxSurfaceLambert, FBX)
+                    for name in ("Diffuse", "Ambient", "Emissive", "TransparentColor"):
+                        props[name] = tuple(round(float(x), 9) for x in tuple(getattr(lambert, name).Get())[:3])
+                    for name in ("DiffuseFactor", "AmbientFactor", "EmissiveFactor", "TransparencyFactor"):
+                        props[name] = float(getattr(lambert, name).Get())
+                    if cid.Is(FBX.FbxSurfacePhong.ClassId):
+                        props["Specular"]         = tuple(round(float(x), 9) for x in tuple(lambert.Specular.Get())[:3])
+                        props["Reflection"]       = tuple(round(float(x), 9) for x in tuple(lambert.Reflection.Get())[:3])
+                        props["SpecularFactor"]   = float(lambert.SpecularFactor.Get())
+                        props["Shininess"]        = float(lambert.Shininess.Get())
+                        props["ReflectionFactor"] = float(lambert.ReflectionFactor.Get())
+                entry["materials"].append((str(material.GetName()), str(cid.GetName()), str(material.ShadingModel.Get()), props))
+                prop = material.GetFirstProperty()
+                while prop.IsValid():
+                    for t in range(prop.GetSrcObjectCount(FBX.FbxCriteria.ObjectType(FBX.FbxFileTexture.ClassId))):
+                        tex = typed(prop.GetSrcObject(FBX.FbxCriteria.ObjectType(FBX.FbxFileTexture.ClassId), t), FBX.FbxFileTexture, FBX)
+                        # the sdk points an extracted file's names at the extraction folder: its own name is kept
+                        entry["textures"][str(material.GetName())] = (
+                            os.path.isfile(str(tex.GetFileName())), os.path.basename(str(tex.GetRelativeFileName())), str(tex.UVSet.Get()),
+                            int(getattr(tex.WrapModeU.Get(), "value", tex.WrapModeU.Get())),
+                            int(getattr(tex.WrapModeV.Get(), "value", tex.WrapModeV.Get())), str(prop.GetName()),
+                        )
+                    prop = material.GetNextProperty(prop)
+            out[str(node.GetName())] = entry
+    return out
+
+
+def other_writer(folder: str) -> str:
+    """an sdk file as another writer makes one, beside its textures: node
+    quad, a 2 by 2 plane, with a phong "fx" (factors other than 1, a
+    texture on its specular slot and a bump map) on faces 0 and 1 and a bare
+    material "pbr" (shading model "Unknown") on faces 2 and 3; node tri, a
+    triangle, with a lambert "layered" whose colour a layered texture feeds,
+    a file texture inside it, its UV set the default; node lost, a triangle,
+    with a lambert "lost" whose texture file does not exist; node two, a
+    triangle holding two materials under an all-same element"""
+    path = os.path.join(folder, "other.fbx")
+    spec = os.path.join(folder, "spec.png")
+    grad = os.path.join(folder, "grad.png")
+    Image.fromarray(gradient()).save(grad)
+    Image.fromarray(gradient()[:, :, ::-1].copy()).save(spec)
+    manager = FBX.FbxManager.Create()
+    manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+    try:
+        scene = FBX.FbxScene.Create(manager, "")
+        root  = scene.GetRootNode()
+
+        def mesh_node(name, points, faces):
+            node = FBX.FbxNode.Create(scene, name)
+            root.AddChild(node)
+            shape = FBX.FbxMesh.Create(scene, name + "Shape")
+            shape.InitControlPoints(len(points))
+            for i, point in enumerate(points):
+                shape.SetControlPointAt(FBX.FbxVector4(*point, 1.0), i)
+            for face in faces:
+                shape.BeginPolygon(-1, -1, -1, False)
+                for v in face:
+                    shape.AddPolygon(v)
+                shape.EndPolygon()
+            node.SetNodeAttribute(shape)
+            return node, shape
+
+        def element(shape, mode, indices):
+            made = shape.CreateElementMaterial()
+            made.SetMappingMode(mode)
+            made.SetReferenceMode(FBX.FbxLayerElement.EReferenceMode.eIndexToDirect)
+            for index in indices:
+                made.GetIndexArray().Add(index)
+
+        def file_texture(name, filename, uv_set=None):
+            tex = FBX.FbxFileTexture.Create(scene, name)
+            tex.SetFileName(filename)
+            tex.SetRelativeFileName(os.path.basename(filename))
+            tex.SetTextureUse(FBX.FbxTexture.ETextureUse.eStandard)
+            tex.SetMappingType(FBX.FbxTexture.EMappingType.eUV)
+            if uv_set is not None:
+                tex.UVSet.Set(FBX.FbxString(uv_set))
+            return tex
+
+        grid  = [(x, 0.0, z) for z in (-1.0, 0.0, 1.0) for x in (-1.0, 0.0, 1.0)]
+        quads = [(0, 1, 4, 3), (1, 2, 5, 4), (3, 4, 7, 6), (4, 5, 8, 7)]
+        node, shape = mesh_node("quad", grid, quads)
+        fx = FBX.FbxSurfacePhong.Create(scene, "fx")
+        fx.Diffuse.Set(FBX.FbxDouble3(0.9, 0.2, 0.1))
+        fx.DiffuseFactor.Set(0.8)
+        fx.Ambient.Set(FBX.FbxDouble3(0.5, 0.5, 0.5))
+        fx.AmbientFactor.Set(0.5)
+        fx.Emissive.Set(FBX.FbxDouble3(0.1, 0.1, 0.1))
+        fx.EmissiveFactor.Set(2.0)
+        fx.TransparentColor.Set(FBX.FbxDouble3(1.0, 1.0, 1.0))
+        fx.TransparencyFactor.Set(0.25)
+        fx.Specular.Set(FBX.FbxDouble3(1.0, 1.0, 1.0))
+        fx.SpecularFactor.Set(0.5)
+        fx.Shininess.Set(12.0)
+        fx.ReflectionFactor.Set(0.75)
+        fx.Specular.ConnectSrcObject(file_texture("specMap", spec, "map1"))
+        fx.Bump.ConnectSrcObject(file_texture("bumpMap", spec, "map1"))
+        pbr = FBX.FbxSurfaceMaterial.Create(scene, "pbr")
+        pbr.ShadingModel.Set(FBX.FbxString("Unknown"))
+        node.AddMaterial(fx)
+        node.AddMaterial(pbr)
+        element(shape, FBX.FbxLayerElement.EMappingMode.eByPolygon, (0, 0, 1, 1))
+
+        tri = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+        node, shape = mesh_node("tri", tri, [(0, 1, 2)])
+        layered = FBX.FbxSurfaceLambert.Create(scene, "layered")
+        stack   = FBX.FbxLayeredTexture.Create(scene, "stack")
+        stack.ConnectSrcObject(file_texture("gradMap", grad))
+        layered.Diffuse.ConnectSrcObject(stack)
+        node.AddMaterial(layered)
+        element(shape, FBX.FbxLayerElement.EMappingMode.eAllSame, (0,))
+
+        node, shape = mesh_node("lost", tri, [(0, 1, 2)])
+        lost = FBX.FbxSurfaceLambert.Create(scene, "lost")
+        lost.Diffuse.ConnectSrcObject(file_texture("lostMap", os.path.join(folder, "gone", "lost.png"), "map1"))
+        node.AddMaterial(lost)
+        element(shape, FBX.FbxLayerElement.EMappingMode.eAllSame, (0,))
+
+        node, shape = mesh_node("two", tri, [(0, 1, 2)])
+        node.AddMaterial(FBX.FbxSurfaceLambert.Create(scene, "first"))
+        node.AddMaterial(FBX.FbxSurfacePhong.Create(scene, "second"))
+        element(shape, FBX.FbxLayerElement.EMappingMode.eAllSame, (0,))
+
+        exporter = FBX.FbxExporter.Create(manager, "")
+        if not exporter.Initialize(path, -1, manager.GetIOSettings()):
+            raise RuntimeError(f"cannot write {path}")
+        exporter.Export(scene)
+        exporter.Destroy()
+    finally:
+        manager.Destroy()
+    return path
+
+
+def mapped_file(folder: str, mode: str, indices) -> str:
+    """an sdk file whose triangle's material element is mapped ``mode`` with
+    ``indices``, one lambert on the node"""
+    path    = os.path.join(folder, f"{mode}.fbx")
+    manager = FBX.FbxManager.Create()
+    manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+    try:
+        scene = FBX.FbxScene.Create(manager, "")
+        node  = FBX.FbxNode.Create(scene, "tri")
+        scene.GetRootNode().AddChild(node)
+        shape = FBX.FbxMesh.Create(scene, "triShape")
+        shape.InitControlPoints(3)
+        for i, point in enumerate([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]):
+            shape.SetControlPointAt(FBX.FbxVector4(*point, 1.0), i)
+        for face in ((0, 1, 2), (2, 1, 0)):
+            shape.BeginPolygon(-1, -1, -1, False)
+            for v in face:
+                shape.AddPolygon(v)
+            shape.EndPolygon()
+        node.SetNodeAttribute(shape)
+        node.AddMaterial(FBX.FbxSurfaceLambert.Create(scene, "lam"))
+        made = shape.CreateElementMaterial()
+        made.SetMappingMode(getattr(FBX.FbxLayerElement.EMappingMode, mode))
+        made.SetReferenceMode(FBX.FbxLayerElement.EReferenceMode.eIndexToDirect)
+        for index in indices:
+            made.GetIndexArray().Add(index)
+        exporter = FBX.FbxExporter.Create(manager, "")
+        if not exporter.Initialize(path, -1, manager.GetIOSettings()):
+            raise RuntimeError(f"cannot write {path}")
+        exporter.Export(scene)
+        exporter.Destroy()
+    finally:
+        manager.Destroy()
+    return path
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestMaterials(_Files):
+    """materials on their meshes, saved and read back"""
+
+    def test_round_trip_and_what_the_file_holds(self):
+        """every field back, the texture to the byte, from a binary and an
+        ASCII file, both embedding it (measured: the sdk's ASCII writer
+        embeds too); the file as Maya writes one: a lambert and two phongs,
+        the colour as the diffuse colour and the diffuse as its factor, the
+        other colours with factors of 1, the plane's element by polygon [0,
+        0, 1, 1], the box's all-same [0], the texture on DiffuseColor naming
+        its UV set and wraps; a second cycle bit for bit"""
+        nodes = rig()
+        held  = meshes(nodes)
+        given = materials(held)
+        for as_ascii in (False, True):
+            with self.subTest(as_ascii=as_ascii):
+                path = self.path("ascii.fbx" if as_ascii else "binary.fbx")
+                save_fbx(path, nodes, meshes=held, uvs=plane_uvs(held[0]), materials=given, as_ascii=as_ascii)
+                # the file moved to a folder of its own: its texture is inside it
+                moved = os.path.join(self.folder, "moved")
+                os.makedirs(moved, exist_ok=True)
+                path = shutil.copy(path, os.path.join(moved, os.path.basename(path)))
+                self.assertEqual(sorted(os.listdir(moved)), [os.path.basename(path)])
+                back = load_fbx(path)
+                self.assertSameSkeleton(back.hierarchy, nodes)
+                self.assertEqual([mesh.name for mesh in back.meshes], ["planeShape", "boxShape"])
+                same_materials(self, back.materials, given, back.meshes, held)
+                self.assertEqual([back.hierarchy[mesh.parent_uuid].name for mesh in back.meshes], ["plane", "box"])
+                # a second cycle, bit for bit
+                save_fbx(self.path("again.fbx"), *back)
+                again = load_fbx(self.path("again.fbx"))
+                same_materials(self, again.materials, back.materials, again.meshes, back.meshes)
+                os.remove(path)
+
+        save_fbx(self.path("a.fbx"), nodes, meshes=held, materials=given)
+        found = fbx_materials(self.path("a.fbx"))
+        self.assertEqual(sorted(found), ["box", "plane"])
+        self.assertEqual((found["plane"]["mapping"], found["plane"]["indices"]), (_enum(FBX.FbxLayerElement, "EMappingMode", "eByPolygon"), [0, 0, 1, 1]))
+        self.assertEqual((found["box"]["mapping"], found["box"]["indices"]), (_enum(FBX.FbxLayerElement, "EMappingMode", "eAllSame"), [0]))
+        (lam, phong) = found["plane"]["materials"]
+        self.assertEqual(lam[:3], ("skinLambert", "FbxSurfaceLambert", "Lambert"))
+        self.assertEqual(phong[:3], ("shinyPhong", "FbxSurfacePhong", "Phong"))
+        self.assertEqual(found["box"]["materials"][0][:3], ("boxPhong", "FbxSurfacePhong", "Phong"))
+        props = lam[3]
+        self.assertEqual((props["Diffuse"], props["DiffuseFactor"]), ((1.0, 1.0, 1.0), 0.6))
+        self.assertEqual((props["Ambient"], props["AmbientFactor"]), ((0.05, 0.1, 0.15), 1.0))
+        self.assertEqual((props["Emissive"], props["EmissiveFactor"]), ((0.2, 0.0, 0.1), 1.0))
+        self.assertEqual((props["TransparentColor"], props["TransparencyFactor"]), ((0.1, 0.2, 0.3), 1.0))
+        self.assertNotIn("Specular", props)
+        props = phong[3]
+        self.assertEqual((props["Diffuse"], props["DiffuseFactor"]), ((0.9, 0.2, 0.1), 0.8))
+        self.assertEqual((props["Specular"], props["SpecularFactor"], props["Shininess"]), ((0.3, 0.4, 0.5), 1.0, 35.0))
+        self.assertEqual((props["Reflection"], props["ReflectionFactor"]), ((0.0, 0.0, 0.0), 0.25))
+        self.assertEqual(found["plane"]["textures"], {"skinLambert": (True, "grad.png", "map1", 0, 1, "DiffuseColor")})
+        self.assertEqual(found["box"]["textures"], {})
+
+    def test_a_texture_of_each_channel_count(self):
+        """grey, grey and alpha, RGB and RGBA maps: each back as it was"""
+        nodes = rig()
+        held  = meshes(nodes)
+        maps  = [np.random.default_rng(seed).integers(0, 256, size=(3, 5, channels), dtype=np.uint8) for seed, channels in enumerate((1, 2, 3, 4))]
+        given = MaterialList(
+            [MaterialData(name=f"map{i}", mesh_uuid=held[0].uuid, faces=[i], texture=pixels, texture_file=f"map{i}.png") for i, pixels in enumerate(maps)]
+        )
+        save_fbx(self.path("a.fbx"), nodes, meshes=held, materials=given)
+        back = load_fbx(self.path("a.fbx"))
+        same_materials(self, back.materials, given, back.meshes, held)
+        # the embedded file is a PNG named after the texture file, else the
+        # material, else "texture", a name taken twice told apart by a number
+        bare = MaterialList([MaterialData(mesh_uuid=held[1].uuid, texture=maps[2]), MaterialData(name="dup", mesh_uuid=held[0].uuid, faces=[0, 1], texture=maps[2], texture_file="same.jpg"),
+                             MaterialData(name="dup", mesh_uuid=held[0].uuid, faces=[2, 3], texture=maps[3], texture_file="same.jpg"),
+                             MaterialData(name="named", mesh_uuid=held[1].uuid, texture=maps[0])])
+        with self.assertRaisesRegex(ValueError, "covers the whole mesh 'boxShape' while material 'named' covers it too"):
+            save_fbx(self.path("b.fbx"), nodes, meshes=held, materials=bare)
+        bare[3].mesh_uuid = held[0].uuid
+        bare[3].faces     = [1]
+        bare[1].faces     = [0]
+        save_fbx(self.path("b.fbx"), nodes, meshes=held, materials=bare)
+        back = load_fbx(self.path("b.fbx"))
+        self.assertEqual(sorted(m.texture_file for m in back.materials), ["named.png", "same.png", "same_1.png", "texture.png"])
+
+    def test_another_writers_file(self):
+        """colours times their factors; a bare material a default lambert
+        with one warning; textures on other slots left out with one warning
+        naming slot and material; a layered texture read through to its
+        file, its UV set None for the default; a missing file None with one
+        warning, the name kept; two materials under an all-same element the
+        first alone"""
+        path = other_writer(self.folder)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            back = load_fbx(path)
+        messages = [str(w.message) for w in caught]
+        self.assertEqual(len([m for m in messages if "reads lambert and phong materials" in m]), 1)
+        # the sdk writes no shading model for a bare material, as Maya's export of a standardSurface holds none
+        self.assertIn("material 'pbr' (shading model '')", [m for m in messages if "reads lambert and phong materials" in m][0])
+        left = [m for m in messages if "textures on slots" in m]
+        self.assertEqual(len(left), 1)
+        self.assertIn("material 'fx' SpecularColor", left[0])
+        self.assertIn("material 'fx' Bump", left[0])
+        missing = [m for m in messages if "texture files not found" in m]
+        self.assertEqual(len(missing), 1)
+        self.assertIn("material 'lost'", missing[0])
+        self.assertIn("lost.png", missing[0])
+
+        got = {m.name: m for m in back.materials}
+        self.assertEqual([m.name for m in back.materials], ["fx", "pbr", "layered", "lost", "first"])
+        fx = got["fx"]
+        self.assertEqual(fx.kind, "phong")
+        np.testing.assert_allclose(fx.color, [0.9, 0.2, 0.1], rtol=0, atol=1e-12)
+        self.assertEqual(fx.diffuse, 0.8)
+        np.testing.assert_allclose(fx.ambient_color,  [0.25, 0.25, 0.25], rtol=0, atol=1e-12)
+        np.testing.assert_allclose(fx.incandescence,  [0.2, 0.2, 0.2],    rtol=0, atol=1e-12)
+        np.testing.assert_allclose(fx.transparency,   [0.25, 0.25, 0.25], rtol=0, atol=1e-12)
+        np.testing.assert_allclose(fx.specular_color, [0.5, 0.5, 0.5],    rtol=0, atol=1e-12)
+        self.assertEqual((fx.cosine_power, fx.reflectivity, fx.texture), (12.0, 0.75, None))
+        np.testing.assert_array_equal(fx.faces, [0, 1])
+        self.assertEqual(got["pbr"], MaterialData(faces=[2, 3]))  # a default lambert on its faces
+        np.testing.assert_array_equal(got["pbr"].faces, [2, 3])
+        layered = got["layered"]
+        np.testing.assert_array_equal(layered.texture, gradient())
+        self.assertEqual((layered.texture_file, layered.uv_set, layered.faces), ("grad.png", None, None))
+        lost = got["lost"]
+        self.assertEqual((lost.texture, lost.texture_file, lost.uv_set), (None, "lost.png", "map1"))
+        self.assertEqual(got["first"].kind, "lambert")
+        self.assertEqual([m.mesh_uuid for m in back.materials], [back.meshes[i].uuid for i in (0, 0, 1, 2, 3)])
+
+    def test_the_colour_map_without_pil(self):
+        """with no PIL the texture is None, its name kept, with one warning;
+        a save with a texture raises ImportError"""
+        nodes = rig()
+        held  = meshes(nodes)
+        save_fbx(self.path("a.fbx"), nodes, meshes=held, materials=materials(held))
+        with mock.patch("cgmath.formats._write._pil", return_value=None):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                back = load_fbx(self.path("a.fbx"))
+            self.assertEqual(len([w for w in caught if "PIL (pillow), which is not installed" in str(w.message)]), 1)
+            self.assertEqual((back.materials[0].texture, back.materials[0].texture_file, back.materials[0].uv_set), (None, "grad.png", "map1"))
+            with self.assertRaisesRegex(ImportError, "material 'skinLambert' holds a texture, written as a PNG through PIL"):
+                save_fbx(self.path("b.fbx"), nodes, meshes=held, materials=materials(held))
+
+    def test_refusals(self):
+        nodes = rig()
+        held  = meshes(nodes)
+
+        def refused(message, given, kind=ValueError):
+            with self.assertRaisesRegex(kind, message):
+                save_fbx(self.path("refused.fbx"), nodes, meshes=held, materials=given)
+            self.assertFalse(os.path.exists(self.path("refused.fbx")))
+
+        refused("material 'skinLambert' names no mesh of meshes=: mesh_uuid None", MaterialData(name="skinLambert"))
+        refused("the unnamed material on mesh 'planeShape' channel 'faces' names faces mesh 'planeShape' of 4 faces does not hold",
+                MaterialData(mesh_uuid=held[0].uuid, faces=[3, 4]))
+        refused("material 'twice' channel 'faces' names a face twice", MaterialData(name="twice", mesh_uuid=held[0].uuid, faces=[1, 1]))
+        refused("material 'a' and material 'b' both cover face 1 of mesh 'planeShape'; a face holds one material",
+                MaterialList([MaterialData(name="a", mesh_uuid=held[0].uuid, faces=[0, 1]), MaterialData(name="b", mesh_uuid=held[0].uuid, faces=[1, 2, 3])]))
+        refused("material 'a', material 'b' leave 1 faces of mesh 'planeShape' without a material; a mesh is covered whole or not at all",
+                MaterialList([MaterialData(name="a", mesh_uuid=held[0].uuid, faces=[0, 1]), MaterialData(name="b", mesh_uuid=held[0].uuid, faces=[2])]))
+        refused("material 'a' leaves 2 faces of mesh 'planeShape' without a material", MaterialData(name="a", mesh_uuid=held[0].uuid, faces=[0, 1]))
+        refused("material 'whole' covers the whole mesh 'planeShape' while material 'part' covers it too; a face holds one material",
+                MaterialList([MaterialData(name="part", mesh_uuid=held[0].uuid, faces=[0]), MaterialData(name="whole", mesh_uuid=held[0].uuid)]))
+        refused("material 'hdr' channel 'texture' is uint16; a .fbx embeds an 8 bit PNG",
+                MaterialData(name="hdr", mesh_uuid=held[0].uuid, texture=gradient().astype(np.uint16)))
+        refused(r"material 'wide' channel 'texture' is \(2, 2, 5\), not \(H, W, C\) with 1 to 4 channels",
+                MaterialData(name="wide", mesh_uuid=held[0].uuid, texture=np.zeros((2, 2, 5), dtype=np.uint8)))
+        refused("the materials are a MaterialList or a MaterialData, not a list", [MaterialData()], TypeError)
+        with self.assertRaisesRegex(TypeError, "materials are written on their mesh; missing: meshes="):
+            save_fbx(self.path("refused.fbx"), nodes, materials=MaterialData(mesh_uuid=held[0].uuid))
+        # a mesh with no material writes none, an empty list none
+        save_fbx(self.path("none.fbx"), nodes, meshes=held, materials=MaterialList())
+        self.assertIsNone(load_fbx(self.path("none.fbx")).materials)
+        self.assertEqual(fbx_materials(self.path("none.fbx"))["plane"]["materials"], [])
+
+        # what the reader refuses: another mapping, faces without a material
+        with self.assertRaisesRegex(ValueError, "mesh 'triShape' channel 'materials' is mapped eByControlPoint, which the r17-skeleton fork does not read"):
+            load_fbx(mapped_file(self.folder, "eByControlPoint", (0, 0, 0)))
+        with self.assertRaisesRegex(ValueError, "mesh 'triShape' channel 'materials' leaves 1 faces without a material"):
+            load_fbx(mapped_file(self.folder, "eByPolygon", (0, -1)))
+        with self.assertRaisesRegex(ValueError, "mesh 'triShape' channel 'materials' names material 3 of its node's 1"):
+            load_fbx(mapped_file(self.folder, "eByPolygon", (0, 3)))
+        # a by-polygon element giving one material every face: the whole mesh
+        back = load_fbx(mapped_file(self.folder, "eByPolygon", (0, 0)))
+        self.assertEqual((len(back.materials), back.materials[0].faces, back.materials[0].name), (1, None, "lam"))
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestMayaMaterials(_InMaya):
+    """Maya 2025's export of its shaders read as Maya holds them, and Maya's
+    import of ours"""
+
+    LAMBERT = ("color", "transparency", "ambientColor", "incandescence", "diffuse")
+    PHONG   = ("specularColor", "cosinePower", "reflectivity")
+
+    def maya_scene(self) -> dict:
+        """the probe's scene: a 2 by 2 plane, faces 0 and 1 under a lambert
+        whose colour a file texture feeds (wrap u on, v off), faces 2 and 3
+        under a phong; a cube under a blinn; a sphere under a
+        standardSurface; {shader: (mesh, faces or None)}"""
+        cmds = self.cmds
+        cmds.file(new=True, force=True)
+        cmds.currentUnit(time="ntsc", linear="cm", angle="deg")
+        Image.fromarray(gradient()).save(self.path("grad.png"))
+
+        def shader(kind, name, **values):
+            made  = cmds.shadingNode(kind, asShader=True, name=name)
+            group = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=f"{name}SG")
+            cmds.connectAttr(f"{made}.outColor", f"{group}.surfaceShader", force=True)
+            for attr, value in values.items():
+                if isinstance(value, (tuple, list)):
+                    cmds.setAttr(f"{made}.{attr}", *value, type="double3")
+                else:
+                    cmds.setAttr(f"{made}.{attr}", value)
+            return made, group
+
+        plane_node, _ = cmds.polyPlane(name="plane", width=2.0, height=2.0, subdivisionsX=2, subdivisionsY=2)
+        lambert, lambert_sg = shader("lambert", "skinLambert", transparency=(0.1, 0.2, 0.3), ambientColor=(0.05, 0.1, 0.15),
+                                     incandescence=(0.2, 0.0, 0.1), diffuse=0.6)
+        file_node = cmds.shadingNode("file", asTexture=True, name="gradFile")
+        place     = cmds.shadingNode("place2dTexture", asUtility=True, name="gradPlace")
+        cmds.connectAttr(f"{place}.outUV", f"{file_node}.uvCoord")
+        cmds.connectAttr(f"{place}.outUvFilterSize", f"{file_node}.uvFilterSize")
+        cmds.setAttr(f"{file_node}.fileTextureName", self.path("grad.png").replace(os.sep, "/"), type="string")
+        cmds.setAttr(f"{place}.wrapU", 1)
+        cmds.setAttr(f"{place}.wrapV", 0)
+        cmds.connectAttr(f"{file_node}.outColor", f"{lambert}.color", force=True)
+        phong, phong_sg = shader("phong", "shinyPhong", color=(0.9, 0.2, 0.1), specularColor=(0.3, 0.4, 0.5), cosinePower=35.0, reflectivity=0.25)
+        cmds.sets(f"{plane_node}.f[0:1]", edit=True, forceElement=lambert_sg)
+        cmds.sets(f"{plane_node}.f[2:3]", edit=True, forceElement=phong_sg)
+        cube, _ = cmds.polyCube(name="cube")
+        blinn, blinn_sg = shader("blinn", "dullBlinn", color=(0.1, 0.8, 0.2), eccentricity=0.45, specularRollOff=0.6, specularColor=(0.7, 0.7, 0.2), reflectivity=0.1)
+        cmds.sets(cube, edit=True, forceElement=blinn_sg)
+        ball, _ = cmds.polySphere(name="ball", subdivisionsX=8, subdivisionsY=6)
+        standard, standard_sg = shader("standardSurface", "pbr", baseColor=(0.2, 0.3, 0.9), base=0.7)
+        cmds.sets(ball, edit=True, forceElement=standard_sg)
+        cmds.setAttr(f"{cube}.translate", 3.0, 0.0, 0.0)
+        cmds.setAttr(f"{ball}.translate", -3.0, 0.0, 0.0)
+        return {lambert: (plane_node, [0, 1]), phong: (plane_node, [2, 3]), blinn: (cube, None), standard: (ball, None)}
+
+    def exported_materials(self, name: str, embed: bool) -> str:
+        cmds, mel = self.cmds, self.mel
+        mel.eval("FBXResetExport")
+        mel.eval("FBXExportConvertUnitString cm")
+        mel.eval("FBXExportUpAxis y")
+        mel.eval(f"FBXExportEmbeddedTextures -v {'true' if embed else 'false'}")
+        out = self.path(name).replace(os.sep, "/")
+        mel.eval(f'FBXExport -f "{out}"')
+        return out
+
+    def test_mayas_export_reads_as_maya_holds_it(self):
+        """every lambert and phong attribute as Maya holds it, the blinn a
+        phong with the shininess Maya converts its eccentricity to, the
+        standardSurface a default lambert with one warning, the textured
+        colour white as Maya writes it, the texture's pixels, UV set and
+        wraps, the shading groups' faces; embedded and linked alike"""
+        cmds = self.cmds
+        made = self.maya_scene()
+        for embed in (True, False):
+            with self.subTest(embed=embed):
+                out = self.exported_materials(f"maya_{'embedded' if embed else 'linked'}.fbx", embed)
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    back = load_fbx(out)
+                self.assertEqual(len([w for w in caught if "reads lambert and phong materials" in str(w.message)]), 1)
+                rig    = back.hierarchy if back.hierarchy is not None else back.clip.active
+                meshes = {rig[mesh.parent_uuid].name: mesh for mesh in back.meshes}
+                got    = {material.name: material for material in back.materials}
+                self.assertEqual(sorted(got), ["dullBlinn", "pbr", "shinyPhong", "skinLambert"])
+                for shader, (node, faces) in made.items():
+                    material = got[shader]
+                    with self.subTest(shader):
+                        self.assertEqual(material.mesh_uuid, meshes[node].uuid)
+                        if faces is None:
+                            self.assertIsNone(material.faces)
+                        else:
+                            np.testing.assert_array_equal(material.faces, faces)
+                        kind = cmds.nodeType(shader)
+                        if kind == "standardSurface":
+                            self.assertEqual(material, MaterialData())
+                            continue
+                        self.assertEqual(material.kind, "lambert" if kind == "lambert" else "phong")
+                        if material.texture is None:
+                            np.testing.assert_allclose(material.color, cmds.getAttr(f"{shader}.color")[0], rtol=0, atol=1e-7)
+                        else:
+                            np.testing.assert_array_equal(material.color, [1.0, 1.0, 1.0])  # Maya writes a textured colour white
+                        for attr, field in (("transparency", "transparency"), ("ambientColor", "ambient_color"), ("incandescence", "incandescence")):
+                            np.testing.assert_allclose(getattr(material, field), cmds.getAttr(f"{shader}.{attr}")[0], rtol=0, atol=1e-7, err_msg=attr)
+                        self.assertAlmostEqual(material.diffuse, cmds.getAttr(f"{shader}.diffuse"), places=7)
+                        if kind == "phong":
+                            np.testing.assert_allclose(material.specular_color, cmds.getAttr(f"{shader}.specularColor")[0], rtol=0, atol=1e-7)
+                            self.assertAlmostEqual(material.cosine_power, cmds.getAttr(f"{shader}.cosinePower"), places=7)
+                            self.assertAlmostEqual(material.reflectivity, cmds.getAttr(f"{shader}.reflectivity"), places=7)
+                        if kind == "blinn":
+                            np.testing.assert_allclose(material.specular_color, cmds.getAttr(f"{shader}.specularColor")[0], rtol=0, atol=1e-7)
+                            self.assertAlmostEqual(material.reflectivity, cmds.getAttr(f"{shader}.reflectivity"), places=7)
+                            # Maya 2025's conversion of eccentricity 0.45 (measured)
+                            self.assertAlmostEqual(material.cosine_power, 2.6872277431955554, places=6)
+                skin = got["skinLambert"]
+                np.testing.assert_array_equal(skin.texture, gradient())
+                # Maya's export writes both wrap modes as repeat whatever the
+                # place2dTexture holds (measured: wrapV off reads as repeat)
+                self.assertEqual((skin.texture_file, skin.uv_set, skin.wrap_u, skin.wrap_v), ("grad.png", "map1", "repeat", "repeat"))
+                self.assertEqual(cmds.getAttr("gradPlace.wrapV"), False)  # what the file lost
+                self.assertEqual([m.texture for m in back.materials if m.name != "skinLambert"], [None, None, None])
+
+    def test_maya_imports_our_save_as_we_hold_it(self):
+        """our materials, imported: Maya's lambert and phong shaders with our
+        attributes, the texture on a file node feeding the colour with our
+        pixels and wraps, each shading group on our faces"""
+        cmds  = self.cmds
+        nodes = rig()
+        held  = meshes(nodes)
+        given = materials(held)
+        save_fbx(self.path("a.fbx"), nodes, meshes=held, uvs=plane_uvs(held[0]), materials=given)
+        self.imported(self.path("a.fbx"))
+        for material in given:
+            node  = nodes[[mesh.uuid for mesh in held].index(material.mesh_uuid)].name
+            count = len(held[[mesh.uuid for mesh in held].index(material.mesh_uuid)].counts)
+            with self.subTest(material.name):
+                shaders = cmds.ls(material.name, type=material.kind)
+                self.assertEqual(len(shaders), 1)
+                shader = shaders[0]
+                if material.texture is None:
+                    np.testing.assert_allclose(cmds.getAttr(f"{shader}.color")[0], material.color, rtol=0, atol=1e-6)
+                else:
+                    files = cmds.listConnections(f"{shader}.color", type="file") or []
+                    self.assertEqual(len(files), 1)
+                    with Image.open(cmds.getAttr(f"{files[0]}.fileTextureName")) as image:
+                        np.testing.assert_array_equal(np.asarray(image.convert("RGB")), material.texture)
+                    # Maya's import leaves the place2dTexture's wraps on whatever
+                    # the file's wrap modes say (measured: WrapModeV clamp reads as on)
+                    places = cmds.listConnections(f"{files[0]}.uvCoord", type="place2dTexture") or []
+                    self.assertEqual(len(places), 1)
+                    self.assertEqual((cmds.getAttr(f"{places[0]}.wrapU"), cmds.getAttr(f"{places[0]}.wrapV")), (True, True))
+                    self.assertEqual(material.wrap_v, "clamp")  # what Maya does not take
+                np.testing.assert_allclose(cmds.getAttr(f"{shader}.transparency")[0],  material.transparency,  rtol=0, atol=1e-6)
+                np.testing.assert_allclose(cmds.getAttr(f"{shader}.ambientColor")[0],  material.ambient_color, rtol=0, atol=1e-6)
+                np.testing.assert_allclose(cmds.getAttr(f"{shader}.incandescence")[0], material.incandescence, rtol=0, atol=1e-6)
+                self.assertAlmostEqual(cmds.getAttr(f"{shader}.diffuse"), material.diffuse, places=6)
+                if material.kind == "phong":
+                    np.testing.assert_allclose(cmds.getAttr(f"{shader}.specularColor")[0], material.specular_color, rtol=0, atol=1e-6)
+                    self.assertAlmostEqual(cmds.getAttr(f"{shader}.cosinePower"), material.cosine_power, places=6)
+                    self.assertAlmostEqual(cmds.getAttr(f"{shader}.reflectivity"), material.reflectivity, places=6)
+                groups = cmds.listConnections(f"{shader}.outColor", type="shadingEngine") or []
+                self.assertEqual(len(groups), 1)
+                members = cmds.ls(cmds.sets(groups[0], q=True) or [], flatten=True, long=True)
+                faces   = sorted(int(m.group(1)) for member in members for m in [re.search(r"\.f\[(\d+)\]$", member)] if m)
+                whole   = [member for member in members if ".f[" not in member]
+                if material.faces is None:
+                    self.assertTrue(whole or faces == list(range(count)), members)
+                    for member in whole:
+                        self.assertIn(node, member)
+                else:
+                    self.assertEqual(faces, sorted(material.faces.tolist()), members)
+                    for member in members:
+                        self.assertIn(node, member)
+
+
+if __name__ == "__main__":
+    unittest.main()
