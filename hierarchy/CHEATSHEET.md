@@ -2160,7 +2160,7 @@ loader's, where:
   under them 9.8e-2. A node it turns by neither order parts from the
   loader at another rate by its gap at the file's rate and by a share of
   its own, which grows with how far the angles Maya solves bend or jump
-  between that rate's frames, not with that gap, as the `axis_system`
+  between that rate's frames, not with that gap, as the axes and units
   paragraph below says (a smooth turn about one axis, which agrees at
   the file's rate, parts by 2.8e-3 to 5.3e-3 times the largest second
   difference of its keys in degrees a frame squared from 24 and 25 fps
@@ -2200,7 +2200,7 @@ loader's, where:
   matrices on nodes of world scale 1, a node under them up to twice its
   world distance off in translate (3.72 at 1.87). On a node it turns by
   neither order it is as far apart at the file's rate as the
-  `axis_system` paragraph below says, and it parts where another item of
+  axes and units paragraph below says, and it parts where another item of
   this list says;
 - a layer above the base turns a node that is no joint whose pre
   rotation Maya's FBXImport bakes into its rotate (the item above),
@@ -2258,7 +2258,7 @@ loader's, where:
   under it, and with a pivot the node itself, is off in translate by up
   to twice its world distance from that pivot times the largest over the
   smallest singular value of the parent's world 3x3, as the
-  `axis_system` paragraph below says, and a node on the pivot agrees: on
+  axes and units paragraph below says, and a node on the pivot agrees: on
   the files measured, under even scales, up to 2.0 times that distance
   (3.72 at 1.87 and 38.9 at 19.7; with pivots 0.5 to 7.1 away, the node
   itself 4.00 off with one 2 away), under a group scaled (1, 0.5, 2) up
@@ -2431,9 +2431,9 @@ loader's, where:
 | Loader | Signature |
 |---|---|
 | `TransformList.load` | `(filename, mode=None, **kwargs)` — `mode` in `"gltf" / "glb" / "fbx" / "json" / "npz" / "pkl" / "pickle"`; `kwargs` go to `load_fbx` / `load_glb` by keyword |
-| `TransformList.load_fbx` | `(filename, scale_factor=None, axis_system="maya_y_up", pose="node", node_types=None)` |
+| `TransformList.load_fbx` | `(filename)` — every node of the file at its own values, in Maya's Y-up and cm, a take left unread |
 | `TransformList.load_glb` | `(filename, scale_factor=100.0, pose_frame=None)` |
-| `ClipData.load_fbx` | `(filename, scale_factor=None, take=None, fps=None, start_frame=None, end_frame=None, axis_system="maya_y_up", node_types=None)`; `take` an index or a take's name |
+| `ClipData.load_fbx` | `(filename)` — the active take over every node, in Maya's Y-up and cm; `ValueError` for a file holding none |
 | `ClipData.load_glb` | `(filename, scale_factor=100.0, animation=0, fps=24.0, start_frame=0)` |
 | `TransformList.save_fbx` | `(filename, zero_root=False, as_ascii=False)` — binary unless `as_ascii`; FBX has no shear, so the save leaves it out |
 
@@ -2501,8 +2501,7 @@ A rig's own values are in a `save()` file.
 
 A group or a locator with `segment_scale_compensate` on, which a rig
 built or edited by hand can hold and no reader sets, is written
-`eInheritRrs`. In a save in cm of a rig labelled Maya's Y-up the SDK
-places it and the nodes under it where the rig has them, its scale or
+`eInheritRrs`. In a save the SDK places it and the nodes under it where the rig has them, its scale or
 its parent's mirrored or not (a scale mirrors with an odd number of
 negative axes), and Maya's importer does too. Three cases part, Maya's
 importer in each and the SDK in the last. Their numbers are one rig's,
@@ -2550,14 +2549,6 @@ compensating their scale.
   3.96e+04 and 7.27e+04 under (1e-12, 1, 3e-4). Near 0 it can bring a
   node in not finite, where the SDK and `load_fbx` stay finite.
 
-A rig labelled anything else, X-up, Z-up or left handed, has no such
-promise: such a node, and every node under it, can import elsewhere than
-the SDK and the rig. At a top node in a rotate order other than xyz that
-is new: an earlier `save_fbx`, which wrote it `eInheritRrSs`, had it
-where the rig has it. On the rig above with no parent, in cm, labelled
-`"z up, -y front, right handed"`, that is up to 2.53 in the group's axes
-and 3.44 in the locator's position over rotate orders 1 to 5.
-
 `load_fbx` reads such a group or locator back with the flag off, as
 Maya reads an `eInheritRrs` node, baked: where Maya's FBXImport puts it
 and the nodes under it, not the channels saved, with shear under a
@@ -2581,9 +2572,8 @@ assert np.any(back.shear)
 
 A scale under 1e-12 in size, 0 and -0 among them, is written as 1e-12,
 positive, as Maya's own FBX export writes a static one and as Maya's
-evaluation holds it: it loads back as 1e-12, and, in a save in cm of a
-rig labelled Maya's Y-up, the nodes under it where Maya's FBXImport of
-the save puts them, but for a group or a locator with
+evaluation holds it: it loads back as 1e-12, and the nodes under it
+where Maya's FBXImport of the save puts them, but for a group or a locator with
 `segment_scale_compensate` on and the nodes under that. A scale of 1e-12
 or more in size is written as it is.
 
@@ -2608,253 +2598,41 @@ assert back.take == ["Take 001"] and back.frame_count == [10] and back.start_fra
 animated.frames[3:4].save_fbx(os.path.join(WORKDIR, "frame3.fbx"))  # one pose
 ```
 
-For `load_fbx`, `scale_factor=None` converts the file's unit to
-centimetres: translations, static and keyed, are multiplied by the
-centimetres one of the file's units holds (100.0 for a file in metres,
-1.0 for one in cm); rotations and scales keep the file's values. A
-number is the caller's own factor, and the file's unit is not read.
-The SDK's `FbxSystemUnit.ConvertScene` and Maya's unit-converting export
-(`FBXExportConvertUnitString`) write a scene in another unit, s cm a
-unit, as a scale of 1/s on each child of the scene root, and on each
-node that does not inherit its parent's scale (a joint's segment scale
-compensate), over values left in cm. A child of the scene root scaled
-1/s on all three axes is read as that unit, kept or dropped: its scale
-is reset to 1 and divided out of the compensating joints under it, and
-the lengths under it are read as they are, so such a file loads as the
-cm file it came from, rig, every frame of a clip, bind pose, meshes and
-skins alike. A file only labelled in metres, its numbers in metres, is
-multiplied as above. The one risk: a root authored at exactly 1/s in
-such a file reads as the unit. A root the export found scaled other
-than 1, which it scales by 1/s all the same, holds no unit: the nodes
-at and under it load as the SDK places them, their lengths multiplied
-as above, which is where the cm file has them, scaled 1/s, and the
-points of a mesh there s times larger, so the mesh is right once posed.
-But the export leaves the curves of a take's later layers in cm, and
-there they are read as the SDK places them. Such a root's translate
-keyed on one is multiplied by s with the rest: on a clip the root and
-everything under it are off by s - 1 times that layer's own translate
-times its weight, on each channel its curve node holds: what an
-additive layer adds (Maya's metres export of a group scaled 2 keyed on
-an additive animLayer: up to 2178 cm off), an override or passthrough
-layer's whole value, a channel it holds unkeyed too (the same group's
-translate x and z on an override animLayer: 2475 cm off on frame 5,
-and 198 along y). A scale an override or passthrough layer keys there,
-on the root or on a node under it that does not inherit its parent's
-scale, is read as the cm value it is, s times what the rest of the read
-gives it, and every node under it is off (that group's scale x on an
-override animLayer: its joints 792 and 1780 cm off); an additive
-layer's scale, which multiplies, loads right. And a node there that
-compensates its parent's scale under a parent that is neither the root
-nor compensating, as the second joint of a Maya skeleton does when its
-first joint sits under such a root, is scaled 1/s once more by the
-export, and every node under it with it. Read by their own values
-(`pose="node"`, the default, and a clip on every frame and its rest
-pose), that node loads at its cm position scaled 1/s^2, the nodes under
-it off their cm positions, and a mesh on or under it, or skinned to it,
-is off once posed. Under `pose="bind"` a node a bind pose lists takes
-its bind matrix, which the export converts as a world matrix: it loads
-where the cm file has it, scaled 1/s like the rest, and so do the nodes
-under it and the meshes on them or skinned to them, posed at the bind.
-A node no bind pose lists keeps what its own values give it under its
-parent's bind: the node the export scales once more, and a compensating
-node under it, still loads scaled 1/s^2, and the nodes under them that
-no bind pose lists are off, but for those under a node one lists, which
-load right, as that node does; any other loads scaled 1/s like the rest,
-as the joints of a skeleton whose root joint is scaled other than 1 do,
-the end joints Maya's export leaves out of the bind pose among them.
-Maya's export lists every skin influence, the joints between them and
-the nodes above them. Maya's importer, which scales every root and every
-compensating node by s, puts all of these right.
-The FBX mesh readers (`geometry.mesh.load_fbx`, `MeshData.load_fbx`,
-`MeshList.load_fbx`) and `render.Object.load_fbx`, points and skin bind
-matrices alike, take the same `scale_factor`, with the same default, so
-a mesh under its node's world, or posed by a rig or a clip read from the
-same file, sits where Maya's import puts it.
+Every value cgmath holds is in Maya's axes and unit: Y up, right handed,
+cm. No field says so, and nothing converts a rig or a clip once it is in:
+the FBX boundary does the converting, both ways.
 
-`axis_system="maya_y_up"`, the default, loads an FBX in Maya's Y-up
-axes the way `FbxAxisSystem.MayaYUp.ConvertScene` converts it: every
-node's world matrix, on every whole frame of a clip, is the one Maya's
-FBXImport gives it, in the file's axes times the turn from the file's
-axis system (its up vector, front vector and handedness) to Maya's where
-the read turns, and that import parts from the SDK's own evaluation on
-the nodes the inherit paragraph below names. Maya's FBX importer
-puts a file whose up axis is X or Z, an Unreal file among them, in the
-same place as ConvertScene, but for a skeleton node at the root of the
-file, `eRoot` or `eEffector`, that holds no `eLimbNode` child, which it
-imports as a transform, 1.41 off ConvertScene's in its 3x3 in a Z-up
-file and 1.28 in an X-up one, the nodes under it up to 2.98 and 5.0 off
-in translate, where the loaders follow ConvertScene: one that holds an
-`eLimbNode`, as an Unreal file's skeleton root does, imports as a joint
-where ConvertScene puts it, and `save_fbx` writes every joint as an
-`eLimbNode`. Maya's importer also parts from the loaders on a node below
-the roots that is no camera or light whose rotation is inactive, in
-another order than xyz, which it turns by neither order (below). At the
-file's rate, with FBXImportResamplingRateSource "File", or from a scene
-whose rate is a whole multiple of the file's but 90 fps, Maya's import
-and the loaders are up to 2.0 apart in the 3x3 on a node of world scale
-1: on keys within whole turns of the angles Maya's xyz solve returns (y
-between -90 and 90), less the less the node turns, up to about the
-square of that turn in radians on turns under 20 degrees, and on keys
-off that branch, as (180, 170, 180) is of (0, 10, 0), up to about twice
-the turn in radians in xzy, yzx, yxz and zxy, zyx keeping the square;
-and on a take up to 3.9e-4 more where Maya holds the rotate it solves
-level (the list above). Against the same node under the same parents
-with every scale 1, a scale multiplies that by the node's world scale,
-by the largest axis of an uneven one at most, where the scales above the
-node are even; by up to the product of the largest axes of its own scale
-and those above it where no parent scaled unevenly is turned or sits
-under a turned one; and otherwise by up to 1.19 times that product on
-the files measured (a node scaled (3, 1, 1) under a group scaled (1, 1,
-3) and turned), 1.46 times it in a numpy scan of the rule Maya follows
-and never more than 2.13 times it. Such a node turns about its rotate
-pivot: a node under it is off in translate by up to twice its world
-distance from that pivot, and so is the node itself where it has one,
-times the largest over the smallest singular value of the node's
-parent's world 3x3 (1 where the scales above it are even, and that 3x3's
-longest row over its shortest only where no turned parent sits under one
-scaled unevenly), and a node on the pivot agrees. On the files measured,
-up to 3.0e-4 on turns of 1.1 degrees, 3.3e-2 on 11, 0.32 on 35, 1.1 on
-72 and 2.0 on turns past 110, and off the branch 3.6e-2 on turns of 1.4
-degrees, 7.1e-2 on 3 and 0.35 on 10; on turns of up to 111 degrees, 5.1
-on a node scaled 3, 4.9 on one scaled (1, 2, 3) and 3.4 under one scaled
-2; on turns of 11 degrees, a node scaled (3, 1, 1) under one scaled (1,
-1, 3) 8.2 times its gap at scale 1, where the largest axis of its world
-3x3 is 3.1 and the product of the two largest axes 9; a locator 1.9 away
-up to 3.6 off, one 5.6 away 10.6, and one 0.1 away under a group scaled
-(1, 0.1, 1) up to 10.1 times that distance, as much with a group turned
-45 degrees between them, where that 3x3's rows give 2.8; with rotate
-pivots 0.5 to 7.1 away, the node itself up to 1.99 times that distance
-off (3.94 with a pivot 2 away) and 3.96 times it under a group scaled
-(1, 0.5, 2), and a node on the pivot within 5.9e-14. From another rate
-Maya keys such a node at that rate (the list above), and on the file's
-frames between those keys it parts from the loaders by the gap above and
-by a share of its own, the two adding or partly cancelling: that share
-grows with how far the angles Maya solves bend between that rate's
-frames, not with the gap, and is largest where they jump, as they do by
-180 degrees where the node's turn passes y = 90 or -90 in xyz. On the
-files measured, on nodes of world scale 1, from 24, 25 and 48 fps scenes
-for a 30 fps file and 30 and 25 fps ones for a 24 fps file: a smooth
-turn about one axis, which agrees at the file's rate, parts by 2.8e-3 to
-5.3e-3 times the largest second difference of its keys in degrees a
-frame squared from 24 and 25 fps scenes for a 30 fps file, 0.33 to 0.77
-of that from 48, and by 1.9e-3 to 4.2e-3 times it from 30 and 25 fps
-scenes for a 24 fps file (on the files measured, on second differences
-of 1e-2 or more, 2.9e-5 to 6.8e-1); keys that turn back each frame,
-4.1e-6 apart at the file's rate on a 0.14 degree turn and 3.1e-4 to
-6.4e-4 from those scenes, 4.2e-4 and 3.2e-3 to 6.6e-3 on a 1.4 degree
-one, 1.1e-2 and 1.6e-2 to 3.9e-2 on a 7 degree one; keys linear in time,
-at their largest within 2 percent of the gap at the file's rate, but
-Maya's turn parting from its own at the file's rate by up to 1.3e-3 on
-turns up to 45 degrees, 4.3e-2 on turns to 111 and 1.9 on frames where
-the angles it solves jump. A scale multiplies the share as it does the
-gap: from a 25 fps scene for a 24 fps file, the keys whose share is 1.85
-at scale 1 have one of 7.42 on a node scaled (1, 2, 3) under one scaled
-(2, 2, 2). On an X- or Z-up file Maya's importer also parts from
-ConvertScene, and so from a clip, where a layer blends the rotation of a
-root that is no joint, and in a file of any axes where it keys what it
-solves or merges at another frame rate than the file's (the list above).
-Maya's importer leaves a file whose up axis is Y, pointing up or down,
-in its own axes, so a Y-up file whose front is not +Z, or a -Y-up one,
-loads turned 90 or 180 degrees from where Maya shows it. An Unreal file,
-Z-up, turns (x, y, z) to (x, z, -y), root travel with it. On a root a
-layer above the base translates, additive, override or passthrough, a
-clip still keeps the root's translate in the file's world turned, the
-motion as the file authors it, where ConvertScene leaves that layer's
-translate in the file's axes, and so does Maya's importer wherever the
-base layer holds that translate (within 7.7e-7 of ConvertScene; where
-the base layer holds no curve node for it, Maya parts from ConvertScene
-as the first live layer item above says). A clip sits 2.8 to 49 off
-Maya's import of such a root on the files measured, a gap that grows
-with how far the layer moves it; Maya's import of a Z-up scene it
-exported, a group root an additive layer translates, sits 45 off that
-scene turned, the clip 1.5 off it, as Maya's import of the same scene
-exported Y-up does, and puts that group's 3x3, in xyz, 1.41 off
-ConvertScene's and the clip's, as the list above says. A root whose
-rotation is inactive still blends its rotation, blended by layer, as
-ConvertScene's xyz node, as Maya's importer does a group's, a locator's
-or a joint's (a zyx group root the layer also translates and turns: its
-3x3 1.70 off the file's world turned and within 1.7e-7 of Maya's
-FBXImport into a scene at the file's frame rate, its translate the
-file's world turned, 49 off Maya's import in a Z-up file and 30 in an
-X-up one). The turn goes on the roots: a joint root takes it in its
-joint orient and translate and keeps its rotate curves; any other root's
-rotate is solved again, through `euler_filter` on a clip. A mesh takes
-the turn through its node: the mesh readers keep each mesh in its own
-space and take no `axis_system`, and `render.Object.load_fbx`, a mesh
-with no node above it, turns its points, normals and skin bind matrices.
-A file already in Maya's Y-up, as `save_fbx` writes a default read,
-loads as it is; a left-handed one raises `ValueError`, since a rotation
-can't turn it into Maya's axes. `axis_system=None` keeps the file's own
-axes. `load()` passes `axis_system` on to `load_fbx` as it does any
-argument, so a left-handed file reads through `HierarchyData.load(path,
-axis_system=None)` too. Which way the character faces stays as the file
-has it.
+`load_fbx` reads a file whose up axis is X or Z the way Maya's importer
+reads it (measured): the turn from the file's axes to Maya's Y-up goes on
+the file's roots, a joint root taking it in its joint orient and
+translate and keeping its rotate curves, any other root's rotate solved
+again, frame by frame through `euler_filter` on a clip, and the bind
+matrices turning with them; a node under a root is relative to it and
+keeps its values, and so does a mesh, in its node's space. An Unreal
+file, Z-up, turns (x, y, z) to (x, z, -y). A file whose up axis is Y, up
+or down, whatever its front, is left in its own axes, as Maya's importer
+leaves it: which way the character faces stays as the file has it. A
+left handed file raises `ValueError`, since no rotation turns it into
+Maya's axes. The file's unit is converted: every length (translations
+static and keyed, points, bind matrices) is multiplied by the centimetres
+one of the file's units holds, 100 for metres, 2.54 for inches. Maya's
+importer holds that unit as a scale of s on the file's roots and its
+compensating joints instead, the numbers under them as the file has them
+(measured): the positions are the same, and every world's 3x3 is s times
+`load_fbx`'s. A scale a unit converting export left on a root (the SDK's
+`ConvertScene`, Maya's `FBXExportConvertUnitString`) is read as the file
+holds it.
 
-A rig and a clip record the axis system and the unit their values are
-in, `axis_system` and `unit`, saved with them. The FBX loaders record
-what they produced: `"maya_y_up"` and `1.0` (cm) with their defaults; the
-file's own axes in words with `axis_system=None`, `"z up, -y front, right
-handed"` for an Unreal file, its up and front axes, either one negated,
-and its hand; and with a number for `scale_factor` the file's unit in cm
-over that number (a cm file read with `0.01` records `100.0`, metres).
-Hand-built data, and a file saved before there was a record, hold
-`"maya_y_up"` and `1.0`. Setting either relabels the values and moves
-none of them, a clip's rest pose with the clip. A rig, clip, copy, cut
-or delta built from another takes its record, and a view reads its rig's
-(a view taken from `TransformList.load_fbx`'s, that load's, until a rig
-owns its nodes). Values of two records have no one label, so where they
-would meet `ValueError` is raised: a view over rigs that record two, a
-load's view holding nodes no rig owns beside a rig's of another record,
-nodes of a rig joining one that records another (an empty rig takes
-theirs), the pose algebra between two, matching or pasting the values of
-nodes of another (`match_translate`, `match_rotate`, `match_matrix`, and
-a pose or frames pasted into `clip.frames`; values pass as they are; a
-node a rig lists that another rig owns, as an item assignment lists one,
-counts in that rig's record), `ClipData.from_poses` of poses of two, and
-a clip's rest pose of another. `save_fbx` labels the file with the
-record, the unit set explicitly, and writes the values as they are (but
-for a scale under 1e-12 in size, written as 1e-12), so a save loads with
-the defaults, and imports into Maya, where the file the values were read
-from does, in whatever axes and unit they were read.
-Where the read and Maya part, as on a Y-up file whose front is not +Z
-read with the defaults, the save parts too (`save_fbx`'s docstring lists
-the cases). A node's shear, which FBX has no channel for, stays out of
-the save, as out of Maya's, one warning naming the nodes holding one:
-they and the nodes under them land where the rig with that shear zeroed
-has them, up to 4.20 off on a typed group read back from a file of its
-own; a group read under an even parent holds none and saves as read. A
-save in another unit than cm holds its lengths in that unit, as a file
-authored in it does, which Maya's importer brings in with its top nodes
-scaled by the unit (100 for metres) at the positions the values say, but
-for a node written `eInheritRrs` whose parent is neither a top node nor
-written `eInheritRrs`: the conversion multiplies its scale by the unit,
-so it takes the unit twice, with the nodes under it, and the second of
-the three cases of a group with `segment_scale_compensate` on counts the
-scale the conversion gives that group's parent: a joint compensating its
-scale directly under such a group directly under a top node is off in
-Maya's importer though that top node's scale is 1 (`save_fbx`'s
-docstring gives the numbers). A mesh holds no record: its points are in
-its node's object space, the same in any axes, in the unit its reader's
-`scale_factor` gives, the unit a rig read with the same `scale_factor`
-records. `save_fbx` writes no geometry; a mesh's node, read as a
-transform, is written as a group.
+`save_fbx` labels every file Maya's Y-up and cm and writes the values as
+they are, so a save loads as it was and imports into Maya where cgmath
+has it. A file saved by an earlier cgmath holds `axis_system` and `unit`
+beside its nodes: `"maya_y_up"` and `1.0` load in silence, another label
+warns once and the values load as they are.
 
+<!-- notest -->
 ```python
-rig = make_chain()
-assert (rig.axis_system, rig.unit) == ("maya_y_up", 1.0)      # hand-built: Maya's Y-up, cm
-
-rig.axis_system = "z up, -y front, right handed"  # Unreal's axes: relabels, moves nothing
-rig.unit        = 100.0                           # metres
-rig.save_fbx(os.path.join(WORKDIR, "zup_m.fbx"))
-
-kept = HierarchyData.load_fbx(os.path.join(WORKDIR, "zup_m.fbx"), axis_system=None, scale_factor=1.0)
-assert (kept.axis_system, kept.unit) == ("z up, -y front, right handed", 100.0)
-assert np.allclose(kept.world_matrix, rig.world_matrix)        # the values as they were saved
-
-maya = HierarchyData.load_fbx(os.path.join(WORKDIR, "zup_m.fbx"))   # the defaults
-assert (maya.axis_system, maya.unit) == ("maya_y_up", 1.0)
-turn = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])   # Z-up to Maya's Y-up
-assert np.allclose(maya.world_matrix[:, 3, :3], rig.world_matrix[:, 3, :3] @ turn * 100.0)
+rig = HierarchyData.load_fbx(os.path.join(WORKDIR, "unreal_zup.fbx"))   # Y up, cm, whatever the file was in
+rig.save_fbx(os.path.join(WORKDIR, "maya.fbx"))                         # labelled Maya's Y-up and cm
 ```
 
 `HierarchyData.load_fbx(..., pose="bind")` reads a skinned file's bind
@@ -3402,10 +3180,9 @@ sorted(tree["__items__"][1])
 # ['name', 'node_type', 'parent_uuid', 'translate', 'uuid']
 ```
 
-A `HierarchyData` saves beside the items the record of the axes and the
-unit its values are in, `axis_system` and `unit`. A `ClipData` saves its
-record and its timebase, named as its properties: `start_frame`, `fps`,
-`frame` (the loaded frame, which a load scrubs back to), and `blocks`, one
+A `HierarchyData` saves its items alone. A `ClipData` saves its timebase
+beside them, named as its properties: `start_frame`, `fps`, `frame` (the
+loaded frame, which a load scrubs back to), and `blocks`, one
 `(F, N, 3)` array per framed channel, each keyed by the channel's
 property, but for a `shear` block all zero, which is left out, as a node
 leaves out a zero `shear`, and which a load fills with zeros. A clip
@@ -3414,13 +3191,12 @@ hierarchy's tree; one holding none saves no such entry.
 
 ```python
 sorted(clip.to_dict())
-# ['__items__', 'axis_system', 'blocks', 'fps', 'frame', 'start_frame', 'unit']
+# ['__items__', 'blocks', 'fps', 'frame', 'start_frame']
 clip.to_dict()["blocks"]["translate"].shape     # (4, 3, 3)
 ```
 
 `copy()` is deep and owning, and its nodes keep their uuids. `==` on a
-hierarchy compares its nodes by uuid, not their channels, and its
-`axis_system` and `unit`. On a clip it
+hierarchy compares its nodes by uuid, not their channels. On a clip it
 also compares the timebase, the loaded frame and every block by value,
 and the rest pose as a hierarchy compares: whether there is one, and its
 nodes' uuids.

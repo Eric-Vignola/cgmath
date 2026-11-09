@@ -1056,7 +1056,7 @@ in.
 |---|---|---|
 | `.manager` | `fbx.FbxManager` | lazily created, with IO settings |
 | `.close()` | — | frees the manager and scene; `with` calls it; safe twice |
-| `.scene` | `fbx.FbxScene` | lazily created, Maya Y-up axis system |
+| `.scene` | `fbx.FbxScene` | lazily created, labelled Maya's Y-up and cm |
 | `.add_skeleton(component)` | — | `ValueError` if one is already set |
 | `.export(path, as_ascii=False, zero_root=False)` | — | `path` may be a `str` or `Path` |
 | `._ROTATE_ORDER_MAP` | `dict` | `HierarchyData` rotate-order → `EFbxRotationOrder` |
@@ -1136,10 +1136,8 @@ turned (40, 10, -20) under a group turned 30 about z and scaled
 position). `HierarchyData.save_fbx` says where Maya puts a group or a
 locator with `segment_scale_compensate` on.
 
-The scene is labelled with the axis system and the unit the skeleton's
-values are in, as the rig records them (`axis_system`, `unit`; Maya's
-Y-up and cm for a hand-built one), the unit set explicitly, and the
-values are written as they are, but for a scale under 1e-12 in size, 0
+The scene is labelled Maya's Y-up and cm, the axes and unit every cgmath
+value is in, and the values are written as they are, but for a scale under 1e-12 in size, 0
 and -0 among them, written as 1e-12, positive, as Maya's own exporter
 writes a static one and as Maya's evaluation holds it:
 `HierarchyData.save_fbx` says where that puts a save on a load and in

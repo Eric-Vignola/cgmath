@@ -292,7 +292,6 @@ ClipList(iterable=None)
 Properties:
 
 ```text
-axis_system                        ``axis_system`` of every take, a PerTake; a write reaches every take or none
 draw_style                         ``draw_style`` of every take, a PerTake; a write reaches every take or none
 ds                                 ``draw_style`` of every take, a PerTake; a write reaches every take or none
 end_frame                          ``end_frame`` of every take, a PerTake
@@ -366,7 +365,6 @@ translate_z                        ``translate_z`` of every take, a PerTake; a w
 tx                                 ``translate_x`` of every take, a PerTake; a write reaches every take or none
 ty                                 ``translate_y`` of every take, a PerTake; a write reaches every take or none
 tz                                 ``translate_z`` of every take, a PerTake; a write reaches every take or none
-unit                               ``unit`` of every take, a PerTake; a write reaches every take or none
 uuid                               ``uuid`` of every take, a PerTake
 v                                  ``visibility`` of every take, a PerTake; a write reaches every take or none
 visibility                         ``visibility`` of every take, a PerTake; a write reaches every take or none
@@ -415,13 +413,6 @@ Owning container for a hierarchy of ``TransformData`` nodes.
 
 ```text
 HierarchyData(iterable=None)
-```
-
-Properties:
-
-```text
-axis_system                        the axis system the values are in, "maya_y_up" or one in words
-unit                               the centimeters one unit of the values' lengths holds, 1.0 for cm
 ```
 
 Methods:
@@ -631,7 +622,6 @@ TransformList(iterable=None)
 Properties:
 
 ```text
-axis_system                        the axis system the values are in, as the nodes' rig records it
 draw_style                         
 ds                                 Maya's short name for draw_style
 im                                 Maya's short name for inverse_matrix
@@ -709,7 +699,6 @@ tx                                 Maya's short name for translate_x
 ty                                 Maya's short name for translate_y
 tz                                 Maya's short name for translate_z
 unique_name                        whether each node's name is its own in its owning hierarchy
-unit                               the cm one unit of the values' lengths holds, as their rig records it
 uuid                               returns a list of all node uuids
 v                                  Maya's short name for visibility
 visibility                         
@@ -1016,7 +1005,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000001FB6DB0AA50>
+MISSING = <dataclasses._MISSING_TYPE object at 0x0000025FF0ECA910>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -3228,7 +3217,7 @@ Properties:
 
 ```text
 manager                            fbx.FbxManager: the fbx manager that handles the memory
-scene                              fbx.FbxScene: the fbx scene to export, labelled with its skeleton's axes and unit
+scene                              fbx.FbxScene: the fbx scene to export, labelled Maya's Y-up and cm,
 ```
 
 Methods:
@@ -3512,7 +3501,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001FB3B9D3F60>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000025FBEE68A40>, '...
 ```
 
 ## `cgmath.constraints`
