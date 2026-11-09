@@ -123,9 +123,10 @@ from cgmath.geometry import SkinData, SkinList, CompactSkinData
 from cgmath.geometry import DeltaMushData, PatchRelaxData          # only these two
 from cgmath.geometry.deform import FFDData, SkinDeformData, WrapData, DeformMethod
 from cgmath.geometry.sdf import DMCField, SDFSphere, SDFBox, SDFCylinder
-from cgmath.render import render, Scene, Object, Camera, Light, Frame, look_at, load_texture
+from cgmath.render import render, Scene, Frame, aim, look_at, load_texture
 from cgmath.constraints import ProcrustesData
-from cgmath.formats.fbx import FbxExporter, SceneData
+from cgmath.formats import FbxContents, load_fbx, save_fbx
+from cgmath.formats.fbx import FbxExporter
 from cgmath.formats.glb import GlbData, load_model
 from cgmath.rbf._kernels import get_kernel, list_kernels
 from cgmath.utils import info, docstring, pretty_json
@@ -578,7 +579,7 @@ detached from its `DMCField`. `radius` and `height` are stored as floats;
 ```python
 from cgmath.geometry.sdf import SDFCylinder
 
-hole = SDFCylinder(radius=0.3, height=3, axis=2)
+hole  = SDFCylinder(radius=0.3, height=3, axis=2)
 spare = hole.copy()
 print(spare.radius, spare.height, spare.axis)  # 0.3 3.0 2
 ```
@@ -625,14 +626,15 @@ print(curve.sample(np.array([[2.0, 2.0, 0.0]])).distances.round(3))   # closest 
 
 ## 20. Render a still
 
-Build a `Scene`, append nodes, render. `append()` returns `None`, so it
-does **not** chain — only `configure()` does.
+Build a `Scene`, add the shapes, render. `add()` and `configure()` both
+return the scene, so they chain.
 
 ```python
-from cgmath.render import Camera, Light, Object, Scene
+from cgmath.geometry import CameraData, LightData, MaterialData
+from cgmath.hierarchy import TransformData
+from cgmath.render import aim, Scene
 
-scene = Scene("hero")
-scene.append(Object(name="cube", mesh=cube, uv=cube_uv, base_color=(0.8, 0.5, 0.3)))
+scene = Scene("hero").add(cube, MaterialData(mesh_uuid=cube.uuid, color=(0.8, 0.5, 0.3), diffuse=1.0))
 scene.configure(resolution=(160, 120), samples_per_pixel=1, return_depth=True)
 
 frame = scene.render()
@@ -641,12 +643,15 @@ frame.save(os.path.join(tmp, "hero.png"))
 ```
 
 With no camera and no light the renderer supplies an autofit 3/4 view and
-a 3-point rig sized to the bounding box. Supply your own when you care:
+a 3-point rig sized to the bounding box. Supply your own when you care: a
+camera and a light are shapes on nodes, added after the node they name.
 
 ```python
-scene.append(Camera(name="cam", angle_of_view=35.0, translate=(2, 2, 3)))
-scene["cam"].look_at((0, 0, 0))
-scene.append(Light(name="key", kind="infinite", intensity=1.5, rotate=(-35, 30, 0)))
+cam, key = TransformData("cam", translate=(2.0, 2.0, 3.0)), TransformData("key", rotate=(-35.0, 30.0, 0.0))
+scene.add(cam, key)
+aim(cam, (0.0, 0.0, 0.0))
+scene.add(CameraData(name="cam", parent_uuid=cam.uuid))
+scene.add(LightData(name="key", kind="directional", intensity=1.5, parent_uuid=key.uuid))
 wired = scene.render().wireframe(scene, color=(255, 255, 255, 255), width=1)
 print(wired.array.shape)
 ```
@@ -657,10 +662,12 @@ Every frame is RGBA, so a `.jpg` save needs a convert first:
 frame.image.convert("RGB").save(os.path.join(tmp, "hero.jpg"), quality=95)
 ```
 
-`configure()` accepts exactly eight keys — `resolution`,
+`configure()` takes the render settings — `resolution`,
 `samples_per_pixel`, `background`, `autofit`, `default_light`,
-`return_depth`, `angle_of_view`, `fit_padding`. Anything else is a plain
-attribute or a constructor argument.
+`return_depth`, `angle_of_view`, `fit_padding` — the scene-wide shading
+knobs (`base_color`, `sample_method`, `ambient`, `twosided`, the
+wireframe), `default_camera` and `aspect_ratio`. Every one is a plain
+attribute and a constructor argument too.
 
 Full surface: [`render/CHEATSHEET.md`](render/CHEATSHEET.md).
 
@@ -672,9 +679,7 @@ One call orbits the camera and encodes. The extension picks the writer;
 an `{frame}` token writes an image sequence instead.
 
 ```python
-spin = Scene("spin")
-spin.append(Object(name="cube", mesh=cube))
-spin.configure(resolution=(96, 96), samples_per_pixel=1)
+spin  = Scene("spin", resolution=(96, 96), samples_per_pixel=1).add(cube)
 
 files = spin.turntable(os.path.join(tmp, "spin_{frame:03d}.png"), n_frames=4)
 print(len(files))
@@ -780,7 +785,7 @@ print(HierarchyData.load_fbx(os.path.join(tmp, "rig2.fbx")).name)
 | Skin weights | `cgmath.geometry.skin_weights.load_fbx / load_glb` |
 | Every take of a file | `cgmath.hierarchy.ClipList.load_fbx / load_glb(path)` -> one `ClipData` per take |
 | Takes to a file | `clips.save_fbx(path)`: one stack per take, every frame keyed; `clip.save_fbx(path)` writes one take |
-| Animation curves | `cgmath.formats.fbx.SceneData(path)` — the constructor loads; there is no `from_file` |
+| Everything an fbx holds | `cgmath.formats.load_fbx(path)` -> `FbxContents`: hierarchy or clip, meshes, skins, uvs, cameras, lights, materials, morphs; `save_fbx(path, ...)` writes them; `cgmath.render.Scene.load_fbx(path)` holds them, ready to render |
 | Raw glTF | `cgmath.formats.glb.load_model(path)` -> `Model(name, nodes, ordered_node_indexes, meshes, animations, skins)` |
 
 OBJ is pure python and always available:
@@ -790,9 +795,9 @@ cube.save_obj(os.path.join(tmp, "cube.obj"))
 print(MeshData.load_obj(os.path.join(tmp, "cube.obj")).point_count)
 ```
 
-`MeshData.save_obj` writes the normals a mesh has; a render `Object`'s
-`save_obj` writes its mesh where the Object puts it, with its UVs and normals,
-which Maya's OBJ import reads.
+`MeshData.save_obj` writes the normals a mesh has, which Maya's OBJ import
+reads; `cgmath.render.Scene.load_obj` reads every mesh of a file, with its
+UV sets, into a scene.
 
 Full surface: [`formats/CHEATSHEET.md`](formats/CHEATSHEET.md).
 

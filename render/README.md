@@ -1,11 +1,14 @@
 # `cgmath.render` — the software raytracer
 
-A numpy software raytracer with a small scene graph.
+A numpy software raytracer over the record an fbx holds.
 
-You build a **Scene** out of **Objects**, **Cameras**, and **Lights**, hit
-"render," and get a `Frame` (image + optional depth) back. The nodes are
-the same `TransformData` as the rest of the library, so SRT and parenting
-work as they do everywhere else. No DCC required.
+A **Scene** is what `cgmath.formats.load_fbx` reads and `save_fbx` writes,
+in one object: the **nodes** (a `HierarchyData` at rest, or their takes as
+a `ClipList`), the **meshes** on the nodes, the **UV sets**, **skins**,
+**materials** and **blend shape targets** on the meshes, the **cameras**
+and **lights** on their nodes — plus the render settings. Every shape sits
+where the node its `parent_uuid` names puts it. Hit "render" and you get a
+`Frame` (image + optional depth) back. No DCC required.
 
 - [`CHEATSHEET.md`](CHEATSHEET.md) — every public class, function, property
   and method in this module, each with a small copy-paste example.
@@ -16,8 +19,10 @@ a namespace, notebook style. Start here:
 
 ```python
 import numpy as np
+from cgmath.geometry import CameraData, LightData, MaterialData
 from cgmath.geometry.mesh import MeshData, UVData
-from cgmath.render import Object, Scene
+from cgmath.hierarchy import TransformData
+from cgmath.render import aim, Scene
 
 # A unit cube: 8 points, 6 quads.  There are no mesh assets in this
 # repo, so every example builds its geometry inline.
@@ -29,36 +34,38 @@ points = np.array(
 )
 indices = np.array([0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 1, 0, 1, 7, 5, 3, 6, 0, 2, 4])
 counts  = np.array([4, 4, 4, 4, 4, 4])
-cube    = MeshData(points=points, indices=indices, counts=counts)
+cube    = MeshData(points=points, indices=indices, counts=counts, name="cube")
 
-# One UV square per face (all six faces share the same four corners).
+# One UV square per face (all six faces share the same four corners). A UV
+# set names its mesh by uuid: a shape has one from birth.
 cube_uv = UVData(
-    points  = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
-    indices = np.tile([0, 1, 2, 3], 6),
-    counts  = counts,
+    points    = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
+    indices   = np.tile([0, 1, 2, 3], 6),
+    counts    = counts,
+    name      = "map1",
+    mesh_uuid = cube.uuid,
 )
 
-scene = Scene("hero")
-scene.append(Object(name="cube", mesh=cube, uv=cube_uv))
+scene = Scene("hero").add(cube, cube_uv)
 scene.render().save("cube.png")
 ```
 
-That is the whole minimum-viable render. No Camera, no Light, no rig —
+That is the whole minimum-viable render. No camera, no light, no rig —
 the renderer brings its own. With a real asset on disk it is one line:
 
 <!-- notest -->
 ```python
-Object.load_glb("hero.glb").imshow()
+Scene.load_fbx("hero.fbx").imshow()
 ```
 
-`Scene.append()` returns `None`, so it does **not** chain — append, then
-render.
+`Scene.add()` returns the scene, so it chains; it takes any of the shapes
+and nodes, in any order, and puts each in the list it belongs in.
 
 ---
 
 ## What you actually get for free
 
-When you don't supply a Camera or Light, the renderer fills them in for you:
+When you don't supply a camera or a light, the renderer fills them in:
 
 - **Default camera**: 3/4 elevated front-right view (eye direction
   `(+x, +y·0.7, +z)`), framed so the scene fills the frustum (autofit).
@@ -68,15 +75,19 @@ When you don't supply a Camera or Light, the renderer fills them in for you:
   - **Fill** — front-upper-left, 40% of key
   - **Rim** — back-upper, 30% of key
   All three sit at `1.5 × the AABB diagonal` from the centroid with
-  intensity `distance²`, so it looks right at any scale.
-- **Default resolution**: `(500, 500)` for a `Scene` or an `Object`
-  preview. (The bare `render()` function defaults to `(512, 384)`.)
-  Bump it via `scene.configure(resolution=(W, H))`.
-- **Default samples-per-pixel**: `4` (2×2 MSAA) for an `Object` preview.
-  A `Scene` leaves it unset, which lands on the renderer's `1` — set
-  `scene.configure(samples_per_pixel=4)` for clean silhouettes.
-- **Default sample method**: `"bilinear"` (flat patches). Switch to
-  `"bezier"` for smoothed PN-Quad bicubic surfaces.
+  intensity `distance²`, so it looks right at any scale. The rig is handed
+  to the raytracer for the call; `scene.lights` stays as it was.
+- **Default resolution**: `(500, 500)`. (The bare `render()` function
+  defaults to `(512, 384)`.) Bump it via `scene.configure(resolution=(W, H))`.
+- **Default samples-per-pixel**: a `Scene` leaves it unset, which lands on
+  the renderer's `1` — set `scene.configure(samples_per_pixel=4)` for
+  clean silhouettes and real coverage alpha.
+- **Default shading**: a face no material covers takes the scene's
+  `base_color`, 0.7 grey; a mesh with a `MaterialData` takes the
+  material's colour times its diffuse, and its colour map through the UV
+  set it names.
+- **Default sample method**: `"bilinear"` (flat patches), scene-wide.
+  Switch to `"bezier"` for smoothed PN-Quad bicubic surfaces.
 - **Default background**: `(0, 0, 0, 0)` — **transparent** black, so a
   straight `.png` save is already a cutout. Pass any RGB (auto-promoted
   to opaque RGBA) or a full RGBA tuple to change it.
@@ -90,89 +101,199 @@ quickly without rigging anything.
 
 ---
 
-## The mental model — a scene graph
+## The mental model — the fbx bundle
 
-Three node types, all inheriting `TransformData`
-(`translate / rotate / scale / parent_uuid`, row-major matrices, Maya
-rotate orders). Parent a Light to a Camera and you get a real headlight.
-Parent an Object to another Object for free instancing-with-offsets.
+A `Scene` is a `Data` with nine fields, the ones `cgmath.formats.load_fbx`
+gives back, and the render settings beside them.
 
-| Node | What it is | Lives in |
+| Field | Holds | Placed by |
 |---|---|---|
-| `Object` | A renderable mesh + UV + texture (+ optional skin) | The scene graph |
-| `Camera` | OpenGL-convention perspective or orthographic | The scene graph |
-| `Light` | `point` (with optional 1/r² falloff) or `infinite` (parallel rays, no falloff) | The scene graph |
-| `Scene` | The root container; list-like; tracks render config | The scene graph |
-| `Frame` | The render result (pixels + depth + camera matrix used) | What `render()` hands back |
+| `hierarchy` | `HierarchyData`: the nodes at rest; with skins, the bind pose | — |
+| `clip` | `ClipList`: the takes over the nodes; the active one plays | — |
+| `meshes` | `MeshList` | each mesh's `parent_uuid` names its node |
+| `uvs` | `UVList` | each set's `mesh_uuid` names its mesh |
+| `skins` | `SkinList` | `mesh_uuid`; influences are joint names |
+| `materials` | `MaterialList` | `mesh_uuid`, and `faces` for a part of the mesh |
+| `cameras` | `CameraList` | `parent_uuid` names the camera's node |
+| `lights` | `LightList` | `parent_uuid` names the light's node |
+| `morphs` | `MorphList` (blend shape targets) | `mesh_uuid` |
+
+A shape naming no node, or a node the scene lacks, sits at identity. The
+nodes are the same `TransformData` as the rest of the library — SRT,
+parenting and rotate orders work as they do everywhere else; a node under a
+hidden node is hidden with it, and so are the shapes on it.
 
 ```python
-from cgmath.render import Camera, Frame, Light, load_texture, look_at, Object, render, Scene
+from cgmath.render import aim, Frame, load_texture, look_at, render, Scene
 ```
 
-Those eight names are everything that's exported from `cgmath.render`.
+Those six names are everything that's exported from `cgmath.render`. The
+shapes come from `cgmath.geometry`, the nodes from `cgmath.hierarchy`.
+
+One rule to remember: **a node gets its uuid when it joins a hierarchy.**
+Add the node to the scene first, then build the shapes that name it.
+
+```python
+hero             = TransformData("hero", translate=(0.0, 0.5, 0.0), rotate=(0.0, 30.0, 0.0))
+scene            = Scene("placed").add(hero)  # hero.uuid is set now
+cube.parent_uuid = hero.uuid                  # the cube rides the node
+scene.add(cube, cube_uv)
+print(scene.placed_meshes()[0][1][3, :3])  # [0.  0.5 0. ]: the mesh's world, row-major
+```
 
 ---
 
-## Building an Object
+## Materials
+
+A `MaterialData` (from `cgmath.geometry`) is Maya's lambert or phong as an
+fbx holds it: a colour, a diffuse factor, an optional colour map and the UV
+set it reads, and the faces it covers.
 
 ```python
 checker = np.indices((32, 32)).sum(0) % 2                 # 0/1 squares
 checker = np.repeat(checker[..., None], 3, axis=2).astype(np.float32)
 
-obj = Object(
-    name      = "hero",
-    mesh      = cube,         # cgmath.geometry.mesh.MeshData
-    uv        = cube_uv,      # cgmath.geometry.mesh.UVData (optional)
-    texture   = checker,      # path, (H, W, C) uint8/uint16/float32 array, or None
+skin = MaterialData(
+    name      = "skin",
+    mesh_uuid = cube.uuid,        # the mesh it covers
+    faces     = [0, 1, 2],        # these faces; None for the whole mesh
+    color     = (1.0, 1.0, 1.0),  # times `diffuse` is the base colour
+    diffuse   = 1.0,
+    texture   = checker,          # (H, W, C) uint8 / uint16 / float32, or None
+    uv_set    = "map1",           # the mesh's UV set the map reads; None for its first
+    wrap_u    = "repeat",         # or "clamp", for UVs outside [0, 1]
+)
+lid = MaterialData(name="lid", mesh_uuid=cube.uuid, faces=[3, 4, 5], kind="phong", color=(0.9, 0.2, 0.1))
+scene.add(skin, lid)
+```
 
-    base_color           = (0.7, 0.7, 0.7),  # when texture is None; float64 (3,)
-    sample_method        = "bilinear",       # or "bezier", or a SampleMethod enum
-    wrap                 = "repeat",         # or "clamp" for UVs outside [0, 1]
-    ambient              = 0.8,              # 0..1; 0 = pure shadow, 1 = unshaded
-    twosided             = True,             # render back faces too
-    cast_shadows         = True,             # reserved; no shadow pass yet
-    skin                 = None,             # SkinDeformData, for .pose()
-    samples_per_pixel    = 4,                # MSAA, 1 or any perfect square
-    resolution           = (500, 500),       # per-Object preview; int32 (2,)
+The raytracer shades each face by the material covering it: the colour map
+where there is one, else `color × diffuse`; a face no material covers takes
+`scene.base_color`. A texture without a UV set to read it is an error, not a
+silent fallback. A texture array keeps its dtype when it is uint8, uint16 or
+float32 (other floats become float32).
 
-    # baked-in (UV-space) wireframe — see also Frame.wireframe() for screen-space
+What is **scene-wide** rather than per material: the shading knobs.
+
+```python
+scene.configure(
+    base_color    = (0.7, 0.7, 0.7),  # faces no material covers; float64 (3,)
+    sample_method = "bilinear",       # or "bezier", or a SampleMethod enum, every mesh
+    ambient       = 0.8,              # 0..1; 0 = pure shadow, 1 = unshaded
+    twosided      = True,             # render back faces too
+    cast_shadows  = True,             # reserved; no shadow pass yet
+    # a wireframe baked over every colour map (or over the base colour) in UV space
     wireframe           = False,
-    wireframe_color     = (0, 0, 0),        # 0-255 ints; int32 (3,)
+    wireframe_color     = (0, 0, 0),   # 0-255 ints; int32 (3,)
     wireframe_thickness = 1,
-
-    # SRT (inherited from TransformData)
-    translate  = (0, 0, 0),
-    rotate     = (0, 0, 0),
-    scale      = (1, 1, 1),
-    visibility = True,
 )
 ```
 
 Colors and `resolution` take any sequence and are kept as numpy arrays;
-a value of the wrong size raises `ValueError`. A texture array keeps its
-dtype when it is uint8, uint16 or float32 (other floats become float32).
+a value of the wrong size raises `ValueError`.
 
-### Loading geometry
+---
 
-Three loaders for the common cases, plus two texture side-loaders:
+## Cameras
 
-<!-- notest -->
+A `CameraData` is Maya's camera shape: a focal length and a film back,
+which give the angle of view the raytracer looks through. It sits on a
+node; `aim()` turns the node to look at a point.
+
 ```python
-Object.load_obj("model.obj", index=0)             # mesh + UV from OBJ
-Object.load_glb("model.glb", scale_factor=100.0)  # mesh + UV + texture + skin
-Object.load_fbx("model.fbx", index=0)             # needs the FBX SDK
-obj.extract_texture_from_glb("model.glb", material_index=0)
-obj.extract_texture_from_fbx("model.fbx", material_index=0)
+cam = TransformData("cam", translate=(3.0, 2.0, 4.0))
+scene.add(cam)
+aim(cam, (0.0, 0.5, 0.0))                       # look from where it is at a world point
+camera = CameraData(
+    name                     = "cam",
+    focal_length             = 35.0,     # mm; with the film back, the angle of view
+    horizontal_film_aperture = 1.41732,  # inches, Maya's defaults
+    vertical_film_aperture   = 0.94488,
+    orthographic             = False,    # True + orthographic_width for ortho
+    orthographic_width       = 10.0,     # cm across the frame when orthographic
+    parent_uuid              = cam.uuid,
+)
+scene.add(camera)
+print(round(camera.vertical_angle_of_view, 2))  # 37.85: what the raytracer uses as its FOV
 ```
 
-`load_glb` pulls the PBR **base color (albedo) map** of the mesh's own
-material into `Object.texture` (`Scene.load_glb` does the same for every
-mesh) and, with `load_skin=True` (the default), attaches the mesh's
-`SkinDeformData` to `Object.skin`. The GLB parser also reads
-metallic-roughness, normal, occlusion and emissive maps; the shader
-discards them today, but they're there for a future multi-texture pass.
+Convention: a camera looks down its node's `-Z`, `+Y` is up, `+X` is right
+(OpenGL and Maya alike). A scene renders through `default_camera` by name,
+else its first camera; `scene.camera()` says which.
 
-An OBJ you wrote yourself round-trips the same way:
+**Two matrix layouts, don't mix them up.** `node.world_matrix` is
+row-major like every node — the eye sits at `world_matrix[3, :3]`. The free
+function `look_at()` and `Frame.camera_matrix` are column-major OpenGL — the
+eye sits at `[:3, 3]`. Transpose when you cross between them; `aim()` does.
+
+```python
+m = look_at((0.0, 2.0, 5.0), (0.0, 0.0, 0.0), up=(0.0, 1.0, 0.0))  # (4, 4) camera-to-world
+print(m[:3, 3])                     # OpenGL column-major: eye is here
+
+cam.world_matrix = m.T              # row-major for the node
+print(cam.world_matrix[3, :3])      # -> [0. 2. 5.]
+```
+
+---
+
+## Lights
+
+A `LightData` is Maya's light shape, on a node too.
+
+```python
+key_node = TransformData("key", translate=(2.0, 3.0, 2.0))
+sun_node = TransformData("sun", rotate=(-45.0, 30.0, 0.0))
+scene.add(key_node, sun_node)
+key = LightData(name="key", kind="point", intensity=17.0, decay_rate=2, parent_uuid=key_node.uuid)
+sun = LightData(name="sun", kind="directional", intensity=0.6, parent_uuid=sun_node.uuid)
+scene.add(key, sun)
+```
+
+| `kind` | Where the light comes from | Falloff |
+|---|---|---|
+| `"point"` | The node's world position (parent it to anything) | 1/r² when `decay_rate` is not `0` (Maya's none); constant at `0` |
+| `"directional"` | Down the node's `-Z` axis (a sun) | None (parallel rays) |
+| `"spot"` | As a point light, with one warning: the raytracer draws no cone | as point |
+
+Point-light intensity with falloff is in physical 1/r² units, so the
+number you want scales with **distance²**: ~`17` for a light 4 units off a
+unit cube, ~`1e5` for a hero prop authored in centimetres. (The auto 3-point
+rig does this arithmetic for you — see above.)
+
+---
+
+## Building and configuring a Scene
+
+```python
+hero_shot = Scene("hero", resolution=(640, 360), samples_per_pixel=4)
+hero_shot.add(cube, cube_uv, skin, lid, hero, cam, camera, key_node, key)
+
+# Persistent render config (per-call kwargs always win)
+hero_shot.configure(
+    background    = (0.05, 0.05, 0.05, 1.0),  # RGBA; alpha 0 = transparent
+    angle_of_view = 28.0,                     # the default camera's, when the scene has none
+    fit_padding   = 1.10,                     # autofit safety margin
+    return_depth  = True,                     # pre-populate Frame.depth
+)
+```
+
+`configure()` is **chainable** (returns the scene) and takes the render
+settings — `resolution, samples_per_pixel, background, autofit,
+default_light, return_depth, angle_of_view, fit_padding` — the shading
+knobs above, `default_camera` and `aspect_ratio`. Anything else raises
+`AttributeError`. Every setting is a plain attribute too.
+
+```python
+hero_shot.default_camera = "cam"
+```
+
+`Scene.strip_namespace()` strips `default_camera` along with the nodes
+and every shape, so it still names its camera.
+
+### Loading
+
+An OBJ you wrote yourself round-trips: every mesh with its UV sets, at
+identity.
 
 ```python
 import os
@@ -186,170 +307,39 @@ with open(obj_path, "w") as fp:
     for face in indices.reshape(-1, 4):
         fp.write("f " + " ".join(f"{v + 1}/{i + 1}" for i, v in enumerate(face)) + "\n")
 
-loaded = Object.load_obj(obj_path)
-print(loaded.mesh.points.shape, loaded.uv.points.shape)
-```
-
-### Topology ops that keep your UVs in sync
-
-```python
-scratch = Object(name="scratch", mesh=cube.copy(), uv=cube_uv.copy())
-scratch.triangulate(ngons_only=False)
-scratch.quadrangulate(source="uv")  # promote shared-UV triangle pairs back to quads
-scratch.merge()                     # de-duplicate coincident vertices
-```
-
-These mutate the Object's `mesh` / `uv` in place and clear its cached
-frame for you. `MeshData` / `UVData` are handed around by reference, so
-`.copy()` first if other Objects share them.
-
----
-
-## Cameras
-
-```python
-from cgmath.render import Camera
-
-cam = Camera(
-    name            = "camera",
-    angle_of_view   = 35.0,   # vertical FOV in degrees
-    is_orthographic = False,  # set True + ortho_height for ortho
-    ortho_height    = None,   # world units of vertical extent
-    near_plane      = 0.0,    # reserved; no clipping in v1
-    far_plane       = float("inf"),
-    aspect_ratio    = None,   # taken from resolution if None
-    translate       = (0, 0, 5),
-    rotate          = (0, 0, 0),
-)
-
-cam.look_at((0, 1, 0))                       # aim from current position at a world point
-cam.autofit(scene.union_points(), 500, 500)  # reposition to fit a point cloud in frustum
-framed = Camera.default_view(scene.union_points())  # fresh 3/4 elevated framed camera
-```
-
-Convention: looks down its own `-Z`, `+Y` is up, `+X` is right (OpenGL).
-
-**Two matrix layouts, don't mix them up.** `cam.world_matrix` is
-row-major like every node — the eye sits at `cam.world_matrix[3, :3]`. The free function
-`look_at()` and `Frame.camera_matrix` are column-major OpenGL — the eye
-sits at `[:3, 3]`. Transpose when you cross between them.
-
-```python
-from cgmath.render import look_at
-
-m = look_at((0.0, 2.0, 5.0), (0.0, 0.0, 0.0), up=(0.0, 1.0, 0.0))  # (4, 4) camera-to-world
-print(m[:3, 3])                     # OpenGL column-major: eye is here
-
-cam.world_matrix = m.T              # row-major for the node
-print(cam.world_matrix[3, :3])      # -> [0. 2. 5.]
-```
-
----
-
-## Lights
-
-```python
-from cgmath.render import Light
-
-key  = Light(name="key",  kind="point",    intensity=17.0, color=(1.0, 1.0, 1.0))
-sun  = Light(name="sun",  kind="infinite", intensity=2.0,  rotate=(-45, 30, 0))
-fill = Light(name="fill", kind="point",    intensity=0.4,  falloff=False)  # constant
-```
-
-| Kind | Where the light comes from | Falloff |
-|---|---|---|
-| `"point"` | The light's world position (parent it to anything) | 1/r² by default; set `falloff=False` for constant |
-| `"infinite"` | The light's `-Z` axis (a sun) | None (parallel rays) |
-
-Point-light intensity is in physical 1/r² units, so the number you want
-scales with **distance²**: ~`17` for a light 4 units off a unit cube,
-~`1e5` for a hero prop authored in centimetres. (The auto 3-point rig
-does this arithmetic for you — see above.)
-
-`light.position` and `light.direction` are read-only views of the
-world-space position / forward axis. `light.as_dict()` gives the dict
-shape the low-level `render()` accepts as `point_light=`.
-
-```python
-print(key.position, sun.direction)
-print(fill.as_dict())
-```
-
----
-
-## Building and configuring a Scene
-
-```python
-scene = Scene("hero")
-scene.append(Object(name="cube", mesh=cube, uv=cube_uv))
-cam = Camera(name="cam", angle_of_view=28.0, translate=(3, 2, 4))
-cam.look_at((0, 0, 0))  # outside the cube, aimed at it
-scene.append(cam)
-scene.append(Light(name="key", kind="point", intensity=17.0, translate=(2, 3, 2)))
-
-# Persistent render config (per-call kwargs always win)
-scene.configure(
-    resolution        = (640, 360),
-    samples_per_pixel = 4,
-    background        = (0.05, 0.05, 0.05, 1.0),  # RGBA; alpha 0 = transparent
-    angle_of_view     = 28.0,
-    fit_padding       = 1.10,                     # autofit safety margin
-    return_depth      = True,                     # pre-populate Frame.depth
-)
-```
-
-`configure()` is **chainable** (returns the scene), and the only kwargs
-it accepts are the eight render-config keys: `resolution,
-samples_per_pixel, background, autofit, default_light, return_depth,
-angle_of_view, fit_padding`. Anything else raises `AttributeError` —
-pass it per-call to `render()` instead (`scene.render(sample_method=...)`),
-or, for `aspect_ratio` / `default_camera_name`, set the attribute or the
-`Scene(...)` constructor argument directly.
-
-```python
-scene.aspect_ratio        = None
-scene.default_camera_name = "cam"
-```
-
-`Scene.strip_namespace()` strips `default_camera_name` along with the
-node names, so it still names its Camera.
-
-### Bulk loading
-
-```python
-Scene.load_obj(obj_path)               # one Object per `g` group
+loaded = Scene.load_obj(obj_path)
+print(loaded.meshes.name, len(loaded.uvs), loaded.uvs[0].mesh_uuid == loaded.meshes[0].uuid)
 ```
 
 <!-- notest -->
 ```python
-Scene.load_glb("complex.glb")          # one Object per geometry, textures + skins extracted
+Scene.load_fbx("hero.fbx")  # everything load_fbx reads; needs the FBX SDK
+Scene.load_glb("hero.glb")  # meshes, UV sets, skins + bind pose, a material per colour map
+Scene.load_fbx("hero.fbx").save_fbx("copy.fbx")  # the fields, not the render settings
 ```
 
 ### Inspecting a scene
 
 ```python
-scene.objects                 # list of just the Objects
-scene.cameras                 # list of just the Cameras
-scene.lights                  # list of just the Lights
-scene.get_camera("cam")  # by name; falls back to default_camera_name then first
-scene.union_aabb()       # world-space AABB across all visible Objects
-scene.union_points()     # concatenated visible world points
-scene.scene_name              # "hero" — `scene.name` is the list of CHILD names
+hero_shot.camera()         # (CameraData, its node's uuid): named, default, or first
+hero_shot.pose()           # the nodes a render places by: the hierarchy, or the active take's frame
+hero_shot.placed_meshes()  # [(mesh, world)] of every shown mesh; a skinned one deformed, in world space
+hero_shot.union_aabb()     # world-space AABB across the shown meshes
+hero_shot.union_points()   # concatenated world points
+hero_shot.name                   # "hero"
 ```
 
 ### Saving and loading
 
 ```python
-path  = scene.save(os.path.join(tmp, "hero.npz"))  # or .pkl / .json
+path  = hero_shot.save(os.path.join(tmp, "hero.npz"))  # or .pkl / .json
 again = Scene.load(path)
-print([type(node).__name__ for node in again])     # ['Object', 'Camera', 'Light']
+print([type(x).__name__ for x in (again.hierarchy, again.meshes, again.materials, again.cameras)])
 ```
 
-Every node loads back as its own type, with its uuid and parenting, and
-the scene keeps its name, `aspect_ratio`, `default_camera_name` and the
-`configure()` keys. The cached render is not saved. Two Objects sharing
-one `MeshData` still share one after a load or `copy()`: the file holds
-the mesh once.
+Every list loads back as its class, every node with its uuid and
+parenting, and the scene keeps its name and every setting. The cached
+render is not saved.
 
 ---
 
@@ -358,8 +348,6 @@ the mesh once.
 Three ways to call the raytracer (all return a `Frame`):
 
 ```python
-from cgmath.render import render
-
 # 1. Single mesh shorthand (legacy)
 frame = render(cube, cube_uv, None, resolution=(320, 240))
 
@@ -367,77 +355,57 @@ frame = render(cube, cube_uv, None, resolution=(320, 240))
 frame = render(scene=[{"mesh": cube, "uv": cube_uv, "texture": None}], resolution=(320, 240))
 
 # 3. Scene instance (preferred)
-frame = render(scene=scene, resolution=(320, 240))
+frame = render(scene=hero_shot, resolution=(320, 240))
 ```
 
 Or — much more common — call right off the Scene:
 
 ```python
-frame = scene.render()    # full-quality, honours scene.configure()
-image = scene.to_image()  # PIL Image
+frame = hero_shot.render()    # full-quality, honours configure()
+image = hero_shot.to_image()  # PIL Image
 ```
 
 <!-- notest -->
 ```python
-scene.imshow()                   # opens an OpenCV window and blocks until a keypress
+hero_shot.imshow()            # opens an OpenCV window and blocks until a keypress
 ```
 
-Object has the same trio for one-shot previews without ever building a
-Scene:
-
-```python
-preview = Object(name="solo", mesh=cube, uv=cube_uv)
-preview.render()    # returns a Frame (3-point lighting, 500×500)
-preview.to_image()  # PIL Image
-```
-
-<!-- notest -->
-```python
-preview.imshow()                 # OpenCV window
-```
-
-These work because Object puts a stand-in for itself, a shallow copy
-over the same mesh and texture, in a one-Object preview Scene under the
-hood and runs the same pipeline. The Object stays where it is, in its
-Scene and under its parent, but the preview renders it as a root: a
-parent's transform is not applied. Call `scene.render()` to see a parented
-Object in place.
+`render(frame=...)` picks the frame of the active take the shapes are
+posed at, when the scene holds a clip.
 
 ---
 
 ## The frame cache (it's smart, mostly)
 
-Both `obj.frame` and `scene.frame` cache the last render. Repeated
-`imshow()` / `to_image()` calls don't re-render. The cache is cleared
-automatically when:
+`scene.frame` caches the last render. Repeated `imshow()` / `to_image()`
+calls don't re-render. The cache is cleared automatically when:
 
-- you reassign anything visual on an Object (`mesh, uv, texture,
-  base_color, wireframe, wireframe_color, wireframe_thickness,
-  sample_method, wrap, ambient, twosided, cast_shadows, resolution,
-  samples_per_pixel, background`)
-- you change any SRT on the node **or any ancestor**
-- on a Scene: you change Camera FOV / ortho settings, Light kind /
-  intensity / color / falloff, Object visibility, scene topology
-  (add/remove nodes), or any of the render-config values
+- you change any setting on the scene
+- you change a shape's fields: a material's colour, map or faces, a
+  camera's lens, a light's kind, colour, intensity or decay, a morph's
+  weight, a mesh's points
+- you change any SRT or the visibility on a node a shape sits on, **or any
+  ancestor**; with a skin, on any joint
+- you add a shape or a node, or replace a list, or the frame rendered
 
 ```python
-scene.render()
-print(scene.frame is not None)          # True — cached
-scene.objects[0].translate = (0.2, 0, 0)
-print(scene.frame)                      # None — invalidated
+hero_shot.render()
+print(hero_shot.frame is not None)          # True — cached
+hero.translate = (0.2, 0.0, 0.0)
+print(hero_shot.frame)                      # None — invalidated
 ```
 
-Scene invalidation compares *values*, so re-setting a config key to the
-same value keeps the cache. The one thing it can't catch: in-place
-mutation of `mesh.points`, UV arrays, or texture pixel data. After those,
-call `.render()` explicitly to refresh.
+Scene invalidation compares *values*, so re-setting a setting to the same
+value keeps the cache. The one thing it can't catch: in-place mutation of
+`mesh.points`, UV arrays, or texture pixel data. After those, call
+`.render()` explicitly to refresh.
 
 ---
 
 ## The `Frame` you get back
 
 ```python
-frame = scene.render()
+frame = hero_shot.render()
 
 frame.array          # (H, W, 4) uint8 — RGBA, ALWAYS 4-channel now
 frame.depth          # (H, W) float64; NaN at miss; populated when return_depth=True
@@ -464,7 +432,7 @@ from MSAA — `hits / samples_per_pixel`. Edge pixels get fractional
 alpha, miss pixels get 0, fully-covered pixels get 255.
 
 ```python
-cutout = scene.render(background=(0, 0, 0, 0), samples_per_pixel=4)
+cutout = hero_shot.render(background=(0, 0, 0, 0), samples_per_pixel=4)
 alpha  = cutout.array[..., 3]
 print(alpha.min(), alpha.max())  # 0 255: misses clear, the cube solid
 print(np.unique(alpha))          # [  0  63 127 191 255]: 0 to 4 of 4 samples hit
@@ -498,7 +466,7 @@ raises `OSError: cannot write mode RGBA as JPEG`. Drop the alpha through
 ### Wireframe overlays (screen-space, on any Frame)
 
 ```python
-wired = frame.wireframe(scene,
+wired = frame.wireframe(hero_shot,
                         color        = (255, 255, 255, 220),  # default: dark @ ~80% opacity
                         width        = 2,
                         unique_edges = True,
@@ -506,24 +474,27 @@ wired = frame.wireframe(scene,
 wired.save("wires.png")
 ```
 
-`Frame.wireframe()` is separate from `Object.wireframe=True`:
-- **`Object.wireframe=True`** bakes mesh edges into the diffuse texture
-  in UV space. Cheap, cached.
+`Frame.wireframe()` is separate from `scene.wireframe = True`:
+- **`scene.wireframe = True`** bakes every mesh's edges into its colour
+  map (or over its colour) in UV space. Cheap, cached, rides along through
+  turntables.
 - **`Frame.wireframe(source)`** projects edges through the saved camera
-  matrix and rasterizes them on top via PIL. `source` is a `Scene` or a
-  single `Object`. Use this for hero presentation passes where you want
-  the sharper line.
+  matrix and rasterizes them on top via PIL. `source` is a `Scene` (its
+  shown meshes, placed as it renders them) or a single `MeshData`. Use
+  this for hero presentation passes where you want the sharper line.
 
 ### Video — `.mp4` / `.mov` / `.m4v`
 
 ```python
-from cgmath.render import Frame
-
 spin = Scene("spin", resolution=(160, 120), samples_per_pixel=1)
-spin.append(Object(name="cube", mesh=cube, uv=cube_uv))
+turn = TransformData("turn")
+spin.add(turn)
+spun             = cube.copy()
+spun.parent_uuid = turn.uuid
+spin.add(spun)
 frames = []
 for angle in range(0, 360, 30):
-    spin.objects[0].rotate = (0, angle, 0)
+    turn.rotate = (0, angle, 0)
     frames.append(spin.render())
 
 Frame.encode_mp4(
@@ -602,8 +573,8 @@ scene.turntable(
     rotation_axis = "y",              # "x", "y" (default), or "z"
     start_angle   = 0.0,
     end_angle     = 360.0,
-    fit           = "auto",           # or "static" to use the scene's existing camera as-is
-    camera_name   = "cam",            # which Camera to base orientation on
+    fit           = "auto",           # or "static" to use the scene's camera as-is
+    camera_name   = "cam",            # which camera to base orientation on
     background    = (0.1, 0.1, 0.1),  # mp4 alpha-flatten background
     n_fit_samples = 12,               # how many angles to consider for the framing pass
     verbose       = False,
@@ -629,48 +600,42 @@ scene.turntable("seq/frame_{frame:04d}.png", n_frames=4)  # → list[str] of sav
 scene.turntable("seq/anim.png", n_frames=4)               # auto-injects → seq/anim.{frame:04d}.png
 ```
 
-`Object.turntable()` is the same one-call convenience as
-`Object.render()` — same preview Scene, same stand-in rendered as a root.
-
 ---
 
 ## Animation — the complement of the turntable
 
 `turntable()` moves the camera and holds the scene still.
-`Scene.animate()` moves the scene: every visible Object carrying a
-`skin` is posed to each frame of a `ClipData`, or of a `ClipList` of one
-take, and Objects without one render as static props. Each Object deforms a chunk of frames per
-deformer call, every frame unless that many points would pass 64 MB, and
-the frames render one at a time. The scene is put back in its bind pose
-when the call finishes.
+`Scene.animate()` moves the scene: the active take of a clip — the one
+passed, or the scene's own `clip` — poses the nodes at each frame. A
+skinned mesh deforms to the pose, from the bind pose `scene.hierarchy`
+holds; every other mesh, camera and light rides its node. Blend shape
+targets move the points by their weights before the skin, Maya's way (an
+in-between is a knot the weight blends through). The scene is handed back
+as it was when the call finishes, its own clip included.
 
 <!-- notest -->
 ```python
-from cgmath.hierarchy import ClipData, HierarchyData
+from cgmath.hierarchy import ClipData
 
-rig  = HierarchyData.load_glb("hero.glb")
-clip = ClipData(rig, frames=48, fps=24.0)
+walk = Scene.load_fbx("hero.fbx")             # the bind pose, the skins and the file's takes
+walk.animate("walk.mp4")                      # the active take; fit="auto" keeps the character in frame
 
-walk = Scene("walk")
-walk.append(Object.load_glb("hero.glb"))  # load_skin=True by default
-walk.animate(clip, "walk.mp4")            # fit="auto" keeps the character in frame
-
-# Or pose a single Object yourself and render the result:
-Object.load_glb("hero.glb").pose(rig).render("pose.png")
+clip                        = ClipData(walk.hierarchy, frames=48, fps=24.0)
+clip.frames["spine"].rotate = np.column_stack([np.zeros(48), np.zeros(48), np.linspace(0, 30, 48)])
+walk.animate("bend.{frame:04d}.png", clip=clip)   # a clip of your own over the scene's nodes
 ```
 
-`Object.pose()` always deforms the *bind* mesh, never the current one,
-so calling it in a loop can't compound. `Object.restore_bind_pose()`
-puts it back.
+A clip of another rig raises: the skins name joints the clip does not
+hold. `render(frame=...)` renders one frame of the scene's own clip.
 
 ---
 
 ## Sequences render once
 
 `turntable()` and `animate()` keep their frames, raw, in a scratch
-folder: one per Scene or Object, under one per Python process. The same
-frames asked for again are read back, not rendered, so the `.gif` after
-the `.mp4` costs only the encode:
+folder: one per Scene, under one per Python process. The same frames asked
+for again are read back, not rendered, so the `.gif` after the `.mp4`
+costs only the encode:
 
 ```python
 scene.turntable("spin.mp4", n_frames=24, fps=24)  # renders 24 frames
@@ -685,8 +650,8 @@ scene.turntable("spin.mp4", n_frames=12)          # renders 12: another turntabl
 | the same clip values | a different clip |
 
 - **One sequence per folder.** A different one replaces it.
-- **Nothing to clean up.** The folder goes with its Scene or Object, the
-  scratch folder at exit.
+- **Nothing to clean up.** The folder goes with its Scene, the scratch
+  folder at exit.
 - **Blind to in-place edits**, like the frame cache: mesh points, UVs,
   texture pixels. `clear_render_cache()` drops the kept frames.
 
@@ -702,20 +667,19 @@ scene.clear_render_cache()  # the next turntable renders
 
 <!-- notest -->
 ```python
-Object.load_glb("hero.glb").imshow()
+Scene.load_fbx("hero.fbx").imshow()
 ```
 
 ### Hero still
 
 ```python
-shot = Scene("hero")
-shot.append(Object(name="cube", mesh=cube, uv=cube_uv, sample_method="bezier"))
+shot = Scene("hero", sample_method="bezier").add(cube, cube_uv)
 shot.configure(resolution=(1280, 720), samples_per_pixel=4)
 shot.render().save("hero.png")
 ```
 
-`sample_method` is a per-Object attribute (or a per-call `render()`
-kwarg) — it is **not** one of the `configure()` keys.
+`sample_method` is a scene setting: every mesh of the scene samples the
+same way.
 
 ### Transparent PNG cutout
 
@@ -742,14 +706,11 @@ shot.turntable("spin.mp4", n_frames=24, fps=24)
 
 ### Hero turntable with baked wireframe
 
-`Object.wireframe=True` bakes mesh edges into the diffuse texture (UV
+`scene.wireframe = True` bakes every mesh's edges into its colour map (UV
 space) so they ride along through `turntable()` for free:
 
 ```python
-for obj in shot.objects:
-    obj.wireframe           = True
-    obj.wireframe_color     = (255, 255, 255)
-    obj.wireframe_thickness = 2
+shot.configure(wireframe=True, wireframe_color=(255, 255, 255), wireframe_thickness=2)
 shot.turntable("wired.mp4", n_frames=24, fps=24)
 ```
 
@@ -760,40 +721,44 @@ through the saved camera matrix.
 ### Custom 3-light rig overriding the auto-rig
 
 ```python
-custom = Scene("custom", resolution=(320, 240), samples_per_pixel=4)
-custom.append(Object(name="cube", mesh=cube, uv=cube_uv))
-custom.append(Light(name="key",  kind="point", intensity=17.0,
-                    translate=(2, 3, 2)))
-custom.append(Light(name="fill", kind="point", intensity=4.0, falloff=True,
-                    translate=(-2, 1.5, 2), color=(0.85, 0.9, 1.0)))
-custom.append(Light(name="rim",  kind="point", intensity=3.4,
-                    translate=(0, 1.5, -3)))
+custom = Scene("custom", resolution=(320, 240), samples_per_pixel=4).add(cube, cube_uv)
+for name, where, intensity, color in (
+    ("key",  (2.0, 3.0, 2.0),  17.0, (1.0, 1.0, 1.0)),
+    ("fill", (-2.0, 1.5, 2.0),  4.0, (0.85, 0.9, 1.0)),
+    ("rim",  (0.0, 1.5, -3.0),  3.4, (1.0, 1.0, 1.0)),
+):
+    node = TransformData(name, translate=where)
+    custom.add(node)
+    custom.add(LightData(name=name, kind="point", intensity=intensity, color=color, decay_rate=2, parent_uuid=node.uuid))
 custom.render().save("custom_rig.png")
 ```
 
 ### Headlight follows the camera (parenting trick)
 
 ```python
-cam       = Camera(name="cam", translate=(0, 1, 5))
-headlight = Light(name="headlight", kind="point", intensity=26.0)
-
-hl = Scene("hl", resolution=(320, 240))
-hl.append(Object(name="cube", mesh=cube, uv=cube_uv))
-hl.append(cam)
-hl.append(headlight)
-headlight.set_parent(cam, world_space=False)   # by node, name or uuid
+hl       = Scene("hl", resolution=(320, 240)).add(cube, cube_uv)
+cam_node = TransformData("cam", translate=(0.0, 1.0, 5.0))
+lamp     = TransformData("headlight")
+hl.add(cam_node, lamp)
+lamp.set_parent(cam_node, world_space=False)   # by node, name or uuid
+hl.add(CameraData(name="cam", parent_uuid=cam_node.uuid))
+hl.add(LightData(name="headlight", kind="point", intensity=26.0, decay_rate=2, parent_uuid=lamp.uuid))
 hl.render().save("headlight.png")
 ```
 
 ### Orthographic shot
 
 ```python
-ortho = Scene("ortho", resolution=(320, 240))
-ortho.append(Object(name="cube", mesh=cube, uv=cube_uv))
-ortho.append(Camera(name="ortho", is_orthographic=True, ortho_height=2.5,
-                    translate=(2, 2, 4)))
+ortho = Scene("ortho", resolution=(320, 240)).add(cube, cube_uv)
+eye   = TransformData("eye", translate=(2.0, 2.0, 4.0))
+ortho.add(eye)
+aim(eye, (0.0, 0.0, 0.0))
+ortho.add(CameraData(name="ortho", orthographic=True, orthographic_width=3.5, parent_uuid=eye.uuid))
 ortho.render().save("ortho.png")
 ```
+
+The orthographic width is what the frame spans horizontally, in the
+scene's units; the height follows the frame's aspect.
 
 ---
 
@@ -808,12 +773,14 @@ ortho.render().save("ortho.png")
 - **Camera-to-world matrices** handed to / returned by the renderer
   (`look_at()`, `Frame.camera_matrix`, `render(camera_matrix=...)`) are
   column-major OpenGL: eye at `M[:3, 3]`.
-- **Colors** are `[0, 1]` floats for base colors, light colors and
+- **Units and axes** are Maya's: Y-up, right-handed, centimetres — what
+  every cgmath value is in. An fbx converts at the boundary.
+- **Colors** are `[0, 1]` floats for material colours, light colours and
   backgrounds; `0-255` ints for `wireframe_color` and
-  `Frame.wireframe(color=...)`. The ones a node keeps take any sequence
-  and are stored as numpy arrays: float64, int32 for `wireframe_color`.
-  Textures are uint8, uint16, or float32 in `[0, 1]`.
-- **Wrap** modes: `"repeat"` (tile) or `"clamp"`.
+  `Frame.wireframe(color=...)`. The ones a scene or a shape keeps take any
+  sequence and are stored as numpy arrays: float64, int32 for
+  `wireframe_color`. Textures are uint8, uint16, or float32 in `[0, 1]`.
+- **Wrap** modes: `"repeat"` (tile) or `"clamp"`, a material's `wrap_u`.
 - **Sample method**: `"bilinear"` for flat patches, `"bezier"` for PN
   Quad bicubic patches (smoother surfaces, ~3-4x slower). The
   `SampleMethod` enum from `cgmath.geometry.mesh` works too.
@@ -822,19 +789,22 @@ ortho.render().save("ortho.png")
 
 ## What it deliberately doesn't do (yet)
 
-- **PBR shading.** Currently Lambertian only. The GLB importer extracts
+- **PBR shading.** Currently Lambertian only: a material's colour times
+  its diffuse, its colour map. A phong's specular colour, cosine power and
+  reflectivity are carried, not shaded. The GLB importer extracts
   metallic / roughness / normal / emissive maps but the shader doesn't
-  use them. They're sitting there for a future shading pass.
-- **Shadows.** `Object.cast_shadows` is reserved for a future shadow
-  pass; today it does nothing.
+  use them.
+- **Shadows.** `cast_shadows` is reserved for a future shadow pass; today
+  it does nothing.
 - **Specular / reflections / refractions.** Diffuse + ambient only.
 - **Texture mip-mapping.** Bilinear filtering at native resolution.
-- **Near / far clipping.** `Camera.near_plane` / `far_plane` are
-  reserved; v1 ignores them.
+- **Near / far clipping.** A `CameraData`'s clip planes are carried, not
+  applied.
+- **Spot light cones.** A spot light renders as a point light.
 - **In-place mutation tracking.** Edit `mesh.points` directly and the
   cached frame won't notice — call `.render()` to refresh.
 
 For everything else (look-dev stills, turntables, alpha cutouts, depth
-passes, wireframe overlays, skinned animation), this is a one-import,
-no-DCC workflow. Every API in the module, with a runnable example
-apiece, is in [`CHEATSHEET.md`](CHEATSHEET.md).
+passes, wireframe overlays, skinned and blend-shaped animation), this is
+a one-import, no-DCC workflow. Every API in the module, with a runnable
+example apiece, is in [`CHEATSHEET.md`](CHEATSHEET.md).

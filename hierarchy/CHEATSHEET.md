@@ -141,7 +141,7 @@ node.translate                    # array([1., 5., 3.])
 node.rotate  = (0.0, 90.0, 0.0)    # degrees
 node.scale_z = 2.0
 node.scale                        # array([1., 1., 2.])
-node.scale   = [[1.0, 1.0, 2.0]]  # one (1, 3) row writes its row
+node.scale = [[1.0, 1.0, 2.0]]  # one (1, 3) row writes its row
 node.scale                        # array([1., 1., 2.])
 
 try:
@@ -649,7 +649,7 @@ of a rig make each node whose parent was left out a root.
 import copy
 from cgmath.hierarchy import generate_uuid
 
-ids  = {name: generate_uuid() for name in ("root", "hip")}
+ids = {name: generate_uuid() for name in ("root", "hip")}
 kids = HierarchyData([
     TransformData("hip", uuid=ids["hip"], parent_uuid=ids["root"]),   # ahead of its parent
     TransformData("root", uuid=ids["root"]),
@@ -666,9 +666,8 @@ assert lone.parent_uuid is None
 `parent_node`, `parent_uuid`'s name before cgmath 2.0.0, went in 3.0.0.
 A node has no such attribute: a read or a write raises `AttributeError`,
 as any name the class does not declare does, the constructor keyword
-raises `TypeError`, through an `Object`'s, a `Camera`'s or a `Light`'s
-constructor too, and a `to_attributes` mapping naming it maps nothing, as
-a public name that is no field does. A file saved before 2.0.0 names its
+raises `TypeError`, and a `to_attributes` mapping naming it maps nothing,
+as a public name that is no field does. A file saved before 2.0.0 names its
 parents under `"parent_node"` and still loads, a uuid as it is and a name
 as the first node of that name in the loaded rig (a name no node carries
 leaves a root); it saves back as `"parent_uuid"`.
@@ -1777,7 +1776,7 @@ except ValueError as error:
     assert "every take of a ClipList is over one skeleton" in str(error)
 assert clips.take == ["idle", "walk"]
 
-still = ClipData(make_chain(), frames=4)
+still                         = ClipData(make_chain(), frames=4)
 still.frames["knee"].rotate_x = [0.0, 5.0, 10.0, 15.0]
 assert still.keyed.tolist() == [False, False, True]
 ```
@@ -1785,8 +1784,8 @@ assert still.keyed.tolist() == [False, False, True]
 One take is active, `clips.active`, the `ClipData` itself: the first take
 until set, by a take's name, its position or the take itself (`None` makes
 the first active again), and the first again once the active take is
-removed. `Scene.animate(clips)` plays it, and a save keeps its position
-as `active`.
+removed. `cgmath.render.Scene.animate(path, clip=clips)` plays it, and a
+save keeps its position as `active`.
 
 ```python
 assert clips.active is idle
@@ -1813,10 +1812,10 @@ a take from the list. `ClipList.load(path)` routes by extension.
 
 <!-- notest -->
 ```python
-clips = ClipList.load_fbx("anim.fbx")         # every take, in file order, the file's active one active
-idle  = clips["idle"]                         # one of them, by its name
-clips.active = "run"                          # another one active
-run   = ClipList.load_glb("anim.glb")["run"]  # every animation, then one by its name
+clips        = ClipList.load_fbx("anim.fbx")         # every take, in file order, the file's active one active
+idle         = clips["idle"]                         # one of them, by its name
+clips.active = "run"                                 # another one active
+run          = ClipList.load_glb("anim.glb")["run"]  # every animation, then one by its name
 ```
 
 The rig edits, `clips.set_rotate_order("zyx")` say, run on every take or
@@ -1942,7 +1941,10 @@ the animation.
 ## Importers and exporters
 
 `save_fbx` writes the loaded pose; `load_fbx` / `load_glb` read a rig
-back. `load` sniffs the file header.
+back. `load` sniffs the file header. Every fbx reader in cgmath is one read,
+`cgmath.formats.load_fbx`: the hierarchy routes here take its nodes, the
+mesh, UV and skin routes in `cgmath.geometry` its shapes, and
+`cgmath.render.Scene.load_fbx` all of it at once.
 
 ```python
 rig  = make_chain()
@@ -2004,13 +2006,15 @@ back = HierarchyData.load_fbx(os.path.join(WORKDIR, "arrays.fbx"))
 assert "weights" not in back["hip"].user_defined_attributes
 ```
 
-Reading the same file as an animation gives a clip, and with it the
-file's static pose, `clip.rest_pose`.
+The same file holds no take, so reading it as an animation is refused:
+`ClipData.load_fbx` reads a take, the one `clip.save_fbx` or
+`cgmath.formats.save_fbx(path, clip=clip)` writes.
 
 ```python
-clip = ClipData.load_fbx(path)
-assert isinstance(clip, ClipData) and clip.frame_count == 1
-assert clip.rest_pose.name == clip.name == HierarchyData.load_fbx(path).name
+try:
+    ClipData.load_fbx(path)                     # nodes alone, no take
+except ValueError as error:
+    print(str(error)[-13:])                     # holds no take
 ```
 
 `ClipData.load_fbx` reads each translate, rotate and scale curve's keys
@@ -2485,19 +2489,25 @@ loader's, where:
 | `TransformList.load_glb` | `(filename, scale_factor=100.0, pose_frame=None)` |
 | `ClipData.load_fbx` | `(filename)` — the active take over every node, in Maya's Y-up and cm; `ValueError` for a file holding none |
 | `ClipData.load_glb` | `(filename, scale_factor=100.0, animation=0, fps=24.0, start_frame=0)` |
-| `TransformList.save_fbx` | `(filename, zero_root=False, as_ascii=False)` — binary unless `as_ascii`; FBX has no shear, so the save leaves it out |
+| `TransformList.save_fbx` | `(filename, as_ascii=False)` — binary unless `as_ascii`; FBX has no shear, so the save refuses it |
 
-`zero_root=True` writes the root joint with an identity transform, so the
-file carries the skeleton at the origin. The root joint is the first joint
-the file writes as a root: one at the world, or the top joint of a view,
-whose parent the view leaves out, as its `copy()` roots it. Meshes and
-locators at the world are left as they are; a skeleton with no root joint
-raises `ValueError`.
+`FbxExporter.export(path, zero_root=True)` writes the root joint with an
+identity transform, so the file carries the skeleton at the origin. The
+root joint is the first joint the file writes as a root: one at the world,
+or the top joint of a view, whose parent the view leaves out, as its
+`copy()` roots it. Meshes and locators at the world are left as they are; a
+skeleton with no root joint raises `ValueError`.
 
 ```python
-make_chain().save_fbx(os.path.join(WORKDIR, "flat.fbx"), zero_root=True)
+from cgmath.formats.fbx import FbxExporter
 
-make_chain().match("hip", "knee").save_fbx(os.path.join(WORKDIR, "legs.fbx"), zero_root=True)
+with FbxExporter() as exporter:
+    exporter.add_skeleton(make_chain())
+    exporter.export(os.path.join(WORKDIR, "flat.fbx"), zero_root=True)
+
+with FbxExporter() as exporter:
+    exporter.add_skeleton(make_chain().match("hip", "knee"))
+    exporter.export(os.path.join(WORKDIR, "legs.fbx"), zero_root=True)
 legs = HierarchyData.load_fbx(os.path.join(WORKDIR, "legs.fbx"))
 assert legs.name == ["hip", "knee"] and np.allclose(legs["hip"].translate, 0.0)
 ```
@@ -2550,7 +2560,8 @@ and `load_fbx` reads such a file where they do, not where it was saved.
 A rig's own values are in a `save()` file.
 
 A group or a locator with `segment_scale_compensate` on, which a rig
-built or edited by hand can hold and no reader sets, is written
+built or edited by hand can hold and no reader sets, `save_fbx` refuses:
+Maya holds the flag on joints only. An earlier `save_fbx` wrote it
 `eInheritRrs`. In a save the SDK places it and the nodes under it where the rig has them, its scale or
 its parent's mirrored or not (a scale mirrors with an odd number of
 negative axes), and Maya's importer does too. Three cases part, Maya's
@@ -2599,12 +2610,10 @@ compensating their scale.
   3.96e+04 and 7.27e+04 under (1e-12, 1, 3e-4). Near 0 it can bring a
   node in not finite, where the SDK and `load_fbx` stay finite.
 
-`load_fbx` reads such a group or locator back with the flag off, as
-Maya reads an `eInheritRrs` node, baked: where Maya's FBXImport puts it
-and the nodes under it, not the channels saved, with shear under a
-parent scaled unevenly and none under an even one. Under a unit root the
-read divides that root's scale out of the node first, as `load_fbx`'s
-docstring says. `save()` keeps the flag.
+`load_fbx` refuses such a file where the group's parent is scaled other
+than 1, a placement no joint or transform holds; under a parent scaled 1,
+or with none, it reads the group with the flag off, where it was saved.
+`save()` keeps the flag.
 
 ```python
 flagged = HierarchyData([
@@ -2612,19 +2621,16 @@ flagged = HierarchyData([
     TransformData("grp", translate=(2.0, 0.5, -0.5), rotate=(20.0, 40.0, 60.0), segment_scale_compensate=True),
 ])
 flagged["grp"].set_parent("top", world_space=False)
-flagged.save_fbx(os.path.join(WORKDIR, "flagged.fbx"))
-
-back = HierarchyData.load_fbx(os.path.join(WORKDIR, "flagged.fbx"))["grp"]
-assert not back.segment_scale_compensate  # baked, as Maya reads it
-assert np.allclose(back.world_matrix, flagged["grp"].world_matrix)
-assert np.any(back.shear)
+try:
+    flagged.save_fbx(os.path.join(WORKDIR, "flagged.fbx"))
+except ValueError as error:
+    print(str(error)[-31:])                     # which Maya holds on joints only
 ```
 
 A scale under 1e-12 in size, 0 and -0 among them, is written as 1e-12,
 positive, as Maya's own FBX export writes a static one and as Maya's
 evaluation holds it: it loads back as 1e-12, and the nodes under it
-where Maya's FBXImport of the save puts them, but for a group or a locator with
-`segment_scale_compensate` on and the nodes under that. A scale of 1e-12
+where Maya's FBXImport of the save puts them. A scale of 1e-12
 or more in size is written as it is.
 
 ```python
@@ -2918,27 +2924,13 @@ position; a keyed joint with pivots, whose pivot term Maya re-keys into
 its translate and filters so, holds level there too, up to 0.0114 in
 position on the files measured.
 
-A typed node's shear is Maya's. `_tests/test_assets/fbx_maya_import.npz`
-holds Maya's world of each file its test writes from a layout; here is one
-written by the test's own writer, a group stored `eInheritRrs` under a
-group scaled (1, 2, 3):
+A group stored `eInheritRrs` under a parent whose own scale is not 1,
+or any node stored `eInheritRrSs` under a parent whose world scale is
+not uniform, is placed as no joint or transform can be: `load_fbx`
+refuses the file, naming the node, the frame and the parent's scale.
 
-```python
-import json
-
-import cgmath._tests as tests
-from cgmath._tests._fbx_import_files import write_layout
-
-record = np.load(os.path.join(os.path.dirname(tests.__file__), "test_assets", "fbx_maya_import.npz"))
-typed  = os.path.join(WORKDIR, "typed.fbx")
-write_layout(typed, json.loads(bytes(record["s0_s123|layout"])))
-
-held = HierarchyData.load_fbx(typed)["gRrs"]
-assert np.allclose(held.world_matrix[:, :3].ravel(), record["s0_s123|s|gRrs"], rtol=0.0, atol=1e-13)
-
-clip = ClipData.load_fbx(typed, start_frame=0, end_frame=6)
-assert np.allclose(clip.frames.shear[:, clip.index("gRrs")], record["s0_s123|h|gRrs"], rtol=0.0, atol=1e-6)
-```
+A group over joints reads back as it was written, a transform over
+joints, every node kept:
 
 ```python
 grouped = HierarchyData([
@@ -2950,10 +2942,10 @@ grouped["hip"].set_parent("grp", world_space=False)
 grouped["knee"].set_parent("hip", world_space=False)
 grouped.save_fbx(os.path.join(WORKDIR, "grouped.fbx"))
 
-joints = HierarchyData.load_fbx(os.path.join(WORKDIR, "grouped.fbx"), node_types=("joint",))
-assert joints.name == ["hip", "knee"] and joints["hip"].parent_uuid is None
-assert np.allclose(joints["hip"].joint_orient, (0.0, 0.0, 45.0))   # the group's turn
-assert np.allclose(joints["knee"].world_matrix, grouped["knee"].world_matrix)
+back = HierarchyData.load_fbx(os.path.join(WORKDIR, "grouped.fbx"))
+assert sorted(back.name) == ["grp", "hip", "knee"]
+assert back["grp"].node_type == "transform" and back["hip"].parent_uuid == back["grp"].uuid
+assert np.allclose(back["knee"].world_matrix, grouped["knee"].world_matrix)
 ```
 
 For `load_glb`, `scale_factor` converts units (glTF is metres, so `100.0`
@@ -3125,15 +3117,8 @@ loads the keyed take's curves, as Maya does, over that take's frames:
 | The same file, its empty take holding a curve with no key on it | 0-48 | 0-10 |
 | Maya's own export, split into an empty take over frames 100-110 and a take keyed over frames 0-10 with its original take deleted, which records "Take 001", a name neither take has, as active | 100-110 | 0-10 |
 
-`clip.rest_pose` is the pose the file holds outside its take, the nodes'
-own values: a `HierarchyData` with the clip's names and node order, taken
-from the same read and loaded as `HierarchyData.load_fbx` loads the file,
-in the same unit and axes. For an Unreal animation it is the skeleton's
-bind pose, which frame 0 can be far from. It is saved with the clip, a
-`copy()` or a cut of frames (`clip.frames[10:20]`) holds a copy of it, and
-`strip_namespace()` on the clip strips it too. A clip the constructor,
-`from_poses`, `load_glb` or the pose algebra (`get_delta`, `add_delta`)
-builds holds `None`.
+A clip holds no pose outside its take: the nodes' own values are
+`HierarchyData.load_fbx`'s read of the same file.
 
 ---
 
@@ -3235,9 +3220,7 @@ beside them, named as its properties: `start_frame`, `fps`, `frame` (the
 loaded frame, which a load scrubs back to), and `blocks`, one
 `(F, N, 3)` array per framed channel, each keyed by the channel's
 property, but for a `shear` block all zero, which is left out, as a node
-leaves out a zero `shear`, and which a load fills with zeros. A clip
-holding a `rest_pose` saves it as well, under `rest_pose`, as a
-hierarchy's tree; one holding none saves no such entry.
+leaves out a zero `shear`, and which a load fills with zeros.
 
 ```python
 sorted(clip.to_dict())
@@ -3247,9 +3230,7 @@ clip.to_dict()["blocks"]["translate"].shape     # (4, 3, 3)
 
 `copy()` is deep and owning, and its nodes keep their uuids. `==` on a
 hierarchy compares its nodes by uuid, not their channels. On a clip it
-also compares the timebase, the loaded frame and every block by value,
-and the rest pose as a hierarchy compares: whether there is one, and its
-nodes' uuids.
+also compares the timebase, the loaded frame and every block by value.
 
 ```python
 moved               = rig.copy()
@@ -3260,16 +3241,9 @@ twin = clip.copy()
 assert twin == clip
 twin.frame = 2
 assert twin != clip                             # another frame is loaded
-twin.frame = clip.frame
+twin.frame         = clip.frame
 twin.frames.rotate = np.full((4, 3, 3), 45.0)
 assert twin != clip
-
-twin           = clip.copy()
-twin.rest_pose = moved
-assert twin != clip                             # a rest pose, against none
-other                         = twin.copy()
-other.rest_pose["hip"].rotate = (0.0, 0.0, 45.0)
-assert other == twin                            # its nodes, by uuid
 ```
 
 Two more helpers from the base class:

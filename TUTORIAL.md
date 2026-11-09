@@ -66,12 +66,12 @@ cube = MeshData(
 print(cube.point_count, cube.face_count, cube.edge_count)
 ```
 
-Wrap it in an `Object` and render.
+Put it in a `Scene` and render.
 
 ```python
-from cgmath.render import Object
+from cgmath.render import Scene
 
-hero  = Object(name="hero", mesh=cube, base_color=(0.75, 0.55, 0.35))
+hero  = Scene("hero", base_color=(0.75, 0.55, 0.35)).add(cube)
 frame = hero.render(resolution=(320, 240))
 print(frame.shape, frame.dtype)          # (240, 320, 4) uint8 — always RGBA
 frame.save(os.path.join(WORK, "hello.png"))
@@ -79,7 +79,7 @@ frame.save(os.path.join(WORK, "hello.png"))
 
 What happened behind the scenes:
 
-- A 1-object `Scene` was built around the Object.
+- The cube sat at identity: a mesh on no node, in the scene's `base_color`.
 - A 3-point lighting rig was sized to the mesh's AABB.
 - A 3/4 elevated camera was framed with `autofit`.
 
@@ -92,35 +92,35 @@ a script tool.
 hero.imshow()
 ```
 
-If you already have geometry on disk, the loaders return an `Object`
+If you already have geometry on disk, the loaders fill a `Scene`
 directly. OBJ is pure python: a `v` line keeps its x y z and a `vt` line
 its u v, dropping any trailing `w` or vertex colour. GLB needs
-`pygltflib`, FBX needs the Autodesk SDK.
+`pygltflib` and `trimesh`, FBX needs the Autodesk SDK.
 
 <!-- notest: no .obj / .glb / .fbx asset ships with this package -->
 ```python
-Object.load_obj("hero.obj").imshow()
-Object.load_glb("hero.glb").imshow()     # scale_factor=100.0 — metres to cm
-Object.load_fbx("hero.fbx").imshow()
+Scene.load_obj("hero.obj").imshow()
+Scene.load_glb("hero.glb").imshow()      # scale_factor=100.0 — metres to cm
+Scene.load_fbx("hero.fbx").imshow()      # the nodes, meshes, materials, cameras and lights the file holds
 ```
 
-Careful with one thing: `Object.render()` / `imshow()` / `to_image()`
-build a throwaway preview `Scene` and *append the Object to it*, which
-silently pulls the Object out of any Scene it already belonged to. Render
-through the Scene once you have one.
+A mesh sits where its node puts it: `mesh.parent_uuid` names a node of
+`scene.hierarchy`, and a mesh naming none sits at identity. Add the node
+before the shapes that name it — a node gets its uuid when it joins a
+hierarchy.
 
 ---
 
 ## 2. Hero shot, frame to disk
 
-`Scene.configure()` sets render defaults on the scene and returns `self`,
-so it chains. `Scene.append()` does **not** — it returns `None`.
+`Scene.add()` and `Scene.configure()` both return the scene, so they
+chain. A mesh's colour is a `MaterialData` naming the mesh by uuid.
 
 ```python
+from cgmath.geometry import MaterialData
 from cgmath.render import Scene
 
-scene = Scene("hero")
-scene.append(Object(name="hero", mesh=cube.copy(), base_color=(0.75, 0.55, 0.35)))
+scene = Scene("hero").add(cube, MaterialData(mesh_uuid=cube.uuid, color=(0.75, 0.55, 0.35), diffuse=1.0))
 scene.configure(
     resolution        = (640, 480),
     samples_per_pixel = 4,        # 2x2 MSAA -> clean silhouettes + true coverage alpha
@@ -132,25 +132,25 @@ frame.save(os.path.join(WORK, "hero.png"))
 print(frame.width, frame.height, frame.channels)
 ```
 
-`configure()` accepts exactly eight keys — `resolution`,
+`configure()` takes the render settings — `resolution`,
 `samples_per_pixel`, `background`, `autofit`, `default_light`,
-`return_depth`, `angle_of_view`, `fit_padding`. Anything else raises.
+`return_depth`, `angle_of_view`, `fit_padding` — the shading knobs,
+`default_camera` and `aspect_ratio`. Anything else raises.
 `samples_per_pixel` must be `1` or a perfect square.
 
 ```python
 try:
-    scene.configure(aspect_ratio=2.0)
+    scene.configure(aspect=2.0)
 except AttributeError as error:
     print(str(error)[:60])
 ```
 
-Per-object shading knobs are attributes on the `Object`, not scene
-config. `sample_method="bezier"` swaps flat quads for PN-Quad bicubic
-patches: ~3-4x slower, much smoother silhouettes.
+The shading knobs are scene-wide, one value for every mesh.
+`sample_method="bezier"` swaps flat quads for PN-Quad bicubic patches:
+~3-4x slower, much smoother silhouettes.
 
 ```python
-scene.objects[0].sample_method = "bezier"
-scene.objects[0].ambient       = 0.6
+scene.configure(sample_method="bezier", ambient=0.6)
 scene.render().save(os.path.join(WORK, "hero_bezier.png"))
 ```
 
@@ -175,26 +175,19 @@ cutout.image.convert("RGB").save(os.path.join(WORK, "hero.jpg"), quality=95)
 
 ### Want a wireframe overlay?
 
-Two strategies, and they look different.
+Two strategies, and they look different. `scene.wireframe = True` bakes
+every mesh's edges into its colour map, in UV space, so they ride through
+a turntable for free; it needs a UV set to bake on, and this cube has none
+yet. The screen-space line is drawn onto the returned `Frame` with PIL:
 
 ```python
-# (a) Baked into the texture, in UV space. Rides through a turntable for free.
-for obj in scene.objects:
-    obj.wireframe           = True
-    obj.wireframe_color     = (255, 255, 255)
-    obj.wireframe_thickness = 2
-baked = scene.render()
-
-# (b) Sharper screen-space lines drawn onto the returned Frame with PIL.
-for obj in scene.objects:
-    obj.wireframe = False
 wired = scene.render().wireframe(scene, color=(255, 255, 255, 220), width=2)
 wired.save(os.path.join(WORK, "wires.png"))
-print(baked.shape, wired.shape)
+print(wired.shape)
 ```
 
-`Frame.wireframe(source)` takes a `Scene`, a list of `Object`s, or a
-single `Object`.
+`Frame.wireframe(source)` takes a `Scene` (its shown meshes, placed as it
+renders them) or a single `MeshData`.
 
 ---
 
@@ -529,7 +522,7 @@ print(round(float(np.abs(smoothed.points - sheared.points).max()), 4))
 Feed the result to the renderer to eyeball it:
 
 ```python
-Object(name="ffd", mesh=smoothed).render(resolution=(200, 160)).save(
+Scene("ffd").add(smoothed).render(resolution=(200, 160)).save(
     os.path.join(WORK, "ffd.png"))
 print(os.path.exists(os.path.join(WORK, "ffd.png")))
 ```
@@ -632,8 +625,8 @@ it leaves `field` alone. `radius` and `height` are stored as floats, and
 `SDFCylinder.axis` takes 0, 1 or 2 (X, Y, Z).
 
 ```python
-spare = hole.copy()  # radius, height, axis and SRT come along
-spare.radius = 0.6  # the copy is in no field
+spare        = hole.copy()  # radius, height, axis and SRT come along
+spare.radius = 0.6          # the copy is in no field
 print(hole.radius, spare.radius, spare.height, spare.axis)  # 0.3 0.6 3.0 1
 ```
 
@@ -837,59 +830,47 @@ auto = HierarchyData.load(skel_path)         # header sniffing picks the reader
 print(auto.name == back.name)
 ```
 
-`save_fbx(path, zero_root=True)` writes the root joint at identity, so the
-file carries the skeleton at the origin.
+`FbxExporter.export(path, zero_root=True)` writes the root joint at
+identity, so the file carries the skeleton at the origin.
 
 ```python
-rig.save_fbx(os.path.join(WORK, "flat.fbx"), zero_root=True)
+from cgmath.formats.fbx import FbxExporter
+
+with FbxExporter() as exporter:
+    exporter.add_skeleton(rig)
+    exporter.export(os.path.join(WORK, "flat.fbx"), zero_root=True)
 print(os.path.exists(os.path.join(WORK, "flat.fbx")))
 ```
 
-### Author animation curves
+### Author a take
 
-`cgmath.formats.fbx` is the take / layer / curve half of the library.
-The `SceneData` **constructor loads** — there is no `from_file`.
-
-```python
-from cgmath.formats.fbx import SceneData
-
-scene_data = SceneData(skel_path)
-print(scene_data.name, scene_data.fps, scene_data.linear_units)
-print(scene_data.nodes)                      # the root is dropped
-```
-
-Create a take, hang a curve off it, key it. Property names are Maya's
-(`translateX`, `rotateZ`) and are translated to FBX (`Lcl RotationZ`) on
-the way in.
+A take is a `ClipData` over the rig: one row of channel values per frame.
+Bend the knee from 0 to 90 degrees over 24 frames and write it out; the
+clip's nodes go with it.
 
 ```python
-take         = scene_data.create_take("bend")
-curve        = take.create_curve("knee", "rotateZ")
-curve.frames = [0.0, 12.0, 24.0]
-curve.values = [0.0, 45.0, 90.0]
+from cgmath.hierarchy import ClipData
 
-anim_path = scene_data.save(os.path.join(WORK, "bend.fbx"))
-scene_data.destroy()                          # destroys the FBX manager; do call it
+bend                       = ClipData(rig, frames=25, fps=24.0, take="bend")
+bend.frames["knee"].rotate = np.column_stack([np.zeros(25), np.zeros(25), np.linspace(0.0, 90.0, 25)])
+
+anim_path = os.path.join(WORK, "bend.fbx")
+bend.save_fbx(anim_path)
 print(os.path.basename(anim_path))
 ```
 
-Every time-bearing property comes in two flavours — `times` / `frames`,
-`start_time` / `start_frame`, `duration` / `frame_count`. The frame
-variants divide by `SceneData.fps`.
+`ClipData.save_fbx` writes one animation stack named after the take, every
+frame keyed as float32. `cgmath.formats.load_fbx` reads a whole file at
+once: the takes come back as the `clip` field, a `ClipList` of one
+`ClipData` per take over the nodes it animates, the file's active take
+active (and `hierarchy` is `None`: the nodes are the clip's).
 
 ```python
-check = SceneData(anim_path)
-for take in check.takes:                      # TakeList
-    for layer in take.layers:                 # LayerList
-        for c in layer.curves:                # CurveList
-            print(c.name, c.key_count, list(np.round(c.values, 3)),
-                  list(np.round(c.frames, 3)))
-check.destroy()
-```
+from cgmath.formats import load_fbx
 
-Blendshape curves are the one rescaled case: FBX stores `DeformPercent`
-in `0..100`, and `CurveData.values` divides by 100 on read, so you work in
-`0..1` throughout.
+held = load_fbx(anim_path)
+print([take.take for take in held.clip], held.clip.active.frame_count, held.hierarchy)   # ['bend'] 25 None
+```
 
 ### Read it back as a clip
 
@@ -918,20 +899,25 @@ loaded.frames[12:13].save_fbx(os.path.join(WORK, "frame12.fbx"))
 print(os.path.exists(os.path.join(WORK, "frame12.fbx")))
 ```
 
-### Meshes come from `geometry`, not `formats`
+### Meshes, skins, cameras and lights come with the same read
 
-`cgmath.formats` does not hand you a `MeshData`. The mesh, UV and skin
-readers live in `cgmath.geometry`:
+`cgmath.formats.load_fbx` reads everything a file holds that cgmath has a
+class for; the mesh, UV and skin classes' `load_fbx` routes are slices of
+that read, and `cgmath.render.Scene.load_fbx` holds all of it, ready to
+render:
 
 <!-- notest: no mesh-bearing .fbx asset ships with this package -->
 ```python
-from cgmath.geometry.mesh import load_fbx
+from cgmath.formats import load_fbx
+from cgmath.render import Scene
 
-for mesh, uvs in load_fbx("hero.fbx"):         # list[(MeshData, UVList)]
-    print(mesh.name, mesh.points.shape, "UV channels:", len(uvs))
+held = load_fbx("hero.fbx")                    # FbxContents: hierarchy, clip, meshes, skins, uvs, ...
+for mesh in held.meshes:
+    print(mesh.name, mesh.points.shape, mesh.parent_uuid)   # its node's uuid in held.hierarchy
 
-hero_mesh = MeshData.load_fbx("hero.fbx", name="hero_geo")
+hero_mesh = MeshData.load_fbx("hero.fbx", name="hero_geo")   # by the mesh's name, or its node's
 hero_uv   = UVData.load_fbx("hero.fbx", name="hero_geo", channel=0)
+Scene.load_fbx("hero.fbx").render().save("hero.png")
 ```
 
 ---

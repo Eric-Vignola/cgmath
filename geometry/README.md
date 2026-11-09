@@ -137,10 +137,10 @@ the default. A `DataList` saves `"__items__"` (one tree per item) and its
   saved clip is loaded with `ClipData.load`), `skin_weights.load` a
   `SkinList`. What a file holds, a field's object or a list's items, is built
   as the class the field or the list declares: a `MeshList`'s items as
-  `MeshData`, a field declared `Optional[MeshData]` as a `MeshData`; a `Scene`
-  tells its `Object`, `Camera` and `Light` nodes apart by their saved
-  `node_type`. A file saved up to cgmath 3.2 names its class under
-  `"__class__"`, a key a load skips.
+  `MeshData`, a field declared `Optional[MeshData]` as a `MeshData`, a render
+  `Scene`'s `hierarchy` as a `HierarchyData` and its `meshes` as a `MeshList`.
+  A file saved up to cgmath 3.2 names its class under `"__class__"`, a key a
+  load skips.
 - **A field is saved under the name a caller sets it by.** A private field
   behind a public property of its own name is saved as the property:
   `UVData._resolution` as `resolution`, a node's `_translate` as `translate`,
@@ -158,8 +158,8 @@ the default. A `DataList` saves `"__items__"` (one tree per item) and its
 - **json is utf-8 and plain lists.** NaN and the infinities are written as the
   bare `NaN` / `Infinity` tokens Python's `json` reads back. The field
   declarations restore the dtypes; a small `"__dtypes__"` / `"__shapes__"` note
-  covers what a list cannot say (an `Object` texture's own dtype, the shape of
-  an empty array).
+  covers what a list cannot say (a material's texture dtype, the shape of an
+  empty array).
 - **A pickle carries the same tree as plain data**, dicts, lists, scalars and
   bytes, an array as its dtype, shape and raw bytes under `"__array__"`, so it
   holds no numpy object and no cgmath name: a pickle written under numpy 2
@@ -173,11 +173,12 @@ the default. A `DataList` saves `"__items__"` (one tree per item) and its
 - **A failed save leaves the file as it was.** The whole file is written to
   scratch first, then over the target in place, so a reader holding it open,
   a link or a read-only file behave as with any plain write.
-- **An object held twice is saved twice.** Two `Object`s over one `MeshData`
-  save the mesh with each and load as two meshes. A load builds the fields in
-  the order the file holds them, so a class that reorders its fields still
-  loads its files. An object, a dict or a list that holds itself cannot be
-  saved.
+- **An object held twice is saved twice.** One `MeshData` put in two lists
+  saves with each and loads as two meshes; a scene holds each mesh once and
+  places it by a node, so nothing is held twice there. A load builds the
+  fields in the order the file holds them, so a class that reorders its
+  fields still loads its files. An object, a dict or a list that holds
+  itself cannot be saved.
 - **Copies.** `copy()` is the save and load round trip, in memory. `copy.copy`
   is shallow: the same field values, caches and links rebuilt; a list's is a
   new list over the same items, but a hierarchy, which owns its nodes, gets
@@ -240,11 +241,11 @@ class PinData(Data):
 
     TRANSIENT_FIELDS = ("lookup",)
 
-    name: str
+    name:    str
     indices: Array(np.int32, "N")
     targets: Array(np.float64, "N", 3)
-    weight: float = 1.0
-    lookup: Optional[dict] = None  # vertex id -> row: a cache, never saved
+    weight:  float = 1.0
+    lookup:  Optional[dict] = None  # vertex id -> row: a cache, never saved
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -268,7 +269,7 @@ print(pins.indices.dtype, pins.targets.dtype)  # int32 float64
 # weight is at its default and lookup is transient: neither is saved
 print(sorted(pins.to_dict()))  # ['indices', 'name', 'targets']
 
-tmp = tempfile.mkdtemp()
+tmp  = tempfile.mkdtemp()
 path = PinList([pins], label="mouth").save(os.path.join(tmp, "pins.json"))
 back = PinList.load(path)
 print(back.label, type(back[0]).__name__, back[0].lookup)  # mouth PinData {4: 0, 9: 1}
@@ -548,7 +549,11 @@ extension, or `mode=`, names it (`.gltf` is glb, `.usda` / `.usdc` / `.usdz`
 usd, `.pkl` / `.pickle` pickle). Arguments after `mode` go to that route by
 keyword, checked against its signature before the file is read or written, so
 `MeshData.load("hero.fbx", name="body")` is `MeshData.load_fbx("hero.fbx",
-name="body")` and a misspelt one raises `TypeError` naming the ones it takes. A
+name="body")` and a misspelt one raises `TypeError` naming the ones it takes.
+Every fbx route reads through `cgmath.formats.load_fbx`, in Maya's Y-up and
+cm: a mesh goes by its own name or its node's (Maya's FBXExport leaves every
+FbxMesh unnamed), a skin by its mesh's, and each shape names its node or its
+mesh by uuid. A
 format the class has no route for, an unknown extension too, raises
 `ValueError` naming the routes it has. `Data.load` and `DataList.load` read
 cgmath's own files only, which name their class: an asset raises, naming the
@@ -564,13 +569,13 @@ pkl keep everything.
 | `MeshData.save("x.obj")` / `save_obj` | the points, the faces and the normals (`vn`) the mesh has; not its matrix, holes or UVs |
 | `UVList.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | one mesh's UV channels |
 | `UVData.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | one `UVData`; no obj writer (its points are 2D) |
-| `skin_weights.load` / `load_fbx` / `load_glb`, `SkinList.load_*` | a `SkinList`, each skin named after its mesh |
-| `SkinData.load_fbx` / `load_glb` | one `SkinData` |
+| `skin_weights.load` / `load_fbx` / `load_glb`, `SkinList.load_*` | a `SkinList`, each skin naming its mesh by uuid (an fbx's named as its deformer is, a glb's after its primitive) |
+| `SkinData.load_fbx` / `load_glb` | one `SkinData`, the first or its mesh's `name=` |
 | `cgmath.hierarchy.load` / `load_fbx` / `load_glb` | a `HierarchyData` from fbx and glb; a cgmath file gives whatever hierarchy it holds (a `ClipData` stays a clip) |
 | `from_prim` / `to_prim` on `MeshData`, `UVData`, `MapData`, `GeomSubsetData`, `MorphData`, `CompactSkinData` | USD |
 
-OBJ is pure python and always available. `cgmath.render.scene.Object.save_obj`
-writes an Object's mesh where the Object puts it, with its UVs and normals.
+OBJ is pure python and always available. `cgmath.render.Scene.load_obj` reads
+every mesh of a file with its UV sets into a scene, at identity.
 
 ### Namespaces
 

@@ -16,7 +16,7 @@ Everything is numpy-native, Numba-accelerated where it matters.
 import numpy as np
 
 from cgmath.geometry import MeshData
-from cgmath.render import Object, Scene
+from cgmath.render import Scene
 
 cube = MeshData(
     points=np.array([
@@ -30,8 +30,7 @@ cube = MeshData(
     counts=np.array([4, 4, 4, 4, 4, 4]),
 )
 
-scene = Scene("hero")
-scene.append(Object(name="cube", mesh=cube))
+scene = Scene("hero").add(cube)
 frame = scene.render()
 print(frame.array.shape)                       # (500, 500, 4) RGBA
 ```
@@ -55,8 +54,8 @@ for it) and a **CHEATSHEET** (every public name, with a runnable example).
 | `cgmath.geometry` | `MeshData`, UVs, B-splines, SDFs, skin weights, morphs, maps, resampling | [README](https://github.com/Eric-Vignola/cgmath/blob/main/geometry/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/geometry/CHEATSHEET.md) |
 | `cgmath.geometry.deform` | FFD, Delta Mush, patch relax, skinning, RBF wrap | [README](https://github.com/Eric-Vignola/cgmath/blob/main/geometry/deform/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/geometry/deform/CHEATSHEET.md) |
 | `cgmath.geometry.utils` | the 59 numba kernels everything above stands on | [README](https://github.com/Eric-Vignola/cgmath/blob/main/geometry/utils/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/geometry/utils/CHEATSHEET.md) |
-| `cgmath.render` | software raytracer, `Scene` / `Object` / `Camera` / `Light` / `Frame` | [README](https://github.com/Eric-Vignola/cgmath/blob/main/render/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/render/CHEATSHEET.md) |
-| `cgmath.formats` | FBX + GLB curve / take / accessor I/O, USD stage and prim helpers | [README](https://github.com/Eric-Vignola/cgmath/blob/main/formats/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/formats/CHEATSHEET.md) |
+| `cgmath.render` | software raytracer: a `Scene` holds what an fbx holds and renders it to a `Frame` | [README](https://github.com/Eric-Vignola/cgmath/blob/main/render/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/render/CHEATSHEET.md) |
+| `cgmath.formats` | `load_fbx` / `save_fbx` of everything cgmath has a class for, GLB accessor I/O, USD stage and prim helpers | [README](https://github.com/Eric-Vignola/cgmath/blob/main/formats/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/formats/CHEATSHEET.md) |
 | `cgmath.rbf` | 21 radial basis function kernels + a JIT LU solver | [README](https://github.com/Eric-Vignola/cgmath/blob/main/rbf/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/rbf/CHEATSHEET.md) |
 | `cgmath.constraints` | `ProcrustesData` — rivet a transform to a deforming patch | [README](https://github.com/Eric-Vignola/cgmath/blob/main/constraints/README.md) · [CHEATSHEET](https://github.com/Eric-Vignola/cgmath/blob/main/constraints/CHEATSHEET.md) |
 
@@ -120,7 +119,8 @@ from cgmath.geometry   import MorphData, MorphList, MapData, GeomSubsetData
 from cgmath.geometry   import SkinData, SkinList, CompactSkinData
 from cgmath.geometry   import DeltaMushData, PatchRelaxData
 from cgmath.geometry.deform import FFDData, SkinDeformData, WrapData, DeformMethod
-from cgmath.render     import render, Scene, Object, Camera, Light, Frame, look_at
+from cgmath.render     import render, Scene, Frame, aim, look_at
+from cgmath.formats    import FbxContents, load_fbx, save_fbx
 from cgmath.constraints import ProcrustesData
 ```
 
@@ -187,7 +187,7 @@ see [Requirements](#requirements).
 | Dependency | Used for | Missing behaviour |
 |---|---|---|
 | `pygltflib` | GLB / glTF read | `RuntimeError("pygltflib is not installed")` at call time |
-| Autodesk FBX SDK — not on PyPI, a manual install | FBX read / write | imports fine, with one `UserWarning` naming the SDK and where to get it; the FBX readers and `save_fbx` raise `ImportError` at call time, and `cgmath.formats.fbx`'s own `SceneData(path)`, an `FbxExporter`'s methods (all but `close`) and any call on its placeholder `fbx` object raise `RuntimeError`, with that same message. A module named `fbx` that holds not all of the SDK's five classes (`FbxManager`, `FbxScene`, `FbxImporter`, `FbxExporter`, `FbxNode`; a folder of that name on the path) counts as missing |
+| Autodesk FBX SDK — not on PyPI, a manual install | FBX read / write | imports fine, with one `UserWarning` naming the SDK and where to get it; the FBX readers and `save_fbx` raise `ImportError` at call time, and an `FbxExporter`'s methods (all but `close`) and any call on `cgmath.formats.fbx`'s placeholder `fbx` object raise `RuntimeError`, with that same message. A module named `fbx` that holds not all of the SDK's five classes (`FbxManager`, `FbxScene`, `FbxImporter`, `FbxExporter`, `FbxNode`; a folder of that name on the path) counts as missing |
 | `pxr`, from `usd-core` or the host DCC's own USD | `cgmath.formats.usd` stage / prim helpers; `from_prim` / `to_prim` / `load_usd` in `geometry` | `import cgmath.formats.usd.prim` itself raises `ImportError`, and the `geometry` paths raise `ImportError` at call time (`geometry.utils.pxr()` is the accessor) |
 | `trimesh` | `GlbData.mesh_list` | that attribute is `None` |
 | `PIL` (Pillow) | `Frame.image` / `.save` / `.wireframe` / `.encode_gif`, `to_image`, texture I/O | `RuntimeError("... install Pillow.")` at call time |
@@ -224,26 +224,28 @@ A `UVData` is a mesh in UV space: the same face stream, with `(V, 2)`
 points. Here every face maps to the whole texture square.
 
 ```python
-from cgmath.geometry import UVData
-from cgmath.render import Object, Scene
+from cgmath.geometry import MaterialData, UVData
+from cgmath.render import Scene
 
 cube_uv = UVData(
-    points  = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
-    indices = np.tile([0, 1, 2, 3], 6),
-    counts  = cube.counts,
+    points    = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
+    indices   = np.tile([0, 1, 2, 3], 6),
+    counts    = cube.counts,
+    name      = "map1",
+    mesh_uuid = cube.uuid,                                 # the mesh the set belongs to
 )
 
 i, j    = np.indices((64, 64)) // 8                        # an 8 x 8 checkerboard
 checker = np.where(((i + j) % 2)[..., None] == 1, 230, 40).astype(np.uint8).repeat(3, axis=2)
 
-scene   = Scene("hero")
-scene.append(Object(name="cube", mesh=cube, uv=cube_uv, texture=checker))
-scene.configure(resolution=(320, 240), samples_per_pixel=4)
+scene   = Scene("hero", resolution=(320, 240), samples_per_pixel=4)
+scene.add(cube, cube_uv, MaterialData(mesh_uuid=cube.uuid, texture=checker, uv_set="map1"))
 scene.render().save("hero.png")
 ```
 
-`texture` takes a file path or an `(H, W, 3)` array. Without a `uv`, an
-`Object` renders in its flat `base_color`.
+A `MaterialData` covers a mesh, or some of its faces, with a colour or an
+`(H, W, C)` texture read through a UV set. A face no material covers
+renders in the scene's flat `base_color`.
 
 ### Carry a sculpt from a dense mesh back to a coarse one
 

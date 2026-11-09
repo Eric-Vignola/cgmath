@@ -1020,7 +1020,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000002397EE3AED0>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000001E9FF58ACD0>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1237,8 +1237,8 @@ grow_vertex_edge_indices(self, indices: 'np.ndarray', n: 'int' = 1) -> 'np.ndarr
     grows vertex edge indices by n steps
 grow_vertex_face_indices(self, indices: 'np.ndarray', n: 'int' = 1) -> 'np.ndarray'
     grows vertex face indices by n steps
-classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None, scale_factor: 'float | None' = None) -> "'MeshData'"
-    returns a single MeshData from an fbx file (first mesh if name is None)
+classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None) -> "'MeshData'"
+    the first mesh of an fbx file, or the one named ``name``, as
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, name: 'str | None' = None) -> "'MeshData'"
     returns a single MeshData from a glb (first mesh if name is None)
 classmethod load_obj(cls, filename: 'str') -> "'MeshData'"
@@ -1309,8 +1309,8 @@ Methods:
 ```text
 fix_symmetry(self, pivot: 'float' = 0.0, axis: 'int' = 0, side: 'float' = 1.0, combined: 'bool' = True, tolerance: 'Union[None, float]' = None) -> 'np.ndarray'
     attempts a symmetry fix on each element or combined.
-classmethod load_fbx(cls, filename: 'str', scale_factor: 'float | None' = None) -> "'MeshList'"
-    loads all meshes from an fbx file into a MeshList
+classmethod load_fbx(cls, filename: 'str') -> "'MeshList'"
+    every mesh of an fbx file, as :func:`cgmath.formats.load_fbx`
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0) -> "'MeshList'"
     loads all meshes from a glb file into a MeshList
 classmethod load_obj(cls, filename: 'str') -> "'MeshList'"
@@ -1481,7 +1481,7 @@ from_vertices(self, *args, **kwarg) -> "'UVList'"
 get_minimum_resolution(self)
     computes the minimum resolution for the entire list
 classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None) -> "'UVList'"
-    loads all UV channels for one mesh from an fbx file (first mesh if name is None)
+    the UV sets of the first mesh of an fbx file, or of the mesh named
 classmethod load_glb(cls, filename: 'str', name: 'str | None' = None) -> "'UVList'"
     loads all UV channels for one mesh from a glb file (first mesh if name is None)
 classmethod load_obj(cls, filename: 'str', name: 'str | None' = None) -> "'UVList'"
@@ -1500,8 +1500,8 @@ Functions:
 ```text
 load(filename: 'str', mode: 'str | None' = None, **kwargs) -> 'list'
     The file's meshes with their UVs, as ``(MeshData, UVList)`` pairs:
-load_fbx(filename: 'str', scale_factor: 'float | None' = None) -> 'list'
-    loads fbx file and returns list of (MeshData, UVList) tuples
+load_fbx(filename: 'str') -> 'list'
+    the meshes of an fbx file with their UV sets, ``[(MeshData, UVList)]``
 load_glb(filename: 'str', scale_factor: 'float' = 100.0) -> 'list'
     loads glb file and returns list of (MeshData, UVList) tuples
 load_obj(filename: 'str') -> 'list'
@@ -1789,7 +1789,7 @@ insert(self, index: 'int', influence: 'str', weight: 'float' = 0.0)
 is_equivalent(self, other: "'SkinData'") -> 'bool'
     checks whether the skin data is equivalent to another
 classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None) -> "'SkinData'"
-    returns a single SkinData from an fbx file (first skinned mesh if name is None)
+    the skin of the first skinned mesh of an fbx file, or of the mesh
 classmethod load_glb(cls, filename: 'str', name: 'str | None' = None) -> "'SkinData'"
     returns a single SkinData from a glb (first skinned primitive if name is None)
 normalize(self, locked_influences=None, indices=None)
@@ -1831,7 +1831,7 @@ Methods:
 
 ```text
 classmethod load_fbx(cls, filename: 'str') -> "'SkinList'"
-    Every skinned mesh of an fbx, in file order, named after its mesh.
+    Every skinned mesh's skin, in file order, as
 classmethod load_glb(cls, filename: 'str') -> "'SkinList'"
     Every skinned primitive of a glb, in file order, named after its
 transfer_influences(self, src_influences: 'list', dst_influences: 'list', weighted: 'bool' = True) -> 'None'
@@ -2693,233 +2693,138 @@ vector_angle_difference(vector_a, vector_b)
 
 ## `cgmath.render`
 
-software raytracer, scene graph, cameras, textures, frames.
+software raytracer, the `Scene` bundle, cameras, textures, frames.
 
-> Software raytracer rendering pipeline for ``MeshData`` / ``UVData`` pairs.
+> Software raytracer rendering pipeline for the scene an fbx holds.
 
 Re-exported classes:
 
 ```text
-Camera
 Frame
-Light
-Object
 Scene
 ```
 
 Functions:
 
 ```text
+aim(node: cgmath.hierarchy.hierarchy.TransformData, target, up=(0.0, 1.0, 0.0)) -> cgmath.hierarchy.hierarchy.TransformData
+    ``node`` turned to look down its -Z at ``target`` from where it is,
 load_texture(texture: 'Union[str, np.ndarray]') -> 'np.ndarray'
     Returns a contiguous ``(H, W, 3)`` float32 array in [0, 1].
 look_at(eye: 'Tuple[float, float, float]', target: 'Tuple[float, float, float]', up: 'Tuple[float, float, float]' = (0.0, 1.0, 0.0)) -> 'np.ndarray'
     OpenGL/Maya-style camera-to-world matrix pointing ``eye`` at ``target``.
-render(mesh: 'Optional[MeshData]' = None, uv: 'Optional[UVData]' = None, texture: 'Optional[Union[str, np.ndarray]]' = None, camera_matrix: 'Optional[np.ndarray]' = None, angle_of_view: 'float' = 35.0, resolution: 'Tuple[int, int]' = (512, 384), point_light: 'Optional[Union[dict, List[dict]]]' = None, background: 'Tuple[float, float, float, float]' = (0.0, 0.0, 0.0, 0.0), sample_method: 'Union[SampleMethod, str]' = <SampleMethod.BILINEAR: 'bilinear'>, ambient: 'float' = 0.1, wrap: 'str' = 'repeat', twosided: 'bool' = True, autofit: 'bool' = False, fit_padding: 'Optional[float]' = None, return_depth: 'bool' = False, samples_per_pixel: 'int' = 1, base_color: 'Tuple[float, float, float]' = (0.7, 0.7, 0.7), scene: "Optional[Union[List[dict], 'Scene']]" = None, default_light: 'bool' = True, threads: 'Optional[int]' = None) -> 'Frame'
+render(mesh: 'Optional[MeshData]' = None, uv: 'Optional[UVData]' = None, texture: 'Optional[Union[str, np.ndarray]]' = None, camera_matrix: 'Optional[np.ndarray]' = None, angle_of_view: 'float' = 35.0, resolution: 'Tuple[int, int]' = (512, 384), point_light: 'Optional[Union[dict, List[dict]]]' = None, background: 'Tuple[float, float, float, float]' = (0.0, 0.0, 0.0, 0.0), sample_method: 'Union[SampleMethod, str]' = <SampleMethod.BILINEAR: 'bilinear'>, ambient: 'float' = 0.1, wrap: 'str' = 'repeat', twosided: 'bool' = True, autofit: 'bool' = False, fit_padding: 'Optional[float]' = None, return_depth: 'bool' = False, samples_per_pixel: 'int' = 1, base_color: 'Tuple[float, float, float]' = (0.7, 0.7, 0.7), scene: "Optional[Union[List[dict], 'Scene']]" = None, default_light: 'bool' = True, threads: 'Optional[int]' = None, frame: 'Optional[int]' = None) -> 'Frame'
     Render a textured mesh / scene to a :class:`Frame`.
 ```
 
 ## `cgmath.render.scene`
 
-`Scene`, `Object`, `Camera`, `Light`.
+`Scene`, `aim`.
 
-> Scene-graph primitives for the raytracer.
+> A scene for the raytracer: what an fbx holds, and the render settings.
 
-#### `Camera(TransformData)`
+#### `RenderInputs(tuple)`
 
-Maya/OpenGL-style camera: looks down its own -Z axis.
+what the raytracer renders: the per-mesh entries, the camera dict or
 
 ```text
-Camera(name: 'str' = 'camera', angle_of_view: 'float' = 35.0, is_orthographic: 'bool' = False, ortho_height: 'Optional[float]' = None, near_plane: 'float' = 0.0, far_plane: 'float' = inf, aspect_ratio: 'Optional[float]' = None, **transform_kwargs) -> 'None'
+RenderInputs(entries: list, camera: Optional[dict], lights: list)
+```
+
+#### `Scene(Data)`
+
+What an fbx holds, and the render settings: nodes, meshes, UV sets,
+
+```text
+Scene(name: Optional[str] = 'scene', hierarchy: Optional[cgmath.hierarchy.hierarchy.HierarchyData] = None, clip: Optional[cgmath.hierarchy.hierarchy.ClipList] = None, meshes: Optional[cgmath.geometry.mesh.MeshList] = None, uvs: Optional[cgmath.geometry.mesh.UVList] = None, skins: Optional[cgmath.geometry.skin_weights.SkinList] = None, materials: Optional[cgmath.geometry.material.MaterialList] = None, cameras: Optional[cgmath.geometry.camera.CameraList] = None, lights: Optional[cgmath.geometry.light.LightList] = None, morphs: Optional[cgmath.geometry.morph_target.MorphList] = None, default_camera: Optional[str] = None, aspect_ratio: Optional[float] = None, resolution: Optional[Annotated[numpy.ndarray, Array(int32 (2,))]] = ImmutableArray([500, 500], dtype=int32), samples_per_pixel: Optional[int] = None, background: Optional[Annotated[numpy.ndarray, Array(float64 (4,))]] = None, autofit: Optional[bool] = None, default_light: Optional[bool] = None, return_depth: Optional[bool] = None, angle_of_view: Optional[float] = None, fit_padding: Optional[float] = None, base_color: typing.Annotated[numpy.ndarray, Array(float64 (3,))] = ImmutableArray([0.7, 0.7, 0.7]), sample_method: str = 'bilinear', ambient: float = 0.8, twosided: bool = True, cast_shadows: bool = True, wireframe: bool = False, wireframe_color: typing.Annotated[numpy.ndarray, Array(int32 (3,))] = ImmutableArray([0, 0, 0], dtype=int32), wireframe_thickness: int = 1) -> None
 ```
 
 Fields:
 
 ```text
-angle_of_view: float = 35.0
-is_orthographic: bool = False
-ortho_height: Optional[float] = None
-near_plane: float = 0.0
-far_plane: float = inf
-aspect_ratio: Optional[float] = None
-```
-
-Methods:
-
-```text
-autofit(self, points: 'np.ndarray', width: 'int', height: 'int') -> 'None'
-    Override this camera's position so that ``points`` fit the frustum.
-classmethod default_view(cls, points: 'np.ndarray', name: 'str' = 'camera', angle_of_view: 'float' = 35.0) -> "'Camera'"
-    Build a 3/4 elevated view Camera looking at the points' bbox center.
-look_at(self, target: 'Union[Tuple[float, float, float], np.ndarray]', up: 'Tuple[float, float, float]' = (0.0, 1.0, 0.0)) -> 'None'
-    Aim this camera at ``target`` from its current world position.
-```
-
-#### `Light(TransformData)`
-
-A scene light.
-
-```text
-Light(name: 'str' = 'light', kind: 'str' = 'point', color: 'Tuple[float, float, float]' = (1.0, 1.0, 1.0), intensity: 'float' = 1.0, falloff: 'bool' = True, **transform_kwargs) -> 'None'
-```
-
-Fields:
-
-```text
-kind: str = 'point'
-color: Array(np.float64, 3) = ImmutableArray([1., 1., 1.])
-intensity: float = 1.0
-falloff: bool = True
+name: Optional = 'scene'
+hierarchy: Optional = None
+clip: Optional = None
+meshes: Optional = None
+uvs: Optional = None
+skins: Optional = None
+materials: Optional = None
+cameras: Optional = None
+lights: Optional = None
+morphs: Optional = None
+default_camera: Optional = None
+aspect_ratio: Optional = None
+resolution: Optional = ImmutableArray([500, 500], dtype=int32)
+samples_per_pixel: Optional = None
+background: Optional = None
+autofit: Optional = None
+default_light: Optional = None
+return_depth: Optional = None
+angle_of_view: Optional = None
+fit_padding: Optional = None
+base_color: Annotated = ImmutableArray([0.7, 0.7, 0.7])
+sample_method: str = 'bilinear'
+ambient: float = 0.8
+twosided: bool = True
+cast_shadows: bool = True
+wireframe: bool = False
+wireframe_color: Annotated = ImmutableArray([0, 0, 0], dtype=int32)
+wireframe_thickness: int = 1
 ```
 
 Properties:
 
 ```text
-direction                          World-space forward direction (-Z axis) for infinite lights.
-position                           World-space position derived from :attr:`world_matrix`.
+buffer                             the kept frame's pixels, None for none
+frame                              the last render, None when none is kept or a render input changed since
 ```
 
 Methods:
 
 ```text
-as_dict(self) -> 'dict'
-    Returns a dict matching the renderer's existing point_light shape.
+add(self, *items) -> 'Scene'
+    Adds each item to the list it belongs in, by its class: a
+animate(self, output_pattern: str = 'animation.{frame:04d}.png', clip=None, fit: str = 'auto', rotation_axis: str = 'y', start_angle: float = 0.0, end_angle: float = 0.0, camera_name: Optional[str] = None, fps: Optional[int] = None, background: Optional[Tuple[float, float, float]] = None, n_pose_samples: Optional[int] = None, n_fit_samples: Optional[int] = None, verbose: bool = False, **render_kwargs) -> Union[str, List[str]]
+    The scene's clip rendered frame by frame: the active take of
+camera(self, name: Optional[str] = None) -> Tuple[Optional[cgmath.geometry.camera.CameraData], Optional[str]]
+    ``(camera, node uuid)``: the camera named ``name``, else the one
+clear_render_cache(self) -> None
+    drops the frames kept from the last turntable or animation, so the
+configure(self, **kwargs) -> 'Scene'
+    sets the render and shading settings given, None values skipped;
+imshow(self, resolution: Tuple[int, int] = (500, 500)) -> None
+    the frame in an OpenCV window, rendered at ``resolution`` when none is kept
+classmethod load_fbx(cls, filename: str, name: Optional[str] = None) -> 'Scene'
+    the file's nodes or takes, meshes, UV sets, skins, materials,
+classmethod load_glb(cls, filename: str, name: Optional[str] = None, scale_factor: float = 100.0, load_skin: bool = True, extract_texture: bool = True) -> 'Scene'
+    Every mesh of a GLB file, with its UV sets, at identity, its points
+classmethod load_obj(cls, filename: str, name: Optional[str] = None) -> 'Scene'
+    every mesh of an OBJ file, with its UV sets, at identity (an OBJ
+placed_meshes(self, frame: Optional[int] = None) -> List[Tuple[cgmath.geometry.mesh.MeshData, numpy.ndarray]]
+    ``[(mesh, world)]`` of every shown mesh at ``frame``: a mesh on a
+pose(self, frame: Optional[int] = None) -> Optional[cgmath.hierarchy.hierarchy.HierarchyData]
+    The nodes a render places the shapes by: the active take at
+render(self, frame: Optional[int] = None, output: Optional[str] = None, **kwargs)
+    The scene rendered as a :class:`Frame`: the shapes placed by
+save_fbx(self, filename: str, as_ascii: bool = False) -> str
+    the scene written as :func:`cgmath.formats.save_fbx` writes its
+strip_namespace(self, namespace: Optional[str] = None) -> None
+    ``strip_namespace()`` on the nodes, the clip and every shape list
+to_image(self, resolution: Tuple[int, int] = (500, 500)) -> 'Image'
+    the frame as a PIL image, rendered at ``resolution`` when none is kept
+turntable(self, output_pattern: str = 'turntable.{frame:04d}.png', n_frames: int = 120, rotation_axis: str = 'y', start_angle: float = 0.0, end_angle: float = 360.0, fit: str = 'auto', camera_name: Optional[str] = None, fps: int = 30, background: Optional[Tuple[float, float, float]] = None, n_fit_samples: Optional[int] = None, verbose: bool = False, **render_kwargs) -> Union[str, List[str]]
+    The camera orbiting the scene, ``n_frames`` frames from
+union_aabb(self, frame: Optional[int] = None) -> Tuple[numpy.ndarray, numpy.ndarray]
+    ``(min corner, max corner)`` of :meth:`union_points`, zeros for none
+union_points(self, frame: Optional[int] = None) -> numpy.ndarray
+    every shown mesh's points at ``frame``, in world space, as one
 ```
 
-#### `Object(TransformData)`
-
-A renderable mesh with attached UVs, texture and shader options.
+Functions:
 
 ```text
-Object(name: 'str' = 'object', mesh: 'Optional[MeshData]' = None, uv: 'Optional[UVData]' = None, texture: 'Optional[Union[str, np.ndarray]]' = None, skin: 'Optional[SkinDeformData]' = None, base_color: 'Tuple[float, float, float]' = (0.7, 0.7, 0.7), sample_method: 'str' = 'bilinear', wrap: 'str' = 'repeat', ambient: 'float' = 0.8, twosided: 'bool' = True, cast_shadows: 'bool' = True, resolution: 'Tuple[int, int]' = (500, 500), samples_per_pixel: 'Optional[int]' = 4, wireframe: 'bool' = False, wireframe_color: 'Tuple[int, int, int]' = (0, 0, 0), wireframe_thickness: 'int' = 1, background: 'Optional[Union[Tuple[float, ...], List[float]]]' = None, **transform_kwargs) -> 'None'
-```
-
-Properties:
-
-```text
-ambient                            
-background                         Per-Object preview RGBA background in [0, 1], float64 ``(4,)``.
-base_color                         Surface color in [0, 1] when there is no texture, float64 ``(3,)``.
-buffer                             Convenience accessor for ``self.frame.array`` -- the pixel
-cast_shadows                       
-frame                              Cached most-recent render output, or ``None`` when the cache
-mesh                               
-resolution                         Per-Object preview render resolution ``(width, height)``, int32.
-sample_method                      
-samples_per_pixel                  Per-Object preview MSAA sample count.
-skin                               
-texture                            
-twosided                           
-uv                                 
-wireframe                          
-wireframe_color                    Edge color in 0..255, int32 ``(3,)``.
-wireframe_thickness                
-world_points                       Mesh points transformed to world space via :attr:`world_matrix`.
-wrap                               
-```
-
-Methods:
-
-```text
-animate(self, clip, output: 'str' = 'animation.{frame:04d}.png', resolution: 'Optional[Tuple[int, int]]' = None, samples_per_pixel: 'Optional[int]' = None, fps: 'Optional[int]' = None, **animate_kwargs) -> 'Union[str, List[str]]'
-    Quick standalone render of this Object animated by *clip*.
-clear_render_cache(self) -> 'None'
-    Deletes the frames kept from this Object's last :meth:`turntable` or
-extract_texture_from_fbx(self, file_path: 'str', mesh_index: 'int' = 0, material_index: 'int' = 0) -> 'bool'
-    Extract the diffuse (base color) texture from an FBX file and
-extract_texture_from_glb(self, file_path: 'str', material_index: 'int' = 0) -> 'bool'
-    Extract the PBR base color (diffuse / albedo) texture from a
-get_loaded_texture(self) -> 'Optional[np.ndarray]'
-    Returns the texture as a contiguous ``(H, W, 3) float32`` array,
-imshow(self) -> 'None'
-    Show the rendered frame in a window via OpenCV.
-classmethod load_fbx(cls, filename: 'str', index: 'int' = 0, extract_texture: 'bool' = True, load_skin: 'bool' = True, scale_factor: 'Optional[float]' = None, axis_system: 'Optional[str]' = 'maya_y_up', **object_kwargs) -> "'Object'"
-    Load a mesh from an FBX file as an :class:`Object`.
-classmethod load_glb(cls, filename: 'str', index: 'int' = 0, scale_factor: 'float' = 100.0, extract_texture: 'bool' = True, load_skin: 'bool' = True, **object_kwargs) -> "'Object'"
-    Load a mesh from a GLB file as an :class:`Object`.
-classmethod load_obj(cls, filename: 'str', index: 'int' = 0, **object_kwargs) -> "'Object'"
-    Load a mesh from an OBJ file as an :class:`Object`.
-merge(self) -> 'None'
-    Merges overlapping points (and resulting overlapping faces),
-pose(self, pose) -> "'Object'"
-    Deform :attr:`mesh` for a posed skeleton, in place on this Object.
-quadrangulate(self, source: 'str' = 'uv') -> 'None'
-    Merges pairs of triangles into quads, in-place, on this
-render(self, output: 'Optional[str]' = None, resolution: 'Optional[Tuple[int, int]]' = None, samples_per_pixel: 'Optional[int]' = None, **render_kwargs) -> "'Frame'"
-    Quick standalone preview render of this Object.
-restore_bind_pose(self) -> "'Object'"
-    Put :attr:`mesh` back to the undeformed bind pose.
-save_obj(self, filename: 'str') -> 'str'
-    Write the Object's mesh as an OBJ file, where the Object puts it.
-to_dict(self) -> 'dict'
-    The tree :meth:`Data.to_dict` builds, with a texture given as a
-to_image(self) -> "'Image'"
-    Returns the rendered frame as a PIL Image.
-triangulate(self, ngons_only=False) -> 'None'
-    Triangulates polygons (quads / n-gons) into triangles, in-place,
-turntable(self, output: 'str' = 'turntable.{frame:04d}.png', n_frames: 'int' = 120, resolution: 'Optional[Tuple[int, int]]' = None, samples_per_pixel: 'Optional[int]' = None, fps: 'int' = 30, **render_kwargs) -> 'Union[str, List[str]]'
-    Quick standalone turntable of this Object.
-```
-
-#### `Scene(HierarchyData)`
-
-A hierarchical container of Objects, Cameras and Lights.
-
-```text
-Scene(name: 'str' = 'scene', aspect_ratio: 'Optional[float]' = None, default_camera_name: 'Optional[str]' = None, resolution: 'Optional[Tuple[int, int]]' = (500, 500), samples_per_pixel: 'Optional[int]' = None, background: 'Optional[Union[Tuple[float, ...], List[float]]]' = None, autofit: 'Optional[bool]' = None, default_light: 'Optional[bool]' = None, return_depth: 'Optional[bool]' = None, angle_of_view: 'Optional[float]' = None, fit_padding: 'Optional[float]' = None) -> 'None'
-```
-
-Properties:
-
-```text
-background                         Optional RGBA background color in [0, 1] used by :meth:`render`,
-buffer                             Convenience accessor for ``self.frame.array`` -- the pixel
-cameras                            
-frame                              Cached most-recent render output, or ``None`` when the cache
-lights                             
-objects                            
-resolution                         Render resolution ``(width, height)``, int32, or ``None`` to fall
-scene_name                         Returns the scene's own label (distinct from the inherited
-```
-
-Methods:
-
-```text
-animate(self, clip, output_pattern: 'str' = 'animation.{frame:04d}.png', fit: 'str' = 'auto', rotation_axis: 'str' = 'y', start_angle: 'float' = 0.0, end_angle: 'float' = 0.0, camera_name: 'Optional[str]' = None, fps: 'Optional[int]' = None, background: 'Optional[Tuple[float, float, float]]' = None, n_pose_samples: 'Optional[int]' = None, n_fit_samples: 'Optional[int]' = None, verbose: 'bool' = False, **render_kwargs) -> 'Union[str, List[str]]'
-    Render a :class:`ClipData` frame by frame, deforming as it goes.
-append(self, node: 'TransformData') -> 'None'
-    S.append(value) -- append value to the end of the sequence
-clear_render_cache(self) -> 'None'
-    Deletes the frames kept from this Scene's last :meth:`turntable` or
-configure(self, **kwargs) -> "'Scene'"
-    Bulk-set persistent render defaults; ``None`` values are ignored.
-get_camera(self, name: 'Optional[str]' = None) -> 'Optional[Camera]'
-    Returns the named Camera, the default Camera, or the first one.
-imshow(self, resolution: 'Tuple[int, int]' = (500, 500)) -> 'None'
-    Show the rendered frame in a window via OpenCV.
-insert(self, index: 'int', node: 'TransformData') -> 'None'
-    S.insert(index, value) -- insert value before index
-classmethod load_glb(cls, filename: 'str', name: 'Optional[str]' = None, scale_factor: 'float' = 100.0, load_skin: 'bool' = True, extract_texture: 'bool' = True) -> "'Scene'"
-    Load every mesh in a GLB file into a new :class:`Scene` as
-classmethod load_obj(cls, filename: 'str', name: 'Optional[str]' = None) -> "'Scene'"
-    Load every mesh in an OBJ file into a new :class:`Scene` as
-render(self, **kwargs)
-    Convenience wrapper around the module-level ``render(scene=self, ...)``.
-strip_namespace(self, namespace: 'Optional[str]' = None) -> 'None'
-    ``strip_namespace()`` on every node, all or nothing, and on
-to_image(self, resolution: 'Tuple[int, int]' = (500, 500)) -> "'Image'"
-    Returns the rendered frame as a PIL Image.
-turntable(self, output_pattern: 'str' = 'turntable.{frame:04d}.png', n_frames: 'int' = 120, rotation_axis: 'str' = 'y', start_angle: 'float' = 0.0, end_angle: 'float' = 360.0, fit: 'str' = 'auto', camera_name: 'Optional[str]' = None, fps: 'int' = 30, background: 'Optional[Tuple[float, float, float]]' = None, n_fit_samples: 'Optional[int]' = None, verbose: 'bool' = False, **render_kwargs) -> 'Union[str, List[str]]'
-    Render a turntable animation: orbit a camera around the scene.
-union_aabb(self, objects: 'Optional[List[Object]]' = None) -> 'Tuple[np.ndarray, np.ndarray]'
-    Returns ``(min_corner, max_corner)`` of the world-space AABB
-union_points(self, objects: 'Optional[List[Object]]' = None) -> 'np.ndarray'
-    Returns the concatenation of all visible Objects' world-space
-```
-
-Constants:
-
-```text
-DTYPES_KEY = '__dtypes__'
+aim(node: cgmath.hierarchy.hierarchy.TransformData, target, up=(0.0, 1.0, 0.0)) -> cgmath.hierarchy.hierarchy.TransformData
+    ``node`` turned to look down its -Z at ``target`` from where it is,
 ```
 
 ## `cgmath.render.frame`
@@ -2996,7 +2901,7 @@ the render call.
 Functions:
 
 ```text
-render(mesh: 'Optional[MeshData]' = None, uv: 'Optional[UVData]' = None, texture: 'Optional[Union[str, np.ndarray]]' = None, camera_matrix: 'Optional[np.ndarray]' = None, angle_of_view: 'float' = 35.0, resolution: 'Tuple[int, int]' = (512, 384), point_light: 'Optional[Union[dict, List[dict]]]' = None, background: 'Tuple[float, float, float, float]' = (0.0, 0.0, 0.0, 0.0), sample_method: 'Union[SampleMethod, str]' = <SampleMethod.BILINEAR: 'bilinear'>, ambient: 'float' = 0.1, wrap: 'str' = 'repeat', twosided: 'bool' = True, autofit: 'bool' = False, fit_padding: 'Optional[float]' = None, return_depth: 'bool' = False, samples_per_pixel: 'int' = 1, base_color: 'Tuple[float, float, float]' = (0.7, 0.7, 0.7), scene: "Optional[Union[List[dict], 'Scene']]" = None, default_light: 'bool' = True, threads: 'Optional[int]' = None) -> 'Frame'
+render(mesh: 'Optional[MeshData]' = None, uv: 'Optional[UVData]' = None, texture: 'Optional[Union[str, np.ndarray]]' = None, camera_matrix: 'Optional[np.ndarray]' = None, angle_of_view: 'float' = 35.0, resolution: 'Tuple[int, int]' = (512, 384), point_light: 'Optional[Union[dict, List[dict]]]' = None, background: 'Tuple[float, float, float, float]' = (0.0, 0.0, 0.0, 0.0), sample_method: 'Union[SampleMethod, str]' = <SampleMethod.BILINEAR: 'bilinear'>, ambient: 'float' = 0.1, wrap: 'str' = 'repeat', twosided: 'bool' = True, autofit: 'bool' = False, fit_padding: 'Optional[float]' = None, return_depth: 'bool' = False, samples_per_pixel: 'int' = 1, base_color: 'Tuple[float, float, float]' = (0.7, 0.7, 0.7), scene: "Optional[Union[List[dict], 'Scene']]" = None, default_light: 'bool' = True, threads: 'Optional[int]' = None, frame: 'Optional[int]' = None) -> 'Frame'
     Render a textured mesh / scene to a :class:`Frame`.
 ```
 
@@ -3149,80 +3054,7 @@ UNSIGNED_SHORT = 5123
 
 ## `cgmath.formats.fbx`
 
-FBX scenes, takes, layers, curves, export (needs the Autodesk FBX SDK).
-
-#### `BaseData`
-
-Base class for FBX data objects with common functionality
-
-```text
-BaseData(scene, data_object)
-```
-
-Properties:
-
-```text
-name                               Get the data object's name in Maya-friendly format
-```
-
-#### `BaseList`
-
-Base class for list containers with custom access methods
-
-```text
-BaseList(data_objects=None)
-```
-
-Methods:
-
-```text
-append(self, data_object)
-    Add a data object to the list
-delete(self, name: str)
-    Delete an object from the scene and remove it from this list
-```
-
-#### `CurveData(BaseData)`
-
-Class to manipulate a specific animation curve from FBX data
-
-```text
-CurveData(scene, anim_curve, curve_name)
-```
-
-Properties:
-
-```text
-frames                             Get all keyframe times from the animation curve expressed in frames
-key_count                          Get the number of keyframes in the animation curve
-name                               Get the curve's identifier name in Maya-friendly format
-times                              Get all keyframe times from the animation curve
-values                             Get all keyframe values from the animation curve
-```
-
-Methods:
-
-```text
-clear(self)
-    Remove all keyframes from the animation curve while preserving attribute connections
-set_keys(self, times, values, interpolation: str = 'linear') -> None
-    Replace every key of the curve with one per time, linear by default
-```
-
-#### `CurveList(BaseList)`
-
-Class to hold a list of CurveData objects with custom access methods
-
-```text
-CurveList(curve_data_objects=None)
-```
-
-Methods:
-
-```text
-delete(self, name: str)
-    Delete a curve from the scene and remove it from this list
-```
+`FbxExporter`, the writer behind `save_fbx` (needs the Autodesk FBX SDK).
 
 #### `FbxExporter`
 
@@ -3256,114 +3088,6 @@ close(self) -> None
     frees the manager, and with it the scene and every node added
 export(self, path: pathlib.Path, as_ascii=False, zero_root=False) -> None
     Export the scene to the given path, binary unless as_ascii is set.
-```
-
-#### `LayerData(BaseData)`
-
-Class to manipulate a specific animation layer in an FBX scene
-
-```text
-LayerData(scene, anim_layer)
-```
-
-Properties:
-
-```text
-curves                             Get all animation curves in this layer
-```
-
-Methods:
-
-```text
-create_curve(self, node_name, property_name, fbx_node=None)
-    Create a new animation curve for an unkeyed attribute
-rename(self, name: str)
-    Rename this layer to a new name
-```
-
-#### `LayerList(BaseList)`
-
-Class to hold a list of LayerData objects with custom access methods
-
-```text
-LayerList(layer_data_objects=None)
-```
-
-#### `SceneData(BaseData)`
-
-Class to manipulate animation data in FBX files from Autodesk Maya
-
-```text
-SceneData(filename=None)
-```
-
-Properties:
-
-```text
-fps                                Get the scene's frames per second value
-linear_units                       Get the scene's linear units
-name                               Get the scene's name
-nodes                              Get all nodes in the scene, including blendshape channels
-scale_factor                       Get the scene's global scale factor
-scene                              Get the FBX scene object
-takes                              Get all takes (animation stacks) in the scene
-```
-
-Methods:
-
-```text
-close(self)
-    Frees the FBX manager and the scene; safe to call twice.
-create_take(self, name: str)
-    Create a new take (animation stack) in the scene with a default "BaseLayer"
-destroy(self)
-    Frees the FBX manager and the scene; safe to call twice.
-load(self, filename)
-    Load an FBX file and store its scene data
-rename(self, name: str)
-    Rename this scene to a new name
-save(self, filename=None, embed_media=True, file_format=-1)
-    Save the FBX scene to disk
-```
-
-#### `TakeData(BaseData)`
-
-Class to manipulate a specific take (animation stack) in an FBX scene
-
-```text
-TakeData(scene, anim_stack)
-```
-
-Properties:
-
-```text
-curves                             Get all animation curves from this take
-duration                           Get the duration of this take in seconds
-end_frame                          Get the end time of this take expressed in frames
-end_time                           Get the end time of this take
-frame_count                        Get the duration of this take in number of frames
-layers                             Get all animation layers from this take
-start_frame                        Get the start time of this take expressed in frames
-start_time                         Get the start time of this take
-```
-
-Methods:
-
-```text
-create_curve(self, node_name, property_name, fbx_node=None)
-    Create a new animation curve for this take
-create_layer(self, name: str)
-    Create a new animation layer under this take
-rename(self, name: str)
-    Rename this take to a new name
-```
-
-#### `TakeList(BaseList)`
-
-Class to hold a list of TakeData objects with custom access methods
-
-```text
-TakeList(take_data_objects=None)
 ```
 
 Constants:
@@ -3520,7 +3244,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000023968131A80>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001E9E2864A40>, '...
 ```
 
 ## `cgmath.constraints`

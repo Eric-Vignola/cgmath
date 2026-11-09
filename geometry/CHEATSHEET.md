@@ -196,8 +196,8 @@ values, `bool` masks. A value is converted when it is set or loaded.
 from cgmath.geometry import Data, DataList, ImmutableArray
 
 print(sorted(MeshData._dataclass_field_names()))
-print(cube.to_dict().keys())  # the fields that differ from their defaults, and no class
-print(str(cube), repr(cube))  # __str__ is the name when one is set
+print(cube.to_dict().keys())                  # the fields that differ from their defaults, and no class
+print(str(cube), repr(cube))                  # __str__ is the name when one is set
 print(cube.indices.dtype, cube.points.dtype)  # int32 float64, whatever was passed in
 ```
 
@@ -475,10 +475,10 @@ class Pegs(DataList[Peg]):
 
 pegs = Pegs([Peg("a", 1.0), Peg("b", 2.0)])
 print(pegs.raise_by(0.5))                       # [1.5 2.5]: each peg's, in order
-pegs.height = [3.0, 4.0]                        # one value per item ...
-pegs.height = 0.0                               # ... or one for every item
-print(pegs.height)                              # [0. 0.]
-print(Pegs.raise_by.__doc__.splitlines()[0])    # Peg.raise_by() on every item, in order
+pegs.height = [3.0, 4.0]  # one value per item ...
+pegs.height = 0.0         # ... or one for every item
+print(pegs.height)                            # [0. 0.]
+print(Pegs.raise_by.__doc__.splitlines()[0])  # Peg.raise_by() on every item, in order
 ```
 
 ### Module helpers
@@ -517,8 +517,8 @@ print(is_ndarray_annotation("np.ndarray"), is_ndarray_annotation("int"))
 name leaves it free. A wrong fixed dimension raises `ValueError`, and an empty
 value takes the declared trailing size. The error names the field the way it
 is set, and saved: a private `_field` behind a public property of the same
-name reads as the property, so `Object(base_color=(1, 2))` says
-`Object.base_color must have shape (3,), got (2,)`.
+name reads as the property, so `TransformData(translate=(1, 2))` says
+`TransformData.translate must have shape (3,), got (2,)`.
 
 ```python
 from cgmath.data import Array
@@ -593,12 +593,12 @@ transform's space. A mesh naming none sits at identity.
 ```python
 from cgmath.hierarchy import HierarchyData, TransformData
 
-under = TransformData("under", translate=[10.0, 0.0, 0.0])
-rig   = HierarchyData([under])
-moved = cube.copy()
+under             = TransformData("under", translate=[10.0, 0.0, 0.0])
+rig               = HierarchyData([under])
+moved             = cube.copy()
 moved.parent_uuid = under.uuid
-print(moved.world_matrix(rig)[3, :3])           # [10. 0. 0.]: where the mesh sits
-print(cube.world_matrix(rig)[3, :3])            # [0. 0. 0.]: no transform, identity
+print(moved.world_matrix(rig)[3, :3])  # [10. 0. 0.]: where the mesh sits
+print(cube.world_matrix(rig)[3, :3])   # [0. 0. 0.]: no transform, identity
 ```
 
 ### Point arithmetic and booleans
@@ -1061,13 +1061,13 @@ an id colour (`color=None`) that decodes back to face indices. `resolution`
 ```python
 uv            = cube_uv.copy()
 uv.resolution = 64
-print(uv.resolution, uv.resolution.dtype)          # [64 64] int32
+print(uv.resolution, uv.resolution.dtype)  # [64 64] int32
 uv.clear_buffer()
 uv.draw_faces(color=(255, 255, 255))
 print(uv.buffer.shape, uv.buffer.max())
 
 uv.clear_buffer()
-uv.draw_faces(indices=[0, 2], color=None)          # id-encoded
+uv.draw_faces(indices=[0, 2], color=None)  # id-encoded
 rgb = np.unique(uv.buffer.reshape(-1, 3), axis=0)
 rgb = rgb[np.sum(rgb == 0, axis=1) != 3]
 print(sorted(np.atleast_1d(uv.decode_rgb(rgb)).tolist()))
@@ -1199,8 +1199,8 @@ default lambert with a warning.
 ```python
 from cgmath.geometry import MaterialData, MaterialList
 
-skin = MaterialData(name="skinLambert", mesh_uuid=cube.uuid, faces=[0, 1, 2], diffuse=0.6, transparency=[0.1, 0.1, 0.1])
-pixels = np.zeros((4, 8, 3), dtype=np.uint8)
+skin           = MaterialData(name="skinLambert", mesh_uuid=cube.uuid, faces=[0, 1, 2], diffuse=0.6, transparency=[0.1, 0.1, 0.1])
+pixels         = np.zeros((4, 8, 3), dtype=np.uint8)
 pixels[..., 0] = np.linspace(0, 255, 8, dtype=np.uint8)[None, :]  # red along u
 pixels[..., 1] = np.linspace(0, 255, 4, dtype=np.uint8)[:, None]  # green along v
 skin.texture, skin.texture_file, skin.uv_set = pixels, "grad.png", "map1"
@@ -1231,8 +1231,8 @@ refused: scale it to uint8), feeding the diffuse colour, extracted to a
 temporary folder on load. Maya's exporter writes the texture's wrap modes
 as repeat and its importer leaves them on whatever the file says, and
 writes a textured colour white; a texture on any other slot is left out
-with a warning. The render package's `Object` holds its own texture still,
-to become this.
+with a warning. The render package shades a mesh by its materials: see
+`render/README.md`.
 
 ---
 
@@ -1272,83 +1272,28 @@ from cgmath.geometry.mesh import load, load_fbx, load_glb, load_usd
 
 load("hero.fbx")                            # list[(MeshData, UVList)], reader by file
 load_glb("hero.glb", scale_factor=100.0)
-load_fbx("hero.fbx")                        # in cm, each mesh in its own space
+load_fbx("hero.fbx")                        # as cgmath.formats.load_fbx reads them
 load_usd("hero.usd")
 
 MeshData.load_glb("hero.glb", name="body")  # one mesh; name=None -> first
-MeshData.load_fbx("hero.fbx", name="body")
+MeshData.load_fbx("hero.fbx", name="body")  # by the mesh's own name, or its node's
 MeshList.load_glb("hero.glb")               # every mesh
 UVData.load_fbx("hero.fbx", channel=0)
 UVList.load_glb("hero.glb", name="body")    # one mesh's UV channels
 ```
 
-The FBX mesh readers keep each mesh in its own object space: the points,
-normals and UVs leave out the mesh's node, and with it the turn
-`HierarchyData.load_fbx` puts on a rig's roots to load a file in Maya's
-Y-up. The points and the UVs are where Maya's importer puts them, but
-for the points' unit: Maya's object space holds the numbers the file
-holds, which the readers multiply as `scale_factor` says (below), into
-cm by default, so a mesh of a file in meters reads 100 times Maya's
-points, or Maya's own at or under a root that holds the file's unit as a
-scale. The normals are the file's, unit length, as Maya's importer makes
-the file's normals on a mesh with no skin, its node's geometric
-transform (below) moving it or not; on a skinned mesh Maya's importer
-holds normals of its own, up to 1.99 apart on the retarget assets
-measured (1.62 on two quads bound to one joint). One of length 0 stays
-0, never NaN, as in Maya, which also keeps an authored normal shorter
-than 1e-10 as the file holds it, not unit (at 1e-10 itself some
-directions read unit), down to 1e-39, below which single precision
-underflows (some corners 0 at 1e-45, all from 1e-46), where the readers
-make it unit, within about 4e-14 down to 1e-155 and up to about 0.58 off
-unit below, and keep the file's vector where its squared length
-underflows, from about 2.7e-162 down to 1e-300, never NaN, on the
-lengths measured: a corner the readers make unit sits up to about 1 off
-Maya's in a component, and up to about 1.22 between 1e-162 and 1e-155.
-Nodes that share one mesh are the exception for the points and the
-normals: Maya's importer bakes one node's geometric transform into all
-of them (below). A node's geometric
-transform, the offset the file gives the node's mesh alone and not its
-children, is baked into the mesh, as Maya's importer bakes it: the
-points take it as the FBX SDK's `FbxAMatrix(T, R, S)` composes it,
-scaled, turned in xyz whatever the node's rotate order (Maya within
-9.25e-08 of that for all six orders), then moved. The normals are turned
-by the offset's rotation alone and flipped when it mirrors, at unit
-length, as Maya's importer turns them, so under an uneven offset scale
-they are not perpendicular to the stretched faces, as in Maya. An offset
-whose scale is exactly 0 on an axis flattens the mesh: Maya's importer
-then drops the file's normals and rebuilds its own from the flat faces,
-and the readers read the mesh with no normals; a scale near 0 but not 0,
-1e-30 say, keeps them, as Maya's importer does. A caller who needs
-normals on such a mesh rebuilds them with `set_normals`. Where the file
-maps its normals by control point or holds none, Maya's edges are soft,
-and `set_normals()` is within 6.78e-08 of Maya's normals in a probe;
-where it maps them per polygon vertex, Maya makes every edge hard: there
-`set_normals()` is 1.77 off and `set_normals(hard_edge_angle=60)` within
-1.48e-06. Normals mapped one per face, or one for the whole mesh, read
-on each face's corners, as the mapping says; Maya's importer reads one
-indexed by face so, but a direct one as if mapped by control point, 0
-past the values, and one indexed for the whole mesh so on its first
-corner alone, the others 0 or another of the file's values from one
-import to the next. The faces keep the file's order, a mirror's too; the
-UVs and the skin weights are the file's (UVs mapped one per face, or one
-for the whole mesh, read on each face's corners as the mapping says, as
-Maya's importer reads one per face, where it assigns no UV to a mesh
-whose UVs are one for the whole mesh), and so are the inverse binds,
-which pose the baked points as the SDK blends a skin, the offset first.
-Nodes that share one mesh each read it with their own offset baked in,
-where the SDK puts it; Maya's importer bakes one offset into all of
-them, that of the first such node in the scene's hierarchy: one
-instanced shape in a probe (the second node's mesh 4.29 cm off the SDK's
-in its own space, 6.93 cm in the world), separate shapes with that same
-offset in another, whose file attaches the mesh first to a node later in
-the hierarchy. A mesh whose node holds no geometric transform reads as
-the file holds it. `scale_factor=None`, the default, converts the file's
-unit to centimetres as the rig loaders do (the points, never the normals
-or the UVs), and a number is the caller's own factor. Under the world
-matrix of its node in a rig read from the same file, which keeps a
-mesh's node as a transform named after it, a mesh sits where Maya's
-import puts it, in cm and Maya's Y-up, its node's world being Maya's and
-the points themselves untouched:
+The FBX routes are slices of one read, `cgmath.formats.load_fbx`: every
+mesh in Maya's Y-up and cm, the file's unit converted, its points as the
+file holds them on its node, its normals as the file holds them, one a
+face corner, its UV sets and skin naming it by uuid. A mesh's
+`parent_uuid` names its node in the hierarchy that read gives (two loads
+of one file mint their own uuids); under that node's world matrix,
+`points @ W[:3, :3] + W[3, :3]` is where Maya's import puts the mesh, and
+`cgmath.render.Scene.placed_meshes` does the placing. Maya's FBXExport
+leaves every FbxMesh unnamed, so a mesh goes by its node's name as well as
+its own. A node holding a geometric transform, which no field holds, or a
+mesh with polygon holes is refused with `ValueError`. The hierarchy
+cheatsheet's "Importers and exporters" has the measured axes and units.
 
 <!-- notest -->
 ```python
@@ -1359,13 +1304,6 @@ body  = MeshData.load_fbx("hero.fbx", name="body")
 W     = rig["body"].world_matrix
 world = body.points @ W[:3, :3] + W[3, :3]  # where Maya's import puts the mesh
 ```
-
-The readers take no `axis_system` and read any file as it is, a
-left-handed one too: a mesh's points are in its node's space, the same in
-any axes, in the unit `scale_factor` gives. `cgmath.formats.load_fbx` reads
-every mesh on its node in Maya's Y-up and cm, as every cgmath value is,
-the file's unit converted (the hierarchy cheatsheet's axes and units
-paragraph).
 
 USD prims round-trip through `from_prim` / `to_prim` on `MeshData`, `UVData`,
 `MapData`, `GeomSubsetData`, `MorphData` and `CompactSkinData`.
