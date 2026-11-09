@@ -18,20 +18,15 @@ from __future__ import annotations
 
 import os
 import tempfile
+import types
 import unittest
 from contextlib import contextmanager
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 from cgmath.formats import _fbx_io
 from cgmath.geometry import mesh as mesh_mod, skin_weights as skin_mod
 from cgmath.hierarchy import hierarchy as hierarchy_mod
-from cgmath._tests.test_fbx_import import (
-    _make_fake_fbx_module,
-    _make_fake_root,
-    _make_real_file,
-    _wire_importer,
-)
 
 fbx = _fbx_io.load_sdk()
 
@@ -41,6 +36,69 @@ except ImportError:
     Image = None
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+# -- a synthetic SDK, for the failure paths -----------------------------------
+
+
+def _make_fake_fbx_module() -> types.SimpleNamespace:
+    """a ``types.SimpleNamespace`` shaped like the Autodesk FBX SDK, holding
+    only what ``_fbx_io.open_fbx`` touches"""
+    fake                               = types.SimpleNamespace()
+    fake.IOSROOT                       = "IOSROOT"
+    fake.IMP_FBX_EXTRACT_EMBEDDED_DATA = "Import|ExtractEmbeddedData"
+    fake.FbxManager                    = types.SimpleNamespace(Create=MagicMock())
+    fake.FbxIOSettings                 = types.SimpleNamespace(Create=MagicMock())
+    fake.FbxImporter                   = types.SimpleNamespace(Create=MagicMock())
+    fake.FbxScene                      = types.SimpleNamespace(Create=MagicMock())
+    return fake
+
+
+def _wire_importer(
+    fake_fbx:      types.SimpleNamespace,
+    *,
+    root_node,
+    initialize_ok: bool                  = True,
+    import_ok:     bool                  = True,
+    error:         str                   = "fbx error",
+) -> MagicMock:
+    """wires the factory ``Create`` calls to mocks that give ``root_node``
+    when the scene is asked; returns the manager mock, for its ``Destroy``"""
+    manager  = MagicMock(name="manager")
+    ios      = MagicMock(name="ios")
+    importer = MagicMock(name="importer")
+    scene    = MagicMock(name="scene")
+
+    importer.Initialize.return_value                            = initialize_ok
+    importer.Import.return_value                                = import_ok
+    importer.GetStatus.return_value.GetErrorString.return_value = error
+    scene.GetRootNode.return_value                              = root_node
+    manager.GetIOSettings.return_value                          = ios
+
+    unit                             = scene.GetGlobalSettings.return_value.GetSystemUnit.return_value
+    unit.GetScaleFactor.return_value = 1.0
+
+    fake_fbx.FbxManager.Create.return_value    = manager
+    fake_fbx.FbxIOSettings.Create.return_value = ios
+    fake_fbx.FbxImporter.Create.return_value   = importer
+    fake_fbx.FbxScene.Create.return_value      = scene
+    return manager
+
+
+def _make_fake_root(children):
+    """a root node exposing ``children``"""
+    root                               = MagicMock(name="root")
+    root.GetNodeAttribute.return_value = None
+    root.GetChildCount.return_value    = len(children)
+    root.GetChild.side_effect          = lambda i, _c=children: _c[i]
+    return root
+
+
+def _make_real_file(suffix: str = ".fbx") -> str:
+    """a real file on disk, so the readers' existence check passes"""
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    return path
 
 
 @contextmanager
@@ -227,9 +285,13 @@ class TestReaders(FbxFixtures):
             with self.subTest(load=load), balanced(self):
                 load(self.rig)
 
-    def test_render_scene(self):
+    def test_formats_and_render(self):
+        from cgmath.formats import load_fbx
         from cgmath.render import Scene
 
+        with balanced(self):
+            held = load_fbx(self.rig)
+        self.assertIsNotNone(held.skins)
         with balanced(self):
             scene = Scene.load_fbx(self.rig)
         self.assertIsNotNone(scene.skins)
@@ -268,6 +330,7 @@ class TestReaders(FbxFixtures):
     def test_a_mesh_without_a_material_has_no_colour_map(self):
         with balanced(self):
             self.assertIsNone(base_color(self.rig))
+
 
 @unittest.skipIf(Image is None, "PIL is not installed")
 class TestEmbeddedMedia(FbxFixtures):
@@ -310,36 +373,7 @@ class TestEmbeddedMedia(FbxFixtures):
         mesh_mod.load_fbx(self.quad)
         self.assert_nothing_written(before)
 
-    def test_a_failed_copy_puts_the_scene_back(self):
-        from cgmath.formats import fbx as fbx_mod
-
-        broken = self.file("broken")
-        later  = self.file("later")
-        os.makedirs(broken)
-        os.makedirs(later)
-
-        with fbx_mod.SceneData(self.quad) as data:
-            with patch.object(fbx_mod.shutil, "copy2", side_effect=PermissionError("read only")):
-                with self.assertRaises(PermissionError):
-                    data.save(os.path.join(broken, "copy.fbx"), embed_media=False)
-
-            # the next save still finds the textures where the scene keeps them
-            saved = data.save(os.path.join(later, "copy.fbx"), embed_media=False)
-
-        np.testing.assert_array_equal(base_color(saved)[0, 0, :3], [0, 255, 0])
-
-    def test_a_failed_export_copies_nothing(self):
-        from cgmath.formats.fbx import SceneData
-
-        target = self.file("taken")
-        os.makedirs(os.path.join(target, "copy.fbx"))  # a folder where the file goes
-        with SceneData(self.quad) as data, self.assertRaises(RuntimeError):
-            data.save(os.path.join(target, "copy.fbx"), embed_media=False)
-        self.assertEqual(os.listdir(target), ["copy.fbx"])
-
     def test_a_non_ascii_temp_folder_falls_back_beside_the_file(self):
-        from cgmath.formats.fbx import SceneData
-
         # the fbx binding cannot hand a non-ASCII path to the SDK
         folder = self.file("fallback")
         os.makedirs(folder)
@@ -362,8 +396,6 @@ class TestEmbeddedMedia(FbxFixtures):
         ):
             with self.assertWarnsRegex(RuntimeWarning, "ASCII"):
                 texture = base_color(source)
-            with self.assertWarnsRegex(RuntimeWarning, "ASCII"), SceneData(source) as data:
-                self.assertEqual(data.name, "quad")
 
         np.testing.assert_array_equal(texture[0, 0, :3], [0, 255, 0])
         self.assertEqual(sorted(os.listdir(folder)), ["quad.fbm", "quad.fbx"])
@@ -372,8 +404,6 @@ class TestEmbeddedMedia(FbxFixtures):
     def test_a_non_ascii_temp_folder_is_reached_by_its_short_name(self):
         import _winapi
         import warnings
-
-        from cgmath.formats.fbx import SceneData
 
         # a temp folder by a non-ASCII path, and an ASCII path to the same
         # folder standing in for its short name: giving it a real one takes
@@ -402,9 +432,6 @@ class TestEmbeddedMedia(FbxFixtures):
         ), warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             texture = base_color(source)
-            with SceneData(source) as data:
-                self.assertEqual(os.path.dirname(data._media), alias)
-                self.assertTrue(os.path.isdir(data._media))
 
         self.assertEqual([str(x.message) for x in caught if "ASCII" in str(x.message)], [])
         np.testing.assert_array_equal(texture[0, 0, :3], [0, 255, 0])
@@ -412,74 +439,6 @@ class TestEmbeddedMedia(FbxFixtures):
         # nothing beside the file, and the media folders are gone
         self.assertEqual(sorted(os.listdir(folder)), ["TEMP~1", "quad.fbx", "temp \u00e9"])
         self.assertEqual(os.listdir(temp), [])
-
-    def test_an_identical_read_only_texture_is_left_alone(self):
-        import stat
-
-        from cgmath.formats.fbx import SceneData
-
-        folder = self.file("read_only")
-        os.makedirs(folder)
-        out     = os.path.join(folder, "copy.fbx")
-        texture = os.path.join(folder, "copy.fbm", "green.png")
-
-        with SceneData(self.quad) as data:
-            data.save(out, embed_media=False)
-        os.chmod(texture, stat.S_IREAD)  # as a submitted file is
-        try:
-            with SceneData(self.quad) as data:
-                data.create_take("second")
-                data.save(out, embed_media=False)
-        finally:
-            os.chmod(texture, stat.S_IWRITE | stat.S_IREAD)
-
-    def test_a_relative_save_path_is_made_absolute(self):
-        from cgmath.formats.fbx import SceneData
-
-        folder = self.file("relative")
-        decoy  = self.file("decoy")
-        os.makedirs(os.path.join(folder, "sub"))
-        os.makedirs(os.path.join(decoy, "sub", "copy.fbm"))
-        red = np.full((8, 8, 3), (255, 0, 0), np.uint8)
-        Image.fromarray(red).save(os.path.join(decoy, "sub", "copy.fbm", "green.png"))
-
-        here = os.getcwd()
-        try:
-            os.chdir(folder)
-            with SceneData(self.quad) as data:
-                data.save(os.path.join("sub", "copy.fbx"), embed_media=False)
-
-            # read from somewhere holding the same relative layout
-            os.chdir(decoy)
-            texture = base_color(os.path.join(folder, "sub", "copy.fbx"))
-        finally:
-            os.chdir(here)
-        np.testing.assert_array_equal(texture[0, 0, :3], [0, 255, 0])
-
-    def test_a_wrapper_of_the_wrong_type_is_re_typed(self):
-        from cgmath.formats.fbx import SceneData
-
-        folder = self.file("re_typed")
-        os.makedirs(folder)
-        with SceneData(self.quad) as data:
-            # the binding can hand back a wrapper typed for whatever lived at
-            # the object's address before; a base FbxObject stands in for it
-            scene      = data.scene
-            get_object = scene.GetSrcObject
-            handed     = []
-
-            def base_typed(*args):
-                handed.append(fbx.cast(get_object(*args), fbx.FbxObject))
-                return handed[-1]
-
-            scene.GetSrcObject = base_typed
-            saved              = data.save(os.path.join(folder, "copy.fbx"), embed_media=False)
-
-        self.assertTrue(handed and not isinstance(handed[0], fbx.FbxFileTexture))
-
-        # wrappers of the closed scene, dropped before the next read
-        del handed, scene, get_object, base_typed
-        np.testing.assert_array_equal(base_color(saved)[0, 0, :3], [0, 255, 0])
 
     def test_typed(self):
         manager = fbx.FbxManager.Create()
@@ -498,199 +457,6 @@ class TestEmbeddedMedia(FbxFixtures):
             self.assertIsNone(_fbx_io.typed(None, fbx.FbxFileTexture, fbx))
         finally:
             manager.Destroy()
-
-    def test_a_save_without_embedding_brings_its_textures(self):
-        from cgmath.formats.fbx import SceneData
-
-        plain    = self.file("plain")
-        embedded = self.file("embedded_again")
-        os.makedirs(plain)
-        os.makedirs(embedded)
-
-        before = scratch_folders()
-        with SceneData(self.quad) as data:
-            linked = data.save(os.path.join(plain, "copy.fbx"), embed_media=False)
-            packed = data.save(os.path.join(embedded, "copy.fbx"))
-
-        # the textures sit beside the file that points at them
-        self.assertEqual(sorted(os.listdir(plain)), ["copy.fbm", "copy.fbx"])
-        self.assert_nothing_written(before)
-
-        # and the scene was pointed back: the next save still embeds them
-        for path in (linked, packed):
-            with self.subTest(path=path):
-                np.testing.assert_array_equal(base_color(path)[0, 0, :3], [0, 255, 0])
-
-
-class TestSceneData(FbxFixtures):
-    def test_with_block(self):
-        from cgmath.formats.fbx import SceneData
-
-        with balanced(self):
-            with SceneData(self.rig) as data:
-                self.assertEqual(data.name, "rig")
-                media = data._media
-                self.assertTrue(os.path.isdir(media))
-
-        self.assertEqual(data.name, "No Scene")
-        self.assertFalse(os.path.exists(media))
-        data.close()  # twice is fine
-
-    def test_unreadable_file(self):
-        from cgmath.formats.fbx import SceneData
-
-        before = scratch_folders()
-        with balanced(self), self.assertRaises(_fbx_io.FbxReadError):
-            SceneData(self.bad)
-        self.assertEqual(scratch_folders(), before)
-
-    def test_failed_manager_leaves_no_folder(self):
-        from cgmath.formats import fbx as fbx_mod
-
-        before = scratch_folders()
-        with patch.object(fbx_mod, "new_manager", side_effect=RuntimeError("no sdk")):
-            with self.assertRaisesRegex(RuntimeError, "no sdk"):
-                fbx_mod.SceneData(self.rig)
-        self.assertEqual(scratch_folders(), before)
-
-    def test_reading_after_close_raises(self):
-        from cgmath.formats.fbx import SceneData
-
-        data   = SceneData(self.rig)
-        takes  = data.takes
-        take   = takes[0]
-        layers = take.layers
-        layer  = layers[0]
-        self.assertEqual(take.name, "take")
-        data.close()
-
-        for read in (take, layer):
-            with self.subTest(read=type(read).__name__):
-                with self.assertRaisesRegex(RuntimeError, "destroyed"):
-                    read.name
-                self.assertIn("<destroyed>", repr(read))
-
-        # a repr never raises, so the lists still print
-        for items in (takes, layers):
-            self.assertIn("<destroyed>", repr(items))
-
-    def test_reload_frees_the_previous_scene(self):
-        from cgmath.formats.fbx import SceneData
-
-        with balanced(self):
-            data = SceneData(self.rig)
-            take = data.takes[0]
-            data.load(self.static)
-            with self.assertRaises(RuntimeError):
-                take.name
-            self.assertEqual(data.name, "static")
-            data.close()
-
-    def test_failed_reload_keeps_the_scene(self):
-        from cgmath.formats.fbx import SceneData
-
-        with balanced(self), SceneData(self.rig) as data:
-            take = data.takes[0]
-            with self.assertRaises(_fbx_io.FbxReadError):
-                data.load(self.bad)
-            self.assertEqual(take.name, "take")
-            self.assertEqual(data.name, "rig")
-
-    def test_a_layer_can_not_take_a_sibling_layer_name(self):
-        from cgmath.formats.fbx import SceneData
-
-        with SceneData(self.rig) as data:
-            take   = data.takes[0]
-            second = take.create_layer("second")
-            other  = data.create_take("other")  # comes with a BaseLayer
-
-            # == holds for any two layers in this binding, so every layer
-            # passed for the one renamed and any name was free
-            with self.assertRaisesRegex(ValueError, "already exists in take 'take'"):
-                second.rename("base")
-            self.assertEqual([x.name for x in take.layers], ["base", "second"])
-
-            # its own name, and a name only another take's layer has
-            second.rename("second")
-            second.rename("BaseLayer")
-            other.layers[0].rename("base")
-            self.assertEqual([x.name for x in take.layers], ["base", "BaseLayer"])
-            self.assertEqual([x.name for x in other.layers], ["base"])
-
-
-class TestDelete(FbxFixtures):
-    """deleting takes, layers and curves, and the wrappers left holding them"""
-
-    def test_a_take_goes_with_its_layers_and_keys(self):
-        from cgmath.formats.fbx import SceneData
-
-        with SceneData(self.rig) as data:
-            take  = data.takes[0]
-            layer = take.layers[0]
-            curve = layer.curves[0]
-            self.assertEqual(curve.key_count, 2)
-
-            data.takes.delete("take")
-            self.assertEqual(len(data.takes), 0)
-
-            # every other wrapper of what went raises, rather than read freed memory
-            reads = ((take, lambda: take.name), (layer, lambda: layer.name),
-                     (curve, lambda: curve.key_count))
-            for stale, read in reads:
-                with self.subTest(stale=type(stale).__name__):
-                    with self.assertRaisesRegex(RuntimeError, "deleted"):
-                        read()
-                    self.assertIn("<destroyed>", repr(stale))
-
-            saved = data.save(self.out)
-
-        with SceneData(saved) as back:
-            self.assertNotIn("take", [x.name for x in back.takes])
-
-    def test_a_layer_and_a_curve(self):
-        from cgmath.formats.fbx import SceneData
-
-        with SceneData(self.rig) as data:
-            layers = data.takes[0].layers
-            curves = layers[0].curves
-            curves.delete(curves[0].name)
-            self.assertEqual(len(layers[0].curves), 0)
-            saved = data.save(self.out)
-
-            layers.delete(layers[0].name)
-            self.assertEqual(len(data.takes[0].layers), 0)
-
-        with SceneData(saved) as back:
-            self.assertEqual(len(back.takes["take"].layers[0].curves), 0)
-
-    def test_a_list_holding_a_deleted_item_still_finds_the_rest(self):
-        from cgmath.formats.fbx import SceneData
-
-        with SceneData(self.rig) as data:
-            data.create_take("second")
-            kept = data.takes
-            data.takes.delete("take")
-
-            self.assertIn("second", kept)
-            self.assertEqual(kept["second"].name, "second")
-            kept.delete("second")
-            self.assertEqual(len(data.takes), 0)
-
-    def test_a_wrapper_built_by_hand_is_tracked_too(self):
-        from cgmath.formats.fbx import SceneData, TakeData, TakeList
-
-        with SceneData(self.rig) as data:
-            take  = data.takes[0]
-            stack = take._data
-            TakeList([TakeData(data.scene, stack)]).delete("take")
-            with self.assertRaisesRegex(RuntimeError, "deleted"):
-                take.name
-
-            data.create_take("second")
-            by_hand = TakeData(data.scene, data.takes[0]._data)
-
-        with self.assertRaisesRegex(RuntimeError, "destroyed"):
-            by_hand.name
 
 
 class TestFbxExporter(FbxFixtures):
@@ -724,16 +490,18 @@ class TestFbxExporter(FbxFixtures):
 
 
 class TestFakeSdk(unittest.TestCase):
-    """the failure paths, through a fake SDK, so they run without one"""
+    """the failure paths, through a fake SDK, so they run without one: every
+    reader opens its file through formats._fbx_io with the sdk
+    cgmath.hierarchy.hierarchy holds"""
 
     def setUp(self):
         self.path = _make_real_file()
         self.addCleanup(os.unlink, self.path)
 
-    def check(self, module, attribute, load):
+    def check(self, load):
         for wiring in ({"initialize_ok": False}, {"import_ok": False}):
             fake = _make_fake_fbx_module()
-            with self.subTest(**wiring), patch.object(module, attribute, fake):
+            with self.subTest(**wiring), patch.object(hierarchy_mod, "FBX", fake):
                 manager = _wire_importer(
                     fake, root_node=_make_fake_root([]), error="bad header", **wiring
                 )
@@ -742,16 +510,21 @@ class TestFakeSdk(unittest.TestCase):
                 manager.Destroy.assert_called_once()
 
     def test_hierarchy(self):
-        self.check(hierarchy_mod, "FBX", hierarchy_mod.HierarchyData.load_fbx)
+        self.check(hierarchy_mod.HierarchyData.load_fbx)
 
     def test_clip(self):
-        self.check(hierarchy_mod, "FBX", hierarchy_mod.ClipData.load_fbx)
+        self.check(hierarchy_mod.ClipData.load_fbx)
 
     def test_skin(self):
-        self.check(skin_mod, "fbx", skin_mod.SkinList.load_fbx)
+        self.check(skin_mod.SkinList.load_fbx)
 
     def test_mesh(self):
-        self.check(mesh_mod, "fbx", mesh_mod.load_fbx)
+        self.check(mesh_mod.load_fbx)
+
+    def test_formats(self):
+        from cgmath.formats import load_fbx
+
+        self.check(load_fbx)
 
 
 class TestOpenFbx(unittest.TestCase):
@@ -847,10 +620,15 @@ class TestOneManagerSite(unittest.TestCase):
                         found.append(os.path.relpath(path, ROOT).replace(os.sep, "/"))
         self.assertEqual(found, ["formats/_fbx_io.py"])
 
-    def test_the_old_reader_is_gone(self):
+    def test_the_old_readers_are_gone(self):
         from cgmath import hierarchy
+        from cgmath.formats import fbx as fbx_mod
 
         self.assertFalse(hasattr(hierarchy, "_read_fbx"))
+        for name in ("SceneData", "TakeData", "LayerData", "CurveData", "TakeList", "LayerList", "CurveList"):
+            self.assertFalse(hasattr(fbx_mod, name), name)
+        self.assertFalse(hasattr(mesh_mod, "_load_fbx"))
+        self.assertFalse(hasattr(skin_mod, "_read_skins_fbx"))
 
 
 if __name__ == "__main__":

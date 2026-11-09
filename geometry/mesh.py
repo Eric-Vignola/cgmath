@@ -58,7 +58,7 @@ from cgmath.data import (
     DataList,
     ImmutableArray as numpy_array,
 )
-from cgmath.formats._fbx_io import load_sdk, open_fbx
+from cgmath.formats._fbx_io import load_sdk
 from cgmath.formats.glb import _trimesh_scene
 from cgmath.geometry._bilinear_surface import integrate, sample
 from cgmath.geometry.utils import (
@@ -89,7 +89,7 @@ from cgmath.geometry.utils import (
     stream_to_matrix,
     subdivide_catmull_clark,
 )
-from cgmath.hierarchy import _fbx_axis_turn, _fbx_check_axis_system, _fbx_units, ShapeData
+from cgmath.hierarchy import ShapeData
 from cgmath.transforms import euler_to_matrix
 from scipy.ndimage import convolve
 from scipy.spatial import QhullError, cKDTree
@@ -2896,28 +2896,16 @@ class MeshData(ShapeData):
     # ----------------------------------- FBX ------------------------------------ #
 
     @classmethod
-    def load_fbx(
-        cls,
-        filename:     str,
-        name:         str   | None = None,
-        scale_factor: float | None = None,
-    ) -> "MeshData":
-        """returns a single MeshData from an fbx file (first mesh if name is None)
-
-        In the mesh's own object space, its node's geometric transform baked
-        in as Maya's importer bakes it, in centimeters by default: the
-        geometric transform and ``scale_factor`` as in :func:`load_fbx`.
+    def load_fbx(cls, filename: str, name: str | None = None) -> "MeshData":
+        """the first mesh of an fbx file, or the one named ``name``, as
+        :func:`cgmath.formats.load_fbx` reads it: in Maya's Y-up and cm, its
+        ``parent_uuid`` naming its node in the file's hierarchy, which this
+        does not return. RuntimeError for a file with no mesh, ValueError for
+        a name no mesh has.
         """
-        data = load_fbx(filename, scale_factor)
-        if not data:
-            raise RuntimeError("No meshes found in FBX file")
-        if name is None:
-            return data[0][0]
-        for mesh_data, _ in data:
-            if mesh_data.name == name:
-                return mesh_data
-        available = [m.name for m, _ in data]
-        raise ValueError(f"Mesh '{name}' not found; available: {available}")
+        from cgmath.formats import load_fbx
+
+        return _fbx_select(load_fbx(filename), name)
 
     def save_fbx(self, filename: str, as_ascii: bool = False) -> None:
         """writes the mesh to an fbx file, binary unless ``as_ascii``
@@ -4754,14 +4742,12 @@ class UVData(MeshData):
 
 class MeshList(DataList[MeshData]):
     @classmethod
-    def load_fbx(cls, filename: str, scale_factor: float | None = None) -> "MeshList":
-        """loads all meshes from an fbx file into a MeshList
+    def load_fbx(cls, filename: str) -> "MeshList":
+        """every mesh of an fbx file, as :func:`cgmath.formats.load_fbx`
+        reads them (:meth:`MeshData.load_fbx`); empty for a file with none"""
+        from cgmath.formats import load_fbx
 
-        Each in its own object space, its node's geometric transform baked
-        in as Maya's importer bakes it, in centimeters by default: the
-        geometric transform and ``scale_factor`` as in :func:`load_fbx`.
-        """
-        return cls([mesh_data for mesh_data, _ in load_fbx(filename, scale_factor)])
+        return load_fbx(filename).meshes or cls()
 
     def save_fbx(self, filename: str, as_ascii: bool = False) -> None:
         """writes every mesh to one fbx file, binary unless ``as_ascii``: each
@@ -4840,8 +4826,14 @@ class UVList(MeshList, DataList[UVData]):
 
     @classmethod
     def load_fbx(cls, filename: str, name: str | None = None) -> "UVList":
-        """loads all UV channels for one mesh from an fbx file (first mesh if name is None)"""
-        return _one_uv_list(load_fbx(filename), name, "FBX")
+        """the UV sets of the first mesh of an fbx file, or of the mesh named
+        ``name`` (:meth:`MeshData.load_fbx`), as :func:`cgmath.formats.load_fbx`
+        reads them; empty for a mesh with none"""
+        from cgmath.formats import load_fbx
+
+        held = load_fbx(filename)
+        mesh = _fbx_select(held, name)
+        return cls([uv for uv in held.uvs or [] if uv.mesh_uuid == mesh.uuid])
 
     @classmethod
     def load_glb(cls, filename: str, name: str | None = None) -> "UVList":
@@ -5362,15 +5354,6 @@ def save_obj(file_path: str, data: list) -> None:
         f.write("\n")
 
 
-def _walk_fbx_mesh_nodes(node, out):
-    """Recursively collect FBX nodes whose attribute is a mesh."""
-    attr = node.GetNodeAttribute()
-    if attr is not None and attr.GetAttributeType() == fbx.FbxNodeAttribute.EType.eMesh:
-        out.append(node)
-    for i in range(node.GetChildCount()):
-        _walk_fbx_mesh_nodes(node.GetChild(i), out)
-
-
 def _fbx_control_points(mesh) -> np.ndarray:
     n      = mesh.GetControlPointsCount()
     points = np.empty((n, 3), dtype=np.float64)
@@ -5380,41 +5363,6 @@ def _fbx_control_points(mesh) -> np.ndarray:
         points[i, 1] = cp[1]
         points[i, 2] = cp[2]
     return points
-
-
-def _fbx_geometric_transform(node, space: float) -> Optional[tuple]:
-    """an FbxNode's geometric transform, the offset the file gives the
-    node's mesh alone and not its children, as ``(matrix, translate,
-    rotation)``: the points take ``points @ matrix + translate``, the
-    translate times ``space``, the cm the node's own space holds per unit
-    (``_FbxUnits.space``), and the normals ``normals @ rotation``; None when
-    the node holds none, so its mesh reads as the file holds it
-
-    Composed as the sdk's ``FbxAMatrix(T, R, S)`` composes it and Maya's
-    FBXImport bakes it into the points: scaled, then turned in xyz whatever
-    the node's rotate order, then moved. ``rotation`` is the matrix's
-    rotation part, its scale left out, negated when the scale mirrors (a
-    negative determinant): the normals turn as Maya's import turns them, by
-    the offset's rotation alone, flipped in a mirror, whose faces keep their
-    order. Under an uneven scale they are then not perpendicular to the
-    stretched faces, as in Maya. ``rotation`` is None when the scale is 0 on
-    an axis, which flattens the mesh: Maya's import then drops the file's
-    normals and rebuilds its own from the flat faces, and the readers drop
-    them too.
-    """
-    pivot     = fbx.FbxNode.EPivotSet.eSourcePivot
-    translate = np.array(tuple(node.GetGeometricTranslation(pivot))[:3], dtype=np.float64)
-    rotate    = np.array(tuple(node.GetGeometricRotation(pivot))[:3],    dtype=np.float64)
-    scale     = np.array(tuple(node.GetGeometricScaling(pivot))[:3],     dtype=np.float64)
-    if not translate.any() and not rotate.any() and (scale == 1.0).all():
-        return None
-
-    turn   = euler_to_matrix(np.radians(rotate))[0, :3, :3]
-    signs  = np.where(scale < 0.0, -1.0, 1.0)
-    matrix = scale[:, None] * turn
-    if (scale == 0.0).any():
-        return matrix, translate * space, None
-    return matrix, translate * space, np.prod(signs) * signs[:, None] * turn
 
 
 def _fbx_polygon_streams(mesh) -> Tuple[np.ndarray, np.ndarray]:
@@ -5520,224 +5468,49 @@ def _fbx_face_varying_indices(mesh, layer_element, counts: np.ndarray) -> np.nda
     return indices
 
 
-def _extract_fbx_uv_channels(mesh, counts: np.ndarray) -> List["UVData"]:
-    """Build one UVData per UV element in the mesh."""
-    uv_list = []
-    for layer_i in range(mesh.GetElementUVCount()):
-        uv_element = mesh.GetElementUV(layer_i)
-        if uv_element is None:
-            continue
+def load_fbx(filename: str) -> list:
+    """the meshes of an fbx file with their UV sets, ``[(MeshData, UVList)]``
+    in the file's order, as :func:`cgmath.formats.load_fbx` reads them: in
+    Maya's Y-up and cm, each mesh's ``parent_uuid`` naming its node in the
+    file's hierarchy, which this does not return (the mesh itself holds its
+    own points, its node's placement left to the node), each set naming its
+    mesh by uuid, a mesh with no set holding an empty UVList."""
+    from cgmath.formats import load_fbx as read
 
-        points  = _fbx_direct_array_to_ndarray(uv_element.GetDirectArray(), dim=2)
-        indices = _fbx_face_varying_indices(mesh, uv_element, counts)
-        name    = uv_element.GetName() or f"map{layer_i + 1}"
-
-        uv_list.append(
-            UVData(
-                name    = name,
-                indices = indices,
-                counts  = counts.copy(),
-                points  = points,
-            )
-        )
-    return uv_list
+    return _fbx_pairs(read(filename))
 
 
-def _extract_fbx_normals(
-    mesh, counts: np.ndarray
-) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-    """Return (normals, normal_indices) face-varying, or (None, None) if not authored."""
-    if mesh.GetElementNormalCount() == 0:
-        return None, None
-
-    normal_element = mesh.GetElementNormal(0)
-    normals        = _fbx_direct_array_to_ndarray(normal_element.GetDirectArray(), dim=3)
-
-    # one a control point, as many as there are: the mesh's own vertex
-    # normals, which a MeshData holds with no normal_indices
-    by_point = normal_element.GetMappingMode() == fbx.FbxLayerElement.EMappingMode.eByControlPoint
-    direct   = normal_element.GetReferenceMode() == fbx.FbxLayerElement.EReferenceMode.eDirect
-    if by_point and direct and len(normals) == mesh.GetControlPointsCount():
-        return normals, None
-    normal_indices = _fbx_face_varying_indices(mesh, normal_element, counts)
-    return normals, normal_indices
+def _fbx_pairs(contents) -> list:
+    """``[(MeshData, UVList)]`` of what ``cgmath.formats.load_fbx`` read"""
+    sets = {}
+    for uv in contents.uvs or []:
+        sets.setdefault(uv.mesh_uuid, []).append(uv)
+    return [(mesh, UVList(sets.get(mesh.uuid, []))) for mesh in contents.meshes or []]
 
 
-def load_fbx(filename: str, scale_factor: float | None = None) -> list:
-    """loads fbx file and returns list of (MeshData, UVList) tuples
-
-    Each mesh's points, normals and UVs are in its own object space: its
-    node's transform is left out, and so is the turn
-    ``HierarchyData.load_fbx`` and ``ClipData.load_fbx`` put on a rig's
-    roots to load a file in Maya's Y-up, which reaches a mesh through its
-    node. The points and the UVs are where Maya's importer puts them, but
-    for the points' unit: Maya's object space holds the numbers the file
-    holds, which the readers multiply as ``scale_factor`` says (below),
-    into centimeters by default, so a mesh of a file in meters reads 100
-    times Maya's points, or Maya's own at or under a root that holds the
-    file's unit as a scale. The normals are the file's, unit length, as
-    Maya's importer makes the file's normals on a mesh with no skin, its
-    node's geometric transform (below) moving it or not; on a skinned mesh
-    Maya's importer holds normals of its own, up to 1.99 apart on the
-    retarget assets measured (1.62 on two quads bound to one joint). One of
-    length 0 stays 0, never NaN, as in Maya, which also keeps an authored
-    normal shorter than 1e-10 as the file holds it, not unit (at 1e-10
-    itself some directions read unit), down to 1e-39, below which single
-    precision underflows (some corners 0 at 1e-45, all from 1e-46), where
-    the read makes it unit, within about 4e-14 down to 1e-155 and up to
-    about 0.58 off unit below, and keeps the file's vector where its
-    squared length underflows, from about 2.7e-162 down to 1e-300, never
-    NaN, on the lengths measured: a corner the read makes unit sits up to
-    about 1 off Maya's in a component, and up to about 1.22 between 1e-162
-    and 1e-155. Nodes that share one mesh are the exception for the points
-    and the normals: Maya's importer bakes one node's geometric transform
-    into all of them (below). Under the world matrix ``W`` of its node in a
-    rig read from the same file, which keeps a mesh's node as a transform
-    named after it, ``points @ W[:3, :3] + W[3, :3]`` is where Maya's
-    import puts the mesh, in centimeters and Maya's Y-up, its node's world
-    being Maya's and the points themselves untouched. Any file reads as it
-    is, a left handed one too. ``render.Object.load_fbx``, whose Object has
-    no node to carry the turn, turns its points itself.
-
-    A node's geometric transform, the offset the file gives the node's mesh
-    alone and not its children, is baked into the mesh, as Maya's importer
-    bakes it. The points take it as the fbx sdk composes it
-    (``FbxAMatrix(T, R, S)``): scaled, then turned in xyz whatever the
-    node's rotate order, as Maya turns it too (within 9.25e-08 for all six
-    orders), then moved, its translation in the unit the points are read
-    in. The normals are turned by the offset's rotation alone, its scale
-    left out, and flipped when it mirrors (a negative determinant), at unit
-    length, as Maya's importer turns them: under an uneven offset scale
-    they are not perpendicular to the stretched faces, as in Maya. An offset
-    whose scale is exactly 0 on an axis flattens the mesh: Maya's importer
-    then drops the file's normals and rebuilds its own from the flat faces,
-    and the readers read the mesh with no normals (``normals`` and
-    ``normal_indices`` None); a scale near 0 but not 0, 1e-30 say, keeps
-    them, as Maya's importer does. A caller who needs normals on such a mesh
-    rebuilds them with ``MeshData.set_normals``. Where the file maps its
-    normals by control point or holds none, Maya's edges are soft, and
-    ``set_normals()`` is within 6.78e-08 of Maya's normals in a probe; where
-    it maps them per polygon vertex, Maya makes every edge hard: there
-    ``set_normals()`` is 1.77 off and ``set_normals(hard_edge_angle=60)``
-    within 1.48e-06. Normals mapped one per face, or one for the whole mesh,
-    are read on each face's corners, as the mapping says; Maya's importer
-    reads one indexed by face so, but a direct one as if mapped by control
-    point, each corner the value at its control point's place and 0 past the
-    values, and one indexed for the whole mesh so on its first corner alone,
-    the others reading past the index array: 0 or another of the file's
-    values, from one import to the next. The faces keep the file's order, a
-    mirror's too, and the UVs are the file's: UVs mapped one per face, or
-    one for the whole mesh, read on each face's corners as the mapping says,
-    as Maya's importer reads one per face, where it assigns no UV to a mesh
-    whose UVs are one for the whole mesh. Nodes that share one mesh each
-    read it with their own offset baked in, where the fbx sdk puts it;
-    Maya's importer differs: it bakes one offset into all of them, that of
-    the first such node in the scene's hierarchy, as one instanced shape in
-    one probe, where the second node's mesh was 4.29 cm off the sdk's in its
-    own space and 6.93 cm off in the world, and as separate shapes with that
-    same offset in another, whose file attaches the mesh first to a node
-    later in the hierarchy. A mesh whose node holds no geometric transform
-    reads as the file holds it.
-
-    ``scale_factor`` None, the default, converts the file's unit to
-    centimeters, as ``HierarchyData.load_fbx`` and ``ClipData.load_fbx`` do:
-    the points are multiplied by the centimeters one unit of the file holds,
-    1.0 for a file in cm, 100.0 for one in meters. A number is the caller's
-    own factor, and the file's unit is not read. Normals and UVs are not
-    scaled. A mesh at or under a child of the scene root that holds
-    the file's unit as a scale, as the sdk's and Maya's unit conversions
-    write it (``HierarchyData.load_fbx``), holds its points in cm already,
-    and they are read as they are: such a file's meshes load as the cm
-    file's. A mesh at or under a root the export found scaled other than 1,
-    which it scales by 1/s all the same (s the cm one unit of the file
-    holds), is under no such root: its points load s times larger and its
-    node, in the rig loaders, scaled 1/s, so it is right once posed, but on
-    the frames of a clip where a later layer of a take keys that root's
-    translate, or an override or passthrough one a scale there
-    (``HierarchyData.load_fbx``). A mesh on or under a node the export
-    scales by 1/s once more there, or skinned to one (from the second joint
-    of a Maya skeleton down, its first joint under such a root), is off once
-    posed by a rig of the nodes' own values (``pose="node"``) or by a clip,
-    and right posed at the bind by a ``pose="bind"`` rig when a bind pose
-    lists those nodes, as Maya's export lists a skin's joints;
-    ``HierarchyData.load_fbx`` says which.
-    """
-    return _load_fbx(filename, scale_factor)
-
-
-def _load_fbx(
-    filename:     str,
-    scale_factor: float | None = None,
-    axis_system:  str   | None = None,
-) -> list:
-    """:func:`load_fbx`'s read, and ``render.Object.load_fbx``'s
-
-    ``axis_system`` None, the default, leaves each mesh in its own space, as
-    :func:`load_fbx` reads it, its node's geometric transform baked in.
-    "maya_y_up" then turns the points and the normals by the turn the rig
-    loaders put on a rig's roots (``_fbx_axis_turn``), an Unreal file's
-    (x, y, z) to (x, z, -y): the mesh as Maya's Y-up holds it under a node
-    with nothing above it and no other transform of its own, which is what
-    an Object shows. A file already in Maya's Y-up reads as it is; a left
-    handed one raises ValueError.
-    """
-
-    if fbx is None:
-        raise ImportError("Autodesk FBX Python SDK is not installed")
-
-    _fbx_check_axis_system(axis_system)
-
-    # everything read from the scene dies with it: copy out inside the block
-    with open_fbx(filename, fbx) as scene:
-        units      = _fbx_units(scene, scale_factor, fbx)
-        turn       = _fbx_axis_turn(scene, axis_system, filename, fbx)
-        mesh_nodes = []
-        _walk_fbx_mesh_nodes(scene.GetRootNode(), mesh_nodes)
-
-        data = []
-        for node in mesh_nodes:
-            mesh   = node.GetNodeAttribute()
-            space  = units.space(node)
-            points = _fbx_control_points(mesh) * space
-            indices, counts = _fbx_polygon_streams(mesh)
-            normals, normal_indices = _extract_fbx_normals(mesh, counts)
-
-            # the node's geometric transform, which moves its mesh alone, is
-            # baked into the mesh as Maya's import bakes it, before the turn
-            offset = _fbx_geometric_transform(node, space)
-            if offset is not None:
-                matrix, translate, rotation = offset
-                points = points @ matrix + translate
-                if rotation is None:
-                    # a flattening offset: Maya drops the file's normals
-                    normals, normal_indices = None, None
-                elif normals is not None:
-                    normals = _unit_normals(normals @ rotation)
-            elif normals is not None:
-                # Maya's import makes every authored normal unit length; one
-                # of length 0 stays 0
-                normals = _unit_normals(normals)
-
-            if turn is not None:
-                points = points @ turn
-                if normals is not None:
-                    normals = normals @ turn
-
-            mesh_data = MeshData(
-                points         = points,
-                indices        = indices,
-                counts         = counts,
-                name           = node.GetName(),
-                normals        = normals,
-                normal_indices = normal_indices,
-            )
-
-            uv_data_list = _extract_fbx_uv_channels(mesh, counts)
-            for uv_data in uv_data_list:
-                uv_data.mesh_uuid = mesh_data.uuid
-            data.append((mesh_data, UVList(uv_data_list)))
-
-        return data
+def _fbx_select(contents, name: str | None, meshes=None, what: str = "Mesh"):
+    """the first of ``meshes`` (``contents.meshes`` by default), or the one
+    named ``name``: a mesh's own name, or its node's (Maya's FBXExport
+    leaves every FbxMesh unnamed, so a mesh goes by its node). RuntimeError
+    for none, ValueError naming the meshes there are, each by its own name,
+    else its node's"""
+    if meshes is None:
+        meshes = contents.meshes
+    if not meshes:
+        raise RuntimeError(f"No {'meshes' if what == 'Mesh' else 'skinned meshes'} found in FBX file")
+    if name is None:
+        return meshes[0]
+    nodes = contents.hierarchy
+    if nodes is None and contents.clip is not None and len(contents.clip):
+        nodes = contents.clip.active
+    available = []
+    for mesh in meshes:
+        node = mesh.transform(nodes) if nodes is not None else None
+        held = node.name if node is not None else None
+        if name in (mesh.name, held):
+            return mesh
+        available.append(mesh.name if mesh.name is not None else held)
+    raise ValueError(f"{what} '{name}' not found; available: {available}")
 
 
 # --------------------------------- NORMAL HELPERS ---------------------------------- #
