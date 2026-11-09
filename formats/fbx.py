@@ -2885,48 +2885,16 @@ class FbxExporter:
 
     @property
     def scene(self):
-        """fbx.FbxScene: the fbx scene to export, labelled with its skeleton's axes and unit
-
-        :meth:`add_skeleton` labels it with what the skeleton records; until
-        then it is labelled Maya's Y-up and cm."""
+        """fbx.FbxScene: the fbx scene to export, labelled Maya's Y-up and cm,
+        the axes and unit every cgmath value is in"""
         self._check_open()
 
         if self._scene is None:
             self._scene = fbx.FbxScene.Create(self.manager, "")
-            self._label("maya_y_up", 1.0)
+            settings    = self._scene.GetGlobalSettings()
+            settings.SetAxisSystem(fbx.FbxAxisSystem.MayaYUp)
+            settings.SetSystemUnit(fbx.FbxSystemUnit.cm)
         return self._scene
-
-    def _label(self, axis_system: str, unit: float) -> None:
-        """labels the scene with ``axis_system`` and ``unit``, a rig's record
-        (``HierarchyData.axis_system`` and ``unit``): the six properties
-        that hold the axis system, the up and front axes with their signs
-        and the third axis, its sign giving the hand, and the system unit,
-        the cm one unit holds. The binding builds no axis system pointing
-        down, so the properties are set one by one."""
-        # imported here, cgmath.hierarchy imports this module
-        from cgmath.hierarchy.hierarchy import _axis_record_axes
-
-        up, up_sign, front, front_sign, right = _axis_record_axes(axis_system)
-        third = 3 - up - front
-
-        # up x front is the third axis of a right handed system, its negative
-        # of a left handed one
-        upward         = np.zeros(3)
-        forward        = np.zeros(3)
-        upward[up]     = up_sign
-        forward[front] = front_sign
-        third_sign     = int(np.cross(upward, forward)[third]) * (1 if right else -1)
-        settings       = self.scene.GetGlobalSettings()
-        for name, value in (
-            ("UpAxis", up),
-            ("UpAxisSign", up_sign),
-            ("FrontAxis", front),
-            ("FrontAxisSign", front_sign),
-            ("CoordAxis", third),
-            ("CoordAxisSign", third_sign),
-        ):
-            fbx.FbxPropertyInteger1(settings.FindProperty(name)).Set(int(value))
-        settings.SetSystemUnit(fbx.FbxSystemUnit(float(unit)))
 
     def close(self) -> None:
         """frees the manager, and with it the scene and every node added"""
@@ -2962,11 +2930,9 @@ class FbxExporter:
         under an unevenly scaled parent, and the nodes under it, elsewhere
         than the component has them.
 
-        The scene is labelled with the axis system and unit the component's
-        values are in, as it records them (``HierarchyData.axis_system`` and
-        ``unit``; a view's are its rig's, a list's of nodes their rig's): the
-        values are written as they are, under that label, but for a scale
-        under 1e-12 in size, 0 and -0 among them, written as 1e-12,
+        The scene is labelled Maya's Y-up and cm, the axes and unit every
+        cgmath value is in: the values are written as they are, but for a
+        scale under 1e-12 in size, 0 and -0 among them, written as 1e-12,
         positive, as Maya's own exporter writes a static one and as Maya's
         evaluation holds it, and for a node's shear: fbx has no channel for
         it, so scale, rotate and translate are written as they are
@@ -2974,10 +2940,7 @@ class FbxExporter:
 
         Raises ValueError, before anything is added, when a user defined string
         attr is not plain ASCII, the only text the FBX SDK takes, or a node's user
-        defined attr specs do not go to json, or when the component's nodes
-        come from rigs that record other axes or units, or it is
-        ``TransformList.load_fbx``'s view, or one taken from it, holding
-        nodes no rig owns beside nodes of a rig that records another.
+        defined attr specs do not go to json.
 
         Notes:
             Only a single skeleton is supported.
@@ -3007,12 +2970,6 @@ class FbxExporter:
         members = list(skeleton_component)
         items   = [members[i] for i in TransformList._owning_parent_first(members, within=True)]
 
-        # what the values are in, the label the file takes
-        held = skeleton_component
-        if not isinstance(held, TransformList):
-            held = TransformList(members)
-        record = held._records()
-
         # every node's user defined attrs are worked out first, so one that
         # can't be written raises before anything is added
         kept = []
@@ -3025,7 +2982,6 @@ class FbxExporter:
             kept.append((item, self._user_properties(item, skipped)))
 
         self._skeleton = skeleton_component
-        self._label(*record)
 
         # the fbx node of every item, keyed by item identity.
         # parents can't be found by name, names may be duplicated across branches.

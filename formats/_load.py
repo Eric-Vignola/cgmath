@@ -4,7 +4,11 @@ The r17-skeleton fork reads every node of a file as a joint (a skeleton
 node) or a transform (any other: a group, or a node holding a shape, a
 mesh, a camera, a light or a locator), at their own values, a bind pose left
 out, or the active take animating them; each mesh as a MeshData on its node,
-the mesh's UV sets and its skin naming it by uuid.
+the mesh's UV sets and its skin naming it by uuid. Everything comes back in
+Maya's Y-up and cm, the axes and unit every cgmath value is in: a file
+whose up axis is X or Z is turned as Maya's importer turns it, one whose up
+axis is Y is left in its own axes whatever its front, as Maya leaves it, a
+left handed one is refused, and the file's unit is converted.
 """
 
 import os
@@ -51,6 +55,23 @@ def load_fbx(filename) -> FbxContents:
     without UVs. A node holding a shape that is no mesh is a transform, the
     shape left out; a joint is a joint whatever else it holds (Maya's FBX
     holds no mesh on one).
+
+    The values are in Maya's Y-up and cm, as every cgmath value is. A file
+    whose up axis is X or Z is turned the way Maya's importer turns it
+    (measured): its roots take the turn, a joint root in its joint orient and
+    translate, any other root in its rotate, solved again frame by frame
+    through euler_filter, and translate, and a bind pose with them; a node
+    under a root is relative to it and keeps its values, and so does a mesh,
+    in its node's space. A file whose up axis is Y, up or down, whatever its
+    front, is left in its own axes, as Maya's importer leaves it. A left
+    handed file raises ValueError: no rotation turns it into Maya's axes.
+    Lengths are multiplied by the centimeters one of the file's units holds,
+    translations, points and bind matrices alike (a file written in metres
+    loads a hundred times its numbers); a scale a unit converting export
+    left on a root stays as the file holds it. Maya's importer holds that
+    unit as a scale on the file's roots and its compensating joints instead,
+    the numbers under them as the file has them (measured): the same scene,
+    every position the same, every world's 3x3 the unit times load_fbx's.
     """
     read = _open(filename, True, True)
     hierarchy, order = _build(read)
@@ -100,7 +121,7 @@ def _open(filename, take: bool, meshes: bool = False) -> dict:
         raise FileNotFoundError(filename)
 
     with open_fbx(filename, FBX) as scene:
-        return _read(scene, FBX, take, meshes)
+        return _read(scene, FBX, take, meshes, filename)
 
 
 def _walk(scene) -> list:
@@ -267,19 +288,16 @@ def _read_skin(scene, node, at: int, label: str, shape, found, fbx) -> dict:
     }
 
 
-def _read(scene, fbx, take: bool = True, meshes: bool = False) -> dict:
-    """everything the build needs, out of the scene as python and numpy: every
-    node, one uuid each, the active take's curves unless not ``take``, and
-    with ``meshes`` each mesh and its skin, else the meshes left unread"""
-    from cgmath.formats._fbx_io import typed
+def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "") -> dict:
+    """everything the build needs, out of the scene as python and numpy, in
+    Maya's Y-up and cm (:func:`_convert`): every node, one uuid each, the
+    active take's curves unless not ``take``, and with ``meshes`` each mesh
+    and its skin, else the meshes left unread"""
     from cgmath.hierarchy.hierarchy import (
         _FBX_ROTATE_ORDERS,
         _FBX_VISIBLE,
-        _axis_words,
-        _fbx_frame_rate,
         _fbx_joint_look,
         _fbx_negative_zeros,
-        _fbx_scene_axes,
         _fbx_user_attributes,
         _fbx_written_axis,
         generate_uuid,
@@ -367,20 +385,30 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False) -> dict:
         nodes.append(entry)
 
     # a bind pose (FbxPose) is left out: no node takes its values from one
-    settings = scene.GetGlobalSettings()
-    record   = (_axis_words(*_fbx_scene_axes(scene, fbx)), float(settings.GetSystemUnit().GetScaleFactor()))
-    read     = {"nodes": nodes, "record": record, "take": None, "meshes": shapes}
+    read = {"nodes": nodes, "take": None, "meshes": shapes}
+    if take:
+        read["take"] = _take(scene, fbx, found, nodes)
+    _convert(read, *_axes(scene, fbx, filename))
+    return read
 
-    # the active take, else the first
+
+def _take(scene, fbx, found, nodes):
+    """the active take, else the first, sampled on every frame of its span:
+    its name, fps, frame numbers and values (:func:`_sampled`); None for a
+    file holding none"""
+    from cgmath.formats._fbx_io import typed
+    from cgmath.hierarchy.hierarchy import _fbx_frame_rate
+
     criteria = fbx.FbxCriteria.ObjectType(fbx.FbxAnimStack.ClassId)
     stacks   = [typed(scene.GetSrcObject(criteria, i), fbx.FbxAnimStack, fbx) for i in range(scene.GetSrcObjectCount(criteria))]
-    if not take or not stacks:
-        return read
-    active = str(scene.ActiveAnimStackName.Get())
-    stack  = next((x for x in stacks if str(x.GetName()) == active), stacks[0])
+    if not stacks:
+        return None
+    active   = str(scene.ActiveAnimStackName.Get())
+    stack    = next((x for x in stacks if str(x.GetName()) == active), stacks[0])
 
-    mode   = settings.GetTimeMode()
-    fps    = _fbx_frame_rate(mode)
+    settings = scene.GetGlobalSettings()
+    mode     = settings.GetTimeMode()
+    fps      = _fbx_frame_rate(mode)
     if fps <= 0.0:
         fps = float(settings.GetCustomFrameRate())
     second = fbx.FbxTime()
@@ -419,13 +447,12 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False) -> dict:
                 users[name] = [typed(prop.GetCurve(layer, False), fbx.FbxAnimCurve, fbx)]
         curves.append((held, users))
 
-    read["take"] = {
+    return {
         "name":   str(stack.GetName()),
         "fps":    fps,
         "frames": frames,
         "values": _sampled(curves, ticks, per_second),
     }
-    return read
 
 
 def _sampled(curves, ticks, per_second) -> list:
@@ -458,6 +485,123 @@ def _sampled(curves, ticks, per_second) -> list:
         for row, (n, side, channel, k) in zip(sampled, where):
             out[n][side][channel][k] = np.array(row, dtype=np.float64)
     return out
+
+
+def _axes(scene, fbx, filename: str) -> tuple:
+    """``(turn, cm)``: the (3, 3) rotation from the file's axes to Maya's
+    Y-up, None for a file whose up axis is y, which Maya's importer leaves
+    in its own axes whatever its front (measured), and the centimeters one
+    of the file's units holds; ValueError for a left handed file, which no
+    rotation turns"""
+    from cgmath.hierarchy.hierarchy import _fbx_axis_turn, _fbx_scene_axes
+
+    up, _, _, _, right = _fbx_scene_axes(scene, fbx)
+    if not right:
+        raise ValueError(
+            f"load_fbx: {filename!r} is in a left handed axis system, which no rotation turns into Maya's Y-up; "
+            f"{FORK} reads right handed files"
+        )
+    turn = None if up == 1 else _fbx_axis_turn(scene, "maya_y_up", filename, fbx)
+    return turn, float(scene.GetGlobalSettings().GetSystemUnit().GetScaleFactor())
+
+
+def _convert(read: dict, turn, cm: float) -> None:
+    """``read`` put in Maya's Y-up and cm, in place: every length times
+    ``cm``, the centimeters one of the file's units holds (translations,
+    static and keyed, points and bind matrices), and with ``turn`` (3, 3)
+    the file's roots turned (:func:`_fbx_turn_roots`, measured against
+    Maya's importer): a joint root takes the turn in its joint orient and
+    translate and keeps its rotate curves, any other root's rotate is solved
+    again, frame by frame through euler_filter when the take keys it, and
+    every bind matrix, a world, turns with them. A node under a root is
+    relative to it and keeps its values; so does a mesh's points, in its
+    node's space"""
+    from cgmath.hierarchy.hierarchy import _fbx_turn_roots
+
+    entries = read["nodes"]
+    take    = read["take"]
+    if cm != 1.0:
+        for entry in entries:
+            entry["translate"] = entry["translate"] * cm
+        if take is not None:
+            for held, _ in take["values"]:
+                held["translate"] = [None if value is None else value * cm for value in held["translate"]]
+        for held in read["meshes"]:
+            held["points"] = held["points"] * cm
+            skin           = held["skin"]
+            if skin is None:
+                continue
+            for cluster in skin["clusters"]:
+                cluster["link"][3, :3] *= cm
+                cluster["mesh"][3, :3] *= cm
+            for matrix in skin["binds"].values():
+                matrix[3, :3] *= cm
+    if turn is None:
+        return
+
+    turn          = np.asarray(turn, dtype=np.float64)
+    turn4         = np.eye(4)
+    turn4[:3, :3] = turn
+    for held in read["meshes"]:
+        skin = held["skin"]
+        if skin is None:
+            continue
+        for cluster in skin["clusters"]:
+            cluster["link"] = cluster["link"] @ turn4
+            cluster["mesh"] = cluster["mesh"] @ turn4
+        for at, matrix in skin["binds"].items():
+            skin["binds"][at] = matrix @ turn4
+
+    # the roots' own values, then the take's curves on them: each component
+    # the file keys, the statics filling the others, turned every frame at
+    # once. A translate component lands on the axis the turn sends its own
+    # to, keyed as it was; a turned rotate mixes its components, so one key
+    # keys all three, and a turned static stays static
+    roots = [i for i, entry in enumerate(entries) if entry["parent"] < 0]
+    if not roots:
+        return
+    channels = ("translate", "rotate", "joint_orient")
+    joints   = [entries[i]["node_type"] == "joint" for i in roots]
+    orders   = [entries[i]["rotate_order"] for i in roots]
+    statics  = [np.array([[entries[i][channel] for i in roots]], dtype=np.float64) for channel in channels]
+    turned   = _fbx_turn_roots(turn, joints, orders, *statics)
+    for column, i in enumerate(roots):
+        entries[i]["translate"] = turned[0][0, column]
+        if joints[column]:
+            entries[i]["joint_orient"] = turned[2][0, column]
+        else:
+            entries[i]["rotate"] = turned[1][0, column]
+    if take is None:
+        return
+
+    frames = len(take["frames"])
+    blocks = []
+    for static, channel in zip(statics, channels):
+        block = np.empty((frames, len(roots), 3))
+        for column, i in enumerate(roots):
+            values = take["values"][i][0].get(channel)
+            for k in range(3):
+                value               = None if values is None else values[k]
+                block[:, column, k] = static[0, column, k] if value is None else value
+        blocks.append(block)
+    translate, rotate, _ = _fbx_turn_roots(turn, joints, orders, *blocks)
+    sends = [int(np.flatnonzero(turn[k])[0]) for k in range(3)]
+    for column, i in enumerate(roots):
+        values = take["values"][i][0]
+        was    = values["translate"]
+        moved  = [None, None, None]
+        for k in range(3):
+            if was[k] is not None:
+                row             = translate[:, column, sends[k]]
+                moved[sends[k]] = row if isinstance(was[k], np.ndarray) else float(row[0])
+        values["translate"] = moved
+        if joints[column]:
+            continue
+        was = values["rotate"]
+        if any(isinstance(value, np.ndarray) for value in was):
+            values["rotate"] = [rotate[:, column, k] for k in range(3)]
+        elif any(value is not None for value in was):
+            values["rotate"] = [float(rotate[0, column, k]) for k in range(3)]
 
 
 def _build(read: dict) -> tuple:
@@ -495,10 +639,9 @@ def _build(read: dict) -> tuple:
     if made and None not in kept and sorted(kept) == order:
         order = sorted(order, key=lambda i: kept[i])
     hierarchy = HierarchyData([made[i] for i in order])
-    hierarchy._axis_system, hierarchy._unit = read["record"]
 
-    parents  = np.array([entry["parent"] for entry in entries], dtype=np.intp)
-    in_order = [made[i] for i in order]
+    parents   = np.array([entry["parent"] for entry in entries], dtype=np.intp)
+    in_order  = [made[i] for i in order]
     refuse_values(
         "load_fbx, the nodes",
         in_order,

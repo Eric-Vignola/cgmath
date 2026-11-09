@@ -3,13 +3,14 @@ import os
 import pickle
 import tempfile
 import unittest
+import warnings
 import zipfile
 from dataclasses import dataclass, field, fields
 
 import numpy as np
 from cgmath import hierarchy
 from cgmath.geometry import Data
-from cgmath.hierarchy import HierarchyData, TransformData, TransformList
+from cgmath.hierarchy import ClipData, HierarchyData, TransformData, TransformList
 
 
 CHANNELS = ("_scale", "_rotate", "_translate", "_rotate_axis", "_joint_orient", "_shear")
@@ -153,6 +154,36 @@ class TestHierarchyFiles(unittest.TestCase):
         tree["__class__"]                 = "cgmath.hierarchy.hierarchy.HierarchyData"
         tree["__items__"][0]["__class__"] = "cgmath.hierarchy.hierarchy.TransformData"
         self.assertEqual(HierarchyData.from_dict(tree), source)
+
+    def test_a_file_labelled_with_axes_and_a_unit_loads_in_silence(self):
+        """a file saved before 2026-11-08 labels its values with axis_system
+        and unit, fields a rig no longer has: Maya's Y-up and cm, the only
+        axes and unit since, are skipped in silence; another label warns
+        once, and the values load as they are"""
+        source = rig()
+        tree   = source.to_dict()
+        self.assertNotIn("axis_system", tree)
+        self.assertNotIn("unit", tree)
+        tree["axis_system"], tree["unit"] = "maya_y_up", 1.0
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            back = HierarchyData.from_dict(tree)
+        self.assertEqual(back, source)
+        self.assertFalse(hasattr(back, "axis_system"))
+        self.assertFalse(hasattr(back, "unit"))
+
+        tree["axis_system"], tree["unit"] = "z up, -y front, right handed", 1.0
+        with self.assertWarnsRegex(UserWarning, "axis_system 'z up, -y front, right handed', a field the class no longer has"):
+            back = HierarchyData.from_dict(tree)
+        np.testing.assert_array_equal(back.translate, source.translate)
+
+        clip         = ClipData(source, frames=2)
+        tree         = clip.to_dict()
+        tree["unit"] = 100.0
+        with self.assertWarnsRegex(UserWarning, "ClipData: the data holds unit 100.0"):
+            back = ClipData.from_dict(tree)
+        self.assertEqual(back.frame_count, 2)
+        np.testing.assert_array_equal(back.frames.translate, clip.frames.translate)
 
     def test_a_view_saves_as_its_copy(self):
         # a view owns nothing, so it saves as the hierarchy copy() gives: its

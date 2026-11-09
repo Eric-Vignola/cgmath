@@ -152,6 +152,17 @@ def _concrete(cls, method: str) -> None:
         )
 
 
+def _retired(cls, key, value) -> None:
+    """a key of ``cls.RETIRED_FIELDS`` in a tree: silence for the value that
+    meant nothing, one warning for any other"""
+    meant_nothing = cls.RETIRED_FIELDS[key]
+    if value != meant_nothing:
+        warnings.warn(
+            f"{cls.__name__}: the data holds {key} {value!r}, a field the class no longer has (it meant nothing "
+            f"at {meant_nothing!r}); the values load as they are"
+        )
+
+
 def _dropped(cls, key) -> None:
     """warns of a key of the data that names no field of ``cls``: it is dropped"""
     warnings.warn(
@@ -1649,6 +1660,11 @@ class Data:
     # fields never saved: caches and links rebuilt after a load
     TRANSIENT_FIELDS = ()
 
+    # fields the class no longer has, as {saved name: the value that meant
+    # nothing}: a file holding one loads in silence when it holds that
+    # value, with one warning otherwise, the values as they are
+    RETIRED_FIELDS = {}
+
     # fields saved under a name other than the one _saved_names gives them,
     # as {field: saved name}: a field behind a property of another name, or
     # one mapped to itself, kept under its own name beside an unrelated
@@ -2095,7 +2111,10 @@ class Data:
         A field the tree leaves out takes a fresh copy of its default; one
         with no default left out raises ValueError naming it. A key naming
         no field warns and is dropped, but ``"__class__"``, which a file
-        saved up to cgmath 3.2 holds, skipped in silence.
+        saved up to cgmath 3.2 holds, skipped in silence, and a key of
+        ``RETIRED_FIELDS``, a field the class no longer has, skipped in
+        silence when it holds the value that meant nothing, with one
+        warning otherwise.
         """
         _concrete(cls, "from_dict")
         data = dict(data)
@@ -2170,7 +2189,10 @@ class Data:
         # tree built by hand. Private state -- a cache, a link, a _STATE
         # name -- is rebuilt after a load, never read from one
         for key in data:
-            _dropped(cls, key)
+            if key in cls.RETIRED_FIELDS:
+                _retired(cls, key, data[key])
+            else:
+                _dropped(cls, key)
 
         obj._post_load()
         return obj
@@ -2649,6 +2671,9 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
     # attributes saved with the list, beside its items
     LIST_FIELDS = ()
 
+    # LIST_FIELDS the class no longer has, as Data.RETIRED_FIELDS
+    RETIRED_FIELDS = {}
+
     # LIST_FIELDS saved under a name other than the one _saved_names gives
     # them, as {attribute: saved name}; one mapped to itself keeps its name
     SAVED_NAMES = {}
@@ -3044,7 +3069,8 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
         LIST_FIELDS is read under its property's name, as a file saves it,
         or its own, and a tree naming one both ways raises ValueError. A
         key naming neither warns and is dropped, but ``"__class__"``, which
-        a file saved up to cgmath 3.2 holds, skipped in silence.
+        a file saved up to cgmath 3.2 holds, skipped in silence, and a key
+        of ``RETIRED_FIELDS`` as :meth:`Data.from_dict` says.
         """
         _concrete(cls, "from_dict")
         data = dict(data)
@@ -3075,6 +3101,8 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
         for name, value in data.items():
             if name in cls.LIST_FIELDS:
                 setattr(obj, name, _as_declared(value, hints.get(name)))
+            elif name in cls.RETIRED_FIELDS:
+                _retired(cls, name, value)
             else:
                 _dropped(cls, name)
 

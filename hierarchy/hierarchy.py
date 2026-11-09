@@ -4,7 +4,6 @@ import copy
 import itertools
 import bisect
 import json
-import numbers
 import operator
 import os
 import re
@@ -31,6 +30,7 @@ from cgmath.data import (
     _class_attribute,
     _dropped,
     _forward_doc,
+    _retired,
     _mask_to_indices,
     _NO_DEFAULT,
     _refusal,
@@ -2231,13 +2231,7 @@ class TransformData(Data):
         y:     bool                         = True,
         z:     bool                         = True,
     ):
-        """matches the world position of a TransformData object
-
-        A node of a rig that records other axes or units than this node's
-        rig raises ValueError, before anything moves
-        (:attr:`HierarchyData.axis_system`); a position is taken as it is.
-        """
-        _check_matched(self, other)
+        """matches the world position of a TransformData object"""
         M0 = self.world_matrix
 
         # other is a xyz translation
@@ -2262,12 +2256,7 @@ class TransformData(Data):
         y, and a mirror on one side alone of a parent world that is one
         length times a rotation, stay off by that mirror: rotate is all it
         writes.
-
-        A node of a rig that records other axes or units than this node's
-        rig raises ValueError, before anything moves, as
-        :meth:`match_translate` says; a rotation is taken as it is.
         """
-        _check_matched(self, other)
 
         # convert the input to world matrix
         if _is_sequence(other, ndim=1):
@@ -2319,12 +2308,7 @@ class TransformData(Data):
 
     def match_matrix(self, other: "TransformData"):
         """matches the world matrix of a TransformData object
-
-        A node of a rig that records other axes or units than this node's
-        rig raises ValueError, before anything moves, as
-        :meth:`match_translate` says.
         """
-        _check_matched(self, other)
         M                 = other.world_matrix
         self.world_matrix = M
 
@@ -4430,7 +4414,7 @@ def _fbx_converted_turn(scene) -> Optional[np.ndarray]:
     up_axis, _, _, _, right = _fbx_scene_axes(scene)
     if up_axis == 1 or not right:
         return None
-    return _fbx_axis_turn(scene, _MAYA_Y_UP, "")
+    return _fbx_axis_turn(scene, "maya_y_up", "")
 
 
 def _fbx_flips(tree: _FbxTree, scale: np.ndarray) -> Optional[np.ndarray]:
@@ -5876,218 +5860,6 @@ def _fbx_scene_axes(scene, sdk=None) -> tuple:
         1 if front_sign > 0 else -1,
         axes.GetCoorSystem() != left,
     )
-
-
-# ------------------------- WHAT A RIG'S VALUES ARE IN ------------------------ #
-#
-# A rig and a clip record the axis system and the unit their values are in,
-# axis_system and unit: the fbx loaders set them to what they produced, and
-# save_fbx labels the file with them. Hand-built data, and a file saved
-# before there were any, hold Maya's Y-up and cm.
-
-# the axis_system of Maya's Y-up, the fbx loaders' default
-_MAYA_Y_UP = "maya_y_up"
-
-# any other axis system, as a record spells it: "z up, -y front, right handed"
-_AXIS_WORDS = re.compile(r"(-?)([xyz]) up, (-?)([xyz]) front, (right|left) handed")
-
-
-def _axis_words(up_axis: int, up_sign: int, front_axis: int, front_sign: int, right: bool) -> str:
-    """the axis_system an axis system is recorded as (:func:`_fbx_scene_axes`'s
-    tuple): "maya_y_up" for Maya's Y-up, any other its up and front axes and
-    its handedness in words: "z up, -y front, right handed" for Unreal's"""
-    if (up_axis, up_sign, front_axis, front_sign, right) == (1, 1, 2, 1, True):
-        return _MAYA_Y_UP
-
-    def axis(index, sign):
-        return ("-" if sign < 0 else "") + "xyz"[index]
-
-    hand = "right" if right else "left"
-    return f"{axis(up_axis, up_sign)} up, {axis(front_axis, front_sign)} front, {hand} handed"
-
-
-def _axis_record(value) -> str:
-    """``value`` as a rig records an axis_system: "maya_y_up", or an axis
-    system in words (:func:`_axis_words`), Maya's Y-up in words read as
-    "maya_y_up"
-
-    Raises TypeError for anything but a str, and ValueError for a str that
-    names no axis system, up and front on one axis among them.
-    """
-    if not isinstance(value, str):
-        raise TypeError(f"axis_system must be a str, got {type(value).__name__}")
-    if value == _MAYA_Y_UP:
-        return value
-
-    match = _AXIS_WORDS.fullmatch(value)
-    if match is None or match.group(2) == match.group(4):
-        raise ValueError(
-            "axis_system must be 'maya_y_up' or an axis system in words, its up and "
-            "front two of x, y and z, either one negated, and its hand, such as "
-            f"'z up, -y front, right handed'; got {value!r}"
-        )
-    return _axis_words(*_axis_record_axes(value))
-
-
-def _axis_record_axes(record: str) -> tuple:
-    """the ``(up axis, up sign, front axis, front sign, right handed)`` of a
-    recorded axis_system, as :func:`_fbx_scene_axes` gives a scene's"""
-    if record == _MAYA_Y_UP:
-        return 1, 1, 2, 1, True
-    up_sign, up, front_sign, front, hand = _AXIS_WORDS.fullmatch(record).groups()
-    return (
-        "xyz".index(up),
-        -1 if up_sign else 1,
-        "xyz".index(front),
-        -1 if front_sign else 1,
-        hand == "right",
-    )
-
-
-def _unit_record(value) -> float:
-    """``value`` as a rig records a unit, the centimeters one unit of its
-    lengths holds: a positive finite number
-
-    Raises TypeError for anything but a real number, a bool among them, and
-    ValueError for one that is not positive and finite.
-    """
-    if isinstance(value, bool) or not isinstance(value, numbers.Real):
-        raise TypeError(f"unit must be a number of centimeters, got {type(value).__name__}")
-    unit = float(value)
-    if not (np.isfinite(unit) and unit > 0.0):
-        raise ValueError(f"unit must be a positive number of centimeters, got {value!r}")
-    return unit
-
-
-def _fbx_check_scale_factor(scale_factor) -> None:
-    """refuses a ``scale_factor`` that leaves the read's lengths in no unit:
-    anything but None and a positive finite number"""
-    if scale_factor is None:
-        return
-    try:
-        factor = float(scale_factor)
-    except (TypeError, ValueError):
-        factor = float("nan")
-    if not (np.isfinite(factor) and factor > 0.0):
-        raise ValueError(
-            "scale_factor must be None, which converts the file's unit to "
-            f"centimeters, or a positive number, got {scale_factor!r}"
-        )
-
-
-def _fbx_record(scene, axis_system: Optional[str], scale_factor: Optional[float]) -> tuple:
-    """``(axis_system, unit)`` a load of ``scene`` records: "maya_y_up" when
-    it loads in Maya's Y-up, the file's own axes in words when it keeps
-    them; 1.0, cm, when it converts the file's unit, and the file's unit in
-    cm over the caller's factor when it is given one, the unit the lengths
-    it multiplies by that factor are in"""
-    axes = _MAYA_Y_UP if axis_system is not None else _axis_words(*_fbx_scene_axes(scene))
-    if scale_factor is None:
-        return axes, 1.0
-    return axes, _unit_record(_fbx_scale_factor(scene, None) / float(scale_factor))
-
-
-def _recorded(data, record: tuple):
-    """``data``, the rig, clip or view a load made, recording ``record``,
-    the ``(axis_system, unit)`` of :func:`_fbx_record`"""
-    if isinstance(data, HierarchyData):
-        data._axis_system, data._unit = record
-    else:
-        data._record = record
-    return data
-
-
-def _records_listed(records) -> str:
-    """``(axis_system, unit)`` records as a refusal names them, each once"""
-    return "; ".join(f"axis_system {axes!r}, unit {unit!r}" for axes, unit in sorted(set(records)))
-
-
-def _refuse_records(what: str, records) -> None:
-    """raises ValueError for values recorded in two axis systems or units
-    meeting in one rig, clip or pose algebra: no one axis_system and unit
-    says where they are. ``what`` names them, ``records`` holds their
-    ``(axis_system, unit)``"""
-    raise ValueError(
-        f"{what} are in other axes or units ({_records_listed(records)}): no one "
-        "axis_system and unit says where they are; give them one first"
-    )
-
-
-def _owner_records(nodes) -> list:
-    """the ``(axis_system, unit)`` the rigs owning ``nodes`` record, each
-    once, sorted; none for nodes no rig owns"""
-    found = {}
-    for node in nodes:
-        owner = getattr(node, "_hierarchy", None)
-        if owner is not None and id(owner) not in found:
-            found[id(owner)] = (owner._axis_system, owner._unit)
-    return sorted(set(found.values()))
-
-
-def _records_of(nodes) -> tuple:
-    """``(axis_system, unit)`` of nodes given as a rig, a clip, a view or a
-    plain sequence: a TransformList's own (``_records``), or what the rigs
-    owning a sequence's nodes record, Maya's Y-up and cm when no rig owns
-    one. ValueError when they record two"""
-    if isinstance(nodes, TransformList):
-        return nodes._records()
-    records = _owner_records(nodes)
-    if len(records) > 1:
-        _refuse_records("the nodes", records)
-    return records[0] if records else (_MAYA_Y_UP, 1.0)
-
-
-def _check_operands(data, other) -> None:
-    """refuses the pose algebra between values in two axis systems or units,
-    ``data``'s and ``other``'s: a delta taken between them, or applied in
-    other axes or units than its own, mixes them"""
-    records = (data._records(), other._records())
-    if records[0] != records[1]:
-        _refuse_records("the pose algebra's operands", records)
-
-
-def _held_records(values) -> list:
-    """the ``(axis_system, unit)`` records the nodes of a match_* or paste
-    operand or receiver hold, each once, sorted: a frame axis's clip's, a
-    rig's or clip's own and the rigs' of the nodes it lists without owning
-    them (an item assignment lists such a node), a view's nodes'
-    (``TransformList._held_records``), a node's rig's and a sequence's
-    nodes' rigs'. A node no rig owns holds none, as it holds none joining a
-    rig, but in a view :meth:`TransformList.load_fbx` gave, or one taken
-    from it, which holds its load's"""
-    if isinstance(values, _FrameAxis):
-        values = values._clip
-    if isinstance(values, TransformList):
-        return values._held_records()
-    if isinstance(values, TransformData):
-        values = (values,)
-    return _owner_records(values)
-
-
-def _check_matched(data, other, what: str = "the nodes and the nodes they match") -> None:
-    """refuses matching or pasting into ``data`` the values of nodes that
-    hold another record than ``data``'s: the positions, rotations or
-    channels taken from them would land in ``data`` under a label that does
-    not describe them. Values, and nodes that hold no record, pass"""
-    # a node matching a node, which a view's match_* does node by node, read
-    # off their rigs without the sets
-    if isinstance(other, TransformData) and isinstance(data, TransformData):
-        theirs, mine = other._hierarchy, data._hierarchy
-        if theirs is None or mine is None or theirs is mine:
-            return
-        records = (mine._records(), theirs._records())
-        if records[0] != records[1]:
-            _refuse_records(what, records)
-        return
-
-    if not _holds_nodes(other):
-        return
-    found = _held_records(other)
-    if not found:
-        return
-    found = set(found) | set(_held_records(data))
-    if len(found) > 1:
-        _refuse_records(what, found)
 
 
 def _fbx_turn_roots(turn, joints, orders, translate, rotate, joint_orient) -> tuple:
@@ -7922,89 +7694,12 @@ class TransformList(DataList[TransformData]):
     """
 
     # the private state a view holds beside its list: the uuids extend()
-    # keeps while it adds (_holds), and the record of a load (_record)
-    _STATE = ("_held", "_record")
-
-    # (axis_system, unit) TransformList.load_fbx records on the view it gives,
-    # whose nodes no rig owns, and every view taken from that one carries
-    # (_view); None on any other view. It stands for the nodes no rig owns:
-    # a node a rig owns is in what that rig records (_records)
-    _record = None
-
-    def __init__(self, iterable=None):
-        super().__init__(iterable)
-        # a view of the one load_fbx gives holds its load's record too
-        record = iterable._record if isinstance(iterable, TransformList) else None
-        if record is not None and not isinstance(self, HierarchyData):
-            self._record = record
+    # keeps while it adds (_holds)
+    _STATE = ("_held",)
 
     def _view(self, nodes) -> "TransformList":
-        """a view over ``nodes``, taken from this one: a view of the one
-        :meth:`load_fbx` gives carries its load's record (``_record``)"""
-        view = TransformList(nodes)
-        if self._record is not None:
-            view._record = self._record
-        return view
-
-    @property
-    def axis_system(self) -> str:
-        """the axis system the values are in, as the nodes' rig records it
-
-        :attr:`HierarchyData.axis_system`, read only. A view whose nodes no
-        rig owns says "maya_y_up", as hand-built data does, but for the one
-        :meth:`load_fbx` gives, and every view taken from it (a slice or an
-        index of it, its :meth:`match`, :meth:`get_roots`, ``TransformList``
-        of it), which say what its load produced until a rig owns their
-        nodes (``HierarchyData(view)``), and then what that rig records. A
-        view holding nodes of rigs that record other axes or units raises
-        ValueError, and so do its :meth:`copy` and :meth:`save_fbx`; so
-        does :meth:`load_fbx`'s view, or one taken from it, that holds
-        nodes no rig owns beside nodes of a rig that records another.
-        """
-        return self._records()[0]
-
-    @property
-    def unit(self) -> float:
-        """the cm one unit of the values' lengths holds, as their rig records it
-
-        :attr:`HierarchyData.unit`, read only; a view whose nodes no rig
-        owns says 1.0, as :attr:`axis_system` says.
-        """
-        return self._records()[1]
-
-    def _held_records(self) -> list:
-        """the ``(axis_system, unit)`` records the nodes hold, each once,
-        sorted: those the rigs that own them record, and the load's of a
-        view :meth:`load_fbx` gave for its nodes no rig owns, or for the view
-        left empty; none for a node no rig owns of any other view"""
-        records = _owner_records(self.list)
-        if self._record is not None and (
-            not self.list or any(getattr(node, "_hierarchy", None) is None for node in self.list)
-        ):
-            records = sorted(set(records) | {self._record})
-        return records
-
-    def _records(self) -> tuple:
-        """``(axis_system, unit)`` of the values: those the rigs that own the
-        nodes record, for the nodes no rig owns the load's of a view
-        :meth:`load_fbx` gave, and Maya's Y-up and cm for nodes no rig owns
-        of any other view
-
-        A rig that owns the nodes of a load's view, ``HierarchyData(view)``,
-        holds them in its record, and a relabel of it relabels them: the
-        rig is asked first, and the load's record stands only for nodes no
-        rig owns, or for the view left empty.
-
-        Raises ValueError when the nodes hold two of them.
-        """
-        records = self._held_records()
-        if len(records) > 1:
-            raise ValueError(
-                "the view holds nodes whose values are in other axes or units "
-                f"({_records_listed(records)}): no one axis_system and unit says "
-                "where they are; give them one first"
-            )
-        return records[0] if records else (_MAYA_Y_UP, 1.0)
+        """a view over ``nodes``, taken from this one"""
+        return TransformList(nodes)
 
     # TODO scale_factor is prolly not the best name, think of a better way to handle unit conversions
     @classmethod
@@ -8089,7 +7784,7 @@ class TransformList(DataList[TransformData]):
             if cls is not HierarchyData:
                 raise NotImplementedError(f"{cls.__name__}.load_fbx: {_FORK} reads a HierarchyData skeleton")
             return skeleton
-        return _recorded(cls(node.copy() for node in skeleton), skeleton._records())
+        return cls(node.copy() for node in skeleton)
 
     def save_fbx(self, filename, as_ascii=False):
         """the nodes written as a skeleton, as ``cgmath.formats.save_fbx``
@@ -8097,7 +7792,6 @@ class TransformList(DataList[TransformData]):
         skeleton = self
         if type(self) is not HierarchyData:
             skeleton = HierarchyData(node.copy() for node in self)
-            skeleton._axis_system, skeleton._unit = self._records()
         _save_fbx(filename, skeleton, as_ascii=as_ascii)
 
     # --------- vectorized properties and methods --------- #
@@ -8461,12 +8155,7 @@ class TransformList(DataList[TransformData]):
         self, other, x: bool = True, y: bool = True, z: bool = True
     ) -> None:
         """matches the world position of a node, a list of nodes or a translation
-
-        Nodes in other axes or units than these, as their rigs record
-        them, raise ValueError before anything moves, as
-        :meth:`TransformData.match_translate` says.
         """
-        _check_matched(self, other)
         # the head of a multi-frame clip writes its frame through the clip solve
         if _clip_setter(self, "translate", other, axes=(x, y, z)):
             return
@@ -8477,12 +8166,7 @@ class TransformList(DataList[TransformData]):
 
     def match_rotate(self, other) -> None:
         """matches the world rotation of a node, a list of nodes or a rotation
-
-        Nodes in other axes or units than these, as their rigs record
-        them, raise ValueError before anything moves, as
-        :meth:`TransformData.match_translate` says.
         """
-        _check_matched(self, other)
         # the head of a multi-frame clip writes its frame through the clip solve
         if _clip_setter(self, "rotate", other):
             return
@@ -8493,12 +8177,7 @@ class TransformList(DataList[TransformData]):
 
     def match_matrix(self, other) -> None:
         """matches the world matrix of a node or a list of nodes
-
-        Nodes in other axes or units than these, as their rigs record
-        them, raise ValueError before anything moves, as
-        :meth:`TransformData.match_translate` says.
         """
-        _check_matched(self, other)
         # the head of a multi-frame clip writes its frame through the clip solve
         if _clip_setter(self, "match", other):
             return
@@ -9074,13 +8753,9 @@ class TransformList(DataList[TransformData]):
         node whose parent is not among them made a root, as any node joining
         a hierarchy is. A shallow copy is over the values its node holds: the
         nodes themselves keep their owner and parent, and an object they
-        share is still one object. It records the axes and unit these record
-        (:meth:`_records`), taken before the copies join it.
+        share is still one object.
         """
-        record = self._records()
-        rig    = HierarchyData(nodes)
-        rig._axis_system, rig._unit = record
-        return rig
+        return HierarchyData(nodes)
 
     def _matched_subset(self, other, by: str = "index"):
         """Return ``(nodes_self, nodes_other, parents)`` for paired nodes.
@@ -9196,8 +8871,6 @@ class TransformList(DataList[TransformData]):
         """In-place subtraction: ``self`` becomes the delta ``self - other``."""
         if not isinstance(other, TransformList):
             return NotImplemented
-        _check_operands(self, other)
-
         nodes_self, nodes_other, parents = self._matched_subset(other, by=by)
 
         # snapshot every read up front: writing to a node invalidates the
@@ -9280,11 +8953,6 @@ class TransformList(DataList[TransformData]):
         delta is taken against each, all solved at once, and comes back as
         a :class:`ClipData` on that clip's timebase, bound to its first
         frame. The axis of a clip of one frame, or none, is one pose.
-
-        Both sides record one axis system and unit (:attr:`axis_system`,
-        :attr:`unit`), which the delta records; values of two raise
-        ValueError, since no one axis_system and unit says where their
-        difference is.
         """
         # clip.frames stands for every frame of its clip: this pose, repeated
         # down the clip, is taken against each
@@ -9304,8 +8972,6 @@ class TransformList(DataList[TransformData]):
         """In-place addition: ``self`` (a delta) becomes ``self + other``."""
         if not isinstance(other, TransformList):
             return NotImplemented
-        _check_operands(self, other)
-
         nodes_self, nodes_other, parents = self._matched_subset(other, by=by)
 
         # snapshot every read up front: the loop below writes as it goes, and
@@ -9389,10 +9055,6 @@ class TransformList(DataList[TransformData]):
         poses ``self``, all solved at once, and the result is a
         :class:`ClipData` on the delta clip's timebase, bound to its first
         frame. The axis of a clip of one frame, or none, is one delta.
-
-        ``delta`` records the axis system and unit ``self`` does
-        (:attr:`axis_system`, :attr:`unit`), which the result records; a
-        delta of another raises ValueError, as :meth:`get_delta` of two.
         """
         # deltas.frames stands for every frame: a copy of the clip takes this
         # pose on every frame at once
@@ -9678,138 +9340,10 @@ class HierarchyData(TransformList):
         "_uuid_counts",
     )
 
-    # saved beside the nodes: the axis system and the unit their values are
-    # in, which a file names as their properties, axis_system and unit. A
-    # file saved before there were any loads them as hand-built data holds
-    # them, Maya's Y-up and cm
-    LIST_FIELDS = ("_axis_system", "_unit")
-
-    # hand-built data's record; an empty rig takes the one the nodes of
-    # another rig, clip or view joining it bring (_join_records)
-    _axis_system = _MAYA_Y_UP
-    _unit        = 1.0
-
-    @property
-    def axis_system(self) -> str:
-        """the axis system the values are in, "maya_y_up" or one in words
-
-        "maya_y_up" is Maya's Y-up; any other is its up and front axes,
-        either one negated, and its hand in words, "z up, -y front, right
-        handed" for Unreal's. :meth:`load_fbx` and :meth:`ClipData.load_fbx`
-        record what they produced: "maya_y_up" by default, and with
-        ``axis_system=None`` the file's own axes. :meth:`save_fbx` labels
-        the file with it, so values saved in a file's own axes are labelled
-        in them, and load, and import into Maya, where that file does.
-        Hand-built data, and a file saved before there was a record, hold
-        "maya_y_up". A rig or clip built from another
-        (``HierarchyData(view)``, ``ClipData(rig, frames=...)``, a copy, a
-        cut of frames, a delta) takes its record. Values of two records
-        have no one label, and where they would meet ValueError is raised:
-        nodes of a rig recording another joining this one (:meth:`append`,
-        :meth:`extend`, :meth:`insert`, an item assignment), unless this one
-        is empty, which takes theirs; the pose algebra between two
-        (:meth:`get_delta`, :meth:`add_delta`); matching or pasting the
-        values of nodes of another (``match_translate``, ``match_rotate`` and
-        ``match_matrix`` of a node, a view, a rig, a clip or ``clip.frames``,
-        given nodes, a view, a rig, a clip or a frame axis, and a pose or
-        frames pasted into ``clip.frames``), where values pass as they are,
-        and so do nodes no rig owns, but in a view
-        :meth:`TransformList.load_fbx` gave or one taken from it, which hold
-        its load's; :meth:`ClipData.from_poses` of poses of two; a clip's
-        :attr:`ClipData.rest_pose` of another.
-        Setting it relabels the values and moves none of them, a clip's rest
-        pose with the clip; Maya's Y-up in words is held as "maya_y_up".
-        """
-        return self._axis_system
-
-    @axis_system.setter
-    def axis_system(self, value: str) -> None:
-        self._axis_system = _axis_record(value)
-
-    @property
-    def unit(self) -> float:
-        """the centimeters one unit of the values' lengths holds, 1.0 for cm
-
-        100.0 for meters, 2.54 for inches. :meth:`load_fbx` and
-        :meth:`ClipData.load_fbx` record what they produced: 1.0 when they
-        convert the file's unit to cm, the default, and with a number for
-        ``scale_factor`` the file's unit in cm over that number, the unit
-        the file's lengths times it are in (a cm file read with 0.01 records
-        100.0, meters). :meth:`save_fbx` writes the file in it, so the file
-        loads at the size the file it was read from does, and Maya's
-        importer puts its nodes at the positions it puts that file's, its
-        top nodes scaled by the unit (:meth:`save_fbx` says why). Hand-built
-        data, and a file saved before there was a record, hold 1.0. It is
-        passed on, checked and set as :attr:`axis_system` is: setting it
-        relabels the values, scaling none of them.
-        """
-        return self._unit
-
-    @unit.setter
-    def unit(self, value: float) -> None:
-        self._unit = _unit_record(value)
-
-    def _records(self) -> tuple:
-        return self._axis_system, self._unit
-
-    def _held_records(self) -> list:
-        # a node an item assignment lists here that another rig owns is in
-        # that rig's record, and a match or a paste writes or reads its
-        # values with the rest: its record counts, as a view's nodes' do, so
-        # one of another record is refused before the first node moves
-        records = {self._records()}
-        for node in self.list:
-            owner = getattr(node, "_hierarchy", None)
-            if owner is not None and owner is not self:
-                records.add(owner._records())
-        return sorted(records)
-
-    def _join_records(self, nodes, given=None) -> None:
-        """
-        Checks that ``nodes``, about to join this rig, are in its axes and
-        unit: a node another rig owns in what that rig records, and a node
-        no rig owns of the view :meth:`TransformList.load_fbx` gave, or of
-        one taken from it (``given``, the view they come in), in what its
-        load records. Any other node holds no record. An empty rig takes the
-        one they hold.
-
-        Raises
-        ------
-        ValueError
-            The nodes hold two records, or another than this rig's.
-        """
-        loaded = given._record if isinstance(given, TransformList) else None
-        found  = set()
-        for node in nodes:
-            owner = getattr(node, "_hierarchy", None)
-            if owner is None:
-                if loaded is not None:
-                    found.add(loaded)
-            elif owner is not self:
-                found.add(owner._records())
-        if not found:
-            return
-
-        empty = not self.list
-        if not empty:
-            found.add(self._records())
-        if len(found) > 1:
-            _refuse_records("the nodes joining the rig" if empty else "the rig and the nodes joining it", found)
-        if empty:
-            self.axis_system, self.unit = found.pop()
-
-    def _post_load(self) -> None:
-        """
-        Checks the record a file holds, as the setters check one.
-
-        Raises
-        ------
-        TypeError, ValueError
-            The file's axis_system or unit is none the setters take.
-        """
-        super()._post_load()
-        self._axis_system = _axis_record(self._axis_system)
-        self._unit        = _unit_record(self._unit)
+    # a file saved before 2026-11-08 labels the values with the axis system
+    # and the unit they were in; Maya's Y-up and cm, the only ones since,
+    # load in silence, another with one warning: the values load as they are
+    RETIRED_FIELDS = {"axis_system": "maya_y_up", "unit": 1.0}
 
     def _claim(self, node: "TransformData") -> None:
         """Take ownership of ``node`` for this hierarchy.
@@ -10075,11 +9609,7 @@ class HierarchyData(TransformList):
         # joins now; in a batch, once every node is in (extend). A rig of
         # _BUILT_FOR_APPEND nodes or more with no current index builds one
         # for an append outside a batch, unless such builds go to waste
-        # (_index_for_append). A node of another rig joins in that rig's
-        # axes and unit (_join_records), which a batch checks once
-        owner = getattr(node, "_hierarchy", None)
-        if owner is not None and owner is not self and "_joining" not in self.__dict__:
-            self._join_records((node,))
+        # (_index_for_append)
         index = self._kept_index()
         if index is not None:
             if "_append_builds" in self.__dict__:
@@ -10155,7 +9685,6 @@ class HierarchyData(TransformList):
         order.
         """
         values = list(iterable)
-        self._join_records(values, iterable)
         if "_joining" in self.__dict__:
             return super().extend(values)
 
@@ -10167,7 +9696,6 @@ class HierarchyData(TransformList):
             self._join([v for v in values if isinstance(v, TransformData)])
 
     def insert(self, index: int, node: "TransformData") -> None:
-        self._join_records((node,))
         kept  = self._kept_index()
         count = len(self.list)
         super().insert(index=index, node=node)
@@ -10191,13 +9719,9 @@ class HierarchyData(TransformList):
         # uuid written on it retires the rig's index and uuid counts. The
         # list is read only for a node no hierarchy owns that names a
         # parent: a swap, reverse() or a loop putting nodes back makes no
-        # pass over it. A node of another rig is listed in that rig's axes
-        # and unit, and a node no rig owns of TransformList.load_fbx's view
-        # in its load's, as one joining is (_join_records)
+        # pass over it
         if isinstance(index, slice):
-            given = value
-            value = list(value)
-            self._join_records(value, given)
+            value  = list(value)
             counts = self._uuid_counts_kept()
             gone   = self.list[index] if counts is not None else ()
             super().__setitem__(index, value)
@@ -10228,9 +9752,6 @@ class HierarchyData(TransformList):
         # (_uuid_counts_kept). A loop assigning such nodes -- each node's
         # copy put back in its place -- counts the list once, where a count
         # at each ran it in the square of its size
-        owner = getattr(value, "_hierarchy", None)
-        if owner is not None and owner is not self:
-            self._join_records((value,))
         if "_uuid_counts" not in self.__dict__:
             super().__setitem__(index, value)
             _structure_changed(self)
@@ -10382,11 +9903,14 @@ class HierarchyData(TransformList):
                 _parent_by_name(obj, named)
 
             # in the order the tree holds them, as DataList._from_state reads
-            # them; a part the class no longer declares warns and is dropped
+            # them; a part the class no longer declares warns and is dropped,
+            # a retired one in silence at the value that meant nothing
             hints = cls._list_hints()
             for name, value in data.items():
                 if name in cls.LIST_FIELDS:
                     setattr(obj, name, _as_declared(value, hints.get(name)))
+                elif name in cls.RETIRED_FIELDS:
+                    _retired(cls, name, value)
                 else:
                     _dropped(cls, name)
 
@@ -13343,21 +12867,16 @@ class _FrameAxis:
         A run is written in one go. A clip's blocks are copied across whole,
         without scrubbing it, so its current frame stays where it was. A
         single pose is read once and repeated down the range. Either way the
-        nodes pair by position, as they do for one pose. A clip or a pose in
-        other axes or units than this clip, as their rigs record them,
-        raises ValueError before anything is written
-        (:attr:`HierarchyData.axis_system`).
+        nodes pair by position, as they do for one pose.
         """
         clip = self._clip
 
         if self._uuids is not None:
             raise TypeError("a node scoped axis writes channels, not poses")
 
-        # a pose given as an iterator of nodes is read once, for its record
-        # and for its values
+        # a pose given as an iterator of nodes is read once
         if isinstance(value, Iterable) and not isinstance(value, (DataList, _FrameAxis)):
             value = list(value)
-        _check_matched(clip, value, "the clip and the frames or pose pasted into it")
 
         # this axis may have been taken before the nodes were reordered, and
         # pairing by position needs column i to be node i
@@ -13495,11 +13014,8 @@ class _FrameAxis:
 
         ``other`` is a clip or a frame axis, paired frame for frame; a node,
         a list of nodes or a pose, held on every frame; or positions: (3,),
-        (n, 3) or (F, n, 3). Nodes in other axes or units than the clip, as
-        their rigs record them, raise ValueError before anything moves
-        (:attr:`HierarchyData.axis_system`).
+        (n, 3) or (F, n, 3).
         """
-        _check_matched(self, other)
         if _holds_nodes(other):
             target = self._worlds(other)[..., 3, :3]
         else:
@@ -13511,10 +13027,8 @@ class _FrameAxis:
 
         ``other`` is what :meth:`match_translate` takes, or rotations: eulers
         in degrees in each node's rotate order, (3,), (n, 3) or (F, n, 3), or
-        quaternions, (4,), (n, 4) or (F, n, 4). Nodes in other axes or units
-        than the clip raise ValueError, as :meth:`match_translate` says.
+        quaternions, (4,), (n, 4) or (F, n, 4).
         """
-        _check_matched(self, other)
         if _holds_nodes(other):
             target = _orientations(self._worlds(other))
         else:
@@ -13533,11 +13047,8 @@ class _FrameAxis:
         """matches world matrices on every frame at once
 
         ``other`` is a clip or a frame axis, paired frame for frame, or a
-        node, a list of nodes or a pose, held on every frame. Nodes in other
-        axes or units than the clip raise ValueError, as
-        :meth:`match_translate` says.
+        node, a list of nodes or a pose, held on every frame.
         """
-        _check_matched(self, other)
         if not _holds_nodes(other):
             raise TypeError(
                 "match_matrix matches nodes, clips or frame axes; "
@@ -13975,11 +13486,11 @@ class ClipData(HierarchyData):
     )
 
     # saved beside the nodes: the timebase, the loaded frame, one (F, N, 3)
-    # block per framed channel, keyed by channel, the rest pose, a rig's
-    # record of the axes and unit, and the take's name. A file names them as
-    # their properties, start_frame, fps, frame, rest_pose, axis_system, unit
-    # and take, and the blocks, which have none, "blocks", each keyed by its
-    # channel's property, "translate". A clip with no rest pose saves no
+    # block per framed channel, keyed by channel, the rest pose and the
+    # take's name. A file names them as their properties, start_frame, fps,
+    # frame, rest_pose and take, and the blocks, which have none, "blocks",
+    # each keyed by its channel's property, "translate". A clip with no
+    # rest pose saves no
     # "rest_pose", one with no take name no "take", and a shear block all
     # zero is left out, so a clip holding no shear saves as one did before it
     # had any; a load fills it back with zeros
@@ -13994,8 +13505,6 @@ class ClipData(HierarchyData):
         "_blocks",
         "_animated",
         "_user_keys",
-        "_axis_system",
-        "_unit",
         "_take",
     )
     SAVED_NAMES = {"_blocks": "blocks", "_animated": "animated", "_user_keys": "user_keys"}
@@ -14021,16 +13530,9 @@ class ClipData(HierarchyData):
         self._fps         = float(fps)
         self._take        = _take_name(take)
 
-        # a clip owns its nodes: adopting the caller's rig would empty it.
-        # The record of a rig, clip or view comes with its nodes, and so
-        # does the one the rigs owning a sequence's nodes record
-        if iterable is not None and not isinstance(iterable, TransformList):
-            iterable = list(iterable)
-        record = None if iterable is None else _records_of(iterable)
-        nodes  = [] if iterable is None else [node.copy() for node in iterable]
+        # a clip owns its nodes: adopting the caller's rig would empty it
+        nodes = [] if iterable is None else [node.copy() for node in iterable]
         super().__init__(nodes)
-        if record is not None:
-            self._axis_system, self._unit = record
 
         if frames is not None:
             self._allocate(int(frames))
@@ -14133,9 +13635,7 @@ class ClipData(HierarchyData):
             for name, rows in keys.items():
                 if name in channels:
                     _user_put(attrs, name, channels[name], rows[index])
-        pose = HierarchyData(nodes)
-        pose._axis_system, pose._unit = self._records()
-        return pose
+        return HierarchyData(nodes)
 
     # (the column list, each uuid's column in it)
     _column_place_cache = None
@@ -14307,18 +13807,12 @@ class ClipData(HierarchyData):
 
         The nodes are copies of the first pose's, and every pose pairs with
         them by position. Each pose is read once, straight into the blocks,
-        and the nodes are bound once, to frame 0. The poses record one axis
-        system and unit, which the clip records (:attr:`axis_system`,
-        :attr:`unit`); poses of two raise ValueError.
+        and the nodes are bound once, to frame 0.
         """
-        # a pose given as a sequence of nodes is read twice: for its record,
-        # then for its values
+        # a pose given as an iterator of nodes is read as a list
         poses = [pose if isinstance(pose, DataList) else list(pose) for pose in poses]
         if not poses:
             raise ValueError("from_poses needs at least one pose")
-        records = [_records_of(pose) for pose in poses]
-        if len(set(records)) > 1:
-            _refuse_records("the poses", records)
 
         clip     = cls(poses[0], start_frame=start_frame, fps=fps)
         count    = len(clip)
@@ -14345,8 +13839,7 @@ class ClipData(HierarchyData):
 
         The constructor copies every node, so a clip never takes a caller's
         rig. A hierarchy built only to become a clip -- a delta's working
-        copy -- is handed over instead of being copied a second time, with
-        its record of the axes and unit.
+        copy -- is handed over instead of being copied a second time.
         """
         clip              = cls.__new__(cls)
         clip._blocks      = {}
@@ -14357,8 +13850,6 @@ class ClipData(HierarchyData):
         clip._start_frame = int(start_frame)
         clip._fps         = float(fps)
         clip._take        = ""
-        clip._axis_system = hierarchy._axis_system
-        clip._unit        = hierarchy._unit
         clip.list         = hierarchy.list
         hierarchy.list    = []
         for node in clip.list:
@@ -14471,7 +13962,6 @@ class ClipData(HierarchyData):
         frame 0 kept. Nodes left out of the pairing keep their channels.
         Everything is read before anything is written; the caller rebinds.
         """
-        _check_operands(self, other)
         self._realign()
         frames = self.frame_count
 
@@ -14556,7 +14046,6 @@ class ClipData(HierarchyData):
         offsets, rotate axes and joint orients -- is built once and
         broadcast over the frames.
         """
-        _check_operands(self, delta)
         self._realign()
         frames = self.frame_count
 
@@ -14597,7 +14086,6 @@ class ClipData(HierarchyData):
         Nodes the pairing leaves out keep their channels. Everything is read
         before anything is written; the caller rebinds.
         """
-        _check_operands(self, source)
         self._realign()
         blocks = self._blocks
         scale, rotate, offset, shear = self._add_solve(self, blocks, source, by, translate)
@@ -14951,7 +14439,6 @@ class ClipData(HierarchyData):
         clip=clip)`` writes it; a clip of no frame writes its nodes alone"""
         if not self.frame_count:
             skeleton = HierarchyData(node.copy() for node in self)
-            skeleton._axis_system, skeleton._unit = self._records()
             _save_fbx(filename, skeleton, as_ascii=as_ascii)
             return
         _save_fbx(filename, clip=self, as_ascii=as_ascii)
@@ -15026,8 +14513,6 @@ class ClipData(HierarchyData):
             of the same F, N the node count; shear alone may be missing.
         TypeError
             The rest pose is not a :class:`HierarchyData`, or is a clip.
-        ValueError
-            The rest pose records other axes or units than the clip.
         """
         super()._post_load()
 
@@ -15261,11 +14746,6 @@ def _takes_to_save(clips) -> list:
             f"save_fbx: no fbx time mode carries {rates[0]} fps; the rates a take may have are "
             f"{[round(rate, 6) for rate, _ in _FBX_FRAME_RATES]}"
         )
-
-    records = [(clip._axis_system, clip._unit) for clip in clips]
-    if len(set(records)) > 1:
-        shown = ", ".join(f"{label}: axis_system {a!r}, unit {u!r}" for label, (a, u) in zip(labels, records))
-        raise ValueError(f"save_fbx: the takes are in other axes or units ({shown}); one file has one of each")
 
     names = [clip.take.strip() or _blank_take(index) for index, clip in enumerate(clips)]
     twice = sorted({name for name in names if names.count(name) > 1})
@@ -15968,13 +15448,11 @@ class ClipList(DataList[ClipData]):
             clips.append(_glb_take_clip(ClipData, model, rig, column, animations, index, scale_factor, fps, 0, name))
         return cls(clips)
 
-    # --- every take's timebase and record --- #
+    # --- every take's timebase --- #
     fps         = _per_take("fps")
     start_frame = _per_take("start_frame")
     end_frame   = _per_take("end_frame",   writable=False)
     frame_count = _per_take("frame_count", writable=False)
-    axis_system = _per_take("axis_system")
-    unit        = _per_take("unit")
 
     # --- every take's nodes, at the frame it is on --- #
     translate = _per_take("translate")

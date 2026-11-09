@@ -202,10 +202,7 @@ def rig() -> HierarchyData:
         "collisionLayer", "limbs", attribute_type="enum", enum_names="body:limbs:props"
     )
 
-    h             = HierarchyData([root, pelvis, hip, aim, group, space])
-    h.axis_system = "z up, -y front, right handed"
-    h.unit        = 100.0
-    return h
+    return HierarchyData([root, pelvis, hip, aim, group, space])
 
 
 def hierarchy_data() -> HierarchyData:

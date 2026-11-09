@@ -428,7 +428,7 @@ def whole(clips) -> list:
         held.append((
             {name: (block.shape, block.tobytes()) for name, block in clip._blocks.items()},
             list(clip._columns),
-            (clip.fps, clip.start_frame, clip.unit, clip.axis_system, clip.take, clip.frame),
+            (clip.fps, clip.start_frame, clip.take, clip.frame),
             nodes,
         ))
     return held
@@ -601,7 +601,7 @@ class TestClipList(unittest.TestCase):
             return [
                 (
                     {name: block.tobytes() for name, block in channels(clip).items()},
-                    (clip.fps, clip.start_frame, clip.unit, clip.axis_system, clip.take, clip.frame),
+                    (clip.fps, clip.start_frame, clip.take, clip.frame),
                     [(n.name, int(n.rotate_order), n.node_type, bool(n.segment_scale_compensate), n.visibility,
                       n.radius, n.draw_style) for n in clip],
                 )
@@ -618,8 +618,6 @@ class TestClipList(unittest.TestCase):
                 return value + 1
             if isinstance(value, HierarchyData):
                 return HierarchyData(node.copy() for node in value)
-            if name == "axis_system":
-                return "z up, -y front, right handed"
             return value
 
         refused = set()
@@ -639,7 +637,7 @@ class TestClipList(unittest.TestCase):
                         except (TypeError, ValueError):
                             refused.add(name)
                             self.assertEqual(state(clips), before)
-        for name in ("fps", "start_frame", "unit", "translate", "world_matrix", "rotate_order"):
+        for name in ("fps", "start_frame", "translate", "world_matrix", "rotate_order"):
             self.assertIn(name, refused)
 
         # takes 0 and 1 turn their joints into transforms, which
@@ -944,9 +942,9 @@ class TestClipListLoad(unittest.TestCase):
 
     def same_take(self, got, want):
         """a take of a ClipList equal to the ClipData read alone: its frames,
-        timebase, name, labels and rest pose"""
+        timebase, name and rest pose"""
         self.assertEqual(fingerprint(got), fingerprint(want))
-        self.assertEqual((got.take, got.axis_system, got.unit), (want.take, want.axis_system, want.unit))
+        self.assertEqual(got.take, want.take)
 
     @unittest.skipIf(pygltflib is None, "pygltflib is not installed")
     def test_load_glb_every_animation(self):
