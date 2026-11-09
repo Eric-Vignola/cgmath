@@ -1,9 +1,10 @@
 """``cgmath.formats.load_fbx``: a hierarchy or its takes, the meshes on its nodes
 
 The r17-skeleton fork reads every node of a file as a joint (a skeleton
-node) or a transform (any other: a group, or a node holding a shape, a
-mesh, a camera, a light or a locator), at their own values, a bind pose left
-out, or the file's takes animating them, every animation stack a ClipData
+node), a locator (a null drawn as a cross, as Maya's own export writes one)
+or a transform (any other: a group, or a node holding a shape, a mesh, a
+camera or a light), at their own values, a bind pose left out, or the
+file's takes animating them, every animation stack a ClipData
 of one ClipList, the file's active stack the active take; each mesh as a
 MeshData on its node,
 the mesh's UV sets and its skin naming it by uuid. Everything comes back in
@@ -18,7 +19,7 @@ from collections import namedtuple
 
 import numpy as np
 
-from cgmath.formats._write import FORK, ORDER_PROPERTY, refuse_values
+from cgmath.formats._write import FORK, ORDER_PROPERTY, nonuniform, refuse_values
 
 # a parent scale this close to 1 leaves an inherit type nothing to change
 UNIT_SCALE = 1e-6
@@ -301,9 +302,11 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "
     Maya's Y-up and cm (:func:`_convert`): every node, one uuid each, every
     take's curves and the active take's position unless not ``take``, and
     with ``meshes`` each mesh and its skin, else the meshes left unread"""
+    from cgmath.formats._fbx_io import typed
     from cgmath.hierarchy.hierarchy import (
         _FBX_ROTATE_ORDERS,
         _FBX_VISIBLE,
+        _fbx_enum,
         _fbx_joint_look,
         _fbx_negative_zeros,
         _fbx_user_attributes,
@@ -313,6 +316,7 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "
 
     source  = fbx.FbxNode.EPivotSet.eSourcePivot
     inherit = fbx.FbxTransform.EInheritType
+    cross   = _fbx_enum(fbx.FbxNull, "ELook", "eCross")
     found   = _walk(scene)
     shapes  = []
     if meshes:
@@ -328,7 +332,11 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "
     for node, parent in found:
         name      = str(node.GetName())
         attribute = node.GetNodeAttribute()
-        joint     = attribute is not None and attribute.GetAttributeType() == fbx.FbxNodeAttribute.EType.eSkeleton
+        kind      = None if attribute is None else attribute.GetAttributeType()
+        joint     = kind == fbx.FbxNodeAttribute.EType.eSkeleton
+        # a null drawn as a cross is a locator, as Maya's own export writes
+        # one; a bare null is a group
+        locator   = kind == fbx.FbxNodeAttribute.EType.eNull and typed(attribute, fbx.FbxNull, fbx).Look.Get() == cross
         active    = bool(node.GetRotationActive())
         stored    = node.GetRotationOrder(source)
         stored    = int(getattr(stored, "value", stored))
@@ -372,7 +380,7 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "
             "name":         name,
             "parent":       parent,
             "uuid":         generate_uuid(),
-            "node_type":    "joint" if joint else "transform",
+            "node_type":    "joint" if joint else "locator" if locator else "transform",
             "translate":    translate,
             "rotate":       rotate,
             "scale":        scale,
@@ -452,6 +460,10 @@ def _takes(scene, fbx, found, nodes) -> tuple:
                     typed(prop.GetCurve(layer, component, False), fbx.FbxAnimCurve, fbx) if layer is not None else None
                     for component in "XYZ"
                 ]
+            # the node's visibility, one curve, stepped as Maya keys it
+            held["visibility"] = [
+                typed(node.Visibility.GetCurve(layer, False), fbx.FbxAnimCurve, fbx) if layer is not None else None
+            ]
             users = {}
             for attr, spec in entry["attrs"].items():
                 prop = node.FindProperty(attr)
@@ -713,6 +725,17 @@ def _build_clip(read: dict, hierarchy, order, take: dict):
             block[:, column] = rows
         clip._animated[field] = keyed
 
+    # each node's visibility: the file's value, or its Visibility curve's,
+    # held frame by frame where the take changes it
+    from cgmath.hierarchy.hierarchy import _FBX_VISIBLE
+
+    shown = np.repeat(np.array([[entries[i]["visibility"] for i in order]], dtype=bool), count, axis=0)
+    for column, i in enumerate(order):
+        value = take["values"][i][0]["visibility"][0]
+        if value is not None:
+            shown[:, column] = np.asarray(value, dtype=np.float64) > _FBX_VISIBLE
+    clip._show(shown)
+
     # the user channels: a key's value as the attribute holds it, an enum's
     # field place read back as its index
     for column, i in enumerate(order):
@@ -767,25 +790,29 @@ def _scales(worlds: np.ndarray) -> np.ndarray:
 
 
 def _refuse_inherit(entries, parents, worlds, scales, frames) -> None:
-    """ValueError for an inherit type a joint or transform can not hold
-    where the parent's scale is not 1: eInheritRrSs where the parent's world
-    scale is not, eInheritRrs on a transform where the parent's own is not;
-    ``worlds`` (F, N, 4, 4) and ``scales`` (F, N, 3) in the file's order"""
+    """ValueError for an inherit type a joint or transform can not hold:
+    eInheritRrSs under a parent whose world scale is not uniform (under a
+    uniform one, whatever its size, the parent's scale commutes with the
+    child's rotation and the type is the standard product), eInheritRrs on
+    a transform under a parent whose own scale is not 1 (Maya holds it on
+    joints alone, as segment scale compensate); ``worlds`` (F, N, 4, 4) and
+    ``scales`` (F, N, 3) in the file's order"""
     for i, entry in enumerate(entries):
         parent = int(parents[i])
         if parent < 0 or entry["inherit"] == "RSrs" or (entry["inherit"] == "Rrs" and entry["node_type"] == "joint"):
             continue
         if entry["inherit"] == "RrSs":
             scale = _scales(worlds[:, parent])
-            what  = "eInheritRrSs under a parent whose world scale"
+            off   = np.flatnonzero(nonuniform(scale))
+            what  = "eInheritRrSs under a parent whose world scale is not uniform"
         else:
             scale = np.asarray(scales[:, parent], dtype=np.float64)
-            what  = "eInheritRrs on a transform under a parent whose scale"
-        off = np.flatnonzero(np.any(np.abs(scale - 1.0) > UNIT_SCALE, axis=-1))
+            off   = np.flatnonzero(np.any(np.abs(scale - 1.0) > UNIT_SCALE, axis=-1))
+            what  = "eInheritRrs on a transform under a parent whose scale is not 1"
         if len(off):
             when = "" if frames is None else f" frame {int(frames[off[0]])}"
             raise ValueError(
-                f"load_fbx: node {entry['name']!r} channel 'inherit type'{when} is {what} is not 1, "
+                f"load_fbx: node {entry['name']!r} channel 'inherit type'{when} is {what}, "
                 f"{np.round(scale[off[0]], 9).tolist()}, which a joint or transform can not hold"
             )
 
