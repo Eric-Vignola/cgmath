@@ -1174,6 +1174,58 @@ class TestClipListLoad(unittest.TestCase):
         self.assertEqual(fingerprint(got), fingerprint(want))
         self.assertEqual(got.take, want.take)
 
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_load_fbx_every_take(self):
+        """an sdk file of three stacks, two named idle: every take over every
+        node, in file order, told apart as the glb loader tells animations
+        apart, each on its own span, the first active when the file marks
+        none; ClipData.load_fbx is the active take"""
+        from cgmath.formats import load_fbx
+
+        # TAKES with the third take's hips scale keys made rotate keys: the
+        # fork refuses an uneven scale on a node with children, and the sdk's
+        # default inherit type (RrSs) under any scaled parent
+        turned    = list(TAKES)
+        turned[2] = ("idle", {"hips": {"r": [(0, (0, 0, 0)), (10, (0, 0, 20))]}, "head": {"t": [(2.4, (0, 25, 0)), (9, (0, 26, 1))]}})
+        path      = build_fbx(os.path.join(self.tmp.name, "takes.fbx"), takes=tuple(turned))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            clips = ClipList.load_fbx(path)
+        self.assertEqual(len([w for w in caught if "takes that would read under one name are told apart" in str(w.message)]), 1)
+        self.assertEqual(clips.take, ["walk", "idle", "idle_1"])
+        self.assertEqual((clips.frame_count, clips.start_frame, clips.fps), ([25, 25, 11], [0, 6, 0], [24.0] * 3))
+        self.assertIs(clips.active, clips[0])
+        self.assertEqual(clips.name[0], ["offset", "hips", "spine", "head"])
+        self.assertEqual(len({tuple(uuids) for uuids in clips.uuid}), 1)
+        np.testing.assert_allclose(clips["walk"].frames["hips"].translate[12],  (5.0, 92.0, 1.0),  rtol=0, atol=1e-5)
+        np.testing.assert_allclose(clips["idle"].frames["head"].rotate[14 - 6], (0.0, -10.0, 0.0), rtol=0, atol=1e-5)
+        np.testing.assert_allclose(clips["idle_1"].frames["hips"].rotate[10],   (0.0, 0.0, 20.0),  rtol=0, atol=1e-5)
+        self.assertEqual([x.tolist() for x in clips.keyed], [[True, True, True, False], [False, False, False, True], [False, True, False, True]])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            self.assertEqual(fingerprint(ClipData.load_fbx(path)), fingerprint(clips.active))
+            self.assertEqual(load_fbx(path).clip.take, clips.take)
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_load_fbx_reads_the_active_take(self):
+        """the stack a file marks active is the active take; a stack of no
+        key is a take holding every node still"""
+        takes, active = DIALOG_FILES["three_takes_middle_active"]
+        clips = ClipList.load_fbx(build_dialog_fbx(os.path.join(self.tmp.name, "middle.fbx"), takes, active))
+        self.assertEqual(clips.take, ["first", "middle", "last"])
+        self.assertIs(clips.active, clips["middle"])
+        self.assertEqual((clips.start_frame, clips.frame_count), ([0, 20, 40], [11, 11, 11]))
+        for clip, (name, keys, span) in zip(clips, takes):
+            np.testing.assert_allclose(clip.frames["probe_root"].translate[[0, -1], 0], [keys[0][1], keys[-1][1]], rtol=0, atol=1e-5)
+        self.assertEqual(ClipData.load_fbx(os.path.join(self.tmp.name, "middle.fbx")).take, "middle")
+
+        takes, active = DIALOG_FILES["empty_first_take"]
+        clips = ClipList.load_fbx(build_dialog_fbx(os.path.join(self.tmp.name, "empty.fbx"), takes, active))
+        self.assertEqual(clips.take, ["Take 001", "Walk Forward", "Run"])
+        self.assertIs(clips.active, clips[0])
+        self.assertEqual([x.tolist() for x in clips.keyed], [[False, False], [True, False], [True, False]])
+        self.assertEqual(clips.frame_count, [49, 11, 21])
+
     @unittest.skipIf(pygltflib is None, "pygltflib is not installed")
     def test_load_glb_every_animation(self):
         from unittest import mock
@@ -1356,10 +1408,67 @@ class TestClipListSaveFbx(unittest.TestCase):
             if rate > 0 and name not in held:
                 self.assertTrue(any(abs(rate - r) <= 1e-9 * r for r, _ in _FBX_FRAME_RATES), name)
 
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_every_take_written_and_read(self):
+        """ClipList.save_fbx writes every take, the active one the file's;
+        ClipList.load_fbx gives the list back, each take to float32, and a
+        second cycle gives the first back"""
+        clips        = oriented_takes()
+        clips.active = "b"
+        path         = self.path("takes.fbx")
+        clips.save_fbx(path)
+        back = ClipList.load_fbx(path)
+        self.assert_back(clips, back, exact_statics=True)
+        self.assertIs(back.active, back["b"])
+        self.assertEqual([x.tolist() for x in back.keyed], [x.tolist() for x in clips.keyed])
+        back.save_fbx(self.path("again.fbx"))
+        again = ClipList.load_fbx(self.path("again.fbx"))
+        self.assert_back(back, again, exact_statics=True)  # float32 in, float32 out: the same values
+        self.assertIs(again.active, again["b"])
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_refused_before_writing(self):
+        """orients that move within a take, or differ between takes, two
+        frame rates, two takes of one name: ValueError, no file"""
+        for label, clips, error in (
+            ("moving", oriented_takes(), "a file holds one joint_orient a node, which no curve animates"),
+            ("rates", oriented_takes(), "a file holds one frame rate"),
+            ("names", oriented_takes(), r"two takes would be written as \['a'\]"),
+            ("orients", oriented_takes(), r"node 'n1' channel 'joint_orient' is \[1\.0, 2\.0, 3\.0\] in take 2 \('c'\) and"),
+        ):
+            with self.subTest(label):
+                if label == "moving":
+                    clips[0].frames["n1"].joint_orient = np.array([[5.0, 15.0, 5.0 + f] for f in range(5)])
+                elif label == "rates":
+                    clips[1].fps = 30.0
+                elif label == "names":
+                    clips[2].take = "a"
+                elif label == "orients":
+                    clips[2].frames["n1"].joint_orient = (1.0, 2.0, 3.0)
+                with self.assertRaisesRegex(ValueError, error):
+                    clips.save_fbx(self.path("refused.fbx"))
+                self.assertFalse(os.path.exists(self.path("refused.fbx")))
+
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+    def test_maya_reads_each_take(self):
+        """Maya 2025's FBXImport -t of each take of a three-take save: every
+        node's world on every frame within 1e-6 of the take"""
+        clips        = oriented_takes()
+        clips.active = "c"
+        path         = self.path("takes.fbx")
+        clips.save_fbx(path)
+        back = ClipList.load_fbx(path)
+        for index, clip in enumerate(back):
+            frames = clip.start_frame + np.arange(clip.frame_count)
+            worlds = self.maya_frames(path, index + 1, frames)
+            wanted = np.asarray(clip.frames.world_matrix)
+            for column, node in enumerate(clip):
+                np.testing.assert_allclose(worlds[node.name], wanted[:, column], rtol=0, atol=1e-6, err_msg=(clip.take, node.name))
+
     def maya_frames(self, path, take, frames):
         """{node: (F, 4, 4) world matrices} of Maya 2025's FBXImport of take
         ``take`` (1-based -t), on each of ``frames``; skips without Maya"""
-        from cgmath._tests.test_fbx_labels import _maya
+        from cgmath._tests.test_skeleton_fbx import _maya
 
         maya = _maya()
         if maya is None:
@@ -1372,7 +1481,7 @@ class TestClipListSaveFbx(unittest.TestCase):
         nodes  = cmds.ls(type="transform", long=True)
         worlds = {node.rsplit("|", 1)[-1]: [] for node in nodes}
         for frame in frames:
-            cmds.currentTime(frame)
+            cmds.currentTime(int(frame))  # a numpy int is no Maya time
             for node in nodes:
                 worlds[node.rsplit("|", 1)[-1]].append(cmds.xform(node, q=True, ws=True, m=True))
         return {name: np.array(rows).reshape(-1, 4, 4) for name, rows in worlds.items()}

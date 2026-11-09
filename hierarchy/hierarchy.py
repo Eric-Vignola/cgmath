@@ -111,7 +111,7 @@ MAYA_ATTRIBUTE_MAP = {
 SUPPORTED_NODE_TYPES = ("transform", "joint", "locator", "space_transform")
 
 # what no longer works names the fork it does not work on
-_FORK = "the r17-skeleton fork (one hierarchy and one take)"
+_FORK = "the r17-skeleton fork (one hierarchy and its takes)"
 
 # ---------------------------------------------------------------------------- #
 
@@ -14452,14 +14452,15 @@ class ClipData(HierarchyData):
     @classmethod
     def load_fbx(cls, filename) -> "ClipData":
         """the active take of an fbx file over every node, as
-        ``cgmath.formats.load_fbx`` reads it, the meshes and skins left out;
-        ValueError for a file holding no take"""
-        from cgmath.formats._load import load_take
+        ``cgmath.formats.load_fbx`` reads the file's takes
+        (``ClipList.load_fbx`` gives them all), the meshes and skins left
+        out; ValueError for a file holding no take"""
+        from cgmath.formats._load import load_takes
 
-        clip = load_take(filename)
-        if clip is None:
+        clips = load_takes(filename)
+        if clips is None:
             raise ValueError(f"{filename} holds no take")
-        return clip
+        return clips.active
 
     def save_fbx(self, filename, as_ascii=False):
         """the clip written as one take, as ``cgmath.formats.save_fbx(filename,
@@ -15600,19 +15601,25 @@ class ClipList(DataList[ClipData]):
     set_joint_orient_to_rotate = _every_take(ClipData.set_joint_orient_to_rotate)
     set_parent                 = _every_take(ClipData.set_parent)
 
-    def save_fbx(self, filename, *args, **kwargs) -> None:
-        raise NotImplementedError(
-            f"ClipList.save_fbx: {_FORK} saves one skeleton and one take, "
-            "cgmath.formats.save_fbx(filename, clip=clip)"
-        )
+    def save_fbx(self, filename, as_ascii=False) -> None:
+        """every take written to one file, as ``cgmath.formats.save_fbx(filename,
+        clip=clips)`` writes them: the nodes at the active take's first frame,
+        one animation stack a take, the active take's the file's current one"""
+        _save_fbx(filename, clip=self, as_ascii=as_ascii)
 
     # --- reading a file's takes --- #
     @classmethod
-    def load_fbx(cls, filename, *args, **kwargs) -> "ClipList":
-        raise NotImplementedError(
-            f"ClipList.load_fbx: {_FORK} reads one skeleton and its active take, "
-            "cgmath.formats.load_fbx(filename)"
-        )
+    def load_fbx(cls, filename) -> "ClipList":
+        """every take of an fbx file over every node, as
+        ``cgmath.formats.load_fbx`` reads them, the meshes and skins left
+        out: a ClipList in file order, the file's active take active, empty
+        for a file holding no take"""
+        from cgmath.formats._load import load_takes
+
+        if cls is not ClipList:
+            raise NotImplementedError(f"{cls.__name__}.load_fbx: {_FORK} reads a ClipList")
+        clips = load_takes(filename)
+        return ClipList() if clips is None else clips
 
     @classmethod
     def load_glb(

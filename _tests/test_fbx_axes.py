@@ -284,7 +284,7 @@ class TestAxes(_Files):
             with self.subTest(label):
                 path  = authored(self.path("axes.fbx"), system, flip=flips)
                 still = HierarchyData.load_fbx(path)
-                clip  = load_fbx(path).clip
+                clip  = load_fbx(path).clip.active
                 want_still, want_moving = truth(path, convert=True)
                 self.assertWorlds(self.rig_worlds(still), want_still)
                 self.assertWorlds(self.clip_worlds(clip), want_moving)
@@ -303,7 +303,7 @@ class TestAxes(_Files):
         from cgmath.transforms import euler_to_matrix, matrix_to_euler
 
         path   = authored(self.path("zup.fbx"), FBX.FbxAxisSystem.MayaZUp)
-        clip   = load_fbx(path).clip
+        clip   = load_fbx(path).clip.active
         rig    = HierarchyData.load_fbx(path)
         rotate = np.array(clip.frames["group"].rotate)
         self.assertLess(float(np.abs(np.diff(rotate, axis=0)).max()), 90.0)
@@ -326,7 +326,7 @@ class TestAxes(_Files):
             with self.subTest(label):
                 path  = authored(self.path("yup.fbx"), system, flip=flips)
                 still = HierarchyData.load_fbx(path)
-                clip  = load_fbx(path).clip
+                clip  = load_fbx(path).clip.active
                 want_still, want_moving = truth(path, convert=False)
                 self.assertWorlds(self.rig_worlds(still), want_still)
                 self.assertWorlds(self.clip_worlds(clip), want_moving)
@@ -345,7 +345,7 @@ class TestAxes(_Files):
                 with self.subTest(unit=unit, axes=label):
                     path  = authored(self.path("unit.fbx"), system, unit=unit)
                     still = HierarchyData.load_fbx(path)
-                    clip  = load_fbx(path).clip
+                    clip  = load_fbx(path).clip.active
                     want_still, want_moving = truth(path, convert=convert, cm=cm)
                     self.assertWorlds(self.rig_worlds(still), want_still, atol=1e-9 * cm)
                     self.assertWorlds(self.clip_worlds(clip), want_moving, atol=1e-9 * cm)
@@ -397,9 +397,9 @@ class TestSkinnedZUp(_Files):
         # the take's keys are float32: the Y-up cm file's read, every length
         # a hundred times, turned, is the Z-up metres file's read
         base = load_fbx(cm)
-        want = np.asarray(base.clip.frames.world_matrix).copy()
+        want = np.asarray(base.clip.active.frames.world_matrix).copy()
         want[..., 3, :3] *= 100.0
-        np.testing.assert_allclose(np.asarray(got.clip.frames.world_matrix), want @ turn4, rtol=1e-12, atol=1e-9)
+        np.testing.assert_allclose(np.asarray(got.clip.active.frames.world_matrix), want @ turn4, rtol=1e-12, atol=1e-9)
         # the mesh on geo, a root at identity in the file, turned: its
         # points in its node's space as they were, a hundred times
         self.assertEqual(got.hierarchy[got.meshes[0].parent_uuid].name, "geo")
@@ -427,9 +427,10 @@ class TestSkinnedZUp(_Files):
         for channel in ("translate", "rotate", "scale", "joint_orient", "rotate_axis"):
             np.testing.assert_allclose(getattr(second.hierarchy, channel), getattr(first.hierarchy, channel), rtol=1e-6, atol=1e-6, err_msg=channel)
             np.testing.assert_array_equal(getattr(third.hierarchy, channel), getattr(second.hierarchy, channel), err_msg=channel)
-        for name, block in first.clip._blocks.items():
-            np.testing.assert_allclose(second.clip._blocks[name], block, rtol=1e-6, atol=1e-6, err_msg=name)
-            np.testing.assert_array_equal(third.clip._blocks[name], second.clip._blocks[name], err_msg=name)
+        self.assertEqual((second.clip.take, third.clip.take), (first.clip.take, first.clip.take))
+        for name, block in first.clip.active._blocks.items():
+            np.testing.assert_allclose(second.clip.active._blocks[name], block, rtol=1e-6, atol=1e-6, err_msg=name)
+            np.testing.assert_array_equal(third.clip.active._blocks[name], second.clip.active._blocks[name], err_msg=name)
         np.testing.assert_array_equal(second.meshes[0].points, first.meshes[0].points)
         np.testing.assert_array_equal(second.skins[0].weights, first.skins[0].weights)
         self.assertEqual(second.hierarchy[second.meshes[0].parent_uuid].name, "geo")
@@ -461,7 +462,7 @@ class TestMayaAxes(_InMaya):
         for unit, cm in (("cm", 1.0), ("m", 100.0)):
             with self.subTest(unit=unit):
                 path = relabelled(self.path("y_cm.fbx"), self.path(f"z_{unit}.fbx"), FBX.FbxAxisSystem.MayaZUp, unit)
-                clip = load_fbx(path).clip
+                clip = load_fbx(path).clip.active
                 self.imported(path)
                 self.assertEqual(cmds.ls(type="dagPose"), [])
                 self.assertEqual(clip.start_frame, 0)
@@ -512,7 +513,7 @@ class TestMayaAxes(_InMaya):
         geom   = np.array(cmds.getAttr(f"{clusters[0]}.geomMatrix")).reshape(4, 4)
         near(geom, worlds[back.hierarchy.name.index("geo")], err_msg="geomMatrix")
         deformer = SkinDeformData(back.meshes[0], back.skins[0], bind_rig=back.hierarchy)
-        wanted   = deformer.apply(back.clip.frames)
+        wanted   = deformer.apply(back.clip.active.frames)
         for f in (0, TAKE // 2, TAKE - 1):
             cmds.currentTime(START + f)
             got = np.array([tuple(p)[:3] for p in om.MFnMesh(dag).getPoints(om.MSpace.kWorld)])

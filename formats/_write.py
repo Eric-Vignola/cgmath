@@ -1,9 +1,10 @@
-"""``cgmath.formats.save_fbx``: a hierarchy or a take, the meshes on its nodes
+"""``cgmath.formats.save_fbx``: a hierarchy or its takes, the meshes on its nodes
 
 The r17-skeleton fork writes a hierarchy of joints and transforms, or a
-clip's nodes and its take, each mesh as the shape of its node, a bind pose
-with skins only. Nothing here imports the fbx sdk, nor the classes, until a
-file is written: the classes' modules import this one.
+ClipList's nodes and its takes (a ClipData as a ClipList of one), each mesh
+as the shape of its node, a bind pose with skins only. Nothing here imports
+the fbx sdk, nor the classes, until a file is written: the classes' modules
+import this one.
 """
 
 import logging
@@ -34,16 +35,20 @@ ORDER_PROPERTY = "cgmath:index"
 
 def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=None, as_ascii: bool = False) -> None:
     """writes one of ``hierarchy``, a HierarchyData of joints and transforms,
-    or ``clip``, a ClipData of joints and transforms, and ``meshes`` on their
+    or ``clip``, a ClipList of ClipData over joints and transforms (one
+    ClipData is written as a ClipList of one), and ``meshes`` on their
     nodes; binary unless ``as_ascii``
 
-    A hierarchy alone: its nodes and their own values, no take. A clip alone:
-    its nodes, their static values its pose at its first frame, and one take,
-    named ``clip.take`` or "Take 001", spanning the clip's frames at its fps;
-    every channel of every node has its curves, one a component: a constant
-    channel one key on the clip's first frame, an animated one a key a
-    frame. A hierarchy given with a clip is a bind pose, which comes with
-    skins (NotImplementedError without them).
+    A hierarchy alone: its nodes and their own values, no take. A clip
+    alone: its nodes, their static values the active take's pose at its
+    first frame, and one animation stack a take, in the list's order, named
+    ``take`` or "Take 001", "Take 002" ... by position, each spanning its
+    take's frames at the takes' one fps, the active take's stack the file's
+    current one (``ActiveAnimStackName``); every channel of every node has
+    its curves in every stack, one a component: a constant channel one key
+    on the take's first frame, an animated one a key a frame. A hierarchy
+    given with a clip is a bind pose, which comes with skins
+    (NotImplementedError without them).
 
     ``meshes``, a MeshList or one MeshData: each the shape of the transform
     its ``parent_uuid`` names, named after the mesh (unnamed for a mesh of
@@ -60,8 +65,11 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
     Refused, ValueError naming node, channel and frame, before anything is
     written: a node that is no joint or transform, a transform holding
     segment scale compensate or a joint orient, a shear, a scale that is not
-    uniform on a node with children, in the hierarchy or on any frame of the
-    clip, a joint orient or rotate axis the clip changes over its frames; a
+    uniform on a node with children, in the hierarchy or on any frame of any
+    take, a joint orient or rotate axis a take changes over its frames or
+    holds other than the active take's (a file holds one a node), takes at
+    two frame rates (a file holds one time mode), two takes written under
+    one name, a ClipList of no take, a take of no frame; a
     mesh holding holes or faces naming points it does not hold, two meshes
     on one node, a mesh on a joint (Maya's FBX drops one); a UV set or a
     skin naming no mesh; a UV set of no name, of
@@ -72,19 +80,24 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
     off its bind world (Maya's skinCluster applies the node's own transform
     on top of the skin; measured). UV sets given without meshes, skins
     without the hierarchy and the meshes, nothing given, a hierarchy that is
-    not a HierarchyData (a ClipData is passed as ``clip``), a clip that is
-    not a ClipData, meshes, skins or uvs of another class: TypeError.
+    not a HierarchyData (a ClipData or a ClipList is passed as ``clip``), a
+    clip that is not a ClipData or a ClipList, meshes, skins or uvs of
+    another class: TypeError.
     """
     # imported here: the classes' modules import this one
     from cgmath.geometry.mesh import MeshData, MeshList, UVData, UVList
     from cgmath.geometry.skin_weights import SkinData, SkinList
-    from cgmath.hierarchy.hierarchy import FBX, ClipData, FbxExporter, HierarchyData
+    from cgmath.hierarchy.hierarchy import FBX, ClipData, ClipList, FbxExporter, HierarchyData
 
     if hierarchy is not None and type(hierarchy) is not HierarchyData:
-        hint = ", pass it as clip=" if isinstance(hierarchy, ClipData) else ""
+        hint = ", pass it as clip=" if isinstance(hierarchy, (ClipData, ClipList)) else ""
         raise TypeError(f"save_fbx: the hierarchy is a HierarchyData, not a {type(hierarchy).__name__}{hint}")
-    if clip is not None and not isinstance(clip, ClipData):
-        raise TypeError(f"save_fbx: the clip is a ClipData, not a {type(clip).__name__}")
+    if isinstance(clip, ClipData):
+        clip = ClipList([clip])  # one take, the active one
+    if clip is not None and not isinstance(clip, ClipList):
+        raise TypeError(f"save_fbx: the clip is a ClipData or a ClipList, not a {type(clip).__name__}")
+    if clip is not None and not len(clip):
+        raise ValueError("save_fbx: the ClipList holds no take")
     if isinstance(meshes, MeshData) and not isinstance(meshes, UVData):
         meshes = MeshList([meshes])
     if meshes is not None and (not isinstance(meshes, MeshList) or isinstance(meshes, UVList)):
@@ -116,7 +129,8 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
         )
     if hierarchy is None and clip is None and meshes is None:
         raise TypeError(
-            "save_fbx takes a hierarchy (a HierarchyData) or clip= (a ClipData), and meshes= (a MeshList or a MeshData)"
+            "save_fbx takes a hierarchy (a HierarchyData) or clip= (a ClipData or a ClipList), and meshes= (a MeshList "
+            "or a MeshData)"
         )
     if FBX is None or FbxExporter is None:
         raise ImportError("fbx module not found")
@@ -126,11 +140,12 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
     if hierarchy is not None:
         _check_hierarchy(hierarchy)
     if clip is not None:
-        _check_clip(clip)
+        _check_takes(clip)
         if hierarchy is None:
-            written = clip.at(clip.start_frame)
+            written = clip.active.at(clip.active.start_frame)
         else:
-            _check_same(hierarchy, clip)
+            for take in clip:
+                _check_same(hierarchy, take)
     if meshes is not None:
         _check_meshes(meshes, written)
     if uvs is not None:
@@ -138,7 +153,8 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
     if skins is not None:
         _check_skins(skins, meshes, hierarchy)
         if clip is not None:
-            _check_still(skins, meshes, hierarchy, clip)
+            for take in clip:
+                _check_still(skins, meshes, hierarchy, take)
 
     fbx = FBX
     with FbxExporter() as exporter:
@@ -149,7 +165,7 @@ def save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=N
         for index, fbx_node in enumerate(nodes):
             _index(fbx_node, index, fbx)
         if clip is not None:
-            _write_take(exporter, nodes, clip)
+            _write_takes(exporter, nodes, clip)
         if meshes is not None:
             by_uuid = {node.uuid: fbx_node for node, fbx_node in zip(written, nodes)} if written is not None else {}
             shapes  = {}
@@ -266,6 +282,43 @@ def _check_clip(clip) -> None:
                 f"{channel} a node, which no curve animates"
             )
     refuse_values("save_fbx, the clip", nodes, clip.frames.shear, clip.frames.scale, frames)
+
+
+def _check_takes(clips) -> None:
+    """every take as :func:`_check_clip` checks one, then the list as one
+    file holds it: one frame rate (a file holds one time mode), every take's
+    joint orient and rotate axis the active take's (a file holds one a node,
+    unkeyed; each take holds one over its frames, checked first), and no two
+    takes written under one name"""
+    from cgmath.hierarchy.hierarchy import _blank_take, _take_label
+
+    for clip in clips:
+        _check_clip(clip)
+    rates = sorted({float(clip.fps) for clip in clips})
+    if len(rates) > 1:
+        raise ValueError(f"save_fbx: the takes play at {rates} fps; a file holds one frame rate")
+
+    active = clips.active
+    at     = clips._active
+    for channel in ("joint_orient", "rotate_axis"):
+        held = np.asarray(getattr(active.frames, channel), dtype=np.float64)[0]
+        for index, clip in enumerate(clips):
+            if clip is active:
+                continue
+            values = np.asarray(getattr(clip.frames, channel), dtype=np.float64)[0]
+            bad    = np.flatnonzero(np.any(values != held, axis=-1))
+            if len(bad):
+                column = int(bad[0])
+                raise ValueError(
+                    f"save_fbx: node {clip[column].name!r} channel {channel!r} is {values[column].tolist()} in "
+                    f"{_take_label(clip, index)} and {held[column].tolist()} in the active {_take_label(active, at)}: "
+                    f"a file holds one {channel} a node, the active take's"
+                )
+
+    names = [clip.take.strip() or _blank_take(index) for index, clip in enumerate(clips)]
+    twice = sorted({name for name in names if names.count(name) > 1})
+    if twice:
+        raise ValueError(f"save_fbx: two takes would be written as {twice}; take names must differ")
 
 
 def _user_kinds(node) -> dict:
@@ -604,18 +657,36 @@ def _keys(curve, times, values, mode, fbx) -> None:
         curve.KeyModifyEnd()
 
 
-def _write_take(exporter, nodes, clip) -> None:
-    """one take: a stack spanning the clip's frames, a BaseLayer, and the
-    curves of every channel of every node"""
+def _write_takes(exporter, nodes, clips) -> None:
+    """every take of ``clips``, one animation stack each (:func:`_write_take`)
+    in the list's order, named ``take`` or by position, the file's time mode
+    the takes' one frame rate, the active take's stack the file's current one"""
+    from cgmath.hierarchy.hierarchy import FBX as fbx
+    from cgmath.hierarchy.hierarchy import _blank_take, _fbx_rate_mode
+
+    scene = exporter.scene
+    mode  = getattr(fbx.FbxTime.EMode, _fbx_rate_mode(float(clips[0].fps)))
+    scene.GetGlobalSettings().SetTimeMode(mode)
+    active = clips.active
+    held   = None
+    for index, clip in enumerate(clips):
+        stack = _write_take(exporter, nodes, clip, clip.take.strip() or _blank_take(index), mode)
+        if clip is active:
+            held = stack
+    scene.SetCurrentAnimationStack(held)
+    scene.ActiveAnimStackName.Set(fbx.FbxString(held.GetName()))
+
+
+def _write_take(exporter, nodes, clip, name: str, mode):
+    """one take: a stack named ``name`` spanning the clip's frames in time
+    mode ``mode``, a BaseLayer, and the curves of every channel of every
+    node; the stack"""
     from cgmath.formats._fbx_io import typed
     from cgmath.formats.fbx import _user_property_value
     from cgmath.hierarchy.hierarchy import FBX as fbx
-    from cgmath.hierarchy.hierarchy import _fbx_rate_mode, _user_channels
+    from cgmath.hierarchy.hierarchy import _user_channels
 
-    scene = exporter.scene
-    mode  = getattr(fbx.FbxTime.EMode, _fbx_rate_mode(float(clip.fps)))
-    scene.GetGlobalSettings().SetTimeMode(mode)
-
+    scene  = exporter.scene
     frames = clip.start_frame + np.arange(clip.frame_count)
     times  = []
     for frame in frames.tolist():
@@ -628,14 +699,11 @@ def _write_take(exporter, nodes, clip) -> None:
     if first.Get() == 0 and last.Get() == 0:
         last.Set(1)
 
-    name  = clip.take.strip() or "Take 001"
     stack = fbx.FbxAnimStack.Create(scene, name)
     stack.SetLocalTimeSpan(fbx.FbxTimeSpan(first, last))
     stack.SetReferenceTimeSpan(fbx.FbxTimeSpan(first, last))
     layer = fbx.FbxAnimLayer.Create(scene, "BaseLayer")
     stack.AddMember(layer)
-    scene.SetCurrentAnimationStack(stack)
-    scene.ActiveAnimStackName.Set(fbx.FbxString(name))
 
     linear = fbx.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear
     clip._settle()
@@ -680,3 +748,4 @@ def _write_take(exporter, nodes, clip) -> None:
             for axis, component in enumerate("XYZ"):
                 curve = typed(prop.GetCurve(layer, component, True), fbx.FbxAnimCurve, fbx)
                 _keys(curve, times[: len(rows)], rows[:, axis], linear, fbx)
+    return stack
