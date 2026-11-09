@@ -46,13 +46,14 @@ def save_fbx(
     cameras        = None,
     lights         = None,
     materials      = None,
+    morphs         = None,
     as_ascii: bool = False,
 ) -> None:
     """writes one of ``hierarchy``, a HierarchyData of joints and transforms,
     or ``clip``, a ClipList of ClipData over joints and transforms (one
     ClipData is written as a ClipList of one), and ``meshes``, ``cameras``
-    and ``lights`` on their nodes, ``materials`` on their meshes; binary
-    unless ``as_ascii``
+    and ``lights`` on their nodes, ``materials`` and ``morphs`` on their
+    meshes; binary unless ``as_ascii``
 
     A hierarchy alone: its nodes and their own values, no take. A clip
     alone: its nodes, their static values the active take's pose at its
@@ -108,6 +109,18 @@ def save_fbx(
     wrapping as the material says (Maya's import takes the UV set and
     leaves both wraps on; measured).
 
+    ``morphs``, a MorphList or one MorphData: each on the mesh its
+    ``mesh_uuid`` names, written as Maya's exporter writes a blendShape
+    (measured): one FbxBlendShape a mesh, named after its targets'
+    ``deformer`` (None as "blendShape"), one channel the targets of a name,
+    named "deformer.name" as Maya names one (its import strips the prefix),
+    its DeformPercent the targets' weight times 100, one shape a target
+    holding every point of the mesh, moved by the offsets, in-betweens
+    first by ``at``, each at its ``at`` times 100 as the shape's full
+    weight; a target's normals are not written. Two deformer names on one
+    mesh are refused: Maya's import deforms a mesh by its last blend shape
+    deformer alone (measured).
+
     Refused, ValueError naming node, channel and frame, before anything is
     written: a node that is no joint, transform or locator, a transform or
     locator holding segment scale compensate or a joint orient, a shear, a
@@ -132,18 +145,24 @@ def save_fbx(
     materials leaving faces of their mesh uncovered (a mesh is covered whole
     or not at all), a material covering the whole mesh beside another on
     it, a texture that is not (H, W, C) uint8 with 1 to 4 channels (a .fbx
-    embeds an 8 bit PNG). UV sets or materials given without meshes, skins
+    embeds an 8 bit PNG); a morph naming no mesh, moving points its mesh
+    does not hold or as many offsets as it has not indices, two deformer
+    names on one mesh, a channel (the targets of one name on one mesh)
+    without one target at 1, with two targets at one ``at``, an in-between
+    above 1, or targets of two weights. UV sets, materials or morphs given
+    without meshes, skins
     without the hierarchy and the meshes, nothing given, a hierarchy that is
     not a HierarchyData (a ClipData or a ClipList is passed as ``clip``), a
     clip that is not a ClipData or a ClipList, meshes, skins, uvs, cameras,
-    lights or materials of another class: TypeError. A texture with no PIL
-    (pillow) to encode it: ImportError.
+    lights, materials or morphs of another class: TypeError. A texture with
+    no PIL (pillow) to encode it: ImportError.
     """
     # imported here: the classes' modules import this one
     from cgmath.geometry.camera import CameraData, CameraList
     from cgmath.geometry.light import LightData, LightList
     from cgmath.geometry.material import MaterialData, MaterialList
     from cgmath.geometry.mesh import MeshData, MeshList, UVData, UVList
+    from cgmath.geometry.morph_target import MorphData, MorphList
     from cgmath.geometry.skin_weights import SkinData, SkinList
     from cgmath.hierarchy.hierarchy import FBX, ClipData, ClipList, FbxExporter, HierarchyData
 
@@ -180,16 +199,23 @@ def save_fbx(
         materials = MaterialList([materials])
     if materials is not None and not isinstance(materials, MaterialList):
         raise TypeError(f"save_fbx: the materials are a MaterialList or a MaterialData, not a {type(materials).__name__}")
+    if isinstance(morphs, MorphData):
+        morphs = MorphList([morphs])
+    if morphs is not None and not isinstance(morphs, MorphList):
+        raise TypeError(f"save_fbx: the morphs are a MorphList or a MorphData, not a {type(morphs).__name__}")
     meshes    = meshes if meshes is not None and len(meshes) else None
     skins     = skins if skins is not None and len(skins) else None
     uvs       = uvs if uvs is not None and len(uvs) else None
     cameras   = cameras if cameras is not None and len(cameras) else None
     lights    = lights if lights is not None and len(lights) else None
     materials = materials if materials is not None and len(materials) else None
+    morphs    = morphs if morphs is not None and len(morphs) else None
     if uvs is not None and meshes is None:
         raise TypeError("save_fbx: UV sets are written on their mesh; missing: meshes=")
     if materials is not None and meshes is None:
         raise TypeError("save_fbx: materials are written on their mesh; missing: meshes=")
+    if morphs is not None and meshes is None:
+        raise TypeError("save_fbx: morphs are written on their mesh; missing: meshes=")
     if skins is not None:
         missing = [
             what for what, given in (("hierarchy (a HierarchyData, the bind pose)", hierarchy), ("meshes=", meshes))
@@ -234,6 +260,8 @@ def save_fbx(
         _check_views(cameras, lights, meshes, written)
     if materials is not None:
         _check_materials(materials, meshes)
+    if morphs is not None:
+        _check_morphs(morphs, meshes)
 
     fbx = FBX
     with FbxExporter() as exporter, _texture_folder(materials) as folder:
@@ -269,6 +297,11 @@ def save_fbx(
                 if any(material.texture is not None for material in materials):
                     # the PNGs go into the file, as Maya's Embed Media writes them
                     exporter.manager.GetIOSettings().SetBoolProp(fbx.EXP_FBX_EMBEDDED, True)
+            if morphs is not None:
+                for mesh in meshes:
+                    held = [morph for morph in morphs if morph.mesh_uuid == mesh.uuid]
+                    if held:
+                        _write_morphs(exporter, mesh, held, shapes[mesh.uuid][1])
             if skins is not None:
                 column = {node.uuid: i for i, node in enumerate(hierarchy)}
                 placed = {mesh.uuid: column.get(mesh.parent_uuid) for mesh in meshes}
@@ -639,6 +672,101 @@ def _check_materials(materials, meshes) -> None:
                 f"save_fbx: {', '.join(label for label, _ in held)} {'leaves' if len(held) == 1 else 'leave'} {left} "
                 f"faces of {_mesh_label(mesh)} without a material; a mesh is covered whole or not at all"
             )
+
+
+def _morph_label(morph, meshes=None) -> str:
+    """"blend shape target 'smile'", on its mesh of ``meshes`` (uuid to mesh)
+    when it names one"""
+    mesh = None if meshes is None else meshes.get(morph.mesh_uuid)
+    return f"blend shape target {morph.name!r}" + ("" if mesh is None else f" of {_mesh_label(mesh)}")
+
+
+def _morph_channels(morphs) -> dict:
+    """{(mesh uuid, deformer name, target name): [morphs]}, in first
+    appearance order: the channels the targets form"""
+    channels = {}
+    for morph in morphs:
+        channels.setdefault((morph.mesh_uuid, morph.deformer or "blendShape", morph.name), []).append(morph)
+    return channels
+
+
+def _check_morphs(morphs, meshes) -> None:
+    """a morph naming no mesh, moving points its mesh does not hold or as
+    many offsets as it has not indices, two deformer names on one mesh
+    (Maya's import deforms a mesh by its last blend shape deformer alone,
+    measured), a channel without one target at 1, with two targets at one
+    ``at``, an in-between above 1, or targets of two weights: refused"""
+    by_uuid = {mesh.uuid: mesh for mesh in meshes}
+    for morph in morphs:
+        label = _morph_label(morph, by_uuid)
+        mesh  = by_uuid.get(morph.mesh_uuid)
+        if mesh is None:
+            raise ValueError(f"save_fbx: {label} names no mesh of meshes=: mesh_uuid {morph.mesh_uuid!r}; set it to its mesh's uuid")
+        indices = np.asarray(morph.indices, dtype=np.int64)
+        offsets = np.asarray(morph.offsets, dtype=np.float64)
+        if indices.size != len(offsets):
+            raise ValueError(f"save_fbx: {label} holds {len(offsets)} offsets for {indices.size} indices")
+        if indices.size and (indices.min() < 0 or indices.max() >= mesh.point_count):
+            raise ValueError(f"save_fbx: {label} channel 'indices' names points {_mesh_label(mesh)} of {mesh.point_count} points does not hold")
+    deformers = {}
+    for uuid, deformer, _ in _morph_channels(morphs):
+        deformers.setdefault(uuid, [])
+        if deformer not in deformers[uuid]:
+            deformers[uuid].append(deformer)
+    for uuid, names in deformers.items():
+        if len(names) > 1:
+            raise ValueError(
+                f"save_fbx: {_mesh_label(by_uuid[uuid])} holds blend shape deformers {names}; Maya's import deforms a "
+                f"mesh by its last blend shape deformer alone (measured), so {FORK} writes one a mesh"
+            )
+    for (uuid, deformer, name), held in _morph_channels(morphs).items():
+        label = f"blend shape target {name!r} of {_mesh_label(by_uuid[uuid])} under deformer {deformer!r}"
+        ats   = [float(morph.at) for morph in held]
+        if ats.count(1.0) != 1:
+            raise ValueError(
+                f"save_fbx: {label} has {ats.count(1.0)} targets at 1 of {len(held)}; a channel holds one full target, at 1, and "
+                f"its in-betweens below 1"
+            )
+        if len(set(ats)) != len(ats):
+            raise ValueError(f"save_fbx: {label} has two targets at {sorted(x for x in ats if ats.count(x) > 1)[0]}; a weight is reached by one")
+        if max(ats) > 1.0:
+            raise ValueError(f"save_fbx: {label} has a target at {max(ats)}, above its full target at 1")
+        weights = {float(morph.weight) for morph in held}
+        if len(weights) > 1:
+            raise ValueError(f"save_fbx: {label} holds weights {sorted(weights)}; a channel holds one weight")
+
+
+def _write_morphs(exporter, mesh, morphs, shape) -> None:
+    """``morphs``, the targets of ``mesh``, on ``shape`` (its FbxMesh) as
+    Maya's exporter writes a blendShape (measured): one FbxBlendShape named
+    after the targets' deformer, one channel the targets of a name, named
+    "deformer.name", its DeformPercent the weight times ``WEIGHT_UNIT``, one
+    FbxShape a target over every point of the mesh, moved by the offsets, by
+    ``at``, each added at its ``at`` times ``WEIGHT_UNIT``, an in-between
+    named "name_50" for one at 0.5 (Maya's import mangles a dot); no
+    normals"""
+    from cgmath.formats._load import WEIGHT_UNIT
+    from cgmath.hierarchy.hierarchy import FBX as fbx
+
+    scene    = exporter.scene
+    points   = np.asarray(mesh.points, dtype=np.float64)
+    deformer = None
+    for (_, dname, name), held in _morph_channels(morphs).items():
+        if deformer is None:
+            deformer = fbx.FbxBlendShape.Create(scene, dname)
+        channel = fbx.FbxBlendShapeChannel.Create(scene, f"{dname}.{name}")
+        channel.DeformPercent.Set(float(held[0].weight) * WEIGHT_UNIT)
+        for morph in sorted(held, key=lambda x: float(x.at)):
+            at     = float(morph.at)
+            target = fbx.FbxShape.Create(scene, name if at == 1.0 else f"{name}_{round(at * WEIGHT_UNIT):g}")
+            moved  = points.copy()
+            moved[np.asarray(morph.indices, dtype=np.int64)] += np.asarray(morph.offsets, dtype=np.float64)
+            target.InitControlPoints(len(moved))
+            for index, point in enumerate(moved.tolist()):
+                target.SetControlPointAt(fbx.FbxVector4(*point, 1.0), index)
+            channel.AddTargetShape(target, at * WEIGHT_UNIT)
+        deformer.AddBlendShapeChannel(channel)
+    shape.AddDeformer(deformer)
 
 
 @contextlib.contextmanager
