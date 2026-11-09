@@ -10,6 +10,7 @@ from cgmath.geometry.camera import CameraData, CameraList
 from cgmath.geometry.deform import DeltaMushData, PatchRelaxData
 from cgmath.geometry.light import LightData, LightList
 from cgmath.geometry.map import GeomSubsetData, MapData
+from cgmath.geometry.material import MaterialData, MaterialList
 from cgmath.geometry.mesh import (
     MeshData,
     MeshList,

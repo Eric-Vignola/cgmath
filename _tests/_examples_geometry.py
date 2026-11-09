@@ -26,6 +26,7 @@ import numpy as np
 from cgmath.geometry.camera import CameraData, CameraList
 from cgmath.geometry.light import LightData, LightList
 from cgmath.geometry.map import GeomSubsetData, MapData
+from cgmath.geometry.material import MaterialData, MaterialList
 from cgmath.geometry.mesh import MeshData, MeshList, UVData, UVList
 from cgmath.geometry.morph_target import MorphData, MorphList
 from cgmath.geometry.sdf import SDFBox, SDFCylinder, SDFSphere
@@ -386,6 +387,56 @@ def light_list() -> LightList:
     return LightList([light_data(), LightData(name="sunShape", kind="directional", intensity=0.5), LightData()])
 
 
+# --------------------------------- MATERIALS -------------------------------- #
+
+# the mesh the materials cover
+_PANEL_UUID = "B1E2D3C4-5F60-4718-9A2B-3C4D5E6F7A8B"
+
+
+def _gradient() -> np.ndarray:
+    """an 8 by 4 RGB gradient, red along u, green along v, blue 128"""
+    pixels         = np.zeros((4, 8, 3), dtype=np.uint8)
+    pixels[..., 0] = np.linspace(0, 255, 8, dtype=np.uint8)[None, :]
+    pixels[..., 1] = np.linspace(0, 255, 4, dtype=np.uint8)[:, None]
+    pixels[..., 2] = 128
+    return pixels
+
+
+def material_data() -> MaterialData:
+    """a textured lambert on the panel's first two faces, every attribute off
+    its default"""
+    return MaterialData(
+        name           = "skinLambert",
+        mesh_uuid      = _PANEL_UUID,
+        faces          = [0, 1],
+        kind           = "lambert",
+        color          = [1.0, 1.0, 1.0],
+        transparency   = [0.1, 0.2, 0.3],
+        ambient_color  = [0.05, 0.1, 0.15],
+        incandescence  = [0.2, 0.0, 0.1],
+        diffuse        = 0.6,
+        specular_color = [0.3, 0.4, 0.5],
+        cosine_power   = 35.0,
+        reflectivity   = 0.25,
+        texture        = _gradient(),
+        texture_file   = "grad.png",
+        uv_set         = "map1",
+        wrap_u         = "repeat",
+        wrap_v         = "clamp",
+    )
+
+
+def material_list() -> MaterialList:
+    """the textured lambert, a phong on the panel's last face, a fresh
+    material, and one holding a float32 map"""
+    phong = MaterialData(
+        name="shinyPhong", mesh_uuid=_PANEL_UUID, faces=[2], kind="phong", color=[0.9, 0.2, 0.1],
+        specular_color=[0.3, 0.4, 0.5], cosine_power=35.0, reflectivity=0.25,
+    )
+    hdr = MaterialData(name="hdr", texture=np.linspace(0.0, 2.0, 2 * 3 * 3, dtype=np.float32).reshape(2, 3, 3))
+    return MaterialList([material_data(), phong, MaterialData(), hdr])
+
+
 EXAMPLES = {
     MeshData:        mesh_data,
     UVData:          uv_data,
@@ -395,6 +446,8 @@ EXAMPLES = {
     CameraList:      camera_list,
     LightData:       light_data,
     LightList:       light_list,
+    MaterialData:    material_data,
+    MaterialList:    material_list,
     MapData:         map_data,
     GeomSubsetData:  geom_subset_data,
     MorphData:       morph_data,
