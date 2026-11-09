@@ -41,9 +41,10 @@ class TestCameraData(unittest.TestCase):
         self.assertIsNone(camera.parent_uuid)
 
     def test_angle_of_view_as_maya_derives_it(self):
-        """2 atan(aperture / 2 focal), the aperture in mm, squeezed and scaled
-        horizontally, scaled vertically; Maya's angleOfView is the horizontal
-        one: 54.432 degrees for the default camera"""
+        """2 atan(aperture / 2 focal), the aperture in mm; Maya's angleOfView
+        is the horizontal one: 54.432 degrees for the default camera. Maya's
+        own query takes neither the camera scale nor the lens squeeze into
+        account (measured in Maya 2025), so neither does this"""
         camera = CameraData()
         self.assertAlmostEqual(camera.angle_of_view, math.degrees(2.0 * math.atan(1.41732 * 25.4 / 70.0)), places=12)
         self.assertAlmostEqual(camera.angle_of_view, 54.4322, places=3)
@@ -52,8 +53,8 @@ class TestCameraData(unittest.TestCase):
         camera.focal_length       = 50.0
         camera.lens_squeeze_ratio = 2.0
         camera.camera_scale       = 0.5
-        self.assertAlmostEqual(camera.horizontal_angle_of_view, math.degrees(2.0 * math.atan(1.41732 * 25.4 * 2.0 * 0.5 / 100.0)), places=12)
-        self.assertAlmostEqual(camera.vertical_angle_of_view, math.degrees(2.0 * math.atan(0.94488 * 25.4 * 0.5 / 100.0)), places=12)
+        self.assertAlmostEqual(camera.horizontal_angle_of_view, math.degrees(2.0 * math.atan(1.41732 * 25.4 / 100.0)), places=12)
+        self.assertAlmostEqual(camera.vertical_angle_of_view, math.degrees(2.0 * math.atan(0.94488 * 25.4 / 100.0)), places=12)
 
     def test_film_fit_is_one_of_mayas(self):
         camera = CameraData()

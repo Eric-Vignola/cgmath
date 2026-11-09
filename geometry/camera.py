@@ -58,7 +58,10 @@ class CameraData(ShapeData):
         Parallel rays when True. Default False.
     orthographic_width : float
         The view's width in cm when orthographic. Default 10, a fresh
-        camera's; Maya's persp camera holds 30.
+        camera's; Maya's persp camera holds 30. FBX holds it for an
+        orthographic camera only (Maya's export writes the ortho zoom of a
+        perspective camera as 1, measured): a perspective camera's loads as
+        this default.
     """
 
     EQUALITY_TEST_IGNORE = ShapeData.EQUALITY_TEST_IGNORE + ["name"]
@@ -83,16 +86,19 @@ class CameraData(ShapeData):
 
     @property
     def horizontal_angle_of_view(self) -> float:
-        """Maya's horizontal angle of view, in degrees: the horizontal film
-        aperture, squeezed and scaled, against the focal length"""
-        aperture = self.horizontal_film_aperture * INCH * self.lens_squeeze_ratio * self.camera_scale
+        """Maya's horizontal angle of view, in degrees: 2 atan(aperture / 2
+        focal length), the horizontal film aperture in mm, as Maya's own
+        query gives it (``cmds.camera -q -horizontalFieldOfView``, measured:
+        neither the camera scale nor the lens squeeze enters it)"""
+        aperture = self.horizontal_film_aperture * INCH
         return math.degrees(2.0 * math.atan(aperture / (2.0 * self.focal_length)))
 
     @property
     def vertical_angle_of_view(self) -> float:
-        """Maya's vertical angle of view, in degrees: the vertical film
-        aperture, scaled, against the focal length"""
-        aperture = self.vertical_film_aperture * INCH * self.camera_scale
+        """Maya's vertical angle of view, in degrees: 2 atan(aperture / 2
+        focal length), the vertical film aperture in mm, as Maya's own
+        query gives it"""
+        aperture = self.vertical_film_aperture * INCH
         return math.degrees(2.0 * math.atan(aperture / (2.0 * self.focal_length)))
 
     @property
