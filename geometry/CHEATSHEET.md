@@ -1430,7 +1430,15 @@ assert GeomSubsetData.load(subset.save(os.path.join(tmp, "subset.json"))) == sub
 
 A morph target is a sparse set of point offsets, `float64` `(N, 3)`, and the
 `int32` `indices` they apply to. `indices` defaults to `arange(len(offsets))`,
-i.e. the whole mesh, and a saved morph without them loads the same way.
+i.e. the whole mesh, and a saved morph without them loads the same way. It
+is a blend shape target as Maya's blendShape holds one: `mesh_uuid` names
+the mesh it deforms (as a skin names its), `weight` is Maya's weight (1 the
+target reached, default 0), `at` the weight the target is reached at (1 for
+a full target, below 1 for an in-between, Maya's inBetween weight; above
+0), and `deformer` the blendShape node's name. Targets of one name under
+one deformer are one channel, its shapes by `at`. `==` ignores the name,
+the mesh and the deformer and compares the weight and `at`; arithmetic
+keeps the left shape's fields.
 
 ```python
 from cgmath.geometry import MorphData, MorphList
@@ -1446,6 +1454,14 @@ print(bulge.is_zero())
 
 dense = MorphData(name="dense", offsets=np.zeros((cube.point_count, 3)))
 print(dense.size, dense.is_zero())
+
+smile = MorphData("smile", [[0.0, 0.5, 0.0]], [0], mesh_uuid=cube.uuid, weight=0.3, deformer="faceShapes")
+half  = MorphData("smile", [[0.0, 0.2, 0.0]], [0], mesh_uuid=cube.uuid, weight=0.3, at=0.5, deformer="faceShapes")
+print(smile.weight, half.at, smile == half, (smile * 2).deformer)   # 0.3 0.5 False faceShapes
+try:
+    MorphData("flat", [[0.0, 0.0, 0.0]], [0], at=0.0)                # reached above 0
+except ValueError as error:
+    print(error)
 ```
 
 ### Deriving one from two meshes, and applying it
@@ -1538,6 +1554,22 @@ trio = MorphList([ones.copy(), ones.copy(), ones.copy()])
 print((ones / [1.0, 2.0, 4.0]).offsets[0].tolist())              # [1.0, 0.5, 0.25]: x, y and z
 print([s.offsets[0, 0].item() for s in trio / [1.0, 2.0, 4.0]])  # [1.0, 0.5, 0.25]: shape by shape
 ```
+
+### Through FBX
+
+`cgmath.formats.load_fbx` reads a file's blend shape targets as these, mesh
+by mesh, each on its mesh with its deformer, weight and `at`, the offsets
+the shape's points less the mesh's at the points that differ, and
+`save_fbx(..., morphs=)` writes them as Maya's own exporter does
+(measured): one `FbxBlendShape` a mesh named after the deformer (None as
+"blendShape"), a channel "deformer.name" a target name (Maya's import
+strips the prefix) with DeformPercent = weight × 100, a shape a target over
+every point, in-betweens first by `at` with full weights at × 100; Maya's
+import rebuilds the blendShape node, its aliases, weights and in-betweens.
+A weight keyed over a take is read at the active take's first frame with a
+warning; a target's normals are lost both ways; two deformer names on one
+mesh are refused, since Maya's import deforms a mesh by its last blend
+shape deformer alone (measured).
 
 ---
 
