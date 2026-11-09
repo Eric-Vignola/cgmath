@@ -896,7 +896,7 @@ classmethod load_npz(cls, filename: str) -> Any
 classmethod load_pickle(cls, filename: str) -> Any
     the object a pickle holds, read as :meth:`load` reads one
 match(self, *args, exact: bool = True) -> bool
-    returns True if name matches any arguments
+    returns True if name matches any arguments; False without a name (None or no field)
 reset_cached_data(self)
     resets cached data: every attribute that is not an annotated field
 save(self, filename: str, mode: Optional[str] = None, **kwargs) -> str
@@ -1016,7 +1016,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x0000024A58B2DB90>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000001FB6DB0AA50>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1958,7 +1958,7 @@ tensor-product B-spline patches.
 B-spline tensor-product surface.
 
 ```text
-NurbsSurfaceData(points: typing.Annotated[numpy.ndarray, Array(float64 (Nu, Nv, D))], degree_u: int, degree_v: int, periodic_u: bool, periodic_v: bool, uniform_u: bool = False, uniform_v: bool = False, use_numba: bool = True, registered_u: bool = False, registered_v: bool = False, arc_length_samples: int = 1000, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
+NurbsSurfaceData(points: typing.Annotated[numpy.ndarray, Array(float64 (Nu, Nv, D))], degree_u: int, degree_v: int, periodic_u: bool, periodic_v: bool, uniform_u: bool = False, uniform_v: bool = False, use_numba: bool = True, registered_u: bool = False, registered_v: bool = False, arc_length_samples: int = 1000, knots_u: Optional[Annotated[numpy.ndarray, Array(float64 (K,))]] = None, knots_v: Optional[Annotated[numpy.ndarray, Array(float64 (K,))]] = None, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
 ```
 
 Fields:
@@ -1975,6 +1975,8 @@ use_numba: bool = True
 registered_u: bool = False
 registered_v: bool = False
 arc_length_samples: int = 1000
+knots_u: Optional = None
+knots_v: Optional = None
 ```
 
 Properties:
@@ -1985,14 +1987,18 @@ control_point_params               Per-direction parameter values for each contr
 count_u                            
 count_v                            
 cv                                 Control vertices with periodic wrapping applied (cu, cv, dims).
+domain_u                           The U parameter range, (min_param_u, max_param_u), like Maya's knotDomainInU.
+domain_v                           The V parameter range, (min_param_v, max_param_v), like Maya's knotDomainInV.
 geometry_u                         Parametric U index map (with periodic wrap).
 geometry_v                         Parametric V index map (with periodic wrap).
 kv_u                               Unpadded U knot vector.
 kv_v                               Unpadded V knot vector.
 length_u                           Fast approximation of total arc length along U (mid-V iso-curve).
 length_v                           Fast approximation of total arc length along V (mid-U iso-curve).
-max_param_u                        
-max_param_v                        
+max_param_u                        End of the U parameter range: the end of the knots' range, or the
+max_param_v                        End of the V parameter range: the end of the knots' range, or the
+min_param_u                        Start of the U parameter range: the start of the knots' range, or 0
+min_param_v                        Start of the V parameter range: the start of the knots' range, or 0
 total_length_u                     Total arc length along U.
 total_length_v                     Total arc length along V.
 ```
@@ -3506,7 +3512,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000024A26A76FC0>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001FB3B9D3F60>, '...
 ```
 
 ## `cgmath.constraints`
