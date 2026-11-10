@@ -1020,7 +1020,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x0000025DED6EA990>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000002A97E50DD90>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -2704,6 +2704,7 @@ Re-exported classes:
 
 ```text
 Frame
+Renderable
 Scene
 ```
 
@@ -2732,6 +2733,20 @@ what the raytracer renders: the per-mesh entries, the camera dict or
 
 ```text
 RenderInputs(entries: list, camera: Optional[dict], lights: list)
+```
+
+#### `Renderable(tuple)`
+
+One mesh of a :class:`Scene` with what places, deforms and shades it,
+
+```text
+Renderable(mesh: cgmath.geometry.mesh.MeshData, node: Optional[cgmath.hierarchy.hierarchy.TransformData], uvs: cgmath.geometry.mesh.UVList, skin: Optional[cgmath.geometry.skin_weights.SkinData], joints: list, materials: cgmath.geometry.material.MaterialList, morphs: cgmath.geometry.morph_target.MorphList)
+```
+
+Properties:
+
+```text
+name                               the mesh's name, else its node's (Maya's export leaves the FbxMesh
 ```
 
 #### `Scene(Data)`
@@ -2810,6 +2825,10 @@ pose(self, frame: Optional[int] = None) -> Optional[cgmath.hierarchy.hierarchy.H
     The nodes a render places the shapes by: the active take at
 render(self, frame: Optional[int] = None, output: Optional[str] = None, **kwargs)
     The scene rendered as a :class:`Frame`: the shapes placed by
+renderable(self, name: str) -> cgmath.render.scene.Renderable
+    The one renderable whose mesh, or whose node, is named ``name``
+renderables(self) -> List[cgmath.render.scene.Renderable]
+    One :class:`Renderable` per mesh, in the meshes' order: the mesh, the
 save_fbx(self, filename: str, as_ascii: bool = False) -> str
     the scene written as :func:`cgmath.formats.save_fbx` writes its
 strip_namespace(self, namespace: Optional[str] = None) -> None
@@ -3248,7 +3267,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000025DBB5FCFE0>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000002A94C439300>, '...
 ```
 
 ## `cgmath.constraints`

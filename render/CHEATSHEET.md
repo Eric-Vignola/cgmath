@@ -262,6 +262,20 @@ print(scene.union_points().shape)            # concatenated world points
 print(scene.name)
 ```
 
+Each mesh with what places, deforms and shades it, joined by uuid: a
+`Renderable` a mesh, in the meshes' order. A view over the scene's own
+records, built on every call; the skeleton is shared, so every mesh skinned
+to it lists the same joints.
+
+```python
+from cgmath.render import Renderable
+
+item = scene.renderables()[0]                # one Renderable per mesh
+print(isinstance(item, Renderable), item.name)
+print(item.mesh is mesh, item.node is hero_node, len(item.uvs), item.skin, len(item.joints), len(item.materials), len(item.morphs))
+print(scene.renderable("hero") is not item, scene.renderable("hero").mesh is mesh)   # by the mesh's or the node's name; a new view each call
+```
+
 Hide the node and the mesh is left out:
 
 ```python

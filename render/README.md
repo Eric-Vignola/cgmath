@@ -141,6 +141,19 @@ scene.add(cube, cube_uv)
 print(scene.placed_meshes()[0][1][3, :3])  # [0.  0.5 0. ]: the mesh's world, row-major
 ```
 
+The joins are done for you, one mesh at a time: `scene.renderables()` gives a
+`Renderable` per mesh, in the meshes' order, with its node, UV sets, skin, the
+skin's joints, materials (textures inside) and targets. It is a view over the
+scene's records, built on every call, so it never goes stale; the skeleton is
+shared, every mesh skinned to it lists the same joints. `scene.renderable(name)`
+picks one by its mesh's or its node's name.
+
+```python
+for item in scene.renderables():
+    print(item.name, item.node.name, item.mesh is cube, len(item.uvs), item.skin, len(item.materials))
+print(scene.renderable("hero").node is hero)   # the mesh is unnamed: the node's name finds it
+```
+
 ---
 
 ## Materials
@@ -331,6 +344,7 @@ Scene.load_fbx("hero.fbx").save_fbx("copy.fbx")  # the fields, not the render se
 ```python
 hero_shot.camera()         # (CameraData, its node's uuid): named, default, or first
 hero_shot.pose()           # the nodes a render places by: the hierarchy, or the active take's frame
+hero_shot.renderables()    # [Renderable]: each mesh with its node, UV sets, skin, joints, materials, targets
 hero_shot.placed_meshes()  # [(mesh, world)] of every shown mesh; a skinned one deformed, in world space
 hero_shot.union_aabb()     # world-space AABB across the shown meshes
 hero_shot.union_points()   # concatenated world points
