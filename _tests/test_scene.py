@@ -586,6 +586,123 @@ class TestSkinnedMesh(unittest.TestCase):
         self.assertIsNot(scene._deformer(self.tri, other), first)
 
 
+def _tri(name=None, **fields):
+    return MeshData(
+        points  = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        indices = np.arange(3),
+        counts  = np.array([3]),
+        name    = name,
+        **fields,
+    )
+
+
+def _uv(mesh, name="map1"):
+    return UVData(name=name, points=np.zeros((3, 2)), indices=np.arange(3), counts=np.array([3]), mesh_uuid=mesh.uuid)
+
+
+class TestRenderables(unittest.TestCase):
+    """Scene.renderables(): each mesh with what places, deforms and shades it,
+    joined by uuid, a view over the scene's records"""
+
+    def setUp(self):
+        self.root           = _node("root", node_type="joint")
+        self.j1             = _node("j1", node_type="joint", translate=(0.0, 1.0, 0.0))
+        self.j2             = _node("j2", node_type="joint", translate=(0.0, 1.0, 0.0))
+        self.j1.parent_uuid = self.root.uuid
+        self.j2.parent_uuid = self.j1.uuid
+        self.a_node         = _node("a_node")
+        self.b_node         = _node("b_node", translate=(2.0, 0.0, 0.0))
+        self.a              = _under(_tri("a"), self.a_node)
+        self.b              = _under(_tri("b"), self.b_node)
+        self.a_skin         = SkinData(weights=np.ones((3, 3)) / 3.0, influences=["j1", "root", "ghost"], mesh_uuid=self.a.uuid)
+        self.b_skin         = SkinData(weights=np.ones((3, 1)), influences=["j2"], mesh_uuid=self.b.uuid)
+        self.a_uv           = _uv(self.a)
+        self.b_uv1          = _uv(self.b, "map1")
+        self.b_uv2          = _uv(self.b, "lightmap")
+        self.b_mat          = MaterialData(mesh_uuid=self.b.uuid, color=(1.0, 0.0, 0.0))
+        self.a_morph        = MorphData(name="smile", offsets=np.zeros((3, 3)), indices=np.arange(3), mesh_uuid=self.a.uuid)
+        self.scene = _scene(
+            self.root, self.j1, self.j2, self.a_node, self.b_node,
+            self.a, self.b, self.b_skin, self.a_skin, self.b_uv1, self.a_uv, self.b_uv2, self.b_mat, self.a_morph,
+        )
+
+    def test_one_per_mesh_in_order_holding_the_scenes_records(self):
+        items = self.scene.renderables()
+        self.assertEqual([item.mesh for item in items], [self.a, self.b])
+        a, b = items
+        self.assertIs(a.mesh, self.a)
+        self.assertIs(a.node, self.scene.hierarchy[self.a_node.uuid])
+        self.assertIs(a.skin, self.a_skin)
+        self.assertEqual([uv for uv in a.uvs],  [self.a_uv])
+        self.assertEqual(len(a.materials),      0)
+        self.assertEqual([m for m in a.morphs], [self.a_morph])
+        self.assertEqual([j.name for j in a.joints], ["j1", "root"], "the skin's order, a name no node carries left out")
+        self.assertIs(a.joints[0], self.scene.hierarchy["j1"])
+        self.assertIs(b.skin, self.b_skin)
+        self.assertEqual([uv.name for uv in b.uvs],  ["map1", "lightmap"])
+        self.assertEqual([m for m in b.materials],   [self.b_mat])
+        self.assertEqual([j.name for j in b.joints], ["j2"])
+        self.assertEqual((a.name, b.name),           ("a", "b"))
+
+    def test_a_view_edits_the_scene_in_place_and_is_built_on_every_call(self):
+        first = self.scene.renderables()[1]
+        first.mesh.points[:] += [0.0, 0.0, 1.0]
+        np.testing.assert_array_equal(self.scene.meshes[1].points[:, 2], [1.0, 1.0, 1.0])
+        first.uvs.append(_uv(self.b, "stray"))  # a new list: the scene keeps its sets
+        self.assertEqual(len(self.scene.uvs), 3)
+        self.scene.add(MaterialData(mesh_uuid=self.b.uuid, color=(0.0, 1.0, 0.0)))
+        again = self.scene.renderables()[1]
+        self.assertEqual((len(first.materials), len(again.materials)), (1, 2))
+
+    def test_a_mesh_on_no_node_and_an_unnamed_mesh(self):
+        loose = _tri("loose")
+        hero  = _node("hero")
+        shape = _under(_tri(None), hero)
+        scene = _scene(hero, loose, shape)
+        items = scene.renderables()
+        self.assertIsNone(items[0].node)
+        self.assertEqual(items[0].name,   "loose")
+        self.assertEqual(items[1].name,   "hero")
+        self.assertEqual(items[1].joints, [])
+        self.assertIsNone(items[1].skin)
+        self.assertIs(scene.renderable("hero").mesh, shape)
+        self.assertIs(scene.renderable("loose").mesh, loose)
+
+    def test_renderable_wants_exactly_one_name(self):
+        twin = _under(_tri("a"), self.b_node)
+        self.scene.add(twin)
+        with self.assertRaisesRegex(ValueError, "2 meshes are named 'a'"):
+            self.scene.renderable("a")
+        with self.assertRaisesRegex(ValueError, "0 meshes are named 'nobody'"):
+            self.scene.renderable("nobody")
+
+    def test_a_scene_of_takes_alone_gives_the_first_frames_node(self):
+        rig  = HierarchyData([_node("hero", translate=(1.0, 0.0, 0.0))])
+        clip = ClipData(rig, frames=2)
+        clip.frames["hero"].translate = np.array([[1.0, 0.0, 0.0], [5.0, 0.0, 0.0]])
+        mesh  = _under(_tri("m"), rig["hero"])
+        scene = Scene("s", clip=clip).add(mesh)
+        item  = scene.renderables()[0]
+        self.assertEqual((item.node.name, item.node.uuid), ("hero", rig["hero"].uuid))
+        np.testing.assert_array_equal(item.node.translate, [1.0, 0.0, 0.0])
+        self.assertEqual(Scene("empty").renderables(), [])
+
+    def test_the_render_places_through_the_same_join(self):
+        """a's skin names a joint the rig lacks, which a deformer refuses: the
+        render scene keeps b's skin alone"""
+        scene  = _scene(self.root, self.j1, self.j2, self.a_node, self.b_node, self.a, self.b, self.b_skin, self.b_uv1, self.b_mat)
+        placed = scene._placed(scene.pose())
+        self.assertEqual([item.mesh for _, _, item in placed], [self.a, self.b])
+        self.assertIs(placed[1][2].skin, self.b_skin)
+        self.assertIsNone(placed[0][2].skin)
+        shown, world = scene.placed_meshes()[1]
+        self.assertIsNot(shown, self.b)  # skinned: a copy at its pose
+        np.testing.assert_array_equal(world, np.eye(4))
+        entry = scene._render_inputs().entries[1]
+        self.assertEqual(len(entry["materials"]), 1)
+        np.testing.assert_allclose(entry["materials"][0]["base_color"], [0.8, 0.0, 0.0])
+
+
 class TestOrthographic(unittest.TestCase):
     """an orthographic CameraData: its width over the frame's aspect"""
 

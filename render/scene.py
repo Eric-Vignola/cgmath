@@ -94,6 +94,55 @@ class RenderInputs(NamedTuple):
     lights:  list
 
 
+class Renderable(NamedTuple):
+    """
+    One mesh of a :class:`Scene` with what places, deforms and shades it,
+    joined by uuid (:meth:`Scene.renderables`): a view, not a container.
+    Its fields are the scene's own records, so an edit in place
+    (``item.mesh.points[:] = ...``) edits the scene; its lists are new lists
+    of those records, so appending to one changes nothing: a shape joins the
+    scene through :meth:`Scene.add`. Built on every call, never cached.
+
+    Attributes
+    ----------
+    mesh : MeshData
+        The mesh itself.
+    node : TransformData or None
+        The node of :meth:`Scene.pose` that carries ``mesh.parent_uuid`` and
+        places the mesh: the hierarchy's node itself or, in a scene holding
+        takes alone, a copy at the active take's first frame. None for a
+        mesh on no node, which sits at identity.
+    uvs : UVList
+        The UV sets naming the mesh, in the scene's order.
+    skin : SkinData or None
+        The first skin naming the mesh.
+    joints : list of TransformData
+        The skin's influences: the nodes of :meth:`Scene.pose` carrying their
+        names, in the skin's order, a name no node carries left out. The
+        skeleton is shared, so every mesh skinned to it lists the same nodes.
+    materials : MaterialList
+        The materials naming the mesh, their textures inside them.
+    morphs : MorphList
+        The blend shape targets naming the mesh.
+    """
+
+    mesh:      MeshData
+    node:      Optional[TransformData]
+    uvs:       UVList
+    skin:      Optional[SkinData]
+    joints:    list
+    materials: MaterialList
+    morphs:    MorphList
+
+    @property
+    def name(self) -> Optional[str]:
+        """the mesh's name, else its node's (Maya's export leaves the FbxMesh
+        unnamed and names the node), else None"""
+        if self.mesh.name:
+            return self.mesh.name
+        return None if self.node is None else self.node.name
+
+
 # the settings merged into render() / turntable() / animate() kwargs
 _RENDER_CONFIG_KEYS = (
     "resolution",
@@ -347,6 +396,65 @@ class Scene(Data):
                     return camera, camera.parent_uuid
         return self.cameras[0], self.cameras[0].parent_uuid
 
+    # -- the meshes with what deforms and shades them --------------------------------
+
+    def renderables(self) -> List[Renderable]:
+        """
+        One :class:`Renderable` per mesh, in the meshes' order: the mesh, the
+        node of :meth:`pose` placing it, its UV sets, skin, the skin's joints,
+        materials and blend shape targets, joined by uuid. Views over the
+        scene's records, built on every call: a shape added since shows in
+        the next call, never in an item already held. ``[]`` for a scene with
+        no mesh.
+        """
+        return self._joined(self.pose())
+
+    def renderable(self, name: str) -> Renderable:
+        """
+        The one renderable whose mesh, or whose node, is named ``name``
+        (Maya's export names the node and leaves the mesh unnamed);
+        ValueError for none or several.
+        """
+        found = [
+            item for item in self.renderables()
+            if item.mesh.name == name or (item.node is not None and item.node.name == name)
+        ]
+        if len(found) != 1:
+            raise ValueError(
+                f"Scene.renderable: {len(found)} meshes are named {name!r} or sit on a node named so; one expected"
+            )
+        return found[0]
+
+    def _joined(self, pose) -> List[Renderable]:
+        """the renderables, each mesh's node and joints taken from ``pose``
+        (None: no node, no joints), one pass over each list"""
+        nodes, names = {}, {}
+        for node in pose or []:
+            nodes[node.uuid] = node
+            names.setdefault(node.name, node)
+        held = {}
+        for field in ("uvs", "skins", "materials", "morphs"):
+            groups = held[field] = {}
+            for record in getattr(self, field) or []:
+                groups.setdefault(record.mesh_uuid, []).append(record)
+        out = []
+        for mesh in self.meshes or []:
+            skins  = held["skins"].get(mesh.uuid)
+            skin   = skins[0] if skins else None
+            joints = [] if skin is None else [names[n] for n in skin.influences if n in names]
+            out.append(
+                Renderable(
+                    mesh,
+                    nodes.get(mesh.parent_uuid),
+                    UVList(held["uvs"].get(mesh.uuid, [])),
+                    skin,
+                    joints,
+                    MaterialList(held["materials"].get(mesh.uuid, [])),
+                    MorphList(held["morphs"].get(mesh.uuid, [])),
+                )
+            )
+        return out
+
     def placed_meshes(self, frame: Optional[int] = None) -> List[Tuple[MeshData, np.ndarray]]:
         """
         ``[(mesh, world)]`` of every shown mesh at ``frame``: a mesh on a
@@ -372,37 +480,33 @@ class Scene(Data):
         return points.min(axis=0), points.max(axis=0)
 
     def _placed(self, pose) -> list:
-        """``[(mesh, world, shown mesh's materials)]`` of every shown mesh
-        placed by ``pose`` (:meth:`placed_meshes`)"""
+        """``[(mesh, world, renderable)]`` of every shown mesh placed by
+        ``pose`` (:meth:`placed_meshes`): the mesh as shown, a copy deformed
+        by its skin or its targets or the mesh itself, its world, and its
+        :class:`Renderable` (:meth:`_joined`), whose ``mesh`` is the original"""
         worlds, shown = _worlds(pose)
         found = []
-        for mesh in self.meshes or []:
+        for item in self._joined(None):
+            mesh = item.mesh
             if mesh.parent_uuid is not None and mesh.parent_uuid in shown and not shown[mesh.parent_uuid]:
                 continue
             world  = worlds.get(mesh.parent_uuid, np.eye(4))
-            points = self._morphed_points(mesh)
-            skin   = self._skin_of(mesh)
-            if skin is not None:
-                deformer = self._deformer(mesh, skin)
+            points = _morphed_points(mesh, item.morphs)
+            if item.skin is not None:
+                deformer = self._deformer(mesh, item.skin)
                 if pose is None:
                     raise ValueError(f"Scene: {_mesh_label(mesh)} is skinned, which takes a pose: the scene holds no nodes")
                 points = deformer.apply(pose, mesh.points if points is None else points)
                 world  = np.eye(4)
             if points is None:
-                found.append((mesh, world, None))
+                found.append((mesh, world, item))
                 continue
             moved        = mesh.copy()
             moved.points = np.asarray(points, dtype=np.float64)
             if moved.normals is not None:
                 moved.normals = None
-            found.append((moved, world, mesh))
-        return [(shown_mesh, world, original if original is not None else shown_mesh) for shown_mesh, world, original in found]
-
-    def _skin_of(self, mesh) -> Optional[SkinData]:
-        for skin in self.skins or []:
-            if skin.mesh_uuid == mesh.uuid:
-                return skin
-        return None
+            found.append((moved, world, item))
+        return found
 
     def _deformer(self, mesh, skin) -> SkinDeformData:
         """the deformer of a skinned mesh, bound from the bind pose
@@ -423,25 +527,6 @@ class Scene(Data):
         self._deformers[mesh.uuid] = (key, deformer)
         return deformer
 
-    def _morphed_points(self, mesh) -> Optional[np.ndarray]:
-        """the mesh's points moved by its blend shape targets at their
-        weights, Maya's way (a weight between two targets of a channel
-        blends them, beyond the last continues its slope); None for a mesh
-        with no target weighing anything"""
-        channels = {}
-        for morph in self.morphs or []:
-            if morph.mesh_uuid == mesh.uuid:
-                channels.setdefault((morph.deformer, morph.name), []).append(morph)
-        points = None
-        for targets in channels.values():
-            weight = float(targets[0].weight)
-            if weight == 0.0:
-                continue
-            if points is None:
-                points = np.array(mesh.points, dtype=np.float64)
-            points += _channel_offsets(targets, weight, len(points))
-        return points
-
     # -- what the raytracer takes ---------------------------------------------------
 
     def _render_inputs(self, frame: Optional[int] = None) -> RenderInputs:
@@ -450,20 +535,20 @@ class Scene(Data):
         pose = self.pose(frame)
         worlds, shown = _worlds(pose)
         entries = []
-        for mesh, world, original in self._placed(pose):
-            entries.append(self._entry(mesh, original, world))
+        for mesh, world, item in self._placed(pose):
+            entries.append(self._entry(mesh, item, world))
         return RenderInputs(entries, self._camera_dict(worlds), self._light_dicts(worlds, shown))
 
-    def _entry(self, mesh, original, world) -> dict:
-        """one mesh's entry: its materials, each the faces it covers (None
-        for all), its colour times its diffuse, its colour map through the UV
-        set it names (the mesh's first for None) and its wrap; a mesh with
-        no material takes the scene's base colour on every face"""
-        sets      = [uv for uv in self.uvs or [] if uv.mesh_uuid == original.uuid]
+    def _entry(self, mesh, item, world) -> dict:
+        """one mesh's entry, ``mesh`` as shown and ``item`` its renderable:
+        its materials, each the faces it covers (None for all), its colour
+        times its diffuse, its colour map through the UV set it names (the
+        mesh's first for None) and its wrap; a mesh with no material takes
+        the scene's base colour on every face"""
+        original  = item.mesh
+        sets      = list(item.uvs)
         materials = []
-        for material in self.materials or []:
-            if material.mesh_uuid != original.uuid:
-                continue
+        for material in item.materials:
             uv = next((x for x in sets if x.name == material.uv_set), sets[0] if sets else None)
             materials.append({
                 "faces":      None if material.faces is None else material.covers(original),
@@ -871,13 +956,14 @@ class Scene(Data):
             raise ValueError("animate: the clip has no frames")
         if not self.meshes:
             raise ValueError("animate: the scene holds no mesh")
-        for mesh in self.meshes:
-            skin = self._skin_of(mesh)
-            if skin is not None:
+        for item in self._joined(None):
+            if item.skin is not None:
                 try:
-                    self._deformer(mesh, skin).pose_indices(take)
+                    self._deformer(item.mesh, item.skin).pose_indices(take)
                 except ValueError as exc:
-                    raise ValueError(f"animate: {_mesh_label(mesh)} is skinned to joints the clip does not hold ({exc})") from exc
+                    raise ValueError(
+                        f"animate: {_mesh_label(item.mesh)} is skinned to joints the clip does not hold ({exc})"
+                    ) from exc
         if fps is None:
             fps = int(round(float(getattr(take, "fps", 30.0)) or 30.0))
 
@@ -1106,6 +1192,25 @@ def _world_points(mesh, world) -> np.ndarray:
     world = np.asarray(world, dtype=np.float64)
     with np.errstate(all="ignore"):
         return points @ world[:3, :3] + world[3, :3]
+
+
+def _morphed_points(mesh, morphs) -> Optional[np.ndarray]:
+    """the mesh's points moved by ``morphs``, its blend shape targets, at
+    their weights, Maya's way (a weight between two targets of a channel
+    blends them, beyond the last continues its slope); None for a mesh with
+    no target weighing anything"""
+    channels = {}
+    for morph in morphs:
+        channels.setdefault((morph.deformer, morph.name), []).append(morph)
+    points = None
+    for targets in channels.values():
+        weight = float(targets[0].weight)
+        if weight == 0.0:
+            continue
+        if points is None:
+            points = np.array(mesh.points, dtype=np.float64)
+        points += _channel_offsets(targets, weight, len(points))
+    return points
 
 
 def _channel_offsets(targets, weight: float, count: int) -> np.ndarray:
