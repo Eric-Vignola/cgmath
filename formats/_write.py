@@ -1025,7 +1025,10 @@ def _write_materials(exporter, mesh, materials, node, shape, folder) -> None:
     shininess, its reflectivity as the reflection factor with a reflection
     colour of 0; a texture as a PNG in ``folder`` (embedded by the export)
     feeding the diffuse colour through an FbxFileTexture reading the UV set
-    and wrapping as the material says"""
+    and wrapping as the material says. The element goes on the mesh's first
+    layer, where Maya's exporter puts it: the sdk's ``CreateElementMaterial``
+    takes the last layer (a UV set makes one each) and pads the layers under
+    it with empty eNone elements, which a reader meets first"""
     from cgmath.hierarchy.hierarchy import FBX as fbx
 
     scene = exporter.scene
@@ -1064,7 +1067,10 @@ def _write_materials(exporter, mesh, materials, node, shape, folder) -> None:
         texture.WrapModeV.Set(wraps[material.wrap_v])
         made.Diffuse.ConnectSrcObject(texture)
 
-    element = shape.CreateElementMaterial()
+    if shape.GetLayerCount() == 0:
+        shape.CreateLayer()
+    element = fbx.FbxLayerElementMaterial.Create(shape, "")
+    shape.GetLayer(0).SetMaterials(element)
     element.SetReferenceMode(fbx.FbxLayerElement.EReferenceMode.eIndexToDirect)
     indices = element.GetIndexArray()
     if len(materials) == 1 and materials[0].faces is None:

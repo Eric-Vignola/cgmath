@@ -145,12 +145,13 @@ def fbx_materials(path: str) -> dict:
             if attribute is None or attribute.GetAttributeType() != FBX.FbxNodeAttribute.EType.eMesh:
                 continue
             mesh  = typed(attribute, FBX.FbxMesh, FBX)
-            entry = {"materials": [], "mapping": None, "indices": [], "textures": {}}
+            entry = {"materials": [], "mapping": None, "indices": [], "textures": {}, "elements": mesh.GetElementMaterialCount(), "layer": None}
             if mesh.GetElementMaterialCount():
                 element          = mesh.GetElementMaterial(0)
                 held             = element.GetIndexArray()
                 entry["mapping"] = int(getattr(element.GetMappingMode(), "value", element.GetMappingMode()))
                 entry["indices"] = [int(held.GetAt(k)) for k in range(held.GetCount())]
+                entry["layer"]   = next(i for i in range(mesh.GetLayerCount()) if mesh.GetLayer(i).GetMaterials() is not None)
             for m in range(node.GetMaterialCount()):
                 material = typed(node.GetMaterial(m), FBX.FbxSurfaceMaterial, FBX)
                 cid      = material.GetClassId()
@@ -289,10 +290,12 @@ def other_writer(folder: str) -> str:
     return path
 
 
-def mapped_file(folder: str, mode: str, indices) -> str:
+def mapped_file(folder: str, mode: str, indices, uv_sets: int = 0) -> str:
     """an sdk file whose triangle's material element is mapped ``mode`` with
-    ``indices``, one lambert on the node"""
-    path    = os.path.join(folder, f"{mode}.fbx")
+    ``indices``, one lambert on the node; ``uv_sets`` UV sets made first, a
+    layer each, so the sdk's CreateElementMaterial takes the last layer and
+    pads the ones under it with empty eNone elements"""
+    path    = os.path.join(folder, f"{mode}_{uv_sets}uv.fbx")
     manager = FBX.FbxManager.Create()
     manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
     try:
@@ -309,6 +312,14 @@ def mapped_file(folder: str, mode: str, indices) -> str:
                 shape.AddPolygon(v)
             shape.EndPolygon()
         node.SetNodeAttribute(shape)
+        for k in range(uv_sets):
+            uv = shape.CreateElementUV(f"map{k + 1}")
+            uv.SetMappingMode(FBX.FbxLayerElement.EMappingMode.eByPolygonVertex)
+            uv.SetReferenceMode(FBX.FbxLayerElement.EReferenceMode.eIndexToDirect)
+            for u, v in ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)):
+                uv.GetDirectArray().Add(FBX.FbxVector2(u, v))
+            for corner in (0, 1, 2, 2, 1, 0):
+                uv.GetIndexArray().Add(corner)
         node.AddMaterial(FBX.FbxSurfaceLambert.Create(scene, "lam"))
         made = shape.CreateElementMaterial()
         made.SetMappingMode(getattr(FBX.FbxLayerElement.EMappingMode, mode))
@@ -510,6 +521,38 @@ class TestMaterials(_Files):
         # a by-polygon element giving one material every face: the whole mesh
         back = load_fbx(mapped_file(self.folder, "eByPolygon", (0, 0)))
         self.assertEqual((len(back.materials), back.materials[0].faces, back.materials[0].name), (1, None, "lam"))
+        # the sdk's own placement, two UV layers first: the material element
+        # on the last layer, the layer under it padded with an empty eNone
+        # element (measured); the mapped element is read, a lone eNone refused
+        padded = mapped_file(self.folder, "eAllSame", (0,), uv_sets=2)
+        self.assertEqual((fbx_materials(padded)["tri"]["elements"], fbx_materials(padded)["tri"]["mapping"]), (2, _enum(FBX.FbxLayerElement, "EMappingMode", "eNone")))
+        back = load_fbx(padded)
+        self.assertEqual((len(back.materials), back.materials[0].faces, back.materials[0].name), (1, None, "lam"))
+        with self.assertRaisesRegex(ValueError, "mesh 'triShape' channel 'materials' is mapped eNone, which the r17-skeleton fork does not read"):
+            load_fbx(mapped_file(self.folder, "eNone", (0,)))
+
+    def test_the_material_element_goes_on_the_first_layer_whatever_the_uv_sets(self):
+        """a mesh with two UV sets (a layer each) and a material writes one
+        material element, on layer 0, as Maya's exporter does: the sdk's
+        CreateElementMaterial would take the last layer and pad layer 0 with
+        an empty eNone element, which the reader met first (the UV step's
+        Maya test, whose import gives the mesh a Default_Material)"""
+        nodes  = rig()
+        held   = meshes(nodes)
+        first  = plane_uvs(held[0])
+        second = UVData(name="lightmap", points=np.asarray(first.points) * 0.5, counts=first.counts, indices=first.indices, mesh_uuid=held[0].uuid)
+        given  = MaterialList([MaterialData(name="flat", mesh_uuid=held[0].uuid)])
+        path   = self.path("two_sets.fbx")
+        save_fbx(path, nodes, meshes=held, uvs=UVList([first, second]), materials=given)
+        found = fbx_materials(path)["plane"]
+        self.assertEqual((found["elements"], found["layer"], found["mapping"], found["indices"]), (1, 0, _enum(FBX.FbxLayerElement, "EMappingMode", "eAllSame"), [0]))
+        back = load_fbx(path)
+        same_materials(self, back.materials, given, back.meshes, held)
+        self.assertEqual([uv.name for uv in back.uvs], ["map1", "lightmap"])
+        # a mesh with no UV set, no layer yet: the element still goes on layer 0
+        save_fbx(self.path("no_sets.fbx"), nodes, meshes=held, materials=given)
+        found = fbx_materials(self.path("no_sets.fbx"))["plane"]
+        self.assertEqual((found["elements"], found["layer"]), (1, 0))
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
