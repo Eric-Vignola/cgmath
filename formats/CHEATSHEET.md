@@ -643,6 +643,10 @@ back = load_fbx(os.path.join(WORK, "spin.fbx"))
 print(back.hierarchy, [take.take for take in back.clip], back.clip.active.frame_count)   # None ['spin'] 3
 ```
 
+A take covers its stored span widened to its keys (an Unreal export stores
+the span a frame short of its last key); its layers holding no curve are
+passed over, curves on two layers, or on a muted one, are refused.
+
 The measured conventions, the refusals (shear, non-uniform scale off a
 leaf, a geometric transform on a mesh node, two deformers on one mesh ...)
 and each shape's fields are in the hierarchy cheatsheet's "Importers and
