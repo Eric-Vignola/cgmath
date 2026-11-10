@@ -16,6 +16,7 @@ import warnings
 from unittest.mock import patch
 
 import numpy as np
+from cgmath.geometry import MeshData
 from cgmath.render.scene import _glb_material_indices, Scene
 
 try:
@@ -121,6 +122,99 @@ def by_mesh(scene):
     """each mesh's material, by the mesh's name, None for a mesh with none"""
     held = {material.mesh_uuid: material for material in scene.materials or []}
     return {mesh.name: held.get(mesh.uuid) for mesh in scene.meshes}
+
+
+def write_colored_glb(path, colors, kind="VEC4", component=None, normalized=False, textured=False):
+    """one triangle with ``colors`` as its COLOR_0: ``kind`` VEC3 or VEC4,
+    ``component`` the accessor's type (float by default), ``normalized`` for
+    an integer one; ``textured`` adds a UV set and a textured material"""
+    gltf = pygltflib.GLTF2()
+    blob = bytearray()
+
+    def view(data):
+        while len(blob) % 4:
+            blob.append(0)
+        gltf.bufferViews.append(pygltflib.BufferView(buffer=0, byteOffset=len(blob), byteLength=len(data)))
+        blob.extend(data)
+        return len(gltf.bufferViews) - 1
+
+    def accessor(array, kind, component, normalized=False):
+        gltf.accessors.append(
+            pygltflib.Accessor(
+                bufferView=view(array.tobytes()), componentType=component, count=len(array), type=kind, normalized=normalized or None
+            )
+        )
+        return len(gltf.accessors) - 1
+
+    points                = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], np.float32)
+    attributes            = {"POSITION": accessor(points, "VEC3", pygltflib.FLOAT)}
+    attributes["COLOR_0"] = accessor(np.asarray(colors), kind, component or pygltflib.FLOAT, normalized)
+    material              = None
+    if textured:
+        gltf.images.append(pygltflib.Image(bufferView=view(png(RED)), mimeType="image/png"))
+        gltf.textures.append(pygltflib.Texture(source=0))
+        gltf.materials.append(
+            pygltflib.Material(
+                name="mat0", pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(baseColorTexture=pygltflib.TextureInfo(index=0))
+            )
+        )
+        attributes["TEXCOORD_0"] = accessor(np.array([[0, 0], [1, 0], [0, 1]], np.float32), "VEC2", pygltflib.FLOAT)
+        material                 = 0
+    primitive = pygltflib.Primitive(
+        attributes = pygltflib.Attributes(**attributes),
+        indices    = accessor(np.array([0, 1, 2], np.uint32), "SCALAR", pygltflib.UNSIGNED_INT),
+        material   = material,
+    )
+    gltf.meshes.append(pygltflib.Mesh(name="tri", primitives=[primitive]))
+    gltf.nodes.append(pygltflib.Node(name="tri", mesh=0))
+    gltf.scenes = [pygltflib.Scene(nodes=[0])]
+    gltf.scene  = 0
+    gltf.buffers.append(pygltflib.Buffer(byteLength=len(blob)))
+    gltf.set_binary_blob(bytes(blob))
+    gltf.save_binary(path)
+    return path
+
+
+@unittest.skipIf(
+    pygltflib is None or trimesh is None or Image is None,
+    "pygltflib, trimesh and PIL are needed",
+)
+class TestGlbColors(unittest.TestCase):
+    """a file's COLOR_0 is the mesh's colours, one a vertex, as trimesh holds
+    them: RGBA bytes, so a float colour comes back quantised to 8 bits"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.folder = tmp.name
+
+    def test_a_float_rgba_colour_a_vertex(self):
+        colors = np.array([[1.0, 0.0, 0.0, 1.0], [0.0, 0.75, 0.0, 0.5], [0.0, 0.0, 1.0, 0.25]], np.float32)
+        mesh   = MeshData.load_glb(write_colored_glb(os.path.join(self.folder, "rgba.glb"), colors))
+        self.assertIsNone(mesh.color_indices)
+        np.testing.assert_allclose(mesh.colors, colors, atol=0.5 / 255)
+        self.assertEqual(mesh.colors.dtype, np.float64)
+        scene = Scene.load_glb(os.path.join(self.folder, "rgba.glb"))
+        np.testing.assert_array_equal(scene.meshes[0].colors, mesh.colors)
+
+    def test_a_normalized_rgb_colour_a_vertex_takes_alpha_1(self):
+        colors = np.array([[255, 0, 0], [0, 128, 0], [0, 0, 64]], np.uint8)
+        mesh = MeshData.load_glb(
+            write_colored_glb(os.path.join(self.folder, "rgb.glb"), colors, kind="VEC3", component=pygltflib.UNSIGNED_BYTE, normalized=True)
+        )
+        np.testing.assert_allclose(mesh.colors, np.column_stack([colors / 255.0, np.ones(3)]), atol=0.5 / 255)
+
+    def test_a_textured_mesh_s_colours(self):
+        """COLOR_0 beside a texture: trimesh keeps it as the mesh's "color"
+        vertex attribute, as the file has it (measured), and so do we"""
+        colors = np.array([[1.0, 0.0, 0.0, 1.0], [0.0, 0.75, 0.0, 0.5], [0.0, 0.0, 1.0, 0.25]], np.float32)
+        mesh   = MeshData.load_glb(write_colored_glb(os.path.join(self.folder, "both.glb"), colors, textured=True))
+        self.assertIsNotNone(mesh.colors)
+        np.testing.assert_allclose(mesh.colors, colors, atol=0.5 / 255)
+        self.assertIsNone(mesh.color_indices)
+
+    def test_a_mesh_without_colours_has_none(self):
+        self.assertIsNone(MeshData.load_glb(write_glb(os.path.join(self.folder, "parts.glb"), [None])).colors)
 
 
 @unittest.skipIf(

@@ -190,6 +190,10 @@ def build_scene(texture=None) -> Scene:
     crate_geo             = cube_mesh("crate_geo")
     crate_geo.uuid        = _SHAPES["crate_geo"]
     crate_geo.parent_uuid = _UUIDS["crate"]
+    # the hero's colours a face corner (a colour a side), the crate's a vertex
+    mesh.colors        = np.array([[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1], [1, 1, 0, 0.5], [0, 1, 1, 0.5], [1, 0, 1, 0.5]], dtype=np.float64)
+    mesh.color_indices = np.repeat(np.arange(6, dtype=np.int32), 4)
+    crate_geo.colors   = np.column_stack([np.linspace(0.0, 1.0, 8), np.linspace(1.0, 0.0, 8), np.full(8, 0.25), np.ones(8)])
     scene.add(mesh, crate_geo)
 
     uv      = cube_uv(mesh.uuid)
