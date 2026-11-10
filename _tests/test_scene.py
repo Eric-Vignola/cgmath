@@ -703,6 +703,98 @@ class TestRenderables(unittest.TestCase):
         np.testing.assert_allclose(entry["materials"][0]["base_color"], [0.8, 0.0, 0.0])
 
 
+class TestRenewUuids(unittest.TestCase):
+    """Scene.renew_uuids(): fresh uuids on every node and shape, every link
+    rewired, the records the same objects"""
+
+    def setUp(self):
+        self.root           = _node("root", node_type="joint")
+        self.j1             = _node("j1", node_type="joint", translate=(0.0, 1.0, 0.0))
+        self.j1.parent_uuid = self.root.uuid
+        self.hero           = _node("hero", translate=(1.0, 0.0, 0.0))
+        self.cam_node, self.cam = _looking((0.0, 2.0, 6.0))
+        self.lamp_node = _node("lamp_node", translate=(0.0, 5.0, 0.0))
+        self.lamp      = LightData(name="lamp", kind="point", parent_uuid=self.lamp_node.uuid)
+        self.mesh      = _under(_tri("tri"), self.hero)
+        self.skin      = SkinData(weights=np.ones((3, 2)) / 2.0, influences=["j1", "root"], mesh_uuid=self.mesh.uuid)
+        self.uv        = _uv(self.mesh)
+        self.mat       = MaterialData(mesh_uuid=self.mesh.uuid, color=(0.0, 0.0, 1.0))
+        self.morph     = MorphData("puff", np.zeros((1, 3)), [0], mesh_uuid=self.mesh.uuid)
+        self.scene = _scene(
+            self.root, self.j1, self.hero, self.cam_node, self.lamp_node,
+            self.mesh, self.skin, self.uv, self.mat, self.morph, self.cam, self.lamp,
+        )
+        clip                        = ClipData(self.scene.hierarchy, frames=2)
+        clip.frames["j1"].translate = np.array([[0.0, 1.0, 0.0], [0.0, 2.0, 0.0]])
+        self.scene.clip             = clip
+
+    @staticmethod
+    def _uuids(scene) -> set:
+        """every uuid the scene holds: the nodes' and every link"""
+        held = set()
+        for rig in [scene.hierarchy] + list(scene.clip or []):
+            for node in rig:
+                held.add(node.uuid)
+                if node.parent_uuid is not None:
+                    held.add(node.parent_uuid)
+        for field in ("meshes", "uvs", "skins", "materials", "cameras", "lights", "morphs"):
+            for record in getattr(scene, field) or []:
+                for link in ("uuid", "parent_uuid", "mesh_uuid"):
+                    value = getattr(record, link, None)
+                    if isinstance(value, str):
+                        held.add(value)
+        return held
+
+    def test_every_uuid_is_new_and_every_link_follows(self):
+        scene    = self.scene
+        before   = self._uuids(scene)
+        old_root = self.root.uuid
+        mapping  = scene.renew_uuids()
+        after    = self._uuids(scene)
+        self.assertEqual(set(mapping), before)
+        self.assertEqual(after, set(mapping.values()))
+        self.assertFalse(before & after)
+        self.assertIs(scene.hierarchy[0], self.root)  # the same objects
+        self.assertEqual(self.root.uuid, mapping[old_root])
+        self.assertEqual(self.j1.parent_uuid, self.root.uuid)
+        item = scene.renderables()[0]
+        self.assertIs(item.mesh, self.mesh)
+        self.assertEqual(item.node.uuid, self.mesh.parent_uuid)
+        self.assertEqual([j.uuid for j in item.joints], [self.j1.uuid, self.root.uuid])
+        for record in (self.uv, self.skin, self.mat, self.morph):
+            self.assertEqual(record.mesh_uuid, self.mesh.uuid)
+        self.assertEqual(self.cam.parent_uuid, self.cam_node.uuid)
+        self.assertEqual(self.lamp.parent_uuid, self.lamp_node.uuid)
+        self.assertEqual([n.uuid for n in scene.clip.active], [n.uuid for n in scene.hierarchy])  # the takes share
+        moved = np.asarray(scene.clip.active.frames["j1"].translate).reshape(-1, 3)
+        np.testing.assert_array_equal(moved, [[0.0, 1.0, 0.0], [0.0, 2.0, 0.0]])  # the frames stay with their node
+        again = scene.renew_uuids()
+        self.assertEqual(set(again), set(mapping.values()))
+
+    def test_the_render_caches_are_dropped(self):
+        scene  = self.scene
+        before = scene.placed_meshes()[0][0].points.copy()  # binds the skin's deformer
+        self.assertTrue(scene._deformers)
+        signature = scene._signature()
+        scene.renew_uuids()
+        self.assertIsNone(scene._deformers)
+        self.assertNotEqual(scene._signature(), signature)
+        placed, world = scene.placed_meshes()[0]  # placed again from the new ids, the same
+        np.testing.assert_allclose(placed.points, before, atol=1e-12)
+
+    def test_a_hierarchy_and_its_clip_renew_alike(self):
+        rig                  = HierarchyData([_node("a"), _node("b")])
+        rig["b"].parent_uuid = rig["a"].uuid
+        clip                 = ClipData(rig, frames=2)
+        mapping              = rig.renew_uuids()
+        self.assertEqual(sorted(mapping.values()), sorted([rig["a"].uuid, rig["b"].uuid]))
+        self.assertEqual(rig["b"].parent_uuid, rig["a"].uuid)
+        self.assertIs(rig[rig["a"].uuid], rig["a"])  # the index follows
+        clip.renew_uuids(mapping)
+        self.assertEqual([n.uuid for n in clip], [n.uuid for n in rig])
+        self.assertEqual(clip["b"].parent_uuid, rig["a"].uuid)
+
+
 class TestOrthographic(unittest.TestCase):
     """an orthographic CameraData: its width over the frame's aspect"""
 

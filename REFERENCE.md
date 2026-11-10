@@ -398,6 +398,8 @@ classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, fps: '
     every animation of a glb file, one :class:`ClipData` each
 match(self, *args, exclude: 'bool' = False, exact: 'bool' = True) -> '_Takes'
     every take's ``match``, the nodes it selects at the frame each take
+renew_uuids(self, mapping: 'Optional[dict]' = None) -> 'dict'
+    ``renew_uuids(mapping)`` on every take with one mapping: the takes
 save_fbx(self, filename, as_ascii=False) -> 'None'
     every take written to one file, as ``cgmath.formats.save_fbx(filename,
 set_joint_orient_to_rotate(self) -> None
@@ -435,6 +437,8 @@ insert(self, index: 'int', node: "'TransformData'") -> 'None'
     S.insert(index, value) -- insert value before index
 pop(self, index=-1) -> 'TransformData'
     S.pop([index]) -> item -- remove and return item at index (default last).
+renew_uuids(self, mapping: 'Optional[dict]' = None) -> 'dict'
+    Fresh uuids on every node, in place, the parent links rewired: the
 sort(self, key=None, reverse=False) -> 'None'
     sorts the nodes in place, by name unless ``key`` says otherwise
 ```
@@ -1020,7 +1024,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000002A97E50DD90>
+MISSING = <dataclasses._MISSING_TYPE object at 0x0000026A4260DD90>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -2829,6 +2833,8 @@ renderable(self, name: str) -> cgmath.render.scene.Renderable
     The one renderable whose mesh, or whose node, is named ``name``
 renderables(self) -> List[cgmath.render.scene.Renderable]
     One :class:`Renderable` per mesh, in the meshes' order: the mesh, the
+renew_uuids(self) -> dict
+    Fresh uuids on every node and shape, every link rewired, in place:
 save_fbx(self, filename: str, as_ascii: bool = False) -> str
     the scene written as :func:`cgmath.formats.save_fbx` writes its
 strip_namespace(self, namespace: Optional[str] = None) -> None
@@ -3267,7 +3273,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000002A94C439300>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000026A905AD580>, '...
 ```
 
 ## `cgmath.constraints`

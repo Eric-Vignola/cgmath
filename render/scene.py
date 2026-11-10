@@ -64,7 +64,7 @@ from cgmath.geometry.mesh import _corner_colors, load_glb as _load_glb, load_obj
 from cgmath.geometry.morph_target import MorphData, MorphList
 from cgmath.geometry.skin_weights import _read_skins_glb, SkinData, SkinList
 from cgmath.geometry.utils import stream_to_matrix
-from cgmath.hierarchy import ClipData, ClipList, HierarchyData, TransformData
+from cgmath.hierarchy import ClipData, ClipList, generate_uuid, HierarchyData, TransformData
 from cgmath.render.camera import (
     _default_camera_for_points,
     _inflate_points_about_center,
@@ -367,6 +367,33 @@ class Scene(Data):
                         f"shape targets, not a {type(item).__name__}"
                     )
         return self
+
+    def renew_uuids(self) -> dict:
+        """
+        Fresh uuids on every node and shape, every link rewired, in place:
+        the records stay the same objects. The hierarchy and the takes renew
+        alike, sharing the nodes' uuids as before; each shape's ``uuid``,
+        ``parent_uuid`` and ``mesh_uuid`` follow; the render caches are
+        dropped. Returns ``{old: new}``.
+
+        For a scene built a second time in Maya beside the first: rig gives
+        the nodes it makes the data's uuids, and Maya wants them unique.
+        """
+        mapping = {}
+        if self.hierarchy is not None:
+            self.hierarchy.renew_uuids(mapping)
+        if self.clip is not None:
+            self.clip.renew_uuids(mapping)
+        for field, _, _ in _LISTS:
+            for record in getattr(self, field) or []:
+                for link in ("uuid", "parent_uuid", "mesh_uuid"):
+                    value = getattr(record, link, None)
+                    if isinstance(value, str):
+                        setattr(record, link, mapping.setdefault(value, generate_uuid()))
+        self._deformers = None
+        self._textures  = None
+        _clear_render_cache(self)
+        return mapping
 
     # -- placement -------------------------------------------------------------------
 
