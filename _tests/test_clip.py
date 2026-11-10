@@ -4274,7 +4274,7 @@ class TestClipFramedSolve(unittest.TestCase):
         fast                                   = clip.copy()
         fast.frames[["j4", "j4"]].world_matrix = np.stack([first, last], axis=1)
         once                                   = clip.copy()
-        once.frames["j4"].world_matrix         = last[:, None]
+        once.frames["j4"].world_matrix         = last  # (F, 4, 4) on the axis of one node
         self._assert_same(fast, once)
 
     def test_bad_operands_raise_before_writing(self):
@@ -9456,6 +9456,80 @@ class TestVisibilityFrameByFrame(unittest.TestCase):
             ClipData.from_dict(tree)
         self.assertNotIn("visibility", self.clip().to_dict()["blocks"])
         self.assertEqual(pickle.loads(pickle.dumps(clip)), clip)
+
+
+class TestOneNodeAxisShapes(unittest.TestCase):
+    """clip.frames["name"] has no node axis: the evaluated values read one a
+    frame and the writes take one value, one a frame, or one a frame with a
+    node axis of one; a selection keeps the node axis"""
+
+    FRAMES = 4
+
+    def _clip(self) -> ClipData:
+        rig = HierarchyData([
+            TransformData("a", node_type="joint", translate=(0.0, 1.0, 0.0)),
+            TransformData("b", node_type="joint", translate=(0.0, 2.0, 0.0), rotate=(0.0, 0.0, 30.0)),
+            TransformData("c", translate=(1.0, 0.0, 0.0)),
+        ])
+        rig["b"].set_parent("a", world_space=False)
+        rig["c"].set_parent("b", world_space=False)
+        clip                         = ClipData(rig, frames=self.FRAMES)
+        clip.frames["a"].rotate_y    = np.linspace(0.0, 90.0, self.FRAMES)
+        clip.frames["b"].translate_x = np.linspace(0.0, 3.0, self.FRAMES)
+        return clip
+
+    def test_reads_drop_the_node_axis(self):
+        clip = self._clip()
+        one, two, every = clip.frames["b"], clip.frames[["b"]], clip.frames
+        for name, width in (("world_matrix", (4, 4)), ("matrix", (4, 4)), ("parent_matrix", (4, 4)),
+                            ("inverse_matrix", (4, 4)), ("world_inverse_matrix", (4, 4)),
+                            ("parent_inverse_matrix", (4, 4)), ("quaternion", (4,)), ("visibility", ())):
+            with self.subTest(name):
+                single = np.asarray(getattr(one, name))
+                self.assertEqual(single.shape, (self.FRAMES,) + width)
+                np.testing.assert_array_equal(single, np.asarray(getattr(two, name))[:, 0])
+                np.testing.assert_array_equal(single, np.asarray(getattr(every, name))[:, 1])
+                self.assertEqual(np.asarray(getattr(two, name)).shape, (self.FRAMES, 1) + width)
+        self.assertEqual(clip.frames[["a", "c"]].world_matrix.shape, (self.FRAMES, 2, 4, 4))
+
+    def test_writes_take_one_value_or_one_a_frame(self):
+        clip  = self._clip()
+        world = np.array(clip.frames.world_matrix)
+        moved = world[:, 2].copy()
+        moved[:, 3, 0] += np.arange(self.FRAMES)
+        for label, value in (("(F, 4, 4)", moved), ("(F, 1, 4, 4) too", moved[:, None])):
+            with self.subTest(label):
+                fast                            = clip.copy()
+                fast.frames["c"].world_matrix   = value
+                slow                            = clip.copy()
+                slow.frames[["c"]].world_matrix = moved[:, None]
+                np.testing.assert_allclose(fast.frames.world_matrix, slow.frames.world_matrix, rtol=0.0, atol=1e-9)
+                np.testing.assert_allclose(fast.frames["c"].world_matrix, moved, rtol=0.0, atol=1e-9)
+        for label, value in (("(4, 4)", moved[1]), ("(1, 4, 4)", moved[1:2])):
+            with self.subTest(label):
+                fast                          = clip.copy()
+                fast.frames["c"].world_matrix = value
+                np.testing.assert_allclose(fast.frames["c"].world_matrix, np.repeat(moved[1:2], self.FRAMES, axis=0), rtol=0.0, atol=1e-9)
+        fast                    = clip.copy()
+        fast.frames["c"].matrix = np.eye(4)
+        np.testing.assert_allclose(fast.frames["c"].matrix, np.repeat(np.eye(4)[None], self.FRAMES, axis=0), rtol=0.0, atol=1e-12)
+        fast.frames["c"].quaternion = fast.frames["b"].quaternion  # (F, 4)
+        np.testing.assert_allclose(fast.frames["c"].quaternion, fast.frames["b"].quaternion, rtol=0.0, atol=1e-9)
+        with self.assertRaisesRegex(ValueError, r"the axis of one node takes \(4, 4\), \(1,\) \+ \(4, 4\) or \(F,\) \+ \(4, 4\)"):
+            fast.frames["c"].world_matrix = np.zeros((self.FRAMES + 1, 4, 4))
+
+    def test_match_and_visibility_on_one_node(self):
+        clip, other = self._clip(), self._clip()
+        other.frames["c"].translate_y = np.linspace(0.0, 5.0, self.FRAMES)
+        clip.frames["c"].match_matrix(other.frames["c"])
+        np.testing.assert_allclose(clip.frames["c"].world_matrix, other.frames["c"].world_matrix, rtol=0.0, atol=1e-9)
+        clip.frames["c"].visibility = [True, False, True, False]
+        np.testing.assert_array_equal(clip.frames["c"].visibility, [True, False, True, False])
+        np.testing.assert_array_equal(clip.frames[["c"]].visibility, np.array([True, False, True, False])[:, None])
+        clip.frames["c"].visibility = False
+        self.assertFalse(clip.frames["c"].visibility.any())
+        clip.frames["c"].visibility = np.array([True, True, False, True])[:, None]  # a node axis of one still writes
+        np.testing.assert_array_equal(clip.frames["c"].visibility, [True, True, False, True])
 
 
 def _fbx_matrix(rows):
