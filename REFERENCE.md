@@ -1,6 +1,6 @@
 # `cgmath` Reference
 
-Generated from the live code by `gen_reference.py` (kept in the `tools/` folder beside the packages, not in this repository) on 2026-11-09. Do not edit by hand; re-run the script after any API change.
+Generated from the live code by `gen_reference.py` (kept in the `tools/` folder beside the packages, not in this repository) on 2026-11-10. Do not edit by hand; re-run the script after any API change.
 
 Every public class, property, method, function and constant of the modules below, with the real signature (`inspect.signature`) and the first line of its docstring. To *learn* a subpackage read its `README.md` and `CHEATSHEET.md`; this page is for looking things up.
 
@@ -272,7 +272,7 @@ classmethod from_poses(cls, poses, start_frame: 'int' = 0, fps: 'float' = 24.0) 
     builds a clip from a sequence of HierarchyData poses
 get_delta(self, other, by: 'str' = 'index', translate: 'bool' = True) -> "'ClipData'"
     The delta of every frame against ``other``, as a clip.
-classmethod load_fbx(cls, filename) -> "'ClipData'"
+classmethod load_fbx(cls, filename, verbose: 'bool' = True) -> "'ClipData'"
     the active take of an fbx file over every node, as
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, animation: 'int' = 0, fps: 'float' = 24.0, start_frame: 'int' = 0) -> "'ClipData'"
     builds a clip from a glb's animation
@@ -392,7 +392,7 @@ index(self, value, start=0, stop=None) -> 'int'
     the position of the first take named ``value``, or of that clip,
 insert(self, index, clip) -> 'None'
     inserts a take, as :meth:`append` admits one
-classmethod load_fbx(cls, filename) -> "'ClipList'"
+classmethod load_fbx(cls, filename, verbose: 'bool' = True) -> "'ClipList'"
     every take of an fbx file over every node, as
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, fps: 'float' = 24.0) -> "'ClipList'"
     every animation of a glb file, one :class:`ClipData` each
@@ -756,7 +756,7 @@ index(self, obj, start=0, stop=None) -> 'int'
     The position of a node, given as the node, its uuid or its name,
 insert(self, index: 'int', node: "'TransformData'") -> 'None'
     S.insert(index, value) -- insert value before index
-classmethod load_fbx(cls, filename)
+classmethod load_fbx(cls, filename, verbose: 'bool' = True)
     the nodes of an fbx file at their own values, whether it holds a
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, pose_frame: 'None | int' = None)
     primitive glb joint loader that supports style2 and momentum glbs
@@ -793,7 +793,7 @@ generate_uuid() -> 'str'
     generates a new unique uuid
 load(filename: 'str', mode: 'Optional[str]' = None, **kwargs) -> "'HierarchyData'"
     The hierarchy the file holds, read as ``mode`` says or as the file
-load_fbx(filename: 'str') -> "'HierarchyData'"
+load_fbx(filename: 'str', verbose: 'bool' = True) -> "'HierarchyData'"
     The fbx's skeleton: ``HierarchyData.load_fbx()``.
 load_glb(filename: 'str', scale_factor: 'float' = 100.0, pose_frame: 'Optional[int]' = None) -> "'HierarchyData'"
     The glb's joint hierarchy, names as in the file: ``HierarchyData.load_glb()``.
@@ -1024,7 +1024,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x0000026A4260DD90>
+MISSING = <dataclasses._MISSING_TYPE object at 0x0000024D3E76AA10>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1244,7 +1244,7 @@ grow_vertex_edge_indices(self, indices: 'np.ndarray', n: 'int' = 1) -> 'np.ndarr
     grows vertex edge indices by n steps
 grow_vertex_face_indices(self, indices: 'np.ndarray', n: 'int' = 1) -> 'np.ndarray'
     grows vertex face indices by n steps
-classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None) -> "'MeshData'"
+classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None, verbose: 'bool' = True) -> "'MeshData'"
     the first mesh of an fbx file, or the one named ``name``, as
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, name: 'str | None' = None) -> "'MeshData'"
     returns a single MeshData from a glb (first mesh if name is None)
@@ -1316,7 +1316,7 @@ Methods:
 ```text
 fix_symmetry(self, pivot: 'float' = 0.0, axis: 'int' = 0, side: 'float' = 1.0, combined: 'bool' = True, tolerance: 'Union[None, float]' = None) -> 'np.ndarray'
     attempts a symmetry fix on each element or combined.
-classmethod load_fbx(cls, filename: 'str') -> "'MeshList'"
+classmethod load_fbx(cls, filename: 'str', verbose: 'bool' = True) -> "'MeshList'"
     every mesh of an fbx file, as :func:`cgmath.formats.load_fbx`
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0) -> "'MeshList'"
     loads all meshes from a glb file into a MeshList
@@ -1434,8 +1434,8 @@ imshow(self) -> 'None'
     shows the image in a window
 imwrite(self, fname: 'str') -> 'str'
     writes a png file
-classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None, channel: 'int' = 0) -> "'UVData'"
-    returns a single UV channel from an fbx file (first mesh / channel 0 by default)
+classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None, channel: 'int' = 0, verbose: 'bool' = True) -> "'UVData'"
+    returns a single UV channel from an fbx file (first mesh / channel
 classmethod load_glb(cls, filename: 'str', name: 'str | None' = None, channel: 'int' = 0) -> "'UVData'"
     returns a single UV channel from a glb (first mesh / channel 0 by default)
 classmethod load_obj(cls, filename: 'str', name: 'str | None' = None, channel: 'int' = 0) -> "'UVData'"
@@ -1487,7 +1487,7 @@ from_vertices(self, *args, **kwarg) -> "'UVList'"
     returns a new UVList object from the given vertex indices or rules
 get_minimum_resolution(self)
     computes the minimum resolution for the entire list
-classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None) -> "'UVList'"
+classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None, verbose: 'bool' = True) -> "'UVList'"
     the UV sets of the first mesh of an fbx file, or of the mesh named
 classmethod load_glb(cls, filename: 'str', name: 'str | None' = None) -> "'UVList'"
     loads all UV channels for one mesh from a glb file (first mesh if name is None)
@@ -1507,7 +1507,7 @@ Functions:
 ```text
 load(filename: 'str', mode: 'str | None' = None, **kwargs) -> 'list'
     The file's meshes with their UVs, as ``(MeshData, UVList)`` pairs:
-load_fbx(filename: 'str') -> 'list'
+load_fbx(filename: 'str', verbose: 'bool' = True) -> 'list'
     the meshes of an fbx file with their UV sets, ``[(MeshData, UVList)]``
 load_glb(filename: 'str', scale_factor: 'float' = 100.0) -> 'list'
     loads glb file and returns list of (MeshData, UVList) tuples
@@ -1795,7 +1795,7 @@ insert(self, index: 'int', influence: 'str', weight: 'float' = 0.0)
     inserts an influence at the specified index
 is_equivalent(self, other: "'SkinData'") -> 'bool'
     checks whether the skin data is equivalent to another
-classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None) -> "'SkinData'"
+classmethod load_fbx(cls, filename: 'str', name: 'str | None' = None, verbose: 'bool' = True) -> "'SkinData'"
     the skin of the first skinned mesh of an fbx file, or of the mesh
 classmethod load_glb(cls, filename: 'str', name: 'str | None' = None) -> "'SkinData'"
     returns a single SkinData from a glb (first skinned primitive if name is None)
@@ -1837,7 +1837,7 @@ SkinList(iterable=None)
 Methods:
 
 ```text
-classmethod load_fbx(cls, filename: 'str') -> "'SkinList'"
+classmethod load_fbx(cls, filename: 'str', verbose: 'bool' = True) -> "'SkinList'"
     Every skinned mesh's skin, in file order, as
 classmethod load_glb(cls, filename: 'str') -> "'SkinList'"
     Every skinned primitive of a glb, in file order, named after its
@@ -1850,7 +1850,7 @@ Functions:
 ```text
 load(filename: 'str', mode: 'Optional[str]' = None, **kwargs) -> 'SkinList'
     The file's skins, read as ``mode`` says or as the file reads (fbx, glb,
-load_fbx(filename: 'str') -> 'SkinList'
+load_fbx(filename: 'str', verbose: 'bool' = True) -> 'SkinList'
     Every skinned mesh of an fbx, names as in the file: ``SkinList.load_fbx()``.
 load_glb(filename: 'str') -> 'SkinList'
     Every skinned primitive of a glb, names as in the file: ``SkinList.load_glb()``.
@@ -2817,7 +2817,7 @@ configure(self, **kwargs) -> 'Scene'
     sets the render and shading settings given, None values skipped;
 imshow(self, resolution: Tuple[int, int] = (500, 500)) -> None
     the frame in an OpenCV window, rendered at ``resolution`` when none is kept
-classmethod load_fbx(cls, filename: str, name: Optional[str] = None) -> 'Scene'
+classmethod load_fbx(cls, filename: str, name: Optional[str] = None, **options) -> 'Scene'
     the file's nodes or takes, meshes, UV sets, skins, materials,
 classmethod load_glb(cls, filename: str, name: Optional[str] = None, scale_factor: float = 100.0, load_skin: bool = True, extract_texture: bool = True) -> 'Scene'
     Every mesh of a GLB file, with its UV sets, at identity, its points
@@ -2955,7 +2955,7 @@ FbxContents
 Functions:
 
 ```text
-load_fbx(filename) -> cgmath.formats._load.FbxContents
+load_fbx(filename, *, takes: bool = True, meshes: bool = True, uvs: bool = True, skins: bool = True, materials: bool = True, textures: bool = True, morphs: bool = True, cameras: bool = True, lights: bool = True, verbose: bool = True) -> cgmath.formats._load.FbxContents
     ``(hierarchy, clip, meshes, skins, uvs, cameras, lights, materials,
 save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=None, cameras=None, lights=None, materials=None, morphs=None, as_ascii: bool = False) -> None
     writes one of ``hierarchy``, a HierarchyData of joints and transforms,
@@ -3273,7 +3273,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000026A905AD580>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000024D8BDD1B20>, '...
 ```
 
 ## `cgmath.constraints`

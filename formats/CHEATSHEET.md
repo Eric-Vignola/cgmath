@@ -631,8 +631,23 @@ print(held.hierarchy[held.meshes[0].parent_uuid].name, held.clip, held.skins, he
 ```
 
 The fields are `save_fbx`'s arguments, in order, so `save_fbx(b, *load_fbx(a))`
-writes a file back. A take is a `ClipData` over the nodes; a file holding
-takes comes back with `hierarchy` None and the nodes in `clip`:
+writes a file back. Each kind is a flag, `True` by default (`takes`,
+`meshes`, `uvs`, `skins`, `materials`, `textures`, `morphs`, `cameras`,
+`lights`); a kind left unread is None and costs nothing, the nodes are
+always read. `textures=False` keeps each material's `texture_file`, UV set
+and wraps and decodes no pixels; a texture file many materials name is
+decoded once, the one array shared. `verbose=False` silences the read's
+warnings.
+
+```python
+some = load_fbx(DEMO_FBX, materials=False, cameras=False, lights=False)
+print(some.hierarchy.name, some.meshes.name, some.uvs.name, some.materials, some.cameras, some.lights)
+print(load_fbx(DEMO_FBX, meshes=False).meshes, load_fbx(DEMO_FBX, textures=False).materials[0].texture)   # None None
+```
+
+A take is a `ClipData` over the nodes; a file holding takes comes back
+with `hierarchy` None and the nodes in `clip` (`takes=False` reads the
+nodes at their own values instead, the take left unread):
 
 ```python
 clip                      = ClipData(rig, frames=3, fps=24.0, take="spin")
@@ -832,9 +847,14 @@ component holding one as `.data`.
 ## The class routes slice the same read
 
 `cgmath.formats.load_fbx` hands back every class at once; each class's own
-`load_fbx` is one field of it, read the same way. GLB has no such bundle:
-its readers live in `geometry` and `hierarchy` (`GlbData.mesh_list` is the
-one `MeshData` this package gives).
+`load_fbx` is one field of it, read the same way, its kinds alone:
+`MeshData.load_fbx` reads the nodes and the meshes, `UVList.load_fbx` the
+UV sets too, `SkinList.load_fbx` the skins, `HierarchyData.load_fbx` the
+nodes, `ClipList.load_fbx` the nodes and the takes. Every route takes
+`verbose=False`; `Scene.load_fbx` takes every flag
+(`Scene.load_fbx(path, textures=False)`). GLB has no such bundle: its
+readers live in `geometry` and `hierarchy` (`GlbData.mesh_list` is the one
+`MeshData` this package gives).
 
 <!-- notest: illustrative import map; the loaders need real asset files -->
 ```python
@@ -860,7 +880,8 @@ Scene.load_fbx("hero.fbx")  # -> every field, ready to render
 |---|---|
 | `import cgmath.formats.fbx` fails without the SDK | Wrap the import; `glb` only fails at call time |
 | `FbxExporter.save` / `.add_scene` do not exist | `.export(path)` / `.add_skeleton(component)` |
-| `load_fbx` gives `hierarchy` None | the file holds takes: the nodes are in `clip`, every take's |
+| `load_fbx` gives `hierarchy` None | the file holds takes: the nodes are in `clip`, every take's; `takes=False` gives the nodes |
+| A material's `texture` is None | read with `textures=False`, the file not found, or no PIL: `texture_file` still names it |
 | A shape's `parent_uuid` / `mesh_uuid` matches nothing | it came from another load: each read mints its own uuids |
 | `set_binary` on a `GLTF2()` with no blob | `TypeError` — `binary_blob()` is `None`; load a real file first |
 | `GlbData.mesh_list` is `None` | `trimesh` is not installed |

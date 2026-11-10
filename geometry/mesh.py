@@ -2955,16 +2955,17 @@ class MeshData(ShapeData):
     # ----------------------------------- FBX ------------------------------------ #
 
     @classmethod
-    def load_fbx(cls, filename: str, name: str | None = None) -> "MeshData":
+    def load_fbx(cls, filename: str, name: str | None = None, verbose: bool = True) -> "MeshData":
         """the first mesh of an fbx file, or the one named ``name``, as
-        :func:`cgmath.formats.load_fbx` reads it: in Maya's Y-up and cm, its
-        ``parent_uuid`` naming its node in the file's hierarchy, which this
-        does not return. RuntimeError for a file with no mesh, ValueError for
-        a name no mesh has.
+        :func:`cgmath.formats.load_fbx` reads it, the nodes and the meshes
+        alone read: in Maya's Y-up and cm, its ``parent_uuid`` naming its
+        node in the file's hierarchy, which this does not return.
+        RuntimeError for a file with no mesh, ValueError for a name no mesh
+        has; ``verbose`` False silences the read's warnings.
         """
-        from cgmath.formats import load_fbx
+        from cgmath.formats._load import load_only
 
-        return _fbx_select(load_fbx(filename), name)
+        return _fbx_select(load_only(filename, meshes=True, verbose=verbose), name)
 
     def save_fbx(self, filename: str, as_ascii: bool = False) -> None:
         """writes the mesh to an fbx file, binary unless ``as_ascii``
@@ -4681,10 +4682,11 @@ class UVData(MeshData):
 
     @classmethod
     def load_fbx(
-        cls, filename: str, name: str | None = None, channel: int = 0
+        cls, filename: str, name: str | None = None, channel: int = 0, verbose: bool = True
     ) -> "UVData":
-        """returns a single UV channel from an fbx file (first mesh / channel 0 by default)"""
-        uv_list = UVList.load_fbx(filename, name=name)
+        """returns a single UV channel from an fbx file (first mesh / channel
+        0 by default), as :meth:`UVList.load_fbx` reads them"""
+        uv_list = UVList.load_fbx(filename, name=name, verbose=verbose)
         if channel >= len(uv_list):
             raise IndexError(
                 f"UV channel {channel} not found; mesh has {len(uv_list)} channel(s)"
@@ -4763,12 +4765,13 @@ class UVData(MeshData):
 
 class MeshList(DataList[MeshData]):
     @classmethod
-    def load_fbx(cls, filename: str) -> "MeshList":
+    def load_fbx(cls, filename: str, verbose: bool = True) -> "MeshList":
         """every mesh of an fbx file, as :func:`cgmath.formats.load_fbx`
-        reads them (:meth:`MeshData.load_fbx`); empty for a file with none"""
-        from cgmath.formats import load_fbx
+        reads them, the nodes and the meshes alone read
+        (:meth:`MeshData.load_fbx`); empty for a file with none"""
+        from cgmath.formats._load import load_only
 
-        return load_fbx(filename).meshes or cls()
+        return load_only(filename, meshes=True, verbose=verbose).meshes or cls()
 
     def save_fbx(self, filename: str, as_ascii: bool = False) -> None:
         """writes every mesh to one fbx file, binary unless ``as_ascii``: each
@@ -4846,13 +4849,14 @@ class UVList(MeshList, DataList[UVData]):
     save_fbx = _NoRoute("MeshList's fbx writer writes meshes, a UVList holds UV sets")
 
     @classmethod
-    def load_fbx(cls, filename: str, name: str | None = None) -> "UVList":
+    def load_fbx(cls, filename: str, name: str | None = None, verbose: bool = True) -> "UVList":
         """the UV sets of the first mesh of an fbx file, or of the mesh named
         ``name`` (:meth:`MeshData.load_fbx`), as :func:`cgmath.formats.load_fbx`
-        reads them; empty for a mesh with none"""
-        from cgmath.formats import load_fbx
+        reads them, the nodes, meshes and UV sets alone read; empty for a
+        mesh with none"""
+        from cgmath.formats._load import load_only
 
-        held = load_fbx(filename)
+        held = load_only(filename, meshes=True, uvs=True, verbose=verbose)
         mesh = _fbx_select(held, name)
         return cls([uv for uv in held.uvs or [] if uv.mesh_uuid == mesh.uuid])
 
@@ -5564,16 +5568,18 @@ def _fbx_face_varying_indices(mesh, layer_element, counts: np.ndarray) -> np.nda
     return indices
 
 
-def load_fbx(filename: str) -> list:
+def load_fbx(filename: str, verbose: bool = True) -> list:
     """the meshes of an fbx file with their UV sets, ``[(MeshData, UVList)]``
-    in the file's order, as :func:`cgmath.formats.load_fbx` reads them: in
-    Maya's Y-up and cm, each mesh's ``parent_uuid`` naming its node in the
-    file's hierarchy, which this does not return (the mesh itself holds its
-    own points, its node's placement left to the node), each set naming its
-    mesh by uuid, a mesh with no set holding an empty UVList."""
-    from cgmath.formats import load_fbx as read
+    in the file's order, as :func:`cgmath.formats.load_fbx` reads them, the
+    nodes, meshes and UV sets alone read: in Maya's Y-up and cm, each mesh's
+    ``parent_uuid`` naming its node in the file's hierarchy, which this does
+    not return (the mesh itself holds its own points, its node's placement
+    left to the node), each set naming its mesh by uuid, a mesh with no set
+    holding an empty UVList; ``verbose`` False silences the read's
+    warnings."""
+    from cgmath.formats._load import load_only
 
-    return _fbx_pairs(read(filename))
+    return _fbx_pairs(load_only(filename, meshes=True, uvs=True, verbose=verbose))
 
 
 def _fbx_pairs(contents) -> list:

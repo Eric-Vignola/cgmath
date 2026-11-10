@@ -1085,11 +1085,13 @@ class Scene(Data):
     # -- files --------------------------------------------------------------------------
 
     @classmethod
-    def load_fbx(cls, filename: str, name: Optional[str] = None) -> "Scene":
+    def load_fbx(cls, filename: str, name: Optional[str] = None, **options) -> "Scene":
         """the file's nodes or takes, meshes, UV sets, skins, materials,
         cameras, lights and blend shape targets, as :func:`cgmath.formats.load_fbx`
-        reads them, named after the file unless ``name`` says"""
-        contents = _load_fbx(filename)
+        reads them, named after the file unless ``name`` says; ``options``
+        are ``load_fbx``'s flags (``textures=False``, ``verbose=False`` ...),
+        a kind left unread None"""
+        contents = _load_fbx(filename, **options)
         stem     = os.path.splitext(os.path.basename(os.path.expanduser(filename)))[0]
         return cls(name=name or stem, **contents._asdict())
 
