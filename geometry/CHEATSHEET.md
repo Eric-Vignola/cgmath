@@ -1242,7 +1242,13 @@ covers in `faces`, None for the whole mesh. The defaults are a fresh Maya
 grey, cosine power 20, reflectivity 0.5. `kind` is lambert or phong: Maya's
 own FBX export writes a blinn as a phong (its eccentricity converted to the
 shininess) and a standardSurface as a bare material, which loads as a
-default lambert with a warning.
+default lambert with a warning. Maya's own default material,
+`standardSurface1` on `initialShadingGroup`, is such a bare material:
+covering the whole mesh with no map it reads as no material at all, in
+silence, the mesh as Maya makes one by hand. Maya's own importer makes
+a fresh `standardSurface2` in a new shading group of such a file's
+default material, and leaves a mesh holding no material on no shading
+group at all (measured on Maya 2025).
 
 A bump2d's map rides along: `normal_map` (pixels as `texture`, reading
 the colour map's UV set and wraps), `normal_map_file`, `normal_map_kind`

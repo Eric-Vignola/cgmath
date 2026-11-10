@@ -1017,6 +1017,133 @@ class TestMayaNormalMaps(_Recorded):
                 self.assertEqual(entry["color_files"], 0 if material.texture is None else 1)
 
 
+def defaulted(folder: str) -> str:
+    """an sdk file holding Maya's default material as Maya writes it, a bare
+    FbxSurfaceMaterial named standardSurface1: node whole, a 2 by 2 plane
+    under it alone; node split, the plane with it on faces 0 and 1 and a
+    lambert "paint" on 2 and 3; node other under a bare "pbr"; node mapped
+    under standardSurface1 with grad.png feeding its DiffuseColor"""
+    path = os.path.join(folder, "defaulted.fbx")
+    grad = os.path.join(folder, "grad.png")
+    Image.fromarray(gradient()).save(grad)
+    manager = FBX.FbxManager.Create()
+    manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+    try:
+        scene = FBX.FbxScene.Create(manager, "")
+        root  = scene.GetRootNode()
+        grid  = [(x, 0.0, z) for z in (-1.0, 0.0, 1.0) for x in (-1.0, 0.0, 1.0)]
+        quads = [(0, 1, 4, 3), (1, 2, 5, 4), (3, 4, 7, 6), (4, 5, 8, 7)]
+
+        def mesh_node(name, *materials, indices=(0,), by_polygon=False):
+            node = FBX.FbxNode.Create(scene, name)
+            root.AddChild(node)
+            shape = FBX.FbxMesh.Create(scene, name + "Shape")
+            shape.InitControlPoints(len(grid))
+            for i, point in enumerate(grid):
+                shape.SetControlPointAt(FBX.FbxVector4(*point, 1.0), i)
+            for face in quads:
+                shape.BeginPolygon(-1, -1, -1, False)
+                for v in face:
+                    shape.AddPolygon(v)
+                shape.EndPolygon()
+            node.SetNodeAttribute(shape)
+            for material in materials:
+                node.AddMaterial(material)
+            made = shape.CreateElementMaterial()
+            made.SetMappingMode(FBX.FbxLayerElement.EMappingMode.eByPolygon if by_polygon else FBX.FbxLayerElement.EMappingMode.eAllSame)
+            made.SetReferenceMode(FBX.FbxLayerElement.EReferenceMode.eIndexToDirect)
+            for index in indices:
+                made.GetIndexArray().Add(index)
+
+        def default():
+            made = FBX.FbxSurfaceMaterial.Create(scene, "standardSurface1")
+            made.ShadingModel.Set(FBX.FbxString(""))
+            return made
+
+        mesh_node("whole", default())
+        paint = FBX.FbxSurfaceLambert.Create(scene, "paint")
+        paint.Diffuse.Set(FBX.FbxDouble3(0.2, 0.4, 0.6))
+        mesh_node("split", default(), paint, indices=(0, 0, 1, 1), by_polygon=True)
+        pbr = FBX.FbxSurfaceMaterial.Create(scene, "pbr")
+        pbr.ShadingModel.Set(FBX.FbxString("Unknown"))
+        mesh_node("other", pbr)
+        mapped = default()
+        tex    = FBX.FbxFileTexture.Create(scene, "gradMap")
+        tex.SetFileName(grad)
+        tex.SetRelativeFileName(os.path.basename(grad))
+        tex.SetTextureUse(FBX.FbxTexture.ETextureUse.eStandard)
+        tex.SetMappingType(FBX.FbxTexture.EMappingType.eUV)
+        # a bare material holds no DiffuseColor: made here, as a writer of such a material would
+        FBX.FbxProperty.Create(mapped, FBX.FbxDouble3DT, "DiffuseColor").ConnectSrcObject(tex)
+        mesh_node("mapped", mapped)
+        exporter = FBX.FbxExporter.Create(manager, "")
+        if not exporter.Initialize(path, -1, manager.GetIOSettings()):
+            raise RuntimeError(f"cannot write {path}")
+        exporter.Export(scene)
+        exporter.Destroy()
+    finally:
+        manager.Destroy()
+    return path
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestDefaultMaterial(_Files):
+    """Maya's default material, written bare: on the whole mesh with no map it
+    is no material; on faces of a mesh, with a map, or any other bare
+    material, a default lambert with the warning"""
+
+    def test_the_default_material_on_the_whole_mesh_is_no_material(self):
+        path = defaulted(self.folder)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            back = load_fbx(path)
+        rig   = back.hierarchy if back.hierarchy is not None else back.clip.active
+        nodes = {rig[mesh.parent_uuid].name: mesh.uuid for mesh in back.meshes}
+        self.assertEqual(sorted(nodes), ["mapped", "other", "split", "whole"])
+        held = [(m.name, [k for k, v in nodes.items() if v == m.mesh_uuid][0], None if m.faces is None else list(m.faces)) for m in back.materials]
+        self.assertEqual(held, [("standardSurface1", "split", [0, 1]), ("paint", "split", [2, 3]), ("pbr", "other", None), ("standardSurface1", "mapped", None)])
+        self.assertNotIn(nodes["whole"], [m.mesh_uuid for m in back.materials])
+        np.testing.assert_array_equal(back.materials[3].texture, gradient())
+        self.assertEqual(back.materials[0], MaterialData(faces=[0, 1]))  # a default lambert on its faces
+        messages = [str(w.message) for w in caught]
+        self.assertEqual(len(messages), 1, messages)
+        self.assertIn("reads lambert and phong materials", messages[0])
+        self.assertIn("material 'pbr' (shading model '')", messages[0])                           # the sdk writes no shading model for a bare material
+        self.assertEqual(messages[0].count("material 'standardSurface1' (shading model '')"), 1)  # split and mapped, named once
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestMayaDefaultMaterial(_Recorded):
+    """Maya 2025's export of a mesh on its default shading group, and its
+    import of a mesh with no material; as recorded"""
+
+    def test_mayas_default_material_reads_as_none_and_a_mesh_with_none_lands_on_it(self):
+        case = self.case("default_material")
+        self.assertEqual(case.value("default_shader"), ["standardSurface1"])
+        self.assertEqual(case.value("cube_sets"), ["initialShadingGroup"])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            back = load_fbx(self.fixture("maya_cube.fbx"))
+        self.assertEqual([str(w.message) for w in caught], [])
+        self.assertIsNone(back.materials)
+        self.assertEqual(len(back.meshes), 1)
+        self.assertIsNone(Scene.load_fbx(self.fixture("maya_cube.fbx")).materials)
+        # our meshes with no material: Maya's importer leaves each on no shading
+        # group at all, and its own default material, imported back, is a fresh
+        # standardSurface2 in a new shading group (measured): neither is the
+        # initialShadingGroup a mesh made in Maya by hand starts on
+        nodes = rig()
+        held  = meshes(nodes)
+        self.assertFreshSave(self.fixture("ours.fbx"), hierarchy=nodes, meshes=held)
+        imported = case.value("imported")
+        for node in ("plane", "box"):
+            with self.subTest(node):
+                self.assertEqual((imported[node]["groups"], imported[node]["shaders"]), ([], {}))
+        again = case.value("reimported")
+        self.assertEqual((again["groups"], again["shaders"]), (["cubeSG"], {"cubeSG": ["standardSurface2"]}))
+        self.assertIn("standardSurface2", again["materials"])
+
+
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
 class TestMayaMaterials(_Recorded):
     """Maya 2025's export of its shaders read as Maya holds them, and Maya's

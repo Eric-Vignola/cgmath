@@ -1,0 +1,34 @@
+{
+ "cube_sets": [
+  "initialShadingGroup"
+ ],
+ "default_shader": [
+  "standardSurface1"
+ ],
+ "imported": {
+  "box": {
+   "groups": [],
+   "shaders": {}
+  },
+  "plane": {
+   "groups": [],
+   "shaders": {}
+  }
+ },
+ "reimported": {
+  "groups": [
+   "cubeSG"
+  ],
+  "materials": [
+   "lambert1",
+   "standardSurface1",
+   "particleCloud1",
+   "standardSurface2"
+  ],
+  "shaders": {
+   "cubeSG": [
+    "standardSurface2"
+   ]
+  }
+ }
+}
