@@ -643,6 +643,9 @@ class TestRenderables(unittest.TestCase):
         self.assertEqual([m for m in b.materials],   [self.b_mat])
         self.assertEqual([j.name for j in b.joints], ["j2"])
         self.assertEqual((a.name, b.name),           ("a", "b"))
+        # the lists are of that mesh alone
+        self.assertEqual((a.uvs.mesh_uuid, a.materials.mesh_uuid, a.morphs.mesh_uuid), (self.a.uuid,) * 3)
+        self.assertEqual((b.uvs.mesh_uuid, b.materials.mesh_uuid, b.morphs.mesh_uuid), (self.b.uuid,) * 3)
 
     def test_a_view_edits_the_scene_in_place_and_is_built_on_every_call(self):
         first = self.scene.renderables()[1]
@@ -650,6 +653,8 @@ class TestRenderables(unittest.TestCase):
         np.testing.assert_array_equal(self.scene.meshes[1].points[:, 2], [1.0, 1.0, 1.0])
         first.uvs.append(_uv(self.b, "stray"))  # a new list: the scene keeps its sets
         self.assertEqual(len(self.scene.uvs), 3)
+        with self.assertRaisesRegex(ValueError, f"UVList of mesh '{self.b.uuid}' takes records naming it"):
+            first.uvs.append(_uv(self.a))  # a set of another mesh
         self.scene.add(MaterialData(mesh_uuid=self.b.uuid, color=(0.0, 1.0, 0.0)))
         again = self.scene.renderables()[1]
         self.assertEqual((len(first.materials), len(again.materials)), (1, 2))
@@ -770,6 +775,16 @@ class TestRenewUuids(unittest.TestCase):
         np.testing.assert_array_equal(moved, [[0.0, 1.0, 0.0], [0.0, 2.0, 0.0]])  # the frames stay with their node
         again = scene.renew_uuids()
         self.assertEqual(set(again), set(mapping.values()))
+
+    def test_records_sharing_a_material_uuid_still_share_it(self):
+        other = _under(_tri("other"), self.hero)
+        twin  = MaterialData(mesh_uuid=other.uuid, color=(0.0, 0.0, 1.0), uuid=self.mat.uuid)
+        self.scene.add(other, twin)
+        old     = self.mat.uuid
+        mapping = self.scene.renew_uuids()
+        self.assertEqual(self.mat.uuid,  twin.uuid)
+        self.assertEqual(self.mat.uuid,  mapping[old])
+        self.assertEqual(twin.mesh_uuid, other.uuid)
 
     def test_the_render_caches_are_dropped(self):
         scene  = self.scene

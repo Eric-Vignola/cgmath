@@ -290,10 +290,11 @@ def save_fbx(
                     if sets:
                         exporter.add_uvs(shapes[mesh.uuid][1], sets)
             if materials is not None:
+                shaders, taken = {}, set()  # the surfaces written so far by uuid, the PNG names taken so far
                 for mesh in meshes:
                     held = [material for material in materials if material.mesh_uuid == mesh.uuid]
                     if held:
-                        _write_materials(exporter, mesh, held, *shapes[mesh.uuid], folder)
+                        _write_materials(exporter, mesh, held, *shapes[mesh.uuid], folder, shaders, taken)
                 if any(material.texture is not None for material in materials):
                     # the PNGs go into the file, as Maya's Embed Media writes them
                     exporter.manager.GetIOSettings().SetBoolProp(fbx.EXP_FBX_EMBEDDED, True)
@@ -605,14 +606,41 @@ def _material_label(material, meshes=None) -> str:
     return "the unnamed material" if mesh is None else f"the unnamed material on {_mesh_label(mesh)}"
 
 
+# the fields the records of one material (one uuid) agree on: everything but
+# its name, its mesh, its faces and the uuid itself
+_SHADING_FIELDS = (
+    "kind", "color", "transparency", "ambient_color", "incandescence", "diffuse", "specular_color", "cosine_power",
+    "reflectivity", "texture", "texture_file", "uv_set", "wrap_u", "wrap_v",
+)
+
+
+def _differing(a, b) -> list:
+    """the shading fields two records of one material disagree on"""
+    out = []
+    for name in _SHADING_FIELDS:
+        x, y = getattr(a, name), getattr(b, name)
+        if x is None or y is None:
+            same = x is None and y is None
+        elif isinstance(x, np.ndarray) or isinstance(y, np.ndarray):
+            same = np.array_equal(np.asarray(x), np.asarray(y))
+        else:
+            same = x == y
+        if not same:
+            out.append(name)
+    return out
+
+
 def _check_materials(materials, meshes) -> None:
     """a material naming no mesh, covering faces its mesh does not hold or a
     face twice, two materials covering one face, materials leaving faces of
     their mesh uncovered, a material covering the whole mesh beside another
-    on it, a texture that is not (H, W, C) uint8 with 1 to 4 channels:
-    refused. A texture with no PIL to encode it: ImportError"""
+    on it, a texture that is not (H, W, C) uint8 with 1 to 4 channels,
+    records sharing a uuid that differ past their faces (one material is
+    written per uuid): refused. A texture with no PIL to encode it:
+    ImportError"""
     by_uuid = {mesh.uuid: mesh for mesh in meshes}
     covered = {}
+    shaders = {}
     for material in materials:
         label = _material_label(material, by_uuid)
         mesh  = by_uuid.get(material.mesh_uuid)
@@ -620,6 +648,16 @@ def _check_materials(materials, meshes) -> None:
             raise ValueError(
                 f"save_fbx: {label} names no mesh of meshes=: mesh_uuid {material.mesh_uuid!r}; set it to its mesh's uuid"
             )
+        if material.uuid is not None:
+            first = shaders.setdefault(material.uuid, (label, mesh, material))
+            if first[2] is not material:
+                differ = _differing(first[2], material)
+                if differ:
+                    raise ValueError(
+                        f"save_fbx: {label} on {_mesh_label(mesh)} and {first[0]} on {_mesh_label(first[1])} share uuid "
+                        f"{material.uuid!r} but differ in {', '.join(differ)}; one material is written per uuid, so "
+                        f"records sharing one agree but for their faces: give one of them a uuid of its own"
+                    )
         texture = material.texture
         if texture is not None:
             pixels = np.asarray(texture)
@@ -1041,59 +1079,74 @@ def _write_png(material, folder: str, taken: set) -> str:
     return path
 
 
-def _write_materials(exporter, mesh, materials, node, shape, folder) -> None:
+def _surface(scene, material, folder: str, taken: set, wraps: dict, fbx):
+    """the FbxSurfaceMaterial of ``material``, as Maya's exporter writes a
+    lambert or a phong (measured): the colour as the diffuse colour, the
+    diffuse as the diffuse factor, the ambient colour, incandescence and
+    transparency as the ambient, emissive and transparent colours with
+    factors of 1, a phong's specular colour with a factor of 1, its cosine
+    power as the shininess, its reflectivity as the reflection factor with
+    a reflection colour of 0; a texture as a PNG in ``folder`` (embedded by
+    the export, its name told from ``taken``) feeding the diffuse colour
+    through an FbxFileTexture reading the UV set and wrapping as the
+    material says"""
+    phong = material.kind == "phong"
+    made  = (fbx.FbxSurfacePhong if phong else fbx.FbxSurfaceLambert).Create(scene, material.name or "")
+    made.Diffuse.Set(fbx.FbxDouble3(*[float(x) for x in material.color]))
+    made.DiffuseFactor.Set(float(material.diffuse))
+    made.Ambient.Set(fbx.FbxDouble3(*[float(x) for x in material.ambient_color]))
+    made.AmbientFactor.Set(1.0)
+    made.Emissive.Set(fbx.FbxDouble3(*[float(x) for x in material.incandescence]))
+    made.EmissiveFactor.Set(1.0)
+    made.TransparentColor.Set(fbx.FbxDouble3(*[float(x) for x in material.transparency]))
+    made.TransparencyFactor.Set(1.0)
+    if phong:
+        made.Specular.Set(fbx.FbxDouble3(*[float(x) for x in material.specular_color]))
+        made.SpecularFactor.Set(1.0)
+        made.Shininess.Set(float(material.cosine_power))
+        made.Reflection.Set(fbx.FbxDouble3(0.0, 0.0, 0.0))
+        made.ReflectionFactor.Set(float(material.reflectivity))
+    if material.texture is None:
+        return made
+    path    = _write_png(material, folder, taken)
+    texture = fbx.FbxFileTexture.Create(scene, os.path.splitext(os.path.basename(path))[0])
+    texture.SetFileName(path)
+    texture.SetRelativeFileName(os.path.basename(path))
+    texture.SetTextureUse(fbx.FbxTexture.ETextureUse.eStandard)
+    texture.SetMappingType(fbx.FbxTexture.EMappingType.eUV)
+    texture.SetMaterialUse(fbx.FbxFileTexture.EMaterialUse.eModelMaterial)
+    if material.uv_set:
+        texture.UVSet.Set(fbx.FbxString(material.uv_set))
+    texture.WrapModeU.Set(wraps[material.wrap_u])
+    texture.WrapModeV.Set(wraps[material.wrap_v])
+    made.Diffuse.ConnectSrcObject(texture)
+    return made
+
+
+def _write_materials(exporter, mesh, materials, node, shape, folder, shaders: dict, taken: set) -> None:
     """``materials``, the ones covering ``mesh``, on ``node`` (its FbxNode)
     in their order, and the material element of ``shape`` (its FbxMesh):
     all-same for one material covering the whole mesh, by-polygon for
-    materials covering faces; each as Maya's exporter writes a lambert or a
-    phong (measured): the colour as the diffuse colour, the diffuse as the
-    diffuse factor, the ambient colour, incandescence and transparency as
-    the ambient, emissive and transparent colours with factors of 1, a
-    phong's specular colour with a factor of 1, its cosine power as the
-    shininess, its reflectivity as the reflection factor with a reflection
-    colour of 0; a texture as a PNG in ``folder`` (embedded by the export)
-    feeding the diffuse colour through an FbxFileTexture reading the UV set
-    and wrapping as the material says. The element goes on the mesh's first
-    layer, where Maya's exporter puts it: the sdk's ``CreateElementMaterial``
-    takes the last layer (a UV set makes one each) and pads the layers under
-    it with empty eNone elements, which a reader meets first"""
+    materials covering faces; each an FbxSurfaceMaterial as :func:`_surface`
+    makes it, one per uuid: ``shaders`` holds the ones made so far by uuid,
+    across the meshes, and a record of a material already there puts that
+    one on its node (a material on several meshes, one record a mesh);
+    ``taken`` the PNG names written so far. The element goes on the mesh's
+    first layer, where Maya's exporter puts it: the sdk's
+    ``CreateElementMaterial`` takes the last layer (a UV set makes one each)
+    and pads the layers under it with empty eNone elements, which a reader
+    meets first"""
     from cgmath.hierarchy.hierarchy import FBX as fbx
 
     scene = exporter.scene
-    taken = set()
     wraps = {"repeat": _enum(fbx.FbxTexture, "EWrapMode", "eRepeat"), "clamp": _enum(fbx.FbxTexture, "EWrapMode", "eClamp")}
     for material in materials:
-        phong = material.kind == "phong"
-        made  = (fbx.FbxSurfacePhong if phong else fbx.FbxSurfaceLambert).Create(scene, material.name or "")
-        made.Diffuse.Set(fbx.FbxDouble3(*[float(x) for x in material.color]))
-        made.DiffuseFactor.Set(float(material.diffuse))
-        made.Ambient.Set(fbx.FbxDouble3(*[float(x) for x in material.ambient_color]))
-        made.AmbientFactor.Set(1.0)
-        made.Emissive.Set(fbx.FbxDouble3(*[float(x) for x in material.incandescence]))
-        made.EmissiveFactor.Set(1.0)
-        made.TransparentColor.Set(fbx.FbxDouble3(*[float(x) for x in material.transparency]))
-        made.TransparencyFactor.Set(1.0)
-        if phong:
-            made.Specular.Set(fbx.FbxDouble3(*[float(x) for x in material.specular_color]))
-            made.SpecularFactor.Set(1.0)
-            made.Shininess.Set(float(material.cosine_power))
-            made.Reflection.Set(fbx.FbxDouble3(0.0, 0.0, 0.0))
-            made.ReflectionFactor.Set(float(material.reflectivity))
+        made = None if material.uuid is None else shaders.get(material.uuid)
+        if made is None:
+            made = _surface(scene, material, folder, taken, wraps, fbx)
+            if material.uuid is not None:
+                shaders[material.uuid] = made
         node.AddMaterial(made)
-        if material.texture is None:
-            continue
-        path    = _write_png(material, folder, taken)
-        texture = fbx.FbxFileTexture.Create(scene, os.path.splitext(os.path.basename(path))[0])
-        texture.SetFileName(path)
-        texture.SetRelativeFileName(os.path.basename(path))
-        texture.SetTextureUse(fbx.FbxTexture.ETextureUse.eStandard)
-        texture.SetMappingType(fbx.FbxTexture.EMappingType.eUV)
-        texture.SetMaterialUse(fbx.FbxFileTexture.EMaterialUse.eModelMaterial)
-        if material.uv_set:
-            texture.UVSet.Set(fbx.FbxString(material.uv_set))
-        texture.WrapModeU.Set(wraps[material.wrap_u])
-        texture.WrapModeV.Set(wraps[material.wrap_v])
-        made.Diffuse.ConnectSrcObject(texture)
 
     if shape.GetLayerCount() == 0:
         shape.CreateLayer()

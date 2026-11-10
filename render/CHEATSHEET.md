@@ -273,6 +273,7 @@ from cgmath.render import Renderable
 item = scene.renderables()[0]                # one Renderable per mesh
 print(isinstance(item, Renderable), item.name)
 print(item.mesh is mesh, item.node is hero_node, len(item.uvs), item.skin, len(item.joints), len(item.materials), len(item.morphs))
+print(item.uvs.mesh_uuid == mesh.uuid, item.materials.mesh_uuid == mesh.uuid, item.morphs.mesh_uuid == mesh.uuid)   # lists of that mesh alone
 print(scene.renderable("hero") is not item, scene.renderable("hero").mesh is mesh)   # by the mesh's or the node's name; a new view each call
 ```
 

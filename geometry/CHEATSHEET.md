@@ -1244,8 +1244,18 @@ own FBX export writes a blinn as a phong (its eccentricity converted to the
 shininess) and a standardSurface as a bare material, which loads as a
 default lambert with a warning.
 
+Each material has a `uuid` of its own, made when none is given and kept
+by a copy: the records of one material on several meshes share it (a
+shader on two Maya meshes reads as two records, one a mesh, with one uuid,
+and `save_fbx` writes one shader per uuid, so records sharing one agree but
+for their faces). `==` leaves `name`, `mesh_uuid` and `uuid` out. A
+`MaterialList`, like a `UVList` or a `MorphList`, is a list of any mesh's
+records (`mesh_uuid` None, as a file holds them) or of one mesh's alone,
+which refuses a record of another mesh.
+
 ```python
 from cgmath.geometry import MaterialData, MaterialList
+from cgmath.hierarchy import generate_uuid
 
 skin           = MaterialData(name="skinLambert", mesh_uuid=cube.uuid, faces=[0, 1, 2], diffuse=0.6, transparency=[0.1, 0.1, 0.1])
 pixels         = np.zeros((4, 8, 3), dtype=np.uint8)
@@ -1259,6 +1269,16 @@ materials = MaterialList([skin, shiny])
 path      = materials.save(os.path.join(tmp, "materials.npz"))
 back      = MaterialList.load(path)
 print(back == materials, back[0].texture.dtype, back[0].texture.shape, [m.kind for m in back])
+
+twin = skin.copy()                                        # the same material, on another mesh
+print(twin.uuid == skin.uuid, twin == skin, twin.uuid != shiny.uuid)
+
+mine = MaterialList([skin, shiny], mesh_uuid=cube.uuid)   # a list of one mesh's materials
+print(mine.mesh_uuid == cube.uuid, mine == materials)
+try:
+    mine.append(MaterialData(name="stray", mesh_uuid=generate_uuid()))
+except ValueError as error:
+    print(str(error)[:48])
 
 try:
     MaterialData(kind="blinn")  # lambert or phong

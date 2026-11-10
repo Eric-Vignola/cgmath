@@ -113,7 +113,8 @@ class Renderable(NamedTuple):
         takes alone, a copy at the active take's first frame. None for a
         mesh on no node, which sits at identity.
     uvs : UVList
-        The UV sets naming the mesh, in the scene's order.
+        The UV sets naming the mesh, in the scene's order: a list of that
+        mesh alone (its ``mesh_uuid``), which takes no set of another.
     skin : SkinData or None
         The first skin naming the mesh.
     joints : list of TransformData
@@ -121,9 +122,10 @@ class Renderable(NamedTuple):
         names, in the skin's order, a name no node carries left out. The
         skeleton is shared, so every mesh skinned to it lists the same nodes.
     materials : MaterialList
-        The materials naming the mesh, their textures inside them.
+        The materials naming the mesh, their textures inside them, a list
+        of that mesh alone.
     morphs : MorphList
-        The blend shape targets naming the mesh.
+        The blend shape targets naming the mesh, a list of that mesh alone.
     """
 
     mesh:      MeshData
@@ -373,8 +375,9 @@ class Scene(Data):
         Fresh uuids on every node and shape, every link rewired, in place:
         the records stay the same objects. The hierarchy and the takes renew
         alike, sharing the nodes' uuids as before; each shape's ``uuid``,
-        ``parent_uuid`` and ``mesh_uuid`` follow; the render caches are
-        dropped. Returns ``{old: new}``.
+        ``parent_uuid`` and ``mesh_uuid`` follow, a material's ``uuid`` too,
+        records sharing one still sharing; the render caches are dropped.
+        Returns ``{old: new}``.
 
         For a scene built a second time in Maya beside the first: rig gives
         the nodes it makes the data's uuids, and Maya wants them unique.
@@ -473,11 +476,11 @@ class Scene(Data):
                 Renderable(
                     mesh,
                     nodes.get(mesh.parent_uuid),
-                    UVList(held["uvs"].get(mesh.uuid, [])),
+                    UVList(held["uvs"].get(mesh.uuid, []), mesh_uuid=mesh.uuid),
                     skin,
                     joints,
-                    MaterialList(held["materials"].get(mesh.uuid, [])),
-                    MorphList(held["morphs"].get(mesh.uuid, [])),
+                    MaterialList(held["materials"].get(mesh.uuid, []), mesh_uuid=mesh.uuid),
+                    MorphList(held["morphs"].get(mesh.uuid, []), mesh_uuid=mesh.uuid),
                 )
             )
         return out

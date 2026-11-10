@@ -29,7 +29,8 @@ from cgmath.formats import _load as _load_module, load_fbx, save_fbx
 from cgmath.formats._fbx_io import load_sdk, open_fbx, typed
 from cgmath.formats._write import _enum
 from cgmath.geometry import CameraData, CameraList, LightData, LightList, MaterialData, MaterialList, MeshData, MeshList, UVData, UVList
-from cgmath.hierarchy import ClipData, HierarchyData, TransformData
+from cgmath.hierarchy import ClipData, HierarchyData, TransformData, generate_uuid
+from cgmath.hierarchy.hierarchy import _is_uuid
 from cgmath.render import Scene
 
 FBX = load_sdk()
@@ -719,6 +720,73 @@ class TestReadOptions(_Files):
             warnings.simplefilter("always")
             load_fbx(path)
         self.assertEqual(len(again), 1)
+
+
+def shader_count(path: str) -> int:
+    """the FbxSurfaceMaterial objects a file holds"""
+    with open_fbx(path, FBX, media=False) as scene:
+        return int(scene.GetMaterialCount())
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestSharedMaterials(_Files):
+    """a material on several meshes: one record a mesh sharing one uuid, read
+    from one shader and written back as one"""
+
+    def test_one_shader_on_two_nodes_reads_as_two_records_of_one_uuid(self):
+        back = load_fbx(shared_texture(self.folder), verbose=False)
+        a, b = back.materials
+        self.assertTrue(_is_uuid(a.uuid))
+        self.assertEqual(a.uuid, b.uuid)
+        self.assertEqual([m.mesh_uuid for m in (a, b)], [mesh.uuid for mesh in back.meshes])
+        other = load_fbx(other_writer(self.folder), verbose=False).materials
+        self.assertEqual(len({m.uuid for m in other}), 5)  # five shaders, five uuids
+
+    def test_records_sharing_a_uuid_are_written_as_one_shader(self):
+        nodes          = rig()
+        held           = meshes(nodes)
+        sets           = UVList([plane_uvs(held[0]), plane_uvs(held[1])])
+        paint          = MaterialData(name="paint", mesh_uuid=held[0].uuid, color=[0.2, 0.4, 0.6], texture=gradient(), texture_file="grad.png", uv_set="map1")
+        twin           = paint.copy()
+        twin.mesh_uuid = held[1].uuid
+        path           = self.path("shared.fbx")
+        save_fbx(path, nodes, meshes=held, uvs=sets, materials=MaterialList([paint, twin]))
+        self.assertEqual(shader_count(path), 1)
+        back = load_fbx(path, verbose=False)
+        self.assertEqual([m.name for m in back.materials], ["paint", "paint"])
+        self.assertEqual(back.materials[0].uuid, back.materials[1].uuid)
+        self.assertEqual([m.mesh_uuid for m in back.materials], [mesh.uuid for mesh in back.meshes])
+        self.assertIs(back.materials[0].texture, back.materials[1].texture)  # one file, decoded once
+        np.testing.assert_array_equal(back.materials[0].texture, gradient())
+        self.assertEqual(back.materials[1], paint)
+        # two uuids: two shaders, two files, as before
+        twin.uuid = generate_uuid()
+        save_fbx(path, nodes, meshes=held, uvs=sets, materials=MaterialList([paint, twin]))
+        self.assertEqual(shader_count(path), 2)
+        back = load_fbx(path, verbose=False)
+        self.assertNotEqual(back.materials[0].uuid, back.materials[1].uuid)
+        self.assertEqual((back.materials[0].texture_file, back.materials[1].texture_file), ("grad.png", "grad_1.png"))
+
+    def test_records_sharing_a_uuid_must_agree_but_for_their_faces(self):
+        nodes = rig()
+        held  = meshes(nodes)
+        paint = MaterialData(name="paint", mesh_uuid=held[0].uuid, color=[0.2, 0.4, 0.6])
+        twin  = paint.copy()
+        twin.mesh_uuid, twin.kind, twin.color = held[1].uuid, "phong", [1.0, 0.0, 0.0]
+        with self.assertRaisesRegex(
+            ValueError,
+            r"save_fbx: material 'paint' on mesh 'boxShape' and material 'paint' on mesh 'planeShape' share uuid "
+            r"'[0-9A-F-]+' but differ in kind, color; one material is written per uuid",
+        ):
+            save_fbx(self.path("x.fbx"), nodes, meshes=held, materials=MaterialList([paint, twin]))
+        self.assertFalse(os.path.exists(self.path("x.fbx")))
+        faces       = paint.copy()
+        faces.faces = [0, 1]
+        other       = paint.copy()
+        other.faces = [2, 3]
+        save_fbx(self.path("y.fbx"), nodes, meshes=held, materials=MaterialList([faces, other]))  # the faces may differ
+        self.assertEqual(shader_count(self.path("y.fbx")), 1)
+        self.assertEqual([list(m.faces) for m in load_fbx(self.path("y.fbx")).materials], [[0, 1], [2, 3]])
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")

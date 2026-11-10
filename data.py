@@ -2671,6 +2671,9 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
     # attributes saved with the list, beside its items
     LIST_FIELDS = ()
 
+    # the LIST_FIELDS == leaves out, as a Data's
+    EQUALITY_TEST_IGNORE = ()
+
     # LIST_FIELDS the class no longer has, as Data.RETIRED_FIELDS
     RETIRED_FIELDS = {}
 
@@ -2844,7 +2847,9 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
             return False
         if any(a != b for a, b in zip(self.list, other.list)):
             return False
-        return all(_close(getattr(self, x), getattr(other, x)) for x in self.LIST_FIELDS)
+        return all(
+            _close(getattr(self, x), getattr(other, x)) for x in self.LIST_FIELDS if x not in self.EQUALITY_TEST_IGNORE
+        )
 
     def __ne__(self, other) -> bool:
         return not self.__eq__(other)

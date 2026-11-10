@@ -1024,7 +1024,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x0000024D3E76AA10>
+MISSING = <dataclasses._MISSING_TYPE object at 0x0000016BBABBAA50>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1458,12 +1458,12 @@ union(self, *args)
     combines faces of given Mesh objects to self (this is not a boolean)
 ```
 
-#### `UVList(MeshList, DataList)`
+#### `UVList(OneMeshList, MeshList, DataList)`
 
-A list of Data objects of one class.
+A list of :class:`UVData`, as a file holds its UV sets, or one mesh's
 
 ```text
-UVList(iterable=None)
+UVList(iterable=None, mesh_uuid: Optional[str] = None)
 ```
 
 Properties:
@@ -1657,12 +1657,12 @@ to_prim(self, prim) -> 'None'
     Streams data into a prim.
 ```
 
-#### `MorphList(DataList)`
+#### `MorphList(OneMeshList, DataList)`
 
-A list of MorphData, its arithmetic shape by shape.
+A list of MorphData, as a file holds its targets or one mesh's alone
 
 ```text
-MorphList(iterable=None)
+MorphList(iterable=None, mesh_uuid: Optional[str] = None)
 ```
 
 Properties:
@@ -3273,7 +3273,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000024D8BDD1B20>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000016C08B463E0>, '...
 ```
 
 ## `cgmath.constraints`
