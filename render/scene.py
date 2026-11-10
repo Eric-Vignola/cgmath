@@ -60,9 +60,10 @@ from cgmath.geometry.camera import CameraData, CameraList
 from cgmath.geometry.deform import SkinDeformData
 from cgmath.geometry.light import LightData, LightList
 from cgmath.geometry.material import MaterialData, MaterialList
-from cgmath.geometry.mesh import load_glb as _load_glb, load_obj as _load_obj, MeshData, MeshList, UVData, UVList
+from cgmath.geometry.mesh import _corner_colors, load_glb as _load_glb, load_obj as _load_obj, MeshData, MeshList, UVData, UVList
 from cgmath.geometry.morph_target import MorphData, MorphList
 from cgmath.geometry.skin_weights import _read_skins_glb, SkinData, SkinList
+from cgmath.geometry.utils import stream_to_matrix
 from cgmath.hierarchy import ClipData, ClipList, HierarchyData, TransformData
 from cgmath.render.camera import (
     _default_camera_for_points,
@@ -115,7 +116,11 @@ _SHADING_KEYS = (
     "wireframe",
     "wireframe_color",
     "wireframe_thickness",
+    "vertex_colors",
 )
+
+# what a mesh's colours do to its surface colour
+_VERTEX_COLOR_MODES = ("off", "multiply", "replace")
 
 # a shape's list field, by the class of what it holds
 _LISTS = (
@@ -187,6 +192,12 @@ class Scene(Data):
         The edges' colour, 0 to 255. Default black.
     wireframe_thickness : int
         The edges' width, in texels. Default 1.
+    vertex_colors : str
+        What a mesh's ``colors`` do to its surface colour: "off", "multiply"
+        (the material colour and map times the vertex colour, the game
+        engines' way) or "replace" (the vertex colour alone, Maya's Color
+        Set display); blended over a face as the UVs are. The alpha channel
+        is carried, not rendered. Default off.
 
     A render through :meth:`render`, :meth:`to_image` or :meth:`imshow`
     keeps its :attr:`frame`, dropped when a setting, a shape, a node or the
@@ -224,6 +235,7 @@ class Scene(Data):
     wireframe:           bool = False
     wireframe_color:     Array(np.int32, 3) = numpy_array(np.zeros(3, dtype=np.int32))
     wireframe_thickness: int = 1
+    vertex_colors:       str = "off"
 
     # the render caches: class defaults, never saved, a loaded Scene starts without
     _frame              = None
@@ -255,6 +267,10 @@ class Scene(Data):
             value = _validate_samples_per_pixel(value, field_name="Scene.samples_per_pixel")
         elif name == "sample_method":
             value = str(_enum_value(value))
+        elif name == "vertex_colors":
+            value = str(value).lower()
+            if value not in _VERTEX_COLOR_MODES:
+                raise ValueError(f"Scene.vertex_colors is one of {', '.join(_VERTEX_COLOR_MODES)}, not {value!r}")
         elif name == "default_camera" and value is not None:
             value = str(value)
         else:
@@ -479,7 +495,20 @@ class Scene(Data):
             "twosided":      bool(self.twosided),
             "world_matrix":  np.asarray(world, dtype=np.float64).T,
             "materials":     materials,
+            "colors":        self._colors(original),
+            "vertex_colors": self.vertex_colors,
         }
+
+    def _colors(self, mesh) -> Optional[tuple]:
+        """``(colors, table)`` for the raytracer: the mesh's RGBA colours,
+        float32, and the colour each face corner names as an (F, slots)
+        table, -1 past a face's corners, as a UV set's geometry names its
+        points; None without colours, or with ``vertex_colors`` off"""
+        if self.vertex_colors == "off" or mesh.colors is None:
+            return None
+        colors, ids = _corner_colors(mesh)
+        table = stream_to_matrix(np.asarray(ids, dtype=np.int32), np.asarray(mesh.counts, dtype=np.int32))
+        return np.asarray(colors, dtype=np.float32), np.asarray(table)
 
     def _texture(self, material, uv) -> Optional[np.ndarray]:
         """a material's colour map as the renderer samples it, (H, W, 3)
@@ -619,7 +648,8 @@ class Scene(Data):
         settings = tuple(_frozen(getattr(self, k)) for k in _RENDER_CONFIG_KEYS + _SHADING_KEYS)
         parts    = [settings, self.default_camera, self.aspect_ratio, frame, len(pose) if pose is not None else None]
         parts.append(tuple(
-            (m.uuid, id(m.points), id(m.indices), id(m.counts), placed(m.parent_uuid)) for m in self.meshes or []
+            (m.uuid, id(m.points), id(m.indices), id(m.counts), id(m.colors), id(m.color_indices), placed(m.parent_uuid))
+            for m in self.meshes or []
         ))
         parts.append(tuple((uv.name, uv.mesh_uuid, id(uv.points), id(uv.indices)) for uv in self.uvs or []))
         parts.append(tuple((s.mesh_uuid, id(s.weights), tuple(s.influences)) for s in self.skins or []))

@@ -1292,7 +1292,7 @@ class TestSceneRenderConfig(unittest.TestCase):
                 self.assertIsNone(getattr(scene, k), f"{k} should default to None")
         self.assertEqual(
             [getattr(scene, k) if not isinstance(getattr(scene, k), np.ndarray) else tuple(getattr(scene, k)) for k in _SHADING_KEYS],
-            [(0.7, 0.7, 0.7), "bilinear", 0.8, True, True, False, (0, 0, 0), 1],
+            [(0.7, 0.7, 0.7), "bilinear", 0.8, True, True, False, (0, 0, 0), 1, "off"],
         )
 
     def test_init_kwargs_set_render_config(self):
@@ -1447,6 +1447,104 @@ class TestSceneWireframe(unittest.TestCase):
         self.assertIsNone(scene._texture(material, None))  # no UV set: nothing to bake on
         scene.wireframe = False
         self.assertIsNone(scene._texture(material, self.uv))  # wireframe is opt-in
+
+
+class TestVertexColors(unittest.TestCase):
+    """a mesh's colours in a render: off, multiplied into the surface colour,
+    or in its place; blended over a face as the UVs are"""
+
+    def setUp(self):
+        self.mesh, self.uv = _make_textured_cube()
+
+    def flat(self, scene):
+        """the frame with no light at all: the surface colour as sampled"""
+        return scene.render(resolution=(32, 32), default_light=False)
+
+    def colored(self, rgba):
+        mesh        = self.mesh.copy()
+        mesh.colors = np.tile(np.asarray(rgba, dtype=np.float64), (mesh.point_count, 1))
+        return mesh
+
+    def test_the_knob(self):
+        self.assertEqual(Scene("s").vertex_colors, "off")
+        self.assertEqual(Scene("s", vertex_colors="Replace").vertex_colors, "replace")
+        with self.assertRaisesRegex(ValueError, "Scene.vertex_colors is one of off, multiply, replace, not 'blend'"):
+            Scene("s", vertex_colors="blend")
+        self.assertIn("vertex_colors", _SHADING_KEYS)
+        self.assertNotIn("vertex_colors", Scene("s").to_dict())  # the default is not saved
+
+    def test_off_ignores_the_colours_and_replace_shows_them(self):
+        red   = self.colored((1.0, 0.0, 0.0, 1.0))
+        off   = self.flat(_scene(red))
+        plain = self.flat(_scene(self.mesh))
+        np.testing.assert_array_equal(off.array, plain.array)
+        shown = self.flat(_scene(red, vertex_colors="replace"))
+        base  = self.flat(_scene(self.mesh, base_color=(1.0, 0.0, 0.0)))
+        np.testing.assert_array_equal(shown.array, base.array)
+        self.assertGreater(int(_hits(shown).sum()), 100)
+        # outside a Scene the colours are off
+        np.testing.assert_array_equal(
+            render(red, resolution=(32, 32), default_light=False).array,
+            render(self.mesh, resolution=(32, 32), default_light=False).array,
+        )
+
+    def test_multiply_scales_the_surface_colour_and_its_map(self):
+        half = self.colored((0.5, 0.5, 0.5, 1.0))
+        dim  = self.flat(_scene(half, vertex_colors="multiply"))  # 0.7 times 0.5
+        base = self.flat(_scene(self.mesh, base_color=(0.35, 0.35, 0.35)))
+        np.testing.assert_allclose(dim.array.astype(int), base.array.astype(int), atol=1)
+        checker  = _make_checker()
+        textured = self.flat(_scene(half, self.uv, _material(half, checker), vertex_colors="multiply"))
+        full     = self.flat(_scene(self.mesh, self.uv, _material(self.mesh, checker)))
+        np.testing.assert_allclose(
+            textured.array[..., :3].astype(int), (full.array[..., :3].astype(float) * 0.5).round().astype(int), atol=1
+        )
+        np.testing.assert_array_equal(textured.array[..., 3], full.array[..., 3])  # the coverage, not the colours' alpha
+
+    def test_a_colour_a_corner_renders_as_the_materials_do(self):
+        """a colour on each face's corners is the face's colour, as a material
+        covering the face is: the cube's 12 triangles, a colour a side"""
+        palette               = np.array([[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1], [1, 1, 0, 1], [0, 1, 1, 1], [1, 0, 1, 1]], dtype=np.float64)
+        corners               = self.mesh.copy()
+        corners.colors        = palette
+        corners.color_indices = np.repeat(np.arange(12) // 2, 3)
+        shown                 = self.flat(_scene(corners, vertex_colors="replace"))
+        materials = [
+            MaterialData(mesh_uuid=self.mesh.uuid, faces=[2 * k, 2 * k + 1], color=palette[k, :3], diffuse=1.0) for k in range(6)
+        ]
+        painted = self.flat(_scene(self.mesh, *materials))
+        np.testing.assert_array_equal(shown.array, painted.array)
+        self.assertGreater(len({tuple(x) for x in shown.array[_hits(shown)][:, :3].tolist()}), 2)  # several sides seen
+
+    def test_the_colours_blend_over_a_face(self):
+        """a quad red on two corners and blue on the two across: half of each
+        at its centre, mostly one at one side, mostly the other across"""
+        quad = MeshData(
+            points=[(-1.0, -1.0, 0.0), (1.0, -1.0, 0.0), (1.0, 1.0, 0.0), (-1.0, 1.0, 0.0)], indices=[0, 1, 2, 3], counts=[4],
+            name="quadShape",
+        )
+        quad.colors = [(1.0, 0.0, 0.0, 1.0), (0.0, 0.0, 1.0, 1.0), (0.0, 0.0, 1.0, 1.0), (1.0, 0.0, 0.0, 1.0)]
+        node, camera = _looking((0.0, 0.0, 5.0), orthographic=True, orthographic_width=3.0)
+        frame = _scene(node, camera, quad, vertex_colors="replace").render(resolution=(33, 33), default_light=False)
+        np.testing.assert_allclose(frame.array[16, 16, :3].astype(int), [128, 0, 128], atol=1)
+        sides = sorted((int(frame.array[16, column, 0]), int(frame.array[16, column, 2])) for column in (7, 25))
+        self.assertLess(sides[0][0], 60)      # one side mostly blue
+        self.assertGreater(sides[0][1], 200)
+        self.assertGreater(sides[1][0], 200)  # the other mostly red
+        self.assertLess(sides[1][1], 60)
+
+    def test_a_colour_write_drops_the_kept_frame(self):
+        red   = self.colored((1.0, 0.0, 0.0, 1.0))
+        scene = _scene(red, vertex_colors="replace")
+        first = self.flat(scene)
+        self.assertIs(scene.frame, first)
+        scene.vertex_colors = "multiply"
+        self.assertIsNone(scene.frame)
+        second     = self.flat(scene)
+        red.colors = np.tile([0.0, 1.0, 0.0, 1.0], (red.point_count, 1))
+        self.assertIsNone(scene.frame)
+        third = self.flat(scene)
+        self.assertFalse(np.array_equal(second.array, third.array))
 
 
 class TestSceneCacheInvalidation(unittest.TestCase):

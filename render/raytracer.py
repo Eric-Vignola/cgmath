@@ -457,7 +457,11 @@ def _sample_colors(entry: dict, hit_idx: np.ndarray, hit_w: np.ndarray) -> np.nd
     ``base_color``, ``tex`` and ``wrap``, the ``uv`` its texture reads)
     sample the hits on the faces they cover, in order, over the entry's
     ``base_color``; an entry with no materials is one of its own ``tex``,
-    ``base_color``, ``wrap`` and ``uv`` over every face"""
+    ``base_color``, ``wrap`` and ``uv`` over every face. An entry's
+    ``colors``, ``(colors, table)`` as ``Scene._colors`` builds them, are the
+    mesh's own colours blended at each hit as the UVs are: multiplied into
+    the colour sampled when ``vertex_colors`` is "multiply", in its place
+    otherwise; their alpha is carried, not rendered"""
     n_hit     = hit_idx.shape[0]
     sampled   = np.tile(np.asarray(entry["base_color"], dtype=np.float32), (n_hit, 1))
     materials = entry.get("materials")
@@ -474,6 +478,10 @@ def _sample_colors(entry: dict, hit_idx: np.ndarray, hit_w: np.ndarray) -> np.nd
             continue
         uvs           = _interpolate_uvs(material["uv"], hit_idx[rows], hit_w[rows])
         sampled[rows] = _sample_texture_bilinear(tex, uvs, material["wrap"] == "repeat")
+    held = entry.get("colors")
+    if held is not None:
+        rgb     = _interpolate_colors(held[0], held[1], hit_idx, hit_w)[:, :3].astype(np.float32)
+        sampled = sampled * rgb if entry.get("vertex_colors") == "multiply" else rgb
     return sampled
 
 
@@ -847,6 +855,19 @@ def _interpolate_uvs(
     safe_uv_idx    = np.where(hit_uv_idx >= 0, hit_uv_idx, 0)
     hit_uv_corners = uv.points[safe_uv_idx]
     return np.einsum("ij,ijk->ik", hit_weights, hit_uv_corners)
+
+
+def _interpolate_colors(colors: np.ndarray, table: np.ndarray, hit_face_idx: np.ndarray, hit_weights: np.ndarray) -> np.ndarray:
+    """the (n, 4) RGBA at each hit: ``table`` (F, slots) names the colour of
+    each face corner, -1 past a face's corners, as a UV set's geometry names
+    its points; a hit's weights blend its face's corner colours"""
+    if table.shape[1] < 4:
+        padded                      = np.full((table.shape[0], 4), -1, dtype=table.dtype)
+        padded[:, : table.shape[1]] = table
+        table                       = padded
+    hit_ids  = table[hit_face_idx]
+    safe_ids = np.where(hit_ids >= 0, hit_ids, 0)
+    return np.einsum("ij,ijk->ik", hit_weights, colors[safe_ids])
 
 
 # -- Camera ray generation ---------------------------------------------------
