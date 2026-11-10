@@ -354,6 +354,13 @@ Two independent things.
   `hard_edges` they become face-varying. `recompute_normals()` refreshes the
   vectors after a deformation while keeping the splits. Topology edits clear
   both. Both families take triangles, quads and n-gons.
+- `colors` / `color_indices` are RGBA vertex colours in 0..1: one a vertex
+  (`color_indices` None) or the ones `color_indices` name a face corner each.
+  The operations that keep face corners keep them (`delete_faces`,
+  `detach_faces`, `triangulate`, `merge`); the ones that rebuild faces drop
+  them (`subdivide`, `quadrangulate`, `union`, `difference`).
+  `Scene.vertex_colors` shows them in a render; fbx carries them as a colour
+  set, a glb's `COLOR_0` reads as them.
 
 ### Skin weights, morph targets, maps
 
