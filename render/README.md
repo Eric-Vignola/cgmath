@@ -154,6 +154,17 @@ for item in scene.renderables():
 print(scene.renderable("hero").node is hero)   # the mesh is unnamed: the node's name finds it
 ```
 
+A scene built a second time in Maya beside the first needs uuids of its own
+(rig gives the nodes it makes the data's uuids, and Maya wants them unique):
+`scene.renew_uuids()` mints fresh ones on every node and shape and rewires
+every link, in place, the records staying the same objects.
+
+```python
+old     = hero.uuid
+mapping = scene.renew_uuids()                  # {old: new}
+print(hero.uuid == mapping[old], cube.parent_uuid == hero.uuid, scene.renderable("hero").node is hero)
+```
+
 ---
 
 ## Materials

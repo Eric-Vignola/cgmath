@@ -276,6 +276,16 @@ print(item.mesh is mesh, item.node is hero_node, len(item.uvs), item.skin, len(i
 print(scene.renderable("hero") is not item, scene.renderable("hero").mesh is mesh)   # by the mesh's or the node's name; a new view each call
 ```
 
+A second build of the scene in Maya beside the first needs uuids of its own:
+`renew_uuids()` mints fresh ones on every node and shape, in place, every
+link rewired, the records the same objects.
+
+```python
+old     = hero_node.uuid
+mapping = scene.renew_uuids()                # {old: new}
+print(hero_node.uuid == mapping[old], mesh.parent_uuid == hero_node.uuid, scene.renderable("hero").node is hero_node)
+```
+
 Hide the node and the mesh is left out:
 
 ```python

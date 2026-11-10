@@ -9811,6 +9811,23 @@ class HierarchyData(TransformList):
             return None
         return kept[3]
 
+    def renew_uuids(self, mapping: Optional[dict] = None) -> dict:
+        """
+        Fresh uuids on every node, in place, the parent links rewired: the
+        nodes stay the same objects, so a reference held outside still names
+        its node. ``mapping`` ``{old: new}`` gives the uuid a node takes where
+        it holds the node's old one; it is grown with a fresh uuid for every
+        other node and returned, so two rigs sharing uuids, a bind pose and
+        its takes, renew alike when handed the same mapping. A ClipData's
+        frames and user keys follow their nodes.
+
+        A rig built a second time in Maya beside an earlier build needs
+        uuids of its own: rig gives the nodes it makes the data's uuids.
+        """
+        mapping = {} if mapping is None else mapping
+        _renew_uuids(self, mapping)
+        return mapping
+
     def __delitem__(self, index) -> None:
         super().__delitem__(index)
         _structure_changed(self)
@@ -15198,6 +15215,27 @@ def _adopt_uuids(first, clip) -> None:
     _structure_changed(clip)
 
 
+def _renew_uuids(rig, mapping: dict) -> None:
+    """every node of ``rig`` takes the uuid ``mapping`` holds for its own,
+    ``mapping`` grown with a fresh one where it holds none, its parent link
+    rewired; the nodes stay the same objects. A ClipData's block columns and
+    user keys move with their nodes, as :func:`_adopt_uuids` moves them, and
+    the rig's caches are retired"""
+    for node in rig.list:
+        mapping.setdefault(node.uuid, generate_uuid())
+    if isinstance(rig, ClipData):
+        rig._realign()
+        rig._columns   = [mapping.get(uuid, uuid) for uuid in rig._columns]
+        rig._user_keys = {mapping.get(uuid, uuid): keys for uuid, keys in rig._user_keys.items()}
+    for node in rig.list:
+        object.__setattr__(node, "uuid", mapping[node.uuid])
+        if node.parent_uuid in mapping:
+            object.__setattr__(node, "parent_uuid", mapping[node.parent_uuid])
+        for lister in node._listers:
+            _structure_changed(lister())
+    _structure_changed(rig)
+
+
 class ClipList(DataList[ClipData]):
     """Every take of a file, one :class:`ClipData` each, over one skeleton.
 
@@ -15409,6 +15447,15 @@ class ClipList(DataList[ClipData]):
     def sort(self, key=None, reverse: bool = False) -> None:
         """orders the takes, by their names unless ``key`` says otherwise"""
         self.list.sort(key=key or (lambda clip: clip.take), reverse=reverse)
+
+    def renew_uuids(self, mapping: Optional[dict] = None) -> dict:
+        """``renew_uuids(mapping)`` on every take with one mapping: the takes
+        share one skeleton's uuids and keep sharing the new ones; returns
+        the mapping, grown"""
+        mapping = {} if mapping is None else mapping
+        for clip in self.list:
+            clip.renew_uuids(mapping)
+        return mapping
 
     def strip_namespace(self, namespace: Optional[str] = None) -> None:
         """``strip_namespace()`` on every take, every take or none: a take

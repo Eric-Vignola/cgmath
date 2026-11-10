@@ -623,6 +623,18 @@ except ValueError as error:
     print(error)    # TransformData.parent_uuid takes a uuid or None, not 'hip'; set_parent('hip') parents by name
 ```
 
+Fresh uuids on every node, the parent links rewired, in place: a rig built a
+second time in Maya beside an earlier build needs ids of its own (rig gives
+the nodes it makes the data's uuids). The nodes stay the same objects, and a
+clip over the rig renews alike when handed the same mapping.
+
+```python
+knee    = rig["knee"]
+mapping = rig.renew_uuids()                      # {old: new}, one entry a node
+assert rig["knee"] is knee and knee.parent_uuid == rig["hip"].uuid
+print(len(mapping) == len(rig), knee.uuid == mapping[next(old for old, new in mapping.items() if new == knee.uuid)])
+```
+
 `set_parent` takes the parent as a node, its uuid, or a name, the first
 node of the hierarchy carrying it. Whichever way it is given, the node
 keeps the uuid: a rename after moves nothing.
