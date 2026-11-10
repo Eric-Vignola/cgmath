@@ -1,0 +1,126 @@
+{
+ "drawn": {
+  "hip": {
+   "is": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "is_plugs": null,
+   "parent": "group",
+   "parent_type": "transform",
+   "ssc": true
+  },
+  "knee": {
+   "is": [
+    5.0,
+    6.0,
+    7.0
+   ],
+   "is_plugs": [
+    "hip.scale"
+   ],
+   "parent": "hip",
+   "parent_type": "joint",
+   "ssc": true
+  }
+ },
+ "loose_under_ankle": {
+  "is": [
+   1.0,
+   1.0,
+   1.0
+  ],
+  "is_plugs": [
+   "ankle.scale"
+  ],
+  "parent": "ankle",
+  "parent_type": "joint",
+  "ssc": true
+ },
+ "loose_under_hip": {
+  "above_parent": [
+   "hip"
+  ],
+  "above_type": "transform",
+  "is_plugs": null
+ },
+ "moved": {
+  "above_parent": [
+   "group"
+  ],
+  "above_type": "transform",
+  "knee": {
+   "is": [
+    5.0,
+    6.0,
+    7.0
+   ],
+   "is_plugs": null,
+   "parent": "transform1",
+   "parent_type": "transform",
+   "ssc": true
+  }
+ },
+ "relative": {
+  "heel": {
+   "is": [
+    5.0,
+    6.0,
+    7.0
+   ],
+   "is_plugs": [
+    "hip.scale"
+   ],
+   "parent": "group",
+   "parent_type": "transform",
+   "ssc": true
+  },
+  "stray": {
+   "is": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "is_plugs": null,
+   "parent": "shin",
+   "parent_type": "joint",
+   "ssc": true
+  },
+  "toe": {
+   "is": [
+    5.0,
+    6.0,
+    7.0
+   ],
+   "is_plugs": [
+    "hip.scale"
+   ],
+   "parent": "shin",
+   "parent_type": "joint",
+   "ssc": true
+  }
+ },
+ "shin": {
+  "is": [
+   1.0,
+   1.0,
+   1.0
+  ],
+  "is_plugs": null,
+  "parent": "hip",
+  "parent_type": "joint",
+  "ssc": true
+ },
+ "wrist": {
+  "is": [
+   5.0,
+   6.0,
+   7.0
+  ],
+  "is_plugs": null,
+  "parent": "sleeve",
+  "parent_type": "transform",
+  "ssc": true
+ }
+}

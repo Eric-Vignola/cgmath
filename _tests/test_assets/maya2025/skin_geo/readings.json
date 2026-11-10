@@ -1,0 +1,16 @@
+{
+ "bindPose": true,
+ "dagPoses": 1,
+ "history_has_cluster": true,
+ "influences": [
+  "hips",
+  "spine",
+  "chest",
+  "head",
+  "arm",
+  "hand",
+  "leg",
+  "foot"
+ ],
+ "skinClusters": 1
+}

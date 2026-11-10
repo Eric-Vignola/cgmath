@@ -15,7 +15,6 @@ import unittest
 import warnings
 
 import numpy as np
-from cgmath._tests import fresh_scene
 from cgmath.data import FORWARD_MARK
 from cgmath.formats._fbx_io import load_sdk
 from cgmath.formats.glb import load_model, pygltflib
@@ -1455,38 +1454,24 @@ class TestClipListSaveFbx(unittest.TestCase):
     @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_maya_reads_each_take(self):
         """Maya 2025's FBXImport -t of each take of a three-take save: every
-        node's world on every frame within 1e-6 of the take"""
+        node's world on every frame within 1e-6 of the take, as recorded
+        (tools/make_maya_fbx_fixtures.py, takes_each)"""
+        from cgmath._tests.maya_fixtures import recorded, same_read
+        from cgmath.formats import load_fbx
+
+        case = recorded("takes_each")
         clips        = oriented_takes()
         clips.active = "c"
         path         = self.path("takes.fbx")
         clips.save_fbx(path)
-        back = ClipList.load_fbx(path)
+        same_read(self, load_fbx(path), load_fbx(case.path("ours.fbx")))
+        back = ClipList.load_fbx(case.path("ours.fbx"))
         for index, clip in enumerate(back):
-            frames = clip.start_frame + np.arange(clip.frame_count)
-            worlds = self.maya_frames(path, index + 1, frames)
             wanted = np.asarray(clip.frames.world_matrix)
             for column, node in enumerate(clip):
-                np.testing.assert_allclose(worlds[node.name], wanted[:, column], rtol=0, atol=1e-6, err_msg=(clip.take, node.name))
-
-    def maya_frames(self, path, take, frames):
-        """{node: (F, 4, 4) world matrices} of Maya 2025's FBXImport of take
-        ``take`` (1-based -t), on each of ``frames``; skips without Maya"""
-        from cgmath._tests.test_skeleton_fbx import _maya
-
-        maya = _maya()
-        if maya is None:
-            self.skipTest("needs Maya and its fbxmaya plug-in")
-        cmds, mel = maya
-        fresh_scene(self)
-        mel.eval("FBXResetImport")
-        mel.eval(f'FBXImport -f "{path.replace(os.sep, "/")}" -t {take}')
-        nodes  = cmds.ls(type="transform", long=True)
-        worlds = {node.rsplit("|", 1)[-1]: [] for node in nodes}
-        for frame in frames:
-            cmds.currentTime(int(frame))  # a numpy int is no Maya time
-            for node in nodes:
-                worlds[node.rsplit("|", 1)[-1]].append(cmds.xform(node, q=True, ws=True, m=True))
-        return {name: np.array(rows).reshape(-1, 4, 4) for name, rows in worlds.items()}
+                np.testing.assert_allclose(
+                    case.array(f"take{index}/world/{node.name}"), wanted[:, column], rtol=0, atol=1e-6, err_msg=(clip.take, node.name)
+                )
 
 # the two files of a Maya import-dialog test (2026-11-01):
 # two joints, the root's

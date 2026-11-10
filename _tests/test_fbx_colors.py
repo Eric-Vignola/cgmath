@@ -11,17 +11,17 @@ set, "colorSet1", Maya's own name for a first set: by control point for a
 colour a vertex, by polygon vertex otherwise, index to direct as Maya writes
 both, on the first layer by hand (the sdk's CreateElementVertexColor takes
 the last layer and pads the ones under it); it reads a file's first set,
-warning of the others. The SDK tests need the Autodesk SDK, the Maya ones a
-Maya with its fbxmaya plug-in.
+warning of the others. The SDK tests need the Autodesk SDK; the Maya ones
+read what Maya 2025 did, recorded once (maya_fixtures), and need no Maya.
 """
 
 import unittest
 
 import numpy as np
 from cgmath._tests.test_fbx_materials import mapped_file
-from cgmath._tests.test_skeleton_fbx import _Files, _InMaya
+from cgmath._tests.test_skeleton_fbx import _Files, _Recorded
 from cgmath.formats import load_fbx, save_fbx
-from cgmath.formats._fbx_io import import_scene, load_sdk, new_manager, open_fbx, typed
+from cgmath.formats._fbx_io import load_sdk, new_manager, open_fbx, typed
 from cgmath.geometry import MeshData, UVData, UVList
 from cgmath.geometry.mesh import _corner_colors
 
@@ -235,62 +235,33 @@ class TestColors(_Files):
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
-class TestMayaColors(_InMaya):
+class TestMayaColors(_Recorded):
     """Maya 2025's export of its colour sets read as Maya holds them, and
-    Maya's import of ours"""
-
-    def maya_colors(self, shape: str) -> tuple:
-        """(the mesh's colour sets, its colour a face corner in face order,
-        (C, 4), from the current set)"""
-        cmds = self.cmds
-        sets = cmds.polyColorSet(shape, query=True, allColorSets=True) or []
-        held = []
-        for face in range(cmds.polyEvaluate(shape, face=True)):
-            for vf in cmds.ls(cmds.polyListComponentConversion(f"{shape}.f[{face}]", toVertexFace=True), flatten=True):
-                held.append(cmds.polyColorPerVertex(vf, query=True, rgb=True) + cmds.polyColorPerVertex(vf, query=True, alpha=True))
-        return sets, np.array(held, dtype=np.float64)
+    Maya's import of ours; as recorded"""
 
     def test_mayas_export_reads_as_maya_holds_it(self):
         """a shared RGBA set and an RGB set on a 2 by 2 plane: Maya writes a
         colour a face corner, read back to the value, alpha 1 for RGB"""
-        cmds = self.cmds
-        cmds.file(new=True, force=True)
-        transform = cmds.polyPlane(w=2.0, h=2.0, sx=2, sy=2, name="grid", constructionHistory=False)[0]
-        shape     = cmds.listRelatives(transform, shapes=True)[0]
-        cmds.polyColorSet(shape, create=True, colorSet="colorSet1", representation="RGBA")
-        cmds.polyColorSet(shape, currentColorSet=True, colorSet="colorSet1")
-        for v in range(9):
-            cmds.polyColorPerVertex(f"{shape}.vtx[{v}]", rgb=(v / 8.0, 1.0 - v / 8.0, 0.25), alpha=0.5 + v / 16.0)
-        sets, maya = self.maya_colors(shape)
-        self.assertEqual(sets, ["colorSet1"])
-        back = load_fbx(self.exported("shared.fbx")).meshes[0]
+        case = self.case("colors_export")
+        self.assertEqual(case.value("shared/sets"), ["colorSet1"])
+        back = load_fbx(self.fixture("shared.fbx")).meshes[0]
         self.assertIsNotNone(back.color_indices)  # Maya writes by polygon vertex, a shared set too
         self.assertEqual(back.colors.shape, (16, 4))
-        np.testing.assert_allclose(per_corner(back), maya, atol=1e-6)
-        self.assertEqual([x[0] for x in fbx_colors(self.path("shared.fbx"))], ["colorSet1"])
+        np.testing.assert_allclose(per_corner(back), case.array("shared/colors"), atol=1e-6)
+        self.assertEqual([x[0] for x in fbx_colors(self.fixture("shared.fbx"))], ["colorSet1"])
 
-        cmds.file(new=True, force=True)
-        transform = cmds.polyPlane(w=2.0, h=2.0, sx=2, sy=2, name="rgb", constructionHistory=False)[0]
-        shape     = cmds.listRelatives(transform, shapes=True)[0]
-        cmds.polyColorSet(shape, create=True, colorSet="tint", representation="RGB")
-        cmds.polyColorSet(shape, currentColorSet=True, colorSet="tint")
-        for v in range(9):
-            cmds.polyColorPerVertex(f"{shape}.vtx[{v}]", rgb=(0.1 * v, 0.0, 1.0 - 0.1 * v))
-        sets, maya = self.maya_colors(shape)
-        back = load_fbx(self.exported("rgb.fbx")).meshes[0]
-        np.testing.assert_allclose(per_corner(back)[:, :3], maya[:, :3], atol=1e-6)
+        self.assertEqual(case.value("rgb/sets"), ["tint"])
+        back = load_fbx(self.fixture("rgb.fbx")).meshes[0]
+        np.testing.assert_allclose(per_corner(back)[:, :3], case.array("rgb/colors")[:, :3], atol=1e-6)
         np.testing.assert_array_equal(per_corner(back)[:, 3], 1.0)
 
     def test_maya_imports_our_save_as_we_hold_it(self):
         """a colour a vertex and a colour a corner: one set, colorSet1, every
         corner's colour ours to the value"""
-        cmds = self.cmds
+        case = self.case("colors_import")
         for form in ("vertex", "corner", "palette"):
             with self.subTest(form=form):
                 mesh = colored(form)
-                save_fbx(self.path(f"{form}.fbx"), meshes=mesh)
-                self.imported(self.path(f"{form}.fbx"))
-                shape = cmds.ls(type="mesh")[0]
-                sets, maya = self.maya_colors(shape)
-                self.assertEqual(sets, ["colorSet1"])
-                np.testing.assert_allclose(maya, per_corner(mesh), atol=1e-6)
+                self.assertFreshSave(self.fixture(f"ours_{form}.fbx"), meshes=mesh)
+                self.assertEqual(case.value(f"{form}/sets"), ["colorSet1"])
+                np.testing.assert_allclose(case.array(f"{form}/colors"), per_corner(mesh), atol=1e-6)

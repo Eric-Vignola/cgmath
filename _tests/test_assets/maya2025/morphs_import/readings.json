@@ -1,0 +1,39 @@
+{
+ "deformers": {
+  "blendShape": {
+   "alias": [
+    "puff",
+    "weight[0]"
+   ],
+   "nodes": [
+    "blendShape"
+   ],
+   "weights": [
+    0.0
+   ]
+  },
+  "faceShapes": {
+   "alias": [
+    "smile",
+    "weight[0]",
+    "frown",
+    "weight[1]",
+    "wide",
+    "weight[2]"
+   ],
+   "nodes": [
+    "faceShapes"
+   ],
+   "weights": [
+    0.30000001192092896,
+    0.75,
+    1.0
+   ]
+  }
+ },
+ "extra": [],
+ "items": [
+  5500,
+  6000
+ ]
+}

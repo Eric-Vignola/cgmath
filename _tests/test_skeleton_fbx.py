@@ -7,8 +7,8 @@ its takes (a ClipData as a list of one), ``meshes=`` each mesh as the shape
 of the node its ``parent_uuid`` names; ``cgmath.formats.load_fbx(path)``
 gives ``(hierarchy, clip, meshes, skins, uvs)`` back, ``clip`` a ClipList of
 every take, None for what the file holds none of. A bind pose comes with
-skins only. The FBX tests need the Autodesk SDK (mayapy), the Maya
-ones a Maya with its fbxmaya plug-in.
+skins only. The FBX tests need the Autodesk SDK; the Maya ones read what
+Maya 2025 did, recorded once (maya_fixtures), and need no Maya.
 """
 
 import os
@@ -17,7 +17,7 @@ import tempfile
 import unittest
 
 import numpy as np
-from cgmath._tests import fresh_scene
+from cgmath._tests.maya_fixtures import recorded, same_read
 from cgmath.formats import load_fbx, save_fbx
 from cgmath.formats._fbx_io import load_sdk, open_fbx, typed
 from cgmath.geometry import mesh as mesh_module, MeshData, skin_weights as skin_module, SkinData
@@ -795,18 +795,6 @@ class TestPoses(_Files):
         np.testing.assert_array_equal(clip.frames["p"].scale,     [[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]])
 
 
-def _maya():
-    """maya.cmds and maya.mel with the fbxmaya plug-in loaded, or None"""
-    try:
-        import maya.cmds as cmds
-        import maya.mel as mel
-
-        cmds.loadPlugin("fbxmaya", quiet=True)
-    except Exception:  # not running in Maya, or no fbx plug-in
-        return None
-    return cmds, mel
-
-
 # Maya's FBXImport makes a double of a float, doubleAngle or doubleLinear,
 # an enum whose fields Maya numbers by their place in the list, and its
 # FBXExport adds filmboxTypeID and writes a char as 0
@@ -824,118 +812,101 @@ def maya_value(node, name: str, value) -> np.ndarray:
     return value
 
 
-class _InMaya(_Files):
-    def setUp(self):
-        super().setUp()
-        maya = _maya()
-        if maya is None:
-            self.skipTest("needs Maya and its fbxmaya plug-in")
-        self.cmds, self.mel = maya
-        fresh_scene(self)
+class _Recorded(_Files):
+    """a test over a case Maya 2025 recorded once
+    (tools/make_maya_fbx_fixtures.py, read through maya_fixtures): ``case()``
+    loads its readings, ``fixture()`` names a file it holds, the files Maya
+    exported and the ones our writer gave Maya, and ``assertFreshSave``
+    checks a save of the same data today still reads as the file Maya was
+    given, so the readings still apply"""
 
-    def imported(self, path: str, take=None) -> None:
-        """a fresh ntsc Y-up scene with the file imported; ``take`` picks one
-        of the file's takes by its 1-based position (FBXImport -t)"""
-        cmds, mel = self.cmds, self.mel
-        cmds.file(new=True, force=True)
-        cmds.currentUnit(time="ntsc", linear="cm", angle="deg")
-        cmds.upAxis(axis="y")
-        mel.eval("FBXResetImport")
-        flag = "" if take is None else f" -t {int(take)}"
-        mel.eval(f'FBXImport -f "{path.replace(os.sep, "/")}"{flag}')
+    def case(self, name: str):
+        self.held = recorded(name)
+        return self.held
 
-    def exported(self, name: str) -> str:
-        """Maya's FBXExport of the scene at the clip's first frame"""
-        cmds, mel = self.cmds, self.mel
-        cmds.currentTime(START)
-        mel.eval("FBXResetExport")
-        # what FBXResetExport leaves as an earlier export set it
-        mel.eval("FBXExportConvertUnitString cm")
-        mel.eval("FBXExportUpAxis y")
-        out = self.path(name).replace(os.sep, "/")
-        mel.eval(f'FBXExport -f "{out}"')
-        return out
+    def fixture(self, name: str) -> str:
+        return self.held.path(name)
+
+    def assertFreshSave(self, stored: str, **data) -> None:
+        path = self.path("fresh.fbx")
+        save_fbx(path, **data)
+        same_read(self, load_fbx(path), load_fbx(stored), f"{os.path.basename(stored)}: ")
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
-class TestMaya(_InMaya):
-    """Maya 2025's FBXImport of a save, and its FBXExport of that scene"""
+class TestMaya(_Recorded):
+    """Maya 2025's FBXImport of a save, and its FBXExport of that scene, as
+    recorded"""
 
-    def maya_node(self, node) -> None:
-        """the imported node's name, type, parent and static attributes"""
-        cmds = self.cmds
-        self.assertEqual(len(cmds.ls(node.name, long=True)), 1, node.name)
+    def maya_node(self, node, meta: dict) -> None:
+        """the imported node's name, type, parent and static attributes, as
+        Maya held them"""
+        self.assertEqual(meta["count"], 1, node.name)
         if node.node_type == "locator":
             # Maya's locator: a transform holding a locator shape
-            self.assertEqual(cmds.nodeType(node.name), "transform")
-            self.assertEqual(len(cmds.listRelatives(node.name, shapes=True, type="locator") or []), 1, node.name)
+            self.assertEqual(meta["type"], "transform")
+            self.assertEqual(meta["shapes"], ["locator"], node.name)
         else:
-            self.assertEqual(cmds.nodeType(node.name), node.node_type)
-            self.assertEqual(cmds.listRelatives(node.name, shapes=True), None, node.name)
-        parent = cmds.listRelatives(node.name, parent=True)
-        self.assertEqual(parent[0] if parent else None, node.parent_name)
-        self.assertEqual(cmds.getAttr(f"{node.name}.rotateOrder"), node.rotate_order)
-        np.testing.assert_allclose(cmds.getAttr(f"{node.name}.rotateAxis")[0], node.rotate_axis, rtol=0, atol=1e-6)
+            self.assertEqual(meta["type"], node.node_type)
+            self.assertEqual(meta["shapes"], [], node.name)
+        self.assertEqual(meta["parent"], node.parent_name)
+        self.assertEqual(meta["rotate_order"], node.rotate_order)
+        np.testing.assert_allclose(meta["rotate_axis"], node.rotate_axis, rtol=0, atol=1e-6)
         if node.node_type == "joint":
-            np.testing.assert_allclose(cmds.getAttr(f"{node.name}.jointOrient")[0], node.joint_orient, rtol=0, atol=1e-6)
-            self.assertEqual(cmds.getAttr(f"{node.name}.segmentScaleCompensate"), node.segment_scale_compensate)
+            np.testing.assert_allclose(meta["joint_orient"], node.joint_orient, rtol=0, atol=1e-6)
+            self.assertEqual(meta["ssc"], node.segment_scale_compensate)
 
     def maya_user(self, node, frame=None) -> None:
         from cgmath.hierarchy.hierarchy import _user_channels
 
-        cmds = self.cmds
         for name in _user_channels(node.user_defined_attributes):
-            value = cmds.getAttr(f"{node.name}.{name}") if frame is None else cmds.getAttr(f"{node.name}.{name}", time=frame)
-            value = np.ravel(value[0] if isinstance(value, list) else value).astype(np.float64)
-            want  = maya_value(node, name, np.atleast_1d(np.asarray(getattr(node, name), dtype=np.float64)))
+            value = self.held.array(f"user/{node.name}/{name}")
+            if frame is not None:
+                value = value[frame]
+            want = maya_value(node, name, np.atleast_1d(np.asarray(getattr(node, name), dtype=np.float64)))
             np.testing.assert_allclose(value, want, rtol=0, atol=1e-6, err_msg=(node.name, name, frame))
 
     def test_maya_imports_the_clip_as_an_animated_hierarchy(self):
         """every node, and on every frame its channels, user attributes and
         world matrix, within 1e-6 of load_fbx's read of the same file"""
-        cmds = self.cmds
-        save_fbx(self.path("a.fbx"), clip=take(skeleton()))
-        rig, clips = load_fbx(self.path("a.fbx"))[:2]
+        held = self.case("clip_import")
+        self.assertFreshSave(self.fixture("ours.fbx"), clip=take(skeleton()))
+        rig, clips = load_fbx(self.fixture("ours.fbx"))[:2]
         self.assertIsNone(rig)
         back = clips.active
-        self.imported(self.path("a.fbx"))
-        self.assertEqual(cmds.ls(type="dagPose"), [])
-        self.assertEqual(len(cmds.ls(type="animCurve")), curve_count(back))
+        self.assertEqual(held.value("counts")["dagPose"], 0)
+        self.assertEqual(held.value("counts")["animCurve"], curve_count(back))
         for node in back:
-            self.maya_node(node)
+            self.maya_node(node, held.value("nodes")[node.name])
 
         wanted = np.asarray(back.frames.world_matrix)
         for f in range(back.frame_count):
-            frame      = START + f
             back.frame = f
             for column, node in enumerate(back):
                 for attr in ("translate", "rotate", "scale"):
-                    value = cmds.getAttr(f"{node.name}.{attr}", time=frame)[0]
-                    np.testing.assert_allclose(value, getattr(node, attr), rtol=0, atol=1e-6, err_msg=(node.name, attr, frame))
-                world = np.array(cmds.getAttr(f"{node.name}.worldMatrix", time=frame)).reshape(4, 4)
-                np.testing.assert_allclose(world, wanted[f, column], rtol=0, atol=1e-6, err_msg=(node.name, frame))
-                self.maya_user(node, frame)
+                    np.testing.assert_allclose(
+                        held.array(f"{attr}/{node.name}")[f], getattr(node, attr), rtol=0, atol=1e-6, err_msg=(node.name, attr, f)
+                    )
+                np.testing.assert_allclose(held.array(f"world/{node.name}")[f], wanted[f, column], rtol=0, atol=1e-6, err_msg=(node.name, f))
+                self.maya_user(node, f)
 
     def test_maya_imports_visibility_keys_and_a_locator_and_exports_them_back(self):
         """prop, a locator hidden on frames 3 to 5, head hidden throughout:
         Maya's import keys prop's visibility as ours on every frame, gives
         prop a locator shape, and its export reads back as the save"""
-        cmds = self.cmds
+        held = self.case("visibility_locator")
         rig  = skeleton()
         rig["prop"].node_type = "locator"
         clip = hidden(take(rig))
-        save_fbx(self.path("a.fbx"), clip=clip)
-        self.imported(self.path("a.fbx"))
+        self.assertFreshSave(self.fixture("ours.fbx"), clip=clip)
         for node in clip:
-            self.maya_node(node)
+            self.maya_node(node, held.value("nodes")[node.name])
         shown = np.asarray(clip.frames.visibility)
-        for f in range(clip.frame_count):
-            for column, node in enumerate(clip):
-                self.assertEqual(bool(cmds.getAttr(f"{node.name}.visibility", time=START + f)), bool(shown[f, column]), (node.name, f))
-        self.assertEqual(len(cmds.listConnections("prop.visibility", type="animCurve") or []), 1)
+        for column, node in enumerate(clip):
+            np.testing.assert_array_equal(held.array(f"visibility/{node.name}"), shown[:, column], err_msg=node.name)
+        self.assertEqual(held.value("prop_visibility_curves"), 1)
 
-        out  = self.exported("maya.fbx")
-        back = load_fbx(out).clip.active
+        back = load_fbx(self.fixture("maya.fbx")).clip.active
         self.assertEqual(back["prop"].node_type, "locator")
         np.testing.assert_array_equal(np.asarray(back.frames.visibility), shown)
         self.assertFalse(back["head"].visibility)
@@ -943,68 +914,57 @@ class TestMaya(_InMaya):
     def test_maya_reads_rrss_under_a_uniform_parent_as_we_do(self):
         """an sdk file with eInheritRrSs under a parent scaled 2 uniformly:
         Maya's import and load_fbx agree on every world within 1e-6"""
-        cmds = self.cmds
+        held = self.case("rrss")
         path = _written(self.path("rrss.fbx"), parent_scale=(2.0, 2.0, 2.0), inherit=FBX.FbxTransform.EInheritType.eInheritRrSs)
-        rig  = load_fbx(path).hierarchy
-        self.imported(path)
+        same_read(self, load_fbx(path), load_fbx(self.fixture("source.fbx")))
+        rig = load_fbx(self.fixture("source.fbx")).hierarchy
         for column, node in enumerate(rig):
-            world = np.array(cmds.getAttr(f"{node.name}.worldMatrix")).reshape(4, 4)
-            np.testing.assert_allclose(world, np.asarray(rig.world_matrix)[column], rtol=0, atol=1e-6, err_msg=node.name)
+            np.testing.assert_allclose(
+                held.array(f"world/{node.name}"), np.asarray(rig.world_matrix)[column], rtol=0, atol=1e-6, err_msg=node.name
+            )
 
     def test_maya_imports_each_take(self):
         """a file of three takes: FBXImport -t picks one by position, and
         gives that take's curves alone, every node's world on every frame of
         it within 1e-6 of load_fbx's read of the take"""
-        cmds  = self.cmds
-        clips = takes()
-        save_fbx(self.path("a.fbx"), clip=clips)
-        back = load_fbx(self.path("a.fbx")).clip
+        held = self.case("takes")
+        self.assertFreshSave(self.fixture("ours.fbx"), clip=takes())
+        back = load_fbx(self.fixture("ours.fbx")).clip
         self.assertEqual(back.take, ["walk", "run", "Take 003"])
         for index, clip in enumerate(back):
             with self.subTest(take=clip.take):
-                self.imported(self.path("a.fbx"), take=index + 1)
-                self.assertEqual(len(cmds.ls(type="animCurve")), curve_count(clip))
+                self.assertEqual(held.value(f"take{index}/animCurve"), curve_count(clip))
                 wanted = np.asarray(clip.frames.world_matrix)
-                for f in range(clip.frame_count):
-                    frame = clip.start_frame + f
-                    for column, node in enumerate(clip):
-                        world = np.array(cmds.getAttr(f"{node.name}.worldMatrix", time=frame)).reshape(4, 4)
-                        np.testing.assert_allclose(world, wanted[f, column], rtol=0, atol=1e-6, err_msg=(clip.take, node.name, frame))
+                for column, node in enumerate(clip):
+                    np.testing.assert_allclose(
+                        held.array(f"take{index}/world/{node.name}"), wanted[:, column], rtol=0, atol=1e-6, err_msg=(clip.take, node.name)
+                    )
 
     def test_maya_imports_the_skeleton_as_a_still_hierarchy(self):
         """no curve; every node's attributes and world matrix within 1e-6 of
         the skeleton"""
-        cmds = self.cmds
+        held = self.case("skeleton_import")
         rig  = skeleton()
-        save_fbx(self.path("rig.fbx"), rig)
-        self.assertEqual(counts(self.path("rig.fbx"))["poses"], 0)
-        self.imported(self.path("rig.fbx"))
-        self.assertEqual(cmds.ls(type="animCurve"), [])
-        self.assertEqual(cmds.ls(type="dagPose"), [])
+        self.assertFreshSave(self.fixture("ours.fbx"), hierarchy=rig)
+        self.assertEqual(counts(self.fixture("ours.fbx"))["poses"], 0)
+        self.assertEqual(held.value("counts")["animCurve"],         0)
+        self.assertEqual(held.value("counts")["dagPose"],           0)
         worlds = np.asarray(rig.world_matrix)
         for column, node in enumerate(rig):
-            self.maya_node(node)
+            self.maya_node(node, held.value("nodes")[node.name])
             self.maya_user(node)
-            world = np.array(cmds.getAttr(f"{node.name}.worldMatrix")).reshape(4, 4)
-            np.testing.assert_allclose(world, worlds[column], rtol=0, atol=1e-6, err_msg=node.name)
+            np.testing.assert_allclose(held.array(f"world/{node.name}"), worlds[column], rtol=0, atol=1e-6, err_msg=node.name)
             for attr in ("translate", "rotate", "scale"):
-                np.testing.assert_allclose(cmds.getAttr(f"{node.name}.{attr}")[0], getattr(node, attr), rtol=0, atol=1e-6)
+                np.testing.assert_allclose(held.array(f"{attr}/{node.name}"), getattr(node, attr), rtol=0, atol=1e-6)
 
     def test_maya_export_reads_back_as_the_save(self):
         """Maya's FBXExport of the import: load, save, load gives the first
         load back bit for bit; the first is the source's take within 1e-6"""
         from cgmath.hierarchy.hierarchy import _user_channels
 
-        cmds, mel = self.cmds, self.mel
-        save_fbx(self.path("a.fbx"), clip=take(skeleton()))
-        self.imported(self.path("a.fbx"))
-        cmds.currentTime(START)
-        mel.eval("FBXResetExport")
-        # what FBXResetExport leaves as an earlier export set it
-        mel.eval("FBXExportConvertUnitString cm")
-        mel.eval("FBXExportUpAxis y")
-        out = self.path("maya.fbx").replace(os.sep, "/")
-        mel.eval(f'FBXExport -f "{out}"')
+        self.case("export_reads_back")
+        self.assertFreshSave(self.fixture("ours.fbx"), clip=take(skeleton()))
+        out = self.fixture("maya.fbx")
 
         rig, clips = load_fbx(out)[:2]
         self.assertIsNone(rig)
@@ -1018,7 +978,7 @@ class TestMaya(_InMaya):
         for frame in (START, START + FRAMES - 1):
             self.assertSameSkeleton(second.at(frame), first.at(frame))
 
-        source = load_fbx(self.path("a.fbx")).clip.active
+        source = load_fbx(self.fixture("ours.fbx")).clip.active
         self.assertEqual((first.start_frame, first.frame_count, first.fps), (START, FRAMES, FPS))
         self.assertEqual([n.name for n in first], [n.name for n in source])
         for a, b in zip(first, source):
@@ -1718,18 +1678,10 @@ def _matrix(matrix) -> np.ndarray:
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
-class TestMayaSkin(_InMaya, _Skinned):
+class TestMayaSkin(_Recorded, _Skinned):
     """Maya 2025's FBXImport of a skinned save: one skinCluster and one bind
-    pose deforming the mesh as cgmath's own skinning does, frame by frame"""
-
-    def mesh_path(self, name: str):
-        import maya.api.OpenMaya as om
-
-        shapes = self.cmds.listRelatives(name, shapes=True, noIntermediate=True, fullPath=True)
-        self.assertEqual(len(shapes), 1)
-        chosen = om.MSelectionList()
-        chosen.add(shapes[0])
-        return chosen.getDagPath(0)
+    pose deforming the mesh as cgmath's own skinning does, frame by frame,
+    as recorded"""
 
     @staticmethod
     def skinned(on: str) -> dict:
@@ -1740,54 +1692,37 @@ class TestMayaSkin(_InMaya, _Skinned):
         return {"hierarchy": rig, "clip": motion(rig), "meshes": mesh, "skins": weighed(mesh)}
 
     def test_maya_imports_one_skin_that_deforms_as_cgmath(self):
-        self.deforms_as_cgmath("geo")
+        self.deforms_as_cgmath("geo", "skin_geo")
 
     def test_maya_imports_a_skin_on_a_placed_node_that_deforms_as_cgmath(self):
         """the mesh on placed, off the origin, turned and scaled at the bind:
         Maya's skinCluster takes the bind placement as its geomMatrix and
         deforms as cgmath's, which takes it from the node"""
-        self.deforms_as_cgmath("placed")
+        self.deforms_as_cgmath("placed", "skin_placed")
 
-    def deforms_as_cgmath(self, on: str) -> None:
-        import maya.api.OpenMaya as om
-        import maya.api.OpenMayaAnim as oma
+    def deforms_as_cgmath(self, on: str, case: str) -> None:
         from cgmath.geometry.deform import SkinDeformData
 
-        cmds   = self.cmds
+        held   = self.case(case)
         source = self.skinned(on)
-        save_fbx(self.path("a.fbx"), **source)
-        back = load_fbx(self.path("a.fbx"))
-        self.imported(self.path("a.fbx"))
+        self.assertFreshSave(self.fixture("ours.fbx"), **source)
+        back = load_fbx(self.fixture("ours.fbx"))
 
         # the mesh is the node's shape
-        path     = self.mesh_path(on)
-        clusters = cmds.ls(type="skinCluster")
-        self.assertEqual(len(clusters), 1)
-        self.assertEqual(cmds.ls(cmds.listHistory(path.fullPathName()), type="skinCluster"), clusters)
-        poses = cmds.ls(type="dagPose")
-        self.assertEqual(len(poses), 1)
-        self.assertTrue(cmds.getAttr(f"{poses[0]}.bindPose"))
+        self.assertEqual(held.value("skinClusters"), 1)
+        self.assertTrue(held.value("history_has_cluster"))
+        self.assertEqual(held.value("dagPoses"), 1)
+        self.assertTrue(held.value("bindPose"))
 
-        chosen = om.MSelectionList()
-        chosen.add(clusters[0])
-        skin       = oma.MFnSkinCluster(chosen.getDependNode(0))
-        influences = [x.partialPathName() for x in skin.influenceObjects()]
+        influences = held.value("influences")
         self.assertEqual(influences, list(source["skins"].influences))
-        every = om.MFnSingleIndexedComponent()
-        part  = every.create(om.MFn.kMeshVertComponent)
-        every.setCompleteData(source["meshes"].point_count)
-        weights, _ = skin.getWeights(path, part)
-        weights = np.array(weights).reshape(source["meshes"].point_count, len(influences))
-        np.testing.assert_allclose(weights, source["skins"].weights, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(held.array("weights"), source["skins"].weights, rtol=0, atol=1e-6)
         worlds = np.asarray(source["hierarchy"].world_matrix)
-        for k, joint in enumerate(skin.influenceObjects()):
-            index    = skin.indexForInfluenceObject(joint)
-            prebind  = np.array(cmds.getAttr(f"{clusters[0]}.bindPreMatrix[{index}]")).reshape(4, 4)
-            expected = np.linalg.inv(worlds[source["hierarchy"].name.index(influences[k])])
-            near(prebind, expected, err_msg=influences[k])
+        for k, name in enumerate(influences):
+            expected = np.linalg.inv(worlds[source["hierarchy"].name.index(name)])
+            near(held.array("bindPreMatrix")[k], expected, err_msg=name)
         # the bind placement: the mesh node's world as the cluster's geomMatrix
-        geom = np.array(cmds.getAttr(f"{clusters[0]}.geomMatrix")).reshape(4, 4)
-        near(geom, worlds[source["hierarchy"].name.index(on)], err_msg="geomMatrix")
+        near(held.array("geomMatrix"), worlds[source["hierarchy"].name.index(on)], err_msg="geomMatrix")
         self.assertOn(back.meshes[0], back.hierarchy, on)
 
         # THE SKIN DEFORMATION: cgmath's linear blend skinning of the re-read
@@ -1796,10 +1731,9 @@ class TestMayaSkin(_InMaya, _Skinned):
         deformer = SkinDeformData(back.meshes[0], back.skins[0], bind_rig=back.hierarchy)
         wanted   = deformer.apply(back.clip.active.frames)
         self.assertEqual(wanted.shape, (TAKE, source["meshes"].point_count, 3))
+        points = held.array("points")
         for f in range(TAKE):
-            cmds.currentTime(START + f)
-            got = np.array([tuple(p)[:3] for p in om.MFnMesh(path).getPoints(om.MSpace.kWorld)])
-            near(got, wanted[f], err_msg=f"frame {START + f}")
+            near(points[f], wanted[f], err_msg=f"frame {START + f}")
         # the deformation is no stand-still: the points move by whole units
         self.assertGreater(float(np.abs(wanted[-1] - source["meshes"].points).max()), 2.0 * UNIT)
 
@@ -1808,56 +1742,46 @@ class TestMayaSkin(_InMaya, _Skinned):
         and scales unevenly: each the shape of its node, its points and
         normals as the mesh holds them, in the world where its node's frame
         puts them, within 1e-6 of load_fbx's read of the same file"""
-        import maya.api.OpenMaya as om
-
-        cmds   = self.cmds
+        held   = self.case("two_meshes")
         clip   = motion(bound())
         meshes = MeshList([body(clip["geo"].uuid), tetra(clip["prop"].uuid)])
-        save_fbx(self.path("a.fbx"), clip=clip, meshes=meshes)
-        back = load_fbx(self.path("a.fbx"))
-        self.imported(self.path("a.fbx"))
-        self.assertEqual(cmds.ls(type="skinCluster"),    [])
-        self.assertEqual(cmds.ls(type="dagPose"),        [])
-        self.assertEqual(len(cmds.ls(type="animCurve")), curve_count(clip))
+        self.assertFreshSave(self.fixture("ours.fbx"), clip=clip, meshes=meshes)
+        back = load_fbx(self.fixture("ours.fbx"))
+        self.assertEqual(held.value("counts")["skinCluster"], 0)
+        self.assertEqual(held.value("counts")["dagPose"],     0)
+        self.assertEqual(held.value("counts")["animCurve"],   curve_count(clip))
         worlds = np.asarray(back.clip.active.frames.world_matrix)
         column = {name: i for i, name in enumerate(back.clip.active.name)}
         self.assertEqual([mesh.name for mesh in back.meshes], ["tetra", "body"])
         for mesh, name in zip(meshes, ("geo", "prop")):
-            path  = self.mesh_path(name)
-            shape = om.MFnMesh(path)
-            self.assertIsNone(cmds.listConnections(path.fullPathName(), type="animCurve"))
-            points = np.array([tuple(p)[:3] for p in shape.getPoints(om.MSpace.kObject)])
-            np.testing.assert_allclose(points, mesh.points, rtol=0, atol=1e-6, err_msg=name)
-            counts_, ids = shape.getNormalIds()
-            normals = np.array([tuple(n) for n in shape.getNormals()])
-            np.testing.assert_array_equal(np.array(counts_), mesh.counts, err_msg=name)
-            np.testing.assert_allclose(normals[np.array(ids)], mesh.normals[mesh.normal_indices], rtol=0, atol=1e-6, err_msg=name)
+            self.assertIsNone(held.value(f"{name}/curves"))
+            np.testing.assert_allclose(held.array(f"{name}/points"), mesh.points, rtol=0, atol=1e-6, err_msg=name)
+            np.testing.assert_array_equal(held.array(f"{name}/normal_counts"), mesh.counts, err_msg=name)
+            normals = held.array(f"{name}/normals")[held.array(f"{name}/normal_ids")]
+            np.testing.assert_allclose(normals, mesh.normals[mesh.normal_indices], rtol=0, atol=1e-6, err_msg=name)
             for f in (0, TAKE - 1):
-                cmds.currentTime(START + f)
-                got  = np.array([tuple(p)[:3] for p in om.MFnMesh(path).getPoints(om.MSpace.kWorld)])
                 want = (np.c_[mesh.points, np.ones(len(mesh.points))] @ worlds[f, column[name]])[:, :3]
-                near(got, want, err_msg=(name, START + f))
+                near(held.array(f"{name}/world_points/{f}"), want, err_msg=(name, START + f))
         # prop moves: its mesh is elsewhere on the last frame
         prop = worlds[:, column["prop"]]
         self.assertGreater(float(np.abs(prop[-1] - prop[0]).max()), 0.1 * UNIT)
         np.testing.assert_array_equal(worlds[:, column["geo"]], np.broadcast_to(np.eye(4), (TAKE, 4, 4)))
 
     def test_maya_export_of_the_skin_reads_back(self):
-        self.export_reads_back("geo")
+        self.export_reads_back("geo", "skin_geo")
 
     def test_maya_export_of_a_skin_on_a_placed_node_reads_back(self):
-        self.export_reads_back("placed")
+        self.export_reads_back("placed", "skin_placed")
 
-    def export_reads_back(self, on: str) -> None:
+    def export_reads_back(self, on: str, case: str) -> None:
         """Maya's FBXExport of the skinned import: load, save, load gives the
         first load back bit for bit; the first is the source within 1e-6,
         the mesh on its node"""
+        self.case(case)
         source = self.skinned(on)
-        save_fbx(self.path("a.fbx"), **source)
-        self.imported(self.path("a.fbx"))
-        out   = self.exported("maya.fbx")
+        out    = self.fixture("maya.fbx")
 
-        first = load_fbx(out)
+        first  = load_fbx(out)
         save_fbx(self.path("again.fbx"), *first)
         second = load_fbx(self.path("again.fbx"))
         self.assertSameSkeleton(second.hierarchy, first.hierarchy)
@@ -2136,54 +2060,29 @@ class TestUVs(_Mapped):
         self.assertIsNone(load_fbx(path).uvs)
 
 
-def _dag(name: str):
-    import maya.api.OpenMaya as om
-    import maya.cmds as cmds
-
-    shapes = cmds.listRelatives(name, shapes=True, noIntermediate=True, fullPath=True)
-    chosen = om.MSelectionList()
-    chosen.add(shapes[0])
-    return chosen.getDagPath(0)
-
-
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
-class TestMayaUVs(_InMaya, _Mapped):
-    """Maya 2025's FBXImport of a save's UV sets, and its FBXExport read back"""
-
-    def maya_uvs(self, name: str) -> dict:
-        """{set: (face counts, (corners, 2) UVs)} of the mesh, in Maya's set
-        order"""
-        import maya.api.OpenMaya as om
-
-        shape = om.MFnMesh(_dag(name))
-        found = {}
-        for uv_set in shape.getUVSetNames():
-            us, vs     = shape.getUVs(uv_set)
-            sizes, ids = shape.getAssignedUVs(uv_set)
-            held          = np.stack([np.array(us), np.array(vs)], axis=1) if len(us) else np.zeros((0, 2))
-            found[uv_set] = (np.array(sizes), held[np.array(ids, dtype=np.intp)])
-        return found
+class TestMayaUVs(_Recorded, _Mapped):
+    """Maya 2025's FBXImport of a save's UV sets, and its FBXExport read
+    back, as recorded"""
 
     def test_maya_imports_every_set_on_every_face(self):
+        held = self.case("uvs_import")
         mesh = body()
         uvs  = maps(mesh)
-        save_fbx(self.path("a.fbx"), meshes=mesh, uvs=uvs)
-        self.imported(self.path("a.fbx"))
-        found = self.maya_uvs("body")
-        self.assertEqual(list(found), [uv.name for uv in uvs])
+        self.assertFreshSave(self.fixture("ours.fbx"), meshes=mesh, uvs=uvs)
+        self.assertEqual(held.value("uv_sets"), [uv.name for uv in uvs])
         for uv in uvs:
-            sizes, corners = found[uv.name]
-            np.testing.assert_array_equal(sizes, mesh.counts, err_msg=uv.name)
-            near(corners, per_corner(uv), err_msg=uv.name)
+            np.testing.assert_array_equal(held.array(f"uv/{uv.name}/sizes"), mesh.counts, err_msg=uv.name)
+            near(held.array(f"uv/{uv.name}/corners"), per_corner(uv), err_msg=uv.name)
 
     def test_maya_export_reads_back(self):
         """Maya's FBXExport of the import: its sets within 1e-6 (Maya holds
         UVs in float32); load, save, load bit for bit"""
+        self.case("uvs_export")
         source = bundle()
         uvs    = maps(source["meshes"])
-        save_fbx(self.path("a.fbx"), **source, uvs=uvs)
-        self.imported(self.path("a.fbx"))
-        first = load_fbx(self.exported("maya.fbx"))
+        self.assertFreshSave(self.fixture("ours.fbx"), **source, uvs=uvs)
+        first = load_fbx(self.fixture("maya.fbx"))
         self.assertEqual([uv.name for uv in first.uvs], [uv.name for uv in uvs])
         for got, want in zip(first.uvs, uvs):
             np.testing.assert_array_equal(got.counts, source["meshes"].counts, err_msg=got.name)
@@ -2194,19 +2093,15 @@ class TestMayaUVs(_InMaya, _Mapped):
         self.assertSameUVs(again.uvs, first.uvs, again.meshes[0])
 
     def test_maya_export_of_a_mesh_with_no_uvs_reads_none(self):
-        cmds = self.cmds
+        held = self.case("uvs_none")
         # a save of no UVs, imported
-        save_fbx(self.path("a.fbx"), meshes=body())
-        self.imported(self.path("a.fbx"))
-        sets = self.maya_uvs("body")
-        self.assertTrue(all(not len(corners) for _, corners in sets.values()), list(sets))
-        self.assertIsNone(load_fbx(self.exported("maya.fbx")).uvs)
+        self.assertFreshSave(self.fixture("ours.fbx"), meshes=body())
+        self.assertTrue(all(count == 0 for count in held.value("body_sets").values()), held.value("body_sets"))
+        self.assertIsNone(load_fbx(self.fixture("maya.fbx")).uvs)
         # a mesh Maya makes with no UVs: on its transform, of no name (Maya's
         # FBXExport leaves the FbxMesh unnamed; measured)
-        cmds.file(new=True, force=True)
-        cmds.polyCube(name="box", createUVs=0)
-        self.assertTrue(all(not len(corners) for _, corners in self.maya_uvs("box").values()))
-        got = load_fbx(self.exported("box.fbx"))
+        self.assertTrue(all(count == 0 for count in held.value("box_sets").values()), held.value("box_sets"))
+        got = load_fbx(self.fixture("box.fbx"))
         self.assertIsNone(got.meshes[0].name)
         self.assertOn(got.meshes[0], got.clip.active, "box")
         self.assertIsNone(got.uvs)

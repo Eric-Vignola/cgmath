@@ -8,8 +8,8 @@ width over 30 as the ortho zoom, a light's intensity times 100, its decay
 rate as the decay type, a spot's cone as the inner angle and its cone plus
 twice its penumbra as the outer; it drops the camera scale and the dropoff,
 and writes an ambient light as a point light that casts no light. The fork
-reads and writes the same. The SDK tests need the Autodesk SDK, the Maya ones
-a Maya with its fbxmaya plug-in.
+reads and writes the same. The SDK tests need the Autodesk SDK; the Maya ones
+read what Maya 2025 did, recorded once (maya_fixtures), and need no Maya.
 """
 
 import math
@@ -18,7 +18,8 @@ import unittest
 import warnings
 
 import numpy as np
-from cgmath._tests.test_skeleton_fbx import _Files, _InMaya, at_float32, counts
+from cgmath._tests.test_skeleton_fbx import _Files, _Recorded, at_float32, counts
+from cgmath._tests.maya_fixtures import same_read
 from cgmath.formats import load_fbx, save_fbx
 from cgmath.formats._fbx_io import load_sdk, open_fbx, typed
 from cgmath.formats._load import _amatrix
@@ -431,202 +432,129 @@ class TestViews(_Files):
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
-class TestMayaViews(_InMaya):
+class TestMayaViews(_Recorded):
     """Maya 2025's export of its cameras and lights read as Maya shows them,
-    and Maya's import of ours"""
+    and Maya's import of ours; as recorded"""
 
-    CAMERA_ATTRS = ("focalLength", "horizontalFilmAperture", "verticalFilmAperture", "horizontalFilmOffset",
-                    "verticalFilmOffset", "lensSqueezeRatio", "nearClipPlane", "farClipPlane", "orthographicWidth")
-
-    def exported_views(self, name: str) -> str:
-        cmds, mel = self.cmds, self.mel
-        mel.eval("FBXResetExport")
-        mel.eval("FBXExportConvertUnitString cm")
-        mel.eval("FBXExportUpAxis y")
-        mel.eval("FBXExportCameras -v true")
-        mel.eval("FBXExportLights -v true")
-        out = self.path(name).replace(os.sep, "/")
-        mel.eval(f'FBXExport -f "{out}"')
-        return out
-
-    def maya_scene(self) -> dict:
-        """the probe's scene: a tuned camera, an orthographic one, a fresh one
-        under a turned group, every light kind turned and moved; {transform:
-        shape}"""
-        cmds = self.cmds
-        cmds.file(new=True, force=True)
-        cmds.currentUnit(time="film", linear="cm", angle="deg")
-        made = {}
-        tuned, shape = cmds.camera(name="tunedCam")
-        for attr, value in (("focalLength", 50.0), ("horizontalFilmAperture", 1.0), ("verticalFilmAperture", 0.6),
-                            ("filmFit", 2), ("horizontalFilmOffset", 0.1), ("verticalFilmOffset", -0.05),
-                            ("lensSqueezeRatio", 1.5), ("cameraScale", 2.0), ("nearClipPlane", 1.0), ("farClipPlane", 5000.0)):
-            cmds.setAttr(f"{shape}.{attr}", value)
-        cmds.setAttr(f"{tuned}.translate", 10.0, 20.0, 30.0)
-        cmds.setAttr(f"{tuned}.rotate", 10.0, 20.0, 30.0)
-        made[tuned] = shape
-        ortho, shape = cmds.camera(name="orthoCam")
-        cmds.setAttr(f"{shape}.orthographic", True)
-        cmds.setAttr(f"{shape}.orthographicWidth", 50.0)
-        cmds.setAttr(f"{ortho}.rotate", -90.0, 0.0, 0.0)
-        made[ortho] = shape
-        plain, shape = cmds.camera(name="plainCam")
-        group = cmds.group(empty=True, name="camGroup")
-        cmds.setAttr(f"{group}.rotate", 0.0, 45.0, 0.0)
-        cmds.parent(plain, group)
-        made[plain] = shape
-        for kind, make in (("point", cmds.pointLight), ("directional", cmds.directionalLight), ("spot", cmds.spotLight),
-                           ("ambient", cmds.ambientLight)):
-            node = make(name=f"{kind}LightShape")
-            if cmds.nodeType(node) != "transform":
-                node = cmds.listRelatives(node, parent=True)[0]
-            node  = cmds.rename(node, f"{kind}Light")
-            shape = cmds.listRelatives(node, shapes=True)[0]
-            cmds.setAttr(f"{shape}.color", 0.25, 0.5, 1.0)
-            cmds.setAttr(f"{shape}.intensity", 2.5)
-            if kind in ("point", "spot"):
-                cmds.setAttr(f"{shape}.decayRate", 2)
-            if kind == "spot":
-                cmds.setAttr(f"{shape}.coneAngle",     50.0)
-                cmds.setAttr(f"{shape}.penumbraAngle", 5.0)
-                cmds.setAttr(f"{shape}.dropoff",       3.0)
-            cmds.setAttr(f"{node}.translate", 1.0, 2.0, 3.0)
-            cmds.setAttr(f"{node}.rotate", 10.0, 20.0, 30.0)
-            made[node] = shape
-        for kind in ("areaLight", "volumeLight"):
-            # shadingNode hands back the transform or the shape, by kind
-            node = cmds.shadingNode(kind, asLight=True, name=f"{kind}Shape")
-            if cmds.nodeType(node) != "transform":
-                node = cmds.listRelatives(node, parent=True)[0]
-            node = cmds.rename(node, kind)
-            cmds.setAttr(f"{node}.rotate", 10.0, 20.0, 30.0)
-            made[node] = cmds.listRelatives(node, shapes=True)[0]
-        return made
+    CAMERA_FIELDS = (
+        ("focalLength", "focal_length"), ("horizontalFilmAperture", "horizontal_film_aperture"),
+        ("verticalFilmAperture", "vertical_film_aperture"), ("lensSqueezeRatio", "lens_squeeze_ratio"),
+        ("nearClipPlane", "near_clip_plane"), ("farClipPlane", "far_clip_plane"),
+    )
+    FITS = ("fill", "horizontal", "vertical", "overscan")
 
     def test_mayas_export_reads_as_maya_shows_it(self):
         """every camera attribute as Maya holds it (the camera scale apart,
         which Maya's export drops: it reads 1), every light's, the kinds, the
         node worlds within 1e-6, the ambient, area and volume lights
         skipped with one warning"""
-        cmds = self.cmds
-        made = self.maya_scene()
-        out  = self.exported_views("maya.fbx")
+        held = self.case("views_export")
+        made = held.value("made")
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            back = load_fbx(out)
+            back = load_fbx(self.fixture("maya.fbx"))
         self.assertEqual(len([w for w in caught if "reads point, directional and spot lights" in str(w.message)]), 1)
         rig = back.hierarchy if back.hierarchy is not None else back.clip.active
-        for node, shape in made.items():
+        for node in made:
             with self.subTest(node):
                 self.assertEqual(rig[node].node_type, "transform")
-                world = np.array(cmds.xform(node, q=True, ws=True, m=True)).reshape(4, 4)
-                np.testing.assert_allclose(np.asarray(rig[node].world_matrix), world, rtol=0, atol=1e-6)
-        cameras = {rig[c.parent_uuid].name: c for c in back.cameras}
+                np.testing.assert_allclose(np.asarray(rig[node].world_matrix), held.array(f"world/{node}"), rtol=0, atol=1e-6)
+        cameras  = {rig[c.parent_uuid].name: c for c in back.cameras}
+        readings = held.value("cameras")
         self.assertEqual(sorted(cameras), ["orthoCam1", "plainCam1", "tunedCam1"])
         for node, camera in cameras.items():
-            shape = made[node]
+            shape = readings[node]
             with self.subTest(node):
-                for attr, field in (("focalLength", "focal_length"), ("horizontalFilmAperture", "horizontal_film_aperture"),
-                                    ("verticalFilmAperture", "vertical_film_aperture"), ("lensSqueezeRatio", "lens_squeeze_ratio"),
-                                    ("nearClipPlane", "near_clip_plane"), ("farClipPlane", "far_clip_plane"),
-                                    ("orthographicWidth", "orthographic_width")):
-                    self.assertAlmostEqual(getattr(camera, field), cmds.getAttr(f"{shape}.{attr}"), places=9, msg=attr)
-                self.assertEqual(camera.film_fit, ("fill", "horizontal", "vertical", "overscan")[cmds.getAttr(f"{shape}.filmFit")])
-                np.testing.assert_allclose(camera.film_offset, [cmds.getAttr(f"{shape}.horizontalFilmOffset"), cmds.getAttr(f"{shape}.verticalFilmOffset")], rtol=0, atol=1e-12)
-                self.assertEqual(camera.orthographic, bool(cmds.getAttr(f"{shape}.orthographic")))
+                for attr, field in self.CAMERA_FIELDS + (("orthographicWidth", "orthographic_width"),):
+                    self.assertAlmostEqual(getattr(camera, field), shape[attr], places=9, msg=attr)
+                self.assertEqual(camera.film_fit, self.FITS[shape["filmFit"]])
+                np.testing.assert_allclose(camera.film_offset, [shape["horizontalFilmOffset"], shape["verticalFilmOffset"]], rtol=0, atol=1e-12)
+                self.assertEqual(camera.orthographic, bool(shape["orthographic"]))
                 self.assertEqual(camera.camera_scale, 1.0)
-        self.assertEqual(cmds.getAttr(f"{made['tunedCam1']}.cameraScale"), 2.0)  # what the file lost
-        lights = {rig[x.parent_uuid].name: x for x in back.lights}
+        self.assertEqual(readings["tunedCam1"]["cameraScale"], 2.0)  # what the file lost
+        lights   = {rig[x.parent_uuid].name: x for x in back.lights}
+        readings = held.value("lights")
         self.assertEqual(sorted(lights), ["directionalLight", "pointLight", "spotLight"])
         for node, light in lights.items():
-            shape = made[node]
+            shape = readings[node]
             with self.subTest(node):
-                self.assertEqual(light.kind, cmds.nodeType(shape)[: -len("Light")])
-                np.testing.assert_allclose(light.color, cmds.getAttr(f"{shape}.color")[0], rtol=0, atol=1e-12)
-                self.assertAlmostEqual(light.intensity, cmds.getAttr(f"{shape}.intensity"), places=9)
-                self.assertEqual(light.decay_rate, cmds.getAttr(f"{shape}.decayRate"))
+                self.assertEqual(light.kind, shape["type"][: -len("Light")])
+                np.testing.assert_allclose(light.color, shape["color"], rtol=0, atol=1e-12)
+                self.assertAlmostEqual(light.intensity, shape["intensity"], places=9)
+                self.assertEqual(light.decay_rate, shape["decayRate"])
                 if light.kind == "spot":
-                    self.assertAlmostEqual(light.cone_angle, cmds.getAttr(f"{shape}.coneAngle"), places=9)
-                    self.assertAlmostEqual(light.penumbra_angle, cmds.getAttr(f"{shape}.penumbraAngle"), places=9)
+                    self.assertAlmostEqual(light.cone_angle, shape["coneAngle"], places=9)
+                    self.assertAlmostEqual(light.penumbra_angle, shape["penumbraAngle"], places=9)
                     self.assertEqual(light.dropoff, 0.0)  # what the file lost
-        self.assertEqual(cmds.getAttr(f"{made['spotLight']}.dropoff"), 3.0)
+        self.assertEqual(readings["spotLight"]["dropoff"], 3.0)
 
     def test_maya_imports_our_save_as_we_hold_it(self):
         """our cameras and lights, imported: Maya's camera and light shapes
         with our attributes, on transforms at our worlds within 1e-6"""
-        cmds    = self.cmds
+        held    = self.case("views_import")
         rig     = views_rig()
         cameras = CameraList([shot(rig), ortho(rig)])
         lights  = views_lights(rig)
-        save_fbx(self.path("a.fbx"), rig, cameras=cameras, lights=lights)
-        self.imported(self.path("a.fbx"))
+        self.assertFreshSave(self.fixture("ours.fbx"), hierarchy=rig, cameras=cameras, lights=lights)
         worlds = {node.name: np.asarray(node.world_matrix) for node in rig}
         for node in rig:
             with self.subTest(node.name):
-                world = np.array(cmds.xform(node.name, q=True, ws=True, m=True)).reshape(4, 4)
-                np.testing.assert_allclose(world, worlds[node.name], rtol=0, atol=1e-6)
+                np.testing.assert_allclose(held.array(f"world/{node.name}"), worlds[node.name], rtol=0, atol=1e-6)
+        readings = held.value("cameras")
         for camera in cameras:
             node  = rig[camera.parent_uuid].name
-            shape = cmds.listRelatives(node, shapes=True, type="camera")
+            shape = readings[node]
             with self.subTest(node):
-                self.assertEqual(len(shape or []), 1)
-                shape = shape[0]
-                for attr, field in (("focalLength", "focal_length"), ("horizontalFilmAperture", "horizontal_film_aperture"),
-                                    ("verticalFilmAperture", "vertical_film_aperture"), ("lensSqueezeRatio", "lens_squeeze_ratio"),
-                                    ("nearClipPlane", "near_clip_plane"), ("farClipPlane", "far_clip_plane")):
-                    self.assertAlmostEqual(cmds.getAttr(f"{shape}.{attr}"), getattr(camera, field), places=6, msg=attr)
-                self.assertEqual(cmds.getAttr(f"{shape}.filmFit"), ("fill", "horizontal", "vertical", "overscan").index(camera.film_fit))
-                self.assertAlmostEqual(cmds.getAttr(f"{shape}.horizontalFilmOffset"), camera.film_offset[0], places=9)
-                self.assertAlmostEqual(cmds.getAttr(f"{shape}.verticalFilmOffset"), camera.film_offset[1], places=9)
-                self.assertEqual(bool(cmds.getAttr(f"{shape}.orthographic")), camera.orthographic)
+                self.assertEqual(shape["shape_count"], 1)
+                for attr, field in self.CAMERA_FIELDS:
+                    self.assertAlmostEqual(shape[attr], getattr(camera, field), places=6, msg=attr)
+                self.assertEqual(shape["filmFit"], self.FITS.index(camera.film_fit))
+                self.assertAlmostEqual(shape["horizontalFilmOffset"], camera.film_offset[0], places=9)
+                self.assertAlmostEqual(shape["verticalFilmOffset"], camera.film_offset[1], places=9)
+                self.assertEqual(bool(shape["orthographic"]), camera.orthographic)
                 if camera.orthographic:
-                    self.assertAlmostEqual(cmds.getAttr(f"{shape}.orthographicWidth"), camera.orthographic_width, places=6)
+                    self.assertAlmostEqual(shape["orthographicWidth"], camera.orthographic_width, places=6)
+        readings = held.value("lights")
         for light in lights:
             node  = rig[light.parent_uuid].name
-            shape = cmds.listRelatives(node, shapes=True)
+            shape = readings[node]
             with self.subTest(node):
-                self.assertEqual(len(shape or []), 1)
-                shape = shape[0]
-                self.assertEqual(cmds.nodeType(shape), f"{light.kind}Light")
-                np.testing.assert_allclose(cmds.getAttr(f"{shape}.color")[0], light.color, rtol=0, atol=1e-6)
-                self.assertAlmostEqual(cmds.getAttr(f"{shape}.intensity"), light.intensity, places=6)
-                self.assertEqual(cmds.getAttr(f"{shape}.decayRate"), light.decay_rate)
+                self.assertEqual(shape["shape_count"], 1)
+                self.assertEqual(shape["type"], f"{light.kind}Light")
+                np.testing.assert_allclose(shape["color"], light.color, rtol=0, atol=1e-6)
+                self.assertAlmostEqual(shape["intensity"], light.intensity, places=6)
+                self.assertEqual(shape["decayRate"], light.decay_rate)
                 if light.kind == "spot":
-                    self.assertAlmostEqual(cmds.getAttr(f"{shape}.coneAngle"), light.cone_angle, places=6)
-                    self.assertAlmostEqual(cmds.getAttr(f"{shape}.penumbraAngle"), light.penumbra_angle, places=6)
+                    self.assertAlmostEqual(shape["coneAngle"], light.cone_angle, places=6)
+                    self.assertAlmostEqual(shape["penumbraAngle"], light.penumbra_angle, places=6)
 
     def test_maya_reads_another_writers_camera_as_we_do(self):
         """a camera and a directional light on nodes with no post rotation,
         as another writer leaves them: Maya's import puts their transforms
         where our turn puts them, within 1e-6, on every frame"""
-        cmds = self.cmds
+        held = self.case("other_writer")
         path = other_writer(self.path("other.fbx"))
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            clip = load_fbx(path).clip.active
-        self.imported(path)
-        cmds.currentUnit(time="film")
+            same_read(self, load_fbx(path), load_fbx(self.fixture("other.fbx")))
+            clip = load_fbx(self.fixture("other.fbx")).clip.active
         ours = np.asarray(clip.frames.world_matrix)
         for name in ("cam", "sun"):
             column = clip.name.index(name)
-            for f in range(FRAMES):
-                world = np.array(cmds.getAttr(f"{name}.worldMatrix", time=f)).reshape(4, 4)
-                np.testing.assert_allclose(world, ours[f, column], rtol=0, atol=1e-6, err_msg=(name, f))
+            np.testing.assert_allclose(held.array(f"world/{name}"), ours[:, column], rtol=0, atol=1e-6, err_msg=name)
 
     def test_angle_of_view_is_mayas(self):
         """CameraData's angle of view against Maya's own query on the tuned
         camera: squeeze 1.5, scale 2, 50 mm on a 1 by 0.6 inch back"""
-        cmds  = self.cmds
-        made  = self.maya_scene()
-        shape = made["tunedCam1"]
+        fov = self.case("views_export").value("fov")
         # Maya's query is within 1e-4 of a degree of 2 atan(aperture / 2 focal):
         # its own inch holds a few more digits of rounding (measured 5.5e-5
         # on 28.5035 degrees); neither the camera scale nor the squeeze shows
         camera = CameraData(focal_length=50.0, horizontal_film_aperture=1.0, vertical_film_aperture=0.6, lens_squeeze_ratio=1.5, camera_scale=2.0)
-        self.assertAlmostEqual(camera.horizontal_angle_of_view, cmds.camera(shape, q=True, horizontalFieldOfView=True), delta=1e-3)
-        self.assertAlmostEqual(camera.vertical_angle_of_view, cmds.camera(shape, q=True, verticalFieldOfView=True), delta=1e-3)
+        self.assertAlmostEqual(camera.horizontal_angle_of_view, fov["tunedCam1"]["h"], delta=1e-3)
+        self.assertAlmostEqual(camera.vertical_angle_of_view, fov["tunedCam1"]["v"], delta=1e-3)
         plain = CameraData()
-        self.assertAlmostEqual(plain.horizontal_angle_of_view, cmds.camera(made["plainCam1"], q=True, horizontalFieldOfView=True), delta=1e-3)
+        self.assertAlmostEqual(plain.horizontal_angle_of_view, fov["plainCam1"]["h"], delta=1e-3)
 
 
 if __name__ == "__main__":

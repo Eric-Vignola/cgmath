@@ -1,0 +1,135 @@
+{
+ "counts": {
+  "animCurve": 85,
+  "dagPose": 0,
+  "skinCluster": 0
+ },
+ "nodes": {
+  "arm": {
+   "count": 1,
+   "joint_orient": [
+    0.0,
+    90.0,
+    0.0
+   ],
+   "parent": "arm_grp",
+   "rotate_axis": [
+    0.0,
+    -0.0,
+    10.0
+   ],
+   "rotate_order": 0,
+   "shapes": [],
+   "ssc": false,
+   "type": "joint"
+  },
+  "arm_grp": {
+   "count": 1,
+   "parent": "chest",
+   "rotate_axis": [
+    -0.0,
+    -0.0,
+    -0.0
+   ],
+   "rotate_order": 5,
+   "shapes": [],
+   "type": "transform"
+  },
+  "base": {
+   "count": 1,
+   "parent": null,
+   "rotate_axis": [
+    -0.0,
+    -0.0,
+    -0.0
+   ],
+   "rotate_order": 0,
+   "shapes": [],
+   "type": "transform"
+  },
+  "chest": {
+   "count": 1,
+   "joint_orient": [
+    5.0,
+    0.0,
+    0.0
+   ],
+   "parent": "spine",
+   "rotate_axis": [
+    -0.0,
+    -0.0,
+    -0.0
+   ],
+   "rotate_order": 3,
+   "shapes": [],
+   "ssc": true,
+   "type": "joint"
+  },
+  "head": {
+   "count": 1,
+   "joint_orient": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "parent": "chest",
+   "rotate_axis": [
+    -0.0,
+    -0.0,
+    -0.0
+   ],
+   "rotate_order": 4,
+   "shapes": [],
+   "ssc": false,
+   "type": "joint"
+  },
+  "hips": {
+   "count": 1,
+   "joint_orient": [
+    0.0,
+    0.0,
+    90.0
+   ],
+   "parent": "base",
+   "rotate_axis": [
+    10.0,
+    -0.0,
+    0.0
+   ],
+   "rotate_order": 1,
+   "shapes": [],
+   "ssc": false,
+   "type": "joint"
+  },
+  "prop": {
+   "count": 1,
+   "parent": "base",
+   "rotate_axis": [
+    -0.0,
+    -0.0,
+    -0.0
+   ],
+   "rotate_order": 1,
+   "shapes": [],
+   "type": "transform"
+  },
+  "spine": {
+   "count": 1,
+   "joint_orient": [
+    0.0,
+    0.0,
+    -14.999999999999998
+   ],
+   "parent": "hips",
+   "rotate_axis": [
+    0.0,
+    5.0,
+    0.0
+   ],
+   "rotate_order": 2,
+   "shapes": [],
+   "ssc": true,
+   "type": "joint"
+  }
+ }
+}

@@ -1,0 +1,135 @@
+{
+ "cameras": {
+  "orthoCam1": {
+   "cameraScale": 1.0,
+   "farClipPlane": 10000.0,
+   "filmFit": 1,
+   "focalLength": 35.0,
+   "horizontalFilmAperture": 1.4173200000000001,
+   "horizontalFilmOffset": 0.0,
+   "lensSqueezeRatio": 1.0,
+   "nearClipPlane": 0.1,
+   "orthographic": true,
+   "orthographicWidth": 50.0,
+   "verticalFilmAperture": 0.94488,
+   "verticalFilmOffset": 0.0
+  },
+  "plainCam1": {
+   "cameraScale": 1.0,
+   "farClipPlane": 10000.0,
+   "filmFit": 1,
+   "focalLength": 35.0,
+   "horizontalFilmAperture": 1.4173200000000001,
+   "horizontalFilmOffset": 0.0,
+   "lensSqueezeRatio": 1.0,
+   "nearClipPlane": 0.1,
+   "orthographic": false,
+   "orthographicWidth": 10.0,
+   "verticalFilmAperture": 0.94488,
+   "verticalFilmOffset": 0.0
+  },
+  "tunedCam1": {
+   "cameraScale": 2.0,
+   "farClipPlane": 5000.0,
+   "filmFit": 2,
+   "focalLength": 50.0,
+   "horizontalFilmAperture": 1.0,
+   "horizontalFilmOffset": 0.1,
+   "lensSqueezeRatio": 1.5,
+   "nearClipPlane": 1.0,
+   "orthographic": false,
+   "orthographicWidth": 10.0,
+   "verticalFilmAperture": 0.6,
+   "verticalFilmOffset": -0.05
+  }
+ },
+ "fov": {
+  "orthoCam1": {
+   "h": 54.432223114614956,
+   "v": 37.84928883210247
+  },
+  "plainCam1": {
+   "h": 54.432223114614956,
+   "v": 37.84928883210247
+  },
+  "tunedCam1": {
+   "h": 28.503537459387307,
+   "v": 17.3304381593166
+  }
+ },
+ "lights": {
+  "ambientLight": {
+   "color": [
+    0.25,
+    0.5,
+    1.0
+   ],
+   "intensity": 2.5,
+   "type": "ambientLight"
+  },
+  "areaLight": {
+   "color": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "decayRate": 0,
+   "intensity": 1.0,
+   "type": "areaLight"
+  },
+  "directionalLight": {
+   "color": [
+    0.25,
+    0.5,
+    1.0
+   ],
+   "decayRate": 0,
+   "intensity": 2.5,
+   "type": "directionalLight"
+  },
+  "pointLight": {
+   "color": [
+    0.25,
+    0.5,
+    1.0
+   ],
+   "decayRate": 2,
+   "intensity": 2.5,
+   "type": "pointLight"
+  },
+  "spotLight": {
+   "color": [
+    0.25,
+    0.5,
+    1.0
+   ],
+   "coneAngle": 50.0,
+   "decayRate": 2,
+   "dropoff": 3.0,
+   "intensity": 2.5,
+   "penumbraAngle": 5.0,
+   "type": "spotLight"
+  },
+  "volumeLight": {
+   "color": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "decayRate": 0,
+   "intensity": 1.0,
+   "type": "volumeLight"
+  }
+ },
+ "made": {
+  "ambientLight": "ambientLightShape",
+  "areaLight": "areaLightShape",
+  "directionalLight": "directionalLightShape",
+  "orthoCam1": "orthoCamShape1",
+  "plainCam1": "plainCamShape1",
+  "pointLight": "pointLightShape",
+  "spotLight": "spotLightShape",
+  "tunedCam1": "tunedCamShape1",
+  "volumeLight": "volumeLightShape"
+ }
+}

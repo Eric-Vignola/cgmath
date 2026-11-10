@@ -11,14 +11,14 @@ the sdk tests; Maya's re-import keeps the pivots and refits the translate to
 the same world. A joint's pivots Maya's exporter drops (it writes zeros, and
 its re-import lands 0.5 off a joint whose pivot counted), so a joint
 carrying them comes from another writer and is refused, as is a keyed
-pivot. The sdk tests need the Autodesk SDK, the Maya ones a Maya with its
-fbxmaya plug-in.
+pivot. The sdk tests need the Autodesk SDK; the Maya ones read what Maya
+2025 did, recorded once (maya_fixtures), and need no Maya.
 """
 
 import unittest
 
 import numpy as np
-from cgmath._tests.test_skeleton_fbx import _Files, _InMaya
+from cgmath._tests.test_skeleton_fbx import _Files, _Recorded
 from cgmath.formats import load_fbx
 from cgmath.formats._fbx_io import load_sdk, open_fbx, typed
 from cgmath.formats._load import _amatrix
@@ -223,49 +223,21 @@ class TestPivots(_Files):
         self.assertIn("'grp' keys its pivots", str(held.exception))
 
 
-class TestMayaPivots(_InMaya):
-    """Maya's export of a pivoted transform reads back at Maya's worlds"""
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestMayaPivots(_Recorded):
+    """Maya's export of a pivoted transform reads back at Maya's worlds, as
+    recorded (tools/make_maya_fbx_fixtures.py, pivots_export: the scene of
+    ``pivoted`` built in Maya and keyed over FRAMES frames)"""
 
     def test_maya_export_reads_at_maya_worlds(self):
-        cmds = self.cmds
-        cmds.currentUnit(time="ntsc", linear="cm", angle="deg")
-        grp = cmds.createNode("transform", name="grp")
-        cmds.setAttr(grp + ".rotatePivot", 1.0, 2.0, 3.0)
-        cmds.setAttr(grp + ".scalePivot", -1.0, 0.5, 2.0)
-        cmds.setAttr(grp + ".rotatePivotTranslate", 0.5, 0.0, 0.0)
-        cmds.setAttr(grp + ".scalePivotTranslate", 0.0, 0.25, 0.0)
-        cmds.setAttr(grp + ".rotate", 10.0, 20.0, 30.0)
-        cmds.setAttr(grp + ".rotateOrder", 2)
-        cmds.setAttr(grp + ".rotateAxis", 5.0, 0.0, 0.0)
-        cmds.setAttr(grp + ".scale",      2.0, 2.0, 2.0)
-        cmds.setAttr(grp + ".translate",  3.0, 4.0, 5.0)
-        j = cmds.createNode("joint", name="j", parent=grp)
-        cmds.setAttr(j + ".translate", 1.0, 2.0, 3.0)
-        cmds.setAttr(j + ".jointOrient", 0.0, 15.0, 0.0)
-        leaf = cmds.createNode("transform", name="leaf", parent=grp)
-        cmds.setAttr(leaf + ".scale",       1.0, 2.0,  3.0)
-        cmds.setAttr(leaf + ".rotatePivot", 2.0, 0.0,  0.0)
-        cmds.setAttr(leaf + ".scalePivot",  0.0, 0.0,  1.0)
-        cmds.setAttr(leaf + ".rotate",      0.0, 45.0, 0.0)
-        cmds.setAttr(leaf + ".translate",   0.0, 1.0,  0.0)
-        for frame, (rz, tx, sz) in enumerate(((0.0, 3.0, 3.0), (45.0, 4.0, 4.0), (90.0, 5.0, 5.0))):
-            cmds.setKeyframe(grp,  attribute="rotateZ",    time=frame, value=rz)
-            cmds.setKeyframe(grp,  attribute="translateX", time=frame, value=tx)
-            cmds.setKeyframe(leaf, attribute="scaleZ",     time=frame, value=sz)
-        # Maya's export spans the time slider
-        cmds.playbackOptions(minTime=0, maxTime=FRAMES - 1, animationStartTime=0, animationEndTime=FRAMES - 1)
-        worlds = {
-            name: np.array([cmds.getAttr(name + ".worldMatrix[0]", time=frame) for frame in range(FRAMES)]).reshape(FRAMES, 4, 4)
-            for name in NAMES
-        }
-
-        path = self.exported("maya_pivots.fbx")
+        case = self.case("pivots_export")
+        path = self.fixture("maya.fbx")
         np.testing.assert_array_equal(pivots_of(path)["grp"], [[1.0, 2.0, 3.0], [-1.0, 0.5, 2.0], [0.5, 0.0, 0.0], [0.0, 0.25, 0.0]])
         clip = load_fbx(path).clip.active
         self.assertEqual(clip.frame_count, FRAMES)
         for name in NAMES:
             np.testing.assert_allclose(
-                _frames(clip.frames[name].world_matrix, (4, 4)), worlds[name], rtol=0.0, atol=1e-6, err_msg=name
+                _frames(clip.frames[name].world_matrix, (4, 4)), case.array(f"world/{name}"), rtol=0.0, atol=1e-6, err_msg=name
             )
 
 

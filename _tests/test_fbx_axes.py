@@ -15,7 +15,8 @@ import itertools
 import unittest
 
 import numpy as np
-from cgmath._tests.test_skeleton_fbx import START, TAKE, UNIT, _Files, _InMaya, body, bound, motion, near, weighed
+from cgmath._tests.test_skeleton_fbx import START, TAKE, UNIT, _Files, _Recorded, body, bound, motion, near, weighed
+from cgmath._tests.maya_fixtures import same_read
 from cgmath.formats import load_fbx, save_fbx
 from cgmath.formats._fbx_io import load_sdk, open_fbx
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData, generate_uuid
@@ -447,43 +448,44 @@ def as_maya(world: np.ndarray, cm: float) -> np.ndarray:
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
-class TestMayaAxes(_InMaya):
+class TestMayaAxes(_Recorded):
     """Maya 2025's FBXImport of a Z-up file in metres puts every node where
     load_fbx reads it, the unit held as a scale on its roots where load_fbx
     holds it in the numbers (as_maya), and deforms a skinned one as cgmath
-    does"""
+    does; as recorded"""
 
     def test_maya_imports_a_z_up_file_as_the_read(self):
         """a save relabelled Z-up, in cm and in metres: every node's world on
         every frame, the joint root's joint orient and the group root's
         rotate, solved again, as Maya's import holds them"""
-        cmds = self.cmds
+        held = self.case("zup")
         save_fbx(self.path("y_cm.fbx"), clip=turned_clip(turned_rig()))
+        same_read(self, load_fbx(self.path("y_cm.fbx")), load_fbx(self.fixture("y_cm.fbx")))
         for unit, cm in (("cm", 1.0), ("m", 100.0)):
             with self.subTest(unit=unit):
                 path = relabelled(self.path("y_cm.fbx"), self.path(f"z_{unit}.fbx"), FBX.FbxAxisSystem.MayaZUp, unit)
-                clip = load_fbx(path).clip.active
-                self.imported(path)
-                self.assertEqual(cmds.ls(type="dagPose"), [])
+                same_read(self, load_fbx(path), load_fbx(self.fixture(f"z_{unit}.fbx")))
+                clip = load_fbx(self.fixture(f"z_{unit}.fbx")).clip.active
+                self.assertEqual(held.value(f"{unit}/dagPoses"), 0)
                 self.assertEqual(clip.start_frame, 0)
                 wanted = np.asarray(clip.frames.world_matrix)
-                for frame in range(FRAMES):
-                    for column, node in enumerate(clip):
-                        world = np.array(cmds.getAttr(f"{node.name}.worldMatrix", time=frame)).reshape(4, 4)
-                        near(world, as_maya(wanted[frame, column], cm), err_msg=(node.name, frame, unit))
+                for column, node in enumerate(clip):
+                    worlds = held.array(f"{unit}/world/{node.name}")
+                    for frame in range(FRAMES):
+                        near(worlds[frame], as_maya(wanted[frame, column], cm), err_msg=(node.name, frame, unit))
                 clip.frame = 0
                 # the turn as Maya puts it: in a joint root's joint orient, in
                 # a group root's rotate, solved again; the joint orients
                 # under a root as they were
-                self.assertEqual(cmds.nodeType("hips"), "joint")
-                np.testing.assert_allclose(cmds.getAttr("hips.jointOrient")[0],     clip["hips"].joint_orient, rtol=0, atol=1e-4)
-                np.testing.assert_allclose(cmds.getAttr("knee.jointOrient")[0],     (0.0, 0.0, -90.0),         rtol=0, atol=1e-4)
-                np.testing.assert_allclose(cmds.getAttr("group.rotate", time=0)[0], clip["group"].rotate,      rtol=0, atol=1e-4)
-                np.testing.assert_allclose(cmds.getAttr("loc.rotate", time=0)[0],   clip["loc"].rotate,        rtol=0, atol=1e-4)
+                self.assertEqual(held.value(f"{unit}/hips_type"), "joint")
+                np.testing.assert_allclose(held.array(f"{unit}/hips_joint_orient"), clip["hips"].joint_orient, rtol=0, atol=1e-4)
+                np.testing.assert_allclose(held.array(f"{unit}/knee_joint_orient"), (0.0, 0.0, -90.0),         rtol=0, atol=1e-4)
+                np.testing.assert_allclose(held.array(f"{unit}/group_rotate"),      clip["group"].rotate,      rtol=0, atol=1e-4)
+                np.testing.assert_allclose(held.array(f"{unit}/loc_rotate"),        clip["loc"].rotate,        rtol=0, atol=1e-4)
                 self.assertTrue(np.any(np.abs(clip["hips"].joint_orient - [5.0, -15.0, 25.0]) > 1.0))
                 # the unit: a scale on Maya's roots, in load_fbx's numbers
-                np.testing.assert_allclose(cmds.getAttr("hips.scale")[0], (cm, cm, cm), rtol=0, atol=1e-6)
-                np.testing.assert_allclose(cmds.getAttr("knee.translate")[0], (0.0, -4.0, 0.5), rtol=0, atol=1e-6)
+                np.testing.assert_allclose(held.array(f"{unit}/hips_scale"), (cm, cm, cm), rtol=0, atol=1e-6)
+                np.testing.assert_allclose(held.array(f"{unit}/knee_translate"), (0.0, -4.0, 0.5), rtol=0, atol=1e-6)
                 np.testing.assert_allclose(clip["knee"].translate, np.array((0.0, -4.0, 0.5)) * cm, rtol=0, atol=1e-9)
                 np.testing.assert_array_equal(clip["hips"].scale, (1.0, 1.0, 1.0))
 
@@ -491,33 +493,24 @@ class TestMayaAxes(_InMaya):
         """a skinned Z-up file in cm, as a game engine exports one: Maya turns
         its roots, the mesh's among them, binds the skin where load_fbx reads
         it and deforms as cgmath does"""
-        import maya.api.OpenMaya as om
         from cgmath.geometry.deform import SkinDeformData
 
-        cmds   = self.cmds
+        held   = self.case("zup_skinned")
         rig    = bound()
         mesh   = body(rig["geo"].uuid)
         source = {"hierarchy": rig, "clip": motion(rig), "meshes": mesh, "skins": weighed(mesh)}
         save_fbx(self.path("y_cm.fbx"), **source)
         path = relabelled(self.path("y_cm.fbx"), self.path("z_cm.fbx"), FBX.FbxAxisSystem.MayaZUp, "cm")
-        back = load_fbx(path)
-        self.imported(path)
+        same_read(self, load_fbx(path), load_fbx(self.fixture("z_cm.fbx")))
+        back = load_fbx(self.fixture("z_cm.fbx"))
 
-        shapes = cmds.listRelatives("geo", shapes=True, noIntermediate=True, fullPath=True)
-        chosen = om.MSelectionList()
-        chosen.add(shapes[0])
-        dag      = chosen.getDagPath(0)
-        clusters = cmds.ls(type="skinCluster")
-        self.assertEqual(len(clusters), 1)
+        self.assertEqual(held.value("skinClusters"), 1)
         worlds = np.asarray(back.hierarchy.world_matrix)
-        geom   = np.array(cmds.getAttr(f"{clusters[0]}.geomMatrix")).reshape(4, 4)
-        near(geom, worlds[back.hierarchy.name.index("geo")], err_msg="geomMatrix")
+        near(held.array("geomMatrix"), worlds[back.hierarchy.name.index("geo")], err_msg="geomMatrix")
         deformer = SkinDeformData(back.meshes[0], back.skins[0], bind_rig=back.hierarchy)
         wanted   = deformer.apply(back.clip.active.frames)
         for f in (0, TAKE // 2, TAKE - 1):
-            cmds.currentTime(START + f)
-            got = np.array([tuple(p)[:3] for p in om.MFnMesh(dag).getPoints(om.MSpace.kWorld)])
-            near(got, wanted[f], err_msg=f"frame {START + f}")
+            near(held.array(f"world_points/{f}"), wanted[f], err_msg=f"frame {START + f}")
         # the deformation is no stand-still: the points move by whole units
         self.assertGreater(float(np.abs(wanted[-1] - wanted[0]).max()), 2.0 * UNIT)
 
