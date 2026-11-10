@@ -387,12 +387,15 @@ def _material_faces(shape, count: int, faces: int, label: str, fbx) -> list:
     """[(material index, faces or None)] of the mesh's material element, in
     material order: an all-same element, or none, gives its one material
     the whole mesh; a by-polygon one gives each material the polygons that
-    name it, every face as None, no face left out. ValueError for another
-    mapping, or polygons naming no material of the node's ``count``"""
+    name it, every face as None, no face left out; an empty eNone element
+    padding a layer under the mapped one (the sdk's ``CreateElementMaterial``
+    on a mesh whose UV sets came first) is passed over. ValueError for
+    another mapping, or polygons naming no material of the node's ``count``"""
     mapping = fbx.FbxLayerElement.EMappingMode
-    if not shape.GetElementMaterialCount():
+    found   = [shape.GetElementMaterial(k) for k in range(shape.GetElementMaterialCount())]
+    if not found:
         return [(0, None)]
-    element = shape.GetElementMaterial(0)
+    element = next((e for e in found if e.GetMappingMode() != mapping.eNone), found[0])
     held    = element.GetIndexArray()
     indices = np.array([int(held.GetAt(k)) for k in range(held.GetCount())], dtype=np.int64)
     mode    = element.GetMappingMode()
