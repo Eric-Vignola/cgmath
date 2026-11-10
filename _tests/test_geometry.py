@@ -11,6 +11,7 @@ from cgmath._tests._examples_geometry import mesh_data, uv_data
 from cgmath.geometry.bspline import NurbsCurveData, _fit_knots
 from cgmath.geometry.bspline_patch import NurbsSurfaceData
 from cgmath.geometry.mesh import (
+    _corner_colors,
     AreaMethod,
     Axis,
     cv2,
@@ -6998,6 +6999,178 @@ def patch_grid_distances(patch, queries, n=400, ends=None):
     uu, vv = np.meshgrid(u, v, indexing="ij")
     points = patch.evaluate(uu.ravel(), vv.ravel(), _native=True)
     return cKDTree(points).query(queries)[0]
+
+
+def _strip() -> MeshData:
+    """two quads sharing an edge: 6 points, 8 face corners"""
+    return MeshData(
+        points  = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 1.0, 0.0), (2.0, 1.0, 0.0)],
+        indices = [0, 1, 4, 3, 1, 2, 5, 4],
+        counts  = [4, 4],
+        name    = "stripShape",
+    )
+
+
+VERTEX_COLORS = np.column_stack([np.linspace(0.0, 1.0, 6), np.linspace(1.0, 0.0, 6), np.full(6, 0.5), np.ones(6)])
+CORNER_COLORS = np.column_stack([np.arange(8) / 7.0, np.ones(8), np.zeros(8), np.linspace(1.0, 0.0, 8)])
+THREE_COLORS  = np.array([[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 0.5]])
+THREE_IDS     = [0, 1, 2, 0, 1, 2, 0, 1]
+COLOR_FORMS   = ("vertex", "corner", "indexed")
+
+
+def _colored(form: str) -> MeshData:
+    """the strip with its colours one a vertex, one a corner, or three the
+    corners name"""
+    mesh = _strip()
+    if form == "vertex":
+        mesh.colors = VERTEX_COLORS
+    elif form == "corner":
+        mesh.colors        = CORNER_COLORS
+        mesh.color_indices = np.arange(8)
+    else:
+        mesh.colors        = THREE_COLORS
+        mesh.color_indices = THREE_IDS
+    return mesh
+
+
+def _per_corner(mesh: MeshData) -> np.ndarray:
+    """(C, 4) the colour of each face corner, whatever form holds it"""
+    colors, ids = _corner_colors(mesh)
+    return colors[ids]
+
+
+class TestColors(unittest.TestCase):
+    """RGBA colours one a vertex, one a corner, or the ones color_indices
+    name; kept by the operations that keep face corners, dropped by the
+    ones that rebuild faces"""
+
+    def test_the_fields_default_to_none_and_round_trip(self):
+        self.assertEqual((_strip().colors, _strip().color_indices), (None, None))
+        with tempfile.TemporaryDirectory() as folder:
+            for form in COLOR_FORMS:
+                mesh = _colored(form)
+                for ext in ("json", "npz", "pkl"):
+                    with self.subTest(form=form, ext=ext):
+                        back = MeshData.load(mesh.save(os.path.join(folder, f"{form}.{ext}")))
+                        self.assertEqual(back, mesh)
+                        np.testing.assert_array_equal(_per_corner(back), _per_corner(mesh))
+                twin = mesh.copy()
+                self.assertEqual(twin, mesh)
+                self.assertIsNot(twin.colors, mesh.colors)
+
+    def test_each_form_names_a_colour_a_corner(self):
+        mesh = _colored("vertex")
+        np.testing.assert_array_equal(_corner_colors(mesh)[1], mesh.indices)
+        np.testing.assert_array_equal(_per_corner(mesh), VERTEX_COLORS[mesh.indices])
+        np.testing.assert_array_equal(_corner_colors(_colored("corner"))[1], np.arange(8))
+        np.testing.assert_array_equal(_corner_colors(_colored("indexed"))[1], THREE_IDS)
+        np.testing.assert_array_equal(_per_corner(_colored("indexed")), THREE_COLORS[THREE_IDS])
+        self.assertEqual(_corner_colors(_strip()), (None, None))
+
+    def test_colours_that_fit_nothing_are_refused(self):
+        mesh = _strip()
+        with self.assertRaises(ValueError):
+            mesh.colors = np.zeros((6, 3))  # RGBA, not RGB
+        mesh.colors = np.zeros((5, 4))
+        with self.assertRaisesRegex(ValueError, "holds 5 colors for its 6 vertices and has no color_indices"):
+            _corner_colors(mesh)
+        mesh.colors = CORNER_COLORS  # a colour a corner names its corners
+        with self.assertRaisesRegex(ValueError, "holds 8 colors for its 6 vertices and has no color_indices"):
+            _corner_colors(mesh)
+        mesh.colors        = THREE_COLORS
+        mesh.color_indices = THREE_IDS[:7]
+        with self.assertRaisesRegex(ValueError, "has 7 color_indices for its 8 face corners"):
+            _corner_colors(mesh)
+        mesh.color_indices = [0, 1, 2, 0, 1, 2, 0, 9]
+        with self.assertRaisesRegex(ValueError, "color_indices name colors it does not hold \\(3\\)"):
+            _corner_colors(mesh)
+
+    def test_delete_faces_keeps_the_colours_of_the_corners_kept(self):
+        for form in COLOR_FORMS:
+            with self.subTest(form=form):
+                mesh   = _colored(form)
+                before = _per_corner(mesh)
+                mesh.delete_faces([1])
+                self.assertEqual((mesh.face_count, mesh.point_count), (1, 4))
+                np.testing.assert_array_equal(_per_corner(mesh), before[:4])
+        mesh = _colored("vertex")
+        mesh.delete_faces([1])
+        np.testing.assert_array_equal(mesh.colors, VERTEX_COLORS[[0, 1, 3, 4]])
+        self.assertIsNone(mesh.color_indices)
+        mesh = _colored("indexed")
+        mesh.delete_faces([1])
+        np.testing.assert_array_equal(mesh.colors, THREE_COLORS)
+        np.testing.assert_array_equal(mesh.color_indices, [0, 1, 2, 0])
+        mesh = _colored("corner")
+        mesh.delete_faces([0])  # the second face's corners, compacted
+        np.testing.assert_array_equal(mesh.colors, CORNER_COLORS[4:])
+        np.testing.assert_array_equal(mesh.color_indices, [0, 1, 2, 3])
+
+    def test_triangulate_keeps_the_colours_on_the_corners(self):
+        # rule 0 splits a quad (0, 1, 2, 3) into the slots (1, 2, 0) and (0, 2, 3)
+        corners = [1, 2, 0, 0, 2, 3, 5, 6, 4, 4, 6, 7]
+        for form in COLOR_FORMS:
+            with self.subTest(form=form):
+                mesh   = _colored(form)
+                before = _per_corner(mesh)
+                mesh.triangulate(np.zeros(2, dtype=int))
+                np.testing.assert_array_equal(mesh.indices,      [1, 4, 0, 0, 4, 3, 2, 5, 1, 1, 5, 4])
+                np.testing.assert_array_equal(mesh.counts,       [3] * 4)
+                np.testing.assert_array_equal(_per_corner(mesh), before[corners])
+        mesh = _colored("vertex")
+        mesh.triangulate(np.zeros(2, dtype=int))
+        np.testing.assert_array_equal(mesh.colors, VERTEX_COLORS)  # the points are as they were
+        self.assertIsNone(mesh.color_indices)
+        mesh = _colored("corner")
+        mesh.triangulate(np.zeros(2, dtype=int), preserve_order=False)
+        np.testing.assert_array_equal(_per_corner(mesh), CORNER_COLORS[corners])
+
+    def test_detach_faces_keeps_the_colours(self):
+        for form in COLOR_FORMS:
+            for faces in (None, [1]):
+                with self.subTest(form=form, faces=faces):
+                    mesh   = _colored(form)
+                    before = _per_corner(mesh)
+                    mesh.detach_faces(faces)
+                    self.assertEqual(mesh.point_count, 8)
+                    np.testing.assert_array_equal(_per_corner(mesh), before)
+        mesh = _colored("vertex")
+        mesh.detach_faces()
+        np.testing.assert_array_equal(mesh.colors, VERTEX_COLORS[[0, 1, 4, 3, 1, 2, 5, 4]])
+        self.assertIsNone(mesh.color_indices)
+        mesh = _colored("vertex")
+        mesh.detach_faces([1])
+        self.assertEqual((mesh.colors.shape, mesh.color_indices), ((8, 4), None))
+
+    def test_merge_keeps_the_colours_of_the_points_and_faces_kept(self):
+        # two quads with the shared edge's points twice, and the first quad twice
+        points = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0),
+                  (1.0, 0.0, 0.0), (2.0, 0.0, 0.0), (2.0, 1.0, 0.0), (1.0, 1.0, 0.0)]
+        mesh = MeshData(points=points, indices=[0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3], counts=[4, 4, 4])
+        # a point's colour is its position's, so the doubles agree
+        mesh.colors = np.array([(x / 2.0, y, 0.25, 1.0) for x, y, _ in points])
+        before      = _per_corner(mesh)
+        mesh.merge()
+        self.assertEqual((mesh.point_count, mesh.face_count), (6, 2))
+        self.assertIsNone(mesh.color_indices)
+        np.testing.assert_array_equal(mesh.colors, [(x / 2.0, y, 0.25, 1.0) for x, y, _ in mesh.points.tolist()])
+        mesh               = MeshData(points=points, indices=[0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3], counts=[4, 4, 4])
+        mesh.colors        = THREE_COLORS
+        mesh.color_indices = [0, 1, 2, 0, 1, 2, 0, 1, 0, 1, 2, 0]  # the first quad's corners twice
+        mesh.merge()
+        np.testing.assert_array_equal(np.sort(_per_corner(mesh), axis=0), np.sort(before[:8] * 0 + THREE_COLORS[[0, 1, 2, 0, 1, 2, 0, 1]], axis=0))
+
+    def test_the_rebuilding_operations_drop_the_colours(self):
+        for name, act in (
+            ("union", lambda m: m.union(_strip())),
+            ("difference", lambda m: m.difference(_strip())),
+            ("subdivide", lambda m: m.subdivide(1)),
+            ("quadrangulate", lambda m: (m.triangulate(np.zeros(2, dtype=int)), m.quadrangulate())),
+        ):
+            with self.subTest(name):
+                mesh = _colored("indexed")
+                act(mesh)
+                self.assertEqual((mesh.colors, mesh.color_indices), (None, None))
 
 
 class TestBSplinePatchSample(unittest.TestCase):
