@@ -7,6 +7,7 @@ from typing import Optional
 
 import numpy as np
 from cgmath.data import _is_sequence, Array, Data, DataList
+from cgmath.geometry._one_mesh import OneMeshList
 from cgmath.geometry.utils import pxr
 
 BLS_PRIM_TYPE = "MorphTarget"
@@ -449,9 +450,11 @@ class MorphData(Data):
         bls_api.CreatePointIndicesAttr().Set(self.indices)
 
 
-class MorphList(DataList[MorphData]):
+class MorphList(OneMeshList, DataList[MorphData]):
     """
-    A list of MorphData, its arithmetic shape by shape.
+    A list of MorphData, as a file holds its targets or one mesh's alone
+    (``mesh_uuid``, :class:`~cgmath.geometry._one_mesh.OneMeshList`), its
+    arithmetic shape by shape.
 
     ``shapes + a`` and ``shapes - a`` add or subtract a MorphData from every
     shape; a MorphList, or a list or a tuple of MorphData, adds or

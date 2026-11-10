@@ -601,7 +601,9 @@ rest or its takes, the meshes on the nodes with their colours (one colour
 set, `colorSet1`, one a vertex or one a face corner), their UV sets, skins,
 materials and blend shape targets, the cameras and lights. Everything is in Maya's
 Y-up and cm; a file's unit and axes are converted at the boundary. Each
-shape names its node or its mesh by uuid, so build the nodes first.
+shape names its node or its mesh by uuid, so build the nodes first. A
+material on several meshes is one record a mesh, sharing one `uuid`, and
+is written back as one shader.
 
 ```python
 from cgmath.formats import FbxContents, load_fbx, save_fbx

@@ -702,6 +702,7 @@ def _read_materials(node, shape, counts, label: str, filename: str, fbx, pixels:
             "faces":   faces,
             "texture": texture,
             "left":    left,
+            "id":      int(material.GetUniqueID()),  # the one FbxSurfaceMaterial, on every node it is on
         })
     return found
 
@@ -1811,7 +1812,8 @@ def _build_lights(read: dict):
 
 def _build_materials(read: dict, meshes):
     """the MaterialList of the meshes' materials, mesh by mesh in the
-    meshes' order, each naming its mesh by uuid; None for none. One warning
+    meshes' order, each naming its mesh by uuid, a material on several
+    meshes one record a mesh sharing one uuid; None for none. One warning
     each, naming each material and slot once: materials of another shading
     model, read as default lamberts; textures on slots the fork does not
     read, or that are no file texture; texture files not found; textures
@@ -1819,18 +1821,21 @@ def _build_materials(read: dict, meshes):
     import warnings
 
     from cgmath.geometry.material import MaterialData, MaterialList
+    from cgmath.hierarchy.hierarchy import generate_uuid
 
     if meshes is None:
         return None
     materials = []
+    uuids     = {}  # one uuid an FbxSurfaceMaterial, whatever nodes hold it
     bare      = []
     left      = []
     missing   = []
     no_pil    = []
     for held, mesh in zip(read["meshes"], meshes):
         for entry in held["materials"]:
-            fields  = dict(entry["fields"])
-            texture = entry["texture"]
+            fields         = dict(entry["fields"])
+            fields["uuid"] = uuids.setdefault(entry["id"], generate_uuid())
+            texture        = entry["texture"]
             if entry["bare"]:
                 bare.append(f"{entry['label']} (shading model {entry['model']!r})")
             left.extend(f"{entry['label']} {slot}" for slot in entry["left"])

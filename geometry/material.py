@@ -9,11 +9,13 @@ its wrap modes; and the faces of one mesh it covers, the mesh named by
 and phong's (measured in Maya 2025).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
 from cgmath.data import Array, Data, DataList, ImmutableArray as numpy_array
+from cgmath.geometry._one_mesh import OneMeshList
+from cgmath.hierarchy.hierarchy import _is_uuid, generate_uuid
 
 # the kinds a MaterialData holds: Maya's lambert and phong. Maya's own FBX
 # export writes a blinn as a phong and a standardSurface as a bare material
@@ -35,6 +37,12 @@ class MaterialData(Data):
         The shader's name, None for none.
     mesh_uuid : str, optional
         The uuid of the mesh it covers, None for none yet.
+    uuid : str, optional
+        The material's own identity, made when none is given. The records
+        of one material on several meshes share it: a shader on two Maya
+        meshes reads as two records, one a mesh, with one uuid, and
+        ``save_fbx`` writes one shader per uuid, so records sharing one
+        agree but for their faces. A copy keeps it.
     faces : (N,) int32, optional
         The faces of that mesh it covers, None for the whole mesh.
     kind : str
@@ -73,11 +81,12 @@ class MaterialData(Data):
         its import leaves both on, whatever a file says (measured).
     """
 
-    EQUALITY_TEST_IGNORE = ["name", "mesh_uuid"]
+    EQUALITY_TEST_IGNORE = ["name", "mesh_uuid", "uuid"]
     NAMESPACED_FIELDS    = ("name",)
 
     name:           Optional[str] = None
     mesh_uuid:      Optional[str] = None
+    uuid:           Optional[str] = field(default=None, kw_only=True)
     faces:          Optional[Array(np.int32, "N")] = None
     kind:           str = "lambert"
     color:          Array(np.float64, 3) = numpy_array([0.5, 0.5, 0.5])
@@ -94,12 +103,26 @@ class MaterialData(Data):
     wrap_u:         str = "repeat"
     wrap_v:         str = "repeat"
 
+    def __post_init__(self):
+        super().__post_init__()
+        if self.uuid is None:
+            self.uuid = generate_uuid()
+
     def __setattr__(self, name: str, value) -> None:
         if name == "kind" and value not in MATERIAL_KINDS:
             raise ValueError(f"MaterialData.kind is one of {list(MATERIAL_KINDS)}, not {value!r}")
         if name in ("wrap_u", "wrap_v") and value not in WRAP_MODES:
             raise ValueError(f"MaterialData.{name} is one of {list(WRAP_MODES)}, not {value!r}")
+        if name == "uuid" and value is not None:
+            value = str(value)  # a uuid.UUID as its text
+            if not _is_uuid(value):
+                raise ValueError(f"MaterialData.uuid takes a uuid or None, not {value!r}")
         super().__setattr__(name, value)
+
+    def _post_load(self) -> None:
+        super()._post_load()
+        if self.uuid is None:
+            self.uuid = generate_uuid()  # a file saved before materials had one
 
     @property
     def textured(self) -> bool:
@@ -123,5 +146,6 @@ class MaterialData(Data):
         return mask
 
 
-class MaterialList(DataList[MaterialData]):
-    """A list of :class:`MaterialData`, as a file holds its materials."""
+class MaterialList(OneMeshList, DataList[MaterialData]):
+    """A list of :class:`MaterialData`, as a file holds its materials, or
+    one mesh's alone (``mesh_uuid``, :class:`~cgmath.geometry._one_mesh.OneMeshList`)."""

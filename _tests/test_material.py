@@ -7,6 +7,7 @@ import unittest
 import numpy as np
 from cgmath.geometry import MaterialData, MaterialList, MeshData
 from cgmath.geometry.material import MATERIAL_KINDS, WRAP_MODES
+from cgmath.hierarchy.hierarchy import _is_uuid
 
 
 def quad_grid() -> MeshData:
@@ -107,6 +108,7 @@ class TestMaterialData(unittest.TestCase):
                 with self.subTest(ext):
                     back = MaterialData.load(material.save(os.path.join(folder, f"m.{ext}")))
                     self.assertEqual(back, material)
+                    self.assertEqual(back.uuid, material.uuid)
                     self.assertEqual((back.name, back.mesh_uuid, back.kind, back.texture_file, back.uv_set), ("skin", mesh.uuid, "phong", "grad.png", "map1"))
                     self.assertEqual((back.wrap_u, back.wrap_v), ("clamp", "repeat"))
                     np.testing.assert_array_equal(back.faces, [0, 3])
@@ -116,6 +118,24 @@ class TestMaterialData(unittest.TestCase):
             back      = MaterialList.load(materials.save(os.path.join(folder, "materials.npz")))
             self.assertEqual(back, materials)
             self.assertEqual([m.name for m in back], ["skin", None])
+
+    def test_uuid_is_made_kept_by_a_copy_and_left_out_of_equality(self):
+        a = MaterialData(name="a")
+        b = MaterialData(name="b")
+        self.assertTrue(_is_uuid(a.uuid))
+        self.assertNotEqual(a.uuid, b.uuid)
+        self.assertEqual(a.copy().uuid, a.uuid)
+        self.assertEqual(MaterialData(uuid=a.uuid), a)
+        self.assertEqual(MaterialData(uuid="0F8FAD5B-D9CB-469F-A165-70867728950E").uuid, "0F8FAD5B-D9CB-469F-A165-70867728950E")
+        with self.assertRaisesRegex(ValueError, "MaterialData.uuid takes a uuid or None, not 'nope'"):
+            MaterialData(uuid="nope")
+        with self.assertRaisesRegex(ValueError, "takes a uuid or None"):
+            a.uuid = "x"
+        self.assertEqual(a.uuid, a.copy().uuid)
+        # a file saved before materials had one gives it one
+        tree = MaterialData(name="old").to_dict()
+        self.assertTrue(_is_uuid(tree.pop("uuid")))
+        self.assertTrue(_is_uuid(MaterialData.from_dict(tree).uuid))
 
 
 if __name__ == "__main__":

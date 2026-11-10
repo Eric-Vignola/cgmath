@@ -91,6 +91,7 @@ from cgmath.geometry.utils import (
     stream_to_matrix,
     subdivide_catmull_clark,
 )
+from cgmath.geometry._one_mesh import OneMeshList
 from cgmath.hierarchy import ShapeData
 from cgmath.transforms import euler_to_matrix
 from scipy.ndimage import convolve
@@ -4845,7 +4846,10 @@ class MeshList(DataList[MeshData]):
         return np.array(result)
 
 
-class UVList(MeshList, DataList[UVData]):
+class UVList(OneMeshList, MeshList, DataList[UVData]):
+    """A list of :class:`UVData`, as a file holds its UV sets, or one mesh's
+    alone (``mesh_uuid``, :class:`~cgmath.geometry._one_mesh.OneMeshList`)."""
+
     save_fbx = _NoRoute("MeshList's fbx writer writes meshes, a UVList holds UV sets")
 
     @classmethod
@@ -5587,7 +5591,7 @@ def _fbx_pairs(contents) -> list:
     sets = {}
     for uv in contents.uvs or []:
         sets.setdefault(uv.mesh_uuid, []).append(uv)
-    return [(mesh, UVList(sets.get(mesh.uuid, []))) for mesh in contents.meshes or []]
+    return [(mesh, UVList(sets.get(mesh.uuid, []), mesh_uuid=mesh.uuid)) for mesh in contents.meshes or []]
 
 
 def _fbx_select(contents, name: str | None, meshes=None, what: str = "Mesh"):

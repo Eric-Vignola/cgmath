@@ -25,6 +25,8 @@ from typing import Any, Generic, List, Optional, TypeVar, Union
 import numpy as np
 from cgmath.data import _Item, _List, Data, DataList
 from cgmath.geometry import (
+    MaterialData,
+    MaterialList,
     MeshData,
     MeshList,
     MorphData,
@@ -34,6 +36,7 @@ from cgmath.geometry import (
     UVData,
     UVList,
 )
+from cgmath.geometry._one_mesh import OneMeshList
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData, TransformList
 
 try:
@@ -57,6 +60,7 @@ JEDI_RELEASE = _release(jedi.__version__) if jedi is not None else (0, 0)
 SHIPPED = {
     MeshList:      MeshData,
     UVList:        UVData,
+    MaterialList:  MaterialData,
     MorphList:     MorphData,
     SkinList:      SkinData,
     TransformList: TransformData,
@@ -215,9 +219,12 @@ class TestTheBracketsNameTheItemClass(unittest.TestCase):
         for cls, item in SHIPPED.items():
             with self.subTest(cls=cls.__name__):
                 self.assertIs(cls.DATA_LIST_CLASS, item)
-        for cls in (MeshList, MorphList, SkinList, TransformList):
+        for cls in (MeshList, SkinList, TransformList):
             self.assertEqual(vars(cls)["__orig_bases__"], (DataList[SHIPPED[cls]],))
-        self.assertEqual(vars(UVList)["__orig_bases__"], (MeshList, DataList[UVData]))
+        # a list of one mesh's records mixes OneMeshList in, before the brackets
+        self.assertEqual(vars(MorphList)["__orig_bases__"],    (OneMeshList, DataList[MorphData]))
+        self.assertEqual(vars(MaterialList)["__orig_bases__"], (OneMeshList, DataList[MaterialData]))
+        self.assertEqual(vars(UVList)["__orig_bases__"],       (OneMeshList, MeshList, DataList[UVData]))
         for cls in (HierarchyData, ClipData):
             self.assertNotIn("__orig_bases__", vars(cls), "TransformList's brackets hold for it")
 
