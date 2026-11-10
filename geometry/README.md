@@ -361,6 +361,11 @@ Two independent things.
   them (`subdivide`, `quadrangulate`, `union`, `difference`).
   `Scene.vertex_colors` shows them in a render; fbx carries them as a colour
   set, a glb's `COLOR_0` reads as them.
+- `topology_hash` is the signature of a mesh's structure: a 32-character
+  hex digest of its vertex count, faces and hole streams. The same value
+  means the same vertex numbering and face order, so data that follows a
+  mesh fits either; points, name, uuids, normals, colours and UV sets play
+  no part. Stable across sessions and machines.
 
 ### Skin weights, morph targets, maps
 
