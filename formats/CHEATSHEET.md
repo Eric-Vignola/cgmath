@@ -645,7 +645,11 @@ print(back.hierarchy, [take.take for take in back.clip], back.clip.active.frame_
 
 A take covers its stored span widened to its keys (an Unreal export stores
 the span a frame short of its last key); its layers holding no curve are
-passed over, curves on two layers, or on a muted one, are refused.
+passed over, curves on two layers, or on a muted one, are refused. A
+transform's rotate pivot, scale pivot and the two offsets are folded into
+its translate, as the matrix Maya composes holds them, on every frame
+where translate, rotate or scale is keyed; its 3x3 is untouched. Pivots on
+a joint, or keyed pivots, are refused.
 
 The measured conventions, the refusals (shear, non-uniform scale off a
 leaf, a geometric transform on a mesh node, two deformers on one mesh ...)

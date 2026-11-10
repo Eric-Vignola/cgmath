@@ -94,7 +94,9 @@ Y-up, right-handed, cm. A take is a `ClipData` of one `ClipList`, keyed on
 every frame of its stored span widened to its keys (an Unreal export stores
 the span a frame short of its last key), the file's active stack the active
 take; a take's layers holding no curve are passed over, curves on two
-layers, or on a muted one, are refused.
+layers, or on a muted one, are refused. A transform's pivots and offsets
+are folded into its translate, as the matrix Maya composes holds them, on
+every frame; a joint's are refused.
 
 ### fbx: a shape names its node, a skin or a set names its mesh
 
