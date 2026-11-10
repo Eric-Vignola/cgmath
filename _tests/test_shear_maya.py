@@ -10,6 +10,7 @@ import os
 import unittest
 
 import numpy as np
+from cgmath._tests import fresh_scene
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "test_assets", "maya_shear.npz")
@@ -209,18 +210,10 @@ class TestSplit(unittest.TestCase):
 
 
 class TestInMaya(unittest.TestCase):
-    """a live scene. Needs mayapy"""
+    """a live scene. Needs Maya"""
 
     def setUp(self):
-        try:
-            import maya.cmds as cmds
-
-            cmds.createNode("transform", name="cgmath_probe")
-        except Exception:  # not running in Maya
-            self.skipTest("needs Maya")
-        self.cmds = cmds
-        self.addCleanup(cmds.file, new=True, force=True)
-        cmds.file(new=True, force=True)
+        self.cmds = fresh_scene(self)
 
     def _maya_node(self, name: str, node: TransformData) -> str:
         cmds = self.cmds

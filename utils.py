@@ -198,6 +198,11 @@ def run_tests(
         dependency shows up as an error against that module rather than
         aborting the run.
 
+        The suite runs under python, mayapy and the Maya GUI alike. In the
+        GUI a test that spawns a child Python spawns the mayapy beside
+        maya.exe, and a live-scene test skips while the open scene has
+        unsaved changes.
+
         >>> from cgmath.utils import run_tests
         >>> run_tests()                        # everything, both suites
         >>> run_tests("test_skin*.py")                                       # a glob
@@ -232,7 +237,7 @@ def run_tests(
     # as a bare ``<name>``.  The suites import their own siblings by that dotted
     # path, so pointing this at a ``_tests`` folder would break them.
     top_level_dir = os.path.dirname(package_root)
-    roots         = [
+    roots = [
         ".".join([package] + os.path.relpath(d, package_root).split(os.sep)) + "."
         for d in test_dirs
     ]

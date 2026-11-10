@@ -17,6 +17,7 @@ import tempfile
 import unittest
 
 import numpy as np
+from cgmath._tests import fresh_scene
 from cgmath.formats import load_fbx, save_fbx
 from cgmath.formats._fbx_io import load_sdk, open_fbx, typed
 from cgmath.geometry import mesh as mesh_module, MeshData, skin_weights as skin_module, SkinData
@@ -830,7 +831,7 @@ class _InMaya(_Files):
         if maya is None:
             self.skipTest("needs Maya and its fbxmaya plug-in")
         self.cmds, self.mel = maya
-        self.addCleanup(self.cmds.file, new=True, force=True)
+        fresh_scene(self)
 
     def imported(self, path: str, take=None) -> None:
         """a fresh ntsc Y-up scene with the file imported; ``take`` picks one

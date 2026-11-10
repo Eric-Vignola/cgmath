@@ -15,6 +15,7 @@ import unittest
 import warnings
 
 import numpy as np
+from cgmath._tests import fresh_scene
 from cgmath.data import FORWARD_MARK
 from cgmath.formats._fbx_io import load_sdk
 from cgmath.formats.glb import load_model, pygltflib
@@ -1476,8 +1477,7 @@ class TestClipListSaveFbx(unittest.TestCase):
         if maya is None:
             self.skipTest("needs Maya and its fbxmaya plug-in")
         cmds, mel = maya
-        self.addCleanup(cmds.file, new=True, force=True)
-        cmds.file(new=True, force=True)
+        fresh_scene(self)
         mel.eval("FBXResetImport")
         mel.eval(f'FBXImport -f "{path.replace(os.sep, "/")}" -t {take}')
         nodes  = cmds.ls(type="transform", long=True)

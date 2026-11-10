@@ -16,6 +16,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
+from cgmath._tests import child_env, child_python
 from cgmath.data import (
     _as_declared,
     _is_numeric_or_boolean,
@@ -1234,9 +1235,8 @@ class TestFiles(unittest.TestCase):
         with open(script, "w") as f:
             f.write(_WORKER_SCRIPT)
         # the child sees what this process sees: cgmath, and a runner's venv
-        env = dict(os.environ, PYTHONPATH=os.pathsep.join(x for x in sys.path if x))
         out = subprocess.run(
-            [sys.executable, script], capture_output=True, text=True, env=env, timeout=300
+            [child_python(), script], capture_output=True, text=True, env=child_env(), timeout=300
         )
         self.assertEqual(out.returncode, 0, out.stderr[-2000:])
         self.assertIn("Branch Leaf 7 [0.0, 1.0] {1: 'x'}", out.stdout)
