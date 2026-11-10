@@ -5762,7 +5762,7 @@ class TestClipSaveFbx(unittest.TestCase):
     def path(self, name="clip.fbx"):
         return os.path.join(self.tmp.name, name)
 
-    @unittest.skipIf(FBX is None, "fbx sdk is not installed")
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_a_one_frame_cut_writes_one_pose(self):
         """frames[f] scrubs and hands back the clip, so it has to be a slice"""
         self.assertIs(self.clip.frames[3], self.clip)
@@ -5774,7 +5774,7 @@ class TestClipSaveFbx(unittest.TestCase):
         cut.save_fbx(self.path("cut.fbx"))
         self.assertTrue(os.path.exists(self.path("cut.fbx")))
 
-    @unittest.skipIf(FBX is None, "fbx sdk is not installed")
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_a_single_frame_clip_still_exports(self):
         clip = ClipData(uuid_chain(3), frames=1)
 
@@ -5782,7 +5782,7 @@ class TestClipSaveFbx(unittest.TestCase):
 
         self.assertTrue(os.path.exists(self.path("one.fbx")))
 
-    @unittest.skipIf(FBX is None, "fbx sdk is not installed")
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_a_frameless_clip_still_exports(self):
         """frame_count is 0 there, so the guard has to be > 1 and not != 1"""
         clip = ClipData(uuid_chain(3))
@@ -6991,7 +6991,7 @@ class TestClipLoadGlbMeshNamesake(unittest.TestCase):
                 self.assertFalse(np.isclose(translate[..., 1], 5.0).any())
 
 
-@unittest.skipIf(FBX is None, "fbx sdk is not installed")
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
 class TestClipLoadFbx(unittest.TestCase):
     """the fbx exporter writes no animation, so these fixtures are authored
     straight through the sdk
@@ -7252,7 +7252,7 @@ class TestClipLoadFbx(unittest.TestCase):
         self.assertIsInstance(ClipData.load(path), ClipData)
         self.assertNotIsInstance(HierarchyData.load(path), ClipData)
 
-@unittest.skipIf(FBX is None, "fbx sdk is not installed")
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
 class TestFbxUnitHeldAsAScale(unittest.TestCase):
     """a file the sdk's FbxSystemUnit.ConvertScene or Maya's unit converting
     export (FBXExportConvertUnitString) wrote in another unit, s cm a unit,
@@ -7685,7 +7685,7 @@ class TestFbxUnitHeldAsAScale(unittest.TestCase):
         finally:
             manager.Destroy()
 
-@unittest.skipIf(FBX is None, "fbx sdk is not installed")
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
 class TestFbxLoadsInMayaAxes(unittest.TestCase):
     """the fbx loaders load in Maya's Y-up, by default: every node's world
     matrix, on every frame, is the one the sdk gives after
@@ -8001,7 +8001,7 @@ class TestFbxBindComposition(unittest.TestCase):
         self.assertTrue(np.allclose(rig["hip"].world_matrix, hip @ turn, rtol=0.0, atol=1e-12))
 
 
-@unittest.skipIf(FBX is None, "fbx sdk is not installed")
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
 class TestFbxFoldsWhatItDrops(unittest.TestCase):
     """the fbx loaders keep the kinds node_types names and fold what the
     read can't hold into the nodes they keep: a dropped node's transform
@@ -8792,7 +8792,7 @@ class TestFbxFoldsWhatItDrops(unittest.TestCase):
         manager.Destroy()
         return path, bind
 
-@unittest.skipIf(FBX is None, "fbx sdk is not installed")
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
 class TestClipLoadFbxSampling(unittest.TestCase):
     """load_fbx reads each curve's keys once and evaluates every frame at
     once. These hold it to the sdk's own evaluation, asked one frame at a
@@ -9361,7 +9361,7 @@ class TestFbxWholeFrames(unittest.TestCase):
         self.assertNotEqual(got[0], 12.0)
 
 
-@unittest.skipIf(FBX is None, "fbx sdk is not installed")
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
 class TestFbxFrameRate(unittest.TestCase):
     """the sdk reports one of its own time modes as having no frame rate"""
 

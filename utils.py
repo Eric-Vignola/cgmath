@@ -198,10 +198,11 @@ def run_tests(
         dependency shows up as an error against that module rather than
         aborting the run.
 
-        The suite runs under python, mayapy and the Maya GUI alike. In the
-        GUI a test that spawns a child Python spawns the mayapy beside
-        maya.exe, and a live-scene test skips while the open scene has
-        unsaved changes.
+        The suite runs on a plain Python with the packages installed, under
+        mayapy and in the Maya GUI alike; nothing in it needs Maya, whose
+        import, export and evaluation were recorded once into
+        ``_tests/test_assets/maya2025``. In the GUI a test that spawns a
+        child Python spawns the mayapy beside maya.exe.
 
         >>> from cgmath.utils import run_tests
         >>> run_tests()                        # everything, both suites

@@ -11,8 +11,9 @@ FbxSurfaceMaterial with no shading model; a file texture on the colour as an
 FbxFileTexture feeding DiffuseColor, the colour itself white, naming the UV
 set and the wrap modes; two shading groups on a mesh as a by-polygon material
 element, one as all-same; Embed Media as the file's bytes, extracted on read.
-The fork reads and writes the same. The SDK tests need the Autodesk SDK, the
-Maya ones a Maya with its fbxmaya plug-in.
+The fork reads and writes the same. The SDK tests need the Autodesk SDK; the
+Maya ones read what Maya 2025 did, recorded once (maya_fixtures), and need no
+Maya.
 """
 
 import os
@@ -23,7 +24,7 @@ import warnings
 from unittest import mock
 
 import numpy as np
-from cgmath._tests.test_skeleton_fbx import _Files, _InMaya
+from cgmath._tests.test_skeleton_fbx import _Files, _Recorded
 from cgmath.formats import load_fbx, save_fbx
 from cgmath.formats._fbx_io import load_sdk, open_fbx, typed
 from cgmath.formats._write import _enum
@@ -556,67 +557,9 @@ class TestMaterials(_Files):
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
-class TestMayaMaterials(_InMaya):
+class TestMayaMaterials(_Recorded):
     """Maya 2025's export of its shaders read as Maya holds them, and Maya's
-    import of ours"""
-
-    LAMBERT = ("color", "transparency", "ambientColor", "incandescence", "diffuse")
-    PHONG   = ("specularColor", "cosinePower", "reflectivity")
-
-    def maya_scene(self) -> dict:
-        """the probe's scene: a 2 by 2 plane, faces 0 and 1 under a lambert
-        whose colour a file texture feeds (wrap u on, v off), faces 2 and 3
-        under a phong; a cube under a blinn; a sphere under a
-        standardSurface; {shader: (mesh, faces or None)}"""
-        cmds = self.cmds
-        cmds.file(new=True, force=True)
-        cmds.currentUnit(time="ntsc", linear="cm", angle="deg")
-        Image.fromarray(gradient()).save(self.path("grad.png"))
-
-        def shader(kind, name, **values):
-            made  = cmds.shadingNode(kind, asShader=True, name=name)
-            group = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=f"{name}SG")
-            cmds.connectAttr(f"{made}.outColor", f"{group}.surfaceShader", force=True)
-            for attr, value in values.items():
-                if isinstance(value, (tuple, list)):
-                    cmds.setAttr(f"{made}.{attr}", *value, type="double3")
-                else:
-                    cmds.setAttr(f"{made}.{attr}", value)
-            return made, group
-
-        plane_node, _ = cmds.polyPlane(name="plane", width=2.0, height=2.0, subdivisionsX=2, subdivisionsY=2)
-        lambert, lambert_sg = shader("lambert", "skinLambert", transparency=(0.1, 0.2, 0.3), ambientColor=(0.05, 0.1, 0.15),
-                                     incandescence=(0.2, 0.0, 0.1), diffuse=0.6)
-        file_node = cmds.shadingNode("file", asTexture=True, name="gradFile")
-        place     = cmds.shadingNode("place2dTexture", asUtility=True, name="gradPlace")
-        cmds.connectAttr(f"{place}.outUV", f"{file_node}.uvCoord")
-        cmds.connectAttr(f"{place}.outUvFilterSize", f"{file_node}.uvFilterSize")
-        cmds.setAttr(f"{file_node}.fileTextureName", self.path("grad.png").replace(os.sep, "/"), type="string")
-        cmds.setAttr(f"{place}.wrapU", 1)
-        cmds.setAttr(f"{place}.wrapV", 0)
-        cmds.connectAttr(f"{file_node}.outColor", f"{lambert}.color", force=True)
-        phong, phong_sg = shader("phong", "shinyPhong", color=(0.9, 0.2, 0.1), specularColor=(0.3, 0.4, 0.5), cosinePower=35.0, reflectivity=0.25)
-        cmds.sets(f"{plane_node}.f[0:1]", edit=True, forceElement=lambert_sg)
-        cmds.sets(f"{plane_node}.f[2:3]", edit=True, forceElement=phong_sg)
-        cube, _ = cmds.polyCube(name="cube")
-        blinn, blinn_sg = shader("blinn", "dullBlinn", color=(0.1, 0.8, 0.2), eccentricity=0.45, specularRollOff=0.6, specularColor=(0.7, 0.7, 0.2), reflectivity=0.1)
-        cmds.sets(cube, edit=True, forceElement=blinn_sg)
-        ball, _ = cmds.polySphere(name="ball", subdivisionsX=8, subdivisionsY=6)
-        standard, standard_sg = shader("standardSurface", "pbr", baseColor=(0.2, 0.3, 0.9), base=0.7)
-        cmds.sets(ball, edit=True, forceElement=standard_sg)
-        cmds.setAttr(f"{cube}.translate", 3.0, 0.0, 0.0)
-        cmds.setAttr(f"{ball}.translate", -3.0, 0.0, 0.0)
-        return {lambert: (plane_node, [0, 1]), phong: (plane_node, [2, 3]), blinn: (cube, None), standard: (ball, None)}
-
-    def exported_materials(self, name: str, embed: bool) -> str:
-        cmds, mel = self.cmds, self.mel
-        mel.eval("FBXResetExport")
-        mel.eval("FBXExportConvertUnitString cm")
-        mel.eval("FBXExportUpAxis y")
-        mel.eval(f"FBXExportEmbeddedTextures -v {'true' if embed else 'false'}")
-        out = self.path(name).replace(os.sep, "/")
-        mel.eval(f'FBXExport -f "{out}"')
-        return out
+    import of ours; as recorded"""
 
     def test_mayas_export_reads_as_maya_holds_it(self):
         """every lambert and phong attribute as Maya holds it, the blinn a
@@ -624,11 +567,12 @@ class TestMayaMaterials(_InMaya):
         standardSurface a default lambert with one warning, the textured
         colour white as Maya writes it, the texture's pixels, UV set and
         wraps, the shading groups' faces; embedded and linked alike"""
-        cmds = self.cmds
-        made = self.maya_scene()
+        case = self.case("materials_export")
+        made    = case.value("made")
+        shaders = case.value("shaders")
         for embed in (True, False):
             with self.subTest(embed=embed):
-                out = self.exported_materials(f"maya_{'embedded' if embed else 'linked'}.fbx", embed)
+                out = self.fixture(f"maya_{'embedded' if embed else 'linked'}.fbx")
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
                     back = load_fbx(out)
@@ -639,31 +583,32 @@ class TestMayaMaterials(_InMaya):
                 self.assertEqual(sorted(got), ["dullBlinn", "pbr", "shinyPhong", "skinLambert"])
                 for shader, (node, faces) in made.items():
                     material = got[shader]
+                    reading  = shaders[shader]
                     with self.subTest(shader):
                         self.assertEqual(material.mesh_uuid, meshes[node].uuid)
                         if faces is None:
                             self.assertIsNone(material.faces)
                         else:
                             np.testing.assert_array_equal(material.faces, faces)
-                        kind = cmds.nodeType(shader)
+                        kind = reading["type"]
                         if kind == "standardSurface":
                             self.assertEqual(material, MaterialData())
                             continue
                         self.assertEqual(material.kind, "lambert" if kind == "lambert" else "phong")
                         if material.texture is None:
-                            np.testing.assert_allclose(material.color, cmds.getAttr(f"{shader}.color")[0], rtol=0, atol=1e-7)
+                            np.testing.assert_allclose(material.color, reading["color"], rtol=0, atol=1e-7)
                         else:
                             np.testing.assert_array_equal(material.color, [1.0, 1.0, 1.0])  # Maya writes a textured colour white
                         for attr, field in (("transparency", "transparency"), ("ambientColor", "ambient_color"), ("incandescence", "incandescence")):
-                            np.testing.assert_allclose(getattr(material, field), cmds.getAttr(f"{shader}.{attr}")[0], rtol=0, atol=1e-7, err_msg=attr)
-                        self.assertAlmostEqual(material.diffuse, cmds.getAttr(f"{shader}.diffuse"), places=7)
+                            np.testing.assert_allclose(getattr(material, field), reading[attr], rtol=0, atol=1e-7, err_msg=attr)
+                        self.assertAlmostEqual(material.diffuse, reading["diffuse"], places=7)
                         if kind == "phong":
-                            np.testing.assert_allclose(material.specular_color, cmds.getAttr(f"{shader}.specularColor")[0], rtol=0, atol=1e-7)
-                            self.assertAlmostEqual(material.cosine_power, cmds.getAttr(f"{shader}.cosinePower"), places=7)
-                            self.assertAlmostEqual(material.reflectivity, cmds.getAttr(f"{shader}.reflectivity"), places=7)
+                            np.testing.assert_allclose(material.specular_color, reading["specularColor"], rtol=0, atol=1e-7)
+                            self.assertAlmostEqual(material.cosine_power, reading["cosinePower"], places=7)
+                            self.assertAlmostEqual(material.reflectivity, reading["reflectivity"], places=7)
                         if kind == "blinn":
-                            np.testing.assert_allclose(material.specular_color, cmds.getAttr(f"{shader}.specularColor")[0], rtol=0, atol=1e-7)
-                            self.assertAlmostEqual(material.reflectivity, cmds.getAttr(f"{shader}.reflectivity"), places=7)
+                            np.testing.assert_allclose(material.specular_color, reading["specularColor"], rtol=0, atol=1e-7)
+                            self.assertAlmostEqual(material.reflectivity, reading["reflectivity"], places=7)
                             # Maya 2025's conversion of eccentricity 0.45 (measured)
                             self.assertAlmostEqual(material.cosine_power, 2.6872277431955554, places=6)
                 skin = got["skinLambert"]
@@ -671,50 +616,45 @@ class TestMayaMaterials(_InMaya):
                 # Maya's export writes both wrap modes as repeat whatever the
                 # place2dTexture holds (measured: wrapV off reads as repeat)
                 self.assertEqual((skin.texture_file, skin.uv_set, skin.wrap_u, skin.wrap_v), ("grad.png", "map1", "repeat", "repeat"))
-                self.assertEqual(cmds.getAttr("gradPlace.wrapV"), False)  # what the file lost
+                self.assertEqual(case.value("gradPlace_wrapV"), False)  # what the file lost
                 self.assertEqual([m.texture for m in back.materials if m.name != "skinLambert"], [None, None, None])
 
     def test_maya_imports_our_save_as_we_hold_it(self):
         """our materials, imported: Maya's lambert and phong shaders with our
         attributes, the texture on a file node feeding the colour with our
         pixels and wraps, each shading group on our faces"""
-        cmds  = self.cmds
+        case = self.case("materials_import")
         nodes = rig()
         held  = meshes(nodes)
         given = materials(held)
-        save_fbx(self.path("a.fbx"), nodes, meshes=held, uvs=plane_uvs(held[0]), materials=given)
-        self.imported(self.path("a.fbx"))
+        self.assertFreshSave(self.fixture("ours.fbx"), hierarchy=nodes, meshes=held, uvs=plane_uvs(held[0]), materials=given)
+        readings = case.value("materials")
         for material in given:
             node  = nodes[[mesh.uuid for mesh in held].index(material.mesh_uuid)].name
             count = len(held[[mesh.uuid for mesh in held].index(material.mesh_uuid)].counts)
+            entry = readings[material.name]
             with self.subTest(material.name):
-                shaders = cmds.ls(material.name, type=material.kind)
-                self.assertEqual(len(shaders), 1)
-                shader = shaders[0]
+                self.assertEqual(entry["shader_count"], 1)
                 if material.texture is None:
-                    np.testing.assert_allclose(cmds.getAttr(f"{shader}.color")[0], material.color, rtol=0, atol=1e-6)
+                    np.testing.assert_allclose(entry["color"], material.color, rtol=0, atol=1e-6)
                 else:
-                    files = cmds.listConnections(f"{shader}.color", type="file") or []
-                    self.assertEqual(len(files), 1)
-                    with Image.open(cmds.getAttr(f"{files[0]}.fileTextureName")) as image:
-                        np.testing.assert_array_equal(np.asarray(image.convert("RGB")), material.texture)
+                    self.assertEqual(entry["files"], 1)
+                    np.testing.assert_array_equal(case.array(f"texture/{material.name}"), material.texture)
                     # Maya's import leaves the place2dTexture's wraps on whatever
                     # the file's wrap modes say (measured: WrapModeV clamp reads as on)
-                    places = cmds.listConnections(f"{files[0]}.uvCoord", type="place2dTexture") or []
-                    self.assertEqual(len(places), 1)
-                    self.assertEqual((cmds.getAttr(f"{places[0]}.wrapU"), cmds.getAttr(f"{places[0]}.wrapV")), (True, True))
-                    self.assertEqual(material.wrap_v, "clamp")  # what Maya does not take
-                np.testing.assert_allclose(cmds.getAttr(f"{shader}.transparency")[0],  material.transparency,  rtol=0, atol=1e-6)
-                np.testing.assert_allclose(cmds.getAttr(f"{shader}.ambientColor")[0],  material.ambient_color, rtol=0, atol=1e-6)
-                np.testing.assert_allclose(cmds.getAttr(f"{shader}.incandescence")[0], material.incandescence, rtol=0, atol=1e-6)
-                self.assertAlmostEqual(cmds.getAttr(f"{shader}.diffuse"), material.diffuse, places=6)
+                    self.assertEqual(entry["places"],       1)
+                    self.assertEqual(tuple(entry["wraps"]), (True, True))
+                    self.assertEqual(material.wrap_v,       "clamp")  # what Maya does not take
+                np.testing.assert_allclose(entry["transparency"],  material.transparency,  rtol=0, atol=1e-6)
+                np.testing.assert_allclose(entry["ambientColor"],  material.ambient_color, rtol=0, atol=1e-6)
+                np.testing.assert_allclose(entry["incandescence"], material.incandescence, rtol=0, atol=1e-6)
+                self.assertAlmostEqual(entry["diffuse"], material.diffuse, places=6)
                 if material.kind == "phong":
-                    np.testing.assert_allclose(cmds.getAttr(f"{shader}.specularColor")[0], material.specular_color, rtol=0, atol=1e-6)
-                    self.assertAlmostEqual(cmds.getAttr(f"{shader}.cosinePower"), material.cosine_power, places=6)
-                    self.assertAlmostEqual(cmds.getAttr(f"{shader}.reflectivity"), material.reflectivity, places=6)
-                groups = cmds.listConnections(f"{shader}.outColor", type="shadingEngine") or []
-                self.assertEqual(len(groups), 1)
-                members = cmds.ls(cmds.sets(groups[0], q=True) or [], flatten=True, long=True)
+                    np.testing.assert_allclose(entry["specularColor"], material.specular_color, rtol=0, atol=1e-6)
+                    self.assertAlmostEqual(entry["cosinePower"], material.cosine_power, places=6)
+                    self.assertAlmostEqual(entry["reflectivity"], material.reflectivity, places=6)
+                self.assertEqual(entry["groups"], 1)
+                members = entry["members"]
                 faces   = sorted(int(m.group(1)) for member in members for m in [re.search(r"\.f\[(\d+)\]$", member)] if m)
                 whole   = [member for member in members if ".f[" not in member]
                 if material.faces is None:

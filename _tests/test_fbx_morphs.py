@@ -6,8 +6,9 @@ import strips the prefix) whose DeformPercent is the weight times 100, each
 target shape over every point of the mesh, absolute, with normals, an
 in-between as a second shape of the channel at its weight times 100 (the
 full weights); a keyed weight as a curve on DeformPercent. The fork reads
-and writes the same, less the normals. The SDK tests need the Autodesk SDK,
-the Maya ones a Maya with its fbxmaya plug-in.
+and writes the same, less the normals. The SDK tests need the Autodesk SDK;
+the Maya ones read what Maya 2025 did, recorded once (maya_fixtures), and
+need no Maya.
 """
 
 import os
@@ -16,7 +17,7 @@ import warnings
 
 import numpy as np
 from cgmath._tests.test_fbx_materials import box, plane, rig
-from cgmath._tests.test_skeleton_fbx import _Files, _InMaya
+from cgmath._tests.test_skeleton_fbx import _Files, _Recorded
 from cgmath.formats import load_fbx, save_fbx
 from cgmath.formats._fbx_io import load_sdk, open_fbx, typed
 from cgmath.geometry import MeshList, MorphData, MorphList
@@ -296,69 +297,33 @@ class TestMorphs(_Files):
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
-class TestMayaMorphs(_InMaya):
+class TestMayaMorphs(_Recorded):
     """Maya 2025's export of its blend shapes read as Maya holds them, and
-    Maya's import of ours"""
+    Maya's import of ours; as recorded"""
 
-    def maya_scene(self) -> dict:
-        """the probe's scene: a 2 by 2 plane under blendShape faceShapes with
-        smile (points 0 and 4 lifted 0.5 and 0.25; an in-between at 0.5
-        lifting points 0 and 8 by 0.2 and 0.1; weight 0.3) and frown (point
-        2 down 0.4; keyed 0 at frame 1, 0.5 at 3, 1 at 5); a cube under
-        cubeShapes with puff (points 0 to 3 out 0.3; weight 0);
-        {(deformer, target, at): (mesh transform, {point: offset})}"""
-        cmds = self.cmds
-        cmds.file(new=True, force=True)
-        cmds.currentUnit(time="ntsc", linear="cm", angle="deg")
-        plane_node, _ = cmds.polyPlane(name="plane", width=2.0, height=2.0, subdivisionsX=2, subdivisionsY=2)
-        smile = cmds.duplicate(plane_node, name="smile")[0]
-        cmds.move(0.0, 0.5, 0.0, f"{smile}.vtx[0]", relative=True)
-        cmds.move(0.0, 0.25, 0.0, f"{smile}.vtx[4]", relative=True)
-        half = cmds.duplicate(plane_node, name="smileHalf")[0]
-        cmds.move(0.0, 0.2, 0.0, f"{half}.vtx[0]", relative=True)
-        cmds.move(0.0, 0.1, 0.0, f"{half}.vtx[8]", relative=True)
-        frown = cmds.duplicate(plane_node, name="frown")[0]
-        cmds.move(0.0, -0.4, 0.0, f"{frown}.vtx[2]", relative=True)
-        blend = cmds.blendShape(smile, frown, plane_node, name="faceShapes", frontOfChain=True)[0]
-        cmds.blendShape(blend, edit=True, inBetween=True, target=(plane_node, 0, half, 0.5))
-        cmds.setAttr(f"{blend}.smile", 0.3)
-        for frame, value in ((1, 0.0), (3, 0.5), (5, 1.0)):
-            cmds.setKeyframe(f"{blend}.frown", time=frame, value=value)
-        cmds.playbackOptions(minTime=1, maxTime=5, animationStartTime=1, animationEndTime=5)
-        cmds.currentTime(1)
-        cube, _ = cmds.polyCube(name="cube")
-        puff = cmds.duplicate(cube, name="puff")[0]
-        cmds.move(0.0, 0.0, 0.3, f"{puff}.vtx[0:3]", relative=True)
-        cmds.blendShape(puff, cube, name="cubeShapes")
-        cmds.setAttr(f"{cube}.translate", 3.0, 0.0, 0.0)
-        cmds.hide([smile, half, frown, puff])
-        return {
-            ("faceShapes", "smile", 1.0): (plane_node, {0: (0.0, 0.5, 0.0), 4: (0.0, 0.25, 0.0)}),
-            ("faceShapes", "smile", 0.5): (plane_node, {0: (0.0, 0.2, 0.0), 8: (0.0, 0.1, 0.0)}),
-            ("faceShapes", "frown", 1.0): (plane_node, {2: (0.0, -0.4, 0.0)}),
-            ("cubeShapes", "puff", 1.0): (cube, {i: (0.0, 0.0, 0.3) for i in range(4)}),
-        }
-
-    def exported_shapes(self, name: str) -> str:
-        cmds, mel = self.cmds, self.mel
-        mel.eval("FBXResetExport")
-        mel.eval("FBXExportConvertUnitString cm")
-        mel.eval("FBXExportUpAxis y")
-        mel.eval("FBXExportShapes -v true")
-        out = self.path(name).replace(os.sep, "/")
-        mel.eval(f'FBXExport -f "{out}"')
-        return out
+    # the probe's scene (tools/make_maya_fbx_fixtures.py, morphs_scene): a 2
+    # by 2 plane under blendShape faceShapes with smile (points 0 and 4
+    # lifted 0.5 and 0.25; an in-between at 0.5 lifting points 0 and 8 by
+    # 0.2 and 0.1; weight 0.3) and frown (point 2 down 0.4; keyed 0 at
+    # frame 1, 0.5 at 3, 1 at 5); a cube under cubeShapes with puff (points
+    # 0 to 3 out 0.3; weight 0); {(deformer, target, at): (mesh transform,
+    # {point: offset})}
+    WANT = {
+        ("faceShapes", "smile", 1.0): ("plane", {0: (0.0, 0.5, 0.0), 4: (0.0, 0.25, 0.0)}),
+        ("faceShapes", "smile", 0.5): ("plane", {0: (0.0, 0.2, 0.0), 8: (0.0, 0.1, 0.0)}),
+        ("faceShapes", "frown", 1.0): ("plane", {2: (0.0, -0.4, 0.0)}),
+        ("cubeShapes", "puff", 1.0): ("cube", {i: (0.0, 0.0, 0.3) for i in range(4)}),
+    }
 
     def test_mayas_export_reads_as_maya_holds_it(self):
         """every target with its deformer, name, weight (the keyed one at
         frame 1, with one warning), in-between place and the offsets of
         the points Maya moved, on its mesh"""
-        cmds = self.cmds
-        want = self.maya_scene()
-        out  = self.exported_shapes("maya.fbx")
+        case = self.case("morphs_export")
+        want = self.WANT
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            back = load_fbx(out)
+            back = load_fbx(self.fixture("maya.fbx"))
         messages = [str(w.message) for w in caught if "weight is keyed" in str(w.message)]
         self.assertEqual(len(messages), 1)
         self.assertIn("blend shape target 'frown'", messages[0])
@@ -376,28 +341,26 @@ class TestMayaMorphs(_InMaya):
         self.assertAlmostEqual(got[("faceShapes", "smile", 0.5)].weight, 0.3, places=6)
         self.assertEqual(got[("faceShapes", "frown", 1.0)].weight, 0.0)  # frame 1's key
         self.assertEqual(got[("cubeShapes", "puff", 1.0)].weight,  0.0)
-        self.assertEqual(cmds.getAttr("faceShapes.frown", time=5), 1.0)  # what the static read leaves
+        self.assertEqual(case.value("frown_at_5"), 1.0)                  # what the static read leaves
 
     def test_maya_imports_our_save_as_we_hold_it(self):
         """our targets, imported: blendShape nodes of our deformer names with
         our targets as aliases, our weights, the in-between at 0.5, and the
         meshes deformed as Maya blends them within 1e-6"""
-        cmds  = self.cmds
+        case = self.case("morphs_import")
         nodes = rig()
         held  = meshes(nodes)
         given = face_morphs(held)
-        save_fbx(self.path("a.fbx"), nodes, meshes=held, morphs=given)
-        self.imported(self.path("a.fbx"))
+        self.assertFreshSave(self.fixture("ours.fbx"), hierarchy=nodes, meshes=held, morphs=given)
+        deformers = case.value("deformers")
         for deformer, targets in (("faceShapes", ["smile", "frown", "wide"]), ("blendShape", ["puff"])):
             with self.subTest(deformer):
-                self.assertEqual(cmds.ls(deformer, type="blendShape"), [deformer])
-                alias = cmds.aliasAttr(deformer, q=True) or []
-                self.assertEqual(alias[::2], targets)
+                self.assertEqual(deformers[deformer]["nodes"], [deformer])
+                self.assertEqual(deformers[deformer]["alias"][::2], targets)
                 weights = [m.weight for m in given if (m.deformer or "blendShape") == deformer and m.at == 1.0]
-                np.testing.assert_allclose(cmds.blendShape(deformer, q=True, weight=True), weights, rtol=0, atol=1e-6)
-        items = cmds.getAttr("faceShapes.inputTarget[0].inputTargetGroup[0].inputTargetItem", multiIndices=True)
-        self.assertEqual(sorted(items), [5500, 6000])  # the in-between at 0.5, the full target at 1
-        self.assertEqual(cmds.ls("extra", type="blendShape"), [])
+                np.testing.assert_allclose(deformers[deformer]["weights"], weights, rtol=0, atol=1e-6)
+        self.assertEqual(case.value("items"), [5500, 6000])  # the in-between at 0.5, the full target at 1
+        self.assertEqual(case.value("extra"), [])
         # the deformed points: Maya blends a weight below an in-between's
         # place between the base and the in-between, in proportion
         expected = {mesh.uuid: np.asarray(mesh.points, dtype=np.float64).copy() for mesh in held}
@@ -406,8 +369,7 @@ class TestMayaMorphs(_InMaya):
         expected[held[0].uuid][[1, 7]] += np.array([[-0.3, 0.0, 0.0], [0.3, 0.0, 0.0]])             # wide 1
         for node, mesh in zip(nodes, held):
             with self.subTest(node.name):
-                points = np.array([cmds.pointPosition(f"{node.name}.vtx[{i}]", local=True) for i in range(mesh.point_count)])
-                np.testing.assert_allclose(points, expected[mesh.uuid], rtol=0, atol=1e-6)
+                np.testing.assert_allclose(case.array(f"points/{node.name}"), expected[mesh.uuid], rtol=0, atol=1e-6)
 
 
 if __name__ == "__main__":

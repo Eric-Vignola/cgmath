@@ -1489,7 +1489,7 @@ class TestFbxEnum(unittest.TestCase):
             _fbx_enum(self.Flat, "EType", "eNotAThing")
 
 
-@unittest.skipIf(FBX is None, "fbx sdk is not installed")
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
 class TestLoadFbx(unittest.TestCase):
     """load_fbx could not run at all against a scoped enum binding"""
 
@@ -1571,7 +1571,7 @@ class TestLoadFbx(unittest.TestCase):
                 )
             )
 
-@unittest.skipIf(FBX is None, "fbx sdk is not installed")
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
 class TestLoadFbxDroppedNodes(unittest.TestCase):
     """the reader keeps a subset of attribute types, and used to sever the
     chain at anything it skipped
@@ -1649,7 +1649,7 @@ class TestLoadFbxDroppedNodes(unittest.TestCase):
         self.assertAlmostEqual(loaded["C"].world_matrix[3, 1], 300.0, places=6)
 
 
-@unittest.skipIf(FBX is None, "fbx sdk is not installed")
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
 class TestLoadFbxTransformReads(unittest.TestCase):
     """three static properties the reader used to drop on the floor
 

@@ -1,0 +1,115 @@
+{
+ "materials": {
+  "boxPhong": {
+   "ambientColor": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "color": [
+    0.10000000149011612,
+    0.800000011920929,
+    0.20000000298023224
+   ],
+   "cosinePower": 20.0,
+   "diffuse": 0.800000011920929,
+   "files": 0,
+   "groups": 1,
+   "incandescence": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "members": [
+    "|box|boxShape"
+   ],
+   "reflectivity": 0.10000000149011612,
+   "shader_count": 1,
+   "specularColor": [
+    0.5,
+    0.5,
+    0.5
+   ],
+   "transparency": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "type": "phong"
+  },
+  "shinyPhong": {
+   "ambientColor": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "color": [
+    0.8999999761581421,
+    0.20000000298023224,
+    0.10000000149011612
+   ],
+   "cosinePower": 35.0,
+   "diffuse": 0.800000011920929,
+   "files": 0,
+   "groups": 1,
+   "incandescence": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "members": [
+    "|plane.f[2]",
+    "|plane.f[3]"
+   ],
+   "reflectivity": 0.25,
+   "shader_count": 1,
+   "specularColor": [
+    0.30000001192092896,
+    0.4000000059604645,
+    0.5
+   ],
+   "transparency": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "type": "phong"
+  },
+  "skinLambert": {
+   "ambientColor": [
+    0.05000000074505806,
+    0.10000000149011612,
+    0.15000000596046448
+   ],
+   "color": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "diffuse": 0.6000000238418579,
+   "files": 1,
+   "groups": 1,
+   "incandescence": [
+    0.20000000298023224,
+    0.0,
+    0.10000000149011612
+   ],
+   "members": [
+    "|plane.f[0]",
+    "|plane.f[1]"
+   ],
+   "places": 1,
+   "shader_count": 1,
+   "transparency": [
+    0.10000000149011612,
+    0.20000000298023224,
+    0.30000001192092896
+   ],
+   "type": "lambert",
+   "wraps": [
+    true,
+    true
+   ]
+  }
+ }
+}

@@ -688,7 +688,7 @@ class TestUsdReaders(_Files):
         self.assertEqual(UVData.load(self.path("x.USDZ"), channel=1).name, "st")
 
 
-@unittest.skipIf(fbx is None, "the Autodesk FBX SDK is required")
+@unittest.skipIf(fbx is None, "Autodesk FBX Python SDK is not installed")
 class TestFbx(_Files):
     def rig(self):
         root = TransformData("root", node_type="joint", uuid=str(uuid.uuid4()).upper())

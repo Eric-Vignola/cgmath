@@ -1,0 +1,122 @@
+{
+ "gradPlace_wrapV": false,
+ "made": {
+  "dullBlinn": [
+   "cube",
+   null
+  ],
+  "pbr": [
+   "ball",
+   null
+  ],
+  "shinyPhong": [
+   "plane",
+   [
+    2,
+    3
+   ]
+  ],
+  "skinLambert": [
+   "plane",
+   [
+    0,
+    1
+   ]
+  ]
+ },
+ "shaders": {
+  "dullBlinn": {
+   "ambientColor": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "color": [
+    0.10000000149011612,
+    0.800000011920929,
+    0.20000000298023224
+   ],
+   "diffuse": 0.800000011920929,
+   "incandescence": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "reflectivity": 0.10000000149011612,
+   "specularColor": [
+    0.699999988079071,
+    0.699999988079071,
+    0.20000000298023224
+   ],
+   "transparency": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "type": "blinn"
+  },
+  "pbr": {
+   "specularColor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "type": "standardSurface"
+  },
+  "shinyPhong": {
+   "ambientColor": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "color": [
+    0.8999999761581421,
+    0.20000000298023224,
+    0.10000000149011612
+   ],
+   "cosinePower": 35.0,
+   "diffuse": 0.800000011920929,
+   "incandescence": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "reflectivity": 0.25,
+   "specularColor": [
+    0.30000001192092896,
+    0.4000000059604645,
+    0.5
+   ],
+   "transparency": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "type": "phong"
+  },
+  "skinLambert": {
+   "ambientColor": [
+    0.05000000074505806,
+    0.10000000149011612,
+    0.15000000596046448
+   ],
+   "color": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "diffuse": 0.6000000238418579,
+   "incandescence": [
+    0.20000000298023224,
+    0.0,
+    0.10000000149011612
+   ],
+   "transparency": [
+    0.10000000149011612,
+    0.20000000298023224,
+    0.30000001192092896
+   ],
+   "type": "lambert"
+  }
+ }
+}

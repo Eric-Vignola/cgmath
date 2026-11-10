@@ -26,7 +26,6 @@ from unittest import mock
 
 import numpy as np
 from cgmath import hierarchy
-from cgmath._tests import fresh_scene
 from cgmath.geometry.sdf import SDFSphere
 from cgmath.hierarchy import FBX, ClipData, HierarchyData, TransformData, TransformList
 from cgmath.hierarchy import hierarchy as hierarchy_mod
@@ -440,9 +439,9 @@ class TestTheFourMatrices(unittest.TestCase):
             want     = _expected(*_composed(channels, clip.list))
             for long, matrices in want.items():
                 short = {value: key for key, value in SHORT.items()}[long]
-                self.assert_close(getattr(clip.frames, long)[frame],          matrices,      f"frames.{long}[{frame}]")
-                self.assert_close(getattr(clip.frames, short)[frame],         matrices,      f"frames.{short}[{frame}]")
-                self.assert_close(getattr(clip.frames["knee"], short)[frame], matrices[2],   f"frames['knee'].{short}")
+                self.assert_close(getattr(clip.frames, long)[frame],          matrices,    f"frames.{long}[{frame}]")
+                self.assert_close(getattr(clip.frames, short)[frame],         matrices,    f"frames.{short}[{frame}]")
+                self.assert_close(getattr(clip.frames["knee"], short)[frame], matrices[2], f"frames['knee'].{short}")
                 if frame == BOUND:
                     self.assert_close(getattr(clip, short), matrices, f"clip.{short}")
                     self.assert_close(getattr(clip["foot"], short), matrices[3], f"clip['foot'].{short}")
@@ -787,31 +786,22 @@ class TestTheFourMatrices(unittest.TestCase):
     def test_maya_itself(self):
         """Maya 2025's own joints, posed as POSES with inverseScale wired:
         the short names Maya's attributeQuery gives, every channel read by
-        its short name, and m, wm, pm, im, wim and pim, to 1e-12. Needs
-        Maya"""
-        cmds = fresh_scene(self)
+        its short name, and m, wm, pm, im, wim and pim, to 1e-12. As
+        recorded (tools/make_maya_fbx_fixtures.py, short_names_joints)"""
+        from cgmath._tests.maya_fixtures import recorded
 
-        rig  = _rig()
-        for name, parent, pose in POSES:
-            joint = cmds.createNode("joint", name=name, **({"parent": parent} if parent else {}))
-            if parent:
-                cmds.connectAttr(parent + ".scale", joint + ".inverseScale")
-            node = rig[name]
-            for attr in ("t", "r", "s", "sh", "jo", "ra"):
-                cmds.setAttr(f"{joint}.{attr}", *getattr(node, attr).tolist())
-            for attr in ("ro", "ssc", "v", "radi", "ds"):
-                cmds.setAttr(f"{joint}.{attr}", getattr(node, attr))
-
+        case = recorded("short_names_joints")
+        rig   = _rig()
+        names = case.value("short_names")
         for short, long, maya_long in MAYA_NAMES + (("is", None, "inverseScale"),):
             with self.subTest(short=short):
-                self.assertEqual(cmds.attributeQuery(maya_long, node="knee", shortName=True), short)
+                self.assertEqual(names[maya_long], short)
 
-        plugs = {"m": "m", "wm": "wm[0]", "pm": "pm[0]", "im": "im", "wim": "wim[0]", "pim": "pim[0]"}
         for name, _, _ in POSES:
             node = rig[name]
             for short, long, _ in MAYA_NAMES:
                 with self.subTest(node=name, short=short):
-                    maya = np.array(cmds.getAttr(f"{name}.{plugs.get(short, short)}"), dtype=float)
+                    maya = case.array(f"plug/{name}/{short}")
                     mine = np.asarray(getattr(node, short), dtype=float)
                     self.assertLessEqual(float(np.abs(mine - maya.reshape(mine.shape)).max()), 1e-12)
 
@@ -829,24 +819,19 @@ class TestTheFourMatrices(unittest.TestCase):
         relative=True a joint lands right under a transform or a joint,
         still wired from the joint it left; an absolute cmds.parent wires it
         where it leaves it right under a joint, and under a joint elsewhere
-        puts a transform between them, unwired. Needs Maya"""
-        cmds = fresh_scene(self)
+        puts a transform between them, unwired. As recorded
+        (tools/make_maya_fbx_fixtures.py, inverse_scale)"""
+        from cgmath._tests.maya_fixtures import recorded
 
-        cmds.createNode("transform", name="group")
-        cmds.select("group")
-        cmds.joint(name="hip")
-        cmds.joint(name="knee")
-        cmds.setAttr("group.s", 2.0, 3.0, 4.0)
-        cmds.setAttr("hip.s", 5.0, 6.0, 7.0)
-        self.assertEqual(cmds.listRelatives("hip", parent=True), ["group"])
-        self.assertEqual(cmds.listRelatives("knee", parent=True), ["hip"])
-        self.assertIsNone(cmds.listConnections("hip.is", source=True, destination=False))
-        self.assertEqual(cmds.getAttr("hip.is")[0], (1.0, 1.0, 1.0))
-        self.assertEqual(
-            cmds.listConnections("knee.is", source=True, destination=False, plugs=True), ["hip.scale"]
-        )
-        self.assertEqual(cmds.getAttr("knee.is")[0], (5.0, 6.0, 7.0))
-        self.assertTrue(cmds.getAttr("hip.ssc"))
+        case = recorded("inverse_scale")
+        drawn = case.value("drawn")
+        self.assertEqual(drawn["hip"]["parent"], "group")
+        self.assertEqual(drawn["knee"]["parent"], "hip")
+        self.assertIsNone(drawn["hip"]["is_plugs"])
+        self.assertEqual(tuple(drawn["hip"]["is"]),  (1.0, 1.0, 1.0))
+        self.assertEqual(drawn["knee"]["is_plugs"],  ["hip.scale"])
+        self.assertEqual(tuple(drawn["knee"]["is"]), (5.0, 6.0, 7.0))
+        self.assertTrue(drawn["hip"]["ssc"])
 
         rig = HierarchyData([TransformData("group", scale=(2.0, 3.0, 4.0))])
         rig.append(TransformData("hip", node_type="joint", scale=(5.0, 6.0, 7.0), parent_uuid=rig["group"].uuid))
@@ -854,124 +839,98 @@ class TestTheFourMatrices(unittest.TestCase):
         self.assertEqual(rig["hip"].parent_scale_inverse.tolist(), [2.0, 3.0, 4.0])
         self.assertEqual(rig["knee"].parent_scale_inverse.tolist(), [5.0, 6.0, 7.0])
 
-        def gap(name: str, short: str) -> float:
-            maya = np.array(cmds.getAttr(f"{name}.{short}" + ("[0]" if short != "m" else "")))
-            return float(np.abs(getattr(rig[name], short) - maya.reshape(4, 4)).max())
+        def gap(name: str, short: str, key: str) -> float:
+            return float(np.abs(getattr(rig[name], short) - case.array(key)).max())
 
         rig.ssc = True
-        self.assertGreater(gap("hip", "m"), 0.5)
+        self.assertGreater(gap("hip", "m", "drawn/hip/m"), 0.5)
         rig["hip"].ssc = False
         for name in ("hip", "knee"):
             for short in ("m", "wm", "pm", "wim"):
                 with self.subTest(name=name, short=short):
-                    self.assertLessEqual(gap(name, short), 1e-12)
+                    self.assertLessEqual(gap(name, short, f"drawn/{name}/{short}"), 1e-12)
 
         # a joint made with createNode -p under a joint: unwired, at 1, so
         # compensating it has Maya's matrices with segment_scale_compensate
         # off, as under a transform
-        cmds.createNode("joint", name="shin", parent="hip")
-        self.assertIsNone(cmds.listConnections("shin.is", source=True, destination=False))
-        self.assertEqual(cmds.getAttr("shin.is")[0], (1.0, 1.0, 1.0))
-        self.assertTrue(cmds.getAttr("shin.ssc"))
+        shin = case.value("shin")
+        self.assertIsNone(shin["is_plugs"])
+        self.assertEqual(tuple(shin["is"]), (1.0, 1.0, 1.0))
+        self.assertTrue(shin["ssc"])
         rig.append(TransformData("shin", node_type="joint", parent_uuid=rig["hip"].uuid))
         rig["shin"].ssc = True
-        self.assertGreater(gap("shin", "m"), 0.5)
+        self.assertGreater(gap("shin", "m", "shin/m"), 0.5)
         rig["shin"].ssc = False
         for short in ("m", "wm", "pm", "wim"):
             with self.subTest(name="shin", short=short):
-                self.assertLessEqual(gap("shin", short), 1e-12)
+                self.assertLessEqual(gap("shin", short, f"shin/{short}"), 1e-12)
 
         # knee moved under the transform: Maya puts it under a transform,
         # unwires its inverseScale and leaves hip's scale there, which its
         # m divides by, compensating
-        cmds.parent("knee", "group")
-        above = cmds.listRelatives("knee", parent=True)
-        self.assertEqual(cmds.nodeType(above[0]), "transform")
-        self.assertEqual(cmds.listRelatives(above[0], parent=True), ["group"])
-        self.assertIsNone(cmds.listConnections("knee.is", source=True, destination=False))
-        self.assertEqual(cmds.getAttr("knee.is")[0], (5.0, 6.0, 7.0))
-        self.assertTrue(cmds.getAttr("knee.ssc"))
-        maya = np.array(cmds.getAttr("knee.m")).reshape(4, 4)[:3, :3]
+        moved = case.value("moved")
+        self.assertEqual(moved["above_type"], "transform")
+        self.assertEqual(moved["above_parent"], ["group"])
+        self.assertIsNone(moved["knee"]["is_plugs"])
+        self.assertEqual(tuple(moved["knee"]["is"]), (5.0, 6.0, 7.0))
+        self.assertTrue(moved["knee"]["ssc"])
+        maya = case.array("moved/knee/m")[:3, :3]
         self.assertLessEqual(float(np.abs(maya - np.diag([1 / 5, 1 / 6, 1 / 7])).max()), 1e-12)
-        moved = HierarchyData([TransformData("group", scale=(2.0, 3.0, 4.0))])
-        moved.append(TransformData("knee", node_type="joint", parent_uuid=moved["group"].uuid))
+        under = HierarchyData([TransformData("group", scale=(2.0, 3.0, 4.0))])
+        under.append(TransformData("knee", node_type="joint", parent_uuid=under["group"].uuid))
         for compensate in (True, False):
             with self.subTest(compensate=compensate):
-                moved["knee"].ssc = compensate
-                self.assertGreater(float(np.abs(moved["knee"].m[:3, :3] - maya).max()), 0.25)
+                under["knee"].ssc = compensate
+                self.assertGreater(float(np.abs(under["knee"].m[:3, :3] - maya).max()), 0.25)
 
         # moved with cmds.parent -relative, a joint lands right under its new
         # parent, a transform or a joint, wired as it was: from the joint it
         # left, or, a root, not at all
-        for name, drawn, under, wired in (
-            ("heel", "hip", "group", ["hip.scale"]),
-            ("toe", "hip", "shin", ["hip.scale"]),
-            ("stray", None, "shin", None),
-        ):
-            with self.subTest(name=name, under=under):
-                cmds.select(clear=True)
-                if drawn:
-                    cmds.select(drawn)
-                cmds.joint(name=name)
-                cmds.parent(name, under, relative=True)
-                self.assertEqual(cmds.listRelatives(name, parent=True), [under])
-                self.assertEqual(
-                    cmds.listConnections(name + ".is", source=True, destination=False, plugs=True), wired
-                )
+        relative = case.value("relative")
+        for name, under_node, wired in (("heel", "group", ["hip.scale"]), ("toe", "shin", ["hip.scale"]), ("stray", "shin", None)):
+            with self.subTest(name=name, under=under_node):
+                self.assertEqual(relative[name]["parent"], under_node)
+                self.assertEqual(relative[name]["is_plugs"], wired)
 
         # an absolute cmds.parent wires it where it leaves a joint right under
         # a joint, as under ankle, a root joint unscaled, and under a joint
         # elsewhere puts a transform between them, unwired, as under hip,
         # scaled
-        for name in ("ankle", "loose"):
-            cmds.select(clear=True)
-            cmds.joint(name=name)
-        cmds.parent("loose", "ankle")
-        self.assertEqual(cmds.listRelatives("loose", parent=True), ["ankle"])
-        self.assertEqual(
-            cmds.listConnections("loose.is", source=True, destination=False, plugs=True), ["ankle.scale"]
-        )
-        cmds.parent("loose", "hip")
-        above = cmds.listRelatives("loose", parent=True)
-        self.assertEqual(cmds.nodeType(above[0]), "transform")
-        self.assertEqual(cmds.listRelatives(above[0], parent=True), ["hip"])
-        self.assertIsNone(cmds.listConnections("loose.is", source=True, destination=False))
+        loose = case.value("loose_under_ankle")
+        self.assertEqual(loose["parent"], "ankle")
+        self.assertEqual(loose["is_plugs"], ["ankle.scale"])
+        loose = case.value("loose_under_hip")
+        self.assertEqual(loose["above_type"], "transform")
+        self.assertEqual(loose["above_parent"], ["hip"])
+        self.assertIsNone(loose["is_plugs"])
 
         # and under a transform it can leave the joint right under it,
         # unwired, holding the scale of the joint it left: wrist, drawn under
         # elbow, moved under sleeve, both scaled (5, 6, 7), where cgmath's
         # parent_scale_inverse is sleeve's scale, what Maya's inverseScale
         # holds, and its m and wm, compensating or not, are Maya's
-        cmds.select(clear=True)
-        cmds.joint(name="elbow")
-        cmds.joint(name="wrist", position=(1.0, 2.0, 3.0))
-        cmds.setAttr("elbow.s", 5.0, 6.0, 7.0)
-        cmds.createNode("transform", name="sleeve")
-        cmds.setAttr("sleeve.s", 5.0, 6.0, 7.0)
-        cmds.parent("wrist", "sleeve")
-        self.assertEqual(cmds.listRelatives("wrist", parent=True), ["sleeve"])
-        self.assertIsNone(cmds.listConnections("wrist.is", source=True, destination=False))
-        self.assertEqual(cmds.getAttr("wrist.is")[0], (5.0, 6.0, 7.0))
+        wrist = case.value("wrist")
+        self.assertEqual(wrist["parent"], "sleeve")
+        self.assertIsNone(wrist["is_plugs"])
+        self.assertEqual(tuple(wrist["is"]), (5.0, 6.0, 7.0))
         sleeve = HierarchyData([TransformData("sleeve", scale=(5.0, 6.0, 7.0))])
-        wrist = TransformData(
+        sleeve.append(TransformData(
             "wrist",
             node_type    = "joint",
-            translate    = cmds.getAttr("wrist.t")[0],
-            rotate       = cmds.getAttr("wrist.r")[0],
-            scale        = cmds.getAttr("wrist.s")[0],
-            joint_orient = cmds.getAttr("wrist.jo")[0],
+            translate    = case.array("wrist/t"),
+            rotate       = case.array("wrist/r"),
+            scale        = case.array("wrist/s"),
+            joint_orient = case.array("wrist/jo"),
             parent_uuid  = sleeve["sleeve"].uuid,
-        )
-        sleeve.append(wrist)
+        ))
         self.assertEqual(sleeve["wrist"].parent_scale_inverse.tolist(), [5.0, 6.0, 7.0])
         for compensate in (True, False):
-            cmds.setAttr("wrist.ssc", compensate)
             sleeve["wrist"].ssc = compensate
             for short in ("m", "wm"):
                 with self.subTest(compensate=compensate, short=short):
-                    maya = np.array(cmds.getAttr("wrist." + short + ("[0]" if short != "m" else "")))
+                    maya = case.array(f"wrist/{'ssc' if compensate else 'free'}/{short}")
                     mine = getattr(sleeve["wrist"], short)
-                    self.assertLessEqual(float(np.abs(mine - maya.reshape(4, 4)).max()), 1e-12)
+                    self.assertLessEqual(float(np.abs(mine - maya).max()), 1e-12)
 
 
 def _spec(value: float) -> dict:

@@ -26,7 +26,7 @@ import unittest
 from unittest import mock
 
 import cgmath
-from cgmath._tests import child_python, fresh_scene
+from cgmath._tests import child_python
 
 # Imports guarded by ``try: ... except ImportError`` inside the package are
 # fine -- they degrade to ``None``. This set is for modules that cannot import
@@ -70,10 +70,9 @@ def _iter_modules():
         yield name
 
 
-class TestInsideMaya(unittest.TestCase):
-    """the suite runs under python, mayapy and the Maya GUI: a child
-    interpreter is never Maya itself, and a live-scene test spares a scene
-    with unsaved changes"""
+class TestChildPython(unittest.TestCase):
+    """the suite runs under python and mayapy alike: a child interpreter is
+    never Maya itself"""
 
     def test_a_child_is_a_python_never_maya_itself(self):
         child = child_python()
@@ -97,50 +96,6 @@ class TestInsideMaya(unittest.TestCase):
             os.remove(mayapy)
             with mock.patch.object(sys, "executable", maya):
                 self.assertEqual(child_python(), maya)  # none beside it: this one again
-
-    def test_a_fresh_scene_is_maya_s_or_a_skip(self):
-        try:
-            import maya.cmds as cmds
-
-            cmds.about(batch=True)
-        except Exception:  # not running in Maya
-            with self.assertRaises(unittest.SkipTest):
-                fresh_scene(self)
-            return
-        self.assertIs(fresh_scene(self), cmds)
-        self.assertFalse(cmds.file(query=True, modified=True))
-
-    def test_a_fresh_scene_spares_an_unsaved_scene_in_the_gui(self):
-        try:
-            import maya.cmds as cmds
-
-            cmds.about(batch=True)
-        except Exception:  # not running in Maya
-            self.skipTest("needs Maya")
-        with mock.patch.object(cmds, "about", return_value=False), mock.patch.object(cmds, "file", return_value=True) as file:
-            with self.assertRaises(unittest.SkipTest) as caught:
-                fresh_scene(self)
-        self.assertIn("unsaved changes", str(caught.exception))
-        file.assert_called_once_with(query=True, modified=True)
-
-    def test_a_fresh_scene_asks_about_the_open_scene_once_per_test(self):
-        """a test that opens several fresh scenes (one per take) is not
-        stopped by the changes its own earlier scene made"""
-        try:
-            import maya.cmds as cmds
-
-            cmds.about(batch=True)
-        except Exception:  # not running in Maya
-            self.skipTest("needs Maya")
-        answers = iter([False, True, True])  # clean when the test starts, changed by its own imports after
-
-        def file(*args, **kwargs):
-            return next(answers) if kwargs.get("modified") else None
-
-        with mock.patch.object(cmds, "about", return_value=False), mock.patch.object(cmds, "file", side_effect=file):
-            for _ in range(3):
-                fresh_scene(self)
-        self.assertEqual(list(answers), [True, True])  # asked once
 
 
 class TestNotTheFbxSdk(unittest.TestCase):

@@ -2,7 +2,7 @@
 
 test_assets/maya_shear.npz holds what Maya 2025 did, recorded by
 tools/make_maya_shear_fixture.py (its docstring lists every array). Nothing
-here needs Maya but TestInMaya, which skips without it.
+here needs Maya: TestParentAsMaya reads what Maya did, recorded too.
 """
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import os
 import unittest
 
 import numpy as np
-from cgmath._tests import fresh_scene
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "test_assets", "maya_shear.npz")
@@ -209,25 +208,16 @@ class TestSplit(unittest.TestCase):
         self.assertEqual(seen, 44)
 
 
-class TestInMaya(unittest.TestCase):
-    """a live scene. Needs Maya"""
-
-    def setUp(self):
-        self.cmds = fresh_scene(self)
-
-    def _maya_node(self, name: str, node: TransformData) -> str:
-        cmds = self.cmds
-        made = cmds.createNode("transform", name=name)
-        for attr in ("t", "r", "s", "sh", "ra"):
-            cmds.setAttr(f"{made}.{attr}", *getattr(node, attr).tolist())
-        cmds.setAttr(f"{made}.ro", node.rotate_order)
-        return made
+class TestParentAsMaya(unittest.TestCase):
+    """set_parent against cmds.parent on a transform: twelve random trials,
+    as recorded (tools/make_maya_fbx_fixtures.py, shear_parent)"""
 
     def test_set_parent_is_cmds_parent_on_a_transform(self):
-        cmds = self.cmds
-        rng  = np.random.default_rng(13)
+        from cgmath._tests.maya_fixtures import recorded
+
+        case = recorded("shear_parent")
+        rng = np.random.default_rng(13)
         for trial in range(12):
-            cmds.file(new=True, force=True)
             parent = TransformData(
                 "p",
                 uuid      = "00000000-0000-4000-8000-000000000001",
@@ -246,18 +236,14 @@ class TestInMaya(unittest.TestCase):
                 rotate_axis  = rng.uniform(-30.0, 30.0, 3),
             )
             HierarchyData([parent, child])
-            p, c = self._maya_node("p", parent), self._maya_node("c", child)
-
-            cmds.parent(c, p)
             child.set_parent("p")
 
-            c      = "p|c"
-            matrix = np.array(cmds.getAttr(c + ".m"), dtype=float).reshape(4, 4)
+            matrix = case.array(f"trial{trial}/m")
             with self.subTest(trial=trial):
-                self.assertLessEqual(np.abs(child.scale - np.array(cmds.getAttr(c + ".s")[0])).max(), 1e-12)
-                self.assertLessEqual(np.abs(child.shear - np.array(cmds.getAttr(c + ".sh")[0])).max(), 1e-12)
-                self.assertLessEqual(np.abs(child.matrix[:3, :3] - matrix[:3, :3]).max(), 1e-12)
-                self.assertLessEqual(np.abs(child.matrix[3, :3] - matrix[3, :3]).max(), 1e-12)
+                self.assertLessEqual(np.abs(child.scale - case.array(f"trial{trial}/s")).max(),  1e-12)
+                self.assertLessEqual(np.abs(child.shear - case.array(f"trial{trial}/sh")).max(), 1e-12)
+                self.assertLessEqual(np.abs(child.matrix[:3, :3] - matrix[:3, :3]).max(),        1e-12)
+                self.assertLessEqual(np.abs(child.matrix[3, :3] - matrix[3, :3]).max(),          1e-12)
 
 
 if __name__ == "__main__":

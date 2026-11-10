@@ -191,7 +191,7 @@ class TestNoFbxWarnings(unittest.TestCase):
         self.assertEqual((logger.handlers, logger.level, logger.propagate), before)
 
 
-@unittest.skipIf(fbx is None, "the Autodesk FBX SDK is required")
+@unittest.skipIf(fbx is None, "Autodesk FBX Python SDK is not installed")
 class TestFbxExportSkeleton(unittest.TestCase):
     def setUp(self):
         self.tmp  = tempfile.TemporaryDirectory()
@@ -560,7 +560,7 @@ def _spec(kind, value=None, keyable=True, channel_box=False, **extra):
     return spec
 
 
-@unittest.skipIf(fbx is None, "the Autodesk FBX SDK is required")
+@unittest.skipIf(fbx is None, "Autodesk FBX Python SDK is not installed")
 class TestFbxUserAttributes(unittest.TestCase):
     """user defined attributes come back from save_fbx as they went in"""
 
