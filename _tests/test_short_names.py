@@ -442,7 +442,7 @@ class TestTheFourMatrices(unittest.TestCase):
                 short = {value: key for key, value in SHORT.items()}[long]
                 self.assert_close(getattr(clip.frames, long)[frame],          matrices,      f"frames.{long}[{frame}]")
                 self.assert_close(getattr(clip.frames, short)[frame],         matrices,      f"frames.{short}[{frame}]")
-                self.assert_close(getattr(clip.frames["knee"], short)[frame], matrices[2:3], f"frames['knee'].{short}")
+                self.assert_close(getattr(clip.frames["knee"], short)[frame], matrices[2],   f"frames['knee'].{short}")
                 if frame == BOUND:
                     self.assert_close(getattr(clip, short), matrices, f"clip.{short}")
                     self.assert_close(getattr(clip["foot"], short), matrices[3], f"clip['foot'].{short}")
