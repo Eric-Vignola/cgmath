@@ -50,6 +50,18 @@ def gradient() -> np.ndarray:
     return pixels
 
 
+def normal_map() -> np.ndarray:
+    """a tangent space normal map: the gradient's red and green, blue 255"""
+    pixels         = gradient()
+    pixels[..., 2] = 255
+    return pixels
+
+
+def bump_map() -> np.ndarray:
+    """a bump map: the gradient's channels reversed"""
+    return gradient()[:, :, ::-1].copy()
+
+
 def plane(parent_uuid=None) -> MeshData:
     """a 2 by 2 plane of four quads in xz, 2 units wide"""
     points = [(x, 0.0, z) for z in (-1.0, 0.0, 1.0) for x in (-1.0, 0.0, 1.0)]
@@ -110,6 +122,44 @@ def materials(held) -> MaterialList:
     return MaterialList([skin_lambert(held[0]), shiny_phong(held[0]), box_phong(held[1])])
 
 
+def normal_materials(held) -> MaterialList:
+    """a lambert on the plane with a colour map and a tangent space normal
+    map (depth 0.7), a phong on the box with a bump map (depth 0.4)"""
+    return MaterialList([
+        MaterialData(
+            name="tangentLambert", mesh_uuid=held[0].uuid, color=[1.0, 1.0, 1.0], texture=gradient(), texture_file="grad.png",
+            uv_set="map1", normal_map=normal_map(), normal_map_file="normal.png", normal_map_kind="tangent", bump_depth=0.7,
+        ),
+        MaterialData(
+            name="bumpPhong", mesh_uuid=held[1].uuid, kind="phong", color=[0.9, 0.2, 0.1], uv_set="map1", normal_map=bump_map(),
+            normal_map_file="bump.png", normal_map_kind="bump", bump_depth=0.4,
+        ),
+    ])
+
+
+def texture_slots(path: str) -> dict:
+    """{material: (sorted [(slot, file name)], BumpFactor)} of a file's
+    materials through the sdk, the factor None for a bare material"""
+    out = {}
+    with open_fbx(path, FBX, media=False) as scene:
+        for m in range(scene.GetMaterialCount()):
+            material = typed(scene.GetMaterial(m), FBX.FbxSurfaceMaterial, FBX)
+            cid      = material.GetClassId()
+            slots    = []
+            prop     = material.GetFirstProperty()
+            while prop.IsValid():
+                for t in range(prop.GetSrcObjectCount(FBX.FbxCriteria.ObjectType(FBX.FbxFileTexture.ClassId))):
+                    tex = typed(prop.GetSrcObject(FBX.FbxCriteria.ObjectType(FBX.FbxFileTexture.ClassId), t), FBX.FbxFileTexture, FBX)
+                    slots.append((str(prop.GetName()), os.path.basename(str(tex.GetRelativeFileName()))))
+                prop = material.GetNextProperty(prop)
+            depth = None
+            if cid.Is(FBX.FbxSurfaceLambert.ClassId):
+                lambert = typed(material, FBX.FbxSurfacePhong if cid.Is(FBX.FbxSurfacePhong.ClassId) else FBX.FbxSurfaceLambert, FBX)
+                depth   = float(lambert.BumpFactor.Get())
+            out[str(material.GetName())] = (sorted(slots), depth)
+    return out
+
+
 def same_materials(test, got, want, got_meshes, want_meshes) -> None:
     """``got``, a MaterialList read back, holds ``want``'s materials in
     order: every field equal, the texture to the byte, each on the mesh of
@@ -119,15 +169,18 @@ def same_materials(test, got, want, got_meshes, want_meshes) -> None:
     for a, b in zip(got, want):
         test.assertEqual(a, b, a.name)
         test.assertEqual((a.name, a.kind, a.texture_file, a.uv_set, a.wrap_u, a.wrap_v), (b.name, b.kind, b.texture_file, b.uv_set, b.wrap_u, b.wrap_v))
+        test.assertEqual((a.normal_map_file, a.normal_map_kind, a.bump_depth), (b.normal_map_file, b.normal_map_kind, b.bump_depth), a.name)
         if b.faces is None:
             test.assertIsNone(a.faces, a.name)
         else:
             np.testing.assert_array_equal(a.faces, b.faces, err_msg=a.name)
-        if b.texture is None:
-            test.assertIsNone(a.texture, a.name)
-        else:
-            test.assertEqual(a.texture.dtype, b.texture.dtype, a.name)
-            np.testing.assert_array_equal(a.texture, b.texture, err_msg=a.name)
+        for channel in ("texture", "normal_map"):
+            x, y = getattr(a, channel), getattr(b, channel)
+            if y is None:
+                test.assertIsNone(x, f"{a.name} {channel}")
+            else:
+                test.assertEqual(x.dtype, y.dtype, f"{a.name} {channel}")
+                np.testing.assert_array_equal(x, y, err_msg=f"{a.name} {channel}")
         place = [mesh.uuid for mesh in want_meshes].index(b.mesh_uuid)
         test.assertEqual(a.mesh_uuid, got_meshes[place].uuid, a.name)
 
@@ -439,7 +492,7 @@ class TestMaterials(_Files):
         left = [m for m in messages if "textures on slots" in m]
         self.assertEqual(len(left), 1)
         self.assertIn("material 'fx' SpecularColor", left[0])
-        self.assertIn("material 'fx' Bump", left[0])
+        self.assertNotIn("Bump", left[0])  # the bump map is read
         missing = [m for m in messages if "texture files not found" in m]
         self.assertEqual(len(missing), 1)
         self.assertIn("material 'lost'", missing[0])
@@ -456,6 +509,8 @@ class TestMaterials(_Files):
         np.testing.assert_allclose(fx.transparency,   [0.25, 0.25, 0.25], rtol=0, atol=1e-12)
         np.testing.assert_allclose(fx.specular_color, [0.5, 0.5, 0.5],    rtol=0, atol=1e-12)
         self.assertEqual((fx.cosine_power, fx.reflectivity, fx.texture), (12.0, 0.75, None))
+        np.testing.assert_array_equal(fx.normal_map, bump_map())  # spec.png on its Bump slot
+        self.assertEqual((fx.normal_map_file, fx.normal_map_kind, fx.bump_depth, fx.uv_set), ("spec.png", "bump", 1.0, "map1"))
         np.testing.assert_array_equal(fx.faces, [0, 1])
         self.assertEqual(got["pbr"], MaterialData(faces=[2, 3]))  # a default lambert on its faces
         np.testing.assert_array_equal(got["pbr"].faces, [2, 3])
@@ -684,42 +739,42 @@ class TestReadOptions(_Files):
         self.assertIsNone(load_fbx(path, skins=False).hierarchy)  # the takes hold the nodes
 
     def test_a_texture_file_is_decoded_once_and_each_case_warned_once(self):
-        """one phong on two nodes: its colour map one array both materials
-        share, decoded once; its bump map named once in the one warning"""
+        """one phong on two nodes: its colour map and its bump map one array
+        each, both materials sharing them, each file decoded once"""
         path = shared_texture(self.folder)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             with mock.patch("cgmath.formats._load._pixels", wraps=_load_module._pixels) as decoded:
                 back = load_fbx(path)
-        self.assertEqual(decoded.call_count, 1)
+        self.assertEqual(decoded.call_count, 2)
         self.assertEqual([m.name for m in back.materials], ["fx", "fx"])
         self.assertEqual([m.mesh_uuid for m in back.materials], [mesh.uuid for mesh in back.meshes])
         self.assertIs(back.materials[0].texture, back.materials[1].texture)
+        self.assertIs(back.materials[0].normal_map, back.materials[1].normal_map)
         np.testing.assert_array_equal(back.materials[0].texture, gradient())
+        np.testing.assert_array_equal(back.materials[0].normal_map, bump_map())
         self.assertEqual((back.materials[0].uv_set, back.materials[0].wrap_u, back.materials[0].wrap_v), ("map1", "repeat", "clamp"))
-        messages = [str(w.message) for w in caught]
-        left     = [m for m in messages if "textures on slots" in m]
-        self.assertEqual(len(left), 1, messages)
-        self.assertEqual(left[0].count("material 'fx' Bump"), 1, left[0])
-        self.assertEqual([m for m in messages if "textures on slots" not in m], [])
+        self.assertEqual((back.materials[0].normal_map_file, back.materials[0].normal_map_kind, back.materials[0].bump_depth), ("spec.png", "bump", 1.0))
+        self.assertEqual([str(w.message) for w in caught], [])
 
     def test_verbose_false_silences_the_read(self):
-        path = shared_texture(self.folder)
+        path = other_writer(self.folder)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             loud  = load_fbx(path)
             quiet = load_fbx(path, verbose=False)
             scene = Scene.load_fbx(path, verbose=False, textures=False)
             mesh  = MeshData.load_fbx(path, verbose=False)
-        self.assertEqual(len(caught), 1, [str(w.message) for w in caught])  # the loud read's
-        self.assertEqual(quiet.materials[0], loud.materials[0])
-        self.assertEqual((scene.materials[0].texture, scene.materials[0].texture_file), (None, "grad.png"))
-        self.assertEqual(mesh.name, "aShape")
+        # the loud read's: a bare material, a slot left out, a file not found
+        self.assertEqual(len(caught), 3, [str(w.message) for w in caught])
+        self.assertEqual(list(quiet.materials), list(loud.materials))
+        self.assertEqual((scene.materials[2].texture, scene.materials[2].texture_file), (None, "grad.png"))
+        self.assertEqual(mesh.name, "quadShape")
         # the filter is the read's alone
         with warnings.catch_warnings(record=True) as again:
             warnings.simplefilter("always")
             load_fbx(path)
-        self.assertEqual(len(again), 1)
+        self.assertEqual(len(again), 3)
 
 
 def shader_count(path: str) -> int:
@@ -787,6 +842,179 @@ class TestSharedMaterials(_Files):
         save_fbx(self.path("y.fbx"), nodes, meshes=held, materials=MaterialList([faces, other]))  # the faces may differ
         self.assertEqual(shader_count(self.path("y.fbx")), 1)
         self.assertEqual([list(m.faces) for m in load_fbx(self.path("y.fbx")).materials], [[0, 1], [2, 3]])
+
+
+def slotted(folder: str) -> str:
+    """an sdk file beside its maps: node both under lambert "both" holding a
+    tangent space normal map on NormalMap and a bump map on Bump, BumpFactor
+    0.9; node tangent under lambert "tangent" holding the normal map alone,
+    BumpFactor 0.6"""
+    path   = os.path.join(folder, "slotted.fbx")
+    normal = os.path.join(folder, "normal.png")
+    bump   = os.path.join(folder, "bump.png")
+    Image.fromarray(normal_map()).save(normal)
+    Image.fromarray(bump_map()).save(bump)
+    manager = FBX.FbxManager.Create()
+    manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+    try:
+        scene = FBX.FbxScene.Create(manager, "")
+
+        def texture(name, filename):
+            tex = FBX.FbxFileTexture.Create(scene, name)
+            tex.SetFileName(filename)
+            tex.SetRelativeFileName(os.path.basename(filename))
+            tex.SetTextureUse(FBX.FbxTexture.ETextureUse.eStandard)
+            tex.SetMappingType(FBX.FbxTexture.EMappingType.eUV)
+            tex.UVSet.Set(FBX.FbxString("map1"))
+            return tex
+
+        def mesh_node(name, material):
+            node = FBX.FbxNode.Create(scene, name)
+            scene.GetRootNode().AddChild(node)
+            shape = FBX.FbxMesh.Create(scene, name + "Shape")
+            shape.InitControlPoints(3)
+            for i, point in enumerate(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0))):
+                shape.SetControlPointAt(FBX.FbxVector4(*point, 1.0), i)
+            shape.BeginPolygon(-1, -1, -1, False)
+            for v in (0, 1, 2):
+                shape.AddPolygon(v)
+            shape.EndPolygon()
+            node.SetNodeAttribute(shape)
+            node.AddMaterial(material)
+            made = shape.CreateElementMaterial()
+            made.SetMappingMode(FBX.FbxLayerElement.EMappingMode.eAllSame)
+            made.SetReferenceMode(FBX.FbxLayerElement.EReferenceMode.eIndexToDirect)
+            made.GetIndexArray().Add(0)
+
+        both = FBX.FbxSurfaceLambert.Create(scene, "both")
+        both.NormalMap.ConnectSrcObject(texture("bothNormal", normal))
+        both.Bump.ConnectSrcObject(texture("bothBump", bump))
+        both.BumpFactor.Set(0.9)
+        mesh_node("both", both)
+        tangent = FBX.FbxSurfaceLambert.Create(scene, "tangent")
+        tangent.NormalMap.ConnectSrcObject(texture("tangentNormal", normal))
+        tangent.BumpFactor.Set(0.6)
+        mesh_node("tangent", tangent)
+        exporter = FBX.FbxExporter.Create(manager, "")
+        if not exporter.Initialize(path, -1, manager.GetIOSettings()):
+            raise RuntimeError(f"cannot write {path}")
+        exporter.Export(scene)
+        exporter.Destroy()
+    finally:
+        manager.Destroy()
+    return path
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestNormalMaps(_Files):
+    """a bump2d's map: tangent space normals on FBX's NormalMap slot, a bump
+    map on Bump, the depth as BumpFactor (Maya's convention, measured)"""
+
+    def saved(self) -> tuple:
+        nodes = rig()
+        held  = meshes(nodes)
+        given = normal_materials(held)
+        path  = self.path("normals.fbx")
+        save_fbx(path, nodes, meshes=held, uvs=UVList([plane_uvs(held[0]), plane_uvs(held[1])]), materials=given)
+        return path, nodes, held, given
+
+    def test_round_trip_and_the_slots_written(self):
+        path, nodes, held, given = self.saved()
+        slots = texture_slots(path)
+        self.assertEqual(slots["tangentLambert"], ([("DiffuseColor", "grad.png"), ("NormalMap", "normal.png")], 0.7))
+        self.assertEqual(slots["bumpPhong"], ([("Bump", "bump.png")], 0.4))
+        back = load_fbx(path)
+        same_materials(self, back.materials, given, back.meshes, held)
+        self.assertEqual([m.normal_map_kind for m in back.materials], ["tangent", "bump"])
+        np.testing.assert_array_equal(back.materials[0].normal_map, normal_map())
+        np.testing.assert_array_equal(back.materials[1].normal_map, bump_map())
+        # a material with no colour map takes its UV set and wraps from the normal map
+        self.assertEqual((back.materials[1].texture, back.materials[1].uv_set, back.materials[1].wrap_u), (None, "map1", "repeat"))
+        # a save of the read is the same file again
+        again = self.path("again.fbx")
+        save_fbx(again, *back)
+        self.assertEqual(texture_slots(again), slots)
+        read = load_fbx(again)
+        same_materials(self, read.materials, back.materials, read.meshes, back.meshes)
+
+    def test_both_slots_read_as_the_bump_map_as_maya_imports_them(self):
+        path = slotted(self.folder)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            back = load_fbx(path)
+        both, tangent = back.materials
+        self.assertEqual((both.name, both.normal_map_kind, both.normal_map_file, both.bump_depth), ("both", "bump", "bump.png", 0.9))
+        np.testing.assert_array_equal(both.normal_map, bump_map())
+        self.assertEqual((tangent.name, tangent.normal_map_kind, tangent.normal_map_file, tangent.bump_depth), ("tangent", "tangent", "normal.png", 0.6))
+        np.testing.assert_array_equal(tangent.normal_map, normal_map())
+        self.assertEqual((both.texture, both.uv_set), (None, "map1"))
+        messages = [str(w.message) for w in caught]
+        self.assertEqual(len(messages), 1, messages)
+        self.assertIn("textures on slots", messages[0])
+        self.assertIn("material 'both' NormalMap", messages[0])
+        self.assertNotIn("'tangent'", messages[0])
+
+    def test_textures_off_keeps_the_names_and_a_bad_map_is_refused(self):
+        path, nodes, held, given = self.saved()
+        bare = load_fbx(path, textures=False).materials
+        self.assertEqual([(m.texture, m.normal_map) for m in bare], [(None, None), (None, None)])
+        self.assertEqual(
+            [(m.texture_file, m.normal_map_file, m.normal_map_kind, m.bump_depth) for m in bare],
+            [("grad.png", "normal.png", "tangent", 0.7), (None, "bump.png", "bump", 0.4)],
+        )
+        given[1].normal_map = bump_map().astype(np.uint16)
+        with self.assertRaisesRegex(ValueError, r"material 'bumpPhong' channel 'normal_map' is uint16; a \.fbx embeds an 8 bit PNG"):
+            save_fbx(self.path("bad.fbx"), nodes, meshes=held, materials=given)
+        given[1].normal_map = np.zeros((4, 8, 5), dtype=np.uint8)
+        with self.assertRaisesRegex(ValueError, r"channel 'normal_map' is \(4, 8, 5\), not \(H, W, C\) with 1 to 4 channels"):
+            save_fbx(self.path("bad.fbx"), nodes, meshes=held, materials=given)
+        self.assertFalse(os.path.exists(self.path("bad.fbx")))
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestMayaNormalMaps(_Recorded):
+    """Maya 2025's export of bump2d maps and its import of ours; as recorded"""
+
+    def test_mayas_export_reads_as_maya_holds_it(self):
+        """bumpInterp 0 (bump) lands on Bump, 1 (tangent space normals) on
+        NormalMap, 2 (object space normals) on Bump too, the bumpDepth as
+        BumpFactor, the map's UV set the mesh's; linked and embedded alike"""
+        case = self.case("normals_export")
+        made   = case.value("made")
+        pixels = {"bump.png": bump_map(), "normal.png": normal_map(), "object.png": gradient()}
+        for embed in (True, False):
+            with self.subTest(embed=embed):
+                back = load_fbx(self.fixture(f"maya_{'embedded' if embed else 'linked'}.fbx"), verbose=False)
+                got  = {m.name: m for m in back.materials}
+                self.assertEqual(sorted(got), ["bumpLambert", "normalPhong", "objectLambert"])
+                for shader, (node, interp, depth, file) in made.items():
+                    material = got[shader]
+                    with self.subTest(shader):
+                        self.assertEqual(material.normal_map_kind, "tangent" if interp == 1 else "bump")
+                        self.assertAlmostEqual(material.bump_depth, depth, places=6)
+                        self.assertEqual((material.normal_map_file, material.uv_set, material.texture), (file, "map1", None))
+                        np.testing.assert_array_equal(material.normal_map, pixels[file])
+
+    def test_maya_imports_our_save_as_we_hold_it(self):
+        """our normal maps, imported: a bump2d on each shader's normalCamera
+        reading our file, tangent space normals or bump as the kind says,
+        our depth; the colour map on the colour beside it"""
+        case = self.case("normals_import")
+        nodes = rig()
+        held  = meshes(nodes)
+        given = normal_materials(held)
+        self.assertFreshSave(
+            self.fixture("ours.fbx"), hierarchy=nodes, meshes=held, uvs=UVList([plane_uvs(held[0]), plane_uvs(held[1])]), materials=given
+        )
+        readings = case.value("materials")
+        for material in given:
+            entry = readings[material.name]
+            with self.subTest(material.name):
+                self.assertEqual((entry["shader_count"], entry["bumps"], entry["files"]), (1, 1, 1))
+                self.assertEqual(entry["bumpInterp"], 1 if material.normal_map_kind == "tangent" else 0)
+                self.assertAlmostEqual(entry["bumpDepth"], material.bump_depth, places=6)
+                np.testing.assert_array_equal(case.array(f"normal_map/{material.name}"), material.normal_map)
+                self.assertEqual(entry["color_files"], 0 if material.texture is None else 1)
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")

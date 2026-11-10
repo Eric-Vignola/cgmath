@@ -1244,6 +1244,15 @@ own FBX export writes a blinn as a phong (its eccentricity converted to the
 shininess) and a standardSurface as a bare material, which loads as a
 default lambert with a warning.
 
+A bump2d's map rides along: `normal_map` (pixels as `texture`, reading
+the colour map's UV set and wraps), `normal_map_file`, `normal_map_kind`
+("tangent" for tangent space normals, "bump" for a bump map) and
+`bump_depth` (Maya's bumpDepth). Maya's exporter writes tangent space
+normals on FBX's NormalMap slot and a bump map on Bump, object space
+normals as a bump map too, the depth as BumpFactor, and its importer keeps
+the bump map of a file holding both (measured); `load_fbx` and `save_fbx`
+follow. The renderer carries the map and does not shade by it.
+
 Each material has a `uuid` of its own, made when none is given and kept
 by a copy: the records of one material on several meshes share it (a
 shader on two Maya meshes reads as two records, one a mesh, with one uuid,
@@ -1262,6 +1271,7 @@ pixels         = np.zeros((4, 8, 3), dtype=np.uint8)
 pixels[..., 0] = np.linspace(0, 255, 8, dtype=np.uint8)[None, :]  # red along u
 pixels[..., 1] = np.linspace(0, 255, 4, dtype=np.uint8)[:, None]  # green along v
 skin.texture, skin.texture_file, skin.uv_set = pixels, "grad.png", "map1"
+skin.normal_map, skin.normal_map_file, skin.normal_map_kind, skin.bump_depth = pixels[:, :, ::-1].copy(), "bump.png", "bump", 0.7
 shiny = MaterialData(name="shinyPhong", mesh_uuid=cube.uuid, faces=[3, 4, 5], kind="phong", color=[0.9, 0.2, 0.1], cosine_power=35.0)
 print(skin.textured, shiny.textured, skin.covers(cube), shiny.covers(cube))
 
@@ -1269,6 +1279,7 @@ materials = MaterialList([skin, shiny])
 path      = materials.save(os.path.join(tmp, "materials.npz"))
 back      = MaterialList.load(path)
 print(back == materials, back[0].texture.dtype, back[0].texture.shape, [m.kind for m in back])
+print(back[0].normal_map_kind, back[0].bump_depth, back[0].normal_map.shape, back[1].normal_map)
 
 twin = skin.copy()                                        # the same material, on another mesh
 print(twin.uuid == skin.uuid, twin == skin, twin.uuid != shiny.uuid)

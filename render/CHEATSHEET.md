@@ -459,7 +459,9 @@ print(again == scene)
 A `MaterialData` is Maya's lambert or phong as an fbx holds it: a colour
 and its diffuse factor, an optional colour map and the UV set it reads,
 the faces it covers. The raytracer shades each face by the material
-covering it; a face no material covers takes `scene.base_color`.
+covering it; a face no material covers takes `scene.base_color`. A
+material's normal map (`normal_map`, in the geometry cheatsheet) is
+carried through a scene and a file, not shaded by.
 
 ### Colour and faces
 

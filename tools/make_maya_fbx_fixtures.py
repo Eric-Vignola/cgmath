@@ -43,7 +43,7 @@ from cgmath._tests import test_fbx_morphs as morphs  # noqa: E402
 from cgmath._tests import test_short_names as short_names  # noqa: E402
 from cgmath._tests import test_skeleton_fbx as skel  # noqa: E402
 from cgmath.formats import load_fbx, save_fbx  # noqa: E402
-from cgmath.geometry import CameraList, MeshList  # noqa: E402
+from cgmath.geometry import CameraList, MeshList, UVList  # noqa: E402
 from cgmath.hierarchy import ClipList, HierarchyData, TransformData  # noqa: E402
 from cgmath.hierarchy.hierarchy import _user_channels  # noqa: E402
 
@@ -919,6 +919,101 @@ def shear_parent(rec: Recorder) -> None:
         rec.array(f"trial{trial}/m",  np.array(cmds.getAttr("p|c.m"), dtype=float).reshape(4, 4))
 
 
+def _bumped(shader_node: str, file_name: str, texture: str, interp: int, depth: float) -> str:
+    """file -> bump2d (bumpInterp ``interp``: 0 bump, 1 tangent space normals,
+    2 object space normals; bumpDepth ``depth``) -> the shader's normalCamera"""
+    file_node = cmds.shadingNode("file", asTexture=True, name=file_name)
+    place     = cmds.shadingNode("place2dTexture", asUtility=True, name=file_name + "Place")
+    cmds.connectAttr(f"{place}.outUV", f"{file_node}.uvCoord")
+    cmds.connectAttr(f"{place}.outUvFilterSize", f"{file_node}.uvFilterSize")
+    cmds.setAttr(f"{file_node}.fileTextureName", texture.replace(os.sep, "/"), type="string")
+    bump = cmds.shadingNode("bump2d", asUtility=True, name=file_name + "Bump")
+    cmds.setAttr(f"{bump}.bumpInterp", interp)
+    cmds.setAttr(f"{bump}.bumpDepth", depth)
+    cmds.connectAttr(f"{file_node}.outAlpha", f"{bump}.bumpValue")
+    cmds.connectAttr(f"{bump}.outNormal", f"{shader_node}.normalCamera")
+    return bump
+
+
+def normals_scene(bump: str, normal: str, obj: str) -> dict:
+    """the probe's scene: a plane under lambert bumpLambert whose bump2d reads
+    ``bump`` as a bump map (depth 0.7), a cube under phong normalPhong whose
+    bump2d reads ``normal`` as tangent space normals (depth 1.0), a sphere
+    under lambert objectLambert whose bump2d reads ``obj`` as object space
+    normals (depth 0.5); {shader: (mesh, bumpInterp, bumpDepth, file)}"""
+    cmds.file(new=True, force=True)
+    cmds.currentUnit(time="ntsc", linear="cm", angle="deg")
+
+    def shader(kind, name, **values):
+        made  = cmds.shadingNode(kind, asShader=True, name=name)
+        group = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=f"{name}SG")
+        cmds.connectAttr(f"{made}.outColor", f"{group}.surfaceShader", force=True)
+        for attr, value in values.items():
+            if isinstance(value, (tuple, list)):
+                cmds.setAttr(f"{made}.{attr}", *value, type="double3")
+            else:
+                cmds.setAttr(f"{made}.{attr}", value)
+        return made, group
+
+    plane, _ = cmds.polyPlane(name="plane", width=2.0, height=2.0, subdivisionsX=1, subdivisionsY=1)
+    lam, lam_sg = shader("lambert", "bumpLambert", color=(0.6, 0.6, 0.6))
+    _bumped(lam, "bumpFile", bump, 0, 0.7)
+    cmds.sets(plane, edit=True, forceElement=lam_sg)
+    cube, _ = cmds.polyCube(name="cube")
+    pho, pho_sg = shader("phong", "normalPhong", color=(0.9, 0.2, 0.1))
+    _bumped(pho, "normalFile", normal, 1, 1.0)
+    cmds.sets(cube, edit=True, forceElement=pho_sg)
+    ball, _ = cmds.polySphere(name="ball", subdivisionsX=8, subdivisionsY=6)
+    lam2, lam2_sg = shader("lambert", "objectLambert", color=(0.2, 0.2, 0.9))
+    _bumped(lam2, "objectFile", obj, 2, 0.5)
+    cmds.sets(ball, edit=True, forceElement=lam2_sg)
+    cmds.setAttr(f"{cube}.translate", 3.0, 0.0, 0.0)
+    cmds.setAttr(f"{ball}.translate", -3.0, 0.0, 0.0)
+    return {lam: (plane, 0, 0.7, bump), pho: (cube, 1, 1.0, normal), lam2: (ball, 2, 0.5, obj)}
+
+
+def normals_export(rec: Recorder) -> None:
+    """Maya's export of a bump map, a tangent space normal map and object
+    space normals through bump2d, linked and embedded"""
+    bump, normal, obj = rec.path("bump.png"), rec.path("normal.png"), rec.path("object.png")
+    Image.fromarray(mats.bump_map()).save(bump)
+    Image.fromarray(mats.normal_map()).save(normal)
+    Image.fromarray(mats.gradient()).save(obj)
+    made = normals_scene(bump, normal, obj)
+    rec.value("made", {shader: [node, interp, depth, os.path.basename(path)] for shader, (node, interp, depth, path) in made.items()})
+    exported(rec.path("maya_linked.fbx"), embed=False)
+    exported(rec.path("maya_embedded.fbx"), embed=True)
+
+
+def normals_import(rec: Recorder) -> None:
+    """Maya's import of our normal maps: the bump2d each shader gets"""
+    nodes = mats.rig()
+    held  = mats.meshes(nodes)
+    given = mats.normal_materials(held)
+    ours  = rec.path("ours.fbx")
+    save_fbx(ours, nodes, meshes=held, uvs=UVList([mats.plane_uvs(held[0]), mats.plane_uvs(held[1])]), materials=given)
+    imported(ours)
+    readings = {}
+    for material in given:
+        shaders = cmds.ls(material.name, type=material.kind)
+        entry   = {"shader_count": len(shaders)}
+        if shaders:
+            shader         = shaders[0]
+            bumps          = cmds.listConnections(f"{shader}.normalCamera", source=True, destination=False, type="bump2d") or []
+            entry["bumps"] = len(bumps)
+            if bumps:
+                entry["bumpInterp"] = cmds.getAttr(f"{bumps[0]}.bumpInterp")
+                entry["bumpDepth"]  = cmds.getAttr(f"{bumps[0]}.bumpDepth")
+                files               = cmds.listConnections(f"{bumps[0]}.bumpValue", source=True, destination=False, type="file") or []
+                entry["files"]      = len(files)
+                if files:
+                    with Image.open(cmds.getAttr(f"{files[0]}.fileTextureName")) as image:
+                        rec.array(f"normal_map/{material.name}", np.asarray(image.convert("RGB")))
+            entry["color_files"] = len(cmds.listConnections(f"{shader}.color", type="file") or [])
+        readings[material.name] = entry
+    rec.value("materials", readings)
+
+
 CASES = {
     "clip_import": clip_import,
     "visibility_locator": visibility_locator,
@@ -939,6 +1034,8 @@ CASES = {
     "other_writer": other_writer,
     "materials_export": materials_export,
     "materials_import": materials_import,
+    "normals_export": normals_export,
+    "normals_import": normals_import,
     "morphs_export": morphs_export,
     "morphs_import": morphs_import,
     "colors_export": colors_export,

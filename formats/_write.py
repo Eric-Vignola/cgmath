@@ -295,7 +295,7 @@ def save_fbx(
                     held = [material for material in materials if material.mesh_uuid == mesh.uuid]
                     if held:
                         _write_materials(exporter, mesh, held, *shapes[mesh.uuid], folder, shaders, taken)
-                if any(material.texture is not None for material in materials):
+                if any(material.texture is not None or material.normal_map is not None for material in materials):
                     # the PNGs go into the file, as Maya's Embed Media writes them
                     exporter.manager.GetIOSettings().SetBoolProp(fbx.EXP_FBX_EMBEDDED, True)
             if morphs is not None:
@@ -610,7 +610,8 @@ def _material_label(material, meshes=None) -> str:
 # its name, its mesh, its faces and the uuid itself
 _SHADING_FIELDS = (
     "kind", "color", "transparency", "ambient_color", "incandescence", "diffuse", "specular_color", "cosine_power",
-    "reflectivity", "texture", "texture_file", "uv_set", "wrap_u", "wrap_v",
+    "reflectivity", "texture", "texture_file", "uv_set", "wrap_u", "wrap_v", "normal_map", "normal_map_file",
+    "normal_map_kind", "bump_depth",
 )
 
 
@@ -634,9 +635,9 @@ def _check_materials(materials, meshes) -> None:
     """a material naming no mesh, covering faces its mesh does not hold or a
     face twice, two materials covering one face, materials leaving faces of
     their mesh uncovered, a material covering the whole mesh beside another
-    on it, a texture that is not (H, W, C) uint8 with 1 to 4 channels,
-    records sharing a uuid that differ past their faces (one material is
-    written per uuid): refused. A texture with no PIL to encode it:
+    on it, a texture or normal map that is not (H, W, C) uint8 with 1 to 4
+    channels, records sharing a uuid that differ past their faces (one
+    material is written per uuid): refused. A map with no PIL to encode it:
     ImportError"""
     by_uuid = {mesh.uuid: mesh for mesh in meshes}
     covered = {}
@@ -658,20 +659,22 @@ def _check_materials(materials, meshes) -> None:
                         f"{material.uuid!r} but differ in {', '.join(differ)}; one material is written per uuid, so "
                         f"records sharing one agree but for their faces: give one of them a uuid of its own"
                     )
-        texture = material.texture
-        if texture is not None:
-            pixels = np.asarray(texture)
+        for channel, what in (("texture", "a texture"), ("normal_map", "a normal map")):
+            pixels = getattr(material, channel)
+            if pixels is None:
+                continue
+            pixels = np.asarray(pixels)
             if pixels.dtype != np.uint8:
                 raise ValueError(
-                    f"save_fbx: {label} channel 'texture' is {pixels.dtype.name}; a .fbx embeds an 8 bit PNG, so {FORK} "
-                    f"writes a uint8 texture: scale it to 0..255"
+                    f"save_fbx: {label} channel {channel!r} is {pixels.dtype.name}; a .fbx embeds an 8 bit PNG, so {FORK} "
+                    f"writes a uint8 map: scale it to 0..255"
                 )
             if pixels.ndim != 3 or pixels.shape[2] not in (1, 2, 3, 4) or not pixels.shape[0] or not pixels.shape[1]:
                 raise ValueError(
-                    f"save_fbx: {label} channel 'texture' is {pixels.shape}, not (H, W, C) with 1 to 4 channels"
+                    f"save_fbx: {label} channel {channel!r} is {pixels.shape}, not (H, W, C) with 1 to 4 channels"
                 )
             if _pil() is None:
-                raise ImportError(f"save_fbx: {label} holds a texture, written as a PNG through PIL (pillow), which is not installed")
+                raise ImportError(f"save_fbx: {label} holds {what}, written as a PNG through PIL (pillow), which is not installed")
         count = len(mesh.counts)
         held  = covered.setdefault(mesh.uuid, [])
         if material.faces is None:
@@ -809,9 +812,10 @@ def _write_morphs(exporter, mesh, morphs, shape) -> None:
 
 @contextlib.contextmanager
 def _texture_folder(materials):
-    """a folder for the PNGs the textures of ``materials`` are written to on
-    their way into the file, gone when the block ends; None for no texture"""
-    if materials is None or all(material.texture is None for material in materials):
+    """a folder for the PNGs the textures and normal maps of ``materials``
+    are written to on their way into the file, gone when the block ends;
+    None for no map"""
+    if materials is None or all(material.texture is None and material.normal_map is None for material in materials):
         yield None
         return
     from cgmath.formats._fbx_io import media_folder
@@ -1051,11 +1055,11 @@ def _enum(owner, scope: str, name: str) -> int:
     return int(getattr(value, "value", value))
 
 
-def _png_name(material, taken: set) -> str:
-    """the file name a material's texture is embedded under: its texture
-    file's stem, else its name, else "texture", as a .png, told apart from
-    the names ``taken`` by a number"""
-    stem = os.path.splitext(os.path.basename(material.texture_file or ""))[0] or material.name or "texture"
+def _png_name(file, fallback, taken: set) -> str:
+    """the file name a map is embedded under: the stem of ``file``, the name
+    it came from, else ``fallback`` (the material's name), else "texture",
+    as a .png, told apart from the names ``taken`` by a number"""
+    stem = os.path.splitext(os.path.basename(file or ""))[0] or fallback or "texture"
     stem = "".join(x if x.isascii() and (x.isalnum() or x in "-_.") else "_" for x in stem)
     name = stem + ".png"
     k    = 1
@@ -1066,15 +1070,16 @@ def _png_name(material, taken: set) -> str:
     return name
 
 
-def _write_png(material, folder: str, taken: set) -> str:
-    """the material's texture written as a PNG into ``folder``: an (H, W, C)
-    uint8 array as L, LA, RGB or RGBA by its channels; the path"""
+def _write_png(pixels, file, fallback, folder: str, taken: set) -> str:
+    """``pixels``, an (H, W, C) uint8 array, written as a PNG into ``folder``
+    as L, LA, RGB or RGBA by its channels, named by :func:`_png_name`; the
+    path"""
     Image  = _pil()
-    pixels = np.ascontiguousarray(np.asarray(material.texture, dtype=np.uint8))
+    pixels = np.ascontiguousarray(np.asarray(pixels, dtype=np.uint8))
     modes  = {1: "L", 2: "LA", 3: "RGB", 4: "RGBA"}
     mode   = modes[pixels.shape[2]]
     image  = Image.fromarray(pixels[:, :, 0] if mode == "L" else pixels, mode)
-    path   = os.path.join(folder, _png_name(material, taken))
+    path   = os.path.join(folder, _png_name(file, fallback, taken))
     image.save(path, format="PNG")
     return path
 
@@ -1089,7 +1094,9 @@ def _surface(scene, material, folder: str, taken: set, wraps: dict, fbx):
     a reflection colour of 0; a texture as a PNG in ``folder`` (embedded by
     the export, its name told from ``taken``) feeding the diffuse colour
     through an FbxFileTexture reading the UV set and wrapping as the
-    material says"""
+    material says; a normal map the same way on the slot Maya's exporter
+    writes a bump2d's map to (measured): NormalMap for tangent space
+    normals, Bump for a bump map, the depth as BumpFactor"""
     phong = material.kind == "phong"
     made  = (fbx.FbxSurfacePhong if phong else fbx.FbxSurfaceLambert).Create(scene, material.name or "")
     made.Diffuse.Set(fbx.FbxDouble3(*[float(x) for x in material.color]))
@@ -1106,20 +1113,27 @@ def _surface(scene, material, folder: str, taken: set, wraps: dict, fbx):
         made.Shininess.Set(float(material.cosine_power))
         made.Reflection.Set(fbx.FbxDouble3(0.0, 0.0, 0.0))
         made.ReflectionFactor.Set(float(material.reflectivity))
-    if material.texture is None:
-        return made
-    path    = _write_png(material, folder, taken)
-    texture = fbx.FbxFileTexture.Create(scene, os.path.splitext(os.path.basename(path))[0])
-    texture.SetFileName(path)
-    texture.SetRelativeFileName(os.path.basename(path))
-    texture.SetTextureUse(fbx.FbxTexture.ETextureUse.eStandard)
-    texture.SetMappingType(fbx.FbxTexture.EMappingType.eUV)
-    texture.SetMaterialUse(fbx.FbxFileTexture.EMaterialUse.eModelMaterial)
-    if material.uv_set:
-        texture.UVSet.Set(fbx.FbxString(material.uv_set))
-    texture.WrapModeU.Set(wraps[material.wrap_u])
-    texture.WrapModeV.Set(wraps[material.wrap_v])
-    made.Diffuse.ConnectSrcObject(texture)
+
+    def file_texture(pixels, file, fallback):
+        path    = _write_png(pixels, file, fallback, folder, taken)
+        texture = fbx.FbxFileTexture.Create(scene, os.path.splitext(os.path.basename(path))[0])
+        texture.SetFileName(path)
+        texture.SetRelativeFileName(os.path.basename(path))
+        texture.SetTextureUse(fbx.FbxTexture.ETextureUse.eStandard)
+        texture.SetMappingType(fbx.FbxTexture.EMappingType.eUV)
+        texture.SetMaterialUse(fbx.FbxFileTexture.EMaterialUse.eModelMaterial)
+        if material.uv_set:
+            texture.UVSet.Set(fbx.FbxString(material.uv_set))
+        texture.WrapModeU.Set(wraps[material.wrap_u])
+        texture.WrapModeV.Set(wraps[material.wrap_v])
+        return texture
+
+    if material.texture is not None:
+        made.Diffuse.ConnectSrcObject(file_texture(material.texture, material.texture_file, material.name))
+    if material.normal_map is not None:
+        slot = made.NormalMap if material.normal_map_kind == "tangent" else made.Bump
+        slot.ConnectSrcObject(file_texture(material.normal_map, material.normal_map_file, f"{material.name or 'texture'}_normal"))
+        made.BumpFactor.Set(float(material.bump_depth))
     return made
 
 

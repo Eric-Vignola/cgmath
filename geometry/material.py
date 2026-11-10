@@ -4,7 +4,8 @@ A :class:`MaterialData` holds what Maya's lambert and phong shaders hold: the
 colour, transparency, ambient colour, incandescence and diffuse of a lambert,
 and a phong's specular colour, cosine power and reflectivity; the colour map's
 pixels, where a file texture feeds the colour, with the UV set it reads and
-its wrap modes; and the faces of one mesh it covers, the mesh named by
+its wrap modes; the map a bump2d feeds the normal from, tangent space normals
+or a bump map, with its depth; and the faces of one mesh it covers, the mesh named by
 ``mesh_uuid`` as a skin names its. The defaults are a fresh Maya lambert's
 and phong's (measured in Maya 2025).
 """
@@ -23,6 +24,10 @@ MATERIAL_KINDS = ("lambert", "phong")
 
 # how a texture repeats past its edges, Maya's place2dTexture wrapU / wrapV
 WRAP_MODES = ("repeat", "clamp")
+
+# how Maya's bump2d reads a material's normal map (its bumpInterp): tangent
+# space normals, or a bump map
+NORMAL_MAP_KINDS = ("tangent", "bump")
 
 
 @dataclass(repr=False, eq=False)
@@ -79,29 +84,48 @@ class MaterialData(Data):
         (Maya's wrapU and wrapV). Default "repeat". FBX holds them as the
         texture's wrap modes; Maya's own export writes both as repeat and
         its import leaves both on, whatever a file says (measured).
+    normal_map : (H, W, C) uint8, uint16 or float32, optional
+        The pixels of the map a bump2d feeds the shader's normal from, rows
+        top down, as ``texture``; None for none. It reads the colour map's
+        UV set and wraps. Carried through a scene and a file; the renderer
+        does not shade by it.
+    normal_map_file : str, optional
+        The file name the pixels came from, or go to. None for none.
+    normal_map_kind : str
+        How Maya's bump2d reads the map (its bumpInterp): "tangent" for
+        tangent space normals, FBX's NormalMap slot, or "bump" for a bump
+        map, FBX's Bump slot, which is also what Maya exports object space
+        normals as (measured). Default "tangent". A file holding both slots
+        reads as the bump map, as Maya's importer takes it (measured).
+    bump_depth : float
+        Maya's bumpDepth, FBX's BumpFactor. Default 1.
     """
 
     EQUALITY_TEST_IGNORE = ["name", "mesh_uuid", "uuid"]
     NAMESPACED_FIELDS    = ("name",)
 
-    name:           Optional[str] = None
-    mesh_uuid:      Optional[str] = None
-    uuid:           Optional[str] = field(default=None, kw_only=True)
-    faces:          Optional[Array(np.int32, "N")] = None
-    kind:           str = "lambert"
-    color:          Array(np.float64, 3) = numpy_array([0.5, 0.5, 0.5])
-    transparency:   Array(np.float64, 3) = numpy_array([0.0, 0.0, 0.0])
-    ambient_color:  Array(np.float64, 3) = numpy_array([0.0, 0.0, 0.0])
-    incandescence:  Array(np.float64, 3) = numpy_array([0.0, 0.0, 0.0])
-    diffuse:        float = 0.8
-    specular_color: Array(np.float64, 3) = numpy_array([0.5, 0.5, 0.5])
-    cosine_power:   float = 20.0
-    reflectivity:   float = 0.5
-    texture:        Optional[Array((np.uint8, np.uint16, np.float32), "H", "W", "C")] = None
-    texture_file:   Optional[str] = None
-    uv_set:         Optional[str] = None
-    wrap_u:         str = "repeat"
-    wrap_v:         str = "repeat"
+    name:            Optional[str] = None
+    mesh_uuid:       Optional[str] = None
+    uuid:            Optional[str] = field(default=None, kw_only=True)
+    faces:           Optional[Array(np.int32, "N")] = None
+    kind:            str = "lambert"
+    color:           Array(np.float64, 3) = numpy_array([0.5, 0.5, 0.5])
+    transparency:    Array(np.float64, 3) = numpy_array([0.0, 0.0, 0.0])
+    ambient_color:   Array(np.float64, 3) = numpy_array([0.0, 0.0, 0.0])
+    incandescence:   Array(np.float64, 3) = numpy_array([0.0, 0.0, 0.0])
+    diffuse:         float = 0.8
+    specular_color:  Array(np.float64, 3) = numpy_array([0.5, 0.5, 0.5])
+    cosine_power:    float = 20.0
+    reflectivity:    float = 0.5
+    texture:         Optional[Array((np.uint8, np.uint16, np.float32), "H", "W", "C")] = None
+    texture_file:    Optional[str] = None
+    uv_set:          Optional[str] = None
+    wrap_u:          str = "repeat"
+    wrap_v:          str = "repeat"
+    normal_map:      Optional[Array((np.uint8, np.uint16, np.float32), "H", "W", "C")] = None
+    normal_map_file: Optional[str] = None
+    normal_map_kind: str = "tangent"
+    bump_depth:      float = 1.0
 
     def __post_init__(self):
         super().__post_init__()
@@ -113,6 +137,8 @@ class MaterialData(Data):
             raise ValueError(f"MaterialData.kind is one of {list(MATERIAL_KINDS)}, not {value!r}")
         if name in ("wrap_u", "wrap_v") and value not in WRAP_MODES:
             raise ValueError(f"MaterialData.{name} is one of {list(WRAP_MODES)}, not {value!r}")
+        if name == "normal_map_kind" and value not in NORMAL_MAP_KINDS:
+            raise ValueError(f"MaterialData.normal_map_kind is one of {list(NORMAL_MAP_KINDS)}, not {value!r}")
         if name == "uuid" and value is not None:
             value = str(value)  # a uuid.UUID as its text
             if not _is_uuid(value):

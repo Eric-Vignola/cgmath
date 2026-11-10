@@ -18,6 +18,9 @@ Conventions: matrices are row-major with translation at `M[3, :3]`; quaternions 
 - [`cgmath.geometry.mesh`](#cgmathgeometrymesh)
 - [`cgmath.geometry.map`](#cgmathgeometrymap)
 - [`cgmath.geometry.morph_target`](#cgmathgeometrymorph_target)
+- [`cgmath.geometry.material`](#cgmathgeometrymaterial)
+- [`cgmath.geometry.camera`](#cgmathgeometrycamera)
+- [`cgmath.geometry.light`](#cgmathgeometrylight)
 - [`cgmath.geometry.skin_weights`](#cgmathgeometryskin_weights)
 - [`cgmath.geometry.bspline`](#cgmathgeometrybspline)
 - [`cgmath.geometry.bspline_patch`](#cgmathgeometrybspline_patch)
@@ -1024,7 +1027,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x0000016BBABBAA50>
+MISSING = <dataclasses._MISSING_TYPE object at 0x0000023A74BE7250>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1687,6 +1690,179 @@ Constants:
 
 ```text
 BLS_PRIM_TYPE = 'MorphTarget'
+```
+
+## `cgmath.geometry.material`
+
+Maya's lambert and phong attributes, the colour map and the normal map, on the faces of one mesh.
+
+> A material: Maya's lambert and phong attributes, on the faces of one mesh.
+
+#### `MaterialData(Data)`
+
+A material, as Maya's lambert and phong shaders hold one, assigned to
+
+```text
+MaterialData(name: Optional[str] = None, mesh_uuid: Optional[str] = None, faces: Optional[Annotated[numpy.ndarray, Array(int32 (N,))]] = None, kind: str = 'lambert', color: typing.Annotated[numpy.ndarray, Array(float64 (3,))] = ImmutableArray([0.5, 0.5, 0.5]), transparency: typing.Annotated[numpy.ndarray, Array(float64 (3,))] = ImmutableArray([0., 0., 0.]), ambient_color: typing.Annotated[numpy.ndarray, Array(float64 (3,))] = ImmutableArray([0., 0., 0.]), incandescence: typing.Annotated[numpy.ndarray, Array(float64 (3,))] = ImmutableArray([0., 0., 0.]), diffuse: float = 0.8, specular_color: typing.Annotated[numpy.ndarray, Array(float64 (3,))] = ImmutableArray([0.5, 0.5, 0.5]), cosine_power: float = 20.0, reflectivity: float = 0.5, texture: Optional[Annotated[numpy.ndarray, Array(uint8/uint16/float32 (H, W, C))]] = None, texture_file: Optional[str] = None, uv_set: Optional[str] = None, wrap_u: str = 'repeat', wrap_v: str = 'repeat', normal_map: Optional[Annotated[numpy.ndarray, Array(uint8/uint16/float32 (H, W, C))]] = None, normal_map_file: Optional[str] = None, normal_map_kind: str = 'tangent', bump_depth: float = 1.0, *, uuid: Optional[str] = None) -> None
+```
+
+Fields:
+
+```text
+name: Optional = None
+mesh_uuid: Optional = None
+uuid: Optional = None
+faces: Optional = None
+kind: str = 'lambert'
+color: Annotated = ImmutableArray([0.5, 0.5, 0.5])
+transparency: Annotated = ImmutableArray([0., 0., 0.])
+ambient_color: Annotated = ImmutableArray([0., 0., 0.])
+incandescence: Annotated = ImmutableArray([0., 0., 0.])
+diffuse: float = 0.8
+specular_color: Annotated = ImmutableArray([0.5, 0.5, 0.5])
+cosine_power: float = 20.0
+reflectivity: float = 0.5
+texture: Optional = None
+texture_file: Optional = None
+uv_set: Optional = None
+wrap_u: str = 'repeat'
+wrap_v: str = 'repeat'
+normal_map: Optional = None
+normal_map_file: Optional = None
+normal_map_kind: str = 'tangent'
+bump_depth: float = 1.0
+```
+
+Properties:
+
+```text
+textured                           whether a texture feeds the colour
+```
+
+Methods:
+
+```text
+covers(self, mesh) -> numpy.ndarray
+    (F,) bool, one a face of ``mesh``: the faces this material covers,
+```
+
+#### `MaterialList(OneMeshList, DataList)`
+
+A list of :class:`MaterialData`, as a file holds its materials, or
+
+```text
+MaterialList(iterable=None, mesh_uuid: Optional[str] = None)
+```
+
+Constants:
+
+```text
+MATERIAL_KINDS = ('lambert', 'phong')
+NORMAL_MAP_KINDS = ('tangent', 'bump')
+WRAP_MODES = ('repeat', 'clamp')
+```
+
+## `cgmath.geometry.camera`
+
+a camera shape, as Maya holds one.
+
+> A camera: Maya's camera attributes, a shape placed by its transform.
+
+#### `CameraData(ShapeData)`
+
+A camera, as Maya's camera shape holds one; a shape placed by the
+
+```text
+CameraData(name: Optional[str] = None, focal_length: float = 35.0, horizontal_film_aperture: float = 1.41732, vertical_film_aperture: float = 0.94488, film_fit: str = 'horizontal', film_offset: typing.Annotated[numpy.ndarray, Array(float64 (2,))] = ImmutableArray([0., 0.]), lens_squeeze_ratio: float = 1.0, camera_scale: float = 1.0, near_clip_plane: float = 0.1, far_clip_plane: float = 10000.0, orthographic: bool = False, orthographic_width: float = 10.0, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
+```
+
+Fields:
+
+```text
+name: Optional = None
+focal_length: float = 35.0
+horizontal_film_aperture: float = 1.41732
+vertical_film_aperture: float = 0.94488
+film_fit: str = 'horizontal'
+film_offset: Annotated = ImmutableArray([0., 0.])
+lens_squeeze_ratio: float = 1.0
+camera_scale: float = 1.0
+near_clip_plane: float = 0.1
+far_clip_plane: float = 10000.0
+orthographic: bool = False
+orthographic_width: float = 10.0
+```
+
+Properties:
+
+```text
+angle_of_view                      Maya's angleOfView: the horizontal one
+film_aspect_ratio                  the film back's width over its height
+horizontal_angle_of_view           Maya's horizontal angle of view, in degrees: 2 atan(aperture / 2
+vertical_angle_of_view             Maya's vertical angle of view, in degrees: 2 atan(aperture / 2
+```
+
+#### `CameraList(DataList)`
+
+A list of :class:`CameraData`, as a file holds its cameras.
+
+```text
+CameraList(iterable=None)
+```
+
+Constants:
+
+```text
+FILM_FITS = ('fill', 'horizontal', 'vertical', 'overscan')
+INCH = 25.4
+```
+
+## `cgmath.geometry.light`
+
+a light shape, as Maya holds one.
+
+> A light: Maya's light attributes, a shape placed by its transform.
+
+#### `LightData(ShapeData)`
+
+A light, as Maya's light shapes hold one; a shape placed by the
+
+```text
+LightData(name: Optional[str] = None, kind: str = 'point', color: typing.Annotated[numpy.ndarray, Array(float64 (3,))] = ImmutableArray([1., 1., 1.]), intensity: float = 1.0, decay_rate: int = 0, cone_angle: float = 40.0, penumbra_angle: float = 0.0, dropoff: float = 0.0, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
+```
+
+Fields:
+
+```text
+name: Optional = None
+kind: str = 'point'
+color: Annotated = ImmutableArray([1., 1., 1.])
+intensity: float = 1.0
+decay_rate: int = 0
+cone_angle: float = 40.0
+penumbra_angle: float = 0.0
+dropoff: float = 0.0
+```
+
+Properties:
+
+```text
+decay                              the decay rate's name: none, linear, quadratic or cubic
+```
+
+#### `LightList(DataList)`
+
+A list of :class:`LightData`, as a file holds its lights.
+
+```text
+LightList(iterable=None)
+```
+
+Constants:
+
+```text
+DECAY_RATES = ('none', 'linear', 'quadratic', 'cubic')
+LIGHT_KINDS = ('point', 'directional', 'spot')
 ```
 
 ## `cgmath.geometry.skin_weights`
@@ -3273,7 +3449,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000016C08B463E0>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000023A42B76480>, '...
 ```
 
 ## `cgmath.constraints`

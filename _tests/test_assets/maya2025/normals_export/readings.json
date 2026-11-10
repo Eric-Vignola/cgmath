@@ -1,0 +1,22 @@
+{
+ "made": {
+  "bumpLambert": [
+   "plane",
+   0,
+   0.7,
+   "bump.png"
+  ],
+  "normalPhong": [
+   "cube",
+   1,
+   1.0,
+   "normal.png"
+  ],
+  "objectLambert": [
+   "ball",
+   2,
+   0.5,
+   "object.png"
+  ]
+ }
+}
