@@ -143,6 +143,7 @@ def build_scene(texture=None) -> Scene:
         wireframe           = True,
         wireframe_color     = (255, 128, 0),
         wireframe_thickness = 2,
+        vertex_colors       = "multiply",
     )
 
     group = TransformData(name="set",   uuid=_UUIDS["set"],   translate=[0.0, -1.0, 0.0])
