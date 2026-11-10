@@ -17,6 +17,7 @@ left handed one is refused, and the file's unit is converted.
 """
 
 import os
+import warnings
 from collections import namedtuple
 
 import numpy as np
@@ -264,6 +265,7 @@ def _read_mesh(node, at: int, filename: str, fbx) -> dict:
         normals = _fbx_direct_array_to_ndarray(element.GetDirectArray(), dim=3)
         ids     = _fbx_face_varying_indices(shape, element, counts)
     points = _fbx_control_points(shape)
+    colors, color_ids = _read_colors(shape, counts, label, fbx)
     return {
         "uvs":            _read_uvs(label, shape, counts, fbx),
         "materials":      _read_materials(node, shape, counts, label, filename, fbx),
@@ -276,8 +278,52 @@ def _read_mesh(node, at: int, filename: str, fbx) -> dict:
         "indices":        indices,
         "normals":        normals,
         "normal_indices": ids,
+        "colors":         colors,
+        "color_indices":  color_ids,
         "shape":          shape,
     }
+
+
+def _read_colors(shape, counts, label: str, fbx) -> tuple:
+    """``(colors, color_indices)`` of the mesh's first vertex colour element,
+    eNone elements padding a layer passed over: its RGBA doubles, one a
+    control point (``color_indices`` None; Maya reads such an element) or
+    one a face corner through the indices
+    :func:`_fbx_face_varying_indices` gives (Maya writes a colour set so,
+    a shared one too); a mesh holding several sets gives its first with a
+    warning naming the others, ``MeshData`` holding one; ``(None, None)``
+    for none. ValueError for another mapping"""
+    from cgmath.geometry.mesh import _fbx_face_varying_indices
+
+    mapping   = fbx.FbxLayerElement.EMappingMode
+    reference = fbx.FbxLayerElement.EReferenceMode
+    held      = [shape.GetElementVertexColor(k) for k in range(shape.GetElementVertexColorCount())]
+    mapped    = [e for e in held if e.GetMappingMode() != mapping.eNone]
+    if not mapped:
+        return None, None
+    element = mapped[0]
+    if len(mapped) > 1:
+        warnings.warn(
+            f"load_fbx: {label} holds the colour sets {[str(e.GetName()) for e in mapped[1:]]} beside "
+            f"{str(element.GetName())!r}; {FORK} reads the first",
+            stacklevel=2,
+        )
+    mode = element.GetMappingMode()
+    if mode not in (mapping.eByControlPoint, mapping.eByPolygonVertex):
+        raise ValueError(
+            f"load_fbx: {label} channel 'colors' is mapped {str(mode).rsplit('.', 1)[-1]}, which {FORK} does not read; "
+            f"a colour a vertex or a face corner"
+        )
+    direct = element.GetDirectArray()
+    colors = np.array(
+        [[c.mRed, c.mGreen, c.mBlue, c.mAlpha] for c in (direct.GetAt(i) for i in range(direct.GetCount()))], dtype=np.float64
+    ).reshape(-1, 4)
+    if mode == mapping.eByPolygonVertex:
+        return colors, _fbx_face_varying_indices(shape, element, counts)
+    if element.GetReferenceMode() == reference.eDirect:
+        return colors, None
+    index = element.GetIndexArray()
+    return colors[np.array([index.GetAt(i) for i in range(index.GetCount())], dtype=np.int64)], None
 
 
 # fbx's DeformPercent and full weights are Maya's weights times this
@@ -1623,6 +1669,8 @@ def _build_meshes(read: dict):
                 indices        = held["indices"],
                 normals        = held["normals"],
                 normal_indices = held["normal_indices"],
+                colors         = held["colors"],
+                color_indices  = held["color_indices"],
                 parent_uuid    = entries[held["node"]]["uuid"],
             )
             for held in read["meshes"]

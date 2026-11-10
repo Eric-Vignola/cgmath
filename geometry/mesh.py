@@ -5063,6 +5063,24 @@ def load_glb(filename: str, scale_factor: float = 100.0) -> list:
             name    = name,
         )
 
+        # the file's COLOR_0 as trimesh holds it, one a vertex: a textured
+        # mesh keeps it as its "color" vertex attribute, as the file has it;
+        # a plain one as its vertex colours, RGBA bytes (a float colour
+        # quantised to 8 bits); trimesh's own defaults, for a mesh with no
+        # colours, have no kind
+        visual = geometry.visual
+        held   = getattr(visual, "vertex_attributes", {}).get("color")
+        if held is None and getattr(visual, "kind", None) == "vertex":
+            held = visual.vertex_colors
+        if held is not None:
+            held = np.asarray(held)
+            if held.dtype.kind in "ui":
+                held = held / float(np.iinfo(held.dtype).max)
+            colors = np.asarray(held, dtype=np.float64)
+            if colors.shape[1] == 3:
+                colors = np.column_stack([colors, np.ones(len(colors))])
+            mesh_data.colors = colors[:, :4]
+
         uv_data_list = []
         # trimesh returns TextureVisuals (.uv) for textured meshes and
         # ColorVisuals (no .uv) for vertex-colored / material-less meshes.

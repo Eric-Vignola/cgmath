@@ -935,9 +935,12 @@ def _write_mesh(exporter, mesh, node) -> tuple:
     """(the node, the FbxMesh): the mesh as the shape of ``node``, the
     FbxNode of the transform its ``parent_uuid`` names, or of a new root
     node at identity named after the mesh for None; its points, faces and
-    normals, one a face corner through their indices; the FbxMesh named
-    after the mesh, unnamed for a mesh of no name"""
-    from cgmath.geometry.mesh import _corner_normals
+    normals, one a face corner through their indices; its colours as one
+    set, :data:`COLOR_SET`, on the mesh's first layer where Maya's exporter
+    puts a set, by control point for a colour a vertex and by polygon vertex
+    otherwise, index to direct as Maya writes both; the FbxMesh named after
+    the mesh, unnamed for a mesh of no name"""
+    from cgmath.geometry.mesh import _corner_colors, _corner_normals
     from cgmath.hierarchy.hierarchy import FBX as fbx
 
     scene = exporter.scene
@@ -973,8 +976,33 @@ def _write_mesh(exporter, mesh, node) -> tuple:
         held = element.GetIndexArray()
         for index in np.asarray(ids, dtype=np.int64).tolist():
             held.Add(index)
+
+    colors, ids = _corner_colors(mesh)
+    if colors is not None:
+        # on the first layer by hand: the sdk's CreateElementVertexColor would
+        # take the last layer and pad the ones under it, as it does a material
+        per_vertex = mesh.color_indices is None
+        if shape.GetLayerCount() == 0:
+            shape.CreateLayer()
+        element = fbx.FbxLayerElementVertexColor.Create(shape, COLOR_SET)
+        shape.GetLayer(0).SetVertexColors(element)
+        element.SetMappingMode(
+            fbx.FbxLayerElement.EMappingMode.eByControlPoint if per_vertex else fbx.FbxLayerElement.EMappingMode.eByPolygonVertex
+        )
+        element.SetReferenceMode(fbx.FbxLayerElement.EReferenceMode.eIndexToDirect)
+        direct = element.GetDirectArray()
+        for color in np.asarray(colors, dtype=np.float64).tolist():
+            direct.Add(fbx.FbxColor(*color))
+        held = element.GetIndexArray()
+        for index in (range(len(colors)) if per_vertex else np.asarray(ids, dtype=np.int64).tolist()):
+            held.Add(int(index))
     node.SetNodeAttribute(shape)
     return node, shape
+
+
+# the name a mesh's colours are written under: Maya's name for a first colour
+# set (its importer names an unnamed element "colorSet0")
+COLOR_SET = "colorSet1"
 
 
 def _enum(owner, scope: str, name: str) -> int:
