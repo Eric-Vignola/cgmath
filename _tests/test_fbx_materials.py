@@ -24,12 +24,13 @@ import warnings
 from unittest import mock
 
 import numpy as np
-from cgmath._tests.test_skeleton_fbx import _Files, _Recorded
-from cgmath.formats import load_fbx, save_fbx
+from cgmath._tests.test_skeleton_fbx import _Files, _Recorded, _edited, _named, bundle
+from cgmath.formats import _load as _load_module, load_fbx, save_fbx
 from cgmath.formats._fbx_io import load_sdk, open_fbx, typed
 from cgmath.formats._write import _enum
-from cgmath.geometry import MaterialData, MaterialList, MeshData, MeshList, UVData, UVList
-from cgmath.hierarchy import HierarchyData, TransformData
+from cgmath.geometry import CameraData, CameraList, LightData, LightList, MaterialData, MaterialList, MeshData, MeshList, UVData, UVList
+from cgmath.hierarchy import ClipData, HierarchyData, TransformData
+from cgmath.render import Scene
 
 FBX = load_sdk()
 
@@ -554,6 +555,170 @@ class TestMaterials(_Files):
         save_fbx(self.path("no_sets.fbx"), nodes, meshes=held, materials=given)
         found = fbx_materials(self.path("no_sets.fbx"))["plane"]
         self.assertEqual((found["elements"], found["layer"]), (1, 0))
+
+
+def shared_texture(folder: str) -> str:
+    """an sdk file beside its textures: nodes a and b, triangles, both
+    holding the one phong "fx", its colour fed by grad.png on UV set map1
+    with V clamped, and a bump map, spec.png, on a slot the fork does not
+    read"""
+    path = os.path.join(folder, "shared.fbx")
+    grad = os.path.join(folder, "grad.png")
+    spec = os.path.join(folder, "spec.png")
+    Image.fromarray(gradient()).save(grad)
+    Image.fromarray(gradient()[:, :, ::-1].copy()).save(spec)
+    manager = FBX.FbxManager.Create()
+    manager.SetIOSettings(FBX.FbxIOSettings.Create(manager, FBX.IOSROOT))
+    try:
+        scene = FBX.FbxScene.Create(manager, "")
+        fx    = FBX.FbxSurfacePhong.Create(scene, "fx")
+        for prop, name, filename in ((fx.Diffuse, "colorMap", grad), (fx.Bump, "bumpMap", spec)):
+            tex = FBX.FbxFileTexture.Create(scene, name)
+            tex.SetFileName(filename)
+            tex.SetRelativeFileName(os.path.basename(filename))
+            tex.SetTextureUse(FBX.FbxTexture.ETextureUse.eStandard)
+            tex.SetMappingType(FBX.FbxTexture.EMappingType.eUV)
+            tex.UVSet.Set(FBX.FbxString("map1"))
+            tex.WrapModeV.Set(_enum(FBX.FbxTexture, "EWrapMode", "eClamp"))
+            prop.ConnectSrcObject(tex)
+        for name in ("a", "b"):
+            node = FBX.FbxNode.Create(scene, name)
+            scene.GetRootNode().AddChild(node)
+            shape = FBX.FbxMesh.Create(scene, name + "Shape")
+            shape.InitControlPoints(3)
+            for i, point in enumerate(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0))):
+                shape.SetControlPointAt(FBX.FbxVector4(*point, 1.0), i)
+            shape.BeginPolygon(-1, -1, -1, False)
+            for v in (0, 1, 2):
+                shape.AddPolygon(v)
+            shape.EndPolygon()
+            node.SetNodeAttribute(shape)
+            node.AddMaterial(fx)
+            made = shape.CreateElementMaterial()
+            made.SetMappingMode(FBX.FbxLayerElement.EMappingMode.eAllSame)
+            made.SetReferenceMode(FBX.FbxLayerElement.EReferenceMode.eIndexToDirect)
+            made.GetIndexArray().Add(0)
+        exporter = FBX.FbxExporter.Create(manager, "")
+        if not exporter.Initialize(path, -1, manager.GetIOSettings()):
+            raise RuntimeError(f"cannot write {path}")
+        exporter.Export(scene)
+        exporter.Destroy()
+    finally:
+        manager.Destroy()
+    return path
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestReadOptions(_Files):
+    """load_fbx's flags: a kind left unread is None, a texture named by many
+    materials is decoded once and shared, verbose False silences the read"""
+
+    def everything(self) -> str:
+        """our writer's file: the nodes, two meshes, a UV set, three
+        materials (one textured), a camera and a light"""
+        nodes = rig()
+        nodes.append(TransformData("cam"))
+        nodes.append(TransformData("lamp"))
+        held = meshes(nodes)
+        path = self.path("all.fbx")
+        save_fbx(
+            path, nodes, meshes=held, uvs=UVList([plane_uvs(held[0])]), materials=materials(held),
+            cameras = CameraList([CameraData(name="cam", focal_length=50.0, parent_uuid=nodes["cam"].uuid)]),
+            lights  = LightList([LightData(name="lamp", kind="point", intensity=2.0, parent_uuid=nodes["lamp"].uuid)]),
+        )
+        return path
+
+    def test_a_kind_left_unread_is_none(self):
+        path  = self.everything()
+        every = load_fbx(path)
+        #                                                  hierarchy clip meshes skins uvs cameras lights materials morphs
+        self.assertEqual([x is not None for x in every], [True, False, True, False, True, True, True, True, False])
+        self.assertEqual(every.hierarchy.name, ["plane", "box", "cam", "lamp"])
+
+        no_meshes = load_fbx(path, meshes=False)
+        self.assertEqual([x is not None for x in no_meshes], [True, False, False, False, False, True, True, False, False])
+        self.assertEqual(no_meshes.hierarchy.name, every.hierarchy.name)
+
+        some = load_fbx(path, uvs=False, materials=False, cameras=False)
+        self.assertEqual([x is not None for x in some], [True, False, True, False, False, False, True, False, False])
+        self.assertEqual(some.meshes.name, every.meshes.name)
+        self.assertEqual(some.lights.name, ["lamp"])
+
+        bare = load_fbx(path, textures=False).materials
+        self.assertEqual([m.name for m in bare], ["skinLambert", "shinyPhong", "boxPhong"])
+        self.assertEqual(
+            (bare[0].texture, bare[0].texture_file, bare[0].uv_set, bare[0].wrap_u, bare[0].wrap_v), (None, "grad.png", "map1", "repeat", "clamp")
+        )
+        np.testing.assert_array_equal(every.materials[0].texture, gradient())
+        self.assertEqual(bare[1], every.materials[1])
+
+    def test_takes_off_gives_the_nodes_at_their_own_values(self):
+        clip                      = ClipData(rig(), frames=3, fps=24.0, take="spin")
+        clip.frames["box"].rotate = np.array([[0.0, 0.0, 0.0], [0.0, 45.0, 0.0], [0.0, 90.0, 0.0]])
+        path                      = self.path("spin.fbx")
+        save_fbx(path, clip=clip)
+        with_takes = load_fbx(path)
+        self.assertIsNone(with_takes.hierarchy)
+        self.assertEqual([take.take for take in with_takes.clip], ["spin"])
+        without = load_fbx(path, takes=False)
+        self.assertIsNone(without.clip)
+        self.assertEqual(without.hierarchy.name, ["plane", "box"])
+        np.testing.assert_allclose(without.hierarchy["box"].translate, [3.0, 0.0, 0.0], rtol=0, atol=1e-12)
+
+    def test_skins_off_gives_the_nodes_their_own_values_not_the_bind_pose(self):
+        source = bundle()
+        save_fbx(self.path("a.fbx"), **source)
+
+        def moved(scene):
+            _named(scene, "spine").LclRotation.Set(FBX.FbxDouble3(40.0, -20.0, 7.0))
+
+        path  = _edited(self.path("a.fbx"), self.path("moved.fbx"), moved)
+        bound = load_fbx(path)
+        self.assertIsNotNone(bound.skins)
+        np.testing.assert_allclose(bound.hierarchy.world_matrix, source["hierarchy"].world_matrix, rtol=0, atol=1e-9)
+        own = load_fbx(path, skins=False, takes=False)
+        self.assertIsNone(own.skins)
+        self.assertEqual(own.hierarchy.name, bound.hierarchy.name)
+        np.testing.assert_allclose(own.hierarchy["spine"].rotate, [40.0, -20.0, 7.0], rtol=0, atol=1e-9)
+        self.assertIsNone(load_fbx(path, skins=False).hierarchy)  # the takes hold the nodes
+
+    def test_a_texture_file_is_decoded_once_and_each_case_warned_once(self):
+        """one phong on two nodes: its colour map one array both materials
+        share, decoded once; its bump map named once in the one warning"""
+        path = shared_texture(self.folder)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with mock.patch("cgmath.formats._load._pixels", wraps=_load_module._pixels) as decoded:
+                back = load_fbx(path)
+        self.assertEqual(decoded.call_count, 1)
+        self.assertEqual([m.name for m in back.materials], ["fx", "fx"])
+        self.assertEqual([m.mesh_uuid for m in back.materials], [mesh.uuid for mesh in back.meshes])
+        self.assertIs(back.materials[0].texture, back.materials[1].texture)
+        np.testing.assert_array_equal(back.materials[0].texture, gradient())
+        self.assertEqual((back.materials[0].uv_set, back.materials[0].wrap_u, back.materials[0].wrap_v), ("map1", "repeat", "clamp"))
+        messages = [str(w.message) for w in caught]
+        left     = [m for m in messages if "textures on slots" in m]
+        self.assertEqual(len(left), 1, messages)
+        self.assertEqual(left[0].count("material 'fx' Bump"), 1, left[0])
+        self.assertEqual([m for m in messages if "textures on slots" not in m], [])
+
+    def test_verbose_false_silences_the_read(self):
+        path = shared_texture(self.folder)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            loud  = load_fbx(path)
+            quiet = load_fbx(path, verbose=False)
+            scene = Scene.load_fbx(path, verbose=False, textures=False)
+            mesh  = MeshData.load_fbx(path, verbose=False)
+        self.assertEqual(len(caught), 1, [str(w.message) for w in caught])  # the loud read's
+        self.assertEqual(quiet.materials[0], loud.materials[0])
+        self.assertEqual((scene.materials[0].texture, scene.materials[0].texture_file), (None, "grad.png"))
+        self.assertEqual(mesh.name, "aShape")
+        # the filter is the read's alone
+        with warnings.catch_warnings(record=True) as again:
+            warnings.simplefilter("always")
+            load_fbx(path)
+        self.assertEqual(len(again), 1)
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")

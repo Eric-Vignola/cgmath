@@ -711,6 +711,25 @@ class TestFbx(_Files):
         with self.assertRaisesRegex(TypeError, r"^Data\.load\(\) builds nothing: a file names no class"):
             Data.load(path)
 
+    def test_the_fbx_routes_take_the_read_s_flags(self):
+        """Scene.load hands load_fbx's flags on; a class route takes verbose
+        and its own arguments alone, the rest refused before the read"""
+        nodes = self.rig()
+        nodes.append(TransformData("geo", uuid=str(uuid.uuid4()).upper()))
+        mesh             = quad()
+        mesh.parent_uuid = nodes["geo"].uuid
+        path             = Scene("s", hierarchy=nodes, meshes=MeshList([mesh])).save(self.path("q.fbx"))
+        self.assertIsNone(Scene.load(path, meshes=False).meshes)
+        self.assertEqual(Scene.load(path, verbose=False).meshes.name, ["quadShape"])
+        self.assertEqual(MeshData.load(path, verbose=False).name,     "quadShape")
+        self.assertEqual(hierarchy.load(path, verbose=False).name,    ["root", "hip", "geo"])
+        with self.assertRaisesRegex(TypeError, r"load_fbx: .*'meshes'.*; it takes name, verbose$"):
+            MeshData.load(path, meshes=False)
+        with self.assertRaisesRegex(TypeError, r"load_fbx: .*'textures'.*; it takes verbose$"):
+            HierarchyData.load(path, textures=False)
+        with self.assertRaisesRegex(TypeError, r"^load_fbx\(\) got an unexpected keyword argument 'nope'$"):
+            Scene.load(path, nope=False)  # Scene's route takes every flag: load_fbx itself refuses one it lacks
+
 
 class TestMeshObj(_Files):
     """MeshData.save_obj writes the mesh's normals, every face corner naming its own"""

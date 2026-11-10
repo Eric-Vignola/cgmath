@@ -486,17 +486,18 @@ class SkinData(Data):
     # ----------------------------------- FBX ------------------------------------ #
 
     @classmethod
-    def load_fbx(cls, filename: str, name: str | None = None) -> "SkinData":
+    def load_fbx(cls, filename: str, name: str | None = None, verbose: bool = True) -> "SkinData":
         """the skin of the first skinned mesh of an fbx file, or of the mesh
-        named ``name``, as :func:`cgmath.formats.load_fbx` reads it: named as
-        its deformer is, naming its mesh by ``mesh_uuid``, its influences the
-        joints' names. RuntimeError for a file with no skin, ValueError for a
-        name no skinned mesh has.
+        named ``name``, as :func:`cgmath.formats.load_fbx` reads it, the
+        nodes, meshes and skins alone read: named as its deformer is, naming
+        its mesh by ``mesh_uuid``, its influences the joints' names.
+        RuntimeError for a file with no skin, ValueError for a name no
+        skinned mesh has; ``verbose`` False silences the read's warnings.
         """
-        from cgmath.formats import load_fbx
+        from cgmath.formats._load import load_only
         from cgmath.geometry.mesh import _fbx_select
 
-        held = load_fbx(filename)
+        held = load_only(filename, meshes=True, skins=True, verbose=verbose)
         if not held.skins:
             raise RuntimeError("No skinned meshes found in FBX file")
         skinned = {skin.mesh_uuid: skin for skin in held.skins}
@@ -927,16 +928,17 @@ _SPARSE_WEIGHTS = "__sparse_weights__"
 
 class SkinList(DataList[SkinData]):
     @classmethod
-    def load_fbx(cls, filename: str) -> "SkinList":
+    def load_fbx(cls, filename: str, verbose: bool = True) -> "SkinList":
         """
         Every skinned mesh's skin, in file order, as
-        :func:`cgmath.formats.load_fbx` reads them (:meth:`SkinData.load_fbx`);
-        empty for a file with none. Names and influences are as in the file;
+        :func:`cgmath.formats.load_fbx` reads them, the nodes, meshes and
+        skins alone read (:meth:`SkinData.load_fbx`); empty for a file with
+        none. Names and influences are as in the file;
         ``strip_namespace()`` removes namespaces afterwards.
         """
-        from cgmath.formats import load_fbx
+        from cgmath.formats._load import load_only
 
-        return load_fbx(filename).skins or cls()
+        return load_only(filename, meshes=True, skins=True, verbose=verbose).skins or cls()
 
     @classmethod
     def load_glb(cls, filename: str) -> "SkinList":
@@ -1086,9 +1088,9 @@ def load(filename: str, mode: Optional[str] = None, **kwargs) -> SkinList:
     return SkinList.load(filename, mode, **kwargs)
 
 
-def load_fbx(filename: str) -> SkinList:
+def load_fbx(filename: str, verbose: bool = True) -> SkinList:
     """Every skinned mesh of an fbx, names as in the file: ``SkinList.load_fbx()``."""
-    return SkinList.load_fbx(filename)
+    return SkinList.load_fbx(filename, verbose=verbose)
 
 
 def load_glb(filename: str) -> SkinList:

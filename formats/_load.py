@@ -16,6 +16,7 @@ axis is Y is left in its own axes whatever its front, as Maya leaves it, a
 left handed one is refused, and the file's unit is converted.
 """
 
+import contextlib
 import os
 import warnings
 from collections import namedtuple
@@ -46,9 +47,23 @@ FbxContents = namedtuple(
 )
 
 
-def load_fbx(filename) -> FbxContents:
+def load_fbx(
+    filename,
+    *,
+    takes:     bool = True,
+    meshes:    bool = True,
+    uvs:       bool = True,
+    skins:     bool = True,
+    materials: bool = True,
+    textures:  bool = True,
+    morphs:    bool = True,
+    cameras:   bool = True,
+    lights:    bool = True,
+    verbose:   bool = True,
+) -> FbxContents:
     """``(hierarchy, clip, meshes, skins, uvs, cameras, lights, materials,
-    morphs)``, None where the file holds none
+    morphs)``, None where the file holds none, or where the read was told to
+    leave a kind out (the flags below)
 
     ``hierarchy`` every node of the file at its own values, a mesh's node
     among them; None for a file holding a take, whose nodes ``clip`` holds at
@@ -163,8 +178,46 @@ def load_fbx(filename) -> FbxContents:
     ones); curves on two layers, or on a muted one, raise
     NotImplementedError. A take covers its stored span widened to its
     keys: an Unreal export stores the span a frame short of its last key.
+
+    The flags leave a kind unread, its field None, so a caller after one
+    thing pays for that alone: ``takes`` the animation stacks (the nodes
+    then come back as ``hierarchy`` at their own values), ``meshes`` the
+    meshes and with them everything on a mesh, ``uvs``, ``skins`` (without
+    skins ``hierarchy`` is the nodes' own values, not the bind pose),
+    ``materials``, ``morphs``, ``cameras`` and ``lights``; ``textures``
+    False keeps each material's ``texture_file``, UV set and wraps but
+    decodes no pixels, ``texture`` None. The hierarchy is always read. A
+    texture file is decoded once a read, however many materials name it,
+    which all share the one array. ``verbose`` False silences the read's
+    warnings.
     """
-    read = _open(filename, True, True)
+    parts = {
+        "takes":     takes,
+        "meshes":    meshes,
+        "uvs":       uvs,
+        "skins":     skins,
+        "materials": materials,
+        "textures":  textures,
+        "morphs":    morphs,
+        "cameras":   cameras,
+        "lights":    lights,
+    }
+    with _quiet(verbose):
+        return _load(filename, parts)
+
+
+@contextlib.contextmanager
+def _quiet(verbose: bool):
+    """the read's warnings, silenced unless ``verbose``"""
+    with warnings.catch_warnings():
+        if not verbose:
+            warnings.simplefilter("ignore")
+        yield
+
+
+def _load(filename, parts: dict) -> FbxContents:
+    """:func:`load_fbx`'s read of the kinds ``parts`` turns on"""
+    read = _open(filename, parts)
     hierarchy, order = _build(read)
     # Maya's FBXExport writes a take whether anything moves or not: a take
     # over no node is no clip
@@ -173,13 +226,13 @@ def load_fbx(filename) -> FbxContents:
     rank = {at: column for column, at in enumerate(order)}
     for kind in ("meshes", "cameras", "lights"):
         read[kind].sort(key=lambda held: rank[held["node"]])
-    meshes    = _build_meshes(read)
-    uvs       = _build_uvs(read, meshes)
-    cameras   = _build_cameras(read)
-    lights    = _build_lights(read)
-    materials = _build_materials(read, meshes)
-    morphs    = _build_morphs(read, meshes)
-    if any(held["skin"] is not None for held in read["meshes"]):
+    meshes    = _build_meshes(read) if parts["meshes"] else None
+    uvs       = _build_uvs(read, meshes) if parts["uvs"] else None
+    cameras   = _build_cameras(read) if parts["cameras"] else None
+    lights    = _build_lights(read) if parts["lights"] else None
+    materials = _build_materials(read, meshes) if parts["materials"] else None
+    morphs    = _build_morphs(read, meshes) if parts["morphs"] else None
+    if parts["skins"] and any(held["skin"] is not None for held in read["meshes"]):
         bind, order = _build(read)
         _settle_bind(read, bind, order)
         return FbxContents(bind, clip, meshes, _build_skins(read, meshes), uvs, cameras, lights, materials, morphs)
@@ -188,25 +241,40 @@ def load_fbx(filename) -> FbxContents:
     return FbxContents(hierarchy if len(hierarchy) else None, None, meshes, None, uvs, cameras, lights, materials, morphs)
 
 
-def load_nodes(filename):
+# the reads of one kind: the nodes alone, and the nodes with their takes
+_PARTS_NODES = {kind: False for kind in ("takes", "meshes", "uvs", "skins", "materials", "textures", "morphs", "cameras", "lights")}
+_PARTS_TAKES = dict(_PARTS_NODES, takes=True)
+
+
+def load_nodes(filename, verbose: bool = True):
     """the HierarchyData of an fbx file's nodes at their own values, whether
     it holds a take or not (the take left unread), a mesh's node among them,
-    its shape left out"""
-    return _build(_open(filename, False, False))[0]
+    its shape left out; ``verbose`` False silences the read's warnings"""
+    with _quiet(verbose):
+        return _build(_open(filename, _PARTS_NODES))[0]
 
 
-def load_takes(filename):
+def load_takes(filename, verbose: bool = True):
     """the ClipList of an fbx file's takes over every node, a mesh's among
     them, its shape and skin left out, the file's active take active; None
-    for a file holding no take, or no node"""
-    read = _open(filename, True, False)
-    if read["takes"] is None or not read["nodes"]:
-        return None
-    hierarchy, order = _build(read)
-    return _build_clips(read, hierarchy, order)
+    for a file holding no take, or no node; ``verbose`` False silences the
+    read's warnings"""
+    with _quiet(verbose):
+        read = _open(filename, _PARTS_TAKES)
+        if read["takes"] is None or not read["nodes"]:
+            return None
+        hierarchy, order = _build(read)
+        return _build_clips(read, hierarchy, order)
 
 
-def _open(filename, take: bool, meshes: bool = False) -> dict:
+def load_only(filename, *, verbose: bool = True, **kinds) -> FbxContents:
+    """:func:`load_fbx` with every kind off but the ``kinds`` named True,
+    the class routes' read: ``load_only(path, meshes=True)`` reads the
+    nodes and the meshes alone"""
+    return load_fbx(filename, verbose=verbose, **dict(_PARTS_NODES, **kinds))
+
+
+def _open(filename, parts: dict) -> dict:
     # imported here: the classes' modules import this one
     from cgmath.formats._fbx_io import open_fbx
     from cgmath.hierarchy.hierarchy import FBX
@@ -218,9 +286,11 @@ def _open(filename, take: bool, meshes: bool = False) -> dict:
         raise FileNotFoundError(filename)
 
     # with the meshes come their materials, whose embedded textures are
-    # extracted to a temporary folder for the read
-    with open_fbx(filename, FBX, media=meshes) as scene:
-        return _read(scene, FBX, take, meshes, filename)
+    # extracted to a temporary folder for the read, when their pixels are
+    # read at all
+    media = bool(parts["meshes"] and parts["materials"] and parts["textures"])
+    with open_fbx(filename, FBX, media=media) as scene:
+        return _read(scene, FBX, parts, filename)
 
 
 def _walk(scene) -> list:
@@ -243,11 +313,12 @@ def _amatrix(matrix) -> np.ndarray:
     return np.array([[matrix.Get(row, column) for column in range(4)] for row in range(4)], dtype=np.float64)
 
 
-def _read_mesh(node, at: int, filename: str, fbx) -> dict:
+def _read_mesh(node, at: int, filename: str, fbx, parts: dict, cache: dict) -> dict:
     """the mesh on the node at place ``at`` of the file's nodes: its name,
-    points, faces, normals, one a face corner, UV sets and materials;
-    ValueError for a node holding a geometric transform, which no field
-    holds, or a mesh holding holes"""
+    points, faces, normals, one a face corner, and its UV sets, materials
+    and targets where ``parts`` turns them on (``cache`` the read's decoded
+    textures by file); ValueError for a node holding a geometric transform,
+    which no field holds, or a mesh holding holes"""
     from cgmath.formats._fbx_io import typed
     from cgmath.geometry.mesh import (
         _fbx_control_points,
@@ -279,9 +350,9 @@ def _read_mesh(node, at: int, filename: str, fbx) -> dict:
     points = _fbx_control_points(shape)
     colors, color_ids = _read_colors(shape, counts, label, fbx)
     return {
-        "uvs":            _read_uvs(label, shape, counts, fbx),
-        "materials":      _read_materials(node, shape, counts, label, filename, fbx),
-        "morphs":         _read_morphs(shape, points, label, fbx),
+        "uvs":            _read_uvs(label, shape, counts, fbx) if parts["uvs"] else [],
+        "materials":      _read_materials(node, shape, counts, label, filename, fbx, parts["textures"], cache) if parts["materials"] else [],
+        "morphs":         _read_morphs(shape, points, label, fbx) if parts["morphs"] else [],
         "name":           name,
         "label":          label,
         "node":           at,
@@ -496,19 +567,18 @@ def _pixels(image) -> np.ndarray:
     return pixels[:, :, None] if pixels.ndim == 2 else pixels
 
 
-def _read_texture(texture, filename: str, fbx) -> dict:
+def _read_texture(texture, filename: str, fbx, pixels: bool = True, cache=None) -> dict:
     """a file texture, as the fields of a material: its pixels through PIL,
     its file name, UV set and wrap modes; ``pixels`` None with ``missing``
     the path when the file is not found, at its own path, by its relative
     name beside ``filename`` (the .fbx) or by its own name there, and
-    ``no_pil`` True when PIL is not installed"""
+    ``no_pil`` True when PIL is not installed. ``pixels`` False names the
+    file and decodes nothing; ``cache`` holds the read's decoded files by
+    path, so a file many materials name is decoded once and shared"""
     from cgmath.formats._write import _pil
 
     path     = str(texture.GetFileName())
     relative = str(texture.GetRelativeFileName())
-    beside   = os.path.dirname(os.path.abspath(filename))
-    tried    = [x for x in (path, os.path.join(beside, relative) if relative else "", os.path.join(beside, os.path.basename(path)) if path else "") if x]
-    found    = next((x for x in tried if os.path.isfile(x)), None)
     wraps    = {_enum_int(_fbx_enum_of(fbx.FbxTexture, "EWrapMode", x)): mode for x, mode in (("eRepeat", "repeat"), ("eClamp", "clamp"))}
     uv_set   = str(texture.UVSet.Get())
     held = {
@@ -520,6 +590,11 @@ def _read_texture(texture, filename: str, fbx) -> dict:
         "missing": None,
         "no_pil":  False,
     }
+    if not pixels:
+        return held
+    beside = os.path.dirname(os.path.abspath(filename))
+    tried  = [x for x in (path, os.path.join(beside, relative) if relative else "", os.path.join(beside, os.path.basename(path)) if path else "") if x]
+    found  = next((x for x in tried if os.path.isfile(x)), None)
     if found is None:
         held["missing"] = path or relative
         return held
@@ -527,8 +602,14 @@ def _read_texture(texture, filename: str, fbx) -> dict:
     if Image is None:
         held["no_pil"] = True
         return held
-    with Image.open(found) as image:
-        held["pixels"] = np.array(_pixels(image))
+    key    = os.path.normcase(os.path.abspath(found))
+    shared = None if cache is None else cache.get(key)
+    if shared is None:
+        with Image.open(found) as image:
+            shared = np.array(_pixels(image))
+        if cache is not None:
+            cache[key] = shared
+    held["pixels"] = shared
     return held
 
 
@@ -561,14 +642,15 @@ def _file_texture(prop, fbx):
     return None, other
 
 
-def _read_materials(node, shape, counts, label: str, filename: str, fbx) -> list:
+def _read_materials(node, shape, counts, label: str, filename: str, fbx, pixels: bool = True, cache=None) -> list:
     """the materials the mesh's material element assigns faces to, in the
     node's order: each its name, kind, Maya's attributes off the file's
     properties (a colour times its factor, the diffuse colour and factor
     apart, which are Maya's color and diffuse), its faces, and its colour
-    map through :func:`_read_texture`; a material of another shading model
-    a default lambert, flagged ``bare``; textures on other slots, or that
-    are no file texture, listed in ``left`` by slot"""
+    map through :func:`_read_texture` (``pixels`` and ``cache`` as it takes
+    them); a material of another shading model a default lambert, flagged
+    ``bare``; textures on other slots, or that are no file texture, listed
+    in ``left`` by slot"""
     from cgmath.formats._fbx_io import typed
 
     count = node.GetMaterialCount()
@@ -607,7 +689,7 @@ def _read_materials(node, shape, counts, label: str, filename: str, fbx) -> list
                 file, other = _file_texture(prop, fbx)
                 slot = str(prop.GetName())
                 if slot == COLOUR_SLOT and file is not None:
-                    texture = _read_texture(file, filename, fbx)
+                    texture = _read_texture(file, filename, fbx, pixels, cache)
                 elif file is not None or other:
                     left.append(slot)
             prop = material.GetNextProperty(prop)
@@ -721,11 +803,12 @@ def _read_skin(scene, node, at: int, label: str, shape, found, fbx) -> dict:
     }
 
 
-def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "") -> dict:
+def _read(scene, fbx, parts: dict, filename: str = "") -> dict:
     """everything the build needs, out of the scene as python and numpy, in
-    Maya's Y-up and cm (:func:`_convert`): every node, one uuid each, every
-    take's curves and the active take's position unless not ``take``, and
-    with ``meshes`` each mesh and its skin, else the meshes left unread"""
+    Maya's Y-up and cm (:func:`_convert`): every node, one uuid each, and
+    the kinds ``parts`` turns on (:func:`load_fbx`'s flags): every take's
+    curves and the active take's position, each mesh with what sits on it,
+    its skin, the cameras and the lights"""
     from cgmath.formats._fbx_io import typed
     from cgmath.hierarchy.hierarchy import (
         _FBX_ROTATE_ORDERS,
@@ -746,17 +829,19 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "
     shapes  = []
     cameras = []
     lights  = []
-    if meshes:
+    cache   = {}
+    if parts["meshes"] or parts["cameras"] or parts["lights"]:
         for at, (node, _) in enumerate(found):
             attribute = node.GetNodeAttribute()
             kind      = None if attribute is None else attribute.GetAttributeType()
-            if kind == kinds.eMesh:
-                mesh         = _read_mesh(node, at, filename, fbx)
-                mesh["skin"] = _read_skin(scene, node, at, mesh["label"], mesh.pop("shape"), found, fbx)
+            if kind == kinds.eMesh and parts["meshes"]:
+                mesh         = _read_mesh(node, at, filename, fbx, parts, cache)
+                shape        = mesh.pop("shape")
+                mesh["skin"] = _read_skin(scene, node, at, mesh["label"], shape, found, fbx) if parts["skins"] else None
                 shapes.append(mesh)
-            elif kind == kinds.eCamera:
+            elif kind == kinds.eCamera and parts["cameras"]:
                 cameras.append(_read_camera(node, at, fbx))
-            elif kind == kinds.eLight:
+            elif kind == kinds.eLight and parts["lights"]:
                 lights.append(_read_light(node, at, fbx))
     nodes = []
     for node, parent in found:
@@ -853,7 +938,7 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "
 
     # a bind pose (FbxPose) is left out: no node takes its values from one
     read = {"nodes": nodes, "takes": None, "active": 0, "meshes": shapes, "cameras": cameras, "lights": lights}
-    if take:
+    if parts["takes"]:
         read["takes"], read["active"] = _takes(scene, fbx, found, nodes)
     _fold_pivots(read)
     _turn_views(read)
@@ -1727,9 +1812,10 @@ def _build_lights(read: dict):
 def _build_materials(read: dict, meshes):
     """the MaterialList of the meshes' materials, mesh by mesh in the
     meshes' order, each naming its mesh by uuid; None for none. One warning
-    each for: materials of another shading model, read as default lamberts;
-    textures on slots the fork does not read, or that are no file texture;
-    texture files not found; textures with no PIL to decode them"""
+    each, naming each material and slot once: materials of another shading
+    model, read as default lamberts; textures on slots the fork does not
+    read, or that are no file texture; texture files not found; textures
+    with no PIL to decode them"""
     import warnings
 
     from cgmath.geometry.material import MaterialData, MaterialList
@@ -1761,6 +1847,8 @@ def _build_materials(read: dict, meshes):
                 if texture["no_pil"]:
                     no_pil.append(entry["label"])
             materials.append(MaterialData(name=entry["name"], mesh_uuid=mesh.uuid, faces=entry["faces"], **fields))
+    # a material on many meshes is read once a mesh: each case named once
+    bare, left, missing, no_pil = (list(dict.fromkeys(held)) for held in (bare, left, missing, no_pil))
     if bare:
         warnings.warn(
             f"load_fbx: {', '.join(bare)}: {FORK} reads lambert and phong materials; read as a default lambert of its name",

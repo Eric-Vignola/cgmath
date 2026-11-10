@@ -150,6 +150,25 @@ for take in held.clip or []:                  # a ClipList, one ClipData per tak
 save_fbx("copy.fbx", *held)                   # the same fields, the same file
 ```
 
+Each kind is a flag, `True` by default: `takes`, `meshes` (and with them
+everything on a mesh), `uvs`, `skins`, `materials`, `textures`, `morphs`,
+`cameras`, `lights`. A kind left unread is `None`, so a caller after one
+thing pays for that alone; the nodes are always read. `takes=False` gives
+them as `hierarchy` at their own values, and so does `skins=False` (the
+bind pose comes with the skins); `textures=False` keeps each material's
+`texture_file`, UV set and wraps and decodes no pixels. A texture file is
+decoded once a read, however many materials name it, which share the one
+array. `verbose=False` silences the read's warnings. The class routes read
+their kinds alone (`MeshData.load_fbx` the nodes and the meshes,
+`UVList.load_fbx` the UV sets too, `SkinList.load_fbx` the skins) and take
+`verbose`; `Scene.load_fbx` takes every flag.
+
+<!-- notest: no .fbx asset ships with this repo -->
+```python
+held = load_fbx("hero.fbx", takes=False, materials=False, morphs=False)   # nodes, meshes, UV sets, skins, cameras, lights
+print(held.clip, held.materials, held.morphs)                             # None None None
+```
+
 The FBX SDK frees what it read only when told to; every FBX reader in
 cgmath frees its memory before it returns, and none of them writes anything
 next to the file. An `FbxExporter` holds its scene until `close()`; a `with`

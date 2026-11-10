@@ -7773,13 +7773,14 @@ class TransformList(DataList[TransformData]):
         return hierarchy_data
 
     @classmethod
-    def load_fbx(cls, filename):
+    def load_fbx(cls, filename, verbose: bool = True):
         """the nodes of an fbx file at their own values, whether it holds a
         take or not, a mesh's node among them (its shape left out): a
-        HierarchyData, or a view of its nodes' copies"""
+        HierarchyData, or a view of its nodes' copies; ``verbose`` False
+        silences the read's warnings"""
         from cgmath.formats._load import load_nodes
 
-        skeleton = load_nodes(filename)
+        skeleton = load_nodes(filename, verbose)
         if issubclass(cls, HierarchyData):
             if cls is not HierarchyData:
                 raise NotImplementedError(f"{cls.__name__}.load_fbx: {_FORK} reads a HierarchyData skeleton")
@@ -14514,14 +14515,15 @@ class ClipData(HierarchyData):
         return _glb_take_clip(cls, model, rig, column, animations, animation, scale_factor, fps, start_frame, take)
 
     @classmethod
-    def load_fbx(cls, filename) -> "ClipData":
+    def load_fbx(cls, filename, verbose: bool = True) -> "ClipData":
         """the active take of an fbx file over every node, as
         ``cgmath.formats.load_fbx`` reads the file's takes
         (``ClipList.load_fbx`` gives them all), the meshes and skins left
-        out; ValueError for a file holding no take"""
+        out; ValueError for a file holding no take; ``verbose`` False
+        silences the read's warnings"""
         from cgmath.formats._load import load_takes
 
-        clips = load_takes(filename)
+        clips = load_takes(filename, verbose)
         if clips is None:
             raise ValueError(f"{filename} holds no take")
         return clips.active
@@ -15601,16 +15603,17 @@ class ClipList(DataList[ClipData]):
 
     # --- reading a file's takes --- #
     @classmethod
-    def load_fbx(cls, filename) -> "ClipList":
+    def load_fbx(cls, filename, verbose: bool = True) -> "ClipList":
         """every take of an fbx file over every node, as
         ``cgmath.formats.load_fbx`` reads them, the meshes and skins left
         out: a ClipList in file order, the file's active take active, empty
-        for a file holding no take"""
+        for a file holding no take; ``verbose`` False silences the read's
+        warnings"""
         from cgmath.formats._load import load_takes
 
         if cls is not ClipList:
             raise NotImplementedError(f"{cls.__name__}.load_fbx: {_FORK} reads a ClipList")
-        clips = load_takes(filename)
+        clips = load_takes(filename, verbose)
         return ClipList() if clips is None else clips
 
     @classmethod
@@ -15760,9 +15763,9 @@ def load(filename: str, mode: Optional[str] = None, **kwargs) -> "HierarchyData"
     return HierarchyData.load(filename, mode, **kwargs)
 
 
-def load_fbx(filename: str) -> "HierarchyData":
+def load_fbx(filename: str, verbose: bool = True) -> "HierarchyData":
     """The fbx's skeleton: ``HierarchyData.load_fbx()``."""
-    return HierarchyData.load_fbx(filename)
+    return HierarchyData.load_fbx(filename, verbose=verbose)
 
 
 def load_glb(
