@@ -151,6 +151,11 @@ def load_fbx(filename) -> FbxContents:
     unit as a scale on the file's roots and its compensating joints instead,
     the numbers under them as the file has them (measured): the same scene,
     every position the same, every world's 3x3 the unit times load_fbx's.
+
+    A take's layers holding no curve are passed over (an Unreal export
+    carries empty ones); curves on two layers, or on a muted one, raise
+    NotImplementedError. A take covers its stored span widened to its
+    keys: an Unreal export stores the span a frame short of its last key.
     """
     read = _open(filename, True, True)
     hierarchy, order = _build(read)
@@ -1123,11 +1128,12 @@ def _view_keys(read: dict, fbx) -> None:
 
 def _takes(scene, fbx, found, nodes) -> tuple:
     """``(takes, active)``: every animation stack of the file, in its order,
-    each sampled on every frame of its own span, its name (:func:`_take_names`:
-    a blank one named by its position, a repeat told apart), fps, frame
-    numbers and values (:func:`_sampled`); and the position of the active
-    one, the stack ``ActiveAnimStackName`` names, else the first.
-    ``(None, 0)`` for a file holding no stack"""
+    each sampled on every frame of its span widened to its keys, its name
+    (:func:`_take_names`: a blank one named by its position, a repeat told
+    apart), fps, frame numbers and values (:func:`_sampled`) off the one
+    layer holding curves; and the position of the active one, the stack
+    ``ActiveAnimStackName`` names, else the first. ``(None, 0)`` for a file
+    holding no stack"""
     from cgmath.formats._fbx_io import typed
     from cgmath.hierarchy.hierarchy import _fbx_frame_rate, _take_names
 
@@ -1157,13 +1163,31 @@ def _takes(scene, fbx, found, nodes) -> tuple:
         last  = int(round(span.GetStop().Get() * fps / per_second))
         if last < first:
             first, last = last, first
+
+        # the layer holding curves: one holding none (an Unreal export
+        # carries empty ones) is passed over; curves on two layers, or on a
+        # muted one, blend, which the fork does not read
+        held  = [typed(stack.GetMember(layers, k), fbx.FbxAnimLayer, fbx) for k in range(stack.GetMemberCount(layers))]
+        keyed = [(layer, _layer_keys(layer, fbx)) for layer in held]
+        keyed = [(layer, keys) for layer, keys in keyed if keys is not None]
+        if len(keyed) > 1:
+            raise NotImplementedError(
+                f"load_fbx: the take {str(stack.GetName())!r} holds {len(keyed)} animation layers with curves; {FORK} reads one"
+            )
+        layer, keys = keyed[0] if keyed else (None, None)
+        if layer is not None and bool(layer.Mute.Get()):
+            raise NotImplementedError(
+                f"load_fbx: the take {str(stack.GetName())!r} holds its curves on a muted layer, which {FORK} does not read"
+            )
+
+        # the take covers its stored span and every key: an Unreal export
+        # stores the span a frame short of its last key (measured), a Maya
+        # export can store one wider than its keys
+        if keys is not None:
+            first = min(first, int(np.floor(keys[0] * fps / per_second + 1e-6)))
+            last  = max(last, int(np.ceil(keys[1] * fps / per_second - 1e-6)))
         frames = np.arange(first, last + 1)
         ticks  = np.round(frames * (per_second / fps)).astype(np.int64)
-
-        count  = stack.GetMemberCount(layers)
-        if count > 1:
-            raise NotImplementedError(f"load_fbx: the take {str(stack.GetName())!r} holds {count} animation layers; {FORK} reads one")
-        layer  = typed(stack.GetMember(layers, 0), fbx.FbxAnimLayer, fbx) if count else None
 
         curves = []
         for (node, _), entry in zip(found, nodes):
@@ -1197,6 +1221,29 @@ def _takes(scene, fbx, found, nodes) -> tuple:
             "values": _sampled(curves, ticks, per_second),
         })
     return takes, active
+
+
+def _layer_keys(layer, fbx):
+    """``(first, last)`` key time in ticks over every curve of the layer
+    holding a key, None for a layer holding none. A curve keeps its keys in
+    time order, so its first and last keys are its ends"""
+    from cgmath.formats._fbx_io import typed
+
+    criteria = fbx.FbxCriteria.ObjectType(fbx.FbxAnimCurveNode.ClassId)
+    first    = last = None
+    for j in range(layer.GetSrcObjectCount(criteria)):
+        curve_node = typed(layer.GetSrcObject(criteria, j), fbx.FbxAnimCurveNode, fbx)
+        for channel in range(curve_node.GetChannelsCount()):
+            for k in range(curve_node.GetCurveCount(channel)):
+                curve = typed(curve_node.GetCurve(channel, k), fbx.FbxAnimCurve, fbx)
+                count = curve.KeyGetCount() if curve is not None else 0
+                if not count:
+                    continue
+                lo    = int(curve.KeyGetTime(0).Get())
+                hi    = int(curve.KeyGetTime(count - 1).Get())
+                first = lo if first is None else min(first, lo)
+                last  = hi if last is None else max(last, hi)
+    return None if first is None else (first, last)
 
 
 def _sampled(curves, ticks, per_second) -> list:

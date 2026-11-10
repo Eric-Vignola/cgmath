@@ -91,7 +91,10 @@ a side effect (`-1` for roots).
 turns it, leaves a Y-up file in its own axes, refuses a left-handed one, and
 converts the file's unit to centimetres: every cgmath value is in Maya's
 Y-up, right-handed, cm. A take is a `ClipData` of one `ClipList`, keyed on
-every frame, the file's active stack the active take.
+every frame of its stored span widened to its keys (an Unreal export stores
+the span a frame short of its last key), the file's active stack the active
+take; a take's layers holding no curve are passed over, curves on two
+layers, or on a muted one, are refused.
 
 ### fbx: a shape names its node, a skin or a set names its mesh
 
