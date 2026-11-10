@@ -7173,6 +7173,73 @@ class TestColors(unittest.TestCase):
                 self.assertEqual((mesh.colors, mesh.color_indices), (None, None))
 
 
+class TestTopologyHash(unittest.TestCase):
+    """the signature of a mesh's structure: its vertex numbering and face
+    order, nothing else; stable across sessions"""
+
+    STRIP = "cf9714d8646c6088f42ca32f1feee6d3"  # pinned: the format must not drift unnoticed
+
+    def test_the_value_is_stable_and_pinned(self):
+        held = _strip().topology_hash
+        self.assertEqual(held, self.STRIP)
+        self.assertEqual((len(held), set(held) <= set("0123456789abcdef")), (32, True))
+        self.assertEqual(_strip().topology_hash, held)
+
+    def test_what_plays_no_part(self):
+        for label, change in (
+            ("a copy", lambda m: m.copy()),
+            ("another name", lambda m: setattr(m, "name", "other") or m),
+            ("another uuid", lambda m: setattr(m, "uuid", "00000000-0000-4000-8000-000000000042") or m),
+            ("moved points", lambda m: setattr(m, "points", np.asarray(m.points) * 3.0 + 1.0) or m),
+            ("normals", lambda m: m.set_normals(hard_edge_angle=20.0) or m),
+            ("colours", lambda m: setattr(m, "colors", np.ones((6, 4))) or m),
+            ("int64 streams", lambda m: MeshData(points=m.points, indices=np.asarray(m.indices, dtype=np.int64), counts=np.asarray(m.counts, dtype=np.int64))),
+        ):
+            with self.subTest(label):
+                self.assertEqual(change(_strip()).topology_hash, self.STRIP)
+
+    def test_what_changes_it(self):
+        def deleted(m):
+            m.delete_faces([1])
+            return m
+
+        def reversed_face(m):
+            m.indices = np.concatenate([np.asarray(m.indices[:4])[::-1], m.indices[4:]])
+            return m
+
+        def swapped_vertices(m):
+            indices = np.asarray(m.indices).copy()
+            indices[indices == 0], indices[indices == 1] = 1, 0
+            return MeshData(points=m.points, indices=indices, counts=m.counts)
+
+        def unreferenced_vertex(m):
+            m.points = np.concatenate([m.points, [[9.0, 9.0, 9.0]]])
+            return m
+
+        held = {label: change(_strip()).topology_hash for label, change in (
+            ("a deleted face", deleted), ("a reversed face", reversed_face),
+            ("two vertices swapped", swapped_vertices), ("an unreferenced vertex", unreferenced_vertex),
+        )}
+        for label, value in held.items():
+            with self.subTest(label):
+                self.assertNotEqual(value, self.STRIP)
+        self.assertEqual(len(set(held.values())), 4)
+        # the hole streams are topology
+        panel           = mesh_data()
+        bare            = panel.copy()
+        bare.hole_faces = bare.hole_counts = bare.hole_indices = None
+        self.assertNotEqual(panel.topology_hash, bare.topology_hash)
+        self.assertEqual(panel.topology_hash, mesh_data().topology_hash)
+
+    def test_a_uv_set_signs_its_own_numbering(self):
+        mesh = _strip()
+        same = UVData(points=np.zeros((6, 2)), indices=mesh.indices, counts=mesh.counts)
+        cut  = UVData(points=np.zeros((8, 2)), indices=np.arange(8), counts=mesh.counts)  # a point a corner
+        self.assertEqual(same.topology_hash, mesh.topology_hash)
+        self.assertNotEqual(cut.topology_hash, mesh.topology_hash)
+        self.assertEqual(cut.topology_hash, UVData(points=np.ones((8, 2)), indices=np.arange(8), counts=mesh.counts).topology_hash)
+
+
 class TestBSplinePatchSample(unittest.TestCase):
     """
     sample() finds each query's closest point. Its Newton search used to run

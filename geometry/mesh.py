@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import locale
 import os
 import re
+import struct
 import warnings
 from dataclasses import dataclass
 from enum import Enum
@@ -682,6 +684,27 @@ class MeshData(ShapeData):
     def geometry(self):
         """returns what you'd consider the geometric construct"""
         return self.f2v
+
+    @property
+    def topology_hash(self) -> str:
+        """
+        The signature of the mesh's structure: a 32-character hex digest of
+        its vertex count, its faces (``counts`` and ``indices``) and its hole
+        streams, in that order, each behind its length. Two meshes with the
+        same value share their vertex numbering and face order, so data that
+        follows a mesh (weights, targets, UV sets, colours, materials) fits
+        either; the points, the name, the uuids, the normals, the colours and
+        the UV sets play no part. Stable across sessions and machines: blake2b
+        over little-endian int32 bytes behind a version prefix. Computed on
+        each call, so a stream written in place is seen.
+        """
+        digest = hashlib.blake2b(b"cgmath.topology.1", digest_size=16)
+        digest.update(struct.pack("<q", int(self.point_count)))
+        for stream in (self.counts, self.indices, self.hole_faces, self.hole_counts, self.hole_indices):
+            held = b"" if stream is None else np.ascontiguousarray(stream, dtype="<i4").tobytes()
+            digest.update(struct.pack("<q", len(held)))
+            digest.update(held)
+        return digest.hexdigest()
 
     @property
     def points4(self):

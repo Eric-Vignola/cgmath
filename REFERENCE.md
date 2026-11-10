@@ -1020,7 +1020,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000001C63A46E050>
+MISSING = <dataclasses._MISSING_TYPE object at 0x0000025DED6EA990>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1093,6 +1093,7 @@ shell_count                        returns the number of shells
 shell_edges                        returns the shells as edge indices
 shell_faces                        returns the shells as face indices
 shell_points                       returns the shells as point indices
+topology_hash                      The signature of the mesh's structure: a 32-character hex digest of
 triangles                          returns the triangle count for the mesh
 ue                                 
 ue2f                               
@@ -3247,7 +3248,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001C68824CF40>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000025DBB5FCFE0>, '...
 ```
 
 ## `cgmath.constraints`

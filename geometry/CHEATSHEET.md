@@ -13,7 +13,7 @@ Concepts, conventions and the file map live in [`README.md`](README.md).
 | [Setup](#setup) | fixtures: a unit cube, its UVs, two quad grids |
 | [Import surface](#import-surface) | what the package re-exports, and what it does not |
 | [`cgmath.data` — the `Data` contract](#cgmathdata--the-data-contract) | fields, round trips, `save`/`load`, equality, `DataList` |
-| [`MeshData` — the polygonal mesh](#meshdata--the-polygonal-mesh) | construction, counts, extents, placement, booleans |
+| [`MeshData` — the polygonal mesh](#meshdata--the-polygonal-mesh) | construction, counts, extents, placement, topology hash, booleans |
 | [Topology maps](#topology-maps) | `f2v` / `v2f` / `e2v` / `ue2v` …, `-1` padding, face census |
 | [Diagnostics](#diagnostics) | borders, shells, non-manifold, lamina, degenerate, unused |
 | [Normals, areas, curvature](#normals-areas-curvature) | geometric vs shading normals, `AreaMethod`, curvature, tangents |
@@ -603,6 +603,26 @@ moved             = cube.copy()
 moved.parent_uuid = under.uuid
 print(moved.world_matrix(rig)[3, :3])  # [10. 0. 0.]: where the mesh sits
 print(cube.world_matrix(rig)[3, :3])   # [0. 0. 0.]: no transform, identity
+```
+
+### Topology hash
+
+`topology_hash` is the signature of a mesh's structure: a 32-character hex
+digest of its vertex count, its faces (`counts` and `indices`) and its hole
+streams. Two meshes with the same value share their vertex numbering and
+face order, so data that follows a mesh (weights, targets, UV sets, colours,
+materials) fits either; the points, the name, the uuids, the normals, the
+colours and the UV sets play no part. Stable across sessions and machines.
+
+```python
+moved        = cube.copy()
+moved.points = moved.points * 2.0 + 1.0
+moved.name   = "elsewhere"
+print(moved.topology_hash == cube.topology_hash)   # True: the same structure
+
+refaced = cube.copy()
+refaced.delete_faces([0])
+print(len(cube.topology_hash), refaced.topology_hash == cube.topology_hash)   # 32 False
 ```
 
 ### Point arithmetic and booleans
