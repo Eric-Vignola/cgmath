@@ -23,8 +23,10 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 import cgmath
+from cgmath._tests import child_python, fresh_scene
 
 # Imports guarded by ``try: ... except ImportError`` inside the package are
 # fine -- they degrade to ``None``. This set is for modules that cannot import
@@ -68,6 +70,79 @@ def _iter_modules():
         yield name
 
 
+class TestInsideMaya(unittest.TestCase):
+    """the suite runs under python, mayapy and the Maya GUI: a child
+    interpreter is never Maya itself, and a live-scene test spares a scene
+    with unsaved changes"""
+
+    def test_a_child_is_a_python_never_maya_itself(self):
+        child = child_python()
+        here  = os.path.basename(sys.executable).lower()
+        if here.startswith("maya") and not here.startswith("mayapy"):
+            self.assertEqual(os.path.dirname(child), os.path.dirname(sys.executable))
+            self.assertTrue(os.path.basename(child).lower().startswith("mayapy"), child)
+        else:
+            self.assertEqual(child, sys.executable)
+
+    def test_inside_maya_the_child_is_the_mayapy_beside_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            maya   = os.path.join(folder, "maya.exe")
+            mayapy = os.path.join(folder, "mayapy.exe")
+            for path in (maya, mayapy):
+                open(path, "w").close()
+            with mock.patch.object(sys, "executable", maya):
+                self.assertEqual(child_python(), mayapy)
+            with mock.patch.object(sys, "executable", mayapy):
+                self.assertEqual(child_python(), mayapy)  # mayapy is a python
+            os.remove(mayapy)
+            with mock.patch.object(sys, "executable", maya):
+                self.assertEqual(child_python(), maya)  # none beside it: this one again
+
+    def test_a_fresh_scene_is_maya_s_or_a_skip(self):
+        try:
+            import maya.cmds as cmds
+
+            cmds.about(batch=True)
+        except Exception:  # not running in Maya
+            with self.assertRaises(unittest.SkipTest):
+                fresh_scene(self)
+            return
+        self.assertIs(fresh_scene(self), cmds)
+        self.assertFalse(cmds.file(query=True, modified=True))
+
+    def test_a_fresh_scene_spares_an_unsaved_scene_in_the_gui(self):
+        try:
+            import maya.cmds as cmds
+
+            cmds.about(batch=True)
+        except Exception:  # not running in Maya
+            self.skipTest("needs Maya")
+        with mock.patch.object(cmds, "about", return_value=False), mock.patch.object(cmds, "file", return_value=True) as file:
+            with self.assertRaises(unittest.SkipTest) as caught:
+                fresh_scene(self)
+        self.assertIn("unsaved changes", str(caught.exception))
+        file.assert_called_once_with(query=True, modified=True)
+
+    def test_a_fresh_scene_asks_about_the_open_scene_once_per_test(self):
+        """a test that opens several fresh scenes (one per take) is not
+        stopped by the changes its own earlier scene made"""
+        try:
+            import maya.cmds as cmds
+
+            cmds.about(batch=True)
+        except Exception:  # not running in Maya
+            self.skipTest("needs Maya")
+        answers = iter([False, True, True])  # clean when the test starts, changed by its own imports after
+
+        def file(*args, **kwargs):
+            return next(answers) if kwargs.get("modified") else None
+
+        with mock.patch.object(cmds, "about", return_value=False), mock.patch.object(cmds, "file", side_effect=file):
+            for _ in range(3):
+                fresh_scene(self)
+        self.assertEqual(list(answers), [True, True])  # asked once
+
+
 class TestNotTheFbxSdk(unittest.TestCase):
     """a module that imports as ``fbx`` but is not the Autodesk SDK -- a
     folder of that name on the path, another package -- is taken for no SDK,
@@ -93,7 +168,7 @@ class TestNotTheFbxSdk(unittest.TestCase):
             path = [folder, holder] + [x for x in sys.path if x and os.path.isdir(x)]
             env  = dict(os.environ, PYTHONPATH=os.pathsep.join(path))
             done = subprocess.run(
-                [sys.executable, "-c", self.REPORT], capture_output=True, text=True, env=env, timeout=600, cwd=folder
+                [child_python(), "-c", self.REPORT], capture_output=True, text=True, env=env, timeout=600, cwd=folder
             )
         return done
 

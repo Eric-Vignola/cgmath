@@ -17,6 +17,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+from cgmath._tests import child_python
 from cgmath.geometry import MeshData
 from cgmath.hierarchy import ClipData, generate_uuid, HierarchyData, TransformData
 from cgmath.render import scene as scene_module
@@ -155,7 +156,7 @@ class TestTurntable(RenderCacheCase):
             "s.turntable({out!r}, n_frames=2, resolution=(16, 16), samples_per_pixel=1); "
             "print(S._CACHE_ROOT)"
         ).format(path=sys.path, out=self.out("child"))
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        result = subprocess.run([child_python(), "-c", code], capture_output=True, text=True, timeout=300)
         lines  = result.stdout.strip().splitlines()
         self.assertTrue(lines, result.stderr)
         self.assertTrue(os.path.basename(lines[-1]).startswith("cgmath_render_"), result.stderr)

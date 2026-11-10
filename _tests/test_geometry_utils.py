@@ -1,11 +1,11 @@
 import importlib.util
 import os
 import subprocess
-import sys
 import textwrap
 import unittest
 
 import numpy as np
+from cgmath._tests import child_env, child_python
 from cgmath.geometry.utils.main import (
     average_points,
     compare_normals,
@@ -58,7 +58,12 @@ class TestPxrFunction(unittest.TestCase):
             """
         )
         result = subprocess.run(
-            [sys.executable, "-c", script], cwd=PROJECTS, capture_output=True, text=True
+            [child_python(), "-c", script],
+            cwd            = PROJECTS,
+            env            = child_env(),
+            capture_output = True,
+            text           = True,
+            timeout        = 300,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 

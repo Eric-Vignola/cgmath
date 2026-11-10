@@ -8,6 +8,7 @@ import textwrap
 import unittest
 
 import numpy as np
+from cgmath._tests import child_python
 from cgmath.geometry.utils import bilinear_sample, compute_centroids
 from cgmath.geometry.utils.main import _seeded_bilinear_sample, bezier_evaluate
 
@@ -294,11 +295,12 @@ class TestBilinearSampleSeedFaces(unittest.TestCase):
             env = dict(os.environ, NUMBA_CACHE_DIR=cache)
             for script in (fill, check):
                 result = subprocess.run(
-                    [sys.executable, "-c", path + script],
+                    [child_python(), "-c", path + script],
                     cwd            = PROJECTS,
                     env            = env,
                     capture_output = True,
                     text           = True,
+                    timeout        = 300,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr[-1500:])
 

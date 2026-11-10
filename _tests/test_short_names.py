@@ -26,6 +26,7 @@ from unittest import mock
 
 import numpy as np
 from cgmath import hierarchy
+from cgmath._tests import fresh_scene
 from cgmath.geometry.sdf import SDFSphere
 from cgmath.hierarchy import FBX, ClipData, HierarchyData, TransformData, TransformList
 from cgmath.hierarchy import hierarchy as hierarchy_mod
@@ -787,17 +788,10 @@ class TestTheFourMatrices(unittest.TestCase):
         """Maya 2025's own joints, posed as POSES with inverseScale wired:
         the short names Maya's attributeQuery gives, every channel read by
         its short name, and m, wm, pm, im, wim and pim, to 1e-12. Needs
-        mayapy"""
-        try:
-            import maya.cmds as cmds
+        Maya"""
+        cmds = fresh_scene(self)
 
-            cmds.createNode("transform", name="cgmath_probe")
-        except Exception:  # not running in Maya
-            self.skipTest("needs Maya")
-        self.addCleanup(cmds.file, new=True, force=True)
-        cmds.file(new=True, force=True)
-
-        rig = _rig()
+        rig  = _rig()
         for name, parent, pose in POSES:
             joint = cmds.createNode("joint", name=name, **({"parent": parent} if parent else {}))
             if parent:
@@ -835,15 +829,8 @@ class TestTheFourMatrices(unittest.TestCase):
         relative=True a joint lands right under a transform or a joint,
         still wired from the joint it left; an absolute cmds.parent wires it
         where it leaves it right under a joint, and under a joint elsewhere
-        puts a transform between them, unwired. Needs mayapy"""
-        try:
-            import maya.cmds as cmds
-
-            cmds.createNode("transform", name="cgmath_probe")
-        except Exception:  # not running in Maya
-            self.skipTest("needs Maya")
-        self.addCleanup(cmds.file, new=True, force=True)
-        cmds.file(new=True, force=True)
+        puts a transform between them, unwired. Needs Maya"""
+        cmds = fresh_scene(self)
 
         cmds.createNode("transform", name="group")
         cmds.select("group")

@@ -2,7 +2,6 @@ import operator
 import os
 import pickle
 import subprocess
-import sys
 import tempfile
 import textwrap
 import unittest
@@ -10,6 +9,7 @@ from unittest import mock
 
 import numpy as np
 from numpy.lib.stride_tricks import as_strided, sliding_window_view
+from cgmath._tests import child_env, child_python
 from cgmath.geometry import morph_target
 from cgmath.geometry.mesh import MeshData
 from cgmath.geometry.morph_target import MorphData, MorphList
@@ -1138,7 +1138,12 @@ class TestMorphData(unittest.TestCase):
             """
         )
         result = subprocess.run(
-            [sys.executable, "-c", script], cwd=PROJECTS, capture_output=True, text=True
+            [child_python(), "-c", script],
+            cwd            = PROJECTS,
+            env            = child_env(),
+            capture_output = True,
+            text           = True,
+            timeout        = 300,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 

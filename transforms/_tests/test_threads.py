@@ -12,7 +12,6 @@ of the 14 public functions built on them.
 """
 
 import json
-import os
 import subprocess
 import sys
 import unittest
@@ -24,6 +23,7 @@ from numba.core.registry import CPUDispatcher
 from numba.core.runtime import _nrt_python, rtsys
 
 from cgmath import transforms
+from cgmath._tests import child_env, child_python
 from cgmath.transforms import _numba, main
 from cgmath.transforms._numba import _axis, _euler, _matrix, _quaternion, _vector
 
@@ -303,13 +303,9 @@ class TestPublicFunctions(unittest.TestCase):
         # NUMBA_DISABLE_JIT=1 (a debugger, a coverage run) leaves every
         # kernel a python function, with no dispatcher to copy a twin from.
         # the child sees what this process sees: cgmath, and a runner's venv
-        env = dict(
-            os.environ,
-            NUMBA_DISABLE_JIT = "1",
-            PYTHONPATH        = os.pathsep.join(x for x in sys.path if x),
-        )
+        env = child_env(NUMBA_DISABLE_JIT="1")
         out = subprocess.run(
-            [sys.executable, "-c", _JIT_OFF_SCRIPT],
+            [child_python(), "-c", _JIT_OFF_SCRIPT],
             capture_output = True,
             text           = True,
             env            = env,

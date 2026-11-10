@@ -16,7 +16,6 @@ import os
 import pickle
 import shutil
 import subprocess
-import sys
 import tempfile
 import textwrap
 import unittest
@@ -26,6 +25,7 @@ from importlib import util
 import numpy as np
 import cgmath.hierarchy
 from cgmath import geometry
+from cgmath._tests import child_env, child_python
 from cgmath.data import (
     _Unpickler,
     Array,
@@ -50,14 +50,13 @@ def _fresh(code: str) -> str:
     """
     init   = os.path.abspath(cgmath.__file__)
     holder = os.path.dirname(os.path.dirname(init))
-    env    = dict(os.environ, PYTHONPATH=os.pathsep.join(x for x in sys.path if x))
     check  = f"\nimport cgmath, os\nassert os.path.samefile(cgmath.__file__, {init!r}), cgmath.__file__\n"
     out = subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(code) + check],
+        [child_python(), "-c", textwrap.dedent(code) + check],
         cwd            = holder,
         capture_output = True,
         text           = True,
-        env            = env,
+        env            = child_env(),
         timeout        = 300,
     )
     if out.returncode != 0:

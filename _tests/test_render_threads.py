@@ -25,6 +25,7 @@ from unittest import mock
 
 import numba
 import numpy as np
+from cgmath._tests import child_python
 from cgmath.geometry import CameraData, LightData, MaterialData
 from cgmath.geometry.mesh import MeshData, UVData, UVList
 from cgmath.hierarchy import generate_uuid, TransformData
@@ -1629,7 +1630,7 @@ def _child(body, **env):
         """
     ) + textwrap.dedent(body)
     proc = subprocess.run(
-        [sys.executable, "-c", code],
+        [child_python(), "-c", code],
         capture_output = True,
         text           = True,
         env            = dict(os.environ, **env),

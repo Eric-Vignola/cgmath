@@ -28,6 +28,7 @@ from unittest import mock
 
 import numpy as np
 import cgmath
+from cgmath._tests import child_env, child_python
 from cgmath.data import (
     _data_class,
     _json_tree,
@@ -370,9 +371,8 @@ class TestAFileIsBuiltAsTheClassAsked(unittest.TestCase):
         with open(script, "w") as f:
             f.write(_PIN_SCRIPT)
         # the child sees what this process sees: cgmath, and a runner's venv
-        env = dict(os.environ, PYTHONPATH=os.pathsep.join(x for x in sys.path if x))
         out = subprocess.run(
-            [sys.executable, script, self.tmp], capture_output=True, text=True, env=env, timeout=300
+            [child_python(), script, self.tmp], capture_output=True, text=True, env=child_env(), timeout=300
         )
         self.assertEqual(out.returncode, 0, out.stderr[-2000:])
 
