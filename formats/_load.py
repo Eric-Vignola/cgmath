@@ -508,6 +508,10 @@ def _morph_keys(read: dict, fbx) -> None:
 # the material property a texture feeds that the fork reads: the colour map
 COLOUR_SLOT = "DiffuseColor"
 
+# the slots a bump2d's map lands on, by how Maya reads it (measured): tangent
+# space normals as NormalMap, a bump map (and object space normals) as Bump
+NORMAL_SLOTS = {"NormalMap": "tangent", "Bump": "bump"}
+
 # fbx's texture UVSet meaning the mesh's first set
 DEFAULT_UV_SET = "default"
 
@@ -646,11 +650,14 @@ def _read_materials(node, shape, counts, label: str, filename: str, fbx, pixels:
     """the materials the mesh's material element assigns faces to, in the
     node's order: each its name, kind, Maya's attributes off the file's
     properties (a colour times its factor, the diffuse colour and factor
-    apart, which are Maya's color and diffuse), its faces, and its colour
-    map through :func:`_read_texture` (``pixels`` and ``cache`` as it takes
-    them); a material of another shading model a default lambert, flagged
-    ``bare``; textures on other slots, or that are no file texture, listed
-    in ``left`` by slot"""
+    apart, which are Maya's color and diffuse), its faces, its colour map
+    and the bump2d's map on its NormalMap or Bump slot through
+    :func:`_read_texture` (``pixels`` and ``cache`` as it takes them), the
+    bump map of a material holding both, as Maya's importer takes it
+    (measured), with its kind and the BumpFactor as ``bump_depth``; a
+    material of another shading model a default lambert, flagged ``bare``;
+    textures on other slots, or that are no file texture, listed in
+    ``left`` by slot"""
     from cgmath.formats._fbx_io import typed
 
     count = node.GetMaterialCount()
@@ -680,8 +687,9 @@ def _read_materials(node, shape, counts, label: str, filename: str, fbx, pixels:
                 fields["specular_color"] = colour(held.Specular, held.SpecularFactor)
                 fields["cosine_power"]   = float(held.Shininess.Get())
                 fields["reflectivity"]   = float(held.ReflectionFactor.Get())
-        # the textures: the colour map read, any other slot's noted
+        # the textures: the colour map and the bump2d's map read, any other slot's noted
         texture = None
+        normals = {}
         left    = []
         prop    = material.GetFirstProperty()
         while prop.IsValid():
@@ -690,19 +698,31 @@ def _read_materials(node, shape, counts, label: str, filename: str, fbx, pixels:
                 slot = str(prop.GetName())
                 if slot == COLOUR_SLOT and file is not None:
                     texture = _read_texture(file, filename, fbx, pixels, cache)
+                elif slot in NORMAL_SLOTS and file is not None:
+                    normals[slot] = file
                 elif file is not None or other:
                     left.append(slot)
             prop = material.GetNextProperty(prop)
+        # Maya's importer keeps the bump map of a material holding both (measured)
+        normal = kind = None
+        if normals:
+            slot   = "Bump" if "Bump" in normals else "NormalMap"
+            normal = _read_texture(normals[slot], filename, fbx, pixels, cache)
+            kind   = NORMAL_SLOTS[slot]
+            left.extend(other_slot for other_slot in normals if other_slot != slot)
         found.append({
-            "name":    name,
-            "label":   f"material {name!r}" if name else f"the unnamed material on {label}",
-            "model":   str(material.ShadingModel.Get()),
-            "bare":    not lambert,
-            "fields":  fields,
-            "faces":   faces,
-            "texture": texture,
-            "left":    left,
-            "id":      int(material.GetUniqueID()),  # the one FbxSurfaceMaterial, on every node it is on
+            "name":        name,
+            "label":       f"material {name!r}" if name else f"the unnamed material on {label}",
+            "model":       str(material.ShadingModel.Get()),
+            "bare":        not lambert,
+            "fields":      fields,
+            "faces":       faces,
+            "texture":     texture,
+            "normal":      normal,
+            "normal_kind": kind,
+            "bump_depth":  float(held.BumpFactor.Get()) if lambert else 1.0,
+            "left":        left,
+            "id":          int(material.GetUniqueID()),  # the one FbxSurfaceMaterial, on every node it is on
         })
     return found
 
@@ -1836,20 +1856,27 @@ def _build_materials(read: dict, meshes):
             fields         = dict(entry["fields"])
             fields["uuid"] = uuids.setdefault(entry["id"], generate_uuid())
             texture        = entry["texture"]
+            normal         = entry["normal"]
             if entry["bare"]:
                 bare.append(f"{entry['label']} (shading model {entry['model']!r})")
             left.extend(f"{entry['label']} {slot}" for slot in entry["left"])
-            if texture is not None:
-                fields.update(
-                    texture      = texture["pixels"],
-                    texture_file = texture["file"],
-                    uv_set       = texture["uv_set"],
-                    wrap_u       = texture["wrap_u"],
-                    wrap_v       = texture["wrap_v"],
-                )
-                if texture["missing"] is not None:
-                    missing.append(f"{entry['label']} {texture['missing']}")
-                if texture["no_pil"]:
+            for held_map, is_colour in ((texture, True), (normal, False)):
+                if held_map is None:
+                    continue
+                if is_colour:
+                    fields.update(texture=held_map["pixels"], texture_file=held_map["file"])
+                else:
+                    fields.update(
+                        normal_map      = held_map["pixels"],
+                        normal_map_file = held_map["file"],
+                        normal_map_kind = entry["normal_kind"],
+                        bump_depth      = entry["bump_depth"],
+                    )
+                if is_colour or texture is None:  # the UV set and wraps: the colour map's, else the normal map's
+                    fields.update(uv_set=held_map["uv_set"], wrap_u=held_map["wrap_u"], wrap_v=held_map["wrap_v"])
+                if held_map["missing"] is not None:
+                    missing.append(f"{entry['label']} {held_map['missing']}")
+                if held_map["no_pil"]:
                     no_pil.append(entry["label"])
             materials.append(MaterialData(name=entry["name"], mesh_uuid=mesh.uuid, faces=entry["faces"], **fields))
     # a material on many meshes is read once a mesh: each case named once

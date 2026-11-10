@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 from cgmath.geometry import MaterialData, MaterialList, MeshData
-from cgmath.geometry.material import MATERIAL_KINDS, WRAP_MODES
+from cgmath.geometry.material import MATERIAL_KINDS, NORMAL_MAP_KINDS, WRAP_MODES
 from cgmath.hierarchy.hierarchy import _is_uuid
 
 
@@ -43,6 +43,7 @@ class TestMaterialData(unittest.TestCase):
         self.assertEqual((material.cosine_power, material.reflectivity),             (20.0, 0.5))
         self.assertEqual((material.texture, material.texture_file, material.uv_set), (None, None, None))
         self.assertEqual((material.wrap_u, material.wrap_v, material.textured),      ("repeat", "repeat", False))
+        self.assertEqual((material.normal_map, material.normal_map_file, material.normal_map_kind, material.bump_depth), (None, None, "tangent", 1.0))
         # the colour defaults are each object's own
         other          = MaterialData()
         other.color[:] = 1.0
@@ -56,6 +57,10 @@ class TestMaterialData(unittest.TestCase):
             material.kind = "blinn"
         with self.assertRaises(ValueError):
             MaterialData(kind="standardSurface")
+        for kind in NORMAL_MAP_KINDS:
+            material.normal_map_kind = kind
+        with self.assertRaisesRegex(ValueError, r"normal_map_kind is one of \['tangent', 'bump'\], not 'object'"):
+            material.normal_map_kind = "object"
         for mode in WRAP_MODES:
             material.wrap_u = mode
             material.wrap_v = mode

@@ -1,0 +1,20 @@
+{
+ "materials": {
+  "bumpPhong": {
+   "bumpDepth": 0.4000000059604645,
+   "bumpInterp": 0,
+   "bumps": 1,
+   "color_files": 0,
+   "files": 1,
+   "shader_count": 1
+  },
+  "tangentLambert": {
+   "bumpDepth": 0.699999988079071,
+   "bumpInterp": 1,
+   "bumps": 1,
+   "color_files": 1,
+   "files": 1,
+   "shader_count": 1
+  }
+ }
+}
