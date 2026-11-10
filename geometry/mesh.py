@@ -353,6 +353,14 @@ class MeshData(ShapeData):
     A shape: it holds no transform of its own. ``parent_uuid`` names the
     ``TransformData`` it sits under, which places it (:class:`ShapeData`);
     the points are in that transform's space, or the world's with none.
+
+    ``colors`` are RGBA in 0..1, one a vertex, or the ones ``color_indices``
+    name a corner each (a colour a corner: ``color_indices = arange``), as
+    ``normals`` and ``normal_indices`` work. An operation that keeps face
+    corners (``delete_faces``,
+    ``detach_faces``, ``triangulate``, ``merge``) keeps their colours; one
+    that rebuilds faces (``subdivide``, ``quadrangulate``, ``union``,
+    ``difference``) drops them, as it drops the normals.
     """
 
     EQUALITY_TEST_IGNORE = ShapeData.EQUALITY_TEST_IGNORE + ["name"]
@@ -366,6 +374,8 @@ class MeshData(ShapeData):
     hole_indices:   Optional[Array(np.int32, "N")] = None
     normals:        Optional[Array(np.float64, "N", 3)] = None
     normal_indices: Optional[Array(np.int32, "N")] = None
+    colors:         Optional[Array(np.float64, "N", 4)] = None
+    color_indices:  Optional[Array(np.int32, "N")] = None
 
     # --- cached attributes --- #
     _f2v = None  # faces to vertices
@@ -1994,6 +2004,10 @@ class MeshData(ShapeData):
         idx  = np.unique(f2v)
         kept = idx[idx >= 0]
 
+        # the colours follow the vertices and the corners kept
+        colors, color_ids, per_vertex = _color_form(self)
+        corners = np.flatnonzero(np.repeat(np.isin(np.arange(self.counts.size), faces), self.counts))
+
         # a kept face's holes, renumbered as the faces and points kept are
         if self.hole_faces is not None and self.hole_counts is not None and self.hole_indices is not None:
             # each hole's slice of hole_indices, cut as np.split cuts them and
@@ -2027,6 +2041,7 @@ class MeshData(ShapeData):
         self.reset_cached_data()
         self.normals        = None
         self.normal_indices = None
+        self.colors, self.color_indices = _mapped_colors(colors, color_ids, per_vertex, kept, corners)
 
     def __iadd__(self, other):
         """inplace add of two MeshData objects"""
@@ -2124,6 +2139,8 @@ class MeshData(ShapeData):
         self.reset_cached_data()
         self.normals        = None
         self.normal_indices = None
+        self.colors         = None
+        self.color_indices  = None
 
     def difference(self, *args, tolerance=1e-6):
         """removes overlapping faces of given Mesh objects from self (this is not a boolean)"""
@@ -2151,13 +2168,21 @@ class MeshData(ShapeData):
             self.reset_cached_data()
             self.normals        = None
             self.normal_indices = None
+            self.colors         = None
+            self.color_indices  = None
 
     def detach_faces(self, indices=None):
-        """detaches faces"""
+        """detaches faces; the colours stay on their corners"""
+
+        # the corners keep their order either way: colours held one a vertex
+        # follow the points, the others stay as they are
+        colors, _, per_vertex = _color_form(self)
 
         if indices is None:
             # make each face its own island
-            self.points  = self.points[self.indices]
+            self.points = self.points[self.indices]
+            if per_vertex:
+                self.colors = colors[self.indices]
             self.indices = np.arange(self.indices.size, dtype=np.int32)
 
         else:
@@ -2194,6 +2219,9 @@ class MeshData(ShapeData):
 
             self.points = np.concatenate([new_self.points, new_points])
             self.indices, self.counts = matrix_to_stream(self.geometry)
+            if per_vertex:
+                # new_self and new_faces carried theirs, one a vertex
+                self.colors = np.concatenate([new_self.colors, new_faces.colors[new_idx]])
 
         # reset cached geometry
         self.reset_cached_data()
@@ -2201,7 +2229,10 @@ class MeshData(ShapeData):
         self.normal_indices = None
 
     def merge(self):
-        """merges overlapping points"""
+        """merges overlapping points; the colours follow the points and the
+        faces kept"""
+        colors, color_ids, per_vertex = _color_form(self)
+        positions = np.arange(self.indices.size)
 
         # combine points and their indices
         indices, v0, v1 = point_row_overlaps(self.points, tolerance=1e-6)
@@ -2209,14 +2240,16 @@ class MeshData(ShapeData):
         self.points  = self.points[indices]
 
         # remove overlapping faces
-        matrix = stream_to_matrix(self.indices, self.counts)
-        faces  = matrix_row_overlaps(matrix, exact=False)[0]
+        matrix  = stream_to_matrix(self.indices, self.counts)
+        faces   = matrix_row_overlaps(matrix, exact=False)[0]
+        corners = matrix_to_stream(stream_to_matrix(positions, self.counts)[faces])[0]
         self.indices, self.counts = matrix_to_stream(matrix[faces])
 
         # reset components
         self.reset_cached_data()
         self.normals        = None
         self.normal_indices = None
+        self.colors, self.color_indices = _mapped_colors(colors, color_ids, per_vertex, indices, corners)
 
     def contains_vertices(self, vertices, contained=True, exclude=False):
         """returns the mesh's faces which contains the given vertex indices"""
@@ -2348,10 +2381,12 @@ class MeshData(ShapeData):
         if np.any((np.diff(ordered, axis=1) == 0) & (ordered[:, :-1] < width)):
             raise ValueError("Subset rules select the same vertex slot twice")
 
-        stream = np.take_along_axis(self.geometry, np.where(kept, rules, 0), axis=1)[
-            kept
-        ]
+        slots  = np.where(kept, rules, 0)
+        stream = np.take_along_axis(self.geometry, slots, axis=1)[kept]
         surviving, indices = np.unique(stream, return_inverse=True)
+        # the corners kept, gathered as the vertices are: the colours follow
+        corners = np.take_along_axis(stream_to_matrix(np.arange(self.indices.size), counts), slots, axis=1)[kept]
+        colors, color_ids, per_vertex = _color_form(self)
 
         new         = self.copy()
         new.counts  = kept.sum(axis=1)[kept.any(axis=1)].astype(counts.dtype)
@@ -2361,6 +2396,7 @@ class MeshData(ShapeData):
         # how many vertices the face has
         new.normals        = None
         new.normal_indices = None
+        new.colors, new.color_indices = _mapped_colors(colors, color_ids, per_vertex, surviving, corners)
         new.reset_cached_data()
         return new
 
@@ -3222,106 +3258,60 @@ class MeshData(ShapeData):
         if quad_ids.size == 0 and not ngon_tris:
             return None
 
-        # --- Quad triangulation ---
-        if quad_ids.size > 0:
-            quad_rules = rules[quad_ids]
-            quads      = self.geometry[quad_ids]
-            arange     = np.arange(quads.shape[0])[:, None]
-
-            # Maya winding order:
-            #   rule=0 (split 0-2): tri1 = (1,2,0), tri2 = (0,2,3)
-            #   rule=1 (split 1-3): tri1 = (0,1,3), tri2 = (3,1,2)
-            tri_rules = np.array([[1, 2, 0], [0, 1, 3]])
-            triangleA = tri_rules[quad_rules]
-            triangleA = quads[arange, triangleA]
-
-            tri_rules = np.array([[0, 2, 3], [3, 1, 2]])
-            triangleB = tri_rules[quad_rules]
-            triangleB = quads[arange, triangleB]
-
-            quad_tri_faces          = np.empty((2 * quad_rules.size, 3), dtype=int)
-            quad_tri_faces[0::2, :] = triangleA
-            quad_tri_faces[1::2, :] = triangleB
-        else:
-            triangleA      = np.empty((0, 3), dtype=int)
-            triangleB      = np.empty((0, 3), dtype=int)
-            quad_tri_faces = np.empty((0, 3), dtype=int)
-
-        tris = (
-            self.geometry[tri_ids, :3]
-            if tri_ids.size > 0
-            else np.empty((0, 3), dtype=int)
-        )
-
-        # --- N-gon triangulation: map local indices to global ---
-        ngon_tri_faces_list = []
-        for face_id, local_tris in ngon_tris.items():
-            if len(local_tris) == 0:
-                continue
-            face_verts  = self.geometry[face_id]
-            face_verts  = face_verts[face_verts >= 0]
-            local_tris  = np.asarray(local_tris).reshape(-1, 3)
-            global_tris = face_verts[local_tris]
-            ngon_tri_faces_list.append(global_tris)
-
-        if ngon_tri_faces_list:
-            ngon_tri_faces = np.concatenate(ngon_tri_faces_list, axis=0)
-        else:
-            ngon_tri_faces = np.empty((0, 3), dtype=int)
-
-        # recombine: use stream format to handle mixed face sizes
-        # (skipped quads remain 4-vert, everything else is 3-vert)
-        active_quad_set = set(quad_ids.tolist()) if quad_ids.size > 0 else set()
-        ngon_set        = set(ngon_tris.keys())
-
-        # precompute quad triangulations for fast lookup
+        # Every new corner is a (face, slot) of the mesh as it is: the vertex
+        # ids and the per corner colours are gathered from the same pairs.
+        # --- Quad triangulation: the slots of each quad's two triangles ---
+        # Maya winding order:
+        #   rule=0 (split 0-2): tri1 = (1,2,0), tri2 = (0,2,3)
+        #   rule=1 (split 1-3): tri1 = (0,1,3), tri2 = (3,1,2)
         quad_tri_map = {}
         if quad_ids.size > 0:
-            for i, qi in enumerate(quad_ids):
-                quad_tri_map[qi] = (triangleA[i], triangleB[i])
+            quad_rules = rules[quad_ids]
+            slots_a    = np.array([[1, 2, 0], [0, 1, 3]])[quad_rules]
+            slots_b    = np.array([[0, 2, 3], [3, 1, 2]])[quad_rules]
+            for i, qi in enumerate(quad_ids.tolist()):
+                quad_tri_map[qi] = (slots_a[i], slots_b[i])
 
+        # --- N-gon triangulation: local indices are the slots ---
+        ngon_set = {face_id for face_id, local_tris in ngon_tris.items() if len(local_tris) > 0}
+
+        def whole(fi):
+            count = int(self.counts[fi])
+            new_counts.append(count)
+            faces.extend([fi] * count)
+            slots.extend(range(count))
+
+        def triangles(fi, tris):
+            for tri in tris:
+                new_counts.append(3)
+                faces.extend([fi] * 3)
+                slots.extend(int(x) for x in tri)
+
+        faces, slots, new_counts = [], [], []
         if preserve_order:
-            new_indices = []
-            new_counts  = []
-            geom        = self.geometry
             for fi in range(self.counts.size):
                 if fi in quad_tri_map:
-                    triA, triB = quad_tri_map[fi]
-                    new_counts.append(3)
-                    new_indices.extend(triA.tolist())
-                    new_counts.append(3)
-                    new_indices.extend(triB.tolist())
-                elif fi in ngon_set and len(ngon_tris[fi]) > 0:
-                    face_verts = geom[fi]
-                    face_verts = face_verts[face_verts >= 0]
-                    for tri in np.asarray(ngon_tris[fi]).reshape(-1, 3):
-                        new_counts.append(3)
-                        new_indices.extend(face_verts[tri].tolist())
+                    triangles(fi, quad_tri_map[fi])
+                elif fi in ngon_set:
+                    triangles(fi, np.asarray(ngon_tris[fi]).reshape(-1, 3))
                 else:
-                    face_verts = geom[fi]
-                    face_verts = face_verts[face_verts >= 0]
-                    new_counts.append(len(face_verts))
-                    new_indices.extend(face_verts.tolist())
+                    whole(fi)
         else:
-            new_indices = []
-            new_counts  = []
-            geom        = self.geometry
-            untouched = sorted(
-                set(range(self.counts.size)) - active_quad_set - ngon_set
-            )
-            for fi in untouched:
-                face_verts = geom[fi]
-                face_verts = face_verts[face_verts >= 0]
-                new_counts.append(len(face_verts))
-                new_indices.extend(face_verts.tolist())
-            for tri in quad_tri_faces:
-                new_counts.append(3)
-                new_indices.extend(tri.tolist())
-            for tri in ngon_tri_faces:
-                new_counts.append(3)
-                new_indices.extend(tri.tolist())
+            # untouched faces first, then the quads' triangles, then the n-gons'
+            for fi in sorted(set(range(self.counts.size)) - set(quad_tri_map) - ngon_set):
+                whole(fi)
+            for qi in quad_ids.tolist():
+                triangles(qi, quad_tri_map[qi])
+            for face_id, local_tris in ngon_tris.items():
+                if len(local_tris) > 0:
+                    triangles(face_id, np.asarray(local_tris).reshape(-1, 3))
 
-        self.indices = np.array(new_indices, dtype=np.int32)
+        faces   = np.asarray(faces, dtype=np.intp)
+        slots   = np.asarray(slots, dtype=np.intp)
+        corners = (np.cumsum(self.counts) - self.counts)[faces] + slots  # the old corner of each new one
+        colors, color_ids, per_vertex = _color_form(self)
+
+        self.indices = self.geometry[faces, slots].astype(np.int32)
         self.counts  = np.array(new_counts, dtype=np.int32)
 
         # clear hole metadata -- mesh is now all triangles
@@ -3333,6 +3323,8 @@ class MeshData(ShapeData):
         self.reset_cached_data()
         self.normals        = None
         self.normal_indices = None
+        if not per_vertex:  # the points are as they were: colours one a vertex stay
+            self.colors, self.color_indices = _mapped_colors(colors, color_ids, per_vertex, None, corners)
 
     # ------------------------------ QUADRANGULATION
 
@@ -3531,6 +3523,8 @@ class MeshData(ShapeData):
         self.reset_cached_data()
         self.normals        = None
         self.normal_indices = None
+        self.colors         = None
+        self.color_indices  = None
 
     # ---------------------------------- SMOOTH ---------------------------------- #
     def smooth(
@@ -3609,6 +3603,8 @@ class MeshData(ShapeData):
             self.reset_cached_data()
             self.normals        = None
             self.normal_indices = None
+            self.colors         = None
+            self.color_indices  = None
 
         # normal subdivision steps
         else:
@@ -3635,6 +3631,8 @@ class MeshData(ShapeData):
 
             self.normals        = None
             self.normal_indices = None
+            self.colors         = None
+            self.color_indices  = None
 
     def get_correspondence(self, mesh: "MeshData") -> None:
         """computes the point correspondence between MeshData objects"""
@@ -5262,6 +5260,63 @@ def _corner_normals(mesh: "MeshData") -> tuple:
     if ids.size and (ids.min() < 0 or ids.max() >= normals.shape[0]):
         raise ValueError(f"{label}'s normal_indices name normals it does not hold ({normals.shape[0]})")
     return normals, ids
+
+
+def _corner_colors(mesh: "MeshData") -> tuple:
+    """
+    ``(colors, ids)``: the mesh's RGBA colours and the one each face corner
+    names, through ``color_indices``, else its vertex's (one colour a
+    vertex; a colour a corner names its corners, ``arange``, so that a mesh
+    with as many corners as vertices stays unambiguous); ``(None, None)``
+    without colours. ValueError for colours that fit neither.
+    """
+    if mesh.colors is None:
+        return None, None
+
+    colors  = np.asarray(mesh.colors, dtype=np.float64)
+    indices = np.asarray(mesh.indices)
+    label   = f"mesh {mesh.name!r}" if mesh.name else "the mesh"
+    if mesh.color_indices is not None:
+        ids = np.asarray(mesh.color_indices)
+        if ids.size != indices.size:
+            raise ValueError(f"{label} has {ids.size} color_indices for its {indices.size} face corners")
+    elif colors.shape[0] == mesh.point_count:
+        ids = indices
+    else:
+        raise ValueError(
+            f"{label} holds {colors.shape[0]} colors for its {mesh.point_count} vertices and has no "
+            "color_indices; a colour a face corner names its corners"
+        )
+    if ids.size and (ids.min() < 0 or ids.max() >= colors.shape[0]):
+        raise ValueError(f"{label}'s color_indices name colors it does not hold ({colors.shape[0]})")
+    return colors, ids
+
+
+def _color_form(mesh: "MeshData") -> tuple:
+    """``(colors, ids, per_vertex)``: :func:`_corner_colors` and whether the
+    colours are held one a vertex, which an operation keeps by mapping the
+    vertices, the other forms by mapping the corners"""
+    colors, ids = _corner_colors(mesh)
+    return colors, ids, colors is not None and mesh.color_indices is None
+
+
+def _mapped_colors(colors, ids, per_vertex: bool, vertices, corners) -> tuple:
+    """
+    ``(colors, color_indices)`` after an operation on a mesh whose colours
+    :func:`_color_form` gave as ``colors``, ``ids`` and ``per_vertex``:
+    colours one a vertex follow ``vertices``, the old vertex of each new one
+    (None: the points as they were); the others follow ``corners``, the old
+    corner of each new one (None: the corners as they were), compacted to
+    the colours still named. ``(None, None)`` without colours.
+    """
+    if colors is None:
+        return None, None
+    if per_vertex:
+        return (colors if vertices is None else colors[np.asarray(vertices, dtype=np.intp)]), None
+    if corners is not None:
+        ids = ids[np.asarray(corners, dtype=np.intp)]
+    unique, inverse = np.unique(ids, return_inverse=True)
+    return colors[unique], inverse.astype(np.int32)
 
 
 def _write_obj(
