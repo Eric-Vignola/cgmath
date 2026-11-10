@@ -17,6 +17,7 @@ Concepts, conventions and the file map live in [`README.md`](README.md).
 | [Topology maps](#topology-maps) | `f2v` / `v2f` / `e2v` / `ue2v` …, `-1` padding, face census |
 | [Diagnostics](#diagnostics) | borders, shells, non-manifold, lamina, degenerate, unused |
 | [Normals, areas, curvature](#normals-areas-curvature) | geometric vs shading normals, `AreaMethod`, curvature, tangents |
+| [Vertex colours](#vertex-colours) | RGBA `colors`, one a vertex or one a face corner; which ops keep them |
 | [Subsets — rebuild a mesh from a selection](#subsets--rebuild-a-mesh-from-a-selection) | `from_faces`, `from_vertices`, subset rules, component plumbing |
 | [Mutating ops — triangulate, quadrangulate, merge](#mutating-ops--triangulate-quadrangulate-merge) | rules objects, merge/detach, subdivide, smooth |
 | [`UVData` and `UVList`](#uvdata-and-uvlist) | projections, holes, layout, rasterising, channels |
@@ -560,8 +561,9 @@ Three required fields describe any polygon soup:
 | `counts` | `(F,)` | vertices per face — mixed tri/quad/n-gon is fine |
 
 Optional fields: `name`, `uuid` / `parent_uuid` (the node the mesh sits
-under), `normals` / `normal_indices` (shading normals), and `hole_faces` /
-`hole_counts` / `hole_indices` (n-gon hole bookkeeping).
+under), `normals` / `normal_indices` (shading normals), `colors` /
+`color_indices` (RGBA vertex colours), and `hole_faces` / `hole_counts` /
+`hole_indices` (n-gon hole bookkeeping).
 
 ```python
 quad = MeshData(
@@ -874,6 +876,30 @@ print(np.unique(tangents[:, 3]))
 ```
 
 ---
+
+## Vertex colours
+
+`colors` are RGBA in 0..1, one a vertex (`color_indices` None) or the ones
+`color_indices` name a face corner each; a colour a corner names its corners
+(`np.arange`), so a mesh with as many corners as vertices stays unambiguous.
+The operations that keep face corners keep them (`delete_faces`,
+`detach_faces`, `triangulate`, `merge`); the ones that rebuild faces drop
+them, as they drop the normals (`subdivide`, `quadrangulate`, `union`,
+`difference`). A render shows them through `Scene.vertex_colors`; fbx
+carries them as a colour set and a glb's `COLOR_0` reads as them.
+
+```python
+mesh        = cube.copy()
+mesh.colors = np.column_stack([np.linspace(0.0, 1.0, 8), np.zeros(8), np.linspace(1.0, 0.0, 8), np.ones(8)])
+print(mesh.colors.shape, mesh.color_indices)        # (8, 4) None: a colour a vertex
+
+mesh.colors        = np.array([[1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]])
+mesh.color_indices = np.repeat([0, 1], 12)           # a colour a face corner: three faces red, three blue
+mesh.triangulate(np.zeros(6, dtype=int))           # the corners keep their colours
+print(mesh.colors.shape, mesh.color_indices.size)  # (2, 4) 36
+mesh.subdivide(1)
+print(mesh.colors, mesh.color_indices)             # None None
+```
 
 ## Subsets — rebuild a mesh from a selection
 

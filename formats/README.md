@@ -6,8 +6,9 @@ Python SDK), plus stage and prim helpers for **USD** (via `pxr`).
 
 The fbx half is one read and one write: `load_fbx(path)` gives everything a
 file holds that cgmath has a class for, as one `FbxContents` — the
-hierarchy or its takes, the meshes on the nodes, their UV sets, skins,
-materials and blend shape targets, the cameras and lights — and
+hierarchy or its takes, the meshes on the nodes with their colours, their
+UV sets, skins, materials and blend shape targets, the cameras and lights —
+and
 `save_fbx(path, ...)` writes the same fields back, in Maya's Y-up and cm.
 Every other fbx reader in the library (`HierarchyData.load_fbx`,
 `MeshData.load_fbx`, `SkinList.load_fbx`, `cgmath.render.Scene.load_fbx`
@@ -245,7 +246,9 @@ print(reopened.GetPrimAtPath("/Shot/Hero").IsValid())
 ## Where mesh loading lives
 
 `formats` does **not** give you a `MeshData`. Mesh, UV and skin readers live
-in `geometry`:
+in `geometry` (a glb's `COLOR_0` comes back as the mesh's `colors`, one a
+vertex, as trimesh holds it: 8 bits on a plain mesh, as the file has it on
+a textured one):
 
 | Want | Call |
 |---|---|

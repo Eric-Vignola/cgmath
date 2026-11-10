@@ -186,8 +186,16 @@ scene.configure(
     wireframe           = False,
     wireframe_color     = (0, 0, 0),   # 0-255 ints; int32 (3,)
     wireframe_thickness = 1,
+    # a mesh's own colours: "multiply" them into the surface colour, "replace" it, or "off"
+    vertex_colors       = "off",
 )
 ```
+
+A mesh's `colors` (RGBA, one a vertex or one a face corner through
+`color_indices`) take part through `vertex_colors`: `"multiply"` scales the
+material colour and map by the vertex colour, `"replace"` shows the vertex
+colour alone (Maya's Color Set display); blended over a face as the UVs
+are. Off by default, as Maya's viewport shows no colour set until asked.
 
 Colors and `resolution` take any sequence and are kept as numpy arrays;
 a value of the wrong size raises `ValueError`.
@@ -796,6 +804,8 @@ scene's units; the height follows the frame's aspect.
   use them.
 - **Shadows.** `cast_shadows` is reserved for a future shadow pass; today
   it does nothing.
+- **Vertex alpha.** A mesh's colours are RGBA; the alpha channel is carried,
+  not rendered (no transparency pass).
 - **Specular / reflections / refractions.** Diffuse + ambient only.
 - **Texture mip-mapping.** Bilinear filtering at native resolution.
 - **Near / far clipping.** A `CameraData`'s clip planes are carried, not

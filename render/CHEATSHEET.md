@@ -178,6 +178,7 @@ What an fbx holds, and the render settings, as one `Data`.
 | `twosided` | `bool` | `True`: back faces hit |
 | `cast_shadows` | `bool` | reserved |
 | `wireframe`, `wireframe_color`, `wireframe_thickness` | `bool`, int32 `(3,)`, `int` | edges baked over every colour map |
+| `vertex_colors` | `str` | `"off"`, `"multiply"` or `"replace"`: a mesh's own colours, times the surface colour or in its place |
 
 Every field is a constructor keyword and a plain attribute. A list field
 takes one shape, a list of them or its list class; a value of another kind
@@ -276,7 +277,7 @@ settings, the shading knobs, `default_camera` and `aspect_ratio`:
 
 ```text
 resolution  samples_per_pixel  background  autofit  default_light  return_depth  angle_of_view  fit_padding
-base_color  sample_method  ambient  twosided  cast_shadows  wireframe  wireframe_color  wireframe_thickness
+base_color  sample_method  ambient  twosided  cast_shadows  wireframe  wireframe_color  wireframe_thickness  vertex_colors
 default_camera  aspect_ratio
 ```
 
@@ -483,7 +484,7 @@ A material of another mesh is not this mesh's: the renderer matches on
 The knobs are scene-wide, one value for every mesh: `base_color`,
 `sample_method` (`"bilinear"` flat patches or `"bezier"` PN-quad bicubic,
 a `SampleMethod` enum stored as its string), `ambient`, `twosided`,
-`cast_shadows` (reserved).
+`cast_shadows` (reserved) and `vertex_colors`.
 
 ```python
 flat = Scene("flat", base_color=(0.9, 0.3, 0.2), ambient=1.0).add(mesh)
@@ -495,6 +496,23 @@ from cgmath.geometry.mesh import SampleMethod
 
 smooth = Scene("smooth", sample_method=SampleMethod.BEZIER).add(mesh)
 print(smooth.sample_method)                  # bezier
+```
+
+### Vertex colours
+
+A mesh's `colors` (RGBA, one a vertex or one a face corner through
+`color_indices`) take part through `vertex_colors`: `"multiply"` scales the
+material colour and map by them, `"replace"` shows them alone (Maya's Color
+Set display), `"off"` ignores them, the default, as Maya's viewport does
+until asked. Blended over a face as the UVs are; the alpha channel is
+carried, not rendered.
+
+```python
+tinted        = mesh.copy()
+tinted.colors = np.tile([1.0, 0.5, 0.0, 1.0], (tinted.point_count, 1))   # orange, a colour a vertex
+shown         = Scene("shown", vertex_colors="replace").add(tinted).render(resolution=(32, 32), default_light=False)
+plain         = Scene("plain", base_color=(1.0, 0.5, 0.0)).add(mesh).render(resolution=(32, 32), default_light=False)
+print(np.array_equal(shown.array, plain.array))      # True: the vertex colour is the surface colour
 ```
 
 ### Baked wireframe

@@ -1020,7 +1020,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000001E9FF58ACD0>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000001C63A46E050>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1049,7 +1049,7 @@ Axis(value, names=None, *, module=None, qualname=None, type=None, start=1, bound
 Polygonal descriptor representing an object with edges, faces and vertices.
 
 ```text
-MeshData(indices: "Array(np.int32, 'N')", counts: "Array(np.int32, 'N')", points: "Array(np.float64, 'N', 3)", name: 'Optional[str]' = None, hole_faces: "Optional[Array(np.int32, 'N')]" = None, hole_counts: "Optional[Array(np.int32, 'N')]" = None, hole_indices: "Optional[Array(np.int32, 'N')]" = None, normals: "Optional[Array(np.float64, 'N', 3)]" = None, normal_indices: "Optional[Array(np.int32, 'N')]" = None, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
+MeshData(indices: "Array(np.int32, 'N')", counts: "Array(np.int32, 'N')", points: "Array(np.float64, 'N', 3)", name: 'Optional[str]' = None, hole_faces: "Optional[Array(np.int32, 'N')]" = None, hole_counts: "Optional[Array(np.int32, 'N')]" = None, hole_indices: "Optional[Array(np.int32, 'N')]" = None, normals: "Optional[Array(np.float64, 'N', 3)]" = None, normal_indices: "Optional[Array(np.int32, 'N')]" = None, colors: "Optional[Array(np.float64, 'N', 4)]" = None, color_indices: "Optional[Array(np.int32, 'N')]" = None, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
 ```
 
 Fields:
@@ -1064,6 +1064,8 @@ hole_counts: Optional[Array(np.int32, 'N')] = None
 hole_indices: Optional[Array(np.int32, 'N')] = None
 normals: Optional[Array(np.float64, 'N', 3)] = None
 normal_indices: Optional[Array(np.int32, 'N')] = None
+colors: Optional[Array(np.float64, 'N', 4)] = None
+color_indices: Optional[Array(np.int32, 'N')] = None
 ```
 
 Properties:
@@ -1113,7 +1115,7 @@ contains_vertices(self, vertices, contained=True, exclude=False)
 delete_faces(self, faces, exclude=False)
     deletes faces at given face indices. The hole metadata (hole_faces)
 detach_faces(self, indices=None)
-    detaches faces
+    detaches faces; the colours stay on their corners
 difference(self, *args, tolerance=1e-06)
     removes overlapping faces of given Mesh objects from self (this is not a boolean)
 edges_to_vertex_pairs(self, edges: 'np.ndarray') -> 'np.ndarray'
@@ -1246,7 +1248,7 @@ classmethod load_obj(cls, filename: 'str') -> "'MeshData'"
 classmethod load_usd(cls, filename: 'str', name: 'str | None' = None) -> "'MeshData'"
     returns a single MeshData from a usd file (the first mesh prim if name is None)
 merge(self)
-    merges overlapping points
+    merges overlapping points; the colours follow the points and the
 quadrangulate(self, rules: 'np.ndarray | None' = None) -> 'None'
     Merges pairs of triangles into quads, in-place.
 raycast(self, origins: 'MeshData | np.ndarray', directions: 'np.ndarray | None' = None, method: 'SampleMethod | str' = <SampleMethod.BILINEAR: 'bilinear'>, forward_only: 'bool' = True, twosided: 'bool' = True) -> "'RaycastData'"
@@ -1367,7 +1369,7 @@ ngon_tris: dict
 UV map topology treated as a Mesh object for resampling purposes
 
 ```text
-UVData(indices: "Array(np.int32, 'N')", counts: "Array(np.int32, 'N')", points: "Array(np.float64, 'N', 2)", name: 'str' = 'map1', hole_faces: "Optional[Array(np.int32, 'N')]" = None, hole_counts: "Optional[Array(np.int32, 'N')]" = None, hole_indices: "Optional[Array(np.int32, 'N')]" = None, normals: "Optional[Array(np.float64, 'N', 3)]" = None, normal_indices: "Optional[Array(np.int32, 'N')]" = None, _resolution: 'Array(np.int32, 2)' = ImmutableArray([2048, 2048], dtype=int32), _antialias: 'bool' = False, mesh_uuid: 'Optional[str]' = None, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
+UVData(indices: "Array(np.int32, 'N')", counts: "Array(np.int32, 'N')", points: "Array(np.float64, 'N', 2)", name: 'str' = 'map1', hole_faces: "Optional[Array(np.int32, 'N')]" = None, hole_counts: "Optional[Array(np.int32, 'N')]" = None, hole_indices: "Optional[Array(np.int32, 'N')]" = None, normals: "Optional[Array(np.float64, 'N', 3)]" = None, normal_indices: "Optional[Array(np.int32, 'N')]" = None, colors: "Optional[Array(np.float64, 'N', 4)]" = None, color_indices: "Optional[Array(np.int32, 'N')]" = None, _resolution: 'Array(np.int32, 2)' = ImmutableArray([2048, 2048], dtype=int32), _antialias: 'bool' = False, mesh_uuid: 'Optional[str]' = None, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
 ```
 
 Fields:
@@ -2736,7 +2738,7 @@ RenderInputs(entries: list, camera: Optional[dict], lights: list)
 What an fbx holds, and the render settings: nodes, meshes, UV sets,
 
 ```text
-Scene(name: Optional[str] = 'scene', hierarchy: Optional[cgmath.hierarchy.hierarchy.HierarchyData] = None, clip: Optional[cgmath.hierarchy.hierarchy.ClipList] = None, meshes: Optional[cgmath.geometry.mesh.MeshList] = None, uvs: Optional[cgmath.geometry.mesh.UVList] = None, skins: Optional[cgmath.geometry.skin_weights.SkinList] = None, materials: Optional[cgmath.geometry.material.MaterialList] = None, cameras: Optional[cgmath.geometry.camera.CameraList] = None, lights: Optional[cgmath.geometry.light.LightList] = None, morphs: Optional[cgmath.geometry.morph_target.MorphList] = None, default_camera: Optional[str] = None, aspect_ratio: Optional[float] = None, resolution: Optional[Annotated[numpy.ndarray, Array(int32 (2,))]] = ImmutableArray([500, 500], dtype=int32), samples_per_pixel: Optional[int] = None, background: Optional[Annotated[numpy.ndarray, Array(float64 (4,))]] = None, autofit: Optional[bool] = None, default_light: Optional[bool] = None, return_depth: Optional[bool] = None, angle_of_view: Optional[float] = None, fit_padding: Optional[float] = None, base_color: typing.Annotated[numpy.ndarray, Array(float64 (3,))] = ImmutableArray([0.7, 0.7, 0.7]), sample_method: str = 'bilinear', ambient: float = 0.8, twosided: bool = True, cast_shadows: bool = True, wireframe: bool = False, wireframe_color: typing.Annotated[numpy.ndarray, Array(int32 (3,))] = ImmutableArray([0, 0, 0], dtype=int32), wireframe_thickness: int = 1) -> None
+Scene(name: Optional[str] = 'scene', hierarchy: Optional[cgmath.hierarchy.hierarchy.HierarchyData] = None, clip: Optional[cgmath.hierarchy.hierarchy.ClipList] = None, meshes: Optional[cgmath.geometry.mesh.MeshList] = None, uvs: Optional[cgmath.geometry.mesh.UVList] = None, skins: Optional[cgmath.geometry.skin_weights.SkinList] = None, materials: Optional[cgmath.geometry.material.MaterialList] = None, cameras: Optional[cgmath.geometry.camera.CameraList] = None, lights: Optional[cgmath.geometry.light.LightList] = None, morphs: Optional[cgmath.geometry.morph_target.MorphList] = None, default_camera: Optional[str] = None, aspect_ratio: Optional[float] = None, resolution: Optional[Annotated[numpy.ndarray, Array(int32 (2,))]] = ImmutableArray([500, 500], dtype=int32), samples_per_pixel: Optional[int] = None, background: Optional[Annotated[numpy.ndarray, Array(float64 (4,))]] = None, autofit: Optional[bool] = None, default_light: Optional[bool] = None, return_depth: Optional[bool] = None, angle_of_view: Optional[float] = None, fit_padding: Optional[float] = None, base_color: typing.Annotated[numpy.ndarray, Array(float64 (3,))] = ImmutableArray([0.7, 0.7, 0.7]), sample_method: str = 'bilinear', ambient: float = 0.8, twosided: bool = True, cast_shadows: bool = True, wireframe: bool = False, wireframe_color: typing.Annotated[numpy.ndarray, Array(int32 (3,))] = ImmutableArray([0, 0, 0], dtype=int32), wireframe_thickness: int = 1, vertex_colors: str = 'off') -> None
 ```
 
 Fields:
@@ -2770,6 +2772,7 @@ cast_shadows: bool = True
 wireframe: bool = False
 wireframe_color: Annotated = ImmutableArray([0, 0, 0], dtype=int32)
 wireframe_thickness: int = 1
+vertex_colors: str = 'off'
 ```
 
 Properties:
@@ -3244,7 +3247,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001E9E2864A40>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001C68824CF40>, '...
 ```
 
 ## `cgmath.constraints`
