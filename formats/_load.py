@@ -118,7 +118,13 @@ def load_fbx(
     specular colours times their factors, a phong's cosine power the
     shininess and its reflectivity the reflection factor; a material of
     another shading model (Maya writes a standardSurface as one, bare) a
-    default lambert of its name, with one warning naming them. The file
+    default lambert of its name, with one warning naming them, but Maya's
+    own default material (``MAYA_DEFAULT_MATERIALS``), written bare, is no
+    material where it covers the whole mesh with no map: the mesh comes
+    back with none, in silence, as a mesh made in Maya by hand starts with
+    none of its own (Maya's importer, for its part, makes a fresh
+    standardSurface2 of such a file's default material, and leaves a mesh
+    holding no material on no shading group; measured). The file
     texture feeding the diffuse colour, through one layered texture if so,
     gives the material its texture: the pixels decoded through PIL, 8 bit
     unless the file holds 16, rows top down, as (H, W, C); ``texture_file``
@@ -512,6 +518,14 @@ COLOUR_SLOT = "DiffuseColor"
 # space normals as NormalMap, a bump map (and object space normals) as Bump
 NORMAL_SLOTS = {"NormalMap": "tangent", "Bump": "bump"}
 
+# Maya's default material, the surface shader of initialShadingGroup, which
+# its export writes as a bare FbxSurfaceMaterial of that name (measured on
+# Maya 2025): on a whole mesh with no map it is no material of ours. Maya's
+# own import makes a fresh standardSurface2 in a new shading group of it,
+# and leaves a mesh holding no material on no shading group at all; a mesh
+# made in Maya by hand lands on initialShadingGroup (measured)
+MAYA_DEFAULT_MATERIALS = ("standardSurface1",)
+
 # fbx's texture UVSet meaning the mesh's first set
 DEFAULT_UV_SET = "default"
 
@@ -655,8 +669,9 @@ def _read_materials(node, shape, counts, label: str, filename: str, fbx, pixels:
     :func:`_read_texture` (``pixels`` and ``cache`` as it takes them), the
     bump map of a material holding both, as Maya's importer takes it
     (measured), with its kind and the BumpFactor as ``bump_depth``; a
-    material of another shading model a default lambert, flagged ``bare``;
-    textures on other slots, or that are no file texture, listed in
+    material of another shading model a default lambert, flagged ``bare``,
+    but Maya's default material, bare on the whole mesh with no map, left
+    out; textures on other slots, or that are no file texture, listed in
     ``left`` by slot"""
     from cgmath.formats._fbx_io import typed
 
@@ -710,6 +725,10 @@ def _read_materials(node, shape, counts, label: str, filename: str, fbx, pixels:
             normal = _read_texture(normals[slot], filename, fbx, pixels, cache)
             kind   = NORMAL_SLOTS[slot]
             left.extend(other_slot for other_slot in normals if other_slot != slot)
+        # Maya's default material on the whole mesh, with no map, is the mesh
+        # with no material of its own (MAYA_DEFAULT_MATERIALS)
+        if not lambert and name in MAYA_DEFAULT_MATERIALS and faces is None and texture is None and normal is None:
+            continue
         found.append({
             "name":        name,
             "label":       f"material {name!r}" if name else f"the unnamed material on {label}",

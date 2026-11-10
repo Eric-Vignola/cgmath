@@ -1014,6 +1014,35 @@ def normals_import(rec: Recorder) -> None:
     rec.value("materials", readings)
 
 
+def default_material(rec: Recorder) -> None:
+    """Maya's default material: a cube left on initialShadingGroup exported
+    (its surface shader written bare), and our meshes with no material
+    imported, the shading group each lands on"""
+    cmds.file(new=True, force=True)
+    cmds.currentUnit(time="ntsc", linear="cm", angle="deg")
+    cube, _ = cmds.polyCube(name="cube")
+    rec.value("default_shader", cmds.listConnections("initialShadingGroup.surfaceShader") or [])
+    rec.value("cube_sets", cmds.listSets(object=cmds.listRelatives(cube, shapes=True)[0], type=1) or [])
+    exported(rec.path("maya_cube.fbx"))
+    nodes = mats.rig()
+    held  = mats.meshes(nodes)
+    ours  = rec.path("ours.fbx")
+    save_fbx(ours, nodes, meshes=held)
+    imported(ours)
+    readings = {}
+    for node in ("plane", "box"):
+        shape          = cmds.listRelatives(node, shapes=True)[0]
+        groups         = cmds.listSets(object=shape, type=1) or []
+        readings[node] = {"groups": groups, "shaders": {g: (cmds.listConnections(f"{g}.surfaceShader") or []) for g in groups}}
+    rec.value("imported", readings)
+    # Maya's own export of the cube, imported back: the shading group and shader it gets
+    imported(rec.path("maya_cube.fbx"))
+    shape  = cmds.listRelatives("cube", shapes=True)[0]
+    groups = cmds.listSets(object=shape, type=1) or []
+    rec.value("reimported", {"groups": groups, "shaders": {g: (cmds.listConnections(f"{g}.surfaceShader") or []) for g in groups},
+                              "materials": cmds.ls(materials=True)})
+
+
 CASES = {
     "clip_import": clip_import,
     "visibility_locator": visibility_locator,
@@ -1036,6 +1065,7 @@ CASES = {
     "materials_import": materials_import,
     "normals_export": normals_export,
     "normals_import": normals_import,
+    "default_material": default_material,
     "morphs_export": morphs_export,
     "morphs_import": morphs_import,
     "colors_export": colors_export,
