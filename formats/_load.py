@@ -152,8 +152,15 @@ def load_fbx(filename) -> FbxContents:
     the numbers under them as the file has them (measured): the same scene,
     every position the same, every world's 3x3 the unit times load_fbx's.
 
-    A take's layers holding no curve are passed over (an Unreal export
-    carries empty ones); curves on two layers, or on a muted one, raise
+    A transform's rotate pivot, scale pivot, rotate offset and scale offset
+    (Maya's rotatePivot, scalePivot, rotatePivotTranslate and
+    scalePivotTranslate) are folded into its translate, as the matrix Maya
+    composes holds them: its 3x3 is untouched, its position moves, on every
+    frame of a take where its translate, rotate or scale is keyed (measured
+    against Maya's own evaluation). ValueError for pivots on a joint, which
+    sit before its segment scale compensate, or keyed pivots. A take's
+    layers holding no curve are passed over (an Unreal export carries empty
+    ones); curves on two layers, or on a muted one, raise
     NotImplementedError. A take covers its stored span widened to its
     keys: an Unreal export stores the span a frame short of its last key.
     """
@@ -791,12 +798,24 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "
                 f"load_fbx: node {name!r} channel 'joint_orient' is a pre rotation on a transform, which Maya "
                 f"folds into its rotate and {FORK} does not read"
             )
-        pivots = [
-            tuple(getter(source))[:3]
-            for getter in (node.GetRotationPivot, node.GetScalingPivot, node.GetRotationOffset, node.GetScalingOffset)
-        ]
-        if np.any(np.abs(np.array(pivots)) > 0.0):
-            raise ValueError(f"load_fbx: node {name!r} channel 'pivots' holds pivots or offsets, which {FORK} does not read")
+        # the rotate pivot, scale pivot, rotate offset and scale offset, which
+        # _fold_pivots folds into a transform's translate once the takes are
+        # read; on a joint they would sit before the segment scale compensate
+        # (measured: Maya's joint honours them), which the fold does not take
+        pivots = np.array(
+            [
+                tuple(getter(source))[:3]
+                for getter in (node.GetRotationPivot, node.GetScalingPivot, node.GetRotationOffset, node.GetScalingOffset)
+            ],
+            dtype=np.float64,
+        )
+        if not np.any(pivots != 0.0):
+            pivots = None
+        elif joint:
+            raise ValueError(
+                f"load_fbx: joint {name!r} channel 'pivots' holds pivots or offsets, which {FORK} folds on a transform, not on "
+                f"a joint"
+            )
 
         kind = node.GetTransformationInheritType()
         if kind == inherit.eInheritRrs:
@@ -821,6 +840,7 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "
             "inherit":      held,
             "visibility":   float(node.Visibility.Get()) > _FBX_VISIBLE,
             "attrs":        _fbx_user_attributes(node),
+            "pivots":       pivots,
             "index":        None,
             "id":           node.GetUniqueID(),
         }
@@ -835,11 +855,85 @@ def _read(scene, fbx, take: bool = True, meshes: bool = False, filename: str = "
     read = {"nodes": nodes, "takes": None, "active": 0, "meshes": shapes, "cameras": cameras, "lights": lights}
     if take:
         read["takes"], read["active"] = _takes(scene, fbx, found, nodes)
+    _fold_pivots(read)
     _turn_views(read)
     _view_keys(read, fbx)
     _morph_keys(read, fbx)
     _convert(read, *_axes(scene, fbx, filename))
     return read
+
+
+def _shifts(vectors) -> np.ndarray:
+    """(..., 4, 4) translation matrices moving by ``vectors`` (..., 3)"""
+    vectors = np.asarray(vectors, dtype=np.float64)
+    out     = np.broadcast_to(np.eye(4), vectors.shape[:-1] + (4, 4)).copy()
+
+    out[..., 3, :3] = vectors
+    return out
+
+
+def _folded(translate, rotate, scale, orient, axis, order: int, pivots) -> np.ndarray:
+    """(F, 3) the translate holding a node's pivots and offsets, frame by
+    frame: the position of the matrix Maya composes, Sp^-1 S Sp St Rp^-1 RA
+    R JO Rp Rt T (measured against Maya's own evaluation and the sdk's),
+    whose 3x3, S RA R JO, the pivots leave alone"""
+    from cgmath.transforms import euler_to_matrix
+
+    translate = np.asarray(translate, dtype=np.float64).reshape(-1, 3)
+    rotate    = np.asarray(rotate, dtype=np.float64).reshape(-1, 3)
+    scale     = np.asarray(scale, dtype=np.float64).reshape(-1, 3)
+    count     = len(translate)
+    rp, sp, rt, st = (np.asarray(pivots, dtype=np.float64)[k] for k in range(4))
+
+    scaling = np.zeros((count, 4, 4))
+    scaling[:, [0, 1, 2], [0, 1, 2]] = scale
+    scaling[:, 3, 3]                 = 1.0
+    turned = euler_to_matrix(np.radians(np.broadcast_to(np.asarray(axis, dtype=np.float64), (count, 3))), 0)
+    turned = turned @ euler_to_matrix(np.radians(rotate), int(order))
+    turned = turned @ euler_to_matrix(np.radians(np.broadcast_to(np.asarray(orient, dtype=np.float64), (count, 3))), 0)
+    matrices = (
+        _shifts(-sp) @ scaling @ _shifts(sp) @ _shifts(st)
+        @ _shifts(-rp) @ turned @ _shifts(rp) @ _shifts(rt) @ _shifts(translate)
+    )
+    return matrices[:, 3, :3]
+
+
+def _fold_pivots(read: dict) -> None:
+    """every node's pivots and offsets folded into its translate, in place:
+    its own values, and on every frame of every take, the frames filled
+    from its own values where a channel holds no curve, the folded
+    translate keyed wherever translate, rotate or scale is; the node's 3x3
+    is untouched (:func:`_folded`). The file's own axes and unit: the fold
+    comes before the roots are turned and the lengths converted"""
+    entries = read["nodes"]
+    takes   = read["takes"] or []
+    for i, entry in enumerate(entries):
+        pivots = entry.pop("pivots")
+        if pivots is None:
+            continue
+        own = {channel: np.asarray(entry[channel], dtype=np.float64) for channel in ("translate", "rotate", "scale")}
+        for take in takes:
+            values = take["values"][i][0]
+            if all(value is None for channel in own for value in values[channel]):
+                continue
+            count  = len(take["frames"])
+            blocks = {}
+            for channel, static in own.items():
+                block = np.empty((count, 3))
+                for k in range(3):
+                    value       = values[channel][k]
+                    block[:, k] = static[k] if value is None else value
+                blocks[channel] = block
+            moved = _folded(
+                blocks["translate"], blocks["rotate"], blocks["scale"], entry["joint_orient"], entry["rotate_axis"],
+                entry["rotate_order"], pivots,
+            )
+            keyed               = any(isinstance(value, np.ndarray) for channel in own for value in values[channel])
+            values["translate"] = [moved[:, k] if keyed else float(moved[0, k]) for k in range(3)]
+        entry["translate"] = _folded(
+            own["translate"], own["rotate"], own["scale"], entry["joint_orient"], entry["rotate_axis"], entry["rotate_order"],
+            pivots,
+        )[0]
 
 
 # Maya's exporter turns a camera's node and a directed light's node to fbx's
@@ -1191,6 +1285,14 @@ def _takes(scene, fbx, found, nodes) -> tuple:
 
         curves = []
         for (node, _), entry in zip(found, nodes):
+            if entry["pivots"] is not None and layer is not None and any(
+                getattr(node, prop).GetCurveNode(layer, False) is not None
+                for prop in ("RotationPivot", "ScalingPivot", "RotationOffset", "ScalingOffset")
+            ):
+                raise ValueError(
+                    f"load_fbx: node {entry['name']!r} keys its pivots in take {str(stack.GetName())!r}, which {FORK} "
+                    f"does not read"
+                )
             held = {}
             for channel, prop in (("translate", node.LclTranslation), ("rotate", node.LclRotation), ("scale", node.LclScaling)):
                 held[channel] = [
