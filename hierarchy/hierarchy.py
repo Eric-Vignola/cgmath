@@ -12677,6 +12677,14 @@ class _FrameAxis:
     component read, ``rotate_y``, is a copy of its own, so ``+=`` works on a
     component on any clip and any scope and writes back through it.
 
+    The axis of one node, ``clip.frames["name"]``, has no node axis: a
+    channel reads as the rows it holds, (1, 3) or (F, 3), and the evaluated
+    values as one a frame, ``world_matrix``, ``matrix`` and
+    ``parent_matrix`` (F, 4, 4), ``quaternion`` (F, 4), ``visibility``
+    (F,); a write takes one value, one a frame, or one a frame with a node
+    axis of one. A selection, ``clip.frames[["a", "b"]]``, keeps the node
+    axis: (F, n, 4, 4) and so on.
+
     An axis can be held across an edit that reorders the clip's nodes: it
     keeps its nodes' uuids, not their positions, and lines the clip up with
     them on every read and write.
@@ -12966,7 +12974,8 @@ class _FrameAxis:
 
     @property
     def visibility(self) -> np.ndarray:
-        """every frame's visibility, (F, N) bool, a copy"""
+        """every frame's visibility, (F, N) bool, a copy; (F,) on the axis of
+        one node"""
         columns = self._columns
         return self._scoped(self._clip._shown(), columns)
 
@@ -12975,26 +12984,43 @@ class _FrameAxis:
         columns = self._columns
         clip    = self._clip
         shown   = clip._shown()
+        value   = np.asarray(value, dtype=bool)
         if columns is None:
-            shown[:] = np.broadcast_to(np.asarray(value, dtype=bool), shown.shape)
+            shown[:] = np.broadcast_to(value, shown.shape)
         else:
-            shown[:, columns] = np.broadcast_to(np.asarray(value, dtype=bool), (len(shown), len(columns)))
+            if self._single and value.ndim == 1:
+                value = value[:, None]
+            shown[:, columns] = np.broadcast_to(value, (len(shown), len(columns)))
         clip._show(shown)
 
     @property
     def matrix(self) -> np.ndarray:
-        """every frame's local matrices, (F, N, 4, 4)"""
+        """every frame's local matrices, (F, N, 4, 4); (F, 4, 4) on the axis
+        of one node"""
         columns = self._columns
         return self._scoped(_evaluate_local(self._clip), columns)
 
-    @staticmethod
-    def _scoped(values: np.ndarray, columns) -> np.ndarray:
-        """``values`` over every node, cut to ``columns`` (None for all)"""
-        return values if columns is None else values[:, columns]
+    def _scoped(self, values: np.ndarray, columns) -> np.ndarray:
+        """``values`` over every node, (F, N, ...), cut to ``columns`` (None
+        for all), the node axis dropped on the axis of one node"""
+        if columns is None:
+            return values
+        return self._squeezed(values[:, columns])
+
+    def _squeezed(self, values: np.ndarray) -> np.ndarray:
+        """``values`` (F, n, ...) of this axis's nodes as read back: (F, ...)
+        on the axis of one node"""
+        return values[:, 0] if self._single else values
+
+    def _widened(self, values: np.ndarray) -> np.ndarray:
+        """the inverse of :meth:`_squeezed`: values read back, (F, ...) on the
+        axis of one node, as (F, n, ...)"""
+        return values[:, None] if self._single else values
 
     @property
     def world_matrix(self) -> np.ndarray:
-        """every frame's world matrices, (F, N, 4, 4)"""
+        """every frame's world matrices, (F, N, 4, 4); (F, 4, 4) on the axis
+        of one node"""
         columns = self._columns
         clip    = self._clip
         parents = clip._parent_indices(clip.list)
@@ -13006,24 +13032,28 @@ class _FrameAxis:
     def matrix(self, value) -> None:
         """writes local matrices as TransformData.matrix does, every frame at
         once: (4, 4) for every node and frame, (n, 4, 4) per node, or
-        (F, n, 4, 4) frame for frame"""
+        (F, n, 4, 4) frame for frame; on the axis of one node (4, 4),
+        (1, 4, 4) or (F, 4, 4)"""
         self._solve("local", self._values(value, (4, 4)))
 
     @world_matrix.setter
     def world_matrix(self, value) -> None:
         """writes world matrices as TransformData.world_matrix does, every
-        frame at once: (4, 4), (n, 4, 4) or (F, n, 4, 4)"""
+        frame at once: (4, 4), (n, 4, 4) or (F, n, 4, 4); on the axis of one
+        node (4, 4), (1, 4, 4) or (F, 4, 4)"""
         self._solve("world", self._values(value, (4, 4)))
 
     @property
     def quaternion(self) -> np.ndarray:
-        """every frame's orientation RO * R * JO as quaternions, (F, n, 4)"""
-        return _span_quaternions(self._clip, self._positions(), slice(None))
+        """every frame's orientation RO * R * JO as quaternions, (F, n, 4);
+        (F, 4) on the axis of one node"""
+        return self._squeezed(_span_quaternions(self._clip, self._positions(), slice(None)))
 
     @quaternion.setter
     def quaternion(self, value) -> None:
         """writes orientations as TransformData.quaternion does, every frame
-        at once: (4,), (n, 4) or (F, n, 4)"""
+        at once: (4,), (n, 4) or (F, n, 4); on the axis of one node (4,),
+        (1, 4) or (F, 4)"""
         self._solve("quaternion", self._values(value, (4,)))
 
     def match_translate(self, other, x: bool = True, y: bool = True, z: bool = True) -> None:
@@ -13083,11 +13113,23 @@ class _FrameAxis:
 
     def _values(self, value, shape: tuple) -> np.ndarray:
         """``value`` as (F, n) + ``shape``: one value for every node and frame,
-        one per node held on every frame, or one per node and frame"""
+        one per node held on every frame, or one per node and frame; on the
+        axis of one node one value, one a frame, (F,) + ``shape``, or one a
+        frame with a node axis of one"""
         frames, count = self._clip.frame_count, len(self._positions())
         value = np.asarray(value, dtype=float)
+        given = value.shape
         lead  = value.ndim - len(shape)
+        if self._single and lead == 1:
+            value = value[:, None]
+            lead  = 2
+        one_node = (
+            f"the axis of one node takes {tuple(shape)}, (1,) + {tuple(shape)} or (F,) + {tuple(shape)} values, "
+            f"got shape {given}"
+        )
         if not 0 <= lead <= 2 or value.shape[lead:] != tuple(shape):
+            if self._single:
+                raise ValueError(one_node)
             raise ValueError(
                 f"expected {tuple(shape)}, (n,) + {tuple(shape)} or (F, n) + "
                 f"{tuple(shape)} values, got shape {value.shape}"
@@ -13096,6 +13138,8 @@ class _FrameAxis:
         try:
             return np.broadcast_to(value, (frames, count) + tuple(shape))
         except ValueError:
+            if self._single:
+                raise ValueError(f"{one_node}, for {frames} frames") from None
             raise ValueError(
                 f"values of shape {value.shape} do not fit {frames} frames "
                 f"of {count} nodes"
@@ -13111,7 +13155,7 @@ class _FrameAxis:
             source = other._clip if isinstance(other, _FrameAxis) else other
             if source.frame_count not in (frames, 1):
                 raise ValueError(f"clips hold {frames} and {source.frame_count} frames")
-            world = np.asarray(other.world_matrix if isinstance(other, _FrameAxis)
+            world = np.asarray(other._widened(other.world_matrix) if isinstance(other, _FrameAxis)
                                else other.frames.world_matrix)
         elif isinstance(other, TransformData):
             world = other.world_matrix[None, None]
@@ -13268,7 +13312,8 @@ class _FrameAxis:
 
     @property
     def parent_matrix(self) -> np.ndarray:
-        """every frame's parent world matrices, (F, N, 4, 4)
+        """every frame's parent world matrices, (F, N, 4, 4); (F, 4, 4) on
+        the axis of one node
 
         What get_parent_matrix gives a node on each frame: identity for a
         root, and for a node whose parent is not in the clip.
@@ -13286,7 +13331,7 @@ class _FrameAxis:
         parented = parents >= 0
         if parented.any():
             out[:, parented] = world[:, parents[parented]]
-        return out
+        return self._squeezed(out)
 
     def get_parent_matrix(self) -> np.ndarray:
         """every frame's parent world matrices, the same as parent_matrix"""
@@ -13294,19 +13339,21 @@ class _FrameAxis:
 
     @property
     def inverse_matrix(self) -> np.ndarray:
-        """every frame's inverse local matrices, (F, N, 4, 4), in one call"""
-        return _inverse(self.matrix, "matrix", self._names)
+        """every frame's inverse local matrices, (F, N, 4, 4), in one call;
+        (F, 4, 4) on the axis of one node"""
+        return self._squeezed(_inverse(self._widened(self.matrix), "matrix", self._names))
 
     @property
     def world_inverse_matrix(self) -> np.ndarray:
-        """every frame's inverse world matrices, (F, N, 4, 4), in one call"""
-        return _inverse(self.world_matrix, "world_matrix", self._names)
+        """every frame's inverse world matrices, (F, N, 4, 4), in one call;
+        (F, 4, 4) on the axis of one node"""
+        return self._squeezed(_inverse(self._widened(self.world_matrix), "world_matrix", self._names))
 
     @property
     def parent_inverse_matrix(self) -> np.ndarray:
         """every frame's inverse parent world matrices, (F, N, 4, 4):
-        identity for a root; in one call"""
-        return _inverse(self.parent_matrix, "parent_matrix", self._names)
+        identity for a root; in one call; (F, 4, 4) on the axis of one node"""
+        return self._squeezed(_inverse(self._widened(self.parent_matrix), "parent_matrix", self._names))
 
     def _names(self) -> list:
         """the names of the nodes this axis covers, in column order"""

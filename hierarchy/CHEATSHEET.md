@@ -1450,17 +1450,24 @@ assert one["knee"].rotate_y == 5.0
 
 ### Scoping to nodes
 
-A scoped axis addresses channels across **every** frame at once. One
-node's component reads back `(F, 1)`, and takes a flat list of `F` values
-as well.
+A scoped axis addresses channels across **every** frame at once. The axis
+of one node has no node axis: a channel reads as the rows it holds, `(1, 3)`
+while no key moves it, `(F, 3)` once one does, a component `(1,)` or `(F,)`;
+the evaluated values read one a frame, `world_matrix`, `matrix` and
+`parent_matrix` `(F, 4, 4)`, `quaternion` `(F, 4)`, `visibility` `(F,)`. A
+selection of nodes keeps the node axis.
 
 ```python
-clip.frames["knee"].translate.shape             # (6, 1, 3)
-clip.frames["knee"].translate = np.zeros((6, 1, 3))
-clip.frames["knee"].translate_y.shape           # (6, 1)
+clip.frames["knee"].translate.shape             # (1, 3): no key moves it yet
+clip.frames["knee"].translate = np.zeros((6, 3))
+clip.frames["knee"].translate.shape             # (6, 3)
+clip.frames["knee"].translate_y.shape           # (6,)
 clip.frames["knee"].translate_y = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
 assert np.allclose(clip.frames.translate[:, 2, 1], np.arange(6.0))
+clip.frames["knee"].world_matrix.shape          # (6, 4, 4)
+clip.frames["knee"].world_matrix = clip.frames["knee"].world_matrix   # (F, 4, 4) writes frame for frame
 clip.frames[["root", "knee"]].rotate.shape      # (6, 2, 3)
+clip.frames[["root", "knee"]].world_matrix.shape   # (6, 2, 4, 4)
 clip.frames[[0, 2]].rotate.shape                # (6, 2, 3) -- indices too
 
 before = np.array(clip.frames.rotate_y)
