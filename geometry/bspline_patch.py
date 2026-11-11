@@ -2879,13 +2879,16 @@ class NurbsSurfaceData(ShapeData):
         Parameters
         ----------
         samples : int
-            Samples per direction, 51 by default.
+            Samples per direction, 51 by default; 2 or more, fewer raise
+            ValueError.
 
         Returns
         -------
         float
             Approximate surface area.
         """
+        if samples < 2:
+            raise ValueError(f"NurbsSurfaceData.get_area: samples must be 2 or more, got {samples}")
         if self._max_param_u is None:
             self._init_bspline()
 
@@ -2930,7 +2933,7 @@ def _area_rule(samples: int, periodic: bool) -> tuple:
     the trapezoid rule.
     """
     weights = np.ones(samples, dtype=np.float64)
-    if periodic or samples < 2:
+    if periodic:
         return weights, 1.0
     if samples == 2:
         return weights, 2.0

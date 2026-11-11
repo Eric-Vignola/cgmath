@@ -2562,7 +2562,8 @@ print(round(patch.total_length_u, 4), round(patch.total_length_v, 4))
 
 `get_area()` works each direction by its own rule: composite Simpson's
 rule on an open direction, odd count or even, and the trapezoid rule around
-a periodic one. `area` is `get_area()` with the default `samples=51`.
+a periodic one. `area` is `get_area()` with the default `samples=51`;
+fewer than 2 `samples` raise `ValueError`.
 
 ```python
 print(round(patch.area, 4))                  # samples=51
