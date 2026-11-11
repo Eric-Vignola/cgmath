@@ -40,6 +40,7 @@ from cgmath._tests import test_fbx_cameras_lights as views  # noqa: E402
 from cgmath._tests import test_fbx_colors as colors  # noqa: E402
 from cgmath._tests import test_fbx_materials as mats  # noqa: E402
 from cgmath._tests import test_fbx_morphs as morphs  # noqa: E402
+from cgmath._tests import test_fbx_nurbs as nurbs  # noqa: E402
 from cgmath._tests import test_short_names as short_names  # noqa: E402
 from cgmath._tests import test_skeleton_fbx as skel  # noqa: E402
 from cgmath.formats import load_fbx, save_fbx  # noqa: E402
@@ -1116,6 +1117,131 @@ def derived_normals(rec: Recorder) -> None:
     exported(rec.path("maya.fbx"))
 
 
+def _api_curve(name: str, points, knots, degree: int, form) -> str:
+    """a curve built through the API, which takes a periodic or a closed
+    form with the knots given"""
+    parent = om.MFnTransform().create()
+    om.MFnDependencyNode(parent).setName(name)
+    cvs = [om.MPoint(*(float(c) for c in point)) for point in points]
+    om.MFnNurbsCurve().create(cvs, [float(k) for k in knots], degree, form, False, False, parent)
+    return name
+
+
+def _under(parent: str, child: str) -> None:
+    """``child``'s shape moved under ``parent``, beside its own"""
+    cmds.parent(cmds.listRelatives(child, shapes=True, fullPath=True)[0], parent, relative=True, shape=True)
+    cmds.delete(child)
+
+
+def _cvs(grid) -> list:
+    return [tuple(float(c) for c in point) for point in np.asarray(grid).reshape(-1, 3)]
+
+
+def nurbs_readings(rec: Recorder, names) -> None:
+    """what Maya holds under each transform of ``names``: its translate and,
+    for each shape in Maya's order, the degree, the form, the knots and the
+    control points, in object space"""
+    for name in names:
+        told = []
+        for at, shape in enumerate(cmds.listRelatives(name, shapes=True, noIntermediate=True, fullPath=True) or []):
+            chosen = om.MSelectionList()
+            chosen.add(shape)
+            path = chosen.getDagPath(0)
+            kind = cmds.nodeType(shape)
+            key  = f"{name}/{at}"
+            if kind == "nurbsCurve":
+                curve = om.MFnNurbsCurve(path)
+                told.append({"type": kind, "degree": curve.degree, "form": curve.form})
+                rec.array(f"{key}/knots", list(curve.knots()))
+                rec.array(f"{key}/cvs", [tuple(p)[:3] for p in curve.cvPositions(om.MSpace.kObject)])
+            elif kind == "nurbsSurface":
+                surface = om.MFnNurbsSurface(path)
+                told.append({
+                    "type":     kind,
+                    "degree_u": surface.degreeInU,
+                    "degree_v": surface.degreeInV,
+                    "form_u":   surface.formInU,
+                    "form_v":   surface.formInV,
+                    "count_u":  surface.numCVsInU,
+                    "count_v":  surface.numCVsInV,
+                })
+                rec.array(f"{key}/knots_u", list(surface.knotsInU()))
+                rec.array(f"{key}/knots_v", list(surface.knotsInV()))
+                rec.array(f"{key}/cvs",     [tuple(p)[:3] for p in surface.cvPositions(om.MSpace.kObject)])
+            else:
+                told.append({"type": kind})
+        rec.value(name, {"shapes": told, "translate": triple(name, "translate")})
+
+
+def nurbs_scene() -> list:
+    """a curve and a surface of every kind Maya's exporter writes, on the
+    test module's points; the names of their transforms"""
+    new_scene()
+    loop  = list(nurbs.ring())
+    shut  = list(nurbs.wave(4))
+    forms = om.MFnNurbsCurve
+    cmds.curve(n="open3", d=3, p=_cvs(nurbs.wave(6)), k=[0, 0, 0, 1, 2, 3, 3, 3])
+    cmds.curve(n="knots3", d=3, p=_cvs(nurbs.wave(6, 1.0)), k=[0, 0, 0, 1, 2.5, 3, 3, 3])
+    cmds.setAttr("knots3.translate", 1.0, 2.0, 3.0)
+    # Maya's own count of a periodic curve: its first points again at the end
+    _api_curve("loop3",     loop + loop[:3], range(-2, 9),          3, forms.kPeriodic)
+    _api_curve("loopKnots", loop + loop[:3], nurbs.LOOP_KNOTS,      3, forms.kPeriodic)
+    _api_curve("closed3",   shut + shut[:1], [0, 0, 0, 1, 2, 2, 2], 3, forms.kClosed)
+    cmds.curve(n="degree2",   d=2, p=_cvs(nurbs.wave(5)),      k=[0, 0, 1, 2, 3, 3])
+    cmds.curve(n="line",      d=1, p=_cvs(nurbs.wave(4, 2.0)), k=[0, 1, 2, 3])
+    cmds.curve(n="lineKnots", d=1, p=_cvs(nurbs.wave(4)),      k=[0, 1, 3, 4])
+    _api_curve("loop1", loop + loop[:1], range(7), 1, forms.kPeriodic)
+    cmds.curve(n="lines", d=1, p=_cvs(nurbs.wave(2)), k=[0, 1])
+    _under("lines", cmds.curve(n="linesB", d=1, p=_cvs(nurbs.wave(3, 1.0)), k=[0, 1, 2]))
+    cmds.surface(n="patch", du=3, dv=3, ku=[0, 0, 0, 1, 1, 1], kv=[0, 0, 0, 1, 2, 2, 2], p=_cvs(nurbs.sheet(4, 5)))
+    cmds.surface(
+        n="patchKnots", du=2, dv=3, ku=[0, 0, 0.7, 2, 2], kv=[0, 0, 0, 1.5, 2, 2, 2], p=_cvs(nurbs.sheet(4, 5) + 1.0)
+    )
+    cmds.cylinder(n="tube", s=6, nsp=2, ch=False, ax=(0, 1, 0))
+    return [
+        "open3", "knots3", "loop3", "loopKnots", "closed3", "degree2", "line", "lineKnots", "loop1", "lines", "patch",
+        "patchKnots", "tube",
+    ]
+
+
+def nurbs_export(rec: Recorder) -> None:
+    names = nurbs_scene()
+    rec.value("nodes", names)
+    nurbs_readings(rec, names)
+    exported(rec.path("maya.fbx"))
+    # the shapes the fork refuses, each in a file beside one it reads
+    plain = {"d": 3, "p": _cvs(nurbs.wave(6)), "k": [0, 0, 0, 1, 2, 3, 3, 3]}
+    new_scene()
+    cmds.curve(n="rational", d=2, pw=[(0, 0, 0, 1), (1, 1, 0, 0.5), (2, 0, 0, 1)], k=[0, 0, 1, 1])
+    cmds.surface(n="patch", du=3, dv=3, ku=[0, 0, 0, 1, 1, 1], kv=[0, 0, 0, 1, 2, 2, 2], p=_cvs(nurbs.sheet(4, 5)))
+    exported(rec.path("maya_rational.fbx"))
+    new_scene()
+    parent = om.MFnTransform().create()
+    om.MFnDependencyNode(parent).setName("rationalPatch")
+    cvs  = [om.MPoint(u, u * v * 0.25, v, 2.0 if (u, v) == (1, 1) else 1.0) for u in range(4) for v in range(4)]
+    side = om.MFnNurbsSurface.kOpen
+    om.MFnNurbsSurface().create(cvs, [0, 0, 0, 1, 1, 1], [0, 0, 0, 1, 1, 1], 3, 3, side, side, True, parent)
+    cmds.curve(n="plain", **plain)
+    exported(rec.path("maya_rational_surface.fbx"))
+    new_scene()
+    trimmed = cmds.nurbsPlane(n="trimmed", u=2, v=2, ch=False, ax=(0, 1, 0))[0]
+    hole    = cmds.circle(n="trimRing", r=0.2, nr=(0, 1, 0), ch=False)[0]
+    cmds.move(0, 1, 0, hole)
+    cmds.projectCurve(hole, trimmed, d=(0, 1, 0), ch=False)
+    cmds.trim(trimmed, lu=0.9, lv=0.9, ch=False)
+    cmds.delete(hole)
+    cmds.curve(n="plain", **plain)
+    exported(rec.path("maya_trimmed.fbx"))
+
+
+def nurbs_import(rec: Recorder) -> None:
+    nodes = nurbs.rig()
+    ours  = rec.path("ours.fbx")
+    save_fbx(ours, nodes, curves=nurbs.curves(nodes), surfaces=nurbs.surfaces(nodes))
+    imported(ours)
+    nurbs_readings(rec, list(nurbs.NODES) + ["curve", "surface"])
+
+
 CASES = {
     "clip_import": clip_import,
     "visibility_locator": visibility_locator,
@@ -1149,6 +1275,8 @@ CASES = {
     "short_names_joints": short_names_joints,
     "inverse_scale": inverse_scale,
     "shear_parent": shear_parent,
+    "nurbs_export": nurbs_export,
+    "nurbs_import": nurbs_import,
 }
 
 

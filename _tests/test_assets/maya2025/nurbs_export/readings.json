@@ -1,0 +1,216 @@
+{
+ "closed3": {
+  "shapes": [
+   {
+    "degree": 3,
+    "form": 2,
+    "type": "nurbsCurve"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "degree2": {
+  "shapes": [
+   {
+    "degree": 2,
+    "form": 1,
+    "type": "nurbsCurve"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "knots3": {
+  "shapes": [
+   {
+    "degree": 3,
+    "form": 1,
+    "type": "nurbsCurve"
+   }
+  ],
+  "translate": [
+   1.0,
+   2.0,
+   3.0
+  ]
+ },
+ "line": {
+  "shapes": [
+   {
+    "degree": 1,
+    "form": 1,
+    "type": "nurbsCurve"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "lineKnots": {
+  "shapes": [
+   {
+    "degree": 1,
+    "form": 1,
+    "type": "nurbsCurve"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "lines": {
+  "shapes": [
+   {
+    "degree": 1,
+    "form": 1,
+    "type": "nurbsCurve"
+   },
+   {
+    "degree": 1,
+    "form": 1,
+    "type": "nurbsCurve"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "loop1": {
+  "shapes": [
+   {
+    "degree": 1,
+    "form": 3,
+    "type": "nurbsCurve"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "loop3": {
+  "shapes": [
+   {
+    "degree": 3,
+    "form": 3,
+    "type": "nurbsCurve"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "loopKnots": {
+  "shapes": [
+   {
+    "degree": 3,
+    "form": 3,
+    "type": "nurbsCurve"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "nodes": [
+  "open3",
+  "knots3",
+  "loop3",
+  "loopKnots",
+  "closed3",
+  "degree2",
+  "line",
+  "lineKnots",
+  "loop1",
+  "lines",
+  "patch",
+  "patchKnots",
+  "tube"
+ ],
+ "open3": {
+  "shapes": [
+   {
+    "degree": 3,
+    "form": 1,
+    "type": "nurbsCurve"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "patch": {
+  "shapes": [
+   {
+    "count_u": 4,
+    "count_v": 5,
+    "degree_u": 3,
+    "degree_v": 3,
+    "form_u": 1,
+    "form_v": 1,
+    "type": "nurbsSurface"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "patchKnots": {
+  "shapes": [
+   {
+    "count_u": 4,
+    "count_v": 5,
+    "degree_u": 2,
+    "degree_v": 3,
+    "form_u": 1,
+    "form_v": 1,
+    "type": "nurbsSurface"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "tube": {
+  "shapes": [
+   {
+    "count_u": 5,
+    "count_v": 9,
+    "degree_u": 3,
+    "degree_v": 3,
+    "form_u": 1,
+    "form_v": 3,
+    "type": "nurbsSurface"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ }
+}
