@@ -840,7 +840,9 @@ enclose: a loop beside another adds to it (a bowtie, whichever way each lobe
 turns), one inside another wound against it is a hole and is taken off (a
 keyhole), and one inside wound with it adds nothing. `AreaMethod.TRIANGULATE`
 measures only what `triangulate()` makes, so it raises on most of these odd
-faces and on points on one line. A `UVData`'s n-gons measure the same way.
+faces and on points on one line; a quad `triangulate()` leaves whole (a
+bowtie, a quad with an edge next to nothing) it measures whole. A `UVData`'s
+n-gons measure the same way.
 Its corner angles lie between each corner's previous and next edge in its
 own loop: on a face with holes, the outer loop and each hole wrap on
 themselves. `from_faces()` and `delete_faces()` renumber the holes of the

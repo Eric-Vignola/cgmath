@@ -1593,6 +1593,36 @@ class TestMesh(unittest.TestCase):
                             with self.assertRaises(NotImplementedError):
                                 mesh.get_face_areas(method=AreaMethod.TRIANGULATE)
 
+    def test_triangulate_area_quad_left_whole(self):
+        """AreaMethod.TRIANGULATE measures a quad the rules leave whole as one face, and the faces after it as theirs"""
+        unit = [[10, 0, 0], [11, 0, 0], [11, 1, 0], [10, 1, 0]]
+        tri  = [[20, 0, 0], [22, 0, 0], [20, 3, 0]]
+        far  = [[30, 0, 0], [31, 0, 0], [31, 1, 0], [30, 1, 0]]
+        cases = {
+            # neither diagonal makes two triangles facing one way
+            "bowtie": [[0, 0, 0], [1, 1, 0], [1, 0, 0], [0, 1, 0]],
+            # either diagonal leaves a sliver beside half the face: a trapezoid of area 0.51
+            "short edge": [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0.98, 1, 0]],
+        }
+        for label, quad in cases.items():
+            for cls, dim in ((MeshData, 3), (UVData, 2)):
+                with self.subTest(label, cls=cls.__name__):
+                    mesh = cls(
+                        points  = np.array(quad + unit + tri + far, dtype=float)[:, :dim],
+                        indices = np.arange(15),
+                        counts  = [4, 4, 3, 4],
+                    )
+                    rules = mesh.get_triangulate_rules(method="fast")
+                    self.assertEqual(rules.rules.tolist(), [-1, rules.rules[1], -1, rules.rules[3]])
+                    self.assertTrue(rules.rules[1] >= 0 and rules.rules[3] >= 0)
+
+                    areas = mesh.get_face_areas(method=AreaMethod.TRIANGULATE)
+                    self.assertEqual(areas.shape, (4,))
+                    self.assertEqual(areas[0], mesh.get_face_areas()[0])  # whole: 2x2 Gauss
+                    self.assertTrue(np.allclose(areas[1:], [1.0, 3.0, 1.0], rtol=1e-12, atol=0))
+                    if label == "short edge":
+                        self.assertTrue(np.isclose(areas[0], 0.51, rtol=1e-12, atol=0))
+
     def test_ngon_hole_stream_order_area(self):
         """a hole measures the same whichever of its corners the face's index stream starts it at"""
         def panel(x):
