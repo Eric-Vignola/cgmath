@@ -6511,7 +6511,7 @@ class TestNurbsSurfaceData(unittest.TestCase):
     def test_area_rules(self):
         """each direction by its own rule: Simpson's on an open one, the
         trapezoid rule around a periodic one, 51 samples by default"""
-        # a square prism, 2 a side and 3 high: 24 at any odd count
+        # a square prism, 2 a side and 3 high: 24 at any count
         square = np.array([[1.0, 1.0, 0.0], [-1.0, 1.0, 0.0], [-1.0, -1.0, 0.0], [1.0, -1.0, 0.0]])
         prism = NurbsSurfaceData(
             points=np.stack([square, square + [0.0, 0.0, 3.0]], axis=1), degree_u=1, degree_v=1, periodic_u=True,
@@ -6519,13 +6519,18 @@ class TestNurbsSurfaceData(unittest.TestCase):
         )
         self.assertAlmostEqual(prism.area, 24.0, places=12)
         self.assertEqual(prism.area, prism.get_area(51))
-        for samples in (7, 201):
+        for samples in (2, 4, 6, 7, 50, 201):
             self.assertAlmostEqual(prism.get_area(samples), 24.0, places=12)
         # closed both ways: an odd count and an even one agree
         closed = self.closed_closed
         fine   = closed.get_area(400)
         self.assertAlmostEqual(closed.area, fine, delta=1e-4 * fine)
         self.assertAlmostEqual(closed.get_area(401), fine, delta=1e-4 * fine)
+        # open both ways: an even count is as accurate as an odd one
+        opened = self.open_open
+        fine   = opened.get_area(401)
+        self.assertAlmostEqual(opened.get_area(50), fine, delta=1e-4 * fine)
+        self.assertAlmostEqual(opened.get_area(51), fine, delta=1e-4 * fine)
 
     # -------------------------------------------------------------- #
     #  Compute                                                         #

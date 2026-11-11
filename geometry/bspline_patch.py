@@ -2867,11 +2867,11 @@ class NurbsSurfaceData(ShapeData):
         Numerical surface area: ``||S_u x S_v||`` summed over ``samples`` by
         ``samples`` parameters, each direction by its own rule.
 
-        An open direction takes composite Simpson's rule when ``samples``
-        is odd and falls back to a Riemann sum, which counts both of its
-        ends in full, when it is even. A periodic direction's samples stop
-        short of its end and weigh the same, the trapezoid rule around a
-        closed direction, whatever the count. The samples are
+        An open direction takes composite Simpson's rule: the 1/3 rule when
+        ``samples`` is odd; when it is even, the 3/8 rule over three steps
+        at an end and the 1/3 rule over the rest, the two ends averaged. A
+        periodic direction's samples stop short of its end and weigh the
+        same, the trapezoid rule around a closed direction. The samples are
         evenly spaced in the native parameters, not lined up with the knots:
         uneven knots (``knots_u`` / ``knots_v``), short end spans most of
         all, need more of them for the same accuracy.
@@ -2879,8 +2879,7 @@ class NurbsSurfaceData(ShapeData):
         Parameters
         ----------
         samples : int
-            Samples per direction, 51 by default: an odd number, for
-            Simpson's rule on an open direction.
+            Samples per direction, 51 by default.
 
         Returns
         -------
@@ -2921,15 +2920,32 @@ def _area_rule(samples: int, periodic: bool) -> tuple:
     A periodic direction's samples stop short of its end and weigh the
     same: the trapezoid rule around a closed direction. Simpson's weights
     are made for a first and a last sample at the two ends, which such a
-    direction does not have. An open direction takes composite Simpson's
-    rule when ``samples`` is odd and a Riemann sum when it is even.
+    direction does not have.
+
+    An open direction takes composite Simpson's rule. An odd ``samples``
+    leaves an even number of steps: the 1/3 rule over each pair. An even
+    one leaves an odd number: three steps at an end take the 3/8 rule and
+    the rest the 1/3 rule, summed once from each end and averaged, so that
+    turning the direction round leaves the sum as it was. Two samples are
+    the trapezoid rule.
     """
     weights = np.ones(samples, dtype=np.float64)
-    if periodic or samples < 3 or samples % 2 == 0:
+    if periodic or samples < 2:
         return weights, 1.0
-    weights[1:-1:2] = 4.0
-    weights[2:-1:2] = 2.0
-    return weights, 3.0
+    if samples == 2:
+        return weights, 2.0
+    if samples % 2:
+        weights[1:-1:2] = 4.0
+        weights[2:-1:2] = 2.0
+        return weights, 3.0
+    # over 24: the 1/3 rule's 1 4 2 .. 4 1 by 8, the 3/8 rule's 1 3 3 1 by 9
+    ending = np.zeros(samples, dtype=np.float64)
+    if samples > 4:
+        ending[:-3]    = 8.0
+        ending[1:-4:2] = 32.0
+        ending[2:-4:2] = 16.0
+    ending[-4:] += (9.0, 27.0, 27.0, 9.0)
+    return ending + ending[::-1], 48.0
 
 
 def _direction_knots(knots, kv, count, degree, periodic, label):

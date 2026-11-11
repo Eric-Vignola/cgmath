@@ -811,9 +811,9 @@ print(patch.count_u, patch.count_v, patch.max_param_u, patch.max_param_v)
 print(np.round(patch.evaluate(0.5, 0.5), 4))
 ```
 
-`patch.area` calls `get_area(samples=51)`. On an open direction `get_area`
-uses composite Simpson when `samples` is **odd** and degrades to a Riemann
-sum when it is even, so keep the count odd.
+`patch.area` calls `get_area(samples=51)`: composite Simpson on an open
+direction, the trapezoid rule around a periodic one. More `samples`, odd or
+even, buy accuracy.
 
 ```python
 print(round(patch.area, 4), round(patch.get_area(50), 4), round(patch.get_area(201), 4))
