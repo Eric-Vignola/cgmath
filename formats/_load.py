@@ -34,6 +34,11 @@ BIND_AGREE = 1e-8
 # a mesh's geometric transform this close to identity is none
 MESH_IDENTITY = 1e-12
 
+# a file's normals this close, a component, to the ones Maya derives from
+# the points are those ones: the mesh stores none (Maya hands its normals
+# out as floats)
+NORMALS_DERIVED = 1e-5
+
 # a bind matrix the solved channels place a node this far from: refused
 BIND_SOLVED = 1e-6
 
@@ -84,6 +89,18 @@ def load_fbx(
     without UVs. A node holding a shape that is no mesh is a transform, the
     shape left out; a joint is a joint whatever else it holds (Maya's FBX
     holds no mesh on one).
+
+    A mesh stores the least normals that shade it as the file does. The
+    file's normals are held, a face corner at a time, against the ones Maya
+    derives from the points (:meth:`MeshData.get_face_vertex_normals`):
+    with every edge soft, then inside the groups of corners the file's own
+    normals leave, an edge hard where its two faces hold different normals
+    at one of its ends. Within 1e-5 a component the mesh stores none:
+    ``normals`` None, and ``normal_indices`` None when every edge is soft,
+    else the groups, a number a corner. Any other normals, authored ones
+    (Maya's locked normals), are stored as the file holds them, each corner
+    naming its own. Maya's importer, for its part, locks every normal it
+    reads and tells the hard edges from them (measured).
 
     ``cameras`` a CameraList and ``lights`` a LightList, in their nodes'
     order, each ``parent_uuid`` its node's, each in Maya's attributes as
@@ -1940,30 +1957,100 @@ def _build_morphs(read: dict, meshes):
     return MorphList(morphs) if morphs else None
 
 
+def _parted_edges(mesh, corners: np.ndarray) -> np.ndarray:
+    """the edges the corner normals ``corners`` part, as the mesh's own edge
+    ids: an edge of two faces whose normals, at one of its ends, are more
+    than NORMALS_DERIVED apart in a component. A border edge parts nothing;
+    of an edge of more than two faces the first two are read, the ones
+    split_at_hard_edges joins"""
+    e2f = np.asarray(mesh.e2f)
+    if e2f.shape[1] < 2:
+        return np.empty(0, dtype=np.int32)
+
+    # every edge's first two faces, its -1 padding last
+    first  = np.argsort(e2f < 0, axis=1, kind="stable")[:, :2]
+    faces  = np.take_along_axis(e2f, first, axis=1).astype(np.int64)
+    shared = np.flatnonzero((faces >= 0).all(axis=1))
+    faces  = faces[shared]
+    ends   = np.asarray(mesh.e2v, dtype=np.int64)[shared]
+
+    # the corner a face holds at a vertex, found by a sorted key
+    indices = np.asarray(mesh.indices, dtype=np.int64)
+    counts  = np.asarray(mesh.counts)
+    width   = int(indices.max()) + 1
+    keys    = np.repeat(np.arange(counts.size, dtype=np.int64), counts) * width + indices
+    order   = np.argsort(keys, kind="stable")
+    keys    = keys[order]
+
+    parted  = np.zeros(shared.size, dtype=bool)
+    for end in range(2):
+        wanted = [faces[:, side] * width + ends[:, end] for side in range(2)]
+        places = [np.minimum(np.searchsorted(keys, key), keys.size - 1) for key in wanted]
+        found  = (keys[places[0]] == wanted[0]) & (keys[places[1]] == wanted[1])
+        apart  = np.abs(corners[order[places[0]]] - corners[order[places[1]]])
+        parted |= found & ~np.all(apart <= NORMALS_DERIVED, axis=1)
+    return shared[parted].astype(np.int32)
+
+
+def _least_normals(held: dict) -> tuple:
+    """``(normals, normal_indices)`` of the read mesh ``held``: the least
+    that shades it as the file does. The file's normals are held, a face
+    corner at a time, against the ones Maya derives from the points
+    (MeshData.get_face_vertex_normals): with every edge soft, then inside
+    the groups of corners the file's own normals leave (:func:`_parted_edges`).
+    Within NORMALS_DERIVED a component the mesh stores none: ``(None,
+    None)`` with every edge soft, else ``(None, the groups)``. Any other
+    normals, authored ones, come back as read"""
+    from cgmath.geometry.mesh import MeshData, _compute_shading_normals
+    from cgmath.geometry.utils.main import split_at_hard_edges
+
+    normals, ids = held["normals"], held["normal_indices"]
+    if normals is None or not ids.size or ids.min() < 0 or ids.max() >= normals.shape[0]:
+        return normals, ids
+
+    # a mesh of its own: what it keeps to derive normals stays off the one built
+    mesh    = MeshData(points=held["points"], counts=held["counts"], indices=held["indices"])
+    indices = np.asarray(mesh.indices)
+    corners = normals[ids]
+
+    def derived(groups, count: int) -> bool:
+        ours = _compute_shading_normals(mesh, groups, count, True, True, force=False)[groups]
+        return bool(np.all(np.abs(ours - corners) <= NORMALS_DERIVED))
+
+    if derived(indices, mesh.point_count):
+        return None, None
+    groups, count = split_at_hard_edges(indices, mesh.counts, mesh.e2v, mesh.e2f, _parted_edges(mesh, corners))
+    if derived(groups, count):
+        return None, groups
+    return normals, ids
+
+
 def _build_meshes(read: dict):
     """the MeshList of the file's meshes, as ``read`` orders them, each on
-    its node by uuid; None for none"""
+    its node by uuid and storing the least normals that shade it as the
+    file does (:func:`_least_normals`); None for none"""
     from cgmath.geometry.mesh import MeshData, MeshList
 
     entries = read["nodes"]
     if not read["meshes"]:
         return None
-    return MeshList(
-        [
+    meshes = []
+    for held in read["meshes"]:
+        normals, ids = _least_normals(held)
+        meshes.append(
             MeshData(
                 name           = held["name"],
                 points         = held["points"],
                 counts         = held["counts"],
                 indices        = held["indices"],
-                normals        = held["normals"],
-                normal_indices = held["normal_indices"],
+                normals        = normals,
+                normal_indices = ids,
                 colors         = held["colors"],
                 color_indices  = held["color_indices"],
                 parent_uuid    = entries[held["node"]]["uuid"],
             )
-            for held in read["meshes"]
-        ]
-    )
+        )
+    return MeshList(meshes)
 
 
 def _build_uvs(read: dict, meshes):

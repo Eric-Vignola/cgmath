@@ -1219,11 +1219,24 @@ def _edited(source: str, path: str, edit) -> str:
 
 class _Skinned(_Files):
     def assertSameMesh(self, got, want):
+        """``got`` holds ``want``'s name, points and faces bit for bit, and
+        shades as it does. The normals ``got`` stores are ``want``'s, bit for
+        bit. Where it stores none (load_fbx stores no normal Maya would
+        derive from the points) its corners hold ``want``'s normals within
+        1e-5 a component, in ``want``'s groups when ``want`` stores none
+        either"""
         self.assertEqual(got.name, want.name)
-        for field in ("points", "counts", "indices", "normals", "normal_indices"):
+        fields = ["points", "counts", "indices"]
+        if got.normals is not None or want.normals is None:
+            fields += ["normals", "normal_indices"]
+        for field in fields:
             a, b = getattr(got, field), getattr(want, field)
+            if a is None or b is None:
+                self.assertIs(a, b, field)
+                continue
             self.assertEqual(a.dtype, b.dtype, field)
             np.testing.assert_array_equal(a, b, err_msg=field)
+        np.testing.assert_allclose(got.get_face_vertex_normals(), want.get_face_vertex_normals(), rtol=0, atol=1e-5, err_msg="normals")
 
     def assertOn(self, mesh, nodes, name):
         """``mesh`` names, by ``parent_uuid``, the node of ``nodes`` called ``name``"""
@@ -1436,6 +1449,11 @@ class TestSkin(_Skinned):
         for got, want, name in zip(first.meshes, meshes[::-1], ("prop", "geo")):
             self.assertSameMesh(got, want)
             self.assertOn(got, first.clip.active, name)
+        # tetra()'s normals, one a face, are the ones Maya derives with every
+        # edge hard: not stored, a group a corner; body()'s, authored, stay
+        self.assertIsNone(first.meshes[0].normals)
+        self.assertEqual(np.asarray(first.meshes[0].normal_indices).tolist(), list(range(12)))
+        self.assertEqual(len(first.meshes[1].normals), len(meshes[0].normals))
         save_fbx(self.path("b.fbx"), *first)
         second = load_fbx(self.path("b.fbx"))
         self.assertSameClips(second.clip, first.clip)

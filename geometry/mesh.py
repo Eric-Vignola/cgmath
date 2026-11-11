@@ -3090,7 +3090,10 @@ class MeshData(ShapeData):
         holding its points as they are, its faces in their order (ngons
         kept) and its normals as it holds them, in Maya's Y-up and cm;
         ``parent_uuid`` names no node of the file. ``cgmath.formats.load_fbx``
-        reads it back equal, on that node. See :func:`cgmath.formats.save_fbx`.
+        reads it back on that node, equal but for normals Maya would derive
+        from the points: those the read does not store, keeping the groups
+        of corners they shade in ``normal_indices``. See
+        :func:`cgmath.formats.save_fbx`.
         """
         from cgmath.formats import save_fbx
 
