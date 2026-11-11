@@ -290,6 +290,9 @@ class TestAFileIsBuiltAsTheClassAsked(unittest.TestCase):
                     Data.from_dict(obj.to_dict())
                 with self.assertRaisesRegex(TypeError, r"^Data\.from_bytes\(\) builds nothing"):
                     Data.from_bytes(obj.to_bytes())
+                assert_same(self, obj, held.from_json(obj.to_json()))
+                with self.assertRaisesRegex(TypeError, r"^Data\.from_json\(\) builds nothing"):
+                    Data.from_json(obj.to_json())
 
         for ext, path in self.saved(ClipData)[1].items():
             with self.subTest(held="ClipData", ext=ext, loader="DataList"):

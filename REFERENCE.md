@@ -896,6 +896,8 @@ classmethod from_bytes(cls, data: bytes) -> Any
     the object npz bytes hold, read as :meth:`from_dict` reads a tree
 classmethod from_dict(cls, data: dict) -> Any
     The object a tree describes, built as this class, whatever class
+classmethod from_json(cls, text: str) -> Any
+    the object json text holds, :meth:`to_json`'s, read as :meth:`from_dict` reads a tree
 classmethod info(cls) -> str
     Returns this class's docstring as a string.
 classmethod load(cls, filename: str, mode: Optional[str] = None, **kwargs) -> Any
@@ -953,6 +955,8 @@ classmethod from_bytes(cls, data: bytes) -> Any
     the list npz bytes hold, read as :meth:`from_dict` reads a tree
 classmethod from_dict(cls, data: dict) -> Any
     The list a tree describes, built as this class, whatever class saved
+classmethod from_json(cls, text: str) -> Any
+    the list json text holds, :meth:`to_json`'s, read as :meth:`from_dict` reads a tree
 get(self, name: str, default: Any = None) -> Any
     the first item named ``name``, or ``default``
 index(self, value, start=0, stop=None)
@@ -1027,7 +1031,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000001A740E0B190>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000001467F32AE90>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -3452,7 +3456,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001A78EC06D40>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000014670696E80>, '...
 ```
 
 ## `cgmath.constraints`

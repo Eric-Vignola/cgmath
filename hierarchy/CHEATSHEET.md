@@ -2486,12 +2486,14 @@ node_path = rig["hip"].save(os.path.join(WORKDIR, "hip.json"))
 assert TransformData.load(node_path).name == "hip"
 ```
 
-In memory: `to_dict` / `from_dict`, `to_json`, `to_bytes` / `from_bytes`.
+In memory: `to_dict` / `from_dict`, `to_json` / `from_json`, `to_bytes` /
+`from_bytes`.
 
 ```python
 assert HierarchyData.from_dict(rig.to_dict()) == rig
 assert HierarchyData.from_bytes(rig.to_bytes()) == rig
 rig.to_json()[:1]                               # '{'
+assert HierarchyData.from_json(rig.to_json()) == rig
 
 assert TransformData.from_dict(rig["hip"].to_dict()).name == "hip"
 ```

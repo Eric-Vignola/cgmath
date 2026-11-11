@@ -217,6 +217,7 @@ assert MeshData.from_bytes(b) == cube
 
 s = cube.to_json()                    # human readable, columnar arrays
 assert isinstance(s, str)
+assert MeshData.from_json(s) == cube
 ```
 
 A private field behind a public property of its own name is saved under the

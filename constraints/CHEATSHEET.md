@@ -607,10 +607,11 @@ print(type(blob), len(blob) > 0)
 print(ProcrustesData.from_bytes(blob).valid)
 ```
 
-Human-readable JSON as a string.
+Human-readable JSON as a string, and back.
 
 ```python
 print(solve.to_json()[:80])
+print(ProcrustesData.from_json(solve.to_json()).valid)
 ```
 
 ---
