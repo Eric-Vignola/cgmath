@@ -6521,6 +6521,12 @@ class TestNurbsSurfaceData(unittest.TestCase):
         self.assertEqual(prism.area, prism.get_area(51))
         for samples in (2, 4, 6, 7, 50, 201):
             self.assertAlmostEqual(prism.get_area(samples), 24.0, places=12)
+        for samples in (1, 0, -3):
+            with self.assertRaises(ValueError) as caught:
+                prism.get_area(samples)
+            self.assertEqual(
+                str(caught.exception), f"NurbsSurfaceData.get_area: samples must be 2 or more, got {samples}"
+            )
         # closed both ways: an odd count and an even one agree
         closed = self.closed_closed
         fine   = closed.get_area(400)
