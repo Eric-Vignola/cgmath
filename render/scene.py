@@ -173,6 +173,9 @@ _SHADING_KEYS = (
 # what a mesh's colours do to its surface colour
 _VERTEX_COLOR_MODES = ("off", "multiply", "replace")
 
+# the kinds of an fbx file a scene holds: its NURBS curves and surfaces are left unread
+_FBX_FIELDS = tuple(field for field in FbxContents._fields if field not in ("curves", "surfaces"))
+
 # a shape's list field, by the class of what it holds
 _LISTS = (
     ("meshes", MeshData, MeshList),
@@ -1096,15 +1099,16 @@ class Scene(Data):
         cameras, lights and blend shape targets, as :func:`cgmath.formats.load_fbx`
         reads them, named after the file unless ``name`` says; ``options``
         are ``load_fbx``'s flags (``textures=False``, ``verbose=False`` ...),
-        a kind left unread None"""
-        contents = _load_fbx(filename, **options)
+        a kind left unread None; a NURBS curve or surface is left unread,
+        the scene holding none"""
+        contents = _load_fbx(filename, **dict(options, curves=False, surfaces=False))
         stem     = os.path.splitext(os.path.basename(os.path.expanduser(filename)))[0]
-        return cls(name=name or stem, **contents._asdict())
+        return cls(name=name or stem, **{field: getattr(contents, field) for field in _FBX_FIELDS})
 
     def save_fbx(self, filename: str, as_ascii: bool = False) -> str:
         """the scene written as :func:`cgmath.formats.save_fbx` writes its
         fields; the render settings are not in a file. Returns the path"""
-        _save_fbx(filename, as_ascii=as_ascii, **{field: getattr(self, field) for field in FbxContents._fields})
+        _save_fbx(filename, as_ascii=as_ascii, **{field: getattr(self, field) for field in _FBX_FIELDS})
         return filename
 
     @classmethod
