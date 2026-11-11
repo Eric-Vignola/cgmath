@@ -64,9 +64,9 @@ A CSG stack in, a quad `MeshData` out.
 `MeshData`, `UVData`, `MapData`, `GeomSubsetData`, `MorphData`, `SkinData` and
 `CompactSkinData` all derive from `Data`, a `@dataclass` with managed
 serialization. The declared fields *are* the object: `to_dict`, `from_dict`,
-`to_json`, `to_bytes`, `save`, `load`, `copy`, `__eq__` and `__reduce__`
-(pickle) read exactly those fields, less any `TRANSIENT_FIELDS`, and nothing
-else.
+`to_json`, `from_json`, `to_bytes`, `from_bytes`, `save`, `load`, `copy`,
+`__eq__` and `__reduce__` (pickle) read exactly those fields, less any
+`TRANSIENT_FIELDS`, and nothing else.
 
 - **Caches are never persisted.** A `MeshData` memoises a dozen topology
   matrices on private `_`-prefixed attributes, the ones its `_STATE` names.
@@ -126,7 +126,8 @@ the default. A `DataList` saves `"__items__"` (one tree per item) and its
 `LIST_FIELDS`. `copy()` is the same round trip, in memory.
 
 - **The class you load with builds the file.** `load`, `load_json`,
-  `load_npz`, `load_pickle`, `from_dict` and `from_bytes` called on a class
+  `load_npz`, `load_pickle`, `from_dict`, `from_json` and `from_bytes`
+  called on a class
   build that class from the fields the file holds, whatever class saved it: a
   file names none. A field the class lacks is dropped with a warning; one the
   class requires and the file lacks raises `ValueError` naming it, and so does

@@ -487,6 +487,13 @@ class TestData(unittest.TestCase):
         loaded = TestDataClass.from_bytes(data_bytes)
         self.assertEqual(obj, loaded)
 
+    def test_to_from_json(self):
+        """from_json() reads the text to_json() writes"""
+        obj    = TestDataClass(name="test", values=np.array([1.0, 2.0, 3.0]), count=5)
+        loaded = TestDataClass.from_json(obj.to_json())
+        self.assertEqual(obj, loaded)
+        self.assertIsInstance(loaded.values, np.ndarray)
+
     def test_to_json(self):
         """Test to_json() method"""
         obj = TestDataClass(name="named", values=np.array([1.0, 2.0, 4.0]), count=6)
@@ -1664,6 +1671,15 @@ class TestDataListClass(unittest.TestCase):
 
         loaded = TestDataList.from_bytes(data_bytes)
         self.assertEqual(self.data_list, loaded)
+
+    def test_to_from_json(self):
+        """from_json() reads the text to_json() writes, for a DataList"""
+        loaded = TestDataList.from_json(self.data_list.to_json())
+        self.assertEqual(self.data_list, loaded)
+        for item in loaded:
+            self.assertIsInstance(item.values, np.ndarray)
+        with self.assertRaisesRegex(TypeError, r"^DataList\.from_json\(\) builds nothing"):
+            DataList.from_json(self.data_list.to_json())
 
     def test_str_and_repr(self):
         """Test __str__ and __repr__ methods"""

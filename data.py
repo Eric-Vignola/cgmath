@@ -2201,6 +2201,12 @@ class Data:
         """rebuilds what is not saved, once a load has set every field"""
 
     @classmethod
+    def from_json(cls, text: str) -> Any:
+        """the object json text holds, :meth:`to_json`'s, read as :meth:`from_dict` reads a tree"""
+        _concrete(cls, "from_json")
+        return cls.from_dict(json.loads(text, object_hook=_json_dict))
+
+    @classmethod
     def from_bytes(cls, data: bytes) -> Any:
         """the object npz bytes hold, read as :meth:`from_dict` reads a tree"""
         _concrete(cls, "from_bytes")
@@ -3116,6 +3122,12 @@ class DataList(Generic[_Item], MutableSequence[_Item]):
 
     def _post_load(self) -> None:
         """rebuilds what is not saved, once a load has set every item and field"""
+
+    @classmethod
+    def from_json(cls, text: str) -> Any:
+        """the list json text holds, :meth:`to_json`'s, read as :meth:`from_dict` reads a tree"""
+        _concrete(cls, "from_json")
+        return cls.from_dict(json.loads(text, object_hook=_json_dict))
 
     @classmethod
     def from_bytes(cls, data: bytes) -> Any:
