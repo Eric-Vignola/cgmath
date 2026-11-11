@@ -194,10 +194,12 @@ writes them back as Maya's exporter does. A curve of degree 1 that is not
 periodic and holds no knots is a line of the file's polyline, any number
 of them on one node; every other curve is the file's NURBS curve, one a
 node, and a surface is one a node too. `knots` is None where the file's
-are the ones the shape gives itself. Rational shapes (a control point's
-weight that is not 1) and trimmed surfaces are refused, the message naming
-the flag (`curves=False`, `surfaces=False`) that reads the file without
-them.
+are the ones the shape gives itself. A control point's weight is read into
+`weights` and written from it, one a control point, None where each is 1;
+a point is the one Maya shows, not multiplied by its weight. A trimmed
+surface is refused, and so is a weight that is not finite or not above
+zero, the message naming the node; `curves=False` or `surfaces=False`
+reads the file without them.
 
 The FBX SDK frees what it read only when told to; every FBX reader in
 cgmath frees its memory before it returns, and none of them writes anything

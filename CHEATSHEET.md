@@ -629,6 +629,10 @@ print(points.round(3))
 print(curve.sample(np.array([[2.0, 2.0, 0.0]])).distances.round(3))   # closest point
 ```
 
+`weights`, one value per control point, makes the curve rational (None:
+every weight 1): `weights=[1, np.sqrt(0.5), 1]` on three points of degree 2
+is an exact quarter circle.
+
 `points` is held **by reference**. After editing the array in place call
 `invalidate()` or `rebuild()`.
 

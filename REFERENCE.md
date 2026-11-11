@@ -1033,7 +1033,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000001425FAEB0D0>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000001E5BEE0B0D0>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -2082,10 +2082,10 @@ copy(self)
 
 #### `NurbsCurveData(ShapeData)`
 
-NURBS curve data class: a B-spline curve, non-rational (every weight 1),
+NURBS curve data class: a B-spline curve, rational when it holds
 
 ```text
-NurbsCurveData(points: typing.Annotated[numpy.ndarray, Array(float64 (N, D))] = ImmutableArray([], shape=(0, 3), dtype=float64), degree: int = 3, periodic: bool = False, uniform: bool = False, use_numba: bool = True, registered: bool = False, arc_length_samples: int = 1000, knots: Optional[Annotated[numpy.ndarray, Array(float64 (K,))]] = None, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
+NurbsCurveData(points: typing.Annotated[numpy.ndarray, Array(float64 (N, D))] = ImmutableArray([], shape=(0, 3), dtype=float64), degree: int = 3, periodic: bool = False, uniform: bool = False, use_numba: bool = True, registered: bool = False, arc_length_samples: int = 1000, knots: Optional[Annotated[numpy.ndarray, Array(float64 (K,))]] = None, weights: Optional[Annotated[numpy.ndarray, Array(float64 (N,))]] = None, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
 ```
 
 Fields:
@@ -2099,6 +2099,7 @@ use_numba: bool = True
 registered: bool = False
 arc_length_samples: int = 1000
 knots: Optional = None
+weights: Optional = None
 ```
 
 Properties:
@@ -2166,7 +2167,7 @@ tensor-product B-spline patches.
 B-spline tensor-product surface.
 
 ```text
-NurbsSurfaceData(points: typing.Annotated[numpy.ndarray, Array(float64 (Nu, Nv, D))], degree_u: int, degree_v: int, periodic_u: bool, periodic_v: bool, uniform_u: bool = False, uniform_v: bool = False, use_numba: bool = True, registered_u: bool = False, registered_v: bool = False, arc_length_samples: int = 1000, knots_u: Optional[Annotated[numpy.ndarray, Array(float64 (K,))]] = None, knots_v: Optional[Annotated[numpy.ndarray, Array(float64 (K,))]] = None, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
+NurbsSurfaceData(points: typing.Annotated[numpy.ndarray, Array(float64 (Nu, Nv, D))], degree_u: int, degree_v: int, periodic_u: bool, periodic_v: bool, uniform_u: bool = False, uniform_v: bool = False, use_numba: bool = True, registered_u: bool = False, registered_v: bool = False, arc_length_samples: int = 1000, knots_u: Optional[Annotated[numpy.ndarray, Array(float64 (K,))]] = None, knots_v: Optional[Annotated[numpy.ndarray, Array(float64 (K,))]] = None, weights: Optional[Annotated[numpy.ndarray, Array(float64 (Nu, Nv))]] = None, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
 ```
 
 Fields:
@@ -2185,6 +2186,7 @@ registered_v: bool = False
 arc_length_samples: int = 1000
 knots_u: Optional = None
 knots_v: Optional = None
+weights: Optional = None
 ```
 
 Properties:
@@ -3474,7 +3476,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001422DA379C0>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001E60CD47F60>, '...
 ```
 
 ## `cgmath.constraints`
