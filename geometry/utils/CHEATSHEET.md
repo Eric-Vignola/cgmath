@@ -328,9 +328,10 @@ hard, n_hard = gu.split_at_hard_edges(
 print(n_soft, n_hard)   # 8 24 — one slot per vertex vs one per face-corner
 ```
 
-A mesh can hold those slots with no normal stored
-(`mesh.normal_indices = hard`): `MeshData.get_face_vertex_normals()` then
-derives a normal a slot from the points.
+A mesh holds the edges, not the slots: with no normal stored and
+`mesh.hard_edges = mesh.e2v` (a pair of vertices an edge),
+`MeshData.get_face_vertex_normals()` derives a normal a slot from the
+points, the slots the ones this function gives for those edges.
 
 `build_uv_to_normal_map` aligns a UV stream to a normal-slot stream,
 first occurrence wins; unreferenced UV verts get `0`.

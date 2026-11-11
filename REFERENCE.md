@@ -1,6 +1,6 @@
 # `cgmath` Reference
 
-Generated from the live code by `gen_reference.py` (kept in the `tools/` folder beside the packages, not in this repository) on 2026-11-10. Do not edit by hand; re-run the script after any API change.
+Generated from the live code by `gen_reference.py` (kept in the `tools/` folder beside the packages, not in this repository) on 2026-11-11. Do not edit by hand; re-run the script after any API change.
 
 Every public class, property, method, function and constant of the modules below, with the real signature (`inspect.signature`) and the first line of its docstring. To *learn* a subpackage read its `README.md` and `CHEATSHEET.md`; this page is for looking things up.
 
@@ -1027,7 +1027,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000001994F3CB0D0>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000001A740E0B190>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1056,7 +1056,7 @@ Axis(value, names=None, *, module=None, qualname=None, type=None, start=1, bound
 Polygonal descriptor representing an object with edges, faces and vertices.
 
 ```text
-MeshData(indices: "Array(np.int32, 'N')", counts: "Array(np.int32, 'N')", points: "Array(np.float64, 'N', 3)", name: 'Optional[str]' = None, hole_faces: "Optional[Array(np.int32, 'N')]" = None, hole_counts: "Optional[Array(np.int32, 'N')]" = None, hole_indices: "Optional[Array(np.int32, 'N')]" = None, normals: "Optional[Array(np.float64, 'N', 3)]" = None, normal_indices: "Optional[Array(np.int32, 'N')]" = None, colors: "Optional[Array(np.float64, 'N', 4)]" = None, color_indices: "Optional[Array(np.int32, 'N')]" = None, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
+MeshData(indices: "Array(np.int32, 'N')", counts: "Array(np.int32, 'N')", points: "Array(np.float64, 'N', 3)", name: 'Optional[str]' = None, hole_faces: "Optional[Array(np.int32, 'N')]" = None, hole_counts: "Optional[Array(np.int32, 'N')]" = None, hole_indices: "Optional[Array(np.int32, 'N')]" = None, normals: "Optional[Array(np.float64, 'N', 3)]" = None, normal_indices: "Optional[Array(np.int32, 'N')]" = None, colors: "Optional[Array(np.float64, 'N', 4)]" = None, color_indices: "Optional[Array(np.int32, 'N')]" = None, hard_edges: "Optional[Array(np.int32, 'N', 2)]" = None, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
 ```
 
 Fields:
@@ -1073,6 +1073,7 @@ normals: Optional[Array(np.float64, 'N', 3)] = None
 normal_indices: Optional[Array(np.int32, 'N')] = None
 colors: Optional[Array(np.float64, 'N', 4)] = None
 color_indices: Optional[Array(np.int32, 'N')] = None
+hard_edges: Optional[Array(np.int32, 'N', 2)] = None
 ```
 
 Properties:
@@ -1123,7 +1124,7 @@ contains_vertices(self, vertices, contained=True, exclude=False)
 delete_faces(self, faces, exclude=False)
     deletes faces at given face indices. The hole metadata (hole_faces)
 detach_faces(self, indices=None)
-    detaches faces; the colours stay on their corners
+    detaches faces; the colours stay on their corners, and the hard
 difference(self, *args, tolerance=1e-06)
     removes overlapping faces of given Mesh objects from self (this is not a boolean)
 edges_to_vertex_pairs(self, edges: 'np.ndarray') -> 'np.ndarray'
@@ -1379,7 +1380,7 @@ ngon_tris: dict
 UV map topology treated as a Mesh object for resampling purposes
 
 ```text
-UVData(indices: "Array(np.int32, 'N')", counts: "Array(np.int32, 'N')", points: "Array(np.float64, 'N', 2)", name: 'str' = 'map1', hole_faces: "Optional[Array(np.int32, 'N')]" = None, hole_counts: "Optional[Array(np.int32, 'N')]" = None, hole_indices: "Optional[Array(np.int32, 'N')]" = None, normals: "Optional[Array(np.float64, 'N', 3)]" = None, normal_indices: "Optional[Array(np.int32, 'N')]" = None, colors: "Optional[Array(np.float64, 'N', 4)]" = None, color_indices: "Optional[Array(np.int32, 'N')]" = None, _resolution: 'Array(np.int32, 2)' = ImmutableArray([2048, 2048], dtype=int32), _antialias: 'bool' = False, mesh_uuid: 'Optional[str]' = None, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
+UVData(indices: "Array(np.int32, 'N')", counts: "Array(np.int32, 'N')", points: "Array(np.float64, 'N', 2)", name: 'str' = 'map1', hole_faces: "Optional[Array(np.int32, 'N')]" = None, hole_counts: "Optional[Array(np.int32, 'N')]" = None, hole_indices: "Optional[Array(np.int32, 'N')]" = None, normals: "Optional[Array(np.float64, 'N', 3)]" = None, normal_indices: "Optional[Array(np.int32, 'N')]" = None, colors: "Optional[Array(np.float64, 'N', 4)]" = None, color_indices: "Optional[Array(np.int32, 'N')]" = None, hard_edges: "Optional[Array(np.int32, 'N', 2)]" = None, _resolution: 'Array(np.int32, 2)' = ImmutableArray([2048, 2048], dtype=int32), _antialias: 'bool' = False, mesh_uuid: 'Optional[str]' = None, *, uuid: Optional[str] = None, parent_uuid: Optional[str] = None) -> None
 ```
 
 Fields:
@@ -3451,7 +3452,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001991D336840>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001A78EC06D40>, '...
 ```
 
 ## `cgmath.constraints`

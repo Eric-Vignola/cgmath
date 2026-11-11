@@ -356,21 +356,30 @@ Two independent things.
 - `normals` / `normal_indices` are **shading** fields you populate with
   `set_normals(...)`. With no arguments they are per-vertex and
   `normal_indices` stays `None`; with `hard_edge_angle` or explicit
-  `hard_edges` they become face-varying. `recompute_normals()` refreshes the
+  `hard_edges` (a pair of vertices an edge; `mesh.e2v[ids]` for edge ids)
+  they become face-varying. `recompute_normals()` refreshes the
   vectors after a deformation while keeping the splits. Topology edits clear
   both. Both families take triangles, quads and n-gons.
 - A mesh need not store them. What it holds says how it shades:
 
-  | `normals` | `normal_indices` | Shades by |
-  |---|---|---|
-  | None | None | the derived normals, every edge soft |
-  | None | a group a face corner | the derived normals inside each group: the corners around a vertex that no hard edge parts |
-  | stored | None (one a vertex), or the row each face corner reads | the stored ones (authored; locked, in Maya) |
+  | `normals` | `normal_indices` | `hard_edges` | Shades by |
+  |---|---|---|---|
+  | None | None | None | the derived normals, every edge soft |
+  | None | None | `(n, 2)`, a pair of vertices an edge | the derived normals, broken at those edges: the corners around a vertex that no hard edge parts share one |
+  | stored | None (one a vertex), or the row each face corner reads | not read | the stored ones (authored; locked, in Maya) |
+
+  `normal_indices` name stored normals only: held with no `normals` they
+  are refused, a ValueError where the normals are read. Any edge can be
+  hard, a border edge too; a pair that is no edge of the mesh is a
+  RuntimeError at the same read. Face edits keep the hard edges that are
+  still edges (`delete_faces`, `from_faces`, `from_vertices`, `merge`,
+  `triangulate`, `detach_faces`); `subdivide`, `quadrangulate`, `union` and
+  `difference` drop them.
 
   `get_face_vertex_normals()` gives the normal of every face corner in all
   three, `(indices.size, 3)`, and is what `get_tangent_space()` and the
   writers read: `save_obj`, `save_fbx` and `to_prim` write the derived
-  normals of a mesh holding groups, and none for one holding neither field.
+  normals of a mesh holding `hard_edges`, and none for one holding neither.
   The derived normals follow the points, so nothing goes stale;
   `recompute_normals()` is for stored ones and raises without them.
   `load_fbx` stores the least of the three that shades a mesh as its file
@@ -601,7 +610,7 @@ pkl keep everything.
 | `mesh.save_obj(path, data)` | writes that same list shape |
 | `MeshList.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | every mesh, a `MeshList` |
 | `MeshData.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | one `MeshData` |
-| `MeshData.save("x.obj")` / `save_obj` | the points, the faces and the normals (`vn`) the mesh stores, or derives inside its `normal_indices` groups; not its matrix, holes or UVs |
+| `MeshData.save("x.obj")` / `save_obj` | the points, the faces and the normals (`vn`) the mesh stores, or derives between its `hard_edges`; not its matrix, holes or UVs |
 | `UVList.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | one mesh's UV channels |
 | `UVData.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | one `UVData`; no obj writer (its points are 2D) |
 | `skin_weights.load` / `load_fbx` / `load_glb`, `SkinList.load_*` | a `SkinList`, each skin naming its mesh by uuid (an fbx's named as its deformer is, a glb's after its primitive) |
