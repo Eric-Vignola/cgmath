@@ -1033,7 +1033,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x00000155FFE6B0D0>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000001F063DAB0D0>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -2158,6 +2158,15 @@ A list of :class:`NurbsCurveData`, as a file holds its curves.
 NurbsCurveList(iterable=None)
 ```
 
+Methods:
+
+```text
+classmethod load_fbx(cls, filename: str, verbose: bool = True) -> 'NurbsCurveList'
+    every curve of an fbx file, as :func:`cgmath.formats.load_fbx`
+save_fbx(self, filename: str, as_ascii: bool = False) -> None
+    writes every curve to one fbx file, binary unless ``as_ascii``:
+```
+
 ## `cgmath.geometry.bspline_patch`
 
 tensor-product B-spline patches.
@@ -2258,6 +2267,15 @@ A list of :class:`NurbsSurfaceData`, as a file holds its surfaces.
 
 ```text
 NurbsSurfaceList(iterable=None)
+```
+
+Methods:
+
+```text
+classmethod load_fbx(cls, filename: str, verbose: bool = True) -> 'NurbsSurfaceList'
+    every surface of an fbx file, as :func:`cgmath.formats.load_fbx`
+save_fbx(self, filename: str, as_ascii: bool = False) -> None
+    writes every surface to one fbx file, binary unless ``as_ascii``:
 ```
 
 #### `PatchRaycastData(Data)`
@@ -3476,7 +3494,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x00000155CDD27F60>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001F031D5C220>, '...
 ```
 
 ## `cgmath.constraints`

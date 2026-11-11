@@ -236,6 +236,39 @@ class TestRoundTrip(_Shapes):
         self.assertSameCurves(back.curves, [curve])
         self.assertSameSurfaces(back.surfaces, [patch])
 
+    def test_lists(self):
+        """each list through its own save_fbx and load_fbx"""
+        nodes   = rig()
+        given   = curves(nodes)
+        patches = surfaces(nodes)
+        path    = self.path("curves.fbx")
+        given.save_fbx(path)
+        back = NurbsCurveList.load_fbx(path)
+        self.assertIs(type(back), NurbsCurveList)
+        self.assertSameCurves(back, given)
+        # no hierarchy went with them: a root node each, in the list's order
+        self.assertEqual(list(load_fbx(path).hierarchy.name), ["curve"] * len(given))
+        none = NurbsSurfaceList.load_fbx(path)
+        self.assertIs(type(none), NurbsSurfaceList)
+        self.assertEqual(len(none), 0)
+        path = self.path("surfaces.fbx")
+        patches.save_fbx(path)
+        back = NurbsSurfaceList.load_fbx(path)
+        self.assertIs(type(back), NurbsSurfaceList)
+        self.assertSameSurfaces(back, patches)
+        self.assertEqual(list(load_fbx(path).hierarchy.name), ["surface"] * len(patches))
+        self.assertEqual(len(NurbsCurveList.load_fbx(path)), 0)
+        # ASCII holds the sdk's digits: equal, not bit for bit
+        path = self.path("ascii.fbx")
+        patches.save_fbx(path, as_ascii=True)
+        self.assertEqual(list(NurbsSurfaceList.load_fbx(path)), list(patches))
+        # a file of meshes alone holds neither
+        path = self.path("mesh.fbx")
+        MeshList([plane(None)]).save_fbx(path)
+        for kind in (NurbsCurveList, NurbsSurfaceList):
+            self.assertIs(type(kind.load_fbx(path)), kind)
+            self.assertEqual(len(kind.load_fbx(path)), 0)
+
     def test_flags(self):
         path, _, given, patches = self.saved()
         back = load_fbx(path, curves=False)

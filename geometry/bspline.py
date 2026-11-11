@@ -2011,6 +2011,27 @@ class NurbsCurveData(ShapeData):
 class NurbsCurveList(DataList[NurbsCurveData]):
     """A list of :class:`NurbsCurveData`, as a file holds its curves."""
 
+    @classmethod
+    def load_fbx(cls, filename: str, verbose: bool = True) -> "NurbsCurveList":
+        """every curve of an fbx file, as :func:`cgmath.formats.load_fbx`
+        reads them, the nodes and the curves alone read: each in its node's
+        space, its ``parent_uuid`` naming that node in the file's hierarchy,
+        which this does not return; empty for a file with none; ``verbose``
+        False silences the read's warnings"""
+        from cgmath.formats._load import load_only
+
+        return load_only(filename, curves=True, verbose=verbose).curves or cls()
+
+    def save_fbx(self, filename: str, as_ascii: bool = False) -> None:
+        """writes every curve to one fbx file, binary unless ``as_ascii``:
+        each the shape of a new root node at identity named "curve", in the
+        list's order, whatever its ``parent_uuid`` names. See
+        :func:`cgmath.formats.save_fbx`, which places a curve under a node
+        of a hierarchy."""
+        from cgmath.formats import save_fbx
+
+        save_fbx(filename, curves=self, as_ascii=as_ascii)
+
 
 # --------------------------------- Weights ---------------------------------- #
 

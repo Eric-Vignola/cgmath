@@ -711,6 +711,20 @@ print([(curve.degree, curve.knots, back.hierarchy[curve.parent_uuid].name) for c
 print(back.surfaces[0].points.shape, back.surfaces[0] == patch, load_fbx(NURBS_FBX, curves=False).curves)  # (4, 5, 3) True None
 ```
 
+Each list reads and writes a file by itself too: `NurbsCurveList.load_fbx`
+and `NurbsSurfaceList.load_fbx` read the nodes and that one kind of shape,
+and give an empty list for a file with none; `save_fbx` on a list writes
+its shapes with no hierarchy, each on a new root node at identity:
+
+```python
+ALONE_FBX = os.path.join(WORK, "nurbs_alone.fbx")
+NurbsCurveList([arc, edge, rung]).save_fbx(ALONE_FBX)
+
+alone = NurbsCurveList.load_fbx(ALONE_FBX)
+print(len(alone), alone[0] == arc, load_fbx(ALONE_FBX).hierarchy.name)                          # 3 True ['curve', 'curve', 'curve']
+print(NurbsCurveList.load_fbx(NURBS_FBX) == back.curves, NurbsSurfaceList.load_fbx(ALONE_FBX))  # True []
+```
+
 | In cgmath | In the file | Note |
 |---|---|---|
 | A curve of degree 1, not periodic, `knots` None | a line of an `FbxLine` | any number on one node, as Maya writes them; a read gives `knots` None |
