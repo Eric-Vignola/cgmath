@@ -599,7 +599,8 @@ as no SDK.
 One read and one write of everything cgmath has a class for: a hierarchy at
 rest or its takes, the meshes on the nodes with their colours (one colour
 set, `colorSet1`, one a vertex or one a face corner), their UV sets, skins,
-materials and blend shape targets, the cameras and lights. Everything is in Maya's
+materials and blend shape targets, the cameras and lights, the NURBS curves
+and surfaces. Everything is in Maya's
 Y-up and cm; a file's unit and axes are converted at the boundary. Each
 shape names its node or its mesh by uuid, so build the nodes first. A
 material on several meshes is one record a mesh, sharing one `uuid`, and
@@ -635,7 +636,7 @@ print(held.hierarchy[held.meshes[0].parent_uuid].name, held.clip, held.skins, he
 The fields are `save_fbx`'s arguments, in order, so `save_fbx(b, *load_fbx(a))`
 writes a file back. Each kind is a flag, `True` by default (`takes`,
 `meshes`, `uvs`, `skins`, `materials`, `textures`, `morphs`, `cameras`,
-`lights`); a kind left unread is None and costs nothing, the nodes are
+`lights`, `curves`, `surfaces`); a kind left unread is None and costs nothing, the nodes are
 always read. `textures=False` keeps each material's `texture_file`, UV set
 and wraps and decodes no pixels; a texture file many materials name is
 decoded once, the one array shared. `verbose=False` silences the read's
@@ -686,6 +687,49 @@ transform's rotate pivot, scale pivot and the two offsets are folded into
 its translate, as the matrix Maya composes holds them, on every frame
 where translate, rotate or scale is keyed; its 3x3 is untouched. Pivots on
 a joint, or keyed pivots, are refused.
+
+NURBS curves and surfaces are the `curves` and `surfaces` fields, a
+`NurbsCurveList` and a `NurbsSurfaceList`, each shape in its node's space
+and naming the node by `parent_uuid`:
+
+```python
+from cgmath.geometry import NurbsCurveData, NurbsCurveList, NurbsSurfaceData, NurbsSurfaceList
+
+nodes = HierarchyData([TransformData("arc"), TransformData("edges"), TransformData("patch")])
+along = np.arange(6.0)
+arc   = NurbsCurveData(points=np.stack([along, np.sin(along), np.zeros(6)], axis=1), degree=3, parent_uuid=nodes["arc"].uuid)
+edge  = NurbsCurveData(points=np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]), degree=1, parent_uuid=nodes["edges"].uuid)
+rung  = NurbsCurveData(points=np.array([[0.0, 2.0, 0.0], [1.0, 2.0, 0.0]]), degree=1, parent_uuid=nodes["edges"].uuid)
+u, v = np.meshgrid(np.arange(4.0), np.arange(5.0), indexing="ij")
+patch = NurbsSurfaceData(points=np.stack([u, 0.1 * u * v, v], axis=2), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False, parent_uuid=nodes["patch"].uuid)
+
+NURBS_FBX = os.path.join(WORK, "nurbs.fbx")
+save_fbx(NURBS_FBX, hierarchy=nodes, curves=NurbsCurveList([arc, edge, rung]), surfaces=NurbsSurfaceList([patch]))
+
+back = load_fbx(NURBS_FBX)
+print([(curve.degree, curve.knots, back.hierarchy[curve.parent_uuid].name) for curve in back.curves])      # [(3, None, 'arc'), (1, None, 'edges'), (1, None, 'edges')]
+print(back.surfaces[0].points.shape, back.surfaces[0] == patch, load_fbx(NURBS_FBX, curves=False).curves)  # (4, 5, 3) True None
+```
+
+| In cgmath | In the file | Note |
+|---|---|---|
+| A curve of degree 1, not periodic, `knots` None | a line of an `FbxLine` | any number on one node, as Maya writes them; a read gives `knots` None |
+| Any other curve | an `FbxNurbsCurve` | one a node; a periodic curve holds its points once |
+| A surface | an `FbxNurbsSurface` | one a node; `points` are `[u][v]`, the file runs u fastest |
+| `knots`, `knots_u`, `knots_v` | Maya's, plus one at each end | None on a read where they are the ones the shape gives itself |
+| A shape whose `parent_uuid` names no node | a new root node, `curve` or `surface` | at identity |
+| A closed curve of a file | read open | its first point again at the end |
+
+Refused, on a read: a rational curve or surface (a control point's weight
+that is not 1) and a trimmed surface, which no field holds; `curves=False`
+or `surfaces=False` reads the file without them. On a save: two shapes on
+one node, other than lines; a curve or surface on a joint, or on a node
+holding a mesh, a camera or a light; points that are not 3D. Maya writes
+two curves of degree 2 or more under one transform as an empty node, and
+reads the first of two the file holds on one, so a control of several such
+curves is a node a curve. A file holds no `uniform` or `registered` flag: a
+curve that stored the knots it would give itself reads back with `knots`
+None.
 
 The measured conventions, the refusals (shear, non-uniform scale off a
 leaf, a geometric transform on a mesh node, two deformers on one mesh ...)
@@ -873,7 +917,8 @@ component holding one as `.data`.
 UV sets too, `SkinList.load_fbx` the skins, `HierarchyData.load_fbx` the
 nodes, `ClipList.load_fbx` the nodes and the takes. Every route takes
 `verbose=False`; `Scene.load_fbx` takes every flag
-(`Scene.load_fbx(path, textures=False)`). GLB has no such bundle: its
+(`Scene.load_fbx(path, textures=False)`) and leaves the curves and
+surfaces unread. GLB has no such bundle: its
 readers live in `geometry` and `hierarchy` (`GlbData.mesh_list` is the one
 `MeshData` this package gives).
 
@@ -904,6 +949,8 @@ Scene.load_fbx("hero.fbx")  # -> every field, ready to render
 | `load_fbx` gives `hierarchy` None | the file holds takes: the nodes are in `clip`, every take's; `takes=False` gives the nodes |
 | A material's `texture` is None | read with `textures=False`, the file not found, or no PIL: `texture_file` still names it |
 | A loaded mesh's `normals` is None | the file's were the ones Maya derives from the points, so none is stored: `mesh.get_face_vertex_normals()` gives them, `hard_edges` the edges they break at |
+| `load_fbx` raises on a rational curve or a trimmed surface | no field holds a weight or a trim: `curves=False` / `surfaces=False` reads the file without them |
+| A loaded curve's `knots` is None | the file's were the ones the curve gives itself; a line of a polyline holds none |
 | A shape's `parent_uuid` / `mesh_uuid` matches nothing | it came from another load: each read mints its own uuids |
 | `set_binary` on a `GLTF2()` with no blob | `TypeError` — `binary_blob()` is `None`; load a real file first |
 | `GlbData.mesh_list` is `None` | `trimesh` is not installed |
