@@ -811,12 +811,12 @@ print(patch.count_u, patch.count_v, patch.max_param_u, patch.max_param_v)
 print(np.round(patch.evaluate(0.5, 0.5), 4))
 ```
 
-`patch.area` calls `get_area(samples=50)`, and `get_area` only uses
-composite Simpson when `samples` is **odd** — the even default degrades to
-a Riemann sum. Pass an odd count when accuracy matters.
+`patch.area` calls `get_area(samples=51)`. On an open direction `get_area`
+uses composite Simpson when `samples` is **odd** and degrades to a Riemann
+sum when it is even, so keep the count odd.
 
 ```python
-print(round(patch.area, 4), round(patch.get_area(51), 4), round(patch.get_area(201), 4))
+print(round(patch.area, 4), round(patch.get_area(50), 4), round(patch.get_area(201), 4))
 ```
 
 ---
