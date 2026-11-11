@@ -135,7 +135,9 @@ def save_fbx(
     named "curve" or "surface", written as Maya's exporter writes them
     (measured): a curve as an FbxNurbsCurve, a surface as an FbxNurbsSurface
     with u running fastest, unnamed, holding the order, the form, open or
-    periodic, the points each once with a weight of 1, and the knots, the
+    periodic, the points each once with its weight (1 where the shape
+    holds no ``weights``; a point is written as it stands, not multiplied
+    by its weight, as Maya writes it, measured), and the knots, the
     ``knots`` held or with none the ones the shape makes for itself, with
     one more at each end, a step past it as its neighbour's; a curve of
     degree 1 that is not periodic and holds no knots as a polyline of an
@@ -637,17 +639,20 @@ def _check_views(cameras, lights, meshes, nodes) -> None:
 
 def _is_line(curve) -> bool:
     """whether Maya's exporter writes the curve as a line: of degree 1, not
-    periodic, holding no knots"""
-    return curve.degree == 1 and not curve.periodic and curve.knots is None
+    periodic, holding no knots and no weights (a line holds neither)"""
+    return curve.degree == 1 and not curve.periodic and curve.knots is None and curve.weights is None
 
 
 def _check_nurbs(curves, surfaces, meshes, cameras, lights, nodes) -> None:
-    """a curve or surface whose points are not 3D, on a joint, or on a node
+    """a curve or surface whose points are not 3D, whose weights are not
+    one a control point, finite and above zero, on a joint, or on a node
     of ``nodes``, the ones written, holding a mesh, a camera, a light or
     another curve or surface: refused. The curves of degree 1 holding no
     knots of one node are one shape, the lines of one FbxLine, as Maya's
     exporter writes them; it writes a transform of two NURBS curves as an
     empty node (measured)"""
+    from cgmath.geometry.bspline import _checked_weights
+
     held  = {} if nodes is None else {node.uuid: node for node in nodes}
     on    = {}
     lines = set()
@@ -663,6 +668,11 @@ def _check_nurbs(curves, surfaces, meshes, cameras, lights, nodes) -> None:
             width = np.asarray(shape.points).shape[-1]
             if width != 3:
                 raise ValueError(f"save_fbx: {label} holds points of {width} components; a .fbx holds 3D points")
+            if shape.weights is not None:
+                try:
+                    _checked_weights(shape.weights, np.asarray(shape.points).shape[:-1])
+                except ValueError as error:
+                    raise ValueError(f"save_fbx: {label}: {error}") from None
             node = held.get(shape.parent_uuid)
             if node is None:
                 continue
@@ -1414,11 +1424,15 @@ def _fbx_knots(held, computed) -> list:
     return [2.0 * knots[0] - knots[1], *knots.tolist(), 2.0 * knots[-1] - knots[-2]]
 
 
-def _fbx_points(points) -> list:
-    """x, y, z and a weight of 1 a point, flat, as fbx lists a NURBS shape's
-    control points"""
+def _fbx_points(points, weights=None) -> list:
+    """x, y, z and its weight a point, flat, as fbx lists a NURBS shape's
+    control points: the point as it stands, not multiplied by its weight,
+    and 1 for ``weights`` None"""
     points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-    return np.concatenate([points, np.ones((len(points), 1))], axis=1).reshape(-1).tolist()
+    if weights is None:
+        weights = np.ones(len(points))
+    weights = np.asarray(weights, dtype=np.float64).reshape(-1, 1)
+    return np.concatenate([points, weights], axis=1).reshape(-1).tolist()
 
 
 def _write_nurbs(exporter, held: list, fbx) -> None:
@@ -1449,7 +1463,10 @@ def _write_nurbs(exporter, held: list, fbx) -> None:
                 geometry = fbx.FbxNurbsCurve.Create(draft, tag)
                 geometry.SetOrder(shape.degree + 1)
                 geometry.InitControlPoints(len(shape.points), forms.ePeriodic if shape.periodic else forms.eOpen)
-                arrays[tag] = {"Points": _fbx_points(shape.points), "KnotVector": _fbx_knots(shape.knots, shape.kv)}
+                arrays[tag] = {
+                    "Points":     _fbx_points(shape.points, shape.weights),
+                    "KnotVector": _fbx_knots(shape.knots, shape.kv),
+                }
             else:
                 forms    = fbx.FbxNurbsSurface.EType
                 points   = np.asarray(shape.points, dtype=np.float64)
@@ -1463,7 +1480,10 @@ def _write_nurbs(exporter, held: list, fbx) -> None:
                 )
                 geometry.SetStep(1, 1)
                 arrays[tag] = {
-                    "Points":      _fbx_points(points.transpose(1, 0, 2)),
+                    "Points": _fbx_points(
+                        points.transpose(1, 0, 2),
+                        None if shape.weights is None else np.asarray(shape.weights, dtype=np.float64).T,
+                    ),
                     "KnotVectorU": _fbx_knots(shape.knots_u, shape.kv_u),
                     "KnotVectorV": _fbx_knots(shape.knots_v, shape.kv_v),
                 }

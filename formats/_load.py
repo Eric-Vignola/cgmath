@@ -190,11 +190,14 @@ def load_fbx(
     again at its end. A polyline (FbxLine, as Maya writes a curve of
     degree 1) is a curve of degree 1 a line of it, ``knots`` None (Maya's
     export keeps none). Fbx holds no ``uniform``, ``registered`` or
-    ``arc_length_samples``: the defaults. ValueError, naming the node, for
-    a rational curve or surface (a control point's weight that is not 1)
-    and for a trimmed surface, which no field holds: ``curves`` or
-    ``surfaces`` False reads the file without them. Of a node's shapes the
-    first is read, as Maya's importer reads it.
+    ``arc_length_samples``: the defaults. A rational curve or surface, a
+    control point of it holding a weight that is not 1, returns its
+    ``weights``, the file's, its points the file's as they stand (neither
+    Maya nor fbx multiplies a point by its weight, measured); weights of
+    all 1 return as None. ValueError, naming the node, for a weight that is
+    not finite or not above zero and for a trimmed surface, which no field
+    holds: ``curves`` or ``surfaces`` False reads the file without them. Of
+    a node's shapes the first is read, as Maya's importer reads it.
 
     The values are in Maya's Y-up and cm, as every cgmath value is. A file
     whose up axis is X or Z is turned the way Maya's importer turns it
@@ -1167,17 +1170,18 @@ def _held_points(shape) -> np.ndarray:
     return np.array(held, dtype=np.float64).reshape(-1, 4)
 
 
-def _unweighted(held: np.ndarray, label: str, flag: str) -> np.ndarray:
-    """the (N, 3) points of a NURBS shape's (N, 4) control points;
-    ValueError for a weight that is not 1, a rational shape, which no field
-    holds (``flag`` the load_fbx flag leaving the kind unread)"""
-    rational = int(np.count_nonzero(held[:, 3] != 1.0))
-    if rational:
+def _apart(held: np.ndarray, label: str) -> tuple:
+    """``(points, weights)`` of a NURBS shape's (..., 4) control points:
+    their x, y, z as the file holds them, which a weight does not multiply
+    (measured against Maya's own points on a rational curve and surface),
+    and their last component, None when each is 1. ValueError for a weight
+    that is not finite or not above zero"""
+    weights = np.ascontiguousarray(held[..., 3])
+    if not np.isfinite(weights).all() or (weights <= 0.0).any():
         raise ValueError(
-            f"load_fbx: {label} is rational, {rational} of its {len(held)} control points holding a weight that is not 1, "
-            f"which {FORK} does not read; load_fbx(..., {flag}=False) reads the file without its {flag}"
+            f"load_fbx: {label} holds a weight that is not finite or not above zero, which no curve or surface holds"
         )
-    return held[:, :3].copy()
+    return np.ascontiguousarray(held[..., :3]), None if (weights == 1.0).all() else weights
 
 
 def _span(points: np.ndarray, knots, degree: int, form: str, label: str, way: str = "") -> tuple:
@@ -1204,8 +1208,8 @@ def _span(points: np.ndarray, knots, degree: int, form: str, label: str, way: st
 
 def _read_curve(node, at: int, fbx) -> dict:
     """the NURBS curve on the node at place ``at`` of the file's nodes: its
-    points, degree, form and knots (:func:`_span`); ValueError for a node
-    holding a geometric transform, or a rational curve"""
+    points, weights, degree, form and knots (:func:`_span`,
+    :func:`_apart`); ValueError for a node holding a geometric transform"""
     from cgmath.formats._fbx_io import typed
 
     shape = typed(node.GetNodeAttribute(), fbx.FbxNurbsCurve, fbx)
@@ -1215,9 +1219,17 @@ def _read_curve(node, at: int, fbx) -> dict:
     held   = shape.GetType()
     form   = "periodic" if held == forms.ePeriodic else "closed" if held == forms.eClosed else "open"
     degree = int(shape.GetOrder()) - 1
-    points = _unweighted(_held_points(shape), label, "curves")
-    points, periodic, knots = _span(points, shape.GetKnotVector(), degree, form, label)
-    return {"node": at, "label": label, "points": points, "degree": degree, "periodic": periodic, "knots": knots}
+    held, periodic, knots = _span(_held_points(shape), shape.GetKnotVector(), degree, form, label)
+    points, weights = _apart(held, label)
+    return {
+        "node":     at,
+        "label":    label,
+        "points":   points,
+        "weights":  weights,
+        "degree":   degree,
+        "periodic": periodic,
+        "knots":    knots,
+    }
 
 
 def _read_lines(node, at: int, fbx) -> list:
@@ -1243,15 +1255,23 @@ def _read_lines(node, at: int, fbx) -> list:
         start = end + 1
         if len(line) < 2:
             raise ValueError(f"load_fbx: {label} holds a line of {len(line)} point, which is no curve")
-        found.append({"node": at, "label": label, "points": points[line], "degree": 1, "periodic": False, "knots": None})
+        found.append({
+            "node":     at,
+            "label":    label,
+            "points":   points[line],
+            "weights":  None,
+            "degree":   1,
+            "periodic": False,
+            "knots":    None,
+        })
     return found
 
 
 def _read_surface(node, at: int, fbx) -> dict:
     """the NURBS surface on the node at place ``at`` of the file's nodes:
-    its points ``[u][v]`` (the file runs u fastest) and each direction's
-    degree, form and knots (:func:`_span`); ValueError for a node holding a
-    geometric transform, or a rational surface"""
+    its points and weights ``[u][v]`` (the file runs u fastest,
+    :func:`_apart`) and each direction's degree, form and knots
+    (:func:`_span`); ValueError for a node holding a geometric transform"""
     from cgmath.formats._fbx_io import typed
 
     shape = typed(node.GetNodeAttribute(), fbx.FbxNurbsSurface, fbx)
@@ -1263,20 +1283,22 @@ def _read_surface(node, at: int, fbx) -> dict:
         return "periodic" if held == forms.ePeriodic else "closed" if held == forms.eClosed else "open"
 
     count_u, count_v = int(shape.GetUCount()), int(shape.GetVCount())
-    points = _unweighted(_held_points(shape), label, "surfaces")
+    points = _held_points(shape)
     if len(points) != count_u * count_v:
         raise ValueError(f"load_fbx: {label} holds {len(points)} control points, not its {count_u} by {count_v}")
     degree_u = int(shape.GetUOrder()) - 1
     degree_v = int(shape.GetVOrder()) - 1
     # the file's point v * count_u + u is ours [u][v]
-    points = points.reshape(count_v, count_u, 3).transpose(1, 0, 2)
+    points = points.reshape(count_v, count_u, 4).transpose(1, 0, 2)
     points, periodic_u, knots_u = _span(points, shape.GetUKnotVector(), degree_u, form(shape.GetNurbsUType()), label, " in u")
     across = points.transpose(1, 0, 2)
     across, periodic_v, knots_v = _span(across, shape.GetVKnotVector(), degree_v, form(shape.GetNurbsVType()), label, " in v")
+    points, weights = _apart(across.transpose(1, 0, 2), label)
     return {
         "node":       at,
         "label":      label,
-        "points":     np.ascontiguousarray(across.transpose(1, 0, 2)),
+        "points":     points,
+        "weights":    weights,
         "degree_u":   degree_u,
         "degree_v":   degree_v,
         "periodic_u": periodic_u,
@@ -2030,7 +2052,12 @@ def _build_curves(read: dict):
         return None
     curves = []
     for held in read["curves"]:
-        fields = {"degree": held["degree"], "periodic": held["periodic"], "parent_uuid": entries[held["node"]]["uuid"]}
+        fields = {
+            "degree":      held["degree"],
+            "periodic":    held["periodic"],
+            "weights":     held["weights"],
+            "parent_uuid": entries[held["node"]]["uuid"],
+        }
         try:
             curve = NurbsCurveData(held["points"], **fields)
             knots = _own_knots(curve.kv, held["knots"])
@@ -2053,7 +2080,7 @@ def _build_surfaces(read: dict):
         return None
     surfaces = []
     for held in read["surfaces"]:
-        fields                = {name: held[name] for name in ("degree_u", "degree_v", "periodic_u", "periodic_v")}
+        fields                = {name: held[name] for name in ("degree_u", "degree_v", "periodic_u", "periodic_v", "weights")}
         fields["parent_uuid"] = entries[held["node"]]["uuid"]
         try:
             surface = NurbsSurfaceData(held["points"], **fields)
