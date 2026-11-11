@@ -897,8 +897,8 @@ class FbxExporter:
         ``normal_indices``, indexed, one a face corner (``eByPolygonVertex``,
         ``eIndexToDirect``); else one a vertex (``eByControlPoint``, as
         Maya's exporter writes smooth normals) or one a corner; none when it
-        has none, unless ``normal_indices`` holds groups of corners, which
-        write the normals derived inside them. ``node`` is the ``FbxNode``
+        has none, unless it holds ``hard_edges``, which write the normals
+        derived between them, indexed. ``node`` is the ``FbxNode``
         that takes the mesh, a group the
         skeleton wrote, whose own transform it keeps; None makes one at the
         scene root, named after the mesh, at identity: a mesh holds no
@@ -948,7 +948,7 @@ class FbxExporter:
             mapping = fbx.FbxLayerElement.EMappingMode
             refs    = fbx.FbxLayerElement.EReferenceMode
             element = shape.CreateElementNormal()
-            if mesh.normal_indices is not None:
+            if mesh.normal_indices is not None or mesh.normals is None:
                 element.SetMappingMode(mapping.eByPolygonVertex)
                 element.SetReferenceMode(refs.eIndexToDirect)
                 index_array = element.GetIndexArray()

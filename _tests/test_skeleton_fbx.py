@@ -1223,12 +1223,12 @@ class _Skinned(_Files):
         shades as it does. The normals ``got`` stores are ``want``'s, bit for
         bit. Where it stores none (load_fbx stores no normal Maya would
         derive from the points) its corners hold ``want``'s normals within
-        1e-5 a component, in ``want``'s groups when ``want`` stores none
-        either"""
+        1e-5 a component, broken at ``want``'s hard edges when ``want``
+        stores none either"""
         self.assertEqual(got.name, want.name)
         fields = ["points", "counts", "indices"]
         if got.normals is not None or want.normals is None:
-            fields += ["normals", "normal_indices"]
+            fields += ["normals", "normal_indices", "hard_edges"]
         for field in fields:
             a, b = getattr(got, field), getattr(want, field)
             if a is None or b is None:
@@ -1450,9 +1450,12 @@ class TestSkin(_Skinned):
             self.assertSameMesh(got, want)
             self.assertOn(got, first.clip.active, name)
         # tetra()'s normals, one a face, are the ones Maya derives with every
-        # edge hard: not stored, a group a corner; body()'s, authored, stay
+        # edge hard: not stored, its six edges hard; body()'s, authored, stay
         self.assertIsNone(first.meshes[0].normals)
-        self.assertEqual(np.asarray(first.meshes[0].normal_indices).tolist(), list(range(12)))
+        self.assertIsNone(first.meshes[0].normal_indices)
+        self.assertEqual(
+            first.meshes[0].hard_edges.tolist(), [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]]
+        )
         self.assertEqual(len(first.meshes[1].normals), len(meshes[0].normals))
         save_fbx(self.path("b.fbx"), *first)
         second = load_fbx(self.path("b.fbx"))

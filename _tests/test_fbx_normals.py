@@ -11,11 +11,11 @@ one authored, whatever the faces say.
 MeshData computes the same normals: ``get_vertex_normals()`` with every edge
 soft, ``set_normals(hard_edges=...)`` inside the groups the hard edges
 leave. A mesh need not store them: ``get_face_vertex_normals()`` gives every
-corner's normal whatever the mesh stores, derived by the same rule inside
-the groups of corners ``normal_indices`` names when no normal is stored.
+corner's normal whatever the mesh stores, derived by the same rule between
+the edges ``hard_edges`` names when no normal is stored.
 ``load_fbx`` stores the least normals that shade a mesh as its file does:
-none where the file's are the derived ones, the groups of corners where hard
-edges part them, the file's own where they are authored (locked, in Maya).
+none where the file's are the derived ones, with the edges that part them in
+``hard_edges``, the file's own where they are authored (locked, in Maya).
 The tests read what Maya 2025 held on 15 meshes, recorded once
 (maya_fixtures, case derived_normals), and need no Maya.
 """
@@ -28,9 +28,8 @@ from cgmath.formats import load_fbx, save_fbx
 from cgmath.formats._fbx_io import load_sdk
 from cgmath.formats._load import _least_normals
 from cgmath.geometry import MeshData
-from cgmath.geometry.mesh import MeshList, UVData
+from cgmath.geometry.mesh import MeshList, UVData, _corner_normals
 from cgmath.geometry.resample import MeshDataResampler
-from cgmath.geometry.utils.main import split_at_hard_edges
 
 try:
     from pxr import Usd
@@ -48,26 +47,36 @@ def held_mesh(case, name: str) -> MeshData:
     return MeshData(points=case.array(f"{name}/points"), indices=case.array(f"{name}/indices"), counts=case.array(f"{name}/counts"))
 
 
-def hard_edges(case, name: str, mesh: MeshData) -> np.ndarray:
-    """the edges Maya marked hard, as the mesh's own edge ids"""
-    ours   = {tuple(pair): edge for edge, pair in enumerate(np.sort(np.asarray(mesh.e2v), axis=1).tolist())}
-    marked = np.sort(case.array(f"{name}/edges")[~case.array(f"{name}/smooth")], axis=1)
-    return np.array([ours[tuple(pair)] for pair in marked.tolist()], dtype=np.int32)
+def hard_edges(case, name: str) -> np.ndarray:
+    """the edges Maya marked hard, a pair of vertices each, the lower first"""
+    return np.sort(case.array(f"{name}/edges")[~case.array(f"{name}/smooth")], axis=1)
 
 
-def grouped_mesh(case, name: str) -> MeshData:
-    """the recorded mesh with no normal stored and its corners in groups,
-    the ones Maya's hard edges leave, in ``normal_indices``"""
-    mesh = held_mesh(case, name)
-    ids, _ = split_at_hard_edges(mesh.indices, mesh.counts, mesh.e2v, mesh.e2f, hard_edges(case, name, mesh))
-    mesh.normal_indices = ids
+def hard_mesh(case, name: str) -> MeshData:
+    """the recorded mesh with no normal stored and the edges Maya marked
+    hard in ``hard_edges``"""
+    mesh            = held_mesh(case, name)
+    mesh.hard_edges = hard_edges(case, name)
     return mesh
+
+
+def groups(mesh: MeshData) -> np.ndarray:
+    """the group each face corner shades with, named by the first corner of
+    it: the same for two meshes whose hard edges part the same corners"""
+    ids = np.asarray(mesh.indices) if mesh.hard_edges is None else mesh._get_hard_groups()[0]
+    _, first, inverse = np.unique(ids, return_index=True, return_inverse=True)
+    return first[inverse]
+
+
+def pair_set(pairs) -> set:
+    """vertex pairs as a set, the lower vertex first"""
+    return {tuple(pair) for pair in np.sort(np.asarray(pairs).reshape(-1, 2), axis=1).tolist()}
 
 
 def stored_mesh(case, name: str) -> MeshData:
     """the recorded mesh with its normals stored, parted at Maya's hard edges"""
     mesh = held_mesh(case, name)
-    mesh.set_normals(hard_edges=hard_edges(case, name, mesh))
+    mesh.set_normals(hard_edges=hard_edges(case, name))
     return mesh
 
 
@@ -113,15 +122,14 @@ class TestMayaDerivedNormals(_Recorded):
         case, info, names = self.meshes("soft")
         self.assertEqual([name for name in names if info[name]["hard_edges"]], ["softSheet"])
         mesh  = held_mesh(case, "softSheet")
-        edges = hard_edges(case, "softSheet", mesh)
-        self.assertEqual(edges.size, 18)
+        edges = hard_edges(case, "softSheet")
+        self.assertEqual(len(edges), 18)
         faces = np.asarray(mesh.indices).reshape(-1, 4)
         pairs = np.sort(np.stack([faces, np.roll(faces, -1, axis=1)], axis=-1).reshape(-1, 2), axis=1)
         used  = {}
         for pair in pairs.tolist():
             used[tuple(pair)] = used.get(tuple(pair), 0) + 1
-        marked = np.sort(case.array("softSheet/edges")[~case.array("softSheet/smooth")], axis=1)
-        self.assertEqual(sorted(tuple(pair) for pair in marked.tolist()), sorted(pair for pair, count in used.items() if count == 1))
+        self.assertEqual(sorted(tuple(pair) for pair in edges.tolist()), sorted(pair for pair, count in used.items() if count == 1))
         mesh.set_normals(hard_edges=edges)
         slots = np.asarray(mesh.indices) if mesh.normal_indices is None else np.asarray(mesh.normal_indices)
         self.assertEqual(len(mesh.normals), len(mesh.points))
@@ -137,9 +145,9 @@ class TestMayaDerivedNormals(_Recorded):
                 mesh  = held_mesh(case, name)
                 maya  = case.array(f"{name}/normals")
                 ids   = case.array(f"{name}/normal_ids")
-                edges = hard_edges(case, name, mesh)
+                edges = hard_edges(case, name)
                 self.assertEqual(info[name]["locked_corners"], 0)
-                self.assertEqual(edges.size, info[name]["hard_edges"])
+                self.assertEqual(len(edges), info[name]["hard_edges"])
                 mesh.set_normals(hard_edges=edges)
                 slots = np.asarray(mesh.normal_indices)
                 np.testing.assert_allclose(np.asarray(mesh.normals)[slots], maya, rtol=0, atol=TOLERANCE)
@@ -212,9 +220,8 @@ class _Derived(_Recorded):
 
 class TestNormalsNotStored(_Derived):
     """a mesh that stores no normal: ``get_face_vertex_normals()`` derives
-    Maya's from its points, inside the groups of corners ``normal_indices``
-    names, and the writers, the tangent space and the resampler's rays read
-    those"""
+    Maya's from its points, broken at the edges ``hard_edges`` names, and
+    the writers, the tangent space and the resampler's rays read those"""
 
     def assertDerived(self, back: MeshData, name: str) -> None:
         """a mesh read back from a file gives Maya's normals of ``name``,
@@ -225,7 +232,7 @@ class TestNormalsNotStored(_Derived):
         self.assertGreater(np.abs(soft - got).max(), 1e-3)
 
     def test_every_edge_soft(self):
-        """no normal and no group: the vertex normals, one a corner"""
+        """no normal and no hard edge: the vertex normals, one a corner"""
         names = self.names("soft")
         self.assertEqual(len(names), 5)
         for name in names:
@@ -237,17 +244,18 @@ class TestNormalsNotStored(_Derived):
                 np.testing.assert_array_equal(got, mesh.get_vertex_normals()[np.asarray(mesh.indices)])
                 np.testing.assert_allclose(got, self.maya(name), rtol=0, atol=TOLERANCE)
 
-    def test_groups_of_corners(self):
-        """no normal, the corners in the groups Maya's hard edges leave:
-        Maya's normals"""
+    def test_hard_edges_derive_mayas_normals(self):
+        """no normal, the edges Maya marked hard in ``hard_edges``: Maya's
+        normals"""
         names = self.names("hard")
         self.assertEqual(len(names), 9)
         for name in names:
             with self.subTest(name):
-                mesh = grouped_mesh(self.readings, name)
+                mesh = hard_mesh(self.readings, name)
                 got  = mesh.get_face_vertex_normals()
                 self.assertIsNone(mesh.normals)
-                self.assertEqual(int(np.asarray(mesh.normal_indices).max()) + 1, self.info[name]["normals"])
+                self.assertIsNone(mesh.normal_indices)
+                self.assertEqual(_corner_normals(mesh)[0].shape[0], self.info[name]["normals"])
                 np.testing.assert_allclose(got, self.maya(name), rtol=0, atol=TOLERANCE)
                 # with every edge soft the normals are others
                 soft = held_mesh(self.readings, name).get_face_vertex_normals()
@@ -272,27 +280,29 @@ class TestNormalsNotStored(_Derived):
         """the corner angles kept are those of the points assigned: after a
         write inside the array, force=True gives the normals of a mesh
         assigned the same points"""
-        mesh        = grouped_mesh(self.readings, self.HARD)
+        mesh        = hard_mesh(self.readings, self.HARD)
         mesh.points = np.array(mesh.points)  # its own array, not the readings'
         before      = mesh.get_face_vertex_normals()
         mesh.points[:, 1] *= 3.0
         forced = mesh.get_face_vertex_normals(force=True)
         self.assertGreater(np.abs(forced - before).max(), 1e-3)
-        assigned        = grouped_mesh(self.readings, self.HARD)
+        assigned        = hard_mesh(self.readings, self.HARD)
         assigned.points = np.asarray(assigned.points) * [1.0, 3.0, 1.0]
         np.testing.assert_allclose(forced, assigned.get_face_vertex_normals(), rtol=0, atol=1e-12)
 
-    def test_a_dict_keeps_the_groups_and_no_normal(self):
-        mesh = grouped_mesh(self.readings, self.HARD)
+    def test_a_dict_keeps_the_hard_edges_and_no_normal(self):
+        mesh = hard_mesh(self.readings, self.HARD)
         back = MeshData.from_dict(mesh.to_dict())
         self.assertIsNone(back.normals)
-        np.testing.assert_array_equal(back.normal_indices, mesh.normal_indices)
+        self.assertIsNone(back.normal_indices)
+        np.testing.assert_array_equal(back.hard_edges, mesh.hard_edges)
         self.assertEqual(back, mesh)
 
     def test_obj(self):
-        """save_obj writes the normals derived inside the groups, one a
-        group, and none for a mesh with neither normals nor groups"""
-        mesh = grouped_mesh(self.readings, self.HARD)
+        """save_obj writes the normals derived between the hard edges, one a
+        group of corners, and none for a mesh with neither normals nor hard
+        edges"""
+        mesh = hard_mesh(self.readings, self.HARD)
         back = MeshData.load_obj(mesh.save_obj(self.path("hard.obj")))
         self.assertEqual(len(back.normals), self.info[self.HARD]["normals"])
         self.assertDerived(back, self.HARD)
@@ -301,11 +311,12 @@ class TestNormalsNotStored(_Derived):
 
     @unittest.skipIf(Usd is None, "USD (pxr) is not installed")
     def test_usd(self):
-        """to_prim writes the normals derived inside the groups, one a
-        group, and none for a mesh with neither normals nor groups"""
+        """to_prim writes the normals derived between the hard edges, one a
+        group of corners, and none for a mesh with neither normals nor hard
+        edges"""
         stage = Usd.Stage.CreateInMemory()
         prim  = stage.DefinePrim("/hard", "Mesh")
-        grouped_mesh(self.readings, self.HARD).to_prim(prim)
+        hard_mesh(self.readings, self.HARD).to_prim(prim)
         back = MeshData.from_prim(prim)
         self.assertEqual(len(back.normals), self.info[self.HARD]["normals"])
         self.assertDerived(back, self.HARD)
@@ -315,9 +326,9 @@ class TestNormalsNotStored(_Derived):
 
     @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_fbx(self):
-        """save_fbx writes the normals derived inside the groups, and none
-        for a mesh with neither normals nor groups"""
-        mesh      = grouped_mesh(self.readings, self.HARD)
+        """save_fbx writes the normals derived between the hard edges, and
+        none for a mesh with neither normals nor hard edges"""
+        mesh      = hard_mesh(self.readings, self.HARD)
         mesh.name = "hardShape"
         save_fbx(self.path("hard.fbx"), meshes=mesh)
         self.assertDerived(load_fbx(self.path("hard.fbx")).meshes[0], self.HARD)
@@ -326,12 +337,12 @@ class TestNormalsNotStored(_Derived):
         save_fbx(self.path("soft.fbx"), meshes=soft)
         self.assertIsNone(load_fbx(self.path("soft.fbx")).meshes[0].normals)
 
-    def test_the_tangent_space_reads_the_groups(self):
-        """groups and no normal give the tangent space of the same normals
-        stored, not the one of a mesh all soft"""
+    def test_the_tangent_space_reads_the_hard_edges(self):
+        """hard edges and no normal give the tangent space of the same
+        normals stored, not the one of a mesh all soft"""
         for name in ("canJittered", "cubeJittered", "ringSoft45"):
             with self.subTest(name):
-                mesh = grouped_mesh(self.readings, name)
+                mesh = hard_mesh(self.readings, name)
                 uv   = corner_uvs(mesh)
                 tangents, bitangents = mesh.get_tangent_space(uv)
                 stored_tangents, stored_bitangents = stored_mesh(self.readings, name).get_tangent_space(uv)
@@ -364,34 +375,57 @@ class TestNormalsNotStored(_Derived):
 
     def test_normal_indices_that_fit_no_corner_are_refused(self):
         mesh                = held_mesh(self.readings, "cubeJittered")
+        mesh.normals        = np.tile([0.0, 1.0, 0.0], (8, 1))
         mesh.normal_indices = np.arange(5)
         with self.assertRaisesRegex(ValueError, "5 normal_indices for its 24 face corners"):
             mesh.get_face_vertex_normals()
         mesh.normal_indices = np.full(24, -1)
-        with self.assertRaisesRegex(ValueError, "a group of corners below 0"):
+        with self.assertRaisesRegex(ValueError, r"name normals it does not hold \(8\)"):
             mesh.get_face_vertex_normals()
 
-    def test_resample_rays_follow_the_groups(self):
-        """a destination with groups and no normal casts along the normals
-        derived inside them, summed a vertex, as it does when they are
-        stored"""
+    def test_normal_indices_without_normals_are_refused(self):
+        """normal_indices name stored normals: held with none, every reader
+        of the normals refuses them"""
+        mesh                = held_mesh(self.readings, "cubeJittered")
+        mesh.name           = "cubeShape"
+        mesh.normal_indices = np.arange(24)
+        source              = held_mesh(self.readings, "cubeJittered")
+        calls = [
+            mesh.get_face_vertex_normals,
+            lambda: mesh.get_tangent_space(corner_uvs(mesh)),
+            lambda: mesh.save_obj(self.path("refused.obj")),
+            lambda: MeshDataResampler(source, mesh)._get_ray_directions(True, True, True),
+        ]
+        if FBX is not None:
+            calls.append(lambda: save_fbx(self.path("refused.fbx"), meshes=mesh))
+        if Usd is not None:
+            stage = Usd.Stage.CreateInMemory()
+            calls.append(lambda: mesh.to_prim(stage.DefinePrim("/refused", "Mesh")))
+        for call in calls:
+            with self.assertRaisesRegex(ValueError, "holds normal_indices and no normals"):
+                call()
+
+    def test_resample_rays_follow_the_hard_edges(self):
+        """a destination with hard edges and no normal casts along the
+        normals derived between them, summed a vertex, as it does when they
+        are stored"""
         for name in ("canJittered", "ringSoft45"):
             with self.subTest(name):
                 source  = held_mesh(self.readings, name)
-                grouped = MeshDataResampler(source, grouped_mesh(self.readings, name))
+                derived = MeshDataResampler(source, hard_mesh(self.readings, name))
                 stored  = MeshDataResampler(source, stored_mesh(self.readings, name))
-                rays    = grouped._get_ray_directions(True, True, True)
+                rays    = derived._get_ray_directions(True, True, True)
                 np.testing.assert_allclose(rays, stored._get_ray_directions(True, True, True), rtol=0, atol=1e-12)
                 # asked not to read the mesh's normals, the rays are others
-                self.assertGreater(np.abs(grouped._get_ray_directions(False, True, True) - rays).max(), 1e-3)
+                self.assertGreater(np.abs(derived._get_ray_directions(False, True, True) - rays).max(), 1e-3)
 
 
 class TestLeastNormals(_Derived):
     """what load_fbx stores of the normals a file holds
     (``formats._load._least_normals``): none where they are the ones Maya
-    derives from the points, the groups of corners the hard edges leave
-    where those part them, the file's own where they are authored. Read
-    here off the recorded arrays, without the FBX SDK"""
+    derives from the points, with the hard edges where those part them, the
+    file's own where they are authored. Read here off the recorded arrays,
+    without the FBX SDK"""
 
     def read(self, name: str, normals=None, ids=None) -> dict:
         """the mesh ``name`` as the reader holds it: Maya's normals, one a
@@ -409,10 +443,12 @@ class TestLeastNormals(_Derived):
         }
 
     def assertAsRead(self, held: dict) -> None:
-        """the normals of ``held`` and their indices come back themselves"""
-        normals, ids = _least_normals(held)
+        """the normals of ``held`` and their indices come back themselves,
+        with no hard edge"""
+        normals, ids, hard = _least_normals(held)
         self.assertIs(normals, held["normals"])
         self.assertIs(ids, held["normal_indices"])
+        self.assertIsNone(hard)
 
     def test_every_edge_soft(self):
         """Maya's normals of a mesh all soft: nothing is stored"""
@@ -420,25 +456,30 @@ class TestLeastNormals(_Derived):
         self.assertEqual(len(names), 5)
         for name in names:
             with self.subTest(name):
-                self.assertEqual(_least_normals(self.read(name)), (None, None))
+                self.assertEqual(_least_normals(self.read(name)), (None, None, None))
         # one normal a vertex, the corners naming their vertices
         mesh = held_mesh(self.readings, self.SOFT)
         held = self.read(self.SOFT, mesh.get_vertex_normals(), np.asarray(mesh.indices))
-        self.assertEqual(_least_normals(held), (None, None))
+        self.assertEqual(_least_normals(held), (None, None, None))
 
-    def test_hard_edges_leave_groups(self):
+    def test_hard_edges_come_back_as_pairs(self):
         """Maya's normals of a mesh with hard edges: no normal is stored,
-        the corners in the groups Maya's hard edges leave, as many as Maya
-        held normals"""
+        the edges that part them come back, a pair of vertices each, all of
+        them edges Maya marked hard; they leave the groups of corners Maya's
+        own do, as many as Maya held normals"""
         names = self.names("hard")
         self.assertEqual(len(names), 9)
         for name in names:
             with self.subTest(name):
-                normals, groups = _least_normals(self.read(name))
+                normals, ids, hard = _least_normals(self.read(name))
                 self.assertIsNone(normals)
-                self.assertEqual(groups.dtype, np.int32)
-                self.assertEqual(int(groups.max()) + 1, self.info[name]["normals"])
-                np.testing.assert_array_equal(groups, grouped_mesh(self.readings, name).normal_indices)
+                self.assertIsNone(ids)
+                self.assertEqual(hard.dtype, np.int32)
+                self.assertLessEqual(pair_set(hard), pair_set(hard_edges(self.readings, name)))
+                mesh            = held_mesh(self.readings, name)
+                mesh.hard_edges = hard
+                np.testing.assert_array_equal(groups(mesh), groups(hard_mesh(self.readings, name)))
+                self.assertEqual(mesh._get_hard_groups()[1], self.info[name]["normals"])
 
     def test_authored_normals_come_back_as_read(self):
         """a locked normal is not the derived one: the file's normals stay"""
@@ -447,28 +488,31 @@ class TestLeastNormals(_Derived):
 
     def test_a_normal_is_derived_within_1e_5_a_component(self):
         """one component of one corner's normal 9e-6 off the derived one:
-        still not stored, the groups the same; 1.1e-5 off: authored"""
-        for name, mesh in ((self.SOFT, held_mesh(self.readings, self.SOFT)), (self.HARD, grouped_mesh(self.readings, self.HARD))):
+        still not stored, the hard edges leaving the same groups; 1.1e-5
+        off: authored"""
+        for name, mesh in ((self.SOFT, held_mesh(self.readings, self.SOFT)), (self.HARD, hard_mesh(self.readings, self.HARD))):
             with self.subTest(name):
                 ours  = mesh.get_face_vertex_normals()
                 close = ours.copy()
                 close[7, 1] += 9e-6
-                normals, groups = _least_normals(self.read(name, close))
+                normals, ids, hard = _least_normals(self.read(name, close))
                 self.assertIsNone(normals)
-                if mesh.normal_indices is None:
-                    self.assertIsNone(groups)
+                self.assertIsNone(ids)
+                if mesh.hard_edges is None:
+                    self.assertIsNone(hard)
                 else:
-                    np.testing.assert_array_equal(groups, mesh.normal_indices)
+                    back            = held_mesh(self.readings, name)
+                    back.hard_edges = hard
+                    np.testing.assert_array_equal(groups(back), groups(mesh))
                 apart = ours.copy()
                 apart[7, 1] += 1.1e-5
                 self.assertAsRead(self.read(name, apart))
 
     def test_an_edge_of_three_faces(self):
-        """three quads on one edge. Each face its own normals: every corner
-        a group. The edge's first two faces sharing theirs along it: those
-        corners share groups. Another two sharing theirs: no groups say so
-        (split_at_hard_edges joins an edge's first two faces), the normals
-        stay stored"""
+        """three quads on one edge. Each face its own normals: that edge
+        is hard, no normal stored. Two of the faces sharing theirs along it:
+        no hard edge says so (an edge is hard for every face on it), the
+        normals stay stored"""
         points = [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
         for angle in np.deg2rad([0.0, 120.0, 240.0]):
             points += [[np.cos(angle), np.sin(angle), 0.0], [np.cos(angle), np.sin(angle), 1.0]]
@@ -487,20 +531,18 @@ class TestLeastNormals(_Derived):
                 normals[a * 4 + corner] = normals[b * 4 + corner] = both / np.linalg.norm(both)
             return normals
 
-        normals, groups = _least_normals(read(own))
+        normals, ids, hard = _least_normals(read(own))
         self.assertIsNone(normals)
-        self.assertEqual(groups.tolist(), list(range(12)))
-        normals, groups = _least_normals(read(sharing(0, 1)))
-        self.assertIsNone(normals)
-        self.assertEqual(groups.tolist(), [0, 1, 2, 3, 0, 4, 5, 3, 6, 7, 8, 9])
-        self.assertAsRead(read(sharing(0, 2)))
-        self.assertAsRead(read(sharing(1, 2)))
+        self.assertIsNone(ids)
+        self.assertEqual(hard.tolist(), [[0, 1]])
+        for a, b in ((0, 1), (0, 2), (1, 2)):
+            self.assertAsRead(read(sharing(a, b)))
 
     def test_what_fits_no_corner_is_left_as_read(self):
         """a mesh with no normals, or indices outside them: as read"""
         held            = self.read(self.SOFT)
         held["normals"] = held["normal_indices"] = None
-        self.assertEqual(_least_normals(held), (None, None))
+        self.assertEqual(_least_normals(held), (None, None, None))
         for wrong in (-1, len(self.maya(self.SOFT))):
             held                      = self.read(self.SOFT)
             held["normal_indices"][3] = wrong
@@ -511,16 +553,11 @@ class TestLeastNormals(_Derived):
 class TestLoadFbxNormals(_Derived):
     """load_fbx stores the least normals that shade a mesh as its file does"""
 
-    def assertSameGroups(self, got, want) -> None:
-        if want is None:
-            self.assertIsNone(got)
-        else:
-            np.testing.assert_array_equal(got, want)
-
     def test_mayas_export(self):
         """Maya's FBXExport of the 15 meshes. All soft: no normal and no
-        group. Hard edges: no normal, Maya's groups. The locked cube: the
-        file's normals. Each shades as Maya held it"""
+        hard edge. Hard edges: no normal, edges Maya marked hard that leave
+        Maya's groups of corners. The locked cube: the file's normals. Each
+        shades as Maya held it"""
         read   = load_fbx(self.fixture("maya.fbx"))
         nodes  = read.clip.active
         meshes = {nodes[mesh.parent_uuid].name: mesh for mesh in read.meshes}
@@ -533,17 +570,20 @@ class TestLoadFbxNormals(_Derived):
                 if kind == "locked":
                     self.assertEqual(len(mesh.normals), self.info[name]["normals"])
                     self.assertEqual(len(mesh.normal_indices), len(mesh.indices))
+                    self.assertIsNone(mesh.hard_edges)
                     continue
                 self.assertIsNone(mesh.normals)
+                self.assertIsNone(mesh.normal_indices)
                 if kind == "soft":
-                    self.assertIsNone(mesh.normal_indices)
+                    self.assertIsNone(mesh.hard_edges)
                     continue
-                self.assertEqual(int(np.max(mesh.normal_indices)) + 1, self.info[name]["normals"])
-                np.testing.assert_array_equal(mesh.normal_indices, grouped_mesh(self.readings, name).normal_indices)
+                self.assertLessEqual(pair_set(mesh.hard_edges), pair_set(hard_edges(self.readings, name)))
+                np.testing.assert_array_equal(groups(mesh), groups(hard_mesh(self.readings, name)))
+                self.assertEqual(mesh._get_hard_groups()[1], self.info[name]["normals"])
 
     def test_stored_derived_normals_are_not_read_back(self):
         """a mesh saved with the normals Maya would derive stored reads back
-        with none, its corners in the groups the hard edges leave, shading
+        with none, the hard edges that part them in ``hard_edges``, shading
         the same; saved and read again, the same mesh"""
         for name in (self.SOFT, self.HARD, "ballDefault", "sheetSoft20"):
             with self.subTest(name):
@@ -553,13 +593,20 @@ class TestLoadFbxNormals(_Derived):
                 save_fbx(self.path(f"{name}.fbx"), meshes=mesh)
                 back = load_fbx(self.path(f"{name}.fbx")).meshes[0]
                 self.assertIsNone(back.normals)
-                want = grouped_mesh(self.readings, name).normal_indices if self.info[name]["kind"] == "hard" else None
-                self.assertSameGroups(back.normal_indices, want)
+                self.assertIsNone(back.normal_indices)
+                if self.info[name]["kind"] == "hard":
+                    np.testing.assert_array_equal(groups(back), groups(hard_mesh(self.readings, name)))
+                else:
+                    self.assertIsNone(back.hard_edges)
                 np.testing.assert_allclose(back.get_face_vertex_normals(), mesh.get_face_vertex_normals(), rtol=0, atol=TOLERANCE)
                 save_fbx(self.path(f"{name}_again.fbx"), meshes=back)
                 again = load_fbx(self.path(f"{name}_again.fbx")).meshes[0]
                 self.assertIsNone(again.normals)
-                self.assertSameGroups(again.normal_indices, back.normal_indices)
+                self.assertIsNone(again.normal_indices)
+                if back.hard_edges is None:
+                    self.assertIsNone(again.hard_edges)
+                else:
+                    np.testing.assert_array_equal(again.hard_edges, back.hard_edges)
                 np.testing.assert_array_equal(again.get_face_vertex_normals(), back.get_face_vertex_normals())
 
     def test_authored_normals_come_back_as_held(self):
@@ -572,21 +619,25 @@ class TestLoadFbxNormals(_Derived):
         save_fbx(self.path("authored.fbx"), meshes=mesh)
         back = load_fbx(self.path("authored.fbx")).meshes[0]
         self.assertEqual(len(back.normals), self.info[self.HARD]["normals"])
+        self.assertIsNone(back.hard_edges)
         np.testing.assert_array_equal(back.get_face_vertex_normals(), mesh.get_face_vertex_normals())
         save_fbx(self.path("authored_again.fbx"), meshes=back)
         again = load_fbx(self.path("authored_again.fbx")).meshes[0]
         for field in ("normals", "normal_indices"):
             np.testing.assert_array_equal(getattr(again, field), getattr(back, field), err_msg=field)
+        self.assertIsNone(again.hard_edges)
 
     def test_the_class_routes_read_the_same(self):
         """MeshData.load_fbx and MeshList.load_fbx read as load_fbx does"""
         mesh      = stored_mesh(self.readings, self.HARD)
         mesh.name = "routeShape"
         mesh.save_fbx(self.path("route.fbx"))
-        want = grouped_mesh(self.readings, self.HARD).normal_indices
+        want = load_fbx(self.path("route.fbx")).meshes[0].hard_edges
+        self.assertGreater(len(want), 0)
         for back in (MeshData.load_fbx(self.path("route.fbx")), MeshList.load_fbx(self.path("route.fbx"))[0]):
             self.assertIsNone(back.normals)
-            np.testing.assert_array_equal(back.normal_indices, want)
+            self.assertIsNone(back.normal_indices)
+            np.testing.assert_array_equal(back.hard_edges, want)
 
 
 if __name__ == "__main__":

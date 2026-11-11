@@ -534,8 +534,8 @@ class Scene(Data):
             moved        = mesh.copy()
             moved.points = np.asarray(points, dtype=np.float64)
             if moved.normals is not None:
-                # the ids that named them go with them: left alone they
-                # would read as groups of corners
+                # the ids that named them go with them: normal_indices
+                # with no normals are refused
                 moved.normals        = None
                 moved.normal_indices = None
             found.append((moved, world, item))

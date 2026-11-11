@@ -1403,9 +1403,7 @@ class TestMesh(unittest.TestCase):
 
         # split along z = 1: the middle vertex holds two normals, each the
         # sum of the two faces on its side
-        e2v    = np.sort(np.asarray(mesh.e2v), axis=1)
-        crease = np.array([e for e, (a, b) in enumerate(e2v) if (a, b) in ((3, 4), (4, 5))], dtype=np.int32)
-        self.assertEqual(crease.size, 2)
+        crease = np.array([(3, 4), (4, 5)])
         mesh.set_normals(hard_edges=crease)
         slots  = np.asarray(mesh.normal_indices)
         middle = slots[indices == 4].reshape(2, 2)  # faces 0, 1 then faces 2, 3
@@ -1952,7 +1950,7 @@ class TestMesh(unittest.TestCase):
         mesh = self.box.copy()
 
         # mark the first 3 edges as hard
-        hard_edges = np.array([0, 1, 2])
+        hard_edges = mesh.e2v[:3]
         mesh.set_normals(hard_edges=hard_edges)
 
         self.assertIsNotNone(mesh.normals)
@@ -7403,6 +7401,22 @@ class TestHardEdges(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"must have shape \(N, 2\)"):
             mesh.hard_edges = [1, 4, 6]
         self.assertIsNone(mesh.hard_edges)
+
+    def test_set_normals_takes_pairs(self):
+        with self.assertRaisesRegex(ValueError, r"hard_edges is a pair of vertices an edge, \(n, 2\), not \(3,\)"):
+            _folded().set_normals(hard_edges=np.array([1, 4, 6]))
+        with self.assertRaisesRegex(RuntimeError, r"hard_edges names 1 vertex pair\(s\) that are no edge of it: \(0, 4\)"):
+            _folded().set_normals(hard_edges=[(1, 4), (0, 4)])
+
+        # either vertex first, an edge named twice; the field is left alone
+        mesh = _folded()
+        mesh.set_normals(hard_edges=[(4, 1), (1, 4)])
+        self.assertEqual(mesh.normals.shape, (8, 3))
+        self.assertIsNone(mesh.hard_edges)
+
+        derived            = _folded()
+        derived.hard_edges = [(1, 4)]
+        np.testing.assert_allclose(mesh.normals[mesh.normal_indices], derived.get_face_vertex_normals(), atol=1e-15)
 
     def test_the_normals_break_at_the_hard_edges(self):
         up, back = (0.0, 0.0, 1.0), (-1.0, 0.0, 0.0)
