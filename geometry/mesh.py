@@ -483,6 +483,12 @@ class MeshData(ShapeData):
         # compute e2v and e2f
         self._ue2v, self._ue2f = compute_e2v_e2f(self.indices, self.counts)
 
+        # a face with holes: each of its loops closes on itself, where the
+        # kernel closes the whole face as one loop
+        if self.hole_faces is not None:
+            next_corner, _ = self._get_corner_loops()
+            self._ue2v[:, 1] = self.indices[next_corner]
+
         # derive f2e from e2f
         self._f2ue = stream_to_matrix(np.arange(self._ue2f.size), self.counts)
 
@@ -1653,6 +1659,43 @@ class MeshData(ShapeData):
 
         return face_holes
 
+    def _get_corner_loops(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        each corner's next and previous corner in the index stream, around
+        the loop it is on: its face or, on an n-gon with holes
+        (``hole_faces``), that face's outer loop or one of its hole loops
+        """
+        # wrapping around its face (a hole, a count of 0, has no corner)
+        starts = np.cumsum(self.counts) - self.counts
+        faces  = np.flatnonzero(self.counts)
+        first  = starts[faces]
+        last   = first + self.counts[faces] - 1
+        corner = np.arange(self.indices.size)
+
+        next_corner        = corner + 1
+        next_corner[last]  = first
+        prev_corner        = corner - 1
+        prev_corner[first] = last
+
+        # a face with holes lists its outer loop, then each hole loop: each
+        # loop wraps on itself, not over the bridge to the next loop
+        for face_id, holes in self._get_face_holes().items():
+            face_corners = corner[starts[face_id] : starts[face_id] + self.counts[face_id]]
+            face_verts   = self.indices[face_corners]
+            outer        = np.ones(face_corners.size, dtype=bool)
+            loops        = []
+            for hole in holes:
+                in_hole = np.isin(face_verts, hole)
+                outer &= ~in_hole
+                loops.append(face_corners[in_hole])
+            loops.append(face_corners[outer])
+
+            for loop in loops:
+                next_corner[loop] = np.roll(loop, -1)
+                prev_corner[loop] = np.roll(loop, 1)
+
+        return next_corner, prev_corner
+
     # --- normals
 
     def get_face_normals(self, force: bool = False) -> np.ndarray:
@@ -1689,35 +1732,8 @@ class MeshData(ShapeData):
         if self._face_vertex_angles is not None and not force:
             return self._face_vertex_angles
 
-        # each corner's next and previous corner in the index stream, wrapping
-        # around its face (a hole, a count of 0, has no corner)
-        starts = np.cumsum(self.counts) - self.counts
-        faces  = np.flatnonzero(self.counts)
-        first  = starts[faces]
-        last   = first + self.counts[faces] - 1
-        corner = np.arange(self.indices.size)
-
-        next_corner        = corner + 1
-        next_corner[last]  = first
-        prev_corner        = corner - 1
-        prev_corner[first] = last
-
-        # a face with holes lists its outer loop, then each hole loop: each
-        # loop wraps on itself, not over the bridge to the next loop
-        for face_id, holes in self._get_face_holes().items():
-            face_corners = corner[starts[face_id] : starts[face_id] + self.counts[face_id]]
-            face_verts   = self.indices[face_corners]
-            outer        = np.ones(face_corners.size, dtype=bool)
-            loops        = []
-            for hole in holes:
-                in_hole = np.isin(face_verts, hole)
-                outer &= ~in_hole
-                loops.append(face_corners[in_hole])
-            loops.append(face_corners[outer])
-
-            for loop in loops:
-                next_corner[loop] = np.roll(loop, -1)
-                prev_corner[loop] = np.roll(loop, 1)
+        # each corner's next and previous corner, around its own loop
+        next_corner, prev_corner = self._get_corner_loops()
 
         # the edge leaving each corner
         edges = self.points[self.indices[next_corner]] - self.points[self.indices]

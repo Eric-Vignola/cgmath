@@ -25,6 +25,7 @@ from cgmath.geometry.mesh import (
     UVList,
 )
 from cgmath.geometry.utils import compute_topological_neighborhood, ordered_closest_params
+from cgmath.geometry.utils.main import split_at_hard_edges
 from scipy.interpolate import BSpline
 from scipy.spatial import cKDTree
 
@@ -1528,6 +1529,50 @@ class TestMesh(unittest.TestCase):
             with self.subTest(example=type(example).__name__):
                 angles = example.get_face_vertex_angles()
                 self.assertTrue(np.allclose(angles[:8], np.pi / 2, rtol=1e-12, atol=0))
+
+    def test_ngon_hole_edges(self):
+        """an n-gon's outer loop and each hole loop close on themselves in the edge tables"""
+        #  3 ---- 4 ---- 5      face 0: outer 4 3 0 1, hole 6 7 8 9
+        #  |  9 8 |      |      face 1: 1 2 5 4, lifted at 2 and 5
+        #  |  6 7 |      |
+        #  0 ---- 1 ---- 2
+        points = [
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [2.0, 1.0, 1.0],
+            [0.3, 0.0, 0.3], [0.7, 0.0, 0.3], [0.7, 0.0, 0.7], [0.3, 0.0, 0.7],
+        ]
+        mesh = MeshData(
+            points       = np.array(points),
+            counts       = [8, 4],
+            indices      = [4, 3, 0, 1, 6, 7, 8, 9, 1, 2, 5, 4],
+            hole_faces   = [0],
+            hole_counts  = [4],
+            hole_indices = [6, 7, 8, 9],
+        )
+
+        # the edge the two faces share, (1, 4), closes face 0's outer loop and
+        # (6, 9) its hole: no edge bridges the two loops
+        faces_of = {}
+        for pair, faces in zip(mesh.e2v.tolist(), mesh.e2f.tolist()):
+            faces_of[tuple(sorted(pair))] = sorted(face for face in faces if face >= 0)
+        self.assertEqual(
+            sorted(faces_of),
+            [(0, 1), (0, 3), (1, 2), (1, 4), (2, 5), (3, 4), (4, 5), (6, 7), (6, 9), (7, 8), (8, 9)],
+        )
+        self.assertEqual(faces_of[(1, 4)], [0, 1])
+        self.assertEqual([faces_of[pair] for pair in [(6, 7), (7, 8), (8, 9), (6, 9)]], [[0]] * 4)
+
+        # with no hard edge each vertex is one group of corners: vertices 4
+        # and 1 hold their corners of both faces together
+        groups, count = split_at_hard_edges(mesh.indices, mesh.counts, mesh.e2v, mesh.e2f, np.empty(0, dtype=np.int64))
+        self.assertEqual(count,     10)
+        self.assertEqual(groups[0], groups[11])
+        self.assertEqual(groups[3], groups[8])
+
+        # a mesh with no hole keeps the tables it had
+        bare            = mesh.copy()
+        bare.hole_faces = bare.hole_counts = bare.hole_indices = None
+        self.assertEqual(len(bare.e2v), 12)
 
     def test_ngon_flat_area(self):
         """an n-gon with its points on one line measures 0, as a flat quad does: set_normals still runs"""
