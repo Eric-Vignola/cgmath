@@ -1414,7 +1414,10 @@ class MeshData(ShapeData):
         raises (points on one line, a repeated corner, many faces that come
         back through a vertex) and on an n-gon it makes no triangle of (a
         loop walked twice). The triangles it does make of such a face need
-        not cover the region above; they are what it measures.
+        not cover the region above; they are what it measures. A quad the
+        triangulate rules leave whole (neither diagonal makes two triangles
+        facing one way, of like size: a bowtie, a quad with an edge next to
+        nothing) is measured whole, by 2x2 Gauss.
         """
         method = AreaMethod(method)
 
@@ -1493,13 +1496,16 @@ class MeshData(ShapeData):
                 tolerance = tolerance,
             )
 
-            # map triangulated face areas back to original faces:
-            # each tri produced 1 output face, each quad produced 2,
-            # each n-gon produced len(ngon_tris[face_id]).
-            tri_ids                = np.where(self.counts == 3)[0]
-            quad_ids               = np.where(self.counts == 4)[0]
-            out_per_face           = np.ones(self.counts.size, dtype=np.intp)
-            out_per_face[quad_ids] = 2
+            # map the copy's face areas back to the faces they came from: a
+            # triangle is one face there, a quad two where its rule splits it
+            # and one where the rules leave it whole (-1: neither diagonal
+            # makes two triangles facing one way, of like size), an n-gon
+            # len(ngon_tris[face_id]).
+            quads                   = self.counts == 4
+            split_ids               = np.where(quads & (rules.rules >= 0))[0]
+            whole_ids               = np.where((self.counts == 3) | (quads & (rules.rules < 0)))[0]
+            out_per_face            = np.ones(self.counts.size, dtype=np.intp)
+            out_per_face[split_ids] = 2
             for face_id, local_tris in rules.ngon_tris.items():
                 out_per_face[face_id] = len(local_tris)
 
@@ -1507,10 +1513,10 @@ class MeshData(ShapeData):
             out_offsets[0] = 0
             np.cumsum(out_per_face, out=out_offsets[1:])
 
-            triangulated_areas          = np.zeros(self.counts.size, dtype=tri_areas.dtype)
-            triangulated_areas[tri_ids] = tri_areas[out_offsets[tri_ids]]
-            triangulated_areas[quad_ids] = (
-                tri_areas[out_offsets[quad_ids]] + tri_areas[out_offsets[quad_ids] + 1]
+            triangulated_areas            = np.zeros(self.counts.size, dtype=tri_areas.dtype)
+            triangulated_areas[whole_ids] = tri_areas[out_offsets[whole_ids]]
+            triangulated_areas[split_ids] = (
+                tri_areas[out_offsets[split_ids]] + tri_areas[out_offsets[split_ids] + 1]
             )
             for face_id, local_tris in rules.ngon_tris.items():
                 start                       = out_offsets[face_id]
