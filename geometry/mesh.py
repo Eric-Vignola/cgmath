@@ -374,6 +374,18 @@ class MeshData(ShapeData):
     ``get_face_vertex_normals()`` gives the normal of every corner, stored or
     derived.
 
+    ``hard_edges`` are the edges the derived normals break at, a pair of
+    vertices each: the corners around a vertex that no hard edge parts
+    shade with one normal. The mesh holds each pair lower vertex first, the
+    rows in order, each once, and assigning puts them so; None: every edge
+    is soft. They say nothing while the mesh stores ``normals``. Any edge
+    can be hard, a border edge too; a pair that is no edge of the mesh
+    raises when the normals are first read. An operation that keeps faces
+    (``delete_faces``, ``detach_faces``, ``triangulate``, ``merge``,
+    ``from_faces``, ``from_vertices``) keeps the hard edges that are still
+    edges; one that rebuilds them (``subdivide``, ``quadrangulate``,
+    ``union``, ``difference``) drops them all.
+
     ``colors`` are RGBA in 0..1, one a vertex, or the ones ``color_indices``
     name a corner each (a colour a corner: ``color_indices = arange``), as
     ``normals`` and ``normal_indices`` work. An operation that keeps face
@@ -396,6 +408,7 @@ class MeshData(ShapeData):
     normal_indices: Optional[Array(np.int32, "N")] = None
     colors:         Optional[Array(np.float64, "N", 4)] = None
     color_indices:  Optional[Array(np.int32, "N")] = None
+    hard_edges:     Optional[Array(np.int32, "N", 2)] = None
 
     # --- cached attributes --- #
     _f2v = None  # faces to vertices
@@ -425,6 +438,8 @@ class MeshData(ShapeData):
 
     _edge_lengths = None  # edge lengths
     _edge_normals = None  # edge normals
+
+    _hard_groups  = None  # the corner groups hard_edges part, and how many
 
     _triangles        = None  # faces identified as triangles
     _quads            = None  # faces identified as quads
@@ -458,6 +473,7 @@ class MeshData(ShapeData):
         "_border_vertices", "_border_edges", "_border_faces", "_overlap_vertices",
         "_face_normals", "_face_vertex_angles",
         "_edge_lengths", "_edge_normals",
+        "_hard_groups",
         "_triangles", "_quads", "_ngons", "_degenerate_faces", "_valence", "_valid",
         "_v2ev", "_v2fv", "_e2ve", "_e2fe", "_f2vf", "_f2ef",
         "_shell_points", "_shell_faces", "_shell_edges",
@@ -471,6 +487,11 @@ class MeshData(ShapeData):
         ``get_face_vertex_angles()`` and ``get_vertex_normals()`` answer for
         the new ones. A write inside the array (``mesh.points[:, 1] += 5``)
         is not seen: pass those ``force=True`` after one.
+
+        A write of ``hard_edges`` is held in one form: each pair lower
+        vertex first, the rows in order, each once, None for no pair. The
+        array given is left as it is, and the corner groups worked out of
+        the pairs before it are dropped.
         """
         super().__setattr__(name, value)
         if name == "points":
@@ -478,6 +499,12 @@ class MeshData(ShapeData):
                 self._face_normals = None
             if self._face_vertex_angles is not None:
                 self._face_vertex_angles = None
+        elif name == "hard_edges":
+            pairs = self.__dict__.get("hard_edges")
+            if pairs is not None:
+                object.__setattr__(self, "hard_edges", _canonical_pairs(pairs))
+            if self._hard_groups is not None:
+                self._hard_groups = None
 
     def _compute_edges(self):
         # compute e2v and e2f
@@ -1696,6 +1723,27 @@ class MeshData(ShapeData):
 
         return next_corner, prev_corner
 
+    def _get_hard_groups(self) -> Tuple[np.ndarray, int]:
+        """
+        the group each face corner shades with under ``hard_edges``, the
+        corners around a vertex that no hard edge parts, and how many groups
+        there are; kept until the faces or ``hard_edges`` change.
+        RuntimeError for a pair that is no edge of the mesh.
+        """
+        if self._hard_groups is None:
+            ids, found = _pair_edges(self, self.hard_edges)
+            if not found.all():
+                missing = self.hard_edges[~found]
+                label   = f"mesh {self.name!r}" if self.name else "the mesh"
+                shown   = ", ".join(f"({a}, {b})" for a, b in missing[:5].tolist())
+                more    = ", ..." if len(missing) > 5 else ""
+                raise RuntimeError(
+                    f"{label}'s hard_edges names {len(missing)} vertex pair(s) "
+                    f"that are no edge of it: {shown}{more}"
+                )
+            self._hard_groups = split_at_hard_edges(self.indices, self.counts, self.e2v, self.e2f, ids)
+        return self._hard_groups
+
     # --- normals
 
     def get_face_normals(self, force: bool = False) -> np.ndarray:
@@ -1950,8 +1998,9 @@ class MeshData(ShapeData):
         vector times the corner's angle, at unit length (see
         :meth:`get_vertex_normals`). With ``normal_indices`` the groups are
         the ones they name, the corners around a vertex that no hard edge
-        parts; without, every edge is soft and a group is a vertex's
-        corners. A group whose faces have no area gets +Y.
+        parts; without, the groups are the ones ``hard_edges`` part, and
+        with neither every edge is soft and a group is a vertex's corners.
+        A group whose faces have no area gets +Y.
 
         The corner angles the derived normals read are kept until ``points``
         is assigned (``mesh.points = moved``). A write inside the array
@@ -1967,6 +2016,7 @@ class MeshData(ShapeData):
         Raises:
             ValueError: The stored normals fit neither the vertices nor the
                 face corners, or ``normal_indices`` does not fit the corners.
+            RuntimeError: A pair of ``hard_edges`` is no edge of the mesh.
         """
         normals, ids = _corner_normals(self, always=True, force=force)
         return normals[ids]
@@ -2143,7 +2193,11 @@ class MeshData(ShapeData):
         """
         deletes faces at given face indices. The hole metadata (hole_faces)
         of the faces kept is renumbered with them; a deleted face's holes go.
+        The hard edges that are still edges stay hard.
         """
+        hard      = self.hard_edges
+        old_count = self.point_count
+
         # find the reverse mapping and delete everyghing not in faces
         if not exclude:
             arange = np.arange(self.counts.size)
@@ -2194,6 +2248,7 @@ class MeshData(ShapeData):
         self.normals        = None
         self.normal_indices = None
         self.colors, self.color_indices = _mapped_colors(colors, color_ids, per_vertex, kept, corners)
+        self.hard_edges = _mapped_hard_edges(self, hard, _new_vertex_of(old_count, kept))
 
     def __iadd__(self, other):
         """inplace add of two MeshData objects"""
@@ -2293,6 +2348,7 @@ class MeshData(ShapeData):
         self.normal_indices = None
         self.colors         = None
         self.color_indices  = None
+        self.hard_edges     = None
 
     def difference(self, *args, tolerance=1e-6):
         """removes overlapping faces of given Mesh objects from self (this is not a boolean)"""
@@ -2322,13 +2378,18 @@ class MeshData(ShapeData):
             self.normal_indices = None
             self.colors         = None
             self.color_indices  = None
+            self.hard_edges     = None
 
     def detach_faces(self, indices=None):
-        """detaches faces; the colours stay on their corners"""
+        """detaches faces; the colours stay on their corners, and the hard
+        edges of the faces left attached stay hard"""
 
         # the corners keep their order either way: colours held one a vertex
         # follow the points, the others stay as they are
         colors, _, per_vertex = _color_form(self)
+
+        # a detached face shares no edge: nothing is left to be hard on it
+        hard = None
 
         if indices is None:
             # make each face its own island
@@ -2358,6 +2419,10 @@ class MeshData(ShapeData):
             # cleanup existing points by using the existing `from_faces` method
             new_self = self.from_faces(indices, exclude=True)
 
+            # the faces left attached keep new_self's numbering, and with it
+            # the hard edges it kept
+            hard = new_self.hard_edges
+
             # use the cleaned up mesh to establish the point offset
             point_offset = np.arange(new_idx.size) + new_self.points.shape[0]
             new_geometry = indices_replace(geometry, new_idx, point_offset)
@@ -2379,17 +2444,25 @@ class MeshData(ShapeData):
         self.reset_cached_data()
         self.normals        = None
         self.normal_indices = None
+        self.hard_edges     = hard
 
     def merge(self):
         """merges overlapping points; the colours follow the points and the
-        faces kept"""
+        faces kept, and the hard edges that are still edges stay hard"""
         colors, color_ids, per_vertex = _color_form(self)
         positions = np.arange(self.indices.size)
+        hard      = self.hard_edges
+        old_count = self.point_count
+        old       = np.array(self.indices)
 
         # combine points and their indices
         indices, v0, v1 = point_row_overlaps(self.points, tolerance=1e-6)
         self.indices = indices_replace(self.indices, v0, v1, collapse=True)
         self.points  = self.points[indices]
+
+        # the new vertex of each old one, as the corners now name it
+        new_of      = np.full(old_count, -1, dtype=np.int64)
+        new_of[old] = self.indices
 
         # remove overlapping faces
         matrix  = stream_to_matrix(self.indices, self.counts)
@@ -2402,6 +2475,7 @@ class MeshData(ShapeData):
         self.normals        = None
         self.normal_indices = None
         self.colors, self.color_indices = _mapped_colors(colors, color_ids, per_vertex, indices, corners)
+        self.hard_edges = _mapped_hard_edges(self, hard, new_of)
 
     def contains_vertices(self, vertices, contained=True, exclude=False):
         """returns the mesh's faces which contains the given vertex indices"""
@@ -2550,6 +2624,7 @@ class MeshData(ShapeData):
         new.normal_indices = None
         new.colors, new.color_indices = _mapped_colors(colors, color_ids, per_vertex, surviving, corners)
         new.reset_cached_data()
+        new.hard_edges = _mapped_hard_edges(new, self.hard_edges, _new_vertex_of(self.point_count, surviving))
         return new
 
     def sample(
@@ -3489,6 +3564,8 @@ class MeshData(ShapeData):
         self.normal_indices = None
         if not per_vertex:  # the points are as they were: colours one a vertex stay
             self.colors, self.color_indices = _mapped_colors(colors, color_ids, per_vertex, None, corners)
+        # every edge is still one: the hard ones stay hard
+        self.hard_edges = _mapped_hard_edges(self, self.hard_edges)
 
     # ------------------------------ QUADRANGULATION
 
@@ -3689,6 +3766,7 @@ class MeshData(ShapeData):
         self.normal_indices = None
         self.colors         = None
         self.color_indices  = None
+        self.hard_edges     = None
 
     # ---------------------------------- SMOOTH ---------------------------------- #
     def smooth(
@@ -3769,6 +3847,7 @@ class MeshData(ShapeData):
             self.normal_indices = None
             self.colors         = None
             self.color_indices  = None
+            self.hard_edges     = None
 
         # normal subdivision steps
         else:
@@ -3797,6 +3876,7 @@ class MeshData(ShapeData):
             self.normal_indices = None
             self.colors         = None
             self.color_indices  = None
+            self.hard_edges     = None
 
     def get_correspondence(self, mesh: "MeshData") -> None:
         """computes the point correspondence between MeshData objects"""
@@ -5422,10 +5502,13 @@ def _corner_normals(mesh: "MeshData", always: bool = False, force: bool = False)
     names, through ``normal_indices``, else its vertex's (one normal a
     vertex) or its own (one a corner). A mesh that stores none and holds
     groups of corners in ``normal_indices`` gives the normals Maya derives
-    inside them, a normal a group. One that holds neither gives ``(None,
-    None)``, or with ``always`` the derived normals of its vertices, every
-    edge soft. ``force`` recomputes what the derived normals read.
-    ValueError for normals or ``normal_indices`` that fit none of these.
+    inside them, a normal a group; one that stores none and holds
+    ``hard_edges`` gives them inside the groups those part. One that holds
+    none of the three gives ``(None, None)``, or with ``always`` the derived
+    normals of its vertices, every edge soft. ``force`` recomputes what the
+    derived normals read. ValueError for normals or ``normal_indices`` that
+    fit none of these; RuntimeError for a pair of ``hard_edges`` that is no
+    edge of the mesh.
     """
     indices = np.asarray(mesh.indices)
     label   = f"mesh {mesh.name!r}" if mesh.name else "the mesh"
@@ -5438,6 +5521,9 @@ def _corner_normals(mesh: "MeshData", always: bool = False, force: bool = False)
             )
 
     if mesh.normals is None:
+        if ids is None and mesh.hard_edges is not None:
+            ids, count = mesh._get_hard_groups()
+            return _compute_shading_normals(mesh, ids, count, True, True, force=force), ids
         if ids is None and not always:
             return None, None
         if ids is None:
@@ -5463,6 +5549,70 @@ def _corner_normals(mesh: "MeshData", always: bool = False, force: bool = False)
     if ids.size and (ids.min() < 0 or ids.max() >= normals.shape[0]):
         raise ValueError(f"{label}'s normal_indices name normals it does not hold ({normals.shape[0]})")
     return normals, ids
+
+
+def _canonical_pairs(pairs: np.ndarray) -> np.ndarray | None:
+    """
+    ``hard_edges`` as a mesh holds them, an array of its own: each pair
+    lower vertex first, the rows in order, each once; None for no pair
+    """
+    pairs = np.sort(pairs, axis=1)
+    pairs = pairs[np.lexsort((pairs[:, 1], pairs[:, 0]))]
+    if len(pairs) > 1:
+        keep     = np.ones(len(pairs), dtype=bool)
+        keep[1:] = (pairs[1:] != pairs[:-1]).any(axis=1)
+        pairs    = pairs[keep]
+    return pairs if len(pairs) else None
+
+
+def _pair_edges(mesh: "MeshData", pairs) -> tuple:
+    """
+    ``(ids, found)``: the edge of ``mesh.e2v`` each vertex pair names,
+    either vertex first, and whether it names one; an id is only to be read
+    where it does
+    """
+    pairs = np.sort(np.asarray(pairs, dtype=np.int64).reshape(-1, 2), axis=1)
+    none  = np.zeros(len(pairs), dtype=np.int64), np.zeros(len(pairs), dtype=bool)
+    if not pairs.size or not mesh.indices.size:  # no face: no edge table to ask
+        return none
+    edges = np.sort(np.asarray(mesh.e2v, dtype=np.int64).reshape(-1, 2), axis=1)
+    if not edges.size:
+        return none
+
+    # a pair as one number, the lower vertex its high digits
+    span   = max(int(pairs.max()), int(edges.max())) + 1
+    keys   = edges[:, 0] * span + edges[:, 1]
+    wanted = pairs[:, 0] * span + pairs[:, 1]
+    order  = np.argsort(keys, kind="stable")
+    ids    = order[np.minimum(np.searchsorted(keys[order], wanted), len(order) - 1)]
+    return ids, (keys[ids] == wanted) & (pairs[:, 0] >= 0)
+
+
+def _new_vertex_of(count: int, kept) -> np.ndarray:
+    """the new vertex of each of ``count`` old ones when ``kept`` are the
+    old ones kept, in their new order; -1 for one that is gone"""
+    kept         = np.asarray(kept, dtype=np.intp)
+    new_of       = np.full(count, -1, dtype=np.int64)
+    new_of[kept] = np.arange(kept.size)
+    return new_of
+
+
+def _mapped_hard_edges(mesh: "MeshData", pairs, new_of=None) -> np.ndarray | None:
+    """
+    ``hard_edges`` after an operation on a mesh that held ``pairs``: each
+    pair renumbered by ``new_of``, the new vertex of each old one (-1: gone;
+    None: the vertices as they were), and kept when it is an edge of
+    ``mesh``, the mesh after the operation. None without pairs.
+    """
+    if pairs is None:
+        return None
+    pairs = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
+    if new_of is not None:
+        new_of = np.asarray(new_of, dtype=np.int64)
+        pairs  = pairs[((pairs >= 0) & (pairs < new_of.size)).all(axis=1)]
+        pairs  = new_of[pairs]
+    pairs = pairs[_pair_edges(mesh, pairs)[1]]
+    return pairs.astype(np.int32) if len(pairs) else None
 
 
 def _corner_colors(mesh: "MeshData") -> tuple:

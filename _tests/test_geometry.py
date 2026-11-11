@@ -12,6 +12,7 @@ from cgmath.geometry.bspline import NurbsCurveData, _fit_knots
 from cgmath.geometry.bspline_patch import NurbsSurfaceData
 from cgmath.geometry.mesh import (
     _corner_colors,
+    _corner_normals,
     AreaMethod,
     Axis,
     cv2,
@@ -7346,6 +7347,278 @@ class TestColors(unittest.TestCase):
                 mesh = _colored("indexed")
                 act(mesh)
                 self.assertEqual((mesh.colors, mesh.color_indices), (None, None))
+
+
+def _folded() -> MeshData:
+    """the strip with its second quad folded up a right angle about the
+    edge the two share, (1, 4)"""
+    mesh        = _strip()
+    mesh.points = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 1.0), (0.0, 1.0, 0.0), (1.0, 1.0, 0.0), (1.0, 1.0, 1.0)]
+    return mesh
+
+
+def _doubled() -> MeshData:
+    """two quads with the points of the edge they share twice (1 and 4, 2
+    and 7), and the first quad twice"""
+    points = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0),
+              (1.0, 0.0, 0.0), (2.0, 0.0, 0.0), (2.0, 1.0, 0.0), (1.0, 1.0, 0.0)]
+    return MeshData(points=points, indices=[0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3], counts=[4, 4, 4])
+
+
+class TestHardEdges(unittest.TestCase):
+    """hard_edges: the edges the derived normals break at, a pair of
+    vertices each, held in one form; kept by the operations that keep
+    faces, dropped by the ones that rebuild them"""
+
+    def test_the_field_defaults_to_none(self):
+        mesh = _strip()
+        self.assertIsNone(mesh.hard_edges)
+        self.assertEqual(_corner_normals(mesh), (None, None))
+
+    def test_the_pairs_are_held_in_one_form(self):
+        given           = np.array([[4, 1], [1, 0], [1, 4], [0, 1], [5, 2]])
+        mesh            = _strip()
+        mesh.hard_edges = given
+        np.testing.assert_array_equal(mesh.hard_edges, [[0, 1], [1, 4], [2, 5]])
+        self.assertEqual(mesh.hard_edges.dtype, np.int32)
+        np.testing.assert_array_equal(given, [[4, 1], [1, 0], [1, 4], [0, 1], [5, 2]])  # left as it was
+
+        # an int32 array is not held either: a write inside it is not seen
+        given           = np.array([[1, 4]], dtype=np.int32)
+        mesh.hard_edges = given
+        given[0]        = (0, 3)
+        np.testing.assert_array_equal(mesh.hard_edges, [[1, 4]])
+
+        # no pair is None, by every road
+        for empty in ([], np.empty((0, 2), dtype=np.int32), None):
+            mesh.hard_edges = empty
+            self.assertIsNone(mesh.hard_edges)
+
+        # the constructor takes them as an assignment does
+        built = MeshData(points=mesh.points, indices=mesh.indices, counts=mesh.counts, hard_edges=[(4, 1), (4, 1)])
+        np.testing.assert_array_equal(built.hard_edges, [[1, 4]])
+
+    def test_edge_ids_are_refused(self):
+        mesh = _strip()
+        with self.assertRaisesRegex(ValueError, r"must have shape \(N, 2\)"):
+            mesh.hard_edges = [1, 4, 6]
+        self.assertIsNone(mesh.hard_edges)
+
+    def test_the_normals_break_at_the_hard_edges(self):
+        up, back = (0.0, 0.0, 1.0), (-1.0, 0.0, 0.0)
+        middle = (-(0.5**0.5), 0.0, 0.5**0.5)
+
+        # soft: the two quads, of one area and square, share a normal on (1, 4)
+        mesh = _folded()
+        np.testing.assert_allclose(
+            mesh.get_face_vertex_normals(), [up, middle, middle, up, middle, back, back, middle], atol=1e-15
+        )
+
+        # hard: each quad keeps its own, and nothing is stored
+        mesh.hard_edges = [(4, 1)]
+        np.testing.assert_allclose(mesh.get_face_vertex_normals(), [up] * 4 + [back] * 4, atol=1e-15)
+        self.assertEqual((mesh.normals, mesh.normal_indices), (None, None))
+        normals, ids = _corner_normals(mesh)
+        self.assertEqual((normals.shape, sorted(set(ids.tolist()))), ((8, 3), list(range(8))))
+
+        # a border edge can be hard: it parts nothing
+        mesh.hard_edges = [(0, 1), (2, 5)]
+        np.testing.assert_allclose(
+            mesh.get_face_vertex_normals(), [up, middle, middle, up, middle, back, back, middle], atol=1e-15
+        )
+
+    def test_the_normals_are_the_ones_set_normals_stores(self):
+        stored = _folded()
+        stored.set_normals(hard_edge_angle=20.0)  # the fold, a right angle, is the one edge past it
+        self.assertEqual(stored.normals.shape, (8, 3))
+
+        derived            = _folded()
+        derived.hard_edges = [(1, 4)]
+        np.testing.assert_allclose(
+            derived.get_face_vertex_normals(), stored.normals[stored.normal_indices], atol=1e-15
+        )
+
+    def test_a_box_hard_on_every_edge_shades_a_normal_a_corner(self):
+        points = [(x, y, z) for z in (0.0, 1.0) for y in (0.0, 1.0) for x in (0.0, 1.0)]
+        faces  = [(0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4), (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5)]
+        box    = MeshData(points=points, indices=np.ravel(faces), counts=[4] * 6)
+        self.assertEqual(len(box.e2v), 12)
+
+        stored = box.copy()
+        stored.set_normals(hard_edge_angle=20.0)
+        self.assertEqual(stored.normals.shape, (24, 3))
+
+        box.hard_edges = box.e2v
+        self.assertEqual(len(box.hard_edges), 12)
+        normals, ids = _corner_normals(box)
+        self.assertEqual(normals.shape, (24, 3))
+        np.testing.assert_allclose(normals[ids], stored.normals[stored.normal_indices], atol=1e-15)
+        np.testing.assert_allclose(normals[ids], np.repeat(box.get_face_normals(), 4, axis=0), atol=1e-15)
+
+        # the four around one face: each of its vertices shades that face
+        # with one normal and the two other faces with another
+        box.hard_edges = [(4, 5), (5, 7), (6, 7), (4, 6)]
+        normals, ids = _corner_normals(box)
+        self.assertEqual(normals.shape, (12, 3))
+        np.testing.assert_allclose(normals[ids][4:8], np.tile([0.0, 0.0, 1.0], (4, 1)), atol=1e-15)
+
+        # one hard edge at a vertex inside a surface parts nothing there
+        box.hard_edges = [(0, 1), (2, 3), (4, 5), (6, 7)]
+        self.assertEqual(_corner_normals(box)[0].shape, (8, 3))
+
+    def test_stored_normals_win(self):
+        mesh            = _folded()
+        mesh.hard_edges = [(1, 4)]
+        mesh.normals    = np.tile([0.0, 1.0, 0.0], (6, 1))
+        np.testing.assert_array_equal(mesh.get_face_vertex_normals(), np.tile([0.0, 1.0, 0.0], (8, 1)))
+        np.testing.assert_array_equal(mesh.hard_edges, [[1, 4]])  # kept beside them
+        mesh.normals = None
+        self.assertEqual(mesh.get_face_vertex_normals()[4].tolist(), [-1.0, 0.0, 0.0])
+
+    def test_a_pair_that_is_no_edge_raises_when_the_normals_are_read(self):
+        mesh            = _folded()
+        mesh.hard_edges = [(1, 4), (0, 4), (2, 9), (-1, 3)]  # a diagonal, a vertex it has not, one below 0
+        np.testing.assert_array_equal(mesh.hard_edges, [[-1, 3], [0, 4], [1, 4], [2, 9]])
+        message = r"mesh 'stripShape''s hard_edges names 3 vertex pair\(s\) that are no edge of it: \(-1, 3\), \(0, 4\), \(2, 9\)"
+        with self.assertRaisesRegex(RuntimeError, message):
+            mesh.get_face_vertex_normals()
+        with self.assertRaisesRegex(RuntimeError, message):
+            _corner_normals(mesh)
+        mesh.hard_edges = [(1, 4)]
+        self.assertEqual(mesh.get_face_vertex_normals()[4].tolist(), [-1.0, 0.0, 0.0])
+
+    def test_the_groups_follow_the_pairs_and_outlive_the_points(self):
+        mesh            = _folded()
+        mesh.hard_edges = [(1, 4)]
+        hard            = mesh.get_face_vertex_normals()
+        groups          = mesh._hard_groups
+        self.assertEqual(groups[1], 8)
+
+        # the points move, the faces do not: the groups are the ones held
+        mesh.points = mesh.points * 2.0
+        np.testing.assert_allclose(mesh.get_face_vertex_normals(), hard, atol=1e-15)
+        self.assertIs(mesh._hard_groups, groups)
+
+        # other pairs, other groups
+        mesh.hard_edges = None
+        self.assertIsNone(mesh._hard_groups)
+        self.assertFalse(np.allclose(mesh.get_face_vertex_normals(), hard))
+        mesh.hard_edges = [(4, 1)]
+        np.testing.assert_allclose(mesh.get_face_vertex_normals(), hard, atol=1e-15)
+
+    def test_equality_reads_the_pairs(self):
+        a, b = _strip(), _strip()
+        a.hard_edges = [(1, 4), (0, 1)]
+        self.assertNotEqual(a, b)
+        b.hard_edges = [(1, 0), (4, 1), (0, 1)]
+        self.assertEqual(a, b)
+        b.hard_edges = [(1, 4)]
+        self.assertNotEqual(a, b)
+
+    def test_the_pairs_round_trip(self):
+        mesh            = _folded()
+        mesh.hard_edges = [(1, 4), (0, 1)]
+        with tempfile.TemporaryDirectory() as folder:
+            for ext in ("json", "npz", "pkl"):
+                with self.subTest(ext=ext):
+                    back = MeshData.load(mesh.save(os.path.join(folder, f"hard.{ext}")))
+                    self.assertEqual(back, mesh)
+                    np.testing.assert_array_equal(back.hard_edges, [[0, 1], [1, 4]])
+                    self.assertEqual(back.hard_edges.dtype, np.int32)
+                    np.testing.assert_array_equal(back.get_face_vertex_normals(), mesh.get_face_vertex_normals())
+            soft = MeshData.load(_strip().save(os.path.join(folder, "soft.json")))
+            self.assertIsNone(soft.hard_edges)
+        twin = mesh.copy()
+        self.assertEqual(twin, mesh)
+        self.assertIsNot(twin.hard_edges, mesh.hard_edges)
+        self.assertIsNone(twin._hard_groups)
+
+    def test_delete_faces_keeps_the_hard_edges_that_are_still_edges(self):
+        mesh            = _folded()
+        mesh.hard_edges = [(0, 1), (1, 4), (2, 5)]
+        mesh.delete_faces([0])  # points 1, 2, 4, 5 stay, as 0, 1, 2, 3
+        np.testing.assert_array_equal(mesh.indices, [0, 1, 3, 2])
+        np.testing.assert_array_equal(mesh.hard_edges, [[0, 2], [1, 3]])
+        self.assertEqual(mesh.get_face_vertex_normals().shape, (4, 3))
+
+        mesh            = _folded()
+        mesh.hard_edges = [(2, 5)]
+        mesh.delete_faces([1])
+        self.assertIsNone(mesh.hard_edges)
+
+    def test_from_faces_and_from_vertices_keep_them(self):
+        mesh            = _folded()
+        mesh.hard_edges = [(0, 1), (1, 4), (2, 5)]
+        part            = mesh.from_faces([1])
+        np.testing.assert_array_equal(part.hard_edges, [[0, 2], [1, 3]])
+        np.testing.assert_array_equal(mesh.hard_edges, [[0, 1], [1, 4], [2, 5]])  # the source is as it was
+        part = mesh.from_vertices([0, 1, 3, 4])
+        np.testing.assert_array_equal(part.hard_edges, [[0, 1], [1, 3]])
+        part.get_face_vertex_normals()
+
+        # rules that cut the second quad to the triangle 1, 2, 4
+        rules = mesh.get_subset_rules([0, 1, 2, 3, 4])
+        part  = mesh.from_vertices(rules)
+        np.testing.assert_array_equal(part.counts, [4, 3])
+        np.testing.assert_array_equal(part.hard_edges, [[0, 1], [1, 4]])
+        part.get_face_vertex_normals()
+
+    def test_detach_faces_keeps_the_hard_edges_of_the_faces_left(self):
+        mesh            = _folded()
+        mesh.hard_edges = [(0, 1), (1, 4)]
+        mesh.detach_faces()
+        self.assertIsNone(mesh.hard_edges)
+
+        mesh            = _folded()
+        mesh.hard_edges = [(0, 1), (1, 4), (2, 5)]
+        mesh.detach_faces([1])
+        self.assertEqual(mesh.point_count, 8)
+        np.testing.assert_array_equal(mesh.indices[:4], [0, 1, 3, 2])
+        np.testing.assert_array_equal(mesh.hard_edges, [[0, 1], [1, 3]])
+        mesh.get_face_vertex_normals()
+
+        mesh            = _folded()
+        mesh.hard_edges = [(1, 4)]
+        mesh.detach_faces([0, 1])  # the whole thing
+        self.assertIsNone(mesh.hard_edges)
+
+    def test_merge_keeps_the_hard_edges_that_are_still_edges(self):
+        mesh            = _doubled()
+        mesh.hard_edges = [(0, 1), (4, 7), (5, 6), (1, 4)]  # (1, 4) is no edge: one point twice
+        mesh.merge()
+        self.assertEqual((mesh.point_count, mesh.face_count), (6, 2))
+        ends = sorted(tuple(sorted(map(tuple, mesh.points[pair].tolist()))) for pair in mesh.hard_edges.tolist())
+        self.assertEqual(
+            ends,
+            [
+                ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)),
+                ((1.0, 0.0, 0.0), (1.0, 1.0, 0.0)),
+                ((2.0, 0.0, 0.0), (2.0, 1.0, 0.0)),
+            ],
+        )
+        mesh.get_face_vertex_normals()
+
+    def test_triangulate_keeps_them(self):
+        mesh            = _folded()
+        mesh.hard_edges = [(0, 1), (1, 4)]
+        mesh.triangulate(np.zeros(2, dtype=int))
+        np.testing.assert_array_equal(mesh.counts, [3] * 4)
+        np.testing.assert_array_equal(mesh.hard_edges, [[0, 1], [1, 4]])
+        up, back = [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0]
+        np.testing.assert_allclose(mesh.get_face_vertex_normals(), [up] * 6 + [back] * 6, atol=1e-15)
+
+    def test_the_rebuilding_operations_drop_them(self):
+        for name, act in (
+            ("union", lambda m: m.union(_strip())),
+            ("difference", lambda m: m.difference(_strip())),
+            ("subdivide", lambda m: m.subdivide(1)),
+            ("quadrangulate", lambda m: (m.triangulate(np.zeros(2, dtype=int)), m.quadrangulate())),
+        ):
+            with self.subTest(name):
+                mesh            = _strip()
+                mesh.hard_edges = [(1, 4), (0, 1)]
+                act(mesh)
+                self.assertIsNone(mesh.hard_edges)
 
 
 class TestTopologyHash(unittest.TestCase):
