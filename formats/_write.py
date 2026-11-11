@@ -977,7 +977,9 @@ def _write_mesh(exporter, mesh, node) -> tuple:
     """(the node, the FbxMesh): the mesh as the shape of ``node``, the
     FbxNode of the transform its ``parent_uuid`` names, or of a new root
     node at identity named after the mesh for None; its points, faces and
-    normals, one a face corner through their indices; its colours as one
+    normals, one a face corner through their indices (the stored ones, or
+    with none stored and groups of corners in ``normal_indices`` the ones
+    derived inside them; none for a mesh holding neither); its colours as one
     set, :data:`COLOR_SET`, on the mesh's first layer where Maya's exporter
     puts a set, by control point for a colour a vertex and by polygon vertex
     otherwise, index to direct as Maya writes both; the FbxMesh named after
