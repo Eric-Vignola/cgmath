@@ -1998,7 +1998,9 @@ def _least_normals(held: dict) -> tuple:
     the least that shades it as the file does. The file's normals are held,
     a face corner at a time, against the ones Maya derives from the points
     (MeshData.get_face_vertex_normals): with every edge soft, then broken
-    at the edges the file's own normals part (:func:`_parted_edges`).
+    at the edges the file's own normals part (:func:`_parted_edges`). The
+    soft ones are derived only when the file's normals are one a vertex:
+    corners of a vertex that differ cannot both be the vertex's normal.
     Within NORMALS_DERIVED a component the mesh stores none: ``(None, None,
     None)`` with every edge soft, else ``(None, None, those edges)``, a
     pair of vertices each. Any other normals, authored ones, come back as
@@ -2019,7 +2021,13 @@ def _least_normals(held: dict) -> tuple:
         ours = _compute_shading_normals(mesh, groups, count, True, True, force=False)[groups]
         return bool(np.all(np.abs(ours - corners) <= NORMALS_DERIVED))
 
-    if derived(indices, mesh.point_count):
+    # every edge soft gives a vertex one normal: where the file's differ
+    # around a vertex by more than twice the tolerance (three times, for the
+    # rounding) they are not those, and deriving them is skipped
+    first                = np.empty(mesh.point_count, dtype=np.int64)
+    first[indices[::-1]] = np.arange(indices.size)[::-1]
+    apart                = np.abs(corners - corners[first[indices]])
+    if bool(np.all(apart <= 3.0 * NORMALS_DERIVED)) and derived(indices, mesh.point_count):
         return None, None, None
     parted = _parted_edges(mesh, corners)
     if parted.size:
