@@ -7,7 +7,8 @@ Python SDK), plus stage and prim helpers for **USD** (via `pxr`).
 The fbx half is one read and one write: `load_fbx(path)` gives everything a
 file holds that cgmath has a class for, as one `FbxContents` — the
 hierarchy or its takes, the meshes on the nodes with their colours, their
-UV sets, skins, materials and blend shape targets, the cameras and lights —
+UV sets, skins, materials and blend shape targets, the cameras and lights,
+the NURBS curves and surfaces —
 and
 `save_fbx(path, ...)` writes the same fields back, in Maya's Y-up and cm.
 Every other fbx reader in the library (`HierarchyData.load_fbx`,
@@ -101,7 +102,8 @@ every frame; a joint's are refused.
 ### fbx: a shape names its node, a skin or a set names its mesh
 
 A mesh's `parent_uuid` is the uuid of its node in the hierarchy (or the
-clip) the same read gives; a UV set's, a skin's, a material's or a target's
+clip) the same read gives, as a camera's, a light's, a curve's or a
+surface's is; a UV set's, a skin's, a material's or a target's
 `mesh_uuid` is its mesh's. The uuids are minted by the read: two loads of
 one file do not share them. A skin's influences are joint names.
 
@@ -142,7 +144,7 @@ with FbxExporter() as exporter:            # the block frees the FBX SDK's memor
 ```python
 from cgmath.formats import load_fbx, save_fbx
 
-held = load_fbx("hero.fbx")                   # FbxContents: hierarchy, clip, meshes, skins, uvs, cameras, lights, materials, morphs
+held = load_fbx("hero.fbx")                   # FbxContents: hierarchy, clip, meshes, skins, uvs, cameras, lights, materials, morphs, curves, surfaces
 for mesh in held.meshes or []:
     print(mesh.name, mesh.points.shape, held.hierarchy[mesh.parent_uuid].name if held.hierarchy else None)
 for take in held.clip or []:                  # a ClipList, one ClipData per take
@@ -152,7 +154,7 @@ save_fbx("copy.fbx", *held)                   # the same fields, the same file
 
 Each kind is a flag, `True` by default: `takes`, `meshes` (and with them
 everything on a mesh), `uvs`, `skins`, `materials`, `textures`, `morphs`,
-`cameras`, `lights`. A kind left unread is `None`, so a caller after one
+`cameras`, `lights`, `curves`, `surfaces`. A kind left unread is `None`, so a caller after one
 thing pays for that alone; the nodes are always read. `takes=False` gives
 them as `hierarchy` at their own values, and so does `skins=False` (the
 bind pose comes with the skins); `textures=False` keeps each material's
@@ -161,11 +163,12 @@ decoded once a read, however many materials name it, which share the one
 array. `verbose=False` silences the read's warnings. The class routes read
 their kinds alone (`MeshData.load_fbx` the nodes and the meshes,
 `UVList.load_fbx` the UV sets too, `SkinList.load_fbx` the skins) and take
-`verbose`; `Scene.load_fbx` takes every flag.
+`verbose`; `Scene.load_fbx` takes every flag, and leaves the curves and
+surfaces unread, which the render path does not draw.
 
 <!-- notest: no .fbx asset ships with this repo -->
 ```python
-held = load_fbx("hero.fbx", takes=False, materials=False, morphs=False)   # nodes, meshes, UV sets, skins, cameras, lights
+held = load_fbx("hero.fbx", takes=False, materials=False, morphs=False)   # nodes, meshes, UV sets, skins, cameras, lights, curves, surfaces
 print(held.clip, held.materials, held.morphs)                             # None None None
 ```
 
@@ -183,6 +186,18 @@ and written shades the same, while a
 mesh saved with its derived normals stored reads back without them. Nothing
 opts out. The step takes about 0.25 s on 250,000 quads with every edge
 soft, about 1 s with hard edges or authored normals.
+
+A NURBS curve comes back as a `NurbsCurveData` in `curves`, a NURBS
+surface as a `NurbsSurfaceData` in `surfaces`, each in its node's space
+and naming the node by `parent_uuid`; `save_fbx(..., curves=, surfaces=)`
+writes them back as Maya's exporter does. A curve of degree 1 that is not
+periodic and holds no knots is a line of the file's polyline, any number
+of them on one node; every other curve is the file's NURBS curve, one a
+node, and a surface is one a node too. `knots` is None where the file's
+are the ones the shape gives itself. Rational shapes (a control point's
+weight that is not 1) and trimmed surfaces are refused, the message naming
+the flag (`curves=False`, `surfaces=False`) that reads the file without
+them.
 
 The FBX SDK frees what it read only when told to; every FBX reader in
 cgmath frees its memory before it returns, and none of them writes anything
@@ -292,6 +307,7 @@ a textured one):
 | Want | Call |
 |---|---|
 | Everything an FBX holds | `cgmath.formats.load_fbx(path)` → `FbxContents`; `cgmath.render.Scene.load_fbx(path)` holds the same, ready to render |
+| NURBS curves and surfaces from FBX | `cgmath.formats.load_fbx(path).curves` → `NurbsCurveList`, `.surfaces` → `NurbsSurfaceList` |
 | Meshes + UVs from FBX | `cgmath.geometry.mesh.load_fbx(path)` → `[(MeshData, UVList), ...]`, as `load_fbx` reads them, each mesh's `parent_uuid` naming its node |
 | Meshes + UVs from GLB | `cgmath.geometry.mesh.load_glb(path, scale_factor=100.0)` |
 | Meshes, any format | `cgmath.geometry.mesh.load(path)` / `MeshList.load(path)` |

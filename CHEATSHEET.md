@@ -795,7 +795,7 @@ print(HierarchyData.load_fbx(os.path.join(tmp, "rig2.fbx")).name)
 | Skin weights | `cgmath.geometry.skin_weights.load_fbx / load_glb` |
 | Every take of a file | `cgmath.hierarchy.ClipList.load_fbx / load_glb(path)` -> one `ClipData` per take |
 | Takes to a file | `clips.save_fbx(path)`: one stack per take, every frame keyed; `clip.save_fbx(path)` writes one take |
-| Everything an fbx holds | `cgmath.formats.load_fbx(path)` -> `FbxContents`: hierarchy or clip, meshes, skins, uvs, cameras, lights, materials, morphs; `save_fbx(path, ...)` writes them; `cgmath.render.Scene.load_fbx(path)` holds them, ready to render |
+| Everything an fbx holds | `cgmath.formats.load_fbx(path)` -> `FbxContents`: hierarchy or clip, meshes, skins, uvs, cameras, lights, materials, morphs, curves, surfaces; `save_fbx(path, ...)` writes them; `cgmath.render.Scene.load_fbx(path)` holds them, ready to render |
 | Raw glTF | `cgmath.formats.glb.load_model(path)` -> `Model(name, nodes, ordered_node_indexes, meshes, animations, skins)` |
 
 OBJ is pure python and always available:

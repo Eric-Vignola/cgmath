@@ -838,7 +838,9 @@ MeshList
 MorphData
 MorphList
 NurbsCurveData
+NurbsCurveList
 NurbsSurfaceData
+NurbsSurfaceList
 PatchRelaxData
 PatchSampleData
 RaycastData
@@ -1031,7 +1033,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x0000023B7411B090>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000001425FAEB0D0>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -2147,6 +2149,14 @@ smooth(self, n: int, polyorder: int = 3, lock_endpoints: bool = True, pad_endpoi
     smoothes the curve points via a savgol_filter
 ```
 
+#### `NurbsCurveList(DataList)`
+
+A list of :class:`NurbsCurveData`, as a file holds its curves.
+
+```text
+NurbsCurveList(iterable=None)
+```
+
 ## `cgmath.geometry.bspline_patch`
 
 tensor-product B-spline patches.
@@ -2238,6 +2248,14 @@ sample(self, obj, initial_samples=20, max_newton_iters=10, tolerance=1e-10)
     Project points onto the surface: each query's closest point.
 smooth(self, n_u: int, n_v: int, polyorder: int = 3)
     Separable Savgol smoothing along U then V with periodic wrapping.
+```
+
+#### `NurbsSurfaceList(DataList)`
+
+A list of :class:`NurbsSurfaceData`, as a file holds its surfaces.
+
+```text
+NurbsSurfaceList(iterable=None)
 ```
 
 #### `PatchRaycastData(Data)`
@@ -3138,9 +3156,9 @@ FbxContents
 Functions:
 
 ```text
-load_fbx(filename, *, takes: bool = True, meshes: bool = True, uvs: bool = True, skins: bool = True, materials: bool = True, textures: bool = True, morphs: bool = True, cameras: bool = True, lights: bool = True, verbose: bool = True) -> cgmath.formats._load.FbxContents
+load_fbx(filename, *, takes: bool = True, meshes: bool = True, uvs: bool = True, skins: bool = True, materials: bool = True, textures: bool = True, morphs: bool = True, cameras: bool = True, lights: bool = True, curves: bool = True, surfaces: bool = True, verbose: bool = True) -> cgmath.formats._load.FbxContents
     ``(hierarchy, clip, meshes, skins, uvs, cameras, lights, materials,
-save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=None, cameras=None, lights=None, materials=None, morphs=None, as_ascii: bool = False) -> None
+save_fbx(filename, hierarchy=None, clip=None, meshes=None, skins=None, uvs=None, cameras=None, lights=None, materials=None, morphs=None, curves=None, surfaces=None, as_ascii: bool = False) -> None
     writes one of ``hierarchy``, a HierarchyData of joints and transforms,
 ```
 
@@ -3456,7 +3474,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000023B28D63C40>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001422DA379C0>, '...
 ```
 
 ## `cgmath.constraints`
