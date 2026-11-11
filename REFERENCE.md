@@ -1031,7 +1031,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000002F9FF4BAF90>
+MISSING = <dataclasses._MISSING_TYPE object at 0x0000023B7411B090>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -3286,14 +3286,16 @@ scene                              fbx.FbxScene: the fbx scene to export, labell
 Methods:
 
 ```text
+add_mesh(self, mesh, node=None)
+    Adds a ``MeshData`` as an ``FbxMesh`` and returns it.
 add_skeleton(self, skeleton_component) -> None
     Add a skeleton component to the scene.
 add_skin(self, shape, skin, links) -> None
-    Adds a ``SkinData`` to an ``FbxMesh``:
+    Adds a ``SkinData`` to an ``FbxMesh`` :meth:`add_mesh` returned:
 add_takes(self, clips, names, time_mode, zero_root: bool = False, columns=None, active=None, ranges=None) -> None
     One animation stack per clip, after :meth:`add_skeleton`
 add_uvs(self, shape, uvs) -> None
-    Adds UV sets, ``UVData`` each, to an ``FbxMesh``, in their order,
+    Adds UV sets, ``UVData`` each, to an ``FbxMesh`` :meth:`add_mesh`
 close(self) -> None
     frees the manager, and with it the scene and every node added
 export(self, path: pathlib.Path, as_ascii=False, zero_root=False) -> None
@@ -3454,7 +3456,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000002F9E87D6E80>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000023B28D63C40>, '...
 ```
 
 ## `cgmath.constraints`
