@@ -2862,13 +2862,16 @@ class NurbsSurfaceData(ShapeData):
         d = np.diff(pts, axis=0)
         return float(np.sum(np.linalg.norm(d, axis=1)))
 
-    def get_area(self, samples: int = 50) -> float:
+    def get_area(self, samples: int = 51) -> float:
         """
-        Numerical surface area via composite Simpson's rule on
-        ``||S_u x S_v||`` over the parameter rectangle.
+        Numerical surface area: ``||S_u x S_v||`` summed over ``samples`` by
+        ``samples`` parameters, each direction by its own rule.
 
-        Falls back to a Riemann sum when ``samples`` is even (Simpson
-        requires an odd number of points per direction). The samples are
+        An open direction takes composite Simpson's rule when ``samples``
+        is odd and falls back to a Riemann sum, which counts both of its
+        ends in full, when it is even. A periodic direction's samples stop
+        short of its end and weigh the same, the trapezoid rule around a
+        closed direction, whatever the count. The samples are
         evenly spaced in the native parameters, not lined up with the knots:
         uneven knots (``knots_u`` / ``knots_v``), short end spans most of
         all, need more of them for the same accuracy.
@@ -2876,7 +2879,8 @@ class NurbsSurfaceData(ShapeData):
         Parameters
         ----------
         samples : int
-            Samples per direction. Use an odd number for Simpson's rule.
+            Samples per direction, 51 by default: an odd number, for
+            Simpson's rule on an open direction.
 
         Returns
         -------
@@ -2900,23 +2904,32 @@ class NurbsSurfaceData(ShapeData):
         du = self._max_param_u / (samples - (not self.periodic_u))
         dv = self._max_param_v / (samples - (not self.periodic_v))
 
-        # Composite Simpson's rule (1D weights then outer product) when
-        # samples is odd; else fall back to Riemann sum.
-        if samples >= 3 and samples % 2 == 1:
-            w_u         = np.ones(samples, dtype=np.float64)
-            w_u[1:-1:2] = 4.0
-            w_u[2:-1:2] = 2.0
-            w_v         = np.ones(samples, dtype=np.float64)
-            w_v[1:-1:2] = 4.0
-            w_v[2:-1:2] = 2.0
-            weights     = np.outer(w_u, w_v)
-            return float(np.sum(weights * norms) * du * dv / 9.0)
-
-        return float(np.sum(norms) * du * dv)
+        w_u, over_u = _area_rule(samples, self.periodic_u)
+        w_v, over_v = _area_rule(samples, self.periodic_v)
+        return float(np.sum(np.outer(w_u, w_v) * norms) * du * dv / (over_u * over_v))
 
 
 class NurbsSurfaceList(DataList[NurbsSurfaceData]):
     """A list of :class:`NurbsSurfaceData`, as a file holds its surfaces."""
+
+
+def _area_rule(samples: int, periodic: bool) -> tuple:
+    """
+    The weights of one direction's samples in ``get_area()`` and the number
+    they are over, the step between samples left out.
+
+    A periodic direction's samples stop short of its end and weigh the
+    same: the trapezoid rule around a closed direction. Simpson's weights
+    are made for a first and a last sample at the two ends, which such a
+    direction does not have. An open direction takes composite Simpson's
+    rule when ``samples`` is odd and a Riemann sum when it is even.
+    """
+    weights = np.ones(samples, dtype=np.float64)
+    if periodic or samples < 3 or samples % 2 == 0:
+        return weights, 1.0
+    weights[1:-1:2] = 4.0
+    weights[2:-1:2] = 2.0
+    return weights, 3.0
 
 
 def _direction_knots(knots, kv, count, degree, periodic, label):

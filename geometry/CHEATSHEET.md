@@ -2560,14 +2560,15 @@ print(round(patch.get_length_u(fast=False), 4))    # scipy quad, precise
 print(round(patch.total_length_u, 4), round(patch.total_length_v, 4))
 ```
 
-`get_area()` uses composite Simpson's rule when `samples` is **odd** and
-falls back to a coarser Riemann sum when it is even. `area` is
-`get_area()` with the default `samples=50` — even, so pass an odd count
-when you want accuracy.
+`get_area()` works each direction by its own rule. An open direction uses
+composite Simpson's rule when `samples` is **odd** and falls back to a
+coarser Riemann sum when it is even; a periodic direction uses the
+trapezoid rule whatever the count. `area` is `get_area()` with the default
+`samples=51`.
 
 ```python
-print(round(patch.area, 4))                  # samples=50 → Riemann
-print(round(patch.get_area(samples=51), 4))  # odd → Simpson
+print(round(patch.area, 4))                  # samples=51: Simpson
+print(round(patch.get_area(samples=50), 4))  # even: a Riemann sum on an open direction, over
 print(round(patch.get_area(samples=201), 4))
 ```
 

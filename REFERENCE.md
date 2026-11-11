@@ -1033,7 +1033,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000001E5BEE0B0D0>
+MISSING = <dataclasses._MISSING_TYPE object at 0x00000154C11EB0D0>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -2228,8 +2228,8 @@ compute_fast(self, u, v, _native=False)
     Always-numba positions + tangents. Mirrors ``NurbsCurveData.compute_fast``.
 evaluate(self, u, v, _native=False)
     Position-only fast path using the existing surface evaluation kernel.
-get_area(self, samples: int = 50) -> float
-    Numerical surface area via composite Simpson's rule on
+get_area(self, samples: int = 51) -> float
+    Numerical surface area: ``||S_u x S_v||`` summed over ``samples`` by
 get_length_u(self, fast: bool = True, samples: int = 100) -> float
     Approximate arc length along U using a mid-V iso-curve.
 get_length_v(self, fast: bool = True, samples: int = 100) -> float
@@ -3476,7 +3476,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001E60CD47F60>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001550F127F60>, '...
 ```
 
 ## `cgmath.constraints`
