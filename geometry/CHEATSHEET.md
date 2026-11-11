@@ -850,8 +850,8 @@ of a mesh holding `hard_edges`, none for one holding neither).
 `recompute_normals()` is for stored normals and raises without them.
 `load_fbx` gives meshes in the least of these forms that shades as the file
 does. Face edits keep the hard edges that are still edges (`delete_faces`,
-`from_faces`, `from_vertices`, `merge`, `triangulate`, `detach_faces`);
-`subdivide`, `quadrangulate`, `union` and `difference` drop them.
+`from_faces`, `from_vertices`, `merge`, `triangulate`, `detach_faces`,
+`union`, `difference`); `subdivide` and `quadrangulate` drop them.
 
 ```python
 mesh = cube.copy()

@@ -1031,7 +1031,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000001467F32AE90>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000002A64AB3B090>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1130,7 +1130,7 @@ delete_faces(self, faces, exclude=False)
 detach_faces(self, indices=None)
     detaches faces; the colours stay on their corners, and the hard
 difference(self, *args, tolerance=1e-06)
-    removes overlapping faces of given Mesh objects from self (this is not a boolean)
+    removes overlapping faces of given Mesh objects from self (this is not
 edges_to_vertex_pairs(self, edges: 'np.ndarray') -> 'np.ndarray'
     returns the vertex pairs for a given set of edges
 edges_to_vertices(self, edges: 'np.ndarray') -> 'np.ndarray'
@@ -3456,7 +3456,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000014670696E80>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000002A67F60FC40>, '...
 ```
 
 ## `cgmath.constraints`

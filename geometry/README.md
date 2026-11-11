@@ -374,8 +374,8 @@ Two independent things.
   hard, a border edge too; a pair that is no edge of the mesh is a
   RuntimeError at the same read. Face edits keep the hard edges that are
   still edges (`delete_faces`, `from_faces`, `from_vertices`, `merge`,
-  `triangulate`, `detach_faces`); `subdivide`, `quadrangulate`, `union` and
-  `difference` drop them.
+  `triangulate`, `detach_faces`, `union`, `difference`); `subdivide` and
+  `quadrangulate` drop them.
 
   `get_face_vertex_normals()` gives the normal of every face corner in all
   three, `(indices.size, 3)`, and is what `get_tangent_space()` and the
