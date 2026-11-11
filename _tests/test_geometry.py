@@ -1345,6 +1345,81 @@ class TestMesh(unittest.TestCase):
         self.assertTrue(np.array_equal(mesh.get_face_normals(), kept))
         self.assertFalse(np.allclose(mesh.get_face_normals(force=True), kept))
 
+    def test_vertex_normals_newell_weight(self):
+        """area weighting is Maya's: a face counts by its Newell vector, the area of its outline seen along its normal, not by get_face_areas()"""
+        # 2 x 2 quads, none of them flat
+        x      = np.array([0.0, 1.0, 2.5])
+        z      = np.array([0.0, 1.0, 3.0])
+        points = np.array([[x[i], 0.3 * x[i] * z[k] + 0.2 * x[i] ** 2, z[k]] for k in range(3) for i in range(3)])
+        points[8, 1] += 4.0  # a corner lifted: the last quad is bent most
+        cells   = [(i, k) for k in range(2) for i in range(2)]
+        indices = np.array([[k * 3 + i, k * 3 + i + 3, k * 3 + i + 4, k * 3 + i + 1] for i, k in cells], dtype=np.int32).ravel()
+        counts  = np.full(4, 4, dtype=np.int32)
+        mesh    = MeshData(points=points, indices=indices, counts=counts)
+
+        # the rule by hand: each corner's share is its face's Newell vector
+        # times the corner's angle
+        shares = np.zeros((16, 3))
+        newell = np.zeros((4, 3))
+        for face in range(4):
+            p = points[indices[face * 4 : face * 4 + 4]]
+            q = np.roll(p, -1, axis=0)
+            newell[face] = [
+                np.sum((p[:, 1] - q[:, 1]) * (p[:, 2] + q[:, 2])),
+                np.sum((p[:, 2] - q[:, 2]) * (p[:, 0] + q[:, 0])),
+                np.sum((p[:, 0] - q[:, 0]) * (p[:, 1] + q[:, 1])),
+            ]
+            for corner in range(4):
+                a     = p[(corner + 1) % 4] - p[corner]
+                b     = p[corner - 1] - p[corner]
+                angle = np.arccos(a @ b / np.linalg.norm(a) / np.linalg.norm(b))
+                shares[face * 4 + corner] = newell[face] * angle
+
+        def summed(slots):
+            total = np.zeros((slots.max() + 1, 3))
+            np.add.at(total, slots, shares)
+            return total / np.linalg.norm(total, axis=1, keepdims=True)
+
+        expected = summed(indices)
+        self.assertGreater(expected[:, 1].min(), 0.3)  # the faces look up
+        got = mesh.get_vertex_normals()
+        self.assertTrue(np.allclose(got, expected, rtol=0, atol=1e-12))
+
+        # a bent quad's surface is larger than its outline's area, so normals
+        # weighted by get_face_areas() are other normals
+        outline = 0.5 * np.linalg.norm(newell, axis=1)
+        surface = mesh.get_face_areas()
+        self.assertTrue(np.all(surface > outline + 1e-3))
+        by_surface = mesh.get_vertex_normals(_areas=surface)
+        self.assertGreater(np.abs(by_surface - got).max(), 1e-3)
+        self.assertTrue(np.allclose(mesh.get_vertex_normals(_areas=outline), got, rtol=0, atol=1e-12))
+
+        # shading normals follow the rule: all soft, one a vertex
+        mesh.set_normals()
+        self.assertIsNone(mesh.normal_indices)
+        self.assertTrue(np.allclose(mesh.normals, expected, rtol=0, atol=1e-12))
+
+        # split along z = 1: the middle vertex holds two normals, each the
+        # sum of the two faces on its side
+        e2v    = np.sort(np.asarray(mesh.e2v), axis=1)
+        crease = np.array([e for e, (a, b) in enumerate(e2v) if (a, b) in ((3, 4), (4, 5))], dtype=np.int32)
+        self.assertEqual(crease.size, 2)
+        mesh.set_normals(hard_edges=crease)
+        slots  = np.asarray(mesh.normal_indices)
+        middle = slots[indices == 4].reshape(2, 2)  # faces 0, 1 then faces 2, 3
+        self.assertEqual(middle[0, 0], middle[0, 1])
+        self.assertEqual(middle[1, 0], middle[1, 1])
+        self.assertNotEqual(middle[0, 0], middle[1, 0])
+        self.assertTrue(np.allclose(mesh.normals, summed(slots), rtol=0, atol=1e-12))
+
+        # and so does recompute_normals, on moved points
+        mesh.points = points * [1.0, 2.0, 1.0]
+        mesh.recompute_normals()
+        moved = MeshData(points=points * [1.0, 2.0, 1.0], indices=indices, counts=counts)
+        moved.set_normals(hard_edges=crease)
+        self.assertTrue(np.array_equal(mesh.normals, moved.normals))
+        self.assertFalse(np.allclose(mesh.normals, summed(slots), rtol=0, atol=1e-3))
+
     def test_edge_lengths(self):
         """Test get_edge_lengths method"""
         mesh = self.plane.copy()

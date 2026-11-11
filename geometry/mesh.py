@@ -246,11 +246,19 @@ def _newell_normals(
     normals[:, 2] = np.bincount(face_ids, weights=dx * sy, minlength=n_faces)
 
     if normalize:
-        magnitudes                                         = np.sqrt(np.einsum("ij,ij->i", normals, normals))
-        magnitudes[magnitudes < np.finfo(np.float64).tiny] = 1.0
-        normals /= magnitudes[:, None]
+        normals = _unit_newell(normals)
 
     return normals
+
+
+def _unit_newell(vectors: np.ndarray) -> np.ndarray:
+    """
+    Newell vectors at unit length: the face normals. A face with no area
+    keeps its zero vector.
+    """
+    magnitudes                                         = np.sqrt(np.einsum("ij,ij->i", vectors, vectors))
+    magnitudes[magnitudes < np.finfo(np.float64).tiny] = 1.0
+    return vectors / magnitudes[:, None]
 
 
 def _simple_loops(loop) -> list:
@@ -1745,39 +1753,69 @@ class MeshData(ShapeData):
         """Computes vertex normals from face normals, on triangles, quads and
         n-gons alike.
 
+        With both weights on (the default) this is the normal Maya derives
+        for a vertex with no hard edge around it: the sum, over the corners
+        that meet at the vertex, of the face's Newell vector times the
+        corner's angle, at unit length. A face's Newell vector is its normal,
+        as long as twice the area of the face's outline seen along that
+        normal.
+
+        That area is not ``get_face_areas()``'s. On a flat face the two
+        agree; on a bent quad ``get_face_areas()`` measures the surface (2x2
+        Gauss), which is larger, and a normal weighted by it is not Maya's.
+
         For reference, how maya calculates vertex normals:
         https://www.autodesk.com/support/technical/article/caas/sfdcarticles/sfdcarticles/How-Maya-computes-face-normals.html
 
-        Maya's default behavior is: angle_weighted = True, area_weighted = True
-
-        The face normals and corner angles it reads are kept until ``points``
-        is assigned (``mesh.points = moved``). A write inside the array
-        (``mesh.points[:, 1] += 5``) is not seen: pass ``force=True`` after
-        one.
+        The corner angles it reads, and with ``area_weighted=False`` the face
+        normals, are kept until ``points`` is assigned (``mesh.points =
+        moved``). A write inside the array (``mesh.points[:, 1] += 5``) is
+        not seen: pass ``force=True`` after one.
 
         Args:
             angle_weighted: If True, multiply vertex-face angles to each face-vertex normal.
-            area_weighted: If True, multiply face area to each face-vertex normal.
+            area_weighted: If True, each face counts by the length of its
+                Newell vector: twice the area of its outline seen along its
+                normal.
             force: If True, force recomputes all necessary data.
 
         Returns:
             The vertex normal array.
         """
-        # copy face normals into face-vertex normals
-        face_normals = self.get_face_normals(force=force)
-        vert_normals = np.repeat(face_normals, self.counts, axis=0)
+        return self.sum_vertex_normals(
+            self._get_weighted_corner_normals(angle_weighted, area_weighted, force, _areas)
+        )
 
-        # apply face area weighting
-        if area_weighted:
-            areas = self.get_face_areas() if _areas is None else _areas
-            areas = np.repeat(areas, self.counts, axis=0)
-            vert_normals *= areas[:, None]
+    def _get_weighted_corner_normals(
+        self,
+        angle_weighted: bool,
+        area_weighted:  bool,
+        force:          bool              = False,
+        _areas:         np.ndarray | None = None,
+    ) -> np.ndarray:
+        """
+        each corner's share of a derived normal, one row a corner of
+        ``indices``: its face's normal, weighted. With ``area_weighted`` it
+        is the face's Newell vector, the face normal as long as twice the
+        area of the face's outline seen along it (Maya's weight), or with
+        ``_areas`` the unit face normal times the caller's weight for the
+        face. With ``angle_weighted`` it is multiplied by the corner's angle.
+        Keeps the unit face normals when none is kept, or on ``force``.
+        """
+        if area_weighted and _areas is None:
+            vectors = _newell_normals(self.points, self.indices, self.counts, normalize=False)
+            if self._face_normals is None or force:
+                self._face_normals = _unit_newell(vectors)
+            corner_normals = np.repeat(vectors, self.counts, axis=0)
+        else:
+            corner_normals = np.repeat(self.get_face_normals(force=force), self.counts, axis=0)
+            if area_weighted:
+                corner_normals *= np.repeat(_areas, self.counts, axis=0)[:, None]
 
-        # apply vertex angle weighting
         if angle_weighted:
-            vert_normals *= self.get_face_vertex_angles(force=force)[:, None]
+            corner_normals *= self.get_face_vertex_angles(force=force)[:, None]
 
-        return self.sum_vertex_normals(vert_normals)
+        return corner_normals
 
     def sum_vertex_normals(self, face_vertex_normals: np.ndarray) -> np.ndarray:
         """Given a face-vertex normal array, sums the normals at of each unique
@@ -1817,7 +1855,10 @@ class MeshData(ShapeData):
                 all edges are smooth.
             hard_edges: Explicit edge indices to treat as hard.
             angle_weighted: Weight by face-vertex corner angle (Maya default).
-            area_weighted: Weight by face area (Maya default).
+            area_weighted: Weight each face by the length of its Newell
+                vector, as ``get_vertex_normals()`` does (Maya default).
+                With both weights on, the normals are the ones Maya derives
+                for the same hard edges.
         """
         if hard_edges is None and hard_edge_angle is not None:
             hard_edges = _detect_hard_edges(self, hard_edge_angle)
@@ -5682,16 +5723,12 @@ def _detect_hard_edges(mesh, angle_deg):
 def _compute_shading_normals(
     mesh, normal_indices, num_normals, angle_weighted, area_weighted
 ):
-    """Accumulate face normals into face-varying normal slots."""
-    face_normals = mesh.get_face_normals(force=True)
-    fv_normals   = np.repeat(face_normals, mesh.counts, axis=0)
-
-    if area_weighted:
-        areas = mesh.get_face_areas()
-        fv_normals *= np.repeat(areas, mesh.counts)[:, None]
-
-    if angle_weighted:
-        fv_normals *= mesh.get_face_vertex_angles(force=True)[:, None]
+    """
+    Accumulate face normals into face-varying normal slots, weighted as
+    ``get_vertex_normals()`` weighs them: with both weights on, Maya's
+    normal for each slot.
+    """
+    fv_normals = mesh._get_weighted_corner_normals(angle_weighted, area_weighted, force=True)
 
     summed = np.zeros((num_normals, 3))
     np.add.at(summed, normal_indices, fv_normals)
