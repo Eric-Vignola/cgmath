@@ -400,7 +400,7 @@ Geometric normals are computed from `points` on demand. There is no
 `get_normals()`.
 
 ```python
-N = cube.get_vertex_normals()  # (V, 3), angle- and area-weighted
+N = cube.get_vertex_normals()  # (V, 3), Maya's rule: Newell vector x corner angle
 F = cube.get_face_normals()    # (F, 3)
 print(N.shape, F.shape, np.round(F[0], 6))
 ```

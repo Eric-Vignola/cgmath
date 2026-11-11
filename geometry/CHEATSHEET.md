@@ -789,9 +789,17 @@ The face normals and corner angles are kept once worked out, and dropped
 when `points` is assigned (`mesh.points = moved`). A write inside the array
 (`mesh.points[:, 1] += 5`) is not seen: pass `force=True` after one.
 
+A vertex normal is Maya's: each face around the vertex gives its Newell
+vector (its normal, as long as twice the area of the face's outline seen
+along it) times the angle of its corner there, and the sum is made unit.
+On flat faces that area is `get_face_areas()`'s; on a bent quad the outline
+is smaller than the surface, so the weight is not `get_face_areas()`'s.
+`set_normals` and `recompute_normals` use the same rule inside each group
+of faces the hard edges leave.
+
 ```python
 print(cube.get_face_normals().shape)        # (F, 3)
-print(cube.get_vertex_normals().shape)      # (V, 3), Maya weighting
+print(cube.get_vertex_normals().shape)      # (V, 3), Maya's rule
 print(cube.get_vertex_normals(angle_weighted=False, area_weighted=False)[0])
 print(cube.get_edge_normals().shape)        # (E, 3)
 print(cube.get_edge_lengths().shape)        # (E,)

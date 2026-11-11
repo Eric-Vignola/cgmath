@@ -346,8 +346,10 @@ handed to each side.
 Two independent things.
 
 - `get_face_normals()` / `get_vertex_normals()` / `get_edge_normals()` are
-  **geometric** — derived from `points` on demand, Maya's angle- and
-  area-weighted vertex normals by default. There is no `get_normals()`.
+  **geometric** — derived from `points` on demand. A vertex normal is
+  Maya's by default: each face's Newell vector (its normal, as long as
+  twice the area of its outline) times its corner's angle, summed and made
+  unit. There is no `get_normals()`.
   The face normals and corner angles are kept once worked out and dropped
   when `points` is assigned; after a write inside the array
   (`mesh.points[:, 1] += 5`) pass `force=True`.
