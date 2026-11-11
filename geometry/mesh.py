@@ -447,6 +447,21 @@ class MeshData(ShapeData):
         "_bvh_bilinear", "_bvh_bezier",
     )
 
+    def __setattr__(self, name: str, value) -> None:
+        """
+        A write of ``points`` drops the face normals and the corner angles
+        worked out of the points before it, so ``get_face_normals()``,
+        ``get_face_vertex_angles()`` and ``get_vertex_normals()`` answer for
+        the new ones. A write inside the array (``mesh.points[:, 1] += 5``)
+        is not seen: pass those ``force=True`` after one.
+        """
+        super().__setattr__(name, value)
+        if name == "points":
+            if self._face_normals is not None:
+                self._face_normals = None
+            if self._face_vertex_angles is not None:
+                self._face_vertex_angles = None
+
     def _compute_edges(self):
         # compute e2v and e2f
         self._ue2v, self._ue2f = compute_e2v_e2f(self.indices, self.counts)
@@ -1629,6 +1644,10 @@ class MeshData(ShapeData):
         Uses vectorized Newell's method, which works uniformly for
         triangles, quads, and n-gons.
 
+        Kept until ``points`` is assigned (``mesh.points = moved``). A write
+        inside the array (``mesh.points[:, 1] += 5``) is not seen: pass
+        ``force=True`` after one.
+
         Args:
             force: If True, force recomputes the normals.
         """
@@ -1642,6 +1661,10 @@ class MeshData(ShapeData):
         to its previous and next corner, on triangles, quads and n-gons alike.
         On an n-gon with holes (``hole_faces``) the outer loop and each hole
         loop wrap on themselves: a square hole's corners are 90 degrees.
+
+        Kept until ``points`` is assigned (``mesh.points = moved``). A write
+        inside the array (``mesh.points[:, 1] += 5``) is not seen: pass
+        ``force=True`` after one.
 
         Args:
             force: If True, force recomputes the face vertex angles.
@@ -1726,6 +1749,11 @@ class MeshData(ShapeData):
         https://www.autodesk.com/support/technical/article/caas/sfdcarticles/sfdcarticles/How-Maya-computes-face-normals.html
 
         Maya's default behavior is: angle_weighted = True, area_weighted = True
+
+        The face normals and corner angles it reads are kept until ``points``
+        is assigned (``mesh.points = moved``). A write inside the array
+        (``mesh.points[:, 1] += 5``) is not seen: pass ``force=True`` after
+        one.
 
         Args:
             angle_weighted: If True, multiply vertex-face angles to each face-vertex normal.
