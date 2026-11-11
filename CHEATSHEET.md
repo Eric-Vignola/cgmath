@@ -322,6 +322,16 @@ hard.set_normals(hard_edge_angle=30.0)
 print(hard.normals.shape, hard.normal_indices is not None)
 ```
 
+A mesh need not store them: with `normals` None it shades by the derived
+ones (inside the groups `normal_indices` names, when it holds any), and
+`get_face_vertex_normals()` gives the normal of every face corner, stored
+or derived. `load_fbx` stores normals only where a file's are not the ones
+Maya derives from the points.
+
+```python
+print(cube.normals, cube.get_face_vertex_normals().shape)  # None (24, 3)
+```
+
 ---
 
 ## 9. Edit a mesh, keep its UVs in step
@@ -795,9 +805,10 @@ cube.save_obj(os.path.join(tmp, "cube.obj"))
 print(MeshData.load_obj(os.path.join(tmp, "cube.obj")).point_count)
 ```
 
-`MeshData.save_obj` writes the normals a mesh has, which Maya's OBJ import
-reads; `cgmath.render.Scene.load_obj` reads every mesh of a file, with its
-UV sets, into a scene.
+`MeshData.save_obj` writes the normals a mesh stores, or the ones derived
+inside its `normal_indices` groups when it stores none, which Maya's OBJ
+import reads; `cgmath.render.Scene.load_obj` reads every mesh of a file,
+with its UV sets, into a scene.
 
 Full surface: [`formats/CHEATSHEET.md`](formats/CHEATSHEET.md).
 

@@ -647,6 +647,25 @@ print(some.hierarchy.name, some.meshes.name, some.uvs.name, some.materials, some
 print(load_fbx(DEMO_FBX, meshes=False).meshes, load_fbx(DEMO_FBX, textures=False).materials[0].texture)   # None None
 ```
 
+A mesh stores the least normals that shade it as its file does. Where the
+file's normals are the ones Maya derives from the points (within 1e-5 a
+component) the mesh stores none, `normal_indices` holding the groups its
+hard edges leave (None when every edge is soft); any other normals are
+stored as read, each face corner naming its own.
+`get_face_vertex_normals()` gives the normal of every face corner either
+way:
+
+```python
+flat = quad.copy()
+flat.set_normals()  # the derived normals, stored
+tilt         = quad.copy()
+tilt.normals = np.tile([0.0, 0.6, 0.8], (4, 1))  # authored: not what the points give
+for mesh in (flat, tilt):
+    save_fbx(os.path.join(WORK, "normals.fbx"), hierarchy=rig, meshes=mesh)
+    back = load_fbx(os.path.join(WORK, "normals.fbx")).meshes[0]
+    print(back.normals is None, back.get_face_vertex_normals()[0])  # True [0. 0. 1.], then False [0.  0.6 0.8]
+```
+
 A take is a `ClipData` over the nodes; a file holding takes comes back
 with `hierarchy` None and the nodes in `clip` (`takes=False` reads the
 nodes at their own values instead, the take left unread):
@@ -884,6 +903,7 @@ Scene.load_fbx("hero.fbx")  # -> every field, ready to render
 | `FbxExporter.save` / `.add_scene` do not exist | `.export(path)` / `.add_skeleton(component)` |
 | `load_fbx` gives `hierarchy` None | the file holds takes: the nodes are in `clip`, every take's; `takes=False` gives the nodes |
 | A material's `texture` is None | read with `textures=False`, the file not found, or no PIL: `texture_file` still names it |
+| A loaded mesh's `normals` is None | the file's were the ones Maya derives from the points, so none is stored: `mesh.get_face_vertex_normals()` gives them, `normal_indices` the groups its hard edges leave |
 | A shape's `parent_uuid` / `mesh_uuid` matches nothing | it came from another load: each read mints its own uuids |
 | `set_binary` on a `GLTF2()` with no blob | `TypeError` — `binary_blob()` is `None`; load a real file first |
 | `GlbData.mesh_list` is `None` | `trimesh` is not installed |

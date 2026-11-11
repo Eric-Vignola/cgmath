@@ -359,6 +359,23 @@ Two independent things.
   `hard_edges` they become face-varying. `recompute_normals()` refreshes the
   vectors after a deformation while keeping the splits. Topology edits clear
   both. Both families take triangles, quads and n-gons.
+- A mesh need not store them. What it holds says how it shades:
+
+  | `normals` | `normal_indices` | Shades by |
+  |---|---|---|
+  | None | None | the derived normals, every edge soft |
+  | None | a group a face corner | the derived normals inside each group: the corners around a vertex that no hard edge parts |
+  | stored | None (one a vertex), or the row each face corner reads | the stored ones (authored; locked, in Maya) |
+
+  `get_face_vertex_normals()` gives the normal of every face corner in all
+  three, `(indices.size, 3)`, and is what `get_tangent_space()` and the
+  writers read: `save_obj`, `save_fbx` and `to_prim` write the derived
+  normals of a mesh holding groups, and none for one holding neither field.
+  The derived normals follow the points, so nothing goes stale;
+  `recompute_normals()` is for stored ones and raises without them.
+  `load_fbx` stores the least of the three that shades a mesh as its file
+  does: a mesh off Maya's FBX export stores its normals only where Maya
+  held locked ones on it.
 - `colors` / `color_indices` are RGBA vertex colours in 0..1: one a vertex
   (`color_indices` None) or the ones `color_indices` name a face corner each.
   The operations that keep face corners keep them (`delete_faces`,
@@ -570,7 +587,8 @@ name="body")` and a misspelt one raises `TypeError` naming the ones it takes.
 Every fbx route reads through `cgmath.formats.load_fbx`, in Maya's Y-up and
 cm: a mesh goes by its own name or its node's (Maya's FBXExport leaves every
 FbxMesh unnamed), a skin by its mesh's, and each shape names its node or its
-mesh by uuid. A
+mesh by uuid; a mesh stores no normal its points already give ("Geometric
+normals vs shading normals"). A
 format the class has no route for, an unknown extension too, raises
 `ValueError` naming the routes it has. `Data.load` and `DataList.load` read
 cgmath's own files only, which name their class: an asset raises, naming the
@@ -583,7 +601,7 @@ pkl keep everything.
 | `mesh.save_obj(path, data)` | writes that same list shape |
 | `MeshList.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | every mesh, a `MeshList` |
 | `MeshData.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | one `MeshData` |
-| `MeshData.save("x.obj")` / `save_obj` | the points, the faces and the normals (`vn`) the mesh has; not its matrix, holes or UVs |
+| `MeshData.save("x.obj")` / `save_obj` | the points, the faces and the normals (`vn`) the mesh stores, or derives inside its `normal_indices` groups; not its matrix, holes or UVs |
 | `UVList.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | one mesh's UV channels |
 | `UVData.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | one `UVData`; no obj writer (its points are 2D) |
 | `skin_weights.load` / `load_fbx` / `load_glb`, `SkinList.load_*` | a `SkinList`, each skin naming its mesh by uuid (an fbx's named as its deformer is, a glb's after its primitive) |

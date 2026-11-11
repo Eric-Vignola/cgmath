@@ -561,9 +561,10 @@ Three required fields describe any polygon soup:
 | `counts` | `(F,)` | vertices per face — mixed tri/quad/n-gon is fine |
 
 Optional fields: `name`, `uuid` / `parent_uuid` (the node the mesh sits
-under), `normals` / `normal_indices` (shading normals), `colors` /
-`color_indices` (RGBA vertex colours), and `hole_faces` / `hole_counts` /
-`hole_indices` (n-gon hole bookkeeping).
+under), `normals` / `normal_indices` (shading normals, when the mesh stores
+any: see "Normals and areas"), `colors` / `color_indices` (RGBA vertex
+colours), and `hole_faces` / `hole_counts` / `hole_indices` (n-gon hole
+bookkeeping).
 
 ```python
 quad = MeshData(
@@ -829,6 +830,34 @@ mesh = cube.copy()
 mesh.set_normals()
 mesh.delete_faces([0])
 print(mesh.normals, mesh.normal_indices)           # None, None
+```
+
+A mesh need not store its normals. With `normals` None it shades by the
+derived ones: every edge soft when `normal_indices` is None too, otherwise
+inside the groups `normal_indices` names, a number a face corner, the
+corners around a vertex that no hard edge parts (what
+`split_at_hard_edges` returns). `get_face_vertex_normals()` gives the normal
+of every face corner, stored or derived; `get_tangent_space()` and the
+writers read through it (`save_obj`, `save_fbx` and `to_prim` write the
+derived normals of a mesh holding groups, none for one holding neither
+field). `recompute_normals()` is for stored normals and raises without
+them. `load_fbx` gives meshes in the least of these forms that shades as
+the file does.
+
+```python
+mesh = cube.copy()
+print(mesh.normals, mesh.normal_indices)  # None None: every edge soft
+corners = mesh.get_face_vertex_normals()  # (24, 3), a normal a face corner
+print(np.allclose(corners, mesh.get_vertex_normals()[mesh.indices]))  # True
+
+mesh.points = mesh.points * [1.0, 3.0, 1.0]  # nothing stored, nothing stale
+print(np.allclose(corners, mesh.get_face_vertex_normals()))  # False
+
+mesh.normal_indices, groups = gu.split_at_hard_edges(
+    mesh.indices, mesh.counts, mesh.e2v, mesh.e2f, np.arange(mesh.e2v.shape[0]))
+print(mesh.normals, groups)  # None 24: every edge hard, still none stored
+flat = np.repeat(mesh.get_face_normals(), mesh.counts, axis=0)
+print(np.allclose(mesh.get_face_vertex_normals(), flat))  # True: a corner shades as its face
 ```
 
 Face areas.
@@ -1383,8 +1412,11 @@ UVList.load_glb("hero.glb", name="body")    # one mesh's UV channels
 
 The FBX routes are slices of one read, `cgmath.formats.load_fbx`: every
 mesh in Maya's Y-up and cm, the file's unit converted, its points as the
-file holds them on its node, its normals as the file holds them, one a
-face corner, its UV sets and skin naming it by uuid. A mesh's
+file holds them on its node, the least normals that shade it as the file
+does (none where the file's are the ones Maya derives from the points,
+`normal_indices` then holding the groups its hard edges leave; the file's
+own, one a face corner, where they are authored), its UV sets and skin
+naming it by uuid. A mesh's
 `parent_uuid` names its node in the hierarchy that read gives (two loads
 of one file mint their own uuids); under that node's world matrix,
 `points @ W[:3, :3] + W[3, :3]` is where Maya's import puts the mesh, and

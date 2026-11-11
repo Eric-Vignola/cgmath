@@ -328,6 +328,10 @@ hard, n_hard = gu.split_at_hard_edges(
 print(n_soft, n_hard)   # 8 24 — one slot per vertex vs one per face-corner
 ```
 
+A mesh can hold those slots with no normal stored
+(`mesh.normal_indices = hard`): `MeshData.get_face_vertex_normals()` then
+derives a normal a slot from the points.
+
 `build_uv_to_normal_map` aligns a UV stream to a normal-slot stream,
 first occurrence wins; unreferenced UV verts get `0`.
 
@@ -578,8 +582,8 @@ float64.
 ```python
 bound = cube.points * 0.9 + 0.05
 cells, uvw = gu.assign_cells(bound, lattice, max_hops=4)
-print(cells[0], np.round(uvw[0], 3))   # [0 0 0] [0.1 0.1 0.1]
-print(cells.dtype, uvw.dtype)          # int32 float64
+print(cells[0], np.round(uvw[0], 3))  # [0 0 0] [0.1 0.1 0.1]
+print(cells.dtype, uvw.dtype)         # int32 float64
 ```
 
 `bernstein_basis_1d` is the raw polynomial basis; `bernstein_eval` is the
