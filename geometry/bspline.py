@@ -3,7 +3,7 @@ from typing import Optional
 
 import numpy as np
 import scipy.integrate as si
-from cgmath.data import Array, Data, ImmutableArray as numpy_array
+from cgmath.data import Array, Data, DataList, ImmutableArray as numpy_array
 from cgmath.geometry.utils import compute_basis, ordered_closest_params
 from cgmath.hierarchy import ShapeData
 from cgmath.geometry.utils._numba._bspline import (
@@ -1910,6 +1910,10 @@ class NurbsCurveData(ShapeData):
             params    = params,
             basis     = basis,
         )
+
+
+class NurbsCurveList(DataList[NurbsCurveData]):
+    """A list of :class:`NurbsCurveData`, as a file holds its curves."""
 
 
 # ------------------------------- Knots and fit ------------------------------- #

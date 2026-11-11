@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
-from cgmath.data import Array, Data
+from cgmath.data import Array, Data, DataList
 from cgmath.geometry.bspline import CurveSampleData, _knot_vector
 from cgmath.geometry.utils import compute_basis
 from cgmath.hierarchy import ShapeData
@@ -2951,6 +2951,10 @@ class NurbsSurfaceData(ShapeData):
             return float(np.sum(weights * norms) * du * dv / 9.0)
 
         return float(np.sum(norms) * du * dv)
+
+
+class NurbsSurfaceList(DataList[NurbsSurfaceData]):
+    """A list of :class:`NurbsSurfaceData`, as a file holds its surfaces."""
 
 
 def _direction_knots(knots, kv, count, degree, periodic, label):
