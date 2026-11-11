@@ -365,6 +365,15 @@ class MeshData(ShapeData):
     ``TransformData`` it sits under, which places it (:class:`ShapeData`);
     the points are in that transform's space, or the world's with none.
 
+    ``normals`` are the shading normals the mesh stores: one a vertex, or
+    the ones ``normal_indices`` name a corner each. A mesh that stores none
+    (``normals`` None) is shaded by the normals Maya derives from its points:
+    with ``normal_indices`` None every edge is soft, a normal a vertex; with
+    ``normal_indices`` set they name the group each corner shades with, the
+    corners around a vertex that no hard edge parts, a normal a group.
+    ``get_face_vertex_normals()`` gives the normal of every corner, stored or
+    derived.
+
     ``colors`` are RGBA in 0..1, one a vertex, or the ones ``color_indices``
     name a corner each (a colour a corner: ``color_indices = arange``), as
     ``normals`` and ``normal_indices`` work. An operation that keeps face
@@ -1912,14 +1921,49 @@ class MeshData(ShapeData):
                 area_weighted  = area_weighted,
             )
 
+    def get_face_vertex_normals(self, force: bool = False) -> np.ndarray:
+        """The shading normal of every face corner, one row a corner of
+        ``indices``, whatever the mesh stores.
+
+        Stored ``normals`` are returned as held: the one each corner names
+        through ``normal_indices``, else its vertex's (one normal a vertex)
+        or its own (one a corner).
+
+        A mesh that stores none gets the normals Maya derives from its
+        points: the sum, over the corners of a group, of the face's Newell
+        vector times the corner's angle, at unit length (see
+        :meth:`get_vertex_normals`). With ``normal_indices`` the groups are
+        the ones they name, the corners around a vertex that no hard edge
+        parts; without, every edge is soft and a group is a vertex's
+        corners. A group whose faces have no area gets +Y.
+
+        The corner angles the derived normals read are kept until ``points``
+        is assigned (``mesh.points = moved``). A write inside the array
+        (``mesh.points[:, 1] += 5``) is not seen: pass ``force=True`` after
+        one.
+
+        Args:
+            force: If True, force recomputes all necessary data.
+
+        Returns:
+            The ``(indices.size, 3)`` normals, an array of its own.
+
+        Raises:
+            ValueError: The stored normals fit neither the vertices nor the
+                face corners, or ``normal_indices`` does not fit the corners.
+        """
+        normals, ids = _corner_normals(self, always=True, force=force)
+        return normals[ids]
+
     def get_tangent_space(
         self,
         uvdata: "UVData",
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Compute MikkTSpace tangent vectors.
 
-        Uses stored ``self.normals`` if available, otherwise falls back
-        to smooth ``get_vertex_normals()``.
+        Uses the normals ``get_face_vertex_normals()`` gives: the stored
+        ``self.normals``, otherwise the ones derived from the points, inside
+        the groups ``normal_indices`` names when it holds them.
 
         The output is indexed by ``uvdata.indices`` (face-varying,
         matching UV topology).
@@ -1937,15 +1981,8 @@ class MeshData(ShapeData):
 
         _require_no_ngons("get_tangent_space", self.counts)
 
-        # resolve normals
-        if self.normals is not None:
-            shading_normals = np.asarray(self.normals)
-            nrm_indices = (
-                self.normal_indices if self.normal_indices is not None else self.indices
-            )
-        else:
-            shading_normals = self.get_vertex_normals()
-            nrm_indices     = self.indices
+        # resolve normals: stored, or derived from the points
+        shading_normals, nrm_indices = _corner_normals(self, always=True)
 
         # triangulate if needed
         tri_mesh        = self
@@ -2982,7 +3019,10 @@ class MeshData(ShapeData):
         Writes the mesh as an obj file: its points, its faces and, when it
         has them, its normals as ``vn`` lines, each face corner naming its
         own, through ``normal_indices`` or, without them, its vertex's (one
-        normal a vertex) or its own (one a corner). The group is the mesh's
+        normal a vertex) or its own (one a corner). A mesh that stores no
+        normals and holds groups of corners in ``normal_indices`` writes the
+        normals derived inside them (:meth:`get_face_vertex_normals`); one
+        that holds neither writes none. The group is the mesh's
         name without its ``Shape`` suffix, which :meth:`load_obj` puts back.
 
         An obj keeps only that: the matrix, the holes and a UV set (a
@@ -3118,8 +3158,13 @@ class MeshData(ShapeData):
         mesh_api.CreatePointsAttr().Set(self.points)
         mesh_api.CreateExtentAttr().Set((min_bbx.tolist(), max_bbx.tolist()))
 
-        # write shading normals
-        if self.normals is not None:
+        # write shading normals: the stored ones as held, or with none
+        # stored and groups of corners in normal_indices, the derived ones
+        normals        = self.normals
+        normal_indices = self.normal_indices
+        if normals is None and normal_indices is not None:
+            normals, normal_indices = _corner_normals(self)
+        if normals is not None:
             Sdf = pxr().Sdf
             attr = prim.CreateAttribute(
                 "primvars:normals",
@@ -3127,17 +3172,17 @@ class MeshData(ShapeData):
                 False,
                 Sdf.VariabilityVarying,
             )
-            attr.Set(self.normals)
+            attr.Set(normals)
             attr.SetMetadata("interpolation", "faceVarying")
 
-            if self.normal_indices is not None:
+            if normal_indices is not None:
                 idx_attr = prim.CreateAttribute(
                     "primvars:normals:indices",
                     Sdf.ValueTypeNames.IntArray,
                     False,
                     Sdf.VariabilityVarying,
                 )
-                idx_attr.Set(self.normal_indices)
+                idx_attr.Set(normal_indices)
 
     # ------------------------------ TRIANGULATION
 
@@ -5352,30 +5397,45 @@ def _obj_group(name: str | None) -> str | None:
     return name
 
 
-def _corner_normals(mesh: "MeshData") -> tuple:
+def _corner_normals(mesh: "MeshData", always: bool = False, force: bool = False) -> tuple:
     """
     ``(normals, ids)``: the mesh's normals and the one each face corner
     names, through ``normal_indices``, else its vertex's (one normal a
-    vertex) or its own (one a corner); ``(None, None)`` without normals.
-    ValueError for normals that fit none of these.
+    vertex) or its own (one a corner). A mesh that stores none and holds
+    groups of corners in ``normal_indices`` gives the normals Maya derives
+    inside them, a normal a group. One that holds neither gives ``(None,
+    None)``, or with ``always`` the derived normals of its vertices, every
+    edge soft. ``force`` recomputes what the derived normals read.
+    ValueError for normals or ``normal_indices`` that fit none of these.
     """
-    if mesh.normals is None:
-        return None, None
-
-    normals = np.asarray(mesh.normals, dtype=np.float64)
     indices = np.asarray(mesh.indices)
     label   = f"mesh {mesh.name!r}" if mesh.name else "the mesh"
+    ids     = None
     if mesh.normal_indices is not None:
         ids = np.asarray(mesh.normal_indices)
         if ids.size != indices.size:
             raise ValueError(
                 f"{label} has {ids.size} normal_indices for its {indices.size} face corners"
             )
-    elif normals.shape[0] == mesh.point_count:
+
+    if mesh.normals is None:
+        if ids is None and not always:
+            return None, None
+        if ids is None:
+            ids   = indices
+            count = mesh.point_count
+        else:
+            if ids.size and ids.min() < 0:
+                raise ValueError(f"{label}'s normal_indices name a group of corners below 0")
+            count = int(ids.max()) + 1 if ids.size else 0
+        return _compute_shading_normals(mesh, ids, count, True, True, force=force), ids
+
+    normals = np.asarray(mesh.normals, dtype=np.float64)
+    if ids is None and normals.shape[0] == mesh.point_count:
         ids = indices
-    elif normals.shape[0] == indices.size:
+    elif ids is None and normals.shape[0] == indices.size:
         ids = np.arange(indices.size)
-    else:
+    elif ids is None:
         raise ValueError(
             f"{label} holds {normals.shape[0]} normals, which fit neither its "
             f"{mesh.point_count} vertices nor its {indices.size} face corners, "
@@ -5721,14 +5781,15 @@ def _detect_hard_edges(mesh, angle_deg):
 
 
 def _compute_shading_normals(
-    mesh, normal_indices, num_normals, angle_weighted, area_weighted
+    mesh, normal_indices, num_normals, angle_weighted, area_weighted, force=True
 ):
     """
     Accumulate face normals into face-varying normal slots, weighted as
     ``get_vertex_normals()`` weighs them: with both weights on, Maya's
-    normal for each slot.
+    normal for each slot. A slot whose faces have no area gets +Y.
+    ``force`` recomputes the face normals and corner angles the mesh keeps.
     """
-    fv_normals = mesh._get_weighted_corner_normals(angle_weighted, area_weighted, force=True)
+    fv_normals = mesh._get_weighted_corner_normals(angle_weighted, area_weighted, force=force)
 
     summed = np.zeros((num_normals, 3))
     np.add.at(summed, normal_indices, fv_normals)

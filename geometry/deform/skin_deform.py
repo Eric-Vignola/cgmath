@@ -622,9 +622,13 @@ class SkinDeformData(Data):
             result.points = self._points.copy()
             # copy() drops the underscore caches (the BVH included) by
             # rebuilding from to_dict(), but `normals` is a real field and
-            # would survive as the bind-pose normals.
+            # would survive as the bind-pose normals. The ids that named them
+            # go with them: left alone they would read as groups of corners.
+            # A mesh that stores no normal keeps its groups, so its hard
+            # edges follow the deformation.
             if getattr(result, "normals", None) is not None:
-                result.normals = None
+                result.normals        = None
+                result.normal_indices = None
             return result
 
         return self._points

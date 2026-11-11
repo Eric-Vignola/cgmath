@@ -897,7 +897,9 @@ class FbxExporter:
         ``normal_indices``, indexed, one a face corner (``eByPolygonVertex``,
         ``eIndexToDirect``); else one a vertex (``eByControlPoint``, as
         Maya's exporter writes smooth normals) or one a corner; none when it
-        has none. ``node`` is the ``FbxNode`` that takes the mesh, a group the
+        has none, unless ``normal_indices`` holds groups of corners, which
+        write the normals derived inside them. ``node`` is the ``FbxNode``
+        that takes the mesh, a group the
         skeleton wrote, whose own transform it keeps; None makes one at the
         scene root, named after the mesh, at identity: a mesh holds no
         transform of its own. Raises ValueError for normals that fit neither
