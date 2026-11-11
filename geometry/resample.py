@@ -189,20 +189,21 @@ class MeshDataResampler:
         """Returns one unit direction per destination vertex.
 
         Reads the stored dst_mesh.normals when asked to and they exist; with
-        none stored and groups of corners in dst_mesh.normal_indices, the
-        normals derived inside them (get_face_vertex_normals()), summed per
-        vertex; else computes them with get_vertex_normals(). Never writes
-        normals onto the mesh.
+        none stored and dst_mesh.hard_edges held, the normals derived between
+        them (get_face_vertex_normals()), summed per vertex; else computes
+        them with get_vertex_normals(). Never writes normals onto the mesh.
 
         Raises:
             ValueError: The stored normals fit neither the vertex count nor
-                the face-vertex count, and carry no normal_indices.
+                the face-vertex count, and carry no normal_indices; or
+                dst_mesh holds normal_indices and no normals.
         """
         dst     = self.dst_mesh
         normals = dst.normals if use_mesh_normals else None
 
-        if normals is None and use_mesh_normals and dst.normal_indices is not None:
-            # no normal stored, hard edges held as groups of corners
+        if normals is None and use_mesh_normals and (dst.hard_edges is not None or dst.normal_indices is not None):
+            # no normal stored: derived between the hard edges (normal_indices
+            # with no normals are refused there)
             directions = np.zeros((dst.point_count, 3))
             np.add.at(directions, dst.indices, dst.get_face_vertex_normals())
         elif normals is None:
@@ -581,8 +582,8 @@ class MeshDataResampler:
             twosided: Raycast only. If False, back-face hits are rejected.
             use_mesh_normals: Raycast only. If True and dst_mesh stores
                 normals, rays follow them, face-varying normals summed per
-                vertex; so do the normals derived inside the groups of corners
-                its normal_indices name when it stores none. Otherwise normals
+                vertex; so do the normals derived between its hard_edges
+                when it stores none. Otherwise normals
                 come from get_vertex_normals().
             angle_weighted: get_vertex_normals() option, for computed normals.
             area_weighted: get_vertex_normals() option, for computed normals.

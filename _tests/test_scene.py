@@ -487,8 +487,8 @@ class TestMorphTargets(unittest.TestCase):
         self.assertIs(scene.placed_meshes()[0][0], mesh)
 
     def test_moved_points_drop_the_stored_normals_and_their_indices(self):
-        """left behind, the ids of the dropped normals would read as groups
-        of corners"""
+        """left behind, the ids of the dropped normals would name no normal:
+        normal_indices with no normals are refused"""
         mesh, _ = _make_textured_cube()
         mesh.normals        = np.repeat(mesh.get_face_normals(), np.asarray(mesh.counts), axis=0)
         mesh.normal_indices = np.arange(np.asarray(mesh.indices).size)
@@ -498,17 +498,16 @@ class TestMorphTargets(unittest.TestCase):
         self.assertIsNone(placed.normals)
         self.assertIsNone(placed.normal_indices)
 
-    def test_moved_points_keep_groups_of_corners_without_normals(self):
-        """a mesh that stores no normal keeps its groups, so its hard edges
-        follow the moved points"""
+    def test_moved_points_keep_hard_edges_without_normals(self):
+        """a mesh that stores no normal keeps its hard edges, so they follow
+        the moved points"""
         mesh, _ = _make_textured_cube()
-        groups              = np.arange(np.asarray(mesh.indices).size)
-        mesh.normal_indices = groups
-        morph               = MorphData("puff", [[0.0, 0.0, 0.25]] * 4, [4, 5, 6, 7], mesh_uuid=mesh.uuid, weight=1.0)
+        mesh.hard_edges = mesh.e2v
+        morph           = MorphData("puff", [[0.0, 0.0, 0.25]] * 4, [4, 5, 6, 7], mesh_uuid=mesh.uuid, weight=1.0)
         placed, _ = _scene(mesh, morph).placed_meshes()[0]
         self.assertIsNot(placed, mesh)
         self.assertIsNone(placed.normals)
-        np.testing.assert_array_equal(placed.normal_indices, groups)
+        np.testing.assert_array_equal(placed.hard_edges, mesh.hard_edges)
 
     def test_channels_add_and_deformers_apart_are_separate_channels(self):
         mesh, _ = _make_textured_cube()

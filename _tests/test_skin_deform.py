@@ -571,8 +571,8 @@ class TestApply(unittest.TestCase):
         self.assertIsNone(out.normals)
 
     def test_dropped_normals_take_their_indices_with_them(self):
-        """left behind, the ids of the dropped normals would read as groups
-        of corners"""
+        """left behind, the ids of the dropped normals would name no normal:
+        normal_indices with no normals are refused"""
         mesh                = grid_mesh()
         corners             = np.asarray(mesh.indices).size
         mesh.normals        = np.tile([0.0, 1.0, 0.0], (corners, 1))
@@ -583,18 +583,17 @@ class TestApply(unittest.TestCase):
         self.assertIsNone(out.normals)
         self.assertIsNone(out.normal_indices)
 
-    def test_groups_of_corners_without_normals_are_kept(self):
-        """a mesh that stores no normal keeps its groups: the normals
-        derived inside them follow the deformed points"""
-        mesh                = grid_mesh()
-        groups              = np.arange(np.asarray(mesh.indices).size)
-        mesh.normal_indices = groups
-        turn                = rotation([1.0, 0.0, 0.0], 90.0)
+    def test_hard_edges_without_normals_are_kept(self):
+        """a mesh that stores no normal keeps its hard edges: the normals
+        derived between them follow the deformed points"""
+        mesh            = grid_mesh()
+        mesh.hard_edges = mesh.e2v
+        turn            = rotation([1.0, 0.0, 0.0], 90.0)
 
         d   = deformer(mesh, two_joint_skin(len(mesh.points), split=1.0))
         out = d.apply(np.stack([turn, np.eye(4)]), mesh)
         self.assertIsNone(out.normals)
-        np.testing.assert_array_equal(out.normal_indices, groups)
+        np.testing.assert_array_equal(out.hard_edges, mesh.hard_edges)
         np.testing.assert_allclose(out.get_face_vertex_normals(), mesh.get_face_vertex_normals() @ turn[:3, :3], atol=1e-12)
 
     def test_no_target_deforms_the_bind_points(self):

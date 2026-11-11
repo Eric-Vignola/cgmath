@@ -817,7 +817,7 @@ mesh.set_normals(hard_edge_angle=45.0)             # split every 90 deg edge
 print(mesh.normals.shape, mesh.normal_indices.size)
 
 mesh = cube.copy()
-mesh.set_normals(hard_edges=np.array([0, 1, 2]))   # explicit edge ids
+mesh.set_normals(hard_edges=mesh.e2v[:3])  # explicit edges, a pair of vertices each
 mesh.points[:, 1] += 5.0
 mesh.recompute_normals()                           # keeps the split topology
 print(np.allclose(np.linalg.norm(mesh.normals, axis=1), 1.0))
@@ -853,9 +853,8 @@ print(np.allclose(corners, mesh.get_vertex_normals()[mesh.indices]))  # True
 mesh.points = mesh.points * [1.0, 3.0, 1.0]  # nothing stored, nothing stale
 print(np.allclose(corners, mesh.get_face_vertex_normals()))  # False
 
-mesh.normal_indices, groups = gu.split_at_hard_edges(
-    mesh.indices, mesh.counts, mesh.e2v, mesh.e2f, np.arange(mesh.e2v.shape[0]))
-print(mesh.normals, groups)  # None 24: every edge hard, still none stored
+mesh.hard_edges = mesh.e2v
+print(mesh.normals, len(mesh.hard_edges))  # None 12: every edge hard, still none stored
 flat = np.repeat(mesh.get_face_normals(), mesh.counts, axis=0)
 print(np.allclose(mesh.get_face_vertex_normals(), flat))  # True: a corner shades as its face
 ```

@@ -365,12 +365,12 @@ class MeshData(ShapeData):
     ``TransformData`` it sits under, which places it (:class:`ShapeData`);
     the points are in that transform's space, or the world's with none.
 
-    ``normals`` are the shading normals the mesh stores: one a vertex, or
-    the ones ``normal_indices`` name a corner each. A mesh that stores none
-    (``normals`` None) is shaded by the normals Maya derives from its points:
-    with ``normal_indices`` None every edge is soft, a normal a vertex; with
-    ``normal_indices`` set they name the group each corner shades with, the
-    corners around a vertex that no hard edge parts, a normal a group.
+    ``normals`` are the shading normals the mesh stores: one a vertex, one a
+    face corner, or the ones ``normal_indices`` name a corner each. A mesh
+    that stores none (``normals`` None) is shaded by the normals Maya derives
+    from its points, every edge soft unless it holds ``hard_edges``.
+    ``normal_indices`` name stored normals only: held with no ``normals``
+    they are refused, a ValueError, where the normals are read.
     ``get_face_vertex_normals()`` gives the normal of every corner, stored or
     derived.
 
@@ -1731,16 +1731,7 @@ class MeshData(ShapeData):
         RuntimeError for a pair that is no edge of the mesh.
         """
         if self._hard_groups is None:
-            ids, found = _pair_edges(self, self.hard_edges)
-            if not found.all():
-                missing = self.hard_edges[~found]
-                label   = f"mesh {self.name!r}" if self.name else "the mesh"
-                shown   = ", ".join(f"({a}, {b})" for a, b in missing[:5].tolist())
-                more    = ", ..." if len(missing) > 5 else ""
-                raise RuntimeError(
-                    f"{label}'s hard_edges names {len(missing)} vertex pair(s) "
-                    f"that are no edge of it: {shown}{more}"
-                )
+            ids               = _hard_edge_ids(self, self.hard_edges)
             self._hard_groups = split_at_hard_edges(self.indices, self.counts, self.e2v, self.e2f, ids)
         return self._hard_groups
 
@@ -1918,25 +1909,43 @@ class MeshData(ShapeData):
         These are independent from the geometric normals returned by
         ``get_vertex_normals()`` and ``get_face_normals()``.
 
-        When ``normal_indices`` is ``None``, normals use vertex interpolation
-        (indexed by ``self.indices``). When set, normals are face-varying
-        and support hard edges.
+        With no hard edge the normals are stored one a vertex and
+        ``normal_indices`` is ``None``; with some they are stored one a group
+        of corners, ``normal_indices`` naming the one of each corner. The
+        mesh's own ``hard_edges`` field is neither read nor written: stored
+        normals speak ahead of it.
 
         Args:
             hard_edge_angle: Angle threshold in degrees for auto-detecting
                 hard edges.  If ``None`` and *hard_edges* is also ``None``,
                 all edges are smooth.
-            hard_edges: Explicit edge indices to treat as hard.
+            hard_edges: The edges to treat as hard, ``(n, 2)``: a pair of
+                vertices an edge, either vertex first. Read ahead of
+                *hard_edge_angle*. The pairs of edge ids are
+                ``mesh.e2v[ids]``.
             angle_weighted: Weight by face-vertex corner angle (Maya default).
             area_weighted: Weight each face by the length of its Newell
                 vector, as ``get_vertex_normals()`` does (Maya default).
                 With both weights on, the normals are the ones Maya derives
                 for the same hard edges.
-        """
-        if hard_edges is None and hard_edge_angle is not None:
-            hard_edges = _detect_hard_edges(self, hard_edge_angle)
 
-        if hard_edges is None or hard_edges.size == 0:
+        Raises:
+            ValueError: *hard_edges* is not ``(n, 2)``.
+            RuntimeError: A pair of *hard_edges* is no edge of the mesh.
+        """
+        edges = None
+        if hard_edges is not None:
+            pairs = np.asarray(hard_edges)
+            if pairs.size and (pairs.ndim != 2 or pairs.shape[1] != 2):
+                raise ValueError(
+                    f"set_normals: hard_edges is a pair of vertices an edge, (n, 2), not {pairs.shape}; "
+                    "the pairs of edge ids are mesh.e2v[ids]"
+                )
+            edges = _hard_edge_ids(self, pairs.reshape(-1, 2))
+        elif hard_edge_angle is not None:
+            edges = _detect_hard_edges(self, hard_edge_angle)
+
+        if edges is None or edges.size == 0:
             self.normals = self.get_vertex_normals(
                 angle_weighted = angle_weighted,
                 area_weighted  = area_weighted,
@@ -1944,7 +1953,7 @@ class MeshData(ShapeData):
             self.normal_indices = None
         else:
             self.normal_indices, num_normals = split_at_hard_edges(
-                self.indices, self.counts, self.e2v, self.e2f, hard_edges
+                self.indices, self.counts, self.e2v, self.e2f, edges
             )
             self.normals = _compute_shading_normals(
                 self,
@@ -1996,10 +2005,10 @@ class MeshData(ShapeData):
         A mesh that stores none gets the normals Maya derives from its
         points: the sum, over the corners of a group, of the face's Newell
         vector times the corner's angle, at unit length (see
-        :meth:`get_vertex_normals`). With ``normal_indices`` the groups are
-        the ones they name, the corners around a vertex that no hard edge
-        parts; without, the groups are the ones ``hard_edges`` part, and
-        with neither every edge is soft and a group is a vertex's corners.
+        :meth:`get_vertex_normals`). The groups are the ones ``hard_edges``
+        part, the corners around a vertex that no hard edge parts; with
+        ``hard_edges`` None every edge is soft and a group is a vertex's
+        corners.
         A group whose faces have no area gets +Y.
 
         The corner angles the derived normals read are kept until ``points``
@@ -2015,7 +2024,8 @@ class MeshData(ShapeData):
 
         Raises:
             ValueError: The stored normals fit neither the vertices nor the
-                face corners, or ``normal_indices`` does not fit the corners.
+                face corners, ``normal_indices`` does not fit the corners, or
+                the mesh holds ``normal_indices`` and no ``normals``.
             RuntimeError: A pair of ``hard_edges`` is no edge of the mesh.
         """
         normals, ids = _corner_normals(self, always=True, force=force)
@@ -2028,8 +2038,8 @@ class MeshData(ShapeData):
         """Compute MikkTSpace tangent vectors.
 
         Uses the normals ``get_face_vertex_normals()`` gives: the stored
-        ``self.normals``, otherwise the ones derived from the points, inside
-        the groups ``normal_indices`` names when it holds them.
+        ``self.normals``, otherwise the ones derived from the points, broken
+        at its ``hard_edges`` when it holds them.
 
         The output is indexed by ``uvdata.indices`` (face-varying,
         matching UV topology).
@@ -3111,9 +3121,9 @@ class MeshData(ShapeData):
         has them, its normals as ``vn`` lines, each face corner naming its
         own, through ``normal_indices`` or, without them, its vertex's (one
         normal a vertex) or its own (one a corner). A mesh that stores no
-        normals and holds groups of corners in ``normal_indices`` writes the
-        normals derived inside them (:meth:`get_face_vertex_normals`); one
-        that holds neither writes none. The group is the mesh's
+        normals and holds ``hard_edges`` writes the normals derived between
+        them (:meth:`get_face_vertex_normals`); one that holds neither
+        writes none. The group is the mesh's
         name without its ``Shape`` suffix, which :meth:`load_obj` puts back.
 
         An obj keeps only that: the matrix, the holes and a UV set (a
@@ -3182,8 +3192,8 @@ class MeshData(ShapeData):
         kept) and its normals as it holds them, in Maya's Y-up and cm;
         ``parent_uuid`` names no node of the file. ``cgmath.formats.load_fbx``
         reads it back on that node, equal but for normals Maya would derive
-        from the points: those the read does not store, keeping the groups
-        of corners they shade in ``normal_indices``. See
+        from the points: those the read does not store, keeping the edges
+        they break at in ``hard_edges``. See
         :func:`cgmath.formats.save_fbx`.
         """
         from cgmath.formats import save_fbx
@@ -3253,10 +3263,10 @@ class MeshData(ShapeData):
         mesh_api.CreateExtentAttr().Set((min_bbx.tolist(), max_bbx.tolist()))
 
         # write shading normals: the stored ones as held, or with none
-        # stored and groups of corners in normal_indices, the derived ones
+        # stored and hard_edges held, the derived ones
         normals        = self.normals
         normal_indices = self.normal_indices
-        if normals is None and normal_indices is not None:
+        if normals is None:
             normals, normal_indices = _corner_normals(self)
         if normals is not None:
             Sdf = pxr().Sdf
@@ -5501,19 +5511,24 @@ def _corner_normals(mesh: "MeshData", always: bool = False, force: bool = False)
     ``(normals, ids)``: the mesh's normals and the one each face corner
     names, through ``normal_indices``, else its vertex's (one normal a
     vertex) or its own (one a corner). A mesh that stores none and holds
-    groups of corners in ``normal_indices`` gives the normals Maya derives
-    inside them, a normal a group; one that stores none and holds
-    ``hard_edges`` gives them inside the groups those part. One that holds
-    none of the three gives ``(None, None)``, or with ``always`` the derived
-    normals of its vertices, every edge soft. ``force`` recomputes what the
-    derived normals read. ValueError for normals or ``normal_indices`` that
-    fit none of these; RuntimeError for a pair of ``hard_edges`` that is no
-    edge of the mesh.
+    ``hard_edges`` gives the normals Maya derives between them, a normal a
+    group of corners, the corners around a vertex that no hard edge parts.
+    One that stores none and holds no ``hard_edges`` gives ``(None, None)``,
+    or with ``always`` the derived normals of its vertices, every edge soft.
+    ``force`` recomputes what the derived normals read. ValueError for
+    normals or ``normal_indices`` that fit none of these, and for
+    ``normal_indices`` held with no ``normals``; RuntimeError for a pair of
+    ``hard_edges`` that is no edge of the mesh.
     """
     indices = np.asarray(mesh.indices)
     label   = f"mesh {mesh.name!r}" if mesh.name else "the mesh"
     ids     = None
     if mesh.normal_indices is not None:
+        if mesh.normals is None:
+            raise ValueError(
+                f"{label} holds normal_indices and no normals: they name stored normals. "
+                "The edges its derived normals break at go in hard_edges, a pair of vertices each"
+            )
         ids = np.asarray(mesh.normal_indices)
         if ids.size != indices.size:
             raise ValueError(
@@ -5521,18 +5536,12 @@ def _corner_normals(mesh: "MeshData", always: bool = False, force: bool = False)
             )
 
     if mesh.normals is None:
-        if ids is None and mesh.hard_edges is not None:
+        if mesh.hard_edges is not None:
             ids, count = mesh._get_hard_groups()
-            return _compute_shading_normals(mesh, ids, count, True, True, force=force), ids
-        if ids is None and not always:
+        elif not always:
             return None, None
-        if ids is None:
-            ids   = indices
-            count = mesh.point_count
         else:
-            if ids.size and ids.min() < 0:
-                raise ValueError(f"{label}'s normal_indices name a group of corners below 0")
-            count = int(ids.max()) + 1 if ids.size else 0
+            ids, count = indices, mesh.point_count
         return _compute_shading_normals(mesh, ids, count, True, True, force=force), ids
 
     normals = np.asarray(mesh.normals, dtype=np.float64)
@@ -5586,6 +5595,22 @@ def _pair_edges(mesh: "MeshData", pairs) -> tuple:
     order  = np.argsort(keys, kind="stable")
     ids    = order[np.minimum(np.searchsorted(keys[order], wanted), len(order) - 1)]
     return ids, (keys[ids] == wanted) & (pairs[:, 0] >= 0)
+
+
+def _hard_edge_ids(mesh: "MeshData", pairs) -> np.ndarray:
+    """the edge of ``mesh.e2v`` each vertex pair names, either vertex first;
+    RuntimeError, naming up to five, for pairs that are no edge of the mesh"""
+    ids, found = _pair_edges(mesh, pairs)
+    if not found.all():
+        missing = np.sort(np.asarray(pairs, dtype=np.int64).reshape(-1, 2), axis=1)[~found]
+        label   = f"mesh {mesh.name!r}" if mesh.name else "the mesh"
+        shown   = ", ".join(f"({a}, {b})" for a, b in missing[:5].tolist())
+        more    = ", ..." if len(missing) > 5 else ""
+        raise RuntimeError(
+            f"{label}'s hard_edges names {len(missing)} vertex pair(s) "
+            f"that are no edge of it: {shown}{more}"
+        )
+    return ids
 
 
 def _new_vertex_of(count: int, kept) -> np.ndarray:
