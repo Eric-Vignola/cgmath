@@ -195,6 +195,38 @@
    0.0
   ]
  },
+ "rational": {
+  "shapes": [
+   {
+    "degree": 2,
+    "form": 1,
+    "type": "nurbsCurve"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "rationalPatch": {
+  "shapes": [
+   {
+    "count_u": 4,
+    "count_v": 4,
+    "degree_u": 3,
+    "degree_v": 3,
+    "form_u": 1,
+    "form_v": 1,
+    "type": "nurbsSurface"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
  "tube": {
   "shapes": [
    {

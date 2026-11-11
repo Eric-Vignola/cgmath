@@ -1,4 +1,36 @@
 {
+ "arc": {
+  "shapes": [
+   {
+    "degree": 2,
+    "form": 1,
+    "type": "nurbsCurve"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "bulge": {
+  "shapes": [
+   {
+    "count_u": 3,
+    "count_v": 9,
+    "degree_u": 1,
+    "degree_v": 3,
+    "form_u": 1,
+    "form_v": 3,
+    "type": "nurbsSurface"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
  "curve": {
   "shapes": [
    {
@@ -31,6 +63,20 @@
   "shapes": [
    {
     "degree": 2,
+    "form": 1,
+    "type": "nurbsCurve"
+   }
+  ],
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "edge": {
+  "shapes": [
+   {
+    "degree": 1,
     "form": 1,
     "type": "nurbsCurve"
    }

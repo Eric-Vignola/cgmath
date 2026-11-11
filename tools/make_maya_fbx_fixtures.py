@@ -1137,10 +1137,17 @@ def _cvs(grid) -> list:
     return [tuple(float(c) for c in point) for point in np.asarray(grid).reshape(-1, 3)]
 
 
+def _sample(point) -> list:
+    """the x, y, z of a point Maya found on a shape"""
+    return [point.x / point.w, point.y / point.w, point.z / point.w]
+
+
 def nurbs_readings(rec: Recorder, names) -> None:
     """what Maya holds under each transform of ``names``: its translate and,
-    for each shape in Maya's order, the degree, the form, the knots and the
-    control points, in object space"""
+    for each shape in Maya's order, the degree, the form, the knots, the
+    control points and their weights, in object space, and the points Maya
+    finds on it at parameters across its knots (``at`` and ``samples``; a
+    surface's a row a (u, v))"""
     for name in names:
         told = []
         for at, shape in enumerate(cmds.listRelatives(name, shapes=True, noIntermediate=True, fullPath=True) or []):
@@ -1152,8 +1159,12 @@ def nurbs_readings(rec: Recorder, names) -> None:
             if kind == "nurbsCurve":
                 curve = om.MFnNurbsCurve(path)
                 told.append({"type": kind, "degree": curve.degree, "form": curve.form})
-                rec.array(f"{key}/knots", list(curve.knots()))
-                rec.array(f"{key}/cvs", [tuple(p)[:3] for p in curve.cvPositions(om.MSpace.kObject)])
+                rec.array(f"{key}/knots",   list(curve.knots()))
+                rec.array(f"{key}/cvs",     [tuple(p)[:3] for p in curve.cvPositions(om.MSpace.kObject)])
+                rec.array(f"{key}/weights", [p.w for p in curve.cvPositions(om.MSpace.kObject)])
+                at = np.linspace(*curve.knotDomain, 9).tolist()
+                rec.array(f"{key}/at", at)
+                rec.array(f"{key}/samples", [_sample(curve.getPointAtParam(u, om.MSpace.kObject)) for u in at])
             elif kind == "nurbsSurface":
                 surface = om.MFnNurbsSurface(path)
                 told.append({
@@ -1168,6 +1179,16 @@ def nurbs_readings(rec: Recorder, names) -> None:
                 rec.array(f"{key}/knots_u", list(surface.knotsInU()))
                 rec.array(f"{key}/knots_v", list(surface.knotsInV()))
                 rec.array(f"{key}/cvs",     [tuple(p)[:3] for p in surface.cvPositions(om.MSpace.kObject)])
+                rec.array(f"{key}/weights", [p.w for p in surface.cvPositions(om.MSpace.kObject)])
+                at = [
+                    (u, v)
+                    for u in np.linspace(*surface.knotDomainInU, 5).tolist()
+                    for v in np.linspace(*surface.knotDomainInV, 5).tolist()
+                ]
+                rec.array(f"{key}/at", at)
+                rec.array(
+                    f"{key}/samples", [_sample(surface.getPointAtParam(u, v, om.MSpace.kObject)) for u, v in at]
+                )
             else:
                 told.append({"type": kind})
         rec.value(name, {"shapes": told, "translate": triple(name, "translate")})
@@ -1209,11 +1230,14 @@ def nurbs_export(rec: Recorder) -> None:
     rec.value("nodes", names)
     nurbs_readings(rec, names)
     exported(rec.path("maya.fbx"))
-    # the shapes the fork refuses, each in a file beside one it reads
+    # a rational curve and a rational surface, each in a file beside a plain shape
     plain = {"d": 3, "p": _cvs(nurbs.wave(6)), "k": [0, 0, 0, 1, 2, 3, 3, 3]}
     new_scene()
     cmds.curve(n="rational", d=2, pw=[(0, 0, 0, 1), (1, 1, 0, 0.5), (2, 0, 0, 1)], k=[0, 0, 1, 1])
     cmds.surface(n="patch", du=3, dv=3, ku=[0, 0, 0, 1, 1, 1], kv=[0, 0, 0, 1, 2, 2, 2], p=_cvs(nurbs.sheet(4, 5)))
+    nurbs_readings(rec, ["rational"])
+    # the same point by Maya's command, which holds no weight to divide by
+    rec.array("rational/command", cmds.pointOnCurve("rational", pr=0.5, p=True))
     exported(rec.path("maya_rational.fbx"))
     new_scene()
     parent = om.MFnTransform().create()
@@ -1222,7 +1246,10 @@ def nurbs_export(rec: Recorder) -> None:
     side = om.MFnNurbsSurface.kOpen
     om.MFnNurbsSurface().create(cvs, [0, 0, 0, 1, 1, 1], [0, 0, 0, 1, 1, 1], 3, 3, side, side, True, parent)
     cmds.curve(n="plain", **plain)
+    nurbs_readings(rec, ["rationalPatch"])
+    rec.array("rationalPatch/command", cmds.pointOnSurface("rationalPatch", u=0.5, v=0.5, p=True))
     exported(rec.path("maya_rational_surface.fbx"))
+    # a trimmed surface, which the fork refuses, beside a shape it reads
     new_scene()
     trimmed = cmds.nurbsPlane(n="trimmed", u=2, v=2, ch=False, ax=(0, 1, 0))[0]
     hole    = cmds.circle(n="trimRing", r=0.2, nr=(0, 1, 0), ch=False)[0]

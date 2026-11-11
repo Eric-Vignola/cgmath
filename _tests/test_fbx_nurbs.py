@@ -8,8 +8,10 @@ point; a curve of degree 1 as an FbxLine, which holds no knots and no form
 degree 1 under one transform as the lines of one FbxLine; a surface as an
 FbxNurbsSurface, its points u fastest; a trimmed surface as an
 FbxTrimNurbsSurface. A transform holding two curves of degree 2 or more
-is written as an empty node. The fork reads and writes the same, refusing a
-rational shape and a trimmed surface. The SDK tests need the Autodesk SDK;
+is written as an empty node. A rational shape holds a weight a control
+point, the point's fourth value, the point itself as it stands: Maya's cvs
+and its file are not multiplied by their weights. The fork reads and writes
+the same, refusing a trimmed surface. The SDK tests need the Autodesk SDK;
 the Maya ones read what Maya 2025 did, recorded once (maya_fixtures), and
 need no Maya.
 """
@@ -29,8 +31,14 @@ FBX = load_sdk()
 # the transforms of the rig, one per shape but "lines", which holds two
 NODES = (
     "open3", "knots3", "loop3", "loopKnots", "degree2", "degree1", "loop1", "line", "lines", "patch", "tube",
-    "patchKnots",
+    "patchKnots", "arc", "edge", "bulge",
 )
+# a quarter circle of radius 1: its middle point's weight is the cosine of 45 degrees
+ARC          = [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]
+ARC_WEIGHTS  = [1.0, float(np.sqrt(0.5)), 1.0]
+EDGE_WEIGHTS = [1.0, 2.0, 0.5]
+# a weight per point of pipe(3, 6), [u][v]
+BULGE_WEIGHTS = 1.0 + 0.5 * np.sin(np.arange(18.0)).reshape(3, 6) ** 2
 # a periodic cubic's knots over 6 points, uneven, the spacing repeating every 6
 LOOP_KNOTS = [-2.5, -1.0, 0.0, 1.0, 3.0, 4.0, 4.5, 6.0, 7.0, 8.0, 10.0]
 # Maya's MFnNurbsCurve / MFnNurbsSurface form of a periodic shape
@@ -74,7 +82,8 @@ def curves(nodes) -> NurbsCurveList:
     it: cubic, open and periodic, on cgmath's knots and on uneven ones;
     degree 2; degree 1 on uneven knots and periodic, which are NURBS curves
     in the file; degree 1 on no knots, a line of an FbxLine, alone and as
-    the two of "lines"; and one under no node"""
+    the two of "lines"; a quarter circle and a curve of degree 1 holding
+    weights, NURBS curves in the file; and one under no node"""
 
     def on(name: str) -> str:
         return nodes[name].uuid
@@ -90,14 +99,16 @@ def curves(nodes) -> NurbsCurveList:
         NurbsCurveData(points=wave(4, 2.0), degree=1, parent_uuid=on("line")),
         NurbsCurveData(points=wave(2), degree=1, parent_uuid=on("lines")),
         NurbsCurveData(points=wave(3, 1.0), degree=1, parent_uuid=on("lines")),
+        NurbsCurveData(points=ARC, degree=2, weights=ARC_WEIGHTS, parent_uuid=on("arc")),
+        NurbsCurveData(points=wave(3, 4.0), degree=1, weights=EDGE_WEIGHTS, parent_uuid=on("edge")),
         NurbsCurveData(points=wave(4, 3.0), degree=3),
     ])
 
 
 def surfaces(nodes) -> NurbsSurfaceList:
     """a bicubic patch, a pipe of degree 1 by 3 periodic in v, a patch of
-    degree 2 by 3 on uneven knots, each under the node named for it, and a
-    patch under no node"""
+    degree 2 by 3 on uneven knots, a pipe holding weights, each under the
+    node named for it, and a patch under no node"""
 
     def on(name: str) -> str:
         return nodes[name].uuid
@@ -112,6 +123,10 @@ def surfaces(nodes) -> NurbsSurfaceList:
         NurbsSurfaceData(
             points=sheet(4, 5) + 1.0, degree_u=2, degree_v=3, periodic_u=False, periodic_v=False,
             knots_u=[0, 0, 0.7, 2, 2], knots_v=[0, 0, 0, 1.5, 2, 2, 2], parent_uuid=on("patchKnots"),
+        ),
+        NurbsSurfaceData(
+            points=pipe(3, 6) + [0.0, 4.0, 0.0], degree_u=1, degree_v=3, periodic_u=False, periodic_v=True,
+            weights=BULGE_WEIGHTS, parent_uuid=on("bulge"),
         ),
         NurbsSurfaceData(points=sheet(4, 4), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False),
     ])
@@ -134,6 +149,8 @@ def rig_of(back):
 
 
 def same_knots(test, got, want, label: str) -> None:
+    """a field that is None or an array, knots or weights: the same, bit
+    for bit"""
     test.assertEqual(got is None, want is None, label)
     if want is not None:
         np.testing.assert_array_equal(np.asarray(got), np.asarray(want, dtype=float), err_msg=label)
@@ -149,6 +166,7 @@ class _Shapes(_Files):
             np.testing.assert_array_equal(np.asarray(a.points), np.asarray(b.points), err_msg=label)
             self.assertEqual((a.degree, a.periodic), (b.degree, b.periodic), label)
             same_knots(self, a.knots, b.knots, label)
+            same_knots(self, a.weights, b.weights, label)
 
     def assertSameSurfaces(self, got, want) -> None:
         self.assertEqual(len(got), len(want))
@@ -160,6 +178,7 @@ class _Shapes(_Files):
             self.assertEqual((a.periodic_u, a.periodic_v), (b.periodic_u, b.periodic_v), label)
             same_knots(self, a.knots_u, b.knots_u, label)
             same_knots(self, a.knots_v, b.knots_v, label)
+            same_knots(self, a.weights, b.weights, label)
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
@@ -236,11 +255,11 @@ class TestRoundTrip(_Shapes):
             root = scene.GetRootNode()
             held = {str(root.GetChild(i).GetName()): root.GetChild(i) for i in range(root.GetChildCount())}
             kind = {name: node.GetNodeAttribute().GetAttributeType() for name, node in held.items()}
-            for name in ("open3", "knots3", "loop3", "loopKnots", "degree2", "degree1", "loop1", "curve"):
+            for name in ("open3", "knots3", "loop3", "loopKnots", "degree2", "degree1", "loop1", "arc", "edge", "curve"):
                 self.assertEqual(kind[name], kinds.eNurbsCurve, name)
             for name in ("line", "lines"):
                 self.assertEqual(kind[name], kinds.eLine, name)
-            for name in ("patch", "tube", "patchKnots", "surface"):
+            for name in ("patch", "tube", "patchKnots", "bulge", "surface"):
                 self.assertEqual(kind[name], kinds.eNurbsSurface, name)
             for name, node in held.items():
                 self.assertEqual(node.GetNodeAttributeCount(), 1, name)
@@ -265,6 +284,14 @@ class TestRoundTrip(_Shapes):
             self.assertEqual(list(curve("degree1").GetKnotVector()), [-1.0, 0.0, 1.0, 3.0, 4.0, 5.0])
             self.assertEqual((curve("loop1").GetOrder(), curve("loop1").GetType()), (2, forms.ePeriodic))
 
+            # a weight: the point's fourth value, the point itself as it stands; 1 where the curve holds none
+            got = np.array([tuple(curve("arc").GetControlPointAt(i)) for i in range(3)])
+            np.testing.assert_array_equal(got, np.column_stack([ARC, ARC_WEIGHTS]))
+            self.assertEqual([tuple(curve("open3").GetControlPointAt(i))[3] for i in range(6)], [1.0] * 6)
+            # a curve of degree 1 holding weights is no line, which holds none
+            self.assertEqual((curve("edge").GetOrder(), curve("edge").GetControlPointsCount()), (2, 3))
+            self.assertEqual([tuple(curve("edge").GetControlPointAt(i))[3] for i in range(3)], EDGE_WEIGHTS)
+
             # the curves of degree 1 on no knots: the lines of one FbxLine
             line = typed(held["line"].GetNodeAttribute(), FBX.FbxLine, FBX)
             self.assertEqual((line.GetControlPointsCount(), line.GetEndPointCount()), (4, 1))
@@ -282,6 +309,10 @@ class TestRoundTrip(_Shapes):
             self.assertEqual((tube.GetNurbsUType(), tube.GetNurbsVType()), (sides.eOpen, sides.ePeriodic))
             got = np.array([tuple(tube.GetControlPointAt(i))[:3] for i in range(18)])
             np.testing.assert_array_equal(got, pipe(3, 6).transpose(1, 0, 2).reshape(-1, 3))
+            self.assertEqual([tuple(tube.GetControlPointAt(i))[3] for i in range(18)], [1.0] * 18)
+            bulge = typed(held["bulge"].GetNodeAttribute(), FBX.FbxNurbsSurface, FBX)
+            got   = np.array([tuple(bulge.GetControlPointAt(i))[3] for i in range(18)])
+            np.testing.assert_array_equal(got, BULGE_WEIGHTS.T.reshape(-1))
             knots = typed(held["patchKnots"].GetNodeAttribute(), FBX.FbxNurbsSurface, FBX)
             self.assertEqual(list(knots.GetUKnotVector()), [0.0, 0.0, 0.0, 0.7, 2.0, 2.0, 2.0])
             self.assertEqual(list(knots.GetVKnotVector())[1:-1], [0.0, 0.0, 0.0, 1.5, 2.0, 2.0, 2.0])
@@ -327,6 +358,17 @@ class TestRefused(_Files):
             "save_fbx: curve 0 of curves= holds points of 2 components; a .fbx holds 3D points",
             curves=NurbsCurveData(points=wave(6)[:, :2], degree=3),
         )
+
+    def test_weights(self):
+        """weights that are not one a control point, finite and above zero"""
+        self.refused(
+            "save_fbx: curve 0 of curves=: weights must hold one value per control point, shape (3,), got shape (2,)",
+            curves=NurbsCurveData(points=ARC, degree=2, weights=[1.0, 2.0]),
+        )
+        patch = NurbsSurfaceData(
+            points=sheet(4, 4), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False, weights=np.zeros((4, 4))
+        )
+        self.refused("save_fbx: surface 0 of surfaces=: weights must be finite and above zero", surfaces=patch)
 
     def test_on_a_joint(self):
         nodes = HierarchyData([TransformData("j", node_type="joint")])
@@ -382,6 +424,9 @@ class TestMaya(_Recorded, _Shapes):
             for at, (shape, told) in enumerate(zip(found[name], maya["shapes"])):
                 key = f"{name}/{at}"
                 cvs = held.array(f"{key}/cvs")
+                # Maya's weights, each 1, read as none
+                np.testing.assert_array_equal(held.array(f"{key}/weights"), 1.0, err_msg=key)
+                self.assertIsNone(shape.weights, key)
                 if told["type"] == "nurbsSurface":
                     self.assertEqual((shape.degree_u, shape.degree_v), (told["degree_u"], told["degree_v"]), key)
                     self.assertEqual(shape.periodic_u, told["form_u"] == PERIODIC, key)
@@ -435,6 +480,13 @@ class TestMaya(_Recorded, _Shapes):
                 self.assertEqual(told["form"] == PERIODIC, shape.periodic, key)
                 self.same_points(shape.points, cvs[: len(shape.points)], key)
                 self.same_points(shape.kv, held.array(f"{key}/knots"), key)
+                count   = len(shape.points)
+                weights = np.ones(count) if shape.weights is None else shape.weights
+                self.same_points(weights, held.array(f"{key}/weights")[:count], key)
+                if shape.weights is not None:
+                    # the curve Maya made of them: the points Maya finds on it
+                    got = shape.compute(held.array(f"{key}/at"))[0]
+                    np.testing.assert_allclose(got, held.array(f"{key}/samples"), rtol=0, atol=1e-6, err_msg=key)
                 if shape.periodic:
                     # Maya's own count: the first points again at the end
                     self.same_points(np.asarray(shape.points)[: shape.degree], cvs[len(shape.points) :], key)
@@ -449,33 +501,48 @@ class TestMaya(_Recorded, _Shapes):
             self.same_points(shape.points, grid[:count_u, :count_v],     key)
             self.same_points(shape.kv_u,   held.array(f"{key}/knots_u"), key)
             self.same_points(shape.kv_v,   held.array(f"{key}/knots_v"), key)
+            weights      = np.ones((count_u, count_v)) if shape.weights is None else shape.weights
+            maya_weights = held.array(f"{key}/weights").reshape(told["count_u"], told["count_v"])
+            self.same_points(weights, maya_weights[:count_u, :count_v], key)
+            if shape.weights is not None:
+                at  = held.array(f"{key}/at")
+                got = shape.evaluate(at[:, 0], at[:, 1])
+                np.testing.assert_allclose(got, held.array(f"{key}/samples"), rtol=0, atol=1e-6, err_msg=key)
 
     def test_rational(self):
-        """a weight that is not 1: refused by the node's name, the rest of
-        the file read with the flag the message names"""
-        self.case("nurbs_export")
-        path = self.fixture("maya_rational.fbx")
-        with self.assertRaisesRegex(
-            ValueError,
-            r"^load_fbx: the curve on node 'rational' is rational, 1 of its 3 control points holding a weight that "
-            r"is not 1, which the r17-skeleton fork does not read; load_fbx\(\.\.\., curves=False\) reads the file "
-            r"without its curves$",
-        ):
-            load_fbx(path)
-        back = load_fbx(path, curves=False)
-        self.assertEqual(sorted(rig_of(back).name), ["patch", "rational"])
-        self.assertEqual(len(back.surfaces), 1)
-        path = self.fixture("maya_rational_surface.fbx")
-        with self.assertRaisesRegex(
-            ValueError,
-            r"^load_fbx: the surface on node 'rationalPatch' is rational, 1 of its 16 control points holding a "
-            r"weight that is not 1, which the r17-skeleton fork does not read; load_fbx\(\.\.\., surfaces=False\) "
-            r"reads the file without its surfaces$",
-        ):
-            load_fbx(path)
-        back = load_fbx(path, surfaces=False)
-        self.assertEqual(sorted(rig_of(back).name), ["plain", "rationalPatch"])
-        self.assertEqual(len(back.curves), 1)
+        """Maya's rational curve and surface: the weights Maya held, the
+        points as Maya holds them, and the shape Maya's own"""
+        held = self.case("nurbs_export")
+        back = load_fbx(self.fixture("maya_rational.fbx"))
+        rig  = rig_of(back)
+        self.assertEqual(sorted(rig.name), ["patch", "rational"])
+        curve = by_node(rig, back.curves, "")["rational"][0]
+        np.testing.assert_array_equal(curve.weights, [1.0, 0.5, 1.0])
+        np.testing.assert_array_equal(curve.weights, held.array("rational/0/weights"))
+        # a point is the file's as it stands, which is Maya's cv: not multiplied by its weight
+        np.testing.assert_array_equal(np.asarray(curve.points)[1], [1.0, 1.0, 0.0])
+        self.same_points(curve.points, held.array("rational/0/cvs"), "rational")
+        got = curve.compute(held.array("rational/0/at"))[0]
+        np.testing.assert_allclose(got, held.array("rational/0/samples"), rtol=0, atol=1e-6)
+        # Maya's pointOnCurve finds the same point
+        np.testing.assert_allclose(curve.compute(0.5)[0], held.array("rational/command"), rtol=0, atol=1e-6)
+        # the plain surface beside it holds no weights
+        self.assertIsNone(back.surfaces[0].weights)
+
+        back = load_fbx(self.fixture("maya_rational_surface.fbx"))
+        rig  = rig_of(back)
+        self.assertEqual(sorted(rig.name), ["plain", "rationalPatch"])
+        patch      = by_node(rig, back.surfaces, "")["rationalPatch"][0]
+        want       = np.ones((4, 4))
+        want[1, 1] = 2.0
+        np.testing.assert_array_equal(patch.weights, want)
+        np.testing.assert_array_equal(patch.weights.reshape(-1), held.array("rationalPatch/0/weights"))
+        self.same_points(np.asarray(patch.points).reshape(-1, 3), held.array("rationalPatch/0/cvs"), "rationalPatch")
+        at  = held.array("rationalPatch/0/at")
+        got = patch.evaluate(at[:, 0], at[:, 1])
+        np.testing.assert_allclose(got, held.array("rationalPatch/0/samples"), rtol=0, atol=1e-6)
+        np.testing.assert_allclose(patch.evaluate(0.5, 0.5), held.array("rationalPatch/command"), rtol=0, atol=1e-6)
+        self.assertIsNone(back.curves[0].weights)
 
     def test_trimmed(self):
         self.case("nurbs_export")
