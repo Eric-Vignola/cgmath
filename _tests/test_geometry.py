@@ -7621,10 +7621,45 @@ class TestHardEdges(unittest.TestCase):
         up, back = [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0]
         np.testing.assert_allclose(mesh.get_face_vertex_normals(), [up] * 6 + [back] * 6, atol=1e-15)
 
+    def test_union_keeps_the_hard_edges_of_every_mesh(self):
+        other            = _folded()
+        other.hard_edges = [(1, 4), (0, 1)]
+        shaded           = other.get_face_vertex_normals()
+
+        mesh             = _folded()
+        mesh.hard_edges  = [(2, 5)]
+        mesh.union(other, _folded())
+        np.testing.assert_array_equal(mesh.hard_edges, [[2, 5], [6, 7], [7, 10]])
+        np.testing.assert_array_equal(other.hard_edges, [[0, 1], [1, 4]])  # left as it was
+        corners = mesh.get_face_vertex_normals()
+        np.testing.assert_allclose(corners[8:16], shaded, atol=1e-15)
+        np.testing.assert_allclose(corners[16:], _folded().get_face_vertex_normals(), atol=1e-15)
+
+        # the mesh united to holds none, and neither holds any
+        mesh = _folded()
+        mesh.union(other)
+        np.testing.assert_array_equal(mesh.hard_edges, [[6, 7], [7, 10]])
+        mesh = _folded()
+        mesh.union(_folded())
+        self.assertIsNone(mesh.hard_edges)
+
+    def test_difference_keeps_the_hard_edges_that_are_still_edges(self):
+        mesh            = _strip()
+        mesh.hard_edges = [(0, 1), (1, 4), (2, 5)]
+        hard            = np.asarray(mesh.points)[[[1, 4], [2, 5]]]
+        first           = MeshData(points=np.asarray(mesh.points)[[0, 1, 4, 3]], indices=[0, 1, 2, 3], counts=[4])
+        mesh.difference(first)
+        self.assertEqual(mesh.counts.tolist(), [4])
+        np.testing.assert_array_equal(np.asarray(mesh.points)[mesh.hard_edges], hard)
+
+        # nothing overlaps: the mesh is left as it was
+        mesh            = _strip()
+        mesh.hard_edges = [(1, 4)]
+        mesh.difference(MeshData(points=[(9.0, 9.0, 9.0)], indices=[], counts=[]))
+        np.testing.assert_array_equal(mesh.hard_edges, [[1, 4]])
+
     def test_the_rebuilding_operations_drop_them(self):
         for name, act in (
-            ("union", lambda m: m.union(_strip())),
-            ("difference", lambda m: m.difference(_strip())),
             ("subdivide", lambda m: m.subdivide(1)),
             ("quadrangulate", lambda m: (m.triangulate(np.zeros(2, dtype=int)), m.quadrangulate())),
         ):

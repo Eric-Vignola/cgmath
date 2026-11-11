@@ -382,9 +382,9 @@ class MeshData(ShapeData):
     can be hard, a border edge too; a pair that is no edge of the mesh
     raises when the normals are first read. An operation that keeps faces
     (``delete_faces``, ``detach_faces``, ``triangulate``, ``merge``,
-    ``from_faces``, ``from_vertices``) keeps the hard edges that are still
-    edges; one that rebuilds them (``subdivide``, ``quadrangulate``,
-    ``union``, ``difference``) drops them all.
+    ``from_faces``, ``from_vertices``, ``union``, ``difference``) keeps the
+    hard edges that are still edges; one that rebuilds them (``subdivide``,
+    ``quadrangulate``) drops them all.
 
     ``colors`` are RGBA in 0..1, one a vertex, or the ones ``color_indices``
     name a corner each (a colour a corner: ``color_indices = arange``), as
@@ -2343,10 +2343,14 @@ class MeshData(ShapeData):
     def union(self, *args):
         """
         combines faces of given Mesh objects to self (this is not a boolean);
-        the points are taken as they are, in one space
+        the points are taken as they are, in one space; the hard edges of
+        every mesh stay hard
         """
         points = self.points
+        hard   = [] if self.hard_edges is None else [np.asarray(self.hard_edges, dtype=np.int64)]
         for obj in args:
+            if obj.hard_edges is not None:
+                hard.append(np.asarray(obj.hard_edges, dtype=np.int64) + points.shape[0])
             self.indices = np.concatenate([self.indices, obj.indices + points.shape[0]])
             self.counts  = np.concatenate([self.counts, obj.counts])
             points       = np.concatenate([points, obj.points])
@@ -2358,10 +2362,11 @@ class MeshData(ShapeData):
         self.normal_indices = None
         self.colors         = None
         self.color_indices  = None
-        self.hard_edges     = None
+        self.hard_edges     = np.concatenate(hard) if hard else None
 
     def difference(self, *args, tolerance=1e-6):
-        """removes overlapping faces of given Mesh objects from self (this is not a boolean)"""
+        """removes overlapping faces of given Mesh objects from self (this is not
+        a boolean); the hard edges that are still edges stay hard"""
         source = self
 
         # find matching vertices for each obj to remove
@@ -2388,7 +2393,7 @@ class MeshData(ShapeData):
             self.normal_indices = None
             self.colors         = None
             self.color_indices  = None
-            self.hard_edges     = None
+            self.hard_edges     = source.hard_edges
 
     def detach_faces(self, indices=None):
         """detaches faces; the colours stay on their corners, and the hard
