@@ -888,89 +888,10 @@ class FbxExporter:
         if names:
             self.scene.ActiveAnimStackName.Set(fbx.FbxString(active if active in names else names[0]))
 
-    def add_mesh(self, mesh, node=None):
-        """Adds a ``MeshData`` as an ``FbxMesh`` and returns it.
-
-        The points are written as they are, in the unit and axes the scene
-        is labelled with, the faces in their order with their vertex counts
-        (ngons kept). Normals are written as the mesh holds them: through
-        ``normal_indices``, indexed, one a face corner (``eByPolygonVertex``,
-        ``eIndexToDirect``); else one a vertex (``eByControlPoint``, as
-        Maya's exporter writes smooth normals) or one a corner; none when it
-        has none, unless it holds ``hard_edges``, which write the normals
-        derived between them, indexed. ``node`` is the ``FbxNode``
-        that takes the mesh, a group the
-        skeleton wrote, whose own transform it keeps; None makes one at the
-        scene root, named after the mesh, at identity: a mesh holds no
-        transform of its own. Raises ValueError for normals that fit neither
-        the vertices nor the corners, or a mesh holding polygon holes,
-        which this writer does not write.
-        """
-        # imported here: cgmath.geometry imports this module's package
-        from cgmath.geometry.mesh import _corner_normals
-        from cgmath.hierarchy.hierarchy import TransformData, _fbx_maya_scale
-
-        self._check_open()
-        name  = mesh.name or "mesh"
-        label = f"mesh {name!r}"
-        if mesh.hole_faces is not None and len(mesh.hole_faces):
-            raise ValueError(f"{label} holds polygon holes, which save_fbx does not write")
-        normals, ids = _corner_normals(mesh)
-
-        if node is None:
-            # a node at identity, its channels a transform's defaults
-            own  = TransformData(name)
-            node = fbx.FbxNode.Create(self.manager, name)
-            node.LclTranslation.Set(fbx.FbxDouble3(*own.translate))
-            node.LclRotation.Set(fbx.FbxDouble3(*own.rotate))
-            node.LclScaling.Set(fbx.FbxDouble3(*_fbx_maya_scale(own.scale)))
-            node.SetRotationOrder(fbx.FbxNode.EPivotSet.eSourcePivot, self._ROTATE_ORDER_MAP[own.rotate_order])
-            node.SetRotationActive(True)
-            node.SetTransformationInheritType(fbx.FbxTransform.EInheritType.eInheritRSrs)
-            self.scene.GetRootNode().AddChild(node)
-
-        shape  = fbx.FbxMesh.Create(self.manager, f"{name}Shape")
-        points = np.asarray(mesh.points, dtype=np.float64).tolist()
-        shape.InitControlPoints(len(points))
-        for index, point in enumerate(points):
-            shape.SetControlPointAt(fbx.FbxVector4(*point, 1.0), index)
-
-        indices = np.asarray(mesh.indices, dtype=np.int64).tolist()
-        start   = 0
-        for size in np.asarray(mesh.counts, dtype=np.int64).tolist():
-            shape.BeginPolygon(-1, -1, -1, False)
-            for vertex in indices[start : start + size]:
-                shape.AddPolygon(vertex)
-            shape.EndPolygon()
-            start += size
-
-        if normals is not None:
-            mapping = fbx.FbxLayerElement.EMappingMode
-            refs    = fbx.FbxLayerElement.EReferenceMode
-            element = shape.CreateElementNormal()
-            if mesh.normal_indices is not None or mesh.normals is None:
-                element.SetMappingMode(mapping.eByPolygonVertex)
-                element.SetReferenceMode(refs.eIndexToDirect)
-                index_array = element.GetIndexArray()
-                for index in np.asarray(ids, dtype=np.int64).tolist():
-                    index_array.Add(index)
-            else:
-                # one a vertex, or one a corner: the ids _corner_normals gave
-                by_point = normals.shape[0] == len(points)
-                element.SetMappingMode(mapping.eByControlPoint if by_point else mapping.eByPolygonVertex)
-                element.SetReferenceMode(refs.eDirect)
-            direct = element.GetDirectArray()
-            for normal in normals.tolist():
-                direct.Add(fbx.FbxVector4(*normal, 0.0))
-
-        node.SetNodeAttribute(shape)
-        LOGGER.info(f"added mesh: {name}")
-        return shape
-
     def add_uvs(self, shape, uvs) -> None:
-        """Adds UV sets, ``UVData`` each, to an ``FbxMesh`` :meth:`add_mesh`
-        returned, in their order, each named after its set: its UVs as they
-        are, one a face corner through its ``indices`` (``eByPolygonVertex``,
+        """Adds UV sets, ``UVData`` each, to an ``FbxMesh``, in their order,
+        each named after its set: its UVs as they are, one a face corner
+        through its ``indices`` (``eByPolygonVertex``,
         ``eIndexToDirect``, as Maya's exporter writes a UV set), each set an
         element of its own. The sets' faces are the mesh's, which the caller
         checks (``cgmath.formats.save_fbx`` pairs them)."""
@@ -989,7 +910,7 @@ class FbxExporter:
                 index_array.Add(index)
 
     def add_skin(self, shape, skin, links) -> None:
-        """Adds a ``SkinData`` to an ``FbxMesh`` :meth:`add_mesh` returned:
+        """Adds a ``SkinData`` to an ``FbxMesh``:
         an ``FbxSkin``, one ``FbxCluster`` an influence, in the skin's order,
         linked to the ``FbxNode`` of ``links`` in that order (nodes the
         skeleton wrote), and a bind pose listing the mesh's node and the
