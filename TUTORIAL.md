@@ -405,6 +405,16 @@ F = cube.get_face_normals()    # (F, 3)
 print(N.shape, F.shape, np.round(F[0], 6))
 ```
 
+Shading normals are the `normals` / `normal_indices` fields, which
+`set_normals()` fills. A mesh need not store any: it then shades by the
+derived ones, and `get_face_vertex_normals()` gives the normal of every
+face corner, stored or derived.
+
+```python
+C = cube.get_face_vertex_normals()  # (sum(counts), 3), a normal a face corner
+print(C.shape, cube.normals)  # (24, 3) None
+```
+
 ### Edges come in two flavours
 
 `ue*` are the **raw** per-face-corner edges — an interior edge shows up
@@ -919,6 +929,12 @@ hero_mesh = MeshData.load_fbx("hero.fbx", name="hero_geo")   # by the mesh's nam
 hero_uv   = UVData.load_fbx("hero.fbx", name="hero_geo", channel=0)
 Scene.load_fbx("hero.fbx").render().save("hero.png")
 ```
+
+A mesh read from an FBX file stores no normal its points already give:
+where the file's normals are the ones Maya derives, `normals` is None and
+`normal_indices` holds the groups its hard edges leave; authored normals
+are stored as the file holds them. `mesh.get_face_vertex_normals()` gives
+the normal of every face corner either way.
 
 ---
 

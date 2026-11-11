@@ -169,6 +169,20 @@ held = load_fbx("hero.fbx", takes=False, materials=False, morphs=False)   # node
 print(held.clip, held.materials, held.morphs)                             # None None None
 ```
 
+A mesh comes back with the least normals that shade it as its file does. An
+FBX file holds a normal for every face corner, Maya's exports included.
+Where those are the ones Maya derives from the points (within 1e-5 a
+component), the mesh stores none: `normals` is None, and `normal_indices`
+is None when every edge is soft, else the group each face corner shades
+with, the hard edges read back from the file's normals. Any other normals
+(authored; locked, in Maya) are stored as the file holds them, each corner
+naming its own. `mesh.get_face_vertex_normals()` gives the normal of every
+corner in all three cases, and `save_fbx` writes them back (none for a mesh
+holding neither field), so a file read and written shades the same, while a
+mesh saved with its derived normals stored reads back without them. Nothing
+opts out. The step takes about 0.25 s on 250,000 quads with every edge
+soft, about 1 s with hard edges or authored normals.
+
 The FBX SDK frees what it read only when told to; every FBX reader in
 cgmath frees its memory before it returns, and none of them writes anything
 next to the file. An `FbxExporter` holds its scene until `close()`; a `with`

@@ -1027,7 +1027,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x0000023A74BE7250>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000001994F3CB0D0>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1191,6 +1191,8 @@ get_face_vertex_geodesic_neighborhood(self, n: 'int | None' = None, max_distance
     Compute the topological face vertex neighborhood with distances using Dijkstra's algorithm
 get_face_vertex_neighbors(self, n: 'int' = 0) -> 'np.ndarray'
     return a matrix of vertices neighboring connected faces to vertices
+get_face_vertex_normals(self, force: 'bool' = False) -> 'np.ndarray'
+    The shading normal of every face corner, one row a corner of
 get_lamina_faces(self)
     returns lamina faces
 get_ngons(self)
@@ -3449,7 +3451,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000023A42B76480>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001991D336840>, '...
 ```
 
 ## `cgmath.constraints`
