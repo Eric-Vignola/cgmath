@@ -355,10 +355,11 @@ Two independent things.
   when `points` is assigned; after a write inside the array
   (`mesh.points[:, 1] += 5`) pass `force=True`.
 - `normals` / `normal_indices` are **shading** fields you populate with
-  `set_normals(...)`. With no arguments they are per-vertex and
-  `normal_indices` stays `None`; with `hard_edge_angle` or explicit
-  `hard_edges` (a pair of vertices an edge; `mesh.e2v[ids]` for edge ids)
-  they become face-varying. `recompute_normals()` refreshes the
+  `set_normals(...)`. With no arguments they are the normals the mesh
+  shades by already: per-vertex, `normal_indices` staying `None`, unless it
+  holds `hard_edges`. With `hard_edge_angle` or explicit `hard_edges` (a
+  pair of vertices an edge; `mesh.e2v[ids]` for edge ids) they break at
+  those edges instead. `recompute_normals()` refreshes the
   vectors after a deformation while keeping the splits. Topology edits clear
   both. Both families take triangles, quads and n-gons.
 - A mesh need not store them. What it holds says how it shades:

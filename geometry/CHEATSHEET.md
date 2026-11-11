@@ -843,7 +843,10 @@ parts share a normal. Any edge can be hard, a border edge too; a pair that
 is no edge of the mesh raises RuntimeError when the normals are read.
 Stored normals speak ahead of `hard_edges`, and `normal_indices` name
 stored normals only: held with no `normals` they are a ValueError at the
-same read. `get_face_vertex_normals()` gives the normal of every face
+same read. `set_normals()` with no argument stores the normals the mesh's
+own `hard_edges` give, so storing them changes no shading; an argument
+speaks ahead of the field (`hard_edges=[]`: every edge soft).
+`get_face_vertex_normals()` gives the normal of every face
 corner, stored or derived; `get_tangent_space()` and the writers read
 through it (`save_obj`, `save_fbx` and `to_prim` write the derived normals
 of a mesh holding `hard_edges`, none for one holding neither).

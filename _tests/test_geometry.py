@@ -7480,6 +7480,28 @@ class TestHardEdges(unittest.TestCase):
         box.hard_edges = [(0, 1), (2, 3), (4, 5), (6, 7)]
         self.assertEqual(_corner_normals(box)[0].shape, (8, 3))
 
+    def test_set_normals_reads_the_field_when_no_edge_is_given(self):
+        mesh            = _folded()
+        mesh.hard_edges = [(1, 4)]
+        derived         = mesh.get_face_vertex_normals()
+        mesh.set_normals()
+        self.assertEqual(mesh.normals.shape, (8, 3))
+        np.testing.assert_allclose(mesh.normals[mesh.normal_indices], derived, atol=1e-15)
+        np.testing.assert_array_equal(mesh.hard_edges, [[1, 4]])  # read, not written
+
+        # an argument speaks ahead of the field
+        mesh.set_normals(hard_edges=[])
+        self.assertIsNone(mesh.normal_indices)
+        self.assertEqual(mesh.normals.shape, (6, 3))
+        mesh.set_normals(hard_edge_angle=120.0)  # the fold is a right angle
+        self.assertIsNone(mesh.normal_indices)
+        np.testing.assert_array_equal(mesh.hard_edges, [[1, 4]])
+
+        # a pair that is no edge raises here as at any read of the normals
+        mesh.hard_edges = [(0, 4)]
+        with self.assertRaisesRegex(RuntimeError, r"no edge of it: \(0, 4\)"):
+            mesh.set_normals()
+
     def test_stored_normals_win(self):
         mesh            = _folded()
         mesh.hard_edges = [(1, 4)]
