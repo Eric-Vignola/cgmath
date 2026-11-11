@@ -733,13 +733,11 @@ print(dst.weights.shape, dst.influences, dst.valid)
 
 Real behaviour, verified — not bugs to work around blindly.
 
-- `NurbsSurfaceData.get_area()` wants an **odd** `samples` on an open
-  direction: composite Simpson there, a Riemann sum (a few percent over) when
-  the count is even. The default, 51, is odd, and `area` uses it. A periodic
-  direction takes the trapezoid rule whatever the count.
-  Its samples are evenly spaced in the native parameters, not lined up with
-  the knots, so uneven `knots_u` / `knots_v`, short end spans most of all, need
-  more of them for the same accuracy.
+- `NurbsSurfaceData.get_area()`, and `area` with its 51 samples a direction,
+  samples evenly in the native parameters, not lined up with the knots, so
+  uneven `knots_u` / `knots_v`, short end spans most of all, need more
+  `samples` for the same accuracy. An odd count and an even one are as
+  accurate.
 - The `sdf` module docstring advertises
   `from cgmath.geometry import dual_marching_cubes`, which raises
   `ImportError`. The working path is `from cgmath.geometry.sdf import …`.
