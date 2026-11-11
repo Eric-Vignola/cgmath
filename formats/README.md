@@ -309,7 +309,7 @@ a textured one):
 | Want | Call |
 |---|---|
 | Everything an FBX holds | `cgmath.formats.load_fbx(path)` → `FbxContents`; `cgmath.render.Scene.load_fbx(path)` holds the same, ready to render |
-| NURBS curves and surfaces from FBX | `cgmath.formats.load_fbx(path).curves` → `NurbsCurveList`, `.surfaces` → `NurbsSurfaceList` |
+| NURBS curves and surfaces from FBX | `cgmath.formats.load_fbx(path).curves` → `NurbsCurveList`, `.surfaces` → `NurbsSurfaceList`; one kind alone: `NurbsCurveList.load_fbx(path)`, `NurbsSurfaceList.load_fbx(path)`, written back by the list's `save_fbx(path)` |
 | Meshes + UVs from FBX | `cgmath.geometry.mesh.load_fbx(path)` → `[(MeshData, UVList), ...]`, as `load_fbx` reads them, each mesh's `parent_uuid` naming its node |
 | Meshes + UVs from GLB | `cgmath.geometry.mesh.load_glb(path, scale_factor=100.0)` |
 | Meshes, any format | `cgmath.geometry.mesh.load(path)` / `MeshList.load(path)` |

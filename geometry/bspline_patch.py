@@ -2914,6 +2914,27 @@ class NurbsSurfaceData(ShapeData):
 class NurbsSurfaceList(DataList[NurbsSurfaceData]):
     """A list of :class:`NurbsSurfaceData`, as a file holds its surfaces."""
 
+    @classmethod
+    def load_fbx(cls, filename: str, verbose: bool = True) -> "NurbsSurfaceList":
+        """every surface of an fbx file, as :func:`cgmath.formats.load_fbx`
+        reads them, the nodes and the surfaces alone read: each in its
+        node's space, its ``parent_uuid`` naming that node in the file's
+        hierarchy, which this does not return; empty for a file with none;
+        ``verbose`` False silences the read's warnings"""
+        from cgmath.formats._load import load_only
+
+        return load_only(filename, surfaces=True, verbose=verbose).surfaces or cls()
+
+    def save_fbx(self, filename: str, as_ascii: bool = False) -> None:
+        """writes every surface to one fbx file, binary unless ``as_ascii``:
+        each the shape of a new root node at identity named "surface", in
+        the list's order, whatever its ``parent_uuid`` names. See
+        :func:`cgmath.formats.save_fbx`, which places a surface under a node
+        of a hierarchy."""
+        from cgmath.formats import save_fbx
+
+        save_fbx(filename, surfaces=self, as_ascii=as_ascii)
+
 
 def _area_rule(samples: int, periodic: bool) -> tuple:
     """
