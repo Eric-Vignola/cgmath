@@ -15,10 +15,11 @@ import numpy as np
 from cgmath.constraints.procrustes import ProcrustesData
 from cgmath.geometry._bilinear_surface import RaycastData as BilinearRaycastData
 from cgmath.geometry._bilinear_surface import BilinearSampleData
-from cgmath.geometry.bspline import NurbsCurveData
+from cgmath.geometry.bspline import NurbsCurveData, NurbsCurveList
 from cgmath.geometry.bspline import CurveSampleData
 from cgmath.geometry.bspline_patch import (
     NurbsSurfaceData,
+    NurbsSurfaceList,
     PatchRaycastData,
     PatchSampleData,
 )
@@ -90,6 +91,11 @@ def curve() -> NurbsCurveData:
     )
 
 
+def curve_list() -> NurbsCurveList:
+    """the closed quadratic and an open cubic along the arm, as a file holds its curves"""
+    return NurbsCurveList([curve(), NurbsCurveData(arm())])
+
+
 def curve_sample() -> CurveSampleData:
     """points beside a spine with stacked ends and Maya's knots, projected onto it"""
     spine = NurbsCurveData.from_edit_points(arm(), collapse=(2, 2))
@@ -122,6 +128,12 @@ def patch() -> NurbsSurfaceData:
         knots_u            = np.array([-1.5, 0.0, 1.0, 1.5, 3.0, 4.0, 4.5, 6.0, 7.0]),
         knots_v            = np.array([0.0, 0.0, 0.0, 2.5, 6.0, 6.0, 6.0]),
     )
+
+
+def patch_list() -> NurbsSurfaceList:
+    """the tube and a flat bilinear sheet, as a file holds its surfaces"""
+    sheet = np.array([[[u, 0.0, v] for v in range(3)] for u in range(2)], dtype=float)
+    return NurbsSurfaceList([patch(), NurbsSurfaceData(sheet, degree_u=1, degree_v=1, periodic_u=False, periodic_v=False)])
 
 
 def patch_sample() -> PatchSampleData:
@@ -190,8 +202,10 @@ def procrustes() -> ProcrustesData:
 
 EXAMPLES = {
     NurbsCurveData:      curve,
+    NurbsCurveList:      curve_list,
     CurveSampleData:     curve_sample,
     NurbsSurfaceData:    patch,
+    NurbsSurfaceList:    patch_list,
     PatchSampleData:     patch_sample,
     PatchRaycastData:    patch_raycast,
     BilinearSampleData:  saddle_sample,

@@ -4,8 +4,8 @@ Move all data types into the same namespace
 
 from cgmath.data import Data, DataList, ImmutableArray
 from cgmath.geometry._bilinear_surface import RaycastData
-from cgmath.geometry.bspline import NurbsCurveData
-from cgmath.geometry.bspline_patch import NurbsSurfaceData, PatchSampleData
+from cgmath.geometry.bspline import NurbsCurveData, NurbsCurveList
+from cgmath.geometry.bspline_patch import NurbsSurfaceData, NurbsSurfaceList, PatchSampleData
 from cgmath.geometry.camera import CameraData, CameraList
 from cgmath.geometry.deform import DeltaMushData, PatchRelaxData
 from cgmath.geometry.light import LightData, LightList
