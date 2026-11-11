@@ -649,9 +649,9 @@ print(load_fbx(DEMO_FBX, meshes=False).meshes, load_fbx(DEMO_FBX, textures=False
 
 A mesh stores the least normals that shade it as its file does. Where the
 file's normals are the ones Maya derives from the points (within 1e-5 a
-component) the mesh stores none, `normal_indices` holding the groups its
-hard edges leave (None when every edge is soft); any other normals are
-stored as read, each face corner naming its own.
+component) the mesh stores none, `hard_edges` holding the edges they break
+at, a pair of vertices each (None when every edge is soft); any other
+normals are stored as read, each face corner naming its own.
 `get_face_vertex_normals()` gives the normal of every face corner either
 way:
 
@@ -903,7 +903,7 @@ Scene.load_fbx("hero.fbx")  # -> every field, ready to render
 | `FbxExporter.save` / `.add_scene` do not exist | `.export(path)` / `.add_skeleton(component)` |
 | `load_fbx` gives `hierarchy` None | the file holds takes: the nodes are in `clip`, every take's; `takes=False` gives the nodes |
 | A material's `texture` is None | read with `textures=False`, the file not found, or no PIL: `texture_file` still names it |
-| A loaded mesh's `normals` is None | the file's were the ones Maya derives from the points, so none is stored: `mesh.get_face_vertex_normals()` gives them, `normal_indices` the groups its hard edges leave |
+| A loaded mesh's `normals` is None | the file's were the ones Maya derives from the points, so none is stored: `mesh.get_face_vertex_normals()` gives them, `hard_edges` the edges they break at |
 | A shape's `parent_uuid` / `mesh_uuid` matches nothing | it came from another load: each read mints its own uuids |
 | `set_binary` on a `GLTF2()` with no blob | `TypeError` — `binary_blob()` is `None`; load a real file first |
 | `GlbData.mesh_list` is `None` | `trimesh` is not installed |

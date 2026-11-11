@@ -407,8 +407,9 @@ print(N.shape, F.shape, np.round(F[0], 6))
 
 Shading normals are the `normals` / `normal_indices` fields, which
 `set_normals()` fills. A mesh need not store any: it then shades by the
-derived ones, and `get_face_vertex_normals()` gives the normal of every
-face corner, stored or derived.
+derived ones, broken at the edges its `hard_edges` field names (a pair of
+vertices each; None, every edge soft), and `get_face_vertex_normals()`
+gives the normal of every face corner, stored or derived.
 
 ```python
 C = cube.get_face_vertex_normals()  # (sum(counts), 3), a normal a face corner
@@ -932,7 +933,7 @@ Scene.load_fbx("hero.fbx").render().save("hero.png")
 
 A mesh read from an FBX file stores no normal its points already give:
 where the file's normals are the ones Maya derives, `normals` is None and
-`normal_indices` holds the groups its hard edges leave; authored normals
+`hard_edges` holds the edges they break at; authored normals
 are stored as the file holds them. `mesh.get_face_vertex_normals()` gives
 the normal of every face corner either way.
 

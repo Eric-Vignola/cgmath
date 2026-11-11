@@ -562,7 +562,9 @@ Three required fields describe any polygon soup:
 
 Optional fields: `name`, `uuid` / `parent_uuid` (the node the mesh sits
 under), `normals` / `normal_indices` (shading normals, when the mesh stores
-any: see "Normals and areas"), `colors` / `color_indices` (RGBA vertex
+any: see "Normals and areas"), `hard_edges` (the edges the normals it does
+not store break at, a pair of vertices each), `colors` / `color_indices`
+(RGBA vertex
 colours), and `hole_faces` / `hole_counts` / `hole_indices` (n-gon hole
 bookkeeping).
 
@@ -833,16 +835,22 @@ print(mesh.normals, mesh.normal_indices)           # None, None
 ```
 
 A mesh need not store its normals. With `normals` None it shades by the
-derived ones: every edge soft when `normal_indices` is None too, otherwise
-inside the groups `normal_indices` names, a number a face corner, the
-corners around a vertex that no hard edge parts (what
-`split_at_hard_edges` returns). `get_face_vertex_normals()` gives the normal
-of every face corner, stored or derived; `get_tangent_space()` and the
-writers read through it (`save_obj`, `save_fbx` and `to_prim` write the
-derived normals of a mesh holding groups, none for one holding neither
-field). `recompute_normals()` is for stored normals and raises without
-them. `load_fbx` gives meshes in the least of these forms that shades as
-the file does.
+derived ones: every edge soft when `hard_edges` is None too, otherwise
+broken at the edges `hard_edges` names, `(n, 2)`, a pair of vertices an
+edge, either vertex first: the corners around a vertex that no hard edge
+parts share a normal. Any edge can be hard, a border edge too; a pair that
+is no edge of the mesh raises RuntimeError when the normals are read.
+Stored normals speak ahead of `hard_edges`, and `normal_indices` name
+stored normals only: held with no `normals` they are a ValueError at the
+same read. `get_face_vertex_normals()` gives the normal of every face
+corner, stored or derived; `get_tangent_space()` and the writers read
+through it (`save_obj`, `save_fbx` and `to_prim` write the derived normals
+of a mesh holding `hard_edges`, none for one holding neither).
+`recompute_normals()` is for stored normals and raises without them.
+`load_fbx` gives meshes in the least of these forms that shades as the file
+does. Face edits keep the hard edges that are still edges (`delete_faces`,
+`from_faces`, `from_vertices`, `merge`, `triangulate`, `detach_faces`);
+`subdivide`, `quadrangulate`, `union` and `difference` drop them.
 
 ```python
 mesh = cube.copy()
@@ -1413,7 +1421,7 @@ The FBX routes are slices of one read, `cgmath.formats.load_fbx`: every
 mesh in Maya's Y-up and cm, the file's unit converted, its points as the
 file holds them on its node, the least normals that shade it as the file
 does (none where the file's are the ones Maya derives from the points,
-`normal_indices` then holding the groups its hard edges leave; the file's
+`hard_edges` then holding the edges they break at; the file's
 own, one a face corner, where they are authored), its UV sets and skin
 naming it by uuid. A mesh's
 `parent_uuid` names its node in the hierarchy that read gives (two loads
