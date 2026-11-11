@@ -49,8 +49,8 @@ class CurveSampleData(Data):
 @dataclass
 class NurbsCurveData(ShapeData):
     """
-    NURBS curve data class: a B-spline curve, non-rational (every weight 1),
-    a shape placed by the transform its ``parent_uuid`` names.
+    NURBS curve data class: a B-spline curve, rational when it holds
+    ``weights``, a shape placed by the transform its ``parent_uuid`` names.
 
     Parameters
     ----------
@@ -95,6 +95,14 @@ class NurbsCurveData(ShapeData):
         times: the curve would come apart there. Set by ``fit()``, cleared
         by ``open()`` and ``close()``; call ``invalidate()`` after changing
         it by hand.
+    weights : np.ndarray, optional
+        One weight per control point (N,), float64, finite and above zero:
+        the curve is then rational, each control point pulling it by its
+        weight. None (default) is every weight 1. ``points`` stay the
+        control points themselves, not multiplied by their weights.
+        ``compute()``, ``sample()``, ``basis()`` and the lengths follow the
+        weights; ``fit()`` and ``rebuild()`` refuse a curve that holds
+        them. Call ``invalidate()`` after changing them by hand.
     """
 
     points:             Array(np.float64, "N", "D") = numpy_array(np.zeros((0, 3)))
@@ -105,6 +113,7 @@ class NurbsCurveData(ShapeData):
     registered:         bool = field(default=False)
     arc_length_samples: int = field(default=1000)
     knots:              Optional[Array(np.float64, "K")] = None
+    weights:            Optional[Array(np.float64, "N")] = None
 
     # --- cached attributes --- #
     _kv               = None  # curve knot vector
@@ -114,6 +123,7 @@ class NurbsCurveData(ShapeData):
     _spl              = None  # scipy.interpolate.BSpline instance
     _der              = None  # first derivative of _spl (for tangents)
     _cv_f64           = None  # cached float64 control vertices (with periodic wrap)
+    _hw               = None  # weighted curve: the control vertices times their weight, then the weight
     _arc_length_table = None  # normalized arc lengths [0, 1]
     _u_table          = None  # corresponding native parameter values
     _total_length     = None  # total arc length of curve
@@ -132,6 +142,7 @@ class NurbsCurveData(ShapeData):
         "_spl",
         "_der",
         "_cv_f64",
+        "_hw",
         "_arc_length_table",
         "_u_table",
         "_total_length",
@@ -166,6 +177,7 @@ class NurbsCurveData(ShapeData):
             and self.periodic == other.periodic
             and self.uniform == other.uniform
             and self.registered == other.registered
+            and _same_weights(self.weights, other.weights, self.points.shape[:1])
         )
         if not same:
             return False
@@ -256,13 +268,31 @@ class NurbsCurveData(ShapeData):
             self._offset = self._max_param + np.mean(self._kv[1 : self.degree + 1])
 
         # Create scipy BSpline with control vertices (may be wrapped for periodic)
-        self._cv_f64 = self.cv.astype(np.float64)
-        self._spl    = BSpline(self._kv, self._cv_f64, self.degree)
-        self._der    = self._spl.derivative()
+        self._set_spline()
 
         # Build arc-length table if uniform parameterization is enabled
         if self.uniform:
             self._build_arc_length_table()
+
+    def _set_spline(self) -> None:
+        """
+        Builds the evaluators from the current control points and weights.
+
+        A curve that holds ``weights`` is evaluated on its homogeneous
+        control points, each one times its weight with the weight as one
+        more coordinate, and divided by that coordinate.
+        """
+        self._cv_f64 = self.cv.astype(np.float64)
+        self._hw     = None
+        if self.weights is None:
+            self._spl = BSpline(self._kv, self._cv_f64, self.degree)
+        else:
+            weights = _checked_weights(self.weights, (self._count,))[self._geometry]
+            self._hw = np.ascontiguousarray(
+                np.column_stack([self._cv_f64 * weights[:, None], weights])
+            )
+            self._spl = _RationalSpline(self._kv, self._hw, self.degree)
+        self._der = self._spl.derivative()
 
     def _build_arc_length_table(self) -> None:
         """
@@ -506,19 +536,30 @@ class NurbsCurveData(ShapeData):
         """
         u = np.atleast_1d(u).astype(np.float64)
 
-        # Evaluate positions using fused kernel
-        points = _evaluate_bspline_curve(u, self._kv, self._cv_f64, self.degree)
-
-        # Evaluate tangents using derivative kernel
-        tangents = _evaluate_bspline_curve_derivative(
-            u, self._kv, self._cv_f64, self.degree
-        )
+        # Positions from the fused kernel, tangents from the derivative one
+        points, tangents = self._kernel_eval(u)
 
         # Handle scalar input
         if u.shape[0] == 1:
             return points[0], tangents[0]
 
         return points, tangents
+
+    def _kernel_eval(self, u):
+        """
+        Points and tangents at native parameters ``u`` (n,) from the Numba
+        kernels. A weighted curve runs them on its homogeneous control
+        points and divides.
+        """
+        if self._hw is None:
+            return (
+                _evaluate_bspline_curve(u, self._kv, self._cv_f64, self.degree),
+                _evaluate_bspline_curve_derivative(u, self._kv, self._cv_f64, self.degree),
+            )
+        return _rational(
+            _evaluate_bspline_curve(u, self._kv, self._hw, self.degree),
+            _evaluate_bspline_curve_derivative(u, self._kv, self._hw, self.degree),
+        )
 
     def compute_fast(self, u):
         """
@@ -558,10 +599,7 @@ class NurbsCurveData(ShapeData):
 
         u = np.atleast_1d(u).astype(np.float64)
 
-        points = _evaluate_bspline_curve(u, self._kv, self._cv_f64, self.degree)
-        tangents = _evaluate_bspline_curve_derivative(
-            u, self._kv, self._cv_f64, self.degree
-        )
+        points, tangents = self._kernel_eval(u)
 
         if u.shape[0] == 1:
             points   = points[0]
@@ -655,12 +693,7 @@ class NurbsCurveData(ShapeData):
         if out_high.any():
             u_end = np.array([self._max_param], dtype=np.float64)
             if self.use_numba:
-                p_end = _evaluate_bspline_curve(
-                    u_end, self._kv, self._cv_f64, self.degree
-                )[0]
-                t_end = _evaluate_bspline_curve_derivative(
-                    u_end, self._kv, self._cv_f64, self.degree
-                )[0]
+                p_end, t_end = (part[0] for part in self._kernel_eval(u_end))
             else:
                 p_end = self._spl(u_end)[0]
                 t_end = self._der(u_end)[0]
@@ -674,12 +707,7 @@ class NurbsCurveData(ShapeData):
         if out_low.any():
             u_start = np.array([0.0], dtype=np.float64)
             if self.use_numba:
-                p_start = _evaluate_bspline_curve(
-                    u_start, self._kv, self._cv_f64, self.degree
-                )[0]
-                t_start = _evaluate_bspline_curve_derivative(
-                    u_start, self._kv, self._cv_f64, self.degree
-                )[0]
+                p_start, t_start = (part[0] for part in self._kernel_eval(u_start))
             else:
                 p_start = self._spl(u_start)[0]
                 t_start = self._der(u_start)[0]
@@ -716,6 +744,7 @@ class NurbsCurveData(ShapeData):
         self._geometry         = None
         self._count            = None
         self._cv_f64           = None
+        self._hw               = None
         self._arc_length_table = None
         self._u_table          = None
         self._total_length     = None
@@ -724,6 +753,15 @@ class NurbsCurveData(ShapeData):
         self._lo               = None
         self._hi               = None
         self._scale            = None
+
+    def _refuse_weights(self, what) -> None:
+        """Raises on a weighted curve: ``what`` solves control points of weight 1."""
+        if self.weights is not None:
+            raise ValueError(
+                f"NurbsCurveData.{what}: the curve holds weights, which {what}() "
+                f"does not solve with; set weights to None to {what} it as a "
+                "curve whose weights are all 1"
+            )
 
     def _refresh(self) -> None:
         """Rebuilds every cache from the current fields."""
@@ -787,7 +825,8 @@ class NurbsCurveData(ShapeData):
             An empty curve given any argument; a count of -1 (only fit()
             picks a count) or too small for the degree and stacks; a
             degree below 1; a bad ``collapse`` or ``knots``; any stack on
-            a periodic curve.
+            a periodic curve; a curve that holds ``weights``, given any
+            argument.
 
         Example
         -------
@@ -804,6 +843,7 @@ class NurbsCurveData(ShapeData):
             self._refresh()
             return 0.0
 
+        self._refuse_weights("rebuild")
         if len(self.points) == 0:
             raise ValueError("an empty curve has nothing to rebuild; fit() it first")
         if count is not None and _as_int(count, "count") == -1:
@@ -988,9 +1028,7 @@ class NurbsCurveData(ShapeData):
 
         # ALWAYS rebuild scipy spline AND cv cache (fixes stale cache issue
         # after direct mutation of self.points).
-        self._cv_f64 = self.cv.astype(np.float64)
-        self._spl    = BSpline(self._kv, self._cv_f64, self.degree)
-        self._der    = self._spl.derivative()
+        self._set_spline()
 
         # Rebuild arc-length table if uniform parameterization is enabled
         if self.uniform:
@@ -1234,7 +1272,8 @@ class NurbsCurveData(ShapeData):
             at least ``degree`` on a periodic one); a point at the same
             position as the one before it (stack end control points with
             ``collapse`` instead); a count too small for the degree and
-            stacks; a bad ``collapse``; any stack on a periodic curve.
+            stacks; a bad ``collapse``; any stack on a periodic curve; a
+            curve that holds ``weights``.
 
         Notes
         -----
@@ -1268,6 +1307,7 @@ class NurbsCurveData(ShapeData):
         >>> spine.get_collapsed_points()
         [[0, 1], [10, 11]]
         """
+        self._refuse_weights("fit")
         points = np.asarray(points, dtype=np.float64)
         if points.ndim != 2:
             raise ValueError(
@@ -1607,9 +1647,12 @@ class NurbsCurveData(ShapeData):
         # The partitions are fixed: the repair fit() runs moves each control
         # point to its closest spot between its neighbours' u (open ends stay
         # on the ends, periodic u stay unwrapped)
-        u = ordered_closest_params(
-            self.points[:n], u, self._kv, self._cv_f64, self.degree, self.periodic
-        )
+        # (a weighted curve keeps Newton's answer: the repair searches a
+        # curve whose weights are all 1)
+        if self._hw is None:
+            u = ordered_closest_params(
+                self.points[:n], u, self._kv, self._cv_f64, self.degree, self.periodic
+            )
 
         if self.periodic:
             u = u % self._max_param
@@ -1693,6 +1736,44 @@ class NurbsCurveData(ShapeData):
 
         return u
 
+    def _closest_weighted(self, queries):
+        """
+        Closest spots on a weighted curve: the nearest of 32 samples a span,
+        then Newton's method between that sample's neighbours. A spot Newton
+        leaves farther than its sample goes back to the sample.
+
+        Parameters
+        ----------
+        queries : np.ndarray
+            Points to project (n, dims).
+
+        Returns
+        -------
+        np.ndarray
+            Native parameters (n,), within [0, spans].
+        """
+        spans = max(int(self._max_param), 1)
+        grid  = np.linspace(0.0, self._max_param, 32 * spans + 1)
+        step  = grid[1] - grid[0]
+        if self.periodic:
+            grid = grid[:-1]
+
+        start = grid[cKDTree(self._spl(grid)).query(queries)[1]]
+        lower, upper = start - step, start + step
+        if not self.periodic:
+            lower = np.maximum(lower, 0.0)
+            upper = np.minimum(upper, self._max_param)
+
+        u = self._partitioned_newton(
+            queries, start.copy(), lower, upper, np.ones(len(start), dtype=bool)
+        )
+        if self.periodic:
+            u = u % self._max_param
+
+        moved  = np.linalg.norm(self._spl(u) - queries, axis=1)
+        stayed = np.linalg.norm(self._spl(start) - queries, axis=1)
+        return np.where(moved <= stayed, u, start)
+
     def get_length(self, fast: bool = True, samples: int = 100) -> float:
         """
         Approximates the length of the curve.
@@ -1758,7 +1839,9 @@ class NurbsCurveData(ShapeData):
         Returns
         -------
         np.ndarray
-            Basis function values (n_samples, n_control_points).
+            Basis function values (n_samples, n_control_points). On a
+            curve that holds ``weights`` they are the rational ones: each
+            control point's share of the weighted sum.
         """
         if self._max_param is None:
             self._init_bspline()
@@ -1781,6 +1864,11 @@ class NurbsCurveData(ShapeData):
             b = _compute_basis_parallel(u, self._kv, self.cv.shape[0], self.degree)
         else:
             b = compute_basis(u, self._kv, self.cv.shape[0], self.degree)
+
+        # a weighted curve: each control point's share of the weighted sum
+        if self._hw is not None:
+            b = b * self._hw[:, -1]
+            b = b / b.sum(axis=1, keepdims=True)
 
         # reformat for skin weights
         if collapse and self.periodic:
@@ -1816,6 +1904,11 @@ class NurbsCurveData(ShapeData):
         The search runs in parallel with Numba, use_numba or not;
         ``use_numba=False`` evaluates the points, tangents and basis there
         with scipy.
+
+        A curve that holds ``weights`` is searched another way: the nearest
+        of 32 samples a span, then Newton's method between that sample's
+        neighbours. Its spots are found to Newton's tolerance, and a tie
+        goes to either spot.
 
         Parameters
         ----------
@@ -1874,15 +1967,18 @@ class NurbsCurveData(ShapeData):
         # Each query's closest spot, native; ties go to the spot first in the
         # user's range, which a registered periodic curve starts at its offset
         origin = self._offset if self.registered and self.periodic else 0.0
-        u, points, tangents, distances = _closest_points(
-            queries,
-            self._kv.astype(np.float64),
-            self._cv_f64,
-            self.degree,
-            self.periodic,
-            float(origin),
-        )
-        if not self.use_numba:
+        if self._hw is None:
+            u, points, tangents, distances = _closest_points(
+                queries,
+                self._kv.astype(np.float64),
+                self._cv_f64,
+                self.degree,
+                self.periodic,
+                float(origin),
+            )
+        else:
+            u = self._closest_weighted(queries)
+        if self._hw is not None or not self.use_numba:
             points   = self._spl(u)
             tangents = self._der(u)
 
@@ -1914,6 +2010,86 @@ class NurbsCurveData(ShapeData):
 
 class NurbsCurveList(DataList[NurbsCurveData]):
     """A list of :class:`NurbsCurveData`, as a file holds its curves."""
+
+
+# --------------------------------- Weights ---------------------------------- #
+
+
+class _RationalSpline:
+    """
+    A rational B-spline curve behind scipy BSpline's calls.
+
+    ``hw`` holds the homogeneous control points (C, dims + 1): each control
+    point times its weight, then the weight. Calling it gives the curve's
+    points (..., dims), or its ``order``-th derivative, at most the second,
+    by the quotient rule.
+    """
+
+    def __init__(self, kv, hw, degree, order=0):
+        if order > 2:
+            raise NotImplementedError("a rational curve's derivatives stop at the second")
+        spline      = BSpline(kv, hw, degree)
+        self.t      = kv
+        self.k      = degree
+        self._hw    = hw
+        self._order = order
+        self._parts = [spline] + [spline.derivative(n) for n in range(1, order + 1)]
+
+    def __call__(self, u):
+        whole  = self._parts[0](u)
+        weight = whole[..., -1:]
+        point  = whole[..., :-1] / weight
+        if self._order == 0:
+            return point
+
+        once  = self._parts[1](u)
+        first = (once[..., :-1] - once[..., -1:] * point) / weight
+        if self._order == 1:
+            return first
+
+        twice = self._parts[2](u)
+        return (
+            twice[..., :-1] - 2.0 * once[..., -1:] * first - twice[..., -1:] * point
+        ) / weight
+
+    def derivative(self, nu=1):
+        return _RationalSpline(self.t, self._hw, self.k, self._order + nu)
+
+
+def _rational(whole, slope):
+    """
+    Points and first derivatives of a rational curve or surface from its
+    homogeneous ones (..., dims + 1): the weighted sum and its slope, the
+    weight last.
+    """
+    weight = whole[..., -1:]
+    points = whole[..., :-1] / weight
+    return points, (slope[..., :-1] - slope[..., -1:] * points) / weight
+
+
+def _checked_weights(weights, shape):
+    """
+    The weights of a rational curve or surface as float64: one per control
+    point (``shape``), finite and above zero.
+    """
+    weights = np.asarray(weights, dtype=np.float64)
+    if weights.shape != tuple(shape):
+        raise ValueError(
+            f"weights must hold one value per control point, shape {tuple(shape)}, "
+            f"got shape {weights.shape}"
+        )
+    if not np.isfinite(weights).all() or (weights <= 0.0).any():
+        raise ValueError("weights must be finite and above zero")
+    return weights
+
+
+def _same_weights(a, b, shape):
+    """Whether two ``weights`` fields hold the same weights; None is all ones."""
+    if a is None and b is None:
+        return True
+    a = np.ones(shape) if a is None else np.asarray(a, dtype=np.float64)
+    b = np.ones(shape) if b is None else np.asarray(b, dtype=np.float64)
+    return a.shape == b.shape and bool(np.allclose(a, b))
 
 
 # ------------------------------- Knots and fit ------------------------------- #

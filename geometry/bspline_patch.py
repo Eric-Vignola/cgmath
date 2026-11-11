@@ -3,7 +3,13 @@ from typing import Optional
 
 import numpy as np
 from cgmath.data import Array, Data, DataList
-from cgmath.geometry.bspline import CurveSampleData, _knot_vector
+from cgmath.geometry.bspline import (
+    CurveSampleData,
+    _checked_weights,
+    _knot_vector,
+    _rational,
+    _same_weights,
+)
 from cgmath.geometry.utils import compute_basis
 from cgmath.hierarchy import ShapeData
 from cgmath.geometry.utils._numba._bspline import (
@@ -167,6 +173,15 @@ class NurbsSurfaceData(ShapeData):
         more creases the patch there (it is only C0). Cleared by
         ``open_u()`` / ``close_u()`` (``open_v()`` / ``close_v()``); call
         ``invalidate()`` after changing them by hand.
+    weights : np.ndarray, optional
+        One weight per control point (nu, nv), float64, finite and above
+        zero: the surface is then rational, each control point pulling it
+        by its weight. None (default) is every weight 1. ``points`` stay
+        the control points themselves, not multiplied by their weights.
+        ``evaluate()``, ``compute()``, ``basis()``, the lengths and the
+        area follow the weights; ``sample()`` and ``raycast()`` refuse a
+        surface that holds them. Call ``invalidate()`` after changing them
+        by hand.
     """
 
     points:             Array(np.float64, "Nu", "Nv", "D")
@@ -182,6 +197,7 @@ class NurbsSurfaceData(ShapeData):
     arc_length_samples: int = field(default=1000)
     knots_u:            Optional[Array(np.float64, "K")] = None
     knots_v:            Optional[Array(np.float64, "K")] = None
+    weights:            Optional[Array(np.float64, "Nu", "Nv")] = None
 
     _kv_u               = None
     _kv_v               = None
@@ -193,6 +209,7 @@ class NurbsSurfaceData(ShapeData):
     _max_param_v        = None
     _spl                = None  # scipy.interpolate.NdBSpline (real scipy fallback)
     _cv_f64             = None  # cached float64 control vertices with periodic wrap
+    _hw                 = None  # weighted surface: the control vertices times their weight, then the weight
     _arc_length_table_u = None
     _u_table_u          = None
     _total_length_u     = None
@@ -224,6 +241,7 @@ class NurbsSurfaceData(ShapeData):
         "_max_param_v",
         "_spl",
         "_cv_f64",
+        "_hw",
         "_arc_length_table_u",
         "_u_table_u",
         "_total_length_u",
@@ -268,6 +286,7 @@ class NurbsSurfaceData(ShapeData):
             and np.allclose(self.kv_u, other.kv_u)
             and self.kv_v.shape == other.kv_v.shape
             and np.allclose(self.kv_v, other.kv_v)
+            and _same_weights(self.weights, other.weights, self.points.shape[:2])
         )
 
     # ------------------------------------------------------------------ #
@@ -347,24 +366,81 @@ class NurbsSurfaceData(ShapeData):
         else:
             self._offset_v = self._max_param_v + np.mean(self._kv_v[1 : self.degree_v + 1])
 
-        # Cache float64 control vertices (with periodic wrap) for hot paths
-        self._cv_f64 = self.cv.astype(np.float64)
-
-        # Real scipy fallback via NdBSpline. Only initialized when scipy is
-        # new enough to provide it (>= 1.13). Used when use_numba=False.
-        if _NdBSpline is not None:
-            self._spl = _NdBSpline(
-                (self._kv_u, self._kv_v),
-                self._cv_f64,
-                (self.degree_u, self.degree_v),
-            )
-        else:
-            self._spl = None
+        self._set_spline()
 
         if self.uniform_u:
             self._build_arc_length_table_u()
         if self.uniform_v:
             self._build_arc_length_table_v()
+
+    def _set_spline(self) -> None:
+        """
+        Builds the evaluators from the current control points and weights.
+
+        A surface that holds ``weights`` is evaluated on its homogeneous
+        control points, each one times its weight with the weight as one
+        more coordinate, and divided by that coordinate; it has no scipy
+        evaluator.
+        """
+        # Cache float64 control vertices (with periodic wrap) for hot paths
+        self._cv_f64 = self.cv.astype(np.float64)
+        self._hw     = None
+        self._spl    = None
+
+        if self.weights is not None:
+            weights = _checked_weights(self.weights, self.points.shape[:2])
+            weights = weights[np.ix_(self._geometry_u, self._geometry_v)][..., None]
+            self._hw = np.ascontiguousarray(
+                np.concatenate([self._cv_f64 * weights, weights], axis=2)
+            )
+
+        # Real scipy fallback via NdBSpline. Only initialized when scipy is
+        # new enough to provide it (>= 1.13). Used when use_numba=False.
+        elif _NdBSpline is not None:
+            self._spl = _NdBSpline(
+                (self._kv_u, self._kv_v),
+                self._cv_f64,
+                (self.degree_u, self.degree_v),
+            )
+
+    def _points_at(self, u, v):
+        """
+        Points at native (u, v) (n,) from the Numba kernel. A weighted
+        surface runs it on its homogeneous control points and divides.
+        """
+        if self._hw is None:
+            return _evaluate_bspline_surface(
+                u, v, self._kv_u, self._kv_v, self._cv_f64, self.degree_u, self.degree_v
+            )
+        whole = _evaluate_bspline_surface(
+            u, v, self._kv_u, self._kv_v, self._hw, self.degree_u, self.degree_v
+        )
+        return whole[:, :-1] / whole[:, -1:]
+
+    def _derivs_at(self, u, v):
+        """
+        Points and both partial derivatives at native (u, v) (n,) from the
+        Numba kernel. A weighted surface runs it on its homogeneous control
+        points and divides, the derivatives by the quotient rule.
+        """
+        if self._hw is None:
+            return _evaluate_bspline_surface_derivatives(
+                u, v, self._kv_u, self._kv_v, self._cv_f64, self.degree_u, self.degree_v
+            )
+        whole, slope_u, slope_v = _evaluate_bspline_surface_derivatives(
+            u, v, self._kv_u, self._kv_v, self._hw, self.degree_u, self.degree_v
+        )
+        points, tangents_u = _rational(whole, slope_u)
+        return points, tangents_u, _rational(whole, slope_v)[1]
+
+    def _refuse_weights(self, what) -> None:
+        """Raises on a weighted surface: ``what`` searches one whose weights are all 1."""
+        if self.weights is not None:
+            raise ValueError(
+                f"NurbsSurfaceData.{what}: the surface holds weights, which {what}() "
+                "does not search; set weights to None for the surface its control "
+                "points give at weight 1"
+            )
 
     def _build_arc_length_table_u(self) -> None:
         """Build arc-length table for U using a mid-V iso-curve."""
@@ -382,15 +458,7 @@ class NurbsSurfaceData(ShapeData):
             eval_u          = self._u_table_u
 
         eval_v = np.full(n, v_mid, dtype=np.float64)
-        pts = _evaluate_bspline_surface(
-            eval_u,
-            eval_v,
-            self._kv_u,
-            self._kv_v,
-            self._cv_f64,
-            self.degree_u,
-            self.degree_v,
-        )
+        pts    = self._points_at(eval_u, eval_v)
 
         diffs                        = np.diff(pts, axis=0)
         seg_len                      = np.linalg.norm(diffs, axis=1)
@@ -416,15 +484,7 @@ class NurbsSurfaceData(ShapeData):
             eval_v          = self._u_table_v
 
         eval_u = np.full(n, u_mid, dtype=np.float64)
-        pts = _evaluate_bspline_surface(
-            eval_u,
-            eval_v,
-            self._kv_u,
-            self._kv_v,
-            self._cv_f64,
-            self.degree_u,
-            self.degree_v,
-        )
+        pts    = self._points_at(eval_u, eval_v)
 
         diffs                        = np.diff(pts, axis=0)
         seg_len                      = np.linalg.norm(diffs, axis=1)
@@ -870,26 +930,10 @@ class NurbsSurfaceData(ShapeData):
             u_eval = u % max_param if periodic else u
             if iso_axis == "u":
                 iso = np.full_like(u_eval, iso_value)
-                C, Cp, _ = _evaluate_bspline_surface_derivatives(
-                    u_eval,
-                    iso,
-                    self._kv_u,
-                    self._kv_v,
-                    self._cv_f64,
-                    self.degree_u,
-                    self.degree_v,
-                )
+                C, Cp, _ = self._derivs_at(u_eval, iso)
             else:
                 iso = np.full_like(u_eval, iso_value)
-                C, _, Cp = _evaluate_bspline_surface_derivatives(
-                    iso,
-                    u_eval,
-                    self._kv_u,
-                    self._kv_v,
-                    self._cv_f64,
-                    self.degree_u,
-                    self.degree_v,
-                )
+                C, _, Cp = self._derivs_at(iso, u_eval)
             diff  = C - queries
             f     = np.einsum("ij,ij->i", diff, Cp)
             fp    = np.einsum("ij,ij->i", Cp, Cp)
@@ -990,12 +1034,10 @@ class NurbsSurfaceData(ShapeData):
             if self.periodic_v:
                 v = v % self._max_param_v
 
-        u = np.atleast_1d(u).astype(np.float64)
-        v = np.atleast_1d(v).astype(np.float64)
+        u   = np.atleast_1d(u).astype(np.float64)
+        v   = np.atleast_1d(v).astype(np.float64)
 
-        pts = _evaluate_bspline_surface(
-            u, v, self._kv_u, self._kv_v, self._cv_f64, self.degree_u, self.degree_v
-        )
+        pts = self._points_at(u, v)
 
         if scalar and pts.shape[0] == 1:
             return pts[0]
@@ -1083,15 +1125,7 @@ class NurbsSurfaceData(ShapeData):
         v = np.atleast_1d(v).astype(np.float64)
 
         if self.use_numba:
-            pts, tu, tv = _evaluate_bspline_surface_derivatives(
-                u,
-                v,
-                self._kv_u,
-                self._kv_v,
-                self._cv_f64,
-                self.degree_u,
-                self.degree_v,
-            )
+            pts, tu, tv = self._derivs_at(u, v)
         elif self._spl is not None:
             # Real scipy fallback via NdBSpline analytical derivatives
             xi  = np.column_stack([u, v])
@@ -1100,15 +1134,7 @@ class NurbsSurfaceData(ShapeData):
             tv  = np.asarray(self._spl(xi, nu=(0, 1)))
         else:
             # No scipy NdBSpline available; fall back to numba kernel
-            pts, tu, tv = _evaluate_bspline_surface_derivatives(
-                u,
-                v,
-                self._kv_u,
-                self._kv_v,
-                self._cv_f64,
-                self.degree_u,
-                self.degree_v,
-            )
+            pts, tu, tv = self._derivs_at(u, v)
 
         # derivatives with respect to the knots' parameters, as in Maya
         tu, tv = self._knot_tangents(u, v, tu, tv)
@@ -1172,9 +1198,7 @@ class NurbsSurfaceData(ShapeData):
         u = np.atleast_1d(u).astype(np.float64)
         v = np.atleast_1d(v).astype(np.float64)
 
-        pts, tu, tv = _evaluate_bspline_surface_derivatives(
-            u, v, self._kv_u, self._kv_v, self._cv_f64, self.degree_u, self.degree_v
-        )
+        pts, tu, tv = self._derivs_at(u, v)
 
         # derivatives with respect to the knots' parameters, as in Maya
         tu, tv = self._knot_tangents(u, v, tu, tv)
@@ -1317,6 +1341,8 @@ class NurbsSurfaceData(ShapeData):
         -------
         np.ndarray
             Basis values (n, cu * cv) or (n, count_u * count_v) when collapsed.
+            On a surface that holds ``weights`` they are the rational ones:
+            each control point's share of the weighted sum.
         """
         if self._max_param_u is None:
             self._init_bspline()
@@ -1347,6 +1373,11 @@ class NurbsSurfaceData(ShapeData):
             bv = compute_basis(v, self._kv_v, cv_n, self.degree_v)
 
         b = np.einsum("ki,kj->kij", bu, bv).reshape(u.shape[0], cu * cv_n)
+
+        # a weighted surface: each control point's share of the weighted sum
+        if self._hw is not None:
+            b = b * self._hw[..., -1].reshape(-1)
+            b = b / b.sum(axis=1, keepdims=True)
 
         if collapse and (self.periodic_u or self.periodic_v):
             n_u = self._count_u
@@ -1431,6 +1462,7 @@ class NurbsSurfaceData(ShapeData):
             range with knots), or [0, 1] when uniform; tangents the partial
             derivatives with respect to them, as ``compute()`` gives.
         """
+        self._refuse_weights("sample")
         if self._max_param_u is None:
             self._init_bspline()
 
@@ -1463,15 +1495,7 @@ class NurbsSurfaceData(ShapeData):
         u_flat = uu.ravel().astype(np.float64)
         v_flat = vv.ravel().astype(np.float64)
 
-        pts_coarse = _evaluate_bspline_surface(
-            u_flat,
-            v_flat,
-            self._kv_u,
-            self._kv_v,
-            self._cv_f64,
-            self.degree_u,
-            self.degree_v,
-        )
+        pts_coarse = self._points_at(u_flat, v_flat)
 
         # The 8 nearest samples seed each query, nearest first (found on
         # every core): one sheet of a patch that folds back may hold the
@@ -2395,6 +2419,7 @@ class NurbsSurfaceData(ShapeData):
         crosses the patch more than once gets the hit its search lands on,
         not always the first along it.
         """
+        self._refuse_weights("raycast")
         if self._max_param_u is None:
             self._init_bspline()
 
@@ -2451,17 +2476,9 @@ class NurbsSurfaceData(ShapeData):
             0, self._max_param_v, nv_coarse, endpoint=not self.periodic_v
         )
         uu, vv = np.meshgrid(u_lin, v_lin, indexing="ij")
-        grid_u = np.ascontiguousarray(uu.ravel(), dtype=np.float64)
-        grid_v = np.ascontiguousarray(vv.ravel(), dtype=np.float64)
-        grid_pts = _evaluate_bspline_surface(
-            grid_u,
-            grid_v,
-            self._kv_u,
-            self._kv_v,
-            self._cv_f64,
-            self.degree_u,
-            self.degree_v,
-        )
+        grid_u   = np.ascontiguousarray(uu.ravel(), dtype=np.float64)
+        grid_v   = np.ascontiguousarray(vv.ravel(), dtype=np.float64)
+        grid_pts = self._points_at(grid_u, grid_v)
         grid_pts = np.ascontiguousarray(grid_pts, dtype=np.float64)
 
         # --- forward cast ---
@@ -2526,15 +2543,7 @@ class NurbsSurfaceData(ShapeData):
         # the corresponding outputs are then overwritten below.
         safe_u = np.where(hit_out, u_out, 0.0).astype(np.float64)
         safe_v = np.where(hit_out, v_out, 0.0).astype(np.float64)
-        points, tang_u, tang_v = _evaluate_bspline_surface_derivatives(
-            safe_u,
-            safe_v,
-            self._kv_u,
-            self._kv_v,
-            self._cv_f64,
-            self.degree_u,
-            self.degree_v,
-        )
+        points, tang_u, tang_v = self._derivs_at(safe_u, safe_v)
 
         # derivatives with respect to the knots' parameters, as in Maya
         tang_u, tang_v = self._knot_tangents(safe_u, safe_v, tang_u, tang_v)
@@ -2591,6 +2600,7 @@ class NurbsSurfaceData(ShapeData):
         self._max_param_v        = None
         self._spl                = None
         self._cv_f64             = None
+        self._hw                 = None
         self._arc_length_table_u = None
         self._u_table_u          = None
         self._total_length_u     = None
@@ -2628,16 +2638,8 @@ class NurbsSurfaceData(ShapeData):
             return
 
         # ALWAYS refresh cached control vertices (fixes stale-points issue
-        # after direct mutation of self.points).
-        self._cv_f64 = self.cv.astype(np.float64)
-
-        # Rebuild scipy NdBSpline if available
-        if _NdBSpline is not None:
-            self._spl = _NdBSpline(
-                (self._kv_u, self._kv_v),
-                self._cv_f64,
-                (self.degree_u, self.degree_v),
-            )
+        # after direct mutation of self.points) and the evaluators on them
+        self._set_spline()
 
         if self.uniform_u:
             self._build_arc_length_table_u()
@@ -2796,15 +2798,7 @@ class NurbsSurfaceData(ShapeData):
             def _speed(uu):
                 u_arr = np.atleast_1d(uu).astype(np.float64)
                 v_arr = np.full_like(u_arr, v_mid)
-                _, su, _ = _evaluate_bspline_surface_derivatives(
-                    u_arr,
-                    v_arr,
-                    self._kv_u,
-                    self._kv_v,
-                    self._cv_f64,
-                    self.degree_u,
-                    self.degree_v,
-                )
+                _, su, _ = self._derivs_at(u_arr, v_arr)
                 return float(np.linalg.norm(su[0]))
 
             return float(_si.quad(_speed, 0, self._max_param_u)[0])
@@ -2814,15 +2808,7 @@ class NurbsSurfaceData(ShapeData):
         v_arr = np.full(n, v_mid, dtype=np.float64)
         if self.periodic_u:
             u_lin = u_lin % self._max_param_u
-        pts = _evaluate_bspline_surface(
-            u_lin.astype(np.float64),
-            v_arr,
-            self._kv_u,
-            self._kv_v,
-            self._cv_f64,
-            self.degree_u,
-            self.degree_v,
-        )
+        pts = self._points_at(u_lin.astype(np.float64), v_arr)
         if self.periodic_u:
             pts = np.concatenate([pts, pts[:1]], axis=0)
         d = np.diff(pts, axis=0)
@@ -2860,15 +2846,7 @@ class NurbsSurfaceData(ShapeData):
             def _speed(vv):
                 v_arr = np.atleast_1d(vv).astype(np.float64)
                 u_arr = np.full_like(v_arr, u_mid)
-                _, _, sv = _evaluate_bspline_surface_derivatives(
-                    u_arr,
-                    v_arr,
-                    self._kv_u,
-                    self._kv_v,
-                    self._cv_f64,
-                    self.degree_u,
-                    self.degree_v,
-                )
+                _, _, sv = self._derivs_at(u_arr, v_arr)
                 return float(np.linalg.norm(sv[0]))
 
             return float(_si.quad(_speed, 0, self._max_param_v)[0])
@@ -2878,15 +2856,7 @@ class NurbsSurfaceData(ShapeData):
         u_arr = np.full(n, u_mid, dtype=np.float64)
         if self.periodic_v:
             v_lin = v_lin % self._max_param_v
-        pts = _evaluate_bspline_surface(
-            u_arr,
-            v_lin.astype(np.float64),
-            self._kv_u,
-            self._kv_v,
-            self._cv_f64,
-            self.degree_u,
-            self.degree_v,
-        )
+        pts = self._points_at(u_arr, v_lin.astype(np.float64))
         if self.periodic_v:
             pts = np.concatenate([pts, pts[:1]], axis=0)
         d = np.diff(pts, axis=0)
@@ -2922,15 +2892,7 @@ class NurbsSurfaceData(ShapeData):
         u_flat = uu.ravel().astype(np.float64)
         v_flat = vv.ravel().astype(np.float64)
 
-        _, su, sv = _evaluate_bspline_surface_derivatives(
-            u_flat,
-            v_flat,
-            self._kv_u,
-            self._kv_v,
-            self._cv_f64,
-            self.degree_u,
-            self.degree_v,
-        )
+        _, su, sv = self._derivs_at(u_flat, v_flat)
 
         cross = np.cross(su, sv)
         norms = np.linalg.norm(cross, axis=1).reshape(samples, samples)
