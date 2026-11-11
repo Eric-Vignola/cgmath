@@ -10,6 +10,7 @@ import this one.
 import contextlib
 import logging
 import os
+import re
 import shutil
 import tempfile
 
@@ -35,6 +36,11 @@ NODE_TYPES = ("joint", "transform", "locator")
 # the hidden property keeping each node's place in the hierarchy's list
 ORDER_PROPERTY = "cgmath:index"
 
+# a NURBS geometry of the sdk's ASCII draft, by the name it was made under,
+# and an array of numbers inside one
+_NURBS_BLOCK = re.compile(r'Geometry: (\d+), "Geometry::(g\d+)", "(\w+)" \{')
+_NURBS_ARRAY = re.compile(r"(Points|KnotVectorU|KnotVectorV|KnotVector): \*(\d+) \{\s*a: [^}]*\}")
+
 
 def save_fbx(
     filename,
@@ -47,13 +53,15 @@ def save_fbx(
     lights         = None,
     materials      = None,
     morphs         = None,
+    curves         = None,
+    surfaces       = None,
     as_ascii: bool = False,
 ) -> None:
     """writes one of ``hierarchy``, a HierarchyData of joints and transforms,
     or ``clip``, a ClipList of ClipData over joints and transforms (one
-    ClipData is written as a ClipList of one), and ``meshes``, ``cameras``
-    and ``lights`` on their nodes, ``materials`` and ``morphs`` on their
-    meshes; binary unless ``as_ascii``
+    ClipData is written as a ClipList of one), and ``meshes``, ``cameras``,
+    ``lights``, ``curves`` and ``surfaces`` on their nodes, ``materials``
+    and ``morphs`` on their meshes; binary unless ``as_ascii``
 
     A hierarchy alone: its nodes and their own values, no take. A clip
     alone: its nodes, their static values the active take's pose at its
@@ -121,6 +129,22 @@ def save_fbx(
     mesh are refused: Maya's import deforms a mesh by its last blend shape
     deformer alone (measured).
 
+    ``curves``, a NurbsCurveList or one NurbsCurveData, and ``surfaces``, a
+    NurbsSurfaceList or one NurbsSurfaceData: each the shape of the
+    transform its ``parent_uuid`` names, or of a new root node at identity
+    named "curve" or "surface", written as Maya's exporter writes them
+    (measured): a curve as an FbxNurbsCurve, a surface as an FbxNurbsSurface
+    with u running fastest, unnamed, holding the order, the form, open or
+    periodic, the points each once with a weight of 1, and the knots, the
+    ``knots`` held or with none the ones the shape makes for itself, with
+    one more at each end, a step past it as its neighbour's; a curve of
+    degree 1 that is not periodic and holds no knots as a polyline of an
+    FbxLine, the ones of one node as the lines of one FbxLine. A file holds
+    no ``uniform`` and no ``registered``: neither is written. The sdk's
+    Python binding sets no knot, so the NURBS shapes pass through an ASCII
+    draft in a temporary folder, its numbers replaced and read back bit for
+    bit.
+
     Refused, ValueError naming node, channel and frame, before anything is
     written: a node that is no joint, transform or locator, a transform or
     locator holding segment scale compensate or a joint orient, a shear, a
@@ -140,8 +164,12 @@ def save_fbx(
     off its bind world (Maya's skinCluster applies the node's own transform
     on top of the skin; measured); a camera or light on a joint, on a node
     holding another shape, on a node holding a rotate axis or children (the
-    turn is the node's own); a material naming no mesh, covering faces its
-    mesh does not hold or a face twice, two materials covering one face,
+    turn is the node's own); a curve or surface whose points are not 3D, on
+    a joint, or on a node holding another shape, the curves of degree 1
+    holding no knots of one node apart (Maya's exporter writes two NURBS
+    curves on one transform as an empty node; measured); a material naming
+    no mesh, covering faces its mesh does not hold or a face twice, two
+    materials covering one face,
     materials leaving faces of their mesh uncovered (a mesh is covered whole
     or not at all), a material covering the whole mesh beside another on
     it, a texture that is not (H, W, C) uint8 with 1 to 4 channels (a .fbx
@@ -154,10 +182,12 @@ def save_fbx(
     without the hierarchy and the meshes, nothing given, a hierarchy that is
     not a HierarchyData (a ClipData or a ClipList is passed as ``clip``), a
     clip that is not a ClipData or a ClipList, meshes, skins, uvs, cameras,
-    lights, materials or morphs of another class: TypeError. A texture with
-    no PIL (pillow) to encode it: ImportError.
+    lights, materials, morphs, curves or surfaces of another class:
+    TypeError. A texture with no PIL (pillow) to encode it: ImportError.
     """
     # imported here: the classes' modules import this one
+    from cgmath.geometry.bspline import NurbsCurveData, NurbsCurveList
+    from cgmath.geometry.bspline_patch import NurbsSurfaceData, NurbsSurfaceList
     from cgmath.geometry.camera import CameraData, CameraList
     from cgmath.geometry.light import LightData, LightList
     from cgmath.geometry.material import MaterialData, MaterialList
@@ -203,6 +233,16 @@ def save_fbx(
         morphs = MorphList([morphs])
     if morphs is not None and not isinstance(morphs, MorphList):
         raise TypeError(f"save_fbx: the morphs are a MorphList or a MorphData, not a {type(morphs).__name__}")
+    if isinstance(curves, NurbsCurveData):
+        curves = NurbsCurveList([curves])
+    if curves is not None and not isinstance(curves, NurbsCurveList):
+        raise TypeError(f"save_fbx: the curves are a NurbsCurveList or a NurbsCurveData, not a {type(curves).__name__}")
+    if isinstance(surfaces, NurbsSurfaceData):
+        surfaces = NurbsSurfaceList([surfaces])
+    if surfaces is not None and not isinstance(surfaces, NurbsSurfaceList):
+        raise TypeError(
+            f"save_fbx: the surfaces are a NurbsSurfaceList or a NurbsSurfaceData, not a {type(surfaces).__name__}"
+        )
     meshes    = meshes if meshes is not None and len(meshes) else None
     skins     = skins if skins is not None and len(skins) else None
     uvs       = uvs if uvs is not None and len(uvs) else None
@@ -210,6 +250,8 @@ def save_fbx(
     lights    = lights if lights is not None and len(lights) else None
     materials = materials if materials is not None and len(materials) else None
     morphs    = morphs if morphs is not None and len(morphs) else None
+    curves    = curves if curves is not None and len(curves) else None
+    surfaces  = surfaces if surfaces is not None and len(surfaces) else None
     if uvs is not None and meshes is None:
         raise TypeError("save_fbx: UV sets are written on their mesh; missing: meshes=")
     if materials is not None and meshes is None:
@@ -228,10 +270,11 @@ def save_fbx(
             f"save_fbx on {FORK}: a hierarchy given with a clip is a bind pose, which comes with skins; "
             f"pass meshes= and skins= with them, or clip= alone, or a hierarchy alone"
         )
-    if hierarchy is None and clip is None and meshes is None and cameras is None and lights is None:
+    if all(given is None for given in (hierarchy, clip, meshes, cameras, lights, curves, surfaces)):
         raise TypeError(
             "save_fbx takes a hierarchy (a HierarchyData) or clip= (a ClipData or a ClipList), and meshes= (a MeshList "
-            "or a MeshData), cameras= (a CameraList or a CameraData), lights= (a LightList or a LightData)"
+            "or a MeshData), cameras= (a CameraList or a CameraData), lights= (a LightList or a LightData), curves= (a "
+            "NurbsCurveList or a NurbsCurveData), surfaces= (a NurbsSurfaceList or a NurbsSurfaceData)"
         )
     if FBX is None or FbxExporter is None:
         raise ImportError("fbx module not found")
@@ -262,6 +305,8 @@ def save_fbx(
         _check_materials(materials, meshes)
     if morphs is not None:
         _check_morphs(morphs, meshes)
+    if curves is not None or surfaces is not None:
+        _check_nurbs(curves, surfaces, meshes, cameras, lights, written)
 
     fbx = FBX
     with FbxExporter() as exporter, _texture_folder(materials) as folder:
@@ -317,6 +362,8 @@ def save_fbx(
                 if shape.parent_uuid not in by_uuid:
                     _index(fbx_node, len(nodes) + len(made), fbx)
                     made[shape.uuid] = fbx_node
+        if curves is not None or surfaces is not None:
+            _write_shapes(exporter, curves, surfaces, by_uuid, made, len(nodes), fbx)
         exporter.export(path=filename, as_ascii=as_ascii)
 
 
@@ -586,6 +633,52 @@ def _check_views(cameras, lights, meshes, nodes) -> None:
         warnings.warn(f"save_fbx: {', '.join(scaled)}: fbx holds no camera scale; the file holds none, as Maya's own export", stacklevel=3)
     if drops:
         warnings.warn(f"save_fbx: {', '.join(drops)}: fbx holds no dropoff; the file holds none, as Maya's own export", stacklevel=3)
+
+
+def _is_line(curve) -> bool:
+    """whether Maya's exporter writes the curve as a line: of degree 1, not
+    periodic, holding no knots"""
+    return curve.degree == 1 and not curve.periodic and curve.knots is None
+
+
+def _check_nurbs(curves, surfaces, meshes, cameras, lights, nodes) -> None:
+    """a curve or surface whose points are not 3D, on a joint, or on a node
+    of ``nodes``, the ones written, holding a mesh, a camera, a light or
+    another curve or surface: refused. The curves of degree 1 holding no
+    knots of one node are one shape, the lines of one FbxLine, as Maya's
+    exporter writes them; it writes a transform of two NURBS curves as an
+    empty node (measured)"""
+    held  = {} if nodes is None else {node.uuid: node for node in nodes}
+    on    = {}
+    lines = set()
+    for mesh in meshes or []:
+        if mesh.parent_uuid in held:
+            on[mesh.parent_uuid] = _mesh_label(mesh, held)
+    for shape in list(cameras or []) + list(lights or []):
+        if shape.parent_uuid in held:
+            on[shape.parent_uuid] = _view_label(shape, held)
+    for kind, shapes in (("curve", curves or []), ("surface", surfaces or [])):
+        for at, shape in enumerate(shapes):
+            label = f"{kind} {at} of {kind}s="
+            width = np.asarray(shape.points).shape[-1]
+            if width != 3:
+                raise ValueError(f"save_fbx: {label} holds points of {width} components; a .fbx holds 3D points")
+            node = held.get(shape.parent_uuid)
+            if node is None:
+                continue
+            if node.node_type == "joint":
+                raise ValueError(
+                    f"save_fbx: {label} sits on joint {node.name!r}; Maya's FBX holds a {kind} on a transform only"
+                )
+            line = kind == "curve" and _is_line(shape)
+            if node.uuid in on and not (line and node.uuid in lines):
+                raise ValueError(
+                    f"save_fbx: {on[node.uuid]} and {label} sit on node {node.name!r}; a node holds one shape, or "
+                    f"the curves of degree 1 holding no knots as the lines of one"
+                )
+            on[node.uuid] = label
+            if line:
+                lines.add(node.uuid)
 
 
 def _pil():
@@ -1260,6 +1353,171 @@ def _write_light(exporter, light, node, world):
         shape.OuterAngle.Set(float(light.cone_angle) + 2.0 * float(light.penumbra_angle))
     node.SetNodeAttribute(shape)
     return node
+
+
+def _write_shapes(exporter, curves, surfaces, by_uuid: dict, made: dict, count: int, fbx) -> None:
+    """the curves and surfaces, each the shape of the FbxNode of ``by_uuid``
+    its ``parent_uuid`` names, or of a new root node at identity named
+    "curve" or "surface", kept in ``made`` by the shape's uuid and placed
+    after the ``count`` nodes of the hierarchy and the ones made so far: the
+    curves of degree 1 holding no knots of one node as the lines of one
+    FbxLine (:func:`_write_lines`), every other curve and every surface as a
+    NURBS shape (:func:`_write_nurbs`)"""
+    scene = exporter.scene
+    lines = {}  # the node's uuid, or the curve's own on a new node, to (the FbxNode, its lines)
+    nurbs = []
+    for kind, shapes in (("curve", curves or []), ("surface", surfaces or [])):
+        for shape in shapes:
+            fbx_node = by_uuid.get(shape.parent_uuid)
+            if fbx_node is None:
+                fbx_node = fbx.FbxNode.Create(scene, kind)
+                fbx_node.SetTransformationInheritType(fbx.FbxTransform.EInheritType.eInheritRSrs)
+                scene.GetRootNode().AddChild(fbx_node)
+                _index(fbx_node, count + len(made), fbx)
+                made[shape.uuid] = fbx_node
+            if kind == "curve" and _is_line(shape):
+                key = shape.parent_uuid if shape.parent_uuid in by_uuid else shape.uuid
+                lines.setdefault(key, (fbx_node, []))[1].append(shape)
+            else:
+                nurbs.append((kind, shape, fbx_node))
+    for fbx_node, held in lines.values():
+        _write_lines(exporter, held, fbx_node, fbx)
+    if nurbs:
+        _write_nurbs(exporter, nurbs, fbx)
+
+
+def _write_lines(exporter, lines: list, node, fbx) -> None:
+    """the curves of ``lines``, each of degree 1 holding no knots, as the
+    lines of one unnamed FbxLine on ``node``, as Maya's exporter writes the
+    curves of degree 1 of a transform (measured): their points one after
+    another, each line ending at its last point"""
+    shape  = fbx.FbxLine.Create(exporter.scene, "")
+    points = np.concatenate([np.asarray(line.points, dtype=np.float64) for line in lines], axis=0).tolist()
+    shape.InitControlPoints(len(points))
+    shape.SetIndexArraySize(len(points))
+    for index, point in enumerate(points):
+        shape.SetControlPointAt(fbx.FbxVector4(*point, 1.0), index)
+        shape.SetPointIndexAt(index, index)
+    end = -1
+    for line in lines:
+        end += len(line.points)
+        shape.AddEndPoint(end)
+    node.SetNodeAttribute(shape)
+
+
+def _fbx_knots(held, computed) -> list:
+    """the knots fbx holds for a shape: ``held``, its ``knots``, or for None
+    ``computed``, the ones it makes for itself, and one more at each end, a
+    step past it as its neighbour's, as Maya's exporter writes them
+    (measured)"""
+    knots = np.asarray(computed if held is None else held, dtype=np.float64)
+    return [2.0 * knots[0] - knots[1], *knots.tolist(), 2.0 * knots[-1] - knots[-2]]
+
+
+def _fbx_points(points) -> list:
+    """x, y, z and a weight of 1 a point, flat, as fbx lists a NURBS shape's
+    control points"""
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    return np.concatenate([points, np.ones((len(points), 1))], axis=1).reshape(-1).tolist()
+
+
+def _write_nurbs(exporter, held: list, fbx) -> None:
+    """the NURBS curves and surfaces of ``held``, each ("curve" or
+    "surface", the shape, its FbxNode), as an unnamed FbxNurbsCurve or
+    FbxNurbsSurface on its node. The sdk's Python binding sets no knot, so
+    the shapes go through a text: made in a scene of their own with the
+    order, form and point count that give each array its length, written as
+    ASCII to a temporary folder, their points and knots replaced in the text
+    by the repr of each float, which reads back bit for bit, the text read
+    into another scene, and its geometries moved to the exporter's scene,
+    onto their nodes. A surface's points run u fastest"""
+    from cgmath.formats._fbx_io import import_scene, media_folder
+
+    manager = exporter.manager
+    # an ASCII path: the sdk takes no other
+    folder = media_folder()
+    if folder is None:
+        folder = tempfile.mkdtemp(prefix="cgmath_fbx_nurbs_")
+    draft  = fbx.FbxScene.Create(manager, "")
+    loaded = None
+    try:
+        arrays = {}
+        for at, (kind, shape, _) in enumerate(held):
+            tag = f"g{at}"
+            if kind == "curve":
+                forms    = fbx.FbxNurbsCurve.EType
+                geometry = fbx.FbxNurbsCurve.Create(draft, tag)
+                geometry.SetOrder(shape.degree + 1)
+                geometry.InitControlPoints(len(shape.points), forms.ePeriodic if shape.periodic else forms.eOpen)
+                arrays[tag] = {"Points": _fbx_points(shape.points), "KnotVector": _fbx_knots(shape.knots, shape.kv)}
+            else:
+                forms    = fbx.FbxNurbsSurface.EType
+                points   = np.asarray(shape.points, dtype=np.float64)
+                geometry = fbx.FbxNurbsSurface.Create(draft, tag)
+                geometry.SetOrder(shape.degree_u + 1, shape.degree_v + 1)
+                geometry.InitControlPoints(
+                    points.shape[0],
+                    forms.ePeriodic if shape.periodic_u else forms.eOpen,
+                    points.shape[1],
+                    forms.ePeriodic if shape.periodic_v else forms.eOpen,
+                )
+                geometry.SetStep(1, 1)
+                arrays[tag] = {
+                    "Points":      _fbx_points(points.transpose(1, 0, 2)),
+                    "KnotVectorU": _fbx_knots(shape.knots_u, shape.kv_u),
+                    "KnotVectorV": _fbx_knots(shape.knots_v, shape.kv_v),
+                }
+            holder = fbx.FbxNode.Create(draft, f"holder_{tag}")
+            holder.SetNodeAttribute(geometry)
+            draft.GetRootNode().AddChild(holder)
+
+        path   = os.path.join(folder, "draft.fbx")
+        writer = fbx.FbxExporter.Create(manager, "")
+        try:
+            if not writer.Initialize(path, exporter._get_acsii_type(), manager.GetIOSettings()) or not writer.Export(draft):
+                raise RuntimeError(f"save_fbx: no draft of the NURBS shapes: {writer.GetStatus().GetErrorString()}")
+        finally:
+            writer.Destroy()
+        with open(path, "r", newline="", encoding="latin-1") as handle:
+            text = handle.read()
+        starts = [(match.start(), match.group(2)) for match in _NURBS_BLOCK.finditer(text)]
+        if sorted(tag for _, tag in starts) != sorted(arrays):
+            raise RuntimeError(f"save_fbx: the draft of the NURBS shapes holds {len(starts)} of {len(arrays)}")
+        pieces, last = [], 0
+        for index, (start, tag) in enumerate(starts):
+            end = starts[index + 1][0] if index + 1 < len(starts) else text.find("\n\tModel:", start)
+            end = len(text) if end < 0 else end
+
+            def swap(match, values=arrays[tag]):
+                row = values[match.group(1)]
+                if int(match.group(2)) != len(row):
+                    raise RuntimeError(
+                        f"save_fbx: the sdk holds {match.group(2)} numbers as a NURBS shape's {match.group(1)}, where "
+                        f"the shape holds {len(row)}"
+                    )
+                return f"{match.group(1)}: *{len(row)} {{\n\t\t\ta: {','.join(repr(float(x)) for x in row)}\n\t\t}}"
+
+            pieces += [text[last:start], _NURBS_ARRAY.sub(swap, text[start:end])]
+            last = end
+        pieces.append(text[last:])
+        path = os.path.join(folder, "shapes.fbx")
+        with open(path, "w", newline="", encoding="latin-1") as handle:
+            handle.write("".join(pieces))
+
+        loaded = import_scene(manager, path, fbx)
+        found  = {str(loaded.GetGeometry(i).GetName()): loaded.GetGeometry(i) for i in range(loaded.GetGeometryCount())}
+        for at, (_, _, fbx_node) in enumerate(held):
+            geometry = found[f"g{at}"]
+            geometry.SetName("")
+            geometry.GetNode(0).RemoveNodeAttribute(geometry)
+            loaded.DisconnectSrcObject(geometry)
+            exporter.scene.ConnectSrcObject(geometry)
+            fbx_node.SetNodeAttribute(geometry)
+    finally:
+        draft.Destroy()
+        if loaded is not None:
+            loaded.Destroy()
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def _write_skin(exporter, mesh_node, shape, skin, hierarchy, nodes, at) -> None:

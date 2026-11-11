@@ -3,12 +3,13 @@
 The r17-skeleton fork reads every node of a file as a joint (a skeleton
 node), a locator (a null drawn as a cross, as Maya's own export writes one)
 or a transform (any other: a group, or a node holding a shape, a mesh, a
-camera or a light), at their own values, a bind pose left out, or the
+curve, a surface, a camera or a light), at their own values, a bind pose left out, or the
 file's takes animating them, every animation stack a ClipData
 of one ClipList, the file's active stack the active take; each mesh as a
 MeshData on its node, each camera and light as a CameraData or LightData on
 its node, in Maya's attributes, the node turned back from fbx's camera and
-light axes to Maya's,
+light axes to Maya's, each NURBS curve and surface as a NurbsCurveData or a
+NurbsSurfaceData on its node,
 the mesh's UV sets and its skin naming it by uuid. Everything comes back in
 Maya's Y-up and cm, the axes and unit every cgmath value is in: a file
 whose up axis is X or Z is turned as Maya's importer turns it, one whose up
@@ -48,7 +49,8 @@ BIND_SOLVED = 1e-6
 SKIN_AGREE = 1e-5
 
 FbxContents = namedtuple(
-    "FbxContents", ("hierarchy", "clip", "meshes", "skins", "uvs", "cameras", "lights", "materials", "morphs")
+    "FbxContents",
+    ("hierarchy", "clip", "meshes", "skins", "uvs", "cameras", "lights", "materials", "morphs", "curves", "surfaces"),
 )
 
 
@@ -64,10 +66,12 @@ def load_fbx(
     morphs:    bool = True,
     cameras:   bool = True,
     lights:    bool = True,
+    curves:    bool = True,
+    surfaces:  bool = True,
     verbose:   bool = True,
 ) -> FbxContents:
     """``(hierarchy, clip, meshes, skins, uvs, cameras, lights, materials,
-    morphs)``, None where the file holds none, or where the read was told to
+    morphs, curves, surfaces)``, None where the file holds none, or where the read was told to
     leave a kind out (the flags below)
 
     ``hierarchy`` every node of the file at its own values, a mesh's node
@@ -86,7 +90,7 @@ def load_fbx(
     is named as its FbxMesh is, None for one unnamed (Maya's FBXExport
     leaves every FbxMesh unnamed). A set of no UVs, as Maya's FBXExport
     writes an empty one, is no set; ValueError for a set leaving faces
-    without UVs. A node holding a shape that is no mesh is a transform, the
+    without UVs. A node holding a shape of no kind read here is a transform, the
     shape left out; a joint is a joint whatever else it holds (Maya's FBX
     holds no mesh on one).
 
@@ -174,6 +178,24 @@ def load_fbx(
     for a target of another point count than its mesh, or one reached at a
     weight that is not above 0.
 
+    ``curves`` a NurbsCurveList and ``surfaces`` a NurbsSurfaceList, in
+    their nodes' order, each ``parent_uuid`` its node's, the points in the
+    node's space. A curve's ``knots`` are the file's less the first and the
+    last, Maya's layout (fbx holds one more at each end; measured), None
+    where they are the ones the curve computes for itself, a uniform
+    curve's; a surface's ``knots_u`` and ``knots_v`` likewise, its points
+    ``[u][v]`` (the file runs u fastest). A periodic curve or direction
+    holds its own points once, as the file does; a closed one (fbx's
+    eClosed, its last point left out) comes back open, its first point
+    again at its end. A polyline (FbxLine, as Maya writes a curve of
+    degree 1) is a curve of degree 1 a line of it, ``knots`` None (Maya's
+    export keeps none). Fbx holds no ``uniform``, ``registered`` or
+    ``arc_length_samples``: the defaults. ValueError, naming the node, for
+    a rational curve or surface (a control point's weight that is not 1)
+    and for a trimmed surface, which no field holds: ``curves`` or
+    ``surfaces`` False reads the file without them. Of a node's shapes the
+    first is read, as Maya's importer reads it.
+
     The values are in Maya's Y-up and cm, as every cgmath value is. A file
     whose up axis is X or Z is turned the way Maya's importer turns it
     (measured): its roots take the turn, a joint root in its joint orient and
@@ -208,9 +230,10 @@ def load_fbx(
     then come back as ``hierarchy`` at their own values), ``meshes`` the
     meshes and with them everything on a mesh, ``uvs``, ``skins`` (without
     skins ``hierarchy`` is the nodes' own values, not the bind pose),
-    ``materials``, ``morphs``, ``cameras`` and ``lights``; ``textures``
-    False keeps each material's ``texture_file``, UV set and wraps but
-    decodes no pixels, ``texture`` None. The hierarchy is always read. A
+    ``materials``, ``morphs``, ``cameras``, ``lights``, ``curves`` and
+    ``surfaces``; ``textures`` False keeps each material's
+    ``texture_file``, UV set and wraps but decodes no pixels, ``texture``
+    None. The hierarchy is always read. A
     texture file is decoded once a read, however many materials name it,
     which all share the one array. ``verbose`` False silences the read's
     warnings.
@@ -225,6 +248,8 @@ def load_fbx(
         "morphs":    morphs,
         "cameras":   cameras,
         "lights":    lights,
+        "curves":    curves,
+        "surfaces":  surfaces,
     }
     with _quiet(verbose):
         return _load(filename, parts)
@@ -248,7 +273,7 @@ def _load(filename, parts: dict) -> FbxContents:
     clip = None if read["takes"] is None or not len(hierarchy) else _build_clips(read, hierarchy, order)
     # the shapes in their nodes' order, the hierarchy's
     rank = {at: column for column, at in enumerate(order)}
-    for kind in ("meshes", "cameras", "lights"):
+    for kind in ("meshes", "cameras", "lights", "curves", "surfaces"):
         read[kind].sort(key=lambda held: rank[held["node"]])
     meshes    = _build_meshes(read) if parts["meshes"] else None
     uvs       = _build_uvs(read, meshes) if parts["uvs"] else None
@@ -256,17 +281,20 @@ def _load(filename, parts: dict) -> FbxContents:
     lights    = _build_lights(read) if parts["lights"] else None
     materials = _build_materials(read, meshes) if parts["materials"] else None
     morphs    = _build_morphs(read, meshes) if parts["morphs"] else None
+    curves    = _build_curves(read) if parts["curves"] else None
+    surfaces  = _build_surfaces(read) if parts["surfaces"] else None
+    shapes    = (uvs, cameras, lights, materials, morphs, curves, surfaces)
     if parts["skins"] and any(held["skin"] is not None for held in read["meshes"]):
         bind, order = _build(read)
         _settle_bind(read, bind, order)
-        return FbxContents(bind, clip, meshes, _build_skins(read, meshes), uvs, cameras, lights, materials, morphs)
+        return FbxContents(bind, clip, meshes, _build_skins(read, meshes), *shapes)
     if clip is not None:
-        return FbxContents(None, clip, meshes, None, uvs, cameras, lights, materials, morphs)
-    return FbxContents(hierarchy if len(hierarchy) else None, None, meshes, None, uvs, cameras, lights, materials, morphs)
+        return FbxContents(None, clip, meshes, None, *shapes)
+    return FbxContents(hierarchy if len(hierarchy) else None, None, meshes, None, *shapes)
 
 
 # the reads of one kind: the nodes alone, and the nodes with their takes
-_PARTS_NODES = {kind: False for kind in ("takes", "meshes", "uvs", "skins", "materials", "textures", "morphs", "cameras", "lights")}
+_PARTS_NODES = {kind: False for kind in ("takes", "meshes", "uvs", "skins", "materials", "textures", "morphs", "cameras", "lights", "curves", "surfaces")}
 _PARTS_TAKES = dict(_PARTS_NODES, takes=True)
 
 
@@ -337,6 +365,19 @@ def _amatrix(matrix) -> np.ndarray:
     return np.array([[matrix.Get(row, column) for column in range(4)] for row in range(4)], dtype=np.float64)
 
 
+def _refuse_offset(node, label: str, fbx, what: str) -> None:
+    """ValueError for a node holding a geometric transform, which no field
+    holds: ``what`` ("a mesh") is read at its node"""
+    source = fbx.FbxNode.EPivotSet.eSourcePivot
+    offset = fbx.FbxAMatrix(node.GetGeometricTranslation(source), node.GetGeometricRotation(source), node.GetGeometricScaling(source))
+    offset = _amatrix(offset)
+    if np.abs(offset - np.eye(4)).max() > MESH_IDENTITY:
+        raise ValueError(
+            f"load_fbx: {label} channel 'geometric transform' is {np.round(offset, 12).tolist()} on node "
+            f"{str(node.GetName())!r}, which no field holds; {FORK} reads {what} at its node"
+        )
+
+
 def _read_mesh(node, at: int, filename: str, fbx, parts: dict, cache: dict) -> dict:
     """the mesh on the node at place ``at`` of the file's nodes: its name,
     points, faces, normals, one a face corner, and its UV sets, materials
@@ -351,17 +392,10 @@ def _read_mesh(node, at: int, filename: str, fbx, parts: dict, cache: dict) -> d
         _fbx_polygon_streams,
     )
 
-    shape  = typed(node.GetNodeAttribute(), fbx.FbxMesh, fbx)
-    name   = str(shape.GetName()) or None
-    label  = f"mesh {name!r}" if name else f"the mesh on node {str(node.GetName())!r}"
-    source = fbx.FbxNode.EPivotSet.eSourcePivot
-    offset = fbx.FbxAMatrix(node.GetGeometricTranslation(source), node.GetGeometricRotation(source), node.GetGeometricScaling(source))
-    offset = _amatrix(offset)
-    if np.abs(offset - np.eye(4)).max() > MESH_IDENTITY:
-        raise ValueError(
-            f"load_fbx: {label} channel 'geometric transform' is {np.round(offset, 12).tolist()} on node "
-            f"{str(node.GetName())!r}, which no field holds; {FORK} reads a mesh at its node"
-        )
+    shape = typed(node.GetNodeAttribute(), fbx.FbxMesh, fbx)
+    name  = str(shape.GetName()) or None
+    label = f"mesh {name!r}" if name else f"the mesh on node {str(node.GetName())!r}"
+    _refuse_offset(node, label, fbx, "a mesh")
     holes = [i for i in range(shape.GetPolygonCount()) if shape.GetPolyHoleInfo(i)]
     if holes:
         raise ValueError(f"load_fbx: {label} holds {len(holes)} polygon holes, which {FORK} does not read")
@@ -866,7 +900,7 @@ def _read(scene, fbx, parts: dict, filename: str = "") -> dict:
     Maya's Y-up and cm (:func:`_convert`): every node, one uuid each, and
     the kinds ``parts`` turns on (:func:`load_fbx`'s flags): every take's
     curves and the active take's position, each mesh with what sits on it,
-    its skin, the cameras and the lights"""
+    its skin, the cameras, the lights, the curves and the surfaces"""
     from cgmath.formats._fbx_io import typed
     from cgmath.hierarchy.hierarchy import (
         _FBX_ROTATE_ORDERS,
@@ -879,16 +913,18 @@ def _read(scene, fbx, parts: dict, filename: str = "") -> dict:
         generate_uuid,
     )
 
-    source  = fbx.FbxNode.EPivotSet.eSourcePivot
-    inherit = fbx.FbxTransform.EInheritType
-    cross   = _fbx_enum(fbx.FbxNull, "ELook", "eCross")
-    found   = _walk(scene)
-    kinds   = fbx.FbxNodeAttribute.EType
-    shapes  = []
-    cameras = []
-    lights  = []
-    cache   = {}
-    if parts["meshes"] or parts["cameras"] or parts["lights"]:
+    source   = fbx.FbxNode.EPivotSet.eSourcePivot
+    inherit  = fbx.FbxTransform.EInheritType
+    cross    = _fbx_enum(fbx.FbxNull, "ELook", "eCross")
+    found    = _walk(scene)
+    kinds    = fbx.FbxNodeAttribute.EType
+    shapes   = []
+    cameras  = []
+    lights   = []
+    curves   = []
+    surfaces = []
+    cache    = {}
+    if any(parts[kind] for kind in ("meshes", "cameras", "lights", "curves", "surfaces")):
         for at, (node, _) in enumerate(found):
             attribute = node.GetNodeAttribute()
             kind      = None if attribute is None else attribute.GetAttributeType()
@@ -901,6 +937,17 @@ def _read(scene, fbx, parts: dict, filename: str = "") -> dict:
                 cameras.append(_read_camera(node, at, fbx))
             elif kind == kinds.eLight and parts["lights"]:
                 lights.append(_read_light(node, at, fbx))
+            elif kind == kinds.eNurbsCurve and parts["curves"]:
+                curves.append(_read_curve(node, at, fbx))
+            elif kind == kinds.eLine and parts["curves"]:
+                curves.extend(_read_lines(node, at, fbx))
+            elif kind == kinds.eNurbsSurface and parts["surfaces"]:
+                surfaces.append(_read_surface(node, at, fbx))
+            elif kind == kinds.eTrimNurbsSurface and parts["surfaces"]:
+                raise ValueError(
+                    f"load_fbx: the surface on node {str(node.GetName())!r} is trimmed, which {FORK} does not read; "
+                    f"load_fbx(..., surfaces=False) reads the file without its surfaces"
+                )
     nodes = []
     for node, parent in found:
         name      = str(node.GetName())
@@ -995,7 +1042,16 @@ def _read(scene, fbx, parts: dict, filename: str = "") -> dict:
         nodes.append(entry)
 
     # a bind pose (FbxPose) is left out: no node takes its values from one
-    read = {"nodes": nodes, "takes": None, "active": 0, "meshes": shapes, "cameras": cameras, "lights": lights}
+    read = {
+        "nodes":    nodes,
+        "takes":    None,
+        "active":   0,
+        "meshes":   shapes,
+        "cameras":  cameras,
+        "lights":   lights,
+        "curves":   curves,
+        "surfaces": surfaces,
+    }
     if parts["takes"]:
         read["takes"], read["active"] = _takes(scene, fbx, found, nodes)
     _fold_pivots(read)
@@ -1103,6 +1159,131 @@ def _enum_int(value) -> int:
     """an fbx enum read off a property, as its int, whichever spelling the
     binding gives"""
     return int(getattr(value, "value", value))
+
+
+def _held_points(shape) -> np.ndarray:
+    """the (N, 4) control points of an fbx geometry, the weight last"""
+    held = [tuple(shape.GetControlPointAt(i)) for i in range(shape.GetControlPointsCount())]
+    return np.array(held, dtype=np.float64).reshape(-1, 4)
+
+
+def _unweighted(held: np.ndarray, label: str, flag: str) -> np.ndarray:
+    """the (N, 3) points of a NURBS shape's (N, 4) control points;
+    ValueError for a weight that is not 1, a rational shape, which no field
+    holds (``flag`` the load_fbx flag leaving the kind unread)"""
+    rational = int(np.count_nonzero(held[:, 3] != 1.0))
+    if rational:
+        raise ValueError(
+            f"load_fbx: {label} is rational, {rational} of its {len(held)} control points holding a weight that is not 1, "
+            f"which {FORK} does not read; load_fbx(..., {flag}=False) reads the file without its {flag}"
+        )
+    return held[:, :3].copy()
+
+
+def _span(points: np.ndarray, knots, degree: int, form: str, label: str, way: str = "") -> tuple:
+    """``(points, periodic, knots)`` of a NURBS shape along its points'
+    first axis, as cgmath holds a curve: ``knots`` the file's less the first
+    and the last (fbx holds Maya's knots and one more at each end), the
+    points of a "periodic" ``form`` as the file holds them, each once, those
+    of a "closed" one, whose last point the file leaves out, with the first
+    again at the end, an open curve. ValueError for knots that do not fit
+    the points (``way`` " in u" or " in v" on a surface)"""
+    knots = np.asarray(knots, dtype=np.float64)[1:-1]
+    count = len(points)
+    if form == "closed" and len(knots) == count + degree:
+        points = np.concatenate([points, points[:1]], axis=0)
+    periodic = form == "periodic"
+    fitting  = len(points) + (2 * degree if periodic else degree) - 1
+    if degree < 1 or len(knots) != fitting:
+        raise ValueError(
+            f"load_fbx: {label} holds {len(knots) + 2} knots{way} for {count} control points of degree {degree}, a {form} "
+            f"form, where {fitting + 2} fit"
+        )
+    return points, periodic, knots
+
+
+def _read_curve(node, at: int, fbx) -> dict:
+    """the NURBS curve on the node at place ``at`` of the file's nodes: its
+    points, degree, form and knots (:func:`_span`); ValueError for a node
+    holding a geometric transform, or a rational curve"""
+    from cgmath.formats._fbx_io import typed
+
+    shape = typed(node.GetNodeAttribute(), fbx.FbxNurbsCurve, fbx)
+    label = f"the curve on node {str(node.GetName())!r}"
+    _refuse_offset(node, label, fbx, "a curve")
+    forms  = fbx.FbxNurbsCurve.EType
+    held   = shape.GetType()
+    form   = "periodic" if held == forms.ePeriodic else "closed" if held == forms.eClosed else "open"
+    degree = int(shape.GetOrder()) - 1
+    points = _unweighted(_held_points(shape), label, "curves")
+    points, periodic, knots = _span(points, shape.GetKnotVector(), degree, form, label)
+    return {"node": at, "label": label, "points": points, "degree": degree, "periodic": periodic, "knots": knots}
+
+
+def _read_lines(node, at: int, fbx) -> list:
+    """the polylines of the FbxLine on the node at place ``at`` of the
+    file's nodes, each a curve of degree 1 holding no knots, as Maya writes
+    a curve of degree 1 (the curves of one transform as the lines of one
+    FbxLine); ValueError for a node holding a geometric transform, or a
+    line of one point"""
+    from cgmath.formats._fbx_io import typed
+
+    shape = typed(node.GetNodeAttribute(), fbx.FbxLine, fbx)
+    label = f"the curve on node {str(node.GetName())!r}"
+    _refuse_offset(node, label, fbx, "a curve")
+    points = _held_points(shape)[:, :3]
+    # the points each line runs through, and where each line ends in them
+    indices = [int(shape.GetPointIndexAt(i)) for i in range(shape.GetIndexArraySize())] or list(range(len(points)))
+    ends    = sorted(int(shape.GetEndPointAt(i)) for i in range(shape.GetEndPointCount()))
+    if indices and (not ends or ends[-1] != len(indices) - 1):
+        ends.append(len(indices) - 1)
+    found, start = [], 0
+    for end in ends:
+        line  = indices[start : end + 1]
+        start = end + 1
+        if len(line) < 2:
+            raise ValueError(f"load_fbx: {label} holds a line of {len(line)} point, which is no curve")
+        found.append({"node": at, "label": label, "points": points[line], "degree": 1, "periodic": False, "knots": None})
+    return found
+
+
+def _read_surface(node, at: int, fbx) -> dict:
+    """the NURBS surface on the node at place ``at`` of the file's nodes:
+    its points ``[u][v]`` (the file runs u fastest) and each direction's
+    degree, form and knots (:func:`_span`); ValueError for a node holding a
+    geometric transform, or a rational surface"""
+    from cgmath.formats._fbx_io import typed
+
+    shape = typed(node.GetNodeAttribute(), fbx.FbxNurbsSurface, fbx)
+    label = f"the surface on node {str(node.GetName())!r}"
+    _refuse_offset(node, label, fbx, "a surface")
+    forms = fbx.FbxNurbsSurface.EType
+
+    def form(held) -> str:
+        return "periodic" if held == forms.ePeriodic else "closed" if held == forms.eClosed else "open"
+
+    count_u, count_v = int(shape.GetUCount()), int(shape.GetVCount())
+    points = _unweighted(_held_points(shape), label, "surfaces")
+    if len(points) != count_u * count_v:
+        raise ValueError(f"load_fbx: {label} holds {len(points)} control points, not its {count_u} by {count_v}")
+    degree_u = int(shape.GetUOrder()) - 1
+    degree_v = int(shape.GetVOrder()) - 1
+    # the file's point v * count_u + u is ours [u][v]
+    points = points.reshape(count_v, count_u, 3).transpose(1, 0, 2)
+    points, periodic_u, knots_u = _span(points, shape.GetUKnotVector(), degree_u, form(shape.GetNurbsUType()), label, " in u")
+    across = points.transpose(1, 0, 2)
+    across, periodic_v, knots_v = _span(across, shape.GetVKnotVector(), degree_v, form(shape.GetNurbsVType()), label, " in v")
+    return {
+        "node":       at,
+        "label":      label,
+        "points":     np.ascontiguousarray(across.transpose(1, 0, 2)),
+        "degree_u":   degree_u,
+        "degree_v":   degree_v,
+        "periodic_u": periodic_u,
+        "periodic_v": periodic_v,
+        "knots_u":    knots_u,
+        "knots_v":    knots_v,
+    }
 
 
 def _read_camera(node, at: int, fbx) -> dict:
@@ -1550,7 +1731,7 @@ def _convert(read: dict, turn, cm: float) -> None:
     translate and keeps its rotate curves, any other root's rotate is solved
     again, frame by frame through euler_filter when the take keys it, and
     every bind matrix, a world, turns with them. A node under a root is
-    relative to it and keeps its values; so does a mesh's points, in its
+    relative to it and keeps its values; so does a shape's points, in its
     node's space"""
     from cgmath.hierarchy.hierarchy import _fbx_turn_roots
 
@@ -1566,6 +1747,8 @@ def _convert(read: dict, turn, cm: float) -> None:
         for held in read["cameras"]:
             for name in ("near_clip_plane", "far_clip_plane", "orthographic_width"):
                 held["fields"][name] = held["fields"][name] * cm
+        for held in read["curves"] + read["surfaces"]:
+            held["points"] = held["points"] * cm
         for held in read["meshes"]:
             held["points"] = held["points"] * cm
             for morph in held["morphs"]:
@@ -1828,6 +2011,60 @@ def _refuse_inherit(entries, parents, worlds, scales, frames) -> None:
                 f"load_fbx: node {entry['name']!r} channel 'inherit type'{when} is {what}, "
                 f"{np.round(scale[off[0]], 9).tolist()}, which a joint or transform can not hold"
             )
+
+
+def _own_knots(computed, held):
+    """``held``, a file's knots, or None where they are the ``computed``
+    ones, those the shape makes for itself with none given"""
+    return None if held is None or np.array_equal(np.asarray(computed), held) else held
+
+
+def _build_curves(read: dict):
+    """the NurbsCurveList of the file's curves, as ``read`` orders them,
+    each on its node by uuid, its knots None where they are a uniform
+    curve's own; None for none"""
+    from cgmath.geometry.bspline import NurbsCurveData, NurbsCurveList
+
+    entries = read["nodes"]
+    if not read["curves"]:
+        return None
+    curves = []
+    for held in read["curves"]:
+        fields = {"degree": held["degree"], "periodic": held["periodic"], "parent_uuid": entries[held["node"]]["uuid"]}
+        try:
+            curve = NurbsCurveData(held["points"], **fields)
+            knots = _own_knots(curve.kv, held["knots"])
+            if knots is not None:
+                curve = NurbsCurveData(held["points"], knots=knots, **fields)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"load_fbx: {held['label']} is no curve cgmath holds: {error}") from error
+        curves.append(curve)
+    return NurbsCurveList(curves)
+
+
+def _build_surfaces(read: dict):
+    """the NurbsSurfaceList of the file's surfaces, as ``read`` orders them,
+    each on its node by uuid, a direction's knots None where they are a
+    uniform one's own; None for none"""
+    from cgmath.geometry.bspline_patch import NurbsSurfaceData, NurbsSurfaceList
+
+    entries = read["nodes"]
+    if not read["surfaces"]:
+        return None
+    surfaces = []
+    for held in read["surfaces"]:
+        fields                = {name: held[name] for name in ("degree_u", "degree_v", "periodic_u", "periodic_v")}
+        fields["parent_uuid"] = entries[held["node"]]["uuid"]
+        try:
+            surface = NurbsSurfaceData(held["points"], **fields)
+            knots_u = _own_knots(surface.kv_u, held["knots_u"])
+            knots_v = _own_knots(surface.kv_v, held["knots_v"])
+            if knots_u is not None or knots_v is not None:
+                surface = NurbsSurfaceData(held["points"], knots_u=knots_u, knots_v=knots_v, **fields)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"load_fbx: {held['label']} is no surface cgmath holds: {error}") from error
+        surfaces.append(surface)
+    return NurbsSurfaceList(surfaces)
 
 
 def _build_cameras(read: dict):

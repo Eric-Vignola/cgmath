@@ -687,16 +687,16 @@ class TestReadOptions(_Files):
     def test_a_kind_left_unread_is_none(self):
         path  = self.everything()
         every = load_fbx(path)
-        #                                                  hierarchy clip meshes skins uvs cameras lights materials morphs
-        self.assertEqual([x is not None for x in every], [True, False, True, False, True, True, True, True, False])
+        #                                                  hierarchy clip meshes skins uvs cameras lights materials morphs curves surfaces
+        self.assertEqual([x is not None for x in every], [True, False, True, False, True, True, True, True, False, False, False])
         self.assertEqual(every.hierarchy.name, ["plane", "box", "cam", "lamp"])
 
         no_meshes = load_fbx(path, meshes=False)
-        self.assertEqual([x is not None for x in no_meshes], [True, False, False, False, False, True, True, False, False])
+        self.assertEqual([x is not None for x in no_meshes], [True, False, False, False, False, True, True, False, False, False, False])
         self.assertEqual(no_meshes.hierarchy.name, every.hierarchy.name)
 
         some = load_fbx(path, uvs=False, materials=False, cameras=False)
-        self.assertEqual([x is not None for x in some], [True, False, True, False, False, False, True, False, False])
+        self.assertEqual([x is not None for x in some], [True, False, True, False, False, False, True, False, False, False, False])
         self.assertEqual(some.meshes.name, every.meshes.name)
         self.assertEqual(some.lights.name, ["lamp"])
 
