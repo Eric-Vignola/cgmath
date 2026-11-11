@@ -477,6 +477,22 @@ moves the start of the range (`min_param`) onto the curve point nearest
 project once, then push any per-control-point or per-vertex attribute stream
 through the same weights.
 
+### Weights: rational curves and surfaces
+
+`weights` holds one value per control point, `(N,)` on a curve and `(U, V)`
+on a surface; None is every weight at 1. A shape holding them is rational:
+each control point pulls it by its weight, which is what makes a conic (a
+circle's arc, a cylinder) exact. `points` stay the control points
+themselves, not multiplied by their weights, as Maya's cvs and an fbx file
+hold them. The weights are checked on first use: one per control point,
+finite, above zero.
+
+Evaluation, `basis`, lengths, area, `uniform` and `control_point_params`
+follow the weights. A weighted curve's `sample()` takes the nearest of 32
+samples a span, then Newton's method. What does not solve with weights
+raises `ValueError`: a curve's `fit()` and `rebuild()` with arguments, a
+surface's `sample()` and `raycast()`.
+
 ### Control points are held by reference
 
 `NurbsCurveData(points=arr)` stores `arr` itself when it is already a `float64`

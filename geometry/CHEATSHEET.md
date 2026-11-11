@@ -2041,6 +2041,34 @@ b, _ = ring.compute(float(ring.max_param))
 assert np.allclose(a, b)
 ```
 
+### Weights — rational curves
+
+`weights` holds one value per control point, each above zero; None is every
+weight at 1. A control point pulls a weighted curve by its weight, which
+makes a conic exact. `points` stay the control points themselves, not
+multiplied by their weights, as Maya's cvs and an fbx file hold them.
+
+```python
+arc_points = np.array([[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]])
+quarter    = NurbsCurveData(points=arc_points, degree=2, weights=[1.0, np.sqrt(0.5), 1.0])
+
+on_arc, _ = quarter.compute(np.linspace(0.0, 1.0, 5))
+print(np.linalg.norm(on_arc, axis=1).round(12))  # [1. 1. 1. 1. 1.]: a quarter circle of radius 1
+print(quarter.get_length(fast=False))            # 1.5707963267948966, pi / 2
+print(quarter.basis(0.5).round(4))               # [[0.2929 0.4142 0.2929]]: the shares sum to 1
+
+plain = NurbsCurveData(points=arc_points, degree=2)
+print(np.linalg.norm(plain.compute(0.5)[0]).round(4))  # 1.0607: without weights, a parabola off the circle
+
+found = quarter.sample(np.array([[2.0, 2.0, 0.0]]))
+print(found.points.round(4), found.params.round(4))  # [[0.7071 0.7071 0.    ]] [0.5]
+```
+
+The middle weight is the cosine of half the arc's angle. The weights are
+checked on first use: one per control point, finite, above zero. `fit()`
+and `rebuild()` with arguments raise `ValueError` on a curve holding
+weights.
+
 ### `open()` / `close()` flip the topology in place
 
 ```python
@@ -2603,6 +2631,27 @@ print(np.round(tube.evaluate(1.0, 0.0), 3))  # v=0 lands wherever the knots fall
 print(np.round(reg.evaluate(1.0, 0.0), 3))   # v=0 now sits under tube_cv[:, 0]
 print(np.round(tube_cv[1, 0], 3))
 ```
+
+### Weights — rational surfaces
+
+`weights` is a `(U, V)` grid, one value per control point, laid out as
+`points`; None is every weight at 1.
+
+```python
+wall = NurbsSurfaceData(
+    points=np.stack([arc_points, arc_points + [0.0, 0.0, 2.0]], axis=1),  # the arc along u, 2 high along v
+    degree_u=2, degree_v=1,
+    periodic_u=False, periodic_v=False,
+    weights=np.stack([quarter.weights, quarter.weights], axis=1),
+)
+print(wall.evaluate(0.5, 0.5).round(4))     # [0.7071 0.7071 1.    ]: on a cylinder of radius 1
+print(round(wall.get_area(samples=51), 6))  # 3.141593: a quarter of the cylinder's 4 * pi
+print(wall.get_length_u(fast=False))        # 1.5707963267948966
+```
+
+Evaluation, `basis`, lengths, area and `control_point_params` follow the
+weights. `sample()` and `raycast()` raise `ValueError` on a surface holding
+them.
 
 ### Smoothing and cache control
 

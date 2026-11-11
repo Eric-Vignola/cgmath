@@ -717,14 +717,16 @@ print(back.surfaces[0].points.shape, back.surfaces[0] == patch, load_fbx(NURBS_F
 | Any other curve | an `FbxNurbsCurve` | one a node; a periodic curve holds its points once |
 | A surface | an `FbxNurbsSurface` | one a node; `points` are `[u][v]`, the file runs u fastest |
 | `knots`, `knots_u`, `knots_v` | Maya's, plus one at each end | None on a read where they are the ones the shape gives itself |
+| `weights` | each control point's fourth value | None on a read where each is 1; a point is not multiplied by its weight; a curve of degree 1 holding them is an `FbxNurbsCurve` |
 | A shape whose `parent_uuid` names no node | a new root node, `curve` or `surface` | at identity |
 | A closed curve of a file | read open | its first point again at the end |
 
-Refused, on a read: a rational curve or surface (a control point's weight
-that is not 1) and a trimmed surface, which no field holds; `curves=False`
-or `surfaces=False` reads the file without them. On a save: two shapes on
-one node, other than lines; a curve or surface on a joint, or on a node
-holding a mesh, a camera or a light; points that are not 3D. Maya writes
+Refused, on a read: a trimmed surface, which no field holds, and a weight
+that is not finite or not above zero; `curves=False` or `surfaces=False`
+reads the file without them. On a save: two shapes on one node, other than
+lines; a curve or surface on a joint, or on a node holding a mesh, a camera
+or a light; points that are not 3D; `weights` that are not one a control
+point, finite and above zero. Maya writes
 two curves of degree 2 or more under one transform as an empty node, and
 reads the first of two the file holds on one, so a control of several such
 curves is a node a curve. A file holds no `uniform` or `registered` flag: a
@@ -949,7 +951,8 @@ Scene.load_fbx("hero.fbx")  # -> every field, ready to render
 | `load_fbx` gives `hierarchy` None | the file holds takes: the nodes are in `clip`, every take's; `takes=False` gives the nodes |
 | A material's `texture` is None | read with `textures=False`, the file not found, or no PIL: `texture_file` still names it |
 | A loaded mesh's `normals` is None | the file's were the ones Maya derives from the points, so none is stored: `mesh.get_face_vertex_normals()` gives them, `hard_edges` the edges they break at |
-| `load_fbx` raises on a rational curve or a trimmed surface | no field holds a weight or a trim: `curves=False` / `surfaces=False` reads the file without them |
+| `load_fbx` raises on a trimmed surface | no field holds a trim: `surfaces=False` reads the file without it |
+| A loaded curve's or surface's `weights` is None | every weight in the file was 1 |
 | A loaded curve's `knots` is None | the file's were the ones the curve gives itself; a line of a polyline holds none |
 | A shape's `parent_uuid` / `mesh_uuid` matches nothing | it came from another load: each read mints its own uuids |
 | `set_binary` on a `GLTF2()` with no blob | `TypeError` — `binary_blob()` is `None`; load a real file first |
