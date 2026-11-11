@@ -1911,18 +1911,23 @@ class MeshData(ShapeData):
 
         With no hard edge the normals are stored one a vertex and
         ``normal_indices`` is ``None``; with some they are stored one a group
-        of corners, ``normal_indices`` naming the one of each corner. The
-        mesh's own ``hard_edges`` field is neither read nor written: stored
-        normals speak ahead of it.
+        of corners, ``normal_indices`` naming the one of each corner.
+
+        With neither argument the hard edges are the mesh's own
+        ``hard_edges``, so the normals stored are the ones the mesh shades
+        by already. An argument speaks ahead of the field
+        (``hard_edges=[]``: every edge soft). The field is read, never
+        written, and the stored normals speak ahead of it from then on.
 
         Args:
             hard_edge_angle: Angle threshold in degrees for auto-detecting
                 hard edges.  If ``None`` and *hard_edges* is also ``None``,
-                all edges are smooth.
+                the hard edges are the mesh's own ``hard_edges`` (all edges
+                smooth when it holds none).
             hard_edges: The edges to treat as hard, ``(n, 2)``: a pair of
                 vertices an edge, either vertex first. Read ahead of
-                *hard_edge_angle*. The pairs of edge ids are
-                ``mesh.e2v[ids]``.
+                *hard_edge_angle* and of the mesh's own. The pairs of edge
+                ids are ``mesh.e2v[ids]``.
             angle_weighted: Weight by face-vertex corner angle (Maya default).
             area_weighted: Weight each face by the length of its Newell
                 vector, as ``get_vertex_normals()`` does (Maya default).
@@ -1931,7 +1936,8 @@ class MeshData(ShapeData):
 
         Raises:
             ValueError: *hard_edges* is not ``(n, 2)``.
-            RuntimeError: A pair of *hard_edges* is no edge of the mesh.
+            RuntimeError: A pair of *hard_edges*, or of the mesh's own, is
+                no edge of the mesh.
         """
         edges = None
         if hard_edges is not None:
@@ -1944,6 +1950,8 @@ class MeshData(ShapeData):
             edges = _hard_edge_ids(self, pairs.reshape(-1, 2))
         elif hard_edge_angle is not None:
             edges = _detect_hard_edges(self, hard_edge_angle)
+        elif self.hard_edges is not None:
+            edges = _hard_edge_ids(self, self.hard_edges)
 
         if edges is None or edges.size == 0:
             self.normals = self.get_vertex_normals(
