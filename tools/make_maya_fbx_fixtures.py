@@ -1043,6 +1043,79 @@ def default_material(rec: Recorder) -> None:
                               "materials": cmds.ls(materials=True)})
 
 
+DERIVED_MESHES = (
+    # name, kind, primitive, jitter, polySoftEdge angle (None: the edges Maya makes), the primitive's arguments
+    ("softSheet", "soft", "polyPlane", 0.12, 180.0, {"subdivisionsX": 5, "subdivisionsY": 4}),
+    ("softBall", "soft", "polySphere", 0.12, 180.0, {"subdivisionsX": 12, "subdivisionsY": 8}),
+    ("softCan", "soft", "polyCylinder", 0.12, 180.0, {"subdivisionsX": 9, "subdivisionsY": 3, "subdivisionsCaps": 0}),
+    ("softRing", "soft", "polyTorus", 0.12, 180.0, {"subdivisionsX": 10, "subdivisionsY": 6}),
+    ("softCube", "soft", "polyCube", 0.12, 180.0, {}),
+    ("cubeDefault", "hard", "polyCube", 0.0, None, {}),
+    ("cubeJittered", "hard", "polyCube", 0.12, None, {}),
+    ("canDefault", "hard", "polyCylinder", 0.0, None, {"subdivisionsX": 9, "subdivisionsY": 3, "subdivisionsCaps": 1}),
+    ("canJittered", "hard", "polyCylinder", 0.12, None, {"subdivisionsX": 9, "subdivisionsY": 3, "subdivisionsCaps": 1}),
+    ("coneJittered", "hard", "polyCone", 0.12, None, {"subdivisionsX": 8, "subdivisionsY": 2}),
+    ("ballDefault", "hard", "polySphere", 0.0, None, {"subdivisionsX": 12, "subdivisionsY": 8}),
+    ("ballSoft30", "hard", "polySphere", 0.12, 30.0, {"subdivisionsX": 12, "subdivisionsY": 8}),
+    ("ringSoft45", "hard", "polyTorus", 0.12, 45.0, {"subdivisionsX": 10, "subdivisionsY": 6}),
+    ("sheetSoft20", "hard", "polyPlane", 0.12, 20.0, {"subdivisionsX": 5, "subdivisionsY": 4}),
+    ("lockedCube", "locked", "polyCube", 0.12, 180.0, {}),
+)
+
+
+def mesh_normals(name: str) -> dict:
+    """the mesh as Maya holds it: its points, face counts and corner
+    vertices, the normal of every face corner in face order with its id and
+    its lock, and every edge's two vertices and whether it is smooth"""
+    shape = om.MFnMesh(dag(name))
+    sizes, ids = shape.getVertices()
+    faces      = range(shape.numPolygons)
+    normal_ids = [int(i) for face in faces for i in shape.getFaceNormalIds(face)]
+    return {
+        "points":     np.array([tuple(p)[:3] for p in shape.getPoints()]),
+        "counts":     np.array(sizes, dtype=np.int32),
+        "indices":    np.array(ids, dtype=np.int32),
+        "normals":    np.array([tuple(n) for face in faces for n in shape.getFaceVertexNormals(face)], dtype=np.float64),
+        "normal_ids": np.array(normal_ids, dtype=np.int32),
+        "locked":     np.array([bool(shape.isNormalLocked(i)) for i in normal_ids]),
+        "edges":      np.array([tuple(shape.getEdgeVertices(e)) for e in range(shape.numEdges)], dtype=np.int32),
+        "smooth":     np.array([bool(shape.isEdgeSmooth(e)) for e in range(shape.numEdges)]),
+    }
+
+
+def derived_normals(rec: Recorder) -> None:
+    """the normals Maya derives where none is authored: meshes with every
+    edge soft, meshes with hard edges (the primitives with the edges Maya
+    makes them with among them: a sphere's are all hard), and a cube with
+    one vertex's normal locked; most are jittered so their quads bend. Each
+    as Maya holds it, and all of them as Maya exports them"""
+    new_scene()
+    rng  = np.random.default_rng(11)
+    info = {}
+    for name, kind, primitive, jitter, soften, arguments in DERIVED_MESHES:
+        node   = getattr(cmds, primitive)(name=name, constructionHistory=False, **arguments)[0]
+        shape  = om.MFnMesh(dag(node))
+        points = np.array([tuple(p)[:3] for p in shape.getPoints()])
+        if jitter:
+            points = points + rng.normal(scale=jitter, size=points.shape)
+            shape.setPoints(om.MPointArray([om.MPoint(*p) for p in points]))
+        if soften is not None:
+            cmds.polySoftEdge(node, angle=soften, constructionHistory=False)
+        if kind == "locked":
+            cmds.polyNormalPerVertex(f"{node}.vtx[0]", xyz=(0.0, 1.0, 0.0))
+        info[node] = {"kind": kind, "jittered": bool(jitter)}
+    for name, entry in info.items():
+        held = mesh_normals(name)
+        for key, value in held.items():
+            rec.array(f"{name}/{key}", value)
+        entry["hard_edges"]     = int((~held["smooth"]).sum())
+        entry["locked_corners"] = int(held["locked"].sum())
+        entry["normals"]        = int(np.unique(held["normal_ids"]).size)
+    rec.value("meshes", list(info))
+    rec.value("info", info)
+    exported(rec.path("maya.fbx"))
+
+
 CASES = {
     "clip_import": clip_import,
     "visibility_locator": visibility_locator,
@@ -1066,6 +1139,7 @@ CASES = {
     "normals_export": normals_export,
     "normals_import": normals_import,
     "default_material": default_material,
+    "derived_normals": derived_normals,
     "morphs_export": morphs_export,
     "morphs_import": morphs_import,
     "colors_export": colors_export,
