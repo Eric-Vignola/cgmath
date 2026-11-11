@@ -1,0 +1,126 @@
+{
+ "info": {
+  "ballDefault": {
+   "hard_edges": 180,
+   "jittered": false,
+   "kind": "hard",
+   "locked_corners": 0,
+   "normals": 360
+  },
+  "ballSoft30": {
+   "hard_edges": 123,
+   "jittered": true,
+   "kind": "hard",
+   "locked_corners": 0,
+   "normals": 248
+  },
+  "canDefault": {
+   "hard_edges": 45,
+   "jittered": false,
+   "kind": "hard",
+   "locked_corners": 0,
+   "normals": 92
+  },
+  "canJittered": {
+   "hard_edges": 45,
+   "jittered": true,
+   "kind": "hard",
+   "locked_corners": 0,
+   "normals": 92
+  },
+  "coneJittered": {
+   "hard_edges": 16,
+   "jittered": true,
+   "kind": "hard",
+   "locked_corners": 0,
+   "normals": 32
+  },
+  "cubeDefault": {
+   "hard_edges": 12,
+   "jittered": false,
+   "kind": "hard",
+   "locked_corners": 0,
+   "normals": 24
+  },
+  "cubeJittered": {
+   "hard_edges": 12,
+   "jittered": true,
+   "kind": "hard",
+   "locked_corners": 0,
+   "normals": 24
+  },
+  "lockedCube": {
+   "hard_edges": 0,
+   "jittered": true,
+   "kind": "locked",
+   "locked_corners": 3,
+   "normals": 8
+  },
+  "ringSoft45": {
+   "hard_edges": 59,
+   "jittered": true,
+   "kind": "hard",
+   "locked_corners": 0,
+   "normals": 125
+  },
+  "sheetSoft20": {
+   "hard_edges": 46,
+   "jittered": true,
+   "kind": "hard",
+   "locked_corners": 0,
+   "normals": 74
+  },
+  "softBall": {
+   "hard_edges": 0,
+   "jittered": true,
+   "kind": "soft",
+   "locked_corners": 0,
+   "normals": 86
+  },
+  "softCan": {
+   "hard_edges": 0,
+   "jittered": true,
+   "kind": "soft",
+   "locked_corners": 0,
+   "normals": 36
+  },
+  "softCube": {
+   "hard_edges": 0,
+   "jittered": true,
+   "kind": "soft",
+   "locked_corners": 0,
+   "normals": 8
+  },
+  "softRing": {
+   "hard_edges": 0,
+   "jittered": true,
+   "kind": "soft",
+   "locked_corners": 0,
+   "normals": 60
+  },
+  "softSheet": {
+   "hard_edges": 18,
+   "jittered": true,
+   "kind": "soft",
+   "locked_corners": 0,
+   "normals": 30
+  }
+ },
+ "meshes": [
+  "softSheet",
+  "softBall",
+  "softCan",
+  "softRing",
+  "softCube",
+  "cubeDefault",
+  "cubeJittered",
+  "canDefault",
+  "canJittered",
+  "coneJittered",
+  "ballDefault",
+  "ballSoft30",
+  "ringSoft45",
+  "sheetSoft20",
+  "lockedCube"
+ ]
+}
