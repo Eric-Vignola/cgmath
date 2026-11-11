@@ -782,8 +782,12 @@ print(flat.get_zero_area_faces())
 ## Normals and areas
 
 Two independent families. `get_face_normals` / `get_vertex_normals` are
-*geometric* and always computed on demand. `set_normals` stores *shading*
+*geometric*, worked out of `points`. `set_normals` stores *shading*
 normals on the `normals` / `normal_indices` fields, with hard-edge splitting.
+
+The face normals and corner angles are kept once worked out, and dropped
+when `points` is assigned (`mesh.points = moved`). A write inside the array
+(`mesh.points[:, 1] += 5`) is not seen: pass `force=True` after one.
 
 ```python
 print(cube.get_face_normals().shape)        # (F, 3)

@@ -1320,6 +1320,31 @@ class TestMesh(unittest.TestCase):
         magnitudes = np.linalg.norm(vertex_normals, axis=1)
         self.assertTrue(allclose(magnitudes, 1.0, atol=0.01))
 
+    def test_points_assignment_drops_normal_caches(self):
+        """assigning points drops the face normals and corner angles kept from the old ones; a write inside the array is not seen"""
+        mesh = self.box.copy()
+        mesh.get_vertex_normals()  # keeps the face normals and the corner angles
+        self.assertIsNotNone(mesh._face_normals)
+        self.assertIsNotNone(mesh._face_vertex_angles)
+
+        moved = np.array(mesh.points)
+        moved[0] += [2.0, 1.0, 0.5]
+        mesh.points = moved
+        self.assertIsNone(mesh._face_normals)
+        self.assertIsNone(mesh._face_vertex_angles)
+
+        fresh = MeshData(points=moved, indices=mesh.indices, counts=mesh.counts)
+        self.assertTrue(np.array_equal(mesh.get_vertex_normals(), fresh.get_vertex_normals()))
+        self.assertTrue(np.array_equal(mesh.get_face_normals(), fresh.get_face_normals()))
+        self.assertTrue(np.array_equal(mesh.get_face_vertex_angles(), fresh.get_face_vertex_angles()))
+        self.assertTrue(np.array_equal(mesh.get_vertex_normals(), mesh.get_vertex_normals(force=True)))
+
+        # a write inside the array: the kept answers stand until force
+        kept = mesh.get_face_normals().copy()
+        mesh.points[0] -= [2.0, 1.0, 0.5]
+        self.assertTrue(np.array_equal(mesh.get_face_normals(), kept))
+        self.assertFalse(np.allclose(mesh.get_face_normals(force=True), kept))
+
     def test_edge_lengths(self):
         """Test get_edge_lengths method"""
         mesh = self.plane.copy()

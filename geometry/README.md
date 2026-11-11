@@ -348,6 +348,9 @@ Two independent things.
 - `get_face_normals()` / `get_vertex_normals()` / `get_edge_normals()` are
   **geometric** — derived from `points` on demand, Maya's angle- and
   area-weighted vertex normals by default. There is no `get_normals()`.
+  The face normals and corner angles are kept once worked out and dropped
+  when `points` is assigned; after a write inside the array
+  (`mesh.points[:, 1] += 5`) pass `force=True`.
 - `normals` / `normal_indices` are **shading** fields you populate with
   `set_normals(...)`. With no arguments they are per-vertex and
   `normal_indices` stays `None`; with `hard_edge_angle` or explicit
