@@ -648,6 +648,20 @@ print(some.hierarchy.name, some.meshes.name, some.uvs.name, some.materials, some
 print(load_fbx(DEMO_FBX, meshes=False).meshes, load_fbx(DEMO_FBX, textures=False).materials[0].texture)   # None None
 ```
 
+`CameraList` and `LightList` read and write a file by themselves too:
+`load_fbx` reads the nodes and that one kind, and gives an empty list for
+a file with none; `save_fbx` on a list writes its shapes with no
+hierarchy, each on a new root node at identity named after it, so where
+its node placed and aimed it is not in that file:
+
+```python
+VIEWS_FBX = os.path.join(WORK, "views_alone.fbx")
+CameraList([cam]).save_fbx(VIEWS_FBX)
+
+print(CameraList.load_fbx(DEMO_FBX) == held.cameras, LightList.load_fbx(DEMO_FBX).name)    # True ['lamp']
+print(CameraList.load_fbx(VIEWS_FBX) == CameraList([cam]), LightList.load_fbx(VIEWS_FBX))  # True []
+```
+
 A mesh stores the least normals that shade it as its file does. Where the
 file's normals are the ones Maya derives from the points (within 1e-5 a
 component) the mesh stores none, `hard_edges` holding the edges they break

@@ -430,6 +430,38 @@ class TestViews(_Files):
         same_views(self, back.cameras, CameraList([camera]))
         same_views(self, back.lights, LightList([light]))
 
+    def test_lists(self):
+        """each list through its own save_fbx and load_fbx"""
+        rig     = views_rig()
+        cameras = CameraList([shot(rig), ortho(rig)])
+        lights  = views_lights(rig)
+        path    = self.path("cameras.fbx")
+        cameras.save_fbx(path)
+        same_views(self, CameraList.load_fbx(path), cameras)
+        # no hierarchy went with them: a root node each at identity, named
+        # after its shape, in the list's order
+        held = load_fbx(path)
+        self.assertEqual(held.hierarchy.name, ["shotShape", "orthoShape"])
+        np.testing.assert_array_equal(np.asarray(held.hierarchy.world_matrix), np.broadcast_to(np.eye(4), (2, 4, 4)))
+        none = LightList.load_fbx(path)
+        self.assertIs(type(none), LightList)
+        self.assertEqual(len(none), 0)
+        path = self.path("lights.fbx")
+        lights.save_fbx(path)
+        same_views(self, LightList.load_fbx(path), lights)
+        self.assertEqual(load_fbx(path).hierarchy.name, ["keyShape", "sunShape", "fillShape"])
+        none = CameraList.load_fbx(path)
+        self.assertIs(type(none), CameraList)
+        self.assertEqual(len(none), 0)
+        # under a rig, both kinds in one file: each list reads its own alone
+        path = self.path("both.fbx")
+        save_fbx(path, hierarchy=rig, cameras=cameras, lights=lights)
+        same_views(self, CameraList.load_fbx(path), cameras)
+        same_views(self, LightList.load_fbx(path), lights)
+        path = self.path("ascii.fbx")
+        lights.save_fbx(path, as_ascii=True)
+        same_views(self, LightList.load_fbx(path), lights)
+
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
 class TestMayaViews(_Recorded):

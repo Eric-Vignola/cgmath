@@ -114,3 +114,25 @@ class CameraData(ShapeData):
 
 class CameraList(DataList[CameraData]):
     """A list of :class:`CameraData`, as a file holds its cameras."""
+
+    @classmethod
+    def load_fbx(cls, filename: str, verbose: bool = True) -> "CameraList":
+        """every camera of an fbx file, as :func:`cgmath.formats.load_fbx`
+        reads them, the nodes and the cameras alone read: each in Maya's
+        attributes, its ``parent_uuid`` naming its node in the file's
+        hierarchy, which this does not return; empty for a file with none;
+        ``verbose`` False silences the read's warnings"""
+        from cgmath.formats._load import load_only
+
+        return load_only(filename, cameras=True, verbose=verbose).cameras or cls()
+
+    def save_fbx(self, filename: str, as_ascii: bool = False) -> None:
+        """writes every camera to one fbx file, binary unless ``as_ascii``:
+        each the shape of a new root node at identity named after it
+        ("camera" for one with no name), in the list's order, whatever its
+        ``parent_uuid`` names, so where its node placed and aimed it is not
+        written. See :func:`cgmath.formats.save_fbx`, which puts a camera
+        on a node of a hierarchy."""
+        from cgmath.formats import save_fbx
+
+        save_fbx(filename, cameras=self, as_ascii=as_ascii)

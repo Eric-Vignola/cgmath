@@ -1033,7 +1033,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000001F063DAB0D0>
+MISSING = <dataclasses._MISSING_TYPE object at 0x00000234B4E7B090>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1819,6 +1819,15 @@ A list of :class:`CameraData`, as a file holds its cameras.
 CameraList(iterable=None)
 ```
 
+Methods:
+
+```text
+classmethod load_fbx(cls, filename: str, verbose: bool = True) -> 'CameraList'
+    every camera of an fbx file, as :func:`cgmath.formats.load_fbx`
+save_fbx(self, filename: str, as_ascii: bool = False) -> None
+    writes every camera to one fbx file, binary unless ``as_ascii``:
+```
+
 Constants:
 
 ```text
@@ -1865,6 +1874,15 @@ A list of :class:`LightData`, as a file holds its lights.
 
 ```text
 LightList(iterable=None)
+```
+
+Methods:
+
+```text
+classmethod load_fbx(cls, filename: str, verbose: bool = True) -> 'LightList'
+    every light of an fbx file, as :func:`cgmath.formats.load_fbx`
+save_fbx(self, filename: str, as_ascii: bool = False) -> None
+    writes every light to one fbx file, binary unless ``as_ascii``:
 ```
 
 Constants:
@@ -3494,7 +3512,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001F031D5C220>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000023502DBC360>, '...
 ```
 
 ## `cgmath.constraints`
