@@ -219,8 +219,13 @@ class FbxFile:
         # imported here: the classes' modules import the reader
         from cgmath.hierarchy.hierarchy import FBX
 
-        self._manager = None
-        self._media   = None
+        # what close() lets go, held before anything here can raise
+        self._manager  = None
+        self._scene    = None
+        self._media    = None
+        self._mesh_raw = None
+        self._reads    = {}  # the kinds of a read -> its _Raw
+        self._refused  = {}  # the kinds of a read that raised -> its error
         if FBX is None:
             raise ImportError("fbx module not found")
         path = os.path.expanduser(os.fspath(filename))
@@ -250,12 +255,9 @@ class FbxFile:
         self._textures = bool(textures)
         self._verbose  = bool(verbose)
         self._uuids    = None  # one a node, in the scene's own order
-        self._reads    = {}    # the kinds of a read -> its _Raw
-        self._refused  = {}    # the kinds of a read that raised -> its error
         self._refusals = {}    # a property -> the error it raised
         self._values   = {}    # a property -> its value, once read
         self._digests  = {}    # a property -> its marks when read
-        self._mesh_raw = None  # the read the meshes were built from
         self._warned   = set()
         self._hearing  = False
 
@@ -391,9 +393,14 @@ class FbxFile:
         with ``as_ascii``, through the SDK's own writer: in the file's own
         axes, units and pivots, with its embedded media, everything the
         fork does not read kept. The file is written beside its target and
-        renamed over it, so a failed save leaves the target as it was.
-        ValueError, nothing written, for a closed handle or a record
-        changed since it was read. Returns the path written.
+        renamed over it, so a failed save leaves the target as it was; a
+        folder of the target that does not exist is made (``save_fbx``
+        makes none). ValueError, nothing written, for a closed handle or a
+        record changed since it was read. Returns the path written.
+
+        The SDK's writer adds one empty FbxVideo, once, to a file holding a
+        material's binding table (Maya's standardSurface) beside a file
+        texture: nothing is lost, and a save of the save adds none.
         """
         self._open_or_raise("save")
         for field, held in self._digests.items():

@@ -802,10 +802,14 @@ raises ValueError. A file `load_fbx` refuses (a trimmed surface ...) still
 opens and saves whole: the property reading the refused data raises, the
 others read what they can. `FbxFile(path, textures=False)` decodes no
 pixels and still saves the textures; `Scene.load_fbx(f)` builds a scene of
-the handle's own records. Two things a save changes: a linked texture in
-a file that embeds media is embedded too, and an embedded texture's stored
+the handle's own records. Three things a save changes: a linked texture in
+a file that embeds media is embedded too; an embedded texture's stored
 path names the temporary folder it was extracted to (the pixels are the
-file's). The SDK's ASCII writer prints a double to within 1e-13 of it.
+file's); and the SDK's writer adds one empty FbxVideo, once, to a file
+holding a material's binding table (Maya's standardSurface) beside a file
+texture. Nothing is lost by any of them. `save` makes a folder of its
+target that does not exist. The SDK's ASCII writer prints a double to
+within 1e-13 of it.
 
 ---
 

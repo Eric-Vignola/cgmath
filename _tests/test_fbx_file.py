@@ -290,6 +290,26 @@ class TestSave(_Handles):
                     self.assertTrue(any(x.texture is not None or x.normal_map is not None for x in got))
                     self.assertEqual(sorted(os.listdir(self.folder)), sorted(x for x in os.listdir(self.folder) if x.endswith(".fbx")))
 
+    def test_writer_adds_a_video(self):
+        """the SDK's writer adds one empty FbxVideo (20 properties) to a
+        file holding a material's binding table (Maya's standardSurface)
+        beside a file texture; nothing else differs, the read is the
+        file's, and a save of the save adds none"""
+        for name in ("maya_embedded.fbx", "maya_linked.fbx"):
+            with self.subTest(name=name):
+                source = maya_file("materials_export", name)
+                first  = self.path(f"first_{name}")
+                again  = self.path(f"again_{name}")
+                with FbxFile(source, verbose=False) as f:
+                    f.save(first)
+                with FbxFile(first, verbose=False) as f:
+                    f.save(again)
+                kinds, props, user, keys, poses = census(source)
+                kinds["FbxVideo"] = kinds.get("FbxVideo", 0) + 1
+                self.assertEqual(census(first), (kinds, props + 20, user, keys, poses))
+                self.assertEqual(census(again), census(first))
+                same_read(self, load_fbx(first, verbose=False), load_fbx(source, verbose=False), "saved: ")
+
     def test_axes_and_unit(self):
         """a Z-up file in metres comes back Z-up in metres"""
         source = maya_file("zup", "z_m.fbx")
