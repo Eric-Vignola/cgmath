@@ -889,7 +889,8 @@ class TestClipList(unittest.TestCase):
 
     def test_forwarded_members_are_listed(self):
         """every member a ClipList passes on is a line of its own
-        class, in dir() and in REFERENCE.md"""
+        class, in dir() and in REFERENCE.md (skipped past dir() in a copy
+        shipped without its docs: a wheel, the studio's folder)"""
         lines = [name for name, raw in vars(ClipList).items()
                  if isinstance(raw, property) and raw.fget.__qualname__.startswith("_per_take.")
                  or getattr(raw, FORWARD_MARK, None) is not None]
@@ -897,6 +898,8 @@ class TestClipList(unittest.TestCase):
         for name in ("strip_namespace", "fps", "t", "frames", "take", "set_rotate_order", "wm"):
             self.assertIn(name, dir(ClipList))
         reference = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "REFERENCE.md")
+        if not os.path.isfile(reference):
+            self.skipTest("REFERENCE.md is not shipped with this copy")
         with open(reference, encoding="utf-8") as handle:
             text = handle.read()
         start   = text.index("ClipList(DataList)")
