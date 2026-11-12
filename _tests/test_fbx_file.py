@@ -5,8 +5,9 @@ properties are read, the nodes' uuids shared by all of them; a property
 reads what it depends on alone. A save of the untouched file writes the
 SDK's own scene: everything the SDK reads is kept, the fork's kinds and what
 the fork does not read (a bind pose, an LOD group, user properties) alike,
-in the file's own axes and unit, its embedded media embedded again. A change
-to a record read refuses the save. The tests need the Autodesk SDK; the Maya
+in the file's own axes and unit, its embedded media embedded again. A record
+added, removed or moved under another node refuses the save (the values of
+a record changed: test_fbx_edit). The tests need the Autodesk SDK; the Maya
 files were written by Maya 2025, recorded once (maya_fixtures), and need no
 Maya.
 """
@@ -349,16 +350,21 @@ class TestSave(_Handles):
             self.assertEqual(f.save(out), out)
         self.assertKept(source, out)
 
-    def test_changed_refused(self):
-        """a record changed, added or removed refuses the save, naming it;
-        the target is left as it was and nothing else is written"""
+    def test_layout_refused(self):
+        """a record added or removed, a kind set to None, a node moved under
+        another refuse the save, naming save_fbx; the target is left as it
+        was and nothing else is written"""
+
+        def reparented(f):
+            f.hierarchy.list[2].parent_uuid = f.hierarchy.list[0].uuid
+
         source = every_kind(self.path("every.fbx"))
         target = self.path("target.fbx")
         for change, said in (
-            (lambda f: setattr(f.meshes[1], "points", np.asarray(f.meshes[1].points) + 1.0), "meshes[1] ('planeShape') changed"),
-            (lambda f: setattr(f.hierarchy[0], "name", "renamed"), "hierarchy[0] ('renamed') changed"),
-            (lambda f: f.cameras.append(CameraData(name="extraShape")), "cameras holds 2 records, 1 when it was read"),
-            (lambda f: setattr(f.materials[0], "diffuse", 0.25), "materials[0] ('skinLambert') changed"),
+            (lambda f: f.cameras.append(CameraData(name="extraShape")), "cameras holds 2 records where the file holds 1"),
+            (lambda f: f.materials.pop(), "materials holds 2 records where the file holds 3"),
+            (lambda f: setattr(f, "lights", None), "lights is None where the file holds some"),
+            (reparented, "a node under another parent"),
         ):
             with self.subTest(said=said):
                 with open(target, "wb") as handle:
@@ -368,7 +374,7 @@ class TestSave(_Handles):
                     with self.assertRaises(ValueError) as caught:
                         f.save(target)
                 self.assertIn(said, str(caught.exception))
-                self.assertIn("open it again, or write the changed records with save_fbx", str(caught.exception))
+                self.assertTrue(str(caught.exception).endswith("; write the records with save_fbx"), str(caught.exception))
                 with open(target, "rb") as handle:
                     self.assertEqual(handle.read(), b"before")
                 self.assertEqual(sorted(os.listdir(self.folder)), ["every.fbx", "target.fbx"])

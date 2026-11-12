@@ -776,11 +776,14 @@ sections.
 translated the first time it is read and kept: equal to `load_fbx`'s field
 in any read order, the nodes' uuids the same in all of them. A property
 reads what it depends on alone: `hierarchy` builds no mesh, `meshes` no
-material. `save(path)` writes the file as it was read, through the SDK's
-own writer: in the file's own axes, units and pivots, with what the fork
-does not read (bind poses, LOD groups, user properties) and its embedded
-media. The records are read-only in this version: a save after one of
-them changed is refused, naming it, and writes nothing.
+material. `save(path)` writes the file through the SDK's own writer: in
+the file's own axes, units and pivots, with what the fork does not read
+(bind poses, LOD groups, user properties) and its embedded media. A record
+changed since it was read is written into the open file first, converted
+back to the file's axes, units and pivots, and the saved file is read
+again: it holds the records as they are, or the save is refused. A refused
+save writes nothing and leaves the handle as it was, the records keeping
+their changes.
 
 ```python
 from cgmath.formats import FbxFile
@@ -788,14 +791,52 @@ from cgmath.formats import FbxFile
 with FbxFile(DEMO_FBX) as f:
     print(f.hierarchy.name, f.meshes[0].parent_uuid == f.hierarchy["grp"].uuid)  # ['grp', 'cam', 'lamp'] True
     print(f.meshes == held.meshes, f.cameras == held.cameras)                    # True True
-    COPY_FBX         = f.save(os.path.join(WORK, "demo_copy.fbx"))
-    f.meshes[0].name = "renamed"
+    COPY_FBX                     = f.save(os.path.join(WORK, "demo_copy.fbx"))
+    f.meshes[0].name             = "renamed"
+    f.meshes[0].points           = np.asarray(f.meshes[0].points) + [0.0, 1.0, 0.0]
+    f.hierarchy["grp"].translate = [1.0, 2.0, 3.0]
+    f.cameras[0].focal_length    = 85.0
+    f.save(COPY_FBX)
+    f.cameras.append(f.cameras[0].copy())
     try:
         f.save(COPY_FBX)
     except ValueError as error:
-        print(str(error).split(";")[0])  # FbxFile.save: meshes[0] ('renamed') changed since it was read
-print(f.closed, f.hierarchy.name, load_fbx(COPY_FBX).meshes.name)                  # True ['grp', 'cam', 'lamp'] ['quad']
+        print(error)  # FbxFile.save: cameras holds 2 records where the file holds 1; write the records with save_fbx
+again = load_fbx(COPY_FBX)
+print(f.closed, again.meshes.name, again.hierarchy["grp"].translate, again.cameras[0].focal_length)  # True ['renamed'] [1. 2. 3.] 85.0
 ```
+
+| Property | A save writes | Refused |
+|---|---|---|
+| `hierarchy`, `clip` | a node's name, visibility and transform values; a take's keys, name, span and the active take; the frame rate of every take together | a hierarchy value a take of the file holds otherwise; one take's frame rate alone; the node of a skinned mesh moved off its bind world |
+| `meshes` | name, points, normals, hard edges, vertex colours | other faces or another point count |
+| `uvs` | name, points, indices | a set that does not map every face of its mesh |
+| `skins` | name, weights; an influence dropped, the influences in another order | an influence the file's skin does not hold |
+| `morphs` | a channel's weight and name, the deformer's name, `at` | two weights or two names on one channel; `at` above the full target |
+| `cameras`, `lights` | name, lens, film and clip values; colour, intensity, decay, cone | a value a take of the file keys; a light of another kind; `camera_scale` |
+| `curves`, `surfaces` | points, weights | two shapes on one node |
+| `materials` | name, colours and values, wrap modes, `uv_set`, faces, `bump_depth` | another `kind`, another map, another mesh, a mesh covered in part; records of one uuid changed apart |
+
+A change of the file's layout is refused whatever the property, naming
+`save_fbx`, which writes any records: a record added or removed, a
+property set to None, a node under another parent or of another kind.
+
+`save(path, force=True)` lets a change drop data of the file that no
+record holds and the change leaves stale; a warning names each item, and
+without `force` the save is refused, naming it too:
+
+| Change | Dropped with `force` |
+|---|---|
+| A take moved in time or given another frame count | the keys of what no record holds (a blend shape's weight, another writer's keyed camera), held at their first value |
+| A mesh's points under blend shape targets, a target's offsets | the normals the targets hold |
+| A mesh's points, normals or UVs | its tangents, binormals and smoothing groups, where the file holds them |
+| A curve's or surface's degree, form, knots or point count | the shape is made anew: its settings beyond points, knots and form |
+
+A take's curves hold 32-bit floats, so a keyed value reads back to within
+1e-6 of it. A channel a change touches is written as linear keys, one a
+frame: its tangents are not kept; a channel left alone keeps its curve. A
+UV set renamed is renamed on its mesh alone: give the material's `uv_set`
+the new name with it.
 
 A closed handle keeps what it read; a property it had not read, or a save,
 raises ValueError. A file `load_fbx` refuses (a trimmed surface ...) still

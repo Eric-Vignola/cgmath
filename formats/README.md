@@ -12,8 +12,8 @@ the NURBS curves and surfaces —
 and
 `save_fbx(path, ...)` writes the same fields back, in Maya's Y-up and cm.
 `FbxFile(path)` holds a file open instead: each field a property read the
-first time it is asked for, `save(path)` writing the file back as it was
-read, everything the SDK reads kept.
+first time it is asked for, `save(path)` writing the file back, the
+records' changes in it, everything else the SDK reads kept.
 Every other fbx reader in the library (`HierarchyData.load_fbx`,
 `MeshData.load_fbx`, `SkinList.load_fbx`, `cgmath.render.Scene.load_fbx`
 ...) is a slice of that read. The glb half is **accessor** focused: decode a
@@ -42,7 +42,8 @@ import `prim` and `stage` from it directly.
 |---|---|
 | `_load.py` / `_write.py` | `load_fbx` / `save_fbx`, the fbx read and write of every cgmath class |
 | `_fbx_io.py` | the one place an `FbxManager` is made: `open_fbx`, the sdk lookup, the media folder |
-| `_fbx_file.py` | `FbxFile`: a file held open, read a kind at a time, saved back as it was read |
+| `_fbx_file.py` | `FbxFile`: a file held open, read a kind at a time, saved back with its records' changes |
+| `_fbx_edit.py` | `FbxFile.save` of changed records: each change written into the open scene, in the file's axes, units and pivots |
 | `glb.py` | glTF/GLB reading, accessor decode, payload blobs, `GlbData` |
 | `fbx.py` | `FbxExporter`, the writer `save_fbx` and `HierarchyData.save_fbx` stand on |
 | `usd/stage.py` | open / create / write stages, sublayer editing, a throw-away stage cache |
@@ -313,7 +314,7 @@ a textured one):
 | Want | Call |
 |---|---|
 | Everything an FBX holds | `cgmath.formats.load_fbx(path)` → `FbxContents`; `cgmath.render.Scene.load_fbx(path)` holds the same, ready to render |
-| An FBX held open, read a kind at a time | `cgmath.formats.FbxFile(path)`: `FbxContents`' fields as properties, each read the first time it is asked for; `.save(path)` writes the file back as it was read; `Scene.load_fbx(f)` reads one |
+| An FBX held open, read a kind at a time | `cgmath.formats.FbxFile(path)`: `FbxContents`' fields as properties, each read the first time it is asked for; `.save(path)` writes the file back, the records' changes in it; `Scene.load_fbx(f)` reads one |
 | Cameras or lights from FBX | `cgmath.formats.load_fbx(path).cameras` → `CameraList`, `.lights` → `LightList`; one kind alone: `CameraList.load_fbx(path)`, `LightList.load_fbx(path)`, written back by the list's `save_fbx(path)` |
 | NURBS curves and surfaces from FBX | `cgmath.formats.load_fbx(path).curves` → `NurbsCurveList`, `.surfaces` → `NurbsSurfaceList`; one kind alone: `NurbsCurveList.load_fbx(path)`, `NurbsSurfaceList.load_fbx(path)`, written back by the list's `save_fbx(path)` |
 | Meshes + UVs from FBX | `cgmath.geometry.mesh.load_fbx(path)` → `[(MeshData, UVList), ...]`, as `load_fbx` reads them, each mesh's `parent_uuid` naming its node |

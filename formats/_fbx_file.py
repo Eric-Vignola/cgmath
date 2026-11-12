@@ -4,6 +4,8 @@ The SDK's own scene stays open behind the handle: each kind of the file is
 translated the first time it is asked for, and :meth:`FbxFile.save` writes
 that scene back through the SDK's writer, so everything the fork does not
 read (bind poses, LOD groups, user properties, embedded media ...) is kept.
+A record changed since it was read is written into that scene first
+(:mod:`cgmath.formats._fbx_edit`), in the file's own axes, units and pivots.
 """
 
 import contextlib
@@ -15,7 +17,7 @@ import warnings
 
 import numpy as np
 
-from cgmath.formats import _load
+from cgmath.formats import _fbx_edit, _load
 from cgmath.formats._fbx_io import export_scene, import_scene, media_folder, new_manager, short_path
 
 __all__ = ["FbxFile"]
@@ -27,8 +29,21 @@ _NODES  = frozenset(("takes", "cameras", "lights", "binds"))
 _WIDE   = frozenset(("takes", "meshes", "uvs", "skins", "morphs", "cameras", "lights"))
 _SHAPES = frozenset(("curves", "surfaces"))
 
-# what save refuses on, said once
-_READ_ONLY = "this version writes the file as it was read: open it again, or write the changed records with save_fbx"
+# a property -> where its list's class lives, the class, and the record's
+# class a lone one is wrapped from (as save_fbx wraps it)
+_KINDS = {
+    "hierarchy": ("cgmath.hierarchy.hierarchy", "HierarchyData", None),
+    "clip":      ("cgmath.hierarchy.hierarchy", "ClipList", "ClipData"),
+    "meshes":    ("cgmath.geometry.mesh", "MeshList", "MeshData"),
+    "skins":     ("cgmath.geometry.skin_weights", "SkinList", "SkinData"),
+    "uvs":       ("cgmath.geometry.mesh", "UVList", "UVData"),
+    "cameras":   ("cgmath.geometry.camera", "CameraList", "CameraData"),
+    "lights":    ("cgmath.geometry.light", "LightList", "LightData"),
+    "materials": ("cgmath.geometry.material", "MaterialList", "MaterialData"),
+    "morphs":    ("cgmath.geometry.morph_target", "MorphList", "MorphData"),
+    "curves":    ("cgmath.geometry.bspline", "NurbsCurveList", "NurbsCurveData"),
+    "surfaces":  ("cgmath.geometry.bspline_patch", "NurbsSurfaceList", "NurbsSurfaceData"),
+}
 
 
 def _plans(wide, *needs) -> tuple:
@@ -164,23 +179,10 @@ def _marks(value):
     return _mark(rest, seen), [(item.get("name") if isinstance(item, dict) else None, _mark(item, seen)) for item in items]
 
 
-def _told(field: str, held, now) -> str:
-    """what changed of ``field`` between its marks when read and now"""
-    (rest, items), (rest_now, items_now) = held, now
-    if items is not None and items_now is not None:
-        if len(items) != len(items_now):
-            return f"{field} holds {len(items_now)} records, {len(items)} when it was read"
-        for at, ((_, mark), (name, mark_now)) in enumerate(zip(items, items_now)):
-            if mark != mark_now:
-                named = f" ({name!r})" if name else ""
-                return f"{field}[{at}]{named} changed since it was read"
-    return f"{field} changed since it was read"
-
-
 class FbxFile:
     """
     An fbx file held open, each of its kinds read the first time it is
-    asked for, the file written back as it was read.
+    asked for, its records' changes written back into it.
 
     ``FbxFile(path)`` opens the file through the FBX SDK and holds it open
     until :meth:`close`, or the end of a ``with`` block. Each of its eleven
@@ -199,12 +201,20 @@ class FbxFile:
     False silences the reads' warnings, each of which a handle otherwise
     shows once.
 
-    :meth:`save` writes the file as it was read, through the SDK's own
-    writer: in the file's own axes, units and pivots, with everything the
-    fork does not read (bind poses, LOD groups, user properties ...) and the
-    file's embedded media. The records are read-only in this version: a
-    save after any of them changed is refused, naming it, and writes
-    nothing.
+    :meth:`save` writes the file through the SDK's own writer: in the
+    file's own axes, units and pivots, with everything the fork does not
+    read (bind poses, LOD groups, user properties ...) and the file's
+    embedded media. A record changed since it was read, in place or by
+    giving its property another list, is written into the open file first,
+    converted back to the file's axes, units and pivots: the values of the
+    records the file holds (a node's transform, a take's keys, a mesh's
+    points, a skin's weights, a material's colours ...). A change of the
+    file's layout is refused, naming ``save_fbx``, which writes any
+    records: a record added or removed, a node under another parent, a mesh
+    of other faces, another texture. So is a change the file would not read
+    back as the records hold it. ``force=True`` lets a change drop data of
+    the file that no record holds and the change leaves stale, a warning
+    naming each item; without it such a change is refused.
 
     A file ``load_fbx`` refuses still opens and saves whole. The property
     reading the refused data raises the refusal, every time it is read; the
@@ -252,6 +262,7 @@ class FbxFile:
         self._scene    = scene
         self._media    = folder
         self._filename = path
+        self._origin   = path  # the file the open scene was last read from or saved to
         self._textures = bool(textures)
         self._verbose  = bool(verbose)
         self._uuids    = None  # one a node, in the scene's own order
@@ -323,11 +334,19 @@ class FbxFile:
         a clip, whose nodes ``clip`` holds, or no node"""
         return self._get("hierarchy")
 
+    @hierarchy.setter
+    def hierarchy(self, value) -> None:
+        self._set("hierarchy", value)
+
     @property
     def clip(self):
         """``load_fbx``'s ``clip``: a ClipList of the file's takes over
         every node, its active take the file's; None for no take"""
         return self._get("clip")
+
+    @clip.setter
+    def clip(self, value) -> None:
+        self._set("clip", value)
 
     @property
     def meshes(self):
@@ -335,11 +354,19 @@ class FbxFile:
         on its node by ``parent_uuid``; None for none"""
         return self._get("meshes")
 
+    @meshes.setter
+    def meshes(self, value) -> None:
+        self._set("meshes", value)
+
     @property
     def skins(self):
         """``load_fbx``'s ``skins``: a SkinList, one a skinned mesh, each
         naming its mesh by ``mesh_uuid``; None for none"""
         return self._get("skins")
+
+    @skins.setter
+    def skins(self, value) -> None:
+        self._set("skins", value)
 
     @property
     def uvs(self):
@@ -347,17 +374,29 @@ class FbxFile:
         naming its mesh by ``mesh_uuid``; None for none"""
         return self._get("uvs")
 
+    @uvs.setter
+    def uvs(self, value) -> None:
+        self._set("uvs", value)
+
     @property
     def cameras(self):
         """``load_fbx``'s ``cameras``: a CameraList in their nodes' order;
         None for none"""
         return self._get("cameras")
 
+    @cameras.setter
+    def cameras(self, value) -> None:
+        self._set("cameras", value)
+
     @property
     def lights(self):
         """``load_fbx``'s ``lights``: a LightList in their nodes' order;
         None for none"""
         return self._get("lights")
+
+    @lights.setter
+    def lights(self, value) -> None:
+        self._set("lights", value)
 
     @property
     def materials(self):
@@ -366,6 +405,10 @@ class FbxFile:
         handle was opened with ``textures`` False; None for none"""
         return self._get("materials")
 
+    @materials.setter
+    def materials(self, value) -> None:
+        self._set("materials", value)
+
     @property
     def morphs(self):
         """``load_fbx``'s ``morphs``: a MorphList of the meshes' blend
@@ -373,11 +416,19 @@ class FbxFile:
         none"""
         return self._get("morphs")
 
+    @morphs.setter
+    def morphs(self, value) -> None:
+        self._set("morphs", value)
+
     @property
     def curves(self):
         """``load_fbx``'s ``curves``: a NurbsCurveList in their nodes'
         order; None for none"""
         return self._get("curves")
+
+    @curves.setter
+    def curves(self, value) -> None:
+        self._set("curves", value)
 
     @property
     def surfaces(self):
@@ -385,45 +436,74 @@ class FbxFile:
         order; None for none. A trimmed surface raises ValueError here"""
         return self._get("surfaces")
 
+    @surfaces.setter
+    def surfaces(self, value) -> None:
+        self._set("surfaces", value)
+
     # ---------------------------------------------------------------- save
 
-    def save(self, filename, as_ascii: bool = False) -> str:
+    def save(self, filename, as_ascii: bool = False, force: bool = False) -> str:
         """
-        Writes the file as it was read to ``filename``, binary or ASCII
-        with ``as_ascii``, through the SDK's own writer: in the file's own
-        axes, units and pivots, with its embedded media, everything the
-        fork does not read kept. The file is written beside its target and
-        renamed over it, so a failed save leaves the target as it was; a
-        folder of the target that does not exist is made (``save_fbx``
-        makes none). ValueError, nothing written, for a closed handle or a
-        record changed since it was read. Returns the path written.
+        Writes the file to ``filename``, binary or ASCII with ``as_ascii``,
+        through the SDK's own writer: in the file's own axes, units and
+        pivots, with its embedded media, everything the fork does not read
+        kept. A record changed since it was read, in place or by giving
+        its property another value, is written into the file first; the
+        file is then read again, and a change that would not read back as
+        the records hold it is refused. The file is written beside its
+        target and renamed over it, so a failed save leaves the target as
+        it was; a folder of the target that does not exist is made
+        (``save_fbx`` makes none). Returns the path written.
+
+        ``force`` lets a change drop data of the file the records do not
+        hold, one warning naming each item dropped; without it such a
+        change is refused. A refused save (ValueError, TypeError or
+        NotImplementedError) writes nothing and leaves the handle as it was
+        before the call, the records as they were given.
 
         The SDK's writer adds one empty FbxVideo, once, to a file holding a
         material's binding table (Maya's standardSurface) beside a file
         texture: nothing is lost, and a save of the save adds none.
         """
         self._open_or_raise("save")
-        for field, held in self._digests.items():
-            if held is None:
-                continue
-            now = _marks(self._values[field])
-            if now != held:
-                raise ValueError(f"FbxFile.save: {_told(field, held, now)}; {_READ_ONLY}")
-
-        path   = os.path.abspath(os.path.expanduser(os.fspath(filename)))
-        folder = os.path.dirname(path)
-        os.makedirs(folder, exist_ok=True)
-        handle, temp = tempfile.mkstemp(prefix=".cgmath_", suffix=".fbx", dir=folder)
-        os.close(handle)
+        changed = [
+            field for field in _fbx_edit.FIELDS
+            if field in self._digests and _marks(self._values[field]) != self._digests[field]
+        ]
+        path    = os.path.abspath(os.path.expanduser(os.fspath(filename)))
+        folder  = os.path.dirname(path)
+        dropped = []
+        began   = []
         try:
-            # Maya's fbx binding hands the SDK plain ASCII paths alone
-            target = temp if temp.isascii() else short_path(temp)
-            export_scene(self._manager, self._scene, target, self._fbx, as_ascii=as_ascii, embed=self._embeds())
-            os.replace(temp, path)
+            if changed:
+                dropped = _fbx_edit.apply(self, changed, force, began)
+            os.makedirs(folder, exist_ok=True)
+            handle, temp = tempfile.mkstemp(prefix=".cgmath_", suffix=".fbx", dir=folder)
+            os.close(handle)
+            try:
+                # Maya's fbx binding hands the SDK plain ASCII paths alone
+                target = temp if temp.isascii() else short_path(temp)
+                export_scene(self._manager, self._scene, target, self._fbx, as_ascii=as_ascii, embed=self._embeds())
+                os.replace(temp, path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.remove(temp)
+                raise
         except BaseException:
-            with contextlib.suppress(OSError):
-                os.remove(temp)
+            # a change part written, or written and not saved: the scene as it was
+            if began:
+                self._restore()
             raise
+
+        if changed:
+            # the open scene is the file just written: what was read of it is read anew
+            self._origin   = path
+            self._mesh_raw = None
+            self._reads.clear()
+            self._refused.clear()
+            self._digests = {field: _marks(value) for field, value in self._values.items()}
+        if dropped:
+            warnings.warn(f"FbxFile.save: with force, {path!r} is written without {'; '.join(dropped)}", stacklevel=2)
         return path
 
     def _embeds(self) -> bool:
@@ -439,6 +519,47 @@ class FbxFile:
     def _open_or_raise(self, what: str) -> None:
         if self._manager is None:
             raise ValueError(f"FbxFile.{what}: {self._filename!r} is closed; open it again")
+
+    def _set(self, field: str, value) -> None:
+        """a property given another value: its list, one record of it
+        (wrapped in its list, as ``save_fbx`` wraps it) or None. The
+        property is read first, so a save tells what changed of the file"""
+        import importlib
+
+        self._get(field)
+        module, many, one = _KINDS[field]
+        module = importlib.import_module(module)
+        many   = getattr(module, many)
+        if one is not None and type(value) is getattr(module, one):
+            value = many([value])
+        if value is not None and type(value) is not many:
+            wrapped = f", a {one}" if one is not None else ""
+            raise TypeError(f"FbxFile.{field} is a {many.__name__}{wrapped} or None, not a {type(value).__name__}")
+        self._values[field] = value
+
+    def _restore(self) -> None:
+        """the scene read again off the file it was last read from or saved
+        to, after a change was part written into it. The records and the
+        nodes' uuids are kept; a file gone since closes the handle"""
+        manager, self._manager = self._manager, None
+        self._scene    = None
+        self._mesh_raw = None
+        self._reads.clear()
+        self._refused.clear()
+        if manager is not None:
+            manager.Destroy()
+        try:
+            manager = new_manager(self._fbx, self._media or True)
+            try:
+                scene = import_scene(manager, self._origin, self._fbx)
+            except BaseException:
+                manager.Destroy()
+                raise
+        except BaseException:
+            self.close()
+            raise
+        self._manager = manager
+        self._scene   = scene
 
     def _get(self, field: str):
         """a property's value: kept once read; a refusal raised again"""
@@ -569,5 +690,9 @@ class FbxFile:
         meshes = self.meshes
         if meshes is None:
             return None
+        if self._mesh_raw is None:
+            # the meshes were read before a save: read again, for their materials alone
+            self._mesh_raw = self._raw(frozenset(("meshes",)), _WIDE)
+            self._mesh_raw.sorted()
         filled = _load._fill_materials(self._mesh_raw.read, self._scene, self._fbx, self._filename, self._textures)
         return _load._build_materials(filled, meshes)
