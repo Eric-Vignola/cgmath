@@ -55,7 +55,7 @@ from typing import List, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 from cgmath.data import _strip_namespace, Array, Data, ImmutableArray as numpy_array
-from cgmath.formats import FbxContents, load_fbx as _load_fbx, save_fbx as _save_fbx
+from cgmath.formats import FbxContents, FbxFile, load_fbx as _load_fbx, save_fbx as _save_fbx
 from cgmath.geometry.camera import CameraData, CameraList
 from cgmath.geometry.deform import SkinDeformData
 from cgmath.geometry.light import LightData, LightList
@@ -1100,7 +1100,19 @@ class Scene(Data):
         reads them, named after the file unless ``name`` says; ``options``
         are ``load_fbx``'s flags (``textures=False``, ``verbose=False`` ...),
         a kind left unread None; a NURBS curve or surface is left unread,
-        the scene holding none"""
+        the scene holding none. ``filename`` may be an open
+        :class:`cgmath.formats.FbxFile` instead, its records read as it was
+        opened, no flag taken: the scene holds the handle's own records, so
+        a change made to them through the scene makes the handle's ``save``
+        refuse"""
+        if isinstance(filename, FbxFile):
+            if options:
+                raise TypeError(
+                    f"Scene.load_fbx: an FbxFile is read as it was opened; {', '.join(sorted(options))} "
+                    f"go to FbxFile(path, ...) or to load_fbx"
+                )
+            stem = os.path.splitext(os.path.basename(filename.filename))[0]
+            return cls(name=name or stem, **{field: getattr(filename, field) for field in _FBX_FIELDS})
         contents = _load_fbx(filename, **dict(options, curves=False, surfaces=False))
         stem     = os.path.splitext(os.path.basename(os.path.expanduser(filename)))[0]
         return cls(name=name or stem, **{field: getattr(contents, field) for field in _FBX_FIELDS})

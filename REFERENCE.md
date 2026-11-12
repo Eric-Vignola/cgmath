@@ -1033,7 +1033,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x00000234B4E7B090>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000001817F63AF10>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -3181,7 +3181,7 @@ texture I/O and sampling.
 
 ## `cgmath.formats`
 
-the FBX round trip: `load_fbx`, `save_fbx`, `FbxContents` (needs the Autodesk FBX SDK at call time).
+the FBX round trip: `load_fbx`, `save_fbx`, `FbxContents`, and `FbxFile`, a file held open (needs the Autodesk FBX SDK at call time).
 
 > Readers and writers for external asset formats.
 
@@ -3189,6 +3189,7 @@ Re-exported classes:
 
 ```text
 FbxContents
+FbxFile
 ```
 
 Functions:
@@ -3512,7 +3513,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000023502DBC360>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001816296AE80>, '...
 ```
 
 ## `cgmath.constraints`

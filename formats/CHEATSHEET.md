@@ -769,6 +769,46 @@ sections.
 
 ---
 
+## `fbx` — FbxFile: a file held open
+
+`FbxFile(path)` opens a file and holds it until `close()`, or the end of a
+`with` block. Its eleven properties are `FbxContents`' fields, each
+translated the first time it is read and kept: equal to `load_fbx`'s field
+in any read order, the nodes' uuids the same in all of them. A property
+reads what it depends on alone: `hierarchy` builds no mesh, `meshes` no
+material. `save(path)` writes the file as it was read, through the SDK's
+own writer: in the file's own axes, units and pivots, with what the fork
+does not read (bind poses, LOD groups, user properties) and its embedded
+media. The records are read-only in this version: a save after one of
+them changed is refused, naming it, and writes nothing.
+
+```python
+from cgmath.formats import FbxFile
+
+with FbxFile(DEMO_FBX) as f:
+    print(f.hierarchy.name, f.meshes[0].parent_uuid == f.hierarchy["grp"].uuid)  # ['grp', 'cam', 'lamp'] True
+    print(f.meshes == held.meshes, f.cameras == held.cameras)                    # True True
+    COPY_FBX         = f.save(os.path.join(WORK, "demo_copy.fbx"))
+    f.meshes[0].name = "renamed"
+    try:
+        f.save(COPY_FBX)
+    except ValueError as error:
+        print(str(error).split(";")[0])  # FbxFile.save: meshes[0] ('renamed') changed since it was read
+print(f.closed, f.hierarchy.name, load_fbx(COPY_FBX).meshes.name)                  # True ['grp', 'cam', 'lamp'] ['quad']
+```
+
+A closed handle keeps what it read; a property it had not read, or a save,
+raises ValueError. A file `load_fbx` refuses (a trimmed surface ...) still
+opens and saves whole: the property reading the refused data raises, the
+others read what they can. `FbxFile(path, textures=False)` decodes no
+pixels and still saves the textures; `Scene.load_fbx(f)` builds a scene of
+the handle's own records. Two things a save changes: a linked texture in
+a file that embeds media is embedded too, and an embedded texture's stored
+path names the temporary folder it was extracted to (the pixels are the
+file's). The SDK's ASCII writer prints a double to within 1e-13 of it.
+
+---
+
 ## `fbx` — FbxExporter
 
 Writes a `HierarchyData` skeleton out as an FBX. One skeleton per exporter.

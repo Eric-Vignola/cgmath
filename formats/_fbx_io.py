@@ -23,6 +23,7 @@ import warnings
 
 __all__ = [
     "FbxReadError",
+    "export_scene",
     "import_scene",
     "load_sdk",
     "media_folder",
@@ -165,6 +166,33 @@ def import_scene(manager, filename, sdk):
         importer.Destroy()
 
     return scene
+
+
+def export_scene(manager, scene, filename, sdk, as_ascii=False, embed=False):
+    """
+    Writes ``scene`` to ``filename`` through the SDK's own FBX writer, as it
+    stands: binary, or ASCII with ``as_ascii``. ``embed`` stores the media
+    files the scene names inside the file. RuntimeError names the SDK's own
+    error for a write that fails.
+    """
+    registry    = manager.GetIOPluginRegistry()
+    file_format = registry.GetNativeWriterFormat()
+    if as_ascii:
+        for index in range(registry.GetWriterFormatCount()):
+            if registry.WriterIsFBX(index) and "ascii" in str(registry.GetWriterFormatDescription(index)):
+                file_format = index
+                break
+
+    settings = manager.GetIOSettings()
+    settings.SetBoolProp(sdk.EXP_FBX_EMBEDDED, bool(embed))
+    exporter = sdk.FbxExporter.Create(manager, "")
+    try:
+        if not exporter.Initialize(filename, file_format, settings):
+            raise RuntimeError(f"Failed to initialize FBX exporter: {exporter.GetStatus().GetErrorString()}")
+        if not exporter.Export(scene):
+            raise RuntimeError(f"Failed to export FBX scene: {exporter.GetStatus().GetErrorString()}")
+    finally:
+        exporter.Destroy()
 
 
 def typed(obj, kind, sdk):

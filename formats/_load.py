@@ -270,14 +270,8 @@ def _quiet(verbose: bool):
 def _load(filename, parts: dict) -> FbxContents:
     """:func:`load_fbx`'s read of the kinds ``parts`` turns on"""
     read = _open(filename, parts)
-    hierarchy, order = _build(read)
-    # Maya's FBXExport writes a take whether anything moves or not: a take
-    # over no node is no clip
-    clip = None if read["takes"] is None or not len(hierarchy) else _build_clips(read, hierarchy, order)
-    # the shapes in their nodes' order, the hierarchy's
-    rank = {at: column for column, at in enumerate(order)}
-    for kind in ("meshes", "cameras", "lights", "curves", "surfaces"):
-        read[kind].sort(key=lambda held: rank[held["node"]])
+    hierarchy, order = _sorted(read)
+    clip      = _clip(read, hierarchy, order)
     meshes    = _build_meshes(read) if parts["meshes"] else None
     uvs       = _build_uvs(read, meshes) if parts["uvs"] else None
     cameras   = _build_cameras(read) if parts["cameras"] else None
@@ -286,14 +280,57 @@ def _load(filename, parts: dict) -> FbxContents:
     morphs    = _build_morphs(read, meshes) if parts["morphs"] else None
     curves    = _build_curves(read) if parts["curves"] else None
     surfaces  = _build_surfaces(read) if parts["surfaces"] else None
-    shapes    = (uvs, cameras, lights, materials, morphs, curves, surfaces)
-    if parts["skins"] and any(held["skin"] is not None for held in read["meshes"]):
-        bind, order = _build(read)
-        _settle_bind(read, bind, order)
-        return FbxContents(bind, clip, meshes, _build_skins(read, meshes), *shapes)
-    if clip is not None:
-        return FbxContents(None, clip, meshes, None, *shapes)
-    return FbxContents(hierarchy if len(hierarchy) else None, None, meshes, None, *shapes)
+    bind      = _bind(read) if parts["skins"] else None
+    skins     = None if bind is None else _build_skins(read, meshes)
+    held      = _held(hierarchy, clip is not None, bind)
+    return FbxContents(held, clip, meshes, skins, uvs, cameras, lights, materials, morphs, curves, surfaces)
+
+
+def _sorted(read: dict) -> tuple:
+    """the read's hierarchy and its nodes' order (:func:`_build`), the
+    read's shapes put in their nodes' order, the hierarchy's: what every
+    build of the read starts from"""
+    hierarchy, order = _build(read)
+    rank = {at: column for column, at in enumerate(order)}
+    for kind in ("meshes", "cameras", "lights", "curves", "surfaces"):
+        read[kind].sort(key=lambda held: rank[held["node"]])
+    return hierarchy, order
+
+
+def _clip(read: dict, hierarchy, order):
+    """the read's takes over ``hierarchy`` (:func:`_sorted`), None for a
+    read holding none"""
+    # Maya's FBXExport writes a take whether anything moves or not: a take
+    # over no node is no clip
+    if read["takes"] is None or not len(hierarchy):
+        return None
+    return _build_clips(read, hierarchy, order)
+
+
+def _skinned(read: dict) -> bool:
+    """whether a mesh of the read holds a skin"""
+    return any(held["skin"] is not None for held in read["meshes"])
+
+
+def _bind(read: dict):
+    """the read's hierarchy at its skins' bind pose (:func:`_settle_bind`),
+    None for a read holding no skin"""
+    if not _skinned(read):
+        return None
+    bind, order = _build(read)
+    _settle_bind(read, bind, order)
+    return bind
+
+
+def _held(hierarchy, clip: bool, bind):
+    """:class:`FbxContents`' ``hierarchy``: the bind pose where a mesh is
+    skinned; else None where the file holds a clip, whose nodes are the
+    clip's, or no node; else the nodes as the file places them"""
+    if bind is not None:
+        return bind
+    if clip:
+        return None
+    return hierarchy if len(hierarchy) else None
 
 
 # the reads of one kind: the nodes alone, and the nodes with their takes
@@ -838,11 +875,12 @@ def _read_uvs(label, shape, counts, fbx) -> list:
     return found
 
 
-def _read_skin(scene, node, at: int, label: str, shape, found, fbx) -> dict:
+def _read_skin(scene, node, at: int, label: str, shape, found, fbx, weights: bool = True) -> dict:
     """the one skin on the mesh (``label``) of the node at place ``at``: its
     clusters' nodes (places in ``found``), weights and matrices, and the
     bind pose listing the mesh's node; None for no skin, ValueError for
-    several skins or several bind poses"""
+    several skins or several bind poses. ``weights`` False leaves every
+    cluster's indices and weights unread, empty"""
     from cgmath.formats._fbx_io import typed
 
     kind  = fbx.FbxDeformer.EDeformerType.eSkin
@@ -871,8 +909,8 @@ def _read_skin(scene, node, at: int, label: str, shape, found, fbx) -> dict:
         clusters.append(
             {
                 "node":    linked_at,
-                "indices": np.asarray(cluster.GetControlPointIndices(), dtype=np.int64),
-                "weights": np.asarray(cluster.GetControlPointWeights(), dtype=np.float64),
+                "indices": np.asarray(cluster.GetControlPointIndices() if weights else (), dtype=np.int64),
+                "weights": np.asarray(cluster.GetControlPointWeights() if weights else (), dtype=np.float64),
                 "link":    _amatrix(linked),
                 "mesh":    _amatrix(placed),
             }
@@ -898,12 +936,32 @@ def _read_skin(scene, node, at: int, label: str, shape, found, fbx) -> dict:
     }
 
 
-def _read(scene, fbx, parts: dict, filename: str = "") -> dict:
+def _read_bind(scene, node, at: int, found, fbx):
+    """the skin alone of the mesh on the node at place ``at``, for a read
+    of the bind pose with the meshes off: the mesh's record holding its
+    skin and no geometry, no cluster's weights read; None for a mesh no
+    skin deforms"""
+    from cgmath.formats._fbx_io import typed
+
+    shape = typed(node.GetNodeAttribute(), fbx.FbxMesh, fbx)
+    name  = str(shape.GetName()) or None
+    label = f"mesh {name!r}" if name else f"the mesh on node {str(node.GetName())!r}"
+    skin  = _read_skin(scene, node, at, label, shape, found, fbx, weights=False)
+    if skin is None:
+        return None
+    return {"name": name, "label": label, "node": at, "points": np.zeros((0, 3)), "morphs": [], "skin": skin}
+
+
+def _read(scene, fbx, parts: dict, filename: str = "", uuids=None) -> dict:
     """everything the build needs, out of the scene as python and numpy, in
     Maya's Y-up and cm (:func:`_convert`): every node, one uuid each, and
     the kinds ``parts`` turns on (:func:`load_fbx`'s flags): every take's
     curves and the active take's position, each mesh with what sits on it,
-    its skin, the cameras, the lights, the curves and the surfaces"""
+    its skin, the cameras, the lights, the curves and the surfaces.
+    ``uuids`` names the nodes, one a node in the scene's own order
+    (:func:`_walk`), for the reads of one scene that must agree; new ones
+    otherwise. ``binds`` in ``parts``, with the meshes off, reads each
+    skinned mesh's skin and nothing else of it (:func:`_read_bind`)"""
     from cgmath.formats._fbx_io import typed
     from cgmath.hierarchy.hierarchy import (
         _FBX_ROTATE_ORDERS,
@@ -927,7 +985,8 @@ def _read(scene, fbx, parts: dict, filename: str = "") -> dict:
     curves   = []
     surfaces = []
     cache    = {}
-    if any(parts[kind] for kind in ("meshes", "cameras", "lights", "curves", "surfaces")):
+    binds    = bool(parts.get("binds")) and not parts["meshes"]
+    if binds or any(parts[kind] for kind in ("meshes", "cameras", "lights", "curves", "surfaces")):
         for at, (node, _) in enumerate(found):
             attribute = node.GetNodeAttribute()
             kind      = None if attribute is None else attribute.GetAttributeType()
@@ -936,6 +995,10 @@ def _read(scene, fbx, parts: dict, filename: str = "") -> dict:
                 shape        = mesh.pop("shape")
                 mesh["skin"] = _read_skin(scene, node, at, mesh["label"], shape, found, fbx) if parts["skins"] else None
                 shapes.append(mesh)
+            elif kind == kinds.eMesh and binds:
+                bound = _read_bind(scene, node, at, found, fbx)
+                if bound is not None:
+                    shapes.append(bound)
             elif kind == kinds.eCamera and parts["cameras"]:
                 cameras.append(_read_camera(node, at, fbx))
             elif kind == kinds.eLight and parts["lights"]:
@@ -952,7 +1015,7 @@ def _read(scene, fbx, parts: dict, filename: str = "") -> dict:
                     f"load_fbx(..., surfaces=False) reads the file without its surfaces"
                 )
     nodes = []
-    for node, parent in found:
+    for at, (node, parent) in enumerate(found):
         name      = str(node.GetName())
         attribute = node.GetNodeAttribute()
         kind      = None if attribute is None else attribute.GetAttributeType()
@@ -1021,7 +1084,7 @@ def _read(scene, fbx, parts: dict, filename: str = "") -> dict:
         entry = {
             "name":         name,
             "parent":       parent,
-            "uuid":         generate_uuid(),
+            "uuid":         generate_uuid() if uuids is None else uuids[at],
             "node_type":    "joint" if joint else "locator" if locator else "transform",
             "view":         view,
             "translate":    translate,
@@ -2129,6 +2192,25 @@ def _build_lights(read: dict):
         if held["kind"] in LIGHT_KINDS
     ]
     return LightList(lights) if lights else None
+
+
+def _fill_materials(read: dict, scene, fbx, filename: str, pixels: bool = True) -> dict:
+    """the meshes of a read made with the materials off, each with its
+    materials read off ``scene`` now (``pixels`` as :func:`_read_texture`
+    takes it), for :func:`_build_materials`: the records copied, the read
+    left as it was"""
+    from cgmath.formats._fbx_io import typed
+
+    found  = _walk(scene)
+    cache  = {}
+    filled = {}
+    # in the nodes' own order, as _read fills its texture cache
+    for held in sorted(read["meshes"], key=lambda held: held["node"]):
+        node                 = found[held["node"]][0]
+        shape                = typed(node.GetNodeAttribute(), fbx.FbxMesh, fbx)
+        materials            = _read_materials(node, shape, held["counts"], held["label"], filename, fbx, pixels, cache)
+        filled[held["node"]] = dict(held, materials=materials)
+    return {"meshes": [filled[held["node"]] for held in read["meshes"]]}
 
 
 def _build_materials(read: dict, meshes):
