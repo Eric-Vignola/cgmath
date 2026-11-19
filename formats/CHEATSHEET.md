@@ -797,11 +797,11 @@ with FbxFile(DEMO_FBX) as f:
     f.hierarchy["grp"].translate = [1.0, 2.0, 3.0]
     f.cameras[0].focal_length    = 85.0
     f.save(COPY_FBX)
-    f.cameras.append(f.cameras[0].copy())
+    f.cameras.append(f.cameras[0].copy())  # a second camera on the first one's node
     try:
         f.save(COPY_FBX)
     except ValueError as error:
-        print(error)  # FbxFile.save: cameras holds 2 records where the file holds 1; write the records with save_fbx
+        print(error)  # FbxFile.save: camera 'cam' and camera 'cam' sit on node 'cam'; a node holds one shape
 again = load_fbx(COPY_FBX)
 print(f.closed, again.meshes.name, again.hierarchy["grp"].translate, again.cameras[0].focal_length)  # True ['renamed'] [1. 2. 3.] 85.0
 ```
@@ -812,10 +812,10 @@ print(f.closed, again.meshes.name, again.hierarchy["grp"].translate, again.camer
 | `meshes` | name, points, normals, hard edges, vertex colours; a mesh added, taken off or of other faces | a mesh on no node of the file, or on a joint; other faces on a mesh holding blend shapes |
 | `uvs` | name, points, indices; a set added or taken off | a set that does not map every face of its mesh |
 | `skins` | name, weights; an influence added or dropped, the influences in another order; a skin added or taken off | an influence the hierarchy does not hold |
-| `morphs` | a channel's weight and name, the deformer's name, `at` | two weights or two names on one channel; `at` above the full target |
-| `cameras`, `lights` | name, lens, film and clip values; colour, intensity, decay, cone | a value a take of the file keys; a light of another kind; `camera_scale` |
-| `curves`, `surfaces` | points, weights | two shapes on one node |
-| `materials` | name, colours and values, wrap modes, `uv_set`, faces, `bump_depth`; a record added, taken off, moved to another mesh or given another uuid | another `kind`, another map, a new material that brings a map, a mesh covered in part; records of one uuid changed apart |
+| `morphs` | a channel's weight and name, the deformer's name, `at`; a target added (an in-between on its channel, or a new channel) or taken off; every target of a mesh given other faces | two weights or two names on one channel; `at` above the full target; two deformer names on one mesh |
+| `cameras`, `lights` | name, lens, film and clip values; colour, intensity, decay, cone; a camera or light added on the node it names, or taken off | a value a take of the file keys; a light of another kind; `camera_scale`; one on no node, or on a node that carries a shape |
+| `curves`, `surfaces` | points, weights; a curve or surface added on the node it names, or taken off | two shapes on one node (but the lines of one shape); one on no node |
+| `materials` | name, colours and values, wrap modes, `uv_set`, faces, `bump_depth`; a texture or normal map given, replaced or taken off; a record added, taken off, moved to another mesh or given another uuid | another `kind`, a map in the place of a layered one, a mesh covered in part; records of one uuid changed apart |
 
 A change of the file's layout is written for the nodes, the meshes and the
 records that name a mesh (UV sets, skins, materials). The file is given
@@ -855,9 +855,18 @@ print(again.hierarchy.name, again.meshes.name, again.hierarchy["grp"].user_defin
 The saved file lists its nodes in the records' order: where the file's own
 order (each parent's children as listed) would still differ, each node's
 place is kept on it in a hidden property, `cgmath:index`, as `save_fbx`
-keeps it. For the other kinds (cameras, lights, curves, surfaces, blend
-shapes, takes) a record added or removed, or a property set to None, is
-refused, naming `save_fbx`, which writes any records.
+keeps it.
+
+Every other kind takes a record added or taken off too:
+
+| Layout change | What goes with it |
+|---|---|
+| A camera or a light added | built as `save_fbx` builds it on the node its `parent_uuid` names, the node turned to a camera's or a light's axes. Taken off: its keys go, its node is turned back and stays, an empty transform |
+| A curve or a surface added | on the node it names, in the file's unit: the lines of one node as one shape, any other curve or a surface as a NURBS shape. A node given another count of them has its shape made anew, which takes `force` where the file's held more than the records do |
+| A blend shape target added | on the channel of its name (an in-between) or a new one, under the mesh's deformer or a new one. Taken off: its channel goes once it holds none, with the channel's keys. As many targets as the file holds are paired by place, so a name or an `at` changes in place |
+| A mesh holding blend shapes given other faces | each target is given the mesh's points moved by its record's offsets: `f.morphs.subdivide(mesh, n)` before `mesh.subdivide(n)`, as the skin and the materials. The normals the file's targets held take `force`. Targets the handle never read refuse the save; targets read and left as the file held them raise a warning |
+| A take added | told by name: one of a name the file does not hold is made at its span, its keys written like any take's; the file lists its takes in the records' order. Taken off: every key it holds goes. A file given its first take, or left with none, is refused |
+| A texture or a normal map given or replaced | written as a PNG the export embeds, so the file then embeds its media; another image is read by the file's own texture, whose settings stay. The record is given the file name the map was written under. A map taken off leaves with the media it was read from |
 
 `save(path, force=True)` lets a change drop data of the file that no
 record holds and the change leaves stale; a warning names each item, and

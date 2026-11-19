@@ -1838,8 +1838,19 @@ names the mesh.
 
 These six are every `MeshData` edit that renumbers points: a test
 (`TestAligned` in `_tests/test_skin_points.py`) runs each public method of
-`MeshData` and fails when one that renumbers points has no `SkinData` and
-`SkinList` method of its name.
+`MeshData` and fails when one that renumbers points has no method of its
+name on `SkinData`, `SkinList`, `MorphData` and `MorphList`.
+
+A blend shape target holds an offset a point, so `MorphData` and
+`MorphList` take the same six calls, with the mesh first:
+`morphs.subdivide(mesh, steps)` (the offsets are subdivided as the mesh
+subdivides its points, so the subdivided mesh moved by the target is the
+moved mesh subdivided), `delete_faces`, `detach_faces`, `from_faces`,
+`from_vertices`, and `morphs.union(mesh, *others)`, which moves the
+others' targets onto the mesh and makes one target of those of one name.
+A target left as it was after such an edit moves the points of those
+numbers in the edited mesh: nothing in a target says which mesh it was
+made for.
 
 ```python
 box, s    = cube.copy(), skin.copy()

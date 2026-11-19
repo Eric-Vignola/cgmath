@@ -1033,7 +1033,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000002E45FAE7910>
+MISSING = <dataclasses._MISSING_TYPE object at 0x00000194D88F7890>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1655,18 +1655,30 @@ unit                               returns offsets as unit vectors
 Methods:
 
 ```text
+delete_faces(self, mesh, faces, exclude: 'bool' = False) -> 'None'
+    The target after ``mesh.delete_faces(faces, exclude)``, in place:
+detach_faces(self, mesh, indices=None) -> 'None'
+    The target after ``mesh.detach_faces(indices)``, in place: each
+from_faces(self, mesh, faces, exclude: 'bool' = False, mesh_uuid: 'Optional[str]' = None) -> 'MorphData'
+    The target on the mesh ``mesh.from_faces(faces, exclude)`` returns:
 classmethod from_mesh_data(cls, base_mesh_data, target_mesh_data, target_name: 'str' = '', tolerance: 'float | None' = None) -> 'MorphData'
     Creates a MorphData object from two mesh data objects.
 classmethod from_prim(cls, prim) -> 'MorphData'
     Constructs a data object from a prim.
+from_vertices(self, mesh, vertices, contained: 'bool' = True, exclude: 'bool' = False, mesh_uuid: 'Optional[str]' = None) -> 'MorphData'
+    The target on the mesh ``mesh.from_vertices(vertices, contained,
 is_zero(self, tolerance: 'float' = 0.0) -> 'bool'
     returns True if this morph target has no data or all offsets are zero
 prune_offsets(self, tolerance: 'float | None' = None, neighbors: 'np.ndarray | None' = None) -> 'None'
     prunes offsets with magnidutes <= tolerance
 sort(self)
     sorts indices.
+subdivide(self, mesh, steps: 'int' = 1, keep_borders: 'bool' = False, keep_edges: 'bool' = False) -> 'None'
+    The target after ``mesh.subdivide(steps, keep_borders,
 to_prim(self, prim) -> 'None'
     Streams data into a prim.
+union(self, mesh, *others) -> 'None'
+    The target after ``mesh.union(*others)``, in place: a target of
 ```
 
 #### `MorphList(OneMeshList, DataList)`
@@ -1689,10 +1701,24 @@ size                               returns the datapoint count for each shape
 Methods:
 
 ```text
+delete_faces(self, mesh, faces, exclude: 'bool' = False) -> 'None'
+    the targets of ``mesh`` after ``mesh.delete_faces(faces,
+detach_faces(self, mesh, indices=None) -> 'None'
+    the targets of ``mesh`` after ``mesh.detach_faces(indices)``;
+from_faces(self, mesh, faces, part=None, exclude: 'bool' = False) -> 'MorphList'
+    the targets of ``mesh.from_faces(faces, exclude)``: a new list of
+from_vertices(self, mesh, vertices, part=None, contained: 'bool' = True, exclude: 'bool' = False) -> 'MorphList'
+    the targets of ``mesh.from_vertices(vertices, contained,
+of(self, mesh) -> 'list'
+    the targets that name ``mesh``, in the list's order
 prune_offsets(self, *args, **kwargs) -> 'None'
     prunes offsets with magidutes <= tolerance for each shape
 remove_unused(self, tolerance: 'float' = 0.0) -> 'None'
     removes shapes that are unused (empty or all offsets zero within tolerance)
+subdivide(self, mesh, steps: 'int' = 1, keep_borders: 'bool' = False, keep_edges: 'bool' = False) -> 'None'
+    the targets of ``mesh`` after ``mesh.subdivide(steps, ...)``;
+union(self, mesh, *others) -> 'None'
+    the targets after ``mesh.union(*others)``; call it before the
 ```
 
 Constants:
@@ -3576,7 +3602,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000002E42D9DA7A0>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x00000194A6907240>, '...
 ```
 
 ## `cgmath.constraints`

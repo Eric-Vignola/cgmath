@@ -218,11 +218,13 @@ class FbxFile:
     materials added or taken off. A mesh taken off takes its UV sets, skin,
     blend shapes and material assignments with it, and the materials and
     textures no mesh is left with: after the save the handle's lists hold
-    what the file holds. Its node stays. For the other kinds (cameras,
-    lights, curves, surfaces, blend shapes, takes) a record added or
-    removed is refused, naming ``save_fbx``, which writes any records; so
-    are another texture, and a change the file would not read back as the
-    records hold it. ``force=True`` lets a change drop data of the file
+    what the file holds. Its node stays. Cameras, lights, curves, surfaces,
+    blend shape targets and takes are added and taken off the same way, a
+    shape on the node its ``parent_uuid`` names, and a material's texture or
+    normal map given, replaced or taken off (a map is written as a PNG the
+    file embeds, and its record given the name it was written under). A
+    change the file would not read back as the records hold it is refused,
+    naming what to do. ``force=True`` lets a change drop data of the file
     that no record holds and the change leaves stale, a warning naming each
     item; without it such a change is refused.
 
