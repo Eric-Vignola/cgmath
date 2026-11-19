@@ -18,10 +18,22 @@ import warnings
 
 import numpy as np
 from cgmath._tests.test_fbx_edit import _Edits, loaded
-from cgmath._tests.test_fbx_file import FBX, USER, census, every_kind, extended, maya_file
+from cgmath._tests.test_fbx_file import FBX, USER, census, every_kind, extended, maya_file, sheet, wave
 from cgmath.formats import FbxFile, save_fbx
 from cgmath.formats._fbx_io import open_fbx, typed
-from cgmath.geometry import MaterialData, MaterialList, MeshData, SkinData, UVData, UVList
+from cgmath.geometry import (
+    CameraData,
+    LightData,
+    MaterialData,
+    MaterialList,
+    MeshData,
+    MorphData,
+    NurbsCurveData,
+    NurbsSurfaceData,
+    SkinData,
+    UVData,
+    UVList,
+)
 from cgmath.hierarchy import ClipData, ClipList, HierarchyData, TransformData, generate_uuid
 
 SHARED = {}
@@ -447,6 +459,11 @@ def kinds(path: str) -> dict:
     return census(path)[0]
 
 
+def of(records, mesh) -> list:
+    """the records that name ``mesh``"""
+    return [record for record in records if record.mesh_uuid == mesh.uuid]
+
+
 def taken(records, record) -> None:
     """``record`` itself taken off ``records``"""
     del records[[id(held) for held in records].index(id(record))]
@@ -768,6 +785,178 @@ class TestMeshes(_Edits):
         before, after = census(source), census(self.path("saved.fbx"))
         self.assertEqual(after[0].get("FbxLODGroup"), 1)
         self.assertEqual((after[2], after[4]), (before[2], before[4]))
+
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestOthers(_Edits):
+    """cameras, lights, curves, surfaces and blend shape targets added or
+    taken off"""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.every = every_kind(os.path.join(SHARED["folder"], "every_others.fbx"))
+
+    def test_views(self):
+        """the camera and the light taken off, their nodes left as
+        transforms; a camera and two lights added, each on a node of its
+        own"""
+
+        def taken_off(f):
+            f.cameras = None
+            f.lights  = None
+
+        def added(f):
+            f.cameras.append(CameraData(name="wideShape", focal_length=24.0, near_clip_plane=1.0, parent_uuid=carrier(f, "wide")))
+            f.lights.append(LightData(name="fillShape", kind="point", intensity=0.5, parent_uuid=carrier(f, "fill")))
+            f.lights.append(LightData(name="rimShape", kind="spot", cone_angle=30.0, parent_uuid=carrier(f, "rim")))
+
+        before = kinds(self.every)
+        self.assertEqual(self.assertSaves(self.every, taken_off, name="off.fbx"), [])
+        after = kinds(self.path("off.fbx"))
+        self.assertEqual((after.get("FbxCamera", 0), after.get("FbxLight", 0), after["FbxNode"]), (0, 0, before["FbxNode"]))
+        self.assertEqual(loose_curves(self.path("off.fbx")), 0)
+        self.assertEqual(self.assertSaves(self.every, added, name="added.fbx"), [])
+        after = kinds(self.path("added.fbx"))
+        self.assertEqual((after["FbxCamera"], after["FbxLight"]), (before["FbxCamera"] + 1, before["FbxLight"] + 2))
+        # and back: the added ones taken off again
+        self.assertEqual(self.assertSaves(self.path("added.fbx"), lambda f: (f.cameras.pop(), f.lights.pop(), f.lights.pop()), name="back.fbx"), [])
+        self.assertEqual(kinds(self.path("back.fbx")).get("FbxCamera"), before["FbxCamera"])
+
+    def test_curves_and_surfaces(self):
+        """the curve and the surface taken off; lines, a curve and a
+        surface added, each on a node of its own"""
+
+        def taken_off(f):
+            f.curves   = None
+            f.surfaces = None
+
+        def added(f):
+            line = np.array([[0.0, 0.0, 0.0], [1.0, 2.0, 0.0], [2.0, 0.0, 1.0]])
+            node = carrier(f, "lines")
+            f.curves.append(NurbsCurveData(points=line, degree=1, parent_uuid=node))
+            f.curves.append(NurbsCurveData(points=line + [0.0, 1.0, 0.0], degree=1, parent_uuid=node))
+            f.curves.append(NurbsCurveData(points=wave(7), degree=3, parent_uuid=carrier(f, "path")))
+            f.surfaces.append(
+                NurbsSurfaceData(points=sheet(4, 5), degree_u=3, degree_v=3, periodic_u=False, periodic_v=False, parent_uuid=carrier(f, "patch"))
+            )
+
+        before = kinds(self.every)
+        shapes = ("FbxNurbsCurve", "FbxNurbsSurface", "FbxLine")
+        self.assertEqual(self.assertSaves(self.every, taken_off, name="off.fbx"), [])
+        after = kinds(self.path("off.fbx"))
+        self.assertEqual([after.get(kind, 0) for kind in shapes], [0, 0, 0])
+        self.assertEqual(self.assertSaves(self.every, added, name="added.fbx"), [])
+        after = kinds(self.path("added.fbx"))
+        self.assertEqual(
+            [after.get(kind, 0) - before.get(kind, 0) for kind in shapes], [1, 1, 1],
+        )
+        read = loaded(self.path("added.fbx"))
+        self.assertEqual((len(read.curves), len(read.surfaces)), (4, 2))
+
+    def test_morphs(self):
+        """a target added to a mesh, an in-between to a channel it holds,
+        a target and a whole channel taken off; the weights' keys of the
+        channels left stay"""
+
+        def added(f):
+            box = on(f, "boxShape")
+            f.morphs.append(MorphData("bulge", np.full((2, 3), 0.25), np.array([0, 5], dtype=np.int32), mesh_uuid=box.uuid, weight=0.5, deformer=of(f.morphs, box)[0].deformer))
+            full = of(f.morphs, box)[0]
+            f.morphs.append(MorphData(full.name, np.asarray(full.offsets) * 0.5, np.asarray(full.indices), mesh_uuid=box.uuid, weight=full.weight, at=0.5, deformer=full.deformer))
+
+        def taken_off(f):
+            plane = on(f, "planeShape")
+            held  = of(f.morphs, plane)
+            taken(f.morphs, held[-1])
+
+        def all_taken_off(f):
+            f.morphs = None
+
+        before = kinds(self.every)
+        self.assertEqual(self.assertSaves(self.every, added, name="added.fbx"), [])
+        after = kinds(self.path("added.fbx"))
+        self.assertEqual((after["FbxShape"], after["FbxBlendShapeChannel"]), (before["FbxShape"] + 2, before["FbxBlendShapeChannel"] + 1))
+        self.assertEqual(self.assertSaves(self.every, taken_off, name="off.fbx"), [])
+        self.assertEqual(kinds(self.path("off.fbx"))["FbxShape"], before["FbxShape"] - 1)
+        self.assertEqual(self.assertSaves(self.every, all_taken_off, name="none.fbx"), [])
+        after = kinds(self.path("none.fbx"))
+        self.assertEqual([after.get(kind, 0) for kind in ("FbxShape", "FbxBlendShapeChannel", "FbxBlendShape")], [0, 0, 0])
+        self.assertEqual(loose_curves(self.path("none.fbx")), 0)
+
+    def test_morphed_mesh_of_other_faces(self):
+        """a mesh holding blend shapes subdivided, its targets and its
+        material by the same call: the targets move the points they moved.
+        The normals the file's targets held are of the old points: with
+        force. A mesh so edited whose targets were left alone: refused
+        unread, warned of once read"""
+
+        def edit(f):
+            box = on(f, "boxShape")
+            f.morphs.subdivide(box, 1)
+            f.materials.subdivide(box, 1)
+            box.subdivide(1)
+
+        def targets_unread(f):
+            box = on(f, "boxShape")
+            f.materials.subdivide(box, 1)
+            box.subdivide(1)
+
+        def targets_left(f):
+            f.morphs
+            targets_unread(f)
+
+        with FbxFile(self.every, verbose=False) as f:
+            box   = on(f, "boxShape")
+            morph = of(f.morphs, box)[0]
+            moved = np.array(box.points)
+            moved[np.asarray(morph.indices)] += np.asarray(morph.offsets)
+            target        = box.copy()
+            target.points = moved
+            target.subdivide(1)
+        try:
+            told = self.assertSaves(self.every, edit, name="plain.fbx")
+        except ValueError as error:
+            self.assertIn("force=True", str(error))
+            told = self.assertSaves(self.every, edit, force=True, name="plain.fbx")
+            self.assertTrue(any("the normals of the blend shape targets" in text for text in told), told)
+        read  = loaded(self.path("plain.fbx"))
+        box   = next(mesh for mesh in read.meshes if mesh.name == "boxShape")
+        morph = next(morph for morph in read.morphs if morph.mesh_uuid == box.uuid)
+        moved = np.array(box.points)
+        moved[np.asarray(morph.indices)] += np.asarray(morph.offsets)
+        np.testing.assert_allclose(moved, np.asarray(target.points), atol=1e-9)
+        self.assertEqual(kinds(self.path("plain.fbx"))["FbxShape"], kinds(self.every)["FbxShape"])
+        self.assertRefuses(self.every, targets_unread, "give its targets the mesh's edit too", force=True)
+        with FbxFile(self.every, verbose=False) as f:
+            targets_left(f)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                f.save(self.path("left.fbx"), force=True)
+        self.assertTrue(any("are as the file held them" in str(warning.message) for warning in caught), [str(w.message) for w in caught])
+
+    def test_refused(self):
+        """a camera on no node, a second camera on a camera's node, a curve
+        on a joint"""
+
+        def no_node(f):
+            f.cameras.append(CameraData(name="looseShape"))
+
+        def two_on_one(f):
+            f.cameras.append(CameraData(name="twinShape", parent_uuid=f.cameras[0].parent_uuid))
+
+        def on_a_joint(f):
+            f.curves.append(NurbsCurveData(points=wave(6), degree=3, parent_uuid=every_list(f)[0]["head"].uuid))
+
+        self.assertRefuses(self.every, no_node, "sits on no node of the file")
+        for edit in (two_on_one, on_a_joint):
+            with self.subTest(edit=edit.__name__):
+                with FbxFile(self.every, verbose=False) as f:
+                    edit(f)
+                    with self.assertRaises(ValueError):
+                        f.save(self.path("refused.fbx"))
+                self.assertFalse(os.path.exists(self.path("refused.fbx")))
 
 
 if __name__ == "__main__":

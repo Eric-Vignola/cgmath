@@ -597,14 +597,28 @@ def settle(file, base: dict, state: dict, undo: list) -> dict:
             if record.mesh_uuid in live or record.mesh_uuid not in known or known[record.mesh_uuid] in nodes
         ]
         kept.sort(key=lambda record: live.get(record.mesh_uuid, len(live)))
+        if field == "morphs":
+            # a mesh's targets a channel at a time, a channel's by the weight each is reached at
+            first = {}
+            for record in kept:
+                first.setdefault((record.mesh_uuid, str(record.name)), len(first))
+            kept.sort(
+                key=lambda record: (live.get(record.mesh_uuid, len(live)), first[(record.mesh_uuid, str(record.name))], float(record.at))
+            )
         if not kept:
             replaced[field] = None
         elif [id(record) for record in kept] != [id(record) for record in records.list]:
             replaced[field] = type(records)(kept)
     for field in ("cameras", "lights", "curves", "surfaces"):
         records = _held(state[field])
-        if records is not None and not records.list:
+        if records is None:
+            continue
+        # in their nodes' order, as a read lists them
+        held = sorted(records.list, key=lambda shape: rank.get(shape.parent_uuid, len(rank)))
+        if not held:
             replaced[field] = None
+        elif [id(shape) for shape in held] != [id(shape) for shape in records.list]:
+            replaced[field] = type(records)(held)
     materials = replaced["materials"] if "materials" in replaced else _held(state["materials"])
     for mesh in meshes.list if meshes is not None and materials is not None else ():
         held = [record for record in materials.list if record.mesh_uuid == mesh.uuid]
@@ -784,11 +798,6 @@ def _reshape(edit, node, old, mesh):
     props  = []
     smooth = False
     if held is not None:
-        if _fbx_edit._targets(edit, held):
-            raise ValueError(
-                f"FbxFile.save: {label} is given other faces and holds blend shapes, which an open file keeps on the "
-                f"faces they were made for; {_ELSE}"
-            )
         for kind, plural in _FACE_BOUND:
             count = getattr(held, f"GetElement{kind}Count", None)
             if count is not None and count():
@@ -796,10 +805,11 @@ def _reshape(edit, node, old, mesh):
         if held.GetElementVertexColorCount() > 1:
             edit.unread(f"the colour sets of {label} after its first", why, lambda: None)
         smooth = bool(held.GetElementSmoothingCount())
-        skin   = fbx.FbxDeformer.EDeformerType.eSkin
+        moved  = (fbx.FbxDeformer.EDeformerType.eSkin, fbx.FbxDeformer.EDeformerType.eBlendShape)
         for at in reversed(range(held.GetDeformerCount())):
             deformer = held.GetDeformer(at)
-            if deformer.GetDeformerType() == skin:
+            # the skin and the blend shapes move to the new shape, to be given its points
+            if deformer.GetDeformerType() in moved:
                 kept.append(held.RemoveDeformer(at))
             else:
                 edit.unread(f"the deformer {str(deformer.GetName())!r} of {label}", why, lambda: None)
@@ -999,19 +1009,22 @@ def _sync_skin(edit, node, shape, mesh, skin, hierarchy, label: str) -> None:
             member = by_uuid.get(member.parent_uuid)
 
 
-def _shader_table(edit, base: dict):
-    """{a material record's uuid: the file's FbxSurfaceMaterial}, off the
-    order the handle read its materials in; None for a handle that read
-    none"""
+def _shader_table(edit, base: dict) -> dict:
+    """{a material record's uuid: the file's FbxSurfaceMaterial}, for the
+    uuids of the read's own records and for the ones the handle gave its
+    records when it read them: the records to save are of either"""
     from cgmath.formats import _fbx_edit
 
+    read  = _held(base["materials"])
+    held  = _fbx_edit._shaders(edit, base)
+    table = {}
+    for record, (shader, _, _, _) in zip(read.list if read is not None else (), held):
+        table[record.uuid] = shader
     uuids = edit.file._material_uuids
-    if uuids is None:
-        return None
-    held = _fbx_edit._shaders(edit, base)
-    if len(held) != len(uuids):
-        raise ValueError(f"FbxFile.save: the file's materials are not the ones read; {_ELSE}")
-    return {uuid: shader for uuid, (shader, _, _, _) in zip(uuids, held)}
+    if uuids is not None and len(uuids) == len(held):
+        for uuid, (shader, _, _, _) in zip(uuids, held):
+            table.setdefault(uuid, shader)
+    return table
 
 
 def _sync_materials(edit, node, shape, mesh, records: list, shaders: dict, rebuilt: bool, loose: dict) -> None:
@@ -1095,15 +1108,31 @@ def shapes_differ(file, base: dict, state: dict) -> bool:
             return True
         if after and _weighed(after[0], _held(state["hierarchy"])) - _weighed(before[0], _held(base["hierarchy"])):
             return True
-    if file._material_uuids is None or "materials" not in file._values:
-        return False
+        if len(_of(_held(base["morphs"]), old[uuid])) != len(_of(_held(state["morphs"]), mesh)):
+            return True
+    for field in ("cameras", "lights", "curves", "surfaces"):
+        before, after = _on_nodes(_held(base[field])), _on_nodes(_held(state[field]))
+        if {uuid: len(held) for uuid, held in before.items()} != {uuid: len(held) for uuid, held in after.items()}:
+            return True
     before, after = _held(base["materials"]), _held(state["materials"])
     if before is None or after is None:
         return (before is None) != (after is None)
-    if len(before.list) != len(after.list) or len(file._material_uuids) != len(before.list):
+    if len(before.list) != len(after.list):
         return True
-    for uuid, read, record in zip(file._material_uuids, before.list, after.list):
-        if record.uuid != uuid or record.mesh_uuid != read.mesh_uuid or (record.faces is None) != (read.faces is None):
+    # one material a uuid: the read's own uuids, and the ones the handle gave its records
+    first = {}
+    for at, record in enumerate(before.list):
+        first.setdefault(record.uuid, at)
+    uuids = file._material_uuids
+    if uuids is not None and len(uuids) == len(before.list):
+        for uuid, record in zip(uuids, before.list):
+            first.setdefault(uuid, first[record.uuid])
+    for read, record in zip(before.list, after.list):
+        if (
+            first.get(record.uuid) != first[read.uuid]
+            or record.mesh_uuid != read.mesh_uuid
+            or (record.faces is None) != (read.faces is None)
+        ):
             return True
     return False
 
@@ -1149,9 +1178,308 @@ def write_shapes(edit, base: dict, state: dict) -> None:
         if rebuilt or len(before) != len(after) or added:
             _sync_skin(edit, node, shape, mesh, after[0] if after else None, hierarchy, label)
 
-        records = _of(_held(state["materials"]), mesh)
-        if shaders is not None:
-            _sync_materials(edit, node, shape, mesh, records, shaders, rebuilt, loose)
-        elif old is None and records:
-            _sync_materials(edit, node, shape, mesh, records, {}, True, loose)
+        _sync_materials(edit, node, shape, mesh, _of(_held(state["materials"]), mesh), shaders, rebuilt, loose)
+
+        before = _of(_held(base["morphs"]), old)
+        after  = _of(_held(state["morphs"]), mesh)
+        if rebuilt:
+            _stale_morphs(edit, old, mesh, after, before, label)
+        if (rebuilt and (before or after)) or len(before) != len(after):
+            _sync_morphs(edit, shape, mesh, after, before, rebuilt, label)
     _drop_loose(edit, loose)
+    _sync_views(edit, base, state)
+    _sync_nurbs(edit, base, state)
+
+
+# ------------------------------------------------------- blend shape targets
+
+
+def _morph_key(record) -> tuple:
+    """what tells a target of a mesh from its others: its name and ``at``"""
+    return (str(record.name), round(float(record.at), 9))
+
+
+def _init_target(edit, target, points: np.ndarray, record) -> None:
+    """a target holding ``points``, its mesh's in the file's unit, moved by
+    its record's offsets"""
+    fbx   = edit.fbx
+    moved = points.copy()
+    moved[np.asarray(record.indices, dtype=np.int64)] += np.asarray(record.offsets, dtype=np.float64) / edit.cm
+    target.InitControlPoints(len(moved))
+    for index, point in enumerate(moved.tolist()):
+        target.SetControlPointAt(fbx.FbxVector4(*point, 1.0), index)
+
+
+def _sync_morphs(edit, shape, mesh, records: list, before: list, rebuilt: bool, label: str) -> None:
+    """the blend shape targets of a mesh as its records list them: a target
+    the records leave out taken off, with its channel once that holds none
+    and the channel's keys; one they add made as ``save_fbx`` makes it, on
+    the channel of its name or a new one, under the mesh's deformer or a
+    new one; on a mesh given other faces, every target given the mesh's
+    points moved by its record's offsets, the normals the targets held
+    refused or with ``force`` dropped. The channels then stand in the
+    records' order; their weights' keys stay"""
+    from cgmath.formats import _fbx_edit
+    from cgmath.formats._load import WEIGHT_UNIT
+
+    fbx     = edit.fbx
+    targets = _fbx_edit._targets(edit, shape)
+    if len(targets) != len(before):
+        raise ValueError(f"FbxFile.save: the file's blend shape targets of {label} are not the ones read; {_ELSE}")
+    wanted = [_morph_key(record) for record in records]
+    if len(set(wanted)) != len(wanted):
+        twice = next(key for key in wanted if wanted.count(key) > 1)
+        raise ValueError(f"FbxFile.save: {label} is given two blend shape targets named {twice[0]!r} at {twice[1]:g}")
+    if len(before) == len(records):
+        # as many targets as the file holds: each record is the target in its place,
+        # whatever name or ``at`` it is given
+        have = dict(zip(wanted, targets))
+    else:
+        have = {_morph_key(record): held for record, held in zip(before, targets)}
+    points = np.asarray(mesh.points, dtype=np.float64) / edit.cm
+    if rebuilt:
+        kept = [held for key, held in have.items() if key in wanted]
+        _fbx_edit._stale_targets(edit, kept, label, f"{label} is given other faces")
+
+    deformer = None
+    channels = {}  # a target's name -> the channel of the file that holds it
+    members  = {}  # a target's name -> [(the weight it is reached at, the target)]
+    grown    = set()
+    for key, (owner, channel, _, target) in have.items():
+        deformer = owner if deformer is None else deformer
+        if key in wanted:
+            channels.setdefault(key[0], channel)
+            members.setdefault(key[0], []).append((key[1], target))
+        else:
+            channel.RemoveTargetShape(target)
+            target.Destroy()
+    for record in records:
+        key = _morph_key(record)
+        if key in have:
+            if rebuilt:
+                _init_target(edit, have[key][3], points, record)
+            continue
+        if deformer is None:
+            deformer = fbx.FbxBlendShape.Create(edit.scene, record.deformer or "blendShape")
+            shape.AddDeformer(deformer)
+        channel = channels.get(key[0])
+        if channel is None:
+            channel = fbx.FbxBlendShapeChannel.Create(edit.scene, f"{str(deformer.GetName())}.{record.name}")
+            channel.DeformPercent.Set(float(record.weight) * WEIGHT_UNIT)
+            deformer.AddBlendShapeChannel(channel)
+            channels[key[0]] = channel
+        at     = float(record.at)
+        target = fbx.FbxShape.Create(edit.scene, record.name if at == 1.0 else f"{record.name}_{round(at * WEIGHT_UNIT):g}")
+        _init_target(edit, target, points, record)
+        channel.AddTargetShape(target, at * WEIGHT_UNIT)
+        members.setdefault(key[0], []).append((key[1], target))
+        grown.add(key[0])
+    # a channel given a target holds its targets by the weight each is reached at
+    for name in grown:
+        channel = channels[name]
+        held    = sorted(members[name], key=lambda member: member[0])
+        if len(held) > 1:
+            for _, target in held:
+                channel.RemoveTargetShape(target)
+            for at, target in held:
+                channel.AddTargetShape(target, at * WEIGHT_UNIT)
+
+    kind  = fbx.FbxDeformer.EDeformerType.eBlendShape
+    order = list(dict.fromkeys(key[0] for key in wanted))
+    for at in reversed(range(shape.GetDeformerCount())):
+        held = shape.GetDeformer(at)
+        if held.GetDeformerType() != kind:
+            continue
+        blend = edit.typed(held, fbx.FbxBlendShape, fbx)
+        found = [blend.GetBlendShapeChannel(c) for c in range(blend.GetBlendShapeChannelCount())]
+        live  = []
+        for channel in found:
+            if channel.GetTargetShapeCount():
+                live.append(channel)
+                continue
+            # a channel left with no target goes, its weight's keys with it
+            strip_curves(edit, channel)
+            blend.RemoveBlendShapeChannel(channel)
+            channel.Destroy()
+        if not live:
+            shape.RemoveDeformer(at)
+            blend.Destroy()
+            continue
+        named = {int(channel.GetUniqueID()): name for name, channel in channels.items()}
+        want  = sorted(live, key=lambda channel: order.index(named[int(channel.GetUniqueID())]) if int(channel.GetUniqueID()) in named else len(order))
+        if [int(channel.GetUniqueID()) for channel in want] != [int(channel.GetUniqueID()) for channel in live]:
+            for channel in live:
+                blend.RemoveBlendShapeChannel(channel)
+            for channel in want:
+                blend.AddBlendShapeChannel(channel)
+
+
+def _stale_morphs(edit, old, mesh, records: list, before: list, label: str) -> None:
+    """a mesh given another count of points, and blend shape targets left
+    as the file holds them: refused where the handle never read its
+    targets, which then can not have followed the edit; a warning where it
+    did, since a target is seldom right on points numbered anew"""
+    import warnings
+
+    if old is None or not before or len(old.points) == len(mesh.points):
+        return
+    call = "f.morphs.subdivide(mesh, ...), f.morphs.delete_faces(mesh, ...) ..., before the mesh's own"
+    if "morphs" not in edit.file._values:
+        raise ValueError(
+            f"FbxFile.save: {label} is given other points and holds blend shapes: give its targets the mesh's edit "
+            f"too ({call})"
+        )
+    read = {_morph_key(record): record for record in before}
+    same = [
+        record.name for record in records
+        if _morph_key(record) in read
+        and len(record.offsets)
+        and _same(record.indices, read[_morph_key(record)].indices)
+        and _same(record.offsets, read[_morph_key(record)].offsets)
+    ]
+    if same:
+        warnings.warn(
+            f"FbxFile.save: {label} is given other points and its blend shape targets {same} are as the file held "
+            f"them: a target follows its mesh's edit by the same call ({call})",
+            stacklevel=5,
+        )
+
+
+# ------------------------------------------- cameras, lights, curves, surfaces
+
+
+def _null(edit, node) -> None:
+    """``node`` left carrying nothing given a group's null, as a transform
+    that holds no shape carries one"""
+    fbx   = edit.fbx
+    empty = fbx.FbxNull.Create(edit.scene, "")
+    empty.Look.Set(fbx.FbxNull.ELook.eNone.value)
+    node.SetNodeAttribute(empty)
+
+
+def _clear_null(edit, node, what: str) -> None:
+    """the null of a transform taken off for the shape it is given;
+    ValueError for a node that carries anything else"""
+    fbx     = edit.fbx
+    carried = node.GetNodeAttribute()
+    if carried is None:
+        return
+    if carried.GetAttributeType() != fbx.FbxNodeAttribute.EType.eNull or node.GetNodeAttributeCount() > 1:
+        raise ValueError(
+            f"FbxFile.save: {what} is put on node {str(node.GetName())!r}, which carries another shape or is a joint; "
+            f"give it a transform of its own"
+        )
+    node.RemoveNodeAttribute(carried)
+    carried.Destroy()
+
+
+def _drop_shape(edit, node) -> None:
+    """the shape of ``node`` taken off the file with its keys; the node
+    stays, an empty transform"""
+    for at in reversed(range(node.GetNodeAttributeCount())):
+        shape = node.GetNodeAttributeByIndex(at)
+        if shape is None:
+            continue
+        strip_curves(edit, shape)
+        node.RemoveNodeAttributeByIndex(at)
+        shape.Destroy()
+    _null(edit, node)
+
+
+def _placed(edit, shapes, field: str) -> dict:
+    """{the uuid of its node: [the shapes on it]} of one field's records;
+    ValueError for one on no node of the file"""
+    found = {}
+    for shape in shapes.list if shapes is not None else ():
+        if shape.parent_uuid not in edit.nodes:
+            raise ValueError(
+                f"FbxFile.save: one of {field} ({shape.name!r}) sits on no node of the file; a shape added to an open "
+                f"file names the node that carries it: append a TransformData to the hierarchy and give the shape "
+                f"its uuid as parent_uuid"
+            )
+        found.setdefault(shape.parent_uuid, []).append(shape)
+    return found
+
+
+def _on_nodes(shapes) -> dict:
+    found = {}
+    for shape in shapes.list if shapes is not None else ():
+        found.setdefault(shape.parent_uuid, []).append(shape)
+    return found
+
+
+def _sync_views(edit, base: dict, state: dict) -> None:
+    """the cameras and lights of the records: one they leave out taken off
+    its node, which is turned back to a transform's axes; one they add
+    built as ``save_fbx`` builds it on the node it names, turned to a
+    camera's or a light's axes"""
+    from cgmath.formats import _write
+
+    fbx     = edit.fbx
+    lists   = _node_lists(state)
+    records = {node.uuid: node for node in lists[0][1]} if lists else {}
+    for field, write in (("cameras", _write._write_camera), ("lights", _write._write_light)):
+        was = _on_nodes(_held(base[field]))
+        now = _placed(edit, _held(state[field]), field)
+        for uuid, held in now.items():
+            if len(held) > 1:
+                raise ValueError(f"FbxFile.save: {field} holds two shapes on node {str(edit.nodes[uuid].GetName())!r}; a node carries one")
+        for uuid in was:
+            if uuid not in now and uuid in edit.nodes:
+                node = edit.nodes[uuid]
+                _drop_shape(edit, node)
+                node.SetPostRotation(edit.source, fbx.FbxVector4(0.0, 0.0, 0.0, 1.0))
+        for uuid, held in now.items():
+            if uuid in was:
+                continue
+            node = edit.nodes[uuid]
+            _clear_null(edit, node, f"{field[:-1]} {held[0].name!r}")
+            node.SetRotationActive(True)
+            world = _file_world(edit, records[uuid].world_matrix) if uuid in records else np.eye(4)
+            write(_Shim(edit.scene), held[0], node, world)
+
+
+def _sync_nurbs(edit, base: dict, state: dict) -> None:
+    """the curves and surfaces of the records, a node at a time: a node
+    given another count of them has its shape taken off and the records'
+    written as ``save_fbx`` writes them, in the file's unit (the lines of
+    one node as one shape); a node left with none becomes an empty
+    transform. A shape made anew in the place of one loses what that held
+    beyond the records' fields: refused, or with ``force`` dropped"""
+    from cgmath.formats import _fbx_edit, _write
+
+    fbx   = edit.fbx
+    was   = {field: _on_nodes(_held(base[field])) for field in ("curves", "surfaces")}
+    now   = {field: _placed(edit, _held(state[field]), field) for field in ("curves", "surfaces")}
+    uuids = set(was["curves"]) | set(was["surfaces"]) | set(now["curves"]) | set(now["surfaces"])
+    for uuid in uuids:
+        before = (len(was["curves"].get(uuid, ())), len(was["surfaces"].get(uuid, ())))
+        after  = (len(now["curves"].get(uuid, ())), len(now["surfaces"].get(uuid, ())))
+        if before == after or uuid not in edit.nodes:
+            continue
+        node = edit.nodes[uuid]
+        name = str(node.GetName())
+        if before != (0, 0):
+            if after != (0, 0):
+                _fbx_edit._unread(
+                    edit, f"the settings of the shape on node {name!r} beyond its points, knots and form",
+                    f"node {name!r} is given another count of curves or surfaces, which makes its shape anew", lambda: None,
+                )
+            _drop_shape(edit, node)
+        if after == (0, 0):
+            continue
+        _clear_null(edit, node, "a curve or surface")
+        curves   = [_fbx_edit._in_file(edit, shape) for shape in now["curves"].get(uuid, ())]
+        surfaces = [_fbx_edit._in_file(edit, shape) for shape in now["surfaces"].get(uuid, ())]
+        scribe   = _fbx_edit._Scribe(edit)
+        if len(surfaces) == 1 and not curves:
+            _write._write_nurbs(scribe, [("surface", surfaces[0], node)], fbx)
+        elif curves and not surfaces and all(_write._is_line(shape) for shape in curves):
+            _write._write_lines(scribe, curves, node, fbx)
+        elif len(curves) == 1 and not surfaces:
+            _write._write_nurbs(scribe, [("curve", curves[0], node)], fbx)
+        else:
+            raise ValueError(
+                f"FbxFile.save: node {name!r} is given {len(curves)} curves and {len(surfaces)} surfaces; a node "
+                f"carries one surface, one curve, or the lines of one shape (curves of degree 1 holding no knots)"
+            )

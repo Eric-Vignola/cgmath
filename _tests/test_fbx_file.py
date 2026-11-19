@@ -351,10 +351,10 @@ class TestSave(_Handles):
         self.assertKept(source, out)
 
     def test_layout_refused(self):
-        """a record added or removed, a kind set to None refuse the save,
-        naming save_fbx, and so does a node moved under another in the
-        hierarchy alone of a file whose takes hold it too, naming what to
-        do; the target is left as it was and nothing else is written"""
+        """a shape added on no node of the file, and a node moved under
+        another in the hierarchy alone of a file whose takes hold it too,
+        refuse the save, naming what to do; the target is left as it was
+        and nothing else is written"""
 
         def reparented(f):
             f.hierarchy.list[2].parent_uuid = f.hierarchy.list[0].uuid
@@ -362,8 +362,7 @@ class TestSave(_Handles):
         source = every_kind(self.path("every.fbx"))
         target = self.path("target.fbx")
         for change, said in (
-            (lambda f: f.cameras.append(CameraData(name="extraShape")), "cameras holds 2 records where the file holds 1"),
-            (lambda f: setattr(f, "lights", None), "lights is None where the file holds some"),
+            (lambda f: f.cameras.append(CameraData(name="extraShape")), "sits on no node of the file"),
             (reparented, "under another parent, or as another kind, than the hierarchy; a file holds one set of nodes"),
         ):
             with self.subTest(said=said):
@@ -374,8 +373,7 @@ class TestSave(_Handles):
                     with self.assertRaises(ValueError) as caught:
                         f.save(target)
                 self.assertIn(said, str(caught.exception))
-                if change is not reparented:
-                    self.assertTrue(str(caught.exception).endswith("; write the records with save_fbx"), str(caught.exception))
+                self.assertTrue(str(caught.exception).startswith("FbxFile.save: "), str(caught.exception))
                 with open(target, "rb") as handle:
                     self.assertEqual(handle.read(), b"before")
                 self.assertEqual(sorted(os.listdir(self.folder)), ["every.fbx", "target.fbx"])
