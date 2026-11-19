@@ -171,7 +171,176 @@ class MaterialData(Data):
         mask[faces] = True
         return mask
 
+    # --- the faces follow the mesh's edits ---------------------------------
+    #
+    # A mesh edit that renumbers faces is called on each record of the mesh,
+    # as it is on its UV sets and its skin: the same call, with the same
+    # arguments. A material covering its whole mesh (``faces`` None) still
+    # does, whatever the edit.
+
+    def keep_borders(self, rules) -> np.ndarray:
+        """
+        ``rules``, the pairs of triangles :meth:`MeshData.get_quadrangulate_rules`
+        or :meth:`UVData.get_quadrangulate_rules` would merge, without the
+        pairs that would merge a triangle this material covers with one it
+        does not: a quad carries one material. Pass the mesh's rules through
+        each of its materials, then quadrangulate the mesh, its UV sets and
+        its materials with what is left.
+        """
+        rules = np.asarray(rules, dtype=np.int64).reshape(-1, 4)
+        if self.faces is None or not rules.size:
+            return rules
+        held = np.isin(rules[:, :2], np.asarray(self.faces, dtype=np.int64))
+        return rules[held[:, 0] == held[:, 1]]
+
+    def quadrangulate(self, rules) -> None:
+        """
+        The faces after ``mesh.quadrangulate(rules)``, in place: the two
+        triangles of each pair become one quad, and every later face moves
+        down. ValueError for rules that merge a triangle of this material
+        with one of another (:meth:`keep_borders` leaves those pairs out).
+        """
+        rules = np.asarray(rules, dtype=np.int64).reshape(-1, 4)
+        if self.faces is None or not rules.size:
+            return
+        faces = np.asarray(self.faces, dtype=np.int64)
+        held  = np.isin(rules[:, :2], faces)
+        split = int(np.count_nonzero(held[:, 0] != held[:, 1]))
+        if split:
+            raise ValueError(
+                f"MaterialData.quadrangulate: {split} of the rules' quads would merge a triangle of material "
+                f"{self.name!r} with one of another material; pass the rules through keep_borders() of each of the "
+                f"mesh's materials first"
+            )
+        # the later triangle of a pair joins the earlier one, where the quad is made
+        first = rules[:, :2].min(axis=1)
+        later = rules[:, :2].max(axis=1)
+        order = np.argsort(later)
+        first, later = first[order], later[order]
+        place      = np.searchsorted(later, faces)
+        merged     = (place < later.size) & (later[np.minimum(place, later.size - 1)] == faces)
+        faces      = np.where(merged, first[np.minimum(place, later.size - 1)], faces)
+        self.faces = np.unique(faces - np.searchsorted(later, faces)).astype(np.int32)
+
+    def triangulate(self, mesh) -> None:
+        """
+        The faces after ``mesh.triangulate(...)`` in its default order
+        (``preserve_order``), in place: each face of n corners becomes n - 2
+        triangles, where it was. ``mesh`` is the mesh before the edit, so
+        call this first, as ``skin.subdivide(mesh)`` is called before
+        ``mesh.subdivide()``.
+        """
+        self._spread(np.asarray(mesh.counts, dtype=np.int64) - 2)
+
+    def subdivide(self, mesh, steps: int = 1) -> None:
+        """
+        The faces after ``mesh.subdivide(steps)``, in place: each face of n
+        corners becomes n quads, where it was, and each of those four more
+        a further step. ``mesh`` is the mesh before the edit, so call this
+        first, as ``skin.subdivide(mesh)`` is called before
+        ``mesh.subdivide()``.
+        """
+        if int(steps) < 1:
+            return
+        counts = np.asarray(mesh.counts, dtype=np.int64)
+        self._spread(counts * 4 ** (int(steps) - 1))
+
+    def _spread(self, pieces: np.ndarray) -> None:
+        """each face replaced by ``pieces[face]`` faces, where it was"""
+        if self.faces is None:
+            return
+        faces = np.asarray(self.faces, dtype=np.int64)
+        if faces.size and (faces.min() < 0 or faces.max() >= pieces.size):
+            raise ValueError(f"MaterialData.faces name faces the mesh of {pieces.size} faces does not hold")
+        start      = np.concatenate([[0], np.cumsum(pieces)])
+        spans      = [np.arange(start[face], start[face + 1]) for face in np.sort(faces).tolist()]
+        self.faces = (np.concatenate(spans) if spans else np.zeros(0)).astype(np.int32)
+
+    def delete_faces(self, faces) -> None:
+        """
+        The faces after ``mesh.delete_faces(faces)``, in place: the deleted
+        ones leave, every later face moves down. A material left covering
+        no face holds an empty ``faces``: take it off its list.
+        """
+        if self.faces is None:
+            return
+        gone       = np.unique(np.asarray(faces, dtype=np.int64))
+        held       = np.asarray(self.faces, dtype=np.int64)
+        held       = held[~np.isin(held, gone)]
+        self.faces = np.unique(held - np.searchsorted(gone, held)).astype(np.int32)
+
+    def from_faces(self, faces, mesh_uuid: Optional[str] = None) -> Optional["MaterialData"]:
+        """
+        This material on the mesh ``mesh.from_faces(faces)`` returns: a new
+        record of the same material (the same ``uuid``) covering, of that
+        part, the faces this one covers of the whole; None where it covers
+        none of them. ``mesh_uuid`` names the part: pass its ``uuid``.
+        """
+        kept = np.unique(np.asarray(faces, dtype=np.int64))
+        part = self.copy()
+        if self.faces is not None:
+            held = np.asarray(self.faces, dtype=np.int64)
+            held = held[np.isin(held, kept)]
+            if not held.size:
+                return None
+            part.faces = np.searchsorted(kept, np.unique(held)).astype(np.int32)
+        part.mesh_uuid = mesh_uuid
+        return part
+
 
 class MaterialList(OneMeshList, DataList[MaterialData]):
     """A list of :class:`MaterialData`, as a file holds its materials, or
-    one mesh's alone (``mesh_uuid``, :class:`~cgmath.geometry._one_mesh.OneMeshList`)."""
+    one mesh's alone (``mesh_uuid``, :class:`~cgmath.geometry._one_mesh.OneMeshList`).
+
+    A mesh edit that renumbers faces is called on the list with the mesh
+    first, as the mesh was before the edit: it reaches the records that name
+    that mesh and leaves the others alone, so the list a file holds for all
+    its meshes takes the call as it is.
+    """
+
+    def of(self, mesh) -> list:
+        """the records that name ``mesh``, in the list's order"""
+        return [material for material in self.list if material.mesh_uuid == mesh.uuid]
+
+    def keep_borders(self, mesh, rules) -> np.ndarray:
+        """``rules`` without the pairs that would merge two triangles of
+        different materials of ``mesh`` (:meth:`MaterialData.keep_borders`)"""
+        for material in self.of(mesh):
+            rules = material.keep_borders(rules)
+        return np.asarray(rules, dtype=np.int64).reshape(-1, 4)
+
+    def quadrangulate(self, mesh, rules) -> None:
+        """the faces of ``mesh``'s materials after ``mesh.quadrangulate(rules)``
+        (:meth:`MaterialData.quadrangulate`)"""
+        for material in self.of(mesh):
+            material.quadrangulate(rules)
+
+    def triangulate(self, mesh) -> None:
+        """the faces of ``mesh``'s materials after ``mesh.triangulate(...)``;
+        call it before the mesh's (:meth:`MaterialData.triangulate`)"""
+        for material in self.of(mesh):
+            material.triangulate(mesh)
+
+    def subdivide(self, mesh, steps: int = 1) -> None:
+        """the faces of ``mesh``'s materials after ``mesh.subdivide(steps)``;
+        call it before the mesh's (:meth:`MaterialData.subdivide`)"""
+        for material in self.of(mesh):
+            material.subdivide(mesh, steps)
+
+    def delete_faces(self, mesh, faces) -> None:
+        """the faces of ``mesh``'s materials after ``mesh.delete_faces(faces)``;
+        a material left covering no face is taken off the list"""
+        for material in self.of(mesh):
+            material.delete_faces(faces)
+        self.list[:] = [
+            material for material in self.list
+            if material.mesh_uuid != mesh.uuid or material.faces is None or len(material.faces)
+        ]
+
+    def from_faces(self, mesh, faces, part=None) -> "MaterialList":
+        """the materials of ``mesh.from_faces(faces)``: a new list of new
+        records, one for each material of ``mesh`` covering any of those
+        faces, each naming ``part``, the mesh that call returned"""
+        uuid  = None if part is None else part.uuid
+        found = [material.from_faces(faces, mesh_uuid=uuid) for material in self.of(mesh)]
+        return MaterialList([material for material in found if material is not None])
