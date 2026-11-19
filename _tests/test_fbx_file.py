@@ -484,5 +484,85 @@ class TestScene(_Handles):
         same_read(self, fields(got), fields(want))
 
 
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestUnread(_Handles):
+    """what a file holds that no record does: load_fbx says so, FbxFile
+    lists it and keeps it"""
+
+    WANT = {
+        "LOD group": 1,
+        "display layer": 1,
+        "selection sets": 2,
+        "constraint": 1,
+        "HumanIK character": 1,
+        "rest pose": 1,
+        "user properties on shapes, materials or other objects that are no nodes": 2,
+    }
+
+    def built(self) -> str:
+        """every kind, and one or two of each thing the fork does not read"""
+        source = every_kind(self.path("every.fbx"))
+        path   = self.path("extras.fbx")
+        with FbxFile(source, verbose=False) as f:
+            scene = f._scene
+            node  = FBX.FbxNode.Create(scene, "lod")
+            node.SetNodeAttribute(FBX.FbxLODGroup.Create(scene, "lodShape"))
+            scene.GetRootNode().AddChild(node)
+            FBX.FbxDisplayLayer.Create(scene, "shown")
+            FBX.FbxSelectionSet.Create(scene, "one")
+            FBX.FbxSelectionSet.Create(scene, "two")
+            FBX.FbxConstraintPosition.Create(scene, "pinned")
+            FBX.FbxCharacter.Create(scene, "hero")
+            pose = FBX.FbxPose.Create(scene, "rest")
+            pose.SetIsBindPose(False)
+            scene.AddPose(pose)
+            for kind in (FBX.FbxMesh, FBX.FbxSurfaceMaterial):
+                owner = scene.GetSrcObject(FBX.FbxCriteria.ObjectType(kind.ClassId), 0)
+                prop  = FBX.FbxProperty.Create(owner, FBX.FbxDoubleDT, "note")
+                prop.ModifyFlag(USER, True)
+            f.save(path)
+        return path
+
+    def notices(self, call) -> list:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            call()
+        return [str(warning.message) for warning in caught if "does not read and save_fbx would not write" in str(warning.message)]
+
+    def test_load_fbx_says_so(self):
+        """one warning a read of every kind, naming each thing and how
+        many; none with verbose off, for a read of some kinds, or for a
+        file holding none"""
+        path = self.built()
+        told = self.notices(lambda: load_fbx(path))
+        self.assertEqual(len(told), 1, told)
+        for what, count in self.WANT.items():
+            self.assertIn(f"{count} {what}", told[0])
+        self.assertIn("FbxFile keeps them", told[0])
+        self.assertEqual(self.notices(lambda: load_fbx(path, textures=False)),   told)
+        self.assertEqual(self.notices(lambda: load_fbx(path, verbose=False)),    [])
+        self.assertEqual(self.notices(lambda: MeshList.load_fbx(path)),          [])
+        self.assertEqual(self.notices(lambda: load_fbx(path, cameras=False)),    [])
+        self.assertEqual(self.notices(lambda: load_fbx(self.path("every.fbx"))), [])
+
+    def test_handle_lists_and_keeps(self):
+        """FbxFile.unread() is the list, in words; a save of the handle
+        keeps every item, a property read and changed or not"""
+        path = self.built()
+        with FbxFile(path, verbose=False) as f:
+            self.assertEqual(f.unread(), self.WANT)
+            f.hierarchy
+            f.meshes[0].name = "renamed"
+            f.save(self.path("saved.fbx"))
+            self.assertEqual(f.unread(), self.WANT)
+        with FbxFile(self.path("saved.fbx"), verbose=False) as f:
+            self.assertEqual(f.unread(), self.WANT)
+        with FbxFile(self.path("every.fbx"), verbose=False) as f:
+            self.assertEqual(f.unread(), {})
+        with self.assertRaises(ValueError):
+            f.unread()
+
+
 if __name__ == "__main__":
     unittest.main()

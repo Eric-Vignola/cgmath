@@ -301,6 +301,18 @@ class FbxFile:
         """whether the file is closed (:meth:`close`)"""
         return self._manager is None
 
+    def unread(self) -> dict:
+        """
+        {what: how many} of what the file holds that no property reads and
+        ``save_fbx`` would not write, in words: constraints, HumanIK
+        characters, display layers, selection sets, LOD groups, rest poses,
+        keyed animation layers after a take's first, user properties on
+        anything but a node. A save of the handle keeps them; {} for a file
+        holding none. ``load_fbx`` warns of the same list.
+        """
+        self._open_or_raise("unread")
+        return _load.unread(self._scene, self._fbx)
+
     def close(self) -> None:
         """
         Lets the file go: the SDK's scene and the media extracted from it

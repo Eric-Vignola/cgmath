@@ -240,6 +240,13 @@ def load_fbx(
     texture file is decoded once a read, however many materials name it,
     which all share the one array. ``verbose`` False silences the read's
     warnings.
+
+    A read of every kind warns once of what the file holds beyond them,
+    which a ``save_fbx`` of the result would not write: constraints,
+    HumanIK characters, display layers, selection sets, LOD groups, rest
+    poses, keyed animation layers after a take's first, and user
+    properties on anything but a node, each with how many. ``FbxFile``
+    keeps them through a save, and ``FbxFile(path).unread()`` lists them.
     """
     parts = {
         "takes":     takes,
@@ -283,6 +290,15 @@ def _load(filename, parts: dict) -> FbxContents:
     bind      = _bind(read) if parts["skins"] else None
     skins     = None if bind is None else _build_skins(read, meshes)
     held      = _held(hierarchy, clip is not None, bind)
+    if read.get("unread"):
+        import warnings
+
+        listed = ", ".join(f"{count} {what}" for what, count in read["unread"].items())
+        warnings.warn(
+            f"load_fbx: {os.path.basename(str(filename))!r} holds {listed}, which {FORK} does not read and save_fbx would "
+            f"not write; FbxFile keeps them (FbxFile(path).unread() lists them)",
+            stacklevel=4,
+        )
     return FbxContents(held, clip, meshes, skins, uvs, cameras, lights, materials, morphs, curves, surfaces)
 
 
@@ -382,7 +398,71 @@ def _open(filename, parts: dict) -> dict:
     # read at all
     media = bool(parts["meshes"] and parts["materials"] and parts["textures"])
     with open_fbx(filename, FBX, media=media) as scene:
-        return _read(scene, FBX, parts, filename)
+        read = _read(scene, FBX, parts, filename)
+        # a read of every kind says what the file holds beyond them
+        whole          = all(on for kind, on in parts.items() if kind != "textures")
+        read["unread"] = unread(scene, FBX) if whole else {}
+        return read
+
+
+# what a file may hold that no record does and ``save_fbx`` would not write,
+# by the sdk class it is an object of: what a message calls one, and several
+_UNREAD = (
+    ("FbxConstraint", "constraint", "constraints"),
+    ("FbxCharacter", "HumanIK character", "HumanIK characters"),
+    ("FbxDisplayLayer", "display layer", "display layers"),
+    ("FbxSelectionSet", "selection set", "selection sets"),
+    ("FbxLODGroup", "LOD group", "LOD groups"),
+)
+
+# the objects whose properties are not walked for user properties: a node's
+# are its user defined attributes, which are read, and the rest hold none
+# and are many
+_NO_USER = ("FbxNode", "FbxCluster", "FbxAnimCurve", "FbxAnimCurveNode", "FbxAnimLayer", "FbxAnimStack")
+
+
+def unread(scene, fbx) -> dict:
+    """
+    {what: how many} of what a scene holds that the fork does not read and
+    ``save_fbx`` would not write, in words: constraints, HumanIK
+    characters, display layers, selection sets, LOD groups, rest poses
+    (poses that are no bind pose), keyed animation layers after a take's
+    first, and user properties on anything but a node (a shape, a
+    material ...). {} for a file holding none. Data a save derives anew
+    (tangents, binormals, smoothing groups) is not counted.
+    """
+    found = {}
+
+    def count(one: str, many: str, by: int = 1) -> None:
+        held                              = found.pop(one, 0) + found.pop(many, 0) + by
+        found[one if held == 1 else many] = held
+
+    user = fbx.FbxPropertyFlags.EFlags.eUserDefined
+    for at in range(scene.GetSrcObjectCount()):
+        held = scene.GetSrcObject(at)
+        kind = str(held.GetClassId().GetName())
+        for prefix, one, many in _UNREAD:
+            if kind.startswith(prefix):
+                count(one, many)
+        if kind in _NO_USER:
+            continue
+        prop = held.GetFirstProperty()
+        while prop.IsValid():
+            if prop.GetFlag(user):
+                count("user property on a shape, a material or another object that is no node", "user properties on shapes, materials or other objects that are no nodes")
+            prop = held.GetNextProperty(prop)
+    for at in range(scene.GetPoseCount()):
+        if not scene.GetPose(at).IsBindPose():
+            count("rest pose", "rest poses")
+    stacks = fbx.FbxCriteria.ObjectType(fbx.FbxAnimStack.ClassId)
+    layers = fbx.FbxCriteria.ObjectType(fbx.FbxAnimLayer.ClassId)
+    nodes  = fbx.FbxCriteria.ObjectType(fbx.FbxAnimCurveNode.ClassId)
+    for at in range(scene.GetSrcObjectCount(stacks)):
+        stack = scene.GetSrcObject(stacks, at)
+        keyed = sum(bool(stack.GetSrcObject(layers, k).GetSrcObjectCount(nodes)) for k in range(stack.GetSrcObjectCount(layers)))
+        if keyed > 1:
+            count("keyed animation layer after a take's first", "keyed animation layers after a take's first", keyed - 1)
+    return found
 
 
 def _walk(scene) -> list:

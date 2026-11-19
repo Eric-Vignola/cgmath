@@ -769,6 +769,15 @@ sections.
 
 ---
 
+A file may hold more than these records: constraints, HumanIK characters,
+display layers, selection sets, LOD groups, rest poses, extra keyed
+animation layers, user properties on shapes and materials. `load_fbx`
+leaves them, so a `save_fbx` of what it read writes a file without them;
+a read of every kind says so in one warning, each thing with how many
+(`verbose=False` silences it, and a file holding none is read without a
+word). `FbxFile` keeps them through a save, and `FbxFile(path).unread()`
+returns the same list as a dict.
+
 ## `fbx` — FbxFile: a file held open
 
 `FbxFile(path)` opens a file and holds it until `close()`, or the end of a
