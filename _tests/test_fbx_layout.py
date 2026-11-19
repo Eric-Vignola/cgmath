@@ -18,9 +18,10 @@ import warnings
 
 import numpy as np
 from cgmath._tests.test_fbx_edit import _Edits, loaded
-from cgmath._tests.test_fbx_file import FBX, USER, census, maya_file
+from cgmath._tests.test_fbx_file import FBX, USER, census, every_kind, extended, maya_file
 from cgmath.formats import FbxFile, save_fbx
 from cgmath.formats._fbx_io import open_fbx, typed
+from cgmath.geometry import MaterialData, MaterialList, MeshData, SkinData, UVData, UVList
 from cgmath.hierarchy import ClipData, ClipList, HierarchyData, TransformData, generate_uuid
 
 SHARED = {}
@@ -360,6 +361,288 @@ class TestUserAttributes(_Edits):
                 with self.assertRaises(ValueError) as caught:
                     f.save(self.path("refused.fbx"))
         self.assertIn("plain ASCII", str(caught.exception))
+
+
+
+def every_list(f: FbxFile) -> list:
+    """every record of the handle holding nodes: its hierarchy and its takes"""
+    return ([f.hierarchy] if f.hierarchy is not None else []) + (list(f.clip) if f.clip is not None else [])
+
+
+def carrier(f: FbxFile, name: str) -> str:
+    """a transform added at the top of every record holding nodes, to carry
+    a shape: its uuid"""
+    for nodes in every_list(f):
+        added(nodes, name, node_type="transform")
+    return UUIDS[name]
+
+
+def on(f: FbxFile, node: str):
+    """the mesh on the node named ``node``"""
+    uuid = every_list(f)[0][node].uuid
+    return next(mesh for mesh in f.meshes if mesh.parent_uuid == uuid)
+
+
+def cube(parent_uuid: str, at=(0.0, 0.0, 0.0), name: str = "cubeShape") -> MeshData:
+    corners = np.array([[x, y, z] for x in (-1.0, 1.0) for y in (-1.0, 1.0) for z in (-1.0, 1.0)]) + np.asarray(at)
+    faces   = np.array([0, 1, 3, 2, 4, 6, 7, 5, 0, 4, 5, 1, 2, 3, 7, 6, 0, 2, 6, 4, 1, 5, 7, 3])
+    return MeshData(points=corners, indices=faces, counts=np.full(6, 4), name=name, parent_uuid=parent_uuid)
+
+
+def kinds(path: str) -> dict:
+    return census(path)[0]
+
+
+def taken(records, record) -> None:
+    """``record`` itself taken off ``records``"""
+    del records[[id(held) for held in records].index(id(record))]
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestMeshes(_Edits):
+    """a mesh added, taken off or given other faces, with the records that
+    name it"""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.every = every_kind(os.path.join(SHARED["folder"], "every.fbx"))
+
+    def test_taken_off(self):
+        """every mesh taken off: their UV sets, skins, materials and blend
+        shapes go with them, and the materials' textures; the nodes stay"""
+
+        def edit(f):
+            f.meshes = None
+
+        self.assertEqual(self.assertSaves(self.every, edit), [])
+        before, after = kinds(self.every), kinds(self.path("saved.fbx"))
+        for kind in ("FbxMesh", "FbxSkin", "FbxCluster", "FbxSurfaceLambert", "FbxSurfacePhong", "FbxFileTexture", "FbxBlendShape", "FbxShape"):
+            self.assertEqual(after.get(kind, 0), 0, kind)
+        self.assertEqual(after["FbxNode"], before["FbxNode"])
+        self.assertEqual(loose_curves(self.path("saved.fbx")), 0)
+        with FbxFile(self.every, verbose=False) as f:
+            f.meshes = None
+            f.save(self.path("lists.fbx"))
+            self.assertEqual((f.meshes, f.skins, f.uvs, f.materials, f.morphs), (None, None, None, None, None))
+
+    def test_one_taken_off(self):
+        """one mesh of three taken off: the others keep their records, and
+        a material no mesh is left with goes"""
+
+        def edit(f):
+            taken(f.meshes, on(f, "planeShape"))
+
+        self.assertEqual(self.assertSaves(self.every, edit), [])
+        after = kinds(self.path("saved.fbx"))
+        self.assertEqual((after["FbxMesh"], after.get("FbxSurfaceLambert", 0), after["FbxSurfacePhong"]), (2, 0, 1))
+        read = loaded(self.path("saved.fbx"))
+        self.assertEqual((len(read.meshes), read.uvs, len(read.materials), len(read.skins)), (2, None, 1, 1))
+
+    def test_added(self):
+        """a cube on a node of its own, with a UV set, a material of its
+        own and a skin to one joint, in Maya's files, Z-up among them"""
+
+        def edit(f):
+            mesh = cube(carrier(f, "crate"), at=(0.0, 5.0, 0.0))
+            f.meshes.append(mesh)
+            uv          = UVData(points=np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]), indices=np.tile([0, 1, 2, 3], 6), counts=np.full(6, 4), name="map1", mesh_uuid=mesh.uuid)
+            f.uvs       = UVList(list(f.uvs or ()) + [uv])
+            f.materials = MaterialList(list(f.materials or ()) + [MaterialData(name="crateLambert", mesh_uuid=mesh.uuid, color=[0.2, 0.4, 0.6])])
+            f.skins.append(SkinData(weights=np.ones((8, 1)), influences=["head"], mesh_uuid=mesh.uuid, name="crateSkin"))
+
+        for case, name in (("skin_geo", "maya.fbx"), ("zup_skinned", "z_cm.fbx")):
+            with self.subTest(file=case):
+                source = maya_file(case, name)
+                self.assertEqual(self.assertSaves(source, edit, name=f"{case}.fbx"), [])
+                before, after = kinds(source), kinds(self.path(f"{case}.fbx"))
+                for kind, more in (("FbxMesh", 1), ("FbxSkin", 1), ("FbxCluster", 1), ("FbxSurfaceLambert", 1), ("FbxNode", 1)):
+                    self.assertEqual(after.get(kind, 0), before.get(kind, 0) + more, kind)
+
+    def test_other_faces(self):
+        """a skinned mesh subdivided, its skin with it, and a mesh of two
+        materials and a UV set triangulated, each record following by the
+        same call"""
+
+        def skinned(f):
+            mesh = on(f, "geo")
+            skin = next(skin for skin in f.skins if skin.mesh_uuid == mesh.uuid)
+            skin.subdivide(mesh, 1)
+            mesh.subdivide(1)
+
+        def covered(f):
+            mesh = on(f, "plane")
+            uv   = next(uv for uv in f.uvs if uv.mesh_uuid == mesh.uuid)
+            f.materials.subdivide(mesh, 1)
+            mesh.subdivide(1)
+            uv.subdivide(1)
+
+        self.assertEqual(self.assertSaves(maya_file("zup_skinned", "z_cm.fbx"), skinned, name="skinned.fbx"), [])
+        read = loaded(self.path("skinned.fbx"))
+        self.assertEqual((len(read.meshes[0].points), len(read.skins[0].weights)), (len(read.meshes[0].points),) * 2)
+        self.assertGreater(len(read.meshes[0].counts), 368 * 3)
+        source = maya_file("materials_export", "maya_embedded.fbx")
+        self.assertSaves(source, covered, name="covered.fbx")
+        read = loaded(self.path("covered.fbx"))
+        mesh = read.meshes[0]
+        held = [material for material in read.materials if material.mesh_uuid == mesh.uuid]
+        self.assertEqual((len(mesh.counts), sorted(len(material.faces) for material in held)), (16, [8, 8]))
+        self.assertEqual(kinds(self.path("covered.fbx")).get("FbxFileTexture"), kinds(source).get("FbxFileTexture"))
+
+    def test_split(self):
+        """a mesh split in two by its faces: each part keeps the materials
+        of its faces, the new part's records naming the file's own
+        materials, and its UVs"""
+
+        def edit(f):
+            mesh              = on(f, "plane")
+            uv                = next(uv for uv in f.uvs if uv.mesh_uuid == mesh.uuid)
+            faces             = [0, 1]
+            part              = mesh.from_faces(faces)
+            part.uuid         = generate_uuid()
+            part.parent_uuid  = carrier(f, "half")
+            part_uv           = uv.from_faces(faces)
+            part_uv.mesh_uuid = part.uuid
+            f.materials.extend(f.materials.from_faces(mesh, faces, part))
+            f.materials.delete_faces(mesh, faces)
+            mesh.delete_faces(faces)
+            uv.delete_faces(faces)
+            f.meshes.append(part)
+            f.uvs.append(part_uv)
+
+        source = maya_file("materials_export", "maya_embedded.fbx")
+        self.assertSaves(source, edit)
+        before, after = kinds(source), kinds(self.path("saved.fbx"))
+        self.assertEqual(after["FbxMesh"], before["FbxMesh"] + 1)
+        # no material made: the parts share the file's
+        for kind in ("FbxSurfaceLambert", "FbxSurfacePhong", "FbxSurfaceMaterial", "FbxFileTexture"):
+            self.assertEqual(after.get(kind, 0), before.get(kind, 0), kind)
+        read  = loaded(self.path("saved.fbx"))
+        faces = {mesh.uuid: len(mesh.counts) for mesh in read.meshes}
+        cover = {}
+        for material in read.materials:
+            cover[material.mesh_uuid] = cover.get(material.mesh_uuid, 0) + (faces[material.mesh_uuid] if material.faces is None else len(material.faces))
+        self.assertEqual(cover, faces)
+
+    def test_records(self):
+        """a UV set added and one taken off, a skin given an influence the
+        file's lacks, a skin taken off, a material added on some faces and
+        one taken off"""
+
+        def uv_added(f):
+            first     = f.uvs[0]
+            more      = first.copy()
+            more.name = "extra"
+            f.uvs.append(more)
+
+        def uv_taken_off(f):
+            f.uvs.pop()
+
+        def influence(f):
+            # a joint the save adds, under the chest in every record holding nodes
+            for nodes in every_list(f):
+                added(nodes, "extra", node_type="joint", translate=[0.0, 1.0, 0.5])
+                nodes["extra"].set_parent(nodes["chest"], world_space=False)
+            skin            = f.skins[0]
+            free            = "extra"
+            weights         = np.array(skin.weights)
+            column          = np.zeros((len(weights), 1))
+            column[:10]     = 1.0
+            weights[:10]    = 0.0
+            skin.influences = list(skin.influences) + [free]
+            skin.weights    = np.hstack([weights, column])
+
+        def unskinned(f):
+            f.skins = None
+
+        def material_added(f):
+            mesh       = on(f, "cube")
+            held       = next(material for material in f.materials if material.mesh_uuid == mesh.uuid)
+            held.faces = np.array([0, 1, 2], dtype=np.int32)
+            f.materials.append(MaterialData(name="patch", mesh_uuid=mesh.uuid, faces=np.array([3, 4, 5], dtype=np.int32), kind="phong"))
+
+        def material_taken_off(f):
+            mesh = on(f, "plane")
+            held = [material for material in f.materials if material.mesh_uuid == mesh.uuid]
+            taken(f.materials, held[1])
+            held[0].faces = None
+
+        uvs       = maya_file("uvs_export",       "maya.fbx")
+        materials = maya_file("materials_export", "maya_embedded.fbx")
+        skinned   = maya_file("zup_skinned",      "z_cm.fbx")
+        self.assertEach(
+            saves=[
+                (uvs, uv_added), (uvs, uv_taken_off), (skinned, influence), (uvs, influence), (skinned, unskinned),
+                (materials, material_added), (materials, material_taken_off),
+            ],
+        )
+
+    def test_refused(self):
+        """a mesh on no node, a mesh on a joint, a mesh of blend shapes
+        given other faces, a skin and a material left on the faces their
+        mesh had, a material that brings a texture"""
+
+        def no_node(f):
+            f.meshes.append(cube(None))
+
+        def on_a_joint(f):
+            f.meshes.append(cube(f.hierarchy["head"].uuid))
+
+        def morphed(f):
+            mesh = on(f, "boxShape")
+            f.materials.subdivide(mesh, 1)
+            mesh.subdivide(1)
+
+        def skin_left(f):
+            on(f, "geo").subdivide(1)
+
+        def material_left(f):
+            mesh = on(f, "plane")
+            uv   = next(uv for uv in f.uvs if uv.mesh_uuid == mesh.uuid)
+            mesh.subdivide(1)
+            uv.subdivide(1)
+
+        def textured(f):
+            mesh = on(f, "cube")
+            taken(f.materials, next(material for material in f.materials if material.mesh_uuid == mesh.uuid))
+            f.materials.append(MaterialData(name="new", mesh_uuid=mesh.uuid, texture=np.zeros((2, 2, 3), dtype=np.uint8)))
+
+        def one_uuid(f):
+            mesh             = on(f, "cube")
+            part             = mesh.from_faces([0, 1])
+            part.parent_uuid = carrier(f, "half")
+            f.meshes.append(part)
+
+        materials = maya_file("materials_export", "maya_embedded.fbx")
+        self.assertEach(
+            refusals=[
+                (self.every, no_node, "names the node that carries it"),
+                (self.every, on_a_joint, "holds a mesh on a transform only"),
+                (self.every, morphed, "blend shape"),
+                (maya_file("zup_skinned", "z_cm.fbx"), skin_left, "holds 288 rows"),
+                (materials, material_left, "material"),
+                (materials, textured, "brings a texture or a normal map"),
+                (materials, one_uuid, "share one uuid"),
+            ],
+        )
+
+    def test_kept(self):
+        """what no record holds stays through a change of layout: a bind
+        pose, an LOD group and user properties, with a mesh added and
+        another given other faces"""
+        source = extended(self.every, self.path("extended.fbx"))
+
+        def edit(f):
+            f.meshes.append(cube(carrier(f, "crate")))
+            body = on(f, "geo")
+            skin = next(skin for skin in f.skins if skin.mesh_uuid == body.uuid)
+            skin.subdivide(body, 1)
+            body.subdivide(1)
+
+        self.assertSaves(source, edit)
+        before, after = census(source), census(self.path("saved.fbx"))
+        self.assertEqual(after[0].get("FbxLODGroup"), 1)
+        self.assertEqual((after[2], after[4]), (before[2], before[4]))
 
 
 if __name__ == "__main__":

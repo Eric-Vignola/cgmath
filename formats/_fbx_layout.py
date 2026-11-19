@@ -256,13 +256,13 @@ def _in_order(edit, uuid_of: dict, order: list) -> list:
     return uuids
 
 
-def write_nodes(edit, base: dict, state: dict, undo: list) -> None:
+def write_nodes(edit, base: dict, state: dict, undo: list) -> set:
     """the file given the nodes of the records to save: one they add made
     bare under its parent, one under another parent moved, one they leave
     out taken off (:func:`_take_off`); the file's nodes then in the records'
-    order, and ``file._uuids`` the uuid of each. ValueError for a node of
-    another kind than the file's, and for one left out that still carries a
-    shape the records hold"""
+    order, and ``file._uuids`` the uuid of each. Returns the uuids of the
+    nodes added. ValueError for a node of another kind than the file's, and
+    for one left out that still carries a shape the records hold"""
     file = edit.file
     nodes, links = _wanted(state)
     was   = _node_lists(base)[0][1]
@@ -308,6 +308,7 @@ def write_nodes(edit, base: dict, state: dict, undo: list) -> None:
     uuids   = _in_order(edit, uuid_of, [node.uuid for node in nodes])
     undo.append((file, "_uuids", file._uuids))
     file._uuids = uuids
+    return {record.uuid for record in added}
 
 
 # ------------------------------------------------- user defined attributes
@@ -422,3 +423,678 @@ def strip_curves_of(edit, prop) -> None:
                 if curve is not None:
                     curve.Destroy()
         curve_node.Destroy()
+
+
+# --------------------------------------------------------------- the meshes
+
+# the records that belong to a mesh, naming it by ``mesh_uuid``
+_MESH_RECORDS = ("uvs", "skins", "materials", "morphs")
+
+# a mesh's layer elements no record holds: none outlives its faces
+_FACE_BOUND = (
+    ("Tangent", "tangents"),
+    ("Binormal", "binormals"),
+    ("PolygonGroup", "polygon groups"),
+    ("EdgeCrease", "edge creases"),
+    ("VertexCrease", "vertex creases"),
+    ("Visibility", "face visibilities"),
+    ("UserData", "user data layers"),
+)
+
+
+class _Shim:
+    """what ``save_fbx``'s builders ask of their exporter: the scene"""
+
+    def __init__(self, scene):
+        self.scene = scene
+
+    def _check_open(self) -> None:
+        pass
+
+
+def _same(a, b) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    a, b = np.asarray(a), np.asarray(b)
+    return a.shape == b.shape and bool(np.array_equal(a, b))
+
+
+def _faces_differ(old, new) -> bool:
+    """whether two meshes are of other faces or another count of points"""
+    return (
+        np.shape(old.points) != np.shape(new.points)
+        or not _same(old.counts, new.counts)
+        or not _same(old.indices, new.indices)
+    )
+
+
+def _by_node(meshes) -> dict:
+    """{the uuid of its node: the mesh}; ValueError for two on one node"""
+    found = {}
+    for mesh in meshes.list if meshes is not None else ():
+        if mesh.parent_uuid in found:
+            raise ValueError(
+                f"FbxFile.save: meshes holds two meshes on one node ({mesh.name!r} and "
+                f"{found[mesh.parent_uuid].name!r}); a node carries one"
+            )
+        found[mesh.parent_uuid] = mesh
+    return found
+
+
+def _of(records, mesh) -> list:
+    """the records of ``records`` that name ``mesh``"""
+    if records is None or mesh is None:
+        return []
+    return [record for record in records.list if record.mesh_uuid == mesh.uuid]
+
+
+def settle(file, base: dict, state: dict, undo: list) -> dict:
+    """the records to save as a file lists them, ``state`` changed in place
+    and {field: its new list} returned for the handle to hold once saved:
+
+    - the one material of a mesh that lists every face of it covers the
+      mesh whole (``faces`` None, ``undo`` taking the faces it listed), as
+      a read holds it;
+
+    - a list holding nothing is None;
+    - the meshes in their nodes' order, and each mesh's UV sets, skin,
+      materials and blend shapes in the meshes' order, as a read lists them;
+    - the records of a mesh taken off the file (its node carries none in
+      ``meshes`` any more) taken off with it;
+    - the hierarchy of a file holding takes None once no skin is left: it
+      is the pose the skins are bound in, and the takes hold the nodes
+
+    ValueError for two meshes of one uuid, which the records naming a mesh
+    could not tell apart"""
+    replaced = {}
+    nodes    = _node_lists(state)
+    seen     = {}
+    for mesh in (_held(state["meshes"]).list if _held(state["meshes"]) is not None else ()):
+        if mesh.uuid in seen and seen[mesh.uuid] is not mesh:
+            raise ValueError(
+                f"FbxFile.save: two meshes of meshes share one uuid ({mesh.name!r} and {seen[mesh.uuid].name!r}); a "
+                f"mesh made by copy() or from_faces() keeps its source's: give it one of its own "
+                f"(mesh.uuid = generate_uuid()) before any record names it"
+            )
+        seen[mesh.uuid] = mesh
+    rank   = {node.uuid: at for at, node in enumerate(nodes[0][1])} if nodes else {}
+    meshes = _held(state["meshes"])
+    if meshes is not None:
+        held = sorted(meshes.list, key=lambda mesh: rank.get(mesh.parent_uuid, len(rank)))
+        if not held:
+            replaced["meshes"] = None
+        elif [id(mesh) for mesh in held] != [id(mesh) for mesh in meshes.list]:
+            replaced["meshes"] = type(meshes)(held)
+        meshes = replaced.get("meshes", meshes)
+
+    live  = {mesh.uuid: at for at, mesh in enumerate(meshes.list)} if meshes is not None else {}
+    nodes = {mesh.parent_uuid for mesh in meshes.list} if meshes is not None else set()
+    known = dict(file._issued)
+    was   = _held(base["meshes"])
+    known.update({mesh.uuid: mesh.parent_uuid for mesh in was.list} if was is not None else {})
+    for field in _MESH_RECORDS:
+        records = _held(state[field])
+        if records is None:
+            continue
+        kept = [
+            record for record in records.list
+            if record.mesh_uuid in live or record.mesh_uuid not in known or known[record.mesh_uuid] in nodes
+        ]
+        kept.sort(key=lambda record: live.get(record.mesh_uuid, len(live)))
+        if not kept:
+            replaced[field] = None
+        elif [id(record) for record in kept] != [id(record) for record in records.list]:
+            replaced[field] = type(records)(kept)
+    for field in ("cameras", "lights", "curves", "surfaces"):
+        records = _held(state[field])
+        if records is not None and not records.list:
+            replaced[field] = None
+    materials = replaced["materials"] if "materials" in replaced else _held(state["materials"])
+    for mesh in meshes.list if meshes is not None and materials is not None else ():
+        held = [record for record in materials.list if record.mesh_uuid == mesh.uuid]
+        if len(held) == 1 and held[0].faces is not None and len(np.unique(held[0].faces)) == len(mesh.counts):
+            undo.append((held[0], "faces", held[0].faces))
+            held[0].faces = None
+    skins = replaced["skins"] if "skins" in replaced else _held(state["skins"])
+    if skins is None and _held(base["skins"]) is not None and _held(state["hierarchy"]) is not None and _held(state["clip"]) is not None:
+        _wanted(state)
+        replaced["hierarchy"] = None
+    state.update(replaced)
+    return replaced
+
+
+def _shape_of(edit, node):
+    """the FbxMesh ``node`` carries, None for none"""
+    fbx   = edit.fbx
+    shape = node.GetNodeAttribute()
+    if shape is None or shape.GetAttributeType() != fbx.FbxNodeAttribute.EType.eMesh:
+        return None
+    return edit.typed(shape, fbx.FbxMesh, fbx)
+
+
+def _skin_of(edit, shape):
+    """the FbxSkin of a mesh, None for none"""
+    fbx  = edit.fbx
+    kind = fbx.FbxDeformer.EDeformerType.eSkin
+    if not shape.GetDeformerCount(kind):
+        return None
+    return edit.typed(shape.GetDeformer(0, kind), fbx.FbxSkin, fbx)
+
+
+def _clusters(edit, deformer) -> list:
+    fbx = edit.fbx
+    return [edit.typed(deformer.GetCluster(at), fbx.FbxCluster, fbx) for at in range(deformer.GetClusterCount())]
+
+
+def _label(mesh, node) -> str:
+    return f"mesh {mesh.name!r}" if mesh.name else f"the mesh on node {str(node.GetName())!r}"
+
+
+def _weighed(skin, hierarchy) -> set:
+    """the uuids of the nodes a skin's influences name in ``hierarchy``, a
+    name it does not hold as it is"""
+    names = {}
+    for record in hierarchy.list if hierarchy is not None else ():
+        names.setdefault(record.name, record.uuid)
+    return {names.get(str(name), str(name)) for name in skin.influences}
+
+
+def _file_world(edit, matrix) -> np.ndarray:
+    """a world matrix of the records as the file holds one: in its axes and
+    its unit, what the reader's turn and scale of a bind matrix undo"""
+    held = np.array(matrix, dtype=np.float64)
+    if edit.turn is not None:
+        turn         = np.eye(4)
+        turn[:3, :3] = edit.turn
+        held         = held @ turn.T
+    held[3, :3] /= edit.cm
+    return held
+
+
+def _amatrix(matrix) -> np.ndarray:
+    """(4, 4) of an FbxAMatrix, row by row"""
+    return np.array([[matrix.Get(row, column) for column in range(4)] for row in range(4)], dtype=np.float64)
+
+
+def _drop_mesh(edit, node, loose: dict) -> None:
+    """the mesh of ``node`` taken off the file with what is its own: its
+    skin and clusters, its blend shapes and their keys, its UV sets, its
+    node's materials, which ``loose`` takes ({id: material}) for
+    :func:`_drop_loose`; the node stays, an empty transform"""
+    fbx   = edit.fbx
+    kinds = fbx.FbxDeformer.EDeformerType
+    shape = _shape_of(edit, node)
+    if shape is None:
+        return
+    for at in reversed(range(shape.GetDeformerCount())):
+        deformer = shape.GetDeformer(at)
+        if deformer.GetDeformerType() == kinds.eSkin:
+            for cluster in _clusters(edit, edit.typed(deformer, fbx.FbxSkin, fbx)):
+                cluster.Destroy()
+        elif deformer.GetDeformerType() == kinds.eBlendShape:
+            blend = edit.typed(deformer, fbx.FbxBlendShape, fbx)
+            for c in reversed(range(blend.GetBlendShapeChannelCount())):
+                channel = blend.GetBlendShapeChannel(c)
+                strip_curves(edit, channel)
+                for s in reversed(range(channel.GetTargetShapeCount())):
+                    channel.GetTargetShape(s).Destroy()
+                channel.Destroy()
+        deformer.Destroy()
+    for at in range(node.GetMaterialCount()):
+        held                           = node.GetMaterial(at)
+        loose[int(held.GetUniqueID())] = held
+    node.RemoveAllMaterials()
+    strip_curves(edit, shape)
+    node.RemoveNodeAttribute(shape)
+    shape.Destroy()
+    empty = fbx.FbxNull.Create(edit.scene, "")
+    empty.Look.Set(fbx.FbxNull.ELook.eNone.value)
+    node.SetNodeAttribute(empty)
+    flags = fbx.FbxPropertyFlags.EFlags
+    for prop in (node.LclTranslation, node.LclRotation, node.LclScaling):
+        for member in (flags.eLockedMember0, flags.eLockedMember1, flags.eLockedMember2):
+            prop.ModifyFlag(member, False)
+
+
+def _drop_loose(edit, loose: dict) -> None:
+    """the materials a save left on no node taken off the file, each with
+    the textures nothing else reads and their videos"""
+    fbx    = edit.fbx
+    nodes  = fbx.FbxCriteria.ObjectType(fbx.FbxNode.ClassId)
+    maps   = fbx.FbxCriteria.ObjectType(fbx.FbxTexture.ClassId)
+    videos = fbx.FbxCriteria.ObjectType(fbx.FbxVideo.ClassId)
+    for shader in loose.values():
+        if shader.GetDstObjectCount(nodes):
+            continue
+        textures = {}
+        prop     = shader.GetFirstProperty()
+        while prop.IsValid():
+            for at in range(prop.GetSrcObjectCount(maps)):
+                held                              = prop.GetSrcObject(maps, at)
+                textures[int(held.GetUniqueID())] = held
+            prop = shader.GetNextProperty(prop)
+        shader.Destroy()
+        for texture in textures.values():
+            if texture.GetDstPropertyCount() or texture.GetDstObjectCount(maps):
+                continue
+            clips = [texture.GetSrcObject(videos, at) for at in range(texture.GetSrcObjectCount(videos))]
+            texture.Destroy()
+            for clip in clips:
+                if clip is not None and not clip.GetDstObjectCount(maps):
+                    clip.Destroy()
+
+
+def _smooth_edges(edit, shape, mesh) -> bool:
+    """the smoothing of a mesh given other faces written anew, an edge at a
+    time: hard where the record breaks its normals; False where the record
+    does not say (normals stored with no hard edges)"""
+    fbx = edit.fbx
+    if mesh.hard_edges is None and mesh.normals is not None:
+        return False
+    hard = set()
+    if mesh.hard_edges is not None:
+        for a, b in np.asarray(mesh.hard_edges, dtype=np.int64).reshape(-1, 2).tolist():
+            hard.add((min(a, b), max(a, b)))
+    shape.BuildMeshEdgeArray()
+    if shape.GetLayerCount() == 0:
+        shape.CreateLayer()
+    element = fbx.FbxLayerElementSmoothing.Create(shape, "")
+    shape.GetLayer(0).SetSmoothing(element)
+    element.SetMappingMode(fbx.FbxLayerElement.EMappingMode.eByEdge)
+    element.SetReferenceMode(fbx.FbxLayerElement.EReferenceMode.eDirect)
+    direct = element.GetDirectArray()
+    for at in range(shape.GetMeshEdgeCount()):
+        a, b = tuple(shape.GetMeshEdgeVertices(at))[-2:]
+        direct.Add(0 if (min(a, b), max(a, b)) in hard else 1)
+    return True
+
+
+def _reshape(edit, node, old, mesh):
+    """the FbxMesh of ``mesh`` on ``node``, built as ``save_fbx`` builds one,
+    in the file's unit: a mesh added (``old`` None), or one given other
+    faces, whose FbxMesh it replaces. The skin of the one replaced moves to
+    it, its user defined properties are copied, its smoothing is written
+    anew; its other data no record holds is of the faces it had: refused, or
+    with ``force`` dropped. ValueError for a mesh holding blend shapes, and
+    for a node that carries another shape"""
+    from cgmath.formats import _fbx_edit, _write
+
+    fbx    = edit.fbx
+    kinds  = fbx.FbxNodeAttribute.EType
+    label  = _label(mesh, node)
+    held   = _shape_of(edit, node) if old is not None else None
+    why    = f"{label} is given other faces"
+    kept   = []
+    props  = []
+    smooth = False
+    if held is not None:
+        if _fbx_edit._targets(edit, held):
+            raise ValueError(
+                f"FbxFile.save: {label} is given other faces and holds blend shapes, which an open file keeps on the "
+                f"faces they were made for; {_ELSE}"
+            )
+        for kind, plural in _FACE_BOUND:
+            count = getattr(held, f"GetElement{kind}Count", None)
+            if count is not None and count():
+                edit.unread(f"the {plural} of {label}", why, lambda: None)
+        if held.GetElementVertexColorCount() > 1:
+            edit.unread(f"the colour sets of {label} after its first", why, lambda: None)
+        smooth = bool(held.GetElementSmoothingCount())
+        skin   = fbx.FbxDeformer.EDeformerType.eSkin
+        for at in reversed(range(held.GetDeformerCount())):
+            deformer = held.GetDeformer(at)
+            if deformer.GetDeformerType() == skin:
+                kept.append(held.RemoveDeformer(at))
+            else:
+                edit.unread(f"the deformer {str(deformer.GetName())!r} of {label}", why, lambda: None)
+        prop = held.GetFirstProperty()
+        while prop.IsValid():
+            if prop.GetFlag(fbx.FbxPropertyFlags.EFlags.eUserDefined):
+                props.append(prop)
+            prop = held.GetNextProperty(prop)
+    else:
+        carried = node.GetNodeAttribute()
+        if carried is not None and carried.GetAttributeType() != kinds.eNull:
+            raise ValueError(
+                f"FbxFile.save: {label} is put on node {str(node.GetName())!r}, which carries another shape or is a "
+                f"joint; give the mesh a transform of its own"
+            )
+        if carried is not None:
+            node.RemoveNodeAttribute(carried)
+            carried.Destroy()
+
+    proxy = mesh
+    if edit.cm != 1.0:
+        proxy        = mesh.copy()
+        proxy.points = np.asarray(mesh.points, dtype=np.float64) / edit.cm
+    _, shape = _write._write_mesh(_Shim(edit.scene), proxy, node)
+    if held is not None:
+        for deformer in reversed(kept):
+            shape.AddDeformer(deformer)
+        for prop in props:
+            made = fbx.FbxProperty.Create(shape, prop.GetPropertyDataType(), str(prop.GetName()), str(prop.GetLabel()))
+            made.CopyValue(prop)
+            made.ModifyFlag(fbx.FbxPropertyFlags.EFlags.eUserDefined, True)
+        if smooth and not _smooth_edges(edit, shape, mesh):
+            edit.unread(f"the smoothing groups of {label}", why, lambda: None)
+        for at in reversed(range(node.GetNodeAttributeCount())):
+            other = node.GetNodeAttributeByIndex(at)
+            if other is not None and int(other.GetUniqueID()) == int(held.GetUniqueID()):
+                node.RemoveNodeAttributeByIndex(at)
+        held.Destroy()
+        node.SetNodeAttribute(shape)
+    return shape
+
+
+def _sync_uvs(edit, shape, sets: list, label: str, rebuilt: bool) -> None:
+    """the UV sets of a mesh as its records list them: every set of the
+    file's mesh taken off and each record's written, as ``save_fbx`` writes
+    one"""
+    from cgmath.formats import _fbx_edit
+    from cgmath.formats.fbx import FbxExporter
+
+    if not rebuilt:
+        _fbx_edit._stale_elements(edit, shape, label, "uvs", f"{label} is given other UV sets")
+    while shape.GetElementUVCount():
+        shape.RemoveElementUV(shape.GetElementUV(0))
+    if sets:
+        FbxExporter.add_uvs(_Shim(edit.scene), shape, sets)
+
+
+def _link_world(edit, node):
+    """the bind matrix a cluster of the file already holds for ``node``,
+    None where none links it"""
+    fbx      = edit.fbx
+    criteria = fbx.FbxCriteria.ObjectType(fbx.FbxCluster.ClassId)
+    for at in range(node.GetDstObjectCount(criteria)):
+        cluster = edit.typed(node.GetDstObject(criteria, at), fbx.FbxCluster, fbx)
+        if cluster is not None and cluster.GetLink() is not None:
+            held = fbx.FbxAMatrix()
+            cluster.GetTransformLinkMatrix(held)
+            return held
+    return None
+
+
+def _pose_of(edit, node):
+    """the bind pose that lists ``node``, None for none"""
+    scene = edit.scene
+    for at in range(scene.GetPoseCount()):
+        pose  = scene.GetPose(at)
+        place = pose.Find(node)
+        if pose.IsBindPose() and place is not None and place >= 0:
+            return pose
+    return None
+
+
+def _sync_skin(edit, node, shape, mesh, skin, hierarchy, label: str) -> None:
+    """the skin of a mesh as its record holds it: the file's skin taken off
+    for a mesh given none; one made for a mesh the file binds to nothing; a
+    cluster made for each influence the file's skin lacks, bound where the
+    hierarchy places its joint, and listed in the mesh's bind pose; each
+    influence's weights, the clusters in the record's order, one of an
+    influence the record leaves out taken off"""
+    from cgmath.formats import _fbx_edit, _write
+
+    fbx      = edit.fbx
+    deformer = _skin_of(edit, shape)
+    if skin is None:
+        if deformer is not None:
+            for cluster in _clusters(edit, deformer):
+                cluster.Destroy()
+            deformer.Destroy()
+        return
+    if hierarchy is None:
+        raise ValueError(f"FbxFile.save: {label} is given a skin in a file holding no hierarchy to bind it to; {_ELSE}")
+    if len(set(skin.influences)) != len(skin.influences):
+        raise ValueError(f"FbxFile.save: the skin of {label} names an influence twice")
+    weights = np.asarray(skin.weights, dtype=np.float64)
+    if len(weights) != len(mesh.points):
+        raise ValueError(
+            f"FbxFile.save: the skin of {label} weighs {len(weights)} points, the mesh holds {len(mesh.points)}; give "
+            f"the skin the mesh's points (skin.subdivide(mesh) before mesh.subdivide())"
+        )
+    by_name = {}
+    by_uuid = {}
+    for record in hierarchy.list:
+        by_name.setdefault(record.name, record)
+        by_uuid[record.uuid] = record
+    worlds = {}
+
+    def world(record) -> np.ndarray:
+        if record.uuid not in worlds:
+            worlds[record.uuid] = _file_world(edit, record.world_matrix)
+        return worlds[record.uuid]
+
+    made = deformer is None
+    if made:
+        deformer = fbx.FbxSkin.Create(edit.scene, skin.name or "")
+        deformer.SetSkinningType(fbx.FbxSkin.EType.eLinear)
+        shape.AddDeformer(deformer)
+        flags = fbx.FbxPropertyFlags.EFlags
+        for prop in (node.LclTranslation, node.LclRotation, node.LclScaling):
+            for member in (flags.eLockedMember0, flags.eLockedMember1, flags.eLockedMember2):
+                prop.ModifyFlag(member, True)
+
+    # an influence is its node, whatever a save in progress renames it
+    uuid_of = {int(found.GetUniqueID()): uuid for uuid, found in edit.nodes.items()}
+    groups = {
+        uuid_of.get(int(group[0].GetLink().GetUniqueID())): group for group in _fbx_edit._linked(edit, deformer)
+    }
+    bound = None
+    for group in groups.values():
+        bound = fbx.FbxAMatrix()
+        group[0].GetTransformMatrix(bound)
+        break
+    if bound is None:
+        placed = by_uuid.get(mesh.parent_uuid)
+        bound  = _write._fbx_affine(np.eye(4) if placed is None else world(placed), fbx)
+
+    fresh = []
+    order = []
+    for column, influence in enumerate(skin.influences):
+        record = by_name.get(str(influence))
+        if record is None or record.uuid not in edit.nodes:
+            raise ValueError(
+                f"FbxFile.save: the skin of {label} names the influence {influence!r}, which the hierarchy does not hold"
+            )
+        group = groups.get(record.uuid)
+        if group is None:
+            link    = edit.nodes[record.uuid]
+            held    = _link_world(edit, link)
+            cluster = fbx.FbxCluster.Create(edit.scene, str(influence))
+            cluster.SetLink(link)
+            cluster.SetLinkMode(fbx.FbxCluster.ELinkMode.eNormalize)
+            cluster.SetTransformMatrix(bound)
+            cluster.SetTransformLinkMatrix(_write._fbx_affine(world(record), fbx) if held is None else held)
+            group = [cluster]
+            fresh.append(record)
+        _fbx_edit._set_cluster(group[0], weights[:, column])
+        for cluster in group[1:]:
+            cluster.SetControlPointIWCount(0)
+        order.append(group)
+
+    wanted = {int(cluster.GetUniqueID()) for group in order for cluster in group}
+    for cluster in _clusters(edit, deformer):
+        deformer.RemoveCluster(cluster)
+        if int(cluster.GetUniqueID()) not in wanted:
+            cluster.Destroy()
+    for group in order:
+        for cluster in group:
+            deformer.AddCluster(cluster)
+
+    # the bind pose: Maya's importer poses the joints by it
+    pose = _pose_of(edit, node)
+    if pose is None and made:
+        pose = fbx.FbxPose.Create(edit.scene, skin.name or "BindPose")
+        pose.SetIsBindPose(True)
+        pose.Add(node, _write._fbx_matrix(_amatrix(bound), fbx))
+        edit.scene.AddPose(pose)
+    if pose is None:
+        return
+    for record in fresh:
+        member = record
+        while member is not None:
+            target = edit.nodes.get(member.uuid)
+            place  = None if target is None else pose.Find(target)
+            if target is not None and (place is None or place < 0):
+                held   = _link_world(edit, target)
+                matrix = world(member) if held is None else _amatrix(held)
+                pose.Add(target, _write._fbx_matrix(matrix, fbx))
+            member = by_uuid.get(member.parent_uuid)
+
+
+def _shader_table(edit, base: dict):
+    """{a material record's uuid: the file's FbxSurfaceMaterial}, off the
+    order the handle read its materials in; None for a handle that read
+    none"""
+    from cgmath.formats import _fbx_edit
+
+    uuids = edit.file._material_uuids
+    if uuids is None:
+        return None
+    held = _fbx_edit._shaders(edit, base)
+    if len(held) != len(uuids):
+        raise ValueError(f"FbxFile.save: the file's materials are not the ones read; {_ELSE}")
+    return {uuid: shader for uuid, (shader, _, _, _) in zip(uuids, held)}
+
+
+def _sync_materials(edit, node, shape, mesh, records: list, shaders: dict, rebuilt: bool, loose: dict) -> None:
+    """the materials of a mesh as its records list them: each record's
+    material on the node, in the records' order, the file's own where the
+    record is of one it holds (one uuid a material), else one made as
+    ``save_fbx`` makes it; the faces of each in the mesh's material element,
+    written anew. A mesh whose records the file already lists so, on the
+    faces it had, is left to the values' writer"""
+    from cgmath.formats import _write
+    from cgmath.formats._load import _read_materials
+
+    fbx    = edit.fbx
+    label  = _label(mesh, node)
+    wraps  = {mode: _write._enum(fbx.FbxTexture, "EWrapMode", name) for mode, name in (("repeat", "eRepeat"), ("clamp", "eClamp"))}
+    wanted = []
+    for record in records:
+        held = None if record.uuid is None else shaders.get(record.uuid)
+        if held is None:
+            if record.texture is not None or record.normal_map is not None:
+                raise ValueError(
+                    f"FbxFile.save: material {record.name!r} of {label} is one the file does not hold and brings a "
+                    f"texture or a normal map; an open file keeps the maps it holds; {_ELSE}"
+                )
+            held = _write._surface(edit.scene, record, None, set(), wraps, fbx)
+            if record.uuid is not None:
+                shaders[record.uuid] = held
+        wanted.append(held)
+
+    if not rebuilt:
+        entries = _read_materials(node, shape, mesh.counts, label, edit.file._filename, fbx, pixels=False)
+        same    = [entry["id"] for entry in entries] == [int(held.GetUniqueID()) for held in wanted]
+        whole   = [entry["faces"] is None for entry in entries] == [record.faces is None for record in records]
+        if same and whole:
+            return
+
+    for at in range(node.GetMaterialCount()):
+        held                           = node.GetMaterial(at)
+        loose[int(held.GetUniqueID())] = held
+    node.RemoveAllMaterials()
+    for held in wanted:
+        node.AddMaterial(held)
+    while shape.GetElementMaterialCount():
+        shape.RemoveElementMaterial(shape.GetElementMaterial(0))
+    if not records:
+        return
+    if shape.GetLayerCount() == 0:
+        shape.CreateLayer()
+    element = fbx.FbxLayerElementMaterial.Create(shape, "")
+    shape.GetLayer(0).SetMaterials(element)
+    element.SetReferenceMode(fbx.FbxLayerElement.EReferenceMode.eIndexToDirect)
+    indices = element.GetIndexArray()
+    if len(records) == 1 and records[0].faces is None:
+        element.SetMappingMode(fbx.FbxLayerElement.EMappingMode.eAllSame)
+        indices.Add(0)
+        return
+    element.SetMappingMode(fbx.FbxLayerElement.EMappingMode.eByPolygon)
+    owner = np.zeros(len(mesh.counts), dtype=np.int64)
+    for place, record in enumerate(records):
+        owner[np.asarray(record.faces, dtype=np.int64)] = place
+    for index in owner.tolist():
+        indices.Add(index)
+
+
+def shapes_differ(file, base: dict, state: dict) -> bool:
+    """whether the records to save hold other meshes than the file, a mesh
+    of other faces, or other records of a mesh (UV sets, a skin, its
+    influences, materials) than the file lists for it"""
+    was, now = _held(base["meshes"]), _held(state["meshes"])
+    old = {mesh.parent_uuid: mesh for mesh in was.list} if was is not None else {}
+    new = {mesh.parent_uuid: mesh for mesh in now.list} if now is not None else {}
+    if set(old) != set(new):
+        return True
+    for uuid, mesh in new.items():
+        if _faces_differ(old[uuid], mesh):
+            return True
+        if len(_of(_held(base["uvs"]), old[uuid])) != len(_of(_held(state["uvs"]), mesh)):
+            return True
+        before, after = _of(_held(base["skins"]), old[uuid]), _of(_held(state["skins"]), mesh)
+        if len(before) != len(after):
+            return True
+        if after and _weighed(after[0], _held(state["hierarchy"])) - _weighed(before[0], _held(base["hierarchy"])):
+            return True
+    if file._material_uuids is None or "materials" not in file._values:
+        return False
+    before, after = _held(base["materials"]), _held(state["materials"])
+    if before is None or after is None:
+        return (before is None) != (after is None)
+    if len(before.list) != len(after.list) or len(file._material_uuids) != len(before.list):
+        return True
+    for uuid, read, record in zip(file._material_uuids, before.list, after.list):
+        if record.uuid != uuid or record.mesh_uuid != read.mesh_uuid or (record.faces is None) != (read.faces is None):
+            return True
+    return False
+
+
+def write_shapes(edit, base: dict, state: dict) -> None:
+    """the file given the meshes of the records to save, and each mesh the
+    records that name it: a mesh the records leave out taken off
+    (:func:`_drop_mesh`), one they add or give other faces built
+    (:func:`_reshape`), and each one's UV sets, skin and materials listed as
+    its records list them. ValueError for a mesh on no node of the file"""
+    was       = _by_node(_held(base["meshes"]))
+    now       = _by_node(_held(state["meshes"]))
+    hierarchy = _held(state["hierarchy"])
+    for uuid, mesh in now.items():
+        if uuid not in edit.nodes:
+            raise ValueError(
+                f"FbxFile.save: mesh {mesh.name!r} sits on no node of the file; a mesh added to an open file names "
+                f"the node that carries it: append a TransformData to the hierarchy and give the mesh its uuid as "
+                f"parent_uuid"
+            )
+    loose   = {}
+    shaders = _shader_table(edit, base)
+    for uuid in was:
+        if uuid not in now:
+            _drop_mesh(edit, edit.nodes[uuid], loose)
+    for uuid, mesh in now.items():
+        node    = edit.nodes[uuid]
+        old     = was.get(uuid)
+        label   = _label(mesh, node)
+        rebuilt = old is None or _faces_differ(old, mesh)
+        shape   = _reshape(edit, node, old, mesh) if rebuilt else _shape_of(edit, node)
+
+        sets = _of(_held(state["uvs"]), mesh)
+        if rebuilt or len(sets) != len(_of(_held(base["uvs"]), old)):
+            _sync_uvs(edit, shape, sets, label, rebuilt)
+
+        before = _of(_held(base["skins"]), old)
+        after  = _of(_held(state["skins"]), mesh)
+        if len(after) > 1:
+            raise ValueError(f"FbxFile.save: {label} is given {len(after)} skins; a mesh takes one")
+        added = after and before and _weighed(after[0], hierarchy) - _weighed(before[0], _held(base["hierarchy"]))
+        if rebuilt or len(before) != len(after) or added:
+            _sync_skin(edit, node, shape, mesh, after[0] if after else None, hierarchy, label)
+
+        records = _of(_held(state["materials"]), mesh)
+        if shaders is not None:
+            _sync_materials(edit, node, shape, mesh, records, shaders, rebuilt, loose)
+        elif old is None and records:
+            _sync_materials(edit, node, shape, mesh, records, {}, True, loose)
+    _drop_loose(edit, loose)

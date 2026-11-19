@@ -51,23 +51,26 @@ def _shadow(file, changed, like) -> dict:
     every read"""
     from cgmath.formats._fbx_file import _REFUSALS, FbxFile
 
-    shadow           = FbxFile.__new__(FbxFile)
-    shadow._fbx      = file._fbx
-    shadow._manager  = file._manager
-    shadow._scene    = file._scene
-    shadow._media    = None
-    shadow._mesh_raw = None
-    shadow._reads    = {}
-    shadow._refused  = {}
-    shadow._filename = file._filename
-    shadow._textures = file._textures if "materials" in changed else False
-    shadow._verbose  = False
-    shadow._uuids    = file._uuids
-    shadow._refusals = {}
-    shadow._values   = {}
-    shadow._digests  = {}
-    shadow._warned   = set()
-    shadow._hearing  = False
+    shadow                 = FbxFile.__new__(FbxFile)
+    shadow._fbx            = file._fbx
+    shadow._manager        = file._manager
+    shadow._scene          = file._scene
+    shadow._media          = None
+    shadow._mesh_raw       = None
+    shadow._reads          = {}
+    shadow._refused        = {}
+    shadow._filename       = file._filename
+    shadow._textures       = file._textures if "materials" in changed else False
+    shadow._verbose        = False
+    shadow._uuids          = file._uuids
+    shadow._refusals       = {}
+    shadow._values         = {}
+    shadow._digests        = {}
+    shadow._warned         = set()
+    shadow._hearing        = False
+    shadow._issued         = {}
+    shadow._settled        = {}
+    shadow._material_uuids = None
 
     values = {}
     try:
@@ -359,16 +362,26 @@ def apply(file, changed, force: bool = False, began=None) -> list:
 def _apply(file, changed, force: bool, undo: list, began: list) -> list:
     base    = _shadow(file, changed, file._values.get("meshes"))
     state   = _state(file, base, changed)
+    settled = _fbx_layout.settle(file, base, state, undo)
     dropped = []
-    if _fbx_layout.nodes_differ(base, state):
+    fresh   = set()
+    _spread(file, base, state, undo)
+    nodes = _fbx_layout.nodes_differ(base, state)
+    if nodes or _fbx_layout.shapes_differ(file, base, state):
         # the file given the records' layout first, then read as it stands
         _fbx_layout.check_nodes(state)
         _validate(base, state)
         began.append(True)
         edit = _Edit(file, force)
-        _fbx_layout.write_nodes(edit, base, state, undo)
+        if nodes:
+            fresh = _fbx_layout.write_nodes(edit, base, state, undo)
+            edit, dropped = _Edit(file, force), edit.dropped
+            edit.dropped = dropped
+        _fbx_layout.write_shapes(edit, base, state)
         dropped = edit.dropped
         base    = _shadow(file, changed, state["meshes"])
+    undo.append((file, "_settled", file._settled))
+    file._settled = {field: value for field, value in settled.items() if field in file._values}
     _layout(base, state)
     _spread(file, base, state, undo)
     _validate(base, state)
@@ -376,6 +389,7 @@ def _apply(file, changed, force: bool, undo: list, began: list) -> list:
     began.append(True)
     edit = _Edit(file, force)
     edit.dropped.extend(dropped)
+    edit.fresh = fresh
     _write_nodes(edit, base, state)
     _write_clip(edit, base, state, force)
     for field in FIELDS:
@@ -462,7 +476,8 @@ class _Edit:
         self.roots  = {uuid for uuid, (_, parent) in zip(file._uuids, found) if parent < 0}
         self.turn, self.cm = _load._axes(self.scene, self.fbx, file._filename)
         self.single  = len(self.stacks()) < 2
-        self.dropped = []  # what force dropped of the file, each in words
+        self.dropped = []     # what force dropped of the file, each in words
+        self.fresh   = set()  # the uuids of the nodes this save adds
         self._places = {}
 
     def place(self, uuid) -> _Place:
@@ -587,7 +602,9 @@ def _pairs(base: dict, state: dict) -> dict:
         for held, given in zip(was.list, now.list) if field == "clip" else [(was, now)]:
             before = {node.uuid: node for node in held.list}
             for node in given.list:
-                pairs.setdefault(node.uuid, []).append((before[node.uuid], node))
+                # a node the save adds is in no read yet
+                if node.uuid in before:
+                    pairs.setdefault(node.uuid, []).append((before[node.uuid], node))
     return pairs
 
 
@@ -764,7 +781,8 @@ def _write_nodes(edit, base: dict, state: dict) -> None:
     for record in now.list:
         read  = before[record.uuid]
         moved = [name for name in _MOVES if not np.array_equal(getattr(read, name), getattr(record, name))]
-        if takes and moved:
+        # a node this save adds holds its own values, which nothing else reads yet
+        if takes and moved and record.uuid not in edit.fresh:
             raise ValueError(
                 f"FbxFile.save: node {record.name!r} is given another {moved[0]} in the hierarchy of a file holding takes, "
                 f"where the hierarchy is the pose its takes start from and its skins are bound in; change the node in "

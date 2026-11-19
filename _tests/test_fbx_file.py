@@ -363,7 +363,6 @@ class TestSave(_Handles):
         target = self.path("target.fbx")
         for change, said in (
             (lambda f: f.cameras.append(CameraData(name="extraShape")), "cameras holds 2 records where the file holds 1"),
-            (lambda f: f.materials.pop(), "materials holds 2 records where the file holds 3"),
             (lambda f: setattr(f, "lights", None), "lights is None where the file holds some"),
             (reparented, "under another parent, or as another kind, than the hierarchy; a file holds one set of nodes"),
         ):

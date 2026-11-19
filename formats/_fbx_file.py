@@ -257,20 +257,23 @@ class FbxFile:
                 shutil.rmtree(folder, ignore_errors=True)
             raise
 
-        self._fbx      = FBX
-        self._manager  = manager
-        self._scene    = scene
-        self._media    = folder
-        self._filename = path
-        self._origin   = path  # the file the open scene was last read from or saved to
-        self._textures = bool(textures)
-        self._verbose  = bool(verbose)
-        self._uuids    = None  # one a node, in the scene's own order
-        self._refusals = {}    # a property -> the error it raised
-        self._values   = {}    # a property -> its value, once read
-        self._digests  = {}    # a property -> its marks when read
-        self._warned   = set()
-        self._hearing  = False
+        self._fbx            = FBX
+        self._manager        = manager
+        self._scene          = scene
+        self._media          = folder
+        self._filename       = path
+        self._origin         = path  # the file the open scene was last read from or saved to
+        self._textures       = bool(textures)
+        self._verbose        = bool(verbose)
+        self._uuids          = None  # one a node, in the scene's own order
+        self._refusals       = {}    # a property -> the error it raised
+        self._values         = {}    # a property -> its value, once read
+        self._digests        = {}    # a property -> its marks when read
+        self._warned         = set()
+        self._hearing        = False
+        self._issued         = {}    # the uuid of each mesh the handle read -> its node's
+        self._settled        = {}    # a property -> the list a save in progress settles it as
+        self._material_uuids = None  # the uuid of each material record, in the order the file lists them
 
     # ---------------------------------------------------------------- state
 
@@ -491,11 +494,19 @@ class FbxFile:
                 raise
         except BaseException:
             # a change part written, or written and not saved: the scene as it was
+            self._settled = {}
             if began:
                 self._restore()
             raise
 
+        # the lists as the file now holds them: a mesh's records gone with it
+        self._values.update(self._settled)
+        self._settled = {}
         if changed:
+            for mesh in self._values.get("meshes") or ():
+                self._issued[mesh.uuid] = mesh.parent_uuid
+            if "materials" in self._values:
+                self._material_uuids = [material.uuid for material in self._values["materials"] or ()]
             # the open scene is the file just written: what was read of it is read anew
             self._origin   = path
             self._mesh_raw = None
@@ -660,6 +671,8 @@ class FbxFile:
     def _build_meshes(self, raw: _Raw, need: frozenset):
         meshes         = _load._build_meshes(raw.read)
         self._mesh_raw = raw
+        for mesh in meshes or ():
+            self._issued[mesh.uuid] = mesh.parent_uuid
         return meshes
 
     def _build_uvs(self, raw: _Raw, need: frozenset):
@@ -694,5 +707,7 @@ class FbxFile:
             # the meshes were read before a save: read again, for their materials alone
             self._mesh_raw = self._raw(frozenset(("meshes",)), _WIDE)
             self._mesh_raw.sorted()
-        filled = _load._fill_materials(self._mesh_raw.read, self._scene, self._fbx, self._filename, self._textures)
-        return _load._build_materials(filled, meshes)
+        filled               = _load._fill_materials(self._mesh_raw.read, self._scene, self._fbx, self._filename, self._textures)
+        materials            = _load._build_materials(filled, meshes)
+        self._material_uuids = [material.uuid for material in materials or ()]
+        return materials

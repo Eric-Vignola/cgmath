@@ -371,10 +371,10 @@ class TestShapes(_Edits):
                 (share, vertex_colours),
                 (share, no_colours),
                 (two, new_colours),
+                (two, other_faces),
             ],
             refusals=[
                 (every, under_targets, "force=True"),
-                (two, other_faces, "other faces"),
             ],
         )
 
@@ -459,8 +459,9 @@ class TestShapes(_Edits):
                 (skin, reordered),
                 (skin, joint_renamed),
                 (skin, joint_renamed_alone),
+                (skin, spare),
             ],
-            refusals=[(skin, nobody, "names no node"), (skin, spare, "does not hold")],
+            refusals=[(skin, nobody, "names no node")],
         )
 
     def test_morphs(self):
@@ -782,7 +783,6 @@ class TestMaterials(_Edits):
                 (every, kind, "keeps its kind"),
                 (every, texture, "keeps the maps"),
                 (every, normal_map, "keeps the maps"),
-                (every, mesh, "names another mesh than the file's"),
                 (every, some_faces, "a mesh is covered whole or not at all"),
                 (every, wrap_of_no_map, "materials[1].wrap_u would read back otherwise"),
             ],
@@ -852,8 +852,8 @@ class TestMaterials(_Edits):
 
         source = self.built("twinned.fbx", maya_file("materials_export", "maya_embedded.fbx"), twinned)
         self.assertEach(
-            saves    = [(source, alike)],
-            refusals = [(source, alone, "one material is written per uuid"), (source, apart, "no longer agree")],
+            saves    = [(source, alike), (source, apart)],
+            refusals = [(source, alone, "one material is written per uuid")],
         )
 
 
