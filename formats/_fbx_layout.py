@@ -144,7 +144,10 @@ def strip_curves(edit, owner) -> None:
 
 # the classes a node is tied to as a matter of course, which go or stay with
 # it by themselves
-_OWN_TIES = ("FbxNode", "FbxScene", "FbxDocument", "FbxAnimCurveNode", "FbxCluster", "FbxAnimLayer", "FbxAnimStack")
+_OWN_TIES = (
+    "FbxNode", "FbxScene", "FbxDocument", "FbxAnimCurveNode", "FbxCluster", "FbxAnimLayer", "FbxAnimStack", "FbxPose",
+    "FbxSurfaceMaterial", "FbxSurfaceLambert", "FbxSurfacePhong",
+)
 
 
 def _ties(edit, node) -> list:
@@ -182,12 +185,15 @@ def _off_poses(edit, node) -> None:
             pose.Destroy()
 
 
-def _take_off(edit, node, name: str) -> None:
+def _take_off(edit, node, name: str, loose: dict) -> None:
     """a node the records leave out taken off the file, with what is its
     own: its keys in every take, its place in the poses, the clusters that
-    link it, its shape. What refers to it and no record holds is refused, or
-    with ``force`` cut loose from it and named among what the save dropped"""
+    link it, its shape, a mesh with all that is the mesh's
+    (:func:`_drop_mesh`, ``loose`` taking its materials). What refers to it
+    and no record holds is refused, or with ``force`` cut loose from it and
+    named among what the save dropped"""
     fbx = edit.fbx
+    _drop_mesh(edit, node, loose)
     for label, other in _ties(edit, node):
 
         def remove(other=other):
@@ -301,8 +307,10 @@ def write_nodes(edit, base: dict, state: dict, undo: list) -> set:
         above = links[uuid][0]
         (root if above is None else by_uuid[above]).AddChild(by_uuid[uuid])
     # the deepest first: a node goes once nothing hangs from it
+    loose = {}
     for uuid in reversed([uuid for uuid in file._uuids if uuid in removed]):
-        _take_off(edit, by_uuid.pop(uuid), names[uuid])
+        _take_off(edit, by_uuid.pop(uuid), names[uuid], loose)
+    _drop_loose(edit, loose)
 
     uuid_of = {int(node.GetUniqueID()): uuid for uuid, node in by_uuid.items()}
     uuids   = _in_order(edit, uuid_of, [node.uuid for node in nodes])
@@ -1071,7 +1079,8 @@ def write_shapes(edit, base: dict, state: dict) -> None:
     loose   = {}
     shaders = _shader_table(edit, base)
     for uuid in was:
-        if uuid not in now:
+        # a mesh whose node the save took off went with it
+        if uuid not in now and uuid in edit.nodes:
             _drop_mesh(edit, edit.nodes[uuid], loose)
     for uuid, mesh in now.items():
         node    = edit.nodes[uuid]

@@ -426,6 +426,24 @@ class TestMeshes(_Edits):
             f.save(self.path("lists.fbx"))
             self.assertEqual((f.meshes, f.skins, f.uvs, f.materials, f.morphs), (None, None, None, None, None))
 
+    def test_taken_off_with_their_nodes(self):
+        """every mesh and the node it sat on taken off in one save: the
+        skins, materials and bind pose entries go with them"""
+
+        def edit(f):
+            carriers = {mesh.parent_uuid for mesh in f.meshes}
+            f.meshes = None
+            for nodes in every_list(f):
+                for at in reversed(range(len(nodes))):
+                    if nodes[at].uuid in carriers:
+                        del nodes[at]
+
+        self.assertEqual(self.assertSaves(self.every, edit), [])
+        before, after = kinds(self.every), kinds(self.path("saved.fbx"))
+        for kind in ("FbxMesh", "FbxSkin", "FbxCluster", "FbxSurfaceLambert", "FbxSurfacePhong", "FbxFileTexture"):
+            self.assertEqual(after.get(kind, 0), 0, kind)
+        self.assertEqual(after["FbxNode"], before["FbxNode"] - 3)
+
     def test_one_taken_off(self):
         """one mesh of three taken off: the others keep their records, and
         a material no mesh is left with goes"""
