@@ -110,6 +110,18 @@ class TestMaterialFaces(unittest.TestCase):
         self.assertIsNone(whole.faces)
         self.assertIsNone(whole.from_faces([0, 1]).faces)
 
+    def test_exclude(self):
+        """exclude turns each call round, as it does the mesh's"""
+        mesh, held = self.grid()
+        faces = [0, 1, 2, 3, 4, 5, 6, 7]
+        part  = mesh.from_faces(faces, exclude=True)
+        parts = held.from_faces(mesh, faces, part, exclude=True)
+        self.assertHalves(part, MaterialList(list(parts) + [held[2]]), 4)
+        held.delete_faces(mesh, faces, exclude=True)
+        mesh.delete_faces(faces, exclude=True)
+        self.assertHalves(mesh, held, 4)
+        self.assertIsNone(held[0].from_faces(np.asarray(held[1].faces)))
+
     def test_from_vertices(self):
         """the faces a set of vertices holds, the ones it touches, the
         others, and subset rules: the materials of each part"""

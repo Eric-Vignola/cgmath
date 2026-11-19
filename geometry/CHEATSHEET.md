@@ -1818,6 +1818,47 @@ s.subdivide(cube.copy(), steps=1)                  # Catmull-Clark, matches mesh
 print(s.size)
 ```
 
+### Following the mesh's edits
+
+A skin holds one row a point of its mesh and no faces, so a mesh edit that
+renumbers points is called on the skin with the mesh first, as the mesh is
+before the edit: each row then weighs the point it weighed, wherever the
+edit put that point. On a `SkinList` the same calls reach the skin that
+names the mesh.
+
+| Mesh edit | On its skin | Order |
+|---|---|---|
+| `mesh.subdivide(steps)` | `skin.subdivide(mesh, steps)` | skin first |
+| `mesh.delete_faces(faces, exclude)` | `skin.delete_faces(mesh, faces, exclude)`: the rows of the points no face is left using go | skin first |
+| `mesh.detach_faces(indices)` | `skin.detach_faces(mesh, indices)` | skin first |
+| `part = mesh.from_faces(faces, exclude)` | `skin.from_faces(mesh, faces, exclude, mesh_uuid=part.uuid)`: a new skin of the same influences | either |
+| `part = mesh.from_vertices(vertices, ...)` | `skin.from_vertices(mesh, vertices, contained, exclude, mesh_uuid=part.uuid)` | either |
+| `mesh.union(*others)` | `skin.union(*their_skins)`: their rows after its own, influences matched by name; on a list, `skins.union(mesh, *others)` | either |
+| `mesh.triangulate(...)`, `mesh.quadrangulate(...)` | none: the points stay | |
+
+These six are every `MeshData` edit that renumbers points: a test
+(`TestAligned` in `_tests/test_skin_points.py`) runs each public method of
+`MeshData` and fails when one that renumbers points has no `SkinData` and
+`SkinList` method of its name.
+
+```python
+box, s    = cube.copy(), skin.copy()
+part      = box.from_faces([0, 1])
+part.uuid = generate_uuid()                        # a part keeps its source's uuid
+half      = s.from_faces(box, [0, 1], mesh_uuid=part.uuid)
+print(len(half.weights) == len(part.points), half.influences == s.influences)  # True True
+
+s.delete_faces(box, [0, 1])                                                    # before the mesh's
+box.delete_faces([0, 1])
+s.detach_faces(box)                                                            # before the mesh's
+box.detach_faces()
+print(len(s.weights) == len(box.points))                                       # True
+
+s.union(half)                                                                  # the part's rows after its own
+box.union(part)
+print(len(s.weights) == len(box.points))                                       # True
+```
+
 ### Symmetry
 
 Mirroring is name driven. `patterns` is a `{"positive": [...], "negative": [...]}`

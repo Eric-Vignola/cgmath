@@ -906,6 +906,96 @@ class SkinData(Data):
         else:
             self.weights = weights
 
+    # --- the rows follow the mesh's edits -----------------------------------
+    #
+    # A skin holds one row a point of its mesh and no faces, so an edit that
+    # renumbers the mesh's points takes the mesh first, as it is before the
+    # edit: the same call the mesh takes, with the same arguments after it.
+    # An edit that leaves the points as they are (triangulate, quadrangulate)
+    # needs no call.
+
+    def _rows_after(self, mesh, edit) -> np.ndarray:
+        """the point of ``mesh`` each point of the edited mesh was: ``edit``
+        run on a copy of ``mesh`` whose points hold their own place, so the
+        rows follow exactly what the edit does to the points"""
+        count = len(mesh.points)
+        if len(self.weights) != count:
+            raise ValueError(
+                f"SkinData weighs {len(self.weights)} points, the mesh holds {count}: pass the mesh the skin is of, as "
+                f"it is before the edit"
+            )
+        proxy        = mesh.copy()
+        proxy.points = np.repeat(np.arange(count, dtype=np.float64)[:, None], 3, axis=1)
+        out          = edit(proxy)
+        held         = proxy if out is None else out
+        return np.rint(np.asarray(held.points, dtype=np.float64)[:, 0]).astype(np.int64)
+
+    def _part(self, rows: np.ndarray, mesh_uuid: Optional[str]) -> "SkinData":
+        part           = self.copy()
+        part.weights   = np.asarray(self.weights)[rows]
+        part.mesh_uuid = mesh_uuid
+        return part
+
+    def from_faces(self, mesh, faces, exclude: bool = False, mesh_uuid: Optional[str] = None) -> "SkinData":
+        """
+        The skin of the mesh ``mesh.from_faces(faces, exclude)`` returns: a
+        new skin of the same influences, a row for each point that part
+        keeps, in the part's order. ``mesh_uuid`` names the part: pass its
+        ``uuid``. An influence left weighing nothing stays listed
+        (:meth:`remove_unused` takes it off).
+        """
+        return self._part(self._rows_after(mesh, lambda held: held.from_faces(faces, exclude=exclude)), mesh_uuid)
+
+    def from_vertices(
+        self, mesh, vertices, contained: bool = True, exclude: bool = False, mesh_uuid: Optional[str] = None
+    ) -> "SkinData":
+        """
+        The skin of the mesh ``mesh.from_vertices(vertices, contained,
+        exclude)`` returns, subset rules among the forms ``vertices``
+        takes: a new skin, as :meth:`from_faces` gives one.
+        """
+        rows = self._rows_after(mesh, lambda held: held.from_vertices(vertices, contained=contained, exclude=exclude))
+        return self._part(rows, mesh_uuid)
+
+    def delete_faces(self, mesh, faces, exclude: bool = False) -> None:
+        """
+        The rows after ``mesh.delete_faces(faces, exclude)``, in place: the
+        rows of the points no face is left using go. ``mesh`` is the mesh
+        before the edit, so call this first, as :meth:`subdivide`.
+        """
+        self.weights = np.asarray(self.weights)[self._rows_after(mesh, lambda held: held.delete_faces(faces, exclude=exclude))]
+
+    def detach_faces(self, mesh, indices=None) -> None:
+        """
+        The rows after ``mesh.detach_faces(indices)``, in place: each point
+        the edit makes of a face's corner weighs what the point it was made
+        from weighs. ``mesh`` is the mesh before the edit, so call this
+        first.
+        """
+        self.weights = np.asarray(self.weights)[self._rows_after(mesh, lambda held: held.detach_faces(indices))]
+
+    def union(self, *skins) -> None:
+        """
+        The skin after its mesh's ``mesh.union(*others)``, in place:
+        ``skins``, the skins of the meshes merged in, in their order, give
+        their rows after this one's; an influence one of them brings is
+        added after this skin's, and each skin's weights go under its own
+        influences' names.
+        """
+        names = list(self.influences)
+        for skin in skins:
+            names.extend(name for name in skin.influences if name not in names)
+        place  = {name: column for column, name in enumerate(names)}
+        blocks = []
+        for skin in (self,) + tuple(skins):
+            held  = np.asarray(skin.weights, dtype=np.float64)
+            block = np.zeros((len(held), len(names)), dtype=np.float64)
+            if len(skin.influences):
+                block[:, [place[name] for name in skin.influences]] = held
+            blocks.append(block)
+        self.influences = names
+        self.weights    = np.concatenate(blocks)
+
     # ------------------ serialization ------------------ #
 
     @classmethod
@@ -927,6 +1017,75 @@ _SPARSE_WEIGHTS = "__sparse_weights__"
 
 
 class SkinList(DataList[SkinData]):
+    """A list of :class:`SkinData`, as a file holds its skins, one a mesh.
+
+    A mesh edit that renumbers points is called on the list with the mesh
+    first, as the mesh was before the edit: it reaches the skin that names
+    that mesh and leaves the others alone.
+    """
+
+    def of(self, mesh) -> list:
+        """the skins that name ``mesh``, in the list's order"""
+        return [skin for skin in self.list if skin.mesh_uuid == mesh.uuid]
+
+    def subdivide(
+        self, mesh, steps: int = 1, keep_borders: bool = False, keep_edges: bool = False, keep_size: bool = False
+    ) -> None:
+        """the skin of ``mesh`` after ``mesh.subdivide(steps, ...)``; call
+        it before the mesh's (:meth:`SkinData.subdivide`)"""
+        for skin in self.of(mesh):
+            skin.subdivide(mesh, steps, keep_borders=keep_borders, keep_edges=keep_edges, keep_size=keep_size)
+
+    def delete_faces(self, mesh, faces, exclude: bool = False) -> None:
+        """the skin of ``mesh`` after ``mesh.delete_faces(faces, exclude)``;
+        call it before the mesh's (:meth:`SkinData.delete_faces`)"""
+        for skin in self.of(mesh):
+            skin.delete_faces(mesh, faces, exclude=exclude)
+
+    def detach_faces(self, mesh, indices=None) -> None:
+        """the skin of ``mesh`` after ``mesh.detach_faces(indices)``; call
+        it before the mesh's (:meth:`SkinData.detach_faces`)"""
+        for skin in self.of(mesh):
+            skin.detach_faces(mesh, indices)
+
+    def from_faces(self, mesh, faces, part=None, exclude: bool = False) -> "SkinList":
+        """the skin of ``mesh.from_faces(faces, exclude)``: a new list of
+        the new skin, naming ``part``, the mesh that call returned; empty
+        for a mesh no skin names (:meth:`SkinData.from_faces`)"""
+        uuid = None if part is None else part.uuid
+        return SkinList([skin.from_faces(mesh, faces, exclude=exclude, mesh_uuid=uuid) for skin in self.of(mesh)])
+
+    def from_vertices(self, mesh, vertices, part=None, contained: bool = True, exclude: bool = False) -> "SkinList":
+        """the skin of ``mesh.from_vertices(vertices, contained, exclude)``:
+        a new list of the new skin, naming ``part``
+        (:meth:`SkinData.from_vertices`)"""
+        uuid = None if part is None else part.uuid
+        return SkinList(
+            [skin.from_vertices(mesh, vertices, contained=contained, exclude=exclude, mesh_uuid=uuid) for skin in self.of(mesh)]
+        )
+
+    def union(self, mesh, *others) -> None:
+        """the skins after ``mesh.union(*others)``: the skin of ``mesh``
+        takes the rows of the others' skins, in their order, and those
+        leave the list (:meth:`SkinData.union`). Meshes none of which is
+        skinned are left alone; ValueError for some skinned and some not (a
+        merged point would weigh nothing), and for a mesh of two skins"""
+        meshes = (mesh,) + tuple(others)
+        held   = [self.of(one) for one in meshes]
+        if not others or not any(held):
+            return
+        for one, skins in zip(meshes, held):
+            if len(skins) != 1:
+                what = "no skin" if not skins else f"{len(skins)} skins"
+                raise ValueError(
+                    f"SkinList.union: mesh {one.name!r} has {what} in this list; every mesh merged brings one skin, "
+                    f"or none does"
+                )
+        first, rest = held[0][0], [skins[0] for skins in held[1:]]
+        first.union(*rest)
+        gone         = {id(skin) for skin in rest}
+        self.list[:] = [skin for skin in self.list if id(skin) not in gone]
+
     @classmethod
     def load_fbx(cls, filename: str, verbose: bool = True) -> "SkinList":
         """

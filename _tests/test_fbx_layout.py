@@ -542,6 +542,33 @@ class TestMeshes(_Edits):
             cover[material.mesh_uuid] = cover.get(material.mesh_uuid, 0) + (faces[material.mesh_uuid] if material.faces is None else len(material.faces))
         self.assertEqual(cover, faces)
 
+    def test_split_skinned(self):
+        """a skinned mesh split in two by its faces: each part keeps the
+        weights of its points, by the same calls the mesh takes"""
+        faces = np.arange(100)
+
+        def edit(f):
+            mesh             = on(f, "geo")
+            part             = mesh.from_faces(faces)
+            part.uuid        = generate_uuid()
+            part.name        = "half"
+            part.parent_uuid = carrier(f, "half")
+            f.skins.extend(f.skins.from_faces(mesh, faces, part))
+            f.skins.delete_faces(mesh, faces)
+            mesh.delete_faces(faces)
+            f.meshes.append(part)
+
+        source = maya_file("zup_skinned", "z_cm.fbx")
+        self.assertSaves(source, edit)
+        before, after = kinds(source), kinds(self.path("saved.fbx"))
+        self.assertEqual((after["FbxMesh"], after["FbxSkin"]), (before["FbxMesh"] + 1, before["FbxSkin"] + 1))
+        read = loaded(self.path("saved.fbx"))
+        self.assertEqual(sum(len(mesh.counts) for mesh in read.meshes), 368)
+        for mesh in read.meshes:
+            skin = next(skin for skin in read.skins if skin.mesh_uuid == mesh.uuid)
+            self.assertEqual(len(skin.weights), len(mesh.points))
+            np.testing.assert_allclose(np.asarray(skin.weights).sum(axis=1), 1.0, atol=1e-6)
+
     def test_records(self):
         """a UV set added and one taken off, a skin given an influence the
         file's lacks, a skin taken off, a material added on some faces and

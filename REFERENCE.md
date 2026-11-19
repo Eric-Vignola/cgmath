@@ -1033,7 +1033,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000001D2D4D97910>
+MISSING = <dataclasses._MISSING_TYPE object at 0x0000019F91787710>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1753,10 +1753,10 @@ Methods:
 ```text
 covers(self, mesh) -> numpy.ndarray
     (F,) bool, one a face of ``mesh``: the faces this material covers,
-delete_faces(self, faces) -> None
-    The faces after ``mesh.delete_faces(faces)``, in place: the deleted
-from_faces(self, faces, mesh_uuid: Optional[str] = None) -> Optional[ForwardRef('MaterialData')]
-    This material on the mesh ``mesh.from_faces(faces)`` returns: a new
+delete_faces(self, faces, exclude: bool = False) -> None
+    The faces after ``mesh.delete_faces(faces, exclude)``, in place:
+from_faces(self, faces, exclude: bool = False, mesh_uuid: Optional[str] = None) -> Optional[ForwardRef('MaterialData')]
+    This material on the mesh ``mesh.from_faces(faces, exclude)``
 from_vertices(self, mesh, vertices, contained: bool = True, exclude: bool = False, mesh_uuid: Optional[str] = None) -> Optional[ForwardRef('MaterialData')]
     This material on the mesh ``mesh.from_vertices(vertices, contained,
 keep_borders(self, rules) -> numpy.ndarray
@@ -1782,10 +1782,10 @@ MaterialList(iterable=None, mesh_uuid: Optional[str] = None)
 Methods:
 
 ```text
-delete_faces(self, mesh, faces) -> None
-    the faces of ``mesh``'s materials after ``mesh.delete_faces(faces)``;
-from_faces(self, mesh, faces, part=None) -> 'MaterialList'
-    the materials of ``mesh.from_faces(faces)``: a new list of new
+delete_faces(self, mesh, faces, exclude: bool = False) -> None
+    the faces of ``mesh``'s materials after ``mesh.delete_faces(faces,
+from_faces(self, mesh, faces, part=None, exclude: bool = False) -> 'MaterialList'
+    the materials of ``mesh.from_faces(faces, exclude)``: a new list
 from_vertices(self, mesh, vertices, part=None, contained: bool = True, exclude: bool = False) -> 'MaterialList'
     the materials of ``mesh.from_vertices(vertices, contained,
 keep_borders(self, mesh, rules) -> numpy.ndarray
@@ -2016,10 +2016,18 @@ append(self, influence: 'str', weight: 'float' = 0.0)
     appends an influence to the end of the list
 staticmethod conform(*objects: "'SkinData'") -> "'SkinData'"
     conforms SkinData objects so their influence lists are identical
+delete_faces(self, mesh, faces, exclude: 'bool' = False) -> 'None'
+    The rows after ``mesh.delete_faces(faces, exclude)``, in place: the
+detach_faces(self, mesh, indices=None) -> 'None'
+    The rows after ``mesh.detach_faces(indices)``, in place: each point
 extend(self, influences: 'List[str]', weights: 'Optional[List[float]]' = None)
     appends multiple influences to the end of the list
 fix_symmetry(self, mesh_data, positive_patterns: 'Tuple[str] | None' = None, negative_patterns: 'Tuple[str] | None' = None, pivot: 'float' = 0.0, axis: 'int' = 0, side: 'float' = 1.0, tolerance: 'Union[None, float]' = None, force: 'bool' = False, max_influences: 'int' = -1) -> 'bool'
     Optimized: uses parallel Numba kernel for weight mirroring.
+from_faces(self, mesh, faces, exclude: 'bool' = False, mesh_uuid: 'Optional[str]' = None) -> "'SkinData'"
+    The skin of the mesh ``mesh.from_faces(faces, exclude)`` returns: a
+from_vertices(self, mesh, vertices, contained: 'bool' = True, exclude: 'bool' = False, mesh_uuid: 'Optional[str]' = None) -> "'SkinData'"
+    The skin of the mesh ``mesh.from_vertices(vertices, contained,
 get_asymmetric_weights(self, mesh_data, positive_patterns: 'Tuple[str] | None' = None, negative_patterns: 'Tuple[str] | None' = None, pivot: 'float' = 0.0, axis: 'int' = 0, tolerance: 'Union[None, float]' = None) -> 'bool'
     Optimized: uses parallel Numba kernel for symmetry comparisons.
 get_indices_over_max(self, count: 'int') -> 'np.ndarray'
@@ -2066,11 +2074,13 @@ to_compact_skin_data(self) -> 'CompactSkinData'
     Optimized: uses parallel Numba top-k gathering.
 transfer_influences(self, src_influences: 'list', dst_influences: 'list', weighted: 'bool' = True) -> 'None'
     transfers weights from source influence(s) to destination influence(s)
+union(self, *skins) -> 'None'
+    The skin after its mesh's ``mesh.union(*others)``, in place:
 ```
 
 #### `SkinList(DataList)`
 
-A list of Data objects of one class.
+A list of :class:`SkinData`, as a file holds its skins, one a mesh.
 
 ```text
 SkinList(iterable=None)
@@ -2079,12 +2089,26 @@ SkinList(iterable=None)
 Methods:
 
 ```text
+delete_faces(self, mesh, faces, exclude: 'bool' = False) -> 'None'
+    the skin of ``mesh`` after ``mesh.delete_faces(faces, exclude)``;
+detach_faces(self, mesh, indices=None) -> 'None'
+    the skin of ``mesh`` after ``mesh.detach_faces(indices)``; call
+from_faces(self, mesh, faces, part=None, exclude: 'bool' = False) -> "'SkinList'"
+    the skin of ``mesh.from_faces(faces, exclude)``: a new list of
+from_vertices(self, mesh, vertices, part=None, contained: 'bool' = True, exclude: 'bool' = False) -> "'SkinList'"
+    the skin of ``mesh.from_vertices(vertices, contained, exclude)``:
 classmethod load_fbx(cls, filename: 'str', verbose: 'bool' = True) -> "'SkinList'"
     Every skinned mesh's skin, in file order, as
 classmethod load_glb(cls, filename: 'str') -> "'SkinList'"
     Every skinned primitive of a glb, in file order, named after its
+of(self, mesh) -> 'list'
+    the skins that name ``mesh``, in the list's order
+subdivide(self, mesh, steps: 'int' = 1, keep_borders: 'bool' = False, keep_edges: 'bool' = False, keep_size: 'bool' = False) -> 'None'
+    the skin of ``mesh`` after ``mesh.subdivide(steps, ...)``; call
 transfer_influences(self, src_influences: 'list', dst_influences: 'list', weighted: 'bool' = True) -> 'None'
     transfers weights from one influence to another
+union(self, mesh, *others) -> 'None'
+    the skins after ``mesh.union(*others)``: the skin of ``mesh``
 ```
 
 Functions:
@@ -3552,7 +3576,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001D2A2D660C0>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000019FDF6C60C0>, '...
 ```
 
 ## `cgmath.constraints`

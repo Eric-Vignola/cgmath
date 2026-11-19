@@ -256,34 +256,37 @@ class MaterialData(Data):
         spans      = [np.arange(start[face], start[face + 1]) for face in np.sort(faces).tolist()]
         self.faces = (np.concatenate(spans) if spans else np.zeros(0)).astype(np.int32)
 
-    def delete_faces(self, faces) -> None:
+    def delete_faces(self, faces, exclude: bool = False) -> None:
         """
-        The faces after ``mesh.delete_faces(faces)``, in place: the deleted
-        ones leave, every later face moves down. A material left covering
-        no face holds an empty ``faces``: take it off its list.
+        The faces after ``mesh.delete_faces(faces, exclude)``, in place:
+        the deleted ones leave (with ``exclude``, every face but ``faces``),
+        every later face moves down. A material left covering no face holds
+        an empty ``faces``: take it off its list.
         """
         if self.faces is None:
             return
-        gone       = np.unique(np.asarray(faces, dtype=np.int64))
-        held       = np.asarray(self.faces, dtype=np.int64)
-        held       = held[~np.isin(held, gone)]
-        self.faces = np.unique(held - np.searchsorted(gone, held)).astype(np.int32)
+        listed = np.unique(np.asarray(faces, dtype=np.int64))
+        held   = np.asarray(self.faces, dtype=np.int64)
+        if exclude:
+            # the faces listed alone stay, numbered as they are listed
+            held       = held[np.isin(held, listed)]
+            self.faces = np.searchsorted(listed, np.unique(held)).astype(np.int32)
+        else:
+            held       = held[~np.isin(held, listed)]
+            self.faces = np.unique(held - np.searchsorted(listed, held)).astype(np.int32)
 
-    def from_faces(self, faces, mesh_uuid: Optional[str] = None) -> Optional["MaterialData"]:
+    def from_faces(self, faces, exclude: bool = False, mesh_uuid: Optional[str] = None) -> Optional["MaterialData"]:
         """
-        This material on the mesh ``mesh.from_faces(faces)`` returns: a new
-        record of the same material (the same ``uuid``) covering, of that
-        part, the faces this one covers of the whole; None where it covers
-        none of them. ``mesh_uuid`` names the part: pass its ``uuid``.
+        This material on the mesh ``mesh.from_faces(faces, exclude)``
+        returns: a new record of the same material (the same ``uuid``)
+        covering, of that part, the faces this one covers of the whole;
+        None where it covers none of them. ``mesh_uuid`` names the part:
+        pass its ``uuid``.
         """
-        kept = np.unique(np.asarray(faces, dtype=np.int64))
         part = self.copy()
-        if self.faces is not None:
-            held = np.asarray(self.faces, dtype=np.int64)
-            held = held[np.isin(held, kept)]
-            if not held.size:
-                return None
-            part.faces = np.searchsorted(kept, np.unique(held)).astype(np.int32)
+        part.delete_faces(faces, exclude=not exclude)
+        if part.faces is not None and not len(part.faces):
+            return None
         part.mesh_uuid = mesh_uuid
         return part
 
@@ -372,22 +375,22 @@ class MaterialList(OneMeshList, DataList[MaterialData]):
         for material in self.of(mesh):
             material.subdivide(mesh, steps)
 
-    def delete_faces(self, mesh, faces) -> None:
-        """the faces of ``mesh``'s materials after ``mesh.delete_faces(faces)``;
-        a material left covering no face is taken off the list"""
+    def delete_faces(self, mesh, faces, exclude: bool = False) -> None:
+        """the faces of ``mesh``'s materials after ``mesh.delete_faces(faces,
+        exclude)``; a material left covering no face is taken off the list"""
         for material in self.of(mesh):
-            material.delete_faces(faces)
+            material.delete_faces(faces, exclude=exclude)
         self.list[:] = [
             material for material in self.list
             if material.mesh_uuid != mesh.uuid or material.faces is None or len(material.faces)
         ]
 
-    def from_faces(self, mesh, faces, part=None) -> "MaterialList":
-        """the materials of ``mesh.from_faces(faces)``: a new list of new
-        records, one for each material of ``mesh`` covering any of those
-        faces, each naming ``part``, the mesh that call returned"""
+    def from_faces(self, mesh, faces, part=None, exclude: bool = False) -> "MaterialList":
+        """the materials of ``mesh.from_faces(faces, exclude)``: a new list
+        of new records, one for each material of ``mesh`` covering any of
+        the faces kept, each naming ``part``, the mesh that call returned"""
         uuid  = None if part is None else part.uuid
-        found = [material.from_faces(faces, mesh_uuid=uuid) for material in self.of(mesh)]
+        found = [material.from_faces(faces, exclude=exclude, mesh_uuid=uuid) for material in self.of(mesh)]
         return MaterialList([material for material in found if material is not None])
 
     def from_vertices(self, mesh, vertices, part=None, contained: bool = True, exclude: bool = False) -> "MaterialList":
