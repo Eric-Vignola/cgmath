@@ -397,6 +397,134 @@ class MorphData(Data):
         """``2 / morph`` has no meaning (TypeError): a morph divides by a number"""
         raise _refused(other, "/", self)
 
+    # --- the offsets follow the mesh's edits --------------------------------
+    #
+    # A target holds an offset a point of its mesh and no faces, so an edit
+    # that renumbers the mesh's points takes the mesh first, as it is before
+    # the edit: the same call the mesh takes, with the same arguments after
+    # it. An edit that leaves the points as they are (triangulate,
+    # quadrangulate) needs no call.
+
+    def _held(self, mesh) -> np.ndarray:
+        """the indices, checked against ``mesh``, the mesh they are of"""
+        count   = len(mesh.points)
+        indices = np.asarray(self.indices, dtype=np.int64)
+        if indices.size and (indices.min() < 0 or indices.max() >= count):
+            raise ValueError(
+                f"MorphData moves points the mesh of {count} points does not hold: pass the mesh the target is of, as "
+                f"it is before the edit"
+            )
+        return indices
+
+    def _after(self, mesh, edit) -> tuple:
+        """(offsets, indices) once ``edit`` has renumbered the points of
+        ``mesh``: each point the edit keeps, or makes of one, moves as the
+        point it was"""
+        from cgmath.geometry._follow import rows_after
+
+        indices        = self._held(mesh)
+        rows           = rows_after(mesh, edit)
+        place          = np.full(len(mesh.points), -1, dtype=np.int64)
+        place[indices] = np.arange(indices.size)
+        hit            = place[rows]
+        kept           = hit >= 0
+        return np.asarray(self.offsets, dtype=np.float64)[hit[kept]], np.flatnonzero(kept).astype(np.int32)
+
+    def _part(self, held: tuple, mesh_uuid: Optional[str]) -> MorphData:
+        part           = self.copy()
+        part.offsets   = held[0]
+        part.indices   = held[1]
+        part.mesh_uuid = mesh_uuid
+        return part
+
+    def from_faces(self, mesh, faces, exclude: bool = False, mesh_uuid: Optional[str] = None) -> MorphData:
+        """
+        The target on the mesh ``mesh.from_faces(faces, exclude)`` returns:
+        a new target of the same name, weight, ``at`` and deformer, moving
+        the points of that part this one moves. ``mesh_uuid`` names the
+        part: pass its ``uuid``. A part none of whose points it moves
+        gives a target of no offsets.
+        """
+        return self._part(self._after(mesh, lambda held: held.from_faces(faces, exclude=exclude)), mesh_uuid)
+
+    def from_vertices(
+        self, mesh, vertices, contained: bool = True, exclude: bool = False, mesh_uuid: Optional[str] = None
+    ) -> MorphData:
+        """
+        The target on the mesh ``mesh.from_vertices(vertices, contained,
+        exclude)`` returns, subset rules among the forms ``vertices``
+        takes: a new target, as :meth:`from_faces` gives one.
+        """
+        edit = lambda held: held.from_vertices(vertices, contained=contained, exclude=exclude)
+        return self._part(self._after(mesh, edit), mesh_uuid)
+
+    def delete_faces(self, mesh, faces, exclude: bool = False) -> None:
+        """
+        The target after ``mesh.delete_faces(faces, exclude)``, in place:
+        the offsets of the points no face is left using go. ``mesh`` is the
+        mesh before the edit, so call this first.
+        """
+        self.offsets, self.indices = self._after(mesh, lambda held: held.delete_faces(faces, exclude=exclude))
+
+    def detach_faces(self, mesh, indices=None) -> None:
+        """
+        The target after ``mesh.detach_faces(indices)``, in place: each
+        point the edit makes of a face's corner moves as the point it was
+        made from. ``mesh`` is the mesh before the edit, so call this
+        first.
+        """
+        self.offsets, self.indices = self._after(mesh, lambda held: held.detach_faces(indices))
+
+    def subdivide(self, mesh, steps: int = 1, keep_borders: bool = False, keep_edges: bool = False) -> None:
+        """
+        The target after ``mesh.subdivide(steps, keep_borders,
+        keep_edges)``, in place: the offsets are subdivided as the mesh
+        subdivides its points, so the subdivided mesh moved by the target
+        is the moved mesh subdivided. ``mesh`` is the mesh before the edit,
+        so call this first.
+        """
+        from cgmath.geometry.utils import subdivide_catmull_clark
+
+        indices        = self._held(mesh)
+        dense          = np.zeros((len(mesh.points), 3), dtype=np.float64)
+        dense[indices] = np.asarray(self.offsets, dtype=np.float64)
+        proxy          = mesh.copy()
+        for _ in range(int(steps)):
+            dense, _, _ = subdivide_catmull_clark(
+                dense,
+                proxy.indices,
+                proxy.counts,
+                proxy.f2v,
+                proxy.f2e,
+                proxy.e2v,
+                proxy.e2f,
+                proxy.v2f,
+                proxy.v2e,
+                keep_borders = keep_borders,
+                keep_edges   = keep_edges,
+            )
+            proxy.subdivide(steps=1, keep_borders=keep_borders, keep_edges=keep_edges)
+        moved        = np.flatnonzero(np.any(dense != 0.0, axis=1))
+        self.offsets = dense[moved]
+        self.indices = moved.astype(np.int32)
+
+    def union(self, mesh, *others) -> None:
+        """
+        The target after ``mesh.union(*others)``, in place: a target of
+        ``mesh`` is left as it is; a target of one of ``others`` moves onto
+        ``mesh``, the points it moves counted after those of the meshes
+        merged ahead of it. The meshes are the ones before the edit, so
+        call this first. A target that names none of them is left as it is.
+        """
+        start = 0
+        for held in (mesh,) + tuple(others):
+            if self.mesh_uuid == held.uuid:
+                if start:
+                    self.indices = (self._held(held) + start).astype(np.int32)
+                self.mesh_uuid = mesh.uuid
+                return
+            start += len(held.points)
+
     @classmethod
     def from_mesh_data(
         cls,
@@ -485,6 +613,72 @@ class MorphList(OneMeshList, DataList[MorphData]):
     numpy's error at the shape it reaches, in place the shapes before that
     one already changed.
     """
+
+    # --- the targets follow a mesh's edits: the mesh first, as it is before
+    # the edit, the call reaching the targets that name it ---
+
+    def of(self, mesh) -> list:
+        """the targets that name ``mesh``, in the list's order"""
+        return [morph for morph in self.list if morph.mesh_uuid == mesh.uuid]
+
+    def subdivide(self, mesh, steps: int = 1, keep_borders: bool = False, keep_edges: bool = False) -> None:
+        """the targets of ``mesh`` after ``mesh.subdivide(steps, ...)``;
+        call it before the mesh's (:meth:`MorphData.subdivide`)"""
+        for morph in self.of(mesh):
+            morph.subdivide(mesh, steps, keep_borders=keep_borders, keep_edges=keep_edges)
+
+    def delete_faces(self, mesh, faces, exclude: bool = False) -> None:
+        """the targets of ``mesh`` after ``mesh.delete_faces(faces,
+        exclude)``; call it before the mesh's"""
+        for morph in self.of(mesh):
+            morph.delete_faces(mesh, faces, exclude=exclude)
+
+    def detach_faces(self, mesh, indices=None) -> None:
+        """the targets of ``mesh`` after ``mesh.detach_faces(indices)``;
+        call it before the mesh's"""
+        for morph in self.of(mesh):
+            morph.detach_faces(mesh, indices)
+
+    def from_faces(self, mesh, faces, part=None, exclude: bool = False) -> MorphList:
+        """the targets of ``mesh.from_faces(faces, exclude)``: a new list of
+        new targets, each naming ``part``, the mesh that call returned"""
+        uuid = None if part is None else part.uuid
+        return MorphList([morph.from_faces(mesh, faces, exclude=exclude, mesh_uuid=uuid) for morph in self.of(mesh)])
+
+    def from_vertices(self, mesh, vertices, part=None, contained: bool = True, exclude: bool = False) -> MorphList:
+        """the targets of ``mesh.from_vertices(vertices, contained,
+        exclude)``: a new list of new targets, each naming ``part``"""
+        uuid = None if part is None else part.uuid
+        return MorphList(
+            [morph.from_vertices(mesh, vertices, contained=contained, exclude=exclude, mesh_uuid=uuid) for morph in self.of(mesh)]
+        )
+
+    def union(self, mesh, *others) -> None:
+        """the targets after ``mesh.union(*others)``; call it before the
+        mesh's. The targets of ``others`` move onto ``mesh``
+        (:meth:`MorphData.union`) under its targets' deformer; the targets
+        of one name and one ``at`` become one target moving the points of
+        all, the first of them in the list"""
+        merged   = {held.uuid for held in (mesh,) + tuple(others)}
+        own      = self.of(mesh)
+        deformer = own[0].deformer if own else None
+        first    = {}
+        kept     = []
+        for morph in self.list:
+            if morph.mesh_uuid not in merged:
+                kept.append(morph)
+                continue
+            moved = morph.mesh_uuid != mesh.uuid
+            morph.union(mesh, *others)
+            if moved and own:
+                morph.deformer = deformer
+            held = first.setdefault((morph.name, float(morph.at)), morph)
+            if held is morph:
+                kept.append(morph)
+                continue
+            held.offsets = np.concatenate([np.asarray(held.offsets), np.asarray(morph.offsets)])
+            held.indices = np.concatenate([np.asarray(held.indices), np.asarray(morph.indices)]).astype(np.int32)
+        self.list[:] = kept
 
     # --------- vectorized properties and methods --------- #
     @property

@@ -924,11 +924,9 @@ class SkinData(Data):
                 f"SkinData weighs {len(self.weights)} points, the mesh holds {count}: pass the mesh the skin is of, as "
                 f"it is before the edit"
             )
-        proxy        = mesh.copy()
-        proxy.points = np.repeat(np.arange(count, dtype=np.float64)[:, None], 3, axis=1)
-        out          = edit(proxy)
-        held         = proxy if out is None else out
-        return np.rint(np.asarray(held.points, dtype=np.float64)[:, 0]).astype(np.int64)
+        from cgmath.geometry._follow import rows_after
+
+        return rows_after(mesh, edit)
 
     def _part(self, rows: np.ndarray, mesh_uuid: Optional[str]) -> "SkinData":
         part           = self.copy()

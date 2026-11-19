@@ -13,7 +13,7 @@ import unittest
 import numpy as np
 from cgmath._tests.test_material_faces import TestAligned as FaceEdits
 from cgmath._tests.test_material_faces import TestMaterialFaces
-from cgmath.geometry import MeshData, SkinData, SkinList
+from cgmath.geometry import MeshData, MorphData, MorphList, SkinData, SkinList
 from cgmath.hierarchy import generate_uuid
 
 
@@ -168,9 +168,113 @@ class TestSkinList(unittest.TestCase):
         SkinList().union(mesh, bare)
 
 
+def morphed() -> tuple:
+    """the 4 x 4 grid of quads and a target moving its right half (x >= 2),
+    each point by its own place: (x, z, x + z)"""
+    mesh, _ = TestMaterialFaces.grid()
+    points  = np.asarray(mesh.points, dtype=float)
+    moved   = np.flatnonzero(points[:, 0] >= 2.0)
+    offsets = np.stack([points[moved, 0], points[moved, 2], points[moved, 0] + points[moved, 2]], axis=1)
+    return mesh, MorphData("smile", offsets, moved.astype(np.int32), mesh_uuid=mesh.uuid, weight=0.5, deformer="face")
+
+
+class TestMorphPoints(unittest.TestCase):
+    """each call leaves an offset on the point it moved"""
+
+    def assertFollows(self, mesh, morph) -> None:
+        points  = np.asarray(mesh.points, dtype=float)
+        indices = np.asarray(morph.indices)
+        # the right half is moved, each point by its own place, and nothing else
+        np.testing.assert_array_equal(np.sort(indices), np.flatnonzero(points[:, 0] >= 2.0))
+        held = points[indices]
+        np.testing.assert_allclose(np.asarray(morph.offsets), np.stack([held[:, 0], held[:, 2], held[:, 0] + held[:, 2]], axis=1), atol=1e-9)
+
+    def test_delete_and_detach_faces(self):
+        for call, arguments in (("delete_faces", ([0, 1, 2, 3],)), ("delete_faces", ([0, 1, 2, 3], True)), ("detach_faces", ()), ("detach_faces", ([3, 6],))):
+            with self.subTest(call=call, arguments=arguments):
+                mesh, morph = morphed()
+                getattr(morph, call)(mesh, *arguments)
+                getattr(mesh, call)(*arguments)
+                self.assertFollows(mesh, morph)
+
+    def test_parts(self):
+        mesh, morph = morphed()
+        for exclude in (False, True):
+            part = mesh.from_faces([2, 3, 6], exclude=exclude)
+            made = morph.from_faces(mesh, [2, 3, 6], exclude=exclude, mesh_uuid="12345678-1234-5678-1234-567812345678")
+            self.assertFollows(part, made)
+            self.assertEqual((made.name, made.weight, made.at, made.deformer), ("smile", 0.5, 1.0, "face"))
+        row = np.arange(10)
+        self.assertFollows(mesh.from_vertices(row, contained=False), morph.from_vertices(mesh, row, contained=False))
+        left = morph.from_faces(mesh, [0, 4])  # a part the target moves no point of
+        self.assertEqual(len(left.offsets), 0)
+        self.assertFollows(mesh, morph)
+
+    def test_subdivide(self):
+        """the subdivided mesh moved by the target is the moved mesh subdivided"""
+        for options in ({}, {"keep_borders": True}):
+            with self.subTest(options=options):
+                mesh, morph = morphed()
+                moved  = mesh.copy()
+                points = np.array(moved.points)
+                points[np.asarray(morph.indices)] += np.asarray(morph.offsets)
+                moved.points = points
+                morph.subdivide(mesh, 2, **options)
+                mesh.subdivide(2, **options)
+                moved.subdivide(2, **options)
+                points = np.array(mesh.points)
+                points[np.asarray(morph.indices)] += np.asarray(morph.offsets)
+                np.testing.assert_allclose(points, np.asarray(moved.points), atol=1e-9)
+
+    def test_union(self):
+        """the targets of the meshes merged in move onto the first, after
+        its points; one name on two meshes becomes one target"""
+        mesh, morph  = morphed()
+        other, more  = morphed()
+        other.uuid = generate_uuid()
+        more.mesh_uuid, more.deformer = other.uuid, "other"
+        frown = MorphData("frown", np.ones((2, 3)), np.array([0, 1], dtype=np.int32), mesh_uuid=other.uuid)
+        apart = MorphData("apart", np.ones((1, 3)), np.array([0], dtype=np.int32))
+        held  = MorphList([morph, more, frown, apart])
+        held.union(mesh, other)
+        mesh.union(other)
+        self.assertEqual([item.name for item in held],          ["smile", "frown", "apart"])
+        self.assertEqual([item.deformer for item in held],      ["face", "face", None])
+        self.assertEqual({item.mesh_uuid for item in held[:2]}, {mesh.uuid})
+        self.assertFollows(mesh, held[0])
+        np.testing.assert_array_equal(np.asarray(held[1].indices), [25, 26])
+        np.testing.assert_array_equal(np.asarray(held[2].indices), [0])
+
+    def test_list(self):
+        mesh, morph = morphed()
+        other      = mesh.copy()
+        other.uuid = generate_uuid()
+        held       = MorphList([morph, MorphData("far", np.ones((1, 3)), np.array([0], dtype=np.int32), mesh_uuid=other.uuid)])
+        self.assertEqual(held.of(mesh), [morph])
+        held.subdivide(mesh, 1)
+        mesh.subdivide(1)
+        held.delete_faces(mesh, [0])
+        mesh.delete_faces([0])
+        held.detach_faces(mesh, [1])
+        mesh.detach_faces([1])
+        self.assertEqual(len(held[1].offsets), 1)
+        part  = mesh.from_faces([5, 6])
+        parts = held.from_faces(mesh, [5, 6], part)
+        self.assertEqual([(item.name, item.mesh_uuid) for item in parts], [("smile", part.uuid)])
+        self.assertEqual(len(held.from_vertices(other, [0], part)), 1)
+
+    def test_another_mesh(self):
+        mesh, morph = morphed()
+        small = mesh.from_faces([0])
+        with self.assertRaises(ValueError) as caught:
+            morph.delete_faces(small, [0])
+        self.assertIn("moves points the mesh of 4 points does not hold", str(caught.exception))
+
+
 class TestAligned(unittest.TestCase):
-    """every MeshData edit that renumbers points has a SkinData and a
-    SkinList call of its name: a mesh edit added without one fails here"""
+    """every MeshData edit that renumbers points has a call of its name on
+    the records that hold a row a point, SkinData and MorphData, and on
+    their lists: a mesh edit added without one fails here"""
 
     # the edits that renumber a mesh's points: each one a skin follows
     POINT_EDITS = ("delete_faces", "detach_faces", "from_faces", "from_vertices", "subdivide", "union")
@@ -216,7 +320,7 @@ class TestAligned(unittest.TestCase):
                 found.append(name)
         self.assertEqual(sorted(found), sorted(self.POINT_EDITS), "the MeshData methods that renumber points")
         for name in self.POINT_EDITS:
-            for cls in (SkinData, SkinList):
+            for cls in (SkinData, SkinList, MorphData, MorphList):
                 self.assertTrue(callable(getattr(cls, name, None)), f"{cls.__name__}.{name} is missing")
 
 
