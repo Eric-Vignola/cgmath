@@ -11237,7 +11237,10 @@ class _RigFrames:
         """(F, n, 3) copy of one channel"""
         rows = np.asarray(rows, dtype=int)
         if getattr(self.owner, "_blocks", None):
-            return self.owner._blocks[channel][:, self._columns_of(rows)]
+            # the columns first: lining them up for a node added since
+            # replaces the blocks
+            columns = self._columns_of(rows)
+            return self.owner._blocks[channel][:, columns]
 
         values = [getattr(self.nodes[i], channel) for i in rows]
         return np.array(values, dtype=float).reshape(1, len(rows), 3)
@@ -11249,7 +11252,8 @@ class _RigFrames:
         rows = np.asarray(rows, dtype=int)
         self._touched.update(rows.tolist())
         if getattr(self.owner, "_blocks", None):
-            self.owner._blocks[channel][:, self._columns_of(rows)] = values
+            columns                                 = self._columns_of(rows)
+            self.owner._blocks[channel][:, columns] = values
         else:
             for k, i in enumerate(rows):
                 _store_channel(self.nodes[i], channel, values[0, k])

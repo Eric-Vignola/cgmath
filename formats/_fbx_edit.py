@@ -11,7 +11,7 @@ import dataclasses
 
 import numpy as np
 
-from cgmath.formats import _load
+from cgmath.formats import _fbx_layout, _load
 
 FIELDS = ("hierarchy", "clip", "meshes", "skins", "uvs", "cameras", "lights", "materials", "morphs", "curves", "surfaces")
 
@@ -357,14 +357,25 @@ def apply(file, changed, force: bool = False, began=None) -> list:
 
 
 def _apply(file, changed, force: bool, undo: list, began: list) -> list:
-    base  = _shadow(file, changed, file._values.get("meshes"))
-    state = _state(file, base, changed)
+    base    = _shadow(file, changed, file._values.get("meshes"))
+    state   = _state(file, base, changed)
+    dropped = []
+    if _fbx_layout.nodes_differ(base, state):
+        # the file given the records' layout first, then read as it stands
+        _fbx_layout.check_nodes(state)
+        _validate(base, state)
+        began.append(True)
+        edit = _Edit(file, force)
+        _fbx_layout.write_nodes(edit, base, state, undo)
+        dropped = edit.dropped
+        base    = _shadow(file, changed, state["meshes"])
     _layout(base, state)
     _spread(file, base, state, undo)
     _validate(base, state)
 
     began.append(True)
     edit = _Edit(file, force)
+    edit.dropped.extend(dropped)
     _write_nodes(edit, base, state)
     _write_clip(edit, base, state, force)
     for field in FIELDS:
@@ -458,6 +469,11 @@ class _Edit:
         if uuid not in self._places:
             self._places[uuid] = _Place(self, self.nodes[uuid], uuid in self.roots)
         return self._places[uuid]
+
+    def unread(self, what: str, why: str, remove) -> None:
+        """``what`` of the file, which no record holds and the change
+        leaves stale: refused, or with ``force`` dropped (:func:`_unread`)"""
+        _unread(self, what, why, remove)
 
     def stacks(self) -> list:
         """the scene's takes, as the reader lists them"""
@@ -719,10 +735,8 @@ def _write_nodes(edit, base: dict, state: dict) -> None:
         place = edit.place(uuid)
         for before, after in found:
             if _differs(before.user_defined_attributes, after.user_defined_attributes, _SAME, "") is not None:
-                raise ValueError(
-                    f"FbxFile.save: node {after.name!r} is given other user defined attributes, which are not written "
-                    f"into an open file; {_ELSE}"
-                )
+                _fbx_layout.write_user(edit, node, before, after, lambda a, b: _differs(a, b, _SAME, "") is None)
+                break
         if now.name != was.name:
             node.SetName(_ascii_text(now.name))
         if int(now.rotate_order) != int(was.rotate_order):
