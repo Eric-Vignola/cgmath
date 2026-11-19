@@ -808,18 +808,55 @@ print(f.closed, again.meshes.name, again.hierarchy["grp"].translate, again.camer
 
 | Property | A save writes | Refused |
 |---|---|---|
-| `hierarchy`, `clip` | a node's name, visibility and transform values; a take's keys, name, span and the active take; the frame rate of every take together | a hierarchy value a take of the file holds otherwise; one take's frame rate alone; the node of a skinned mesh moved off its bind world |
-| `meshes` | name, points, normals, hard edges, vertex colours | other faces or another point count |
-| `uvs` | name, points, indices | a set that does not map every face of its mesh |
-| `skins` | name, weights; an influence dropped, the influences in another order | an influence the file's skin does not hold |
+| `hierarchy`, `clip` | a node's name, visibility and transform values; a take's keys, name, span and the active take; the frame rate of every take together; a node added, taken off or under another parent; user defined attributes added, changed or taken off | a hierarchy value a take of the file holds otherwise; one take's frame rate alone; the node of a skinned mesh moved off its bind world; a node of another kind; a node in one record alone of several holding nodes |
+| `meshes` | name, points, normals, hard edges, vertex colours; a mesh added, taken off or of other faces | a mesh on no node of the file, or on a joint; other faces on a mesh holding blend shapes |
+| `uvs` | name, points, indices; a set added or taken off | a set that does not map every face of its mesh |
+| `skins` | name, weights; an influence added or dropped, the influences in another order; a skin added or taken off | an influence the hierarchy does not hold |
 | `morphs` | a channel's weight and name, the deformer's name, `at` | two weights or two names on one channel; `at` above the full target |
 | `cameras`, `lights` | name, lens, film and clip values; colour, intensity, decay, cone | a value a take of the file keys; a light of another kind; `camera_scale` |
 | `curves`, `surfaces` | points, weights | two shapes on one node |
-| `materials` | name, colours and values, wrap modes, `uv_set`, faces, `bump_depth` | another `kind`, another map, another mesh, a mesh covered in part; records of one uuid changed apart |
+| `materials` | name, colours and values, wrap modes, `uv_set`, faces, `bump_depth`; a record added, taken off, moved to another mesh or given another uuid | another `kind`, another map, a new material that brings a map, a mesh covered in part; records of one uuid changed apart |
 
-A change of the file's layout is refused whatever the property, naming
-`save_fbx`, which writes any records: a record added or removed, a
-property set to None, a node under another parent or of another kind.
+A change of the file's layout is written for the nodes, the meshes and the
+records that name a mesh (UV sets, skins, materials). The file is given
+the records' layout first, then read again, and the values written as into
+any file of that layout:
+
+```python
+from cgmath.hierarchy import TransformData, generate_uuid
+
+with FbxFile(DEMO_FBX) as f:
+    nodes = f.hierarchy
+    nodes.append(TransformData("crate", node_type="transform", translate=[0.0, 2.0, 0.0]))
+    crate             = f.meshes[0].copy()
+    crate.uuid        = generate_uuid()      # a copy keeps its source's uuid
+    crate.parent_uuid = nodes["crate"].uuid  # a mesh added names the node that carries it
+    crate.name        = "crateShape"
+    f.meshes.append(crate)
+    nodes["grp"].user_defined_attributes["author"] = {"dataType": "string", "value": "me"}
+    LAYOUT_FBX                                     = f.save(os.path.join(WORK, "demo_layout.fbx"))
+    del f.meshes[0]                          # its UV sets, skin and materials go with it
+    f.save(LAYOUT_FBX)
+    print(f.uvs, f.materials)                # None None
+again = load_fbx(LAYOUT_FBX)
+print(again.hierarchy.name, again.meshes.name, again.hierarchy["grp"].user_defined_attributes["author"]["value"])  # ['grp', 'cam', 'lamp', 'crate'] ['crateShape'] me
+```
+
+| Layout change | What goes with it |
+|---|---|
+| A node added | made bare under its parent, then its values, keys and user attributes written like any node's. A node added to several records (the hierarchy and takes) is one node: one uuid |
+| A node taken off | its keys in every take, its bind pose entries, the clusters linking it, its shape. What else refers to it (a constraint, a display layer) refuses the save, or with `force` is cut loose and named |
+| A mesh taken off | its skin and clusters, UV sets, blend shapes and material assignments, and the materials and textures no mesh is left with. Its node stays, an empty transform. The handle's lists then hold what the file holds |
+| A mesh added, or given other faces | built as `save_fbx` builds one, in the file's unit, on the node its `parent_uuid` names. A mesh given other faces keeps its skin and its user properties; its UV sets, skin weights and material faces are written from its records, so each record follows the mesh's edit by the same call (`skin.subdivide(mesh)`, `materials.subdivide(mesh)`, `uv.subdivide()`) |
+| A skin given a new influence | a cluster bound where the hierarchy places the joint, in the file's axes and unit, listed in the mesh's bind pose |
+| A material record of a uuid the file holds | that material, on its new mesh or faces; of another uuid, a material made as `save_fbx` makes one |
+
+The saved file lists its nodes in the records' order: where the file's own
+order (each parent's children as listed) would still differ, each node's
+place is kept on it in a hidden property, `cgmath:index`, as `save_fbx`
+keeps it. For the other kinds (cameras, lights, curves, surfaces, blend
+shapes, takes) a record added or removed, or a property set to None, is
+refused, naming `save_fbx`, which writes any records.
 
 `save(path, force=True)` lets a change drop data of the file that no
 record holds and the change leaves stale; a warning names each item, and
@@ -830,6 +867,8 @@ without `force` the save is refused, naming it too:
 | A take moved in time or given another frame count | the keys of what no record holds (a blend shape's weight, another writer's keyed camera), held at their first value |
 | A mesh's points under blend shape targets, a target's offsets | the normals the targets hold |
 | A mesh's points, normals or UVs | its tangents, binormals and smoothing groups, where the file holds them |
+| A mesh given other faces | its tangents, binormals, creases, polygon groups and colour sets after the first; its smoothing groups where the record stores normals and no hard edges (it is written anew otherwise) |
+| A node taken off | the link of whatever no record holds and refers to it (a constraint, a display layer, a selection set), which stays in the file |
 | A curve's or surface's degree, form, knots or point count | the shape is made anew: its settings beyond points, knots and form |
 
 A take's curves hold 32-bit floats, so a keyed value reads back to within

@@ -208,13 +208,23 @@ class FbxFile:
     giving its property another list, is written into the open file first,
     converted back to the file's axes, units and pivots: the values of the
     records the file holds (a node's transform, a take's keys, a mesh's
-    points, a skin's weights, a material's colours ...). A change of the
-    file's layout is refused, naming ``save_fbx``, which writes any
-    records: a record added or removed, a node under another parent, a mesh
-    of other faces, another texture. So is a change the file would not read
-    back as the records hold it. ``force=True`` lets a change drop data of
-    the file that no record holds and the change leaves stale, a warning
-    naming each item; without it such a change is refused.
+    points, a skin's weights, a material's colours ...).
+
+    A change of the file's layout is written too, for the nodes, the meshes
+    and the records that name a mesh: a node added, taken off or put under
+    another parent, in the hierarchy and the takes; user defined attributes
+    added or taken off; a mesh added (on the node its ``parent_uuid``
+    names), taken off or given other faces; UV sets, skins, influences and
+    materials added or taken off. A mesh taken off takes its UV sets, skin,
+    blend shapes and material assignments with it, and the materials and
+    textures no mesh is left with: after the save the handle's lists hold
+    what the file holds. Its node stays. For the other kinds (cameras,
+    lights, curves, surfaces, blend shapes, takes) a record added or
+    removed is refused, naming ``save_fbx``, which writes any records; so
+    are another texture, and a change the file would not read back as the
+    records hold it. ``force=True`` lets a change drop data of the file
+    that no record holds and the change leaves stale, a warning naming each
+    item; without it such a change is refused.
 
     A file ``load_fbx`` refuses still opens and saves whole. The property
     reading the refused data raises the refusal, every time it is read; the

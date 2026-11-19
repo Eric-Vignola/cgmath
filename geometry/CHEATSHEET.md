@@ -1357,6 +1357,48 @@ except ValueError as error:
     print(error)
 ```
 
+A mesh edit that renumbers faces is called on the mesh's materials as it is
+on its UV sets and its skin, so each material covers, of the edited mesh,
+what it covered before. On a `MaterialList` the call takes the mesh first
+and reaches the records that name it, so the list a file holds for all its
+meshes takes it as it is; a `MaterialData` takes the same call without the
+mesh where none is needed. A material covering its whole mesh (`faces`
+None) still does.
+
+| Mesh edit | On its materials | Order |
+|---|---|---|
+| `mesh.quadrangulate(rules)` | `materials.quadrangulate(mesh, rules)`; `materials.keep_borders(mesh, rules)` first leaves out the pairs that would merge two triangles of different materials, which `quadrangulate` refuses | either |
+| `mesh.triangulate(rules)` | `materials.triangulate(mesh)` | materials first: they read the faces the mesh has |
+| `mesh.subdivide(steps)` | `materials.subdivide(mesh, steps)` | materials first, as `skin.subdivide(mesh)` |
+| `mesh.delete_faces(faces)` | `materials.delete_faces(mesh, faces)`: a material left with no face leaves the list | either |
+| `part = mesh.from_faces(faces)` | `materials.from_faces(mesh, faces, part)`: a new list of new records of the same materials (the same uuids), naming `part` | once `part` has a uuid of its own |
+
+```python
+grid = cube.copy()                                 # the copy keeps cube's uuid, which skin and shiny name
+held = MaterialList([skin.copy(), shiny.copy()])
+held.subdivide(grid, 1)                                # before the mesh's
+grid.subdivide(1)
+print(len(grid.counts), [len(m.faces) for m in held])  # 24 [12, 12]
+
+held.triangulate(grid)
+grid.triangulate(grid.get_triangulate_rules())
+print(len(grid.counts), [len(m.faces) for m in held])  # 48 [24, 24]
+
+rules = held.keep_borders(grid, grid.get_quadrangulate_rules())        # no quad of two materials
+held.quadrangulate(grid, rules)
+grid.quadrangulate(rules)
+print(sum(len(m.faces) for m in held) == len(grid.counts))             # True
+
+faces     = np.asarray(held[0].faces)
+part      = grid.from_faces(faces)
+part.uuid = generate_uuid()                        # a part keeps its source's uuid
+parts     = held.from_faces(grid, faces, part)
+print([m.name for m in parts], parts[0].uuid == skin.uuid, parts[0].mesh_uuid == part.uuid)  # ['skinLambert'] True True
+held.delete_faces(grid, faces)
+grid.delete_faces(faces)
+print([m.name for m in held], len(held[0].faces) == len(grid.counts))                        # ['shinyPhong'] True
+```
+
 `cgmath.formats.load_fbx` reads a file's materials as these, each on its
 mesh with the faces its material element gives it, and `save_fbx(...,
 materials=)` writes them as Maya's own exporter does (measured): an

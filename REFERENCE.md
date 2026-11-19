@@ -1,6 +1,6 @@
 # `cgmath` Reference
 
-Generated from the live code by `gen_reference.py` (kept in the `tools/` folder beside the packages, not in this repository) on 2026-11-12. Do not edit by hand; re-run the script after any API change.
+Generated from the live code by `gen_reference.py` (kept in the `tools/` folder beside the packages, not in this repository) on 2026-11-19. Do not edit by hand; re-run the script after any API change.
 
 Every public class, property, method, function and constant of the modules below, with the real signature (`inspect.signature`) and the first line of its docstring. To *learn* a subpackage read its `README.md` and `CHEATSHEET.md`; this page is for looking things up.
 
@@ -1033,7 +1033,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x0000016D93B8AD10>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000001EB8FB17910>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1753,6 +1753,18 @@ Methods:
 ```text
 covers(self, mesh) -> numpy.ndarray
     (F,) bool, one a face of ``mesh``: the faces this material covers,
+delete_faces(self, faces) -> None
+    The faces after ``mesh.delete_faces(faces)``, in place: the deleted
+from_faces(self, faces, mesh_uuid: Optional[str] = None) -> Optional[ForwardRef('MaterialData')]
+    This material on the mesh ``mesh.from_faces(faces)`` returns: a new
+keep_borders(self, rules) -> numpy.ndarray
+    ``rules``, the pairs of triangles :meth:`MeshData.get_quadrangulate_rules`
+quadrangulate(self, rules) -> None
+    The faces after ``mesh.quadrangulate(rules)``, in place: the two
+subdivide(self, mesh, steps: int = 1) -> None
+    The faces after ``mesh.subdivide(steps)``, in place: each face of n
+triangulate(self, mesh) -> None
+    The faces after ``mesh.triangulate(...)`` in its default order
 ```
 
 #### `MaterialList(OneMeshList, DataList)`
@@ -1761,6 +1773,25 @@ A list of :class:`MaterialData`, as a file holds its materials, or
 
 ```text
 MaterialList(iterable=None, mesh_uuid: Optional[str] = None)
+```
+
+Methods:
+
+```text
+delete_faces(self, mesh, faces) -> None
+    the faces of ``mesh``'s materials after ``mesh.delete_faces(faces)``;
+from_faces(self, mesh, faces, part=None) -> 'MaterialList'
+    the materials of ``mesh.from_faces(faces)``: a new list of new
+keep_borders(self, mesh, rules) -> numpy.ndarray
+    ``rules`` without the pairs that would merge two triangles of
+of(self, mesh) -> list
+    the records that name ``mesh``, in the list's order
+quadrangulate(self, mesh, rules) -> None
+    the faces of ``mesh``'s materials after ``mesh.quadrangulate(rules)``
+subdivide(self, mesh, steps: int = 1) -> None
+    the faces of ``mesh``'s materials after ``mesh.subdivide(steps)``;
+triangulate(self, mesh) -> None
+    the faces of ``mesh``'s materials after ``mesh.triangulate(...)``;
 ```
 
 Constants:
@@ -3513,7 +3544,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000016DE1A7BBA0>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001EBDDAC60C0>, '...
 ```
 
 ## `cgmath.constraints`

@@ -43,6 +43,7 @@ import `prim` and `stage` from it directly.
 | `_load.py` / `_write.py` | `load_fbx` / `save_fbx`, the fbx read and write of every cgmath class |
 | `_fbx_io.py` | the one place an `FbxManager` is made: `open_fbx`, the sdk lookup, the media folder |
 | `_fbx_file.py` | `FbxFile`: a file held open, read a kind at a time, saved back with its records' changes |
+| `_fbx_layout.py` | `FbxFile.save` of a changed layout: nodes, meshes and the records naming a mesh added to, taken off or moved in the open scene, before their values are written |
 | `_fbx_edit.py` | `FbxFile.save` of changed records: each change written into the open scene, in the file's axes, units and pivots |
 | `glb.py` | glTF/GLB reading, accessor decode, payload blobs, `GlbData` |
 | `fbx.py` | `FbxExporter`, the writer `save_fbx` and `HierarchyData.save_fbx` stand on |
