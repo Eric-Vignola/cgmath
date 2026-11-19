@@ -6,6 +6,7 @@ UV sets and its skin: each material then covers, of the edited mesh, what it
 covered of the mesh before.
 """
 
+import inspect
 import unittest
 
 import numpy as np
@@ -108,6 +109,138 @@ class TestMaterialFaces(unittest.TestCase):
         whole.delete_faces([0])
         self.assertIsNone(whole.faces)
         self.assertIsNone(whole.from_faces([0, 1]).faces)
+
+    def test_from_vertices(self):
+        """the faces a set of vertices holds, the ones it touches, the
+        others, and subset rules: the materials of each part"""
+        mesh, held = self.grid()
+        row = np.arange(10)  # the first two rows of points: the first row of faces
+        for options, count in (({}, 4), ({"contained": False}, 8), ({"exclude": True}, 12)):
+            with self.subTest(options=options):
+                part  = mesh.from_vertices(row, **options)
+                parts = held.from_vertices(mesh, row, part, **options)
+                self.assertEqual(len(part.counts), count)
+                self.assertEqual({material.mesh_uuid for material in parts}, {part.uuid})
+                self.assertHalves(part, MaterialList(list(parts) + [held[2]]), count // 2)
+        rules = mesh.get_subset_rules(row)
+        part  = mesh.from_vertices(rules)
+        parts = held.from_vertices(mesh, rules, part)
+        self.assertEqual(sorted(np.concatenate([material.faces for material in parts]).tolist()), list(range(len(part.counts))))
+        with self.assertRaises(ValueError):
+            held[0].from_vertices(mesh, rules, exclude=True)
+
+    def test_union(self):
+        """two meshes merged: the second's materials move onto the first,
+        after its faces; one material on both becomes one record; a
+        material covering a whole mesh lists the faces it had"""
+        mesh, held      = self.grid()
+        other, more     = self.grid()
+        other.points  = np.asarray(other.points) + [0.0, 0.0, 10.0]
+        whole         = MaterialData(name="whole", mesh_uuid=other.uuid)
+        more[0].uuid  = held[0].uuid  # the left material is one material on both
+        records       = MaterialList([held[0], held[1], held[2], more[0], whole])
+        whole.faces   = None
+        more[0].faces = np.asarray(more[0].faces)
+        records.union(mesh, other)
+        mesh.union(other)
+        self.assertEqual([material.name for material in records], ["left", "right", "elsewhere", "whole"])
+        self.assertEqual({material.mesh_uuid for material in records if material.name != "elsewhere"}, {mesh.uuid})
+        np.testing.assert_array_equal(np.asarray(records[3].faces), np.arange(16, 32))
+        low, high, faces = self.sides(mesh, records[0])
+        self.assertTrue(0.0 < low and high < 2.0 and faces == 16, (low, high, faces))
+        np.testing.assert_array_equal(np.asarray(records[2].faces), [0, 1])
+        alone = MaterialData(name="alone", mesh_uuid=mesh.uuid)
+        alone.union(mesh)
+        self.assertIsNone(alone.faces)
+
+
+class TestAligned(unittest.TestCase):
+    """every MeshData edit that renumbers faces has a MaterialData and a
+    MaterialList call of its name: a mesh edit added without one fails here"""
+
+    # the edits that renumber a mesh's faces: each one a material follows
+    FACE_EDITS = ("delete_faces", "from_faces", "from_vertices", "quadrangulate", "subdivide", "triangulate", "union")
+
+    # how the edits that take arguments are called: (the mesh to start from, the call)
+    CALLS = {
+        "delete_faces":  ("quads", lambda mesh, other: mesh.delete_faces([0, 1])),
+        "from_faces":    ("quads", lambda mesh, other: mesh.from_faces([0, 1])),
+        "from_vertices": ("quads", lambda mesh, other: mesh.from_vertices(np.arange(10))),
+        "quadrangulate": ("triangles", lambda mesh, other: mesh.quadrangulate()),
+        "triangulate":   ("quads", lambda mesh, other: mesh.triangulate(mesh.get_triangulate_rules())),
+        "union":         ("quads", lambda mesh, other: mesh.union(other)),
+    }
+
+    # the methods that take arguments and renumber no face: by what their
+    # name says they do, and by name
+    QUERIES = ("get_", "grow_", "shrink_", "save", "load", "to_", "contains_")
+    KEEPS   = ("apply_morph_target", "raycast", "recompute_normals", "sample", "sum_vertex_normals", "transform", "world_matrix")
+
+    @staticmethod
+    def faces_of(mesh) -> list:
+        """each face as the places of its corners, a face a tuple"""
+        points = np.round(np.asarray(mesh.points, dtype=float), 9)
+        starts = np.concatenate([[0], np.cumsum(np.asarray(mesh.counts))])
+        ids    = np.asarray(mesh.indices)
+        return [tuple(sorted(map(tuple, points[ids[starts[f] : starts[f + 1]]].tolist()))) for f in range(len(mesh.counts))]
+
+    @staticmethod
+    def corners_of(mesh) -> list:
+        starts = np.concatenate([[0], np.cumsum(np.asarray(mesh.counts))])
+        ids    = np.asarray(mesh.indices)
+        return [tuple(sorted(ids[starts[f] : starts[f + 1]].tolist())) for f in range(len(mesh.counts))]
+
+    def renumbers(self, name: str) -> bool | None:
+        """whether calling ``name`` leaves the mesh, or the one it returns,
+        with other faces than it had, or its faces in another order; None
+        for a method that takes arguments and has no entry in CALLS"""
+        mesh, _ = TestMaterialFaces.grid()
+        other = mesh.copy()
+        start, call = self.CALLS.get(name, ("quads", None))
+        if start == "triangles":
+            mesh.triangulate(mesh.get_triangulate_rules())
+        before = (self.faces_of(mesh), self.corners_of(mesh))
+        if call is None:
+            method = getattr(mesh, name)
+            needed = [
+                p for p in inspect.signature(method).parameters.values()
+                if p.default is p.empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+            ]
+            if needed:
+                return None
+            call = lambda mesh, other: getattr(mesh, name)()
+        try:
+            out = call(mesh, other)
+        except Exception:
+            return False  # an edit that does not run on a plain grid renumbers nothing of it
+        held = out if isinstance(out, MeshData) else mesh
+        if len(held.counts) != len(before[0]):
+            return True
+        # a face holding other points and other vertices than it did: the faces moved
+        return self.faces_of(held) != before[0] and self.corners_of(held) != before[1]
+
+    def test_every_face_edit_has_its_material_call(self):
+        unknown = []
+        found   = []
+        for name in sorted(dir(MeshData)):
+            value = inspect.getattr_static(MeshData, name)
+            if name.startswith("_") or isinstance(value, (property, classmethod, staticmethod)) or not callable(value):
+                continue
+            moved = self.renumbers(name)
+            if moved is None:
+                if not (name.startswith(self.QUERIES) or "_to_" in name or name in self.KEEPS):
+                    unknown.append(name)
+            elif moved:
+                found.append(name)
+        self.assertEqual(
+            unknown, [],
+            "MeshData methods taking arguments that this test can not place: one that renumbers faces goes in "
+            "FACE_EDITS and CALLS, with a MaterialData and MaterialList method of its name; any other in KEEPS",
+        )
+        self.assertEqual(sorted(found), sorted(self.FACE_EDITS), "the MeshData methods that renumber faces")
+        for name in self.FACE_EDITS:
+            for cls in (MaterialData, MaterialList):
+                self.assertTrue(callable(getattr(cls, name, None)), f"{cls.__name__}.{name} is missing")
 
 
 if __name__ == "__main__":

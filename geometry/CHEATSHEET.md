@@ -1372,6 +1372,13 @@ None) still does.
 | `mesh.subdivide(steps)` | `materials.subdivide(mesh, steps)` | materials first, as `skin.subdivide(mesh)` |
 | `mesh.delete_faces(faces)` | `materials.delete_faces(mesh, faces)`: a material left with no face leaves the list | either |
 | `part = mesh.from_faces(faces)` | `materials.from_faces(mesh, faces, part)`: a new list of new records of the same materials (the same uuids), naming `part` | once `part` has a uuid of its own |
+| `part = mesh.from_vertices(vertices)` | `materials.from_vertices(mesh, vertices, part)`, with the same `contained` and `exclude`, or the same subset rules | once `part` has a uuid of its own |
+| `mesh.union(*others)` | `materials.union(mesh, *others)`: the others' records move onto `mesh`, their faces after its own; the records of one material become one | materials first |
+
+These seven are every `MeshData` edit that renumbers faces: a test
+(`TestAligned` in `_tests/test_material_faces.py`) runs each public method
+of `MeshData` and fails when one that renumbers faces has no `MaterialData`
+and `MaterialList` method of its name.
 
 ```python
 grid = cube.copy()                                 # the copy keeps cube's uuid, which skin and shiny name
@@ -1397,6 +1404,11 @@ print([m.name for m in parts], parts[0].uuid == skin.uuid, parts[0].mesh_uuid ==
 held.delete_faces(grid, faces)
 grid.delete_faces(faces)
 print([m.name for m in held], len(held[0].faces) == len(grid.counts))                        # ['shinyPhong'] True
+
+both = MaterialList(list(held) + list(parts))      # the two halves put back together
+both.union(grid, part)                                                              # before the mesh's
+grid.union(part)
+print([m.name for m in both], sum(len(m.faces) for m in both) == len(grid.counts))  # ['shinyPhong', 'skinLambert'] True
 ```
 
 `cgmath.formats.load_fbx` reads a file's materials as these, each on its

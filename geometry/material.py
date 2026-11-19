@@ -287,6 +287,51 @@ class MaterialData(Data):
         part.mesh_uuid = mesh_uuid
         return part
 
+    def from_vertices(
+        self, mesh, vertices, contained: bool = True, exclude: bool = False, mesh_uuid: Optional[str] = None
+    ) -> Optional["MaterialData"]:
+        """
+        This material on the mesh ``mesh.from_vertices(vertices, contained,
+        exclude)`` returns, as :meth:`from_faces` gives it for the faces
+        that call keeps: the faces holding (or, with ``contained`` False,
+        touching) the vertices, or with ``exclude`` the others; for subset
+        rules (a 2d array of :meth:`MeshData.get_subset_rules`), every face
+        the rules keep any corner of.
+        """
+        vertices = np.asarray(vertices)
+        if vertices.ndim > 1:
+            if not contained or exclude:
+                raise ValueError(
+                    "contained and exclude do not apply to subset rules, which already describe exactly what is kept"
+                )
+            faces = np.flatnonzero((vertices >= 0).any(axis=1))
+        else:
+            faces = np.asarray(mesh.contains_vertices(np.unique(vertices), contained=contained), dtype=np.int64)
+            if exclude:
+                faces = np.setdiff1d(np.arange(len(mesh.counts)), faces)
+        return self.from_faces(faces, mesh_uuid=mesh_uuid)
+
+    def union(self, mesh, *others) -> None:
+        """
+        This record after ``mesh.union(*others)``, in place: a record of
+        ``mesh`` keeps its faces, listed where it covered the whole mesh,
+        which it no longer does; a record of one of ``others`` moves onto
+        ``mesh``, its faces after those of the meshes merged ahead of it.
+        The meshes are the ones before the edit, so call this first. A
+        record that names none of them is left as it is.
+        """
+        if not others:
+            return
+        start = 0
+        for held in (mesh,) + tuple(others):
+            count = len(held.counts)
+            if self.mesh_uuid == held.uuid:
+                faces          = np.arange(count) if self.faces is None else np.asarray(self.faces, dtype=np.int64)
+                self.faces     = (faces + start).astype(np.int32)
+                self.mesh_uuid = mesh.uuid
+                return
+            start += count
+
 
 class MaterialList(OneMeshList, DataList[MaterialData]):
     """A list of :class:`MaterialData`, as a file holds its materials, or
@@ -344,3 +389,33 @@ class MaterialList(OneMeshList, DataList[MaterialData]):
         uuid  = None if part is None else part.uuid
         found = [material.from_faces(faces, mesh_uuid=uuid) for material in self.of(mesh)]
         return MaterialList([material for material in found if material is not None])
+
+    def from_vertices(self, mesh, vertices, part=None, contained: bool = True, exclude: bool = False) -> "MaterialList":
+        """the materials of ``mesh.from_vertices(vertices, contained,
+        exclude)``: a new list of new records, each naming ``part``, the
+        mesh that call returned (:meth:`MaterialData.from_vertices`)"""
+        uuid  = None if part is None else part.uuid
+        found = [material.from_vertices(mesh, vertices, contained, exclude, mesh_uuid=uuid) for material in self.of(mesh)]
+        return MaterialList([material for material in found if material is not None])
+
+    def union(self, mesh, *others) -> None:
+        """the materials after ``mesh.union(*others)``; call it before the
+        mesh's. The records of ``others`` move onto ``mesh``, their faces
+        after its own (:meth:`MaterialData.union`); the records of one
+        material (one uuid) become one record covering the faces of all,
+        the first of them in the list"""
+        merged = {held.uuid for held in (mesh,) + tuple(others)}
+        first  = {}
+        kept   = []
+        for material in self.list:
+            if material.mesh_uuid not in merged:
+                kept.append(material)
+                continue
+            material.union(mesh, *others)
+            held = first.get(material.uuid)
+            if held is None or material.faces is None or held.faces is None:
+                first.setdefault(material.uuid, material)
+                kept.append(material)
+                continue
+            held.faces = np.unique(np.concatenate([held.faces, material.faces])).astype(np.int32)
+        self.list[:] = kept

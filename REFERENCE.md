@@ -1033,7 +1033,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000001EB8FB17910>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000001D2D4D97910>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -1757,6 +1757,8 @@ delete_faces(self, faces) -> None
     The faces after ``mesh.delete_faces(faces)``, in place: the deleted
 from_faces(self, faces, mesh_uuid: Optional[str] = None) -> Optional[ForwardRef('MaterialData')]
     This material on the mesh ``mesh.from_faces(faces)`` returns: a new
+from_vertices(self, mesh, vertices, contained: bool = True, exclude: bool = False, mesh_uuid: Optional[str] = None) -> Optional[ForwardRef('MaterialData')]
+    This material on the mesh ``mesh.from_vertices(vertices, contained,
 keep_borders(self, rules) -> numpy.ndarray
     ``rules``, the pairs of triangles :meth:`MeshData.get_quadrangulate_rules`
 quadrangulate(self, rules) -> None
@@ -1765,6 +1767,8 @@ subdivide(self, mesh, steps: int = 1) -> None
     The faces after ``mesh.subdivide(steps)``, in place: each face of n
 triangulate(self, mesh) -> None
     The faces after ``mesh.triangulate(...)`` in its default order
+union(self, mesh, *others) -> None
+    This record after ``mesh.union(*others)``, in place: a record of
 ```
 
 #### `MaterialList(OneMeshList, DataList)`
@@ -1782,6 +1786,8 @@ delete_faces(self, mesh, faces) -> None
     the faces of ``mesh``'s materials after ``mesh.delete_faces(faces)``;
 from_faces(self, mesh, faces, part=None) -> 'MaterialList'
     the materials of ``mesh.from_faces(faces)``: a new list of new
+from_vertices(self, mesh, vertices, part=None, contained: bool = True, exclude: bool = False) -> 'MaterialList'
+    the materials of ``mesh.from_vertices(vertices, contained,
 keep_borders(self, mesh, rules) -> numpy.ndarray
     ``rules`` without the pairs that would merge two triangles of
 of(self, mesh) -> list
@@ -1792,6 +1798,8 @@ subdivide(self, mesh, steps: int = 1) -> None
     the faces of ``mesh``'s materials after ``mesh.subdivide(steps)``;
 triangulate(self, mesh) -> None
     the faces of ``mesh``'s materials after ``mesh.triangulate(...)``;
+union(self, mesh, *others) -> None
+    the materials after ``mesh.union(*others)``; call it before the
 ```
 
 Constants:
@@ -3544,7 +3552,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001EBDDAC60C0>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001D2A2D660C0>, '...
 ```
 
 ## `cgmath.constraints`
