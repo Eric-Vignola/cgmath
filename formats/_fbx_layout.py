@@ -10,6 +10,7 @@ it as into any file of that layout.
 """
 
 import json
+import os
 import urllib.parse
 
 import numpy as np
@@ -1034,8 +1035,8 @@ def _sync_materials(edit, node, shape, mesh, records: list, shaders: dict, rebui
     ``save_fbx`` makes it; the faces of each in the mesh's material element,
     written anew. A mesh whose records the file already lists so, on the
     faces it had, is left to the values' writer"""
-    from cgmath.formats import _write
-    from cgmath.formats._load import _read_materials
+    from cgmath.formats import _fbx_edit, _write
+    from cgmath.formats._load import COLOUR_SLOT, _file_texture, _read_materials
 
     fbx    = edit.fbx
     label  = _label(mesh, node)
@@ -1044,14 +1045,21 @@ def _sync_materials(edit, node, shape, mesh, records: list, shaders: dict, rebui
     for record in records:
         held = None if record.uuid is None else shaders.get(record.uuid)
         if held is None:
-            if record.texture is not None or record.normal_map is not None:
-                raise ValueError(
-                    f"FbxFile.save: material {record.name!r} of {label} is one the file does not hold and brings a "
-                    f"texture or a normal map; an open file keeps the maps it holds; {_ELSE}"
-                )
-            held = _write._surface(edit.scene, record, None, set(), wraps, fbx)
+            # a material the file does not hold, its maps written as PNGs the export embeds
+            mapped = record.texture is not None or record.normal_map is not None
+            held   = _write._surface(edit.scene, record, edit.texture_folder() if mapped else None, edit.taken, wraps, fbx)
             if record.uuid is not None:
                 shaders[record.uuid] = held
+            names = {}
+            for field, slots in (("texture_file", (COLOUR_SLOT,)), ("normal_map_file", ("NormalMap", "Bump"))):
+                for slot in slots:
+                    prop = held.FindProperty(slot)
+                    made = _file_texture(prop, fbx)[0] if prop.IsValid() else None
+                    if made is not None:
+                        names[field] = os.path.basename(str(made.GetFileName()))
+            edit.named[record.uuid] = names
+        if record.uuid in edit.named:
+            _fbx_edit.named_as_written(edit, [record], edit.named[record.uuid])
         wanted.append(held)
 
     if not rebuilt:

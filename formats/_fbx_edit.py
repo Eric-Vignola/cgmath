@@ -8,6 +8,7 @@ this module writes wrong is so a refusal, never a wrong file.
 """
 
 import dataclasses
+import os
 
 import numpy as np
 
@@ -69,6 +70,8 @@ def _shadow(file, changed, like) -> dict:
     shadow._warned         = set()
     shadow._hearing        = False
     shadow._issued         = {}
+    shadow._texture_dir    = None
+    shadow._wrote_media    = False
     shadow._settled        = {}
     shadow._material_uuids = None
 
@@ -373,7 +376,8 @@ def _apply(file, changed, force: bool, undo: list, began: list) -> list:
         _fbx_layout.check_nodes(state)
         _validate(base, state)
         began.append(True)
-        edit = _Edit(file, force)
+        edit      = _Edit(file, force)
+        edit.undo = undo
         if nodes:
             fresh = _fbx_layout.write_nodes(edit, base, state, undo)
             edit, dropped = _Edit(file, force), edit.dropped
@@ -390,7 +394,8 @@ def _apply(file, changed, force: bool, undo: list, began: list) -> list:
     _validate(base, state)
 
     began.append(True)
-    edit = _Edit(file, force)
+    edit      = _Edit(file, force)
+    edit.undo = undo
     edit.dropped.extend(dropped)
     edit.fresh = fresh
     _write_nodes(edit, base, state)
@@ -481,12 +486,26 @@ class _Edit:
         self.single  = len(self.stacks()) < 2
         self.dropped = []     # what force dropped of the file, each in words
         self.fresh   = set()  # the uuids of the nodes this save adds or makes another kind
+        self.taken   = set()  # the names of the map files this save writes
+        self.undo    = []     # (record, field, value before) of each record the save touches
+        self.named   = {}     # a new material's uuid -> the names its maps were written under
+        self._maps   = None   # the folder it writes them to
         self._places = {}
 
     def place(self, uuid) -> _Place:
         if uuid not in self._places:
             self._places[uuid] = _Place(self, self.nodes[uuid], uuid in self.roots)
         return self._places[uuid]
+
+    def texture_folder(self) -> str:
+        """a folder of this save's own for the maps it writes, under the
+        handle's: a map of a name the file already holds does not meet it"""
+        import tempfile
+
+        if self._maps is None:
+            self._maps             = tempfile.mkdtemp(prefix="save_", dir=self.file._texture_root())
+            self.file._wrote_media = True
+        return self._maps
 
     def unread(self, what: str, why: str, remove) -> None:
         """``what`` of the file, which no record holds and the change
@@ -1910,6 +1929,123 @@ def _looked(edit, shader, new, fields) -> None:
                 getattr(texture, name).Set(value)
 
 
+def _map_made(edit, record, pixels, file, fallback):
+    """an FbxFileTexture of ``pixels``, written as a PNG the export embeds,
+    as ``save_fbx`` makes a material's map: reading the record's UV set,
+    wrapping as it says"""
+    from cgmath.formats._write import _enum, _write_png
+
+    fbx     = edit.fbx
+    path    = _write_png(pixels, file, fallback, edit.texture_folder(), edit.taken)
+    texture = fbx.FbxFileTexture.Create(edit.scene, os.path.splitext(os.path.basename(path))[0])
+    texture.SetFileName(path)
+    texture.SetRelativeFileName(os.path.basename(path))
+    texture.SetTextureUse(fbx.FbxTexture.ETextureUse.eStandard)
+    texture.SetMappingType(fbx.FbxTexture.EMappingType.eUV)
+    texture.SetMaterialUse(fbx.FbxFileTexture.EMaterialUse.eModelMaterial)
+    if record.uv_set:
+        texture.UVSet.Set(fbx.FbxString(record.uv_set))
+    texture.WrapModeU.Set(_enum(fbx.FbxTexture, "EWrapMode", "eRepeat" if record.wrap_u == "repeat" else "eClamp"))
+    texture.WrapModeV.Set(_enum(fbx.FbxTexture, "EWrapMode", "eRepeat" if record.wrap_v == "repeat" else "eClamp"))
+    return texture
+
+
+def _map_off(edit, prop, place: str) -> None:
+    """the file texture feeding ``prop`` taken off it, and off the file
+    with the media it was read from once nothing else reads them. A map
+    that is no plain file texture (layered, procedural) is refused"""
+    from cgmath.formats._load import _file_texture
+
+    fbx = edit.fbx
+    texture, other = _file_texture(prop, fbx)
+    if other or (texture is None and prop.GetSrcObjectCount()):
+        raise ValueError(
+            f"FbxFile.save: {place} is given another map where the file's is no plain file texture; {_ELSE}"
+        )
+    if texture is None:
+        return
+    if not prop.DisconnectSrcObject(texture):
+        raise ValueError(f"FbxFile.save: {place} is given another map where the file's is layered; {_ELSE}")
+    if texture.GetDstPropertyCount() or texture.GetDstObjectCount(fbx.FbxCriteria.ObjectType(fbx.FbxTexture.ClassId)):
+        return
+    videos = fbx.FbxCriteria.ObjectType(fbx.FbxVideo.ClassId)
+    clips  = [texture.GetSrcObject(videos, at) for at in range(texture.GetSrcObjectCount(videos))]
+    texture.Destroy()
+    for clip in clips:
+        if clip is not None and not clip.GetDstObjectCount(fbx.FbxCriteria.ObjectType(fbx.FbxTexture.ClassId)):
+            clip.Destroy()
+
+
+def _map_given(edit, prop, record, pixels, file, fallback, place: str) -> None:
+    """``prop`` fed the image ``pixels``: the file texture it holds reads
+    the new file, its own settings kept, the media it was read from taken
+    off; a slot holding none is given a texture made as ``save_fbx`` makes
+    one"""
+    from cgmath.formats._load import _file_texture
+    from cgmath.formats._write import _write_png
+
+    fbx = edit.fbx
+    texture, other = _file_texture(prop, fbx)
+    if other:
+        raise ValueError(f"FbxFile.save: {place} is given another map where the file's is no plain file texture; {_ELSE}")
+    if texture is None:
+        made = _map_made(edit, record, pixels, file, fallback)
+        prop.ConnectSrcObject(made)
+        return os.path.basename(str(made.GetFileName()))
+    path = _write_png(pixels, file, fallback, edit.texture_folder(), edit.taken)
+    texture.SetFileName(path)
+    texture.SetRelativeFileName(os.path.basename(path))
+    videos = fbx.FbxCriteria.ObjectType(fbx.FbxVideo.ClassId)
+    for at in reversed(range(texture.GetSrcObjectCount(videos))):
+        clip = texture.GetSrcObject(videos, at)
+        texture.DisconnectSrcObject(clip)
+        if not clip.GetDstObjectCount(fbx.FbxCriteria.ObjectType(fbx.FbxTexture.ClassId)):
+            clip.Destroy()
+    return os.path.basename(path)
+
+
+def named_as_written(edit, records, names: dict) -> None:
+    """each of ``records`` given the file names its maps were written
+    under, {field: name}: a map is written as a PNG, named after the
+    record's file name, its material's, or apart from another of that
+    name, and reads back under that name. ``edit.undo`` takes the names the
+    records held"""
+    for record in records:
+        for field, name in names.items():
+            if getattr(record, field) != name:
+                edit.undo.append((record, field, getattr(record, field)))
+                setattr(record, field, name)
+
+
+def _remapped(edit, shader, old, new, place: str) -> dict:
+    """a material's colour map and normal map as its record holds them: an
+    image given in the place of another written into the file's texture, a
+    map the record drops taken off, one it brings made, a normal map of
+    another kind moved to that kind's slot (NormalMap for tangent space
+    normals, Bump for a bump map)"""
+    from cgmath.formats._load import COLOUR_SLOT
+
+    def slot(kind: str):
+        return shader.FindProperty("NormalMap" if kind == "tangent" else "Bump")
+
+    names  = {}
+    colour = shader.FindProperty(COLOUR_SLOT)
+    if _moved(old, new, "texture", "texture_file"):
+        if new.texture is None:
+            _map_off(edit, colour, place)
+        else:
+            names["texture_file"] = _map_given(edit, colour, new, new.texture, new.texture_file, new.name, place)
+    if _moved(old, new, "normal_map", "normal_map_file", "normal_map_kind"):
+        fallback = f"{new.name or 'texture'}_normal"
+        if old.normal_map is not None and (new.normal_map is None or old.normal_map_kind != new.normal_map_kind):
+            _map_off(edit, slot(old.normal_map_kind), place)
+        if new.normal_map is not None:
+            names["normal_map_file"] = _map_given(
+                edit, slot(new.normal_map_kind), new, new.normal_map, new.normal_map_file, fallback, place
+            )
+    return names
+
+
 def _refaced(edit, shape, records: list) -> None:
     """the faces of a mesh's materials written into its material element:
     each face given to another material names that one's place on the
@@ -1949,9 +2085,10 @@ def _write_materials(edit, was, now, base: dict, state: dict) -> None:
     if len(held) != len(pairs):
         raise ValueError(f"FbxFile.save: materials= holds {len(pairs)} records, the file's meshes {len(held)}; {_ELSE}")
 
-    first  = {}  # a material of the file -> the first record of it
-    owners = {}  # a record's uuid -> the material of the file it is
-    faced  = {}  # an FbxMesh -> its records
+    first   = {}  # a material of the file -> the first record of it
+    owners  = {}  # a record's uuid -> the material of the file it is
+    faced   = {}  # an FbxMesh -> its records
+    written = {}  # a material of the file -> the names its maps were written under
     for at, ((old, new), (shader, entry, index, shape)) in enumerate(zip(pairs, held)):
         place = f"materials[{at}]"
         if old.mesh_uuid != new.mesh_uuid:
@@ -1961,20 +2098,23 @@ def _write_materials(edit, was, now, base: dict, state: dict) -> None:
                 f"FbxFile.save: {place} is a {old.kind} given the kind {new.kind!r}; a material keeps its kind in an "
                 f"open file; {_ELSE}"
             )
-        if _moved(old, new, *_MAPS):
-            raise ValueError(
-                f"FbxFile.save: {place} is given another texture or normal map; an open file keeps the maps it "
-                f"holds; {_ELSE}"
-            )
         other = first.setdefault(entry["id"], (at, new))
         split = new.uuid != other[1].uuid or owners.setdefault(new.uuid, entry["id"]) != entry["id"]
-        if split or _moved(other[1], new, "name", *_SHADES, *_LOOKS):
+        if split or _moved(other[1], new, "name", *_SHADES, *_LOOKS, *_MAPS):
             raise ValueError(
                 f"FbxFile.save: {place} and materials[{other[0]}] no longer agree on which records are one material, "
                 f"or on its values: the file holds one material a uuid, on every mesh it is on; {_ELSE}"
             )
         faced.setdefault(int(shape.GetUniqueID()), (shape, []))[1].append((at, index, old, new))
 
+        if other[0] == at and _moved(old, new, *_MAPS):
+            # once a material, off its first record: the others agree with it
+            if entry["bare"]:
+                raise ValueError(
+                    f"FbxFile.save: {place} is given another texture or normal map, and the file's material is "
+                    f"neither a lambert nor a phong: it reads as a default lambert, whatever it holds; {_ELSE}"
+                )
+            written[entry["id"]] = _remapped(edit, shader, old, new, place)
         changed = [field for field in _SHADES if _moved(old, new, field)]
         if entry["bare"] and changed:
             raise ValueError(
@@ -2009,6 +2149,10 @@ def _write_materials(edit, was, now, base: dict, state: dict) -> None:
     for shape, records in faced.values():
         if any(_moved(old, new, "faces") for _, _, old, new in records):
             _refaced(edit, shape, records)
+    # every record of a material whose maps were written, under the names they were written as
+    for (_, new), (_, entry, _, _) in zip(pairs, held):
+        if entry["id"] in written:
+            named_as_written(edit, [new], written[entry["id"]])
 
 
 _WRITERS["materials"] = _write_materials

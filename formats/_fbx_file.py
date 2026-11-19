@@ -272,18 +272,20 @@ class FbxFile:
         self._scene          = scene
         self._media          = folder
         self._filename       = path
-        self._origin         = path  # the file the open scene was last read from or saved to
+        self._origin         = path   # the file the open scene was last read from or saved to
         self._textures       = bool(textures)
         self._verbose        = bool(verbose)
-        self._uuids          = None  # one a node, in the scene's own order
-        self._refusals       = {}    # a property -> the error it raised
-        self._values         = {}    # a property -> its value, once read
-        self._digests        = {}    # a property -> its marks when read
+        self._uuids          = None   # one a node, in the scene's own order
+        self._refusals       = {}     # a property -> the error it raised
+        self._values         = {}     # a property -> its value, once read
+        self._digests        = {}     # a property -> its marks when read
         self._warned         = set()
         self._hearing        = False
-        self._issued         = {}    # the uuid of each mesh the handle read -> its node's
-        self._settled        = {}    # a property -> the list a save in progress settles it as
-        self._material_uuids = None  # the uuid of each material record, in the order the file lists them
+        self._issued         = {}     # the uuid of each mesh the handle read -> its node's
+        self._texture_dir    = None   # the folder the maps a save writes wait in, to be embedded
+        self._wrote_media    = False  # whether a save wrote a map: the file then embeds its media
+        self._settled        = {}     # a property -> the list a save in progress settles it as
+        self._material_uuids = None   # the uuid of each material record, in the order the file lists them
 
     # ---------------------------------------------------------------- state
 
@@ -313,6 +315,9 @@ class FbxFile:
         media, self._media = self._media, None
         if media is not None:
             shutil.rmtree(media, ignore_errors=True)
+        made, self._texture_dir = self._texture_dir, None
+        if made is not None:
+            shutil.rmtree(made, ignore_errors=True)
 
     def __enter__(self) -> "FbxFile":
         return self
@@ -487,6 +492,7 @@ class FbxFile:
         folder  = os.path.dirname(path)
         dropped = []
         began   = []
+        wrote   = self._wrote_media
         try:
             if changed:
                 dropped = _fbx_edit.apply(self, changed, force, began)
@@ -504,7 +510,8 @@ class FbxFile:
                 raise
         except BaseException:
             # a change part written, or written and not saved: the scene as it was
-            self._settled = {}
+            self._settled     = {}
+            self._wrote_media = wrote
             if began:
                 self._restore()
             raise
@@ -530,12 +537,21 @@ class FbxFile:
     def _embeds(self) -> bool:
         """whether the file held embedded media, extracted when it was
         opened: a save embeds them again"""
+        if self._wrote_media:
+            return True
         folder = self._media
         if folder is None:
             folder = os.path.splitext(self._filename)[0] + ".fbm"
         return os.path.isdir(folder) and any(files for _, _, files in os.walk(folder))
 
     # ------------------------------------------------------------- reading
+
+    def _texture_root(self) -> str:
+        """the folder the maps a save writes wait in until the file is
+        closed: the export embeds them from there"""
+        if self._texture_dir is None:
+            self._texture_dir = media_folder() or tempfile.mkdtemp(prefix="cgmath_fbx_textures_")
+        return self._texture_dir
 
     def _open_or_raise(self, what: str) -> None:
         if self._manager is None:

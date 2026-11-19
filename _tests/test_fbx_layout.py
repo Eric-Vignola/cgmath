@@ -763,7 +763,6 @@ class TestMeshes(_Edits):
                 (self.every, morphed, "blend shape"),
                 (maya_file("zup_skinned", "z_cm.fbx"), skin_left, "holds 288 rows"),
                 (materials, material_left, "material"),
-                (materials, textured, "brings a texture or a normal map"),
                 (materials, one_uuid, "share one uuid"),
             ],
         )
@@ -1037,6 +1036,118 @@ class TestTakes(_Edits):
             with self.assertRaises(ValueError):
                 f.save(self.path("refused.fbx"))
         self.assertFalse(os.path.exists(self.path("refused.fbx")))
+
+
+
+def checker(size: int = 4, shade: int = 200) -> np.ndarray:
+    """a small RGB image, each pixel its own colour"""
+    image         = np.zeros((size, size, 3), dtype=np.uint8)
+    image[..., 0] = np.arange(size, dtype=np.uint8)[None, :] * 40
+    image[..., 1] = np.arange(size, dtype=np.uint8)[:, None] * 40
+    image[..., 2] = shade
+    return image
+
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestMaps(_Edits):
+    """a material's texture and normal map given, replaced and taken off;
+    each saved file is read again once the handle is closed, so its maps
+    are the ones the file embeds"""
+
+    def reread(self, name: str, material: str):
+        """the material named ``material`` of a saved file, read with no
+        handle open"""
+        return next(held for held in loaded(self.path(name)).materials if held.name == material)
+
+    def test_replaced(self):
+        """another image under the file's own name, and under another"""
+        source = maya_file("materials_export", "maya_embedded.fbx")
+
+        def same_name(f):
+            held         = next(material for material in f.materials if material.name == "skinLambert")
+            held.texture = checker(4)
+
+        def another_name(f):
+            held              = next(material for material in f.materials if material.name == "skinLambert")
+            held.texture      = checker(8, 90)
+            held.texture_file = "painted.png"
+
+        before = kinds(source)
+        for edit, image, file in ((same_name, checker(4), None), (another_name, checker(8, 90), "painted.png")):
+            with self.subTest(edit=edit.__name__):
+                out = f"{edit.__name__}.fbx"
+                self.assertSaves(source, edit, name=out)
+                held = self.reread(out, "skinLambert")
+                np.testing.assert_array_equal(np.asarray(held.texture), image)
+                if file is not None:
+                    self.assertEqual(held.texture_file, file)
+                self.assertEqual(kinds(self.path(out)).get("FbxFileTexture"), before.get("FbxFileTexture"))
+
+    def test_taken_off_and_given(self):
+        """a material's texture taken off; a material that held none given
+        one, and a normal map, then the normal map made a bump map"""
+        source = maya_file("materials_export", "maya_embedded.fbx")
+
+        def taken_off(f):
+            held = next(material for material in f.materials if material.name == "skinLambert")
+            held.texture, held.texture_file = None, None
+            held.uv_set = None  # a material of no map reads no UV set
+
+        def given(f):
+            held = next(material for material in f.materials if material.name == "shinyPhong")
+            held.texture, held.texture_file = checker(4), "shiny.png"
+            held.normal_map, held.normal_map_file, held.normal_map_kind = checker(4, 255), "shiny_n.png", "tangent"
+
+        def bumped(f):
+            held                 = next(material for material in f.materials if material.name == "shinyPhong")
+            held.normal_map_kind = "bump"
+
+        self.assertSaves(source, taken_off, name="off.fbx")
+        self.assertIsNone(self.reread("off.fbx", "skinLambert").texture)
+        self.assertEqual(kinds(self.path("off.fbx")).get("FbxFileTexture", 0), kinds(source).get("FbxFileTexture", 0) - 1)
+        self.assertSaves(source, given, name="given.fbx")
+        held = self.reread("given.fbx", "shinyPhong")
+        np.testing.assert_array_equal(np.asarray(held.texture), checker(4))
+        np.testing.assert_array_equal(np.asarray(held.normal_map), checker(4, 255))
+        self.assertEqual((held.texture_file, held.normal_map_file, held.normal_map_kind), ("shiny.png", "shiny_n.png", "tangent"))
+        self.assertSaves(self.path("given.fbx"), bumped, name="bumped.fbx")
+        held = self.reread("bumped.fbx", "shinyPhong")
+        self.assertEqual(held.normal_map_kind, "bump")
+        np.testing.assert_array_equal(np.asarray(held.normal_map), checker(4, 255))
+
+    def test_new_material(self):
+        """a material the file does not hold, bringing a texture, on some
+        faces of a mesh; and in a file that embeds no media"""
+
+        def edit(f):
+            mesh       = on(f, "cube")
+            held       = next(material for material in f.materials if material.mesh_uuid == mesh.uuid)
+            held.faces = np.array([0, 1, 2], dtype=np.int32)
+            f.materials.append(
+                MaterialData(name="decal", mesh_uuid=mesh.uuid, faces=np.array([3, 4, 5], dtype=np.int32), texture=checker(4), texture_file="decal.png")
+            )
+
+        for name in ("maya_embedded.fbx", "maya_linked.fbx"):
+            with self.subTest(file=name):
+                source = maya_file("materials_export", name)
+                self.assertSaves(source, edit, name=name)
+                held = self.reread(name, "decal")
+                np.testing.assert_array_equal(np.asarray(held.texture), checker(4))
+                self.assertEqual(kinds(self.path(name)).get("FbxFileTexture", 0), kinds(source).get("FbxFileTexture", 0) + 1)
+
+    def test_one_material_on_two_meshes(self):
+        """the records of one material given two different images: refused"""
+        every = every_kind(self.path("every.fbx"))
+
+        def edit(f):
+            first = f.materials[0]
+            twin  = first.copy()
+            mesh  = on(f, "boxShape")
+            taken(f.materials, next(material for material in f.materials if material.mesh_uuid == mesh.uuid))
+            twin.mesh_uuid, twin.faces, twin.texture = mesh.uuid, None, checker(4)
+            f.materials.append(twin)
+
+        self.assertRefuses(every, edit, "one material is written per uuid")
 
 
 if __name__ == "__main__":

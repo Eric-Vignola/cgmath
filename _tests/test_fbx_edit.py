@@ -778,11 +778,11 @@ class TestMaterials(_Edits):
                 (every, uv_set),
                 (every, a_face),
                 (every, uuid),
+                (every, texture),
+                (every, normal_map),
             ],
             refusals=[
                 (every, kind, "keeps its kind"),
-                (every, texture, "keeps the maps"),
-                (every, normal_map, "keeps the maps"),
                 (every, some_faces, "a mesh is covered whole or not at all"),
                 (every, wrap_of_no_map, "materials[1].wrap_u would read back otherwise"),
             ],
