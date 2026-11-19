@@ -959,5 +959,85 @@ class TestOthers(_Edits):
                 self.assertFalse(os.path.exists(self.path("refused.fbx")))
 
 
+
+@unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
+class TestTakes(_Edits):
+    """a take added to a file, or taken off it"""
+
+    @staticmethod
+    def jump(clip, name: str = "jump") -> ClipData:
+        """a take of five frames over the nodes of ``clip``'s first, the
+        spine turning and the root rising"""
+        first                           = clip[0]
+        take                            = ClipData(first.at(first.start_frame), frames=5, fps=first.fps, take=name)
+        take.frames["spine"].rotate_x   = np.linspace(0.0, 40.0, 5)
+        take.frames["root"].translate_y = np.linspace(10.0, 14.0, 5)
+        return take
+
+    def test_added(self):
+        """a take appended, and one put ahead of the file's: the file
+        lists its takes as the records do, the others' keys as they were"""
+
+        def at_the_end(f):
+            f.clip.append(self.jump(f.clip))
+
+        def at_the_front(f):
+            f.clip.insert(0, self.jump(f.clip, "intro"))
+
+        before = census(SHARED["takes"])
+        for edit, names in ((at_the_end, ["walk", "run", "jump"]), (at_the_front, ["intro", "walk", "run"])):
+            with self.subTest(edit=edit.__name__):
+                out = f"{edit.__name__}.fbx"
+                self.assertEqual(self.assertSaves(SHARED["takes"], edit, name=out), [])
+                read = loaded(self.path(out)).clip
+                self.assertEqual(list(read.take), names)
+                made = read[names.index("jump" if "jump" in names else "intro")]
+                np.testing.assert_allclose(np.asarray(made.frames["spine"].rotate_x), np.linspace(0.0, 40.0, 5), atol=1e-4)
+                walk = read[names.index("walk")]
+                np.testing.assert_allclose(np.asarray(walk.frames["spine"].rotate_x), np.linspace(0.0, 25.0, 6), atol=1e-4)
+                self.assertEqual(census(self.path(out))[0]["FbxAnimStack"], before[0]["FbxAnimStack"] + 1)
+
+    def test_taken_off(self):
+        """a take taken off: its keys go with it, the other take's stay"""
+
+        def edit(f):
+            del f.clip[0]
+
+        before = census(SHARED["takes"])
+        self.assertEqual(self.assertSaves(SHARED["takes"], edit), [])
+        after = census(self.path("saved.fbx"))
+        self.assertEqual(after[0]["FbxAnimStack"], before[0]["FbxAnimStack"] - 1)
+        self.assertLess(after[3], before[3])
+        self.assertEqual(loose_curves(self.path("saved.fbx")), 0)
+        read = loaded(self.path("saved.fbx")).clip
+        self.assertEqual((list(read.take), read.active.take), (["run"], "run"))
+
+    def test_with_a_skin(self):
+        """a take added to a file holding a bind pose, a skin and a take"""
+        every = every_kind(self.path("every.fbx"))
+
+        def edit(f):
+            first                       = f.clip[0]
+            take                        = ClipData(first.at(first.start_frame), frames=4, fps=first.fps, take="second")
+            take.frames["arm"].rotate_z = np.linspace(0.0, 30.0, 4)
+            f.clip.append(take)
+
+        self.assertSaves(every, edit, name="two.fbx")
+        read = loaded(self.path("two.fbx"))
+        self.assertEqual((len(read.clip), len(read.skins), len(read.meshes)), (2, 1, 3))
+
+    def test_refused(self):
+        """two takes of one name"""
+
+        def twice(f):
+            f.clip.append(self.jump(f.clip, "walk"))
+
+        with FbxFile(SHARED["takes"], verbose=False) as f:
+            twice(f)
+            with self.assertRaises(ValueError):
+                f.save(self.path("refused.fbx"))
+        self.assertFalse(os.path.exists(self.path("refused.fbx")))
+
+
 if __name__ == "__main__":
     unittest.main()

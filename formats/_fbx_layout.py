@@ -1483,3 +1483,88 @@ def _sync_nurbs(edit, base: dict, state: dict) -> None:
                 f"FbxFile.save: node {name!r} is given {len(curves)} curves and {len(surfaces)} surfaces; a node "
                 f"carries one surface, one curve, or the lines of one shape (curves of degree 1 holding no knots)"
             )
+
+
+# ------------------------------------------------------------------ the takes
+
+
+def takes_differ(base: dict, state: dict) -> bool:
+    """whether the records hold another count of takes than the file: a
+    take added or taken off. A file or a save holding no take at all is
+    left to the caller's refusal"""
+    was, now = _held(base["clip"]), _held(state["clip"])
+    return was is not None and now is not None and len(was.list) != len(now.list)
+
+
+def _drop_take(edit, stack) -> None:
+    """a take taken off the file with every key it holds: its layers, their
+    curve nodes and curves"""
+    fbx    = edit.fbx
+    layers = fbx.FbxCriteria.ObjectType(fbx.FbxAnimLayer.ClassId)
+    nodes  = fbx.FbxCriteria.ObjectType(fbx.FbxAnimCurveNode.ClassId)
+    for at in reversed(range(stack.GetMemberCount(layers))):
+        layer = edit.typed(stack.GetMember(layers, at), fbx.FbxAnimLayer, fbx)
+        for k in reversed(range(layer.GetSrcObjectCount(nodes))):
+            curve_node = edit.typed(layer.GetSrcObject(nodes, k), fbx.FbxAnimCurveNode, fbx)
+            for channel in range(curve_node.GetChannelsCount()):
+                for c in reversed(range(curve_node.GetCurveCount(channel))):
+                    curve = edit.typed(curve_node.GetCurve(channel, c), fbx.FbxAnimCurve, fbx)
+                    if curve is not None:
+                        curve.Destroy()
+            curve_node.Destroy()
+        layer.Destroy()
+    stack.Destroy()
+
+
+def write_takes(edit, base: dict, state: dict) -> None:
+    """the file given the takes of the records, told by name: a take of a
+    name the file holds is that take; one of another name is made at its
+    span, holding one key, so the file reads it, and its keys are then
+    written like any take's; a take of the file no record names is taken
+    off with every key it holds. The takes then stand in the records'
+    order. ValueError for two takes of one name"""
+    from cgmath.formats import _fbx_edit, _write
+    from cgmath.formats.fbx import _ascii_text
+
+    fbx   = edit.fbx
+    was   = _held(base["clip"])
+    now   = _held(state["clip"])
+    names = [str(take.take) for take in now.list]
+    if len(set(names)) != len(names):
+        twice = next(name for name in names if names.count(name) > 1)
+        raise ValueError(f"FbxFile.save: clip holds two takes named {twice!r}; a file tells its takes by name")
+    held = {str(read.take): stack for read, stack in zip(was.list, edit.stacks())}
+    for name, stack in list(held.items()):
+        if name not in names:
+            _drop_take(edit, held.pop(name))
+
+    linear = fbx.FbxAnimCurveDef.EInterpolationType.eInterpolationLinear
+    first  = next(iter(edit.nodes.values()), None)
+    for take in now.list:
+        name = str(take.take)
+        if name in held:
+            continue
+        stack = fbx.FbxAnimStack.Create(edit.scene, _ascii_text(name))
+        layer = fbx.FbxAnimLayer.Create(edit.scene, "BaseLayer")
+        stack.AddMember(layer)
+        times = _fbx_edit._times(edit, take)
+        start, end = fbx.FbxTime(times[0].Get()), fbx.FbxTime(times[-1].Get())
+        # the sdk writes no span (0, 0) and reads another in its place
+        if start.Get() == 0 and end.Get() == 0:
+            end.Set(1)
+        stack.SetLocalTimeSpan(fbx.FbxTimeSpan(start, end))
+        stack.SetReferenceTimeSpan(fbx.FbxTimeSpan(start, end))
+        if first is not None:
+            # one key, of the value the node holds: a take of no key is not read as one
+            first.LclTranslation.GetCurveNode(layer, True)
+            curve = edit.typed(first.LclTranslation.GetCurve(layer, "X", True), fbx.FbxAnimCurve, fbx)
+            _write._keys(curve, times[:1], [float(tuple(first.LclTranslation.Get())[0])], linear, fbx)
+        held[name] = stack
+
+    # in the records' order: the scene lists its takes as they were tied to it
+    order = [held[name] for name in names]
+    if [int(stack.GetUniqueID()) for stack in edit.stacks()] != [int(stack.GetUniqueID()) for stack in order]:
+        for stack in order:
+            edit.scene.DisconnectSrcObject(stack)
+        for stack in order:
+            edit.scene.ConnectSrcObject(stack)

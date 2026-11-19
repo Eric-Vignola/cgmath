@@ -367,7 +367,8 @@ def _apply(file, changed, force: bool, undo: list, began: list) -> list:
     fresh   = set()
     _spread(file, base, state, undo)
     nodes = _fbx_layout.nodes_differ(base, state)
-    if nodes or _fbx_layout.shapes_differ(file, base, state):
+    takes = _fbx_layout.takes_differ(base, state)
+    if nodes or takes or _fbx_layout.shapes_differ(file, base, state):
         # the file given the records' layout first, then read as it stands
         _fbx_layout.check_nodes(state)
         _validate(base, state)
@@ -378,6 +379,8 @@ def _apply(file, changed, force: bool, undo: list, began: list) -> list:
             edit, dropped = _Edit(file, force), edit.dropped
             edit.dropped = dropped
         _fbx_layout.write_shapes(edit, base, state)
+        if takes:
+            _fbx_layout.write_takes(edit, base, state)
         dropped = edit.dropped
         base    = _shadow(file, changed, state["meshes"])
     undo.append((file, "_settled", file._settled))
