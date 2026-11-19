@@ -202,7 +202,7 @@ class TestAligned(unittest.TestCase):
         ids    = np.asarray(mesh.indices)
         return [tuple(sorted(ids[starts[f] : starts[f + 1]].tolist())) for f in range(len(mesh.counts))]
 
-    def renumbers(self, name: str) -> bool | None:
+    def renumbers(self, name: str):
         """whether calling ``name`` leaves the mesh, or the one it returns,
         with other faces than it had, or its faces in another order; None
         for a method that takes arguments and has no entry in CALLS"""

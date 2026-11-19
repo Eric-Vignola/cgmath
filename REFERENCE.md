@@ -629,7 +629,7 @@ to_attributes(self, mapping: 'dict' = {'_scale': 'scale', '_shear': 'shear', '_r
 
 #### `TransformList(DataList)`
 
-Non-owning ordered view over ``TransformData`` nodes.
+A plain, non-owning list of ``TransformData`` nodes.
 
 ```text
 TransformList(iterable=None)
@@ -643,6 +643,7 @@ ds                                 Maya's short name for draw_style
 im                                 Maya's short name for inverse_matrix
 indices                            returns each node's index in its owning hierarchy
 inverse_matrix                     every node's inverse local matrix, Maya's inverseMatrix; read only
+is_view                            whether this is a selection of a hierarchy's or a clip's nodes: a
 jo                                 Maya's short name for joint_orient
 joint_orient                       
 joint_orient_matrix                
@@ -655,6 +656,7 @@ joz                                Maya's short name for joint_orient_z
 m                                  Maya's short name for matrix
 matrix                             
 node_type                          
+owner                              the hierarchy or clip this is a view of: None for one that owns
 parent_inverse_matrix              every node's inverse parent matrix, Maya's parentInverseMatrix; read only
 parent_matrix                      every node's parent world matrix, Maya's parentMatrix; read only
 parent_scale_inverse               
@@ -1033,7 +1035,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000001BAF95C7890>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000001E747887910>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -3602,7 +3604,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001BAC7557880>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001E795885440>, '...
 ```
 
 ## `cgmath.constraints`

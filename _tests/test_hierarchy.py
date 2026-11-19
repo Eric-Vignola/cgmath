@@ -371,7 +371,7 @@ class TestHierarchy(unittest.TestCase):
         node     = skeleton['elbow_left_joint']
 
         sub = skeleton[1:]
-        self.assertFalse(isinstance(sub, HierarchyData))
+        self.assertTrue(sub.is_view and sub.owner is skeleton)
         self.assertTrue(node._hierarchy is skeleton)
         for n in sub:
             self.assertTrue(n._hierarchy is skeleton)
@@ -419,7 +419,7 @@ class TestHierarchy(unittest.TestCase):
         self.assertEqual([n.name for n in selected], [names[1], names[3]])
 
         # still a non-owning view
-        self.assertFalse(isinstance(selected, HierarchyData))
+        self.assertTrue(selected.is_view and selected.owner is skeleton)
         for n in selected:
             self.assertTrue(n._hierarchy is skeleton)
 
@@ -1271,7 +1271,7 @@ class TestHierarchy(unittest.TestCase):
 
         view_a, view_b = a[1:], b[1:]
         self.assertTrue(isinstance(view_a, TransformList))
-        self.assertFalse(isinstance(view_a, HierarchyData))
+        self.assertTrue(view_a.is_view)
 
         delta = view_a.get_delta(view_b)
 

@@ -16,8 +16,8 @@ from cgmath.hierarchy import (
 | Type | Role |
 |---|---|
 | `TransformData` | one node: name, uuid, parent, SRT, shear, joint channels, matrices |
-| `TransformList` | a **non-owning** selection of nodes — vectorized reads and writes |
-| `HierarchyData` | the **owning** container — a rig; a `TransformList` that claims its nodes |
+| `TransformList` | a plain, **non-owning** list of any nodes, built by hand — vectorized reads and writes |
+| `HierarchyData` | the **owning** container — a rig; a selection of one is a `HierarchyData` that is a view (`is_view`, `owner`) |
 | `ClipData` | a `HierarchyData` holding `F` poses instead of one |
 | `ClipList` | a file's takes, one `ClipData` each, read and written per take |
 
@@ -39,10 +39,11 @@ name before 2.0.0, went in 3.0.0; a file that names it still loads.
 
 **Ownership is exclusive.** A node's `_hierarchy` back-pointer names the
 one `HierarchyData` that holds it. `append` / `insert` claim it (pulling
-it out of any previous owner), `pop` releases it. A `TransformList` —
-a slice, a mask, a `match()` — claims nothing, which is exactly why a
-node reached through a selection still answers `get_parent()`,
-`world_matrix` and `index` about the whole rig.
+it out of any previous owner), `pop` releases it. A selection —
+a slice, a mask, a `match()` — is a view of the class it is taken from
+and claims nothing, which is exactly why a node reached through a
+selection still answers `get_parent()`, `world_matrix` and `index`
+about the whole rig; a view of a clip keeps the clip's frames.
 
 **Row vectors, Maya composition.** Translation lives at `M[3, :3]`, and
 

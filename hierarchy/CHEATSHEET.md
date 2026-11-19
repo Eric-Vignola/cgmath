@@ -25,7 +25,7 @@ overview see [`README.md`](README.md); for the rest of the library see
 | [Parenting: `parent_uuid`](#parenting-parent_uuid) | the parent's uuid, `parent_name`, `set_parent` by name, joining a rig, older files |
 | [Node queries](#node-queries) | parent / children / branch / root / index |
 | [Node edits](#node-edits) | `set_parent`, `match_*`, `swapaxes`, orient helpers, node type, prefix / suffix, namespaces, user attributes |
-| [`TransformList` — views](#transformlist--views) | slicing, fancy indexing, `match` |
+| [Views and `TransformList`](#views-and-transformlist) | slicing, fancy indexing, `match`: a selection is a view of its owner's class |
 | [Vectorized channels](#vectorized-channels) | read / write a whole selection |
 | [Vectorized queries and edits](#vectorized-queries-and-edits) | the list forms of every node method |
 | [`HierarchyData` — ownership](#hierarchydata--ownership) | `append` / `insert` / `pop` / `extend` |
@@ -721,9 +721,9 @@ rig["root"].get_parent()            # None
 | `get_parent()` | the parent `TransformData`, `None` at a root, or the `parent_uuid` itself when no node of the hierarchy carries it (the parent taken out with `del` or `remove()`) |
 | `parent_name` | the parent's name, `None` at a root; read only |
 | `get_parent_matrix()` | `(4, 4)`; `eye(4)` when the parent is absent or unresolved |
-| `get_children()` | `TransformList` of direct children |
-| `get_branch()` | `TransformList` of self + every descendant |
-| `get_root()` | `TransformList` of the path root → self |
+| `get_children()` | a view of the direct children |
+| `get_branch()` | a view of self + every descendant |
+| `get_root()` | a view of the path root → self |
 | `index` | `int` position in the owning hierarchy; raises when unowned |
 | `unique_name` | `bool`; raises when unowned |
 
@@ -953,43 +953,52 @@ file that carries one.
 
 ---
 
-## `TransformList` — views
+## Views and `TransformList`
 
-A `TransformList` is a **non-owning selection**. Slicing, fancy
-indexing, `match()` and the query methods all return one, and the nodes
-inside still point at their real hierarchy — so `get_parent`,
-`world_matrix` and `index` keep answering about the whole rig.
+A selection is a **view**: an object of the class it is taken from, a
+`HierarchyData` of a hierarchy and a `ClipData` of a clip, holding the
+very nodes its owner holds. Slicing, fancy indexing, `match()` and the
+query methods all return one. `view.is_view` is True and `view.owner` is
+the hierarchy or clip; a write to a view reaches the owner, and the nodes
+inside still point at their real hierarchy, so `get_parent`,
+`world_matrix` and `index` keep answering about the whole rig. A view of
+a view views the owner.
 
 ```python
 rig = make_chain(("root", "hip", "knee", "ankle"))
 
 rig[0]                       # TransformData -- a plain int gives the node
 rig["hip"]                   # TransformData -- by name
-rig[1:]                      # TransformList view
-rig[[0, 2]]                  # TransformList view (fancy index)
-rig[np.array([True, False, True, False])]   # TransformList view (boolean mask)
-rig.match("*n*")                # TransformList view (fnmatch)
+rig[1:]                      # a view: a HierarchyData whose owner is rig
+rig[[0, 2]]                  # a view (fancy index)
+rig[np.array([True, False, True, False])]   # a view (boolean mask)
+rig.match("*n*")                # a view (fnmatch)
 rig.match("hip", exclude=True)  # everything but hip
 rig.match("HIP", exact=False)   # case insensitive
 
 view = rig[1:]
-assert isinstance(view, TransformList) and not isinstance(view, HierarchyData)
+assert isinstance(view, HierarchyData) and view.is_view and view.owner is rig   # a view, of its owner's class
 assert view.name == ["hip", "knee", "ankle"]
 assert view[0].get_parent().name == "root"   # still resolves against the rig
 ```
 
-Build one by hand from existing nodes — it claims nothing.
+A `TransformList` is the list you build by hand, of any nodes: of one
+rig, of two, or of none. It claims nothing and is a view of nothing
+(`is_view` False, `owner` None); a selection of one is a `TransformList`.
 
 ```python
 picked = TransformList([rig["hip"], rig["ankle"]])
 assert picked.name == ["hip", "ankle"]
 assert picked[0].index == 1                  # index is still the rig's
+assert type(picked[0:1]) is TransformList and not picked.is_view
 ```
 
-`copy()` on a view returns an owning `HierarchyData`, with parent
-references that pointed outside the selection cleared. Saving, pickling
-or deep-copying a view gives the same `HierarchyData`. An object two of
-its nodes hold, a mesh two Objects instance, stays one object.
+`copy()` on a view returns an object of its class that owns its nodes, a
+`HierarchyData` here, with parent references that pointed outside the
+selection cleared. Saving, pickling or deep-copying a view gives the same.
+A view holds its nodes as a list built by hand does: appending a node to
+it, or popping one, changes the selection and never the owner. An object
+two of its nodes hold, a mesh two Objects instance, stays one object.
 
 ```python
 detached = rig[1:].copy()
@@ -1469,11 +1478,39 @@ clip.frames["knee"].world_matrix = clip.frames["knee"].world_matrix   # (F, 4, 4
 clip.frames[["root", "knee"]].rotate.shape      # (6, 2, 3)
 clip.frames[["root", "knee"]].world_matrix.shape   # (6, 2, 4, 4)
 clip.frames[[0, 2]].rotate.shape                # (6, 2, 3) -- indices too
+clip.frames[["root", "knee"]][[1]].rotate.shape   # (6, 1, 3): a scoped axis narrows among its own nodes, place 1 is the knee
 
 before = np.array(clip.frames.rotate_y)
 clip.frames.match("k*").rotate_y += 5.0         # every frame of every match
 assert np.allclose(clip.frames.rotate_y[:, 2], before[:, 2] + 5.0)
 assert np.allclose(clip.frames.rotate_y[:, 0], before[:, 0])   # others untouched
+```
+
+A selection of a clip's nodes is a `ClipData` that is a view, and keeps
+the clip's frames: `frames` is the clip's axis over its nodes, `at()`,
+`frame`, `frame_count`, `start_frame`, `end_frame`, `fps`, `take` and
+`keyed` are the clip's, and `copy()`, a save and a pickle give a
+`ClipData` of those nodes with every frame. `view - pose` and
+`view.add_delta(delta)` cover every frame too.
+
+A name or a place given to `view.frames` is one of the view's:
+`view.frames[[0]]` is its first node, and a node it leaves out raises.
+`view.frames[f]` moves the clip to that frame and hands the view back;
+`view.frames[a:b]` is a `ClipData` of those frames that owns its nodes. A
+pose written to a frame, and `-=` / `+=` solved in place, go through the
+clip's own `frames`.
+
+```python
+legs = clip.match("k*")                         # a ClipData, view of clip
+assert legs.is_view and legs.owner is clip and legs.frame_count == 6
+legs.frames.translate_x = np.asarray(legs.frames.translate_x) + 1.0   # every frame, in the clip
+assert np.allclose(clip.frames["knee"].translate_x, 1.0)
+assert np.allclose(legs.frames[[0]].translate_x[:, 0], 1.0)   # place 0 of the view: the knee, not the clip's root
+cut = legs.copy()                               # a ClipData of its own: the knee, six frames
+assert type(cut) is ClipData and not cut.is_view and cut.frame_count == 6
+part = legs.frames[1:3]                         # frames 1 and 2 of the knee, a ClipData of its own
+assert not part.is_view and part.frame_count == 2
+clip.frames["knee"].translate_x = np.zeros(6)   # the clip, as it was
 ```
 
 A scoped axis cannot then be sliced or written a pose — it addresses

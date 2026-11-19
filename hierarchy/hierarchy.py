@@ -20,6 +20,7 @@ from typing import Any, List, Optional, overload, Union
 
 import numpy as np
 from cgmath.data import (
+    _NoRoute,
     FORWARD_MARK,
     ITEMS_KEY,
     Array,
@@ -2686,7 +2687,7 @@ class TransformData(Data):
                 break
             branch_list.append(node)
 
-        return TransformList(branch_list[::-1])
+        return _selection(self, branch_list[::-1])
 
     def get_children(self) -> "TransformList":
         """returns the node's children, the nodes whose parent_uuid is its uuid
@@ -2696,7 +2697,7 @@ class TransformData(Data):
         branch walk, and with it every channel write, costs the size of the
         branch.
         """
-        return TransformList(_Lookups().children(self))
+        return _selection(self, _Lookups().children(self))
 
     def _scan_children(self) -> list:
         """:meth:`get_children` by a scan of every node of the hierarchy: for
@@ -2718,7 +2719,7 @@ class TransformData(Data):
         Python's recursion limit is walked too, and a node is listed once
         even when a cyclic parent_uuid leads back to it.
         """
-        return TransformList(_walk((self,), _Lookups()))
+        return _selection(self, _walk((self,), _Lookups()))
 
     def set_parent(
         self,
@@ -7670,17 +7671,26 @@ def _reset_branches(nodes) -> None:
 
 
 class TransformList(DataList[TransformData]):
-    """Non-owning ordered view over ``TransformData`` nodes.
+    """A plain, non-owning list of ``TransformData`` nodes.
 
-    A ``TransformList`` is a *selection* of nodes (e.g. the result of
-    :meth:`match`, :meth:`get_children`, slicing, or fancy indexing). It never
-    takes ownership of the nodes it contains: it does NOT set their
-    ``_hierarchy`` back-pointer. That back-pointer keeps referencing the owning
+    A ``TransformList`` is the list you build by hand, of any nodes: the
+    nodes of one hierarchy, of several, or of none. It never takes
+    ownership of the nodes it contains: it does NOT set their ``_hierarchy``
+    back-pointer. That back-pointer keeps referencing the owning
     :class:`HierarchyData`, so queries that depend on it (``get_parent``,
     ``world_matrix``, ``index``, ``unique_name``, name-based ``__eq__`` ...)
     keep returning data relative to the real hierarchy even when a node is
-    reached through a view. Use :class:`HierarchyData` when you need an owning
-    container that mutates the hierarchy graph.
+    reached through a list. Use :class:`HierarchyData` when you need an
+    owning container that mutates the hierarchy graph.
+
+    A selection of a hierarchy or of a clip (:meth:`match`,
+    :meth:`get_children`, slicing, fancy indexing) is no ``TransformList``
+    but an object of the class it is taken from, a ``HierarchyData`` or a
+    ``ClipData``, that is a view: :attr:`is_view` True, :attr:`owner` the
+    hierarchy or clip. It holds its owner's nodes the way a list built by
+    hand does, so everything said here of a view is true of it, and of a
+    ``TransformList``; a view of a clip keeps the clip's frames besides.
+    The same queries on a ``TransformList`` give a ``TransformList``.
 
     Every channel settable on a node is settable here, applying to the whole
     selection at once, and the pose algebra (:meth:`get_delta` /
@@ -7700,6 +7710,19 @@ class TransformList(DataList[TransformData]):
     def _view(self, nodes) -> "TransformList":
         """a view over ``nodes``, taken from this one"""
         return TransformList(nodes)
+
+    @property
+    def owner(self):
+        """the hierarchy or clip this is a view of: None for one that owns
+        its nodes, and for a list built by hand, which is a view of none"""
+        return None
+
+    @property
+    def is_view(self) -> bool:
+        """whether this is a selection of a hierarchy's or a clip's nodes: a
+        write to it reaches its :attr:`owner`, and :meth:`copy` gives an
+        object of its class that owns its nodes"""
+        return False
 
     # TODO scale_factor is prolly not the best name, think of a better way to handle unit conversions
     @classmethod
@@ -7792,7 +7815,7 @@ class TransformList(DataList[TransformData]):
         writes one: a view's nodes copied into a HierarchyData first"""
         skeleton = self
         if type(self) is not HierarchyData:
-            skeleton = HierarchyData(node.copy() for node in self)
+            skeleton = HierarchyData(node.copy() for node in self)  # a view, or a list built by hand
         _save_fbx(filename, skeleton, as_ascii=as_ascii)
 
     # --------- vectorized properties and methods --------- #
@@ -8712,7 +8735,7 @@ class TransformList(DataList[TransformData]):
         Subclasses already own their nodes and keep their own class. A copy
         warns of nothing its load would: the original's load did.
         """
-        if type(self) is TransformList:
+        if not _owns(self):
             return self._owned_copy()
 
         with _Copying():
@@ -8724,13 +8747,13 @@ class TransformList(DataList[TransformData]):
         and a node belongs to one hierarchy, so a copy that shared them would
         break the other on its first edit: it gets copy()'s own nodes.
         """
-        if type(self) is TransformList:
+        if not _owns(self):
             return super().__copy__()
         return self.copy()
 
     def __deepcopy__(self, memo):
         # a view copies into a hierarchy of its own, as copy() explains
-        if type(self) is TransformList:
+        if not _owns(self):
             new            = self._owned_copy()
             memo[id(self)] = new
             return new
@@ -9248,7 +9271,7 @@ class TransformList(DataList[TransformData]):
         made a root. A view on its own has no hierarchy to point its nodes
         at, so loading one back as a view would read every node as a root.
         """
-        if type(self) is TransformList:
+        if not _owns(self):
             return self._owned_copy().to_dict()
         return super().to_dict()
 
@@ -9263,6 +9286,8 @@ class TransformList(DataList[TransformData]):
         """
         if cls is TransformList and ITEMS_KEY in data:
             return HierarchyData.from_dict(data)
+        if issubclass(cls, _View):
+            return cls._OWNER.from_dict(data)
         return super().from_dict(data)
 
     @classmethod
@@ -10581,12 +10606,19 @@ def _framed_operand(other) -> tuple:
     one frame. Anything else -- a clip itself included, the pose of the
     frame it is bound to -- is one pose and comes back as it is, with False.
     """
+    if isinstance(other, _ViewAxis):
+        # a view's frames stand for every frame of the nodes viewed
+        clip = other._view.copy()
+        return clip, clip.frame_count > 1
     if isinstance(other, _FrameAxis):
         if other._uuids is not None:
             raise TypeError(
                 "the pose algebra takes a whole clip.frames, not one scoped to some nodes"
             )
         return other._clip, other._clip.frame_count > 1
+    if isinstance(other, _View):
+        # a selection is the pose its nodes hold, whatever it is a view of
+        return TransformList(other.list), False
     return other, False
 
 
@@ -12672,6 +12704,9 @@ class _FrameAxis:
     or writing a pose into one raises rather than quietly widening back to
     the whole clip.
 
+    A scoped axis narrows among its own nodes: on ``clip.frames[["a", "b"]]``
+    the place 0 is ``a``, and a name it does not cover raises ValueError.
+
     Only what the axis defines can be written. Each ``clip.frames`` is a new
     axis, so a write to anything else, ``clip.frames.rotate_order = 0`` say,
     would land on a throwaway object and change nothing; it raises instead.
@@ -12868,10 +12903,10 @@ class _FrameAxis:
         clip = self._clip
 
         if isinstance(query, str):
-            return _FrameAxis(clip, [clip.index(query)], single=True)
+            return _FrameAxis(clip, self._places([query]), single=True)
 
         if _is_sequence(query):
-            return _FrameAxis(clip, [self._column(item) for item in query])
+            return _FrameAxis(clip, self._places(query))
 
         if self._uuids is not None:
             raise TypeError("cut the frame range before scoping to nodes")
@@ -12885,11 +12920,30 @@ class _FrameAxis:
     def match(self, *args, exclude: bool = False, exact: bool = True) -> "_FrameAxis":
         """the same name matching as TransformList, scoped over every frame"""
         clip  = self._clip
-        nodes = clip.match(*args, exclude=exclude, exact=exact)
+        among = clip if self._uuids is None else TransformList(self._scope_nodes())
+        nodes = among.match(*args, exclude=exclude, exact=exact)
         return _FrameAxis(clip, [clip.index(node) for node in nodes])
 
-    def _column(self, item) -> int:
-        return self._clip.index(item) if isinstance(item, str) else int(item)
+    def _places(self, items) -> list:
+        """the place in the clip of each node ``items`` name or count: among
+        the clip's nodes, or the ones this axis is scoped to"""
+        clip = self._clip
+        if self._uuids is None:
+            return [clip.index(item) if isinstance(item, str) else int(item) for item in items]
+
+        columns = self._columns
+        held    = TransformList(self._scope_nodes())
+        found   = []
+        for item in items:
+            if isinstance(item, str):
+                try:
+                    at = held.index(item)
+                except ValueError:
+                    raise ValueError(f"{item!r} is no node this axis covers") from None
+            else:
+                at = int(item)
+            found.append(int(columns[at]))
+        return found
 
     def __setitem__(self, query, value) -> None:
         """int writes one pose, slice writes a run of them
@@ -12912,6 +12966,8 @@ class _FrameAxis:
         # pairing by position needs column i to be node i
         clip._realign()
 
+        if isinstance(value, _View) and isinstance(value, ClipData):
+            value = value.copy()  # a selection of a clip pastes its own frames
         paste = isinstance(query, slice) and isinstance(value, ClipData)
         if isinstance(query, slice):
             span     = query
@@ -14703,7 +14759,7 @@ class ClipData(HierarchyData):
 
     def __eq__(self, other) -> bool:
         """the same nodes, timebase, loaded frame, blocks and layout"""
-        if not isinstance(other, ClipData):
+        if not isinstance(other, ClipData) or isinstance(other, _View):
             return False
 
         # a column belongs to a uuid: line both clips up with their nodes
@@ -14712,6 +14768,284 @@ class ClipData(HierarchyData):
         return super().__eq__(other) and np.array_equal(self._shown(), other._shown())
 
     __hash__ = HierarchyData.__hash__
+
+
+# ---------------------------------- VIEWS ----------------------------------- #
+
+
+def _owns(held) -> bool:
+    """whether ``held`` is a hierarchy or a clip that owns its nodes: no view
+    of one, and no list built by hand"""
+    return isinstance(held, HierarchyData) and not isinstance(held, _View)
+
+
+def _selection(node, nodes) -> TransformList:
+    """the nodes a query of ``node`` gives, as a view of the hierarchy or
+    clip that owns it; a plain list for a node no hierarchy holds"""
+    owner = getattr(node, "_hierarchy", None)
+    return owner._view(nodes) if isinstance(owner, HierarchyData) else TransformList(nodes)
+
+
+class _View:
+    """
+    A selection of a hierarchy's or a clip's nodes: an object of the class
+    it was taken from, holding the very nodes its :attr:`owner` holds.
+
+    ``hierarchy[1:3]``, ``hierarchy.match(...)``, ``get_roots()``,
+    ``get_children()`` and ``get_branch()`` give a ``HierarchyData`` that is
+    a view, the same calls on a clip a ``ClipData`` that is one, and a view
+    of a view views the owner. A write to a view reaches the owner. A view
+    holds its nodes as a list built by hand does: adding a node to it, or
+    taking one off, changes the selection and never the owner. ``copy()``,
+    a save and a pickle give an object of the same class that owns its
+    nodes, a node whose parent the selection leaves out made a root.
+    """
+
+    _STATE = ("_owner",)
+    _OWNER = None  # the class a view is of, and its copy gives
+
+    def __init__(self, iterable=None, owner=None):
+        self._owner = owner
+        TransformList.__init__(self, iterable)
+
+    @property
+    def owner(self):
+        return self._owner
+
+    @property
+    def is_view(self) -> bool:
+        return True
+
+    def _view(self, nodes) -> "TransformList":
+        return type(self)(nodes, owner=self._owner)
+
+    # a file is loaded as a hierarchy or a clip that owns its nodes
+    load_fbx = _NoRoute("a view is not loaded from a file: load the class it is a view of")
+    load_glb = _NoRoute("a view is not loaded from a file: load the class it is a view of")
+
+    def __setattr__(self, name: str, value) -> None:
+        # as a list built by hand takes a write; a refusal names the class a view is of
+        try:
+            TransformList.__setattr__(self, name, value)
+        except AttributeError as error:
+            raise AttributeError(str(error).replace(type(self).__name__, self._OWNER.__name__)) from None
+
+    def __getattr__(self, name: str):
+        try:
+            return TransformList.__getattr__(self, name)
+        except AttributeError as error:
+            raise AttributeError(str(error).replace(type(self).__name__, self._OWNER.__name__)) from None
+
+    # a view holds its nodes as a plain list does: none of the owner's ways
+    # of taking a node in, which would claim it
+    __setitem__ = TransformList.__setitem__
+    __delitem__ = TransformList.__delitem__
+    _holds      = TransformList._holds
+    append      = TransformList.append
+    extend      = TransformList.extend
+    insert      = TransformList.insert
+    pop         = TransformList.pop
+    sort        = TransformList.sort
+    __eq__      = TransformList.__eq__
+    __hash__    = TransformList.__hash__
+
+    def renew_uuids(self, *args, **kwargs):
+        raise TypeError("a view renews no uuid: call renew_uuids() on its owner")
+
+    def __reduce__(self):
+        # a view pickles as its copy, which owns its nodes
+        return self._owned_copy().__reduce__()
+
+    def __repr__(self) -> str:
+        return f"{self._OWNER.__name__}({[node.name for node in self.list]!r}, view)"
+
+
+class _HierarchyView(_View, HierarchyData):
+    """a selection of a HierarchyData's nodes (:class:`_View`)"""
+
+    _OWNER = HierarchyData
+
+
+class _ViewAxis(_FrameAxis):
+    """
+    The frame axis of a view of a clip: the clip's own, over the nodes
+    viewed. A channel read or written through it covers every frame of
+    those nodes, in the clip.
+
+    A name or a place is one of the view's: ``view.frames[[0]]`` is the
+    view's first node, and a node the view leaves out is not reached. An
+    integer moves the clip to that frame and hands the view back; a slice
+    gives a clip of those frames that owns its nodes. ``view.frames - pose``
+    is ``view - pose``, and as an operand of the pose algebra the axis
+    stands for every frame of the nodes viewed. The algebra in place and a
+    pose written to a frame go through the clip's own ``frames``.
+    """
+
+    __slots__ = ("_view",)
+
+    def __init__(self, view: "_ClipView"):
+        _FrameAxis.__init__(self, view._owner, view._rows())
+        self._view = view
+
+    def __getitem__(self, query):
+        """str or sequence scopes to nodes of the view, slice cuts frames, int scrubs"""
+        if isinstance(query, str) or _is_sequence(query):
+            return _FrameAxis.__getitem__(self, query)
+        if isinstance(query, slice):
+            return self._view.copy().frames[query]
+        self._clip.frame = query
+        return self._view
+
+    def __setitem__(self, query, value) -> None:
+        raise TypeError(
+            "a view's frames write channels, eg: view.frames.rotate = values; a pose is written to a frame "
+            "through the clip's own frames, clip.frames[frame] = pose"
+        )
+
+    def _every(self, op: str) -> "ClipData":
+        raise TypeError(
+            f"{op} is not solved in place through a view's frames: view - pose and view.add_delta(delta) give "
+            f"a clip of it, every frame"
+        )
+
+    def __sub__(self, other):
+        """``view.frames - other``: the view's :meth:`_ClipView.get_delta`, every frame"""
+        return self._view.get_delta(other)
+
+
+class _ClipView(_View, ClipData):
+    """
+    A selection of a ClipData's nodes (:class:`_View`): it keeps the clip's
+    frames. ``frames`` is the clip's frame axis over its nodes, ``at()``,
+    ``frame``, ``frame_count``, ``start_frame``, ``end_frame``, ``fps``,
+    ``take`` and ``keyed`` are the clip's, and ``copy()``, a save,
+    ``get_delta()`` and ``add_delta()`` cover every frame.
+    """
+
+    _OWNER  = ClipData
+    _blocks = {}  # a view holds no frames of its own: its owner's, through frames
+
+    def _rows(self) -> list:
+        """the place in the clip of each node viewed; ValueError for one the
+        clip no longer holds"""
+        clip  = self._owner
+        place = {id(node): at for at, node in enumerate(clip.list)}
+        try:
+            return [place[id(node)] for node in self.list]
+        except KeyError:
+            gone = next(node.name for node in self.list if id(node) not in place)
+            raise ValueError(f"node {gone!r} is no longer a node of the clip this views") from None
+
+    @property
+    def frames(self) -> "_FrameAxis":
+        """the clip's frame axis, over the nodes viewed: a channel read or
+        written through it covers every frame"""
+        self._owner._realign()
+        return _ViewAxis(self)
+
+    @frames.setter
+    def frames(self, value) -> None:
+        # an augmented write through the axis hands the axis back
+        if not (isinstance(value, _FrameAxis) and value._clip is self._owner):
+            raise AttributeError("frames is not assigned; write through it, eg: view.frames.rotate_x = values")
+
+    @property
+    def frame(self):
+        return self._owner.frame
+
+    @frame.setter
+    def frame(self, value) -> None:
+        self._owner.frame = value
+
+    frame_count = property(lambda self: self._owner.frame_count)
+    start_frame = property(lambda self: self._owner.start_frame)
+    end_frame   = property(lambda self: self._owner.end_frame)
+    fps         = property(lambda self: self._owner.fps)
+    take        = property(lambda self: self._owner.take)
+
+    @property
+    def keyed(self) -> np.ndarray:
+        """(N,) bool, one a node viewed: the clip's ``keyed`` of them"""
+        return np.asarray(self._owner.keyed)[self._rows()]
+
+    def at(self, frame) -> HierarchyData:
+        """the pose of the nodes viewed at frame number ``frame``, a
+        HierarchyData of its own (:meth:`ClipData.at`)"""
+        return self._owned_copy().at(frame)
+
+    def _owned_copy(self) -> ClipData:
+        """a clip of the nodes viewed that owns them, every frame, in the
+        view's order; a node whose parent the view leaves out a root"""
+        rows = self._rows()
+        clip = self._owner.copy()
+        kept = [clip.list[at] for at in rows]
+        held = {id(node) for node in kept}
+        for at in reversed(range(len(clip.list))):
+            if id(clip.list[at]) not in held:
+                del clip[at]
+        rank = {id(node): place for place, node in enumerate(kept)}
+        if [id(node) for node in clip.list] != [id(node) for node in kept]:
+            clip.sort(key=lambda node: rank[id(node)])
+        clip._settle()  # its blocks lined up with the nodes left
+        return clip
+
+    def copy(self) -> ClipData:
+        return self._owned_copy()
+
+    def __deepcopy__(self, memo):
+        new            = self._owned_copy()
+        memo[id(self)] = new
+        return new
+
+    def to_dict(self) -> dict:
+        return self._owned_copy().to_dict()
+
+    def _every_frame(self, operand, solve) -> ClipData:
+        """a clip of ``solve(nodes, operand)`` at each frame of the clip: the
+        nodes viewed as the pose they hold on that frame, under the parents
+        they have, and ``operand`` the pose it is, or for a whole
+        ``clip.frames`` of as many frames its pose on that frame. The clip
+        is left on the frame it was on"""
+        clip = self._owner
+        operand, all = _framed_operand(operand)
+        if all and operand.frame_count != clip.frame_count:
+            raise ValueError(
+                f"the operand holds {operand.frame_count} frames, the clip {clip.frame_count}: a clip.frames operand "
+                f"pairs frame for frame"
+            )
+        nodes = TransformList(self.list)
+        held  = clip.frame
+        poses = []
+        try:
+            for at in range(clip.frame_count):
+                clip.frame = at
+                poses.append(solve(nodes, operand.at(operand.start_frame + at) if all else operand))
+        finally:
+            clip.frame = held
+        made      = ClipData.from_poses(poses, start_frame=clip.start_frame, fps=clip.fps)
+        made.take = clip.take
+        return made
+
+    def get_delta(self, other, by: str = "index", translate: bool = True) -> ClipData:
+        """``self - other`` on every frame of the clip, a new ClipData: at
+        each frame the delta a selection of a hierarchy gives
+        (:meth:`TransformList.get_delta`). ``other`` is one pose, or a
+        whole ``clip.frames`` of as many frames, paired frame for frame"""
+        return self._every_frame(other, lambda nodes, pose: TransformList.get_delta(nodes, pose, by=by, translate=translate))
+
+    def add_delta(self, delta, by: str = "index", translate: bool = True) -> ClipData:
+        """the nodes viewed with ``delta`` applied on every frame of the
+        clip, a new ClipData (:meth:`TransformList.add_delta` at each
+        frame). ``delta`` is one pose, or a whole ``clip.frames``"""
+        return self._every_frame(delta, lambda nodes, pose: TransformList.add_delta(nodes, pose, by=by, translate=translate))
+
+    def save_fbx(self, filename, *args, **kwargs):
+        """the nodes viewed written as a take, every frame (:meth:`ClipData.save_fbx`)"""
+        return self._owned_copy().save_fbx(filename, *args, **kwargs)
+
+
+HierarchyData._view = lambda self, nodes: _HierarchyView(nodes, owner=self)
+ClipData._view      = lambda self, nodes: _ClipView(nodes, owner=self)
 
 
 # ---------------------------------- TAKES ----------------------------------- #
@@ -14825,7 +15159,9 @@ def _take_rig(clip) -> list:
 
 def _take_label(target, index: int) -> str:
     """the take a target belongs to, as an error names it"""
-    clip = target if isinstance(target, ClipData) else getattr(target, "_clip", None)
+    clip = target if _owns(target) and isinstance(target, ClipData) else getattr(target, "_clip", None)
+    if clip is None and isinstance(target, _View):
+        clip = target.owner
     take = getattr(clip, "_take", "")
     return f"take {index} ({take!r})" if take else f"take {index}"
 
@@ -14894,7 +15230,7 @@ _HOLD_CLIP_SKIP = (
 def _take_of(target) -> Optional["ClipData"]:
     """the take a write to ``target`` reaches: a clip, a frame axis's clip,
     or the clip a view's nodes belong to; None for a view of no node"""
-    if isinstance(target, ClipData):
+    if isinstance(target, ClipData) and _owns(target):
         return target
     clip = getattr(target, "_clip", None)
     if clip is not None:
@@ -15043,7 +15379,10 @@ def _per_take(name: str, writable: bool = True, copied: bool = False) -> propert
 def _scrub(targets: list, frame) -> None:
     """every take's clip to ``frame``, every take checked first: IndexError
     names one too short, and no take moves"""
-    clips = [target if isinstance(target, ClipData) else target._clip for target in targets]
+    clips = [
+        target if isinstance(target, ClipData) and _owns(target) else getattr(target, "_clip", None) or _take_of(target)
+        for target in targets
+    ]
     for index, clip in enumerate(clips):
         try:
             clip._resolve_frame(frame)
@@ -15358,6 +15697,8 @@ class ClipList(DataList[ClipData]):
         empty list defines the skeleton. TypeError for anything else"""
         if not isinstance(clip, ClipData):
             raise TypeError(f"a ClipList holds ClipData objects, not {type(clip).__name__}: {clip!r}")
+        if isinstance(clip, _View):
+            raise TypeError("a ClipList holds clips that own their nodes, not a view of one: pass its copy()")
         kept = self.list if kept is None else kept
         if not kept:
             return

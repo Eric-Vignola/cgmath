@@ -211,7 +211,7 @@ class TestHierarchyFiles(unittest.TestCase):
                     Data.load(path)
 
         # the view and its rig are left as they were
-        self.assertIs(type(view), TransformList)
+        self.assertTrue(view.is_view and view.owner is source)
         self.assertIs(source["hip"].get_parent(), source["ns:root"])
         self.assertTrue(all(node._hierarchy is source for node in source))
 

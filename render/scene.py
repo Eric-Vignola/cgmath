@@ -305,14 +305,15 @@ class Scene(Data):
     def __setattr__(self, name: str, value) -> None:
         if name == "hierarchy" and value is not None:
             if isinstance(value, (ClipData, ClipList)):
-                raise TypeError(f"Scene.hierarchy is a HierarchyData at rest; pass a {type(value).__name__} as clip=")
+                kind = "ClipList" if isinstance(value, ClipList) else "ClipData"  # a view of a clip is named as its class
+                raise TypeError(f"Scene.hierarchy is a HierarchyData at rest; pass a {kind} as clip=")
             if isinstance(value, TransformData):
                 value = HierarchyData([value])
-            elif not isinstance(value, HierarchyData):
-                value = HierarchyData(list(value))
+            elif not isinstance(value, HierarchyData) or value.is_view:
+                value = HierarchyData(list(value))  # a selection, or any nodes: a hierarchy of their own
         elif name == "clip" and value is not None:
             if isinstance(value, ClipData):
-                value = ClipList([value])
+                value = ClipList([value.copy() if value.is_view else value])
             elif not isinstance(value, ClipList):
                 raise TypeError(f"Scene.clip is a ClipList or a ClipData, not a {type(value).__name__}")
         elif name == "background":
@@ -1326,7 +1327,7 @@ def _one_take(clip):
             raise ValueError("animate: the ClipList holds no take")
         return clip.active
     if isinstance(clip, ClipData):
-        return clip
+        return clip.copy() if clip.is_view else clip
     raise TypeError(f"animate plays a ClipData or a ClipList's active take, not {type(clip).__name__}: {clip!r}")
 
 

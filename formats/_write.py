@@ -198,6 +198,11 @@ def save_fbx(
     from cgmath.geometry.skin_weights import SkinData, SkinList
     from cgmath.hierarchy.hierarchy import FBX, ClipData, ClipList, FbxExporter, HierarchyData
 
+    # a selection is written as its copy, which owns its nodes
+    if getattr(hierarchy, "is_view", False):
+        hierarchy = hierarchy.copy()
+    if getattr(clip, "is_view", False):
+        clip = clip.copy()
     if hierarchy is not None and type(hierarchy) is not HierarchyData:
         hint = ", pass it as clip=" if isinstance(hierarchy, (ClipData, ClipList)) else ""
         raise TypeError(f"save_fbx: the hierarchy is a HierarchyData, not a {type(hierarchy).__name__}{hint}")

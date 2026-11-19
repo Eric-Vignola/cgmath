@@ -1079,7 +1079,9 @@ class TestEveryClassTakesOnlyWhatItDeclares(unittest.TestCase):
                     if kind is None:
                         self.assertIn(f"has no attribute {attr!r}", message)
                     else:
-                        self.assertIn(f"{attr!r} is {kind} of {cls.__name__}", message)
+                        # a view answers under the name of the class it is a view of
+                        named = getattr(cls, "_OWNER", None) or cls
+                        self.assertIn(f"{attr!r} is {kind} of {named.__name__}", message)
                     self.assertEqual(vars(obj).keys(), before.keys())
                     self.assertTrue(all(vars(obj)[k] is v for k, v in before.items()))
 
@@ -1102,9 +1104,11 @@ class TestEveryClassTakesOnlyWhatItDeclares(unittest.TestCase):
             for attr, value in (("__dict__", {"_junk": 1}), ("__class__", swapped)):
                 with self.subTest(obj=name, attr=attr):
                     before = dict(vars(obj))
+                    # a view answers under the name of the class it is a view of
+                    named = getattr(cls, "_OWNER", None) or cls
                     with self.assertRaisesRegex(
                         AttributeError,
-                        f"^'{attr}' is Python's, not an attribute an instance of {cls.__name__} takes$",
+                        f"^'{attr}' is Python's, not an attribute an instance of {named.__name__} takes$",
                     ):
                         setattr(obj, attr, value)
                     self.assertIs(type(obj), cls)

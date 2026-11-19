@@ -217,8 +217,23 @@ def shape_data() -> ShapeData:
 def transform_list() -> TransformList:
     """a selection of the rig: the hip, its locator and the space transform,
     the hip's parent left out of it"""
+    view = TransformList(list(rig().match("VLR:hip_L*", "VLR:world_space")))
+    assert type(view) is TransformList and len(view) == 3 and not view.is_view
+    return view
+
+
+def hierarchy_view() -> HierarchyData:
+    """the same selection as the rig gives it: a view, of the rig's class"""
     view = rig().match("VLR:hip_L*", "VLR:world_space")
-    assert type(view) is TransformList and len(view) == 3
+    assert view.is_view and isinstance(view, HierarchyData) and len(view) == 3
+    return view
+
+
+def clip_view() -> ClipData:
+    """a selection of a clip's nodes: a view that keeps the clip's frames"""
+    clip = clip_data()
+    view = clip[: max(1, len(clip) - 1)]
+    assert view.is_view and isinstance(view, ClipData) and view.frame_count == clip.frame_count
     return view
 
 
@@ -266,9 +281,16 @@ EXAMPLES = {
     ShapeData:     shape_data,
 }
 
+# a selection is of a private class of its own, behind the public one it is
+# an instance of: read off a selection of each
+EXAMPLES[type(hierarchy_view())] = hierarchy_view
+EXAMPLES[type(clip_view())]      = clip_view
+
 # a TransformList is a view: it owns no nodes, so it saves as the hierarchy
 # its copy() gives (its nodes copied and owned, the hip's parent, outside the
 # view, cleared), and loads back as that HierarchyData (TransformList docstring)
 SAVES_AS = {
     TransformList: lambda view: view.copy(),
 }
+SAVES_AS[type(hierarchy_view())] = lambda view: view.copy()
+SAVES_AS[type(clip_view())]      = lambda view: view.copy()

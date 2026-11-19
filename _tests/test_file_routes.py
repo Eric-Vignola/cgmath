@@ -153,6 +153,8 @@ class TestInheritedRoutes(unittest.TestCase):
         ("HierarchyData", "load_fbx"),
         ("HierarchyData", "load_glb"),
         ("HierarchyData", "save_fbx"),
+        # a view of a hierarchy is written as a list built by hand is: its copy
+        ("_HierarchyView", "save_fbx"),
     }
 
     def test_every_inherited_asset_route_fits_or_is_refused(self):

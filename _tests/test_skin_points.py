@@ -279,7 +279,7 @@ class TestAligned(unittest.TestCase):
     # the edits that renumber a mesh's points: each one a skin follows
     POINT_EDITS = ("delete_faces", "detach_faces", "from_faces", "from_vertices", "subdivide", "union")
 
-    def renumbers(self, name: str) -> bool | None:
+    def renumbers(self, name: str):
         """whether calling ``name`` leaves the mesh, or the one it returns,
         with another count of points, or its points in another order; None
         for a method that takes arguments and has no entry in the face

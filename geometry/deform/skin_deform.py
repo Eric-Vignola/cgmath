@@ -116,7 +116,7 @@ def _world_matrices(pose) -> tuple:
         names = [node.name for node in pose._nodes()]
         return names, np.asarray(world, dtype=np.float64)
 
-    if isinstance(pose, ClipData) and pose.frame_count:
+    if isinstance(pose, ClipData) and not pose.is_view and pose.frame_count:
         clip = pose.frames._clip  # .frames realigns the blocks with the nodes
         with _one_thread():
             world = _FrameAxis(_BoundFrame(clip)).world_matrix[0]
