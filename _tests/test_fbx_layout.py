@@ -205,6 +205,64 @@ class TestNodes(_Edits):
                 self.assertEqual(self.assertSaves(SHARED[name], edit, name=f"{name}.fbx"), [])
                 self.assertEqual(census(self.path(f"{name}.fbx"))[0]["FbxNode"], census(SHARED[name])[0]["FbxNode"])
 
+    def test_another_kind(self):
+        """a joint made a transform, its orient folded into its rotate, a
+        transform made a joint, a joint made a locator: each the node it
+        was, its children where they were in the world"""
+
+        def edit(f):
+            for nodes in lists(f):
+                nodes["spine"].set_node_type("transform")
+                nodes["props"].set_node_type("joint")
+                nodes["props"].radius = 2.5
+                nodes["arm"].set_node_type("locator")
+
+        for name in ("still", "takes"):
+            with self.subTest(file=name):
+                source = loaded(SHARED[name])
+                held   = source.hierarchy if source.hierarchy is not None else source.clip.active
+                world  = np.array(held["head"].world_matrix)
+                self.assertEqual(self.assertSaves(SHARED[name], edit, name=f"{name}.fbx"), [])
+                read = loaded(self.path(f"{name}.fbx"))
+                held = read.hierarchy if read.hierarchy is not None else read.clip.active
+                self.assertEqual([held[node].node_type for node in ("spine", "props", "arm")], ["transform", "joint", "locator"])
+                np.testing.assert_allclose(np.asarray(held["spine"].joint_orient), 0.0, atol=1e-12)
+                np.testing.assert_allclose(np.asarray(held["head"].world_matrix), world, atol=1e-5)
+                before, after = census(SHARED[name])[0], census(self.path(f"{name}.fbx"))[0]
+                # spine and arm leave the joints, props joins them: one skeleton fewer, one null more
+                self.assertEqual(after["FbxSkeleton"], before["FbxSkeleton"] - 1)
+                self.assertEqual(after["FbxNull"], before["FbxNull"] + 1)
+                self.assertEqual(after["FbxNode"], before["FbxNode"])
+                self.assertEqual(loose_curves(self.path(f"{name}.fbx")), 0)
+
+    def test_locator_and_back(self):
+        """a transform made a locator and a locator a transform: the null
+        the node carries is kept, its look changed"""
+
+        def there(f):
+            f.hierarchy["props"].set_node_type("locator")
+
+        def back(f):
+            f.hierarchy["props"].set_node_type("transform")
+
+        self.assertEqual(self.assertSaves(SHARED["still"], there, name="locator.fbx"), [])
+        self.assertEqual(loaded(self.path("locator.fbx")).hierarchy["props"].node_type, "locator")
+        self.assertEqual(self.assertSaves(self.path("locator.fbx"), back, name="back.fbx"), [])
+        self.assertEqual(census(self.path("back.fbx"))[0], census(SHARED["still"])[0])
+
+    def test_another_kind_refused(self):
+        """a kind given without set_node_type(), which leaves a joint's
+        orient on a transform; a kind changed in one take alone"""
+
+        def by_hand(f):
+            f.hierarchy["spine"].node_type = "transform"
+
+        def one_take(f):
+            f.clip[0]["spine"].set_node_type("transform")
+
+        self.assertRefuses(SHARED["still"], by_hand, "which Maya holds on joints only")
+        self.assertRefuses(SHARED["takes"], one_take, "a file holds one set of nodes")
+
     def test_maya_files(self):
         """a joint added under the first node of Maya's files, Z-up in cm
         and in metres among them, and their last node moved under it"""
@@ -228,11 +286,7 @@ class TestNodes(_Edits):
         def one_take(f):
             between(f.clip[0], "mid", "spine", "neck")
 
-        def another_kind(f):
-            f.hierarchy["props"].node_type = "joint"
-
         self.assertRefuses(SHARED["takes"], one_take, "a file holds one set of nodes")
-        self.assertRefuses(SHARED["still"], another_kind, "a node of another kind is another node")
 
     def test_ties(self):
         """a node a display layer of the file lists: taken off, the save is
@@ -541,6 +595,32 @@ class TestMeshes(_Edits):
         for material in read.materials:
             cover[material.mesh_uuid] = cover.get(material.mesh_uuid, 0) + (faces[material.mesh_uuid] if material.faces is None else len(material.faces))
         self.assertEqual(cover, faces)
+
+    def test_another_kind(self):
+        """a joint a skin weighs made a transform in Maya's Z-up skinned
+        file: the skin still weighs it; the node of a mesh made a joint,
+        and a node carrying what no record holds made one, are refused"""
+
+        def influence(f):
+            for nodes in every_list(f):
+                nodes["hand"].set_node_type("transform")
+
+        def mesh_node(f):
+            for nodes in every_list(f):
+                nodes["geo"].set_node_type("joint")
+
+        def unread(f):
+            for nodes in every_list(f):
+                nodes["lod"].set_node_type("joint")
+
+        source = maya_file("zup_skinned", "z_cm.fbx")
+        self.assertEqual(self.assertSaves(source, influence), [])
+        read = loaded(self.path("saved.fbx"))
+        self.assertEqual(read.hierarchy["hand"].node_type, "transform")
+        self.assertIn("hand", read.skins[0].influences)
+        self.assertEqual(kinds(self.path("saved.fbx"))["FbxCluster"], kinds(source)["FbxCluster"])
+        self.assertRefuses(source, mesh_node, "holds a mesh on a transform only")
+        self.assertRefuses(extended(self.every, self.path("extended.fbx")), unread, "carries a shape, or something no record holds")
 
     def test_split_skinned(self):
         """a skinned mesh split in two by its faces: each part keeps the

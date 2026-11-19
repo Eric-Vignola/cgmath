@@ -477,7 +477,7 @@ class _Edit:
         self.turn, self.cm = _load._axes(self.scene, self.fbx, file._filename)
         self.single  = len(self.stacks()) < 2
         self.dropped = []     # what force dropped of the file, each in words
-        self.fresh   = set()  # the uuids of the nodes this save adds
+        self.fresh   = set()  # the uuids of the nodes this save adds or makes another kind
         self._places = {}
 
     def place(self, uuid) -> _Place:
@@ -781,7 +781,7 @@ def _write_nodes(edit, base: dict, state: dict) -> None:
     for record in now.list:
         read  = before[record.uuid]
         moved = [name for name in _MOVES if not np.array_equal(getattr(read, name), getattr(record, name))]
-        # a node this save adds holds its own values, which nothing else reads yet
+        # a node this save adds, or makes another kind, is given its own values
         if takes and moved and record.uuid not in edit.fresh:
             raise ValueError(
                 f"FbxFile.save: node {record.name!r} is given another {moved[0]} in the hierarchy of a file holding takes, "

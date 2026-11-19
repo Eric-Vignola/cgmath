@@ -211,9 +211,9 @@ class FbxFile:
     points, a skin's weights, a material's colours ...).
 
     A change of the file's layout is written too, for the nodes, the meshes
-    and the records that name a mesh: a node added, taken off or put under
-    another parent, in the hierarchy and the takes; user defined attributes
-    added or taken off; a mesh added (on the node its ``parent_uuid``
+    and the records that name a mesh: a node added, taken off, put under
+    another parent or made another kind (``set_node_type()``), in the
+    hierarchy and the takes; user defined attributes added or taken off; a mesh added (on the node its ``parent_uuid``
     names), taken off or given other faces; UV sets, skins, influences and
     materials added or taken off. A mesh taken off takes its UV sets, skin,
     blend shapes and material assignments with it, and the materials and

@@ -262,13 +262,64 @@ def _in_order(edit, uuid_of: dict, order: list) -> list:
     return uuids
 
 
+def _rekind(edit, node, record, was: str) -> None:
+    """a node made another kind, the fbx node it was: a joint's skeleton
+    swapped for a null, or a null for a skeleton, a null's look changed
+    between a transform's and a locator's. Its keys, the clusters that link
+    it, its place in the poses and its children stay. A node that was a
+    joint holds no joint orient (its record folded it into its rotate), no
+    radius and no draw style, and scales as a transform does. ValueError
+    for a node carrying anything but a skeleton or a null"""
+    from cgmath.formats.fbx import FbxExporter
+
+    fbx     = edit.fbx
+    kinds   = fbx.FbxNodeAttribute.EType
+    now     = record.node_type
+    carried = node.GetNodeAttribute()
+    kind    = None if carried is None else carried.GetAttributeType()
+    if kind not in (None, kinds.eSkeleton, kinds.eNull) or node.GetNodeAttributeCount() > 1:
+        raise ValueError(
+            f"FbxFile.save: node {record.name!r} is made a {now} and carries a shape, or something no record holds; "
+            f"a node made another kind carries a skeleton or nothing: take what it carries off first, or {_ELSE}"
+        )
+    look = fbx.FbxNull.ELook.eCross if now == "locator" else fbx.FbxNull.ELook.eNone
+    if now != "joint" and kind == kinds.eNull:
+        edit.typed(carried, fbx.FbxNull, fbx).Look.Set(look.value)
+    else:
+        if now == "joint":
+            shape = fbx.FbxSkeleton.Create(edit.scene, "")
+            shape.SetSkeletonType(fbx.FbxSkeleton.EType.eLimbNode)
+        elif now in ("transform", "locator"):
+            shape = fbx.FbxNull.Create(edit.scene, "")
+            shape.Look.Set(look.value)
+        else:
+            raise ValueError(f"FbxFile.save: node {record.name!r} is made a {now}, a kind of node an fbx file is not given")
+        if carried is not None:
+            strip_curves(edit, carried)
+            node.RemoveNodeAttribute(carried)
+            carried.Destroy()
+        node.SetNodeAttribute(shape)
+    if was == "joint":
+        node.SetPreRotation(edit.source, fbx.FbxVector4(0.0, 0.0, 0.0, 1.0))
+        node.SetTransformationInheritType(fbx.FbxTransform.EInheritType.eInheritRSrs)
+        for name in (FbxExporter._RADIUS, FbxExporter._DRAW_STYLE):
+            prop = node.FindProperty(name)
+            if prop.IsValid():
+                prop.Destroy()
+        node.Show.Set(True)
+    if now == "locator":
+        node.Show.Set(bool(record.visibility))
+
+
 def write_nodes(edit, base: dict, state: dict, undo: list) -> set:
     """the file given the nodes of the records to save: one they add made
-    bare under its parent, one under another parent moved, one they leave
-    out taken off (:func:`_take_off`); the file's nodes then in the records'
-    order, and ``file._uuids`` the uuid of each. Returns the uuids of the
-    nodes added. ValueError for a node of another kind than the file's, and
-    for one left out that still carries a shape the records hold"""
+    bare under its parent, one under another parent moved, one made another
+    kind given that kind's own (:func:`_rekind`), one they leave out taken
+    off (:func:`_take_off`); the file's nodes then in the records' order,
+    and ``file._uuids`` the uuid of each. Returns the uuids of the nodes
+    added or made another kind, whose own values the save writes whatever
+    else the file holds. ValueError for a node left out that still carries
+    a shape the records hold"""
     file = edit.file
     nodes, links = _wanted(state)
     was   = _node_lists(base)[0][1]
@@ -276,15 +327,10 @@ def write_nodes(edit, base: dict, state: dict, undo: list) -> set:
     names = {node.uuid: node.name for node in was}
     names.update({node.uuid: node.name for node in nodes})
 
-    for uuid in links:
-        if uuid in old and old[uuid][1] != links[uuid][1]:
-            raise ValueError(
-                f"FbxFile.save: node {names[uuid]!r} is a {links[uuid][1]} where the file holds a {old[uuid][1]}; "
-                f"a node of another kind is another node: take it off and add one, or {_ELSE}"
-            )
-    added   = [node for node in nodes if node.uuid not in old]
-    removed = [uuid for uuid in old if uuid not in links]
-    moved   = [uuid for uuid in links if uuid in old and old[uuid][0] != links[uuid][0]]
+    rekinded = [node for node in nodes if node.uuid in old and old[node.uuid][1] != node.node_type]
+    added    = [node for node in nodes if node.uuid not in old]
+    removed  = [uuid for uuid in old if uuid not in links]
+    moved    = [uuid for uuid in links if uuid in old and old[uuid][0] != links[uuid][0]]
     for field in _SHAPE_FIELDS:
         shapes = _held(state[field])
         for shape in shapes.list if shapes is not None else ():
@@ -296,6 +342,8 @@ def write_nodes(edit, base: dict, state: dict, undo: list) -> set:
 
     by_uuid = dict(edit.nodes)
     root    = edit.scene.GetRootNode()
+    for record in rekinded:
+        _rekind(edit, by_uuid[record.uuid], record, old[record.uuid][1])
     for record in added:
         by_uuid[record.uuid] = _bare(edit, record)
     for uuid in moved:
@@ -316,7 +364,7 @@ def write_nodes(edit, base: dict, state: dict, undo: list) -> set:
     uuids   = _in_order(edit, uuid_of, [node.uuid for node in nodes])
     undo.append((file, "_uuids", file._uuids))
     file._uuids = uuids
-    return {record.uuid for record in added}
+    return {record.uuid for record in added + rekinded}
 
 
 # ------------------------------------------------- user defined attributes

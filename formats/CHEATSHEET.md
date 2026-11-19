@@ -808,7 +808,7 @@ print(f.closed, again.meshes.name, again.hierarchy["grp"].translate, again.camer
 
 | Property | A save writes | Refused |
 |---|---|---|
-| `hierarchy`, `clip` | a node's name, visibility and transform values; a take's keys, name, span and the active take; the frame rate of every take together; a node added, taken off or under another parent; user defined attributes added, changed or taken off | a hierarchy value a take of the file holds otherwise; one take's frame rate alone; the node of a skinned mesh moved off its bind world; a node of another kind; a node in one record alone of several holding nodes |
+| `hierarchy`, `clip` | a node's name, visibility and transform values; a take's keys, name, span and the active take; the frame rate of every take together; a node added, taken off, under another parent or made another kind; user defined attributes added, changed or taken off | a hierarchy value a take of the file holds otherwise; one take's frame rate alone; the node of a skinned mesh moved off its bind world; a node added, or made another kind, in one record alone of several holding nodes; a kind given without `set_node_type()` |
 | `meshes` | name, points, normals, hard edges, vertex colours; a mesh added, taken off or of other faces | a mesh on no node of the file, or on a joint; other faces on a mesh holding blend shapes |
 | `uvs` | name, points, indices; a set added or taken off | a set that does not map every face of its mesh |
 | `skins` | name, weights; an influence added or dropped, the influences in another order; a skin added or taken off | an influence the hierarchy does not hold |
@@ -845,6 +845,7 @@ print(again.hierarchy.name, again.meshes.name, again.hierarchy["grp"].user_defin
 | Layout change | What goes with it |
 |---|---|
 | A node added | made bare under its parent, then its values, keys and user attributes written like any node's. A node added to several records (the hierarchy and takes) is one node: one uuid |
+| A node made another kind (`node.set_node_type("transform")`, in every record holding it) | the fbx node it was: a joint's skeleton swapped for a null or the reverse, a null's look changed for a locator. Its keys, children, clusters and bind pose entries stay; a joint's orient, which the record folds into its rotate, its radius and its draw style go. Refused for a node carrying a shape, or something no record holds |
 | A node taken off | its keys in every take, its bind pose entries, the clusters linking it, its shape. What else refers to it (a constraint, a display layer) refuses the save, or with `force` is cut loose and named |
 | A mesh taken off | its skin and clusters, UV sets, blend shapes and material assignments, and the materials and textures no mesh is left with. Its node stays, an empty transform. The handle's lists then hold what the file holds |
 | A mesh added, or given other faces | built as `save_fbx` builds one, in the file's unit, on the node its `parent_uuid` names. A mesh given other faces keeps its skin and its user properties; its UV sets, skin weights and material faces are written from its records, so each record follows the mesh's edit by the same call (`skin.subdivide(mesh)`, `materials.subdivide(mesh)`, `uv.subdivide()`) |
