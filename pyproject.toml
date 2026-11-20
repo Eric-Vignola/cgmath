@@ -17,7 +17,7 @@ name            = "cgmath"
 version         = "4.0.0rc1"
 description     = "A DCC-agnostic CG math library: batched matrix, quaternion and euler math, mesh topology, deformers, resampling, skeletal hierarchies, SDFs, a software raytracer and asset IO, all numpy-native."
 readme          = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license         = { file = "LICENSE" }
 authors         = [{ name = "Eric Vignola", email = "eric.vignola@gmail.com" }]
 keywords        = ["cg", "vfx", "rigging", "matrix", "quaternion", "euler", "mesh", "topology", "deformer", "skinning", "rbf", "sdf", "raytracer", "usd", "gltf", "numpy", "numba"]

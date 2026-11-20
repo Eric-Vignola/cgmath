@@ -440,8 +440,10 @@ def _what_3_9_runs_and_lacks(tree):
 
 class TestPython39(unittest.TestCase):
     """
-    pyproject says python 3.9 and the suite runs on 3.11, which accepts what
-    3.9 refuses. On 3.9 an annotation runs when its ``def`` does, unless the
+    pyproject says python 3.10 since 4.0.0: a shape's keyword-only fields
+    need it. These checks are older and hold the source to what python 3.9
+    parses and runs, a stricter rule than the floor asks; the suite runs on
+    3.11, which accepts what 3.9 refuses. On 3.9 an annotation runs when its ``def`` does, unless the
     module starts with ``from __future__ import annotations``, and ``X | Y``
     of two types raises TypeError there: the module does not import. The
     future import only quotes it: typing.get_type_hints still runs a class's
