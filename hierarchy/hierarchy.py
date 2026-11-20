@@ -35,6 +35,7 @@ from cgmath.data import (
     _mask_to_indices,
     _NO_DEFAULT,
     _refusal,
+    _tree_copy,
     forward,
 )
 from cgmath.formats import save_fbx as _save_fbx
@@ -1686,7 +1687,7 @@ class TransformData(Data):
             # animates a constant channel
             if current.base is not None:
                 owner = self._hierarchy
-                if isinstance(owner, ClipData):
+                if isinstance(owner, (ClipData, _FramePose)):
                     owner._played(self, name)
 
     @property
@@ -2911,7 +2912,7 @@ class TransformData(Data):
             if attrs and name in attrs and not self._is_builtin_attr(name):
                 writes = _user_writes(attrs, name, value, self.name)
                 owner  = self._hierarchy
-                if isinstance(owner, ClipData) and owner._blocks:
+                if isinstance(owner, _FramePose) or (isinstance(owner, ClipData) and owner._blocks):
                     owner._user_played(self, name, writes)
                     return
                 for spec, converted in writes:
@@ -8029,7 +8030,7 @@ class TransformList(DataList[TransformData]):
         writes = [_user_writes(node.user_defined_attributes, name, value, node.name) for node in nodes]
         for node, done in zip(nodes, writes):
             owner = node._hierarchy
-            if isinstance(owner, ClipData) and owner._blocks:
+            if isinstance(owner, _FramePose) or (isinstance(owner, ClipData) and owner._blocks):
                 owner._user_played(node, name, done)
                 continue
             for spec, converted in done:
@@ -11182,6 +11183,8 @@ class _RigFrames:
     """
 
     def __init__(self, owner: "HierarchyData", snapshot: bool = False):
+        if isinstance(owner, _FramePose):
+            raise TypeError(_SHARED.format(name="a rig edit"))
         self.owner   = owner
         self.nodes   = list(owner.list) if snapshot else owner.list
         self.frames  = owner.frame_count if getattr(owner, "_blocks", None) else 1
@@ -11334,11 +11337,16 @@ class _RigFrames:
         node below them: the edit may have moved them"""
         _reset_branches([self.nodes[r] for r in sorted(self._touched)])
         self._touched.clear()
+        # the poses a clip handed out read what its frames share again
+        if getattr(self.owner, "_live", None):
+            self.owner._refresh_live()
 
 
 def _clip_frames(owner) -> Optional[_RigFrames]:
     """the frames of a clip, for an edit that has to cover all of them;
     None for anything that holds one pose"""
+    if isinstance(owner, _FramePose):
+        raise TypeError(_SHARED.format(name="a rig edit"))
     if owner is not None and getattr(owner, "_blocks", None):
         return _RigFrames(owner)
     return None
@@ -11501,6 +11509,8 @@ def _reparent(owner, nodes, parent, world_space: bool) -> None:
     reordered once more. In world space a frame per pose of a hierarchy
     without frames, every frame of a clip, solved at once.
     """
+    if isinstance(owner, _FramePose):
+        raise TypeError(_SHARED.format(name="set_parent()"))
     named = None
     if parent is not None:
         named = _named_after_the_move(owner, nodes, parent)
@@ -13636,7 +13646,7 @@ class ClipData(HierarchyData):
 
     # the private state a clip holds beside its list, its LIST_FIELDS and a
     # rig's: the uuid each block column stands for, and each uuid's column
-    _STATE = ("_columns", "_column_place_cache", "_visible")
+    _STATE = ("_columns", "_column_place_cache", "_visible", "_live")
 
     def __init__(
         self,
@@ -13713,10 +13723,17 @@ class ClipData(HierarchyData):
             column = self._column_place().get(node.uuid)
             if column is not None and column < len(keyed):
                 keyed[column] = True
+        # the pose handed out for this frame reads the same row
+        if self._live:
+            pose = self._live.get(self._frame)
+            twin = None if pose is None else pose._twins.get(id(node))
+            if twin is not None:
+                twin._reset_branch_world_matrices()
 
-    def _user_played(self, node, name: str, writes: list) -> None:
-        """a user attribute written at the playhead: a constant channel
-        becomes animated, its other frames keeping the value it held"""
+    def _user_played(self, node, name: str, writes: list, frame: Optional[int] = None) -> None:
+        """a user attribute written at the playhead, or on ``frame`` through
+        the pose of that frame: a constant channel becomes animated, its
+        other frames keeping the value it held"""
         attrs    = node.user_defined_attributes
         channels = _user_channels(attrs)
         channel  = name if name in channels else attrs[name].get("parent")
@@ -13732,35 +13749,47 @@ class ClipData(HierarchyData):
         rows = keys.get(channel)
         if rows is None:
             rows = keys[channel] = np.repeat(before[None], self.frame_count, axis=0)
-        rows[self._frame] = _user_row(attrs, channel, children)
+        rows[self._frame if frame is None else frame] = _user_row(attrs, channel, children)
+        if frame is None and self._live:
+            self._refresh_live()
 
     def at(self, frame) -> HierarchyData:
-        """the pose at frame number ``frame``, a HierarchyData: a constant
-        channel's one value at any frame number, an animated one's row at a
-        frame of the clip, its first before them and its last after"""
+        """
+        The pose at frame number ``frame``, live: a HierarchyData that is a
+        view of that frame (``is_view`` True, ``owner`` the clip). Its nodes
+        read the clip's values for the frame, and a write to one lands in
+        the clip, on that frame alone; ``copy()`` gives a HierarchyData of
+        its own. A frame number before the clip's first is its first frame,
+        one after its last its last. What every frame shares, a parent, a
+        rotate order, a name, is set on the clip, and raises here. Two
+        frames can be held at once, and asking twice for one frame gives one
+        object while it is held.
+        """
         self._realign()
         if not self._blocks:
             raise ValueError("the clip holds no frames")
         index = int(np.clip(int(round(float(frame))) - self._start_frame, 0, self.frame_count - 1))
-        nodes = [node.copy() for node in self.list]
-        for channel, block in self._blocks.items():
-            rows = block[index]
-            for i, node in enumerate(nodes):
-                node.__dict__[channel] = np.array(rows[i])
-        if self._visible is not None:
-            for node, shown in zip(nodes, self._visible[index].tolist()):
-                node.__dict__["_visibility"] = shown
-        place = self._column_place()
-        for uuid, keys in self._user_keys.items():
-            column = place.get(uuid)
-            if column is None:
-                continue
-            attrs    = nodes[column].user_defined_attributes
-            channels = _user_channels(attrs)
-            for name, rows in keys.items():
-                if name in channels:
-                    _user_put(attrs, name, channels[name], rows[index])
-        return HierarchyData(nodes)
+        return self._live_pose(index)
+
+    # {frame: the pose handed out for it}, held while someone holds it
+    _live = None
+
+    def _live_pose(self, index: int) -> "_FramePose":
+        """the live pose of the frame at ``index``, one object a frame"""
+        live = self._live
+        if live is None:
+            live = self._live = weakref.WeakValueDictionary()
+        pose = live.get(index)
+        if pose is None:
+            pose        = _FramePose(self, index)
+            live[index] = pose
+        return pose
+
+    def _refresh_live(self) -> None:
+        """the poses handed out read the clip again: its rows may have been
+        rebuilt, or what its frames share may have changed"""
+        for pose in list(self._live.values()):
+            pose._refresh()
 
     @property
     def keyed(self) -> np.ndarray:
@@ -13881,6 +13910,8 @@ class ClipData(HierarchyData):
 
         for node in self.list:
             node._transform_changed()
+        if self._live:
+            self._refresh_live()
 
     # --- timebase --- #
     @property
@@ -14461,6 +14492,8 @@ class ClipData(HierarchyData):
             self._visible = None
             for node, value in zip(self.list, shown[0].tolist() if len(shown) else ()):
                 node.__dict__["_visibility"] = value
+            if self._live:
+                self._refresh_live()
             return
         self._visible = shown
         self._bind(self._frame)
@@ -14866,6 +14899,311 @@ class _HierarchyView(_View, HierarchyData):
     _OWNER = HierarchyData
 
 
+_SHARED = "{name} changes what every frame of a clip shares: call it on the clip, not on the pose of one frame"
+
+# what a pose of one frame may write: the channels, matrices and visibility a
+# clip holds frame by frame
+_FRAME_WRITES = frozenset(name for name in vars(_FrameAxis) if not name.startswith("_"))
+
+
+def _refused_on_a_frame(name: str, base):
+    """``base``'s ``name`` for the pose of one frame of a clip, or a node of
+    it: it would change what every frame shares, so it raises, but while the
+    pose is being filled from the clip"""
+    inherited = getattr(base, name)
+
+    def method(self, *args, **kwargs):
+        if "_filling" in self.__dict__:
+            return inherited(self, *args, **kwargs)
+        raise TypeError(_SHARED.format(name=f"{name}()"))
+
+    method.__name__ = name
+    method.__doc__  = f"refused: {_SHARED.format(name=name + '()')}"
+    return method
+
+
+class _FrameNode(TransformData):
+    """
+    A node of the pose of one frame of a clip (:class:`_FramePose`): a
+    TransformData whose framed channels are the clip's own rows of that
+    frame, so a write to one lands in the clip, on that frame alone. What
+    every frame shares, its name, parent, rotate order and type, is the
+    clip's: a write to it raises. ``copy()`` gives a TransformData of its own.
+    """
+
+    _STATE  = ("_source",)
+    _OWNER  = TransformData
+    _source = None  # the clip's own node this is a frame of
+
+    def __setattr__(self, name: str, value) -> None:
+        if name[:1] != "_" and name not in _FRAME_WRITES and name in TransformData._writable():
+            raise AttributeError(_SHARED.format(name=name))
+        try:
+            TransformData.__setattr__(self, name, value)
+        except AttributeError as error:
+            raise AttributeError(str(error).replace(type(self).__name__, "TransformData")) from None
+
+    def __getattr__(self, name: str):
+        try:
+            return TransformData.__getattr__(self, name)
+        except AttributeError as error:
+            raise AttributeError(str(error).replace(type(self).__name__, "TransformData")) from None
+
+    def copy(self) -> TransformData:
+        """a TransformData of its own, holding the values of this frame"""
+        with _Copying():
+            return TransformData.from_dict(_tree_copy(self.to_dict()))
+
+    def __copy__(self):
+        return self.copy()
+
+    def __deepcopy__(self, memo):
+        new            = self.copy()
+        memo[id(self)] = new
+        return new
+
+    def __reduce__(self):
+        return self.copy().__reduce__()
+
+    @classmethod
+    def from_dict(cls, data: dict) -> TransformData:
+        return TransformData.from_dict(data)
+
+    def __repr__(self) -> str:
+        return TransformData.__repr__(self).replace(type(self).__name__, "TransformData")
+
+
+for _name in (
+    "set_parent",
+    "set_rotate_order",
+    "set_node_type",
+    "set_rotate_to_joint_orient",
+    "set_joint_orient_to_rotate",
+    "swapaxes",
+    "add_prefix",
+    "add_suffix",
+    "add_user_attribute",
+):
+    setattr(_FrameNode, _name, _refused_on_a_frame(_name, TransformData))
+
+
+def _frame_state(node: _FrameNode, source: TransformData, clip: "ClipData", frame: int, column: int) -> None:
+    """``node`` made the clip's node ``source`` on ``frame``: everything
+    ``source`` holds, its framed channels the clip's rows of that frame, its
+    visibility and user channels that frame's values"""
+    state = node.__dict__
+    state.clear()
+    state.update(source.__dict__)
+    for key in ("_hierarchy", "_listers", "_world_matrix", "_world_version"):
+        state.pop(key, None)
+    state["_source"] = source
+    for channel, block in clip._blocks.items():
+        state[channel] = block[frame, column]
+    if clip._visible is not None:
+        state["_visibility"] = bool(clip._visible[frame, column])
+    attrs = state.get("user_defined_attributes")
+    if attrs:
+        attrs = state["user_defined_attributes"] = copy.deepcopy(attrs)
+        keys  = clip._user_keys.get(source.uuid)
+        if keys:
+            channels = _user_channels(attrs)
+            for name, rows in keys.items():
+                if name in channels:
+                    _user_put(attrs, name, channels[name], rows[frame])
+
+
+def _set_free(node: _FrameNode) -> None:
+    """``node`` cut from its clip: a TransformData of its own, holding the
+    values it read last"""
+    state = node.__dict__
+    for channel in ClipData.FRAMED_CHANNELS:
+        if channel in state:
+            state[channel] = np.array(state[channel], dtype=float)
+    state.pop("_source", None)
+    state.pop("_hierarchy", None)
+    object.__setattr__(node, "__class__", TransformData)
+
+
+class _FramePose(HierarchyData):
+    """
+    The pose of one frame of a clip, live: a HierarchyData that is a view
+    (``is_view`` True, ``owner`` the clip), handed out by
+    :meth:`ClipData.at`.
+
+    Its nodes are the clip's on that frame: a channel, a matrix, a
+    visibility or a user channel read through them is the frame's value, and
+    a write lands in the clip, on that frame alone; a constant channel so
+    written becomes animated. Everything a HierarchyData answers of a pose,
+    ``world_matrix``, ``match_matrix``, ``get_delta``, it answers of this
+    frame. Two frames can be held at once.
+
+    What every frame shares is the clip's: a name, a parent, a rotate order,
+    a node added or taken off. Set through a pose, each raises, naming the
+    clip; set on the clip, the poses held follow. ``copy()``, a save and a
+    pickle give a HierarchyData that owns its nodes.
+    """
+
+    _STATE = ("_clip", "_frame", "_filling", "_twins")
+    _OWNER = HierarchyData
+
+    def __init__(self, clip: "ClipData", frame: int):
+        self._clip  = clip
+        self._frame = int(frame)
+        clip._realign()
+        self._fill()
+
+    def _fill(self) -> None:
+        """the nodes read from the clip: each kept, a node the clip gained
+        added, one it lost set free"""
+        clip  = self._clip
+        frame = self._frame
+        place = clip._column_place()
+        held  = {id(node.__dict__.get("_source")): node for node in self.__dict__.get("list", ())}
+        nodes = []
+        for source in clip.list:
+            column = place.get(source.uuid)
+            if column is None:
+                continue  # no column yet: the clip's next line-up brings it
+            node = held.pop(id(source), None)
+            if node is None:
+                node = object.__new__(_FrameNode)
+            _frame_state(node, source, clip, frame, column)
+            nodes.append(node)
+        for node in held.values():
+            _set_free(node)
+
+        state = self.__dict__
+        for key in HierarchyData._STATE:
+            state.pop(key, None)
+        # each of the clip's own nodes to its node here
+        state["_twins"]   = {id(node.__dict__["_source"]): node for node in nodes}
+        state["_filling"] = True
+        try:
+            HierarchyData.__init__(self, nodes)
+        finally:
+            del state["_filling"]
+
+    def _refresh(self) -> None:
+        """the clip's rows were rebuilt, or what its frames share changed"""
+        clip = self._clip
+        if self._frame >= clip.frame_count:
+            # the frame is gone: a pose of its own, holding what it read last
+            for node in self.list:
+                _set_free(node)
+                node._hierarchy = self
+            object.__setattr__(self, "__class__", HierarchyData)
+            return
+        self._fill()
+
+    @property
+    def owner(self):
+        return self._clip
+
+    @property
+    def is_view(self) -> bool:
+        return True
+
+    # --- what a node written through this pose tells the clip --- #
+    # a node's visibility written here is the frame's, whatever the clip holds
+    _visible = True
+
+    def _played(self, node, name: str) -> None:
+        """a framed channel of ``node`` was written on this frame"""
+        clip = self._clip
+        clip._played(node, name)
+        if clip._frame == self._frame:
+            # the clip's own node reads the same row
+            source = node.__dict__.get("_source")
+            if source is not None:
+                source._reset_branch_world_matrices()
+
+    def _user_played(self, node, name: str, writes: list) -> None:
+        """a user attribute of ``node`` written on this frame: an animated
+        channel takes it, anything else is shared by every frame"""
+        clip     = self._clip
+        attrs    = node.user_defined_attributes
+        channels = _user_channels(attrs)
+        channel  = name if name in channels else attrs[name].get("parent")
+        if channel not in channels:
+            raise AttributeError(_SHARED.format(name=name))
+        clip._user_played(node, name, writes, frame=self._frame)
+        clip._bind(clip._frame)
+
+    def _shown_everywhere(self, node, value: bool) -> None:
+        """``node``'s visibility ``value`` on this frame (the name a node's
+        visibility setter calls on the hierarchy that holds it frame by frame)"""
+        clip   = self._clip
+        column = clip._column_place().get(node.uuid)
+        if column is not None:
+            shown                      = clip._shown()
+            shown[self._frame, column] = value
+            clip._show(shown)
+            clip._bind(clip._frame)
+
+    # --- a pose of its own --- #
+    def copy(self) -> HierarchyData:
+        return self._owned_copy()
+
+    def __copy__(self):
+        return self._owned_copy()
+
+    def __deepcopy__(self, memo):
+        new            = self._owned_copy()
+        memo[id(self)] = new
+        return new
+
+    def __reduce__(self):
+        return self._owned_copy().__reduce__()
+
+    @classmethod
+    def from_dict(cls, data: dict) -> HierarchyData:
+        return HierarchyData.from_dict(data)
+
+    load_fbx = _NoRoute("the pose of a frame is not loaded from a file: load a HierarchyData")
+    load_glb = _NoRoute("the pose of a frame is not loaded from a file: load a HierarchyData")
+
+    def __setattr__(self, name: str, value) -> None:
+        try:
+            HierarchyData.__setattr__(self, name, value)
+        except AttributeError as error:
+            raise AttributeError(str(error).replace(type(self).__name__, "HierarchyData")) from None
+
+    def __getattr__(self, name: str):
+        try:
+            return HierarchyData.__getattr__(self, name)
+        except AttributeError as error:
+            raise AttributeError(str(error).replace(type(self).__name__, "HierarchyData")) from None
+
+    def __repr__(self) -> str:
+        return f"HierarchyData({[node.name for node in self.list]!r}, view)"
+
+
+for _name in (
+    "append",
+    "extend",
+    "insert",
+    "pop",
+    "sort",
+    "clear",
+    "remove",
+    "reverse",
+    "renew_uuids",
+    "__delitem__",
+    "__setitem__",
+    "add_prefix",
+    "add_suffix",
+    "strip_namespace",
+    "add_user_attribute",
+    "set_parent",
+    "set_rotate_order",
+    "set_rotate_to_joint_orient",
+    "set_joint_orient_to_rotate",
+    "swapaxes",
+):
+    setattr(_FramePose, _name, _refused_on_a_frame(_name, HierarchyData))
+del _name
+
+
 class _ViewAxis(_FrameAxis):
     """
     The frame axis of a view of a clip: the clip's own, over the nodes
@@ -14969,9 +15307,12 @@ class _ClipView(_View, ClipData):
         return np.asarray(self._owner.keyed)[self._rows()]
 
     def at(self, frame) -> HierarchyData:
-        """the pose of the nodes viewed at frame number ``frame``, a
-        HierarchyData of its own (:meth:`ClipData.at`)"""
-        return self._owned_copy().at(frame)
+        """the pose of the nodes viewed at frame number ``frame``, live: a
+        view of the clip's pose of that frame (:meth:`ClipData.at`)"""
+        self._rows()
+        pose = self._owner.at(frame)
+        mine = {id(node.__dict__.get("_source")): node for node in pose.list}
+        return pose._view([mine[id(node)] for node in self.list])
 
     def _owned_copy(self) -> ClipData:
         """a clip of the nodes viewed that owns them, every frame, in the

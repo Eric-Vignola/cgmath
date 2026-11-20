@@ -155,6 +155,8 @@ class TestInheritedRoutes(unittest.TestCase):
         ("HierarchyData", "save_fbx"),
         # a view of a hierarchy is written as a list built by hand is: its copy
         ("_HierarchyView", "save_fbx"),
+        # and so is the pose of one frame of a clip
+        ("_FramePose", "save_fbx"),
     }
 
     def test_every_inherited_asset_route_fits_or_is_refused(self):

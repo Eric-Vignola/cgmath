@@ -237,6 +237,19 @@ def clip_view() -> ClipData:
     return view
 
 
+def frame_pose() -> HierarchyData:
+    """one frame of the clip, live: a view of the clip's pose of that frame"""
+    clip = clip_data()
+    pose = clip.at(1002)
+    assert pose.is_view and pose.owner is clip and isinstance(pose, HierarchyData)
+    return pose
+
+
+def frame_node() -> TransformData:
+    """a node of that pose: the clip's node on that frame"""
+    return frame_pose()["VLR:root"]
+
+
 def clip_data() -> ClipData:
     """the rig over four frames from 1001 at 30 fps, every framed channel
     moving, frame 2 loaded"""
@@ -294,3 +307,10 @@ SAVES_AS = {
 }
 SAVES_AS[type(hierarchy_view())] = lambda view: view.copy()
 SAVES_AS[type(clip_view())]      = lambda view: view.copy()
+
+# the pose of one frame of a clip and a node of it are views too, of the
+# frame: each saves as its copy, a HierarchyData and a TransformData
+EXAMPLES[type(frame_pose())] = frame_pose
+EXAMPLES[type(frame_node())] = frame_node
+SAVES_AS[type(frame_pose())] = lambda pose: pose.copy()
+SAVES_AS[type(frame_node())] = lambda node: node.copy()
