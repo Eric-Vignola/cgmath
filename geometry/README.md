@@ -633,7 +633,7 @@ pkl keep everything.
 | `UVData.load` / `load_obj` / `load_glb` / `load_fbx` / `load_usd` | one `UVData`; no obj writer (its points are 2D) |
 | `skin_weights.load` / `load_fbx` / `load_glb`, `SkinList.load_*` | a `SkinList`, each skin naming its mesh by uuid (an fbx's named as its deformer is, a glb's after its primitive) |
 | `SkinData.load_fbx` / `load_glb` | one `SkinData`, the first or its mesh's `name=` |
-| `cgmath.hierarchy.load` / `load_fbx` / `load_glb` | a `HierarchyData` from fbx and glb; a cgmath file gives whatever hierarchy it holds (a `ClipData` stays a clip) |
+| `cgmath.hierarchy.load` / `load_fbx` / `load_glb` | a `HierarchyData` from fbx, glb or a cgmath file; a saved clip is loaded with `ClipData.load` |
 | `from_prim` / `to_prim` on `MeshData`, `UVData`, `MapData`, `GeomSubsetData`, `MorphData`, `CompactSkinData` | USD |
 
 OBJ is pure python and always available. `cgmath.render.Scene.load_obj` reads

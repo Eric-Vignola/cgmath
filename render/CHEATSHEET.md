@@ -273,8 +273,8 @@ from cgmath.render import Renderable
 item = scene.renderables()[0]                # one Renderable per mesh
 print(isinstance(item, Renderable), item.name)
 print(item.mesh is mesh, item.node is hero_node, len(item.uvs), item.skin, len(item.joints), len(item.materials), len(item.morphs))
-print(item.uvs.mesh_uuid == mesh.uuid, item.materials.mesh_uuid == mesh.uuid, item.morphs.mesh_uuid == mesh.uuid)   # lists of that mesh alone
-print(scene.renderable("hero") is not item, scene.renderable("hero").mesh is mesh)   # by the mesh's or the node's name; a new view each call
+print(item.uvs.mesh_uuid == mesh.uuid, item.materials.mesh_uuid == mesh.uuid, item.morphs.mesh_uuid == mesh.uuid)  # lists of that mesh alone
+print(scene.renderable("hero") is not item, scene.renderable("hero").mesh is mesh)                                 # by the mesh's or the node's name; a new view each call
 ```
 
 A second build of the scene in Maya beside the first needs uuids of its own:
@@ -739,10 +739,10 @@ rigged.add(MorphData("puff", [[0.0, 0.0, 0.5]] * 4, [4, 5, 6, 7], mesh_uuid=body
 at_bind = rigged.placed_meshes()[0][0]
 print(np.round(at_bind.points[4:, 2], 2))    # the morph at half weight: 0.75
 
-clip                      = ClipData(rigged.hierarchy, frames=3, fps=24.0)
-clip.frames["tip"].rotate = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 45.0], [0.0, 0.0, 90.0]])
-rigged.clip               = clip
-posed                     = rigged.placed_meshes(clip.start_frame + 2)[0][0]  # frame 2: the top bent 90 degrees
+clip               = ClipData(rigged.hierarchy, frames=3, fps=24.0)
+clip["tip"].rotate = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 45.0], [0.0, 0.0, 90.0]])
+rigged.clip        = clip
+posed              = rigged.placed_meshes(clip.start_frame + 2)[0][0]  # frame 2: the top bent 90 degrees
 print(np.round(posed.points[2], 2), np.round(body.points[2], 2))   # moved; the mesh itself stays
 ```
 

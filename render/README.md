@@ -354,7 +354,7 @@ Scene.load_fbx("hero.fbx").save_fbx("copy.fbx")  # the fields, not the render se
 
 ```python
 hero_shot.camera()         # (CameraData, its node's uuid): named, default, or first
-hero_shot.pose()           # the nodes a render places by: the hierarchy, or the active take's frame
+hero_shot.pose()           # the nodes a render places by: the hierarchy, or the pose of the active take's first frame
 hero_shot.renderables()    # [Renderable]: each mesh with its node, UV sets, skin, joints, materials, targets
 hero_shot.placed_meshes()  # [(mesh, world)] of every shown mesh; a skinned one deformed, in world space
 hero_shot.union_aabb()     # world-space AABB across the shown meshes
@@ -653,8 +653,8 @@ from cgmath.hierarchy import ClipData
 walk = Scene.load_fbx("hero.fbx")             # the bind pose, the skins and the file's takes
 walk.animate("walk.mp4")                      # the active take; fit="auto" keeps the character in frame
 
-clip                        = ClipData(walk.hierarchy, frames=48, fps=24.0)
-clip.frames["spine"].rotate = np.column_stack([np.zeros(48), np.zeros(48), np.linspace(0, 30, 48)])
+clip                 = ClipData(walk.hierarchy, frames=48, fps=24.0)
+clip["spine"].rotate = np.column_stack([np.zeros(48), np.zeros(48), np.linspace(0, 30, 48)])
 walk.animate("bend.{frame:04d}.png", clip=clip)   # a clip of your own over the scene's nodes
 ```
 

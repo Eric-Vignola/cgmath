@@ -221,22 +221,48 @@ Full surface: [`hierarchy/CHEATSHEET.md`](hierarchy/CHEATSHEET.md).
 
 ## 4. Animate it as a clip
 
-A `ClipData` is a `HierarchyData` holding `F` poses. `clip.frames` writes
-whole channels at once; `clip.frame = n` scrubs the nodes to one pose.
+A `ClipData` is a rig over `F` frames: one table of values, nodes by
+frames, with no current frame. A write on the clip or on one of its nodes
+covers every frame; `clip.frames[i]` is the pose of frame `i`, a live
+`HierarchyData`.
 
 ```python
-clip                         = ClipData(rig, frames=8, start_frame=1001, fps=24.0)
-clip.frames["knee"].rotate_z = np.linspace(0.0, 90.0, 8).reshape(8, 1)
+clip                  = ClipData(rig, frames=8, start_frame=1001, fps=24.0)
+clip["knee"].rotate_z = np.linspace(0.0, 90.0, 8)
 
-print(clip.frames.world_matrix.shape)      # (8, 3, 4, 4) -- every frame, batched
-clip.frame = 4                             # scrub; the nodes now hold frame index 4
-print(round(float(clip["knee"].rotate_z), 4))
+print(clip.world_matrix.shape)      # (8, 3, 4, 4) -- every frame, batched
+print(clip["knee"].rotate_z.shape)  # (8,) -- one node, every frame
+pose = clip.frames[4]                      # the pose of frame index 4, live
+print(round(float(pose["knee"].rotate_z), 4))
 print(clip.frame_count, clip.start_frame, clip.end_frame, clip.fps)
 ```
 
-`clip.frame` is a **0-based index** into the block, not a timeline frame
-number — `start_frame` / `end_frame` / `fps` are the timebase metadata
-that rides alongside it.
+`clip[...]` picks nodes and `clip.frames[...]` picks frames. Every pick is
+a view: a write through it lands in the clip.
+
+| You hold | It is | `translate` reads |
+|---|---|---|
+| `clip` | `ClipData` | `(F, N, 3)` |
+| `clip[1:3]`, `clip.match("*e*")` | `ClipData`, a view: those nodes, every frame | `(F, n, 3)` |
+| `clip["knee"]` | that node on every frame | `(F, 3)` |
+| `clip.frames[2:5]` | `ClipData`, a view: every node, those frames | `(f, N, 3)` |
+| `clip.frames[4]`, `clip.at(1005)` | `HierarchyData`, a view: the pose of that frame, live | `(N, 3)` |
+| `clip.frames[4]["knee"]` | `TransformData`: one node on one frame, live | `(3,)` |
+
+A write through the pose of a frame lands on that frame alone, and two
+frames can be held at once.
+
+```python
+a, b = clip.frames[1], clip.frames[4]
+b["hip"].translate_y = 12.0
+print(a["hip"].translate_y, b["hip"].translate_y)  # 10.0 12.0
+print(clip["hip"].translate_y)                     # [10. 10. 10. 10. 12. 10. 10. 10.]
+```
+
+`clip.frames[i]` takes a **0-based index** into the block, not a timeline
+frame number; `clip.at(n)` takes the frame number. `start_frame` /
+`end_frame` / `fps` are the timebase metadata that rides alongside the
+block.
 
 ---
 

@@ -831,20 +831,20 @@ print(np.allclose(deformer.points, sequence[-1]))
 ```
 
 Every frame goes through one kernel call, never one call per frame. A
-`ClipData` skins straight from its channel blocks: the clip itself is the
-frame it is on, and `clip.frames` is every frame at once.
+`ClipData` skins straight from its channel blocks: the clip is every frame
+at once, and `clip.frames[i]` is the pose of one frame.
 
 ```python
 from cgmath.hierarchy import ClipData
 
-clip                        = ClipData(bind_rig, frames=4)
-clip.frames["tip"].rotate_z = [0.0, 15.0, 30.0, 45.0]
+clip                 = ClipData(bind_rig, frames=4)
+clip["tip"].rotate_z = [0.0, 15.0, 30.0, 45.0]
 
-every = deformer.apply(clip.frames)         # (4, 25, 3), one call
+every = deformer.apply(clip)                # (4, 25, 3), one call
 print(np.allclose(every, sequence))
 
-clip.frame = 2
-print(np.allclose(deformer.apply(clip), sequence[2]))
+one = deformer.apply(clip.frames[2])        # (25, 3), the pose of frame 2
+print(np.allclose(one, sequence[2]))
 ```
 
 A batched pose cannot fill a single mesh:

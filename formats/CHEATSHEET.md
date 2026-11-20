@@ -686,8 +686,8 @@ with `hierarchy` None and the nodes in `clip` (`takes=False` reads the
 nodes at their own values instead, the take left unread):
 
 ```python
-clip                      = ClipData(rig, frames=3, fps=24.0, take="spin")
-clip.frames["grp"].rotate = np.array([[0.0, 0.0, 0.0], [0.0, 45.0, 0.0], [0.0, 90.0, 0.0]])
+clip               = ClipData(rig, frames=3, fps=24.0, take="spin")
+clip["grp"].rotate = np.array([[0.0, 0.0, 0.0], [0.0, 45.0, 0.0], [0.0, 90.0, 0.0]])
 save_fbx(os.path.join(WORK, "spin.fbx"), clip=clip)
 
 back = load_fbx(os.path.join(WORK, "spin.fbx"))

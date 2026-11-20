@@ -433,8 +433,8 @@ print(MeshList.DATA_LIST_CLASS.__name__, MeshList.UNIQUE_LIST)
 
 `DataList` saves and loads exactly like `Data`. Its tree is `"__items__"`
 (one tree per item, each loaded as the list's item class) and the class's
-own `LIST_FIELDS`, named by the same rule (a `ClipData` saves `_start_frame`
-as `start_frame`).
+own `LIST_FIELDS`, named by the same rule (a `ClipList` saves `_active` as
+`active`).
 
 ```python
 path = meshes.save(os.path.join(tmp, "meshes.npz"))

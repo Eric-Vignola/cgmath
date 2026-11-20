@@ -25,16 +25,16 @@ overview see [`README.md`](README.md); for the rest of the library see
 | [Parenting: `parent_uuid`](#parenting-parent_uuid) | the parent's uuid, `parent_name`, `set_parent` by name, joining a rig, older files |
 | [Node queries](#node-queries) | parent / children / branch / root / index |
 | [Node edits](#node-edits) | `set_parent`, `match_*`, `swapaxes`, orient helpers, node type, prefix / suffix, namespaces, user attributes |
-| [Views and `TransformList`](#views-and-transformlist) | slicing, fancy indexing, `match`: a selection is a view of its owner's class |
+| [Views and `TransformList`](#views-and-transformlist) | slicing, fancy indexing, `match`: a pick is a view, of a hierarchy, of a clip's nodes or frames, of one frame's pose |
 | [Vectorized channels](#vectorized-channels) | read / write a whole selection |
 | [Vectorized queries and edits](#vectorized-queries-and-edits) | the list forms of every node method |
 | [`HierarchyData` — ownership](#hierarchydata--ownership) | `append` / `insert` / `pop` / `extend` |
 | [Pose algebra](#pose-algebra) | `get_delta` / `add_delta`, `-` / `+` |
 | [`ClipData` — construction](#clipdata--construction) | frames, timebase |
-| [Scrubbing](#scrubbing) | `clip.frame`, the nodes as a playback head |
-| [The frame axis](#the-frame-axis) | `clip.frames` blocks, components, scoping, cuts, pastes |
-| [Batched evaluation](#batched-evaluation) | `frames.matrix`, `frames.world_matrix`, the factor matrices, `parent_matrix`, `to_attributes()` |
-| [Solving every frame](#solving-every-frame) | `frames.world_matrix =`, `frames.matrix =`, `frames.quaternion`, `frames.match_*` |
+| [Frames as poses](#frames-as-poses) | `clip.frames[i]`, the live pose of one frame; two frames held at once |
+| [The frame axis](#the-frame-axis) | nodes by frames: blocks, components, scoping, cuts, pastes |
+| [Batched evaluation](#batched-evaluation) | `clip.matrix`, `clip.world_matrix`, the factor matrices, `parent_matrix`, `to_attributes()` |
+| [Solving every frame](#solving-every-frame) | `clip.world_matrix =`, `clip.matrix =`, `clip.quaternion`, `clip.match_*` |
 | [Clip deltas](#clip-deltas) | retargeting a whole clip |
 | [`ClipList` — takes](#cliplist--takes) | a file's takes, one clip each, over one skeleton, one of them active |
 | [Rig edits on a clip](#rig-edits-on-a-clip) | every frame at once, the curves filtered |
@@ -245,10 +245,10 @@ pair.set_rotate_order(["zyx", 4])           # one per node: zyx, yxz
 pair.rotate_axes                            # ['zyx', 'yxz']
 assert np.allclose(pair.world_matrix, before)
 
-turn                 = ClipData(make_chain(("a",)), frames=36)
-turn.frames.rotate_x = np.linspace(0.0, 350.0, 36).reshape(36, 1)
+turn          = ClipData(make_chain(("a",)), frames=36)
+turn.rotate_x = np.linspace(0.0, 350.0, 36).reshape(36, 1)
 turn.set_rotate_order("yzx")
-turn.frames.rotate[[17, 18, 35], 0, 0].tolist()
+turn.rotate[[17, 18, 35], 0, 0].tolist()
 # [170.0, 180.0, 350.0] -- frame by frame, 180 and 350 would read -180 and -10
 ```
 
@@ -344,9 +344,9 @@ The four last are true inverses, `np.linalg.inv`, as Maya's are: a
 non-uniform scale under a rotation shears a matrix, which
 `transforms.matrix_inverse`, an inverse for a scale times a rotation, gets
 wrong. A list or a rig reads them for every node at once, each owning rig
-evaluated once and every node inverted in one call, and `clip.frames` for
+evaluated once and every node inverted in one call, and a clip for
 every frame in one call. A zero scale leaves no inverse:
-`numpy.linalg.LinAlgError` names the node, and on `clip.frames` the frame.
+`numpy.linalg.LinAlgError` names the node, and on a clip the frame.
 Maya holds a zero scale at 1e-12 and inverts that, into numbers of 1e12.
 
 ```python
@@ -444,8 +444,8 @@ Each channel and matrix also answers to the short name Maya gives it:
 `node.tx` is `node.translate_x`, `rig.wm` is `rig.world_matrix`. A short
 name is a property that reads and writes its long name itself, so it
 converts and raises as the long name does, takes one value or one per node
-on a list, writes a clip's bound frame on a clip and every frame on
-`clip.frames`. They are Maya 2025's, as
+on a list, and reads and writes every frame on a clip. They are Maya
+2025's, as
 `cmds.attributeQuery(<long>, node=<joint>, shortName=True)` gives them;
 `inverseScale`'s, `is`, is a Python keyword, so it has none. A file keeps
 the long names: a short name is never saved.
@@ -467,9 +467,10 @@ try:
 except ValueError as error:
     print(error)                            # TransformData.translate must have shape (3,), got (2,)
 
-steps           = ClipData(leg, frames=3)
-steps.frames.rz = np.linspace(0.0, 90.0, 3).reshape(3, 1)   # every frame, as frames.rotate_z
-steps.frames.wim.shape                      # (3, 2, 4, 4)
+steps    = ClipData(leg, frames=3)
+steps.rz = np.linspace(0.0, 90.0, 3).reshape(3, 1)   # every frame, as steps.rotate_z
+steps.wim.shape                             # (3, 2, 4, 4)
+steps.frames[1]["knee"].rz                  # 45.0 -- one node on one frame
 ```
 
 | Short | Long | Maya's long name | Writes |
@@ -492,10 +493,11 @@ steps.frames.wim.shape                      # (3, 2, 4, 4)
 | `wim` | `world_inverse_matrix` | `worldInverseMatrix` | read only |
 | `pim` | `parent_inverse_matrix` | `parentInverseMatrix` | read only |
 
-Every one is on a node, a list, a rig and a clip. `clip.frames` has those
-of what it has, the framed channels and the matrices, but not `ro`, `ssc`,
-`v`, `radi` or `ds`: every frame shares those, and reading or writing one
-there raises as its long name does. On an `SDFSphere` or `SDFCylinder`,
+Every one is on a node, a list, a rig and a clip. On a clip the framed
+channels, the matrices and `v` read one value a frame, and `ro`, `ssc`,
+`radi` and `ds` what every frame shares, one value a node: written through
+the pose of one frame, `clip.frames[i]`, each of those four raises as its
+long name does. On an `SDFSphere` or `SDFCylinder`,
 `radi` is the primitive's `radius`, as it is the class's.
 
 `add_user_attribute` refuses every short name, and the four new matrices'
@@ -918,9 +920,8 @@ and meshes read from the same file.
 
 `cgmath.hierarchy.load` / `load_fbx` / `load_glb` read a file's hierarchy
 (names as in the file), like the other modules' loaders. An fbx or glb
-gives a `HierarchyData`; a cgmath file gives whatever hierarchy it holds,
-so a saved clip comes back a `ClipData`, where `HierarchyData.load`
-refuses one.
+gives a `HierarchyData`, and so does a cgmath file, whatever class saved
+it: a saved clip is loaded with `ClipData.load`.
 
 ### User attributes
 
@@ -955,14 +956,25 @@ file that carries one.
 
 ## Views and `TransformList`
 
-A selection is a **view**: an object of the class it is taken from, a
-`HierarchyData` of a hierarchy and a `ClipData` of a clip, holding the
-very nodes its owner holds. Slicing, fancy indexing, `match()` and the
-query methods all return one. `view.is_view` is True and `view.owner` is
-the hierarchy or clip; a write to a view reaches the owner, and the nodes
-inside still point at their real hierarchy, so `get_parent`,
-`world_matrix` and `index` keep answering about the whole rig. A view of
-a view views the owner.
+A selection is a **view**: it holds no value of its own, and a write to
+it reaches its owner. Slicing, fancy indexing, `match()` and the query
+methods all return one. `view.is_view` is True and `view.owner` is the
+hierarchy or clip it is taken from.
+
+| Pick | It is |
+|---|---|
+| `rig[1:]`, `rig[[0, 2]]`, a mask, `rig.match("*n*")` | a `HierarchyData` view: those nodes |
+| `rig[0]`, `rig["hip"]` | the `TransformData` itself |
+| `clip[1:]`, `clip[["hip", "knee"]]`, `clip.match("k*")` | a `ClipData` view: those nodes, every frame |
+| `clip.frames[2:5]` | a `ClipData` view: every node, those frames |
+| `clip.frames[2]`, `clip.at(n)` | a `HierarchyData` view: the pose of one frame, live |
+| `clip["hip"]`, `clip[0]` | that node on every frame, a view too, not a `TransformData` |
+| `clip.frames[2]["hip"]`, `clip["hip"].frames[2]` | a `TransformData`: one node on one frame, live |
+
+A view of a hierarchy holds the very nodes its owner holds, and they
+still point at their real hierarchy, so `get_parent`, `world_matrix` and
+`index` keep answering about the whole rig. A view of a view views the
+owner.
 
 ```python
 rig = make_chain(("root", "hip", "knee", "ankle"))
@@ -982,9 +994,40 @@ assert view.name == ["hip", "knee", "ankle"]
 assert view[0].get_parent().name == "root"   # still resolves against the rig
 ```
 
+A clip is picked along two axes: `clip[...]` picks nodes and
+`clip.frames[...]` picks frames. A pick of several nodes, or of several
+frames, is a `ClipData` view. One frame is its pose, a `HierarchyData`
+view that stays live: a channel read through it is that frame's value,
+and a write through it lands in the clip, on that frame alone. One node
+is that node on every frame: a view of the clip, not a `TransformData`.
+A pick of the nodes of a frame's pose is a view of that pose.
+
+```python
+clip = ClipData(rig, frames=5)
+
+legs = clip[1:]                              # a ClipData view: three nodes, every frame
+assert isinstance(legs, ClipData) and legs.is_view and legs.owner is clip
+legs.translate.shape                         # (5, 3, 3)
+span = clip.frames[0:2]                      # a ClipData view: every node, two frames
+assert isinstance(span, ClipData) and span.is_view and span.owner is clip
+span.translate.shape                         # (2, 4, 3)
+pose = clip.frames[2]                        # a HierarchyData view: the pose of frame 2, live
+assert isinstance(pose, HierarchyData) and pose.is_view and pose.owner is clip
+pose.translate.shape                         # (4, 3)
+hip = clip["hip"]                            # one node on every frame
+assert hip.is_view and hip.owner is clip and not isinstance(hip, TransformData)
+hip.translate.shape                          # (5, 3)
+
+pose["hip"].translate_x = 5.0                # a write through a view lands in the clip, on frame 2
+assert hip.translate_x.tolist() == [0.0, 0.0, 5.0, 0.0, 0.0]
+```
+
 A `TransformList` is the list you build by hand, of any nodes: of one
 rig, of two, or of none. It claims nothing and is a view of nothing
 (`is_view` False, `owner` None); a selection of one is a `TransformList`.
+It holds `TransformData` nodes, a rig's or those of a frame's pose. One
+node of a clip, `clip["hip"]`, is not one: several are picked on the
+clip, `clip[["hip", "ankle"]]`.
 
 ```python
 picked = TransformList([rig["hip"], rig["ankle"]])
@@ -993,12 +1036,15 @@ assert picked[0].index == 1                  # index is still the rig's
 assert type(picked[0:1]) is TransformList and not picked.is_view
 ```
 
-`copy()` on a view returns an object of its class that owns its nodes, a
-`HierarchyData` here, with parent references that pointed outside the
-selection cleared. Saving, pickling or deep-copying a view gives the same.
-A view holds its nodes as a list built by hand does: appending a node to
-it, or popping one, changes the selection and never the owner. An object
-two of its nodes hold, a mesh two Objects instance, stays one object.
+`copy()` detaches. On a view it returns an object that owns what it
+holds: a `HierarchyData` of a hierarchy's view or of a frame's pose, a
+`ClipData` of a clip's view, with every frame the view covers. Parent
+references that pointed outside the selection are cleared. Saving,
+pickling or deep-copying a view gives the same. A view of nodes holds
+them as a list built by hand does: appending a node to it, or popping
+one, changes the selection and never the owner; the pose of a frame
+refuses both. An object two of its nodes hold, a mesh two Objects
+instance, stays one object.
 
 ```python
 detached = rig[1:].copy()
@@ -1007,6 +1053,14 @@ assert detached[0].get_parent() is None      # 'root' was left behind
 
 saved = HierarchyData.load(rig[1:].save(os.path.join(WORKDIR, "view.json")))
 assert type(saved) is HierarchyData and saved[0].get_parent() is None
+
+own = clip.frames[2].copy()                  # a HierarchyData of its own
+assert type(own) is HierarchyData and not own.is_view and own.owner is None
+own["hip"].translate_x = 9.0                 # the clip is left alone
+assert clip.frames[2]["hip"].translate_x == 5.0
+cut = clip[1:].copy()                        # a ClipData of its own: three nodes, five frames
+assert type(cut) is ClipData and not cut.is_view and cut.frame_count == 5
+assert cut["hip"].get_parent() is None       # 'root' was left behind
 ```
 
 ---
@@ -1303,7 +1357,9 @@ for args, kwargs in (((make_chain(("x",)),), {}),                  # length
 
 ## `ClipData` — construction
 
-A `ClipData` is a `HierarchyData` holding `F` poses. It **copies** the
+A `ClipData` is a rig over `F` frames: one table of values, nodes by
+frames. It is not a `HierarchyData`: a clip is not a pose, and it has no
+current frame. A member read on it covers every frame. It **copies** the
 rig it is built from, so the caller's rig is left alone.
 
 ```python
@@ -1314,17 +1370,20 @@ clip.frame_count            # 5
 clip.start_frame            # 1001
 clip.end_frame              # 1005  (start_frame + frame_count - 1)
 clip.fps                    # 30.0
-clip.frame                  # 0     -- the loaded frame
-len(clip)                   # 3     -- nodes
+len(clip)         # 3     -- nodes
+len(clip.frames)  # 5     -- frames
+clip.translate.shape        # (5, 3, 3) -- every frame
 assert len(rig) == 3        # the source rig is untouched
+assert not isinstance(clip, HierarchyData)
 ```
 
 Every frame starts on the rest pose. Without `frames=` the clip holds no
-animation at all (`frame_count == 0`) and behaves like a hierarchy.
+frame (`frame_count == 0`): its names and parenting read, and a channel
+read raises `ValueError`.
 
 ```python
 empty = ClipData(rig)
-assert empty.frame_count == 0
+assert empty.frame_count == 0 and empty.name == ["root", "hip", "knee"]
 ```
 
 From a sequence of poses:
@@ -1338,8 +1397,12 @@ for i in range(3):
 
 built = ClipData.from_poses(poses, start_frame=0, fps=24.0)
 assert built.frame_count == 3
-assert np.allclose(built.frames.rotate[:, 0, 0], [0.0, 10.0, 20.0])
+assert np.allclose(built.rotate[:, 0, 0], [0.0, 10.0, 20.0])
 ```
+
+A clip is built from one pose. One frame of another clip is a pose,
+`ClipData(other.frames[i], frames=n)`; a clip given whole raises
+`TypeError`, and `other.copy()` copies one.
 
 `start_frame` and `fps` are writable; `end_frame` and `frame_count`
 follow the blocks.
@@ -1352,44 +1415,69 @@ assert built.end_frame == 102
 
 ---
 
-## Scrubbing
+## Frames as poses
 
-The nodes *are* the playback head. Each framed channel is bound to one
-row of a dense `(F, N, 3)` block, so reading a channel reads the current
-frame and writing one writes it — no copy, nothing to flush.
+`clip.frames[i]` is the pose of frame `i`: a `HierarchyData` that is a
+view of the clip, live. Each framed channel is one dense `(F, N, 3)`
+block and the pose reads and writes row `i` of it, so a channel read
+through the pose is that frame's value and a write lands on that frame
+alone — no copy, nothing to flush. Two frames can be held at once.
 
 ```python
 clip = ClipData(make_chain(), frames=4)
 
-clip.frame     = 2
-clip.translate = np.full((3, 3), 7.0)          # writes frame 2 only
-assert np.allclose(clip.frames.translate[2], 7.0)
-assert not np.allclose(clip.frames.translate[0], 7.0)
+pose = clip.frames[2]                          # the pose of frame 2
+assert isinstance(pose, HierarchyData) and pose.is_view and pose.owner is clip
+pose.translate.shape                           # (3, 3)
+pose.translate = np.full((3, 3), 7.0)          # writes frame 2 only
+assert np.allclose(clip.translate[2], 7.0)
+assert not np.allclose(clip.translate[0], 7.0)
 
-clip.frame = -1                                # negative indexes from the end
-assert clip.frame == 3
+last                  = clip.frames[-1]  # negative indexes from the end
+last["knee"].rotate_z = 45.0             # per-node write, frame 3
+assert clip["knee"].rotate_z.tolist() == [0.0, 0.0, 0.0, 45.0]
+assert np.allclose(pose.translate, 7.0)        # frame 2, still held
+```
 
-clip["knee"].rotate_z = 45.0                   # per-node write, current frame
-assert np.allclose(clip.frames.rotate[3, 2, 2], 45.0)
+`clip.at(n)` is the same pose by frame number, clamped to the clip, and
+iterating `clip.frames` gives each pose in turn. `copy()` gives a
+`HierarchyData` that owns its nodes.
+
+```python
+clip.start_frame = 1001
+assert np.allclose(clip.at(1003).translate, 7.0)       # frame number 1003 is frame 2
+assert clip.at(5000)["knee"].rotate_z == 45.0          # past the end: the last frame
+
+for pose in clip.frames:                       # each pose in turn
+    pose["root"].translate_x = 1.0
+assert clip["root"].translate_x.tolist() == [1.0, 1.0, 1.0, 1.0]
 ```
 
 Framed channels: `scale`, `rotate`, `translate`, `rotate_axis`,
-`joint_orient`, `shear` (`ClipData.FRAMED_CHANNELS`). Everything else —
-names, uuids, parenting, `rotate_order`, `segment_scale_compensate`,
-`radius`, `draw_style` — is structural and shared by every frame.
+`joint_orient`, `shear` (`ClipData.FRAMED_CHANNELS`); `visibility` is
+held frame by frame too. Everything else — names, uuids, parenting,
+`rotate_order`, `segment_scale_compensate`, `radius`, `draw_style` — is
+structural and shared by every frame. It is read and set on the clip, a
+pick of its nodes or one node, and a pose held follows. Set through the
+pose of one frame it raises, naming the clip.
 
 ```python
-clip.frame                = 0
+pose                      = clip.frames[0]
 clip["knee"].rotate_order = 3
-clip.frame                = 2
-assert clip["knee"].rotate_order == 3          # structural, not keyed
+assert pose["knee"].rotate_order == 3          # structural, not keyed: the pose held follows
+
+try:
+    pose["knee"].rotate_order = 2
+except AttributeError as error:
+    print(error)                               # rotate_order changes what every frame of a clip shares: ...
 ```
 
-Out-of-range frames raise.
+Out-of-range frames raise, and so does `clip.frame`: a clip has no
+current frame.
 
 ```python
 try:
-    clip.frame = 99
+    clip.frames[99]
 except IndexError as error:
     print(error)                               # frame 99 out of range for 4 frames
 ```
@@ -1398,127 +1486,162 @@ except IndexError as error:
 
 ## The frame axis
 
-`clip.frames` is the frame-addressed face of the clip.
+A clip has two axes. `clip[...]` picks nodes and `clip.frames[...]` picks
+frames, an index or a slice, and the two combine in either order. Picking
+several keeps the class; picking one drops that axis. A member read on
+the clip, or on a pick of it, covers every frame it holds.
+
+| You hold | It is | `translate` reads |
+|---|---|---|
+| `clip` | `ClipData` | `(F, N, 3)` |
+| `clip[1:3]`, `clip[[0, 2]]`, `clip[["a", "b"]]`, `clip.match("L_*")` | `ClipData`, a view: those nodes, every frame | `(F, n, 3)` |
+| `clip["hips"]`, `clip[0]` | one node on every frame, not a `TransformData` | `(F, 3)` |
+| `clip.frames[10:20]` | `ClipData`, a view: every node, those 10 frames | `(10, N, 3)` |
+| `clip.frames[12]` | `HierarchyData`, a view: the pose of frame 12, live | `(N, 3)` |
+| `clip.at(1013)` | the same, by frame number, clamped to the clip | `(N, 3)` |
+| `clip.frames[12]["hips"]`, `clip["hips"].frames[12]` | `TransformData`: one node on one frame, live | `(3,)` |
 
 | Expression | Result |
 |---|---|
-| `clip.frames.translate` | `(F, N, 3)` block, **read only** |
-| `clip.frames.translate = values` | write the whole block |
-| `clip.frames.translate_y` | `(F, N)` one component, a copy |
-| `clip.frames[12]` | scrubs to 12 and returns the clip itself |
+| `clip.translate` | `(F, N, 3)` block, **read only** |
+| `clip.translate = values` | write the whole block |
+| `clip.translate_y` | `(F, N)` one component, a copy |
+| `clip.rotate_order`, `clip.name` | what every frame shares, one value a node |
 | `clip.frames[12] = pose` | writes one pose |
-| `clip.frames[10:20]` | a new 10-frame clip cut out of the range (always a copy) |
 | `clip.frames[10:20] = other` | pastes a clip or a pose into the range |
-| `clip.frames["hips"]` | an axis scoped to one node, all frames |
-| `clip.frames[["a", "b"]]` | scoped to several nodes (names or indices) |
-| `clip.frames.match("L_*")` | scoped by fnmatch, all frames |
-| `clip.frames.times` | `(F,)` seconds, `(start_frame + i) / fps` |
-| `len(clip.frames)` | `F` |
-| `iter(clip.frames)` | scrubs frame by frame, yielding the clip |
-| `clip.frames.rotate_order = 0` | raises `AttributeError`: the axis writes only what it defines, and a value every frame shares is set on the clip |
+| `clip.frames[10:20].copy()` | a 10-frame clip of its own, cut out of the range |
+| `clip.times` | `(F,)` seconds, `(start_frame + i) / fps` |
+| `len(clip)`, `len(clip.frames)` | `N`, `F` |
+| `iter(clip)` | each node on every frame |
+| `iter(clip.frames)` | each frame's pose in turn |
+| `clip.frames.translate` | `clip.translate`: a member read or written on `clip.frames` is the clip's own |
+| `clip.frames["hips"]`, `clip.frames[["a", "b"]]`, `clip.frames.match("L_*")` | raise `TypeError`: nodes are picked on the clip, `clip["hips"]`, `clip[["a", "b"]]`, `clip.match("L_*")` |
+| `clip.frame` | raises `AttributeError`: a clip has no current frame |
 
 ### Whole blocks
 
 ```python
 clip = ClipData(make_chain(), frames=6, start_frame=0, fps=24.0)
 
-clip.frames.translate.shape                     # (6, 3, 3)
-clip.frames.scale     = 2.0                         # broadcast
-clip.frames.translate = np.arange(6 * 3 * 3, dtype=float).reshape(6, 3, 3)
-assert np.allclose(clip.frames.translate[5, 2], [51.0, 52.0, 53.0])
-assert np.allclose(clip.frames.times, np.arange(6) / 24.0)
+clip.translate.shape                            # (6, 3, 3)
+clip.scale     = 2.0                            # broadcast
+clip.translate = np.arange(6 * 3 * 3, dtype=float).reshape(6, 3, 3)
+assert np.allclose(clip.translate[5, 2], [51.0, 52.0, 53.0])
+assert np.allclose(clip.times, np.arange(6) / 24.0)
+assert np.array_equal(clip.frames.translate, clip.translate)   # clip.frames reads the clip's own
 ```
 
 Block reads are read-only views, so `+=` on one raises. Take a copy, or
 go through a component accessor (which returns a copy).
 
 ```python
-block = np.array(clip.frames.rotate)            # copy
+block = np.array(clip.rotate)                   # copy
 block[:, 0, 1] += 5.0
-clip.frames.rotate = block                      # write it back
+clip.rotate = block                             # write it back
 
-clip.frames.rotate_y += 5.0                     # components work in place
+clip.rotate_y += 5.0                            # components work in place
 ```
 
 ### Components
 
 Each framed channel has `_x`, `_y`, `_z`, shear `_xy`, `_xz`, `_yz`,
 shaped `(F, N)`. A read is a copy, a new array every time: `+=` works on
-it whatever the clip and the scope, one frame of one node included, and
+it whatever the clip and the pick, one frame of one node included, and
 writing into it changes nothing until it is assigned back.
 
 ```python
-clip.frames.translate_y.shape                   # (6, 3)
-clip.frames.translate_y = np.zeros((6, 3))
-assert np.allclose(clip.frames.translate[..., 1], 0.0)
+clip.translate_y.shape                          # (6, 3)
+clip.translate_y = np.zeros((6, 3))
+assert np.allclose(clip.translate[..., 1], 0.0)
 
 one = ClipData(make_chain(), frames=1)
-one.frames["knee"].rotate_y += 5.0              # one frame of one node
-assert one["knee"].rotate_y == 5.0
+one["knee"].rotate_y += 5.0                     # one frame of one node
+assert one["knee"].rotate_y.tolist() == [5.0]   # (1,): one value a frame
 ```
 
 ### Scoping to nodes
 
-A scoped axis addresses channels across **every** frame at once. The axis
-of one node has no node axis: a channel reads as the rows it holds, `(1, 3)`
-while no key moves it, `(F, 3)` once one does, a component `(1,)` or `(F,)`;
-the evaluated values read one a frame, `world_matrix`, `matrix` and
-`parent_matrix` `(F, 4, 4)`, `quaternion` `(F, 4)`, `visibility` `(F,)`. A
-selection of nodes keeps the node axis.
+A node is picked on the clip, and the pick covers **every** frame at
+once. One node has no node axis: a channel reads one row a frame,
+`(F, 3)`, whether or not a key moves it, a component `(F,)`; the
+evaluated values read one a frame, `world_matrix`, `matrix` and
+`parent_matrix` `(F, 4, 4)`, `quaternion` `(F, 4)`, `visibility` `(F,)`.
+A write takes one value for every frame or one a frame. A pick of
+several nodes keeps the node axis. `clip["knee"].keyed` tells an
+animated node from a constant one, and `clip.keyed` reads one bool a
+node.
 
 ```python
-clip.frames["knee"].translate.shape             # (1, 3): no key moves it yet
-clip.frames["knee"].translate = np.zeros((6, 3))
-clip.frames["knee"].translate.shape             # (6, 3)
-clip.frames["knee"].translate_y.shape           # (6,)
-clip.frames["knee"].translate_y = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
-assert np.allclose(clip.frames.translate[:, 2, 1], np.arange(6.0))
-clip.frames["knee"].world_matrix.shape          # (6, 4, 4)
-clip.frames["knee"].world_matrix = clip.frames["knee"].world_matrix   # (F, 4, 4) writes frame for frame
-clip.frames[["root", "knee"]].rotate.shape      # (6, 2, 3)
-clip.frames[["root", "knee"]].world_matrix.shape   # (6, 2, 4, 4)
-clip.frames[[0, 2]].rotate.shape                # (6, 2, 3) -- indices too
-clip.frames[["root", "knee"]][[1]].rotate.shape   # (6, 1, 3): a scoped axis narrows among its own nodes, place 1 is the knee
+clip["knee"].translate.shape                    # (6, 3): one row a frame
+clip["knee"].translate = np.zeros((6, 3))       # one a frame; (3,) is one value for every frame
+clip["knee"].translate_y.shape                  # (6,)
+clip["knee"].translate_y = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+assert np.allclose(clip.translate[:, 2, 1], np.arange(6.0))
+clip["knee"].world_matrix.shape                 # (6, 4, 4)
+clip["knee"].world_matrix = clip["knee"].world_matrix   # (F, 4, 4) writes frame for frame
+clip[["root", "knee"]].rotate.shape             # (6, 2, 3)
+clip[["root", "knee"]].world_matrix.shape       # (6, 2, 4, 4)
+clip[[0, 2]].rotate.shape                       # (6, 2, 3) -- indices too
+clip[["root", "knee"]][[1]].rotate.shape        # (6, 1, 3): a pick narrows among its own nodes, place 1 is the knee
 
-before = np.array(clip.frames.rotate_y)
-clip.frames.match("k*").rotate_y += 5.0         # every frame of every match
-assert np.allclose(clip.frames.rotate_y[:, 2], before[:, 2] + 5.0)
-assert np.allclose(clip.frames.rotate_y[:, 0], before[:, 0])   # others untouched
+before = np.array(clip.rotate_y)
+clip.match("k*").rotate_y += 5.0                # every frame of every match
+assert np.allclose(clip.rotate_y[:, 2], before[:, 2] + 5.0)
+assert np.allclose(clip.rotate_y[:, 0], before[:, 0])   # others untouched
 ```
 
-A selection of a clip's nodes is a `ClipData` that is a view, and keeps
-the clip's frames: `frames` is the clip's axis over its nodes, `at()`,
-`frame`, `frame_count`, `start_frame`, `end_frame`, `fps`, `take` and
-`keyed` are the clip's, and `copy()`, a save and a pickle give a
-`ClipData` of those nodes with every frame. `view - pose` and
-`view.add_delta(delta)` cover every frame too.
+One node of a clip is that node on every frame, not a `TransformData`.
+One node on one frame is a `TransformData`: `clip.frames[i]["knee"]`, or
+`clip["knee"].frames[i]`, live as the pose of that frame is.
 
-A name or a place given to `view.frames` is one of the view's:
-`view.frames[[0]]` is its first node, and a node it leaves out raises.
-`view.frames[f]` moves the clip to that frame and hands the view back;
-`view.frames[a:b]` is a `ClipData` of those frames that owns its nodes. A
-pose written to a frame, and `-=` / `+=` solved in place, go through the
-clip's own `frames`.
+```python
+knee = clip.frames[3]["knee"]                   # one node on one frame
+assert isinstance(knee, TransformData) and not isinstance(clip["knee"], TransformData)
+knee.translate.shape                            # (3,)
+knee.rotate_x = 30.0                            # frame 3 alone
+assert clip["knee"].rotate_x.tolist() == [0.0, 0.0, 0.0, 30.0, 0.0, 0.0]
+assert clip["knee"].frames[3].rotate_x == 30.0
+```
+
+A pick of a clip's nodes is a `ClipData` that is a view, and keeps the
+clip's frames: `frame_count`, `start_frame`, `end_frame`, `fps` and
+`take` are the clip's, `keyed` reads the clip's for its nodes, and
+`copy()`, a save and a pickle give a `ClipData` of those nodes with
+every frame, which owns what it holds. `view - pose` and
+`view.add_delta(delta)` cover every frame too, and return a new clip.
+
+A name or a place given to a view is one of the view's: `view[[0]]` is
+its first node, and a node it leaves out raises. `view.frames[i]` is the
+pose of frame `i` over the view's nodes, and `view.frames[a:b]` a view
+of those nodes over those frames, its owner the clip. `fps`, `take` and
+`start_frame` are set on the clip itself: a view refuses them. It also
+refuses a pose written to a frame of a pick of nodes, and `-=` / `+=`
+solved in place: both go through the clip itself.
 
 ```python
 legs = clip.match("k*")                         # a ClipData, view of clip
 assert legs.is_view and legs.owner is clip and legs.frame_count == 6
-legs.frames.translate_x = np.asarray(legs.frames.translate_x) + 1.0   # every frame, in the clip
-assert np.allclose(clip.frames["knee"].translate_x, 1.0)
-assert np.allclose(legs.frames[[0]].translate_x[:, 0], 1.0)   # place 0 of the view: the knee, not the clip's root
+legs.translate_x = np.asarray(legs.translate_x) + 1.0   # every frame, in the clip
+assert np.allclose(clip["knee"].translate_x, 1.0)
+assert np.allclose(legs[[0]].translate_x[:, 0], 1.0)   # place 0 of the view: the knee, not the clip's root
 cut = legs.copy()                               # a ClipData of its own: the knee, six frames
 assert type(cut) is ClipData and not cut.is_view and cut.frame_count == 6
-part = legs.frames[1:3]                         # frames 1 and 2 of the knee, a ClipData of its own
-assert not part.is_view and part.frame_count == 2
-clip.frames["knee"].translate_x = np.zeros(6)   # the clip, as it was
+part = legs.frames[1:3]                         # frames 1 and 2 of the knee, a view of clip
+assert part.is_view and part.owner is clip and part.frame_count == 2
+part.translate.shape                            # (2, 1, 3)
+legs.frames[2].translate.shape                  # (1, 3): the knee on frame 2
+clip["knee"].translate_x = 0.0                  # the clip, as it was
+clip["knee"].rotate_x    = 0.0
 ```
 
-A scoped axis cannot then be sliced or written a pose — it addresses
-channels, not frames.
+`clip.frames[...]` takes an index or a slice. A name, a list of nodes or
+`match()` given there raises `TypeError`, naming the clip form, and a
+pose is not written to a frame of one node.
 
 ```python
-for call in (lambda: clip.frames["knee"][0:2],
-             lambda: clip.frames.__getitem__("knee").__setitem__(0, make_chain())):
+for call in (lambda: clip.frames["knee"],
+             lambda: clip.frames.match("k*"),
+             lambda: clip["knee"].frames.__setitem__(0, make_chain())):
     try:
         call()
     except TypeError as error:
@@ -1527,29 +1650,37 @@ for call in (lambda: clip.frames["knee"][0:2],
 
 ### Cutting and pasting frames
 
-```python
-cut = clip.frames[2:5]
-assert isinstance(cut, ClipData)
-assert cut.frame_count == 3 and cut.start_frame == 2      # timebase moves with it
-cut.frames.translate = np.zeros((3, 3, 3))
-assert not np.allclose(clip.frames.translate[2], 0.0)     # a cut always copies
+A slice of the frames is a view: a write through it lands in the clip,
+on those frames. `copy()` cuts it out, a clip of its own.
 
-source                  = ClipData(make_chain(), frames=2)
-source.frames.translate = np.full((2, 3, 3), -1.0)
-clip.frames[0:2]        = source                                 # paste a clip
-assert np.allclose(clip.frames.translate[1], -1.0)
+```python
+span = clip.frames[2:5]
+assert isinstance(span, ClipData) and span.is_view and span.owner is clip
+assert span.frame_count == 3 and span.start_frame == 2    # timebase moves with it
+span.scale = 3.0                                          # frames 2 to 4, in the clip
+assert np.allclose(clip.scale[2:5], 3.0) and np.allclose(clip.scale[:2], 2.0)
+
+cut           = clip.frames[2:5].copy()
+cut.translate = np.zeros((3, 3, 3))
+assert not np.allclose(clip.translate[2], 0.0)            # a copy is detached
+
+source           = ClipData(make_chain(), frames=2)
+source.translate = np.full((2, 3, 3), -1.0)
+clip.frames[0:2] = source                                 # paste a clip
+assert np.allclose(clip.translate[1], -1.0)
 
 pose             = make_chain()
 pose.translate   = np.full((3, 3), 9.0)
 clip.frames[4:6] = pose                                   # or fill with one pose
-assert np.allclose(clip.frames.translate[5], 9.0)
+assert np.allclose(clip.translate[5], 9.0)
 ```
 
 A paste copies the source's frames across whole, nodes paired by
-position, and leaves the source on the frame it was on; a clip pasted
-into itself reads every frame first, so `clip.frames[::-1] = clip` plays
-it backwards. A pose is read once and repeated down the range. Either
-way the nodes are bound once.
+position, and leaves the source as it was; a clip pasted into itself
+reads every frame first, so `clip.frames[::-1] = clip` plays it
+backwards. A pose is read once and repeated down the range. One frame
+takes one pose, `clip.frames[2] = other.frames[i]`: a clip given there
+raises `TypeError`.
 
 Pasting a clip of the wrong length raises.
 
@@ -1564,26 +1695,27 @@ except ValueError as error:
 
 ## Batched evaluation
 
-`frames.matrix` and `frames.world_matrix` evaluate every frame at once
-and agree exactly with scrubbing.
+`clip.matrix` and `clip.world_matrix` evaluate every frame at once and
+agree exactly with each frame's pose.
 
 ```python
-clip               = ClipData(make_chain(("root", "hip", "knee", "ankle")), frames=5)
-clip.frames.rotate = np.random.default_rng(0).normal(size=(5, 4, 3)) * 20.0
+clip        = ClipData(make_chain(("root", "hip", "knee", "ankle")), frames=5)
+clip.rotate = np.random.default_rng(0).normal(size=(5, 4, 3)) * 20.0
 
-clip.frames.matrix.shape                        # (5, 4, 4, 4) local
-clip.frames.world_matrix.shape                  # (5, 4, 4, 4) world
+clip.matrix.shape                               # (5, 4, 4, 4) local
+clip.world_matrix.shape                         # (5, 4, 4, 4) world
 
-batched = clip.frames.world_matrix
-for frame in range(clip.frame_count):
-    clip.frame = frame
-    assert np.array_equal(batched[frame], clip.world_matrix)
+batched = clip.world_matrix
+for frame, pose in enumerate(clip.frames):
+    assert np.array_equal(batched[frame], pose.world_matrix)
 ```
 
-Scoped axes evaluate the same way, narrowed to their columns.
+A pick of nodes evaluates the same way, narrowed to its columns, and one
+node drops the node axis.
 
 ```python
-clip.frames.match("hip").world_matrix.shape     # (5, 1, 4, 4)
+clip.match("hip").world_matrix.shape            # (5, 1, 4, 4)
+clip["hip"].world_matrix.shape                  # (5, 4, 4)
 ```
 
 What a node builds from its channels reads the same way, every frame at
@@ -1596,110 +1728,114 @@ once, each equal bit for bit to the node's own read on every frame:
 | `parent_scale_inverse_matrix` | `(F, N, 4, 4)`: identity for a node that does not compensate |
 | `parent_matrix`, `get_parent_matrix()` | `(F, N, 4, 4)`: identity for a root, or a parent the clip does not hold |
 | `inverse_matrix`, `world_inverse_matrix`, `parent_inverse_matrix` | `(F, N, 4, 4)`: every frame inverted in one call |
-| `to_attributes()` | one dict per node: a framed channel as one `[x, y, z]` per frame, anything else as its one value |
+| `to_attributes()` | one dict per node, one node its dict: a framed channel as one `[x, y, z]` per frame, anything else as its one value |
 
 ```python
-parents = clip.frames.parent_matrix
-rotates = clip.frames.rotate_matrix
-inverse = clip.frames.world_inverse_matrix
-for frame in range(clip.frame_count):
-    clip.frame = frame
-    assert np.array_equal(parents[frame], clip.get_parent_matrix())
-    assert np.array_equal(rotates[frame], clip.rotate_matrix)
-    assert np.array_equal(inverse[frame], [node.world_inverse_matrix for node in clip])
+parents = clip.parent_matrix
+rotates = clip.rotate_matrix
+inverse = clip.world_inverse_matrix
+for frame, pose in enumerate(clip.frames):
+    assert np.array_equal(parents[frame], pose.get_parent_matrix())
+    assert np.array_equal(rotates[frame], pose.rotate_matrix)
+    assert np.array_equal(inverse[frame], [node.world_inverse_matrix for node in pose])
 
-knee = clip.frames["knee"].to_attributes()[0]
+knee = clip["knee"].to_attributes()
 len(knee["rotate"])                             # 5 -- one [x, y, z] per frame
 knee["rotateOrder"]                             # 0 -- shared by every frame
+assert knee == clip.to_attributes()[2]          # the clip: one dict a node
 ```
 
-They are reads: assigning one raises, and so does any name the axis does
-not define, since each `clip.frames` is a new object a write would be lost
-on.
+They are reads: assigning one raises `AttributeError`, and so does a
+name the clip does not define and no node holds as a user attribute.
 
 ```python
 try:
-    clip.frames.rotate_order = 0
+    clip.parent_matrix = parents
 except AttributeError as error:
-    print(error)                                # clip.frames has no 'rotate_order' to write; ...
+    print(type(error).__name__)                 # AttributeError: a read has no setter
+
+try:
+    clip.bogus = 1.0
+except AttributeError as error:
+    print(error)                                # 'ClipData' has no attribute 'bogus' and no node has a user attribute of that name; ...
 ```
 
 ---
 
 ## Solving every frame
 
-The pose setters have every-frame forms on the frame axis, solved for
-every frame at once. Each equals the node setters run frame by frame on
-a copy of each pose (world matrices within 1e-9), and a rotate rebuilt
-from a matrix then goes through `euler_filter` in each node's rotate
-order, frame 0 kept, so the curves carry no 180 or 360 degree steps.
-Within about 1e-4 degrees of gimbal lock, where `matrix_to_euler` snaps
-the angles a rotation reads back as, neither route holds a world matrix
-to better than a few 1e-9.
+The pose setters of a clip are solved for every frame at once, on the
+clip, a pick of its nodes or one node. Each equals the node setters run
+frame by frame on a copy of each pose (world matrices within 1e-9), and
+a rotate rebuilt from a matrix then goes through `euler_filter` in each
+node's rotate order, frame 0 kept, so the curves carry no 180 or 360
+degree steps. Within about 1e-4 degrees of gimbal lock, where
+`matrix_to_euler` snaps the angles a rotation reads back as, neither
+route holds a world matrix to better than a few 1e-9.
 
 | Write | Takes |
 |---|---|
-| `frames.world_matrix = W` | `(4, 4)` for every node and frame, `(n, 4, 4)` per node, `(F, n, 4, 4)` frame for frame |
-| `frames.matrix = L` | the same, local matrices |
-| `frames.quaternion = Q` | `(4,)`, `(n, 4)` or `(F, n, 4)`; reading it gives `(F, n, 4)` |
-| `frames.match_matrix(other)` | a clip or a frame axis, frame for frame; a node, a list of nodes or a pose, on every frame |
-| `frames.match_translate(other, x=, y=, z=)` | the same, or positions `(3,)`, `(n, 3)`, `(F, n, 3)` |
-| `frames.match_rotate(other)` | the same, or eulers in degrees `(..., 3)` in each node's rotate order, or quaternions `(..., 4)` |
+| `clip.world_matrix = W` | `(4, 4)` for every node and frame, `(n, 4, 4)` per node, `(F, n, 4, 4)` frame for frame |
+| `clip.matrix = L` | the same, local matrices |
+| `clip.quaternion = Q` | `(4,)`, `(n, 4)` or `(F, n, 4)`; reading it gives `(F, n, 4)` |
+| `clip.match_matrix(other)` | a clip, frame for frame; a node, a list of nodes or a pose, on every frame |
+| `clip.match_translate(other, x=, y=, z=)` | the same, or positions `(3,)`, `(n, 3)`, `(F, n, 3)` |
+| `clip.match_rotate(other)` | the same, or eulers in degrees `(..., 3)` in each node's rotate order, or quaternions `(..., 4)` |
 
 ```python
-take               = ClipData(make_chain(("root", "hip", "knee", "ankle")), frames=5)
-take.frames.rotate = np.random.default_rng(1).normal(size=(5, 4, 3)) * 30.0
+take        = ClipData(make_chain(("root", "hip", "knee", "ankle")), frames=5)
+take.rotate = np.random.default_rng(1).normal(size=(5, 4, 3)) * 30.0
 
-clip.frames.world_matrix = take.frames.world_matrix    # every frame, one solve
-assert np.allclose(clip.frames.world_matrix, take.frames.world_matrix, atol=1e-9)
+clip.world_matrix = take.world_matrix                  # every frame, one solve
+assert np.allclose(clip.world_matrix, take.world_matrix, atol=1e-9)
 
-clip.frames["knee"].match_rotate([0.0, 0.0, 45.0])     # held on every frame
-clip.frames.match_translate(take, y=False)             # paired frame for frame
-clip.frames.quaternion.shape                           # (5, 4, 4)
+clip["knee"].match_rotate([0.0, 0.0, 45.0])            # held on every frame
+clip.match_translate(take, y=False)                    # paired frame for frame
+clip.quaternion.shape                                  # (5, 4, 4)
 ```
 
-The clip's own setters, `clip.world_matrix = W`, `clip.match_rotate(...)`
-and `clip["hip"].quaternion = q` among them, write the frame the clip is
-bound to, as every channel setter does. A loop over the frames picks each
-frame's euler branch on its own; the frame axis filters the curve.
+The pose of one frame takes the same setters, `pose.world_matrix = W`,
+`pose.match_rotate(...)` and `pose["hip"].quaternion = q` among them,
+and each writes that frame alone. A pose is matched to one frame of a
+clip, `pose.match_matrix(clip.frames[i])`: given the clip it raises
+`TypeError`. A loop over the frames picks each frame's euler branch on
+its own; the clip's setter filters the curve.
 
 ```python
-spin                        = ClipData(make_chain(), frames=7)
-spin.frames["hip"].rotate_x = np.linspace(0.0, 540.0, 7)   # 90 degrees a frame
-W                           = np.array(spin.frames.world_matrix)
+spin                 = ClipData(make_chain(), frames=7)
+spin["hip"].rotate_x = np.linspace(0.0, 540.0, 7)   # 90 degrees a frame
+W                    = np.array(spin.world_matrix)
 
 looped = ClipData(make_chain(), frames=7)
-for frame in range(7):
-    looped.frame        = frame
-    looped.world_matrix = W[frame]                   # this frame alone
-looped.frames["hip"].rotate_x                        # [0, 90, 180, -90, 0, 90, 180]
+for pose, world in zip(looped.frames, W):
+    pose.world_matrix = world                        # this frame alone
+looped["hip"].rotate_x                               # [0, 90, 180, -90, 0, 90, 180]
 
-solved                     = ClipData(make_chain(), frames=7)
-solved.frames.world_matrix = W
-assert np.allclose(solved.frames["hip"].rotate_x, np.linspace(0.0, 540.0, 7))
+solved              = ClipData(make_chain(), frames=7)
+solved.world_matrix = W
+assert np.allclose(solved["hip"].rotate_x, np.linspace(0.0, 540.0, 7))
 ```
 
 ---
 
 ## Clip deltas
 
-`get_delta` / `add_delta` cover the whole clip, not just the loaded
-frame, and return a `ClipData` carrying the timebase forward. Shear is
-additive on every frame, as on a rig.
+`get_delta` / `add_delta` cover every frame of the clip and return a
+`ClipData` carrying the timebase forward. Shear is additive on every
+frame, as on a rig.
 
 ```python
-rest               = make_chain()
-clip               = ClipData(rest, frames=4, start_frame=1001, fps=30.0)
-clip.frames.rotate = np.random.default_rng(1).normal(size=(4, 3, 3)) * 15.0
+rest        = make_chain()
+clip        = ClipData(rest, frames=4, start_frame=1001, fps=30.0)
+clip.rotate = np.random.default_rng(1).normal(size=(4, 3, 3)) * 15.0
 
 delta = clip.get_delta(rest)                    # one pose, against every frame
 assert isinstance(delta, ClipData)
 assert delta.frame_count == 4 and delta.start_frame == 1001
 
 recovered = ClipData(rest, frames=4).add_delta(delta)
-for frame in range(4):
-    clip.frame = recovered.frame = frame
-    assert np.allclose(recovered.world_matrix, clip.world_matrix, atol=1e-6)
+for mine, theirs in zip(recovered.frames, clip.frames):
+    assert np.allclose(mine.world_matrix, theirs.world_matrix, atol=1e-6)
 ```
 
 Every clip delta, taken or applied, against one pose or another clip, is
@@ -1727,42 +1863,46 @@ except ValueError as error:
     print(error)                                # clips hold 4 and 3 frames
 ```
 
-As everywhere else on a clip, the clip itself stands for the frame it is
-bound to and `clip.frames` for every frame. The operators follow that:
-`clip -= pose` and `clip += pose` solve the bound frame alone, as they
-always have, so a loop that scrubs and writes still writes each frame
-once; `clip.frames -= pose` and `clip.frames += pose` solve every frame
-at once and keep the clip on its frame. A single pose against a clip
-reads the clip's bound frame -- `pose.get_delta(clip)`, `pose - clip`,
-`rig.add_delta(deltas)`, `deltas + rig` -- and against its frame axis it
-covers every frame: `pose.get_delta(clip.frames)`, `pose - clip.frames`,
-`rig.add_delta(deltas.frames)` and `deltas.frames + rig` return a
-`ClipData` on the clip's timebase, bound to its first frame. A clip's
-own `get_delta` / `add_delta` (and `clip - pose`) cover every frame, as
-above. A clip of one frame is one pose wherever it stands. Each rotate
-the algebra rebuilds from matrices goes through `euler_filter` per node
-in its rotate order, frame 0 kept as solved, so a curve turning through
-180 degrees comes back continuous rather than stepping by 360; a node
-the pairing leaves out keeps its curves as they were.
+As everywhere else on a clip, the clip stands for every frame, and the
+operators follow that: `clip - pose` and `deltas + pose` return a new
+`ClipData`, and `clip -= pose` and `deltas += pose` solve every frame at
+once, in place. A single pose against a clip covers every frame too:
+`pose.get_delta(clip)`, `pose - clip`, `rig.add_delta(deltas)` and
+`deltas + rig` return a `ClipData` on the clip's timebase. One frame is
+its pose: `pose.get_delta(clip.frames[i])` and `clip.frames[i] - pose`
+return a `HierarchyData`, and `-=` on the pose of a frame solves that
+frame alone, in the clip. A view of a clip, some of its nodes or some of
+its frames, takes the forms that return a clip, `view - pose` and
+`view.add_delta(delta)`, and refuses `-=` and `+=` with `TypeError`. A
+clip of one frame given where a pose is taken reads as that pose:
+`pose.get_delta(one)` returns a `HierarchyData`. Each rotate the algebra
+rebuilds from matrices goes through `euler_filter` per node in its
+rotate order, frame 0 kept as solved, so a curve turning through 180
+degrees comes back continuous rather than stepping by 360; a node the
+pairing leaves out keeps its curves as they were.
 
 ```python
-per_frame = rest.get_delta(clip.frames)         # one pose against each frame
+per_frame = rest.get_delta(clip)                # one pose against each frame
 assert isinstance(per_frame, ClipData) and per_frame.frame_count == 4
 
 delta = clip.copy()
-delta.frames -= rest                            # in place, every frame
-assert np.allclose(delta.frames.rotate, clip.get_delta(rest).frames.rotate)
+delta -= rest                                   # in place, every frame
+assert np.allclose(delta.rotate, clip.get_delta(rest).rotate)
 
-delta.frames += rest                            # rest + (clip - rest): the clip
-assert np.allclose(delta.frames.world_matrix, clip.frames.world_matrix, atol=1e-6)
+delta += rest                                   # rest + (clip - rest): the clip
+assert np.allclose(delta.world_matrix, clip.world_matrix, atol=1e-6)
 
-posed = rest.add_delta(clip.get_delta(rest).frames)  # a clip of deltas poses one rig
+posed = rest.add_delta(clip.get_delta(rest))    # a clip of deltas poses one rig
 assert isinstance(posed, ClipData) and posed.frame_count == 4
 
-clip.frame = 2
-bound      = clip.copy()
-bound -= rest                                   # the bound frame, frame 2, alone
-assert np.allclose(bound.frames.rotate[0], clip.frames.rotate[0])
+single = rest.get_delta(clip.frames[2])         # one pose against one frame
+assert type(single) is HierarchyData
+
+edited = clip.copy()
+pose   = edited.frames[2]
+pose -= rest                                    # frame 2 alone, in the clip
+assert np.allclose(edited.rotate[0], clip.rotate[0])
+assert np.allclose(edited.rotate[2], clip.get_delta(rest).rotate[2])
 ```
 
 ---
@@ -1777,6 +1917,14 @@ of `ClipList`'s own: a value reads as a `PerTake`, one per take, and a
 write reaches every take, one value for all or a `PerTake` of one each,
 or none: a value one take cannot hold changes no take. A misspelt name
 raises.
+
+A list has no current frame, as a clip has none. A member read on it is
+every frame of every take: `clips.translate` is a `PerTake` of one
+`(F, N, 3)` block a take. `clips.frames[k]` is a `PerTake` of each
+take's pose of frame `k`, live, and `clips.frames[a:b]` a `ClipList` of
+each take's cut of those frames, copies. Nodes are picked with
+`clips.match("hip")`, each take's view of them, or on one take,
+`clips[0]["hip"]`; `clips.frames["hip"]` raises `TypeError`.
 
 ```python
 from cgmath.hierarchy import ClipList, PerTake
@@ -1794,19 +1942,24 @@ clips.fps = 30.0                   # one value, every take
 clips.fps = PerTake([24.0, 25.0])  # one per take
 assert clips.fps == [24.0, 25.0]
 
-clips.frames.match("hip").rotate_y += 5             # every frame of every take
-assert np.allclose(walk.frames["hip"].rotate_y, 5.0)
-clips.frame = 2                                     # every take scrubbed to 2
-clips.match("knee").rotate_x += 10                  # frame 2 of every take
-assert np.allclose(idle.frames["knee"].rotate_x, [0, 0, 10, 0, 0, 0])
+[block.shape for block in clips.translate]          # [(6, 3, 3), (4, 3, 3)]: every frame of every take
+clips.match("hip").rotate_y += 5                    # every frame of every take
+assert np.allclose(walk["hip"].rotate_y, 5.0)
+clips[0]["hip"].rotate_y.shape                      # (6,): one node of one take
 
-cuts = clips.frames[1:3]                            # each take's frames 1 and 2
+poses = clips.frames[2]                             # a PerTake: each take's pose of frame 2, live
+assert isinstance(poses, PerTake) and poses[1].owner is walk
+for pose in poses:
+    pose["knee"].rotate_x += 10                     # frame 2 of every take
+assert np.allclose(idle["knee"].rotate_x, [0, 0, 10, 0, 0, 0])
+
+cuts = clips.frames[1:3]                            # each take's frames 1 and 2, copies
 assert cuts.take == ["idle", "walk"] and cuts.frame_count == [2, 2]
 
 try:
-    clips.frame = 5                                 # walk holds 4 frames: no take moves
+    clips.frames[5]                                 # walk holds 4 frames
 except IndexError as error:
-    assert "take 1 ('walk')" in str(error) and clips.frame == [2, 2]
+    assert "take 1 ('walk')" in str(error)
 ```
 
 The skeleton is the first take's: every take appended, inserted, assigned
@@ -1832,8 +1985,8 @@ except ValueError as error:
     assert "every take of a ClipList is over one skeleton" in str(error)
 assert clips.take == ["idle", "walk"]
 
-still                         = ClipData(make_chain(), frames=4)
-still.frames["knee"].rotate_x = [0.0, 5.0, 10.0, 15.0]
+still                  = ClipData(make_chain(), frames=4)
+still["knee"].rotate_x = [0.0, 5.0, 10.0, 15.0]
 assert still.keyed.tolist() == [False, False, True]
 ```
 
@@ -1912,7 +2065,7 @@ clips.save_fbx(path)                                # also clips.save(path)
 back = ClipList.load_fbx(path)
 assert back.take == ["idle", "walk"] and back.frame_count == [6, 4]
 assert back.active.take == "walk"
-assert np.allclose(back["walk"].frames.rotate, walk.frames.rotate, atol=1e-5)
+assert np.allclose(back["walk"].rotate, walk.rotate, atol=1e-5)
 assert HierarchyData.load_fbx(path).name == idle.name  # the nodes, at walk's first frame
 
 rest  = ClipList([ClipData(make_chain(), frames=4, take="walk"), ClipData(make_chain(), frames=6, take="idle")])
@@ -1939,14 +2092,16 @@ The rig-level edits rebuild channels out of matrices: `swapaxes`,
 `set_parent(world_space=True)`, a joint becoming another type
 (`node_type`, `set_node_type`) and `set_rotate_order`. On a clip every
 frame is solved at once, with the result the single-pose method gives
-frame by frame, on the whole clip, a selection or one node.
+frame by frame, on the whole clip, a pick of its nodes or one node.
 
 Each changes what every frame shares -- the parenting, the rotate order,
 the node type, a joint's axes -- so it covers every frame whether it is
-called on the clip, a selection of it or one node, and the clip stays on
-the frame it was on. A channel write or a solve is the other kind: on
-the clip or its nodes (`clip["hip"].world_matrix = M`, `match_*`) it
-writes the frame the clip is on, and on `clip.frames` every frame.
+called on the clip, a pick of its nodes or one node, a view of some of
+its frames included, and through the pose of one frame it is refused. A
+channel write or a solve is the other kind: on the clip or its nodes
+(`clip["hip"].world_matrix = M`, `match_*`) it covers every frame they
+hold, and through the pose of a frame, `clip.frames[i]`, that frame
+alone.
 
 Solved a frame at a time, each frame would pick its own euler branch:
 the poses stay exact while the curves step by 180° and 360°. So every
@@ -1956,36 +2111,41 @@ frame 0 kept as computed, the way Maya's Euler Filter keeps the first
 key.
 
 ```python
-spin                        = ClipData(make_chain(), frames=60)
-spin.frames["hip"].rotate_x = np.linspace(3.0, 357.0, 60)  # one turn, crossing 180
+spin                 = ClipData(make_chain(), frames=60)
+spin["hip"].rotate_x = np.linspace(3.0, 357.0, 60)  # one turn, crossing 180
 spin["knee"].set_parent("root")                 # every frame keeps its world
-spin.frames["knee"].rotate_x.ravel()[[0, 30, 59]].round(1).tolist()
+spin["knee"].rotate_x[[0, 30, 59]].round(1).tolist()
 # [3.0, 183.0, 357.0] -- one smooth curve, no 360 degree step
 
 spin.set_rotate_order("zyx")
-assert np.abs(np.diff(spin.frames.rotate, axis=0)).max() < 10.0
+assert np.abs(np.diff(spin.rotate, axis=0)).max() < 10.0
 ```
 
 A swap keeps every child where it was on every frame:
 
 ```python
-spin                        = ClipData(make_chain(), frames=60)
-spin.frames["hip"].rotate_x = np.linspace(3.0, 357.0, 60)
-before                      = spin.frames.world_matrix.copy()
+spin                 = ClipData(make_chain(), frames=60)
+spin["hip"].rotate_x = np.linspace(3.0, 357.0, 60)
+before               = spin.world_matrix.copy()
 spin["hip"].swapaxes(0, 1, negate=True)
-assert np.allclose(spin.frames.world_matrix[:, 2], before[:, 2])   # knee
+assert np.allclose(spin.world_matrix[:, 2], before[:, 2])   # knee
 ```
 
 `set_parent(world_space=False)` writes no pose, so it moves nothing but
 the parenting.
 
-The frame axis has no rig edits of its own: `clip.frames.swapaxes`,
-`clip.frames["hip"].set_parent` and the rest raise, pointing at the clip
-form, which already covers every frame. A loop of one-node edits costs
-the nodes it edits, not the clip each time.
+The pose of one frame has no rig edits: `clip.frames[2].swapaxes`,
+`clip.frames[2]["hip"].set_parent` and the rest raise, pointing at the
+clip form, which covers every frame. A loop of one-node edits costs the
+nodes it edits, not the clip each time.
 
 ```python
 spin.set_parent(None, world_space=False)
+
+try:
+    spin.frames[2].swapaxes(0, 1)
+except TypeError as error:
+    print(error)                                # swapaxes() changes what every frame of a clip shares: call it on the clip, ...
 ```
 
 Node reordering keeps each block column with its node, so a
@@ -1996,7 +2156,7 @@ the animation.
 
 ## Importers and exporters
 
-`save_fbx` writes the loaded pose; `load_fbx` / `load_glb` read a rig
+`save_fbx` writes the pose a rig holds; `load_fbx` / `load_glb` read a rig
 back. `load` sniffs the file header. Every fbx reader in cgmath is one read,
 `cgmath.formats.load_fbx`: the hierarchy routes here take its nodes, the
 mesh, UV and skin routes in `cgmath.geometry` its shapes, and
@@ -2080,8 +2240,9 @@ frame rate: each translate, rotate, scale and visibility curve is
 evaluated by the SDK itself on each frame, so a frame on a key is the
 file's value bit for bit and a frame between keys is the SDK's own
 interpolation; a channel with no curve holds the node's own value on
-every frame, in one row (`clip.frames[name].translate` reads `(1, 3)`
-until a key moves it). Nothing is filtered or re-solved on the way in:
+every frame (`clip[name].translate` reads `(F, 3)` either way, and
+`clip[name].keyed` says whether a curve moves the node). Nothing is
+filtered or re-solved on the way in:
 fbx stores euler curves, and the read keeps their branches; the only
 rotations solved again are the ones the axis turn below rewrites, a root
 of an X- or Z-up file that is no joint, and a camera or light node
@@ -2468,10 +2629,10 @@ for ext in ("json", "npz", "pkl"):
     path = rig.save(os.path.join(WORKDIR, f"rig.{ext}"))
     assert HierarchyData.load(path) == rig
 
-clip                  = ClipData(rig, frames=4, start_frame=1001, fps=30.0)
-clip.frames.translate = np.arange(4 * 3 * 3, dtype=float).reshape(4, 3, 3)
-path                  = clip.save(os.path.join(WORKDIR, "clip.json"))
-loaded                = ClipData.load(path)
+clip           = ClipData(rig, frames=4, start_frame=1001, fps=30.0)
+clip.translate = np.arange(4 * 3 * 3, dtype=float).reshape(4, 3, 3)
+path           = clip.save(os.path.join(WORKDIR, "clip.json"))
+loaded         = ClipData.load(path)
 assert loaded == clip and loaded.frame_count == 4 and loaded.fps == 30.0
 ```
 
@@ -2553,21 +2714,25 @@ sorted(tree["__items__"][1])
 ```
 
 A `HierarchyData` saves its items alone. A `ClipData` saves its timebase
-beside them, named as its properties: `start_frame`, `fps`, `frame` (the
-loaded frame, which a load scrubs back to), and `blocks`, one
-`(F, N, 3)` array per framed channel, each keyed by the channel's
-property, but for a `shear` block all zero, which is left out, as a node
-leaves out a zero `shear`, and which a load fills with zeros.
+beside them, named as its properties, `start_frame` and `fps`, and
+`blocks`, one `(F, N, 3)` array per framed channel, each keyed by the
+channel's property, but for a `shear` block all zero, which is left out,
+as a node leaves out a zero `shear`, and which a load fills with zeros.
+`animated` holds one `(N,)` bool array per channel, the nodes a key
+moves on it, and `user_keys` the keyed user attributes. A file saved by
+an earlier cgmath names a `frame` beside them, a key a load skips. A
+view saves as its `copy()`.
 
 ```python
 sorted(clip.to_dict())
-# ['__items__', 'blocks', 'fps', 'frame', 'start_frame']
+# ['__items__', 'animated', 'blocks', 'fps', 'start_frame', 'user_keys']
 clip.to_dict()["blocks"]["translate"].shape     # (4, 3, 3)
+clip.to_dict()["animated"]["translate"]         # array([ True,  True,  True])
 ```
 
 `copy()` is deep and owning, and its nodes keep their uuids. `==` on a
 hierarchy compares its nodes by uuid, not their channels. On a clip it
-also compares the timebase, the loaded frame and every block by value.
+also compares the timebase and every block by value.
 
 ```python
 moved               = rig.copy()
@@ -2576,11 +2741,11 @@ assert moved == rig                             # the same nodes, by uuid
 
 twin = clip.copy()
 assert twin == clip
-twin.frame = 2
-assert twin != clip                             # another frame is loaded
-twin.frame         = clip.frame
-twin.frames.rotate = np.full((4, 3, 3), 45.0)
-assert twin != clip
+twin.fps = 24.0
+assert twin != clip                             # another timebase
+twin.fps    = clip.fps
+twin.rotate = np.full((4, 3, 3), 45.0)
+assert twin != clip                             # other values
 ```
 
 Two more helpers from the base class:
@@ -2601,16 +2766,20 @@ rig["hip"].match("hip")                         # True
 | `node.parent_node`, `TransformData(parent_node=...)` | `parent_uuid`'s name before 2.0.0 went in 3.0.0: `AttributeError`, `TypeError` | `parent_uuid`, or `set_parent` by name |
 | `world_matrix` as a call | it is a **property** on every type here | `node.world_matrix`, not `node.world_matrix()` |
 | mutating a channel getter | `node.rotate[0] = 5` writes to a throwaway copy | read, edit, assign back |
-| `clip.frames.rotate += 5` | the block getter is read-only, so `+=` raises | `np.array(...)` then assign, or use `rotate_y += 5` |
+| `clip.rotate += 5` | the block getter is read-only, so `+=` raises | `np.array(...)` then assign, or use `rotate_y += 5` |
 | `rig + delta` | `+` only reads the delta from its **left** operand | `delta + rig`, or `rig.add_delta(delta)` |
 | mixing `translate=` between calls | `get_delta` and `add_delta` store different things in the one channel | pass the same value to both |
 | `by="name"` with a partial overlap | accepted silently; only a completely empty intersection raises | check `len(delta)` when it matters |
 | `by="index"` on mirrored limbs | both arms share a parent index, so left can pair to right | use `by="name"` when sibling order is not guaranteed |
 | `reset_cached_data()` | clears every non-annotated attribute — including the `_hierarchy` back-pointer, which detaches the nodes | re-append the nodes, or just write a channel to drop the world-matrix cache |
-| `ClipData(rig)` with no `frames=` | `frame_count == 0`; it is a plain hierarchy until frames are allocated | pass `frames=N`, or build with `from_poses` |
+| `ClipData(rig)` with no `frames=` | `frame_count == 0`; names and parenting read, a channel read raises `ValueError` | pass `frames=N`, or build with `from_poses` |
 | `rotate_order = n` on a posed joint | the angles stay and read in the new order, so the joint turns, as Maya's `setAttr` does | `set_rotate_order(n)` keeps the pose |
 | a file's user attribute named `tx` (or any short name) | it loads, with one warning a name, but `node.tx` is `translate_x`, which hides it | read it as `node.user_defined_attributes["tx"]["value"]` |
 | `node.is` | Maya's short name for `inverseScale` is a Python keyword: a `SyntaxError` | `node.parent_scale_inverse`, the parent's scale: what Maya's `inverseScale` holds where Maya wires it from the parent joint |
 | a compensating joint Maya did not wire from its parent joint: under a transform, or under a joint after `cmds.createNode` with `parent=` or `cmds.parent` with `relative=True` | `parent_scale_inverse` is the parent's scale, and `matrix` divides by it; Maya wires `inverseScale` from a joint's scale alone, as `cmds.joint` does under a joint and an absolute `cmds.parent` that leaves the joint right under one: a joint made with `cmds.createNode`, or drawn under a transform, holds `(1, 1, 1)`, one moved with `cmds.parent` the scale of the parent joint it left, unwired, under that transform or under one Maya inserts below it, or with `relative=True` still wired from that joint, and Maya's `m` and `wm` divide by what it holds | `segment_scale_compensate = False` on that joint gives Maya's matrices where Maya's `getAttr <joint>.is` reads `(1, 1, 1)` |
-| `clip.frames[12]` | scrubs and hands back the **same** clip — two frames cannot be held at once | `clip.frames[12:13]` for an independent cut, or `copy()` |
-| `clip.frames[a:b] -= pose` (or `+=`, or `[:]`) | the slice is an independent cut bound to its own first frame, and `-=` on a clip solves its bound frame: the paste writes back frame `a` alone, with no error | `clip.frames -= pose` for every frame; for a range, `cut = clip.frames[a:b]`, `cut.frames -= pose`, `clip.frames[a:b] = cut` |
+| `clip.frame` | `AttributeError`: a clip has no current frame | `clip.frames[i]` for the pose of frame `i`, `clip.at(n)` by frame number |
+| `clip.translate` where one pose is meant | every frame, `(F, N, 3)`; `clip["hip"]` is the node on every frame, not a `TransformData` | `clip.frames[i].translate`, `clip.frames[i]["hip"]` |
+| `clip.frames["hip"]`, `clip.frames.match("L_*")` | `TypeError`: `clip.frames[...]` picks frames, an index or a slice | `clip["hip"]`, `clip.match("L_*")` |
+| `clip.frames[12]`, `clip.frames[a:b]`, `clip.at(n)` | a live view, not a copy: a write through it lands in the clip | `copy()` for a pose or a clip of its own |
+| `isinstance(clip, HierarchyData)` | False: a clip is not a pose | `isinstance(x, (HierarchyData, ClipData))`, or hand over `clip.frames[i]` |
+| `clip.frames[a:b] -= pose` (or `+=`) | `TypeError`: `-=` solves every frame of a clip in place, and a view refuses it | `clip -= pose` for every frame; for a range, `clip.frames[a:b] = clip.frames[a:b] - pose` |

@@ -1,8 +1,8 @@
 # `cgmath.hierarchy` — the scene graph
 
 Transform nodes that follow Maya's SRT conventions, the containers that
-hold them, and the animation clip that plays them back. Four public
-types, no DCC, numpy all the way down.
+hold them, and the animation clip that holds them on every frame. Four
+public types, no DCC, numpy all the way down.
 
 ```python
 from cgmath.hierarchy import (
@@ -18,11 +18,13 @@ from cgmath.hierarchy import (
 | `TransformData` | one node: name, uuid, parent, SRT, shear, joint channels, matrices |
 | `TransformList` | a plain, **non-owning** list of any nodes, built by hand — vectorized reads and writes |
 | `HierarchyData` | the **owning** container — a rig; a selection of one is a `HierarchyData` that is a view (`is_view`, `owner`) |
-| `ClipData` | a `HierarchyData` holding `F` poses instead of one |
+| `ClipData` | a rig over `F` frames: one table of values, nodes by frames, with no current frame; a selection of its nodes or a slice of its frames is a `ClipData` that is a view (`is_view`, `owner`) |
 | `ClipList` | a file's takes, one `ClipData` each, read and written per take |
 
-Each is a subclass of the one above it, so a clip answers every rig
-question, and a rig answers every selection question.
+A `HierarchyData` is a `TransformList`, so a rig answers every selection
+question. A `ClipData` is not a `HierarchyData`: a clip is not a pose. A
+member read on it answers for every frame, and `clip.frames[i]` is the
+pose of frame `i`, a `HierarchyData` that is a live view of the clip.
 
 ---
 
@@ -43,7 +45,9 @@ it out of any previous owner), `pop` releases it. A selection —
 a slice, a mask, a `match()` — is a view of the class it is taken from
 and claims nothing, which is exactly why a node reached through a
 selection still answers `get_parent()`, `world_matrix` and `index`
-about the whole rig; a view of a clip keeps the clip's frames.
+about the whole rig. A pick of a clip is a view the same way: a selection
+of its nodes or a slice of its frames is a `ClipData`, and a write through
+it lands in the clip.
 
 **Row vectors, Maya composition.** Translation lives at `M[3, :3]`, and
 
@@ -100,12 +104,33 @@ wire from its parent joint can divide by a scale Maya's does not.
 `add_user_attribute` refuses a short name; a file's user attribute that
 carries one loads, hidden, with one warning a name.
 
-**A clip's nodes are its playback head.** Each framed channel is bound
-to one row of a dense `(F, N, 3)` block. Scrubbing rebinds; reading a
-channel reads the loaded frame; writing one writes it. Only `scale`,
-`rotate`, `translate`, `rotate_axis`, `joint_orient` and `shear` are
-framed — names, parenting, `rotate_order` and the display flags are
-structural and shared by every frame.
+**A clip is nodes by frames, with no current frame.** Each framed
+channel is one dense `(F, N, 3)` block. `clip[...]` picks nodes and
+`clip.frames[...]` picks frames, an index or a slice, and the two combine
+in either order. Picking several keeps the class; picking one drops that
+axis:
+
+| You hold | It is | `translate` reads |
+|---|---|---|
+| `clip` | `ClipData` | `(F, N, 3)` |
+| `clip[1:3]`, `clip[["hip", "knee"]]`, `clip.match("L_*")` | `ClipData`, a view: those nodes, every frame | `(F, n, 3)` |
+| `clip["hip"]`, `clip[0]` | one node on every frame, not a `TransformData` | `(F, 3)` |
+| `clip.frames[2:5]` | `ClipData`, a view: every node, those frames | `(f, N, 3)` |
+| `clip.frames[2]` | `HierarchyData`, a view: the pose of frame 2, live | `(N, 3)` |
+| `clip.at(1003)` | the same, by frame number (clamped to the clip) | `(N, 3)` |
+| `clip.frames[2]["hip"]`, `clip["hip"].frames[2]` | `TransformData`: one node on one frame, live | `(3,)` |
+
+Every pick is a view: it holds no value of its own, and a write through
+it lands in the clip. A write on the clip, on a pick of its nodes or on
+one node covers every frame it holds. A write through the pose of a frame
+lands on that frame alone, and two frames can be held at once. `copy()`
+gives a `ClipData`, or a `HierarchyData` for the pose of a frame, that
+owns what it holds. `scale`, `rotate`, `translate`, `rotate_axis`,
+`joint_orient` and `shear` are held frame by frame, with `visibility` and
+a keyable user attribute — names, parenting, `rotate_order`, `node_type`
+and the display flags are structural and shared by every frame: they are
+set on the clip, a pick of its nodes or one node, and refused through the
+pose of one frame.
 
 **Rig edits cover every frame.** `swapaxes`, the orient helpers,
 `set_parent` in world space, a joint becoming another type and
@@ -123,9 +148,10 @@ rigs whose joint axes or proportions differ. `(a - b) + b == a`.
 transform carries: a `MeshData`, a `NurbsCurveData`, a `NurbsSurfaceData`.
 A shape holds a `uuid` of its own and the `parent_uuid` of the
 `TransformData` it sits under — nothing of the transform itself — and
-`shape.world_matrix(hierarchy)` is that transform's world matrix, at the
-frame a clip is on; a shape naming no transform, or one the hierarchy does
-not hold, sits at identity. A hierarchy holds transforms only.
+`shape.world_matrix(hierarchy)` is that transform's world matrix: `(4, 4)`
+in a rig or in the pose of one frame, `clip.frames[i]`, and one a frame,
+`(F, 4, 4)`, in a clip; a shape naming no transform, or one the hierarchy
+does not hold, sits at identity. A hierarchy holds transforms only.
 
 ---
 
@@ -197,12 +223,13 @@ np.round(rig["knee"].world_matrix[3, :3], 6)
 ```python
 from cgmath.hierarchy import ClipData
 
-clip                         = ClipData(rig, frames=24, start_frame=1001, fps=24.0)
-clip.frames["knee"].rotate_z = np.linspace(0.0, 90.0, 24).reshape(24, 1)
+clip                  = ClipData(rig, frames=24, start_frame=1001, fps=24.0)
+clip["knee"].rotate_z = np.linspace(0.0, 90.0, 24)
 
-clip.frames.world_matrix.shape    # (24, 3, 4, 4) -- batched, all frames
-clip.frame = 12                   # scrub; the nodes hold frame 12
-clip["knee"].rotate_z             # 46.9565...
+clip.world_matrix.shape           # (24, 3, 4, 4) -- batched, all frames
+clip["knee"].rotate_z.shape       # (24,) -- one node, every frame
+pose = clip.frames[12]            # the pose of frame 12, a live HierarchyData
+pose["knee"].rotate_z             # 46.9565...
 ```
 
 ### Retarget a pose onto a different skeleton

@@ -307,25 +307,37 @@ print([n.name for n in rig.match("*e*")])           # fnmatch filter
 
 ### Give it animation
 
-A `ClipData` is a `HierarchyData` holding `F` poses instead of one. The
-nodes are its playback head: scrub with `clip.frame`, read whole channels
-through `clip.frames`.
+A `ClipData` is the rig over `F` frames: one table of values, nodes by
+frames. A channel read on the clip covers every frame, `clip["knee"]` is
+that node on every frame, and `clip.frames[i]` is the pose of frame `i`, a
+`HierarchyData`.
 
 ```python
 from cgmath.hierarchy import ClipData
 
-clip                         = ClipData(rig, frames=24, start_frame=1001, fps=24.0)
-clip.frames["knee"].rotate_z = np.linspace(0.0, 90.0, 24).reshape(24, 1)
+clip                  = ClipData(rig, frames=24, start_frame=1001, fps=24.0)
+clip["knee"].rotate_z = np.linspace(0.0, 90.0, 24)
 
-print(clip.frames.world_matrix.shape)        # (24, 4, 4, 4) — every frame at once
-clip.frame = 12                              # scrub — a 0-based index, not 1012
-print(round(float(clip["knee"].rotate_z), 3))
+print(clip.world_matrix.shape)      # (24, 4, 4, 4) — every frame at once
+print(clip["knee"].rotate_z.shape)  # (24,) — one node, every frame
+pose = clip.frames[12]                       # the pose of frame 12 — a 0-based index, not 1012
+print(round(float(pose["knee"].rotate_z), 3))
 print(clip.start_frame, clip.end_frame, clip.fps)
 ```
 
-`clip.frame` indexes the block `0 .. frame_count - 1`. `start_frame` is
+`clip.frames[i]` indexes the block `0 .. frame_count - 1`. `start_frame` is
 metadata that rides along for round-tripping — it does **not** shift the
-index.
+index. `clip.at(1013)` takes the frame number and gives the same pose.
+
+A pose taken from a clip is live, and two can be held at once. A write
+through one lands in the clip, on that frame alone.
+
+```python
+first, last = clip.frames[0], clip.frames[-1]
+last["knee"].rotate_z = 120.0
+print(first["knee"].rotate_z, last["knee"].rotate_z)  # 0.0 120.0
+print(clip["knee"].rotate_z[-2:].round(3))            # [ 86.087 120.   ]
+```
 
 ### Read an existing rig instead
 
@@ -862,8 +874,8 @@ clip's nodes go with it.
 ```python
 from cgmath.hierarchy import ClipData
 
-bend                       = ClipData(rig, frames=25, fps=24.0, take="bend")
-bend.frames["knee"].rotate = np.column_stack([np.zeros(25), np.zeros(25), np.linspace(0.0, 90.0, 25)])
+bend                = ClipData(rig, frames=25, fps=24.0, take="bend")
+bend["knee"].rotate = np.column_stack([np.zeros(25), np.zeros(25), np.linspace(0.0, 90.0, 25)])
 
 anim_path = os.path.join(WORK, "bend.fbx")
 bend.save_fbx(anim_path)
@@ -891,8 +903,8 @@ from cgmath.hierarchy import ClipData
 loaded = ClipData.load_fbx(anim_path)
 print(loaded.frame_count, loaded.fps, loaded.name)
 
-loaded.frame = 12                                     # 0-based index into the clip
-print(round(float(loaded["knee"].rotate_z), 3))       # 45.0
+pose = loaded.frames[12]                              # 0-based index into the clip
+print(round(float(pose["knee"].rotate_z), 3))         # 45.0
 ```
 
 `ClipData.save_fbx` writes a clip of two frames or more as **one take**,
