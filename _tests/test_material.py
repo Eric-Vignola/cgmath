@@ -40,9 +40,9 @@ class TestMaterialData(unittest.TestCase):
         np.testing.assert_array_equal(material.incandescence, [0.0, 0.0, 0.0])
         self.assertEqual(material.diffuse, 0.8)
         np.testing.assert_array_equal(material.specular_color, [0.5, 0.5, 0.5])
-        self.assertEqual((material.cosine_power, material.reflectivity),             (20.0, 0.5))
+        self.assertEqual((material.cosine_power, material.reflectivity), (20.0, 0.5))
         self.assertEqual((material.texture, material.texture_file, material.uv_set), (None, None, None))
-        self.assertEqual((material.wrap_u, material.wrap_v, material.textured),      ("repeat", "repeat", False))
+        self.assertEqual((material.wrap_u, material.wrap_v, material.textured), ("repeat", "repeat", False))
         self.assertEqual((material.normal_map, material.normal_map_file, material.normal_map_kind, material.bump_depth), (None, None, "tangent", 1.0))
         # the colour defaults are each object's own
         other          = MaterialData()

@@ -1203,9 +1203,9 @@ class TestKeyed(unittest.TestCase):
         self.assertEqual(still.keyed.tolist(), [False, True])
         still["root"].add_user_attribute("heat", 1.0)
         still.frames[3]["root"].heat = 2.0  # a user channel keyed on one frame
-        self.assertEqual(still.keyed.tolist(),            [True, True])
+        self.assertEqual(still.keyed.tolist(), [True, True])
         self.assertEqual(clip.frames[2:3].copy().keyed.tolist(), [False, False])  # one frame keys nothing
-        self.assertEqual(ClipData().keyed.tolist(),       [])
+        self.assertEqual(ClipData().keyed.tolist(), [])
         shown                   = ClipData(clip.frames[0].copy(), frames=4)
         shown["tip"].visibility = np.array([True, False, True, True])[:, None]
         self.assertEqual(shown.keyed.tolist(), [False, True])

@@ -272,12 +272,12 @@ class TestClipLayout(unittest.TestCase):
         # a node's channel reads a row a frame, constant or animated; keyed
         # says which a node is
         self.assertEqual(clip["chest"].rotate.shape, (FRAMES, 3))
-        self.assertEqual(clip["hips"].rotate.shape,  (FRAMES, 3))
-        self.assertEqual(clip["hips"].twist.shape,   (FRAMES, 1))
-        self.assertEqual(clip["hips"].weight.shape,  (FRAMES, 1))
-        self.assertEqual(clip["hips"].aim.shape,     (FRAMES, 3))
+        self.assertEqual(clip["hips"].rotate.shape, (FRAMES, 3))
+        self.assertEqual(clip["hips"].twist.shape, (FRAMES, 1))
+        self.assertEqual(clip["hips"].weight.shape, (FRAMES, 1))
+        self.assertEqual(clip["hips"].aim.shape, (FRAMES, 3))
         self.assertEqual((clip["chest"].keyed, clip["hips"].keyed), (False, True))
-        self.assertEqual(clip.frames.rotate.shape,          (FRAMES, len(NODES), 3))
+        self.assertEqual(clip.frames.rotate.shape, (FRAMES, len(NODES), 3))
         # a channel read and written back is the channel it was: a row a
         # frame, all equal, leaves a constant channel constant
         clip["prop"].translate = np.zeros((FRAMES, 3))
@@ -383,7 +383,7 @@ class TestArguments(_Files):
         self.refused(TypeError, "the clip is a ClipData or a ClipList, not a HierarchyData", clip=skeleton())
         self.refused(TypeError, "the clip is a ClipData or a ClipList, not a list", clip=[take(skeleton())])
         self.refused(TypeError, "the hierarchy is a HierarchyData, not a ClipList, pass it as clip=", ClipList([take(skeleton())]))
-        self.refused(TypeError, "the hierarchy is a HierarchyData, not a list",     list(skeleton()))
+        self.refused(TypeError, "the hierarchy is a HierarchyData, not a list", list(skeleton()))
         self.refused(ValueError, "the ClipList holds no take", clip=ClipList())
         with self.assertRaises(TypeError):
             take(skeleton()).save_fbx(self.path("x.fbx"), hierarchy=skeleton())

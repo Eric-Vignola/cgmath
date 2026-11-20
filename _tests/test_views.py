@@ -53,19 +53,19 @@ def queries(held) -> dict:
     mask     = np.zeros(len(held), dtype=bool)
     mask[:2] = True
     return {
-        "x[1:3]":              held[1:3],
-        "x[[0, 1]]":           held[[0, 1]],
+        "x[1:3]": held[1:3],
+        "x[[0, 1]]": held[[0, 1]],
         "x[np.array([0, 1])]": held[np.array([0, 1])],
-        "x[mask]":             held[mask],
-        "x.match('*')":        held.match("*"),
-        "x.get_roots()":       held.get_roots(),
-        "x.get_children()":    held.get_children(),
-        "x.get_branch()":      held.get_branch(),
+        "x[mask]": held[mask],
+        "x.match('*')": held.match("*"),
+        "x.get_roots()": held.get_roots(),
+        "x.get_children()": held.get_children(),
+        "x.get_branch()": held.get_branch(),
         "x[0].get_children()": held[0].get_children(),
-        "x[0].get_branch()":   held[0].get_branch(),
-        "x[-1].get_root()":    held[-1].get_root(),
-        "x[1:3].match('*')":   held[1:3].match("*"),
-        "x[1:3][0:1]":         held[1:3][0:1],
+        "x[0].get_branch()": held[0].get_branch(),
+        "x[-1].get_root()": held[-1].get_root(),
+        "x[1:3].match('*')": held[1:3].match("*"),
+        "x[1:3][0:1]": held[1:3][0:1],
     }
 
 

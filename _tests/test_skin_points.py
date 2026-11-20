@@ -90,10 +90,10 @@ class TestSkinPoints(unittest.TestCase):
     def test_union(self):
         """the rows of the skins merged in come after, each skin's weights
         under its own influences' names, a new influence after the others"""
-        mesh, skin   = skinned()
-        other, more  = skinned(("z", "extra", "x", "rest"))
+        mesh, skin = skinned()
+        other, more = skinned(("z", "extra", "x", "rest"))
         other.points = np.asarray(other.points) + [0.0, 3.0, 0.0]
-        third, last  = skinned(("rest", "x", "z"))
+        third, last = skinned(("rest", "x", "z"))
         skin.union(more, last)
         mesh.union(other, third)
         self.assertEqual(skin.influences, ["x", "z", "rest", "extra"])
@@ -116,8 +116,8 @@ class TestSkinList(unittest.TestCase):
     """the list's calls take the mesh first and reach its skin alone"""
 
     def held(self) -> tuple:
-        mesh, skin   = skinned()
-        other, more  = skinned(("z", "x", "rest"))
+        mesh, skin = skinned()
+        other, more = skinned(("z", "x", "rest"))
         other.uuid     = generate_uuid()
         more.mesh_uuid = other.uuid
         return mesh, other, SkinList([skin, more])
@@ -229,8 +229,8 @@ class TestMorphPoints(unittest.TestCase):
     def test_union(self):
         """the targets of the meshes merged in move onto the first, after
         its points; one name on two meshes becomes one target"""
-        mesh, morph  = morphed()
-        other, more  = morphed()
+        mesh, morph = morphed()
+        other, more = morphed()
         other.uuid = generate_uuid()
         more.mesh_uuid, more.deformer = other.uuid, "other"
         frown = MorphData("frown", np.ones((2, 3)), np.array([0, 1], dtype=np.int32), mesh_uuid=other.uuid)

@@ -17486,7 +17486,7 @@ class ClipList(DataList[ClipData]):
     # --- every take's timebase --- #
     fps         = _per_take("fps")
     start_frame = _per_take("start_frame")
-    end_frame   = _per_take("end_frame",   writable=False)
+    end_frame   = _per_take("end_frame", writable=False)
     frame_count = _per_take("frame_count", writable=False)
 
     # --- every take's nodes, on every frame --- #

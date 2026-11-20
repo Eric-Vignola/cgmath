@@ -26,7 +26,7 @@ class TestMaterialFaces(unittest.TestCase):
         mesh   = MeshData(points=points, indices=np.array(quads).ravel(), counts=np.full(16, 4))
         left   = np.array([f for f in range(16) if f % 4 < 2], dtype=np.int32)
         right  = np.array([f for f in range(16) if f % 4 >= 2], dtype=np.int32)
-        held   = MaterialList(
+        held = MaterialList(
             [
                 MaterialData(name="left", mesh_uuid=mesh.uuid, faces=left),
                 MaterialData(name="right", mesh_uuid=mesh.uuid, faces=right),
@@ -145,8 +145,8 @@ class TestMaterialFaces(unittest.TestCase):
         """two meshes merged: the second's materials move onto the first,
         after its faces; one material on both becomes one record; a
         material covering a whole mesh lists the faces it had"""
-        mesh, held      = self.grid()
-        other, more     = self.grid()
+        mesh, held = self.grid()
+        other, more = self.grid()
         other.points  = np.asarray(other.points) + [0.0, 0.0, 10.0]
         whole         = MaterialData(name="whole", mesh_uuid=other.uuid)
         more[0].uuid  = held[0].uuid  # the left material is one material on both

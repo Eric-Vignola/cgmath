@@ -91,7 +91,7 @@ class TestLivePose(unittest.TestCase):
 
     def test_two_frames_are_held_at_once(self):
         clip = walk()
-        early, late   = clip.at(1), clip.at(4)
+        early, late = clip.at(1), clip.at(4)
         early["arm"].translate_x = -5.0
         late["arm"].translate_x  = 5.0
         np.testing.assert_array_equal(column(clip, "arm", "translate", 0), [3.0, -5.0, 3.0, 3.0, 5.0, 3.0])

@@ -340,7 +340,7 @@ class TestMayaMorphs(_Recorded):
         self.assertAlmostEqual(got[("faceShapes", "smile", 1.0)].weight, 0.3, places=6)
         self.assertAlmostEqual(got[("faceShapes", "smile", 0.5)].weight, 0.3, places=6)
         self.assertEqual(got[("faceShapes", "frown", 1.0)].weight, 0.0)  # frame 1's key
-        self.assertEqual(got[("cubeShapes", "puff", 1.0)].weight,  0.0)
+        self.assertEqual(got[("cubeShapes", "puff", 1.0)].weight, 0.0)
         self.assertEqual(case.value("frown_at_5"), 1.0)                  # what the static read leaves
 
     def test_maya_imports_our_save_as_we_hold_it(self):
