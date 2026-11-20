@@ -177,8 +177,7 @@ class TestAnimate(RenderCacheCase):
         clip  = ClipData(rig, frames=4, fps=24.0)
         spine = list(rig.name).index("spine")
         for index in range(clip.frame_count):
-            clip.frame         = index
-            clip[spine].rotate = np.array([0.0, 0.0, degrees_per_frame * index])
+            clip.frames[index][spine].rotate = np.array([0.0, 0.0, degrees_per_frame * index])
         return clip
 
     def test_a_second_encode_reads_the_frames_back(self):

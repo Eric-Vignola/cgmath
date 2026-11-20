@@ -62,9 +62,9 @@ def takes() -> ClipList:
     """two takes over :func:`chain`, the spine and the arm keyed"""
     found = []
     for name, count in (("walk", 6), ("run", 4)):
-        take                           = ClipData(chain(), frames=count, fps=30.0, take=name)
-        take.frames["spine"].rotate_x  = np.linspace(0.0, 25.0, count)
-        take.frames["arm"].translate_y = np.linspace(2.0, 3.0, count)
+        take                    = ClipData(chain(), frames=count, fps=30.0, take=name)
+        take["spine"].rotate_x  = np.linspace(0.0, 25.0, count)
+        take["arm"].translate_y = np.linspace(2.0, 3.0, count)
         found.append(take)
     return ClipList(found)
 
@@ -129,13 +129,13 @@ class TestClipNodes(unittest.TestCase):
         """a joint appended to a clip takes a parent, a child that keeps
         its place in the world on every frame, and keys"""
         take = takes()[0]
-        take.frames["neck"].translate_x = np.linspace(0.0, 5.0, take.frame_count)
+        take["neck"].translate_x = np.linspace(0.0, 5.0, take.frame_count)
         worlds = [np.array(take.at(frame)["head"].world_matrix) for frame in range(take.frame_count)]
         made   = between(take, "mid", "spine", "neck", translate=[0.0, 1.5, 0.0])
         self.assertEqual((made.parent_name, take["neck"].parent_name), ("spine", "mid"))
         for frame, world in enumerate(worlds):
             np.testing.assert_allclose(np.asarray(take.at(frame)["head"].world_matrix), world, atol=1e-9)
-        take.frames["mid"].translate_z = np.linspace(0.0, 2.0, take.frame_count)
+        take["mid"].translate_z = np.linspace(0.0, 2.0, take.frame_count)
         np.testing.assert_allclose(np.asarray(take.at(take.frame_count - 1)["mid"].translate), [0.0, 1.5, 2.0])
         self.assertEqual(np.asarray(take.frames.translate).shape, (take.frame_count, 7, 3))
 
@@ -175,13 +175,13 @@ class TestNodes(_Edits):
         def edit(f):
             for take in f.clip:
                 between(take, "mid", "spine", "neck", translate=[0.0, 1.5, 0.0])
-            walk                           = f.clip[0]
-            walk.frames["mid"].translate_z = np.linspace(0.0, 2.0, walk.frame_count)
+            walk                    = f.clip[0]
+            walk["mid"].translate_z = np.linspace(0.0, 2.0, walk.frame_count)
 
         self.assertEqual(self.assertSaves(SHARED["takes"], edit), [])
         read = loaded(self.path("saved.fbx")).clip
-        np.testing.assert_allclose(np.asarray(read[0].frames["mid"].translate_z), np.linspace(0.0, 2.0, 6), atol=1e-5)
-        np.testing.assert_allclose(np.asarray(read[1].frames["mid"].translate_z), 0.0, atol=1e-9)
+        np.testing.assert_allclose(np.asarray(read[0]["mid"].translate_z), np.linspace(0.0, 2.0, 6), atol=1e-5)
+        np.testing.assert_allclose(np.asarray(read[1]["mid"].translate_z), 0.0, atol=1e-9)
 
     def test_taken_off(self):
         """a leaf taken off, and a joint taken off from between two others,
@@ -281,7 +281,7 @@ class TestNodes(_Edits):
 
         def edit(f):
             for nodes in lists(f):
-                first, last = nodes.list[0].name, nodes.list[-1]
+                first, last = nodes[0].name, nodes[-1]
                 added(nodes, "added", node_type="joint", translate=[1.0, 2.0, 3.0], rotate=[10.0, 20.0, 30.0])
                 nodes["added"].set_parent(nodes[first], world_space=False)
                 if last.name != first and not last.get_children():
@@ -967,10 +967,10 @@ class TestTakes(_Edits):
     def jump(clip, name: str = "jump") -> ClipData:
         """a take of five frames over the nodes of ``clip``'s first, the
         spine turning and the root rising"""
-        first                           = clip[0]
-        take                            = ClipData(first.at(first.start_frame), frames=5, fps=first.fps, take=name)
-        take.frames["spine"].rotate_x   = np.linspace(0.0, 40.0, 5)
-        take.frames["root"].translate_y = np.linspace(10.0, 14.0, 5)
+        first                    = clip[0]
+        take                     = ClipData(first.at(first.start_frame), frames=5, fps=first.fps, take=name)
+        take["spine"].rotate_x   = np.linspace(0.0, 40.0, 5)
+        take["root"].translate_y = np.linspace(10.0, 14.0, 5)
         return take
 
     def test_added(self):
@@ -991,9 +991,9 @@ class TestTakes(_Edits):
                 read = loaded(self.path(out)).clip
                 self.assertEqual(list(read.take), names)
                 made = read[names.index("jump" if "jump" in names else "intro")]
-                np.testing.assert_allclose(np.asarray(made.frames["spine"].rotate_x), np.linspace(0.0, 40.0, 5), atol=1e-4)
+                np.testing.assert_allclose(np.asarray(made["spine"].rotate_x), np.linspace(0.0, 40.0, 5), atol=1e-4)
                 walk = read[names.index("walk")]
-                np.testing.assert_allclose(np.asarray(walk.frames["spine"].rotate_x), np.linspace(0.0, 25.0, 6), atol=1e-4)
+                np.testing.assert_allclose(np.asarray(walk["spine"].rotate_x), np.linspace(0.0, 25.0, 6), atol=1e-4)
                 self.assertEqual(census(self.path(out))[0]["FbxAnimStack"], before[0]["FbxAnimStack"] + 1)
 
     def test_taken_off(self):
@@ -1016,9 +1016,9 @@ class TestTakes(_Edits):
         every = every_kind(self.path("every.fbx"))
 
         def edit(f):
-            first                       = f.clip[0]
-            take                        = ClipData(first.at(first.start_frame), frames=4, fps=first.fps, take="second")
-            take.frames["arm"].rotate_z = np.linspace(0.0, 30.0, 4)
+            first                = f.clip[0]
+            take                 = ClipData(first.at(first.start_frame), frames=4, fps=first.fps, take="second")
+            take["arm"].rotate_z = np.linspace(0.0, 30.0, 4)
             f.clip.append(take)
 
         self.assertSaves(every, edit, name="two.fbx")

@@ -1676,8 +1676,7 @@ class TestSequenceCache(unittest.TestCase):
             clip  = ClipData(rig, frames=2, fps=24.0)
             spine = list(rig.name).index("spine")
             for index in range(clip.frame_count):
-                clip.frame         = index
-                clip[spine].rotate = np.array([0.0, 0.0, 15.0 * index])
+                clip.frames[index][spine].rotate = np.array([0.0, 0.0, 15.0 * index])
             scene = Scene.load_glb(glb)
             out   = os.path.join(tmp, "a.{frame:04d}.png")
             kw    = dict(resolution=(32, 32), samples_per_pixel=1)

@@ -155,15 +155,14 @@ def turned_clip(rig: HierarchyData) -> ClipData:
     turned group root's rotate again at the scene's rate) over turned_rig():
     the joint root travels and turns about x, the group root travels and
     turns 50 degrees a frame about z, the locator root turns about y"""
-    clip                           = ClipData(rig, frames=FRAMES, start_frame=0, fps=30.0, take="turn")
-    f                              = np.linspace(0.0, 1.0, FRAMES)[:, None]
-    clip.frames["hips"].translate  = np.hstack([1.0 + f * 6.0, 2.0 + f * 100.0, 3.0 + f * 50.0])
-    clip.frames["hips"].rotate     = np.hstack([10.0 + f * 60.0, 20.0 + f * 0.0, 30.0 + f * 0.0])
-    clip.frames["knee"].rotate     = np.hstack([-30.0 + f * 0.0, 5.0 + f * 0.0, f * -45.0])
-    clip.frames["group"].translate = np.hstack([-2.0 + f * 8.0, 1.0 + f * 0.0, 4.0 + f * 0.0])
-    clip.frames["group"].rotate    = np.hstack([35.0 + f * 40.0, -10.0 + f * 0.0, 50.0 + f * 400.0])
-    clip.frames["loc"].rotate      = np.hstack([f * 0.0, 80.0 + f * 20.0, f * 0.0])
-    clip.frame                     = 0
+    clip                    = ClipData(rig, frames=FRAMES, start_frame=0, fps=30.0, take="turn")
+    f                       = np.linspace(0.0, 1.0, FRAMES)[:, None]
+    clip["hips"].translate  = np.hstack([1.0 + f * 6.0, 2.0 + f * 100.0, 3.0 + f * 50.0])
+    clip["hips"].rotate     = np.hstack([10.0 + f * 60.0, 20.0 + f * 0.0, 30.0 + f * 0.0])
+    clip["knee"].rotate     = np.hstack([-30.0 + f * 0.0, 5.0 + f * 0.0, f * -45.0])
+    clip["group"].translate = np.hstack([-2.0 + f * 8.0, 1.0 + f * 0.0, 4.0 + f * 0.0])
+    clip["group"].rotate    = np.hstack([35.0 + f * 40.0, -10.0 + f * 0.0, 50.0 + f * 400.0])
+    clip["loc"].rotate      = np.hstack([f * 0.0, 80.0 + f * 20.0, f * 0.0])
     return clip
 
 
@@ -306,7 +305,7 @@ class TestAxes(_Files):
         path   = authored(self.path("zup.fbx"), FBX.FbxAxisSystem.MayaZUp)
         clip   = load_fbx(path).clip.active
         rig    = HierarchyData.load_fbx(path)
-        rotate = np.array(clip.frames["group"].rotate)
+        rotate = np.array(clip["group"].rotate)
         self.assertLess(float(np.abs(np.diff(rotate, axis=0)).max()), 90.0)
         self.assertGreater(float(np.ptp(rotate, axis=0).max()), 300.0)
         order  = np.full(len(rotate), clip["group"].rotate_order)
@@ -315,10 +314,10 @@ class TestAxes(_Files):
         np.testing.assert_allclose(rotate[0], rig["group"].rotate, rtol=0, atol=1e-9)
         # hip, a joint root: its rotate curves as the file keys them, the
         # turn in its joint orient and translate
-        hip = np.array(clip.frames["hip"].rotate)
+        hip = np.array(clip["hip"].rotate)
         np.testing.assert_allclose(hip[:, 0], np.linspace(10.0, 70.0, FRAMES), rtol=0, atol=1e-12)
         np.testing.assert_allclose(hip[:, 1:], np.broadcast_to([20.0, 30.0], (FRAMES, 2)), rtol=0, atol=1e-12)
-        translate = np.array(clip.frames["hip"].translate)
+        translate = np.array(clip["hip"].translate)
         file_side = np.stack([np.linspace(1.0, 7.0, FRAMES), np.linspace(2.0, 102.0, FRAMES), np.linspace(3.0, 53.0, FRAMES)], axis=1)
         np.testing.assert_allclose(translate, file_side @ Z_TO_Y, rtol=0, atol=1e-12)
 
@@ -354,7 +353,7 @@ class TestAxes(_Files):
                     np.testing.assert_allclose(still["knee"].translate, np.array([0.0, -4.0, 0.5]) * cm, rtol=0, atol=1e-12)
                     np.testing.assert_array_equal(still["knee"].rotate, [-30.0, 5.0, 0.0])
                     np.testing.assert_array_equal(still["group"].scale, [1.0, 2.0, 0.5])
-                    rows = np.array(clip.frames["knee"].translate)
+                    rows = np.array(clip["knee"].translate)
                     np.testing.assert_allclose(rows, np.broadcast_to(np.array([0.0, -4.0, 0.5]) * cm, rows.shape), rtol=0, atol=1e-12)
 
     def test_a_save_is_labelled_maya_y_up_and_cm(self):
@@ -473,21 +472,21 @@ class TestMayaAxes(_Recorded):
                     worlds = held.array(f"{unit}/world/{node.name}")
                     for frame in range(FRAMES):
                         near(worlds[frame], as_maya(wanted[frame, column], cm), err_msg=(node.name, frame, unit))
-                clip.frame = 0
+                pose = clip.frames[0]
                 # the turn as Maya puts it: in a joint root's joint orient, in
                 # a group root's rotate, solved again; the joint orients
                 # under a root as they were
                 self.assertEqual(held.value(f"{unit}/hips_type"), "joint")
-                np.testing.assert_allclose(held.array(f"{unit}/hips_joint_orient"), clip["hips"].joint_orient, rtol=0, atol=1e-4)
+                np.testing.assert_allclose(held.array(f"{unit}/hips_joint_orient"), pose["hips"].joint_orient, rtol=0, atol=1e-4)
                 np.testing.assert_allclose(held.array(f"{unit}/knee_joint_orient"), (0.0, 0.0, -90.0),         rtol=0, atol=1e-4)
-                np.testing.assert_allclose(held.array(f"{unit}/group_rotate"),      clip["group"].rotate,      rtol=0, atol=1e-4)
-                np.testing.assert_allclose(held.array(f"{unit}/loc_rotate"),        clip["loc"].rotate,        rtol=0, atol=1e-4)
-                self.assertTrue(np.any(np.abs(clip["hips"].joint_orient - [5.0, -15.0, 25.0]) > 1.0))
+                np.testing.assert_allclose(held.array(f"{unit}/group_rotate"),      pose["group"].rotate,      rtol=0, atol=1e-4)
+                np.testing.assert_allclose(held.array(f"{unit}/loc_rotate"),        pose["loc"].rotate,        rtol=0, atol=1e-4)
+                self.assertTrue(np.any(np.abs(pose["hips"].joint_orient - [5.0, -15.0, 25.0]) > 1.0))
                 # the unit: a scale on Maya's roots, in load_fbx's numbers
                 np.testing.assert_allclose(held.array(f"{unit}/hips_scale"), (cm, cm, cm), rtol=0, atol=1e-6)
                 np.testing.assert_allclose(held.array(f"{unit}/knee_translate"), (0.0, -4.0, 0.5), rtol=0, atol=1e-6)
-                np.testing.assert_allclose(clip["knee"].translate, np.array((0.0, -4.0, 0.5)) * cm, rtol=0, atol=1e-9)
-                np.testing.assert_array_equal(clip["hips"].scale, (1.0, 1.0, 1.0))
+                np.testing.assert_allclose(pose["knee"].translate, np.array((0.0, -4.0, 0.5)) * cm, rtol=0, atol=1e-9)
+                np.testing.assert_array_equal(pose["hips"].scale, (1.0, 1.0, 1.0))
 
     def test_maya_imports_a_z_up_skinned_file_and_deforms_as_cgmath(self):
         """a skinned Z-up file in cm, as a game engine exports one: Maya turns

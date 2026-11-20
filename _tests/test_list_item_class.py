@@ -37,7 +37,8 @@ from cgmath.geometry import (
     UVList,
 )
 from cgmath.geometry._one_mesh import OneMeshList
-from cgmath.hierarchy import ClipData, HierarchyData, TransformData, TransformList
+from cgmath.hierarchy import HierarchyData, TransformData, TransformList
+from cgmath.hierarchy.hierarchy import _Clip
 
 try:
     import jedi
@@ -56,7 +57,9 @@ def _release(version: str) -> tuple:
 # depends on what a third-party completer guesses
 JEDI_RELEASE = _release(jedi.__version__) if jedi is not None else (0, 0)
 
-# every list cgmath ships, and the class each holds
+# every list cgmath ships, and the class each holds. A ClipData is no list: it
+# is a thin object over its storage, _Clip, a HierarchyData subclass, which is
+# the list of a clip's nodes
 SHIPPED = {
     MeshList:      MeshData,
     UVList:        UVData,
@@ -65,7 +68,7 @@ SHIPPED = {
     SkinList:      SkinData,
     TransformList: TransformData,
     HierarchyData: TransformData,
-    ClipData:      TransformData,
+    _Clip:         TransformData,
 }
 
 
@@ -225,7 +228,7 @@ class TestTheBracketsNameTheItemClass(unittest.TestCase):
         self.assertEqual(vars(MorphList)["__orig_bases__"],    (OneMeshList, DataList[MorphData]))
         self.assertEqual(vars(MaterialList)["__orig_bases__"], (OneMeshList, DataList[MaterialData]))
         self.assertEqual(vars(UVList)["__orig_bases__"],       (OneMeshList, MeshList, DataList[UVData]))
-        for cls in (HierarchyData, ClipData):
+        for cls in (HierarchyData, _Clip):
             self.assertNotIn("__orig_bases__", vars(cls), "TransformList's brackets hold for it")
 
 
@@ -337,6 +340,9 @@ class TestAnEditorReadsTheItemClass(unittest.TestCase):
         root    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         root    = os.path.dirname(root)  # the folder holding cgmath
         project = jedi.Project(path=root, added_sys_path=[root], smart_sys_path=False)
+        # the lists a caller writes: not a ClipData, which is no list (an item
+        # of one is a node on every frame, declared by no brackets), nor its
+        # storage, which is private
         modules = {
             MeshList:      "cgmath.geometry",
             UVList:        "cgmath.geometry",
@@ -344,7 +350,6 @@ class TestAnEditorReadsTheItemClass(unittest.TestCase):
             SkinList:      "cgmath.geometry",
             TransformList: "cgmath.hierarchy",
             HierarchyData: "cgmath.hierarchy",
-            ClipData:      "cgmath.hierarchy",
         }
         for cls, module in modules.items():
             name = cls.__name__

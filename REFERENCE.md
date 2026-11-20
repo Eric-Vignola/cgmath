@@ -241,9 +241,9 @@ TransformData
 TransformList
 ```
 
-#### `ClipData(HierarchyData)`
+#### `ClipData`
 
-A HierarchyData holding F poses rather than one.
+A skeleton over F frames: one table of values, nodes by frames.
 
 ```text
 ClipData(iterable=None, frames: 'Optional[int]' = None, start_frame: 'int' = 0, fps: 'float' = 24.0, take: 'str' = '')
@@ -252,37 +252,209 @@ ClipData(iterable=None, frames: 'Optional[int]' = None, start_frame: 'int' = 0, 
 Properties:
 
 ```text
-end_frame                          
+draw_style                         what every frame shares: each node's ``draw_style``
+ds                                 Maya's short name for draw_style
+end_frame                          the frame number of its last frame
 fps                                
-frame                              
-frame_count                        
-frames                             
-keyed                              (N,) bool, one per node: True where a channel of the node is
-start_frame                        
-take                               the name of the take the clip holds, "" when built by hand
+frame_count                        how many frames it covers
+frames                             The frames: ``clip.frames[i]`` is the pose of frame ``i``, live, a
+im                                 Maya's short name for inverse_matrix
+indices                            returns each node's index in its owning hierarchy
+inverse_matrix                     every frame's inverse local matrices, (F, N, 4, 4), in one call;
+is_view                            whether this is a part of a clip, holding no value of its own
+jo                                 Maya's short name for joint_orient
+joint_orient                       ``joint_orient`` on every frame, one value a frame of each node covered
+joint_orient_matrix                every frame's joint orient matrices, (F, N, 4, 4)
+joint_orient_x                     ``joint_orient_x`` on every frame, one value a frame of each node covered
+joint_orient_y                     ``joint_orient_y`` on every frame, one value a frame of each node covered
+joint_orient_z                     ``joint_orient_z`` on every frame, one value a frame of each node covered
+jox                                Maya's short name for joint_orient_x
+joy                                Maya's short name for joint_orient_y
+joz                                Maya's short name for joint_orient_z
+keyed                              (N,) bool, one a node: True where a channel of it is animated
+list                               the nodes as the clip stores them, for the code that reads what
+m                                  Maya's short name for matrix
+matrix                             every frame's local matrices, (F, N, 4, 4); (F, 4, 4) on the axis
+name                               every item's name, in order
+namespace                          every item's namespace path, ``""`` where it has none
+node_type                          what every frame shares: each node's ``node_type``
+owner                              the clip this is a part of, None for a clip itself
+parent_inverse_matrix              every frame's inverse parent world matrices, (F, N, 4, 4):
+parent_matrix                      every frame's parent world matrices, (F, N, 4, 4); (F, 4, 4) on
+parent_scale_inverse               every frame's parent scale, (F, N, 3), ones for a root
+parent_scale_inverse_matrix        every frame's parent scale inverse matrices, (F, N, 4, 4)
+pim                                Maya's short name for parent_inverse_matrix
+pm                                 Maya's short name for parent_matrix
+quaternion                         every frame's orientation RO * R * JO as quaternions, (F, n, 4);
+r                                  Maya's short name for rotate
+ra                                 Maya's short name for rotate_axis
+radi                               Maya's short name for radius
+radius                             what every frame shares: each node's ``radius``
+rax                                Maya's short name for rotate_axis_x
+ray                                Maya's short name for rotate_axis_y
+raz                                Maya's short name for rotate_axis_z
+ro                                 Maya's short name for rotate_order
+rotate                             ``rotate`` on every frame, one value a frame of each node covered
+rotate_axes                        returns each node's rotate order as a string
+rotate_axis                        ``rotate_axis`` on every frame, one value a frame of each node covered
+rotate_axis_matrix                 every frame's rotate axis matrices, (F, N, 4, 4)
+rotate_axis_x                      ``rotate_axis_x`` on every frame, one value a frame of each node covered
+rotate_axis_y                      ``rotate_axis_y`` on every frame, one value a frame of each node covered
+rotate_axis_z                      ``rotate_axis_z`` on every frame, one value a frame of each node covered
+rotate_matrix                      every frame's rotate matrices, (F, N, 4, 4), in each node's order
+rotate_order                       every node's rotate order, 0..5
+rotate_x                           ``rotate_x`` on every frame, one value a frame of each node covered
+rotate_y                           ``rotate_y`` on every frame, one value a frame of each node covered
+rotate_z                           ``rotate_z`` on every frame, one value a frame of each node covered
+rx                                 Maya's short name for rotate_x
+ry                                 Maya's short name for rotate_y
+rz                                 Maya's short name for rotate_z
+s                                  Maya's short name for scale
+scale                              ``scale`` on every frame, one value a frame of each node covered
+scale_matrix                       every frame's scale matrices, (F, N, 4, 4); (F, 4, 4) on the axis
+scale_x                            ``scale_x`` on every frame, one value a frame of each node covered
+scale_y                            ``scale_y`` on every frame, one value a frame of each node covered
+scale_z                            ``scale_z`` on every frame, one value a frame of each node covered
+segment_scale_compensate           what every frame shares: each node's ``segment_scale_compensate``
+sh                                 Maya's short name for shear
+shear                              ``shear`` on every frame, one value a frame of each node covered
+shear_matrix                       every frame's shear matrices, (F, N, 4, 4)
+shear_xy                           ``shear_xy`` on every frame, one value a frame of each node covered
+shear_xz                           ``shear_xz`` on every frame, one value a frame of each node covered
+shear_yz                           ``shear_yz`` on every frame, one value a frame of each node covered
+shxy                               Maya's short name for shear_xy
+shxz                               Maya's short name for shear_xz
+shyz                               Maya's short name for shear_yz
+ssc                                Maya's short name for segment_scale_compensate
+start_frame                        the frame number of its first frame
+sx                                 Maya's short name for scale_x
+sy                                 Maya's short name for scale_y
+sz                                 Maya's short name for scale_z
+t                                  Maya's short name for translate
+take                               the name of the take the clip holds (:attr:`_Clip.take`)
+times                              the time of each frame in seconds
+translate                          ``translate`` on every frame, one value a frame of each node covered
+translate_matrix                   every frame's translate matrices, (F, N, 4, 4)
+translate_x                        ``translate_x`` on every frame, one value a frame of each node covered
+translate_y                        ``translate_y`` on every frame, one value a frame of each node covered
+translate_z                        ``translate_z`` on every frame, one value a frame of each node covered
+tx                                 Maya's short name for translate_x
+ty                                 Maya's short name for translate_y
+tz                                 Maya's short name for translate_z
+unique_name                        whether each node's name is its own in its owning hierarchy
+uuid                               returns a list of all node uuids
+v                                  Maya's short name for visibility
+visibility                         every frame's visibility, (F, N) bool, a copy; (F,) on the axis of
+wim                                Maya's short name for world_inverse_matrix
+wm                                 Maya's short name for world_matrix
+world_inverse_matrix               every frame's inverse world matrices, (F, N, 4, 4), in one call;
+world_matrix                       every frame's world matrices, (F, N, 4, 4); (F, 4, 4) on the axis
 ```
 
 Methods:
 
 ```text
 add_delta(self, delta, by: 'str' = 'index', translate: 'bool' = True) -> "'ClipData'"
-    Every frame with ``delta`` applied, as a clip.
+    Every frame with ``delta`` applied, a new ClipData
+add_prefix(self, prefix: 'str') -> 'None'
+    adds a prefix to the node's name
+add_suffix(self, suffix: 'str') -> 'None'
+    adds a suffix to the node's name
+add_user_attribute(self, name: 'str', value: 'Any', attribute_type: 'Optional[str]' = None, keyable: 'bool' = True, enum_names: 'Optional[str]' = None) -> 'None'
+    add_user_attribute() on every node of the view, all or nothing
+append(self, node: "'TransformData'") -> 'None'
 at(self, frame) -> 'HierarchyData'
-    the pose at frame number ``frame``, a HierarchyData: a constant
+    The pose at frame number ``frame``, live: a HierarchyData that is a
+clear(self)
+    S.clear() -> None -- remove all items from S
 copy(self) -> "'ClipData'"
-    returns a deep copy, owning the nodes it holds.
-classmethod from_poses(cls, poses, start_frame: 'int' = 0, fps: 'float' = 24.0) -> "'ClipData'"
+    a ClipData that owns what it holds: this clip, or this part of one
+count(self, value)
+    S.count(value) -> integer -- return number of occurrences of value
+extend(self, iterable) -> 'None'
+    appends every node in turn, as append() would, joining them together
+classmethod from_bytes(cls, *args, **kwargs) -> "'ClipData'"
+    the list npz bytes hold, read as :meth:`from_dict` reads a tree
+classmethod from_dict(cls, *args, **kwargs) -> "'ClipData'"
+    The list a tree describes. A view is not a file: a saved tree, one
+classmethod from_json(cls, *args, **kwargs) -> "'ClipData'"
+    the list json text holds, :meth:`to_json`'s, read as :meth:`from_dict` reads a tree
+classmethod from_poses(cls, *args, **kwargs) -> "'ClipData'"
     builds a clip from a sequence of HierarchyData poses
+get(self, name: str, default: Any = None) -> Any
+    the first item named ``name``, or ``default``
+get_branch(self) -> "'TransformList'"
+    returns every node in the view and all of their decendents
+get_children(self) -> "'TransformList'"
+    returns the children of every node in the view, without duplicates
 get_delta(self, other, by: 'str' = 'index', translate: 'bool' = True) -> "'ClipData'"
-    The delta of every frame against ``other``, as a clip.
-classmethod load_fbx(cls, filename, verbose: 'bool' = True) -> "'ClipData'"
+    The delta of every frame against ``other``, a new ClipData
+get_parent_matrix(self) -> 'np.ndarray'
+    every frame's parent matrix (:attr:`parent_matrix`)
+get_parents(self) -> 'np.ndarray'
+    returns each node's parent index in its owning hierarchy, -1 for none
+get_roots(self) -> "'TransformList'"
+    returns all contained nodes parented to the world
+index(self, obj, start=0, stop=None) -> 'int'
+    The position of a node, given as the node, its uuid or its name,
+insert(self, index: 'int', node: "'TransformData'") -> 'None'
+classmethod load(cls, *args, **kwargs) -> "'ClipData'"
+    Loads the data from a file: ``mode``, or the type the file reads as
+classmethod load_fbx(cls, *args, **kwargs) -> "'ClipData'"
     the active take of an fbx file over every node, as
-classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, animation: 'int' = 0, fps: 'float' = 24.0, start_frame: 'int' = 0) -> "'ClipData'"
+classmethod load_glb(cls, *args, **kwargs) -> "'ClipData'"
     builds a clip from a glb's animation
+classmethod load_json(cls, *args, **kwargs) -> "'ClipData'"
+    the list a json file holds, read as :meth:`load` reads one
+classmethod load_npz(cls, *args, **kwargs) -> "'ClipData'"
+    the list an npz file holds, read as :meth:`load` reads one
+classmethod load_pickle(cls, *args, **kwargs) -> "'ClipData'"
+    the list a pickle holds, read as :meth:`load` reads one
+match(self, *args, exclude: 'bool' = False, exact: 'bool' = True) -> "'TransformList'"
+    returns a TransformList object with matching names
+match_matrix(self, other) -> 'None'
+    matches world matrices on every frame at once (:meth:`_FrameAxis.match_matrix`)
+match_rotate(self, other) -> 'None'
+    matches world orientations on every frame at once (:meth:`_FrameAxis.match_rotate`)
+match_translate(self, other, x: 'bool' = True, y: 'bool' = True, z: 'bool' = True) -> 'None'
+    matches world positions on every frame at once (:meth:`_FrameAxis.match_translate`)
+pop(self, index=-1) -> 'TransformData'
+remove(self, value)
+    S.remove(value) -- remove first occurrence of value.
+renew_uuids(self, mapping: 'Optional[dict]' = None) -> 'dict'
+    Fresh uuids on every node, in place, the parent links rewired: the
+reset_cached_data(self)
+    resets cached data
+reverse(self)
+    S.reverse() -- reverse *IN PLACE*
+save(self, *args, **kwargs)
+    Saves the list as ``mode``, or as the file's extension says, through
 save_fbx(self, filename, as_ascii=False)
     the clip written as one take, as ``cgmath.formats.save_fbx(filename,
+save_json(self, *args, **kwargs)
+save_npz(self, *args, **kwargs)
+save_pickle(self, *args, **kwargs)
+set_joint_orient_to_rotate(self) -> 'None'
+    sets joint_orient to 0 and applies all rotation to rotate
+set_parent(self, parent: "Union['TransformData', str, None]", world_space: 'bool' = True) -> 'None'
+    sets all the nodes under a given parent
+set_rotate_order(self, order) -> 'None'
+    Changes every node's rotate order and keeps the pose.
+set_rotate_to_joint_orient(self) -> 'None'
+    sets rotate to 0 and applies all rotation to joint_orient
+sort(self, key=None, reverse=False) -> 'None'
+    sorts the nodes in place, by name unless ``key`` says otherwise
+strip_namespace(self, namespace: Optional[str] = None) -> None
+    ``strip_namespace()`` on every item, all or nothing.
+swapaxes(self, axis0: 'int', axis1: 'int', negate: 'bool' = False) -> 'None'
+    swaps two local axes on every node in the view
+to_attributes(self, *args, **kwargs)
+    every node's attributes over the frames covered, a list of dicts:
+to_bytes(self, *args, **kwargs)
+    returns a bytes object from the zipped data
 to_dict(self) -> 'dict'
-    The list as a tree. A view saves as the hierarchy :meth:`copy`
+to_json(self, *args, **kwargs)
+    formats the data as human readable json
 ```
 
 #### `ClipList(DataList)`
@@ -301,7 +473,7 @@ draw_style                         ``draw_style`` of every take, a PerTake; a wr
 ds                                 ``draw_style`` of every take, a PerTake; a write reaches every take or none
 end_frame                          ``end_frame`` of every take, a PerTake
 fps                                ``fps`` of every take, a PerTake; a write reaches every take or none
-frame                              the frame every take is on; written, every take scrubbed to it, or
+frame                              
 frame_count                        ``frame_count`` of every take, a PerTake
 frames                             every take's frame axis, as a _Takes
 im                                 ``inverse_matrix`` of every take, a PerTake
@@ -400,25 +572,25 @@ classmethod load_fbx(cls, filename, verbose: 'bool' = True) -> "'ClipList'"
 classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, fps: 'float' = 24.0) -> "'ClipList'"
     every animation of a glb file, one :class:`ClipData` each
 match(self, *args, exclude: 'bool' = False, exact: 'bool' = True) -> '_Takes'
-    every take's ``match``, the nodes it selects at the frame each take
+    every take's ``match``, the nodes it selects on every frame, as a
 renew_uuids(self, mapping: 'Optional[dict]' = None) -> 'dict'
     ``renew_uuids(mapping)`` on every take with one mapping: the takes
 save_fbx(self, filename, as_ascii=False) -> 'None'
     every take written to one file, as ``cgmath.formats.save_fbx(filename,
 set_joint_orient_to_rotate(self) -> None
-    TransformList.set_joint_orient_to_rotate() on every take, every take or none
+    ClipData.set_joint_orient_to_rotate() on every take, every take or none
 set_parent(self, parent: "Union['TransformData', str, None]", world_space: 'bool' = True) -> None
-    TransformList.set_parent() on every take, every take or none
+    ClipData.set_parent() on every take, every take or none
 set_rotate_order(self, order) -> None
-    TransformList.set_rotate_order() on every take, every take or none
+    ClipData.set_rotate_order() on every take, every take or none
 set_rotate_to_joint_orient(self) -> None
-    TransformList.set_rotate_to_joint_orient() on every take, every take or none
+    ClipData.set_rotate_to_joint_orient() on every take, every take or none
 sort(self, key=None, reverse: 'bool' = False) -> 'None'
     orders the takes, by their names unless ``key`` says otherwise
 strip_namespace(self, namespace: 'Optional[str]' = None) -> 'None'
     ``strip_namespace()`` on every take, every take or none: a take
 swapaxes(self, axis0: 'int', axis1: 'int', negate: 'bool' = False) -> None
-    TransformList.swapaxes() on every take, every take or none
+    ClipData.swapaxes() on every take, every take or none
 ```
 
 #### `HierarchyData(TransformList)`
@@ -1035,7 +1207,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000001E747887910>
+MISSING = <dataclasses._MISSING_TYPE object at 0x0000021BC5EF7090>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -3604,7 +3776,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001E795885440>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000021C13E40220>, '...
 ```
 
 ## `cgmath.constraints`

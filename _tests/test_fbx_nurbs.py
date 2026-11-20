@@ -144,8 +144,8 @@ def by_node(nodes, shapes, loose: str) -> dict:
 
 def rig_of(back):
     """the nodes of a read; a file holding a take, as Maya's does, returns
-    them as its clip"""
-    return back.hierarchy if back.hierarchy is not None else back.clip.active
+    them as its clip: the pose of its first frame"""
+    return back.hierarchy if back.hierarchy is not None else back.clip.active.frames[0]
 
 
 def same_knots(test, got, want, label: str) -> None:

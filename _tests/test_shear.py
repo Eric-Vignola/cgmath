@@ -26,7 +26,7 @@ from unittest import mock
 
 import numpy as np
 from cgmath._tests.test_clip import _DeltaRigs
-from cgmath._tests.test_skin_deform import branching_clip, pose_at, skinned_mesh
+from cgmath._tests.test_skin_deform import branching_clip, skinned_mesh
 from cgmath.geometry.deform import SkinDeformData
 from cgmath.geometry.sdf import SDFBox, SDFCylinder, SDFSphere
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData, TransformList, generate_uuid
@@ -399,8 +399,7 @@ def _rig(sheared=None, seed: int = 11, count: int = 9) -> HierarchyData:
 
 
 def _animated(rig: HierarchyData, frames: int = 5, seed: int = 21) -> ClipData:
-    """``rig`` over ``frames`` frames, bound to the first, every framed channel
-    but shear moving"""
+    """``rig`` over ``frames`` frames, every framed channel but shear moving"""
     rng   = np.random.default_rng(seed)
     clip  = ClipData(rig, frames=frames)
     shape = clip.frames.rotate.shape
@@ -559,13 +558,17 @@ class TestShearChannel(unittest.TestCase):
         for k, component in enumerate(("shear_xy", "shear_xz", "shear_yz")):
             self.assertTrue(np.array_equal(getattr(clip.frames, component), clip.frames.shear[..., k]))
 
-        # the bound frame reads and writes its row, and no other frame's
-        before     = np.array(clip.frames.shear)
-        clip.frame = 2
-        self.assertTrue(np.array_equal(clip.shear, before[2]))
-        self.assertTrue(np.array_equal(clip["n3"].shear, before[2, 3]))
+        # the clip and a node of it read every frame
+        before = np.array(clip.frames.shear)
+        self.assertTrue(np.array_equal(clip.shear, before))
+        self.assertTrue(np.array_equal(clip["n3"].shear, before[:, 3]))
 
-        clip["n3"].shear = SHEAR
+        # the pose of a frame reads and writes its row, and no other frame's
+        pose = clip.frames[2]
+        self.assertTrue(np.array_equal(pose.shear, before[2]))
+        self.assertTrue(np.array_equal(pose["n3"].shear, before[2, 3]))
+
+        pose["n3"].shear = SHEAR
         after            = clip.frames.shear
         self.assertEqual(after[2, 3].tolist(), list(SHEAR))
         same       = np.ones(shape, dtype=bool)
@@ -580,7 +583,7 @@ class TestShearChannel(unittest.TestCase):
         rig  = _rig()
         node = rig["n1"]
         for short, long in (("sh", "shear"), ("shxy", "shear_xy"), ("shxz", "shear_xz"), ("shyz", "shear_yz")):
-            for target in (node, rig, clip, clip.frames):
+            for target in (node, rig, clip, clip.frames, clip["n1"], clip.frames[2]):
                 with self.subTest(short=short, target=type(target).__name__):
                     self.assertTrue(np.array_equal(getattr(target, short), getattr(target, long)))
 
@@ -709,8 +712,7 @@ class TestShearBatched(unittest.TestCase, _DeltaRigs):
                 got = getattr(clip.frames, read)
                 for frame in range(clip.frame_count):
                     with self.subTest(label, read=read, frame=frame):
-                        clip.frame = frame
-                        want       = np.array([getattr(node, read) for node in clip.list])
+                        want = np.array([getattr(node, read) for node in clip.frames[frame]])
                         self.assertLessEqual(_gap(got[frame], want), 1e-12)
 
     def test_a_span_of_frames_evaluates_what_the_frames_read(self):
@@ -727,7 +729,7 @@ class TestShearBatched(unittest.TestCase, _DeltaRigs):
 
         want   = []
         for frame in range(clip.frame_count):
-            pose              = pose_at(clip.copy(), frame)
+            pose              = clip.frames[frame].copy()
             pose.world_matrix = target[frame]
             want.append((pose.world_matrix, pose.shear))
 
@@ -745,8 +747,8 @@ class TestShearBatched(unittest.TestCase, _DeltaRigs):
         for method in ("lbs", "dqs"):
             with self.subTest(method):
                 d    = SkinDeformData(mesh, skin, bind_rig=rig, method=method)
-                want = np.stack([d.apply(pose_at(clip.copy(), f)) for f in range(clip.frame_count)])
-                got  = d.apply(clip.frames)
+                want = np.stack([d.apply(clip.frames[f].copy()) for f in range(clip.frame_count)])
+                got = d.apply(clip.frames)
                 self.assertLessEqual(np.abs(got - want).max(), 1e-9)
                 self.assertGreater(np.abs(got - d.apply(plain.frames)).max(), 0.01)
 
@@ -802,7 +804,7 @@ class TestShearBatched(unittest.TestCase, _DeltaRigs):
                     block[at]         = shear
                     clip.frames.shear = block
 
-                    poses  = [pose_at(clip.copy(), f) for f in range(clip.frame_count)]
+                    poses  = [clip.frames[f].copy() for f in range(clip.frame_count)]
                     local  = np.array([[_spelled(node) for node in pose.list] for pose in poses])
                     worlds = np.array([_spelled_worlds(pose) for pose in poses])
                     self.assertLessEqual(_gap(clip.frames.matrix, local), 1e-12)
@@ -983,12 +985,10 @@ class TestShearFiles(unittest.TestCase):
         clip = _animated(_rig(sheared=()), frames=4)
         self.assertNotIn("shear", clip.to_dict()["blocks"])
 
-        # on a frame the clip is not bound to
-        clip.frame        = 0
+        # one entry of one node, on a frame that is not the first
         block             = np.zeros(clip.frames.shear.shape)
         block[2, 3, 1]    = 0.5
         clip.frames.shear = block
-        clip.frame        = 0
         tree              = clip.to_dict()
         self.assertTrue(np.array_equal(np.asarray(tree["blocks"]["shear"]), block))
         self.assertTrue(np.array_equal(ClipData.from_dict(tree).frames.shear, block))
@@ -1753,7 +1753,7 @@ class TestShearBatchedSolves(unittest.TestCase):
     def _pose_by_pose(self, clip, write: str, target) -> np.ndarray:
         got = []
         for frame in range(clip.frame_count):
-            pose = pose_at(clip.copy(), frame)
+            pose = clip.frames[frame].copy()
             for row in pose._parent_first():
                 setattr(pose[row], write, target[frame, row])
             got.append(pose.world_matrix)
@@ -1832,15 +1832,15 @@ class TestShearBatchedSolves(unittest.TestCase):
             M[:3, :3] = np.diag(rng.uniform(0.5, 2.0, 3)) @ _sh3(rng.uniform(-0.8, 0.8, 3)) @ _turn(rng.uniform(-170.0, 170.0, 3))
             M[3, :3]  = rng.uniform(-2.0, 2.0, 3)
 
-            single                        = rig.copy()
-            single["c"].world_matrix      = M
-            clip                          = ClipData(rig.copy(), frames=2)
-            clip.frames[[1]].world_matrix = M
+            single                   = rig.copy()
+            single["c"].world_matrix = M
+            clip                     = ClipData(rig.copy(), frames=2)
+            clip[[1]].world_matrix   = M
 
-            local                     = rig.copy()
-            local["c"].matrix         = M
-            framed                    = ClipData(rig.copy(), frames=2)
-            framed.frames[[1]].matrix = M
+            local              = rig.copy()
+            local["c"].matrix  = M
+            framed             = ClipData(rig.copy(), frames=2)
+            framed[[1]].matrix = M
             with self.subTest(trial=trial):
                 self.assertLessEqual(_gap(clip.frames.world_matrix[1, 1], M), 1e-11)
                 self.assertLessEqual(_gap(clip.frames.world_matrix[1, 1], single["c"].world_matrix), 1e-11)
@@ -2018,10 +2018,10 @@ class TestShearSetParent(unittest.TestCase):
             root["c"].set_parent(None)
             with self.subTest(trial=trial):
                 for name, world in want.items():
-                    self.assertLessEqual(_gap(single[name].world_matrix, world), 1e-11)
-                    self.assertLessEqual(_gap(listed[name].world_matrix, world), 1e-11)
-                    self.assertLessEqual(_gap(root[name].world_matrix, world), 1e-11)
-                    self.assertLessEqual(_gap(clip.frames[[name]].world_matrix[0, 0], world), 1e-11)
+                    self.assertLessEqual(_gap(single[name].world_matrix, world),       1e-11)
+                    self.assertLessEqual(_gap(listed[name].world_matrix, world),       1e-11)
+                    self.assertLessEqual(_gap(root[name].world_matrix, world),         1e-11)
+                    self.assertLessEqual(_gap(clip[[name]].world_matrix[0, 0], world), 1e-11)
 
     def test_a_clip_square_on_its_first_frame(self):
         # c's world is square where c does not turn against its uneven
@@ -2038,7 +2038,7 @@ class TestShearSetParent(unittest.TestCase):
         rotate[1:, 1]      = ((40.0, 10.0, -20.0), (-30.0, 50.0, 15.0))
         clip.frames.rotate = rotate
 
-        poses = [pose_at(clip.copy(), frame) for frame in range(3)]
+        poses = [clip.frames[frame].copy() for frame in range(3)]
         for pose in poses:
             pose["c"].set_parent(None)
         clip["c"].set_parent(None)
@@ -2342,8 +2342,8 @@ class TestShearRigEdits(unittest.TestCase):
                 self.assertLessEqual(_gap(rig.list[0].world_matrix, before[0]),     1e-12)
 
     def _each_frame_is_its_pose(self, clip, trial: int) -> None:
-        poses = [pose_at(clip.copy(), frame) for frame in range(clip.frame_count)]
-        clip.list[1].swapaxes(0, 1)
+        poses = [clip.frames[frame].copy() for frame in range(clip.frame_count)]
+        clip[1].swapaxes(0, 1)
         for frame, pose in enumerate(poses):
             pose.list[1].swapaxes(0, 1)
             with self.subTest(trial=trial, frame=frame):
@@ -2482,7 +2482,7 @@ class TestShearRigEdits(unittest.TestCase):
             listed = rig.copy()
             TransformList([listed.list[1]]).swapaxes(0, 1)
             clip = ClipData(rig.copy(), frames=2)
-            clip.list[1].swapaxes(0, 1)
+            clip[1].swapaxes(0, 1)
             with self.subTest(trial=trial):
                 self.assertLessEqual(_gap(listed.list[2].world_matrix, before[2]),         1e-12)
                 self.assertLessEqual(_gap(clip.frames.world_matrix[0, 2], before[2]),      1e-12)
@@ -2556,7 +2556,7 @@ class TestShearRigEdits(unittest.TestCase):
                     listed = rig.copy()
                     TransformList([listed.list[i] for i in pick]).swapaxes(0, 1)
                     clip = ClipData(rig.copy(), frames=2)
-                    TransformList([clip.list[i] for i in pick]).swapaxes(0, 1)
+                    clip[list(pick)].swapaxes(0, 1)
 
                     self.assertLessEqual(_gap(listed.world_matrix, turn.world_matrix), 1e-12)
                     self.assertLessEqual(_gap(clip.frames.world_matrix[0], turn.world_matrix), 1e-12)
@@ -2578,7 +2578,7 @@ class TestShearRigEdits(unittest.TestCase):
             listed = rig.copy()
             TransformList([listed.list[i] for i in (0, 1)]).swapaxes(*axes)
             clip = ClipData(rig.copy(), frames=2)
-            TransformList([clip.list[i] for i in (0, 1)]).swapaxes(*axes)
+            clip[[0, 1]].swapaxes(*axes)
             with self.subTest(trial=trial, kinds=kinds, shear=shear, axes=axes):
                 self.assertLessEqual(_gap(listed.world_matrix, turn.world_matrix), 1e-12)
                 self.assertLessEqual(_gap(clip.frames.world_matrix[0], turn.world_matrix), 1e-12)
@@ -2595,9 +2595,9 @@ class TestShearRigEdits(unittest.TestCase):
             block[1, 0]       = (SHEAR, *PARTIAL_SHEARS)[trial % 5]
             clip.frames.shear = block
 
-            poses = [pose_at(clip.copy(), frame) for frame in range(3)]
+            poses = [clip.frames[frame].copy() for frame in range(3)]
             axes  = self.AXES[trial % 4]
-            TransformList([clip.list[0], clip.list[1]]).swapaxes(*axes)
+            clip[[0, 1]].swapaxes(*axes)
             for frame, pose in enumerate(poses):
                 pose.list[0].swapaxes(*axes)
                 pose.list[1].swapaxes(*axes)
@@ -2706,7 +2706,10 @@ class TestShearRigEdits(unittest.TestCase):
         )
 
     def _noise_swap(self, rig) -> None:
-        TransformList([rig["a"], rig["b"]]).swapaxes(0, 2, True)
+        if isinstance(rig, ClipData):
+            rig[["a", "b"]].swapaxes(0, 2, True)
+        else:
+            TransformList([rig["a"], rig["b"]]).swapaxes(0, 2, True)
 
     def test_a_put_back_that_leaves_a_target_a_noise_shear(self):
         # the noise sends b's swap through the split and its signs go back, so
@@ -2791,7 +2794,7 @@ class TestShearRigEdits(unittest.TestCase):
             for how in ("a list", "one then the other", "b in a later call"):
                 held = clip.copy()
                 if how == "a list":
-                    TransformList([held["a"], held["b"]]).swapaxes(1, 2)
+                    held[["a", "b"]].swapaxes(1, 2)
                 else:
                     held["a"].swapaxes(1, 2)
                     if how == "b in a later call":
@@ -2822,7 +2825,7 @@ class TestShearRigEdits(unittest.TestCase):
                 if how == "one node":
                     held["a"].swapaxes(1, 2)
                 else:
-                    TransformList([held["a"]]).swapaxes(1, 2)
+                    held[["a"]].swapaxes(1, 2)
                 after = held.frames.world_matrix
                 with self.subTest(trial=trial, how=how):
                     self.assertEqual(
@@ -2900,7 +2903,7 @@ class TestShearRigEdits(unittest.TestCase):
         listed = rig.copy()
         TransformList([listed.list[0], listed.list[2]]).swapaxes(0, 1)
         clip = ClipData(rig.copy(), frames=2)
-        TransformList([clip.list[0], clip.list[2]]).swapaxes(0, 1)
+        clip[[0, 2]].swapaxes(0, 1)
         self.assertLessEqual(_gap(listed.world_matrix, turn.world_matrix), 1e-12)
         self.assertLessEqual(_gap(clip.frames.world_matrix[0], turn.world_matrix), 1e-12)
 
@@ -3072,18 +3075,18 @@ class TestShearOrientation(unittest.TestCase):
 
             want = []
             for frame in range(4):
-                pose = pose_at(clip.copy(), frame)
+                pose = clip.frames[frame].copy()
                 pose["k"].match_rotate(pose["t"])
                 want.append(pose["k"].world_matrix)
 
             target = clip.copy()
-            clip.frames[["k"]].match_rotate(target.frames[["t"]])
-            got = clip.frames[["k"]].world_matrix[:, 0]
+            clip[["k"]].match_rotate(target[["t"]])
+            got = clip[["k"]].world_matrix[:, 0]
             with self.subTest(trial=trial):
                 self.assertLessEqual(_gap(got, np.array(want)), 1e-12)
                 for frame in range(4):
                     gap = _maya_orientation(got[frame, :3, :3]) - _maya_orientation(
-                        target.frames[["t"]].world_matrix[frame, 0, :3, :3]
+                        target[["t"]].world_matrix[frame, 0, :3, :3]
                     )
                     self.assertLessEqual(np.abs(gap).max(), 1e-12)
 
@@ -3161,12 +3164,12 @@ class TestShearOrientation(unittest.TestCase):
                         TransformData("b", parent_uuid=a.uuid, rotate=(5.0, 6.0, 7.0), translate=(0.0, 1.0, 0.0)),
                     ]
                 )
-                clip                     = ClipData(rig, frames=3)
-                scales                   = np.array(clip.frames[["a"]].scale)
-                scales[1, 0, axis]       = 0.0
-                clip.frames[["a"]].scale = scales
-                clip.frames[["b"]].match_rotate((40.0, 50.0, 60.0))
-                rotate = clip.frames[["b"]].rotate
+                clip               = ClipData(rig, frames=3)
+                scales             = np.array(clip[["a"]].scale)
+                scales[1, 0, axis] = 0.0
+                clip[["a"]].scale  = scales
+                clip[["b"]].match_rotate((40.0, 50.0, 60.0))
+                rotate = clip[["b"]].rotate
                 self.assertTrue(np.isfinite(rotate[[0, 2]]).all())
                 self.assertFalse(np.isfinite(rotate[1]).all())
 
@@ -3206,8 +3209,8 @@ class TestShearRigidGate(unittest.TestCase):
         rig["k"].match_rotate(rig["t"])
         self.assertLessEqual(self._landed(rig["k"].world_matrix[:3, :3], rig), 1e-12)
 
-        clip.frames[["k"]].match_rotate(clip.copy().frames[["t"]])
-        self.assertLessEqual(self._landed(clip.frames[["k"]].world_matrix[0, 0, :3, :3], rig), 1e-12)
+        clip[["k"]].match_rotate(clip.copy()[["t"]])
+        self.assertLessEqual(self._landed(clip[["k"]].world_matrix[0, 0, :3, :3], rig), 1e-12)
 
     def test_rows_a_hair_from_one_length(self):
         rig = self._rig((1.0, 1.0 + 1e-9, 1.0))
@@ -3311,7 +3314,7 @@ class TestShearPoseAlgebra(unittest.TestCase, _DeltaRigs):
         self.assertEqual(got["other"].shear.tolist(), delta["other"].shear.tolist())
 
         clip = ClipData(b.copy(), frames=2).add_delta(delta, by="name")
-        self.assertEqual(clip.frames[["other"]].shear[1, 0].tolist(), delta["other"].shear.tolist())
+        self.assertEqual(clip[["other"]].shear[1, 0].tolist(), delta["other"].shear.tolist())
 
 
 if __name__ == "__main__":

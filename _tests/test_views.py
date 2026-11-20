@@ -3,8 +3,9 @@
 Slicing, indexing, match() and the branch queries give an object of the
 class they are asked of, holding the very nodes its owner holds: a write to
 it reaches the owner, and copy() gives one that owns its nodes. A view of a
-clip keeps the clip's frames. A list of nodes built by hand stays a
-TransformList, a view of nothing.
+clip keeps the clip's frames: each of its nodes is the clip's node on every
+frame, and a run of the clip's frames is a view too. A list of nodes built
+by hand stays a TransformList, a view of nothing.
 """
 
 import os
@@ -35,9 +36,9 @@ def chain() -> HierarchyData:
 
 def walk(frames: int = 6) -> ClipData:
     """:func:`chain` over ``frames`` frames, the spine turning and the arm rising"""
-    clip                           = ClipData(chain(), frames=frames, fps=30.0, take="walk")
-    clip.frames["spine"].rotate_x  = np.linspace(0.0, 25.0, frames)
-    clip.frames["arm"].translate_y = np.linspace(2.0, 3.0, frames)
+    clip                    = ClipData(chain(), frames=frames, fps=30.0, take="walk")
+    clip["spine"].rotate_x  = np.linspace(0.0, 25.0, frames)
+    clip["arm"].translate_y = np.linspace(2.0, 3.0, frames)
     return clip
 
 
@@ -133,14 +134,32 @@ class TestClipViews(unittest.TestCase):
                 self.assertIsInstance(view, ClipData)
                 self.assertTrue(view.is_view)
                 self.assertIs(view.owner, clip)
-                self.assertTrue(all(node is clip[node.name] for node in view))
+                # each node is the clip's node of that name, on every frame
+                self.assertTrue(all(node == clip[node.name] for node in view))
+        self.assertEqual((clip.is_view, clip.owner), (False, None))
+        # one node picked is that node on every frame: a view too, and no TransformData
+        for label, node in (("x['spine']", clip["spine"]), ("x[0]", clip[0]), ("x[1:3][0]", clip[1:3][0])):
+            with self.subTest(query=label):
+                self.assertNotIsInstance(node, (ClipData, TransformData))
+                self.assertTrue(node.is_view)
+                self.assertIs(node.owner, clip)
+                self.assertEqual(node, clip[node.name])
+                self.assertEqual(np.asarray(node.translate).shape, (6, 3))
+        # frames picked are a view of the clip as well, and combine with a pick of nodes
+        for label, view in (("x.frames[1:3]", clip.frames[1:3]), ("x[1:3].frames[1:3]", clip[1:3].frames[1:3])):
+            with self.subTest(query=label):
+                self.assertIs(type(view), ClipData)
+                self.assertTrue(view.is_view)
+                self.assertIs(view.owner, clip)
+                self.assertEqual(view.frame_count, 2)
+                self.assertTrue(all(node == clip.frames[1:3][node.name] for node in view))
 
     def test_it_keeps_the_clip_s_frames(self):
         clip = walk()
         view = pick(clip, "arm", "spine")
         self.assertEqual(
-            (view.frame_count, view.start_frame, view.end_frame, view.fps, view.take, view.frame),
-            (clip.frame_count, clip.start_frame, clip.end_frame, clip.fps, clip.take, clip.frame),
+            (view.frame_count, view.start_frame, view.end_frame, view.fps, view.take, len(view.frames)),
+            (clip.frame_count, clip.start_frame, clip.end_frame, clip.fps, clip.take, len(clip.frames)),
         )
         np.testing.assert_array_equal(view.keyed, [True, True])
         np.testing.assert_array_equal(pick(clip, "head").keyed, [False])
@@ -156,9 +175,14 @@ class TestClipViews(unittest.TestCase):
         clip                    = walk()
         view                    = clip.match("arm")
         view.frames.translate_x = np.asarray(view.frames.translate_x) + 1.0
-        np.testing.assert_allclose(np.asarray(clip.frames["arm"].translate_x), 4.0)
-        view.frame = 3
-        self.assertEqual(clip.frame, 3)
+        np.testing.assert_allclose(np.asarray(clip["arm"].translate_x), 4.0)
+        # written on the view itself: the same, every frame
+        view.translate_x += 1.0
+        np.testing.assert_allclose(np.asarray(clip["arm"].translate_x), 5.0)
+        # its pose of one frame is that frame of the clip: a write lands there alone
+        view.frames[3]["arm"].translate_x = 9.0
+        np.testing.assert_allclose(np.asarray(clip["arm"].translate_x), [5.0, 5.0, 5.0, 9.0, 5.0, 5.0])
+        np.testing.assert_allclose(float(clip.frames[3]["arm"].translate[0]), 9.0)
 
     def test_its_frames_count_and_name_the_nodes_viewed(self):
         clip = walk()
@@ -166,40 +190,52 @@ class TestClipViews(unittest.TestCase):
         rise = np.linspace(2.0, 3.0, 6)
         turn = np.linspace(0.0, 25.0, 6)
         # a place and a name are the view's own, never the clip's
-        np.testing.assert_allclose(np.asarray(view.frames[[0]].translate_y)[:, 0],        rise)
-        np.testing.assert_allclose(np.asarray(view.frames[[-1]].rotate_x)[:, 0],          turn)
-        np.testing.assert_allclose(np.asarray(view.frames["spine"].rotate_x),             turn)
-        np.testing.assert_allclose(np.asarray(view.frames.match("a*").translate_y)[:, 0], rise)
-        self.assertEqual(np.asarray(view.frames.match("ro*").translate_y).shape, (6, 0))
-        for reach in (lambda: view.frames["head"], lambda: view.frames[["root"]]):
+        np.testing.assert_allclose(np.asarray(view[[0]].translate_y)[:, 0],        rise)
+        np.testing.assert_allclose(np.asarray(view[[-1]].rotate_x)[:, 0],          turn)
+        np.testing.assert_allclose(np.asarray(view["spine"].rotate_x),             turn)
+        np.testing.assert_allclose(np.asarray(view.match("a*").translate_y)[:, 0], rise)
+        self.assertEqual(np.asarray(view.match("ro*").translate_y).shape, (6, 0))
+        for name, reach in (("head", lambda: view["head"]), ("root", lambda: view[["root"]])):
             with self.assertRaises(ValueError) as caught:
                 reach()
-            self.assertIn("is no node this axis covers", str(caught.exception))
+            self.assertIn(f"{name} is not in list", str(caught.exception))
         with self.assertRaises(IndexError):
-            view.frames[[2]]
-        # a frame moves the clip and hands the view back; a slice is a clip of its own
-        self.assertIs(view.frames[3], view)
-        self.assertEqual(clip.frame, 3)
-        clip.frame = 0
-        cut        = view.frames[1:3]
-        self.assertEqual((type(cut), cut.is_view, cut.frame_count), (ClipData, False, 2))
+            view[[2]]
+        # a frame is the live pose of the nodes viewed, the clip's own frame
+        pose = view.frames[3]
+        self.assertIsInstance(pose, HierarchyData)
+        self.assertNotIsInstance(pose, ClipData)
+        self.assertTrue(pose.is_view)
+        self.assertEqual([node.name for node in pose], ["arm", "spine"])
+        self.assertEqual((float(pose["arm"].translate[1]), float(pose["spine"].rotate[0])), (rise[3], turn[3]))
+        # a slice is a view of those frames; its copy is a clip of its own
+        cut = view.frames[1:3]
+        self.assertEqual((type(cut), cut.is_view, cut.frame_count), (ClipData, True, 2))
+        self.assertIs(cut.owner, clip)
         self.assertEqual([node.name for node in cut], ["arm", "spine"])
-        np.testing.assert_allclose(np.asarray(cut.frames["arm"].translate_y), rise[1:3])
+        np.testing.assert_allclose(np.asarray(cut["arm"].translate_y), rise[1:3])
+        own = cut.copy()
+        self.assertEqual((type(own), own.is_view, own.frame_count), (ClipData, False, 2))
+        self.assertEqual([node.name for node in own], ["arm", "spine"])
+        np.testing.assert_allclose(np.asarray(own["arm"].translate_y), rise[1:3])
         # as an operand it stands for every frame of the nodes viewed
-        rest  = pick(chain(), "arm", "spine")
-        delta = view.frames - rest
-        self.assertEqual((type(delta), delta.frame_count), (ClipData, 6))
-        self.assertEqual(TransformList(rest.list).get_delta(view.frames).frame_count, 6)
+        rest = pick(chain(), "arm", "spine")
+        for operand in (view, view.frames):
+            delta = operand - rest
+            self.assertEqual((type(delta), delta.is_view, delta.frame_count), (ClipData, False, 6))
+            self.assertEqual(TransformList(rest.list).get_delta(operand).frame_count, 6)
         # the algebra in place and a pose written to a frame are the clip's own
+        with self.assertRaises(TypeError):
+            view -= rest
         with self.assertRaises(TypeError):
             view.frames -= rest
         with self.assertRaises(TypeError):
             view.frames[2] = rest
-        np.testing.assert_allclose(np.asarray(clip.frames["spine"].rotate_x), turn)
+        np.testing.assert_allclose(np.asarray(clip["spine"].rotate_x), turn)
 
     def test_a_scoped_axis_narrows_among_its_own_nodes(self):
         clip = walk()
-        axis = clip.frames[["arm", "spine"]]
+        axis = clip[["arm", "spine"]]
         np.testing.assert_allclose(np.asarray(axis[[0]].translate_y)[:, 0], np.linspace(2.0, 3.0, 6))
         np.testing.assert_allclose(np.asarray(axis["spine"].rotate_x), np.linspace(0.0, 25.0, 6))
         self.assertEqual(np.asarray(axis.match("*").translate_y).shape, (6, 2))
@@ -215,13 +251,13 @@ class TestClipViews(unittest.TestCase):
             self.assertIs(type(made), ClipData)
             self.assertFalse(made.is_view)
             self.assertEqual(([node.name for node in made], made.frame_count), (["arm", "spine", "neck"], 6))
-            np.testing.assert_allclose(np.asarray(made.frames["spine"].rotate_x), np.linspace(0.0, 25.0, 6))
-            np.testing.assert_allclose(np.asarray(made.frames["arm"].translate_y), np.linspace(2.0, 3.0, 6))
+            np.testing.assert_allclose(np.asarray(made["spine"].rotate_x), np.linspace(0.0, 25.0, 6))
+            np.testing.assert_allclose(np.asarray(made["arm"].translate_y), np.linspace(2.0, 3.0, 6))
             # the spine's parent is left out: a root; the arm and the neck keep the spine
             self.assertEqual([node.parent_name for node in made], ["spine", None, "spine"])
-        made                           = view.copy()
-        made.frames["arm"].translate_y = np.zeros(6)
-        np.testing.assert_allclose(np.asarray(clip.frames["arm"].translate_y), np.linspace(2.0, 3.0, 6))
+        made                    = view.copy()
+        made["arm"].translate_y = np.zeros(6)
+        np.testing.assert_allclose(np.asarray(clip["arm"].translate_y), np.linspace(2.0, 3.0, 6))
 
     def test_its_delta_covers_every_frame(self):
         clip  = walk()
@@ -229,39 +265,43 @@ class TestClipViews(unittest.TestCase):
         view  = pick(clip, "spine", "arm")
         delta = view - pick(rest, "spine", "arm")
         self.assertIs(type(delta), ClipData)
-        self.assertEqual((delta.frame_count, delta.fps, delta.take, clip.frame), (6, 30.0, "walk", 0))
+        self.assertEqual((delta.frame_count, delta.fps, delta.take, delta.is_view), (6, 30.0, "walk", False))
         # frame by frame, what a selection of the pose on that frame gives
         for frame in (0, 3, 5):
-            clip.frame = frame
-            pose       = TransformList(view.list).get_delta(pick(rest, "spine", "arm"))
+            pose = TransformList(view.frames[frame].list).get_delta(pick(rest, "spine", "arm"))
             for name in ("spine", "arm"):
                 np.testing.assert_allclose(np.asarray(delta.at(frame)[name].rotate), np.asarray(pose[name].rotate), atol=1e-9)
                 np.testing.assert_allclose(np.asarray(delta.at(frame)[name].translate), np.asarray(pose[name].translate), atol=1e-9)
-        clip.frame = 0
-        moved      = view.add_delta(pick(chain(), "spine", "arm"))
+        moved = view.add_delta(pick(chain(), "spine", "arm"))
         self.assertEqual((type(moved), moved.frame_count), (ClipData, 6))
-        with self.assertRaises(ValueError):
-            view.get_delta(walk(4).frames)
+        for other in (walk(4), walk(4).frames):
+            with self.assertRaises(ValueError):
+                view.get_delta(other)
 
     def test_a_node_the_clip_no_longer_holds(self):
         clip = walk()
         view = pick(clip, "arm", "head")
         del clip[[node.name for node in clip].index("arm")]
-        with self.assertRaises(ValueError) as caught:
-            view.frames
-        self.assertIn("'arm' is no longer a node of the clip", str(caught.exception))
+        # the view says so wherever it is read: its values, a frame of it, its copy
+        for read in (lambda: view.translate, lambda: view.frames[0], lambda: view.at(0), lambda: view.copy()):
+            with self.assertRaises(ValueError) as caught:
+                read()
+            self.assertIn("'arm' is no longer a node of the clip", str(caught.exception))
 
     def test_a_view_is_no_take(self):
         clip = walk()
         view = clip[1:3]
         self.assertFalse(clip == view)
-        with self.assertRaises(TypeError) as caught:
-            ClipList([view])
-        self.assertIn("pass its copy()", str(caught.exception))
+        for part in (view, clip.frames[1:3]):
+            with self.assertRaises(TypeError) as caught:
+                ClipList([part])
+            self.assertIn("pass its copy()", str(caught.exception))
         takes = ClipList([clip, walk(4)])
-        # a selection of every take's nodes, moved to a frame: each take moves
-        takes.match("sp*")[2]
-        self.assertEqual([take.frame for take in takes], [2, 2])
+        # a selection of every take's nodes, written: each take is written, every frame
+        takes.match("sp*").translate_y = 9.0
+        for take, frames in zip(takes, (6, 4)):
+            np.testing.assert_array_equal(np.asarray(take["spine"].translate_y), np.full(frames, 9.0))
+            np.testing.assert_array_equal(np.asarray(take["neck"].translate_y), np.full(frames, 3.0))
 
 
 if __name__ == "__main__":

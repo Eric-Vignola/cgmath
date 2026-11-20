@@ -77,7 +77,7 @@ class TestLayers(_Files):
             with self.subTest(label):
                 clip = load_fbx(stacked(self.path(label + ".fbx"), layers=layers)).clip.active
                 self.assertSameClip(clip, plain)
-                np.testing.assert_array_equal(clip.frames["n"].translate[:, 0], [0.0, 1.0, 2.0])
+                np.testing.assert_array_equal(clip["n"].translate[:, 0], [0.0, 1.0, 2.0])
 
     def test_curves_on_two_layers_are_refused(self):
         path = stacked(self.path("two.fbx"), layers=(("BaseLayer", True, False), ("add", True, False), ("empty", False, False)))
@@ -109,7 +109,7 @@ class TestSpan(_Files):
                 np.testing.assert_allclose(clip.frames.times, (start + np.arange(count)) / 30.0, rtol=0.0, atol=1e-12)
                 frames = start + np.arange(count)
                 held   = np.interp(frames, keys, keys)
-                np.testing.assert_allclose(clip.frames["n"].translate[:, 0], held, rtol=0.0, atol=1e-9)
+                np.testing.assert_allclose(clip["n"].translate[:, 0], held, rtol=0.0, atol=1e-9)
 
 
 if __name__ == "__main__":

@@ -57,7 +57,10 @@ class ShapeData(Data):
         """
         The transform of ``hierarchy`` this shape sits under: the node whose
         uuid is ``parent_uuid``. None when the shape names none, or the
-        hierarchy (a HierarchyData, a ClipData, or None) holds none.
+        hierarchy (a HierarchyData, a ClipData, or None) holds none. In a
+        HierarchyData, or in the pose of one frame of a clip,
+        ``clip.frames[i]``, it is a TransformData; in a ClipData, that node
+        on every frame.
         """
         if self.parent_uuid is None or hierarchy is None or self.parent_uuid not in hierarchy:
             return None
@@ -66,8 +69,15 @@ class ShapeData(Data):
     def world_matrix(self, hierarchy) -> np.ndarray:
         """
         Where the shape sits: the world matrix of its transform in
-        ``hierarchy``, at the frame a clip is on, and identity when it has
-        none.
+        ``hierarchy``, and identity when it has none. (4, 4) in a
+        HierarchyData or in the pose of one frame of a clip,
+        ``clip.frames[i]``; in a ClipData one a frame, (F, 4, 4).
         """
+        from cgmath.hierarchy.hierarchy import _Part
+
         node = self.transform(hierarchy)
-        return np.eye(4) if node is None else np.array(node.world_matrix, dtype=np.float64)
+        if node is not None:
+            return np.array(node.world_matrix, dtype=np.float64)
+        if isinstance(hierarchy, _Part):
+            return np.broadcast_to(np.eye(4), (hierarchy.frame_count, 4, 4)).copy()
+        return np.eye(4)

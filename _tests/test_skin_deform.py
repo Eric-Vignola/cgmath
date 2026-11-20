@@ -156,7 +156,6 @@ def branching_clip(joints: int = 12, frames: int = 9, seed: int = 23):
         setattr(clip.frames, channel, getattr(clip.frames, channel) + walk)
     clip.frames.scale = clip.frames.scale * rng.uniform(0.9, 1.1, shape)
     clip.frames.shear = rng.uniform(-0.2, 0.2, shape)
-    clip.frame        = 0
     return rig, clip
 
 
@@ -202,8 +201,7 @@ def skinned_mesh(rig, seed: int = 29):
 def pose_at(clip, frame: int) -> HierarchyData:
     """frame *frame* of *clip* as a plain single-pose HierarchyData: the
     frame-by-frame reference every clip result is checked against"""
-    clip.frame = frame
-    return HierarchyData([node.copy() for node in clip])
+    return clip.frames[frame].copy()
 
 
 class TestConvention(unittest.TestCase):
@@ -1340,20 +1338,20 @@ class TestClipPoses(unittest.TestCase):
         frames = range(clip.frame_count) if frames is None else frames
         return np.stack([d.apply(pose_at(clip, f)) for f in frames])
 
-    def test_a_clip_deforms_at_the_frame_it_is_on(self):
+    def test_a_frame_of_a_clip_deforms_as_that_pose(self):
         for method in ("lbs", "dqs"):
             d = self.make(method)
             for frame in (0, 4, self.clip.frame_count - 1):
                 with self.subTest(method=method, frame=frame):
-                    self.clip.frame = frame
-                    np.testing.assert_allclose(
-                        d.apply(self.clip), self.reference(d, [frame])[0], atol=1e-9
-                    )
+                    expected = self.reference(d, [frame])[0]
+                    np.testing.assert_allclose(d.apply(self.clip.frames[frame]), expected, atol=1e-9)
+                    # the same frame by its number
+                    number = self.clip.start_frame + frame
+                    np.testing.assert_allclose(d.apply(self.clip.at(number)), expected, atol=1e-9)
 
-    def test_a_clip_deforms_a_mesh_target_at_its_frame(self):
-        d               = self.make()
-        self.clip.frame = 6
-        got             = d.apply(self.clip, self.mesh)
+    def test_a_frame_of_a_clip_deforms_a_mesh_target(self):
+        d   = self.make()
+        got = d.apply(self.clip.frames[6], self.mesh)
         self.assertIsInstance(got, MeshData)
         np.testing.assert_allclose(got.points, self.reference(d, [6])[0], atol=1e-9)
 
@@ -1361,52 +1359,62 @@ class TestClipPoses(unittest.TestCase):
         for method in ("lbs", "dqs"):
             with self.subTest(method):
                 d   = self.make(method)
-                got = d.apply(self.clip.frames)
+                got = d.apply(self.clip)
                 self.assertEqual(
                     got.shape, (self.clip.frame_count, len(self.mesh.points), 3)
                 )
                 np.testing.assert_allclose(got, self.reference(d), atol=1e-9)
                 np.testing.assert_array_equal(d.points, got[-1])
+                # clip.frames is the clip, every frame
+                np.testing.assert_array_equal(d.apply(self.clip.frames), got)
 
-    def test_a_node_scoped_frame_axis_finds_the_joints_among_its_nodes(self):
+    def test_a_pick_of_nodes_finds_the_joints_among_its_nodes(self):
         d     = self.make()
         names = list(self.clip.name)
         for scope in (names[::-1], names[:-1], self.skin.influences):
             with self.subTest(scope=scope[:3]):
-                got = d.apply(self.clip.frames[list(scope)])
+                got = d.apply(self.clip[list(scope)])
                 np.testing.assert_allclose(got, self.reference(d), atol=1e-9)
 
-    def test_a_frame_axis_without_a_joint_raises(self):
+    def test_a_pick_of_nodes_without_a_joint_raises(self):
         d = self.make()
         with self.assertRaisesRegex(ValueError, "absent from the rig"):
-            d.apply(self.clip.frames[list(self.clip.name)[:3]])
+            d.apply(self.clip[list(self.clip.name)[:3]])
 
     def test_every_frame_of_a_clip_cannot_fill_one_mesh(self):
-        with self.assertRaisesRegex(ValueError, "batched pose"):
-            self.make().apply(self.clip.frames, self.mesh)
+        for whole in (self.clip, self.clip.frames):
+            with self.assertRaisesRegex(ValueError, "batched pose"):
+                self.make().apply(whole, self.mesh)
 
-    def test_the_clip_keeps_its_frame_and_its_channels(self):
-        d               = self.make()
-        self.clip.frame = 5
-        before          = np.array(self.clip.frames.rotate)
+    def test_the_clip_keeps_its_channels_and_a_pose_held(self):
+        d      = self.make()
+        pose   = self.clip.frames[5]
+        before = np.array(self.clip.rotate)
 
-        d.apply(self.clip.frames)
         d.apply(self.clip)
-        self.make(bind_rig=self.clip)
+        d.apply(pose)
+        self.make(bind_rig=pose)
 
-        self.assertEqual(self.clip.frame, 5)
-        np.testing.assert_array_equal(self.clip.frames.rotate, before)
+        # the pose held is still the clip's frame 5, and reads what it read
+        self.assertIs(self.clip.frames[5], pose)
+        np.testing.assert_array_equal(self.clip.rotate, before)
+        np.testing.assert_array_equal(pose.rotate, before[5])
 
-    def test_an_edit_on_the_bound_frame_is_seen(self):
-        d               = self.make()
-        self.clip.frame = 2
-        names           = list(self.clip.name)
+    def test_an_edit_on_a_frame_is_seen(self):
+        d      = self.make()
+        pose   = self.clip.frames[2]
+        names  = list(self.clip.name)
+        before = d.apply(pose)
 
-        self.clip[names[3]].rotate    = (10.0, 20.0, 30.0)
-        self.clip[names[0]].translate = (1.0, -2.0, 0.5)
+        pose[names[3]].rotate    = (10.0, 20.0, 30.0)
+        pose[names[0]].translate = (1.0, -2.0, 0.5)
 
-        expected = d.apply(HierarchyData([node.copy() for node in self.clip]))
-        np.testing.assert_allclose(d.apply(self.clip), expected, atol=1e-9)
+        expected = d.apply(pose.copy())
+        self.assertFalse(np.allclose(expected, before))
+        np.testing.assert_allclose(d.apply(pose), expected, atol=1e-9)
+        # read with every frame as well, and on that frame alone
+        np.testing.assert_allclose(d.apply(self.clip), self.reference(d), atol=1e-9)
+        np.testing.assert_allclose(d.apply(self.clip)[2], expected, atol=1e-9)
 
     def test_a_clip_without_frames_is_one_pose(self):
         d = self.make()
@@ -1414,25 +1422,26 @@ class TestClipPoses(unittest.TestCase):
             d.apply(ClipData(self.rig)), d.apply(self.rig), atol=1e-12
         )
 
-    def test_a_clip_binds_at_the_frame_it_is_on(self):
-        self.clip.frame = 4
-        got             = self.make(bind_rig=self.clip)
-        ref             = self.make(bind_rig=pose_at(self.clip.copy(), 4))
+    def test_a_frame_of_a_clip_is_a_bind_pose(self):
+        pose = self.clip.frames[4]
+        got  = self.make(bind_rig=pose)
+        ref  = self.make(bind_rig=pose_at(self.clip.copy(), 4))
         np.testing.assert_allclose(
             got.inverse_bind_matrices, ref.inverse_bind_matrices, atol=1e-9
         )
         # that frame is then the bind pose
-        np.testing.assert_allclose(got.apply(self.clip), self.mesh.points, atol=1e-9)
+        np.testing.assert_allclose(got.apply(pose), self.mesh.points, atol=1e-9)
 
     def test_every_frame_of_a_clip_is_not_a_bind_pose(self):
-        with self.assertRaisesRegex(ValueError, "one pose"):
-            self.make(bind_rig=self.clip.frames)
+        for whole in (self.clip, self.clip.frames):
+            with self.assertRaisesRegex(ValueError, "one pose"):
+                self.make(bind_rig=whole)
 
     def test_reading_a_frame_hands_numba_its_threads_back(self):
-        """the bound frame is read on one thread, and only while it is read,
-        even when the read fails. The count is set here rather than read:
-        a test before this one that kept the thread taken left 1 to compare
-        against, and a regression passed"""
+        """one frame of a clip is read on one thread, and only while it is
+        read, even when the read fails. The count is set here rather than
+        read: a test before this one that kept the thread taken left 1 to
+        compare against, and a regression passed"""
         import numba
         from cgmath.geometry.deform import skin_deform
 
@@ -1441,18 +1450,19 @@ class TestClipPoses(unittest.TestCase):
         self.addCleanup(numba.set_num_threads, numba.config.NUMBA_NUM_THREADS)
         numba.set_num_threads(2)
 
-        self.make().apply(self.clip)
+        self.make().apply(self.clip.frames[0])
         self.assertEqual(numba.get_num_threads(), 2)
 
         with patch.object(
             skin_deform, "_BoundFrame", side_effect=RuntimeError("boom")
         ), self.assertRaisesRegex(RuntimeError, "boom"):
-            self.make().apply(self.clip)
+            self.make().apply(self.clip.frames[0])
         self.assertEqual(numba.get_num_threads(), 2)
 
-    def test_a_frame_axis_held_across_a_reorder_skins_its_own_joints(self):
-        # an axis read block columns in the old order against names and
-        # parents in the new: 6 to 16 off the reference, or an IndexError
+    def test_a_part_held_across_a_reorder_skins_its_own_joints(self):
+        # a part of the clip held, its frames, a pick of its nodes or the
+        # pose of a frame, read block columns in the old order against names
+        # and parents in the new: 6 to 16 off the reference, or an IndexError
         # once a node had been added or taken out
         unbound = [n for n in self.clip.name if n not in self.skin.influences]
         reorders = {
@@ -1469,35 +1479,38 @@ class TestClipPoses(unittest.TestCase):
                         clip      = self.source.copy()
                         self.clip = clip
                         d         = self.make(method)
-                        axis      = clip.frames[list(self.skin.influences)] if scoped else clip.frames
+                        part      = clip[list(self.skin.influences)] if scoped else clip.frames
+                        pose      = clip.frames[4]
                         reorder(clip)
 
-                        got = d.apply(axis)  # before anything lines the clip up
+                        got = d.apply(part)  # before anything lines the clip up
                         np.testing.assert_allclose(got, self.reference(d), atol=1e-9)
+                        # the pose of a frame held across it is in step as well
+                        np.testing.assert_allclose(d.apply(pose), self.reference(d, [4])[0], atol=1e-9)
 
-    def test_a_node_put_back_from_elsewhere_is_read_at_the_bound_frame(self):
-        # a node assigned into the clip keeps its own channels and is not the
-        # clip's: the blocks know nothing of it, the nodes do
+    def test_a_node_put_back_from_elsewhere_is_read_on_its_frame(self):
+        # a node assigned into the clip is not the clip's: the pose of a
+        # frame is skinned as that pose reads, the node put back included
         for method in ("lbs", "dqs"):
             with self.subTest(method):
-                self.clip       = self.source.copy()
-                self.clip.frame = 3
-                d               = self.make(method)
-                node            = self.clip[0].copy()
-                node.rotate     = (11.0, 22.0, 33.0)
-                self.clip[0]    = node
-                self.assertIsNot(node._hierarchy, self.clip)
+                self.clip    = self.source.copy()
+                pose         = self.clip.frames[3]
+                d            = self.make(method)
+                node         = pose[0].copy()
+                node.rotate  = (11.0, 22.0, 33.0)
+                self.clip[0] = node
+                self.assertIsNot(node._hierarchy, self.clip._engine)
 
-                expected = HierarchyData([n.copy() for n in self.clip])
-                np.testing.assert_allclose(d.apply(self.clip), d.apply(expected), atol=1e-9)
+                expected = pose.copy()
+                np.testing.assert_allclose(d.apply(pose), d.apply(expected), atol=1e-9)
                 np.testing.assert_allclose(
-                    self.make(method, bind_rig=self.clip).inverse_bind_matrices,
+                    self.make(method, bind_rig=pose).inverse_bind_matrices,
                     self.make(method, bind_rig=expected).inverse_bind_matrices,
                     atol=1e-9,
                 )
 
     def test_the_world_matrices_are_the_nodes_bit_for_bit(self):
-        # the bound frame goes through the evaluator that mirrors
+        # one frame goes through the evaluator that mirrors
         # TransformData.matrix factor for factor, so a skinned frame is the
         # frame skinned through its nodes, to the bit: the clip's own one
         # span read lands 1e-15 away
@@ -1505,9 +1518,8 @@ class TestClipPoses(unittest.TestCase):
         every = [d._posed_world(pose_at(self.clip.copy(), f)) for f in range(self.clip.frame_count)]
         for frame in (0, 4, self.clip.frame_count - 1):
             with self.subTest(frame=frame):
-                self.clip.frame = frame
-                np.testing.assert_array_equal(d._posed_world(self.clip), every[frame])
-        np.testing.assert_array_equal(d._posed_world(self.clip.frames), np.stack(every))
+                np.testing.assert_array_equal(d._posed_world(self.clip.frames[frame]), every[frame])
+        np.testing.assert_array_equal(d._posed_world(self.clip), np.stack(every))
 
     def test_a_clip_is_read_from_its_blocks_not_node_by_node(self):
         """node by node, a world matrix costs ~30 ms a frame on a few hundred
@@ -1518,15 +1530,15 @@ class TestClipPoses(unittest.TestCase):
         def refuse(node):
             raise AssertionError(f"{node.name}.world_matrix was read")
 
-        self.clip.frame = 3
+        pose = self.clip.frames[3]
         with patch.object(TransformData, "world_matrix", property(refuse)):
-            one   = d.apply(self.clip)
-            every = d.apply(self.clip.frames)
-            bound = self.make(bind_rig=self.clip)
+            one   = d.apply(pose)
+            every = d.apply(self.clip)
+            bound = self.make(bind_rig=pose)
 
         np.testing.assert_allclose(one, expected[3], atol=1e-9)
         np.testing.assert_allclose(every, expected, atol=1e-9)
-        np.testing.assert_allclose(bound.apply(self.clip), self.mesh.points, atol=1e-9)
+        np.testing.assert_allclose(bound.apply(pose), self.mesh.points, atol=1e-9)
 
 
 if __name__ == "__main__":

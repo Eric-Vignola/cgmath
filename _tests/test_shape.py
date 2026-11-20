@@ -81,12 +81,12 @@ class TestAShapeIsPlacedByItsTransform(unittest.TestCase):
     def test_a_clip_places_it_frame_by_frame(self):
         clip = ClipData(self.rig, frames=3)
         for frame in range(3):
-            clip.frame              = frame
-            clip["child"].translate = [float(frame), 0.0, 0.0]
+            clip.frames[frame]["child"].translate = [float(frame), 0.0, 0.0]
         mesh = quad(parent_uuid=self.rig["child"].uuid)
         for frame in range(3):
-            clip.frame = frame
-            np.testing.assert_allclose(mesh.world_matrix(clip)[3, :3], [float(frame), 10.0, 0.0])
+            np.testing.assert_allclose(mesh.world_matrix(clip.frames[frame])[3, :3], [float(frame), 10.0, 0.0])
+        # the clip itself places it on every frame at once, (F, 4, 4)
+        np.testing.assert_allclose(mesh.world_matrix(clip)[:, 3, :3], [[float(frame), 10.0, 0.0] for frame in range(3)])
 
 
 class TestTheIdsSave(unittest.TestCase):

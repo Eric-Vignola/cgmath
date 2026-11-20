@@ -6,6 +6,10 @@ with a setter, or private state a class up the MRO names in its
 ``_STATE``. Anything else raises, a typo like ``obj.ambiant = 0.5`` (of
 ``ambient``) and a private name alike, and so does a write over a method,
 a class setting or a read-only property, which names it for what it is.
+
+A ClipData is no Data class: it is a thin object over its storage, a private
+HierarchyData subclass that answers to its name, ``_Clip`` here, and the
+guard is the storage's. The clip these tests write to is that storage.
 """
 
 import contextlib
@@ -31,6 +35,7 @@ from cgmath.data import Data, DataList
 from cgmath.geometry.mesh import MeshData, MeshList
 from cgmath.hierarchy import ClipData, HierarchyData, TransformData
 from cgmath.hierarchy import hierarchy as hierarchy_mod
+from cgmath.hierarchy.hierarchy import _Clip
 from cgmath._tests.test_roundtrip import data_classes, examples
 
 
@@ -627,12 +632,13 @@ class TestDataListStrictSetattr(unittest.TestCase):
 # -- the cost ------------------------------------------------------------
 
 
-def _accepted(node=TransformData, mesh=MeshData, rig=HierarchyData, clip=ClipData, meshes=MeshList):
+def _accepted(node=TransformData, mesh=MeshData, rig=HierarchyData, clip=_Clip, meshes=MeshList):
     """``(objects, writes)``: instances of the classes given, and the writes
     each takes that look up no user attribute -- a field, a settable
     property, _STATE and the user attributes' dict on a node, a mesh's field
-    and cache, a rig's list and _STATE, a clip's frame and cache, a mesh
-    list's list -- each made once, so every class's names are worked out"""
+    and cache, a rig's list and _STATE, the frame a clip's storage is bound
+    to, a settable property of it, and its cache, a mesh list's list -- each
+    made once, so every class's names are worked out"""
     a = node(name="a")
     m = mesh(indices=np.arange(3), counts=np.array([3]), points=np.zeros((3, 3)))
     r = rig([a, node(name="b")])
@@ -708,8 +714,8 @@ def _cost(write) -> Counter:
     least of the last five of eight runs under tracemalloc, by when the
     write holds the same on each. The first run holds more than the write
     does, for tracemalloc counts no release of memory made before it
-    started: a clip's frame write holds 840 B, then 424 B on each run
-    after (Python 3.11). And a run can hold memory that is not the
+    started: a clip storage's frame write holds 840 B, then 424 B on each
+    run after (Python 3.11). And a run can hold memory that is not the
     write's: on Python 3.9 the same write holds 544 B, and now and then
     763 or 1041 B on one run. A copy made in C -- tuple(cls.__dict__) --
     is no line and no call."""
@@ -856,7 +862,7 @@ class TestAnAcceptedWriteWorksNoNamesOut(unittest.TestCase):
         class Rig(HierarchyData, metaclass=RecordingABC):
             pass
 
-        class Clip(ClipData, metaclass=RecordingABC):
+        class Clip(_Clip, metaclass=RecordingABC):
             pass
 
         class Meshes(MeshList, metaclass=RecordingABC):
@@ -889,7 +895,7 @@ class TestAnAcceptedWriteWorksNoNamesOut(unittest.TestCase):
         ready, past it a new one, 28 B more. The sequence is restarted past
         256 for the test, so every count either class draws is a new int,
         however many edits ran before it in the process."""
-        bases = (TransformData, MeshData, HierarchyData, ClipData, MeshList)
+        bases = (TransformData, MeshData, HierarchyData, _Clip, MeshList)
         with mock.patch.object(hierarchy_mod, "_structure_ticks", itertools.count(1 << 20)):
             _, small = _accepted(*(_grown(b, depth=1, width=0) for b in bases))
             _, big = _accepted(*(_grown(b) for b in bases))
@@ -921,8 +927,8 @@ class TestAnAcceptedWriteWorksNoNamesOut(unittest.TestCase):
         self.assertEqual(failing, [], first)
 
     def test_a_block_kept_on_one_run_is_not_the_writes(self):
-        """A clip's frame write that also keeps a block of 1 KB on one of
-        the writes _cost makes, any one, holds what the write alone does.
+        """A clip storage's frame write that also keeps a block of 1 KB on one
+        of the writes _cost makes, any one, holds what the write alone does.
         _cost took the least of three runs, and the write held its own only
         from the third (Python 3.9: 1056, 572, then 544 B): a block kept on
         that one left the second run's 572 B, 28 B of them _cost's own, as
@@ -1088,7 +1094,8 @@ class TestEveryClassTakesOnlyWhatItDeclares(unittest.TestCase):
     def test_no_dunder_takes_a_write(self):
         # __dict__ = {...} would swap every field for what it holds, and
         # __class__ = another class with the same layout the instance's
-        # class: refused on every class, and on a rig's views and a clip's
+        # class: refused on every class, on a rig's views, and on a ClipData
+        # and its views, which hand the write to the storage they are over
         root    = TransformData(name="root")
         rig     = HierarchyData([root, TransformData(name="a", parent_uuid=root.uuid)])
         clip    = ClipData(rig, frames=3)
@@ -1096,14 +1103,22 @@ class TestEveryClassTakesOnlyWhatItDeclares(unittest.TestCase):
         objects += [
             ("rig[0:1]", rig[0:1]),
             ("rig.get_children()", rig.get_children()),
+            ("clip", clip),
+            ("clip[0:1]", clip[0:1]),
             ("clip.frames[0:1]", clip.frames[0:1]),
         ]
+
+        def held(obj) -> dict:
+            """the dict a write to ``obj`` would change: its own, or for a
+            ClipData, which holds none, its storage's"""
+            return vars(obj._engine if isinstance(obj, ClipData) else obj)
+
         for name, obj in objects:
             cls     = type(obj)
             swapped = _Leaf if isinstance(obj, Data) else _Items
             for attr, value in (("__dict__", {"_junk": 1}), ("__class__", swapped)):
                 with self.subTest(obj=name, attr=attr):
-                    before = dict(vars(obj))
+                    before = dict(held(obj))
                     # a view answers under the name of the class it is a view of
                     named = getattr(cls, "_OWNER", None) or cls
                     with self.assertRaisesRegex(
@@ -1112,8 +1127,8 @@ class TestEveryClassTakesOnlyWhatItDeclares(unittest.TestCase):
                     ):
                         setattr(obj, attr, value)
                     self.assertIs(type(obj), cls)
-                    self.assertEqual(vars(obj).keys(), before.keys())
-                    self.assertTrue(all(vars(obj)[k] is v for k, v in before.items()))
+                    self.assertEqual(held(obj).keys(), before.keys())
+                    self.assertTrue(all(held(obj)[k] is v for k, v in before.items()))
 
     def test_the_holes_are_closed(self):
         # what 2.0.0 took and stored on the instance

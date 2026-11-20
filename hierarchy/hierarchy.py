@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import itertools
 import bisect
 import json
@@ -34,6 +35,8 @@ from cgmath.data import (
     _retired,
     _mask_to_indices,
     _NO_DEFAULT,
+    _arrays_back,
+    _plain,
     _refusal,
     _tree_copy,
     forward,
@@ -1687,7 +1690,7 @@ class TransformData(Data):
             # animates a constant channel
             if current.base is not None:
                 owner = self._hierarchy
-                if isinstance(owner, (ClipData, _FramePose)):
+                if isinstance(owner, (_Clip, _FramePose)):
                     owner._played(self, name)
 
     @property
@@ -2912,7 +2915,7 @@ class TransformData(Data):
             if attrs and name in attrs and not self._is_builtin_attr(name):
                 writes = _user_writes(attrs, name, value, self.name)
                 owner  = self._hierarchy
-                if isinstance(owner, _FramePose) or (isinstance(owner, ClipData) and owner._blocks):
+                if isinstance(owner, _FramePose) or (isinstance(owner, _Clip) and owner._blocks):
                     owner._user_played(self, name, writes)
                     return
                 for spec, converted in writes:
@@ -8030,7 +8033,7 @@ class TransformList(DataList[TransformData]):
         writes = [_user_writes(node.user_defined_attributes, name, value, node.name) for node in nodes]
         for node, done in zip(nodes, writes):
             owner = node._hierarchy
-            if isinstance(owner, _FramePose) or (isinstance(owner, ClipData) and owner._blocks):
+            if isinstance(owner, _FramePose) or (isinstance(owner, _Clip) and owner._blocks):
                 owner._user_played(node, name, done)
                 continue
             for spec, converted in done:
@@ -8114,6 +8117,8 @@ class TransformList(DataList[TransformData]):
         ``ndim`` is the dimension a per-node sequence would have, so a value
         one dimension shallower broadcasts to every node instead.
         """
+        if isinstance(other, (_Part, _Frames)):
+            raise TypeError("a clip holds every frame: match a pose to one of them, eg: clip.frames[i]")
         if isinstance(other, TransformData):
             return [other] * len(self)
 
@@ -8557,12 +8562,12 @@ class TransformList(DataList[TransformData]):
     @property
     def quaternion(self) -> np.ndarray:
         # the head of a multi-frame clip reads its frame, every node at once
-        clip = _framed_clip(self)
-        if clip is not None:
+        found = _framed_clip(self)
+        if found is not None:
+            clip, frame, sources = found
             clip._realign()
-            frame = clip.frame
-            span  = slice(frame, frame + 1)
-            return _span_quaternions(clip, _clip_columns(clip, self), span)[0]
+            span = slice(frame, frame + 1)
+            return _span_quaternions(clip, _clip_columns(clip, sources), span)[0]
 
         values = []
         for node in self:
@@ -8973,22 +8978,22 @@ class TransformList(DataList[TransformData]):
                 passed the same value -- the two store different things in
                 the same channel.
 
-        A :class:`ClipData` is the pose of the frame it is bound to, like
-        any other. Its frame axis, ``clip.frames``, is every frame: the
-        delta is taken against each, all solved at once, and comes back as
-        a :class:`ClipData` on that clip's timebase, bound to its first
-        frame. The axis of a clip of one frame, or none, is one pose.
+        A :class:`ClipData` stands for every frame of it: the delta is
+        taken against each, all solved at once, and comes back as a
+        :class:`ClipData` on that clip's timebase. One frame of it,
+        ``clip.frames[i]``, is one pose, like any other; so is a clip of
+        one frame, or none.
         """
         # clip.frames stands for every frame of its clip: this pose, repeated
         # down the clip, is taken against each
         other, every = _framed_operand(other)
         if every:
-            new = ClipData._adopt(
+            new = _Clip._adopt(
                 self._owned_copy(), other.frame_count, other.start_frame, other.fps
             )
             new._subtract_all_frames(other, by=by, translate=translate)
             new._bind(0)
-            return new
+            return _public(new)
 
         new = self._owned_copy()
         return new.__isub__(other, by=by, translate=translate)
@@ -9088,7 +9093,7 @@ class TransformList(DataList[TransformData]):
             new = delta._rooted_copy()
             new._add_all_frames(self, by=by, translate=translate)
             new._bind(0)
-            return new
+            return _public(new)
 
         new = delta._owned_copy()
         return new.__iadd__(self, by=by, translate=translate)
@@ -9114,8 +9119,10 @@ class TransformList(DataList[TransformData]):
         if isinstance(query, str):
             return self.list[self.index(query)]
 
-        # fancy index (indices or boolean mask) -> non-owning view
+        # fancy index (indices, names or boolean mask) -> non-owning view
         if _is_sequence(query):
+            if any(isinstance(item, str) for item in query):
+                query = [self.index(item) if isinstance(item, str) else item for item in query]
             query = _mask_to_indices(query, len(self.list))
             return self._view([self.list[i] for i in query])
 
@@ -9163,6 +9170,11 @@ class TransformList(DataList[TransformData]):
         if self.DATA_LIST_CLASS is not None and not isinstance(
             node, self.DATA_LIST_CLASS
         ):
+            if isinstance(node, (_Part, _Frames)):
+                raise TypeError(
+                    f"{node} is part of a clip, on every frame: pick nodes of a clip on the clip, clip[[...]] or "
+                    f"clip.match(...), or take one frame's, clip.frames[i]"
+                )
             raise TypeError(f"{node} is not a valid object.")
 
         # if the TransformData doesn't have a unique id, assign one and
@@ -9239,6 +9251,11 @@ class TransformList(DataList[TransformData]):
         if self.DATA_LIST_CLASS is not None and not isinstance(
             node, self.DATA_LIST_CLASS
         ):
+            if isinstance(node, (_Part, _Frames)):
+                raise TypeError(
+                    f"{node} is part of a clip, on every frame: pick nodes of a clip on the clip, clip[[...]] or "
+                    f"clip.match(...), or take one frame's, clip.frames[i]"
+                )
             raise TypeError(f"{node} is not a valid object.")
 
         # NOTE: a TransformList is a non-owning view, so it never claims
@@ -10573,30 +10590,39 @@ def _solve_frames(clip, columns, span: slice, op: str, target, axes=None) -> Non
     clip._bind(clip._frame)
 
 
-def _framed_clip(nodes) -> Optional["ClipData"]:
-    """the multi-frame clip every one of ``nodes`` is the playback head of
+def _framed_clip(nodes) -> Optional[tuple]:
+    """``(clip, frame, the clip's own nodes)`` when every one of ``nodes`` is
+    a node of one multi-frame clip on one frame: the storage's own nodes, on
+    the frame they are bound to, or the nodes of the pose of one frame
+    (:class:`_FramePose`). None for anything else.
 
     A node taken out of its clip with del or remove() still points at it,
-    but has no column there: such a node is not a head, and the single pose
-    route takes it.
+    but has no column there: the single pose route takes it.
     """
     nodes = list(nodes)
-    clip  = None
+    owner = None
     for node in nodes:
-        owner = getattr(node, "_hierarchy", None)
-        if clip is None:
-            if not isinstance(owner, ClipData) or owner.frame_count < 2:
-                return None
-            clip = owner
-        elif owner is not clip:
+        held = getattr(node, "_hierarchy", None)
+        if owner is None:
+            owner = held
+        elif held is not owner:
             return None
 
+    if isinstance(owner, _FramePose):
+        clip, frame = owner._clip, owner._frame
+        nodes = [node.__dict__.get("_source") for node in nodes]
+    elif isinstance(owner, _Clip):
+        clip, frame = owner, owner._frame
+    else:
+        return None
+    if clip.frame_count < 2:
+        return None
+
     # listed by identity: list membership would compare uuids node by node
-    if clip is not None:
-        listed = {id(node) for node in clip.list}
-        if any(id(node) not in listed for node in nodes):
-            return None
-    return clip
+    listed = {id(node) for node in clip.list}
+    if any(id(node) not in listed for node in nodes):
+        return None
+    return clip, frame, nodes
 
 
 def _framed_operand(other) -> tuple:
@@ -10607,10 +10633,14 @@ def _framed_operand(other) -> tuple:
     one frame. Anything else -- a clip itself included, the pose of the
     frame it is bound to -- is one pose and comes back as it is, with False.
     """
+    if isinstance(other, (_Part, _Frames)):
+        other = _algebra_operand(other)
     if isinstance(other, _ViewAxis):
-        # a view's frames stand for every frame of the nodes viewed
-        clip = other._view.copy()
-        return clip, clip.frame_count > 1
+        other = other._view
+    if isinstance(other, _ClipView):
+        # a selection of a clip's nodes: every frame of them, under the
+        # parents they have
+        return other, other._owner.frame_count > 1
     if isinstance(other, _FrameAxis):
         if other._uuids is not None:
             raise TypeError(
@@ -10684,9 +10714,10 @@ def _clip_setter(nodes, op: str, value, axes=None) -> bool:
     clears the node's branch alone, where a solve rebinds the whole clip.
     """
     nodes = list(nodes)
-    clip  = _framed_clip(nodes)
-    if clip is None:
+    found = _framed_clip(nodes)
+    if found is None:
         return False
+    clip, frame, sources = found
 
     count = len(nodes)
     if op in ("world", "local", "quaternion"):
@@ -10702,7 +10733,7 @@ def _clip_setter(nodes, op: str, value, axes=None) -> bool:
         operands = TransformList(nodes)._match_operands(value, ndim=ndim)
         if all(isinstance(o, TransformData) for o in operands):
             if (
-                isinstance(value, ClipData)
+                isinstance(value, _Clip)
                 and value._blocks
                 and len(operands) == len(value)
                 and all(a is b for a, b in zip(operands, value.list))
@@ -10739,8 +10770,7 @@ def _clip_setter(nodes, op: str, value, axes=None) -> bool:
             return False
 
     clip._realign()
-    columns, keep = _last_of_each(_clip_columns(clip, nodes))
-    frame = clip.frame
+    columns, keep = _last_of_each(_clip_columns(clip, sources))
     _solve_frames(
         clip,
         columns,
@@ -10782,7 +10812,7 @@ class _PoseFrame:
             channel: np.array(
                 [getattr(node, channel) for node in nodes], dtype=float
             ).reshape(1, len(nodes), 3)
-            for channel in ClipData.FRAMED_CHANNELS
+            for channel in _Clip.FRAMED_CHANNELS
         }
 
 
@@ -11281,7 +11311,7 @@ class _RigFrames:
         return np.array(values, dtype=float).reshape(1, len(rows), 3)
 
     def channels(self, rows) -> dict:
-        return {c: self.read(c, rows) for c in ClipData.FRAMED_CHANNELS}
+        return {c: self.read(c, rows) for c in _Clip.FRAMED_CHANNELS}
 
     def write(self, channel: str, rows, values: np.ndarray) -> None:
         rows = np.asarray(rows, dtype=int)
@@ -12606,8 +12636,7 @@ def _frame_property(channel: str) -> property:
         clip    = self._clip
         block   = clip._blocks[channel]
         if self._single:
-            column = int(columns[0])
-            view   = block[:, column] if clip._keyed(channel)[column] else block[:1, column]
+            view = block[:, int(columns[0])]
         else:
             view = block.view() if columns is None else block[:, columns]
         view.setflags(write=False)
@@ -12625,12 +12654,18 @@ def _frame_property(channel: str) -> property:
                 value = np.full((1, 3), float(value.reshape(())))
             if value.ndim == 0 or value.shape[-1] != 3 or value.size not in (3, 3 * frames):
                 raise ValueError(
-                    f"clip.frames[name].{clip._channel_name(channel)} takes one row, (3,) or (1, 3), or one "
+                    f"clip[name].{clip._channel_name(channel)} takes one row, (3,) or (1, 3), or one "
                     f"a frame, ({frames}, 3); got {value.shape}"
                 )
             rows             = value.reshape(-1, 3)
             block[:, column] = rows
-            clip._keyed(channel)[column] = len(rows) == frames and frames > 1
+            # one row makes the channel constant. A row a frame that differ
+            # animate it; all equal, they leave it as it was, so a channel
+            # read and written back is the channel it was
+            if len(rows) != frames or frames < 2:
+                clip._keyed(channel)[column] = False
+            elif np.any(rows != rows[:1]):
+                clip._keyed(channel)[column] = True
         else:
             framed = value.ndim == 3 and value.shape[0] == frames and frames > 1
             if columns is None:
@@ -12825,7 +12860,8 @@ class _FrameAxis:
         clip = self._clip
         if self._single:
             node, children = held[0]
-            rows = np.array(self._user_rows(node, name, children))
+            rows = self._user_rows(node, name, children)
+            rows = np.array(np.broadcast_to(rows, (clip.frame_count, rows.shape[1])))
             rows.setflags(write=False)
             return rows
         frames = clip.frame_count
@@ -12865,7 +12901,9 @@ class _FrameAxis:
             _user_rows_checked(node.user_defined_attributes, name, children, rows, f"{node.name}.{name}")
         for (node, children), rows in zip(held, blocks):
             keys = clip._user_keys.setdefault(node.uuid, {})
-            if len(rows) == frames and frames > 1:
+            # as a framed channel: a row a frame animates it when the rows
+            # differ, and all equal leaves it as it was
+            if len(rows) == frames and frames > 1 and (name in keys or np.any(rows != rows[:1])):
                 keys[name] = np.array(rows, dtype=np.float64)
                 _user_put(node.user_defined_attributes, name, children, rows[clip._frame])
             else:
@@ -12976,9 +13014,9 @@ class _FrameAxis:
         # pairing by position needs column i to be node i
         clip._realign()
 
-        if isinstance(value, _View) and isinstance(value, ClipData):
+        if isinstance(value, _View) and isinstance(value, _Clip):
             value = value.copy()  # a selection of a clip pastes its own frames
-        paste = isinstance(query, slice) and isinstance(value, ClipData)
+        paste = isinstance(query, slice) and isinstance(value, _Clip)
         if isinstance(query, slice):
             span     = query
             selected = len(range(*query.indices(clip.frame_count)))
@@ -13195,7 +13233,7 @@ class _FrameAxis:
             value = value[:, None]
             lead  = 2
         one_node = (
-            f"the axis of one node takes {tuple(shape)}, (1,) + {tuple(shape)} or (F,) + {tuple(shape)} values, "
+            f"one node of a clip takes {tuple(shape)}, (1,) + {tuple(shape)} or (F,) + {tuple(shape)} values, "
             f"got shape {given}"
         )
         if not 0 <= lead <= 2 or value.shape[lead:] != tuple(shape):
@@ -13222,7 +13260,7 @@ class _FrameAxis:
         frame, and so does a clip of one frame"""
         frames, count = self._clip.frame_count, len(self._positions())
 
-        if isinstance(other, _FrameAxis) or (isinstance(other, ClipData) and other._blocks):
+        if isinstance(other, _FrameAxis) or (isinstance(other, _Clip) and other._blocks):
             source = other._clip if isinstance(other, _FrameAxis) else other
             if source.frame_count not in (frames, 1):
                 raise ValueError(f"clips hold {frames} and {source.frame_count} frames")
@@ -13329,29 +13367,31 @@ class _FrameAxis:
 
     @property
     def scale_matrix(self) -> np.ndarray:
-        """every frame's scale matrices, (F, N, 4, 4)"""
-        return _diagonal(self.scale)
+        """every frame's scale matrices, (F, N, 4, 4); (F, 4, 4) on the axis
+        of one node, as every factor below"""
+        return self._squeezed(_diagonal(self._widened(self.scale)))
 
     @property
     def shear_matrix(self) -> np.ndarray:
         """every frame's shear matrices, (F, N, 4, 4)"""
-        return _scale_shears(np.ones_like(self.shear), self.shear)
+        shear = self._widened(self.shear)
+        return self._squeezed(_scale_shears(np.ones_like(shear), shear))
 
     @property
     def rotate_axis_matrix(self) -> np.ndarray:
         """every frame's rotate axis matrices, (F, N, 4, 4)"""
-        return _euler_matrices(self.rotate_axis, None)
+        return self._squeezed(_euler_matrices(self._widened(self.rotate_axis), None))
 
     @property
     def rotate_matrix(self) -> np.ndarray:
         """every frame's rotate matrices, (F, N, 4, 4), in each node's order"""
         orders = np.array([node.rotate_order for node in self._nodes()], dtype=int)
-        return _euler_matrices(self.rotate, orders)
+        return self._squeezed(_euler_matrices(self._widened(self.rotate), orders))
 
     @property
     def joint_orient_matrix(self) -> np.ndarray:
         """every frame's joint orient matrices, (F, N, 4, 4)"""
-        return _euler_matrices(self.joint_orient, None)
+        return self._squeezed(_euler_matrices(self._widened(self.joint_orient), None))
 
     @property
     def parent_scale_inverse(self) -> np.ndarray:
@@ -13373,13 +13413,13 @@ class _FrameAxis:
         compensate = np.array(
             [bool(node.segment_scale_compensate) for node in self._nodes()], dtype=bool
         )
-        inverse = np.where(compensate[:, None], self.parent_scale_inverse, 1.0)
-        return _diagonal(1.0 / inverse)
+        inverse = np.where(compensate[:, None], self._widened(self.parent_scale_inverse), 1.0)
+        return self._squeezed(_diagonal(1.0 / inverse))
 
     @property
     def translate_matrix(self) -> np.ndarray:
         """every frame's translate matrices, (F, N, 4, 4)"""
-        return _translation(self.translate)
+        return self._squeezed(_translation(self._widened(self.translate)))
 
     @property
     def parent_matrix(self) -> np.ndarray:
@@ -13446,7 +13486,7 @@ class _FrameAxis:
         field_of = self._clip.DATA_LIST_CLASS._saved_names()[1]
         channels = {field_of.get(key, key) for key in mapping}
         framed = {
-            channel: np.swapaxes(self._scoped(block, columns), 0, 1).tolist()
+            channel: np.swapaxes(block if columns is None else block[:, columns], 0, 1).tolist()
             for channel, block in self._clip._blocks.items()
             if channel in channels
         }
@@ -13544,71 +13584,38 @@ def _user_rows_checked(attrs: dict, name: str, children, rows: np.ndarray, label
             raise ValueError(f"{label} takes whole numbers")
 
 
-class ClipData(HierarchyData):
-    """A HierarchyData holding F poses rather than one.
+class _Clip(HierarchyData):
+    """
+    The storage of a :class:`ClipData`: its nodes, and one dense
+    ``(F, N, 3)`` block per framed channel.
 
-    The nodes are the playback head. Each framed channel is bound to one row
-    of a dense ``(F, N, 3)`` block, so reading a channel reads the current
-    frame and writing one writes it -- there is no copy and nothing to flush.
-    Scrubbing rebinds:
+    Nothing outside this module holds one: a caller holds the ClipData over
+    it, a part of it, or the pose of one of its frames. It is a
+    HierarchyData so that everything a hierarchy does with its nodes --
+    parenting, naming, the rig index, files -- is the hierarchy's own code.
 
-        clip = ClipData(rig, frames=300, start_frame=1001, fps=24.0)
+    Its nodes are bound to one row of the blocks, ``_frame``: reading a
+    channel of one reads that frame, and writing one writes it. That frame
+    is the storage's own business: no file keeps it, no comparison reads
+    it, and no ClipData shows it. The batched solvers and the frame axis
+    (:class:`_FrameAxis`) read and write the blocks whole; :meth:`_bind`
+    points the nodes at a row again after any of them wrote.
 
-        clip.frame = 12
-        clip.match("L_*").rotate_y += 5      # writes frame 12
-
-        clip.frames[12].match("L_*").rotate_y += 5   # the same thing
-        clip.frames.translate                # (300, N, 3), read only
-        clip.frames.translate = values       # whole block
-
-    Scoping the frame axis to nodes writes every frame at once, which is the
-    difference between keying a channel and keying a pose:
-
-        clip.frames.match("L_*").rotate_y += 5   # all 300 frames
-        clip.frames["hips"].translate_y = 3.0    # one node, all frames
-        clip.frames[10:20]                       # a new 10 frame clip
-        clip.frames[10:20] = other               # paste 10 frames in
-
-    The pose setters work the same way: on the frame axis they solve every
-    frame at once, and a rotate rebuilt from a matrix is then euler filtered
-    along the frames, while on the clip they write the frame it is bound to:
-
-        clip.frames.world_matrix = W             # (300, N, 4, 4), one solve
-        clip.frames.match_matrix(other_clip)     # frame for frame
-        clip.frames["hips"].match_rotate(pose)   # one pose on every frame
-        clip.world_matrix = W[12]                # frame 12, the one bound above
-
-    So does the pose algebra. The clip stands for the frame it is bound to,
-    its frame axis for every frame:
-
-        clip.frames -= rest                      # every frame, in place
-        rest.get_delta(clip.frames)              # a clip: rest against each frame
-        clip -= rest                             # frame 12 alone
-        rest.get_delta(clip)                     # one pose: rest against frame 12
-
-    A clip's own get_delta and add_delta answer for every frame.
-
-    Only the channels a pose setting path writes are framed. Everything else
-    -- names, uuids, parenting, rotate_order, segment_scale_compensate,
+    Only the channels a pose setting path writes are framed. Everything
+    else -- names, uuids, parenting, rotate_order, segment_scale_compensate,
     radius, draw_style -- is structural and shared by every frame.
 
     The rig level edits -- ``swapaxes``, ``set_rotate_to_joint_orient``,
     ``set_joint_orient_to_rotate``, ``set_parent`` in world space, a joint
     becoming another type and ``set_rotate_order`` -- change what every
-    frame shares, so they cover every frame whether they are called on the
-    clip, a selection or one node, all solved at once, with the result the
-    single pose methods give frame by frame:
-
-        clip.set_rotate_order("zyx")             # every node, every frame
-        clip["hips"].swapaxes(0, 1)              # one node, every frame
-        clip.match("L_*").set_parent("root")     # each keeps its world
-
-    They rebuild channels out of matrices. Solved a frame at a time, each
-    frame would pick its euler branch on its own, and the curves would step
-    by 180 and 360 degrees while every pose stayed exact. So each rebuilt
-    euler curve -- rotate in the node's own rotate order, rotate_axis and
-    joint_orient in xyz -- goes through euler_filter, frame 0 kept as
-    computed, the way Maya's Euler Filter keeps the first key.
+    frame shares, so they cover every frame, all solved at once, with the
+    result the single pose methods give frame by frame. They rebuild
+    channels out of matrices. Solved a frame at a time, each frame would
+    pick its euler branch on its own, and the curves would step by 180 and
+    360 degrees while every pose stayed exact. So each rebuilt euler curve
+    -- rotate in the node's own rotate order, rotate_axis and joint_orient
+    in xyz -- goes through euler_filter, frame 0 kept as computed, the way
+    Maya's Euler Filter keeps the first key.
     """
 
     FRAMED_CHANNELS = (
@@ -13636,7 +13643,6 @@ class ClipData(HierarchyData):
     LIST_FIELDS = (
         "_start_frame",
         "_fps",
-        "_frame",
         "_blocks",
         "_animated",
         "_user_keys",
@@ -13646,7 +13652,11 @@ class ClipData(HierarchyData):
 
     # the private state a clip holds beside its list, its LIST_FIELDS and a
     # rig's: the uuid each block column stands for, and each uuid's column
-    _STATE = ("_columns", "_column_place_cache", "_visible", "_live")
+    _STATE = ("_columns", "_column_place_cache", "_visible", "_live", "_frame", "_public")
+
+    # the frame the storage's own nodes are bound to: its own business, which
+    # no file keeps and no ClipData shows
+    _frame = 0
 
     def __init__(
         self,
@@ -13790,6 +13800,12 @@ class ClipData(HierarchyData):
         rebuilt, or what its frames share may have changed"""
         for pose in list(self._live.values()):
             pose._refresh()
+
+    def _refreshed(self) -> None:
+        """the clip was written from outside its own methods: the poses
+        handed out, if any, read it again"""
+        if self._live:
+            self._refresh_live()
 
     @property
     def keyed(self) -> np.ndarray:
@@ -14079,7 +14095,9 @@ class ClipData(HierarchyData):
         frames = self.frame_count
         other, _ = _framed_operand(other)
 
-        framed = isinstance(other, ClipData) and other.frame_count > 1 and frames > 1
+        # a selection of a clip's nodes is read from the clip it selects
+        other  = other._owner if isinstance(other, _ClipView) else other
+        framed = isinstance(other, _Clip) and other.frame_count > 1 and frames > 1
         if framed:
             if other.frame_count != frames:
                 raise ValueError(
@@ -14120,7 +14138,7 @@ class ClipData(HierarchyData):
         raised, as :meth:`HierarchyData.get_delta` says.
         """
         other, _ = _framed_operand(other)
-        if self.frame_count < 2 and isinstance(other, ClipData) and other.frame_count > 1:
+        if self.frame_count < 2 and isinstance(other, _Clip) and other.frame_count > 1:
             return TransformList.get_delta(self, other.frames, by=by, translate=translate)
 
         if not self._blocks:
@@ -14211,7 +14229,7 @@ class ClipData(HierarchyData):
         is raised, as :meth:`HierarchyData.add_delta` says.
         """
         delta, _ = _framed_operand(delta)
-        if self.frame_count < 2 and isinstance(delta, ClipData) and delta.frame_count > 1:
+        if self.frame_count < 2 and isinstance(delta, _Clip) and delta.frame_count > 1:
             return TransformList.add_delta(self, delta.frames, by=by, translate=translate)
 
         if not self._blocks:
@@ -14243,7 +14261,7 @@ class ClipData(HierarchyData):
 
         # the result takes over `new`, which nothing else holds, rather than
         # copying every node of it a second time
-        clip       = ClipData._adopt(new, frames, self._start_frame, self._fps)
+        clip       = _Clip._adopt(new, frames, self._start_frame, self._fps)
         clip._take = self._take
 
         # block columns belong to uuids; line the solved rows up through them
@@ -14619,7 +14637,8 @@ class ClipData(HierarchyData):
         clips = load_takes(filename, verbose)
         if clips is None:
             raise ValueError(f"{filename} holds no take")
-        return clips.active
+        active = clips.active
+        return active._engine if isinstance(active, _Part) else active
 
     def save_fbx(self, filename, as_ascii=False):
         """the clip written as one take, as ``cgmath.formats.save_fbx(filename,
@@ -14670,6 +14689,9 @@ class ClipData(HierarchyData):
         # each channel back to its field's own name, "translate" to
         # "_translate"; the blocks hold only numbers: one array each now,
         # rather than a walk over every json row looking for objects to rebuild
+        # a file saved while a clip had a current frame names it: read past
+        data.pop("frame", None)
+        data.pop("_frame", None)
         blocks = data.get("_blocks")
         if isinstance(blocks, dict):
             blocks = cls.DATA_LIST_CLASS._as_fields(blocks, "the blocks")
@@ -14792,7 +14814,7 @@ class ClipData(HierarchyData):
 
     def __eq__(self, other) -> bool:
         """the same nodes, timebase, loaded frame, blocks and layout"""
-        if not isinstance(other, ClipData) or isinstance(other, _View):
+        if not isinstance(other, _Clip) or isinstance(other, _View):
             return False
 
         # a column belongs to a uuid: line both clips up with their nodes
@@ -14922,37 +14944,46 @@ def _refused_on_a_frame(name: str, base):
     return method
 
 
-class _FrameNode(TransformData):
+class _OnAFrame:
     """
-    A node of the pose of one frame of a clip (:class:`_FramePose`): a
-    TransformData whose framed channels are the clip's own rows of that
-    frame, so a write to one lands in the clip, on that frame alone. What
-    every frame shares, its name, parent, rotate order and type, is the
-    clip's: a write to it raises. ``copy()`` gives a TransformData of its own.
+    What makes a node class the class of its nodes on one frame of a clip
+    (:func:`_frame_class`): the node of the pose of a frame
+    (:class:`_FramePose`) is of its own class, a TransformData, an
+    SDFSphere, whose framed channels are the clip's own rows of that frame,
+    so a write to one lands in the clip, on that frame alone. What every
+    frame shares, its name, parent, rotate order, type and whatever else its
+    class holds, is the clip's: a write to it raises. ``copy()`` gives a
+    node of its class, of its own.
     """
 
     _STATE  = ("_source",)
-    _OWNER  = TransformData
+    _OWNER  = None  # the class the node is of, and its copy gives
     _source = None  # the clip's own node this is a frame of
 
+    @classmethod
+    def _field_label(cls, name: str) -> str:
+        return cls._OWNER._field_label(name)  # an error names the class a caller knows
+
     def __setattr__(self, name: str, value) -> None:
-        if name[:1] != "_" and name not in _FRAME_WRITES and name in TransformData._writable():
-            raise AttributeError(_SHARED.format(name=name))
+        if name[:1] != "_" and name not in _FRAME_WRITES and name in self._OWNER._writable():
+            owner = self.__dict__.get("_hierarchy")
+            if owner is None or "_filling" not in owner.__dict__:
+                raise AttributeError(_SHARED.format(name=name))
         try:
-            TransformData.__setattr__(self, name, value)
+            self._OWNER.__setattr__(self, name, value)
         except AttributeError as error:
-            raise AttributeError(str(error).replace(type(self).__name__, "TransformData")) from None
+            raise AttributeError(str(error).replace(type(self).__name__, self._OWNER.__name__)) from None
 
     def __getattr__(self, name: str):
         try:
-            return TransformData.__getattr__(self, name)
+            return self._OWNER.__getattr__(self, name)
         except AttributeError as error:
-            raise AttributeError(str(error).replace(type(self).__name__, "TransformData")) from None
+            raise AttributeError(str(error).replace(type(self).__name__, self._OWNER.__name__)) from None
 
     def copy(self) -> TransformData:
-        """a TransformData of its own, holding the values of this frame"""
+        """a node of its class, of its own, holding the values of this frame"""
         with _Copying():
-            return TransformData.from_dict(_tree_copy(self.to_dict()))
+            return self._OWNER.from_dict(_tree_copy(self.to_dict()))
 
     def __copy__(self):
         return self.copy()
@@ -14967,10 +14998,10 @@ class _FrameNode(TransformData):
 
     @classmethod
     def from_dict(cls, data: dict) -> TransformData:
-        return TransformData.from_dict(data)
+        return cls._OWNER.from_dict(data)
 
     def __repr__(self) -> str:
-        return TransformData.__repr__(self).replace(type(self).__name__, "TransformData")
+        return self._OWNER.__repr__(self).replace(type(self).__name__, self._OWNER.__name__)
 
 
 for _name in (
@@ -14984,18 +15015,54 @@ for _name in (
     "add_suffix",
     "add_user_attribute",
 ):
-    setattr(_FrameNode, _name, _refused_on_a_frame(_name, TransformData))
+    setattr(_OnAFrame, _name, _refused_on_a_frame(_name, TransformData))
+
+
+class _FrameNode(_OnAFrame, TransformData):
+    """a TransformData on one frame of a clip (:class:`_OnAFrame`)"""
+
+    _OWNER = TransformData
+
+
+_FRAME_CLASSES = {TransformData: _FrameNode}
+_OWN_STATE     = {}
+
+
+def _own_state(cls: type) -> frozenset:
+    """the private state ``cls`` declares up its classes (``_STATE``): what a
+    node holds beside its fields"""
+    held = _OWN_STATE.get(cls)
+    if held is None:
+        held = _OWN_STATE[cls] = frozenset(name for base in cls.__mro__ for name in vars(base).get("_STATE", ()))
+    return held
+
+
+def _frame_class(cls: type) -> type:
+    """the class of ``cls``'s nodes on one frame of a clip: ``cls`` itself,
+    what every frame shares refused (:class:`_OnAFrame`)"""
+    held = _FRAME_CLASSES.get(cls)
+    if held is None:
+        held                = type(f"_Frame{cls.__name__}", (_OnAFrame, cls), {"_OWNER": cls, "__module__": __name__})
+        held.__doc__        = f"a {cls.__name__} on one frame of a clip (:class:`_OnAFrame`)"
+        _FRAME_CLASSES[cls] = held
+    return held
 
 
 def _frame_state(node: _FrameNode, source: TransformData, clip: "ClipData", frame: int, column: int) -> None:
     """``node`` made the clip's node ``source`` on ``frame``: everything
     ``source`` holds, its framed channels the clip's rows of that frame, its
     visibility and user channels that frame's values"""
+    # the private state a node holds beside its fields is its own: the
+    # hierarchy that holds it, the rigs that list it, an SDF primitive's
+    # field. The fields are the clip's node's; its caches are dropped
+    own   = _own_state(type(node))
     state = node.__dict__
+    kept  = {key: state[key] for key in own if key in state}
     state.clear()
-    state.update(source.__dict__)
-    for key in ("_hierarchy", "_listers", "_world_matrix", "_world_version"):
-        state.pop(key, None)
+    state.update((key, value) for key, value in source.__dict__.items() if key not in own)
+    state.update(kept)
+    state.pop("_world_matrix", None)
+    state.pop("_world_version", None)
     state["_source"] = source
     for channel, block in clip._blocks.items():
         state[channel] = block[frame, column]
@@ -15016,12 +15083,12 @@ def _set_free(node: _FrameNode) -> None:
     """``node`` cut from its clip: a TransformData of its own, holding the
     values it read last"""
     state = node.__dict__
-    for channel in ClipData.FRAMED_CHANNELS:
+    for channel in _Clip.FRAMED_CHANNELS:
         if channel in state:
             state[channel] = np.array(state[channel], dtype=float)
     state.pop("_source", None)
     state.pop("_hierarchy", None)
-    object.__setattr__(node, "__class__", TransformData)
+    object.__setattr__(node, "__class__", type(node)._OWNER)
 
 
 class _FramePose(HierarchyData):
@@ -15066,17 +15133,28 @@ class _FramePose(HierarchyData):
                 continue  # no column yet: the clip's next line-up brings it
             node = held.pop(id(source), None)
             if node is None:
-                node = object.__new__(_FrameNode)
+                node = object.__new__(_frame_class(type(source)))
             _frame_state(node, source, clip, frame, column)
             nodes.append(node)
         for node in held.values():
             _set_free(node)
 
-        state = self.__dict__
+        state  = self.__dict__
+        listed = state.get("list")
+        # each of the clip's own nodes to its node here
+        state["_twins"] = {id(node.__dict__["_source"]): node for node in nodes}
+        if listed is not None and not held and len(listed) == len(nodes) and all(a is b for a, b in zip(listed, nodes)):
+            # the same nodes in the same order: they read the clip again
+            # where they are, and the list a caller holds is the list still
+            _structure_changed(self)
+            for node in nodes:
+                node._transform_changed()
+            return
+
+        for node in nodes:
+            node.__dict__.pop("_hierarchy", None)
         for key in HierarchyData._STATE:
             state.pop(key, None)
-        # each of the clip's own nodes to its node here
-        state["_twins"]   = {id(node.__dict__["_source"]): node for node in nodes}
         state["_filling"] = True
         try:
             HierarchyData.__init__(self, nodes)
@@ -15097,7 +15175,7 @@ class _FramePose(HierarchyData):
 
     @property
     def owner(self):
-        return self._clip
+        return ClipData._of(self._clip)
 
     @property
     def is_view(self) -> bool:
@@ -15251,7 +15329,7 @@ class _ViewAxis(_FrameAxis):
         return self._view.get_delta(other)
 
 
-class _ClipView(_View, ClipData):
+class _ClipView(_View, _Clip):
     """
     A selection of a ClipData's nodes (:class:`_View`): it keeps the clip's
     frames. ``frames`` is the clip's frame axis over its nodes, ``at()``,
@@ -15260,7 +15338,7 @@ class _ClipView(_View, ClipData):
     ``get_delta()`` and ``add_delta()`` cover every frame.
     """
 
-    _OWNER  = ClipData
+    _OWNER  = _Clip
     _blocks = {}  # a view holds no frames of its own: its owner's, through frames
 
     def _rows(self) -> list:
@@ -15295,11 +15373,14 @@ class _ClipView(_View, ClipData):
     def frame(self, value) -> None:
         self._owner.frame = value
 
-    frame_count = property(lambda self: self._owner.frame_count)
-    start_frame = property(lambda self: self._owner.start_frame)
-    end_frame   = property(lambda self: self._owner.end_frame)
-    fps         = property(lambda self: self._owner.fps)
-    take        = property(lambda self: self._owner.take)
+    frame_count  = property(lambda self: self._owner.frame_count)
+    start_frame  = property(lambda self: self._owner.start_frame)
+    end_frame    = property(lambda self: self._owner.end_frame)
+    fps          = property(lambda self: self._owner.fps)
+    take         = property(lambda self: self._owner.take)
+    _start_frame = property(lambda self: self._owner._start_frame)
+    _fps         = property(lambda self: self._owner._fps)
+    _take        = property(lambda self: self._owner._take)
 
     @property
     def keyed(self) -> np.ndarray:
@@ -15314,7 +15395,7 @@ class _ClipView(_View, ClipData):
         mine = {id(node.__dict__.get("_source")): node for node in pose.list}
         return pose._view([mine[id(node)] for node in self.list])
 
-    def _owned_copy(self) -> ClipData:
+    def _owned_copy(self) -> _Clip:
         """a clip of the nodes viewed that owns them, every frame, in the
         view's order; a node whose parent the view leaves out a root"""
         rows = self._rows()
@@ -15327,10 +15408,15 @@ class _ClipView(_View, ClipData):
         rank = {id(node): place for place, node in enumerate(kept)}
         if [id(node) for node in clip.list] != [id(node) for node in kept]:
             clip.sort(key=lambda node: rank[id(node)])
+        # a node whose parent the view leaves out is a root, by its parent_uuid too
+        names = {node.uuid for node in clip.list}
+        for node in clip.list:
+            if node.parent_uuid is not None and node.parent_uuid not in names:
+                node.parent_uuid = None
         clip._settle()  # its blocks lined up with the nodes left
         return clip
 
-    def copy(self) -> ClipData:
+    def copy(self) -> _Clip:
         return self._owned_copy()
 
     def __deepcopy__(self, memo):
@@ -15341,7 +15427,7 @@ class _ClipView(_View, ClipData):
     def to_dict(self) -> dict:
         return self._owned_copy().to_dict()
 
-    def _every_frame(self, operand, solve) -> ClipData:
+    def _every_frame(self, operand, solve) -> _Clip:
         """a clip of ``solve(nodes, operand)`` at each frame of the clip: the
         nodes viewed as the pose they hold on that frame, under the parents
         they have, and ``operand`` the pose it is, or for a whole
@@ -15363,18 +15449,18 @@ class _ClipView(_View, ClipData):
                 poses.append(solve(nodes, operand.at(operand.start_frame + at) if all else operand))
         finally:
             clip.frame = held
-        made      = ClipData.from_poses(poses, start_frame=clip.start_frame, fps=clip.fps)
+        made      = _Clip.from_poses(poses, start_frame=clip.start_frame, fps=clip.fps)
         made.take = clip.take
         return made
 
-    def get_delta(self, other, by: str = "index", translate: bool = True) -> ClipData:
+    def get_delta(self, other, by: str = "index", translate: bool = True) -> _Clip:
         """``self - other`` on every frame of the clip, a new ClipData: at
         each frame the delta a selection of a hierarchy gives
         (:meth:`TransformList.get_delta`). ``other`` is one pose, or a
         whole ``clip.frames`` of as many frames, paired frame for frame"""
         return self._every_frame(other, lambda nodes, pose: TransformList.get_delta(nodes, pose, by=by, translate=translate))
 
-    def add_delta(self, delta, by: str = "index", translate: bool = True) -> ClipData:
+    def add_delta(self, delta, by: str = "index", translate: bool = True) -> _Clip:
         """the nodes viewed with ``delta`` applied on every frame of the
         clip, a new ClipData (:meth:`TransformList.add_delta` at each
         frame). ``delta`` is one pose, or a whole ``clip.frames``"""
@@ -15386,7 +15472,1077 @@ class _ClipView(_View, ClipData):
 
 
 HierarchyData._view = lambda self, nodes: _HierarchyView(nodes, owner=self)
-ClipData._view      = lambda self, nodes: _ClipView(nodes, owner=self)
+_Clip._view         = lambda self, nodes: _ClipView(nodes, owner=self)
+
+
+# ---------------------------------- CLIPS ----------------------------------- #
+# The public ClipData: a clip, or a part of one. The storage and the solvers
+# are _Clip's, above; nothing here holds a value of its own.
+
+# the storage answers to the name its files, its errors and its callers know
+_Clip.__name__     = "ClipData"
+_Clip.__qualname__ = "ClipData"
+
+
+_NO_FRAME = (
+    "a clip has no current frame: clip.frames[i] is the pose of frame i (a frame by its number: "
+    "clip.at(n)), and a member read on the clip itself answers for every frame"
+)
+_NO_TAKE_FRAME = (
+    "a ClipList has no current frame: clips.frames[i] is each take's pose of frame i, and a member read on "
+    "the list answers for every frame of every take"
+)
+_FRAMES_PICK_FRAMES = (
+    "clip.frames[...] picks frames, an index or a slice; nodes are picked on the clip: "
+    'clip["name"], clip[[0, 2]], clip.match("L_*")'
+)
+
+# the members a clip answers frame by frame, read and written through the
+# frame axis: every property _FrameAxis defines
+_FRAMED = tuple(
+    sorted(name for name, member in vars(_FrameAxis).items() if isinstance(member, property) and not name.startswith("_"))
+)
+# of them, the ones a write solves channels for; the others are written as
+# the arrays they are
+_SOLVED = frozenset(("matrix", "m", "world_matrix", "wm", "quaternion"))
+
+# what every frame shares, read and written on the nodes themselves
+_SHARED_OF_NODES = (
+    "name",
+    "namespace",
+    "uuid",
+    "unique_name",
+    "indices",
+    "rotate_order",
+    "ro",
+    "rotate_axes",
+    "node_type",
+    "segment_scale_compensate",
+    "ssc",
+    "radius",
+    "radi",
+    "draw_style",
+    "ds",
+)
+_SHARED_OF_A_NODE = (
+    "name",
+    "uuid",
+    "unique_name",
+    "index",
+    "parent_uuid",
+    "parent_name",
+    "rotate_order",
+    "ro",
+    "rotate_axes",
+    "node_type",
+    "segment_scale_compensate",
+    "ssc",
+    "radius",
+    "radi",
+    "draw_style",
+    "ds",
+    "user_defined_attributes",
+)
+
+
+def _span_of(frames: range) -> slice:
+    """the slice that picks ``frames`` out of the frames they count"""
+    stop = frames.stop
+    if frames.step < 0 and stop < 0:
+        stop = None
+    return slice(frames.start, stop, frames.step)
+
+
+def _unwrap(value):
+    """a part of a clip as the engine takes it: its own nodes"""
+    if isinstance(value, _ClipNode):
+        return value._node
+    if isinstance(value, ClipData):
+        return value._nodes()
+    if type(value) in (list, tuple):
+        return type(value)(_unwrap(item) for item in value)
+    return value
+
+
+def _match_operand(value):
+    """an operand of match_matrix, match_rotate or match_translate as the
+    engine takes it: a clip, a part of one or one node of one as the frame
+    axis over its nodes, every frame of it, each node under the parent it
+    has"""
+    if isinstance(value, _Frames):
+        value = value._part
+    if isinstance(value, _Part):
+        return value._axis(value._spanned())
+    return value
+
+
+def _algebra_operand(value):
+    """an operand of the pose algebra as the engine takes it: a clip as its
+    frame axis, every frame; a pick of its nodes as the storage's own
+    selection of them, every frame, under the parents they have"""
+    if isinstance(value, _Frames):
+        value = value._part
+    if isinstance(value, _ClipNode):
+        raise TypeError("the pose algebra takes poses and clips, not one node of a clip")
+    if isinstance(value, ClipData):
+        engine = value._spanned()
+        if value._sel is None:
+            return _FrameAxis(engine)
+        return engine._view([engine.list[row] for row in value._sel._rows()])
+    return value
+
+
+def _public(value):
+    """a result of the engine as a caller holds it: a clip as a ClipData"""
+    if isinstance(value, _ClipView):
+        return ClipData._over(value._owner, value, None)
+    if isinstance(value, _Clip):
+        return ClipData._of(value)
+    return value
+
+
+def _clip_from_tree(tree: dict) -> "ClipData":
+    """a pickled ClipData back: its plain tree, loaded"""
+    return ClipData.from_dict(_arrays_back(tree))
+
+
+def _framed_member(name: str) -> property:
+    held = getattr(_FrameAxis, name)
+
+    def getter(self):
+        return self._read(name)
+
+    def setter(self, value) -> None:
+        if held.fset is None:
+            raise AttributeError(f"{name!r} is a read-only property of ClipData")
+        self._write(name, value)
+
+    doc            = held.__doc__ or f"``{name}`` on every frame, one value a frame of each node covered"
+    getter.__doc__ = doc
+    return property(getter, setter, doc=doc)
+
+
+def _shared_member(name: str) -> property:
+    def getter(self):
+        return getattr(self._nodes(), name)
+
+    def setter(self, value) -> None:
+        setattr(self._nodes(), name, _unwrap(value))
+        self._touched()
+
+    doc            = getattr(getattr(TransformList, name, None), "__doc__", None)
+    doc            = doc or f"what every frame shares: each node's ``{name}``"
+    getter.__doc__ = doc
+    return property(getter, setter, doc=doc)
+
+
+def _node_call(name: str, wrap: bool):
+    def method(self, *args, **kwargs):
+        result = getattr(self._nodes(), name)(*_unwrap(args), **{key: _unwrap(value) for key, value in kwargs.items()})
+        self._touched()
+        return self._wrapped(result) if wrap else result
+
+    held                 = getattr(_Clip, name)
+    method.__name__      = name
+    method.__qualname__  = f"ClipData.{name}"
+    method.__doc__       = held.__doc__
+    method.__signature__ = inspect.signature(held)
+    return method
+
+
+class _Part:
+    """
+    What a ClipData and one node of a clip share: a part of a clip, some of
+    its nodes over some of its frames, answering for every frame of it.
+
+    ``_engine`` is the clip's storage, ``_span`` the frames of it this part
+    covers, None for all. A member a clip holds frame by frame is read
+    through the clip's frame axis and cut to the span; a write to one goes
+    back through it.
+    """
+
+    __slots__ = ("_engine", "_span", "__weakref__")
+    _OWN      = frozenset(("_engine", "_span", "_sel", "_node"))
+
+    # --- the frames covered --- #
+    def _frames(self) -> range:
+        """the clip's frames this part covers, as positions in the clip"""
+        count = self._engine.frame_count
+        return range(count) if self._span is None else range(*self._span.indices(count))
+
+    @property
+    def frame_count(self) -> int:
+        """how many frames it covers"""
+        return len(self._frames())
+
+    @property
+    def start_frame(self) -> int:
+        """the frame number of its first frame"""
+        frames = self._frames()
+        return self._engine.start_frame + (frames.start if len(frames) else 0)
+
+    @start_frame.setter
+    def start_frame(self, value: int) -> None:
+        self._whole("start_frame").start_frame = value
+
+    @property
+    def end_frame(self) -> int:
+        """the frame number of its last frame"""
+        return self.start_frame + self.frame_count - 1
+
+    @property
+    def fps(self) -> float:
+        return self._engine.fps
+
+    @fps.setter
+    def fps(self, value: float) -> None:
+        self._whole("fps").fps = value
+
+    @property
+    def take(self) -> str:
+        """the name of the take the clip holds (:attr:`_Clip.take`)"""
+        return self._engine.take
+
+    @take.setter
+    def take(self, value: str) -> None:
+        self._whole("take").take = value
+
+    @property
+    def times(self) -> np.ndarray:
+        """the time of each frame in seconds"""
+        return (self.start_frame + np.arange(self.frame_count)) / self.fps
+
+    @property
+    def frames(self) -> "_Frames":
+        """
+        The frames: ``clip.frames[i]`` is the pose of frame ``i``, live, a
+        HierarchyData that is a view of the clip (of one node, the node on
+        that frame); ``clip.frames[a:b]`` those frames, a view;
+        ``len(clip.frames)`` their count, and iterating gives each pose.
+        ``clip.frames[i] = pose`` and ``clip.frames[a:b] = other`` write
+        them. A member read on ``clip.frames`` is the clip's own.
+        """
+        return _Frames(self)
+
+    @frames.setter
+    def frames(self, value) -> None:
+        # ``clip.frames -= pose`` solves in place and hands the frames back
+        if not (isinstance(value, _Frames) and value._part._engine is self._engine):
+            raise AttributeError("frames is not assigned; write through it, eg: clip.frames[2] = pose")
+
+    def _spanned(self) -> "_Clip":
+        """storage holding the frames covered, every node of the clip: the
+        clip's own, or a cut of the frames of a view of them"""
+        engine = self._engine
+        engine._realign()
+        return engine if self._span is None else engine._subclip(self._span)
+
+    def _whole(self, what: str) -> "_Clip":
+        """the engine, for a write only the clip itself takes"""
+        if self.is_view:
+            raise AttributeError(f"{what} is the clip's: set it on the clip, not on a part of it")
+        return self._engine
+
+    # --- what it holds frame by frame --- #
+    def _read(self, name: str):
+        value = getattr(self._axis(), name)
+        return value if self._span is None else value[self._span]
+
+    def _write(self, name: str, value) -> None:
+        if self._span is None:
+            setattr(self._axis(), name, value)
+        elif name in _SOLVED:
+            self._on_cut(lambda axis: setattr(axis, name, value))
+        else:
+            # the frames of the span written into the whole array
+            axis              = self._axis()
+            whole             = np.array(getattr(axis, name))
+            whole[self._span] = np.broadcast_to(np.asarray(value, dtype=whole.dtype), whole[self._span].shape)
+            setattr(axis, name, whole)
+        self._engine._refreshed()
+
+    def _on_cut(self, write) -> None:
+        """a write the engine solves, on the frames of the span alone: made
+        on a cut of them, the cut then pasted back"""
+        engine = self._engine
+        cut    = engine._subclip(self._span)
+        write(self._axis(cut))
+        _FrameAxis(engine)[self._span] = cut
+
+    def _solve(self, name: str, *args, **kwargs) -> None:
+        args = tuple(_match_operand(arg) for arg in args)
+        if self._span is None:
+            getattr(self._axis(), name)(*args, **kwargs)
+        else:
+            self._on_cut(lambda axis: getattr(axis, name)(*args, **kwargs))
+        self._engine._refreshed()
+
+    def match_matrix(self, other) -> None:
+        """matches world matrices on every frame at once (:meth:`_FrameAxis.match_matrix`)"""
+        self._solve("match_matrix", other)
+
+    def match_rotate(self, other) -> None:
+        """matches world orientations on every frame at once (:meth:`_FrameAxis.match_rotate`)"""
+        self._solve("match_rotate", other)
+
+    def match_translate(self, other, x: bool = True, y: bool = True, z: bool = True) -> None:
+        """matches world positions on every frame at once (:meth:`_FrameAxis.match_translate`)"""
+        self._solve("match_translate", other, x=x, y=y, z=z)
+
+    def get_parent_matrix(self) -> np.ndarray:
+        """every frame's parent matrix (:attr:`parent_matrix`)"""
+        return self.parent_matrix
+
+    def to_attributes(self, *args, **kwargs):
+        """every node's attributes over the frames covered, a list of dicts:
+        a framed channel one [x, y, z] a frame, anything else the value every
+        frame shares (:meth:`_FrameAxis.to_attributes`); of one node, its dict"""
+        return self._axis(self._spanned()).to_attributes(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        if name in self._OWN or (name[:2] == "__" and name[-2:] == "__"):
+            raise AttributeError(name)
+        if name == "frame":
+            raise AttributeError(_NO_FRAME)
+        if name[:1] == "_":
+            # the clip's own storage, for the code that reads and writes it
+            return getattr(self._engine, name)
+        try:
+            return self._read(name)  # a user channel held frame by frame
+        except AttributeError:
+            pass
+        if self._has_user(name):
+            return getattr(self._shared(), name)  # a user attribute every frame shares
+        raise AttributeError(f"'ClipData' object has no attribute {name!r}")
+
+    def __setattr__(self, name: str, value) -> None:
+        if name in self._OWN:
+            object.__setattr__(self, name, value)
+        elif name == "frame":
+            raise AttributeError(_NO_FRAME)
+        elif name[:1] == "_":
+            setattr(self._engine, name, value)
+        elif hasattr(type(self), name):
+            object.__setattr__(self, name, value)
+        else:
+            try:
+                self._write(name, value)  # a user channel held frame by frame
+            except AttributeError:
+                if not self._has_user(name):
+                    raise AttributeError(
+                        f"'ClipData' object has no attribute {name!r}, and no node has a user attribute of that "
+                        f"name; add_user_attribute() creates one"
+                    ) from None
+                # a user attribute every frame shares
+                setattr(self._shared(), name, value)
+                self._touched()
+
+    def __dir__(self):
+        users = {name for node in self._user_nodes() for name in node.user_defined_attributes}
+        return sorted({name for name in object.__dir__(self) if not name.startswith("_")} | users)
+
+
+for _name in _FRAMED:
+    setattr(_Part, _name, _framed_member(_name))
+
+
+class ClipData(_Part):
+    """
+    A skeleton over F frames: one table of values, nodes by frames.
+
+        clip = ClipData(rig, frames=300, start_frame=1001, fps=24.0)
+
+    A clip answers for all of itself. A member read on it covers every
+    frame, and a write to one covers every frame:
+
+        clip.translate                       # (300, N, 3)
+        clip.world_matrix                    # (300, N, 4, 4)
+        clip.rotate_y += 5                   # every node, every frame
+        clip.world_matrix = W                # (300, N, 4, 4), one solve
+
+    ``clip[...]`` picks nodes and ``clip.frames[...]`` picks frames, and
+    the two combine in either order. Picking several keeps the class;
+    picking one drops its axis:
+
+        clip.match("L_*")                    # a ClipData: those nodes, every frame
+        clip[1:3], clip[[0, 2]]              # the same, by place
+        clip["hips"]                         # one node on every frame
+        clip["hips"].translate               # (300, 3)
+        clip.frames[10:20]                   # a ClipData: every node, ten frames
+        clip.frames[12]                      # a HierarchyData: the pose of frame 12
+        clip.frames[12]["hips"]              # a TransformData: one node, one frame
+        clip.at(1013)                        # the pose of the frame numbered 1013
+
+    Every pick is a view: it holds no value of its own, a write to it
+    lands in the clip, ``is_view`` is True and ``owner`` is the clip.
+    ``copy()`` gives a ClipData, or a HierarchyData for the pose of a
+    frame, that owns what it holds. A clip has no current frame.
+
+    Only the channels a pose write solves are held frame by frame:
+    translate, rotate, scale, shear, rotate axis and joint orient,
+    visibility, and a keyable user attribute. Names, uuids, parenting,
+    rotate order, node type are shared by every frame: read and set on the
+    clip, a pick of its nodes or one node, a rig edit there (``set_parent``,
+    ``set_rotate_order``, ``swapaxes``, ...) covers every frame, and none
+    of it is set through the pose of one frame.
+
+    The pose algebra covers every frame: ``clip - rest`` and
+    ``clip.get_delta(rest)`` give a clip of deltas, ``clip -= rest`` solves
+    in place, and a clip given where a pose is taken, ``rest.get_delta(clip)``,
+    stands for every frame of it.
+    """
+
+    __slots__ = ("_sel",)
+
+    FRAMED_CHANNELS = _Clip.FRAMED_CHANNELS
+
+    def __init__(
+        self,
+        iterable                   = None,
+        frames:      Optional[int] = None,
+        start_frame: int           = 0,
+        fps:         float         = 24.0,
+        take:        str           = "",
+    ):
+        if isinstance(iterable, _Part):
+            raise TypeError(
+                "a ClipData is built from one pose and a frame count: give a pose of the clip, "
+                "clip.frames[i], or copy it, clip.copy()"
+            )
+        self._bound(_Clip(iterable, frames=frames, start_frame=start_frame, fps=fps, take=take), None, None)
+
+    def _bound(self, engine: "_Clip", sel, span) -> None:
+        object.__setattr__(self, "_engine", engine)
+        object.__setattr__(self, "_sel",    sel)
+        object.__setattr__(self, "_span",   span)
+        if sel is None and span is None:
+            engine.__dict__["_public"] = weakref.ref(self)
+
+    @classmethod
+    def _of(cls, engine: "_Clip") -> "ClipData":
+        """the ClipData of a clip's storage, one object while it is held"""
+        held = engine.__dict__.get("_public")
+        made = None if held is None else held()
+        if made is None:
+            made = object.__new__(ClipData)
+            made._bound(engine, None, None)
+        return made
+
+    @classmethod
+    def _over(cls, engine: "_Clip", sel, span) -> "ClipData":
+        """a view of a clip: the nodes ``sel``, None for all, over ``span``"""
+        made = object.__new__(ClipData)
+        made._bound(engine, sel, span)
+        return made
+
+    # --- views --- #
+    @property
+    def is_view(self) -> bool:
+        """whether this is a part of a clip, holding no value of its own"""
+        return self._sel is not None or self._span is not None
+
+    @property
+    def owner(self) -> Optional["ClipData"]:
+        """the clip this is a part of, None for a clip itself"""
+        return ClipData._of(self._engine) if self.is_view else None
+
+    def _nodes(self):
+        """the nodes covered, as the engine holds them: the clip's own, or
+        the selection of them"""
+        return self._engine if self._sel is None else self._sel
+
+    _shared = _nodes
+
+    def _user_nodes(self) -> list:
+        return self._nodes().list
+
+    def _has_user(self, name: str) -> bool:
+        """whether a node covered has a user attribute ``name``"""
+        return any(_has_user_attr(node, name) for node in self._nodes().list)
+
+    def _places(self) -> Optional[list]:
+        return None if self._sel is None else self._sel._rows()
+
+    def _axis(self, engine: Optional["_Clip"] = None) -> _FrameAxis:
+        """the frame axis over the nodes covered, of the clip or of a cut of it"""
+        columns = self._places()
+        engine  = self._engine if engine is None else engine
+        engine._realign()
+        return _FrameAxis(engine, columns)
+
+    def _solid(self) -> "_Clip":
+        """storage of exactly this part: the clip's own for a clip itself,
+        a copy for a view"""
+        return self._cut() if self.is_view else self._engine
+
+    def _cut(self) -> "_Clip":
+        """a copy of this part alone, owning its nodes: the frames covered,
+        the nodes covered in the order held, one whose parent is left out a
+        root"""
+        engine = self._engine
+        clip   = engine._copy_frames() if self._span is None else engine._subclip(self._span)
+        if self._sel is not None:
+            rows = self._sel._rows()
+            kept = [clip.list[at] for at in rows]
+            held = {id(node) for node in kept}
+            for at in reversed(range(len(clip.list))):
+                if id(clip.list[at]) not in held:
+                    del clip[at]
+            rank = {id(node): place for place, node in enumerate(kept)}
+            if [id(node) for node in clip.list] != [id(node) for node in kept]:
+                clip.sort(key=lambda node: rank[id(node)])
+            names = {node.uuid for node in clip.list}
+            for node in clip.list:
+                if node.parent_uuid is not None and node.parent_uuid not in names:
+                    node.parent_uuid = None
+            clip._settle()
+        return clip
+
+    def _touched(self) -> None:
+        """what every frame shares may have changed: the poses handed out
+        follow; the blocks line up with the nodes at the next read"""
+        engine = self._engine
+        if engine._live:
+            engine._realign()
+            engine._refresh_live()
+
+    def _wrapped(self, value):
+        """a result of the engine as a caller holds it"""
+        if isinstance(value, TransformData):
+            return _ClipNode._on(self._engine, value, self._span) if value._hierarchy is self._engine else value
+        if isinstance(value, _ClipView):
+            return ClipData._over(value._owner, value, self._span if value._owner is self._engine else None)
+        if isinstance(value, _Clip):
+            return ClipData._of(value)
+        return value
+
+    # --- the node axis --- #
+    def __len__(self) -> int:
+        return len(self._nodes().list)
+
+    def __iter__(self):
+        engine, span = self._engine, self._span
+        for node in list(self._nodes().list):
+            yield _ClipNode._on(engine, node, span)
+
+    def __getitem__(self, query):
+        """
+        A name or a place gives that node on every frame; a slice, a list
+        of names or places, or a mask gives a ClipData of those nodes, a
+        view. Frames are picked on :attr:`frames`.
+        """
+        nodes = self._nodes()
+        if isinstance(query, slice) or _is_sequence(query):
+            if _is_sequence(query):
+                query = [nodes.index(item) if isinstance(item, str) else item for item in query]
+            return ClipData._over(self._engine, nodes[query], self._span)
+        return _ClipNode._on(self._engine, nodes[query], self._span)
+
+    def __delitem__(self, query) -> None:
+        del self._nodes()[query]
+        self._touched()
+
+    def __setitem__(self, query, value) -> None:
+        self._nodes()[query] = _unwrap(value)
+        self._touched()
+
+    def __contains__(self, item) -> bool:
+        return _unwrap(item) in self._nodes()
+
+    @property
+    def list(self) -> list:
+        """the nodes as the clip stores them, for the code that reads what
+        every frame shares off them; their channels are no frame's to read"""
+        return self._nodes().list
+
+    @property
+    def keyed(self) -> np.ndarray:
+        """(N,) bool, one a node: True where a channel of it is animated
+        (:attr:`_Clip.keyed`); one frame, or none, keys nothing"""
+        keyed   = np.asarray(self._engine.keyed)
+        columns = self._places()
+        keyed   = keyed if columns is None else keyed[columns]
+        return keyed if self.frame_count > 1 else np.zeros(len(keyed), dtype=bool)
+
+    # --- the frame axis --- #
+    def _framed(self, query: slice) -> "ClipData":
+        """the frames ``query`` picks of the ones covered, a view"""
+        return ClipData._over(self._engine, self._sel, _span_of(self._frames()[query]))
+
+    def _frame_pose(self, index) -> HierarchyData:
+        """the pose of the frame at ``index`` of the ones covered, live"""
+        frames = self._frames()
+        count  = len(frames)
+        index  = operator.index(index)
+        if not count or not -count <= index < count:
+            raise IndexError(f"frame {index} out of range for {count} frames")
+        return self._pose_of(frames[index])
+
+    def _pose_of(self, frame: int) -> HierarchyData:
+        engine = self._engine
+        engine._realign()
+        pose = engine._live_pose(frame)
+        if self._sel is None:
+            return pose
+        self._sel._rows()
+        return pose._view([pose._twins[id(node)] for node in self._sel.list])
+
+    def at(self, frame) -> HierarchyData:
+        """
+        The pose at frame number ``frame``, live: a HierarchyData that is a
+        view of that frame (``is_view`` True, ``owner`` the clip). A write
+        to one of its nodes lands in the clip, on that frame alone;
+        ``copy()`` gives a HierarchyData of its own. A frame number before
+        the first frame is the first, one after the last the last. A clip
+        of no frame holds the one pose its nodes do: a HierarchyData of its
+        own, a copy.
+        """
+        if not self._engine._blocks:
+            return HierarchyData(node.copy() for node in self._nodes().list)
+        frames = self._frames()
+        if not len(frames):
+            raise ValueError("the clip holds no frames")
+        index = int(np.clip(int(round(float(frame))) - self.start_frame, 0, len(frames) - 1))
+        return self._pose_of(frames[index])
+
+    def _paste(self, query, value) -> None:
+        """``clip.frames[query] = value``: one pose written to a frame, or
+        down a run of them, or a clip of as many frames pasted over a run"""
+        if self._sel is not None:
+            raise TypeError(
+                "a pose is written to a frame of the clip itself: clip.frames[i] = pose; a pick of its nodes "
+                "writes its members, eg: clip.match('L_*').rotate = values"
+            )
+        frames = self._frames()
+        if isinstance(value, _Frames):
+            value = value._part
+        if isinstance(query, slice):
+            span = _span_of(frames[query])
+            if isinstance(value, ClipData):
+                value = value._solid()
+        else:
+            if isinstance(value, _Part):
+                raise TypeError("a clip holds every frame: write one pose, eg: clip.frames[i] = other.frames[i]")
+            count = len(frames)
+            index = operator.index(query)
+            if not count or not -count <= index < count:
+                raise IndexError(f"frame {index} out of range for {count} frames")
+            span = frames[index]
+        _FrameAxis(self._engine)[span] = value
+        self._engine._refreshed()
+
+    # --- the pose algebra, every frame --- #
+    def get_delta(self, other, by: str = "index", translate: bool = True) -> "ClipData":
+        """
+        The delta of every frame against ``other``, a new ClipData
+        (:meth:`_Clip.get_delta`). ``other`` is one pose, compared against
+        every frame, or a clip of as many frames, compared frame for frame.
+        """
+        return _public(self._algebra().get_delta(_algebra_operand(other), by=by, translate=translate))
+
+    def add_delta(self, delta, by: str = "index", translate: bool = True) -> "ClipData":
+        """
+        Every frame with ``delta`` applied, a new ClipData
+        (:meth:`_Clip.add_delta`). ``delta`` is one delta, applied to every
+        frame, or a clip of as many frames, applied frame for frame.
+        """
+        return _public(self._algebra().add_delta(_algebra_operand(delta), by=by, translate=translate))
+
+    def _algebra(self):
+        """what solves the algebra for this part: the clip, its selection
+        of nodes under the parents they have, or a cut of its frames"""
+        if self._span is not None:
+            return self._cut()
+        return self._nodes()
+
+    def __sub__(self, other):
+        return self.get_delta(other)
+
+    def __add__(self, other):
+        """``deltas + rig``: ``rig.add_delta(deltas)``, as two poses add"""
+        if isinstance(other, _Frames):
+            other = other._part
+        if not isinstance(other, (TransformList, ClipData)):
+            return NotImplemented
+        return _public(other.add_delta(self))
+
+    def __radd__(self, other):
+        """``delta + clip``, a pose on the left: ``clip.add_delta(delta)``"""
+        if not isinstance(other, TransformList):
+            return NotImplemented
+        return self.add_delta(other)
+
+    def _in_place(self, op: str, other, by: str, translate: bool):
+        if self.is_view:
+            raise TypeError(
+                f"{op} solves every frame of a clip in place: on a part of one, clip - pose and "
+                f"clip.add_delta(delta) give a clip of it"
+            )
+        other = _algebra_operand(other)
+        if isinstance(other, (_FrameAxis, _ClipView)):
+            # a clip of other frames can not be solved against in place
+            mine   = self.frame_count
+            theirs = other._clip.frame_count if isinstance(other, _FrameAxis) else other.frame_count
+            if theirs > 1 and theirs != mine:
+                raise ValueError(
+                    f"clips hold {mine} and {theirs} frames: an in place solve keeps its frames; against one "
+                    f"frame of the other, use other.frames[i]"
+                )
+        axis = _FrameAxis(self._engine)
+        (axis.__isub__ if op == "-=" else axis.__iadd__)(other, by=by, translate=translate)
+        self._engine._refreshed()
+        return self
+
+    def __isub__(self, other, by: str = "index", translate: bool = True):
+        return self._in_place("-=", other, by, translate)
+
+    def __iadd__(self, other, by: str = "index", translate: bool = True):
+        return self._in_place("+=", other, by, translate)
+
+    # --- a clip of its own --- #
+    def copy(self) -> "ClipData":
+        """a ClipData that owns what it holds: this clip, or this part of one"""
+        return ClipData._of(self._cut())
+
+    def __copy__(self):
+        return self.copy()
+
+    def __deepcopy__(self, memo):
+        new            = self.copy()
+        memo[id(self)] = new
+        return new
+
+    def __reduce__(self):
+        return (_clip_from_tree, (_plain(self._solid().to_dict()),))
+
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, ClipData):
+            return NotImplemented
+        return self._solid() == other._solid()
+
+    def __ne__(self, other) -> bool:
+        same = self.__eq__(other)
+        return same if same is NotImplemented else not same
+
+    def __hash__(self) -> int:
+        return hash(self._solid())
+
+    def __repr__(self) -> str:
+        names = [node.name for node in self._nodes().list]
+        return f"ClipData({names!r}, view)" if self.is_view else f"ClipData({names!r})"
+
+    # --- files --- #
+    def to_dict(self) -> dict:
+        return self._solid().to_dict()
+
+    def save_fbx(self, filename, as_ascii=False):
+        """the clip written as one take, as ``cgmath.formats.save_fbx(filename,
+        clip=clip)`` writes it; a clip of no frame writes its nodes alone"""
+        solid = self._solid()
+        if not solid.frame_count:
+            return solid.save_fbx(filename, as_ascii=as_ascii)
+        return _save_fbx(filename, clip=ClipData._of(solid), as_ascii=as_ascii)
+
+
+for _name in _SHARED_OF_NODES:
+    setattr(ClipData, _name, _shared_member(_name))
+
+for _name, _wrap in (
+    ("match", True),
+    ("get", True),
+    ("get_roots", True),
+    ("get_children", True),
+    ("get_branch", True),
+    ("get_parents", True),
+    ("pop", False),
+    ("index", False),
+    ("count", False),
+    ("append", False),
+    ("extend", False),
+    ("insert", False),
+    ("remove", False),
+    ("clear", False),
+    ("reverse", False),
+    ("sort", False),
+    ("renew_uuids", False),
+    ("reset_cached_data", False),
+    ("add_prefix", False),
+    ("add_suffix", False),
+    ("strip_namespace", False),
+    ("add_user_attribute", False),
+    ("set_parent", False),
+    ("set_rotate_order", False),
+    ("set_rotate_to_joint_orient", False),
+    ("set_joint_orient_to_rotate", False),
+    ("swapaxes", False),
+):
+    setattr(ClipData, _name, _node_call(_name, _wrap))
+
+
+def _loader(name: str):
+    def load(cls, *args, **kwargs) -> "ClipData":
+        return _public(getattr(_Clip, name)(*args, **kwargs))
+
+    load.__name__ = name
+    load.__doc__  = getattr(_Clip, name).__doc__
+    return classmethod(load)
+
+
+def _saver(name: str):
+    def save(self, *args, **kwargs):
+        return getattr(self._solid(), name)(*args, **kwargs)
+
+    save.__name__ = name
+    save.__doc__  = getattr(_Clip, name).__doc__
+    return save
+
+
+for _name in ("from_dict", "from_bytes", "from_json", "from_poses", "load", "load_json", "load_npz", "load_pickle", "load_fbx", "load_glb"):
+    setattr(ClipData, _name, _loader(_name))
+for _name in ("save", "save_json", "save_npz", "save_pickle", "to_bytes", "to_json"):
+    setattr(ClipData, _name, _saver(_name))
+
+
+class _ClipNode(_Part):
+    """
+    One node of a clip, on every frame: ``clip["hips"]``.
+
+    A member a clip holds frame by frame reads one value a frame,
+    ``translate`` (F, 3), ``world_matrix`` (F, 4, 4), ``visibility`` (F,),
+    and a write takes one value for every frame or one a frame. What every
+    frame shares, ``name``, ``rotate_order``, ``node_type``, is read and
+    set here as on a TransformData, and a rig edit, ``set_parent``,
+    ``swapaxes``, ``set_rotate_order``, covers every frame.
+    ``node.frames[i]`` is the plain node on frame ``i``, a TransformData,
+    live. ``is_view`` is True and ``owner`` is the clip; ``copy()`` gives a
+    ClipData holding this node alone.
+    """
+
+    __slots__ = ("_node",)
+
+    @classmethod
+    def _on(cls, engine: "_Clip", node: TransformData, span) -> "_ClipNode":
+        made = object.__new__(cls)
+        object.__setattr__(made, "_engine", engine)
+        object.__setattr__(made, "_node",   node)
+        object.__setattr__(made, "_span",   span)
+        return made
+
+    is_view = True
+
+    @property
+    def owner(self) -> ClipData:
+        return ClipData._of(self._engine)
+
+    def _column(self) -> int:
+        engine = self._engine
+        engine._realign()
+        column = engine._column_place().get(self._node.uuid)
+        if column is None or engine.list[column] is not self._node:
+            raise ValueError(f"node {self._node.name!r} is no longer a node of the clip")
+        return column
+
+    def _axis(self, engine: Optional["_Clip"] = None) -> _FrameAxis:
+        column = self._column()
+        return _FrameAxis(self._engine if engine is None else engine, [column], single=True)
+
+    _touched = ClipData._touched
+
+    def _shared(self) -> TransformData:
+        """the clip's own node: what every frame shares is read and set on it"""
+        return self._node
+
+    def _user_nodes(self) -> list:
+        return [self._node]
+
+    def _has_user(self, name: str) -> bool:
+        return _has_user_attr(self._node, name)
+
+    @property
+    def keyed(self) -> bool:
+        """whether a channel of the node is animated; one frame, or none,
+        keys nothing"""
+        return self.frame_count > 1 and bool(np.asarray(self._engine.keyed)[self._column()])
+
+    def _framed(self, query: slice) -> "_ClipNode":
+        return _ClipNode._on(self._engine, self._node, _span_of(self._frames()[query]))
+
+    def _frame_pose(self, index) -> TransformData:
+        """the node on the frame at ``index`` of the ones covered, live"""
+        frames = self._frames()
+        count  = len(frames)
+        index  = operator.index(index)
+        if not count or not -count <= index < count:
+            raise IndexError(f"frame {index} out of range for {count} frames")
+        self._column()
+        return self._engine._live_pose(frames[index])._twins[id(self._node)]
+
+    def at(self, frame) -> TransformData:
+        """the node at frame number ``frame``, live (:meth:`ClipData.at`)"""
+        frames = self._frames()
+        if not len(frames):
+            raise ValueError("the clip holds no frames")
+        index = int(np.clip(int(round(float(frame))) - self.start_frame, 0, len(frames) - 1))
+        return self._frame_pose(index)
+
+    def _paste(self, query, value) -> None:
+        raise TypeError("a node's frames are written through its members, eg: clip['hips'].translate = values")
+
+    def _wrapped(self, value):
+        return ClipData._wrapped(self, value)
+
+    def to_attributes(self, *args, **kwargs) -> dict:
+        return _Part.to_attributes(self, *args, **kwargs)[0]
+
+    def get_parent(self) -> Optional["_ClipNode"]:
+        """the node's parent, on every frame; None for a root"""
+        parent = self._node.get_parent()
+        return self._wrapped(parent) if isinstance(parent, TransformData) else parent
+
+    def copy(self) -> ClipData:
+        """a ClipData of its own holding this node alone, every frame covered"""
+        return ClipData._over(self._engine, self._engine._view([self._node]), self._span).copy()
+
+    def __copy__(self):
+        return self.copy()
+
+    def __deepcopy__(self, memo):
+        new            = self.copy()
+        memo[id(self)] = new
+        return new
+
+    def __reduce__(self):
+        return self.copy().__reduce__()
+
+    def __isub__(self, other, *args, **kwargs):
+        raise TypeError("the pose algebra takes poses and clips, not one node of a clip")
+
+    __iadd__ = __isub__
+
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, _ClipNode):
+            return NotImplemented
+        return self._node is other._node and self._frames() == other._frames()
+
+    def __hash__(self) -> int:
+        return hash((id(self._node), self._span))
+
+    def __repr__(self) -> str:
+        return f"<{self._node.name!r} on {self.frame_count} frames of a clip>"
+
+    def __str__(self) -> str:
+        return str(self._node)  # its name, as a TransformData's
+
+
+def _shared_of_a_node(name: str) -> property:
+    def getter(self):
+        return getattr(self._node, name)
+
+    def setter(self, value) -> None:
+        setattr(self._node, name, _unwrap(value))
+        self._touched()
+
+    doc            = getattr(getattr(TransformData, name, None), "__doc__", None)
+    doc            = doc or f"what every frame shares: the node's ``{name}``"
+    getter.__doc__ = doc
+    return property(getter, setter, doc=doc)
+
+
+def _call_of_a_node(name: str, wrap: bool):
+    def method(self, *args, **kwargs):
+        result = getattr(self._node, name)(*_unwrap(args), **{key: _unwrap(value) for key, value in kwargs.items()})
+        self._touched()
+        return self._wrapped(result) if wrap else result
+
+    method.__name__ = name
+    method.__doc__  = getattr(TransformData, name).__doc__
+    return method
+
+
+for _name in _SHARED_OF_A_NODE:
+    setattr(_ClipNode, _name, _shared_of_a_node(_name))
+for _name, _wrap in (
+    ("get_root", True),
+    ("get_children", True),
+    ("get_branch", True),
+    ("set_parent", False),
+    ("set_rotate_order", False),
+    ("set_node_type", False),
+    ("set_rotate_to_joint_orient", False),
+    ("set_joint_orient_to_rotate", False),
+    ("swapaxes", False),
+    ("add_prefix", False),
+    ("add_suffix", False),
+    ("add_user_attribute", False),
+):
+    setattr(_ClipNode, _name, _call_of_a_node(_name, _wrap))
+del _name, _wrap
+
+
+class _Frames:
+    """
+    ``clip.frames``: the frames of a clip, or of a part of one.
+
+    An index gives the pose of that frame, live; a slice those frames, a
+    view; ``len()`` their count, and iterating each pose in turn. An index
+    or a slice assigned writes a pose, or pastes a clip of as many frames.
+    A member read or written here is the clip's own, every frame:
+    ``clip.frames.translate`` is ``clip.translate``. Nodes are picked on
+    the clip, not here.
+    """
+
+    __slots__ = ("_part",)
+
+    def __init__(self, part: _Part):
+        object.__setattr__(self, "_part", part)
+
+    def __len__(self) -> int:
+        return self._part.frame_count
+
+    def __iter__(self):
+        for index in range(len(self)):
+            yield self[index]
+
+    def __getitem__(self, query):
+        if isinstance(query, slice):
+            return self._part._framed(query)
+        if isinstance(query, str) or _is_sequence(query):
+            raise TypeError(_FRAMES_PICK_FRAMES)
+        return self._part._frame_pose(query)
+
+    def __setitem__(self, query, value) -> None:
+        if isinstance(query, str) or _is_sequence(query):
+            raise TypeError(_FRAMES_PICK_FRAMES)
+        self._part._paste(query, value)
+
+    def match(self, *args, **kwargs):
+        raise TypeError(_FRAMES_PICK_FRAMES)
+
+    def __getattr__(self, name: str):
+        return getattr(self._part, name)
+
+    def __setattr__(self, name: str, value) -> None:
+        setattr(self._part, name, value)
+
+    def __dir__(self):
+        return sorted(set(object.__dir__(self)) | set(dir(self._part)))
+
+    def __isub__(self, other, by: str = "index", translate: bool = True):
+        self._part.__isub__(other, by=by, translate=translate)
+        return self
+
+    def __iadd__(self, other, by: str = "index", translate: bool = True):
+        self._part.__iadd__(other, by=by, translate=translate)
+        return self
+
+    def __sub__(self, other):
+        return self._part - other
+
+    def __add__(self, other):
+        return self._part + other
+
+    def __repr__(self) -> str:
+        return f"<frames 0..{max(len(self) - 1, 0)} of {self._part!r}>"
 
 
 # ---------------------------------- TAKES ----------------------------------- #
@@ -15498,12 +16654,21 @@ def _take_rig(clip) -> list:
     ]
 
 
+def _storage(target) -> Optional["_Clip"]:
+    """the storage of the clip a per-take target belongs to: a ClipData, a
+    part of one, its frames, or one node of it; None for anything else"""
+    if isinstance(target, _Frames):
+        target = target._part
+    if isinstance(target, _Part):
+        return target._engine
+    if isinstance(target, _Clip) and not isinstance(target, _View):
+        return target
+    return None
+
+
 def _take_label(target, index: int) -> str:
     """the take a target belongs to, as an error names it"""
-    clip = target if _owns(target) and isinstance(target, ClipData) else getattr(target, "_clip", None)
-    if clip is None and isinstance(target, _View):
-        clip = target.owner
-    take = getattr(clip, "_take", "")
+    take = getattr(_storage(target), "_take", "")
     return f"take {index} ({take!r})" if take else f"take {index}"
 
 
@@ -15569,14 +16734,13 @@ _HOLD_CLIP_SKIP = (
 
 
 def _take_of(target) -> Optional["ClipData"]:
-    """the take a write to ``target`` reaches: a clip, a frame axis's clip,
-    or the clip a view's nodes belong to; None for a view of no node"""
-    if isinstance(target, ClipData) and _owns(target):
-        return target
-    clip = getattr(target, "_clip", None)
+    """the storage of the take a write to ``target`` reaches: a clip's, its
+    frames', a part of it's, or the one the nodes of a list belong to; None
+    for a list of no node"""
+    clip = _storage(target)
     if clip is not None:
         return clip
-    for node in target.list:
+    for node in getattr(target, "list", ()):
         return node._hierarchy
     return None
 
@@ -15717,34 +16881,15 @@ def _per_take(name: str, writable: bool = True, copied: bool = False) -> propert
     return property(getter, setter, doc=doc)
 
 
-def _scrub(targets: list, frame) -> None:
-    """every take's clip to ``frame``, every take checked first: IndexError
-    names one too short, and no take moves"""
-    clips = [
-        target if isinstance(target, ClipData) and _owns(target) else getattr(target, "_clip", None) or _take_of(target)
-        for target in targets
-    ]
-    for index, clip in enumerate(clips):
-        try:
-            clip._resolve_frame(frame)
-        except IndexError:
-            raise IndexError(
-                f"frame {frame} is past {_take_label(clip, index)}, which holds {clip.frame_count} frames; "
-                f"no take was scrubbed"
-            ) from None
-    for clip in clips:
-        clip.frame = frame
-
-
 class _Takes:
     """The same frame axis or view of every take of a :class:`ClipList`.
 
     ``clips.frames`` and ``clips.match("L_*")`` give one; it reads and
-    writes its members on every take, as a ClipList does, and chains:
-    ``clips.frames.match("L_*").rotate_y += 5``. ``[k]`` scrubs every take
-    to frame ``k`` and gives back the ClipList, ``[a:b]`` gives a ClipList
-    of each take's cut, a node or a list of nodes each take's axis scoped
-    to them. An item assignment, ``clips.frames[1:3] = other`` or
+    writes its members on every take, as a ClipList does:
+    ``clips.match("L_*").rotate_y += 5``. On ``clips.frames``, ``[k]``
+    gives a PerTake of each take's pose of frame ``k``, live, and ``[a:b]``
+    a ClipList of each take's cut; nodes are picked with ``clips.match()``,
+    or on one take, ``clips[0]["hips"]``. An item assignment, ``clips.frames[1:3] = other`` or
     ``clips.frames[2] = pose``, one value for every take or a PerTake of
     one each, reaches every take or none: a PerTake of another length
     changes no take, and when a take refuses, every take it reached is put
@@ -15767,14 +16912,24 @@ class _Takes:
         return f"<{len(self._targets)} takes of {type(self._targets[0]).__name__ if self._targets else 'nothing'}>"
 
     def __getitem__(self, query):
-        if isinstance(query, (int, np.integer)) and not isinstance(query, bool):
-            _scrub(self._targets, int(query))
-            return self._owner
-        if isinstance(query, slice):
-            cuts = ClipList(target[query] for target in self._targets)
-            if isinstance(self._owner, ClipList) and len(cuts) == len(self._owner):
-                cuts._active = self._owner._active  # the cut of the active take is active
-            return cuts
+        if self._targets and all(isinstance(target, _Frames) for target in self._targets):
+            # every take's frames: an index is each take's pose of that
+            # frame, a slice a ClipList of each take's cut
+            if isinstance(query, (int, np.integer)) and not isinstance(query, bool):
+                poses = []
+                for index, target in enumerate(self._targets):
+                    try:
+                        poses.append(target[int(query)])
+                    except IndexError:
+                        raise IndexError(
+                            f"frame {query} is past {_take_label(target, index)}, which holds {len(target)} frames"
+                        ) from None
+                return PerTake(poses)
+            if isinstance(query, slice):
+                cuts = ClipList(target[query].copy() for target in self._targets)
+                if isinstance(self._owner, ClipList) and len(cuts) == len(self._owner):
+                    cuts._active = self._owner._active  # the cut of the active take is active
+                return cuts
         return _Takes([target[query] for target in self._targets], self._owner)
 
     def __setitem__(self, query, value) -> None:
@@ -15880,7 +17035,7 @@ def _every_take(member):
     forwarded = forward(member, doc=_EVERY_TAKE_DOC)
 
     def edit(self, *args, **kwargs):
-        held = [_take_whole(clip) for clip in self.list]
+        held = [_take_whole(_storage(clip)) for clip in self.list]
         try:
             return forwarded(self, *args, **kwargs)
         except BaseException:
@@ -15956,7 +17111,7 @@ def _renew_uuids(rig, mapping: dict) -> None:
     the rig's caches are retired"""
     for node in rig.list:
         mapping.setdefault(node.uuid, generate_uuid())
-    if isinstance(rig, ClipData):
+    if isinstance(rig, (_Clip, ClipData)):
         rig._realign()
         rig._columns   = [mapping.get(uuid, uuid) for uuid in rig._columns]
         rig._user_keys = {mapping.get(uuid, uuid): keys for uuid, keys in rig._user_keys.items()}
@@ -16038,7 +17193,7 @@ class ClipList(DataList[ClipData]):
         empty list defines the skeleton. TypeError for anything else"""
         if not isinstance(clip, ClipData):
             raise TypeError(f"a ClipList holds ClipData objects, not {type(clip).__name__}: {clip!r}")
-        if isinstance(clip, _View):
+        if clip.is_view:
             raise TypeError("a ClipList holds clips that own their nodes, not a view of one: pass its copy()")
         kept = self.list if kept is None else kept
         if not kept:
@@ -16215,31 +17370,17 @@ class ClipList(DataList[ClipData]):
         return _Takes([clip.frames for clip in self.list], self)
 
     def match(self, *args, exclude: bool = False, exact: bool = True) -> _Takes:
-        """every take's ``match``, the nodes it selects at the frame each take
-        is on, as a _Takes"""
+        """every take's ``match``, the nodes it selects on every frame, as a
+        _Takes"""
         return _Takes([clip.match(*args, exclude=exclude, exact=exact) for clip in self.list], self)
 
     @property
-    def frame(self) -> PerTake:
-        """the frame every take is on; written, every take scrubbed to it, or
-        each to its own from a PerTake, every take checked first"""
-        return PerTake(clip.frame for clip in self.list)
+    def frame(self):
+        raise AttributeError(_NO_TAKE_FRAME)
 
     @frame.setter
     def frame(self, value) -> None:
-        values = list(value) if isinstance(value, PerTake) else [value] * len(self.list)
-        if len(values) != len(self.list):
-            raise ValueError(f"{len(values)} frames for {len(self.list)} takes: a PerTake holds one per take")
-        for index, (clip, frame) in enumerate(zip(self.list, values)):
-            try:
-                clip._resolve_frame(frame)
-            except IndexError:
-                raise IndexError(
-                    f"frame {frame} is past {_take_label(clip, index)}, which holds {clip.frame_count} "
-                    f"frames; no take was scrubbed"
-                ) from None
-        for clip, frame in zip(self.list, values):
-            clip.frame = frame
+        raise AttributeError(_NO_TAKE_FRAME)
 
     # --- the pose algebra, take by take --- #
     def _paired(self, other) -> list:
@@ -16333,7 +17474,7 @@ class ClipList(DataList[ClipData]):
         column     = _glb_columns(model, rig, filename)
         clips      = []
         for index, name in enumerate(names):
-            clips.append(_glb_take_clip(ClipData, model, rig, column, animations, index, scale_factor, fps, 0, name))
+            clips.append(_public(_glb_take_clip(_Clip, model, rig, column, animations, index, scale_factor, fps, 0, name)))
         return cls(clips)
 
     # --- every take's timebase --- #
@@ -16342,7 +17483,7 @@ class ClipList(DataList[ClipData]):
     end_frame   = _per_take("end_frame",   writable=False)
     frame_count = _per_take("frame_count", writable=False)
 
-    # --- every take's nodes, at the frame it is on --- #
+    # --- every take's nodes, on every frame --- #
     translate = _per_take("translate")
     rotate = _per_take("rotate")
     scale  = _per_take("scale")

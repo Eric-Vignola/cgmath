@@ -6,6 +6,11 @@ strictly: the same class, every field, every array's dtype and shape and
 values, list against tuple, None against empty. A class with no builder fails
 the test, so a new class cannot slip past it. A file names each field as a
 caller sets it, and still loads when it names one by its private field.
+
+A ClipData is no Data class: it is a thin object over its storage, a private
+HierarchyData subclass that answers to its name, ``_Clip`` here. The storage
+is what the tests of every class find and what saves and loads; where a test
+is of what a caller holds, it builds the ClipData.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ import sys
 import tempfile
 import time
 import unittest
+import warnings
 import zipfile
 from dataclasses import dataclass, fields
 from unittest import mock
@@ -49,6 +55,7 @@ from cgmath.geometry.mesh import MeshData, MeshList, UVData, UVList
 from cgmath.geometry.sdf import SDFCylinder, SDFSphere
 from cgmath.geometry.skin_weights import SkinData, SkinList
 from cgmath.hierarchy import ClipData, ClipList, HierarchyData, TransformData, generate_uuid
+from cgmath.hierarchy.hierarchy import _Clip
 from cgmath.render.scene import Scene
 from cgmath.utils import pretty_json
 
@@ -105,6 +112,15 @@ def examples():
 
 def assert_same(test, a, b, path="obj"):
     """a and b hold exactly the same data"""
+    # a ClipData holds nothing of its own: the same data is the same storage,
+    # a view's that of its copy, compared as the list it is
+    if isinstance(a, ClipData) or isinstance(b, ClipData):
+        test.assertIs(type(b), type(a), f"{path}: class")
+        test.assertEqual(b.is_view, a.is_view, f"{path}: view")
+        if a.is_view:
+            a, b = a.copy(), b.copy()
+        a, b = a._engine, b._engine
+
     if isinstance(a, (Data, DataList)) or isinstance(b, (Data, DataList)):
         test.assertIs(type(b), type(a), f"{path}: class")
 
@@ -179,18 +195,39 @@ class TestEveryClass(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.tmp = tmp.name
 
+    def built(self):
+        """
+        ``(name, class, builder, saves_as)`` of every class that has a
+        builder, ``saves_as`` giving what an object of it loads back as; then
+        of what a caller holds of a clip. data_classes() finds the storage
+        behind a ClipData, not the ClipData, which is no Data class: it is
+        the ClipData a caller saves, loads and copies, and a view of one, a
+        pick of its nodes, of the same class, which saves as its copy.
+        """
+
+        def same(obj):
+            return obj
+
+        for name, cls in sorted(self.classes.items()):
+            builder = self.builders.get(cls)
+            if builder is not None:
+                yield name, cls, builder, self.saves_as.get(cls, same)
+
+        clip = self.builders[ClipData]
+        yield "ClipData, as held", ClipData, clip, same
+        yield "ClipData, a view as held", ClipData, lambda: clip()[:-1], lambda view: view.copy()
+
     def test_every_class_has_a_builder(self):
         missing = sorted(name for name, cls in self.classes.items() if cls not in self.builders)
         self.assertEqual(missing, [], "write a builder in a _examples_* module")
+        # a clip's storage is among them, under the name it answers to
+        self.assertIs(self.classes["cgmath.hierarchy.hierarchy.ClipData"], _Clip)
 
     def test_every_format_loads_back_the_same_object(self):
-        for name, cls in sorted(self.classes.items()):
-            builder = self.builders.get(cls)
-            if builder is None:
-                continue
+        for name, cls, builder, saves_as in self.built():
             with self.subTest(cls=name):
                 obj       = builder()
-                reference = self.saves_as.get(cls, lambda x: x)(obj)
+                reference = saves_as(obj)
                 loads     = {}
                 for ext in FORMATS:
                     path = os.path.join(self.tmp, f"{cls.__name__}.{ext}")
@@ -207,13 +244,10 @@ class TestEveryClass(unittest.TestCase):
                 assert_same(self, trees["pkl"], trees["json"], f"{cls.__name__}: pkl vs json")
 
     def test_copy_is_the_same_object(self):
-        for name, cls in sorted(self.classes.items()):
-            builder = self.builders.get(cls)
-            if builder is None:
-                continue
+        for name, cls, builder, saves_as in self.built():
             with self.subTest(cls=name):
                 obj = builder()
-                assert_same(self, self.saves_as.get(cls, lambda x: x)(obj), obj.copy(), f"{cls.__name__}.copy()")
+                assert_same(self, saves_as(obj), obj.copy(), f"{cls.__name__}.copy()")
 
     def test_no_tree_names_a_class(self):
         # a file names no class, nowhere in its tree: the class loading it
@@ -225,10 +259,7 @@ class TestEveryClass(unittest.TestCase):
                 return any(names_a_class(x) for x in value)
             return False
 
-        for name, cls in sorted(self.classes.items()):
-            builder = self.builders.get(cls)
-            if builder is None:
-                continue
+        for name, cls, builder, _ in self.built():
             with self.subTest(cls=name):
                 self.assertFalse(names_a_class(builder().to_dict()))
 
@@ -242,8 +273,9 @@ class TestAFileIsBuiltAsTheClassAsked(unittest.TestCase):
     builds every item as its item class.
     """
 
-    # (the class asked for, the subclass a file holds)
-    CASES = ((MeshData, UVData), (HierarchyData, ClipData))
+    # (the class asked for, the subclass a file holds): of a clip, its storage,
+    # the HierarchyData subclass behind a ClipData
+    CASES = ((MeshData, UVData), (HierarchyData, _Clip))
 
     @classmethod
     def setUpClass(cls):
@@ -278,14 +310,17 @@ class TestAFileIsBuiltAsTheClassAsked(unittest.TestCase):
                 self.assertEqual(rig.name, clip.name)
 
     def test_the_base_classes_build_nothing(self):
-        for _, held in self.CASES:
+        # the subclass each case holds, then the ClipData a caller holds, no
+        # Data class itself: its file is its storage's
+        for held in (*(held for _, held in self.CASES), ClipData):
             obj, paths = self.saved(held)
+            what = f"{held.__name__}, as held" if held is ClipData else held.__name__
             for ext, path in paths.items():
-                with self.subTest(held=held.__name__, ext=ext):
+                with self.subTest(held=what, ext=ext):
                     assert_same(self, obj, held.load(path))
                     with self.assertRaisesRegex(TypeError, r"^Data\.load\(\) builds nothing: a file names no class"):
                         Data.load(path)
-            with self.subTest(held=held.__name__, ext="tree"):
+            with self.subTest(held=what, ext="tree"):
                 with self.assertRaisesRegex(TypeError, r"^Data\.from_dict\(\) builds nothing"):
                     Data.from_dict(obj.to_dict())
                 with self.assertRaisesRegex(TypeError, r"^Data\.from_bytes\(\) builds nothing"):
@@ -413,6 +448,12 @@ for ext in ("pkl", "npz", "json"):
 '''
 
 
+def _tree_class(cls):
+    """the class whose fields a tree of ``cls`` holds: ``cls``, or the storage
+    behind a ClipData, which is no Data class and holds none of its own"""
+    return _Clip if cls is ClipData else cls
+
+
 def _nested_classes(cls) -> dict:
     """
     The class each key of a tree of ``cls`` holds, by its saved name and its
@@ -437,7 +478,8 @@ def _private_spelling(value, cls):
     A tree of ``cls`` as cgmath wrote it before a file named fields as their
     properties: every field, setting and clip channel under its own name,
     ``_translate``, ``_blocks``; what the tree holds is spelled by the class
-    its field, or its list, declares.
+    its field, or its list, declares. A clip then had a current frame, and
+    its file kept it, ``_frame``.
     """
     if isinstance(value, (list, tuple)):
         return type(value)(_private_spelling(x, cls) for x in value)
@@ -451,13 +493,14 @@ def _private_spelling(value, cls):
         if key in (DTYPES_KEY, SHAPES_KEY):
             out[key] = {fields.get(name, name): x for name, x in item.items()}
         elif key == ITEMS_KEY and issubclass(cls, DataList):
-            out[key] = [_private_spelling(x, cls._item_class(x)) for x in item]
+            out[key] = [_private_spelling(x, _tree_class(cls._item_class(x))) for x in item]
         else:
             out[fields.get(key, key)] = _private_spelling(item, nested.get(key))
 
     if "_blocks" in out and hasattr(cls, "FRAMED_CHANNELS"):
         channels       = cls.DATA_LIST_CLASS._saved_names()[1]
         out["_blocks"] = {channels.get(name, name): x for name, x in out["_blocks"].items()}
+        out["_frame"]  = 2
     return out
 
 
@@ -469,7 +512,11 @@ class _SavedTree:
         self.tree = tree
 
     def __reduce__(self):
-        return (_unpickle, (self.cls, _plain(self.tree)))
+        # pickle names a class by its module and name: a clip's storage
+        # answers to ClipData's, which is the name such a file holds and the
+        # class pickle finds under it
+        named = ClipData if self.cls is _Clip else self.cls
+        return (_unpickle, (named, _plain(self.tree)))
 
 
 def _write_tree(cls, tree: dict, path: str) -> None:
@@ -559,10 +606,12 @@ class TestPublicSavedNames(unittest.TestCase):
     _translate as "translate", and so are a ClipData's settings, its blocks
     ("blocks") and their channels. A load takes either spelling, so a file
     that names the private field still loads, and refuses a tree that names
-    one field both ways.
+    one field both ways. A clip no longer has a current frame: its file
+    names none, and one that does is read past it.
     """
 
-    # the classes holding such fields, and names each example saves publicly
+    # the classes holding such fields, and names each example saves publicly;
+    # "ClipData" is the clip's storage, the class that holds a ClipData's
     PUBLIC = {
         "TransformData":  ("translate", "rotate_order", "joint_orient", "radius", "shear"),
         "DeltaMushData":  ("smooth_iterations", "method", "weight"),
@@ -571,7 +620,7 @@ class TestPublicSavedNames(unittest.TestCase):
         "UVData":         ("resolution", "antialias"),
         "SkinData":       ("patterns",),
         "ProcrustesData": ("scale_offset",),
-        "ClipData":       ("start_frame", "fps", "frame", "blocks", "take"),
+        "ClipData":       ("start_frame", "fps", "blocks", "take"),
     }
 
     @classmethod
@@ -586,6 +635,8 @@ class TestPublicSavedNames(unittest.TestCase):
             for x in classes.values()
             if x.__name__ in cls.PUBLIC and x in builders
         }
+        # the ClipData a caller holds, which is none of the classes above
+        cls.clip_data = staticmethod(builders[ClipData])
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -620,7 +671,8 @@ class TestPublicSavedNames(unittest.TestCase):
                     found.append(f"{path}.{name}")
             if key == ITEMS_KEY and issubclass(cls, DataList):
                 for index, item_tree in enumerate(item):
-                    found += self.private_keys(item_tree, cls._item_class(item_tree), f"{path}.{key}[{index}]")
+                    item_class = _tree_class(cls._item_class(item_tree))
+                    found += self.private_keys(item_tree, item_class, f"{path}.{key}[{index}]")
             elif key not in (DTYPES_KEY, SHAPES_KEY):
                 found += self.private_keys(item, nested.get(key), f"{path}.{key}")
 
@@ -669,12 +721,14 @@ class TestPublicSavedNames(unittest.TestCase):
                     assert_same(self, obj, cls.load(path), f"{name}.{ext}")
 
     def test_a_file_naming_the_private_fields_still_loads(self):
-        # as cgmath wrote every file before: "_translate", "_blocks"
+        # as cgmath wrote every file before: "_translate", "_blocks", and the
+        # frame a clip was on, "_frame", which a load reads past
         for name, (cls, builder) in sorted(self.listed.items()):
             obj = builder()
             old = _private_spelling(obj.to_dict(), cls)
             self.assertNotEqual(self.private_keys(old, cls), [])
             self.assertIn("_" + self.PUBLIC[name][0], old)
+            self.assertEqual("_frame" in old, name == "ClipData")
 
             with self.subTest(cls=name, file="tree"):
                 assert_same(self, obj, cls.from_dict(old), f"{name} from its tree")
@@ -759,13 +813,23 @@ class TestPublicSavedNames(unittest.TestCase):
                 "_blocks": tree["blocks"],
             },
             "settings by field": {
-                ("_" + key if key in ("start_frame", "fps", "frame") else key): x
+                ("_" + key if key in ("start_frame", "fps") else key): x
                 for key, x in tree.items()
             },
         }
         for how, data in mixed.items():
             with self.subTest(how):
                 assert_same(self, clip, cls.from_dict(data), how)
+
+        # a clip has no current frame and saves none: a file saved while it
+        # had one names it, by its property or by its field, and is read past
+        # it without a warning
+        self.assertEqual({"frame", "_frame"} & set(tree), set())
+        for key in ("frame", "_frame"):
+            with self.subTest(key), warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                assert_same(self, clip, cls.from_dict({**tree, key: 2}), key)
+                self.assertEqual([str(x.message) for x in caught], [])
 
         # a channel the clip does not frame is named as the file names it
         for channel in ("radius", "bogus"):
@@ -777,19 +841,21 @@ class TestPublicSavedNames(unittest.TestCase):
                     cls.from_dict(data)
 
     def test_each_list_class_keeps_its_own_saved_names(self):
-        # a ClipData is a HierarchyData, which saves no setting by another
-        # name: each class builds its own map, whichever of them saves first
-        for cls in (HierarchyData, ClipData):
+        # a clip's storage is a HierarchyData, which saves no setting by
+        # another name: each class builds its own map, whichever of them
+        # saves first
+        for cls in (HierarchyData, _Clip):
             cached = cls.__dict__.get("_SAVED_NAMES_CACHE")
             if cached is not None:
                 delattr(cls, "_SAVED_NAMES_CACHE")
                 self.addCleanup(setattr, cls, "_SAVED_NAMES_CACHE", cached)
 
-        self.assertNotIn("_SAVED_NAMES_CACHE", ClipData.__dict__)
+        self.assertNotIn("_SAVED_NAMES_CACHE", _Clip.__dict__)
         HierarchyData().to_dict()
         tree = self.listed["ClipData"][1]().to_dict()
-        self.assertLessEqual({"start_frame", "fps", "frame", "blocks"}, set(tree))
-        self.assertEqual({"_start_frame", "_fps", "_frame", "_blocks"} & set(tree), set())
+        self.assertLessEqual({"start_frame", "fps", "blocks"}, set(tree))
+        # nor the frame a clip was once on, which it no longer has or saves
+        self.assertEqual({"_start_frame", "_fps", "_blocks", "_frame", "frame"} & set(tree), set())
 
     def test_a_tree_built_by_hand_sets_a_property_through_its_setter(self):
         # a tree that names no class is built by hand, as from_dict takes one
@@ -850,15 +916,19 @@ class TestPublicSavedNames(unittest.TestCase):
                     self.listed[name][0].from_dict({**tree, "_" + public: tree[public]})
 
     def test_to_attributes_names_a_field_either_way(self):
+        # of a clip: the ClipData a caller holds and its frames, every frame,
+        # the pose of one frame, and the storage behind them
         rig  = self.builders["cgmath.hierarchy.hierarchy.HierarchyData"]()
-        clip = self.listed["ClipData"][1]()
+        clip = self.clip_data()
         node = rig[1]
         owners = {
-            "node":   node,
-            "rig":    rig,
-            "view":   rig[1:],
-            "clip":   clip,
-            "frames": clip.frames,
+            "node":    node,
+            "rig":     rig,
+            "view":    rig[1:],
+            "clip":    clip,
+            "frames":  clip.frames,
+            "pose":    clip.frames[2],
+            "storage": clip._engine,
         }
         for how, owner in owners.items():
             with self.subTest(how):

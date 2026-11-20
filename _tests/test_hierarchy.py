@@ -5901,7 +5901,10 @@ class TestParentUuid(unittest.TestCase):
             with self.subTest(label):
                 self.assertEqual(rig["head"].parent_name, "spine")
                 self.assertEqual(rig["spine"].parent_name, "root")
-                np.testing.assert_allclose(rig["head"].world_matrix[3, :3], [1.0, 3.0, 0.0])
+                # a clip's node reads one matrix a frame, (F, 4, 4): each frame is checked
+                world = np.asarray(rig["head"].world_matrix).reshape(-1, 4, 4)
+                self.assertEqual(len(world), 2 if isinstance(rig, ClipData) else 1)
+                np.testing.assert_allclose(world[:, 3, :3], [[1.0, 3.0, 0.0]] * len(world))
 
     def test_a_batch_keeps_a_parent_the_rig_holds(self):
         # nodes extending a rig and hanging from a node it held already keep
@@ -6091,12 +6094,13 @@ class TestLegacyParentNode(unittest.TestCase):
 
         clip = ClipData.load(os.path.join(self.ASSETS, "test_hierarchy.legacy_parent_node_clip.json"))
         self.assertIs(type(clip), ClipData)
-        self.assertEqual((clip.frame_count, clip.frame, clip.start_frame), (3, 1, 10))
+        # the file names the frame the clip was saved on: read past, a clip has none
+        self.assertEqual((clip.frame_count, clip.start_frame), (3, 10))
         self.assertEqual([(n.name, n.parent_name) for n in clip], _LEGACY_PARENTS)
-        frames = clip.frames.world_matrix
+        frames = clip.world_matrix
+        self.assertEqual(np.asarray(frames).shape, (3, len(_LEGACY_PARENTS), 4, 4))
         for frame in range(3):
-            clip.frame = frame
-            np.testing.assert_allclose(frames[frame], clip.world_matrix, atol=1e-12)
+            np.testing.assert_allclose(frames[frame], clip.frames[frame].world_matrix, atol=1e-12)
 
     def test_a_tree_by_hand(self):
         # a dict of node dicts, as a tool of one's own builds it, by name and

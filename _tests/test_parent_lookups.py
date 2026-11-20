@@ -317,8 +317,7 @@ class TestClipParentLookups(unittest.TestCase):
     @staticmethod
     def _pose(clip: ClipData, frame: int) -> HierarchyData:
         """one frame of ``clip`` as a plain single pose rig of its own"""
-        clip.frame = frame
-        return TransformList._owned_copy(clip)
+        return clip.frames[frame].copy()
 
     def test_the_rig_resolves_its_awkward_parents(self):
         rig     = self._rig(5, shared=True)
@@ -383,9 +382,10 @@ class TestClipParentLookups(unittest.TestCase):
             return new
 
         builds = {
-            "ClipData(rig, frames)": lambda: ClipData(rig, frames=4),
-            "clip.copy()":           clip.copy,
-            "clip.frames[1:3]":      lambda: clip.frames[1:3],
+            "ClipData(rig, frames)":   lambda: ClipData(rig, frames=4),
+            "clip.copy()":             clip.copy,
+            "clip.frames[1:3]":        lambda: clip.frames[1:3],
+            "clip.frames[1:3].copy()": lambda: clip.frames[1:3].copy(),
         }
         with mock.patch.object(TransformData, "copy", counted_copy):
             for what, build in builds.items():

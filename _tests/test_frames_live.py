@@ -1,9 +1,10 @@
 """The pose of one frame of a clip is live.
 
-``clip.at(n)`` is a HierarchyData that is a view of that frame: its nodes
-read the clip's values for the frame, a write to one lands in the clip, on
-that frame alone, and ``copy()`` gives a pose of its own. What every frame
-shares, a name, a parent, a rotate order, is the clip's.
+``clip.frames[i]``, and ``clip.at(n)`` by frame number, is a HierarchyData
+that is a view of that frame: its nodes read the clip's values for the
+frame, a write to one lands in the clip, on that frame alone, and ``copy()``
+gives a pose of its own. What every frame shares, a name, a parent, a rotate
+order, is the clip's. The clip itself is on no frame.
 """
 
 import os
@@ -34,26 +35,39 @@ class TestLivePose(unittest.TestCase):
         self.assertEqual([node.parent_name for node in pose], [node.parent_name for node in clip])
         self.assertTrue(all(isinstance(node, TransformData) for node in pose))
         self.assertEqual(repr(pose), "HierarchyData(['root', 'props', 'spine', 'neck', 'head', 'arm'], view)")
-        # one object a frame while it is held; the clip stays where it was
+        # one object a frame while it is held, by its number or by its place
         self.assertIs(clip.at(3), pose)
+        self.assertIs(clip.frames[3], pose)
         self.assertIsNot(clip.at(4), pose)
-        self.assertEqual(clip.frame, 0)
+        # the clip itself is on no frame
+        with self.assertRaises(AttributeError) as caught:
+            clip.frame
+        self.assertIn("a clip has no current frame", str(caught.exception))
 
     def test_a_frame_number_is_read_as_at_always_read_it(self):
-        clip                          = ClipData(chain(), frames=4, start_frame=1001, fps=30.0)
-        clip.frames["spine"].rotate_x = [0.0, 10.0, 20.0, 30.0]
+        clip                   = ClipData(chain(), frames=4, start_frame=1001, fps=30.0)
+        clip["spine"].rotate_x = [0.0, 10.0, 20.0, 30.0]
         for number, turn in ((1001, 0.0), (1003, 20.0), (990, 0.0), (2000, 30.0)):
             self.assertEqual(float(clip.at(number)["spine"].rotate[0]), turn)
-        with self.assertRaises(ValueError):
-            ClipData(chain()).at(0)
+        # a clip of no frame holds the one pose its nodes do: a pose of its own, at any number
+        still = ClipData(chain())
+        pose  = still.at(0)
+        self.assertEqual((type(pose), pose.is_view),        (HierarchyData, False))
+        self.assertEqual([node.name for node in pose],      [node.name for node in still])
+        self.assertEqual(float(pose["spine"].translate[1]), 4.0)
+        pose["spine"].translate_y = 9.0
+        self.assertEqual(float(still.at(0)["spine"].translate[1]), 4.0)
 
     def test_it_reads_the_frame(self):
         clip = walk()
         for frame in (0, 3, 5):
-            pose = clip.at(frame)
-            np.testing.assert_allclose(np.asarray(pose.translate), np.asarray(clip.frames.translate)[frame])
-            np.testing.assert_allclose(np.asarray(pose.rotate), np.asarray(clip.frames.rotate)[frame])
-            np.testing.assert_allclose(np.asarray(pose.world_matrix), np.asarray(clip.frames.world_matrix)[frame], atol=1e-12)
+            for pose in (clip.at(frame), clip.frames[frame]):
+                np.testing.assert_allclose(np.asarray(pose.translate), np.asarray(clip.translate)[frame])
+                np.testing.assert_allclose(np.asarray(pose.rotate), np.asarray(clip.rotate)[frame])
+                np.testing.assert_allclose(np.asarray(pose.world_matrix), np.asarray(clip.world_matrix)[frame], atol=1e-12)
+        # read on the frames, a member is the clip's own
+        np.testing.assert_array_equal(np.asarray(clip.frames.translate), np.asarray(clip.translate))
+        self.assertEqual(np.asarray(clip.translate).shape, (6, 6, 3))
 
     def test_a_write_lands_on_its_frame_alone(self):
         clip                     = walk()
@@ -66,8 +80,8 @@ class TestLivePose(unittest.TestCase):
         world                     = np.array(pose["head"].world_matrix)
         world[3, 0]               = 7.0
         pose["head"].world_matrix = world
-        np.testing.assert_allclose(np.asarray(clip.frames["head"].world_matrix)[3, 3, 0], 7.0, atol=1e-9)
-        self.assertFalse(np.isclose(np.asarray(clip.frames["head"].world_matrix)[2, 3, 0], 7.0))
+        np.testing.assert_allclose(np.asarray(clip["head"].world_matrix)[3, 3, 0], 7.0, atol=1e-9)
+        self.assertFalse(np.isclose(np.asarray(clip["head"].world_matrix)[2, 3, 0], 7.0))
         # a write on the whole pose
         before           = np.array(clip.frames.translate_x)
         pose.translate_x = np.asarray(pose.translate_x) + 1.0
@@ -86,16 +100,23 @@ class TestLivePose(unittest.TestCase):
         self.assertEqual((float(early["spine"].rotate[0]), float(late["spine"].rotate[0])), (5.0, 20.0))
 
     def test_the_clip_reads_what_a_pose_wrote(self):
-        clip = walk()
-        clip.frame = 3
+        clip   = walk()
+        place  = [node.name for node in clip].index("head")
         before = np.array(clip["head"].world_matrix)
         pose   = clip.at(3)
         pose["neck"].translate_y = float(pose["neck"].translate[1]) + 2.0
-        # the clip's own node, on that frame, and every frame read at once
-        moved = np.array(clip["head"].world_matrix)
-        self.assertFalse(np.allclose(moved, before))
-        np.testing.assert_allclose(moved, np.asarray(pose["head"].world_matrix), atol=1e-12)
-        np.testing.assert_allclose(moved, np.asarray(clip.frames["head"].world_matrix)[3], atol=1e-12)
+        moved = np.array(pose["head"].world_matrix)
+        self.assertFalse(np.allclose(moved, before[3]))
+        # a second read of the frame: its pose by place and by number, the node on that frame
+        np.testing.assert_allclose(np.asarray(clip.frames[3]["head"].world_matrix), moved, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(clip.at(3)["head"].world_matrix),     moved, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(clip["head"].frames[3].world_matrix), moved, atol=1e-12)
+        # every frame read at once: the node's, the clip's, a run of its frames
+        after = np.array(clip["head"].world_matrix)
+        np.testing.assert_allclose(after[3], moved, atol=1e-12)
+        np.testing.assert_allclose(np.delete(after, 3, axis=0), np.delete(before, 3, axis=0), atol=1e-12)
+        np.testing.assert_allclose(np.asarray(clip.world_matrix)[3, place], moved, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(clip.frames[2:5]["head"].world_matrix)[1], moved, atol=1e-12)
 
     def test_a_pose_reads_what_the_clip_wrote(self):
         clip   = walk()
@@ -161,7 +182,7 @@ class TestLivePose(unittest.TestCase):
         single = pose["arm"].copy()
         self.assertIs(type(single), TransformData)
         single.translate_y = 0.0
-        self.assertEqual(float(clip.frames["arm"].translate_y[5]), 3.0)
+        self.assertEqual(float(clip["arm"].translate_y[5]), 3.0)
 
     def test_a_selection_of_a_pose_writes_the_frame(self):
         clip = walk()
@@ -183,9 +204,9 @@ class TestLivePose(unittest.TestCase):
         rest  = chain()
         delta = clip.at(4) - rest
         self.assertIs(type(delta), HierarchyData)
-        clip.frame = 4
+        # the clip's own algebra covers every frame: frame 4 of it is the same delta
         np.testing.assert_allclose(np.asarray(delta.rotate), np.asarray((clip.copy() - rest).at(4).rotate), atol=1e-9)
-        clip.frame = 0
+        np.testing.assert_allclose(np.asarray(delta.rotate), np.asarray((clip - rest).frames[4].rotate), atol=1e-9)
         # in place: frame 4 becomes its delta, the other frames stay
         before = np.array(clip.frames.rotate)
         pose   = clip.at(4)
@@ -201,11 +222,11 @@ class TestLivePose(unittest.TestCase):
         clip                    = ClipData(rig, frames=4)
         pose                    = clip.at(2)
         pose["neck"].visibility = False
-        np.testing.assert_array_equal(np.asarray(clip.frames["neck"].visibility), [True, True, False, True])
+        np.testing.assert_array_equal(np.asarray(clip["neck"].visibility), [True, True, False, True])
         self.assertEqual((pose["neck"].visibility, clip.at(1)["neck"].visibility), (False, True))
         # a user channel written on one frame is animated, the others keep its value
         pose["spine"].heroHeight = 5.0
-        np.testing.assert_allclose(np.asarray(clip.frames["spine"].heroHeight).reshape(-1), [1.0, 1.0, 5.0, 1.0])
+        np.testing.assert_allclose(np.asarray(clip["spine"].heroHeight).reshape(-1), [1.0, 1.0, 5.0, 1.0])
         self.assertEqual((float(pose["spine"].heroHeight), float(clip.at(0)["spine"].heroHeight)), (5.0, 1.0))
         # a user attribute no frame keys is shared by every frame
         with self.assertRaises(AttributeError) as caught:

@@ -709,9 +709,9 @@ class TestReadOptions(_Files):
         self.assertEqual(bare[1], every.materials[1])
 
     def test_takes_off_gives_the_nodes_at_their_own_values(self):
-        clip                      = ClipData(rig(), frames=3, fps=24.0, take="spin")
-        clip.frames["box"].rotate = np.array([[0.0, 0.0, 0.0], [0.0, 45.0, 0.0], [0.0, 90.0, 0.0]])
-        path                      = self.path("spin.fbx")
+        clip               = ClipData(rig(), frames=3, fps=24.0, take="spin")
+        clip["box"].rotate = np.array([[0.0, 0.0, 0.0], [0.0, 45.0, 0.0], [0.0, 90.0, 0.0]])
+        path               = self.path("spin.fbx")
         save_fbx(path, clip=clip)
         with_takes = load_fbx(path)
         self.assertIsNone(with_takes.hierarchy)

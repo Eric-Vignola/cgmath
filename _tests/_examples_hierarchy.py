@@ -11,9 +11,16 @@ every saved field away from its default where that is valid:
   of every type and the group a user attribute a built-in hides, its values
   recorded in Unreal's axes and in meters.
 - TransformList: a selection of that rig, one node's parent left out of it.
-- ClipData: the rig over four frames, every framed channel moving, a frame
-  other than the first loaded, its own timebase, and a node reparented after
-  the blocks were laid out, so the save has to line the columns up.
+- ClipData: the rig over four frames, every framed channel moving, its own
+  timebase, and a node reparented after the blocks were laid out, so the save
+  has to line the columns up.
+
+A ClipData is no Data class: it is a thin object over its storage, a private
+HierarchyData subclass, and a pick of its nodes one over a selection of the
+storage's nodes, of a private class too. clip_data(), clip_view() and
+clip_list() give what a caller holds; clip_storage() and clip_view_storage()
+what is behind the first two, which is what the tests of every Data class
+build.
 
 Within the lists, the hip carries every field; the other nodes leave the
 fields a real node of their kind would at their defaults, which checks that
@@ -252,7 +259,7 @@ def frame_node() -> TransformData:
 
 def clip_data() -> ClipData:
     """the rig over four frames from 1001 at 30 fps, every framed channel
-    moving, frame 2 loaded"""
+    moving"""
     clip   = ClipData(rig(), frames=4, start_frame=1001, fps=30.0, take="wave")
     frames = clip.frames
     ramp   = np.arange(4, dtype=float)[:, None, None]
@@ -264,9 +271,8 @@ def clip_data() -> ClipData:
     frames.joint_orient = frames.joint_orient + ramp * [0.0, 0.0, 2.0]
     frames.shear        = frames.shear + ramp * [0.125, 0.0, -0.25]
 
-    # one node over every frame reads (F, 1), and writes the same shape
-    clip.frames["VLR:root"].translate_y = np.array([[95.0], [96.5], [98.0], [99.5]])
-    clip.frame                          = 2
+    # one node's channel reads one value a frame, (F,), and takes as many
+    clip["VLR:root"].translate_y = np.array([95.0, 96.5, 98.0, 99.5])
 
     # reparenting without a pose write is allowed on a clip; it moves the
     # group to the end of the list, so the block columns are out of step with
@@ -277,14 +283,29 @@ def clip_data() -> ClipData:
 
 def clip_list() -> ClipList:
     """two takes of the rig: clip_data()'s wave, and an idle cut of two of
-    its frames, its frame 1 loaded"""
-    wave       = clip_data()
-    idle       = wave.frames[1:3]
-    idle.take  = "idle"
-    idle.frame = 1
+    its frames"""
+    wave      = clip_data()
+    idle      = wave.frames[1:3].copy()  # a cut of frames is a view: a take owns its nodes
+    idle.take = "idle"
     return ClipList([wave, idle])
 
 
+def clip_storage():
+    """what clip_data()'s ClipData keeps its values in: a list of the private
+    class behind every ClipData, a HierarchyData subclass, which is what
+    saves and loads"""
+    return clip_data()._engine
+
+
+def clip_view_storage():
+    """what clip_view()'s ClipData selects with: a view of the storage's
+    nodes, of a private class of its own"""
+    return clip_view()._sel
+
+
+# by class. ClipData is no Data class, so no test of every Data class reads
+# its key: it is here for the tests that build what a caller holds, a view of
+# one, clip_view(), being of the same class
 EXAMPLES = {
     TransformData: transform_data,
     TransformList: transform_list,
@@ -295,9 +316,13 @@ EXAMPLES = {
 }
 
 # a selection is of a private class of its own, behind the public one it is
-# an instance of: read off a selection of each
+# an instance of: read off a selection
 EXAMPLES[type(hierarchy_view())] = hierarchy_view
-EXAMPLES[type(clip_view())]      = clip_view
+
+# and so are the storage of a clip and a selection of its nodes: the Data
+# classes behind a ClipData, read off each
+EXAMPLES[type(clip_storage())]      = clip_storage
+EXAMPLES[type(clip_view_storage())] = clip_view_storage
 
 # a TransformList is a view: it owns no nodes, so it saves as the hierarchy
 # its copy() gives (its nodes copied and owned, the hip's parent, outside the
@@ -306,7 +331,9 @@ SAVES_AS = {
     TransformList: lambda view: view.copy(),
 }
 SAVES_AS[type(hierarchy_view())] = lambda view: view.copy()
-SAVES_AS[type(clip_view())]      = lambda view: view.copy()
+
+# a selection of a clip's storage saves as the storage its copy() gives
+SAVES_AS[type(clip_view_storage())] = lambda view: view.copy()
 
 # the pose of one frame of a clip and a node of it are views too, of the
 # frame: each saves as its copy, a HierarchyData and a TransformData

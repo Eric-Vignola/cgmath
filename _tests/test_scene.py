@@ -234,9 +234,9 @@ class TestSceneBuilding(unittest.TestCase):
         scene = _scene(node)
         self.assertIs(scene.pose(), scene.hierarchy)
 
-        clip                          = ClipData(scene.hierarchy, frames=3, start_frame=10)
-        clip.frames["root"].translate = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
-        scene.clip                    = clip
+        clip                   = ClipData(scene.hierarchy, frames=3, start_frame=10)
+        clip["root"].translate = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+        scene.clip             = clip
         np.testing.assert_allclose(scene.pose()["root"].translate, [0.0, 0.0, 0.0])
         np.testing.assert_allclose(scene.pose(11)["root"].translate, [1.0, 0.0, 0.0])
         self.assertIsNone(Scene("bare").pose())
@@ -588,9 +588,9 @@ class TestSkinnedMesh(unittest.TestCase):
         np.testing.assert_allclose(placed.points, self.tri.points, atol=1e-12)  # the bind pose is a fixed point
         np.testing.assert_array_equal(world, np.eye(4))
 
-        clip                          = ClipData(scene.hierarchy, frames=2)
-        clip.frames["root"].translate = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
-        scene.clip                    = clip
+        clip                   = ClipData(scene.hierarchy, frames=2)
+        clip["root"].translate = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        scene.clip             = clip
         placed, _ = scene.placed_meshes(clip.start_frame + 1)[0]
         self.assertIsNot(placed, self.tri)
         np.testing.assert_allclose(placed.points, self.tri.points + [1.0, 0.0, 0.0], atol=1e-12)
@@ -707,7 +707,7 @@ class TestRenderables(unittest.TestCase):
     def test_a_scene_of_takes_alone_gives_the_first_frames_node(self):
         rig  = HierarchyData([_node("hero", translate=(1.0, 0.0, 0.0))])
         clip = ClipData(rig, frames=2)
-        clip.frames["hero"].translate = np.array([[1.0, 0.0, 0.0], [5.0, 0.0, 0.0]])
+        clip["hero"].translate = np.array([[1.0, 0.0, 0.0], [5.0, 0.0, 0.0]])
         mesh  = _under(_tri("m"), rig["hero"])
         scene = Scene("s", clip=clip).add(mesh)
         item  = scene.renderables()[0]
@@ -752,9 +752,9 @@ class TestRenewUuids(unittest.TestCase):
             self.root, self.j1, self.hero, self.cam_node, self.lamp_node,
             self.mesh, self.skin, self.uv, self.mat, self.morph, self.cam, self.lamp,
         )
-        clip                        = ClipData(self.scene.hierarchy, frames=2)
-        clip.frames["j1"].translate = np.array([[0.0, 1.0, 0.0], [0.0, 2.0, 0.0]])
-        self.scene.clip             = clip
+        clip                 = ClipData(self.scene.hierarchy, frames=2)
+        clip["j1"].translate = np.array([[0.0, 1.0, 0.0], [0.0, 2.0, 0.0]])
+        self.scene.clip      = clip
 
     @staticmethod
     def _uuids(scene) -> set:
@@ -794,7 +794,7 @@ class TestRenewUuids(unittest.TestCase):
         self.assertEqual(self.cam.parent_uuid, self.cam_node.uuid)
         self.assertEqual(self.lamp.parent_uuid, self.lamp_node.uuid)
         self.assertEqual([n.uuid for n in scene.clip.active], [n.uuid for n in scene.hierarchy])  # the takes share
-        moved = np.asarray(scene.clip.active.frames["j1"].translate).reshape(-1, 3)
+        moved = np.asarray(scene.clip.active["j1"].translate).reshape(-1, 3)
         np.testing.assert_array_equal(moved, [[0.0, 1.0, 0.0], [0.0, 2.0, 0.0]])  # the frames stay with their node
         again = scene.renew_uuids()
         self.assertEqual(set(again), set(mapping.values()))
@@ -1904,8 +1904,8 @@ class TestSceneCacheInvalidation(unittest.TestCase):
         node  = _node("root")
         scene = _scene(node, _under(self.mesh, node), resolution=(8, 8), samples_per_pixel=1)
         clip  = ClipData(scene.hierarchy, frames=2)
-        clip.frames["root"].translate = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
-        scene.clip                    = clip
+        clip["root"].translate = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        scene.clip             = clip
         first = scene.render(frame=clip.start_frame, default_light=False)
         self.assertIs(scene.frame, first)
         self.assertNotEqual(scene._signature(clip.start_frame), scene._signature(clip.start_frame + 1))

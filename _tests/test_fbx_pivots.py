@@ -199,13 +199,13 @@ class TestPivots(_Files):
         self.assertEqual(clip.frame_count, FRAMES)
         for name in NAMES:
             np.testing.assert_allclose(
-                _frames(clip.frames[name].world_matrix, (4, 4)), worlds[name], rtol=0.0, atol=1e-9, err_msg=name
+                _frames(clip[name].world_matrix, (4, 4)), worlds[name], rtol=0.0, atol=1e-9, err_msg=name
             )
-        moved = _frames(clip.frames["leaf"].translate, (3,))
+        moved = _frames(clip["leaf"].translate, (3,))
         self.assertGreater(float(np.abs(moved[1:] - moved[:1]).max()), 1e-3, "leaf's translate follows its keyed scale")
-        np.testing.assert_allclose(_frames(clip.frames["leaf"].scale, (3,))[:, 2], [3.0, 4.0, 5.0], rtol=0.0, atol=1e-12)
-        np.testing.assert_allclose(_frames(clip.frames["grp"].rotate, (3,))[:, 2], [0.0, 45.0, 90.0], rtol=0.0, atol=1e-9)
-        still = _frames(clip.frames["j"].translate, (3,))  # a channel no key moves is one row
+        np.testing.assert_allclose(_frames(clip["leaf"].scale, (3,))[:, 2], [3.0, 4.0, 5.0], rtol=0.0, atol=1e-12)
+        np.testing.assert_allclose(_frames(clip["grp"].rotate, (3,))[:, 2], [0.0, 45.0, 90.0], rtol=0.0, atol=1e-9)
+        still = _frames(clip["j"].translate, (3,))  # a channel no key moves holds one value on every frame
         np.testing.assert_allclose(still, np.broadcast_to([1.0, 2.0, 3.0], still.shape), rtol=0.0, atol=1e-12)
 
     def test_a_joint_with_pivots_is_refused(self):
@@ -237,7 +237,7 @@ class TestMayaPivots(_Recorded):
         self.assertEqual(clip.frame_count, FRAMES)
         for name in NAMES:
             np.testing.assert_allclose(
-                _frames(clip.frames[name].world_matrix, (4, 4)), case.array(f"world/{name}"), rtol=0.0, atol=1e-6, err_msg=name
+                _frames(clip[name].world_matrix, (4, 4)), case.array(f"world/{name}"), rtol=0.0, atol=1e-6, err_msg=name
             )
 
 

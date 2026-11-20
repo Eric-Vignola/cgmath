@@ -1,10 +1,11 @@
 """Maya's short attribute names, and the four matrices that came with them.
 
 Each of the 35 short names reads and writes what its long name does, on a
-node, a rig, a clip's bound frame and the clip's frame axis, and raises what
-it raises. parent_matrix, inverse_matrix, world_inverse_matrix and
-parent_inverse_matrix are checked against matrices composed here with
-numpy, to 1e-12, and against Maya itself when the suite runs in mayapy.
+node, a rig, a clip, a pick of its nodes, one node of it and the pose of one
+of its frames, and raises what it raises. parent_matrix, inverse_matrix,
+world_inverse_matrix and parent_inverse_matrix are checked against matrices
+composed here with numpy, to 1e-12, and against Maya itself when the suite
+runs in mayapy.
 add_user_attribute refuses every one of the names; a file whose user
 attribute carries one loads it, hidden, with one warning a name.
 """
@@ -29,7 +30,7 @@ from cgmath import hierarchy
 from cgmath.geometry.sdf import SDFSphere
 from cgmath.hierarchy import FBX, ClipData, HierarchyData, TransformData, TransformList
 from cgmath.hierarchy import hierarchy as hierarchy_mod
-from cgmath.hierarchy.hierarchy import _SHORT_NAMES, _looped
+from cgmath.hierarchy.hierarchy import _SHORT_NAMES, _Clip, _looped
 
 # (short, cgmath's long name, Maya's long name): the short names Maya 2025's
 # cmds.attributeQuery(<Maya's long name>, node=<joint>, shortName=True) gives
@@ -77,8 +78,9 @@ VECTORS    = AXES + ("shear",)
 COMPONENTS = tuple(f"{vector}_{axis}" for vector in AXES for axis in "xyz") + ("shear_xy", "shear_xz", "shear_yz")
 READ_ONLY  = ("parent_matrix", "inverse_matrix", "world_inverse_matrix", "parent_inverse_matrix")
 
-# what every frame shares: a clip's frame axis has none of these
-SHARED = ("rotate_order", "segment_scale_compensate", "visibility", "radius", "draw_style")
+# what every frame of a clip shares: one value a node, set on the clip and
+# refused through the pose of one frame
+SHARED = ("rotate_order", "segment_scale_compensate", "radius", "draw_style")
 
 # four joints, every channel away from its default, four rotate orders, and
 # two compensated joints, one under a non-uniformly scaled parent
@@ -140,8 +142,7 @@ def _rig(**user_attributes) -> HierarchyData:
 
 
 def _clip() -> ClipData:
-    """the POSES rig over FRAMES frames, every framed channel moving, bound
-    to frame BOUND"""
+    """the POSES rig over FRAMES frames, every framed channel moving"""
     clip  = ClipData(_rig(), frames=FRAMES)
     rng   = np.random.default_rng(7)
     shape = (FRAMES, len(POSES), 3)
@@ -151,13 +152,12 @@ def _clip() -> ClipData:
     clip.frames.joint_orient = clip.frames.joint_orient + rng.uniform(-10.0, 10.0, shape)
     clip.frames.rotate_axis  = clip.frames.rotate_axis + rng.uniform(-10.0, 10.0, shape)
     clip.frames.shear        = clip.frames.shear + rng.uniform(-0.25, 0.25, shape)
-    clip.frame               = BOUND
     return clip
 
 
 def _value(long: str, lead: tuple, seed: int):
     """a value to write ``long`` with, shaped ``lead`` + the channel's shape:
-    () for a node, (N,) for a list, (F, N) for a frame axis"""
+    () for a node, (N,) for a list, (F, N) for a clip"""
     rng = np.random.default_rng(seed)
     if long in VECTORS:
         return rng.uniform(0.5, 2.0, lead + (3,))
@@ -194,15 +194,22 @@ def _same(test, a, b, what: str) -> None:
     test.assertTrue(np.array_equal(np.asarray(a), np.asarray(b)), what)
 
 
-# the targets each name is read and written on: a node of a rig, the rig,
-# a clip at its bound frame, and the clip's frame axis
+# the targets each name is read and written on: a node of a rig, the rig and
+# a view of it; a clip, its frames, a pick of its nodes and one node of it,
+# every frame each; and the pose of frame BOUND of a clip
 TARGETS = {
-    "node":   (lambda: _rig(), lambda owner: owner["knee"], ()),
-    "rig":    (lambda: _rig(), lambda owner: owner, (len(POSES),)),
-    "view":   (lambda: _rig(), lambda owner: owner[1:3], (2,)),
-    "clip":   (lambda: _clip(), lambda owner: owner, (len(POSES),)),
-    "frames": (lambda: _clip(), lambda owner: owner.frames, (FRAMES, len(POSES))),
+    "node":      (lambda: _rig(), lambda owner: owner["knee"], ()),
+    "rig":       (lambda: _rig(), lambda owner: owner, (len(POSES),)),
+    "view":      (lambda: _rig(), lambda owner: owner[1:3], (2,)),
+    "clip":      (lambda: _clip(), lambda owner: owner, (FRAMES, len(POSES))),
+    "frames":    (lambda: _clip(), lambda owner: owner.frames, (FRAMES, len(POSES))),
+    "pick":      (lambda: _clip(), lambda owner: owner[1:3], (FRAMES, 2)),
+    "clip node": (lambda: _clip(), lambda owner: owner["knee"], (FRAMES,)),
+    "pose":      (lambda: _clip(), lambda owner: owner.frames[BOUND], (len(POSES),)),
 }
+# of them, the ones that cover every frame of a clip: their values lead with
+# the frames, but what every frame shares
+EVERY_FRAME = ("clip", "frames", "pick", "clip node")
 
 
 class TestTheNames(unittest.TestCase):
@@ -219,7 +226,13 @@ class TestTheNames(unittest.TestCase):
             getattr(TransformData("a"), "is")
 
     def test_each_class_has_what_its_long_names_allow(self):
-        for cls in (TransformData, TransformList, HierarchyData, ClipData, type(_clip().frames)):
+        # a clip's names are read on the clip, on one node of it, on the
+        # pose of a frame and on a node of that pose
+        clip = _clip()
+        pose = clip.frames[BOUND]
+        for cls in (
+            TransformData, TransformList, HierarchyData, ClipData, type(clip["knee"]), type(pose), type(pose["knee"]),
+        ):
             for short, long in SHORT.items():
                 with self.subTest(cls=cls.__name__, short=short):
                     held = getattr(cls, long, None)
@@ -229,17 +242,26 @@ class TestTheNames(unittest.TestCase):
                     alias = getattr(cls, short)
                     self.assertIsInstance(alias, property)
                     self.assertEqual(alias.fset is None, held.fset is None)
-                    self.assertEqual(alias.fget.__doc__, f"Maya's short name for {long}")
+                    self.assertEqual(alias.__doc__, f"Maya's short name for {long}")
 
     def test_dir_and_tab_completion_show_them(self):
         clip = _clip()
+        pose = clip.frames[BOUND]
         for label, target in (
-            ("node", clip["knee"]), ("rig", _rig()), ("clip", clip), ("frames", clip.frames),
+            ("node", pose["knee"]),
+            ("rig", _rig()),
+            ("clip", clip),
+            ("pick", clip[1:3]),
+            ("clip node", clip["knee"]),
+            ("pose", pose),
+            ("frames", clip.frames),
         ):
+            # clip.frames answers every name its clip does
+            cls   = ClipData if label == "frames" else type(target)
             names = set(dir(target))
             for short, long in SHORT.items():
                 with self.subTest(target=label, short=short):
-                    self.assertEqual(short in names, hasattr(type(target), long))
+                    self.assertEqual(short in names, hasattr(cls, long))
 
         node      = _rig()["knee"]
         completer = rlcompleter.Completer({"node": node})
@@ -258,15 +280,9 @@ class TestReadsAndWrites(unittest.TestCase):
             owner = make()
             for short, long in SHORT.items():
                 with self.subTest(target=label, short=short):
+                    # every target answers every name: a clip, and its
+                    # frames, rotate_order and ro too
                     on = target(owner)
-                    if not hasattr(type(on), long):
-                        # a frame axis has no rotate_order: nor ro, the same error
-                        with self.assertRaises(AttributeError) as was:
-                            getattr(on, long)
-                        with self.assertRaises(AttributeError) as now:
-                            getattr(on, short)
-                        self.assertEqual(str(now.exception), str(was.exception).replace(repr(long), repr(short)))
-                        continue
                     _same(self, getattr(on, short), getattr(on, long), f"{label}.{short}")
 
     def test_writes_are_the_long_names(self):
@@ -276,8 +292,11 @@ class TestReadsAndWrites(unittest.TestCase):
             for seed, (short, long) in enumerate(SHORT.items()):
                 with self.subTest(target=label, short=short):
                     by_long, by_short = make(), make()
-                    value = _value(long, lead, seed)
-                    if not hasattr(type(target(by_long)), long) or long in READ_ONLY:
+                    # what every frame shares is one value a node on a clip,
+                    # and is not set through the pose of one frame
+                    shared = long in SHARED
+                    value  = _value(long, lead[1:] if shared and label in EVERY_FRAME else lead, seed)
+                    if long in READ_ONLY or (shared and label == "pose"):
                         with self.assertRaises(AttributeError) as was:
                             setattr(target(by_long), long, value)
                         with self.assertRaises(AttributeError) as now:
@@ -291,21 +310,19 @@ class TestReadsAndWrites(unittest.TestCase):
                     setattr(target(by_long), long, value)
                     setattr(target(by_short), short, value)
                     self.assertEqual(by_short.to_json(), by_long.to_json())
-                    if label in ("clip", "frames"):
-                        self.assertTrue(np.array_equal(by_short.frames.world_matrix, by_long.frames.world_matrix))
-                    else:
-                        self.assertTrue(np.array_equal(by_short.world_matrix, by_long.world_matrix))
+                    # a clip's world_matrix is every frame's
+                    self.assertTrue(np.array_equal(by_short.world_matrix, by_long.world_matrix))
 
-    def test_a_clip_writes_its_bound_frame_and_the_axis_every_frame(self):
+    def test_a_pose_writes_its_frame_and_the_clip_every_frame(self):
         clip, before = _clip(), _clip()
-        clip.tx = [9.0, 8.0, 7.0, 6.0]
-        moved   = np.flatnonzero(np.any(clip.frames.translate != before.frames.translate, axis=(1, 2)))
+        clip.frames[BOUND].tx = [9.0, 8.0, 7.0, 6.0]
+        moved                 = np.flatnonzero(np.any(clip.frames.translate != before.frames.translate, axis=(1, 2)))
         self.assertEqual(moved.tolist(), [BOUND])
         self.assertEqual(clip.frames.tx[BOUND].tolist(), [9.0, 8.0, 7.0, 6.0])
 
-        clip.frames.ry = 11.0
+        clip.ry = 11.0
         self.assertTrue(np.all(clip.frames.rotate_y == 11.0))
-        self.assertEqual(clip.ry.tolist(), [11.0] * len(POSES))
+        self.assertEqual(clip.frames[BOUND].ry.tolist(), [11.0] * len(POSES))
 
     def test_errors_are_the_long_names(self):
         clip = _clip()
@@ -317,7 +334,9 @@ class TestReadsAndWrites(unittest.TestCase):
             ("node", _rig()["knee"], "scale_x", "abc"),
             ("rig", _rig(), "rotate", np.zeros((4, 2))),
             ("rig", _rig(), "joint_orient", "abc"),
-            ("clip", clip, "matrix", np.zeros((4, 3, 3))),
+            ("pose", clip.frames[BOUND], "matrix", np.zeros((4, 3, 3))),
+            ("clip", clip, "matrix", np.zeros((4, 4, 3, 3))),
+            ("clip node", clip["knee"], "rotate", np.zeros((4, 2))),
             ("frames", clip.frames, "translate", np.zeros(2)),
             ("frames", clip.frames, "world_matrix", np.zeros((4, 4, 3))),
         ):
@@ -439,12 +458,14 @@ class TestTheFourMatrices(unittest.TestCase):
             want     = _expected(*_composed(channels, clip.list))
             for long, matrices in want.items():
                 short = {value: key for key, value in SHORT.items()}[long]
-                self.assert_close(getattr(clip.frames, long)[frame],          matrices,    f"frames.{long}[{frame}]")
-                self.assert_close(getattr(clip.frames, short)[frame],         matrices,    f"frames.{short}[{frame}]")
-                self.assert_close(getattr(clip.frames["knee"], short)[frame], matrices[2], f"frames['knee'].{short}")
-                if frame == BOUND:
-                    self.assert_close(getattr(clip, short), matrices, f"clip.{short}")
-                    self.assert_close(getattr(clip["foot"], short), matrices[3], f"clip['foot'].{short}")
+                self.assert_close(getattr(clip.frames, long)[frame],   matrices,    f"frames.{long}[{frame}]")
+                self.assert_close(getattr(clip.frames, short)[frame],  matrices,    f"frames.{short}[{frame}]")
+                self.assert_close(getattr(clip, short)[frame],         matrices,    f"clip.{short}[{frame}]")
+                self.assert_close(getattr(clip["knee"], short)[frame], matrices[2], f"clip['knee'].{short}")
+                # the pose of the frame, and a node of it
+                pose = clip.frames[frame]
+                self.assert_close(getattr(pose, short), matrices, f"frames[{frame}].{short}")
+                self.assert_close(getattr(pose["foot"], short), matrices[3], f"frames[{frame}]['foot'].{short}")
 
     def test_a_parent_outside_a_view_or_none_at_all(self):
         rig  = _rig()
@@ -595,16 +616,18 @@ class TestTheFourMatrices(unittest.TestCase):
                     self.assertEqual(sizes[-1], 40)
                     self.assert_close(got, want[long][picks], f"rig[{picks}].{long}")
 
-        # half the rig or more evaluates the whole rig; a clip's view reads
-        # its bound frame
+        # half the rig or more evaluates the whole rig; a view of the pose of
+        # a clip's frame reads that frame, a pick of the clip's nodes every
+        # frame
         sizes.clear()
         rig[:20].wim
         self.assertEqual(sizes, [40])
         clip               = ClipData(rig, frames=3)
-        clip.frame         = 1
         clip.frames.rotate = clip.frames.rotate + rng.uniform(-20.0, 20.0, (3, 40, 3))
+        pose               = clip.frames[1]
         for long in READ_ONLY:
-            self.assertTrue(np.array_equal(getattr(clip[[39, 5]], long), getattr(clip.frames, long)[1, [39, 5]]))
+            self.assertTrue(np.array_equal(getattr(pose[[39, 5]], long), getattr(clip.frames, long)[1, [39, 5]]))
+            self.assertTrue(np.array_equal(getattr(clip[[39, 5]], long), getattr(clip.frames, long)[:, [39, 5]]))
 
         # a small view on a loop raises what its node's world_matrix raises,
         # and reads its inverse_matrix; one above the loop reads
@@ -691,8 +714,8 @@ class TestTheFourMatrices(unittest.TestCase):
         # few nodes'
         worlds = np.array([node.world_matrix for node in rig])
         self.assertTrue(np.array_equal(rig.world_matrix, worlds))
-        self.assertTrue(np.array_equal(ClipData._pose_world(list(rig)), worlds))
-        self.assertTrue(np.array_equal(ClipData._pose_world([rig[7], rig[9]]), worlds[[7, 9]]))
+        self.assertTrue(np.array_equal(_Clip._pose_world(list(rig)), worlds))
+        self.assertTrue(np.array_equal(_Clip._pose_world([rig[7], rig[9]]), worlds[[7, 9]]))
 
     def test_two_nodes_of_one_uuid(self):
         # a uuid written in place onto a second node, listed before the one
@@ -734,7 +757,7 @@ class TestTheFourMatrices(unittest.TestCase):
             rig[[6, 5]], sizes, {long: [4 if long == "inverse_matrix" else 7] for long in READ_ONLY}
         )
         self._assert_node_by_node(rig, sizes, {long: [13] for long in READ_ONLY})
-        self.assertTrue(np.array_equal(ClipData._pose_world(list(rig)), rig.world_matrix))
+        self.assertTrue(np.array_equal(_Clip._pose_world(list(rig)), rig.world_matrix))
 
     def test_a_list_or_a_clip_inverts_in_one_batch(self):
         # no node's own matrix read, one inverse call for the whole list or
@@ -752,7 +775,15 @@ class TestTheFourMatrices(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
-        for label, target in (("rig", rig), ("view", rig[1:]), ("clip", clip), ("frames", clip.frames)):
+        for label, target in (
+            ("rig", rig),
+            ("view", rig[1:]),
+            ("clip", clip),
+            ("frames", clip.frames),
+            ("pick", clip[1:]),
+            ("clip node", clip["knee"]),
+            ("pose", clip.frames[BOUND]),
+        ):
             for short in ("pm", "im", "wim", "pim"):
                 with self.subTest(target=label, short=short):
                     with mock.patch.object(np.linalg, "inv", wraps=np.linalg.inv) as inverse:
@@ -774,14 +805,14 @@ class TestTheFourMatrices(unittest.TestCase):
                     getattr(target, short)
                 self.assertEqual(str(caught.exception), f"{named} has no inverse: a zero scale flattens it")
 
-        clip                       = _clip()
-        clip.frames["hip"].scale_x = [1.0, 1.0, 1.0, 0.0]
+        clip                = _clip()
+        clip["hip"].scale_x = [1.0, 1.0, 1.0, 0.0]
         with self.assertRaises(np.linalg.LinAlgError) as caught:
             clip.frames.im
         self.assertEqual(
             str(caught.exception), "the matrix of 'hip' on frame 3 has no inverse: a zero scale flattens it"
         )
-        clip.frames.match("root", "knee", "foot").im  # the others invert
+        clip.match("root", "knee", "foot").im  # the others invert
 
     def test_maya_itself(self):
         """Maya 2025's own joints, posed as POSES with inverseScale wired:
@@ -1105,7 +1136,8 @@ class TestUserAttributes(unittest.TestCase):
             warnings.simplefilter("always")
             copies = [
                 rig.copy(), rig[1:].copy(), rig["knee"].copy(), copy.deepcopy(rig), copy.copy(rig),
-                clip.copy(), ClipData(rig, frames=2), clip.frames[0:2], rig.get_delta(_rig()),
+                clip.copy(), ClipData(rig, frames=2), clip.frames[0:2].copy(), clip.frames[1].copy(),
+                rig.get_delta(_rig()),
             ]
         self.assertEqual(self.hidden(caught), [])
         self.assertEqual(copies[0]["knee"].user_defined_attributes["tx"]["value"], 8.0)

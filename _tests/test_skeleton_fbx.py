@@ -106,21 +106,20 @@ def skeleton() -> HierarchyData:
 
 def take(rig: HierarchyData) -> ClipData:
     """12 frames from 1001 at 30 fps, some channels animated, some constant"""
-    clip = ClipData(rig, frames=FRAMES, start_frame=START, fps=FPS, take="walk")
-    f    = np.arange(FRAMES, dtype=np.float64)[:, None]
-    clip.frames["hips"].translate    = np.hstack([np.sin(f / 3.0), 90.0 + f * 0.25, -f * 0.1])
-    clip.frames["hips"].rotate       = np.hstack([5.0 + f * 2.0, f * -1.5, np.cos(f) * 4.0])
-    clip.frames["spine"].rotate      = np.hstack([f * 0.5, f * 0.0 + 1.0, 12.0 + f])
-    clip.frames["chest"].rotate      = [[1.0, 2.0, 3.0]]
-    clip.frames["head"].scale        = np.hstack([1.0 + f * 0.01, 1.2 - f * 0.02, 0.8 + f * 0.005])
-    clip.frames["arm_grp"].translate = np.hstack([f * 0.3, 5.0 + f * 0.0, 3.0 - f * 0.2])
-    clip.frames["hips"].weight       = 0.5 + f * 0.05
-    clip.frames["hips"].count        = (f % 4.0) - 1.0
-    clip.frames["hips"].on           = f % 2.0
-    clip.frames["hips"].mode         = np.where(f % 3.0 == 0.0, 1.0, 5.0)
-    clip.frames["hips"].aim          = np.hstack([f * 0.1, -2.0 + f * 0.0, f * f * 0.01])
-    clip.frames["hips"].twist        = [[90.0]]
-    clip.frame = 0
+    clip                      = ClipData(rig, frames=FRAMES, start_frame=START, fps=FPS, take="walk")
+    f                         = np.arange(FRAMES, dtype=np.float64)[:, None]
+    clip["hips"].translate    = np.hstack([np.sin(f / 3.0), 90.0 + f * 0.25, -f * 0.1])
+    clip["hips"].rotate       = np.hstack([5.0 + f * 2.0, f * -1.5, np.cos(f) * 4.0])
+    clip["spine"].rotate      = np.hstack([f * 0.5, f * 0.0 + 1.0, 12.0 + f])
+    clip["chest"].rotate      = [[1.0, 2.0, 3.0]]
+    clip["head"].scale        = np.hstack([1.0 + f * 0.01, 1.2 - f * 0.02, 0.8 + f * 0.005])
+    clip["arm_grp"].translate = np.hstack([f * 0.3, 5.0 + f * 0.0, 3.0 - f * 0.2])
+    clip["hips"].weight       = 0.5 + f * 0.05
+    clip["hips"].count        = (f % 4.0) - 1.0
+    clip["hips"].on           = f % 2.0
+    clip["hips"].mode         = np.where(f % 3.0 == 0.0, 1.0, 5.0)
+    clip["hips"].aim          = np.hstack([f * 0.1, -2.0 + f * 0.0, f * f * 0.01])
+    clip["hips"].twist        = [[90.0]]
     return clip
 
 
@@ -129,10 +128,10 @@ def takes() -> ClipList:
     frames from 1003, every rotate turned 3 degrees; and a take of no name,
     3 frames from 1001; run active"""
     walk              = take(skeleton())
-    run               = walk.frames[2:8]
+    run               = walk.frames[2:8].copy()
     run.take          = "run"
     run.frames.rotate = np.asarray(run.frames.rotate) + 3.0
-    blank             = walk.frames[0:3]
+    blank             = walk.frames[0:3].copy()
     blank.take        = ""
     clips             = ClipList([walk, run, blank])
     clips.active      = "run"
@@ -167,16 +166,23 @@ def structure(nodes) -> list:
 
 
 def layout(clip: ClipData) -> dict:
-    """{(node, channel): rows held}, every framed channel and user channel"""
+    """{(node, channel): rows held}, every framed channel and user channel:
+    one row where the clip holds the channel constant, F rows where it is
+    animated. A node's channel reads F rows either way, so which it is comes
+    from the clip's storage: its layout a framed channel, its keys a user
+    channel"""
     from cgmath.hierarchy.hierarchy import _user_channels
 
+    clip._settle()
     out = {}
-    for node in clip:
-        axis = clip.frames[node.name]
+    for column, node in enumerate(clip):
         for channel in ("translate", "rotate", "scale", "joint_orient", "rotate_axis", "shear"):
-            out[(node.name, channel)] = np.array(getattr(axis, channel))
+            rows                      = np.array(getattr(node, channel))
+            out[(node.name, channel)] = rows if clip._animated["_" + channel][column] else rows[:1]
+        keys = clip._user_keys.get(node.uuid, {})
         for name in _user_channels(node.user_defined_attributes):
-            out[(node.name, name)] = np.array(getattr(axis, name))
+            rows                   = np.array(getattr(node, name))
+            out[(node.name, name)] = rows if name in keys else rows[:1]
     return out
 
 
@@ -257,17 +263,45 @@ class TestClipLayout(unittest.TestCase):
 
     def test_one_row_is_constant_and_f_rows_animated(self):
         clip = take(skeleton())
-        self.assertEqual(clip.frames["chest"].rotate.shape, (1, 3))
-        self.assertEqual(clip.frames["hips"].rotate.shape,  (FRAMES, 3))
-        self.assertEqual(clip.frames["hips"].twist.shape,   (1, 1))
-        self.assertEqual(clip.frames["hips"].weight.shape,  (FRAMES, 1))
-        self.assertEqual(clip.frames["hips"].aim.shape,     (FRAMES, 3))
+        held = layout(clip)
+        self.assertEqual(held[("chest", "rotate")].shape, (1, 3))
+        self.assertEqual(held[("hips", "rotate")].shape,  (FRAMES, 3))
+        self.assertEqual(held[("hips", "twist")].shape,   (1, 1))
+        self.assertEqual(held[("hips", "weight")].shape,  (FRAMES, 1))
+        self.assertEqual(held[("hips", "aim")].shape,     (FRAMES, 3))
+        # a node's channel reads a row a frame, constant or animated; keyed
+        # says which a node is
+        self.assertEqual(clip["chest"].rotate.shape, (FRAMES, 3))
+        self.assertEqual(clip["hips"].rotate.shape,  (FRAMES, 3))
+        self.assertEqual(clip["hips"].twist.shape,   (FRAMES, 1))
+        self.assertEqual(clip["hips"].weight.shape,  (FRAMES, 1))
+        self.assertEqual(clip["hips"].aim.shape,     (FRAMES, 3))
+        self.assertEqual((clip["chest"].keyed, clip["hips"].keyed), (False, True))
         self.assertEqual(clip.frames.rotate.shape,          (FRAMES, len(NODES), 3))
-        # equal values are no reason to be constant: F equal rows stay F rows
-        clip.frames["prop"].translate = np.zeros((FRAMES, 3))
-        self.assertEqual(clip.frames["prop"].translate.shape, (FRAMES, 3))
-        clip.frames["prop"].translate = [[0.0, 0.0, 5.0]]
-        self.assertEqual(clip.frames["prop"].translate.shape, (1, 3))
+        # a channel read and written back is the channel it was: a row a
+        # frame, all equal, leaves a constant channel constant
+        clip["prop"].translate = np.zeros((FRAMES, 3))
+        self.assertEqual(clip["prop"].translate.shape, (FRAMES, 3))
+        self.assertFalse(clip["prop"].keyed)
+        self.assertEqual(layout(clip)[("prop", "translate")].shape, (1, 3))
+        # rows that differ animate it, whether or not keyed is read between,
+        # and equal rows written after leave it animated
+        moving                 = np.zeros((FRAMES, 3))
+        moving[:, 2]           = np.arange(FRAMES)
+        clip["prop"].translate = moving
+        clip["prop"].translate = np.zeros((FRAMES, 3))
+        self.assertTrue(clip["prop"].keyed)
+        self.assertEqual(layout(clip)[("prop", "translate")].shape, (FRAMES, 3))
+        # one frame written through its pose animates a constant channel too
+        clip["chest"].scale = [[1.0, 1.0, 1.0]]
+        self.assertEqual(layout(clip)[("chest", "scale")].shape, (1, 3))
+        clip.frames[0]["chest"].scale = [1.0, 1.0, 1.0]
+        self.assertEqual(layout(clip)[("chest", "scale")].shape, (FRAMES, 3))
+        clip["chest"].scale    = [[1.0, 1.0, 1.0]]
+        clip["prop"].translate = [[0.0, 0.0, 5.0]]
+        self.assertEqual(clip["prop"].translate.shape, (FRAMES, 3))
+        self.assertFalse(clip["prop"].keyed)
+        self.assertEqual(layout(clip)[("prop", "translate")].shape, (1, 3))
 
     def test_a_constant_channel_reads_its_value_at_every_frame_number(self):
         clip = take(skeleton())
@@ -278,21 +312,23 @@ class TestClipLayout(unittest.TestCase):
             self.assertEqual(pose["hips"].twist, 90.0)
             self.assertEqual(pose["hips"].level, -2)
         # an animated one: its first row before the clip, its last after it
-        rows = clip.frames["hips"].rotate
+        rows = clip["hips"].rotate
         np.testing.assert_array_equal(clip.at(0)["hips"].rotate,    rows[0])
         np.testing.assert_array_equal(clip.at(1005)["hips"].rotate, rows[4])
         np.testing.assert_array_equal(clip.at(5000)["hips"].rotate, rows[-1])
 
-    def test_a_write_at_the_playhead_animates_a_constant_channel(self):
-        clip                 = take(skeleton())
-        clip.frame           = 4
-        clip["chest"].rotate = [7.0, 8.0, 9.0]
-        rows                 = clip.frames["chest"].rotate
+    def test_a_write_on_one_frame_animates_a_constant_channel(self):
+        clip = take(skeleton())
+        self.assertFalse(clip["chest"].keyed)
+        pose                 = clip.frames[4]
+        pose["chest"].rotate = [7.0, 8.0, 9.0]
+        rows                 = layout(clip)[("chest", "rotate")]
         self.assertEqual(rows.shape, (FRAMES, 3))
+        self.assertTrue(clip["chest"].keyed)
         np.testing.assert_array_equal(rows[4], [7.0, 8.0, 9.0])
         np.testing.assert_array_equal(np.delete(rows, 4, axis=0), np.tile([1.0, 2.0, 3.0], (FRAMES - 1, 1)))
-        clip["hips"].twist = 10.0
-        rows               = clip.frames["hips"].twist
+        pose["hips"].twist = 10.0
+        rows               = layout(clip)[("hips", "twist")]
         self.assertEqual(rows.shape, (FRAMES, 1))
         self.assertEqual(rows[4, 0], 10.0)
         self.assertEqual(rows[0, 0], 90.0)
@@ -309,10 +345,11 @@ class TestClipLayout(unittest.TestCase):
                 self.assertEqual(list(got), list(want))
                 for key in want:
                     np.testing.assert_array_equal(got[key], want[key], err_msg=str(key))
-        cut = clip.frames[2:5]
-        self.assertEqual(cut.frames["chest"].rotate.shape, (1, 3))
-        self.assertEqual(cut.frames["hips"].rotate.shape, (3, 3))
-        np.testing.assert_array_equal(cut.frames["hips"].weight, clip.frames["hips"].weight[2:5])
+        cut  = clip.frames[2:5].copy()
+        held = layout(cut)
+        self.assertEqual(held[("chest", "rotate")].shape, (1, 3))
+        self.assertEqual(held[("hips", "rotate")].shape, (3, 3))
+        np.testing.assert_array_equal(cut["hips"].weight, clip["hips"].weight[2:5])
 
     def test_the_clip_holds_no_rest_pose(self):
         clip = take(skeleton())
@@ -400,15 +437,16 @@ class TestClipAlone(_Files):
             np.testing.assert_array_equal(pose["base"].translate, [1.0, 2.0, 3.0])
             self.assertEqual(pose["hips"].twist, 90.0)
             self.assertEqual(pose["hips"].level, -2)
-        rows = clip.frames["hips"].rotate
+        rows = clip["hips"].rotate
         np.testing.assert_array_equal(clip.at(FAR[0])["hips"].rotate, rows[0])
         np.testing.assert_array_equal(clip.at(FAR[-1])["hips"].rotate, rows[-1])
 
     def test_the_nodes_hold_the_first_frame(self):
         """their own values, what Maya shows with animation off: the clip's
-        pose at its first frame, wherever its playhead is"""
-        clip       = take(skeleton())
-        clip.frame = 7
+        pose at its first frame, whatever frame its storage is bound to"""
+        clip = take(skeleton())
+        clip._bind(7)
+        self.assertEqual(clip._engine._frame, 7)
         save_fbx(self.path("a.fbx"), clip=clip)
         self.assertSameSkeleton(HierarchyData.load_fbx(self.path("a.fbx")), clip.at(START))
 
@@ -488,28 +526,28 @@ class TestTakes(_Files):
         twice         = takes()
         twice[2].take = "walk"
         refused(ValueError, r"two takes would be written as \['walk'\]; take names must differ", clip=twice)
-        orient                                = takes()
-        orient[0].frames["hips"].joint_orient = (0.0, 0.0, 91.0)
+        orient                         = takes()
+        orient[0]["hips"].joint_orient = (0.0, 0.0, 91.0)
         refused(
             ValueError,
             r"node 'hips' channel 'joint_orient' is \[0\.0, 0\.0, 91\.0\] in take 0 \('walk'\) and \[0\.0, 0\.0, 90\.0\] "
             r"in the active take 1 \('run'\): a file holds one joint_orient a node, the active take's",
             clip=orient,
         )
-        axis                                = takes()
-        axis[2].frames["spine"].rotate_axis = (0.0, 6.0, 0.0)
+        axis                         = takes()
+        axis[2]["spine"].rotate_axis = (0.0, 6.0, 0.0)
         refused(ValueError, r"node 'spine' channel 'rotate_axis' is \[0\.0, 6\.0, 0\.0\] in take 2 and", clip=axis)
-        moving                                = takes()
-        moving[1].frames["hips"].joint_orient = np.array([[0.0, 0.0, 90.0 + f] for f in range(6)])
+        moving                         = takes()
+        moving[1]["hips"].joint_orient = np.array([[0.0, 0.0, 90.0 + f] for f in range(6)])
         refused(ValueError, "node 'hips' channel 'joint_orient' frame 1004", clip=moving)
 
 
 def hidden(clip: ClipData) -> ClipData:
     """``clip`` with prop hidden on frames 3 to 5 and head hidden throughout"""
-    shown                          = np.ones((clip.frame_count, 1), dtype=bool)
-    shown[3:6]                     = False
-    clip.frames["prop"].visibility = shown
-    clip.frames["head"].visibility = False
+    shown                   = np.ones((clip.frame_count, 1), dtype=bool)
+    shown[3:6]              = False
+    clip["prop"].visibility = shown
+    clip["head"].visibility = False
     return clip
 
 
@@ -528,7 +566,7 @@ class TestVisibilityAndLocators(_Files):
         back = load_fbx(self.path("a.fbx")).clip.active
         np.testing.assert_array_equal(back.frames.visibility, clip.frames.visibility)
         self.assertEqual(back.keyed.tolist(), clip.keyed.tolist())
-        self.assertFalse(back["head"].visibility)
+        self.assertFalse(back["head"].visibility.any())
         self.assertIsNotNone(back._visible)
         # the nodes alone: the first frame's values
         self.assertEqual([n.visibility for n in HierarchyData.load_fbx(self.path("a.fbx"))], [n.visibility for n in clip.at(START)])
@@ -637,8 +675,8 @@ class TestRefusals(_Files):
         rig               = skeleton()
         rig["head"].scale = [1.0, 3.0, 0.1]
         save_fbx(self.path("leaf.fbx"), rig)
-        clip                      = take(skeleton())
-        clip.frames["head"].scale = np.tile([1.0, 3.0, 0.1], (FRAMES, 1))
+        clip               = take(skeleton())
+        clip["head"].scale = np.tile([1.0, 3.0, 0.1], (FRAMES, 1))
         save_fbx(self.path("leaf_clip.fbx"), clip=clip)
 
     def test_a_joint_orient_or_rotate_axis_the_clip_changes(self):
@@ -790,9 +828,11 @@ class TestPoses(_Files):
         rig, clips = load_fbx(path)[:2]
         self.assertIsNone(rig)
         clip = clips.active
-        np.testing.assert_array_equal(clip.frames["c"].translate, [[1.0, 2.0, 3.0]])
-        np.testing.assert_array_equal(clip.frames["c"].rotate,    [[10.0, 20.0, 30.0]])
-        np.testing.assert_array_equal(clip.frames["p"].scale,     [[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]])
+        np.testing.assert_array_equal(clip["c"].translate, [[1.0, 2.0, 3.0]] * 2)
+        np.testing.assert_array_equal(clip["c"].rotate,    [[10.0, 20.0, 30.0]] * 2)
+        np.testing.assert_array_equal(clip["p"].scale,     [[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]])
+        # c holds one value on every frame, p's scale is keyed
+        self.assertEqual((clip["c"].keyed, clip["p"].keyed), (False, True))
 
 
 # Maya's FBXImport makes a double of a float, doubleAngle or doubleLinear,
@@ -876,13 +916,12 @@ class TestMaya(_Recorded):
         back = clips.active
         self.assertEqual(held.value("counts")["dagPose"], 0)
         self.assertEqual(held.value("counts")["animCurve"], curve_count(back))
-        for node in back:
+        for node in back.frames[0]:
             self.maya_node(node, held.value("nodes")[node.name])
 
         wanted = np.asarray(back.frames.world_matrix)
-        for f in range(back.frame_count):
-            back.frame = f
-            for column, node in enumerate(back):
+        for f, pose in enumerate(back.frames):
+            for column, node in enumerate(pose):
                 for attr in ("translate", "rotate", "scale"):
                     np.testing.assert_allclose(
                         held.array(f"{attr}/{node.name}")[f], getattr(node, attr), rtol=0, atol=1e-6, err_msg=(node.name, attr, f)
@@ -899,7 +938,7 @@ class TestMaya(_Recorded):
         rig["prop"].node_type = "locator"
         clip = hidden(take(rig))
         self.assertFreshSave(self.fixture("ours.fbx"), clip=clip)
-        for node in clip:
+        for node in clip.frames[0]:
             self.maya_node(node, held.value("nodes")[node.name])
         shown = np.asarray(clip.frames.visibility)
         for column, node in enumerate(clip):
@@ -909,7 +948,7 @@ class TestMaya(_Recorded):
         back = load_fbx(self.fixture("maya.fbx")).clip.active
         self.assertEqual(back["prop"].node_type, "locator")
         np.testing.assert_array_equal(np.asarray(back.frames.visibility), shown)
-        self.assertFalse(back["head"].visibility)
+        self.assertFalse(back["head"].visibility.any())
 
     def test_maya_reads_rrss_under_a_uniform_parent_as_we_do(self):
         """an sdk file with eInheritRrSs under a parent scaled 2 uniformly:
@@ -1084,26 +1123,25 @@ def motion(rig: HierarchyData) -> ClipData:
     clip = ClipData(rig, frames=TAKE, start_frame=START, fps=FPS, take="bend")
     f    = np.arange(TAKE, dtype=np.float64)[:, None]
     one  = np.ones((1, 3))
-    clip.frames["root"].translate    = np.hstack([0.25 + f * 0.025, 0.5 + f * 0.0, -0.25 - f * 0.01]) * UNIT
-    clip.frames["root"].scale        = (1.25 + f * 0.02) * one
-    clip.frames["hips"].translate    = np.hstack([np.sin(f / 3.0) * 0.15, 1.0 + f * 0.01, -f * 0.005]) * UNIT
-    clip.frames["hips"].rotate       = np.hstack([5.0 + f * 2.0, f * -1.5, np.cos(f) * 4.0])
-    clip.frames["spine"].rotate      = np.hstack([f * 0.5, f * 0.0 + 1.0, 12.0 + f])
-    clip.frames["spine"].scale       = (1.1 - f * 0.015) * one
-    clip.frames["arm_grp"].translate = np.hstack([f * 0.015, 0.5 + f * 0.0, 0.25 - f * 0.01]) * UNIT
-    clip.frames["arm"].rotate        = np.hstack([f * 3.0, 10.0 + f * 0.0, -f * 2.0])
-    clip.frames["arm"].scale         = (1.0 + f * 0.03) * one
-    clip.frames["leg"].rotate        = np.hstack([f * -2.0, f * 1.0, f * 2.5])
-    clip.frames["head"].scale        = np.hstack([1.0 + f * 0.01, 1.2 - f * 0.02, 0.8 + f * 0.005])
-    clip.frames["hand"].scale        = np.hstack([0.9 + f * 0.02, 1.1 + f * 0.0, 1.0 - f * 0.03])
-    clip.frames["foot"].scale        = np.hstack([1.3 - f * 0.01, 0.7 + f * 0.02, 1.0 + f * 0.01])
+    clip["root"].translate    = np.hstack([0.25 + f * 0.025, 0.5 + f * 0.0, -0.25 - f * 0.01]) * UNIT
+    clip["root"].scale        = (1.25 + f * 0.02) * one
+    clip["hips"].translate    = np.hstack([np.sin(f / 3.0) * 0.15, 1.0 + f * 0.01, -f * 0.005]) * UNIT
+    clip["hips"].rotate       = np.hstack([5.0 + f * 2.0, f * -1.5, np.cos(f) * 4.0])
+    clip["spine"].rotate      = np.hstack([f * 0.5, f * 0.0 + 1.0, 12.0 + f])
+    clip["spine"].scale       = (1.1 - f * 0.015) * one
+    clip["arm_grp"].translate = np.hstack([f * 0.015, 0.5 + f * 0.0, 0.25 - f * 0.01]) * UNIT
+    clip["arm"].rotate        = np.hstack([f * 3.0, 10.0 + f * 0.0, -f * 2.0])
+    clip["arm"].scale         = (1.0 + f * 0.03) * one
+    clip["leg"].rotate        = np.hstack([f * -2.0, f * 1.0, f * 2.5])
+    clip["head"].scale        = np.hstack([1.0 + f * 0.01, 1.2 - f * 0.02, 0.8 + f * 0.005])
+    clip["hand"].scale        = np.hstack([0.9 + f * 0.02, 1.1 + f * 0.0, 1.0 - f * 0.03])
+    clip["foot"].scale        = np.hstack([1.3 - f * 0.01, 0.7 + f * 0.02, 1.0 + f * 0.01])
     # prop's first frame is its bind value: Maya's dagPose lists the
     # influences and their parents only, so Maya's FBXExport writes a leaf
     # transform at the playhead (measured)
-    clip.frames["prop"].rotate = np.hstack([f * 4.0, 10.0 + f * 0.0, -f * 1.5])
-    clip.frames["prop"].scale  = np.hstack([1.0 + f * 0.02, 1.0 - f * 0.01, 1.0 + f * 0.015])
-    clip.frames["hips"].weight = 0.5 + f * 0.05
-    clip.frame                 = 0
+    clip["prop"].rotate = np.hstack([f * 4.0, 10.0 + f * 0.0, -f * 1.5])
+    clip["prop"].scale  = np.hstack([1.0 + f * 0.02, 1.0 - f * 0.01, 1.0 + f * 0.015])
+    clip["hips"].weight = 0.5 + f * 0.05
     return clip
 
 
@@ -1239,9 +1277,14 @@ class _Skinned(_Files):
         np.testing.assert_allclose(got.get_face_vertex_normals(), want.get_face_vertex_normals(), rtol=0, atol=1e-5, err_msg="normals")
 
     def assertOn(self, mesh, nodes, name):
-        """``mesh`` names, by ``parent_uuid``, the node of ``nodes`` called ``name``"""
+        """``mesh`` names, by ``parent_uuid``, the node of ``nodes`` called
+        ``name``: the very node of a hierarchy; of a clip, whose node is made
+        on each read, one equal to it, which says it is the same node"""
         self.assertEqual(nodes[mesh.parent_uuid].name, name)
-        self.assertIs(mesh.transform(nodes), nodes[name])
+        if isinstance(nodes, ClipData):
+            self.assertEqual(mesh.transform(nodes), nodes[name])
+        else:
+            self.assertIs(mesh.transform(nodes), nodes[name])
 
     def assertSameSkin(self, got, want):
         self.assertEqual(got.name, want.name)
@@ -1473,7 +1516,7 @@ class TestSkin(_Skinned):
         self.assertEqual(got.clip.active.name, clip.name + ["tetra"])
         self.assertOn(got.meshes[0], got.clip.active, "geo")
         self.assertOn(got.meshes[1], got.clip.active, "tetra")
-        np.testing.assert_array_equal(got.meshes[1].world_matrix(got.clip.active), np.eye(4))
+        np.testing.assert_array_equal(got.meshes[1].world_matrix(got.clip.active.frames[0]), np.eye(4))
 
 
 @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")

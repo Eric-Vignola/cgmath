@@ -687,6 +687,8 @@ _RENAMED = {
     ("cgmath.geometry.bspline_patch", "BSplinePatchData"): ("cgmath.geometry.bspline_patch", "NurbsSurfaceData"),
     ("cgmath.geometry._saddle_surface", "SampleData"): ("cgmath.geometry._bilinear_surface", "BilinearSampleData"),
     ("cgmath.geometry._saddle_surface", "RaycastData"): ("cgmath.geometry._bilinear_surface", "RaycastData"),
+    # a clip pickled up to 3.2 names the class its storage is now
+    ("cgmath.hierarchy.hierarchy", "ClipData"): ("cgmath.hierarchy.hierarchy", "_Clip"),
 }
 
 

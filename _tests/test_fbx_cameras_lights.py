@@ -71,10 +71,10 @@ def views_lights(rig) -> LightList:
 
 def views_clip(rig) -> ClipData:
     """FRAMES frames: the shot camera turning about y, the key light about x"""
-    clip                          = ClipData(rig, frames=FRAMES, start_frame=1001, fps=FPS, take="pan")
-    f                             = np.arange(FRAMES, dtype=np.float64)[:, None]
-    clip.frames["shotCam"].rotate = np.hstack([10.0 + f * 0.0, 20.0 + f * 15.0, 30.0 + f * 0.0])
-    clip.frames["key"].rotate     = np.hstack([10.0 + f * 7.0, 20.0 + f * 0.0, 30.0 + f * 0.0])
+    clip                   = ClipData(rig, frames=FRAMES, start_frame=1001, fps=FPS, take="pan")
+    f                      = np.arange(FRAMES, dtype=np.float64)[:, None]
+    clip["shotCam"].rotate = np.hstack([10.0 + f * 0.0, 20.0 + f * 15.0, 30.0 + f * 0.0])
+    clip["key"].rotate     = np.hstack([10.0 + f * 7.0, 20.0 + f * 0.0, 30.0 + f * 0.0])
     return clip
 
 
@@ -486,7 +486,7 @@ class TestMayaViews(_Recorded):
             warnings.simplefilter("always")
             back = load_fbx(self.fixture("maya.fbx"))
         self.assertEqual(len([w for w in caught if "reads point, directional and spot lights" in str(w.message)]), 1)
-        rig = back.hierarchy if back.hierarchy is not None else back.clip.active
+        rig = back.hierarchy if back.hierarchy is not None else back.clip.active.frames[0]
         for node in made:
             with self.subTest(node):
                 self.assertEqual(rig[node].node_type, "transform")

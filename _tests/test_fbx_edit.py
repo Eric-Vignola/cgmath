@@ -130,7 +130,7 @@ class _Edits(_Handles):
             )
         np.testing.assert_array_equal(np.asarray(got.frames.visibility), np.asarray(want.frames.visibility), where)
         np.testing.assert_array_equal(np.asarray(got.keyed), np.asarray(want.keyed), where)
-        self.assertNodes(got, want, LABELS + ("joint_orient", "rotate_axis"), where)
+        self.assertNodes(got.frames[0], want.frames[0], LABELS + ("joint_orient", "rotate_axis"), where)
 
     def assertNear(self, got, want, label: str = "") -> None:
         """two reads hold the same records, uuids aside: a node's values

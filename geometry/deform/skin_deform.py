@@ -43,14 +43,14 @@ from typing import List, Optional
 import numpy as np
 from cgmath.data import Array, Data
 from cgmath.hierarchy import HierarchyData
-from cgmath.hierarchy.hierarchy import ClipData, _FrameAxis, _PoseFrame
+from cgmath.hierarchy.hierarchy import ClipData, _ClipNode, _FrameAxis, _FramePose, _Frames, _Part, _PoseFrame
 
 
 # ============================= posed rigs ================================= #
 
 
 class _BoundFrame:
-    """The frame a ClipData is bound to, shaped as a one-frame clip.
+    """One frame of a clip's storage, shaped as a one-frame clip.
 
     It holds exactly what the clip's batched evaluator reads -- the channel
     blocks, the node list and the parent lookup -- with every block cut to
@@ -63,18 +63,14 @@ class _BoundFrame:
     ``TransformData.matrix`` factor for factor, so a frame skinned here is
     bit for bit the frame skinned through its nodes.
 
-    A node put back in the clip from elsewhere -- ``clip[i] = rig[i]``, a
-    copy -- keeps its own channels rather than a row of the blocks, and the
-    clip does not own it: the bound frame is then read from the nodes
-    themselves, each read once, as the nodes would answer.
+    A column belongs to a uuid: a node put back in the clip from elsewhere,
+    ``clip[i] = rig[i]``, reads the rows its uuid holds, as the pose of the
+    frame does.
     """
 
-    def __init__(self, clip):
-        if all(node._hierarchy is clip for node in clip.list):
-            row          = slice(clip.frame, clip.frame + 1)
-            self._blocks = {name: block[row] for name, block in clip._blocks.items()}
-        else:
-            self._blocks = _PoseFrame(clip.list)._blocks
+    def __init__(self, clip, frame: int):
+        row                  = slice(frame, frame + 1)
+        self._blocks         = {name: block[row] for name, block in clip._blocks.items()}
         self.list            = clip.list
         self._parent_indices = clip._parent_indices
 
@@ -105,22 +101,29 @@ def _one_thread():
 def _world_matrices(pose) -> tuple:
     """``(names, world)`` for a posed skeleton, one name per world matrix.
 
-    ``world`` is ``(N, 4, 4)`` for one pose -- a rig, or a ClipData at its
-    bound frame -- and ``(F, N, 4, 4)`` for a clip's frame axis
-    (``clip.frames``, or one scoped to some of its nodes).  A clip is read
-    from its blocks in one batched evaluation, never node by node.
+    ``world`` is ``(N, 4, 4)`` for one pose -- a rig, or the pose of one
+    frame of a clip, ``clip.frames[i]`` -- and ``(F, N, 4, 4)`` for a clip,
+    or a part of one: every frame of it.  A clip is read from its blocks in
+    one batched evaluation, never node by node.
     """
-    if isinstance(pose, _FrameAxis):
-        # a scoped axis reads back its own columns, in the order it holds them
-        world = pose.world_matrix
-        names = [node.name for node in pose._nodes()]
-        return names, np.asarray(world, dtype=np.float64)
+    if isinstance(pose, _Frames):
+        pose = pose._part
+    if isinstance(pose, _ClipNode):
+        return [pose.name], np.asarray(pose.world_matrix, dtype=np.float64)[:, None]
+    if isinstance(pose, ClipData):
+        if not pose.frame_count:
+            # a clip of no frame holds the one pose its nodes do
+            nodes = pose.list
+            return [node.name for node in nodes], np.array([node.world_matrix for node in nodes], dtype=np.float64)
+        return list(pose.name), np.asarray(pose.world_matrix, dtype=np.float64)
 
-    if isinstance(pose, ClipData) and not pose.is_view and pose.frame_count:
-        clip = pose.frames._clip  # .frames realigns the blocks with the nodes
+    if isinstance(pose, _FramePose):
+        # one frame of a clip: read from its blocks, as every frame is
+        clip = pose._clip
+        clip._realign()
         with _one_thread():
-            world = _FrameAxis(_BoundFrame(clip)).world_matrix[0]
-        return list(clip.name), np.asarray(world, dtype=np.float64)
+            world = _FrameAxis(_BoundFrame(clip, pose._frame)).world_matrix[0]
+        return [node.name for node in clip.list], np.asarray(world, dtype=np.float64)
 
     return list(pose.name), np.asarray(pose.world_matrix, dtype=np.float64)
 
@@ -164,11 +167,12 @@ class SkinDeformData(Data):
     Every frame of a clip at once, in one kernel call rather than one call
     per frame::
 
-        sequence = deformer.apply(clip.frames)  # (F, N, 3)
+        sequence = deformer.apply(clip)         # (F, N, 3)
+        one      = deformer.apply(clip.frames[2])   # (N, 3): the pose of one frame
 
         # the same from world matrices already in hand, e.g. a chunk of them
         cols     = deformer.pose_indices(clip)
-        world    = clip.frames.world_matrix     # (F, N, 4, 4), one evaluation
+        world    = clip.world_matrix            # (F, N, 4, 4), one evaluation
         sequence = deformer.apply(world[:, cols])
 
     Every frame deforms the BIND points: feeding a posed mesh back in would
@@ -219,7 +223,7 @@ class SkinDeformData(Data):
                 per-vertex weights and their influence names.
             bind_rig: Bind-pose skeleton, used to derive the inverse bind
                 matrices when *inverse_bind_matrices* is not supplied.  A
-                :class:`ClipData` binds at the frame it is on.  A mesh on a
+                clip binds at one of its frames, ``clip.frames[i]``.  A mesh on a
                 node of it (its ``parent_uuid``) is bound where that node's
                 world puts its points, as a file's cluster transform binds
                 one (Maya's geomMatrix): the derived matrices carry the
@@ -267,8 +271,8 @@ class SkinDeformData(Data):
             world = self._posed_world(bind_rig)
             if world.ndim != 3:
                 raise ValueError(
-                    "bind_rig must hold one pose -- a rig, or a ClipData at its "
-                    "bind frame, not every frame of a clip"
+                    "bind_rig must hold one pose -- a rig, or one frame of a clip, "
+                    "clip.frames[i] -- not every frame of a clip"
                 )
             self.inverse_bind_matrices = np.ascontiguousarray(np.linalg.inv(world))
             # a mesh on a node of the bind rig is bound where that node's
@@ -432,8 +436,8 @@ class SkinDeformData(Data):
     def _posed_world(self, pose) -> np.ndarray:
         """World matrices of a posed skeleton, ordered to :attr:`joints`.
 
-        ``(J, 4, 4)`` for one pose and ``(F, J, 4, 4)`` for a clip's frame
-        axis -- see :func:`_world_matrices`.
+        ``(J, 4, 4)`` for one pose and ``(F, J, 4, 4)`` for a clip -- see
+        :func:`_world_matrices`.
         """
         names, world = _world_matrices(pose)
         return world[..., self._columns(names), :, :]
@@ -442,6 +446,8 @@ class SkinDeformData(Data):
         """``inverse_bind @ world_posed`` -- row-vector order, do not swap."""
         # never hasattr(pose, ...): that evaluates the property, which on a
         # rig solves every node's world matrix just to answer the question
+        if isinstance(pose, _Frames):
+            pose = pose._part  # clip.frames is the clip, every frame
         if not isinstance(pose, np.ndarray) and (
             hasattr(type(pose), "world_matrix")
             or "world_matrix" in getattr(pose, "__dict__", ())
@@ -572,9 +578,9 @@ class SkinDeformData(Data):
         Auto-binds on first call.
 
         Args:
-            pose: A posed skeleton (:class:`HierarchyData`, or a
-                :class:`ClipData` at the frame it is on), every frame of a
-                clip (``clip.frames``), or raw world matrices shaped
+            pose: A posed skeleton (:class:`HierarchyData`, or the pose of
+                one frame of a clip, ``clip.frames[i]``), a
+                :class:`ClipData` (every frame of it), or raw world matrices shaped
                 ``(J, 4, 4)`` for one frame or ``(F, J, 4, 4)`` for a
                 sequence.  Raw matrices must already be ordered to
                 :attr:`joints` -- see :meth:`pose_indices`.  A sequence is

@@ -179,10 +179,10 @@ def build_scene(texture=None) -> Scene:
         _user_attributes(node)
 
     # the takes: every node held, the spine bending over two frames
-    clip                        = ClipData(scene.hierarchy, frames=2, start_frame=1001, fps=24.0, take="bend")
-    clip.frames["spine"].rotate = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 30.0]])
-    scene.clip                  = clip
-    scene.clip.active           = "bend"
+    clip                 = ClipData(scene.hierarchy, frames=2, start_frame=1001, fps=24.0, take="bend")
+    clip["spine"].rotate = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 30.0]])
+    scene.clip           = clip
+    scene.clip.active    = "bend"
 
     mesh                  = cube_mesh()
     mesh.uuid             = _SHAPES["hero_geo"]

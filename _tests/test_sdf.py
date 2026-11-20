@@ -7,7 +7,7 @@ import unittest
 import numpy as np
 from cgmath.geometry import MeshData
 from cgmath.geometry.sdf import DMCField, SDFBox, SDFCylinder, SDFSphere
-from cgmath.hierarchy import ClipData, HierarchyData, TransformData
+from cgmath.hierarchy import HierarchyData, TransformData
 
 
 class TestSDFIgloo(unittest.TestCase):
@@ -349,17 +349,28 @@ class TestSDFFieldFollowsTransforms(unittest.TestCase):
                 setattr(group, name, value)
                 self.assertTrue(field._dirty)
 
-    def test_a_clip_changing_frame_marks_the_field_dirty(self):
-        clip           = ClipData([self.primitives[0]], frames=2)
-        ball           = clip[0]
-        clip.frame     = 1
-        ball.translate = [1.0, 0.0, 0.0]
+    def test_a_frame_of_a_clip_drives_the_field(self):
+        """a primitive of one frame of a clip is of its own class and keeps
+        its field: a write on that frame, or of every frame on the clip,
+        marks the field dirty"""
+        from cgmath.hierarchy import ClipData
 
-        clip.frame = 0
-        field      = DMCField(resolution=8).add(ball)
+        clip                        = ClipData([self.primitives[0]], frames=2)
+        clip.frames[1][0].translate = [1.0, 0.0, 0.0]
+
+        ball = clip.frames[0][0]
+        self.assertIsInstance(ball, SDFSphere)
+        self.assertEqual(ball.radius, 0.5)
+        field = DMCField(resolution=8).add(ball)
         field.mesh_data
-        clip.frame = 1
+        self.assertFalse(field._dirty)
+
+        ball.translate = [0.25, 0.0, 0.0]
         self.assertTrue(field._dirty)
+        field.mesh_data
+        clip.translate = [[[0.5, 0.0, 0.0]], [[1.0, 0.0, 0.0]]]
+        self.assertTrue(field._dirty)
+        self.assertEqual(ball.translate.tolist(), [0.5, 0.0, 0.0])
 
     def test_a_copied_field_follows_its_moved_primitives(self):
         field = DMCField(resolution=8)

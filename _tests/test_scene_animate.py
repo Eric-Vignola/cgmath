@@ -70,8 +70,7 @@ class AnimateCase(unittest.TestCase):
         clip  = ClipData(rig, frames=frames, fps=fps)
         spine = list(rig.name).index("spine")
         for index in range(clip.frame_count):
-            clip.frame         = index
-            clip[spine].rotate = np.array([0.0, 0.0, degrees_per_frame * index])
+            clip.frames[index][spine].rotate = np.array([0.0, 0.0, degrees_per_frame * index])
         return clip
 
     def scene_with(self, path, **kwargs):
