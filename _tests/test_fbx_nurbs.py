@@ -10,7 +10,7 @@ FbxNurbsSurface, its points u fastest; a trimmed surface as an
 FbxTrimNurbsSurface. A transform holding two curves of degree 2 or more
 is written as an empty node. A rational shape holds a weight a control
 point, the point's fourth value, the point itself as it stands: Maya's cvs
-and its file are not multiplied by their weights. The fork reads and writes
+and its file are not multiplied by their weights. cgmath reads and writes
 the same, refusing a trimmed surface. The SDK tests need the Autodesk SDK;
 the Maya ones read what Maya 2025 did, recorded once (maya_fixtures), and
 need no Maya.
@@ -582,7 +582,7 @@ class TestMaya(_Recorded, _Shapes):
         path = self.fixture("maya_trimmed.fbx")
         with self.assertRaisesRegex(
             ValueError,
-            r"^load_fbx: the surface on node 'trimmed' is trimmed, which the r17-skeleton fork does not read; "
+            r"^load_fbx: the surface on node 'trimmed' is trimmed, which cgmath does not read; "
             r"load_fbx\(\.\.\., surfaces=False\) reads the file without its surfaces$",
         ):
             load_fbx(path)

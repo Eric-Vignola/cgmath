@@ -630,6 +630,9 @@ def settle(file, base: dict, state: dict, undo: list) -> dict:
     if skins is None and _held(base["skins"]) is not None and _held(state["hierarchy"]) is not None and _held(state["clip"]) is not None:
         _wanted(state)
         replaced["hierarchy"] = None
+    takes = _held(state.get("clip"))
+    if takes is not None and type(takes).__name__ == "ClipList" and not len(takes):
+        replaced["clip"] = None  # a list of takes holding none
     state.update(replaced)
     return replaced
 

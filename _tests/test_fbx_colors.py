@@ -6,7 +6,7 @@ direct, one RGBA colour a face corner (16 for a 2 by 2 plane, none shared),
 alpha 1 for an RGB set, on the mesh's first layer beside its first UV set; a
 second set goes on the next layer. Its importer reads a by-control-point
 element and a by-polygon-vertex one alike, to the value, keeps two sets with
-their names, and names an unnamed element "colorSet0". The fork writes one
+their names, and names an unnamed element "colorSet0". cgmath writes one
 set, "colorSet1", Maya's own name for a first set: by control point for a
 colour a vertex, by polygon vertex otherwise, index to direct as Maya writes
 both, on the first layer by hand (the sdk's CreateElementVertexColor takes
@@ -225,10 +225,10 @@ class TestColors(_Files):
             self.path("two.fbx"),
             [("colorSet1", "eByControlPoint", "eDirect", FOUR, []), ("masks", "eByPolygonVertex", "eDirect", [(0.5, 0.5, 0.5, 1.0)] * 4, [])],
         )
-        with self.assertWarnsRegex(UserWarning, r"mesh 'geoShape' holds the colour sets \['masks'\] beside 'colorSet1'; the r17-skeleton fork reads the first"):
+        with self.assertWarnsRegex(UserWarning, r"mesh 'geoShape' holds the colour sets \['masks'\] beside 'colorSet1'; cgmath reads the first"):
             back = load_fbx(two).meshes[0]
         np.testing.assert_array_equal(back.colors, FOUR)
-        with self.assertRaisesRegex(ValueError, "mesh 'geoShape' channel 'colors' is mapped eByPolygon, which the r17-skeleton fork does not read"):
+        with self.assertRaisesRegex(ValueError, "mesh 'geoShape' channel 'colors' is mapped eByPolygon, which cgmath does not read"):
             load_fbx(sdk_file(self.path("face.fbx"), [("c", "eByPolygon", "eDirect", FOUR[:1], [])]))
         # a material file's own mesh, no colour element: None, as before
         self.assertIsNone(load_fbx(mapped_file(self.folder, "eAllSame", (0,))).meshes[0].colors)

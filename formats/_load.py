@@ -1,6 +1,6 @@
 """``cgmath.formats.load_fbx``: a hierarchy or its takes, the meshes on its nodes
 
-The r17-skeleton fork reads every node of a file as a joint (a skeleton
+cgmath reads every node of a file as a joint (a skeleton
 node), a locator (a null drawn as a cross, as Maya's own export writes one)
 or a transform (any other: a group, or a node holding a shape, a mesh, a
 curve, a surface, a camera or a light), at their own values, a bind pose left out, or the
@@ -423,7 +423,7 @@ _NO_USER = ("FbxNode", "FbxCluster", "FbxAnimCurve", "FbxAnimCurveNode", "FbxAni
 
 def unread(scene, fbx) -> dict:
     """
-    {what: how many} of what a scene holds that the fork does not read and
+    {what: how many} of what a scene holds that cgmath does not read and
     ``save_fbx`` would not write, in words: constraints, HumanIK
     characters, display layers, selection sets, LOD groups, rest poses
     (poses that are no bind pose), keyed animation layers after a take's
@@ -649,7 +649,7 @@ def _read_morphs(shape, points, label: str, fbx) -> list:
 def _morph_keys(read: dict, fbx) -> None:
     """a blend shape channel's DeformPercent the active take keys: every
     target of the channel takes the take's first frame's value, and one
-    warning names them; the fork reads a weight static"""
+    warning names them; cgmath reads a weight static"""
     import warnings
 
     from cgmath.formats._fbx_io import typed
@@ -683,7 +683,7 @@ def _morph_keys(read: dict, fbx) -> None:
         )
 
 
-# the material property a texture feeds that the fork reads: the colour map
+# the material property a texture feeds that cgmath reads: the colour map
 COLOUR_SLOT = "DiffuseColor"
 
 # the slots a bump2d's map lands on, by how Maya reads it (measured): tangent
@@ -1648,7 +1648,7 @@ _LIGHT_KEYS = {"Color": "color", "Intensity": "intensity", "InnerAngle": "cone_a
 def _view_keys(read: dict, fbx) -> None:
     """a camera or light property the active take keys: the shape takes the
     take's first frame's value, and one warning names the shape and its
-    keyed properties; the fork reads cameras and lights static"""
+    keyed properties; cgmath reads cameras and lights static"""
     import warnings
 
     from cgmath.formats._fbx_io import typed
@@ -1749,7 +1749,7 @@ def _takes(scene, fbx, found, nodes) -> tuple:
 
         # the layer holding curves: one holding none (an Unreal export
         # carries empty ones) is passed over; curves on two layers, or on a
-        # muted one, blend, which the fork does not read
+        # muted one, blend, which cgmath does not read
         held  = [typed(stack.GetMember(layers, k), fbx.FbxAnimLayer, fbx) for k in range(stack.GetMemberCount(layers))]
         keyed = [(layer, _layer_keys(layer, fbx)) for layer in held]
         keyed = [(layer, keys) for layer, keys in keyed if keys is not None]
@@ -2298,7 +2298,7 @@ def _build_materials(read: dict, meshes):
     meshes' order, each naming its mesh by uuid, a material on several
     meshes one record a mesh sharing one uuid; None for none. One warning
     each, naming each material and slot once: materials of another shading
-    model, read as default lamberts; textures on slots the fork does not
+    model, read as default lamberts; textures on slots cgmath does not
     read, or that are no file texture; texture files not found; textures
     with no PIL to decode them"""
     import warnings

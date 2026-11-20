@@ -1277,8 +1277,8 @@ own exporter does: the node turned to FBX's camera and light axes with a
 post rotation, the focal length and film back as they are, the orthographic
 width over 30 as the ortho zoom, a light's intensity times 100, a spot's
 cone and penumbra as the inner and outer angles (the hierarchy cheatsheet's
-`ClipList` section, and `formats/_load.py`). The render package's `Camera`
-and `Light` are `TransformData` subclasses still, to become these.
+`ClipList` section, and `formats/_load.py`). The render `Scene` holds its
+cameras and lights as these records.
 
 ---
 

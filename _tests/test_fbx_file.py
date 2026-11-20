@@ -3,8 +3,8 @@
 Each property equals load_fbx's field of the same name, in any order the
 properties are read, the nodes' uuids shared by all of them; a property
 reads what it depends on alone. A save of the untouched file writes the
-SDK's own scene: everything the SDK reads is kept, the fork's kinds and what
-the fork does not read (a bind pose, an LOD group, user properties) alike,
+SDK's own scene: everything the SDK reads is kept, cgmath's kinds and what
+cgmath does not read (a bind pose, an LOD group, user properties) alike,
 in the file's own axes and unit, its embedded media embedded again. A record
 added, removed or moved under another node refuses the save (the values of
 a record changed: test_fbx_edit). The tests need the Autodesk SDK; the Maya
@@ -77,7 +77,7 @@ def maya_file(case: str, name: str) -> str:
 
 
 def every_kind(path: str) -> str:
-    """a file of every kind the fork reads: bundle()'s bind pose, its clip,
+    """a file of every kind cgmath reads: bundle()'s bind pose, its clip,
     the skinned body and its skin; the materials test's plane and box, the
     plane's UV set, its textured lambert (an embedded texture) and phong,
     the box's phong, and the morphs test's targets; a camera, a spot light,
@@ -104,7 +104,7 @@ def every_kind(path: str) -> str:
 
 
 def extended(source: str, path: str) -> str:
-    """``source`` with what the fork does not read added through the SDK,
+    """``source`` with what cgmath does not read added through the SDK,
     written by the handle's own save: an LOD group on a new root node, a
     user property on it, and a user property on the first node"""
     with FbxFile(source, verbose=False) as f:
@@ -256,7 +256,7 @@ class TestSave(_Handles):
         same_read(self, load_fbx(saved, verbose=False), load_fbx(source, verbose=False), "saved: ")
 
     def test_untouched(self):
-        """a bind pose, an LOD group and user properties, which the fork
+        """a bind pose, an LOD group and user properties, which cgmath
         does not read, kept by a save with nothing read and by one after
         every property"""
         every  = every_kind(self.path("every.fbx"))
@@ -501,7 +501,7 @@ class TestUnread(_Handles):
     }
 
     def built(self) -> str:
-        """every kind, and one or two of each thing the fork does not read"""
+        """every kind, and one or two of each thing cgmath does not read"""
         source = every_kind(self.path("every.fbx"))
         path   = self.path("extras.fbx")
         with FbxFile(source, verbose=False) as f:

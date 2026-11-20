@@ -786,7 +786,7 @@ translated the first time it is read and kept: equal to `load_fbx`'s field
 in any read order, the nodes' uuids the same in all of them. A property
 reads what it depends on alone: `hierarchy` builds no mesh, `meshes` no
 material. `save(path)` writes the file through the SDK's own writer: in
-the file's own axes, units and pivots, with what the fork does not read
+the file's own axes, units and pivots, with what cgmath does not read
 (bind poses, LOD groups, user properties) and its embedded media. A record
 changed since it was read is written into the open file first, converted
 back to the file's axes, units and pivots, and the saved file is read
@@ -976,8 +976,8 @@ Each `TransformData` maps onto FBX like this:
 | `"locator"` | `FbxNull`, look `eCross`, as Maya writes a locator | the same | — |
 | anything else | not written, nor any node under it; one warning names how many of each type were skipped | — | — |
 
-FBX has no shear channel: a save of a node holding a shear over 1e-9
-raises ValueError naming it, before anything is written.
+FBX has no shear channel: a save of a node holding any shear, 1e-12
+included, raises ValueError naming it, before anything is written.
 
 ```python
 sheared = HierarchyData([TransformData("grp", shear=(0.5, 0.0, 0.0)), TransformData("loc")])

@@ -394,7 +394,7 @@ exact where it can be, which is not Maya's.
 Writing `quaternion` solves only `rotate`, keeping `rotate_axis` and
 `joint_orient`. `set_parent()` and `match_matrix()` write through them
 too, so a reparented transform or locator keeps its `rotate_axis`, which
-`save_fbx` writes for joints only (see
+`save_fbx` writes (see
 [Importers and exporters](#importers-and-exporters)), and takes the shear an
 uneven turned parent asks of it, so its file needs cgmath 3.1.0. `get_delta`
 and `match_rotate` read a world that shears by Maya's split too.
@@ -2283,16 +2283,14 @@ legs = HierarchyData.load_fbx(os.path.join(WORKDIR, "legs.fbx"))
 assert legs.name == ["hip", "knee"] and np.allclose(legs["hip"].translate, 0.0)
 ```
 
-`save_fbx` writes `rotate_axis` (and `joint_orient`) for joints only. A
-transform or locator holding a `rotate_axis` or a `joint_orient` loses
-it in the file, so it reloads off by that rotation, in `load_fbx` and
-Maya's `FBXImport` alike: turned (5, 10, 15) with a `rotate_axis` of
-(10, 20, 30), 0.42 off in its axes and a locator 4 below it 1.44 in
-position (0.41 and 1.39 with that `joint_orient`), a clip of one frame
-as a rig; a `ClipList.save_fbx` take keys it in the rotate. A matrix
-write, `set_parent()`, `match_translate()` and `match_matrix()` all keep
-a node's `rotate_axis`. Fold it into `rotate` before saving: read
-`matrix`, zero `rotate_axis` and `joint_orient`, write `matrix` back.
+`save_fbx` writes `rotate_axis` for every node: a transform or a locator
+holding one reloads with it. A `joint_orient` is a joint's: on a
+transform or a locator `save_fbx` raises ValueError naming the node, as
+Maya holds it on joints only. A matrix write, `set_parent()`,
+`match_translate()` and `match_matrix()` all keep a node's
+`rotate_axis` and `joint_orient`. To save a transform holding a
+`joint_orient`, fold it into `rotate` first: read `matrix`, zero
+`joint_orient`, write `matrix` back.
 Every node is written with rotation active, as Maya's exporter writes
 it: FBX turns a node without it in xyz, whatever its rotate order. A
 file an earlier `save_fbx` wrote holds a group or a locator with its
@@ -2413,8 +2411,9 @@ assert back["flat"].scale.tolist() == [1e-12, 1e-12, -1e-12]
 
 `ClipData.save_fbx` writes a clip of two frames or more as one take,
 as `ClipList([clip]).save_fbx` writes it (see [`ClipList` —
-takes](#cliplist--takes)); a clip of one frame or none, a cut of one
-frame among them, is one pose with no animation stack.
+takes](#cliplist--takes)); a clip of one frame, a cut of one frame among
+them, is a take of one frame, and a clip of no frame is its nodes alone,
+with no animation stack.
 
 ```python
 animated = ClipData(make_chain(), frames=10, start_frame=1001)
@@ -2422,7 +2421,7 @@ animated.save_fbx(os.path.join(WORKDIR, "take.fbx"))
 back = ClipList.load_fbx(os.path.join(WORKDIR, "take.fbx"))
 assert back.take == ["Take 001"] and back.frame_count == [10] and back.start_frame == [1001]
 
-animated.frames[3:4].save_fbx(os.path.join(WORKDIR, "frame3.fbx"))  # one pose
+animated.frames[3:4].save_fbx(os.path.join(WORKDIR, "frame3.fbx"))  # a take of one frame
 ```
 
 Every value cgmath holds is in Maya's axes and unit: Y up, right handed,

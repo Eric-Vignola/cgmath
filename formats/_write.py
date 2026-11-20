@@ -1,6 +1,6 @@
 """``cgmath.formats.save_fbx``: a hierarchy or its takes, the meshes on its nodes
 
-The r17-skeleton fork writes a hierarchy of joints and transforms, or a
+cgmath writes a hierarchy of joints and transforms, or a
 ClipList's nodes and its takes (a ClipData as a ClipList of one), each mesh
 as the shape of its node, a bind pose with skins only. Nothing here imports
 the fbx sdk, nor the classes, until a file is written: the classes' modules
@@ -19,7 +19,7 @@ import numpy as np
 # the fbx writer's logger: its warnings and save_fbx's are one stream
 LOGGER = logging.getLogger("cgmath.formats.fbx")
 
-FORK   = "the r17-skeleton fork"
+FORK   = "cgmath"
 
 # a scale whose components differ by more than this, relative to the
 # largest, is not uniform

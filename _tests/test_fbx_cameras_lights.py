@@ -7,7 +7,7 @@ rotation of (0, -90, 0) and a directional, spot or area light's node with
 width over 30 as the ortho zoom, a light's intensity times 100, its decay
 rate as the decay type, a spot's cone as the inner angle and its cone plus
 twice its penumbra as the outer; it drops the camera scale and the dropoff,
-and writes an ambient light as a point light that casts no light. The fork
+and writes an ambient light as a point light that casts no light. cgmath
 reads and writes the same. The SDK tests need the Autodesk SDK; the Maya ones
 read what Maya 2025 did, recorded once (maya_fixtures), and need no Maya.
 """

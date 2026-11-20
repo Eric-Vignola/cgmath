@@ -5,7 +5,7 @@ name on the mesh, each target as a channel named "deformer.target" (its
 import strips the prefix) whose DeformPercent is the weight times 100, each
 target shape over every point of the mesh, absolute, with normals, an
 in-between as a second shape of the channel at its weight times 100 (the
-full weights); a keyed weight as a curve on DeformPercent. The fork reads
+full weights); a keyed weight as a curve on DeformPercent. cgmath reads
 and writes the same, less the normals. The SDK tests need the Autodesk SDK;
 the Maya ones read what Maya 2025 did, recorded once (maya_fixtures), and
 need no Maya.

@@ -748,7 +748,7 @@ class TestShearBatched(unittest.TestCase, _DeltaRigs):
             with self.subTest(method):
                 d    = SkinDeformData(mesh, skin, bind_rig=rig, method=method)
                 want = np.stack([d.apply(clip.frames[f].copy()) for f in range(clip.frame_count)])
-                got = d.apply(clip.frames)
+                got  = d.apply(clip.frames)
                 self.assertLessEqual(np.abs(got - want).max(), 1e-9)
                 self.assertGreater(np.abs(got - d.apply(plain.frames)).max(), 0.01)
 

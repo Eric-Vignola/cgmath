@@ -3,7 +3,7 @@
 Layers holding no curve are passed over: an Unreal export (measured on the
 Luna animations) carries a 'root_motion', an 'idle_pose' and a muted
 'lean_NOT_4_EXPORT' layer with no curve beside its BaseLayer. Curves on two
-layers, or on a muted one, blend, which the fork does not read. The clip
+layers, or on a muted one, blend, which cgmath does not read. The clip
 covers the stored span widened to the keys: an Unreal export stores the span
 a frame short of its last key (measured: span 0-45 frames, keys to 46), a
 Maya export can store one wider than its keys. Needs the Autodesk SDK.

@@ -1,4 +1,4 @@
-"""The r17-skeleton fork: one hierarchy or its takes, the meshes on its
+"""cgmath: one hierarchy or its takes, the meshes on its
 nodes, saved, read back, and read by Maya's own FBXImport.
 
 ``cgmath.formats.save_fbx(path, hierarchy)`` writes a HierarchyData of

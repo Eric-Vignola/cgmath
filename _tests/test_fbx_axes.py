@@ -1,4 +1,4 @@
-"""The r17-skeleton fork reads every FBX in Maya's Y-up and cm, the axes and
+"""cgmath reads every FBX in Maya's Y-up and cm, the axes and
 unit every cgmath value is in, and writes every file labelled so.
 
 A file whose up axis is X or Z is turned as Maya's importer turns it: the

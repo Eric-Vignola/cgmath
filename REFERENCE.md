@@ -373,13 +373,13 @@ count(self, value)
     S.count(value) -> integer -- return number of occurrences of value
 extend(self, iterable) -> 'None'
     appends every node in turn, as append() would, joining them together
-classmethod from_bytes(cls, *args, **kwargs) -> "'ClipData'"
+classmethod from_bytes(cls, data: bytes) -> Any
     the list npz bytes hold, read as :meth:`from_dict` reads a tree
-classmethod from_dict(cls, *args, **kwargs) -> "'ClipData'"
+classmethod from_dict(cls, data: 'dict') -> "'TransformList'"
     The list a tree describes. A view is not a file: a saved tree, one
-classmethod from_json(cls, *args, **kwargs) -> "'ClipData'"
+classmethod from_json(cls, text: str) -> Any
     the list json text holds, :meth:`to_json`'s, read as :meth:`from_dict` reads a tree
-classmethod from_poses(cls, *args, **kwargs) -> "'ClipData'"
+classmethod from_poses(cls, poses, start_frame: 'int' = 0, fps: 'float' = 24.0) -> "'ClipData'"
     builds a clip from a sequence of HierarchyData poses
 get(self, name: str, default: Any = None) -> Any
     the first item named ``name``, or ``default``
@@ -398,17 +398,17 @@ get_roots(self) -> "'TransformList'"
 index(self, obj, start=0, stop=None) -> 'int'
     The position of a node, given as the node, its uuid or its name,
 insert(self, index: 'int', node: "'TransformData'") -> 'None'
-classmethod load(cls, *args, **kwargs) -> "'ClipData'"
+classmethod load(cls, filename: str, mode: Optional[str] = None, **kwargs) -> Any
     Loads the data from a file: ``mode``, or the type the file reads as
-classmethod load_fbx(cls, *args, **kwargs) -> "'ClipData'"
+classmethod load_fbx(cls, filename, verbose: 'bool' = True) -> "'ClipData'"
     the active take of an fbx file over every node, as
-classmethod load_glb(cls, *args, **kwargs) -> "'ClipData'"
+classmethod load_glb(cls, filename: 'str', scale_factor: 'float' = 100.0, animation: 'int' = 0, fps: 'float' = 24.0, start_frame: 'int' = 0) -> "'ClipData'"
     builds a clip from a glb's animation
-classmethod load_json(cls, *args, **kwargs) -> "'ClipData'"
+classmethod load_json(cls, filename: str) -> Any
     the list a json file holds, read as :meth:`load` reads one
-classmethod load_npz(cls, *args, **kwargs) -> "'ClipData'"
+classmethod load_npz(cls, filename: str) -> Any
     the list an npz file holds, read as :meth:`load` reads one
-classmethod load_pickle(cls, *args, **kwargs) -> "'ClipData'"
+classmethod load_pickle(cls, filename: str) -> Any
     the list a pickle holds, read as :meth:`load` reads one
 match(self, *args, exclude: 'bool' = False, exact: 'bool' = True) -> "'TransformList'"
     returns a TransformList object with matching names
@@ -427,13 +427,13 @@ reset_cached_data(self)
     resets cached data
 reverse(self)
     S.reverse() -- reverse *IN PLACE*
-save(self, *args, **kwargs)
+save(self, filename: str, mode: Optional[str] = None, **kwargs) -> str
     Saves the list as ``mode``, or as the file's extension says, through
 save_fbx(self, filename, as_ascii=False)
     the clip written as one take, as ``cgmath.formats.save_fbx(filename,
-save_json(self, *args, **kwargs)
-save_npz(self, *args, **kwargs)
-save_pickle(self, *args, **kwargs)
+save_json(self, filename: str) -> str
+save_npz(self, filename: str, compression=8) -> str
+save_pickle(self, filename: str) -> str
 set_joint_orient_to_rotate(self) -> 'None'
     sets joint_orient to 0 and applies all rotation to rotate
 set_parent(self, parent: "Union['TransformData', str, None]", world_space: 'bool' = True) -> 'None'
@@ -450,10 +450,10 @@ swapaxes(self, axis0: 'int', axis1: 'int', negate: 'bool' = False) -> 'None'
     swaps two local axes on every node in the view
 to_attributes(self, *args, **kwargs)
     every node's attributes over the frames covered, a list of dicts:
-to_bytes(self, *args, **kwargs)
+to_bytes(self) -> bytes
     returns a bytes object from the zipped data
 to_dict(self) -> 'dict'
-to_json(self, *args, **kwargs)
+to_json(self) -> str
     formats the data as human readable json
 ```
 
@@ -1207,7 +1207,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x0000021BC5EF7090>
+MISSING = <dataclasses._MISSING_TYPE object at 0x000001D474197150>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -3776,7 +3776,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000021C13E40220>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001D4421959E0>, '...
 ```
 
 ## `cgmath.constraints`

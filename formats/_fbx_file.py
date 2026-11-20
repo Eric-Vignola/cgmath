@@ -2,7 +2,7 @@
 
 The SDK's own scene stays open behind the handle: each kind of the file is
 translated the first time it is asked for, and :meth:`FbxFile.save` writes
-that scene back through the SDK's writer, so everything the fork does not
+that scene back through the SDK's writer, so everything cgmath does not
 read (bind poses, LOD groups, user properties, embedded media ...) is kept.
 A record changed since it was read is written into that scene first
 (:mod:`cgmath.formats._fbx_edit`), in the file's own axes, units and pivots.
@@ -202,7 +202,7 @@ class FbxFile:
     shows once.
 
     :meth:`save` writes the file through the SDK's own writer: in the
-    file's own axes, units and pivots, with everything the fork does not
+    file's own axes, units and pivots, with everything cgmath does not
     read (bind poses, LOD groups, user properties ...) and the file's
     embedded media. A record changed since it was read, in place or by
     giving its property another list, is written into the open file first,
@@ -478,7 +478,7 @@ class FbxFile:
         """
         Writes the file to ``filename``, binary or ASCII with ``as_ascii``,
         through the SDK's own writer: in the file's own axes, units and
-        pivots, with its embedded media, everything the fork does not read
+        pivots, with its embedded media, everything cgmath does not read
         kept. A record changed since it was read, in place or by giving
         its property another value, is written into the file first; the
         file is then read again, and a change that would not read back as

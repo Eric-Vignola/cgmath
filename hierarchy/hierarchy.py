@@ -115,8 +115,8 @@ MAYA_ATTRIBUTE_MAP = {
 # it can't be rebuilt nor exported from this data and is skipped along with its children.
 SUPPORTED_NODE_TYPES = ("transform", "joint", "locator")
 
-# what no longer works names the fork it does not work on
-_FORK = "the r17-skeleton fork (one hierarchy and its takes)"
+# what a reader or a writer does not do names the package that does not
+_FORK = "cgmath"
 
 # ---------------------------------------------------------------------------- #
 
@@ -7702,7 +7702,7 @@ class TransformList(DataList[TransformData]):
     selection. Because a delta has to own its nodes, ``get_delta`` returns a
     :class:`HierarchyData` even when called on a view. So does a saved or
     pickled view: it saves as its :meth:`copy`, a :class:`HierarchyData`,
-    which ``pickle.loads``, ``HierarchyData.load()``, ``Data.load()`` or
+    which ``pickle.loads``, ``HierarchyData.load()`` or
     ``cgmath.hierarchy.load()`` gives back; ``TransformList.load()`` refuses
     its file.
     """
@@ -16283,8 +16283,11 @@ def _loader(name: str):
     def load(cls, *args, **kwargs) -> "ClipData":
         return _public(getattr(_Clip, name)(*args, **kwargs))
 
-    load.__name__ = name
-    load.__doc__  = getattr(_Clip, name).__doc__
+    held               = inspect.getattr_static(_Clip.__mro__[[name in vars(base) for base in _Clip.__mro__].index(True)], name)
+    load.__name__      = name
+    load.__qualname__  = f"ClipData.{name}"
+    load.__doc__       = getattr(_Clip, name).__doc__
+    load.__signature__ = inspect.signature(held.__func__)
     return classmethod(load)
 
 
@@ -16292,8 +16295,11 @@ def _saver(name: str):
     def save(self, *args, **kwargs):
         return getattr(self._solid(), name)(*args, **kwargs)
 
-    save.__name__ = name
-    save.__doc__  = getattr(_Clip, name).__doc__
+    held               = getattr(_Clip, name)
+    save.__name__      = name
+    save.__qualname__  = f"ClipData.{name}"
+    save.__doc__       = held.__doc__
+    save.__signature__ = inspect.signature(held)
     return save
 
 

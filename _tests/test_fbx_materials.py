@@ -11,7 +11,7 @@ FbxSurfaceMaterial with no shading model; a file texture on the colour as an
 FbxFileTexture feeding DiffuseColor, the colour itself white, naming the UV
 set and the wrap modes; two shading groups on a mesh as a by-polygon material
 element, one as all-same; Embed Media as the file's bytes, extracted on read.
-The fork reads and writes the same. The SDK tests need the Autodesk SDK; the
+cgmath reads and writes the same. The SDK tests need the Autodesk SDK; the
 Maya ones read what Maya 2025 did, recorded once (maya_fixtures), and need no
 Maya.
 """
@@ -570,7 +570,7 @@ class TestMaterials(_Files):
         self.assertEqual(fbx_materials(self.path("none.fbx"))["plane"]["materials"], [])
 
         # what the reader refuses: another mapping, faces without a material
-        with self.assertRaisesRegex(ValueError, "mesh 'triShape' channel 'materials' is mapped eByControlPoint, which the r17-skeleton fork does not read"):
+        with self.assertRaisesRegex(ValueError, "mesh 'triShape' channel 'materials' is mapped eByControlPoint, which cgmath does not read"):
             load_fbx(mapped_file(self.folder, "eByControlPoint", (0, 0, 0)))
         with self.assertRaisesRegex(ValueError, "mesh 'triShape' channel 'materials' leaves 1 faces without a material"):
             load_fbx(mapped_file(self.folder, "eByPolygon", (0, -1)))
@@ -586,7 +586,7 @@ class TestMaterials(_Files):
         self.assertEqual((fbx_materials(padded)["tri"]["elements"], fbx_materials(padded)["tri"]["mapping"]), (2, _enum(FBX.FbxLayerElement, "EMappingMode", "eNone")))
         back = load_fbx(padded)
         self.assertEqual((len(back.materials), back.materials[0].faces, back.materials[0].name), (1, None, "lam"))
-        with self.assertRaisesRegex(ValueError, "mesh 'triShape' channel 'materials' is mapped eNone, which the r17-skeleton fork does not read"):
+        with self.assertRaisesRegex(ValueError, "mesh 'triShape' channel 'materials' is mapped eNone, which cgmath does not read"):
             load_fbx(mapped_file(self.folder, "eNone", (0,)))
 
     def test_the_material_element_goes_on_the_first_layer_whatever_the_uv_sets(self):
@@ -616,7 +616,7 @@ class TestMaterials(_Files):
 def shared_texture(folder: str) -> str:
     """an sdk file beside its textures: nodes a and b, triangles, both
     holding the one phong "fx", its colour fed by grad.png on UV set map1
-    with V clamped, and a bump map, spec.png, on a slot the fork does not
+    with V clamped, and a bump map, spec.png, on a slot cgmath does not
     read"""
     path = os.path.join(folder, "shared.fbx")
     grad = os.path.join(folder, "grad.png")

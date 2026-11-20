@@ -1249,7 +1249,7 @@ def nurbs_export(rec: Recorder) -> None:
     nurbs_readings(rec, ["rationalPatch"])
     rec.array("rationalPatch/command", cmds.pointOnSurface("rationalPatch", u=0.5, v=0.5, p=True))
     exported(rec.path("maya_rational_surface.fbx"))
-    # a trimmed surface, which the fork refuses, beside a shape it reads
+    # a trimmed surface, which cgmath refuses, beside a shape it reads
     new_scene()
     trimmed = cmds.nurbsPlane(n="trimmed", u=2, v=2, ch=False, ax=(0, 1, 0))[0]
     hole    = cmds.circle(n="trimRing", r=0.2, nr=(0, 1, 0), ch=False)[0]
