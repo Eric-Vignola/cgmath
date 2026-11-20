@@ -352,13 +352,15 @@ class TestRoundTrip(_Shapes):
 
 
 class TestRefused(_Files):
-    """what a .fbx, or Maya's reading of one, has no place for"""
+    """what a .fbx, or Maya's reading of one, has no place for; a refusal
+    that reads the shapes comes after the SDK is found, so it needs one"""
 
     def refused(self, message: str, **data) -> None:
         with self.assertRaises(ValueError) as caught:
             save_fbx(self.path("refused.fbx"), **data)
         self.assertEqual(str(caught.exception), message)
 
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_two_curves_on_a_node(self):
         nodes = HierarchyData([TransformData("a")])
         cubic = NurbsCurveData(points=wave(6), degree=3, parent_uuid=nodes["a"].uuid)
@@ -372,6 +374,7 @@ class TestRefused(_Files):
         self.refused(told, hierarchy=nodes, curves=NurbsCurveList([cubic, line]))
         self.refused(told, hierarchy=nodes, curves=NurbsCurveList([line, cubic]))
 
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_beside_another_shape(self):
         nodes = HierarchyData([TransformData("a")])
         curve = NurbsCurveData(points=wave(6), degree=3, parent_uuid=nodes["a"].uuid)
@@ -386,12 +389,14 @@ class TestRefused(_Files):
         with self.assertRaisesRegex(ValueError, "and curve 0 of curves= sit on node 'a'; a node holds one shape"):
             save_fbx(self.path("refused.fbx"), nodes, meshes=MeshList([plane(nodes["a"].uuid)]), curves=curve)
 
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_points_not_3d(self):
         self.refused(
             "save_fbx: curve 0 of curves= holds points of 2 components; a .fbx holds 3D points",
             curves=NurbsCurveData(points=wave(6)[:, :2], degree=3),
         )
 
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_weights(self):
         """weights that are not one a control point, finite and above zero"""
         self.refused(
@@ -403,6 +408,7 @@ class TestRefused(_Files):
         )
         self.refused("save_fbx: surface 0 of surfaces=: weights must be finite and above zero", surfaces=patch)
 
+    @unittest.skipIf(FBX is None, "Autodesk FBX Python SDK is not installed")
     def test_on_a_joint(self):
         nodes = HierarchyData([TransformData("j", node_type="joint")])
         self.refused(

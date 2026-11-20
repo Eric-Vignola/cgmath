@@ -13,7 +13,7 @@ from dataclasses import fields
 import numpy as np
 from cgmath._tests._examples_render import build_scene, checker_texture, cube_mesh
 from cgmath._tests.test_roundtrip import FORMATS, assert_same
-from cgmath.geometry.mesh import SampleMethod
+from cgmath.geometry.mesh import cv2, SampleMethod, skimage
 from cgmath.render import Scene
 from cgmath.render.scene import _RENDER_CONFIG_KEYS, _SHADING_KEYS
 
@@ -63,17 +63,23 @@ class TestTextureDtypes(unittest.TestCase):
         self.round_trips(scene, "float64")
 
     def test_a_loaded_texture_samples_as_the_original(self):
-        """what the renderer samples is the same after a load"""
+        """what the renderer samples is the same after a load: the colour map
+        alone, and with the wireframe baked over it where cv2 or scikit-image
+        is there to draw it"""
+        drawn = (False, True) if cv2 is not None or skimage is not None else (False,)
         for label, texture in _textures().items():
-            scene = build_scene(texture)
-            uv    = scene.uvs[0]
-            for ext in FORMATS:
-                with self.subTest(texture=label, format=ext):
-                    path   = scene.save(os.path.join(self.tmp, f"s.{ext}"))
-                    loaded = Scene.load(path)
-                    np.testing.assert_array_equal(
-                        loaded._texture(loaded.materials[0], loaded.uvs[0]), scene._texture(scene.materials[0], uv)
-                    )
+            for wireframe in drawn:
+                scene           = build_scene(texture)
+                scene.wireframe = wireframe
+                uv              = scene.uvs[0]
+                for ext in FORMATS:
+                    with self.subTest(texture=label, format=ext, wireframe=wireframe):
+                        path   = scene.save(os.path.join(self.tmp, f"s.{ext}"))
+                        loaded = Scene.load(path)
+                        self.assertEqual(loaded.wireframe, wireframe)
+                        np.testing.assert_array_equal(
+                            loaded._texture(loaded.materials[0], loaded.uvs[0]), scene._texture(scene.materials[0], uv)
+                        )
 
 
 class TestSampleMethodEnum(unittest.TestCase):

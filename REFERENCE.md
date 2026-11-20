@@ -448,7 +448,7 @@ strip_namespace(self, namespace: Optional[str] = None) -> None
     ``strip_namespace()`` on every item, all or nothing.
 swapaxes(self, axis0: 'int', axis1: 'int', negate: 'bool' = False) -> 'None'
     swaps two local axes on every node in the view
-to_attributes(self, *args, **kwargs)
+to_attributes(self, mapping: 'dict' = {'_scale': 'scale', '_shear': 'shear', '_rotate': 'rotate', '_translate': 'translate', '_rotate_order': 'rotateOrder', '_rotate_axis': 'rotateAxis', '_joint_orient': 'jointOrient', '_segment_scale_compensate': 'segmentScaleCompensate', '_radius': 'radius', '_visibility': 'visibility', '_draw_style': 'drawStyle'}) -> 'List[dict]'
     every node's attributes over the frames covered, a list of dicts:
 to_bytes(self) -> bytes
     returns a bytes object from the zipped data
@@ -1207,7 +1207,7 @@ Constants:
 DTYPES_KEY = '__dtypes__'
 FORWARD_MARK = '__cgmath_forward__'
 ITEMS_KEY = '__items__'
-MISSING = <dataclasses._MISSING_TYPE object at 0x000001D474197150>
+MISSING = <dataclasses._MISSING_TYPE object at 0x0000018736407150>
 SHAPES_KEY = '__shapes__'
 ```
 
@@ -3776,7 +3776,7 @@ wu_c4(X, r=1.0)
 Constants:
 
 ```text
-KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x000001D4421959E0>, '...
+KERNEL_REGISTRY = {'gaussian': <function gaussian at 0x0000018784420220>, '...
 ```
 
 ## `cgmath.constraints`

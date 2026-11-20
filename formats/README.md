@@ -162,8 +162,10 @@ Each kind is a flag, `True` by default: `takes`, `meshes` (and with them
 everything on a mesh), `uvs`, `skins`, `materials`, `textures`, `morphs`,
 `cameras`, `lights`, `curves`, `surfaces`. A kind left unread is `None`, so a caller after one
 thing pays for that alone; the nodes are always read. `takes=False` gives
-them as `hierarchy` at their own values, and so does `skins=False` (the
-bind pose comes with the skins); `textures=False` keeps each material's
+them as `hierarchy`, at the bind pose where the file holds a skin;
+`skins=False` reads no bind pose, so `hierarchy` is the nodes at their own
+values, or `None` beside takes, whose `clip` holds the nodes;
+`textures=False` keeps each material's
 `texture_file`, UV set and wraps and decodes no pixels. A texture file is
 decoded once a read, however many materials name it, which share the one
 array. `verbose=False` silences the read's warnings. The class routes read

@@ -15793,11 +15793,11 @@ class _Part:
         """every frame's parent matrix (:attr:`parent_matrix`)"""
         return self.parent_matrix
 
-    def to_attributes(self, *args, **kwargs):
+    def to_attributes(self, mapping: dict = MAYA_ATTRIBUTE_MAP) -> List[dict]:
         """every node's attributes over the frames covered, a list of dicts:
         a framed channel one [x, y, z] a frame, anything else the value every
         frame shares (:meth:`_FrameAxis.to_attributes`); of one node, its dict"""
-        return self._axis(self._spanned()).to_attributes(*args, **kwargs)
+        return self._axis(self._spanned()).to_attributes(mapping)
 
     def __getattr__(self, name: str):
         if name in self._OWN or (name[:2] == "__" and name[-2:] == "__"):
@@ -16397,8 +16397,8 @@ class _ClipNode(_Part):
     def _wrapped(self, value):
         return ClipData._wrapped(self, value)
 
-    def to_attributes(self, *args, **kwargs) -> dict:
-        return _Part.to_attributes(self, *args, **kwargs)[0]
+    def to_attributes(self, mapping: dict = MAYA_ATTRIBUTE_MAP) -> dict:
+        return _Part.to_attributes(self, mapping)[0]
 
     def get_parent(self) -> Optional["_ClipNode"]:
         """the node's parent, on every frame; None for a root"""

@@ -880,7 +880,8 @@ def _data_class(annotation):
         if len(arms) != 1:
             return None
         annotation = arms[0]
-    if isinstance(annotation, type) and issubclass(annotation, (Data, DataList)):
+    # tuple[int, int] is a type to Python 3.10's isinstance, and no class to issubclass
+    if isinstance(annotation, type) and get_origin(annotation) is None and issubclass(annotation, (Data, DataList)):
         return None if annotation is Data or annotation is DataList else annotation
     return None
 
@@ -915,7 +916,7 @@ def _as_declared(value, annotation):
         spec = _array_spec(annotation)
         return np.asarray(value) if spec is None else spec.coerce(value, "a nested array")
 
-    if isinstance(annotation, type) and issubclass(annotation, Enum):
+    if isinstance(annotation, type) and get_origin(annotation) is None and issubclass(annotation, Enum):
         if isinstance(value, annotation):
             return value
         try:

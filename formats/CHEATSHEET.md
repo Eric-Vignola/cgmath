@@ -683,7 +683,7 @@ for mesh in (flat, tilt):
 
 A take is a `ClipData` over the nodes; a file holding takes comes back
 with `hierarchy` None and the nodes in `clip` (`takes=False` reads the
-nodes at their own values instead, the take left unread):
+nodes as `hierarchy` instead, the take left unread):
 
 ```python
 clip               = ClipData(rig, frames=3, fps=24.0, take="spin")
