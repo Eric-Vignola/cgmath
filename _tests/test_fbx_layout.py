@@ -1037,6 +1037,30 @@ class TestTakes(_Edits):
                 f.save(self.path("refused.fbx"))
         self.assertFalse(os.path.exists(self.path("refused.fbx")))
 
+    def test_left_with_none(self):
+        """a file left with no take, its list emptied or set to None: the
+        refusal that names save_fbx, whichever way they went"""
+
+        def one_by_one(f):
+            while len(f.clip):
+                del f.clip[0]
+
+        def an_empty_list(f):
+            f.clip = ClipList([])
+
+        def none(f):
+            f.clip = None
+
+        for edit in (one_by_one, an_empty_list, none):
+            with self.subTest(edit=edit.__name__), FbxFile(SHARED["takes"], verbose=False) as f:
+                f.clip
+                edit(f)
+                with self.assertRaises(ValueError) as caught:
+                    f.save(self.path("none.fbx"))
+                self.assertIn("clip is None where the file holds some", str(caught.exception))
+                self.assertIn("save_fbx", str(caught.exception))
+            self.assertFalse(os.path.exists(self.path("none.fbx")))
+
 
 
 def checker(size: int = 4, shade: int = 200) -> np.ndarray:
